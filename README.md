@@ -27,8 +27,7 @@ TileLang achieves exceptional performance across a variety of computational patt
 
 - Flash Attention Performance on H100
 
-  <div>
-    <img src="./images/mha_performance_h100.png" alt="operator performance on H100" />
+  <div align="center">    <img src="./images/mha_performance_h100.png" alt="operator performance on H100" width=80% />
   </div>
 
 - Matmul Performance on GPUs (RTX 4090, A100, H100, MI300X)
