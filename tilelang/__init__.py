@@ -163,6 +163,7 @@ def _load_tile_lang_lib():
 if SKIP_LOADING_TILELANG_SO == "0":
     _LIB, _LIB_PATH = _load_tile_lang_lib()
 
+from .jit import jit  # noqa: F401
 from .utils import (
     Profiler,  # noqa: F401
     TensorSupplyType,  # noqa: F401
