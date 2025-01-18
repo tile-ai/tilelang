@@ -14,11 +14,11 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# This file is modified from the original version, 
+# This file is modified from the original version,
 # which is part of the TVM project (https://tvm.apache.org/).
 """Package tvm.script.ir_builder.tir"""
-from .ir import *  # pylint: disable=wildcard-import,redefined-builtin
-from .ir import boolean as bool  # pylint: disable=redefined-builtin
-from .ir import buffer as Buffer
+from .ir import *  # noqa: F401
+from .ir import boolean as bool  # noqa: F401
+from .ir import buffer as Buffer  # noqa: F401
 
-from tvm.script.ir_builder.tir import frame
+from tvm.script.ir_builder.tir import frame  # noqa: F401

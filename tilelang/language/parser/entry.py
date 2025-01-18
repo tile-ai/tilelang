@@ -14,8 +14,9 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# This file is modified from the original version, 
+# This file is modified from the original version,
 # which is part of the TVM project (https://tvm.apache.org/).
+# ruff: noqa
 """The entry point of TVM parser for tir."""
 import inspect
 from typing import Callable, Optional, Union
@@ -28,9 +29,9 @@ from tvm.script.parser._core import parse, scan_macro, utils
 from tvm.script.parser.core.parser import Parser, ScriptMacro
 
 
-def prim_func(
-    func: Optional[Callable] = None, private: bool = False, check_well_formed=True
-) -> Union[PrimFunc, Callable]:
+def prim_func(func: Optional[Callable] = None,
+              private: bool = False,
+              check_well_formed=True) -> Union[PrimFunc, Callable]:
     """The parsing method for tir prim func, by using `@prim_func` as decorator.
 
     Parameters
@@ -79,7 +80,6 @@ def prim_func(
 
 
 setattr(prim_func, "dispatch_token", "tir")
-
 
 # Semantics of TIR macros:
 # - Function that is decorated with @T.macro can have any parameters that
@@ -150,8 +150,7 @@ def macro(*args, hygienic: bool = True) -> Callable:
         return _decorator(args[0])
 
     raise ValueError(
-        "Invalid use of T.macro. Usage: @T.macro, @T.macro(), @T.macro(hygienic=[True|False])"
-    )
+        "Invalid use of T.macro. Usage: @T.macro, @T.macro(), @T.macro(hygienic=[True|False])")
 
 
 class BufferProxy:

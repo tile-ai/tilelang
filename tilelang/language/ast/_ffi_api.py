@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# This file is modified from the original version, 
+# This file is modified from the original version,
 # which is part of the TVM project (https://tvm.apache.org/).
 """FFI APIs"""
 import tvm._ffi

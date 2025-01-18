@@ -14,7 +14,7 @@ column_limit = 100
 indent_width = 4
 
 [tool.codespell]
-ignore-words-list = "nd, te, ist, LOD, offen"
+ignore-words-list = "nd, te, ist, LOD, offen, NotIn"
 skip = [
     "build",
     "3rdparty",
