@@ -18,8 +18,7 @@ class BaseKernelAdapter:
         elif isinstance(result_idx, int):
             if result_idx > len(params) or result_idx < -len(params):
                 raise ValueError(
-                    f"result_idx should be an integer between {-len(params)} and {len(params) - 1}"
-                )
+                    f"result_idx should be an integer between {-len(params)} and {len(params) - 1}")
             if result_idx < 0:
                 result_idx = len(params) + result_idx
             result_idx = [result_idx]

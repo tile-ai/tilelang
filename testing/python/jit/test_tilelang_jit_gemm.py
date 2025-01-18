@@ -6,6 +6,7 @@ import tilelang.testing
 import tilelang
 import torch
 
+
 def matmul(
     M,
     N,
@@ -29,7 +30,7 @@ def matmul(
     import tilelang.language as T
 
     @tilelang.jit(
-        out_idx=-1, # create the output tensor during runtime
+        out_idx=-1,  # create the output tensor during runtime
     )
     @T.prim_func
     def main(
@@ -87,16 +88,15 @@ def run_gemm(
         num_stages,
         num_threads,
     )
-    
-    
+
     A = torch.randn(M, K, dtype=torch.__getattribute__(in_dtype)).cuda()
     B = torch.randn(K, N, dtype=torch.__getattribute__(in_dtype)).cuda()
-    
+
     if trans_A:
         A = A.T
     if trans_B:
         B = B.T
-        
+
     def ref_program(A, B):
         import torch
         C = torch.matmul(A.to(torch.float), B.to(torch.float))

@@ -7,6 +7,7 @@ from typing import List
 from tvm.contrib.dlpack import to_pytorch_func
 from .base import BaseKernelAdapter
 
+
 class TorchDLPackKernelAdapter(BaseKernelAdapter):
 
     def _convert_torch_func(self) -> callable:
