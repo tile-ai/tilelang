@@ -3,8 +3,8 @@
 """The language interface for tl programs."""
 
 from typing import Optional
-from tvm.script import tir as T
-from tvm.script.parser.tir import *
+from .parser import *
+# from tvm.script.parser.tir import *
 from tilelang.layout import Layout, Fragment  # noqa: F401
 from .parallel import Parallel  # noqa: F401
 from .pipeline import Pipelined  # noqa: F401
@@ -36,16 +36,16 @@ def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
     # The panel size is the number of threads in a warp
     # Use to improve the L2 Cache Locality
     device_func = ("rasterization2DRow" if order == "row" else "rasterization2DColumn")
-    return T.attr(None, "threadblock_swizzle_pattern",
-                  f"tl::{device_func}<{panel_size}>") if enable else None
+    return attr(None, "threadblock_swizzle_pattern",
+                f"tl::{device_func}<{panel_size}>") if enable else None
 
 
 def annotate_layout(layout_map):
     # layout_map is a dictionary of buffer to layout
     layout_map = {buffer.data: layout for buffer, layout in layout_map.items()}
-    return T.block_attr({"layout_map": layout_map})
+    return block_attr({"layout_map": layout_map})
 
 
 def import_source(source: Optional[str] = None):
     # source is the source code to be imported
-    return T.block_attr({"pragma_import_c": source}) if source is not None else None
+    return block_attr({"pragma_import_c": source}) if source is not None else None

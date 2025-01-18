@@ -78,7 +78,8 @@ class KernelLaunchFrame(TIRFrame):
             return self.frames[0].iter_var.var
 
         last_block_frame = self.frames[-1]
-        assert isinstance(last_block_frame, BlockFrame), "Last frame must be a block frame"
+        assert isinstance(last_block_frame,
+                          BlockFrame), f"Last frame must be a block frame, got {last_block_frame}"
 
         maybe_cpu = last_block_frame.annotations.get("tilelang.is_cpu_kernel_frame", False)
 

@@ -38,7 +38,10 @@ class ConvertTorch:
                 )
             ins_idx = 0
             args = []
-            device = torch.cuda.current_device()
+
+            # use the device of the first input tensor if available
+            device = ins[0].device if len(ins) > 0 else torch.cuda.current_device()
+
             for i in range(len(self.params)):
                 if i in self.result_idx:
                     dtype = torch.__getattribute__(str(self.params[i].dtype))
