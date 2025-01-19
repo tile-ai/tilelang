@@ -11,6 +11,7 @@ from tilelang.jit.adapter import TorchCPPKernelAdapter, TorchDLPackKernelAdapter
 from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
 from tilelang.profiler import Profiler, TensorSupplyType
 
+
 class JITKernel(object):
     """
     A wrapper class for compiling and invoking TileLang (TVM TIR) functions as PyTorch-compatible functions.
@@ -72,7 +73,7 @@ class JITKernel(object):
 
         # Compile the TileLang function and create a kernel adapter for execution.
         adapter = self._compile_and_create_adapter(func)
-        
+
         # The adapter's function is assigned as the callable function for this instance.
         self.adapter = adapter
         self.torch_function = adapter.func
@@ -165,7 +166,8 @@ class JITKernel(object):
         """
         return cls(func=tilelang_func, **kwargs)
 
-    def get_profiler(self, tensor_supply_type: TensorSupplyType = TensorSupplyType.Integer) -> Profiler:
+    def get_profiler(self,
+                     tensor_supply_type: TensorSupplyType = TensorSupplyType.Integer) -> Profiler:
         """
         Creates a profiler to benchmark the compiled runtime module.
 
