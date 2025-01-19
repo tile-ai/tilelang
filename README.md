@@ -57,7 +57,7 @@ pip install tilelang
 Alternatively, you can install directly from the GitHub repository:
 
 ```bash
-pip install git+https://github.com/TileLang/tile-lang
+pip install git+https://github.com/tile-ai/tilelang
 ```
 
 Or install locally:
@@ -82,6 +82,9 @@ In this section, you’ll learn how to write and execute a straightforward GEMM 
 Below is an example that demonstrates more advanced features: layout annotation, parallelized copy, and swizzle for improved L2 cache locality. This snippet shows how to adapt your kernel to maximize performance on complex hardware.
 
 ```python
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+import tilelang
 import tilelang.language as T
 # `make_mma_swizzle_layout` is a python defined layout function
 # specifically designed for for MMA operations
@@ -91,6 +94,7 @@ from tilelang.intrinsics import (
     make_mma_swizzle_layout as make_swizzle_layout,)
 
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+    # add decorator @tilelang.jit if you want to return a torch function
     @T.prim_func
     def main(
         A: T.Buffer((M, K), dtype),
@@ -105,13 +109,13 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
             # Apply layout optimizations or define your own layout (Optional)
             # If not specified, we will deduce the layout automatically
-            T.annotate_layout({
-                A_shared: make_swizzle_layout(A_shared),
-                B_shared: make_swizzle_layout(B_shared),
-            })
+            # T.annotate_layout({
+            #     A_shared: make_swizzle_layout(A_shared),
+            #     B_shared: make_swizzle_layout(B_shared),
+            # })
 
             # Enable rasterization for better L2 cache locality (Optional)
-            T.use_swizzle(panel_size=10, enable=True)
+            # T.use_swizzle(panel_size=10, enable=True)
 
             # Clear local accumulation
             T.clear(C_local)
@@ -133,6 +137,45 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
+
+
+# 1. Define the kernel (matmul) and compile/lower it into an executable module
+func = matmul(1024, 1024, 1024, 128, 128, 32)
+
+# 2. Compile the kernel into a torch function
+# out_idx specifies the index of the output buffer in the argument list
+# if out_idx is specified, the tensor will be created during runtime
+# target currently can be "cuda" or "hip" or "cpu".
+jit_kernel = tilelang.JITKernel(func, out_idx=[2], target="cuda")
+
+# 3. Test the kernel in Python with PyTorch data
+import torch
+
+# Create random input tensors on the GPU
+a = torch.randn(1024, 1024, device="cuda", dtype=torch.float16)
+b = torch.randn(1024, 1024, device="cuda", dtype=torch.float16)
+
+
+# Run the kernel through the Profiler
+c = jit_kernel(a, b)
+
+# Reference multiplication using PyTorch
+ref_c = a @ b
+
+# Validate correctness
+torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+print("Kernel output matches PyTorch reference.")
+
+# 4. Retrieve and inspect the generated CUDA source (optional)
+cuda_source = jit_kernel.get_kernel_source()
+print("Generated CUDA kernel:\n", cuda_source)
+
+# 5.Pofile latency with kernel
+profiler = jit_kernel.get_profiler()
+
+latency = profiler.do_bench()
+
+print(f"Latency: {latency} ms")
 ```
 
 ### Dive Deep into TileLang Beyond GEMM
@@ -152,4 +195,4 @@ TileLang has now been used in project [BitBLAS](https://github.com/microsoft/Bit
 
 ## Acknowledgements
 
-We learned a lot from the [TVM](https://github.com/apache/tvm) community and would like to thank them for their contributions.
+We learned a lot from the [TVM](https://github.com/apache/tvm) community and would like to thank them for their contributions. The initial version of this project is mainly contributed by [LeiWang1999](https://github.com/LeiWang1999), [chengyupku](https://github.com/chengyupku) and [nox-410](https://github.com/nox-410). Part of this work was done during the internship at Microsoft Research, under the supervision of Dr. Lingxiao Ma, Dr. Yuqing Xia, Dr. Jilong Xue, and Dr. Fan Yang.

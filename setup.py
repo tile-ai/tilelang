@@ -447,7 +447,7 @@ setup(
     ],
     license="MIT",
     keywords="BLAS, CUDA, HIP, Code Generation, TVM",
-    url="https://github.com/TileLang/tile-lang",
+    url="https://github.com/tile-ai/tilelang",
     classifiers=[
         "Programming Language :: Python :: 3.8",
         "License :: OSI Approved :: MIT License",

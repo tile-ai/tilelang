@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 from typing import List, Union, Any, Callable, Literal
 from tvm.target import Target
 import tilelang

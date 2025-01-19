@@ -9,7 +9,7 @@
 
 The easiest way to install TileLang is directly from the PyPi using pip. To install the latest version, run the following command in your terminal.
 
-**Note**: Currently, TileLang whl is only supported on Ubuntu 20.04 or later version as we build the whl files on this platform. Currently we only provide whl files for CUDA>=11.0 and with Python>=3.8. **If you are using a different platform or environment, you may need to [build TileLang from source](https://github.com/TileLang/tile-lang/blob/main/docs/Installation.md#building-from-source).**
+**Note**: Currently, TileLang whl is only supported on Ubuntu 20.04 or later version as we build the whl files on this platform. Currently we only provide whl files for CUDA>=11.0 and with Python>=3.8. **If you are using a different platform or environment, you may need to [build TileLang from source](https://github.com/tile-ai/tilelang/blob/main/docs/Installation.md#building-from-source).**
 
 ```bash
 pip install tilelang
@@ -24,7 +24,7 @@ pip install tilelang-0.0.0.dev0+ubuntu.20.4.cu120-py3-none-any.whl
 To install the latest version of TileLang from the github repository, you can run the following command:
 
 ```bash
-pip install git+https://github.com/TileLang/tile-lang.git
+pip install git+https://github.com/tile-ai/tilelang.git
 ```
 
 After installing TileLang, you can verify the installation by running:
@@ -56,7 +56,7 @@ sudo apt-get install -y python3 python3-dev python3-setuptools gcc libtinfo-dev 
 After installing the prerequisites, you can clone the TileLang repository and install it using pip:
 
 ```bash
-git clone --recursive https://github.com/TileLang/tile-lang.git
+git clone --recursive https://github.com/tile-ai/tilelang.git
 cd TileLang
 pip install .  # Please be patient, this may take some time.
 ```
@@ -80,7 +80,7 @@ If you already have a compatible TVM installation, follow these steps:
 1. **Clone the Repository:**
 
     ```bash
-    git clone --recursive https://github.com/TileLang/tile-lang
+    git clone --recursive https://github.com/tile-ai/tilelang
     cd TileLang
     ```
 
@@ -114,7 +114,7 @@ If you prefer to use the built-in TVM version, follow these instructions:
 1. **Clone the Repository:**
 
     ```bash
-    git clone --recursive https://github.com/TileLang/tile-lang
+    git clone --recursive https://github.com/tile-ai/tilelang
     cd TileLang
     ```
 
@@ -152,7 +152,7 @@ For a simplified installation, use the provided script:
 1. **Clone the Repository:**
 
     ```bash
-    git clone --recursive https://github.com/TileLang/tile-lang
+    git clone --recursive https://github.com/tile-ai/tilelang
     cd TileLang
     ```
 
