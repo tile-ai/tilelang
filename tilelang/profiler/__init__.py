@@ -12,7 +12,7 @@ from torch.utils.dlpack import to_dlpack
 from tvm.runtime import ndarray
 from tvm.relay import TensorType
 
-from tilelang.utils.adapter import TorchDLPackKernelAdapter
+from tilelang.jit.adapter import TorchDLPackKernelAdapter
 from tilelang.utils.tensor import (
     get_tensor_supply,
     TensorSupplyType,
@@ -99,7 +99,7 @@ class Profiler(TorchDLPackKernelAdapter):
 
     def do_bench(
         self,
-        func: callable,
+        func: callable = None,
         warmup=25,
         rep=100,
         n_warmup=1,
@@ -107,6 +107,11 @@ class Profiler(TorchDLPackKernelAdapter):
         profiler: Literal["torch", "tvm", "auto"] = "auto",
         input_tensors: List[torch.Tensor] = None,
     ):
+        if func is None:
+            # set default value if not provided
+            func = self.mod
+            profiler = "tvm"
+
         if profiler == "torch":
             ins = self._get_inputs() if input_tensors is None else input_tensors
             bench_func = partial(func, *ins)
@@ -133,6 +138,8 @@ class Profiler(TorchDLPackKernelAdapter):
             # Transform Latency to ms
             return time_evaluator(*tvm_inputs).mean * 1e3
         elif profiler == "auto":
+            # TODO(lei): select appropriate profiler based on the function
+            # class
             ins = self._get_inputs()
             bench_func = partial(func, *ins)
             torch_res = do_bench(

@@ -359,18 +359,4 @@ def run_matmul_rrr(
 #     )
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    run_matmul_ssr(
-        1024,
-        1024,
-        1024,
-        False,
-        True,
-        "float16",
-        "float16",
-        "float16",
-        128,
-        128,
-        32,
-        2,
-    )
+    tilelang.testing.main()

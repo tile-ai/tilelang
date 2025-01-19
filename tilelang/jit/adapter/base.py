@@ -6,7 +6,7 @@ from typing import Any, List
 from tvm.relay import TensorType
 
 
-class BaseKernelAdapter:
+class BaseKernelAdapter(object):
 
     def __init__(self, mod, params: List[TensorType], result_idx: List[int]) -> None:
         self.mod = mod
@@ -26,6 +26,7 @@ class BaseKernelAdapter:
             raise ValueError("result_idx should be a list of integers")
 
         self.result_idx = result_idx
+
         self.func = self._convert_torch_func()
 
     def _convert_torch_func(self) -> callable:

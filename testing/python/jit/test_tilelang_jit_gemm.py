@@ -31,6 +31,7 @@ def matmul(
 
     @tilelang.jit(
         out_idx=-1,  # create the output tensor during runtime
+        execution_backend="dl_pack",
     )
     @T.prim_func
     def main(
@@ -127,4 +128,5 @@ def test_gemm_f16f16f16_nn():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_gemm_f16f16f16_nn()

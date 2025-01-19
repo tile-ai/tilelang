@@ -8,21 +8,25 @@ kernel adapter using TVM.
 
 from typing import Callable, List, Literal, Union
 
-import tilelang
 from tilelang import tvm as tvm
 from tvm.tir import PrimFunc
 from tvm.target import Target
 
-from tilelang.utils.adapter import TorchDLPackKernelAdapter, BaseKernelAdapter
+from tilelang.jit.adapter import BaseKernelAdapter
+from tilelang.jit.kernel import JITKernel
 from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
+from logging import getLogger
+
+logger = getLogger(__name__)
 
 
 def jit(
     func: Callable = None,
     *,  # Enforce keyword-only arguments from here on
     out_idx: Union[List[int], int] = None,
-    wrapper: Literal["auto", "dl_pack", "torch_cpp"] = "auto",
+    execution_backend: Literal["dl_pack", "torch_cpp", "ctypes"] = "dl_pack",
     target: Union[str, Target] = "auto",
+    verbose: bool = False,
 ) -> BaseKernelAdapter:
     """
     A decorator (or decorator factory) that JIT-compiles a given TileLang PrimFunc 
@@ -38,10 +42,9 @@ def jit(
     out_idx : Union[List[int], int], optional
         The index (or list of indices) of the function outputs. This can be used
         to specify which outputs from the compiled function will be returned.
-    wrapper : Literal["auto", "dl_pack", "torch_cpp"], optional
-        The wrapper type to use for the kernel adapter. Currently only "auto" 
-        and "dl_pack" are effectively supported in this code, but "torch_cpp"
-        can be integrated as well. Defaults to "auto".
+    execution_backend : Literal["dl_pack", "torch_cpp", "ctypes"], optional
+        The wrapper type to use for the kernel adapter. Currently, only "dl_pack"
+        and "torch_cpp" are supported.
     target : Union[str, Target], optional
         The compilation target for TVM. If set to "auto", an appropriate target
         will be inferred automatically. Otherwise, must be one of the supported
@@ -64,6 +67,10 @@ def jit(
         assert target in AVALIABLE_TARGETS, f"Invalid target: {target}"
         target = determine_target(target)
 
+    target = Target(target)
+
+    assert execution_backend in ["dl_pack", "torch_cpp", "ctypes"], "Invalid execution backend."
+
     def _compile_and_create_adapter(tilelang_func: PrimFunc) -> BaseKernelAdapter:
         """
         Compile the given TileLang PrimFunc with TVM and build a kernel adapter.
@@ -78,13 +85,16 @@ def jit(
         BaseKernelAdapter
             The compiled and ready-to-run kernel adapter.
         """
-        # Merge static shared memory where possible during lowering.
-        with tvm.transform.PassContext(opt_level=3):
-            rt_mod, params = tilelang.lower(tilelang_func, target=target)
+        if verbose:
+            logger.info(f"Compiling TileLang function:\n{tilelang_func}")
 
-        # Create an adapter using TorchDLPack for bridging.
-        adapter = TorchDLPackKernelAdapter(rt_mod, params=params, result_idx=out_idx)
-        return adapter
+        return JITKernel(
+            tilelang_func,
+            target=target,
+            verbose=verbose,
+            execution_backend=execution_backend,
+            out_idx=out_idx,
+        ).adapter
 
     # If `func` was given, compile it immediately and return the adapter.
     if func is not None:

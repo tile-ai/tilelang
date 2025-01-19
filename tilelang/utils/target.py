@@ -42,7 +42,8 @@ def check_hip_availability() -> bool:
         return False
 
 
-def determine_target(target: Union[str, Target, Literal["auto"]]) -> Union[str, Target]:
+def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
+                     return_object: bool = False) -> Union[str, Target]:
     """
     Determine the appropriate target for compilation (CUDA, HIP, or manual selection).
 
@@ -58,6 +59,9 @@ def determine_target(target: Union[str, Target, Literal["auto"]]) -> Union[str, 
         ValueError: If no CUDA or HIP is available and the target is "auto".
         AssertionError: If the target is invalid.
     """
+
+    return_var: Union[str, Target] = target
+
     if target == "auto":
         # Check for CUDA and HIP availability
         is_cuda_available = check_cuda_availability()
@@ -65,13 +69,18 @@ def determine_target(target: Union[str, Target, Literal["auto"]]) -> Union[str, 
 
         # Determine the target based on availability
         if is_cuda_available:
-            return "cuda"
+            return_var = "cuda"
         elif is_hip_available:
-            return "hip"
+            return_var = "hip"
         else:
             raise ValueError("No CUDA or HIP available on this system.")
     else:
         # Validate the target if it's not "auto"
         assert isinstance(
             target, Target) or target in AVALIABLE_TARGETS, f"Target {target} is not supported"
-        return target
+        return_var = target
+
+    if return_object:
+        return Target(return_var)
+
+    return return_var
