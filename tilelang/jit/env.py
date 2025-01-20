@@ -17,7 +17,7 @@
 # specific language governing permissions and limitations
 # under the License.
 # This file is modified from the original version,
-# which is part of the flashinfer project 
+# which is part of the flashinfer project
 # (https://github.com/flashinfer-ai/flashinfer).
 """Library information. This is a standalone file that can be used to get various info. 
 Modified from flashinfer
