@@ -81,7 +81,7 @@ else
     echo "TileLang build completed successfully."
 fi
 
-cd ../../..
+cd ..
 
 
 # Define the lines to be added

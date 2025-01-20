@@ -110,10 +110,11 @@ else
     echo "TileLang build completed successfully."
 fi
 
-cd ../../..
+cd ..
 
 # Step 11: Set environment variables
 TILELANG_PATH="$(pwd)"
+echo "TileLang path set to: $TILELANG_PATH"
 echo "Configuring environment variables for TVM..."
 echo "export PYTHONPATH=${TILELANG_PATH}:\$PYTHONPATH" >> ~/.bashrc
 echo "export CUDA_DEVICE_ORDER=PCI_BUS_ID" >> ~/.bashrc

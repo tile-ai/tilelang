@@ -110,7 +110,7 @@ else
     echo "TileLang build completed successfully."
 fi
 
-cd ../../..
+cd ..
 
 # Step 11: Set environment variables
 TILELANG_PATH="$(pwd)"
