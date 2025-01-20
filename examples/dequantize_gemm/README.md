@@ -35,3 +35,5 @@ def dequant_matmul(
             T.gemm(B_dequantize_local, A_shared, Ct_local, transpose_B=True)
         T.copy(Ct_local, Ct[bx * block_N, by * block_M])
 ```
+
+**Notes:** Dequantize GEMM with magic layout transformations to get optimal performance can be found at project [BitBLAS](https://github.com/microsoft/BitBLAS), example kernels can be found at `testing/python/kernel/test_tilelang_dequantize_gemm.py`, detailed explanation and examples is coming soon.
