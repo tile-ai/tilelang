@@ -10,6 +10,8 @@ fi
 
 python -m build --wheel -o dist
 
+python -m build --sdist -o dist --formats=gztar,zip
+
 if [ $? -ne 0 ]; then
     echo "Error: Failed to build the wheel."
     exit 1
