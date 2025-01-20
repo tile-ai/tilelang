@@ -1,3 +1,5 @@
+<img src=./images/logo-row.svg />
+
 <div align="center">
 
 # Tile Language
