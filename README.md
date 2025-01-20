@@ -28,7 +28,7 @@ Within the `examples` repository, you will also find additional complex kernelsâ
 
 ## Benchmark Summary
 
-TileLang achieves exceptional performance across a variety of computational patterns. Below are selected results showcasing its capabilities:
+TileLang achieves exceptional performance across a variety of computational patterns. Comprehensive benchmark scripts and settings are available at [tilelang-benchmark](https://github.com/tile-ai/tilelang-benchmark). Below are selected results showcasing its capabilities:
 
 - Flash Attention Performance on H100
 
