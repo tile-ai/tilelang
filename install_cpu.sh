@@ -92,7 +92,7 @@ cd build
 
 
 echo "Configuring TVM build with LLVM and CUDA paths..."
-echo "set(USE_LLVM $LLVM_CONFIG_PATH)" >> config.cmake && echo "set(USE_CUDA /usr/local/cuda)" >> config.cmake
+echo "set(USE_LLVM $LLVM_CONFIG_PATH)" >> config.cmake
 
 echo "Running CMake for TileLang..."
 cmake ..
@@ -113,9 +113,10 @@ fi
 cd ../../..
 
 # Step 11: Set environment variables
+TILELANG_PATH="$(pwd)"
 echo "Configuring environment variables for TVM..."
-echo "export PYTHONPATH=$(pwd):\$PYTHONPATH" >> ~/.bashrc
-echo "export CUDA_DEVICE_ORDER=PCI_BUS_ID" >> ~/.bashrc
+echo "export PYTHONPATH=${TILELANG_PATH}:\$PYTHONPATH" >> ~/.bashrc
+
 
 # Step 12: Source .bashrc to apply changes
 echo "Applying environment changes by sourcing .bashrc..."

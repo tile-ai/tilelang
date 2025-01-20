@@ -85,8 +85,12 @@ cd ../../..
 
 
 # Define the lines to be added
-TVM_HOME_ENV="export TVM_HOME=$(pwd)/3rdparty/tvm"
-TILELANG_PYPATH_ENV="export PYTHONPATH=\$TVM_HOME/python:$(pwd):\$PYTHONPATH"
+TILELANG_PATH="$(pwd)"
+echo "Configuring environment variables for TVM..."
+echo "export PYTHONPATH=${TILELANG_PATH}:\$PYTHONPATH" >> ~/.bashrc
+echo "export CUDA_DEVICE_ORDER=PCI_BUS_ID" >> ~/.bashrc
+TVM_HOME_ENV="export TVM_HOME=${TILELANG_PATH}/3rdparty/tvm"
+TILELANG_PYPATH_ENV="export PYTHONPATH=\$TVM_HOME/python:${TILELANG_PATH}:\$PYTHONPATH"
 CUDA_DEVICE_ORDER_ENV="export CUDA_DEVICE_ORDER=PCI_BUS_ID"
 
 # Check and add the first line if not already present
