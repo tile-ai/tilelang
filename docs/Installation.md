@@ -57,7 +57,7 @@ After installing the prerequisites, you can clone the TileLang repository and in
 
 ```bash
 git clone --recursive https://github.com/tile-ai/tilelang.git
-cd TileLang
+cd tilelang
 pip install .  # Please be patient, this may take some time.
 ```
 
@@ -81,7 +81,7 @@ If you already have a compatible TVM installation, follow these steps:
 
     ```bash
     git clone --recursive https://github.com/tile-ai/tilelang
-    cd TileLang
+    cd tilelang
     ```
 
    > **Note**: Use the `--recursive` flag to include necessary submodules.
@@ -115,7 +115,7 @@ If you prefer to use the built-in TVM version, follow these instructions:
 
     ```bash
     git clone --recursive https://github.com/tile-ai/tilelang
-    cd TileLang
+    cd tilelang
     ```
 
    > **Note**: Ensure the `--recursive` flag is included to fetch submodules.
@@ -142,7 +142,7 @@ If you prefer to use the built-in TVM version, follow these instructions:
     Ensure the `tile-lang` Python package is in your `PYTHONPATH`:
 
     ```bash
-    export PYTHONPATH=/your/path/to/TileLang/python:$PYTHONPATH
+    export PYTHONPATH=/your/path/to/tilelang/tilelang:$PYTHONPATH
     ```
 
 ### Method 3: Install Using the Provided Script
@@ -153,13 +153,13 @@ For a simplified installation, use the provided script:
 
     ```bash
     git clone --recursive https://github.com/tile-ai/tilelang
-    cd TileLang
+    cd tilelang
     ```
 
 2. **Run the Installation Script:**
 
     ```bash
-    bash install.sh
+    bash install_cuda.sh
     # or bash `install_amd.sh` if you want to enable rocm runtime
     ```
 

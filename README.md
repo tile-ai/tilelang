@@ -192,6 +192,12 @@ In addition to GEMM, we provide a variety of examples to showcase the versatilit
 
 TileLang has now been used in project [BitBLAS](https://github.com/microsoft/BitBLAS).
 
+## Join the Discussion
+
+Welcome to join our Discord community for discussions, support, and collaboration!
+
+[![Join our Discord](https://img.shields.io/badge/Discord-Join%20Us-blue?logo=discord&style=for-the-badge)](https://discord.gg/TUrHyJnKPG)
+
 ## Acknowledgements
 
 We learned a lot from the [TVM](https://github.com/apache/tvm) community and would like to thank them for their contributions. The initial version of this project is mainly contributed by [LeiWang1999](https://github.com/LeiWang1999), [chengyupku](https://github.com/chengyupku) and [nox-410](https://github.com/nox-410). Part of this work was done during the internship at Microsoft Research, under the supervision of Dr. Lingxiao Ma, Dr. Yuqing Xia, Dr. Jilong Xue, and Dr. Fan Yang.
