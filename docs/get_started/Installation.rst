@@ -116,7 +116,7 @@ If you already have a compatible TVM installation, follow these steps:
 
    .. code:: bash
 
-      export PYTHONPATH=/your/path/to/tile-lang/tilelang:$PYTHONPATH
+      export PYTHONPATH=/your/path/to/tilelang/:$PYTHONPATH
       # TVM_IMPORT_PYTHON_PATH is used by 3rd-party frameworks to import TVM
       export TVM_IMPORT_PYTHON_PATH=/your/path/to/tvm/python
 
@@ -157,7 +157,7 @@ If you prefer to use the built-in TVM version, follow these instructions:
 
    .. code:: bash
 
-      export PYTHONPATH=/your/path/to/tilelang/tilelang:$PYTHONPATH
+      export PYTHONPATH=/your/path/to/tilelang/:$PYTHONPATH
 
 Method 3: Install Using the Provided Script
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
