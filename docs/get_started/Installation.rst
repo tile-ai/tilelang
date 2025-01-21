@@ -76,11 +76,13 @@ If you want to install TileLang in development mode, you can run the following c
 
 We currently provide three methods to install **TileLang**:
 
-1. Install from Source (using your own TVM installation)
+1. `Install from Source (using your own TVM installation)`_
+2. `Install from Source (using the bundled TVM submodule)`_
+3. `Install Using the Provided` Script_
 
-2. Install from Source (using the bundled TVM submodule)
-
-3. Install Using the Provided Script
+.. _Install from Source (using your own TVM installation): #method-1-install-from-source-using-your-own-tvm-installation
+.. _Install from Source (using the bundled TVM submodule): #method-2-install-from-source-using-the-bundled-tvm-submodule
+.. _Install Using the Provided Script: #method-3-install-using-the-provided-script
 
 
 Method 1: Install from Source (Using Your Own TVM Installation)
