@@ -65,7 +65,7 @@ After installing the prerequisites, you can clone the TileLang repository and in
 .. code:: bash
 
    git clone --recursive https://github.com/tile-ai/tilelang.git
-   cd TileLang
+   cd tileLang
    pip install .  # Please be patient, this may take some time.
 
 If you want to install TileLang in development mode, you can run the following command:
@@ -93,7 +93,7 @@ If you already have a compatible TVM installation, follow these steps:
    .. code:: bash
 
       git clone --recursive https://github.com/tile-ai/tilelang
-      cd TileLang
+      cd tilelang
 
    **Note**: Use the `--recursive` flag to include necessary submodules.
 
@@ -114,7 +114,7 @@ If you already have a compatible TVM installation, follow these steps:
 
    .. code:: bash
 
-      export PYTHONPATH=/your/path/to/tile-lang/python:$PYTHONPATH
+      export PYTHONPATH=/your/path/to/tile-lang/tilelang:$PYTHONPATH
       # TVM_IMPORT_PYTHON_PATH is used by 3rd-party frameworks to import TVM
       export TVM_IMPORT_PYTHON_PATH=/your/path/to/tvm/python
 
@@ -128,7 +128,7 @@ If you prefer to use the built-in TVM version, follow these instructions:
    .. code:: bash
 
       git clone --recursive https://github.com/tile-ai/tilelang
-      cd TileLang
+      cd tilelang
 
    **Note**: Ensure the `--recursive` flag is included to fetch submodules.
 
@@ -155,7 +155,7 @@ If you prefer to use the built-in TVM version, follow these instructions:
 
    .. code:: bash
 
-      export PYTHONPATH=/your/path/to/TileLang/python:$PYTHONPATH
+      export PYTHONPATH=/your/path/to/tilelang/tilelang:$PYTHONPATH
 
 Method 3: Install Using the Provided Script
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -167,11 +167,11 @@ For a simplified installation, use the provided script:
    .. code:: bash
 
       git clone --recursive https://github.com/tile-ai/tilelang
-      cd TileLang
+      cd tilelang
 
 2. **Run the Installation Script**:
 
    .. code:: bash
 
-      bash install.sh
+      bash install_cuda.sh
       # or bash `install_amd.sh` if you want to enable ROCm runtime
