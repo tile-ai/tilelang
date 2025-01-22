@@ -71,9 +71,9 @@ pip install .  # with -e option if you want to install in editable mode
 
 ### Method 2: Build from Source
 We currently provide three ways to install **tile-lang** from source:
- - [Install from Source (using your own TVM installation)](./docs/Installation.md#install-from-source-with-your-own-tvm-installation)
- - [Install from Source (using the bundled TVM submodule)](./docs/Installation.md#install-from-source-with-our-tvm-submodule)
- - [Install Using the Provided Script](./docs/Installation.md#install-with-provided-script)
+ - [Install from Source (using your own TVM installation)](./docs/get_started/Installation.rst#method-1-install-from-source-using-your-own-tvm-installation)
+ - [Install from Source (using the bundled TVM submodule)](./docs/get_started/Installation.rst#method-2-install-from-source-with-our-tvm-submodule)
+ - [Install Using the Provided Script](./docs/get_started/Installation.rst##method-3-install-using-the-provided-script)
 
 
 ## Quick Start
@@ -191,6 +191,12 @@ In addition to GEMM, we provide a variety of examples to showcase the versatilit
 ---
 
 TileLang has now been used in project [BitBLAS](https://github.com/microsoft/BitBLAS).
+
+## Join the Discussion
+
+Welcome to join our Discord community for discussions, support, and collaboration!
+
+[![Join our Discord](https://img.shields.io/badge/Discord-Join%20Us-blue?logo=discord&style=for-the-badge)](https://discord.gg/TUrHyJnKPG)
 
 ## Acknowledgements
 
