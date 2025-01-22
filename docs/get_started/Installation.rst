@@ -78,7 +78,7 @@ We currently provide three methods to install **TileLang**:
 
 1. `Install from Source (using your own TVM installation)`_
 2. `Install from Source (using the bundled TVM submodule)`_
-3. `Install Using the Provided` Script_
+3. `Install Using the Provided Script`_
 
 .. _Install from Source (using your own TVM installation): #method-1-install-from-source-using-your-own-tvm-installation
 .. _Install from Source (using the bundled TVM submodule): #method-2-install-from-source-using-the-bundled-tvm-submodule
