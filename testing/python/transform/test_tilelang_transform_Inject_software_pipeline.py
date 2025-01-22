@@ -20,22 +20,26 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 
+
 def _check(original, transformed):
     func = original
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
     mod = tl.transform.Simplify()(mod)
-    tvm.ir.assert_structural_equal(
-        mod["main"], transformed.with_attr("global_symbol", "main"), True
-    )
+    tvm.ir.assert_structural_equal(mod["main"], transformed.with_attr("global_symbol", "main"),
+                                   True)
 
 
 @T.prim_func
 def trivial_pipeline(A: T.Buffer((16, 1), "float32"), C: T.Buffer((16, 1), "float32")):
     for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
         for i in T.serial(
-            0, 1, annotations={"software_pipeline_stage": [0, 1], "software_pipeline_order": [0, 1]}
-        ):
+                0,
+                1,
+                annotations={
+                    "software_pipeline_stage": [0, 1],
+                    "software_pipeline_order": [0, 1]
+                }):
             with T.block():
                 T.reads(A[tx, i])
                 T.writes(C[tx, i])
@@ -49,10 +53,10 @@ def trivial_pipeline(A: T.Buffer((16, 1), "float32"), C: T.Buffer((16, 1), "floa
                     T.writes(C[tx, i])
                     C[tx, i] = B[tx, 0] + T.float32(1)
 
+
 @T.prim_func
-def transformed_trivial_pipeline(
-    A: T.Buffer((16, 1), "float32"), C: T.Buffer((16, 1), "float32")
-) -> None:
+def transformed_trivial_pipeline(A: T.Buffer((16, 1), "float32"), C: T.Buffer((16, 1),
+                                                                              "float32")) -> None:
     for tx in T.thread_binding(16, thread="threadIdx.x"):
         with T.block():
             T.reads(A[tx, 0])
@@ -79,8 +83,10 @@ def transformed_trivial_pipeline(
                 T.writes(C[tx, 0])
                 C[tx, 0] = B[0, tx, 0] + T.float32(1)
 
+
 def test_trivial_pipeline():
     _check(trivial_pipeline, transformed_trivial_pipeline)
+
 
 if __name__ == "__main__":
     tilelang.testing.main()
