@@ -463,6 +463,8 @@ def visit_expr_stmt(self: Parser, node: doc.Expr) -> None:
     elif isinstance(res, str):
         # Ignore docstrings
         pass
+    elif isinstance(res, tvm.tir.stmt.BufferStore):
+        T.buffer_store(res.buffer, res.value, res.indices, res.predicate)
     else:
         self.report_error(node, f"Parsing resulted in unexpected type {type(res)}")
 
@@ -480,13 +482,8 @@ def visit_if(self: Parser, node: doc.If) -> None:
         The doc AST if node.
     """
     with self.var_table.with_frame():
-        condition = self.eval_expr(node.test)
-        if isinstance(condition, bool):
-            if condition:
-                self.visit_body(node.body)
-            elif node.orelse:
-                self.visit_body(node.orelse)
-        else:
+        predicate = self.eval_expr(node.test)
+        if isinstance(predicate, (PrimExpr, tvm.tir.expr.ExprOp)):
             with T.If(self.eval_expr(node.test)):
                 with T.Then():
                     with self.var_table.with_frame():
@@ -495,6 +492,16 @@ def visit_if(self: Parser, node: doc.If) -> None:
                     with T.Else():
                         with self.var_table.with_frame():
                             self.visit_body(node.orelse)
+        elif isinstance(predicate, bool):
+            if predicate:
+                with self.var_table.with_frame():
+                    self.visit_body(node.body)
+            elif node.orelse:
+                with self.var_table.with_frame():
+                    self.visit_body(node.orelse)
+        else:
+            self.report_error(node.test,
+                              f"If condition must be a boolean expression, but got {predicate}")
 
 
 @dispatch.register(token="tir", type_name="Assert")
@@ -529,6 +536,8 @@ def visit_return(self: Parser, node: doc.Return) -> None:
         The doc AST return node.
     """
     value = self.eval_expr(node.value)
+    if value is None:
+        self.report_error(node, "Expression to be returned must be a PrimExpr")
     T.evaluate(tvm.tir.ret(value))
 
 
