@@ -124,7 +124,7 @@ class KernelLaunchFrame(TIRFrame):
         """
         iter_var = self.frames[-4 + dim].iter_var
         return int(iter_var.dom.extent)
-    
+
     def get_thread_binding(self, dim: int = 0) -> Var:
         """
         Returns the thread binding for the given dimension.

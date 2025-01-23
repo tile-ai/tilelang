@@ -214,6 +214,7 @@ class TensorCoreIntrinEmitter(object):
         b_transposed = self.b_transposed
         current_frame = T.KernelLaunchFrame.Current()
         thread_binding = current_frame.get_thread_binding()
+
         @T.macro
         def _warp_ldmatrix_b(
             B_local_buf,
