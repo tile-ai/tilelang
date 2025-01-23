@@ -190,7 +190,7 @@ class GemmPrimitiveMMA(GemmBaseParams):
 
         # Infer block partition if necessary
         current_frame = T.KernelLaunchFrame.Current()
-        threads = current_frame.get_thread_binding(0)
+        threads = current_frame.get_num_threads()
 
         self.infer_block_partition(threads)
 
