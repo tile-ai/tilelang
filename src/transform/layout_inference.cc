@@ -48,8 +48,7 @@ using namespace tir;
  */
 class ThreadBindingCollector : public StmtExprVisitor {
 public:
-
-  void VisitStmt_(const AttrStmtNode* op) final {
+  void VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       thread_binding_[iv->var.get()] = iv;
@@ -58,7 +57,7 @@ public:
   }
 
   // The thread binding map
-  std::unordered_map<const VarNode*, IterVar> thread_binding_;
+  std::unordered_map<const VarNode *, IterVar> thread_binding_;
 };
 
 using namespace tir;
