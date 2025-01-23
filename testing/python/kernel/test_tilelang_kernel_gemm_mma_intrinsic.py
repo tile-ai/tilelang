@@ -217,5 +217,4 @@ def test_assert_tl_matmul():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    assert_tl_matmul_correctness(128, 128, 128, "float16", "float16", "float16")
+    tilelang.testing.main()
