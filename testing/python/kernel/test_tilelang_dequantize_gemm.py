@@ -111,8 +111,20 @@ def test_fp4_fp16_convert_close():
     assert torch.allclose(tl_out, ref_out, rtol=0.01, atol=0.01), (tl_out, ref_out)
     print("Pass")
 
-def matmul_fp16xfp4(M, N, K, in_dtype, out_dtype, accum_dtype, block_M=64, block_N=64, block_K=64, num_stages=1, threads=128):
+
+def matmul_fp16xfp4(M,
+                    N,
+                    K,
+                    in_dtype,
+                    out_dtype,
+                    accum_dtype,
+                    block_M=64,
+                    block_N=64,
+                    block_K=64,
+                    num_stages=1,
+                    threads=128):
     num_bits = 4
+
     def kernel_func(block_M, block_N, block_K, num_stages, threads):
         num_elems_per_byte = 8 // num_bits
         storage_dtype = "uint8"
@@ -174,16 +186,30 @@ def ref_program(A, qB):
     C = C.to(torch.__getattribute__(dtypeC))
     return C.transpose(0, 1)
 
-def assert_simple_impl_float16xfp4_gemm(M, N, K, in_dtype, out_dtype, accum_dtype, block_M=64, block_N=64, block_K=64, num_stages=1, threads=128):
-    func = matmul_fp16xfp4(
-        M, N, K, in_dtype, out_dtype, accum_dtype, block_M, block_N, block_K, num_stages, threads)
+
+def assert_simple_impl_float16xfp4_gemm(M,
+                                        N,
+                                        K,
+                                        in_dtype,
+                                        out_dtype,
+                                        accum_dtype,
+                                        block_M=64,
+                                        block_N=64,
+                                        block_K=64,
+                                        num_stages=1,
+                                        threads=128):
+    func = matmul_fp16xfp4(M, N, K, in_dtype, out_dtype, accum_dtype, block_M, block_N, block_K,
+                           num_stages, threads)
 
     torch_func = JITKernel(func, [2])
-    profiler = torch_func.get_profiler()    
+    profiler = torch_func.get_profiler()
     profiler.assert_allclose(ref_program)
 
+
 def test_simple_impl_float16xfp4_gemm():
-    assert_simple_impl_float16xfp4_gemm(256, 256, 256, "float16", "float16", "float32", 64, 64, 64, 1, 128)
+    assert_simple_impl_float16xfp4_gemm(256, 256, 256, "float16", "float16", "float32", 64, 64, 64,
+                                        1, 128)
+
 
 def matmul(
     M,
