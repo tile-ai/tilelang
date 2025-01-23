@@ -43,76 +43,21 @@ namespace tl {
 
 using namespace tir;
 
-using runtime::StorageRank;
-using runtime::StorageScope;
-
-static bool IsDynamicSharedMemory(Var buffer_var) {
-  StorageScope storage_scope =
-      runtime::StorageScope::Create(GetPtrStorageScope(buffer_var));
-  return storage_scope.rank == runtime::StorageRank::kShared &&
-         storage_scope.tag == ".dyn";
-}
-
-static bool IsStaticSharedMemory(Var buffer_var) {
-  StorageScope storage_scope =
-      runtime::StorageScope::Create(GetPtrStorageScope(buffer_var));
-  return storage_scope.rank == runtime::StorageRank::kShared &&
-         storage_scope.tag == "";
-}
-
-static bool isLocalFragment(Var buffer_var) {
-  StorageScope storage_scope =
-      runtime::StorageScope::Create(GetPtrStorageScope(buffer_var));
-  return storage_scope.rank == runtime::StorageRank::kLocal &&
-         storage_scope.tag == ".fragment";
-}
-
 /*!
  * \brief collect the mapping from the buffer var to its allocate
  */
-class AllocateCollector : public StmtExprVisitor {
+class ThreadBindingCollector : public StmtExprVisitor {
 public:
-  void VisitStmt_(const AllocateNode *op) final {
-    if (IsDynamicSharedMemory(op->buffer_var)) {
-      dyn_shmem_allocs_[op->buffer_var.get()] = op;
-    } else if (IsStaticSharedMemory(op->buffer_var)) {
-      static_shmem_allocs_[op->buffer_var.get()] = op;
-    } else if (isLocalFragment(op->buffer_var)) {
-      local_fragment_allocs_[op->buffer_var.get()] = op;
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-  void VisitStmt_(const BlockNode *op) final {
-    for (auto buffer : op->alloc_buffers) {
-      if (IsDynamicSharedMemory(buffer->data)) {
-        dyn_shmem_allocs_[buffer->data.get()] = op;
-      } else if (IsStaticSharedMemory(buffer->data)) {
-        static_shmem_allocs_[buffer->data.get()] = op;
-      } else if (isLocalFragment(buffer->data)) {
-        local_fragment_allocs_[buffer->data.get()] = op;
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const AllocateConstNode *op) final {
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const SeqStmtNode *op) final {
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
   void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tir::attr::thread_extent) {
+      IterVar iv = Downcast<IterVar>(op->node);
+      thread_binding_[iv->var.get()] = iv;
+    }
     StmtExprVisitor::VisitStmt_(op);
   }
 
-  // The dynamic mapping from the original buffer var to its allocate
-  std::unordered_map<const VarNode *, const Object *> dyn_shmem_allocs_;
-  // The static mapping from the original buffer var to its allocate
-  std::unordered_map<const VarNode *, const Object *> static_shmem_allocs_;
-  // The local fragment mapping from the original buffer var to its allocate
-  std::unordered_map<const VarNode *, const Object *> local_fragment_allocs_;
+  // The thread binding map
+  std::unordered_map<const VarNode *, IterVar> thread_binding_;
 };
 
 using namespace tir;
@@ -477,15 +422,10 @@ private:
 tvm::transform::Pass LayoutInference() {
   using namespace tir::transform;
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    AllocateCollector collector;
+    ThreadBindingCollector collector;
     collector(f->body);
-    // TODO(Lei): This is a hack to avoid the issue of thread partition
-    // for cpu backend. We should remove this after we have a better
-    // solution for thread partition detect.
-    bool need_thread_partition = (collector.dyn_shmem_allocs_.size() > 1 ||
-                                  collector.static_shmem_allocs_.size() > 1 ||
-                                  collector.local_fragment_allocs_.size() > 1);
-    bool skip_thread_partition = !need_thread_partition;
+    bool has_thread_binding = collector.thread_binding_.size() > 0;
+    bool skip_thread_partition = !has_thread_binding;
     return LayoutInferencer::Substitute(std::move(f), skip_thread_partition);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LayoutInference", {});
