@@ -12,7 +12,7 @@ from tilelang.intrinsics.mfma_macro_generator import (
     MatrixCoreIntrinEmitter,)
 from tilelang.transform import simplify_prim_func
 
-torch.manual_seed(0)
+tilelang.testing.set_random_seed(0)
 
 
 @simplify_prim_func

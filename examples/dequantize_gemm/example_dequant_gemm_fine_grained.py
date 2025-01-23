@@ -8,7 +8,7 @@ from tvm import DataType
 import tilelang as TL
 import tilelang.language as T
 
-torch.manual_seed(0)
+tilelang.testing.set_random_seed(0)
 
 
 def matmul(

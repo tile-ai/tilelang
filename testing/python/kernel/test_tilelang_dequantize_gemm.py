@@ -9,7 +9,7 @@ import tilelang as TL
 import tilelang.language as T
 from tilelang import JITKernel, Profiler
 
-torch.manual_seed(0)
+tilelang.testing.set_random_seed(0)
 
 
 def _tir_u8_to_f4_to_f16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, dtype: str):

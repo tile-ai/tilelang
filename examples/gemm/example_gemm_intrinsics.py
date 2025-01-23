@@ -12,8 +12,6 @@ from tilelang.intrinsics.mma_macro_generator import (
     TensorCoreIntrinEmitter,)
 from tilelang.transform import simplify_prim_func
 
-torch.manual_seed(0)
-
 
 def make_swizzle_layout(shared_buf):
     dtype = shared_buf.dtype

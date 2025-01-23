@@ -11,7 +11,7 @@ import tilelang.language as T
 from tilelang.intrinsics.utils import get_swizzle_layout
 from tilelang.intrinsics.mma_macro_generator import (TensorCoreIntrinEmitter)
 
-torch.manual_seed(0)
+tilelang.testing.set_random_seed(0)
 
 
 def make_swizzle_layout(shared_buf):

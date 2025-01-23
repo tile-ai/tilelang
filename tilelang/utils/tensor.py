@@ -20,8 +20,7 @@ def get_tensor_supply(supply_type: TensorSupplyType):
     def get_tensor(tensor: TensorType) -> torch.Tensor:
         dtype = torch.__getattribute__(str(tensor.dtype))
         device = torch.cuda.current_device()
-        # torch.manual_seed(0)
-        # torch.cuda.manual_seed(0)
+
         shape = list(map(int, tensor.shape))
         if dtype == torch.int8 and supply_type in [
                 TensorSupplyType.Uniform,
