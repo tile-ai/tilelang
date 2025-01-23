@@ -159,7 +159,6 @@ class TensorCoreIntrinEmitter(object):
                    A_local_buf: Buffer,
                    A_shared_buf: Buffer,
                    ki: PrimExpr,
-                   thread_binding: PrimExpr,
                    rk: Optional[PrimExpr] = 0):
         warp_row_tiles = self.warp_row_tiles
         warp_rows = self.warp_rows
@@ -169,6 +168,9 @@ class TensorCoreIntrinEmitter(object):
         local_size_a = self.local_size_a
         a_dtype = self.a_dtype
         a_transposed = self.a_transposed
+
+        current_frame = T.KernelLaunchFrame.Current()
+        thread_binding = current_frame.get_thread_binding()
 
         @T.macro
         def _warp_ldmatrix_a(
@@ -304,7 +306,7 @@ class TensorCoreIntrinEmitter(object):
 
         return _warp_mma(A_local_buf, B_local_buf, C_local_buf)
 
-    def stmatrix(self, C_local_buf, C_buf, thread_binding, pid_m=None, pid_n=None):
+    def stmatrix(self, C_local_buf, C_buf, pid_m=None, pid_n=None):
         block_row_warps = self.block_row_warps
         block_col_warps = self.block_col_warps
         warp_rows = self.warp_rows
@@ -315,6 +317,9 @@ class TensorCoreIntrinEmitter(object):
         BLOCK_M = block_row_warps * warp_rows
         BLOCK_N = block_col_warps * warp_cols
         M_DIM, N_DIM = self.M_DIM, self.N_DIM
+
+        current_frame = T.KernelLaunchFrame.Current()
+        thread_binding = current_frame.get_thread_binding()
 
         # STS
         # MMA Store must be in simulated instead of TVM Intrins
@@ -610,7 +615,7 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         assert transform_kind_a in [0, 1, 2, 3], "Input transform stage should be 0, 1, 2, or 3"
         assert transform_kind_b in [0, 1, 2, 3], "Weight transform stage should be 0, 1, 2, or 3"
 
-    def ldmatrix_a(self, A_local_buf, A_shared_buf, ki, thread_binding, rk=0):
+    def ldmatrix_a(self, A_local_buf, A_shared_buf, ki, rk=0):
         warp_row_tiles = self.warp_row_tiles
         warp_rows = self.warp_rows
         chunk = self.chunk
@@ -620,6 +625,9 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         a_dtype = self.a_dtype
         a_transposed = self.a_transposed
         transform_kind_a = self.transform_kind_a
+
+        current_frame = T.KernelLaunchFrame.Current()
+        thread_binding = current_frame.get_thread_binding()
 
         @T.macro
         def _warp_ldmatrix_a(
@@ -714,7 +722,7 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
 
         return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
 
-    def ldmatrix_b(self, B_local_buf, B_shared_buf, ki, thread_binding, rk=0):
+    def ldmatrix_b(self, B_local_buf, B_shared_buf, ki, rk=0):
         warp_col_tiles = self.warp_col_tiles
         warp_cols = self.warp_cols
         chunk = self.chunk
@@ -725,6 +733,9 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         transform_kind_b = self.transform_kind_b
         b_transposed = self.b_transposed
         num_elems_per_byte = self.num_elems_per_byte
+
+        current_frame = T.KernelLaunchFrame.Current()
+        thread_binding = current_frame.get_thread_binding()
 
         @T.macro
         def _warp_ldmatrix_b(

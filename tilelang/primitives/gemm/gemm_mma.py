@@ -77,7 +77,6 @@ class GemmPrimitiveMMA(GemmBaseParams):
                     B_local,
                     B_shared,
                     ki,
-                    thread_binding=thread_binding,
                 )
                 # Perform Matrix Multiplication
                 mma_emitter.mma(
@@ -164,7 +163,6 @@ class GemmPrimitiveMMA(GemmBaseParams):
                     A_local,
                     A_shared,
                     ki,
-                    thread_binding=thread_binding,
                 )
 
                 # Load B into fragment
@@ -172,7 +170,6 @@ class GemmPrimitiveMMA(GemmBaseParams):
                     B_local,
                     B_shared,
                     ki,
-                    thread_binding=thread_binding,
                 )
 
                 # Perform Matrix Multiplication

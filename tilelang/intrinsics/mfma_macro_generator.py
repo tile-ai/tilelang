@@ -205,7 +205,7 @@ class MatrixCoreIntrinEmitter(object):
                                                (WARP_SIZE * block_row_warps)) % block_col_warps,
             return lane_id, warp_n, warp_m
 
-    def ldmatrix_a(self, A_local_buf, A_shared_buf, ki, thread_binding, rk=0):
+    def ldmatrix_a(self, A_local_buf, A_shared_buf, ki, rk=0):
         warp_row_tiles = self.warp_row_tiles
         warp_rows = self.warp_rows
         chunk = self.chunk
@@ -214,7 +214,8 @@ class MatrixCoreIntrinEmitter(object):
         local_size_a = self.local_size_a
         k_pack = self.k_pack
         is_transposed = self.a_transposed
-
+        current_frame = T.KernelLaunchFrame.Current()
+        thread_binding = current_frame.get_thread_binding()
         _, reverse_index_map = self.get_ldmatrix_index_map(is_b=False)
 
         @T.macro
@@ -245,7 +246,7 @@ class MatrixCoreIntrinEmitter(object):
 
         return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
 
-    def ldmatrix_b(self, B_local_buf, B_shared_buf, ki, thread_binding, rk=0):
+    def ldmatrix_b(self, B_local_buf, B_shared_buf, ki, rk=0):
         warp_col_tiles = self.warp_col_tiles
         warp_cols = self.warp_cols
         chunk = self.chunk
@@ -254,7 +255,8 @@ class MatrixCoreIntrinEmitter(object):
         local_size_b = self.local_size_b
         k_pack = self.k_pack
         is_transposed = self.b_transposed
-
+        current_frame = T.KernelLaunchFrame.Current()
+        thread_binding = current_frame.get_thread_binding()
         _, reverse_index_map = self.get_ldmatrix_index_map(is_b=True)
 
         @T.macro
@@ -324,13 +326,14 @@ class MatrixCoreIntrinEmitter(object):
 
         return _warp_mma(A_local_buf, B_local_buf, C_local_buf)
 
-    def stmatrix(self, C_local_buf, C_buf, thread_binding, pid_m=None, pid_n=None):
+    def stmatrix(self, C_local_buf, C_buf, pid_m=None, pid_n=None):
         block_row_warps = self.block_row_warps
         block_col_warps = self.block_col_warps
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         local_size_out = self.local_size_out
-
+        current_frame = T.KernelLaunchFrame.Current()
+        thread_binding = current_frame.get_thread_binding()
         is_global = pid_m is not None and pid_n is not None
         BLOCK_M = block_row_warps * warp_rows
         BLOCK_N = block_col_warps * warp_cols

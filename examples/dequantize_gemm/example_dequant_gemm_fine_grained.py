@@ -299,7 +299,6 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
                         A_local,
                         A_shared,
                         ki,
-                        thread_binding=thread_binding,
                         rk=rk,
                     )
 
@@ -308,7 +307,6 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
                         B_local,
                         B_shared,
                         ki,
-                        thread_binding=thread_binding,
                         rk=rk,
                     )
 
@@ -343,7 +341,6 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
                 mma_emitter.stmatrix(
                     C_local,
                     C_shared,
-                    thread_binding=thread_binding,
                 )
 
             for i, j in T.Parallel(block_M, (block_N // reduce_k)):

@@ -142,16 +142,14 @@ def tl_matmul_macro(
                         A_local,
                         A_shared,
                         ki,
-                        thread_binding=thread_binding,
-                    )
+                        )
 
                     # Load B into fragment
                     mma_emitter.ldmatrix_b(
                         B_local,
                         B_shared,
                         ki,
-                        thread_binding=thread_binding,
-                    )
+                        )
 
                     # Perform Matrix Multiplication
                     mma_emitter.mma(A_local, B_local, C_local)
@@ -160,7 +158,6 @@ def tl_matmul_macro(
             mma_emitter.stmatrix(
                 C_local,
                 C_shared,
-                thread_binding=thread_binding,
             )
 
             # Store shared into global

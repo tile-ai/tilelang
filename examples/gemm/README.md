@@ -367,16 +367,14 @@ def tl_matmul(
                     mma_emitter.ldmatrix_a(
                         A_local,
                         A_shared,
-                        ki,
-                        thread_binding=thread_binding,
+                        ki
                     )
 
                     # Load B into fragment
                     mma_emitter.ldmatrix_b(
                         B_local,
                         B_shared,
-                        ki,
-                        thread_binding=thread_binding,
+                        ki
                     )
 
                     # Perform Matrix Multiplication
@@ -386,7 +384,6 @@ def tl_matmul(
             mma_emitter.stmatrix(
                 C_local,
                 C_shared,
-                thread_binding=thread_binding,
             )
 
             # Store shared into global
@@ -416,10 +413,10 @@ def tl_matmul(
    ```python
    for ki in T.serial(0, (block_K // micro_size_k)):
        # Warp-synchronous load for A
-       mma_emitter.ldmatrix_a(A_local, A_shared, ki, thread_binding=thread_binding)
+       mma_emitter.ldmatrix_a(A_local, A_shared, ki)
 
        # Warp-synchronous load for B
-       mma_emitter.ldmatrix_b(B_local, B_shared, ki, thread_binding=thread_binding)
+       mma_emitter.ldmatrix_b(B_local, B_shared, ki)
    ```
    Internally, these calls orchestrate how each thread in the warp issues the correct load instructions, performs address calculations, and stores the data into registers.
 
@@ -437,7 +434,7 @@ def tl_matmul(
 5. **Store Results via `stmatrix`**  
    Finally, you write the results from the warp-level fragments back to shared memory or global memory. This step might happen multiple times in a loop or just once at the end. The code snippet:
    ```python
-   mma_emitter.stmatrix(C_local, C_shared, thread_binding=thread_binding)
+   mma_emitter.stmatrix(C_local, C_shared)
    ```
    orchestrates the warp-synchronous stores, ensuring each thread places the correct fragment element into the correct location of the shared or global buffer.
 

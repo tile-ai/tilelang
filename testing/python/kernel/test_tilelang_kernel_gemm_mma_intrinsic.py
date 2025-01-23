@@ -148,7 +148,6 @@ def tl_matmul(
                         A_local,
                         A_shared,
                         ki,
-                        thread_binding=thread_binding,
                     )
 
                     # Load B into fragment
@@ -165,7 +164,6 @@ def tl_matmul(
             mma_emitter.stmatrix(
                 C_local,
                 C_shared,
-                thread_binding=thread_binding,
             )
 
             # Store shared into global
