@@ -285,9 +285,14 @@ clang_tidy_changed() {
 
     MERGEBASE="$(git merge-base $BASE_BRANCH HEAD)"
 
-    if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' &>/dev/null; then
-        git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' | xargs -n 1 clang-tidy -- -std=c++17
+    CHANGED_FILES=$(git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp')
+
+    if [[ -z "$CHANGED_FILES" ]]; then
+        echo "No changed C/C++ files to check."
+        return
     fi
+
+    echo "$CHANGED_FILES" | xargs -n 1 clang-tidy -- -std=c++17
 }
 
 # Add clang-tidy support to the main script logic
