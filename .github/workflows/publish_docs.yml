@@ -1,12 +1,16 @@
 name: documentation
 
-on: [push, pull_request, workflow_dispatch]
+on:
+  pull_request:
+    types:
+      - closed
 
 permissions:
   contents: write
 
 jobs:
   docs:
+    if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -20,9 +24,9 @@ jobs:
       - name: Sphinx build
         run: |
           make html
+          cp CNAME _build/html
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         with:
           publish_branch: gh-pages
           github_token: ${{ secrets.GITHUB_TOKEN }}
