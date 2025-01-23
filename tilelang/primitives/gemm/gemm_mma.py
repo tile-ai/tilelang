@@ -54,7 +54,7 @@ class GemmPrimitiveMMA(GemmBaseParams):
             """
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
 
-            thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
+            thread_binding = T.thread_binding(0, threads, "threadIdx.x")
             if a_is_fragment:
                 # Annotate layout for A_local if it is a fragment.
                 T.annotate_layout({
@@ -77,7 +77,7 @@ class GemmPrimitiveMMA(GemmBaseParams):
                     B_local,
                     B_shared,
                     ki,
-                    thread_bindings=thread_bindings,
+                    thread_binding=thread_binding,
                 )
                 # Perform Matrix Multiplication
                 mma_emitter.mma(
@@ -150,7 +150,7 @@ class GemmPrimitiveMMA(GemmBaseParams):
             A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
 
-            thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
+            thread_binding = T.thread_binding(0, threads, "threadIdx.x")
 
             if c_is_fragment:
                 # Annotate layout for C_local if it is a fragment.
@@ -164,7 +164,7 @@ class GemmPrimitiveMMA(GemmBaseParams):
                     A_local,
                     A_shared,
                     ki,
-                    thread_bindings=thread_bindings,
+                    thread_binding=thread_binding,
                 )
 
                 # Load B into fragment
@@ -172,7 +172,7 @@ class GemmPrimitiveMMA(GemmBaseParams):
                     B_local,
                     B_shared,
                     ki,
-                    thread_bindings=thread_bindings,
+                    thread_binding=thread_binding,
                 )
 
                 # Perform Matrix Multiplication
@@ -197,7 +197,8 @@ class GemmPrimitiveMMA(GemmBaseParams):
 
         # Infer block partition if necessary
         current_frame = T.KernelLaunchFrame.Current()
-        threads = current_frame.num_threads
+        threads = current_frame.get_thread_binding(0)
+
         self.infer_block_partition(threads)
 
         A, B, C = self.A, self.B, self.C

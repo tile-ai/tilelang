@@ -339,7 +339,7 @@ def tl_matmul(
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
 
-            thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
+            thread_binding = T.thread_binding(0, threads, "threadIdx.x")
 
             T.annotate_layout({
                 A_shared: make_swizzle_layout(A_shared),
@@ -368,7 +368,7 @@ def tl_matmul(
                         A_local,
                         A_shared,
                         ki,
-                        thread_bindings=thread_bindings,
+                        thread_binding=thread_binding,
                     )
 
                     # Load B into fragment
@@ -376,7 +376,7 @@ def tl_matmul(
                         B_local,
                         B_shared,
                         ki,
-                        thread_bindings=thread_bindings,
+                        thread_binding=thread_binding,
                     )
 
                     # Perform Matrix Multiplication
@@ -386,7 +386,7 @@ def tl_matmul(
             mma_emitter.stmatrix(
                 C_local,
                 C_shared,
-                thread_bindings=thread_bindings,
+                thread_binding=thread_binding,
             )
 
             # Store shared into global
@@ -416,10 +416,10 @@ def tl_matmul(
    ```python
    for ki in T.serial(0, (block_K // micro_size_k)):
        # Warp-synchronous load for A
-       mma_emitter.ldmatrix_a(A_local, A_shared, ki, thread_bindings=thread_bindings)
+       mma_emitter.ldmatrix_a(A_local, A_shared, ki, thread_binding=thread_binding)
 
        # Warp-synchronous load for B
-       mma_emitter.ldmatrix_b(B_local, B_shared, ki, thread_bindings=thread_bindings)
+       mma_emitter.ldmatrix_b(B_local, B_shared, ki, thread_binding=thread_binding)
    ```
    Internally, these calls orchestrate how each thread in the warp issues the correct load instructions, performs address calculations, and stores the data into registers.
 
@@ -437,7 +437,7 @@ def tl_matmul(
 5. **Store Results via `stmatrix`**  
    Finally, you write the results from the warp-level fragments back to shared memory or global memory. This step might happen multiple times in a loop or just once at the end. The code snippet:
    ```python
-   mma_emitter.stmatrix(C_local, C_shared, thread_bindings=thread_bindings)
+   mma_emitter.stmatrix(C_local, C_shared, thread_binding=thread_binding)
    ```
    orchestrates the warp-synchronous stores, ensuring each thread places the correct fragment element into the correct location of the shared or global buffer.
 

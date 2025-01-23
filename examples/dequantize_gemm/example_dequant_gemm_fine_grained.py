@@ -257,7 +257,7 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
             B_dequantize_local = T.alloc_local((warp_cols * local_size), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size), accum_dtype)
             reduced_accum_res = T.alloc_local(0, accum_dtype)
-            thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
+            thread_binding = T.thread_binding(0, threads, "threadIdx.x")
             rk = T.thread_binding(0, reduce_k, "threadIdx.y")
 
             T.annotate_layout({
@@ -279,7 +279,7 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
                 for i in T.serial(block_N * (block_K // reduce_k) // num_elems_per_byte //
                                   (threads * vec_load_qb)):
                     for v in T.vectorized(0, vec_load_qb):
-                        t = thread_bindings
+                        t = thread_binding
                         idx = i * threads * vec_load_qb * reduce_k + rk * threads * vec_load_qb + t * vec_load_qb + v
                         vkk = idx % (micro_size_k // num_elems_per_byte)
                         vjj = (idx // (micro_size_k // num_elems_per_byte)) % micro_size_y
@@ -299,7 +299,7 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
                         A_local,
                         A_shared,
                         ki,
-                        thread_bindings=thread_bindings,
+                        thread_binding=thread_binding,
                         rk=rk,
                     )
 
@@ -308,7 +308,7 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
                         B_local,
                         B_shared,
                         ki,
-                        thread_bindings=thread_bindings,
+                        thread_binding=thread_binding,
                         rk=rk,
                     )
 
@@ -343,7 +343,7 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
                 mma_emitter.stmatrix(
                     C_local,
                     C_shared,
-                    thread_bindings=thread_bindings,
+                    thread_binding=thread_binding,
                 )
 
             for i, j in T.Parallel(block_M, (block_N // reduce_k)):

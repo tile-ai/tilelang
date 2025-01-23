@@ -113,7 +113,7 @@ def tl_matmul_macro(
             B_local = T.alloc_local((warp_cols * local_size), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size), accum_dtype)
 
-            thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
+            thread_binding = T.thread_binding(0, threads, "threadIdx.x")
 
             T.annotate_layout({
                 A_shared: make_swizzle_layout(A_shared),
@@ -142,7 +142,7 @@ def tl_matmul_macro(
                         A_local,
                         A_shared,
                         ki,
-                        thread_bindings=thread_bindings,
+                        thread_binding=thread_binding,
                     )
 
                     # Load B into fragment
@@ -150,7 +150,7 @@ def tl_matmul_macro(
                         B_local,
                         B_shared,
                         ki,
-                        thread_bindings=thread_bindings,
+                        thread_binding=thread_binding,
                     )
 
                     # Perform Matrix Multiplication
@@ -160,7 +160,7 @@ def tl_matmul_macro(
             mma_emitter.stmatrix(
                 C_local,
                 C_shared,
-                thread_bindings=thread_bindings,
+                thread_binding=thread_binding,
             )
 
             # Store shared into global
