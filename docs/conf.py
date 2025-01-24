@@ -2,7 +2,7 @@
 import os
 import sys
 
-import tlcpack_sphinx_addon
+# import tlcpack_sphinx_addon
 
 # -- General configuration ------------------------------------------------
 
@@ -11,12 +11,13 @@ sys.path.insert(0, os.path.abspath("../"))
 autodoc_mock_imports = ["torch"]
 
 # General information about the project.
-project = "tilelang"
+project = "Tile Language <br>"
 author = "Tile Lang Contributors"
 copyright = "2025-2025, %s" % author
 
 # Version information.
 
+# TODO: use the version from project metadata
 version = "0.1.0"
 release = "0.1.0"
 
@@ -27,6 +28,8 @@ extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.napoleon",
     "sphinx_reredirects",
+    "sphinx.ext.mathjax",
+    "sphinx.ext.autosummary",
 ]
 
 redirects = {"get_started/try_out": "../index.html#getting-started"}
@@ -46,23 +49,18 @@ todo_include_todos = False
 
 # -- Options for HTML output ----------------------------------------------
 
-# The theme is set by the make target
-import sphinx_rtd_theme
-
-html_theme = "sphinx_rtd_theme"
-html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
+html_theme = "furo"
 
 templates_path = []
 
-html_static_path = []
+html_static_path = ["_static"]
 
 footer_copyright = "© 2025-2025 Tile Language"
 footer_note = " "
 
-html_logo = "_static/img/logo-row.svg"
-
 html_theme_options = {
-    "logo_only": True,
+    "light_logo": "img/logo-row.svg",
+    "dark_logo": "img/logo-row.svg",
 }
 
 header_links = [
@@ -84,6 +82,6 @@ html_context = {
     # "version_selecter": "",
 }
 
-# add additional overrides
-templates_path += [tlcpack_sphinx_addon.get_templates_path()]
-html_static_path += [tlcpack_sphinx_addon.get_static_path()]
+# # add additional overrides
+# templates_path += [tlcpack_sphinx_addon.get_templates_path()]
+# html_static_path += [tlcpack_sphinx_addon.get_static_path()]
