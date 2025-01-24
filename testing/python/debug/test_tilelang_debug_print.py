@@ -99,5 +99,6 @@ def debug_print_msg(M=16, N=16):
 def test_debug_print_msg():
     debug_print_msg(16, 16)
 
+
 if __name__ == "__main__":
     tilelang.testing.main()
