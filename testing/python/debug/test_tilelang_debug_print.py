@@ -4,6 +4,7 @@ import tilelang
 import tilelang.testing
 import tilelang.language as T
 
+
 def debug_print_buffer(M=16, N=16):
     dtype = "float16"
 
@@ -12,7 +13,7 @@ def debug_print_buffer(M=16, N=16):
         with T.Kernel(4, 4, 2, threads=128 * 2) as (bx, by, bz):
             shared_buf = T.alloc_shared([M, N], dtype)
             T.print(shared_buf)
-    
+
     jit_kernel = tilelang.JITKernel(program, target="cuda")
     profiler = jit_kernel.get_profiler()
     profiler.run_once()
@@ -21,6 +22,7 @@ def debug_print_buffer(M=16, N=16):
 def test_debug_print_buffer():
     debug_print_buffer(16, 16)
 
+
 def debug_print_buffer_conditional(M=16, N=16):
     dtype = "float16"
 
@@ -28,11 +30,10 @@ def debug_print_buffer_conditional(M=16, N=16):
     def program(Q: T.Buffer((M, N), dtype)):
         with T.Kernel(4, 4, 2, threads=128 * 2) as (bx, by, bz):
             shared_buf = T.alloc_shared([M, N], dtype)
-            
-            
+
             if bx == 0 and by == 0 and bz == 0:
                 T.print(shared_buf)
-    
+
     jit_kernel = tilelang.JITKernel(program, target="cuda")
     profiler = jit_kernel.get_profiler()
     profiler.run_once()
@@ -40,7 +41,6 @@ def debug_print_buffer_conditional(M=16, N=16):
 
 def test_debug_print_buffer_conditional():
     debug_print_buffer_conditional(16, 16)
-
 
 
 def debug_print_value_conditional(M=16, N=16):
@@ -52,7 +52,7 @@ def debug_print_value_conditional(M=16, N=16):
             tid = T.get_thread_binding()
             if tid == 0:
                 T.print(bx + by + bz)
-    
+
     jit_kernel = tilelang.JITKernel(program, target="cuda")
     profiler = jit_kernel.get_profiler()
     profiler.run_once()
@@ -60,6 +60,7 @@ def debug_print_value_conditional(M=16, N=16):
 
 def test_debug_print_value_conditional():
     debug_print_value_conditional(16, 16)
+
 
 if __name__ == "__main__":
     tilelang.testing.main()
