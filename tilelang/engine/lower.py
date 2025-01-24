@@ -144,6 +144,8 @@ def lower(
     mod = tl.transform.LegalizeSafeMemoryAccess()(mod)
     # Inject Simplify to remove the duplicated conditions
     mod = tir.transform.Simplify()(mod)
+    mod = tir.transform.VectorizeLoop()(mod)
+
     # which may be introduced by the LegalizeSafeMemoryAccess
     if target.arch == "sm_90":
         mod = tl.transform.MultiVersionBuffer()(mod)
@@ -161,7 +163,6 @@ def lower(
     mod = tir.transform.FlattenBuffer()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tir.transform.Simplify()(mod)
-    mod = tir.transform.VectorizeLoop()(mod)
     mod = tir.transform.StorageRewrite()(mod)
     mod = tir.transform.UnrollLoop()(mod)
     mod = tir.transform.RenormalizeSplitPattern()(mod)

@@ -69,7 +69,8 @@ class JITKernel(object):
         target = Target(target)
 
         # Validate the execution backend.
-        assert execution_backend in ["dl_pack", "torch_cpp", "ctypes"], "Invalid execution backend."
+        assert execution_backend in ["dl_pack", "torch_cpp",
+                                     "ctypes"], f"Invalid execution backend. {execution_backend}"
 
         # Compile the TileLang function and create a kernel adapter for execution.
         adapter = self._compile_and_create_adapter(func)

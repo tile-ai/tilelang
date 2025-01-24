@@ -3,6 +3,9 @@
 import sys
 import inspect
 import pytest
+import random
+import torch
+import numpy as np
 from tvm.testing.utils import *
 
 
@@ -75,3 +78,11 @@ def torch_assert_close(tensor_a,
             f"Greatest relative difference: {(diff / (torch.abs(tensor_b) + 1e-12)).max().item()}.")
     else:
         return True
+
+
+def set_random_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)

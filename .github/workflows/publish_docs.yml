@@ -1,0 +1,45 @@
+name: documentation
+
+on:
+  pull_request:
+    types:
+      - closed
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  docs:
+    if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' }} || ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+      - name: Build docs
+        run: |
+          chmod +x ./maint/scripts/build_docs.sh
+          ./maint/scripts/build_docs.sh
+      - name: Configure git
+        run: |
+          git config --global user.email "tilelang@outlook.com"
+          git config --global user.name "GitHub Actions"
+      - name: Push to another repo
+        env:
+          TARGET_REPO: ${{ secrets.TARGET_REPO }}
+          TARGET_TOKEN: ${{ secrets.TARGET_TOKEN }}
+        run: |
+          git config --global url."https://$TARGET_TOKEN@github.com".insteadOf "https://github.com"
+          git clone https://github.com/${TARGET_REPO}.git target_repo
+          cd target_repo
+          git checkout main
+          cp -r ../docs/_build/html/* ./
+          git add .
+          if [[ -n "$(git status --porcelain)" ]]; then
+          # If there are changes, commit and push
+            git commit -m "Update docs"
+            git push https://github.com/${TARGET_REPO}.git main
+          else
+            echo "No changes detected, skipping commit and push."
+          fi
+

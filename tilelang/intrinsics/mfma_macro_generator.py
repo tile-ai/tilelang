@@ -205,7 +205,7 @@ class MatrixCoreIntrinEmitter(object):
                                                (WARP_SIZE * block_row_warps)) % block_col_warps,
             return lane_id, warp_n, warp_m
 
-    def ldmatrix_a(self, A_local_buf, A_shared_buf, ki, thread_bindings, rk=0):
+    def ldmatrix_a(self, A_local_buf, A_shared_buf, ki, rk=0):
         warp_row_tiles = self.warp_row_tiles
         warp_rows = self.warp_rows
         chunk = self.chunk
@@ -214,7 +214,8 @@ class MatrixCoreIntrinEmitter(object):
         local_size_a = self.local_size_a
         k_pack = self.k_pack
         is_transposed = self.a_transposed
-
+        current_frame = T.KernelLaunchFrame.Current()
+        thread_binding = current_frame.get_thread_binding()
         _, reverse_index_map = self.get_ldmatrix_index_map(is_b=False)
 
         @T.macro
@@ -222,10 +223,10 @@ class MatrixCoreIntrinEmitter(object):
             A_local_buf,
             A_shared_buf,
             ki,
-            thread_bindings,
+            thread_binding,
             rk=0,
         ):
-            tx, _, warp_m = self.extract_thread_binding(thread_bindings)
+            tx, _, warp_m = self.extract_thread_binding(thread_binding)
             if is_transposed:
                 for i in T.serial(warp_rows):
                     for local_id in T.vectorized(k_pack * local_size_a):
@@ -243,9 +244,9 @@ class MatrixCoreIntrinEmitter(object):
                         A_local_buf[i * k_pack * local_size_a + local_id] = A_shared_buf[l + row,
                                                                                          r + col]
 
-        return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_bindings, rk)
+        return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
 
-    def ldmatrix_b(self, B_local_buf, B_shared_buf, ki, thread_bindings, rk=0):
+    def ldmatrix_b(self, B_local_buf, B_shared_buf, ki, rk=0):
         warp_col_tiles = self.warp_col_tiles
         warp_cols = self.warp_cols
         chunk = self.chunk
@@ -254,7 +255,8 @@ class MatrixCoreIntrinEmitter(object):
         local_size_b = self.local_size_b
         k_pack = self.k_pack
         is_transposed = self.b_transposed
-
+        current_frame = T.KernelLaunchFrame.Current()
+        thread_binding = current_frame.get_thread_binding()
         _, reverse_index_map = self.get_ldmatrix_index_map(is_b=True)
 
         @T.macro
@@ -262,10 +264,10 @@ class MatrixCoreIntrinEmitter(object):
             B_local_buf,
             B_shared_buf,
             ki,
-            thread_bindings,
+            thread_binding,
             rk=0,
         ):
-            tx, warp_n, _ = self.extract_thread_binding(thread_bindings)
+            tx, warp_n, _ = self.extract_thread_binding(thread_binding)
 
             if is_transposed:
                 for j in T.serial(warp_cols):
@@ -288,7 +290,7 @@ class MatrixCoreIntrinEmitter(object):
                         B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[l + row,
                                                                                          r + col]
 
-        return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_bindings, rk)
+        return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
     def mfma(self, A_local_buf, B_local_buf, C_local_buf):
         warp_rows = self.warp_rows
@@ -324,13 +326,14 @@ class MatrixCoreIntrinEmitter(object):
 
         return _warp_mma(A_local_buf, B_local_buf, C_local_buf)
 
-    def stmatrix(self, C_local_buf, C_buf, thread_bindings, pid_m=None, pid_n=None):
+    def stmatrix(self, C_local_buf, C_buf, pid_m=None, pid_n=None):
         block_row_warps = self.block_row_warps
         block_col_warps = self.block_col_warps
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         local_size_out = self.local_size_out
-
+        current_frame = T.KernelLaunchFrame.Current()
+        thread_binding = current_frame.get_thread_binding()
         is_global = pid_m is not None and pid_n is not None
         BLOCK_M = block_row_warps * warp_rows
         BLOCK_N = block_col_warps * warp_cols
@@ -341,8 +344,8 @@ class MatrixCoreIntrinEmitter(object):
         # As TVM Intrins is like a hack that the threadIdx.x should be always
         # equal to the warp_size
         @T.macro
-        def _warp_stmatrix_shared(C_local_buf, C_buf, thread_bindings):
-            tx, warp_n, warp_m = self.extract_thread_binding(thread_bindings)
+        def _warp_stmatrix_shared(C_local_buf, C_buf, thread_binding):
+            tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
             for i, j in T.grid(warp_rows, warp_cols):
                 for local_id in T.serial(local_size_out):
                     row, col = T.meta_var(mfma_store_index_map(tx, local_id))
@@ -351,8 +354,8 @@ class MatrixCoreIntrinEmitter(object):
                                              local_id]
 
         @T.macro
-        def _warp_stmatrix_global(C_local_buf, C_buf, thread_bindings):
-            tx, warp_n, warp_m = self.extract_thread_binding(thread_bindings)
+        def _warp_stmatrix_global(C_local_buf, C_buf, thread_binding):
+            tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
             for i, j in T.grid(warp_rows, warp_cols):
                 for local_id in T.serial(local_size_out):
                     row, col = T.meta_var(mfma_store_index_map(tx, local_id))
@@ -362,5 +365,5 @@ class MatrixCoreIntrinEmitter(object):
                                              local_id]
 
         return _warp_stmatrix_global(C_local_buf, C_buf,
-                                     thread_bindings) if is_global else _warp_stmatrix_shared(
-                                         C_local_buf, C_buf, thread_bindings)
+                                     thread_binding) if is_global else _warp_stmatrix_shared(
+                                         C_local_buf, C_buf, thread_binding)

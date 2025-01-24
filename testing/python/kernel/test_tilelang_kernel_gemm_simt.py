@@ -11,7 +11,7 @@ import tilelang.language as T
 from tilelang.intrinsics import get_swizzle_layout
 from tilelang.transform import simplify_prim_func
 
-torch.manual_seed(0)
+tilelang.testing.set_random_seed(0)
 
 
 def make_swizzle_layout(shared_buf):

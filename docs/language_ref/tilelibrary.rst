@@ -1,4 +1,4 @@
-Language reference
+Tile Language: TileLibrary
 =========================
 
 T.Kernel

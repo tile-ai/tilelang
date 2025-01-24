@@ -20,8 +20,7 @@ def get_tensor_supply(supply_type: TensorSupplyType):
     def get_tensor(tensor: TensorType) -> torch.Tensor:
         dtype = torch.__getattribute__(str(tensor.dtype))
         device = torch.cuda.current_device()
-        # torch.manual_seed(0)
-        # torch.cuda.manual_seed(0)
+
         shape = list(map(int, tensor.shape))
         if dtype == torch.int8 and supply_type in [
                 TensorSupplyType.Uniform,
@@ -30,7 +29,11 @@ def get_tensor_supply(supply_type: TensorSupplyType):
             return torch.ones(*shape, device=device, dtype=dtype)
 
         if supply_type == TensorSupplyType.Integer:
-            return torch.randint(low=-2, high=3, size=shape, device=device, dtype=dtype)
+            is_unsigned = tensor.dtype.startswith("uint")
+            if is_unsigned:
+                return torch.randint(low=0, high=3, size=shape, device=device, dtype=dtype)
+            else:
+                return torch.randint(low=-2, high=3, size=shape, device=device, dtype=dtype)
         elif supply_type == TensorSupplyType.Uniform:
             return torch.empty(*shape, device=device, dtype=dtype).uniform_(-1.0, 1.0)
         elif supply_type == TensorSupplyType.Normal:

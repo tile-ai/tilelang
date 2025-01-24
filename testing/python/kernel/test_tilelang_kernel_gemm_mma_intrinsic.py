@@ -13,7 +13,7 @@ from tilelang.intrinsics.mma_macro_generator import (
     TensorCoreIntrinEmitter,)
 from tilelang.transform import simplify_prim_func
 
-torch.manual_seed(0)
+tilelang.testing.set_random_seed(0)
 
 
 def make_swizzle_layout(shared_buf):
@@ -119,7 +119,7 @@ def tl_matmul(
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
 
-            thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
+            thread_binding = T.thread_binding(0, threads, "threadIdx.x")
 
             T.annotate_layout({
                 A_shared: make_swizzle_layout(A_shared),
@@ -148,7 +148,6 @@ def tl_matmul(
                         A_local,
                         A_shared,
                         ki,
-                        thread_bindings=thread_bindings,
                     )
 
                     # Load B into fragment
@@ -156,7 +155,6 @@ def tl_matmul(
                         B_local,
                         B_shared,
                         ki,
-                        thread_bindings=thread_bindings,
                     )
 
                     # Perform Matrix Multiplication
@@ -166,7 +164,6 @@ def tl_matmul(
             mma_emitter.stmatrix(
                 C_local,
                 C_shared,
-                thread_bindings=thread_bindings,
             )
 
             # Store shared into global

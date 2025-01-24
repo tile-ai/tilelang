@@ -40,7 +40,7 @@ class GemmPrimitiveMMA(GemmBaseParams):
         local_size_b = mma_emitter.local_size_b
         block_K = mma_emitter.chunk
         micro_size_k = mma_emitter.micro_size_k
-        threads = mma_emitter.threads
+
         # Check if C is a fragment for applying custom layout
         a_is_fragment = is_fragment(A)
         c_is_fragment = is_fragment(C)
@@ -54,7 +54,6 @@ class GemmPrimitiveMMA(GemmBaseParams):
             """
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
 
-            thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
             if a_is_fragment:
                 # Annotate layout for A_local if it is a fragment.
                 T.annotate_layout({
@@ -77,7 +76,6 @@ class GemmPrimitiveMMA(GemmBaseParams):
                     B_local,
                     B_shared,
                     ki,
-                    thread_bindings=thread_bindings,
                 )
                 # Perform Matrix Multiplication
                 mma_emitter.mma(
@@ -135,7 +133,6 @@ class GemmPrimitiveMMA(GemmBaseParams):
         local_size_b = mma_emitter.local_size_b
         block_K = mma_emitter.chunk
         micro_size_k = mma_emitter.micro_size_k
-        threads = mma_emitter.threads
 
         # Check if C is a fragment for applying custom layout
         c_is_fragment = is_fragment(C)
@@ -150,8 +147,6 @@ class GemmPrimitiveMMA(GemmBaseParams):
             A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
 
-            thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
-
             if c_is_fragment:
                 # Annotate layout for C_local if it is a fragment.
                 T.annotate_layout({
@@ -164,7 +159,6 @@ class GemmPrimitiveMMA(GemmBaseParams):
                     A_local,
                     A_shared,
                     ki,
-                    thread_bindings=thread_bindings,
                 )
 
                 # Load B into fragment
@@ -172,7 +166,6 @@ class GemmPrimitiveMMA(GemmBaseParams):
                     B_local,
                     B_shared,
                     ki,
-                    thread_bindings=thread_bindings,
                 )
 
                 # Perform Matrix Multiplication
@@ -197,7 +190,8 @@ class GemmPrimitiveMMA(GemmBaseParams):
 
         # Infer block partition if necessary
         current_frame = T.KernelLaunchFrame.Current()
-        threads = current_frame.num_threads
+        threads = current_frame.get_num_threads()
+
         self.infer_block_partition(threads)
 
         A, B, C = self.A, self.B, self.C
