@@ -36,7 +36,6 @@ jobs:
           git add .
           if [[ -n "$(git status --porcelain)" ]]; then
           # If there are changes, commit and push
-            git add .
             git commit -m "Update docs"
             git push https://github.com/${TARGET_REPO}.git main
           else
