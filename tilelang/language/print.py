@@ -3,7 +3,6 @@
 """The language interface for tl programs."""
 
 from tvm import tir
-import builtins
 from typing import Any
 from tilelang.language.kernel import get_thread_bindings
 from tilelang.language import macro, serial
@@ -29,11 +28,6 @@ def print_flat_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer
 
 
 def print(obj: Any) -> tir.PrimExpr:
-    builtins.print(obj)
-    builtins.print(type(obj))
-    builtins.print("isinstance(expr, tir.PrimExpr) ", isinstance(obj, tir.PrimExpr))
-    builtins.print("isinstance(expr, tir.Buffer) ", isinstance(obj, tir.Buffer))
-    builtins.print("isinstance(expr, tir.Stmt) ", isinstance(obj, tir.Stmt))
     if isinstance(obj, tir.Buffer):
         # print a buffer must be in just one thread
         tx, ty, tz = get_thread_bindings()
@@ -43,7 +37,7 @@ def print(obj: Any) -> tir.PrimExpr:
         # only allow print in the first thread
         condition = (tx == 0 and ty == 0 and tz == 0)
         return print_flat_buffer_with_condition(condition, buffer, elems)
-        return tir.call_extern("handle", "debug_print_var", buffer.data, elems)
+
     elif isinstance(obj, tir.PrimExpr):
         return print_var(obj)
     else:
