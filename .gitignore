@@ -76,3 +76,6 @@ models/frozenmodels/
 
 # build sdist
 build_sdist/
+
+# exclude debug testing folder
+!testing/python/debug
