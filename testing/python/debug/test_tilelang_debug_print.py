@@ -62,5 +62,24 @@ def test_debug_print_value_conditional():
     debug_print_value_conditional(16, 16)
 
 
+def debug_print_register_files(M=16, N=16):
+    dtype = "float16"
+
+    @T.prim_func
+    def program(Q: T.Buffer((M, N), dtype)):
+        with T.Kernel(4, 4, 2, threads=128 * 2) as (bx, by, bz):
+            shared_buf = T.alloc_fragment([M, N], dtype)
+            for i, j in T.Parallel(M, N):
+                T.print(shared_buf[i, j])
+
+    jit_kernel = tilelang.JITKernel(program, target="cuda")
+    profiler = jit_kernel.get_profiler()
+    profiler.run_once()
+
+
+def test_debug_print_register_files():
+    debug_print_register_files(16, 16)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

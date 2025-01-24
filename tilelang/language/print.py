@@ -12,7 +12,7 @@ from tilelang.language import macro, serial
 
 
 @macro
-def print_var(var: tir.PrimExpr) -> tir.PrimExpr:
+def print_var(var: tir.PrimExpr, msg: str = "") -> tir.PrimExpr:
     """
     Prints the value of a TIR primitive expression (PrimExpr) for debugging purposes.
     
@@ -22,11 +22,13 @@ def print_var(var: tir.PrimExpr) -> tir.PrimExpr:
     Returns:
         tir.PrimExpr: The TIR expression for the debug print operation.
     """
-    return tir.call_extern("handle", "debug_print_var", var)
+    tir.call_extern("handle", "debug_print_var", msg, var)
 
 
 @macro
-def print_var_with_condition(condition: tir.PrimExpr, var: tir.PrimExpr) -> tir.PrimExpr:
+def print_var_with_condition(condition: tir.PrimExpr,
+                             var: tir.PrimExpr,
+                             msg: str = "") -> tir.PrimExpr:
     """
     Conditionally prints a TIR primitive expression (PrimExpr) if a given condition is True.
     
@@ -38,12 +40,14 @@ def print_var_with_condition(condition: tir.PrimExpr, var: tir.PrimExpr) -> tir.
         tir.PrimExpr: The TIR expression for the debug print operation, if the condition is True.
     """
     if condition:
-        return tir.call_extern("handle", "debug_print_var", var)
+        tir.call_extern("handle", "debug_print_var", msg, var)
 
 
 @macro
-def print_flat_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer,
-                                     elems: int) -> tir.PrimExpr:
+def print_flat_buffer_with_condition(condition: tir.PrimExpr,
+                                     buffer: tir.Buffer,
+                                     elems: int,
+                                     msg: str = "") -> tir.PrimExpr:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
     
@@ -58,10 +62,10 @@ def print_flat_buffer_with_condition(condition: tir.PrimExpr, buffer: tir.Buffer
     if condition:
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
-            tir.call_extern("handle", "debug_print_buffer_value", buffer.name, i, buffer[i])
+            tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[i])
 
 
-def print(obj: Any) -> tir.PrimExpr:
+def print(obj: Any, msg: str = "") -> tir.PrimExpr:
     """
     A generic print function that handles both TIR buffers and primitive expressions.
     
@@ -70,6 +74,7 @@ def print(obj: Any) -> tir.PrimExpr:
     
     Parameters:
         obj (Any): The object to print. It can be either a tir.Buffer or tir.PrimExpr.
+        msg (str): An optional message to include in the print statement.
         
     Returns:
         tir.PrimExpr: The TIR expression for the debug print operation.
@@ -93,11 +98,15 @@ def print(obj: Any) -> tir.PrimExpr:
 
         # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
         condition = (tx == 0 and ty == 0 and tz == 0)
-        return print_flat_buffer_with_condition(condition, buffer, elems)
+        if not msg:
+            msg = f"buffer<{buffer.name}, {buffer.dtype}>"
+        return print_flat_buffer_with_condition(condition, buffer, elems, msg)
 
     elif isinstance(obj, tir.PrimExpr):
+        if not msg:
+            msg = f"expr<{obj}>"
         # Directly print primitive expressions.
-        return print_var(obj)
+        return print_var(obj, msg)
 
     else:
         # Unsupported object type.
