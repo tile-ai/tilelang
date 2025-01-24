@@ -8,7 +8,7 @@ from .parser import *
 from tilelang.layout import Layout, Fragment  # noqa: F401
 from .parallel import Parallel  # noqa: F401
 from .pipeline import Pipelined  # noqa: F401
-from .kernel import Kernel, KernelLaunchFrame  # noqa: F401
+from .kernel import Kernel, KernelLaunchFrame, get_thread_binding  # noqa: F401
 from .allocate import (
     alloc_local,  # noqa: F401
     alloc_shared,  # noqa: F401
@@ -24,6 +24,7 @@ from .reduce import (
     reduce_sum,  # noqa: F401
     reduce_abssum,  # noqa: F401
 )
+from .print import print  # noqa: F401
 from .customize import (
     atomic_add,  # noqa: F401
     atomic_addx2,  # noqa: F401
