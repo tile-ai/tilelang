@@ -21,7 +21,7 @@ class Fragment(Layout):
         vars = [iv.var for iv in forward_vars]
 
         forward_index = forward_index_fn(*vars) if forward_index_fn else None
-        if not isinstance(forward_index, tvm.ir.container.Array):
+        if not isinstance(forward_index, tvm.ir.container.Array) and forward_index is not None:
             forward_index = [forward_index]
 
         if replicate > 1:
