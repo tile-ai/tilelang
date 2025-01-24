@@ -13,23 +13,40 @@ from tilelang.layout import Layout
 @tvm._ffi.register_object("tl.Fragment")
 class Fragment(Layout):
     # pylint: disable=super-init-not-called
-    def __init__(self, shape, forward_thread_fn, replicate=1, forward_index_fn=None):
+    def __init__(self,
+                 shape,
+                 forward_fn=None,
+                 forward_thread_fn=None,
+                 replicate=1,
+                 forward_index_fn=None):
         forward_vars = []
         for idx, size in enumerate(shape):
             iv = IterVar(Range(0, size), Var(f"i{idx}", "int32"), 0)
             forward_vars.append(iv)
         vars = [iv.var for iv in forward_vars]
 
-        forward_index = forward_index_fn(*vars) if forward_index_fn else None
+        forward_thread: IterVar = None
+        forward_index: tvm.ir.container.Array = None
+        thread_replicate: IterVar = None
+
+        if forward_fn is not None:
+            if replicate > 1:
+                thread_replicate = IterVar(Range(0, replicate), Var("rep", "int32"), 0)
+                forward_thread, forward_index = forward_fn(*vars, thread_replicate)
+            else:
+                thread_replicate = None
+                forward_thread, forward_index = forward_fn(*vars)
+        else:
+            forward_index = forward_index_fn(*vars) if forward_index_fn else None
+            if replicate > 1:
+                thread_replicate = IterVar(Range(0, replicate), Var("rep", "int32"), 0)
+                forward_thread = forward_thread_fn(*vars, thread_replicate.var)
+            else:
+                thread_replicate = None
+                forward_thread = forward_thread_fn(*vars)
+
         if not isinstance(forward_index, tvm.ir.container.Array):
             forward_index = [forward_index]
-
-        if replicate > 1:
-            thread_replicate = IterVar(Range(0, replicate), Var("rep", "int32"), 0)
-            forward_thread = forward_thread_fn(*vars, thread_replicate.var)
-        else:
-            thread_replicate = None
-            forward_thread = forward_thread_fn(*vars)
 
         self.__init_handle_by_constructor__(
             _ffi_api.Fragment,

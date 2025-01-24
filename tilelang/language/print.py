@@ -84,6 +84,8 @@ def print(obj: Any) -> tir.PrimExpr:
 
         # Flatten the buffer for consistent printing. This assumes a 1D flattened buffer.
         buffer = obj.get_flattened_buffer()
+        if buffer.scope() == "local.fragment":
+            raise NotImplementedError("Printing fragment buffers currently is not supported.")
         assert len(buffer.shape) == 1, "Buffer must be flattened into a 1D shape."
 
         # Get the number of elements in the buffer.
