@@ -34,3 +34,4 @@ thefuzz
 tabulate
 wheel
 setuptools
+einops
