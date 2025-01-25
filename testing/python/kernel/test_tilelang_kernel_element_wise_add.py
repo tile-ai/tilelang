@@ -25,12 +25,11 @@ def elementwise_add(
             start_x = bx * block_N
             start_y = by * block_M
 
-            for local_y in range(block_M):
-                for local_x in range(block_N):
-                    y = start_y + local_y
-                    x = start_x + local_x
-                    if y < M and x < N:
-                        C[y, x] = A[y, x] + B[y, x]
+            for (local_y, local_x) in T.Parallel(block_M, block_N):
+                y = start_y + local_y
+                x = start_x + local_x
+                if y < M and x < N:
+                    C[y, x] = A[y, x] + B[y, x]
 
     return main
 
