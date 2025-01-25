@@ -123,7 +123,6 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_casual, block_M, block_
             bid = by // heads
             sid = bz
 
-            T.annotate_layout({Q_shared: tilelang.layout.make_swizzled_layout(Q_shared)})
             T.copy(Q[bid, mid * block_M:(mid + 1) * block_M, hid, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
