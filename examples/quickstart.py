@@ -3,7 +3,7 @@
 import tilelang
 import tilelang.language as T
 # `make_mma_swizzle_layout` is a python defined layout function
-# specifically designed for for MMA operations
+# specifically designed for MMA operations
 # which ensures the consistency with the nvidia CUTLASS Library.
 # to avoid bank conflicts and maximize the performance.
 from tilelang.intrinsics import (
@@ -86,7 +86,7 @@ print("Kernel output matches PyTorch reference.")
 cuda_source = jit_kernel.get_kernel_source()
 print("Generated CUDA kernel:\n", cuda_source)
 
-# 5.Pofile latency with kernel
+# 5.Profile latency with kernel
 profiler = jit_kernel.get_profiler()
 
 latency = profiler.do_bench()
