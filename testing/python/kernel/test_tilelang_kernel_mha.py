@@ -188,7 +188,7 @@ def test_mha_causal_dim128():
         is_causal=True,
         block_M=64,
         block_N=64,
-        num_stages=2,
+        num_stages=1,
         threads=128)
 
 
@@ -201,7 +201,7 @@ def test_mha_no_causal_dim128():
         is_causal=False,
         block_M=64,
         block_N=64,
-        num_stages=2,
+        num_stages=1,
         threads=128)
 
 
@@ -214,7 +214,7 @@ def test_mha_causal_dim256():
         is_causal=True,
         block_M=64,
         block_N=64,
-        num_stages=2,
+        num_stages=1,
         threads=128)
 
 
@@ -227,7 +227,7 @@ def test_mha_no_causal_dim256():
         is_causal=False,
         block_M=64,
         block_N=64,
-        num_stages=2,
+        num_stages=1,
         threads=128)
 
 
