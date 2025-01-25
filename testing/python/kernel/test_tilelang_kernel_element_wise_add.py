@@ -28,7 +28,7 @@ def elementwise_add(
             for (local_y, local_x) in T.Parallel(block_M, block_N):
                 y = start_y + local_y
                 x = start_x + local_x
-                
+
                 C[y, x] = A[y, x] + B[y, x]
 
     return main
