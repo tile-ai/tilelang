@@ -190,7 +190,7 @@ In addition to GEMM, we provide a variety of examples to showcase the versatilit
 
 ---
 
-TileLang has now been used in project [BitBLAS](https://github.com/microsoft/BitBLAS).
+TileLang has now been used in project [BitBLAS](https://github.com/microsoft/BitBLAS) and [AttentionEngine](https://github.com/microsoft/AttentionEngine).
 
 ## Join the Discussion
 

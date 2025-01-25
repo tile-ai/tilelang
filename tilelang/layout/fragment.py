@@ -45,7 +45,7 @@ class Fragment(Layout):
                 thread_replicate = None
                 forward_thread = forward_thread_fn(*vars)
 
-        if not isinstance(forward_index, tvm.ir.container.Array) and forward_index is not None:
+        if forward_index is not None and not isinstance(forward_index, tvm.ir.container.Array):
             forward_index = [forward_index]
 
         self.__init_handle_by_constructor__(

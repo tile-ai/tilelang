@@ -300,18 +300,4 @@ def test_pad_f16f16f32_nn():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    run_gemm(
-        512,
-        1024,
-        768,
-        False,
-        True,
-        "float16",
-        "float16",
-        "float16",
-        128,
-        256,
-        32,
-        2,
-    )
+    tilelang.testing.main()

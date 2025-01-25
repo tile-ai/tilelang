@@ -129,7 +129,6 @@ def flashattn(batch, heads, seq_len, dim, is_casual, tune=False):
                 scores_sum = T.alloc_fragment([block_M], accum_dtype)
                 logsum = T.alloc_fragment([block_M], accum_dtype)
 
-                T.annotate_layout({Q_shared: tilelang.layout.make_swizzled_layout(Q_shared)})
                 T.copy(Q[bz, bx * block_M:(bx + 1) * block_M, by, :], Q_shared)
                 T.fill(acc_o, 0)
                 T.fill(logsum, 0)
@@ -208,7 +207,7 @@ if __name__ == "__main__":
     if (not args.tune):
         program = flashattn(
             batch, heads, seq_len, dim, is_casual, tune=args.tune)(
-                block_M=128, block_N=128, num_stages=2, threads=256)
+                block_M=128, block_N=128, num_stages=1, threads=128)
         ref_program = partial(ref_program, is_casual=is_casual)
         mod, params = tilelang.lower(program)
         mod = Profiler(mod, params, [3], tilelang.TensorSupplyType.Normal)
