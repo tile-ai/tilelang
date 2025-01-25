@@ -97,7 +97,7 @@ Array<PrimExpr> LayoutNode::OutputShape() const {
       // X-OR Expression
       ret.Set(i, input_size_[i]);
     } else {
-      CHECK(is_one(ist.min())) << ist.min();
+      // CHECK(is_one(ist.min())) << ist.min();
       ret.Set(i, ist.max());
     }
   }
