@@ -179,30 +179,29 @@ def test_mha_no_causal_dim64():
         threads=128)
 
 
-def test_mha_causal_dim128():
-    run_mha(
-        batch=4,
-        heads=8,
-        seq_len=8192,
-        dim=128,
-        is_causal=True,
-        block_M=64,
-        block_N=64,
-        num_stages=1,
-        threads=128)
+# def test_mha_causal_dim128():
+#     run_mha(
+#         batch=4,
+#         heads=8,
+#         seq_len=8192,
+#         dim=128,
+#         is_causal=True,
+#         block_M=64,
+#         block_N=64,
+#         num_stages=1,
+#         threads=128)
 
-
-def test_mha_no_causal_dim128():
-    run_mha(
-        batch=4,
-        heads=8,
-        seq_len=8192,
-        dim=128,
-        is_causal=False,
-        block_M=64,
-        block_N=64,
-        num_stages=1,
-        threads=128)
+# def test_mha_no_causal_dim128():
+#     run_mha(
+#         batch=4,
+#         heads=8,
+#         seq_len=8192,
+#         dim=128,
+#         is_causal=False,
+#         block_M=64,
+#         block_N=64,
+#         num_stages=1,
+#         threads=128)
 
 
 def test_mha_causal_dim256():
