@@ -167,8 +167,8 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_casual, block_M, block_
             scale_local = T.alloc_fragment([block_M], accum_dtype)
 
             T.annotate_layout({
-                o_accum_local: T.Fragment(o_accum_local.shape, lambda i, j: i),
-                lse_local_split: T.Fragment(lse_local_split.shape, lambda i: i),
+                o_accum_local: T.Fragment(o_accum_local.shape, forward_thread_fn=lambda i, j: i),
+                lse_local_split: T.Fragment(lse_local_split.shape, forward_thread_fn=lambda i: i),
                 o_shared: tilelang.layout.make_swizzled_layout(o_shared),
                 po_shared: tilelang.layout.make_swizzled_layout(po_shared),
             })

@@ -132,6 +132,13 @@ class KernelLaunchFrame(TIRFrame):
         """
         return self.frames[-4 + dim].iter_var.var
 
+    def get_thread_bindings(self) -> List[Var]:
+        """
+        Returns the thread binding for the given dimension.
+        dim=0 corresponds to threadIdx.x, dim=1 to threadIdx.y, and dim=2 to threadIdx.z.
+        """
+        return [frame.iter_var.var for frame in self.frames[-4:-1]]
+
     def get_num_threads(self) -> int:
         """
         Returns the thread indices from the topmost frame.
@@ -213,3 +220,15 @@ def Kernel(
         attrs["pragma_import_c"] = prelude
 
     return _ffi_api.KernelLaunch(blocks, threads, attrs)
+
+
+def get_thread_binding(dim: int = 0) -> Var:
+    """Returns the thread binding for the given dimension.
+    """
+    return KernelLaunchFrame.Current().get_thread_binding(dim)
+
+
+def get_thread_bindings() -> List[Var]:
+    """Returns all three thread bindings.
+    """
+    return KernelLaunchFrame.Current().get_thread_bindings()
