@@ -39,7 +39,7 @@ const Op &CreateTMAIm2ColDescriptorOp();
 /*!
  * \brief Create a list of mbarrier with num_threads
  *
- * GetMBarrier(num_threads0, num_threads1, ...)
+ * CreateListofMBarrierOp(num_threads0, num_threads1, ...)
  *
  */
 const Op &CreateListofMBarrierOp();
