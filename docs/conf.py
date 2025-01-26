@@ -27,6 +27,7 @@ extensions = [
     "sphinxcontrib.httpdomain",
     "sphinx.ext.autodoc",
     "sphinx.ext.napoleon",
+    "sphinx.ext.intersphinx",
     "sphinx_reredirects",
     "sphinx.ext.mathjax",
     "sphinx.ext.autosummary",
