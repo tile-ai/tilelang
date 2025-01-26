@@ -195,5 +195,5 @@ class JITKernel(object):
         """
         return self.rt_module.imported_modules[0].get_source()
 
-    def run_once(self, func:Optional[Callable]=None) -> None:
+    def run_once(self, func: Optional[Callable] = None) -> None:
         return self.get_profiler().run_once(func)

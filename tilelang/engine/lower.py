@@ -31,8 +31,8 @@ def is_host_call(func: tir.PrimFunc):
     return not is_device_call(func)
 
 
-@tvm.register_func("tvm_callback_cuda_compile", override=True)
-def tvm_callback_cuda_compile(code, target):
+@tvm.register_func("tilelang_callback_cuda_compile", override=True)
+def tilelang_callback_cuda_compile(code, target):
     project_root = osp.join(osp.dirname(__file__), "../..")
     if "TL_TEMPLATE_PATH" in os.environ:
         tl_template_path = os.environ["TL_TEMPLATE_PATH"]
@@ -73,8 +73,8 @@ def tvm_callback_cuda_compile(code, target):
     return ptx
 
 
-@tvm.register_func("tvm_callback_hip_compile", override=True)
-def tvm_callback_hip_compile(code, target):
+@tvm.register_func("tilelang_callback_hip_compile", override=True)
+def tilelang_callback_hip_compile(code, target):
     project_root = osp.join(osp.dirname(__file__), "../..")
     tl_template_path = osp.abspath(osp.join(project_root, "src"))
 

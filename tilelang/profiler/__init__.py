@@ -87,7 +87,7 @@ class Profiler(TorchDLPackKernelAdapter):
                     rhs,
                 ]
 
-    def run_once(self, func:Optional[Callable]=None):
+    def run_once(self, func: Optional[Callable] = None):
         ins = self._get_inputs()
         if not func:
             func = self.__call__
@@ -96,10 +96,10 @@ class Profiler(TorchDLPackKernelAdapter):
     def do_bench(
         self,
         func: Optional[Callable] = None,
-        warmup:int=25,
-        rep:int=100,
-        n_warmup:int=1,
-        n_repeat:int=1,
+        warmup: int = 25,
+        rep: int = 100,
+        n_warmup: int = 1,
+        n_repeat: int = 1,
         profiler: Literal["torch", "tvm", "auto"] = "auto",
         input_tensors: List[torch.Tensor] = None,
     ):
