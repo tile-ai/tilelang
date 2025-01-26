@@ -98,8 +98,8 @@ def compile_hip(code,
         return data
 
 
-@tvm._ffi.register_func("tvm_callback_hip_compile", override=True)
-def tvm_callback_hip_compile(code, target):
+@tvm._ffi.register_func("tilelang_callback_hip_compile", override=True)
+def tilelang_callback_hip_compile(code, target):
     """use hipcc to generate fatbin code for better optimization"""
     hsaco = compile_hip(code, target_format="hsaco")
     return hsaco

@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 """The profiler and convert to torch utils"""
 
-from typing import List, Literal
+from typing import List, Literal, Optional, Callable
 from functools import partial
 import torch
 from contextlib import suppress
@@ -41,7 +41,7 @@ class Profiler(TorchDLPackKernelAdapter):
 
     def assert_allclose(
         self,
-        reference_program: callable,
+        reference_program: Callable,
         atol: float = 1e-2,
         rtol: float = 1e-2,
         max_mismatched_ratio=0.01,
@@ -87,11 +87,7 @@ class Profiler(TorchDLPackKernelAdapter):
                     rhs,
                 ]
 
-    def run_once(self, func=None):
-        import ctypes
-
-        libcuda = ctypes.CDLL("libcuda.so")  # noqa: F841
-
+    def run_once(self, func: Optional[Callable] = None):
         ins = self._get_inputs()
         if not func:
             func = self.__call__
@@ -99,11 +95,11 @@ class Profiler(TorchDLPackKernelAdapter):
 
     def do_bench(
         self,
-        func: callable = None,
-        warmup=25,
-        rep=100,
-        n_warmup=1,
-        n_repeat=1,
+        func: Optional[Callable] = None,
+        warmup: int = 25,
+        rep: int = 100,
+        n_warmup: int = 1,
+        n_repeat: int = 1,
         profiler: Literal["torch", "tvm", "auto"] = "auto",
         input_tensors: List[torch.Tensor] = None,
     ):

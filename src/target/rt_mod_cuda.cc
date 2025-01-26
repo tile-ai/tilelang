@@ -54,12 +54,12 @@ runtime::Module BuildTileLangCUDA(IRModule mod, Target target) {
   }
 
   std::string code = cg.Finish();
-  if (const auto *f = Registry::Get("tvm_callback_cuda_postproc")) {
+  if (const auto *f = Registry::Get("tilelang_callback_cuda_postproc")) {
     code = (*f)(code, target).operator std::string();
   }
   std::string fmt = "ptx";
   std::string ptx;
-  if (const auto *f = Registry::Get("tvm_callback_cuda_compile")) {
+  if (const auto *f = Registry::Get("tilelang_callback_cuda_compile")) {
     ptx = (*f)(code, target).operator std::string();
     if (ptx[0] != '/')
       fmt = "cubin";
@@ -85,7 +85,7 @@ String BuildTLDebug(IRModule mod, Target target) {
   }
 
   std::string code = cg.Finish();
-  if (const auto *f = Registry::Get("tvm_callback_cuda_postproc")) {
+  if (const auto *f = Registry::Get("tilelang_callback_cuda_postproc")) {
     code = (*f)(code, target).operator std::string();
   }
   return String(code);

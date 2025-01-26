@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-from typing import List, Union, Any, Callable, Literal
+from typing import List, Union, Any, Callable, Literal, Optional
 from tvm.target import Target
 import tilelang
 from tilelang import tvm as tvm
@@ -194,3 +194,6 @@ class JITKernel(object):
             The source code of the compiled kernel function.
         """
         return self.rt_module.imported_modules[0].get_source()
+
+    def run_once(self, func: Optional[Callable] = None) -> None:
+        return self.get_profiler().run_once(func)
