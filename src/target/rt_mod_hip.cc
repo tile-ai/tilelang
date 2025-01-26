@@ -26,10 +26,10 @@ namespace codegen {
           << "HiprtcError: " #x " failed with error: "                         \
           << hiprtcGetErrorString(result);                                     \
       \  
-                                                                                                                                                                                                                               \
+                                                                                                                                                                                                                                                                                                     \
     }                                                                          \
     \  
-                                                                                                                                                                                                                                   \
+                                                                                                                                                                                                                                                                                                           \
   }
 
 static std::string FindHIPIncludePath() {

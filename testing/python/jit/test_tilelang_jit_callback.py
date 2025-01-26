@@ -85,18 +85,20 @@ def run_gemm(
         num_stages,
         num_threads,
     )
-    
+
     stramp = "&*(XS)"
+
     @tvm.register_func
     def tilelang_callback_cuda_postproc(code, _):
         code = f"// {stramp}\n" + code
         return code
 
     matmul_kernel = tilelang.JITKernel(program, out_idx=-1, execution_backend="dl_pack")
-    
+
     kernel_source = matmul_kernel.get_kernel_source()
 
     assert stramp in kernel_source, f"Expected {stramp} in the kernel source"
+
 
 def test_gemm_f16f16f16_nn():
     run_gemm(
