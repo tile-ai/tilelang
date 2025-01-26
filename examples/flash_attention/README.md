@@ -45,7 +45,7 @@ def flash_attention(
         T.fill(logsum, 0)
         T.fill(scores_max, -T.infinity(accum_dtype))
         loop_range = (
-            T.ceildiv((bx + 1) * block_M, block_N) if is_casual else T.ceildiv(seq_len, block_N)
+            T.ceildiv((bx + 1) * block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N)
         )
 
         # Pipeline the loop to overlap copies/gemm stages
@@ -53,7 +53,7 @@ def flash_attention(
             # Copy K block into shared memory
             T.copy(K[bz, k * block_N : (k + 1) * block_N, by, :], K_shared)
 
-            if is_casual:
+            if is_causal:
                 for i, j in T.Parallel(block_M, block_N):
                     acc_s[i, j] = T.if_then_else(
                         bx * block_M + i >= k * block_N + j, 0, -T.infinity(acc_s.dtype)

@@ -8,7 +8,7 @@ from functools import partial
 num_split = 4
 
 
-def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_casual, block_M, block_N):
+def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_N):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     shape_q = [batch, seqlen_q, heads, dim]
     shape_kv = [batch, seqlen_kv, heads, dim]
@@ -31,8 +31,8 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_casual, block_M, block_
         T.copy(
             K[bid, (seqlen_kv // num_split) * sid + k * block_N:(seqlen_kv // num_split) * sid +
               (k + 1) * block_N, hid, :], K_shared)
-        # TODO: Handle casual split case
-        if is_casual:
+        # TODO: Handle causal split case
+        if is_causal:
             for i, j in T.Parallel(block_M, block_N):
                 acc_s[i, j] = T.if_then_else(mid * block_M + i >= k * block_N + j, 0,
                                              -T.infinity(acc_s.dtype))
@@ -129,10 +129,10 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_casual, block_M, block_
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
 
-            # TODO: Handle casual split case
+            # TODO: Handle causal split case
             loop_range = (
                 T.min(T.ceildiv(seqlen_kv, block_N), T.ceildiv(
-                    (mid + 1) * block_M, block_N)) if is_casual else T.ceildiv(
+                    (mid + 1) * block_M, block_N)) if is_causal else T.ceildiv(
                         (seqlen_kv // num_split), block_N))
 
             for k in T.Pipelined(loop_range, num_stages=2):
@@ -214,8 +214,8 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_casual, block_M, block_
     return main
 
 
-def ref_program(Q, K, V, glse, Output_partial, casual):
-    assert casual is False
+def ref_program(Q, K, V, glse, Output_partial, causal):
+    assert causal is False
     dim = Q.size(-1)
     scores = torch.einsum('bqhd,bkhd->bhqk', Q, K)
     scores = scores / torch.sqrt(torch.tensor(dim, dtype=scores.dtype))
@@ -224,7 +224,7 @@ def ref_program(Q, K, V, glse, Output_partial, casual):
     return output
 
 
-def reduce_ref(Q, K, V, glse, Output_partial, casual):
+def reduce_ref(Q, K, V, glse, Output_partial, causal):
     o = torch.empty_like(Output_partial[:, :, :, 0, :]).fill_(0)
     lse_logsum = torch.empty_like(glse[:, :, 0, :]).fill_(0)  # [batch, seqlen_q, heads]
     lse_max = glse.max(dim=2, keepdim=False).values
@@ -239,7 +239,7 @@ def reduce_ref(Q, K, V, glse, Output_partial, casual):
     return o.to(torch.float16)
 
 
-def flash_split_ref(Q, K, V, casual):
+def flash_split_ref(Q, K, V, causal):
     # [batch, seqlen_q, heads, dim]
     batch = Q.size(0)
     block_M = Q.size(1)
@@ -296,15 +296,15 @@ def flash_split_ref(Q, K, V, casual):
 
 if __name__ == "__main__":
     BATCH, H, Q_CTX, KV_CTX, D_HEAD = 1, 32, 128, 8192, 128
-    casual = False
+    causal = False
     flops_per_matmul = 2.0 * BATCH * H * Q_CTX * KV_CTX * D_HEAD
     total_flops = 2 * flops_per_matmul
-    if casual:
+    if causal:
         total_flops *= 0.5
     BLOCK_M = 128
     BLOCK_N = 64  # if D_HEAD <= 128 else 32
-    program = flashattn(BATCH, H, Q_CTX, KV_CTX, D_HEAD, casual, BLOCK_M, BLOCK_N)
-    ref_program = partial(ref_program, casual=casual)
+    program = flashattn(BATCH, H, Q_CTX, KV_CTX, D_HEAD, causal, BLOCK_M, BLOCK_N)
+    ref_program = partial(ref_program, causal=causal)
     mod, params = tilelang.lower(program)
     mod = tilelang.Profiler(mod, params, [5], tilelang.TensorSupplyType.Normal)
     mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
