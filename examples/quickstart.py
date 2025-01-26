@@ -3,25 +3,26 @@
 import tilelang
 import tilelang.language as T
 # `make_mma_swizzle_layout` is a python defined layout function
-# specifically designed for for MMA operations
+# specifically designed for MMA operations
 # which ensures the consistency with the nvidia CUTLASS Library.
 # to avoid bank conflicts and maximize the performance.
 from tilelang.intrinsics import (
-    make_mma_swizzle_layout as make_swizzle_layout,)
+    make_mma_swizzle_layout as make_swizzle_layout,)  # noqa: F401
+
 
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
     # add decorator @tilelang.jit if you want to return a torch function
     @T.prim_func
     def main(
-        A: T.Buffer((M, K), dtype),
-        B: T.Buffer((K, N), dtype),
-        C: T.Buffer((M, N), dtype),
+            A: T.Buffer((M, K), dtype),
+            B: T.Buffer((K, N), dtype),
+            C: T.Buffer((M, N), dtype),
     ):
         # Initialize Kernel Context
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
-            C_local  = T.alloc_fragment((block_M, block_N), accum_dtype)
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
             # Apply layout optimizations or define your own layout (Optional)
             # If not specified, we will deduce the layout automatically
@@ -71,7 +72,6 @@ import torch
 a = torch.randn(1024, 1024, device="cuda", dtype=torch.float16)
 b = torch.randn(1024, 1024, device="cuda", dtype=torch.float16)
 
-
 # Run the kernel through the Profiler
 c = jit_kernel(a, b)
 
@@ -86,7 +86,7 @@ print("Kernel output matches PyTorch reference.")
 cuda_source = jit_kernel.get_kernel_source()
 print("Generated CUDA kernel:\n", cuda_source)
 
-# 5.Pofile latency with kernel
+# 5.Profile latency with kernel
 profiler = jit_kernel.get_profiler()
 
 latency = profiler.do_bench()
