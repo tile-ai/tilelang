@@ -6,6 +6,8 @@ import tilelang.testing
 import tilelang as tl
 import tilelang.language as T
 
+tilelang.testing.set_random_seed(0)
+
 
 def chunk_scan_fwd(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate, block_M, block_N,
                    block_K, block_Dstate, num_stages, threads):
