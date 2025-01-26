@@ -33,6 +33,7 @@ jobs:
           git clone https://github.com/${TARGET_REPO}.git target_repo
           cd target_repo
           git checkout main
+          find . -mindepth 1 -maxdepth 1 ! -name ".github" ! -name "." ! -name ".git" -exec rm -rf {} +
           cp -r ../docs/_build/html/* ./
           git add .
           if [[ -n "$(git status --porcelain)" ]]; then
