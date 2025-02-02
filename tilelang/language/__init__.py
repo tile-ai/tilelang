@@ -30,6 +30,7 @@ from .customize import (
     atomic_addx2,  # noqa: F401
     dp4a,  # noqa: F401
 )
+from .builtin import *  # noqa: F401
 
 
 def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
