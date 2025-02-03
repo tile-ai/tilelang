@@ -162,7 +162,7 @@ def lower(
     mod = tir.transform.FlattenBuffer()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tir.transform.Simplify()(mod)
-    mod = tir.transform.VectorizeLoop()(mod)
+    mod = tl.transform.VectorizeLoop()(mod)
     mod = tir.transform.StorageRewrite()(mod)
     mod = tir.transform.UnrollLoop()(mod)
     mod = tir.transform.RenormalizeSplitPattern()(mod)
