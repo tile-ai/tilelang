@@ -3,8 +3,10 @@
 """The language interface for tl programs."""
 
 from typing import Optional
-from .parser import *
-# from tvm.script.parser.tir import *
+# from .parser import *
+# now is fully compatible with the upstream
+# tir script
+from tvm.script.parser.tir import *
 from tilelang.layout import Layout, Fragment  # noqa: F401
 from .parallel import Parallel  # noqa: F401
 from .pipeline import Pipelined  # noqa: F401
