@@ -31,7 +31,7 @@ from tvm.script.ir_builder import ir as I
 from tvm.script.ir_builder import tir as T
 
 # May rewrite some register functions
-# if we use our own registeration
+# if we use our own registration
 # from .. import ast as T
 
 from tvm.script.ir_builder.base import IRBuilder
