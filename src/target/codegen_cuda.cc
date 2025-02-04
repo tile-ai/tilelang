@@ -177,21 +177,30 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     return;
   }
 
+  if (t == tl::cuTensorMapType()) {
+    os << "CUtensorMap";
+    return;
+  }
+
   bool fail = false;
   if (t.is_float()) {
     switch (t.bits()) {
     case 16:
       enable_fp16_ = true;
       if (t.is_scalar()) {
-        os << "half";
+        os << "half_t";
       } else if (lanes <= 8) {
-        ICHECK_EQ(lanes % 2, 0)
-            << "Only support an even number of lanes for half type";
-        if (lanes <= 4) {
-          os << "half" << lanes;
-        } else {
-          os << "uint" << lanes / 2;
-        }
+        // Emit CUDA code to access fp16 vector elements.
+        //
+        // half4 is stored as uint2
+        //
+        // h4.x is emitted as *(half2*)(&(u2.x)).x
+        // h4.y is emitted as *(half2*)(&(u2.x)).y
+        // h4.z is emitted as *(half2*)(&(u2.y)).x
+        // h4.w is emitted as *(half2*)(&(u2.y)).y
+        //
+        ICHECK_EQ(lanes % 2, 0) << "only support even lane for half type";
+        os << "uint" << lanes / 2;
       } else {
         fail = true;
       }
@@ -232,7 +241,7 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
   } else if (t.is_bfloat16()) {
     enable_bf16_ = true;
     if (t.is_scalar()) {
-      os << "nv_bfloat16";
+      os << "bfloat16_t";
     } else if (lanes <= 8) {
       ICHECK_EQ(lanes % 2, 0) << "only support even lane for half type";
       os << "uint" << lanes / 2;

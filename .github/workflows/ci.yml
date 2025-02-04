@@ -18,11 +18,11 @@ jobs:
         python-version: '3.9'
 
     - name: Create virtual environment
-      run: python -m venv bitblas_ci
+      run: python -m venv tilelang_ci
 
     - name: Activate virtual environment and install dependencies
       run: |
-        source bitblas_ci/bin/activate
+        source tilelang_ci/bin/activate
         python -m pip install --upgrade pip
         if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
 
@@ -31,7 +31,7 @@ jobs:
 
     - name: Run format check
       run: |
-        source bitblas_ci/bin/activate
+        source tilelang_ci/bin/activate
         ./format.sh
 
   build-test:
@@ -50,21 +50,21 @@ jobs:
         python-version: '3.9'
 
     - name: Create virtual environment
-      run: python -m venv bitblas_ci
+      run: python -m venv tilelang_ci
 
     - name: Activate virtual environment and install dependencies
       run: |
-        source bitblas_ci/bin/activate
+        source tilelang_ci/bin/activate
         python -m pip install --upgrade pip
         if [ -f requirements-test.txt ]; then python -m pip install -r requirements-test.txt; fi
 
     - name: Install project in wheel mode
       run: |
-        source bitblas_ci/bin/activate
+        source tilelang_ci/bin/activate
         python -m pip install .
 
     - name: Run tests
       run: |
-        source bitblas_ci/bin/activate
+        source tilelang_ci/bin/activate
         cd testing/python
         python -m pytest
