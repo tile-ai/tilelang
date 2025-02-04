@@ -73,14 +73,37 @@ private:
 
   friend void PrintConst(const FloatImmNode *op, std::ostream &os,
                          CodeGenTileLangCUDA *p);
-  // The size of the barrier array in shared memory
-  int barrier_count_ = -1;
+
+  // Whether global barrier is needed.
+  bool need_global_barrier_{false};
+  // Global barrier state
+  std::string vid_global_barrier_state_;
+  // Global barrier expected node.
+  std::string vid_global_barrier_expect_;
+  // whether enable fp16
+  bool enable_fp16_{false};
+  // whether enable bf16
+  bool enable_bf16_{false};
+  // whether enable fp8
+  bool enable_fp8_{false};
+  // whether enable int8
+  bool enable_int8_{false};
+  // whether enable warp shuffle intrinsics
+  bool enable_warp_shuffle_{false};
+  // whether need math_constants.h
+  bool need_math_constants_h_{false};
   // whether need mma.h
   bool need_mma_h_{false};
   // whether need cast_smem_ptr_to_int helper function
   bool need_cast_smem_ptr_to_int_{false};
+  // Op attribute map
+  OpAttrMap<bool> op_need_warp_shuffle_ =
+      Op::GetAttrMap<bool>("cuda.need_warp_shuffle");
+
   // The name of the barrier array in shared memory
   const std::string barrier_name_ = "barrier";
+  // The size of the barrier array in shared memory
+  int barrier_count_ = -1;
   // The alignment of the barrier array in shared memory
   // Set to 16 to maintain minimum alignment requirements for async bulk copy
   const int barrier_alignment_bytes_ = 16;
