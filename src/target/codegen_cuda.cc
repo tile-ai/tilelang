@@ -114,19 +114,6 @@ std::string CodeGenTileLangCUDA::Finish() {
     decl_stream << "#include <math_constants.h>\n";
   }
 
-  if (need_cast_smem_ptr_to_int_) {
-    decl_stream << "__forceinline__ __device__ unsigned int\n";
-    decl_stream << "cast_smem_ptr_to_int(const void* const smem_ptr)\n";
-    decl_stream << "{\n";
-    decl_stream << "  unsigned int smem_int;\n";
-    decl_stream << "  asm volatile (\"{ .reg .u64 smem_int; cvta.to.shared.u64 "
-                   "smem_int, %1; "
-                   "cvt.u32.u64 %0, smem_int; }\"\n";
-    decl_stream << "    : \"=r\"(smem_int) : \"l\"(smem_ptr));\n";
-    decl_stream << "  return smem_int;\n";
-    decl_stream << "}\n";
-  }
-
   decl_stream << "#include <tl_templates/cuda/gemm.h>\n";
   decl_stream << "#include <tl_templates/cuda/copy.h>\n";
   decl_stream << "#include <tl_templates/cuda/reduce.h>\n";

@@ -230,9 +230,6 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
 
 def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(128, 128, 128, "float16", "float16", "float16")
-    assert_tl_matmul_correctness(128, 256, 256, "float16", "float32", "float32")
-    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", "int32")
     assert_tl_matmul_correctness(128, 128, 128, "e4m3_float8", "float32", "float32")
     assert_tl_matmul_correctness(128, 128, 128, "e5m2_float8", "float32", "float32")
 

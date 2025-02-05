@@ -81,7 +81,7 @@ def get_mma_micro_size(dtype: Literal["float16", "int8"]):
     # Basic Tensor Core Matrix Multiply operation Unit
     micro_size_x = micro_size_y = 16
     micro_size_k = 16
-    if dtype == "int8":
+    if dtype in {"e4m3_float8", "e5m2_float8", "int8"}:
         micro_size_k = 32
     return micro_size_x, micro_size_y, micro_size_k
 
