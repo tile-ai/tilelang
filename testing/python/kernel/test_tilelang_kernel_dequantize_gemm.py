@@ -239,7 +239,7 @@ def matmul(
     local_size = MAX_TRANSACTION_SIZE_IN_BITS // DataType(in_dtype).bits
     local_size_compressed = local_size // num_elems_per_byte
 
-    import tvm.tl.language as T
+    import tilelang.language as T
 
     @T.prim_func
     def main(
