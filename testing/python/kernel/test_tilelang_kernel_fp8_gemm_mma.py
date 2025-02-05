@@ -227,6 +227,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     print(ref_c)
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(8, 9)
 def test_assert_tl_matmul():
