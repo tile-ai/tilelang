@@ -50,12 +50,12 @@ TL_DEVICE uint32_t smem_ptr_to_uint(void const *const ptr) {
 }
 
 // Helper to cast SMEM pointer to unsigned
-TL_DEVICE unsigned int
-cast_smem_ptr_to_int(const void* const smem_ptr)
-{
+TL_DEVICE unsigned int cast_smem_ptr_to_int(const void *const smem_ptr) {
   unsigned int smem_int;
-  asm volatile ("{ .reg .u64 smem_int; cvta.to.shared.u64 smem_int, %1; cvt.u32.u64 %0, smem_int; }"
-    : "=r"(smem_int) : "l"(smem_ptr));
+  asm volatile("{ .reg .u64 smem_int; cvta.to.shared.u64 smem_int, %1; "
+               "cvt.u32.u64 %0, smem_int; }"
+               : "=r"(smem_int)
+               : "l"(smem_ptr));
   return smem_int;
 }
 

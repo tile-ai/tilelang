@@ -199,8 +199,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     in_dtype = map_torch_type(in_dtype)
     out_dtype = map_torch_type(out_dtype)
     accum_dtype = map_torch_type(accum_dtype)
-    
-    
+
     if in_dtype in {torch.int8, torch.int32}:
         A = torch.randint(-128, 128, (M, K), dtype=torch.int8).to(in_dtype).cuda()
         B = torch.randint(-128, 128, (N, K), dtype=torch.int8).to(in_dtype).cuda()

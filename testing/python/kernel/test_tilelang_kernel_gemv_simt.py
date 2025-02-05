@@ -4,10 +4,9 @@ import torch
 import torch.backends
 import tilelang.testing
 from tilelang import tvm as tvm
-from tvm import DataType, tir
-import tilelang as TL
+from tvm import DataType
 import tilelang.language as T
-from tilelang import JITKernel, Profiler
+from tilelang import JITKernel
 from tilelang.transform.simplify import apply_simplify
 from typing import Optional
 
@@ -109,12 +108,13 @@ def gemv_simt(
                     ))
             if kr == 0:
                 if with_bias:
-                    C[by, bx * n_partition +
-                        ni] = reduced_accum_res[0] + Bias[bx * n_partition + ni]
+                    C[by,
+                      bx * n_partition + ni] = reduced_accum_res[0] + Bias[bx * n_partition + ni]
                 else:
                     C[by, bx * n_partition + ni] = reduced_accum_res[0]
 
     return apply_simplify(main)
+
 
 def evaluate_gemv_simt(
     M: int,
@@ -127,11 +127,10 @@ def evaluate_gemv_simt(
     trans_B: bool = True,
     with_bias: bool = False,
 ):
-    program = gemv_simt(M, N, K, in_dtype, out_dtype, accum_dtype,
-                        trans_A, trans_B, with_bias)
+    program = gemv_simt(M, N, K, in_dtype, out_dtype, accum_dtype, trans_A, trans_B, with_bias)
 
     kernel = JITKernel(program, target="cuda")
-    
+
     def map_torch_type(intype):
         typemap = {
             'e4m3_float8': torch.float8_e4m3fn,
@@ -145,8 +144,7 @@ def evaluate_gemv_simt(
     in_dtype = map_torch_type(in_dtype)
     out_dtype = map_torch_type(out_dtype)
     accum_dtype = map_torch_type(accum_dtype)
-    
-    
+
     if in_dtype in {torch.int8, torch.int32}:
         A = torch.randint(-128, 128, (M, K), dtype=torch.int8).to(in_dtype).cuda()
         B = torch.randint(-128, 128, (N, K), dtype=torch.int8).to(in_dtype).cuda()
@@ -161,25 +159,27 @@ def evaluate_gemv_simt(
         Bias = torch.randn(N).to(accum_dtype).cuda() - 0.5
 
     C = torch.zeros(M, N).to(out_dtype).cuda()
-    
+
     if with_bias:
         kernel(A, B, Bias, C)
     else:
         kernel(A, B, C)
-    
+
     ref_c = torch.mm(A.to(torch.float32), B.T.to(torch.float32))
     if with_bias:
         ref_c += Bias.to(torch.float32)
-    
+
     print(C)
     print(ref_c)
     tilelang.testing.torch_assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
+
 
 def test_gemv_simt():
     evaluate_gemv_simt(1, 1024, 1024, "float16", "float16", "float16", with_bias=False)
     evaluate_gemv_simt(1, 1024, 1024, "int8", "int32", "int32", with_bias=False)
     evaluate_gemv_simt(1, 1024, 1024, "e4m3_float8", "float32", "float32", with_bias=False)
     evaluate_gemv_simt(1, 1024, 1024, "e5m2_float8", "float32", "float32", with_bias=False)
+
 
 if __name__ == "__main__":
     tilelang.testing.main()

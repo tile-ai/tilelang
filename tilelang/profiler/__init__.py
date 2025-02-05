@@ -8,8 +8,6 @@ import torch
 from contextlib import suppress
 
 import tvm
-from torch.utils.dlpack import to_dlpack
-from tvm.runtime import ndarray
 from tvm.relay import TensorType
 
 from tilelang.jit.adapter import TorchDLPackKernelAdapter
