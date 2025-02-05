@@ -177,8 +177,7 @@ def evaluate_gemv_simt(
 def test_gemv_simt():
     evaluate_gemv_simt(1, 1024, 1024, "float16", "float16", "float16", with_bias=False)
     evaluate_gemv_simt(1, 1024, 1024, "int8", "int32", "int32", with_bias=False)
-    evaluate_gemv_simt(1, 1024, 1024, "e4m3_float8", "float32", "float32", with_bias=False)
-    evaluate_gemv_simt(1, 1024, 1024, "e5m2_float8", "float32", "float32", with_bias=False)
+    # fp8 test please checkout testing/python/kernel/test_tilelang_kernel_fp8_gemv_simt.py
 
 
 if __name__ == "__main__":

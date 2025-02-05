@@ -232,8 +232,7 @@ def test_assert_tl_matmul():
     assert_tl_matmul_correctness(128, 128, 128, "float16", "float16", "float16")
     assert_tl_matmul_correctness(128, 256, 256, "float16", "float32", "float32")
     assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", "int32")
-    assert_tl_matmul_correctness(128, 128, 128, "e4m3_float8", "float32", "float32")
-    assert_tl_matmul_correctness(128, 128, 128, "e5m2_float8", "float32", "float32")
+    # fp8 test please checkout testing/python/kernel/test_tilelang_kernel_fp8_gemm_mma.py
 
 
 if __name__ == "__main__":

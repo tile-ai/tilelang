@@ -174,6 +174,8 @@ def evaluate_gemv_simt(
     tilelang.testing.torch_assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(8, 9)
 def test_gemv_simt():
     evaluate_gemv_simt(1, 1024, 1024, "e4m3_float8", "float32", "float32", with_bias=False)
     evaluate_gemv_simt(1, 1024, 1024, "e5m2_float8", "float32", "float32", with_bias=False)
