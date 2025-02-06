@@ -182,7 +182,6 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
     mod, params = TL.lower(matmul)
     src_code = mod.imported_modules[0].get_source()
-    print(src_code)
     # src_code is the generated cuda source
     assert src_code is not None
 
@@ -223,9 +222,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
     # Get Reference Result
     ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(out_dtype)
-    print(C)
-    print(ref_c)
-    torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
+    tilelang.testing.torch_assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
 
 @tilelang.testing.requires_cuda
