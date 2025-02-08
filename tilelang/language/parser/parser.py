@@ -28,7 +28,12 @@ from tvm.ir import GlobalVar, PrimType
 from tvm.tir import Buffer, IterVar, PrimExpr, Var
 
 from tvm.script.ir_builder import ir as I
-from .. import ast as T
+from tvm.script.ir_builder import tir as T
+
+# May rewrite some register functions
+# if we use our own registration
+# from .. import ast as T
+
 from tvm.script.ir_builder.base import IRBuilder
 from tvm.script.ir_builder.base import IRBuilderFrame as Frame
 from tvm.script.parser._core import Parser, dispatch, doc

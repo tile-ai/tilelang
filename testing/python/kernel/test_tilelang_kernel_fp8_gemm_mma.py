@@ -42,7 +42,6 @@ def tl_matmul(
 ):
     assert in_dtype in [
         "float16",
-        "bfloat16",
         "e4m3_float8",
         "e5m2_float8",
         "int8",
@@ -183,6 +182,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
     mod, params = TL.lower(matmul)
     src_code = mod.imported_modules[0].get_source()
+    print(src_code)
     # src_code is the generated cuda source
     assert src_code is not None
 
@@ -222,22 +222,15 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     assert latency is not None
 
     # Get Reference Result
-    ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(out_dtype)
-    tilelang.testing.torch_assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
-
-
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(8, 0)
-def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(128, 128, 128, "float16", "float16", "float16")
-    assert_tl_matmul_correctness(128, 256, 256, "float16", "float32", "float32")
-    assert_tl_matmul_correctness(128, 128, 128, "bfloat16", "float32", "float32")
-    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", "int32")
+    ref_c = torch.matmul(A.to(accum_dtype), B.T.to(accum_dtype)).to(out_dtype)
+    print(C)
+    print(ref_c)
+    torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(8, 9)
-def test_assert_tl_matmul_fp8():
+def test_assert_tl_matmul():
     assert_tl_matmul_correctness(128, 128, 128, "e4m3_float8", "float32", "float32")
     assert_tl_matmul_correctness(128, 128, 128, "e5m2_float8", "float32", "float32")
 

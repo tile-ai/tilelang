@@ -4,6 +4,8 @@
 from enum import Enum
 import torch
 from tvm.relay import TensorType
+from tvm.runtime import ndarray
+from torch.utils.dlpack import to_dlpack
 
 
 class TensorSupplyType(Enum):
@@ -15,10 +17,40 @@ class TensorSupplyType(Enum):
     One = 6
 
 
+def map_torch_type(intype):
+    typemap = {
+        'e4m3_float8': torch.float8_e4m3fn,
+        'e5m2_float8': torch.float8_e5m2,
+    }
+    if intype in typemap:
+        return typemap[intype]
+    else:
+        return getattr(torch, intype)
+
+
+float8_dtype_map = {
+    torch.float8_e4m3fn: "e4m3_float8",
+    torch.float8_e4m3fnuz: "e4m3_float8",
+    torch.float8_e5m2: "e5m2_float8",
+    torch.float8_e5m2fnuz: "e5m2_float8",
+}
+
+
+def adapt_torch2tvm(arg):
+    if isinstance(arg, torch.Tensor):
+        if arg.dtype in {
+                torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz
+        }:
+            return ndarray.from_dlpack(to_dlpack(arg.view(torch.int8)))._create_view(
+                shape=arg.shape, dtype=float8_dtype_map[arg.dtype])
+        return ndarray.from_dlpack(to_dlpack(arg))
+    return arg
+
+
 def get_tensor_supply(supply_type: TensorSupplyType):
 
     def get_tensor(tensor: TensorType) -> torch.Tensor:
-        dtype = torch.__getattribute__(str(tensor.dtype))
+        dtype = map_torch_type(str(tensor.dtype))
         device = torch.cuda.current_device()
 
         shape = list(map(int, tensor.shape))
@@ -30,8 +62,12 @@ def get_tensor_supply(supply_type: TensorSupplyType):
 
         if supply_type == TensorSupplyType.Integer:
             is_unsigned = tensor.dtype.startswith("uint")
+            is_float8 = tensor.dtype.endswith("float8")
             if is_unsigned:
                 return torch.randint(low=0, high=3, size=shape, device=device, dtype=dtype)
+            elif is_float8:
+                return torch.randint(
+                    low=-128, high=128, size=shape, device=device, dtype=torch.int8).to(dtype)
             else:
                 return torch.randint(low=-2, high=3, size=shape, device=device, dtype=dtype)
         elif supply_type == TensorSupplyType.Uniform:

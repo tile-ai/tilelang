@@ -186,3 +186,14 @@ def AnnotateDeviceRegions():
         The result pass
     """
     return _ffi_api.AnnotateDeviceRegions()  # type: ignore
+
+
+def VectorizeLoop(enable_vectorize: bool = True):
+    """VectorizeLoop
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.VectorizeLoop(enable_vectorize)  # type: ignore

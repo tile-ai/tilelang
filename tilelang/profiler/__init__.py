@@ -8,8 +8,6 @@ import torch
 from contextlib import suppress
 
 import tvm
-from torch.utils.dlpack import to_dlpack
-from tvm.runtime import ndarray
 from tvm.relay import TensorType
 
 from tilelang.jit.adapter import TorchDLPackKernelAdapter
@@ -17,6 +15,7 @@ from tilelang.utils.tensor import (
     get_tensor_supply,
     TensorSupplyType,
     torch_assert_close,
+    adapt_torch2tvm,
 )
 
 
@@ -130,7 +129,7 @@ class Profiler(TorchDLPackKernelAdapter):
             device = tvm.cuda(0) if target == "cuda" else tvm.rocm(0)
             time_evaluator = self.mod.time_evaluator(
                 self.mod.entry_name, device, number=rep, repeat=n_repeat)
-            tvm_inputs = [ndarray.from_dlpack(to_dlpack(inp)) for inp in ins]
+            tvm_inputs = [adapt_torch2tvm(inp) for inp in ins]
             # Transform Latency to ms
             return time_evaluator(*tvm_inputs).mean * 1e3
         elif profiler == "auto":
@@ -149,7 +148,7 @@ class Profiler(TorchDLPackKernelAdapter):
             ins = self._get_inputs(with_output=True)
             time_evaluator = self.mod.time_evaluator(
                 self.mod.entry_name, tvm.cuda(0), number=rep, repeat=n_repeat)
-            tvm_inputs = [ndarray.from_dlpack(to_dlpack(inp)) for inp in ins]
+            tvm_inputs = [adapt_torch2tvm(inp) for inp in ins]
             tvm_res = time_evaluator(*tvm_inputs).mean * 1e3
             return min(torch_res, tvm_res)
         else:

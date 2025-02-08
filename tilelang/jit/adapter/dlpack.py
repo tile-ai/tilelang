@@ -4,7 +4,7 @@
 
 import torch
 from typing import List
-from tvm.contrib.dlpack import to_pytorch_func
+from tilelang.contrib.dlpack import to_pytorch_func
 from .base import BaseKernelAdapter
 
 

@@ -44,9 +44,19 @@ TL_DEVICE unsigned __pack_half2(const bfloat16_t x, const bfloat16_t y) {
   return (v1 << 16) | v0;
 }
 
-/// Helper to cast SMEM pointer to unsigned
+// Helper to cast SMEM pointer to unsigned
 TL_DEVICE uint32_t smem_ptr_to_uint(void const *const ptr) {
   return static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
+}
+
+// Helper to cast SMEM pointer to unsigned
+TL_DEVICE unsigned int cast_smem_ptr_to_int(const void *const smem_ptr) {
+  unsigned int smem_int;
+  asm volatile("{ .reg .u64 smem_int; cvta.to.shared.u64 smem_int, %1; "
+               "cvt.u32.u64 %0, smem_int; }"
+               : "=r"(smem_int)
+               : "l"(smem_ptr));
+  return smem_int;
 }
 
 // AtomicAdd Functions for FP16

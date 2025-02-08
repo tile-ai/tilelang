@@ -23,6 +23,34 @@
 namespace tvm {
 namespace codegen {
 
+static std::string GetFP8Type(DataType type) {
+  std::stringstream stream;
+  int32_t lanes = type.lanes();
+  std::string vec;
+  if (type.is_scalar()) {
+    vec = "";
+  } else if (lanes == 2) {
+    vec = "_2";
+  } else if (lanes == 4) {
+    vec = "_4";
+  } else if (lanes == 8) {
+    vec = "_8";
+  } else if (lanes == 16) {
+    vec = "_16";
+  } else {
+    LOG(FATAL) << "Only support scalar and vector types of width (2, 4, 8, 16) "
+                  "for FP8";
+  }
+  if (type.code() == DataType::kE4M3Float) {
+    stream << "fp8_e4" << vec << "_t";
+  } else if (type.code() == DataType::kE5M2Float) {
+    stream << "fp8_e5" << vec << "_t";
+  } else {
+    LOG(FATAL) << "Unsupported FP8 type in CUDA codegen";
+  }
+  return stream.str();
+}
+
 CodeGenTileLangCUDA::CodeGenTileLangCUDA() {
   restrict_keyword_ = "__restrict__";
 }
@@ -78,6 +106,14 @@ std::string CodeGenTileLangCUDA::Finish() {
   if (need_mma_h_) {
     decl_stream << "#include <mma.h>\n";
   }
+  if (enable_fp8_) {
+    decl_stream << "#include <tl_templates/cuda/cuda_fp8.h>\n";
+  }
+
+  if (need_math_constants_h_) {
+    decl_stream << "#include <math_constants.h>\n";
+  }
+
   decl_stream << "#include <tl_templates/cuda/gemm.h>\n";
   decl_stream << "#include <tl_templates/cuda/copy.h>\n";
   decl_stream << "#include <tl_templates/cuda/reduce.h>\n";
@@ -137,6 +173,7 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
   if (t.is_float()) {
     switch (t.bits()) {
     case 16:
+      enable_fp16_ = true;
       if (t.is_scalar()) {
         os << "half_t";
       } else if (lanes <= 8) {
@@ -189,6 +226,7 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
       return;
     }
   } else if (t.is_bfloat16()) {
+    enable_bf16_ = true;
     if (t.is_scalar()) {
       os << "bfloat16_t";
     } else if (lanes <= 8) {
@@ -200,18 +238,9 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     if (!fail)
       return;
   } else if (t.is_float8()) {
-    if (t.is_scalar()) {
-      os << "unsigned char"; // __nv_fp8_storage_t is an alias of unsigned char
-    } else if (lanes == 2) {
-      os << "unsigned short int"; // __nv_fp8x2_storage_t is an alias of
-                                  // unsigned short
-    } else if (lanes == 4) {
-      os << "unsigned int"; // __nv_fp8x4_storage_t is an alias of unsigned int
-    } else {
-      fail = true;
-    }
-    if (!fail)
-      return;
+    enable_fp8_ = true;
+    os << GetFP8Type(t);
+    return;
   } else if (t == DataType::Bool()) {
     os << "bool";
     return;
@@ -272,6 +301,7 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     case 8: {
       if (t.lanes() == 4) {
         // directly 4 8 bit int in integer.
+        enable_int8_ = true;
 
         // We use int for int8x4 instead of char4 because using char4 is
         // likely to produce extra instructions to pack four int8 elements
@@ -279,9 +309,11 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
         os << "int";
         return;
       } else if (t.lanes() == 8) {
+        enable_int8_ = true;
         os << "int2";
         return;
       } else if (t.lanes() == 16) {
+        enable_int8_ = true;
         os << "int4";
         return;
       } else if (!t.is_uint() && t.is_scalar()) {
@@ -512,6 +544,38 @@ void CodeGenTileLangCUDA::PrintStorageSync(const CallNode *op) {
   if (sync == "warp") {
     // DO nothing.
   } else if (sync == "shared" || sync == "shared.dyn") {
+    this->PrintIndent();
+    this->stream << "__syncthreads();\n";
+  } else if (sync == "global") {
+    if (!need_global_barrier_) {
+      need_global_barrier_ = true;
+      this->decl_stream << "extern \"C\" __device__ unsigned "
+                        << vid_global_barrier_state_ << ";\n";
+    }
+    // global synchronizer
+    std::string is_load = PrintExpr(op->args[1]);
+    std::string num_blocks = PrintExpr(op->args[2]);
+    this->PrintIndent();
+    // In theory only threadfence is needed
+    // but we observed problems with only threadfence
+    this->stream << "__threadfence_system();\n";
+    this->PrintIndent();
+    this->stream << "if (" << is_load << ") {\n";
+    int wb = this->BeginScope();
+    this->PrintIndent();
+    this->stream << "atomicAdd(&" << vid_global_barrier_state_ << ", 1);\n";
+    this->PrintIndent();
+    std::string ptr = name_supply_->FreshName("pf");
+    this->stream << "volatile unsigned* " << ptr << " = &"
+                 << vid_global_barrier_state_ << ";\n";
+    this->PrintIndent();
+    this->stream << vid_global_barrier_expect_ << " += " << num_blocks << ";\n";
+    this->PrintIndent();
+    this->stream << "while (" << ptr << "[0] < " << vid_global_barrier_expect_
+                 << ");\n";
+    this->EndScope(wb);
+    this->PrintIndent();
+    this->stream << "}\n";
     this->PrintIndent();
     this->stream << "__syncthreads();\n";
   }
