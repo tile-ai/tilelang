@@ -19,3 +19,7 @@ def CreateTMADescriptorOp(*args):
 
 def TMALoadOp(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.TMALoadOp"), *args)
+
+
+def FenceProxyAsyncOp(*args):
+    return tir.call_intrin("handle", tir.op.Op.get("tl.FenceProxyAsyncOp"), *args)
