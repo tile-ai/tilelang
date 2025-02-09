@@ -3,7 +3,12 @@
 
 import tilelang.language as T
 
-def plot_layout(layout: T.Layout, save_directory="./tmp", name: str = "layout", colormap: str = "RdPu", verbose: bool = False) -> None:
+
+def plot_layout(layout: T.Layout,
+                save_directory="./tmp",
+                name: str = "layout",
+                colormap: str = "RdPu",
+                verbose: bool = False) -> None:
     """
     Plot the layout of a buffer.
 
@@ -89,26 +94,36 @@ def plot_layout(layout: T.Layout, save_directory="./tmp", name: str = "layout", 
 
             color = colors[thread_id]  # Select color based on thread ID
             # Create a rectangle patch for visualization
-            rect = patches.Rectangle((j, i), 1, 1, linewidth=0.5,
-                                     edgecolor='black', facecolor=color)
+            rect = patches.Rectangle((j, i),
+                                     1,
+                                     1,
+                                     linewidth=0.5,
+                                     edgecolor='black',
+                                     facecolor=color)
             ax.add_patch(rect)  # Add the rectangle to the plot
 
             # Add text annotations inside the rectangles
             text = f"T{thread_id}\nL{local_id}"
-            ax.text(j + 0.5, i + 0.5, text, ha='center', va='center',
-                    color='black', fontsize=font_size)
+            ax.text(
+                j + 0.5, i + 0.5, text, ha='center', va='center', color='black', fontsize=font_size)
 
     # Add row labels to the left side of the plot
     for i in range(nrows):
         text = f"row {i}"
-        ax.text(-0.75, i + 0.5, text, ha='center', va='center',
-                color='black', fontsize=font_size)
+        ax.text(-0.75, i + 0.5, text, ha='center', va='center', color='black', fontsize=font_size)
 
     # Add column labels at the top of the plot
     for j in range(ncols):
         text = f"col {j}"
-        ax.text(j + 0.5, -0.5, text, ha='center', va='center',
-                color='black', fontsize=font_size, rotation=45)
+        ax.text(
+            j + 0.5,
+            -0.5,
+            text,
+            ha='center',
+            va='center',
+            color='black',
+            fontsize=font_size,
+            rotation=45)
 
     # Set the plot limits
     ax.set_xlim(0, ncols)
@@ -124,7 +139,7 @@ def plot_layout(layout: T.Layout, save_directory="./tmp", name: str = "layout", 
 
     # Save the figure in multiple formats
     plt.tight_layout()
-    
+
     # Save as PDF
     pdf_path = tmp_directory / f"{name}.pdf"
     plt.savefig(pdf_path, bbox_inches="tight")

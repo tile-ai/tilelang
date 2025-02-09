@@ -10,6 +10,7 @@ from tilelang import _ffi_api
 from tilelang.layout import Layout
 from typing import List
 
+
 @tvm._ffi.register_object("tl.Fragment")
 class Fragment(Layout):
     """
@@ -22,14 +23,12 @@ class Fragment(Layout):
     # Disable the linter warning about not calling super().__init__()
     # because this object is created via TVM's FFI constructor mechanism.
     # pylint: disable=super-init-not-called
-    def __init__(
-        self,
-        shape,
-        forward_fn=None,
-        forward_thread_fn=None,
-        replicate=1,
-        forward_index_fn=None
-    ):
+    def __init__(self,
+                 shape,
+                 forward_fn=None,
+                 forward_thread_fn=None,
+                 replicate=1,
+                 forward_index_fn=None):
         """
         Initialize the Fragment with iteration variables and optional thread replication.
 
@@ -121,7 +120,10 @@ class Fragment(Layout):
         """
         return _ffi_api.Fragment_thread_size(self)
 
-    def repeat(self, repeats, repeat_on_thread: bool = False, lower_dim_first: bool = True) -> "Fragment":
+    def repeat(self,
+               repeats,
+               repeat_on_thread: bool = False,
+               lower_dim_first: bool = True) -> "Fragment":
         """
         Returns a new Fragment that repeats the iteration space a given number of times.
 
@@ -190,10 +192,7 @@ class Fragment(Layout):
         forward_thread = self.thread
         # Construct an IndexMap to map the provided args into the final thread index
         index_map = IndexMap(
-            initial_indices=forward_vars,
-            final_indices=[forward_thread],
-            inverse_index_map=None
-        )
+            initial_indices=forward_vars, final_indices=[forward_thread], inverse_index_map=None)
         return index_map.map_indices(indices)
 
     def __repr__(self):

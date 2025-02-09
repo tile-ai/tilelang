@@ -9,6 +9,7 @@ from tvm.tir import IterVar, Var, PrimExpr, IndexMap
 from tilelang import _ffi_api
 from typing import List
 
+
 # Register the Layout class as a TVM object under the name "tl.Layout"
 @tvm._ffi.register_object("tl.Layout")
 class Layout(Node):
@@ -25,7 +26,7 @@ class Layout(Node):
             A function that maps index variables to their computed forward index.
         """
         forward_vars = []  # List to store IterVars corresponding to each shape dimension
-        
+
         # Create an IterVar for each dimension in the shape
         for idx, size in enumerate(shape):
             # Define an IterVar over the range [0, size) with an associated variable name
@@ -34,10 +35,10 @@ class Layout(Node):
 
         # Extract the variable references from the IterVars
         vars = [iv.var for iv in forward_vars]
-        
+
         # Compute the forward index using the provided forward function
         forward_index = forward_fn(*vars)
-        
+
         # Ensure forward_index is a list (to handle cases where a single expression is returned)
         if isinstance(forward_index, PrimExpr):
             forward_index = [forward_index]
@@ -106,10 +107,10 @@ class Layout(Node):
         """
         # Retrieve the iteration variables used in the layout transformation
         forward_vars = self.get_forward_vars()
-        
+
         # Retrieve the computed forward index expressions
         forward_indexes = self.index
-        
+
         # Construct an IndexMap to map the input indices to the computed output indices
         index_map = IndexMap(
             initial_indices=forward_vars,  # The original iteration variables

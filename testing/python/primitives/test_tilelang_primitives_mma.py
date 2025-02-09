@@ -104,13 +104,24 @@ def run_matmul_ssr(
 
 
 def test_gemm_f16f16f16_nt_ssr():
-    run_matmul_ssr(16, 16, 16, False, True,
-        "float16", "float16", "float16", 16, 16, 16, 0, num_threads=32)
-    run_matmul_ssr(128, 128, 128, False, True,
-        "float16", "float16", "float16", 32, 32, 32, 0, num_threads=64)
-    run_matmul_ssr(1024, 1024, 1024, False, True,
-        "float16", "float16", "float16", 128, 128, 32, 2, num_threads=128)
-    
+    run_matmul_ssr(
+        16, 16, 16, False, True, "float16", "float16", "float16", 16, 16, 16, 0, num_threads=32)
+    run_matmul_ssr(
+        128, 128, 128, False, True, "float16", "float16", "float16", 32, 32, 32, 0, num_threads=64)
+    run_matmul_ssr(
+        1024,
+        1024,
+        1024,
+        False,
+        True,
+        "float16",
+        "float16",
+        "float16",
+        128,
+        128,
+        32,
+        2,
+        num_threads=128)
 
 
 def matmul_rsr(
