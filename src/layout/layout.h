@@ -73,7 +73,7 @@ public:
                PrimExpr forward_thread, PrimExpr replicate_size);
 
   PrimExpr GetForwardThread() const { return forward_thread_; }
-  
+
   Array<PrimExpr> GetForwardVars() const final;
 
   Layout Inverse() const final;
