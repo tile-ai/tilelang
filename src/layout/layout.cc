@@ -87,6 +87,14 @@ void LayoutNode::UpdateAnalyzer(arith::Analyzer *analyzer) const {
   }
 }
 
+Array<PrimExpr> LayoutNode::GetForwardVars() const {
+  Array<PrimExpr> vars;
+  for (size_t i = 0; i < InputDim(); i++) {
+    vars.push_back(InputPlaceholder(i));
+  }
+  return vars;
+}
+
 Array<PrimExpr> LayoutNode::OutputShape() const {
   Array<PrimExpr> ret(OutputDim(), 1);
   arith::Analyzer analyzer;
@@ -307,6 +315,17 @@ PrimExpr FragmentNode::ThreadExtent() const {
   return ist.max();
 }
 
+Array<PrimExpr> FragmentNode::GetForwardVars() const {
+  Array<PrimExpr> vars;
+  if (*as_const_int(ReplicateExtent()) > 1) {
+    vars.push_back(ReplicationPlaceholder());
+  }
+  for (size_t i = 0; i < InputDim(); i++) {
+    vars.push_back(InputPlaceholder(i));
+  }
+  return vars;
+}
+
 PrimExpr FragmentNode::ForwardThread(const Array<PrimExpr> &vars,
                                      const Optional<PrimExpr> &rep_var) const {
   Map<Var, PrimExpr> vmap;
@@ -394,6 +413,10 @@ TVM_REGISTER_GLOBAL("tl.Layout_inverse").set_body_typed([](Layout layout) {
 
 TVM_REGISTER_GLOBAL("tl.Layout_index").set_body_typed([](Layout layout) {
   return layout->GetForwardIndex();
+});
+
+TVM_REGISTER_GLOBAL("tl.Layout_forward_vars").set_body_typed([](Layout layout) {
+  return layout->GetForwardVars();
 });
 
 TVM_REGISTER_GLOBAL("tl.Fragment").set_body([](TVMArgs args, TVMRetValue *ret) {
