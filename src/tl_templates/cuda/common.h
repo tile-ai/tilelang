@@ -54,11 +54,11 @@ TL_DEVICE int make_int(signed char x0, signed char x1, signed char x2,
 
 // Pack sixteen char values.
 TL_DEVICE int4_t make_int4(signed char x0, signed char x1, signed char x2,
-                            signed char x3, signed char y0, signed char y1,
-                            signed char y2, signed char y3, signed char z0,
-                            signed char z1, signed char z2, signed char z3,
-                            signed char w0, signed char w1, signed char w2,
-                            signed char w3) {
+                           signed char x3, signed char y0, signed char y1,
+                           signed char y2, signed char y3, signed char z0,
+                           signed char z1, signed char z2, signed char z3,
+                           signed char w0, signed char w1, signed char w2,
+                           signed char w3) {
   int4_t result;
   result.x = make_int(x0, x1, x2, x3);
   result.y = make_int(y0, y1, y2, y3);
