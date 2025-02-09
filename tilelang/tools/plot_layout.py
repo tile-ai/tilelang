@@ -132,6 +132,18 @@ def plot_layout(layout: T.Layout,
     plt.xticks([])  # Remove x-axis ticks
     plt.yticks([])  # Remove y-axis ticks
 
+    legend_patches = [
+        patches.Patch(color='black', label="T: Thread ID"),
+        patches.Patch(color='black', label="L: Local ID")
+    ]
+    ax.legend(
+        handles=legend_patches,
+        loc="upper right",
+        fontsize=font_size - 4,
+        frameon=False,
+        bbox_to_anchor=(1.0, 1.12),
+        ncols=2)
+
     # Create the output directory if it does not exist
     tmp_directory = pathlib.Path(save_directory)
     if not os.path.exists(tmp_directory):
