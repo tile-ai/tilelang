@@ -7,6 +7,7 @@ echo "Starting installation script..."
 
 # Step 1: Install Python requirements
 echo "Installing Python requirements from requirements.txt..."
+pip install -r requirements-build.txt
 pip install -r requirements.txt
 if [ $? -ne 0 ]; then
     echo "Error: Failed to install Python requirements."

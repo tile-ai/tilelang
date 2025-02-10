@@ -1,5 +1,3 @@
-# build requirements
-cmake>=3.26
 # runtime requirements
 Cython
 decorator
