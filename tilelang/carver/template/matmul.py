@@ -107,8 +107,7 @@ class MatmulTemplate(BaseTemplate):
             B_indices = [k, j] if not trans_B else [j, k]  # Adjust indexing if B is transposed
             return te.sum(
                 A[tuple(A_indices)].astype(accum_dtype) * B[tuple(B_indices)].astype(accum_dtype),
-                axis=k
-            )
+                axis=k)
 
         # Compute matrix multiplication result
         C = te.compute(

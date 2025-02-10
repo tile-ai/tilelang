@@ -64,7 +64,7 @@ class ElementwiseTemplate(BaseTemplate):
 
         # Store input and output tensors as function arguments
         args = [A, B]
-        
+
         # Create and set the computation function
         self.set_function(te.create_prim_func(args))
 
