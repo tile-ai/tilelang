@@ -18,7 +18,7 @@ from .analysis import (
 )
 from tvm.target.target import Target
 from tvm.tir.stmt_functor import pre_order_visit
-from bitblas.base.arch import get_arch, is_tensorcore_supported_precision
+from .arch import get_arch, is_tensorcore_supported_precision
 import logging
 
 logger = logging.getLogger(__name__)
