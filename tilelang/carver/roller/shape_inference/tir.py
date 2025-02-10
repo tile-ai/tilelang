@@ -8,6 +8,7 @@ from tvm import arith, tir
 
 
 class Statement:
+
     def __init__(self, block_analyzer, block: BlockRV):
         self.block_analyzer = block_analyzer
         self.block = block
@@ -79,6 +80,7 @@ class TensorDepNode(object):
 
 
 class DependencyAnalysis(object):
+
     def __init__(self, deps):
         self.deps = deps
         # issue: duplicate name when we have two same ops.
@@ -90,8 +92,8 @@ class DependencyAnalysis(object):
         This is a workaround for the issue that we have two same ops' fuse case.
         See https://github.com/apache/tvm/issues/16433
         """
-        _names:Set = set()
-        name2dep:Mapping = {}
+        _names: Set = set()
+        name2dep: Mapping = {}
         for dep in deps:
             output_buffer = dep.block_analyzer.get_output_buffers(dep.block)[0]
             base_name = output_buffer.name
@@ -105,7 +107,7 @@ class DependencyAnalysis(object):
                 _names.add(base_name)
             name2dep[base_name] = dep
         return name2dep
-        
+
     def get_or_create_node(self, name):
         if name not in self.mapping:
             self.mapping[name] = TensorDepNode(name)
@@ -114,8 +116,7 @@ class DependencyAnalysis(object):
     def traverse_dependencies(self, compute):
         if isinstance(compute, Statement):
             node = self.get_or_create_node(
-                compute.block_analyzer.get_output_buffers(compute.block)[0].name
-            )
+                compute.block_analyzer.get_output_buffers(compute.block)[0].name)
             # Loop through input tensors
             for input_buffer in compute.block_analyzer.get_input_buffers(compute.block):
                 # Get the input node
@@ -169,6 +170,7 @@ class DependencyAnalysis(object):
 
 
 class InputShapeInference:
+
     def __init__(self, deps: List[Statement]):
         self.deps = deps
         self.target_mapping = {}
@@ -242,9 +244,12 @@ class InputShapeInference:
         self.target_mapping[targets] = input_vars, mapping
         return input_vars, mapping
 
-    def infer(
-        self, shape: Dict[str, List[arith.ConstIntBound]], rstep: Dict[str, int] = {}, targets=None
-    ):
+    def infer(self,
+              shape: Dict[str, List[arith.ConstIntBound]],
+              rstep: Dict[str, int] = None,
+              targets=None):
+        if rstep is None:
+            rstep = {}
         compute_targets = tuple(shape.keys())
         input_vars, mapping = self.construct_dependency_target(compute_targets)
         ana = arith.Analyzer()
@@ -257,8 +262,7 @@ class InputShapeInference:
             # assume the dom.min is always 0, maybe we can extend the IterInfo to include the min value.
             if ax.var.name in rstep:
                 bound = arith.ConstIntBound(
-                    int(ax.dom.min), int(ax.dom.min + min(ax.dom.extent, rstep[ax.var.name]) - 1)
-                )
+                    int(ax.dom.min), int(ax.dom.min + min(ax.dom.extent, rstep[ax.var.name]) - 1))
             else:
                 bound = arith.ConstIntBound(int(ax.dom.min), int(ax.dom.min + ax.dom.extent - 1))
             ana.update(ax.var, bound, True)
@@ -318,16 +322,14 @@ class InputShapeInference:
 
 
 def region_exist_in_list(a, list) -> bool:
+
     def expr_is_same(a, b) -> bool:
         if isinstance(a, tir.IntImm) and isinstance(b, tir.IntImm):
             return a.value == b.value
         return structural_equal(a, b)
 
     def region_is_same(a, b) -> bool:
-        for indice_a, indice_b in zip(a, b):
-            if not expr_is_same(indice_a, indice_b):
-                return False
-        return True
+        return all(expr_is_same(indice_a, indice_b) for indice_a, indice_b in zip(a, b))
 
     return any([region_is_same(a, x) for x in list])
 
@@ -340,9 +342,7 @@ def walk_indice(expr):
             return expr
         else:
             return None
-    elif isinstance(expr, tir.expr.ConstExpr):
-        return expr
-    elif isinstance(expr, tir.Var):
+    elif isinstance(expr, (tir.Var, tir.expr.ConstExpr)):
         return expr
     elif isinstance(expr, tir.ProducerLoad):
         return None
@@ -381,7 +381,7 @@ def _extract_dependent_region(block_analyzer, block: BlockRV) -> Dict[str, List[
                         with T.init():
                             T_dense_reindex[T.int64(0), v0, v1] = T.float16(0)
                         T_dense_reindex[T.int64(0), v0, v1] = T_dense_reindex[T.int64(0), v0, v1] + A_reindex[T.int64(0), v0, v2] * B_reindex[T.int64(0), v1, v2]
-                For exmaple, the T_dense_reindex has three dims, however there're only two spatial loops.
+                For example, the T_dense_reindex has three dims, however there're only two spatial loops.
                 """
                 continue
             index.append(expr)

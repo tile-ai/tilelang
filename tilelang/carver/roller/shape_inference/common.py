@@ -8,16 +8,21 @@ from tvm import arith
 
 
 class Statement():
-    def __init__(self, output: str, dependent_region: dict, var_map: OrderedDict, range_map: OrderedDict):
+
+    def __init__(self, output: str, dependent_region: dict, var_map: OrderedDict,
+                 range_map: OrderedDict):
         self.output = output
         self.dependent_region = dependent_region
         self.var_map = var_map
         self.range_map = range_map
 
+
 def _merge_two_bounds(x: arith.ConstIntBound, y: arith.ConstIntBound):
     return arith.ConstIntBound(min(x.min_value, y.min_value), max(x.max_value, y.max_value))
 
+
 class InputShapeInference():
+
     def __init__(self, deps: List[Statement]):
         self.deps = deps
 
@@ -34,7 +39,7 @@ class InputShapeInference():
             for name, regions in dep.dependent_region.items():
                 for region in regions:
                     bounds = [ana.const_int_bound(index) for index in region]
-                    if name in shape: # simply merge two bounds
+                    if name in shape:  # simply merge two bounds
                         bounds = [_merge_two_bounds(x, y) for x, y in zip(shape[name], bounds)]
                     shape[name] = bounds
 
@@ -42,9 +47,11 @@ class InputShapeInference():
             shape[name] = [c.max_value - c.min_value + 1 for c in bounds]
         return shape
 
-    def infer(self, shape, rstep: Dict[str, int] = {}):
+    def infer(self, shape, rstep: Dict[str, int] = None):
+        if rstep is None:
+            rstep = {}
         if isinstance(shape, (list, tuple)):
-            shape = {"output0" : [arith.ConstIntBound(0, val - 1) for val in shape]}
+            shape = {"output0": [arith.ConstIntBound(0, val - 1) for val in shape]}
         shape = self._infer(shape, rstep)
         return shape
 
@@ -63,4 +70,3 @@ class InputShapeInference():
                 input_expr = [ana.simplify(index) for index in region]
                 result[name] = input_expr
         return result
-

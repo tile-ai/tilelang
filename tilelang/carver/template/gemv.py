@@ -9,9 +9,10 @@ from ..roller import Hint
 from typing import List
 from ..utils import get_roller_hints_from_func
 
+
 @dataclass
 class GEMVTemplate(BaseTemplate):
-    
+
     # OP Related Config
     N: int = None
     K: int = None
@@ -21,34 +22,28 @@ class GEMVTemplate(BaseTemplate):
     accum_dtype: str = "float16"
     with_bias: bool = False
 
-    def get_hardware_aware_configs(self,
-                                   arch: TileDevice = None,
-                                   topk: int = 10) -> List[Hint]:
-        roller_hints = get_roller_hints_from_func(
-            self._func, arch=arch, topk=topk)
+    def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> List[Hint]:
+        roller_hints = get_roller_hints_from_func(self._func, arch=arch, topk=topk)
         return roller_hints
 
     def initialize_function(self) -> None:
-        M:int = 1
+        M: int = 1
         N, K = self.N, self.K
-        assert (isinstance(M, int)
-                and isinstance(N, int) 
-                and isinstance(K, int)), "Only Support Integer M, N, K"
+        assert (isinstance(M, int) and isinstance(N, int) and
+                isinstance(K, int)), "Only Support Integer M, N, K"
         assert (M > 0 and N > 0 and K > 0), "M, N, K should be positive"
-        
+
         trans_B = self.trans_B
         in_dtype, out_dtype, accum_dtype = self.in_dtype, self.out_dtype, self.accum_dtype
         with_bias = self.with_bias
-        
+
         input_shape = (M, K)
         weight_shape = (K, N) if not trans_B else (N, K)
         output_shape = (M, N)
-        Bias_shape = (N, )
+        Bias_shape = (N,)
         A = te.placeholder(input_shape, name="A", dtype=in_dtype)
         B = te.placeholder(weight_shape, name="B", dtype=in_dtype)
-        Bias = te.placeholder(
-            Bias_shape, name="Bias", dtype=accum_dtype)
-        
+        Bias = te.placeholder(Bias_shape, name="Bias", dtype=accum_dtype)
 
         k = te.reduce_axis((0, K), name="k")
 
@@ -56,21 +51,22 @@ class GEMVTemplate(BaseTemplate):
             A_indices = [i, k]
             B_indices = [k, j] if not trans_B else [j, k]
             return te.sum(
-                A[tuple(A_indices)].astype(accum_dtype) * B[tuple(B_indices)].astype(accum_dtype), axis=k)
+                A[tuple(A_indices)].astype(accum_dtype) * B[tuple(B_indices)].astype(accum_dtype),
+                axis=k)
 
         C = te.compute(
             output_shape,
-            fcompute = _compute_matmul,
+            fcompute=_compute_matmul,
             name="C",
         )
-        
+
         if with_bias:
             C = te.compute(
                 output_shape,
                 lambda i, j: C[i, j] + Bias[j],
                 name="Bias",
             )
-        
+
         if out_dtype != accum_dtype:
             C = te.compute(
                 output_shape,

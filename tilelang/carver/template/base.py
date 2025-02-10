@@ -1,12 +1,13 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-from abc import ABC
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from ..arch import TileDevice, is_volta_arch, is_ampere_arch, is_cdna_arch, auto_infer_current_arch
 from ..roller import Hint
 from typing import List
 from tvm.tir import PrimFunc
+
 
 @dataclass
 class BaseTemplate(ABC):
@@ -15,10 +16,9 @@ class BaseTemplate(ABC):
 
     _func: PrimFunc = field(default=None, init=False, repr=False)
 
-    def get_hardware_aware_configs(self,
-                                   arch: TileDevice = None,
-                                   topk: int = 10) -> List[Hint]:
-        raise NotImplementedError("get_hardware_aware_configs is not implemented")
+    @abstractmethod
+    def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> List[Hint]:
+        pass
 
     def with_arch(self, arch: TileDevice) -> "BaseTemplate":
         self._arch = arch

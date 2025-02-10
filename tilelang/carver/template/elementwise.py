@@ -9,18 +9,16 @@ from ..roller import Hint
 from typing import List
 from ..utils import get_roller_hints_from_func
 
+
 @dataclass
 class ElementwiseTemplate(BaseTemplate):
-    
+
     # OP Related Config
     shape: List[int] = None
     dtype: str = "float16"
 
-    def get_hardware_aware_configs(self,
-                                   arch: TileDevice = None,
-                                   topk: int = 10) -> List[Hint]:
-        roller_hints = get_roller_hints_from_func(
-            self._func, arch=arch, topk=topk, allow_gemv=True)
+    def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> List[Hint]:
+        roller_hints = get_roller_hints_from_func(self._func, arch=arch, topk=topk, allow_gemv=True)
         return roller_hints
 
     def initialize_function(self) -> None:
@@ -33,18 +31,15 @@ class ElementwiseTemplate(BaseTemplate):
 
         B = te.compute(
             shape,
-            fcompute = _compute_elementwise,
+            fcompute=_compute_elementwise,
             name="B",
         )
-        
+
         args = [A, B]
         self.set_function(te.create_prim_func(args))
 
     def params_as_dict(self):
-        return {
-            "shape": self.shape,
-            "dtype": self.dtype
-        }
+        return {"shape": self.shape, "dtype": self.dtype}
 
     @property
     def class_attributes(self):

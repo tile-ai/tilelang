@@ -232,8 +232,9 @@ class PrimFuncNode(Node):
         if rstep is None:
             rstep = {}
         shape = {
-            self.block_analyzer.get_output_buffers(block)[0].name:
-            [tvm.arith.ConstIntBound(0, val - 1) for val in tile] for block in self.schedule_stages
+            self.block_analyzer.get_output_buffers(block)[0].name: [
+                tvm.arith.ConstIntBound(0, val - 1) for val in tile
+            ] for block in self.schedule_stages
         }
         return self.ana.infer(shape, rstep, targets)
 
