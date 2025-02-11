@@ -292,7 +292,8 @@ class TileLangBuilPydCommand(build_py):
 
         # Copy CUTLASS to the package directory
         CUTLASS_PREBUILD_ITEMS = [
-            "3rdparty/cutlass",
+            "3rdparty/cutlass/include",
+            "3rdparty/cutlass/tools",
         ]
         for item in CUTLASS_PREBUILD_ITEMS:
             source_dir = os.path.join(ROOT_DIR, item)
@@ -307,7 +308,8 @@ class TileLangBuilPydCommand(build_py):
                 shutil.copy2(source_dir, target_dir)
         # copy compoable kernel to the package directory
         CK_PREBUILD_ITEMS = [
-            "3rdparty/composable_kernel",
+            "3rdparty/composable_kernel/include",
+            "3rdparty/composable_kernel/library",
         ]
         for item in CK_PREBUILD_ITEMS:
             source_dir = os.path.join(ROOT_DIR, item)
