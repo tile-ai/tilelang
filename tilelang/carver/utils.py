@@ -7,6 +7,7 @@ from tvm.tir import PrimFunc
 from .arch import TileDevice
 from .roller.policy import TensorCorePolicy, DefaultPolicy
 from .roller.hint import Hint
+from .roller.node import OutputNode
 from .matmul_analysis import get_tensorized_func_and_tags
 import logging
 
@@ -67,6 +68,27 @@ def get_roller_hints_from_func(func_or_module: Union[tir.PrimFunc, IRModule],
         if tags and tensorized_func:
             policy = TensorCorePolicy.from_prim_func(func=tensorized_func, arch=arch, tags=tags)
         return policy.emit_config(topk)
+
+
+def get_roller_hints_from_output_nodes(
+        output_nodes: List[OutputNode],
+        arch: TileDevice,
+        topk: int = 10,
+        extra_tags: Optional[List[str]] = None) -> Optional[List[Hint]]:
+    assert isinstance(output_nodes, list), "The input should be a list of functions."
+
+    lints = []
+    try:
+        policy = TensorCorePolicy.from_output_nodes(output_nodes, arch=arch, tags=None)
+        lints = policy.emit_config(topk)
+    except Exception as e_msg:
+        logger.debug(f"Generate hints from output nodes failed: {e_msg}",
+                     "fallback to default policy")
+
+    if len(lints) == 0:
+        policy = DefaultPolicy.from_output_nodes(output_nodes, arch=arch, tags=None)
+        lints = policy.emit_config(topk)
+    return lints
 
 
 def retrieve_func_from_module(ir_module: IRModule) -> PrimFunc:
