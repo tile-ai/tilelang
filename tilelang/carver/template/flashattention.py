@@ -28,7 +28,7 @@ class FlashAttentionTemplate(BaseTemplate):
     in_dtype: str = "float16"
     out_dtype: str = "float16"
     accum_dtype: str = "float16"
-    
+
     def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> List[Hint]:
         """
         Retrieves optimized hardware-aware configurations.
@@ -59,11 +59,11 @@ class FlashAttentionTemplate(BaseTemplate):
         head_dim = self.head_dim
         seq_length = self.seq_length
         seq_kv_length = self.seq_kv_length
-        
+
         in_dtype = self.in_dtype
         out_dtype = self.out_dtype
         accum_dtype = self.accum_dtype
-        
+
         # Equalize the input shaps into a matmul shape
         QK_B, QK_M, QK_N, QK_K = batch_size * num_heads, seq_length, seq_kv_length, head_dim
         SV_B, SV_M, SV_N, SV_K = batch_size * num_heads, seq_length, head_dim, seq_kv_length
@@ -78,7 +78,7 @@ class FlashAttentionTemplate(BaseTemplate):
             # Create TVM placeholders for input tensors
             A = te.placeholder(input_shape, name="A", dtype=in_dtype)  # Input matrix A
             B = te.placeholder(weight_shape, name="B", dtype=in_dtype)  # Weight matrix B
-            
+
             # Define a reduction axis for matrix multiplication
             k = te.reduce_axis((0, K), name="k")
 
@@ -96,7 +96,8 @@ class FlashAttentionTemplate(BaseTemplate):
                 A_indices = [b, i, k]
                 B_indices = [b, j, k]
                 return te.sum(
-                    A[tuple(A_indices)].astype(accum_dtype) * B[tuple(B_indices)].astype(accum_dtype),
+                    A[tuple(A_indices)].astype(accum_dtype) *
+                    B[tuple(B_indices)].astype(accum_dtype),
                     axis=k)
 
             # Compute matrix multiplication result
@@ -105,7 +106,7 @@ class FlashAttentionTemplate(BaseTemplate):
                 fcompute=_compute_matmul,
                 name="C",
             )
-            
+
             # Optionally cast the output to a different type
             if out_dtype != accum_dtype:
                 C = te.compute(
@@ -113,22 +114,20 @@ class FlashAttentionTemplate(BaseTemplate):
                     lambda b, i, j: C[b, i, j].astype(out_dtype),
                     name="D",
                 )
-            
+
             args = [A, B, C]
             return te.create_prim_func(args)
-        
+
         MMA0_prim_func = create_matmul(QK_B, QK_M, QK_N, QK_K)
         MMA1_prim_func = create_matmul(SV_B, SV_M, SV_N, SV_K)
-        
-        self.set_function(
-            [MMA0_prim_func, MMA1_prim_func]
-        )
-        
+
+        self.set_function([MMA0_prim_func, MMA1_prim_func])
+
         def create_node_from_function(func, name):
             tensorized_func, tags = get_tensorized_func_and_tags(func, self.arch.target)
             assert tags is not None
             return PrimFuncNode(tensorized_func, name=name, tags=tags)
-        
+
         node_0 = create_node_from_function(MMA0_prim_func, name="MMA0")
         node_1 = create_node_from_function(MMA1_prim_func, name="MMA1")
 
@@ -136,7 +135,7 @@ class FlashAttentionTemplate(BaseTemplate):
         edge = Edge(node_0, node_1, 0, 0)
         node_0._out_edges.append(edge)
         node_1.set_inputs(0, edge)
-        
+
         output_nodes = [OutputNode(node_1)]
         self.set_output_nodes(output_nodes)
 

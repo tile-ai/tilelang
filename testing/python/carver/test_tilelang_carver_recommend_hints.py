@@ -140,10 +140,11 @@ def run_fmha_recommend_hints(
         print(hint)
     assert len(hints) > 0, "Hints length should be greater than 0"
 
+
 def test_fmha_recommend_hints():
     run_fmha_recommend_hints(4, 32, 512, 512, 128, "float16", "float16", "float16")
     run_fmha_recommend_hints(4, 32, 512, 512, 128, "int8", "int32", "int32")
- 
+
 
 if __name__ == "__main__":
     tilelang.testing.main()
