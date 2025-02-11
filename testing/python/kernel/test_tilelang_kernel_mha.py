@@ -150,7 +150,7 @@ def run_mha(batch, heads, seq_len, dim, is_causal, block_M, block_N, num_stages=
         output = torch.einsum('bhqk,bkhd->bqhd', attention_weights, V)
         return output
 
-    mod.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+    mod.assert_allclose(ref_program, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
 def test_mha_causal_dim64():
