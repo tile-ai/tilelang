@@ -99,8 +99,8 @@ class TileDict:
     def get_tile(self, func) -> List[int]:
         return self.tile_map[func]
 
-    def get_rstep(self, func) -> Dict[str, int]:
-        return self.rstep_map
+    def get_rstep(self, node) -> Dict[str, int]:
+        return self.rstep_map[node]
 
     def __hash__(self) -> int:
         return hash(tuple(self.output_tile))

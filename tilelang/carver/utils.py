@@ -56,7 +56,7 @@ def get_roller_hints_from_func(func_or_module: Union[tir.PrimFunc, IRModule],
         else:
             return None
     else:
-        policy = DefaultPolicy(func=func, arch=arch)
+        policy = DefaultPolicy.from_prim_func(func=func, arch=arch)
         tensorized_func = None
         try:
             tensorized_func, tags = get_tensorized_func_and_tags(
@@ -65,7 +65,7 @@ def get_roller_hints_from_func(func_or_module: Union[tir.PrimFunc, IRModule],
             logger.debug("Get tensorized func and tags failed: ", e_msg)
             tags = None
         if tags and tensorized_func:
-            policy = TensorCorePolicy(func=tensorized_func, arch=arch, tags=tags)
+            policy = TensorCorePolicy.from_prim_func(func=tensorized_func, arch=arch, tags=tags)
         return policy.emit_config(topk)
 
 
