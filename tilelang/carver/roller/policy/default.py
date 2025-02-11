@@ -389,7 +389,7 @@ class DefaultPolicy:
                 new_rstep_id = _enlarge(cur_rstep_id)
                 if new_rstep_id is None:
                     break
-                new_rstep_map = {
+                new_rstep_map[node] = {
                     k.var.name: all_steps[k.var.name][new_rstep_id[k.var.name]] for k in node.raxis
                 }
                 old_rstep_map = td.rstep_map
@@ -405,8 +405,8 @@ class DefaultPolicy:
 
         for node in self.ordered_nodes:
             if len(node.raxis) > 0:
-                rstep = _optimize(node, rstep_map)
-                rstep_map = rstep
+                rstep = _optimize(node, rstep_map[node])
+                rstep_map[node] = rstep
         td.rstep_map = rstep_map
         td.smem_cost, td.cached_tensors_map = self._compute_shared_memory_usage(td)
 
