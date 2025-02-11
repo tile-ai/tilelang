@@ -23,3 +23,15 @@ def TMALoadOp(*args):
 
 def FenceProxyAsyncOp(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.FenceProxyAsyncOp"), *args)
+
+
+def SetMaxNReg(*args):
+    return tir.call_intrin("handle", tir.op.Op.get("tl.SetMaxNReg"), *args)
+
+
+def MBarrierWaitParity(*args):
+    return tir.call_intrin("handle", tir.op.Op.get("tl.MBarrierWaitParity"), *args)
+
+
+def MBarrierExpectTX(*args):
+    return tir.call_intrin("handle", tir.op.Op.get("tl.MBarrierExpectTX"), *args)
