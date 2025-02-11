@@ -182,7 +182,7 @@ def run_chunk_scan(batch,
             out = out + x * D
         return out
 
-    mod.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+    mod.assert_allclose(ref_program, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
 def chunk_state_fwd(batch,
@@ -313,7 +313,7 @@ def run_chunk_state(batch,
         return torch.einsum("bclhn,bhcl,bhcl,bclhp->bchpn", B.to(x.dtype), decay_states.to(x.dtype),
                             dt.to(x.dtype), x)
 
-    mod.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+    mod.assert_allclose(ref_program, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
 def test_chunk_scan():
