@@ -196,6 +196,7 @@ This helps quickly test multiple configurations without manually guessing.
 
 Carver abstracts common loop patterns through templates:
 - **`GeneralReductionTemplate`**: For general `Spatial-Spatial-Reduce` (SSR) structures or similar.
+- **`FlashAttentionTemplate`**: For attention-like operations with flash memory.
 - **`MatmulTemplate`**: For standard matrix multiplication `C = A * B`.
 - **`GEMVTemplate`**: For `y = Ax` or `y = xA` style operations.
 - **`ElementwiseTemplate`**: For elementwise transformations or pointwise ops.
@@ -205,6 +206,5 @@ You can also create your own specialized templates if you have unique loop struc
 
 ## TODO Items
 
-- [ ] **Flash Attention** and its variants: Support search-space generation for specialized attention kernels.
 - [ ] **Adapt to tile language**: Provide ready-made scheduling calls or wrappers for [tilelang](https://github.com/LeiYanggh/tilelang) to streamline end-to-end integration.
 
