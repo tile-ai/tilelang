@@ -7,9 +7,9 @@ from tilelang.carver.arch import auto_infer_current_arch
 from tvm import te
 
 
-def run_general_matmul_emit_configs(M, N, K,
-                                          topk: int = 20):
+def run_general_matmul_emit_configs(M, N, K, topk: int = 20):
     arch = auto_infer_current_arch()
+
     def gemm(M, N, K):
         A = te.placeholder((M, K), name='A', dtype='float16')
         B = te.placeholder((N, K), name='B', dtype='float16')
@@ -20,12 +20,10 @@ def run_general_matmul_emit_configs(M, N, K,
         C = te.compute(
             (M, N),
             lambda i, j: te.sum(A[i, k].astype('float16') * B[j, k].astype('float16'), axis=[k]),
-            name='C'
-        )
+            name='C')
 
         return A, B, C
 
-    
     arg1 = gemm(M, N, K)
     args = arg1
 
@@ -33,7 +31,8 @@ def run_general_matmul_emit_configs(M, N, K,
 
     tensorized_func, tags = carver.utils.get_tensorized_func_and_tags(func, arch.target)
     print(tags)
-    policy = carver.TensorCorePolicy.from_prim_func(func=tensorized_func, arch=arch, tags=tags, name="matmul_0")
+    policy = carver.TensorCorePolicy.from_prim_func(
+        func=tensorized_func, arch=arch, tags=tags, name="matmul_0")
 
     hints = policy.emit_config(topk=topk)
 
@@ -50,16 +49,17 @@ def run_general_matmul_emit_configs(M, N, K,
 
     for config in hints:
         print(config)
-    
+
     assert len(hints) > 0, "Hints length is zero"
 
 
 def test_general_matmul_emit_configs():
     run_general_matmul_emit_configs(128, 128, 128)
 
-def run_general_matmul_matmul_emit_configs(M, N, K,
-                                          topk: int = 20):
+
+def run_general_matmul_matmul_emit_configs(M, N, K, topk: int = 20):
     arch = auto_infer_current_arch()
+
     def gemm(M, N, K):
         A = te.placeholder((M, K), name='A', dtype='float16')
         B = te.placeholder((N, K), name='B', dtype='float16')
@@ -70,15 +70,13 @@ def run_general_matmul_matmul_emit_configs(M, N, K,
         C = te.compute(
             (M, N),
             lambda i, j: te.sum(A[i, k].astype('float16') * B[j, k].astype('float16'), axis=[k]),
-            name='C'
-        )
+            name='C')
 
         return A, B, C
 
-    
     arg1 = gemm(M, N, K)
     args = arg1
- 
+
     func = te.create_prim_func(args)
 
     tensorized_func, tags = carver.utils.get_tensorized_func_and_tags(func, arch.target)
@@ -99,12 +97,12 @@ def run_general_matmul_matmul_emit_configs(M, N, K,
     for config in hints:
         print(config)
 
-    
     assert len(hints) > 0, "Hints length is zero"
 
 
 def test_general_matmul_matmul_emit_configs():
     run_general_matmul_matmul_emit_configs(128, 128, 128)
+
 
 if __name__ == "__main__":
     tilelang.testing.main()
