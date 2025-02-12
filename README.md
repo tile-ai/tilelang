@@ -190,6 +190,10 @@ In addition to GEMM, we provide a variety of examples to showcase the versatilit
 - [LinearAttention](./examples/linear_attention/): Examples include RetNet and Mamba implementations.
 - [Convolution](./examples/convolution/): Implementations of Convolution with IM2Col.
 
+## Upcoming Features
+
+Check our [tilelang v0.2.0 release plan](https://github.com/tile-ai/tilelang/issues/79) for upcoming features.
+
 ---
 
 TileLang has now been used in project [BitBLAS](https://github.com/microsoft/BitBLAS) and [AttentionEngine](https://github.com/microsoft/AttentionEngine).
