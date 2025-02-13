@@ -7,6 +7,7 @@ import shutil
 from setuptools import setup, find_packages, Extension
 from setuptools.command.build_py import build_py
 from setuptools.command.sdist import sdist
+from setuptools.command.develop import develop
 import distutils.dir_util
 from typing import List
 import re
@@ -204,9 +205,9 @@ class TileLangBuilPydCommand(build_py):
         self.run_command("build_ext")
         build_ext_cmd = self.get_finalized_command("build_ext")
         build_temp_dir = build_ext_cmd.build_temp
-        ext_modules = build_ext_cmd.extensions  # 列出所有扩展模块
+        ext_modules = build_ext_cmd.extensions
         for ext in ext_modules:
-            extdir = build_ext_cmd.get_ext_fullpath(ext.name)  # 获取扩展模块的完整路径
+            extdir = build_ext_cmd.get_ext_fullpath(ext.name)
             print(f"Extension {ext.name} output directory: {extdir}")
 
         ext_output_dir = os.path.dirname(extdir)
@@ -348,6 +349,52 @@ class TileLangSdistCommand(sdist):
         super().make_distribution()
 
 
+# ------------------------------------------------------------------------
+# NEW: Add a custom 'develop' command so that `pip install -e .` works.
+# ------------------------------------------------------------------------
+class TileLangDevelopCommand(develop):
+    """
+    Customized setuptools 'develop' command for an editable install.
+    Ensures the extension is built and all necessary assets are copied.
+    """
+
+    def run(self):
+        # 1. Build the C/C++ extension modules
+        self.run_command("build_ext")
+
+        build_ext_cmd = self.get_finalized_command("build_ext")
+        ext_modules = build_ext_cmd.extensions
+        for ext in ext_modules:
+            extdir = build_ext_cmd.get_ext_fullpath(ext.name)
+            print(f"Extension {ext.name} output directory: {extdir}")
+
+        ext_output_dir = os.path.dirname(extdir)
+        print(f"Extension output directory (parent): {ext_output_dir}")
+
+        # Copy the built TVM to the package directory
+        TVM_PREBUILD_ITEMS = [
+            f"{ext_output_dir}/libtvm_runtime.so",
+            f"{ext_output_dir}/libtvm.so",
+            f"{ext_output_dir}/libtilelang.so",
+            f"{ext_output_dir}/libtilelang_module.so",
+        ]
+        for item in TVM_PREBUILD_ITEMS:
+            source_lib_file = os.path.join(ROOT_DIR, item)
+            # only copy the file
+            file_name = os.path.basename(item)
+            target_dir = os.path.join(PACKAGE_NAME, file_name)
+            target_dir = os.path.dirname(target_dir)
+            target_dir = os.path.join(target_dir, "lib")
+            if not os.path.exists(target_dir):
+                os.makedirs(target_dir)
+            if os.path.exists(source_lib_file):
+                shutil.copy2(source_lib_file, target_dir)
+                # remove the original file
+                os.remove(source_lib_file)
+            else:
+                print(f"INFO: {source_lib_file} does not exist.")
+
+
 class CMakeExtension(Extension):
     """
     A specialized setuptools Extension class for building a CMake project.
@@ -466,5 +513,6 @@ setup(
         "build_py": TileLangBuilPydCommand,
         "sdist": TileLangSdistCommand,
         "build_ext": CMakeBuild,
+        "develop": TileLangDevelopCommand,
     },
 )

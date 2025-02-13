@@ -79,3 +79,6 @@ build_sdist/
 
 # exclude debug testing folder
 !testing/python/debug
+
+# ignore lib with develop mode
+tilelang/lib
