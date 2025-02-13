@@ -28,7 +28,6 @@ cloudpickle
 ml_dtypes
 psutil
 scipy
-tornado
 torch
 thefuzz
 tabulate

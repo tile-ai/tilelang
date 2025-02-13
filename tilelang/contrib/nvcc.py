@@ -188,14 +188,14 @@ def get_cuda_version(cuda_path=None):
     raise RuntimeError("Cannot read cuda version file")
 
 
-@tvm._ffi.register_func("tvm_callback_cuda_compile", override=True)
-def tvm_callback_cuda_compile(code, target):  # pylint: disable=unused-argument
+@tvm._ffi.register_func("tilelang_callback_cuda_compile", override=True)
+def tilelang_callback_cuda_compile(code, target):  # pylint: disable=unused-argument
     """use nvcc to generate fatbin code for better optimization"""
     ptx = compile_cuda(code, target_format="fatbin")
     return ptx
 
 
-@tvm._ffi.register_func("tvm_callback_libdevice_path", override=True)
+@tvm._ffi.register_func("tilelang_callback_libdevice_path", override=True)
 def find_libdevice_path(arch):
     """Utility function to find libdevice
 

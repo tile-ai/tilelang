@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-from typing import List, Union, Any, Callable, Literal
+from typing import List, Union, Any, Callable, Literal, Optional
 from tvm.target import Target
 import tilelang
 from tilelang import tvm as tvm
@@ -34,7 +34,7 @@ class JITKernel(object):
         self,
         func: PrimFunc = None,
         out_idx: Union[List[int], int] = None,
-        execution_backend: Literal["dl_pack", "torch_cpp", "ctypes"] = "dl_pack",
+        execution_backend: Literal["dlpack", "torch_cpp", "ctypes"] = "dlpack",
         target: Union[str, Target] = "auto",
         verbose: bool = False,
     ):
@@ -47,8 +47,8 @@ class JITKernel(object):
             The TileLang TIR function to compile and wrap.
         out_idx : Union[List[int], int], optional
             Index(es) of the output tensors to return (default: None).
-        execution_backend : Literal["dl_pack", "torch_cpp", "ctypes"], optional
-            Execution backend to use for kernel execution (default: "dl_pack").
+        execution_backend : Literal["dlpack", "torch_cpp", "ctypes"], optional
+            Execution backend to use for kernel execution (default: "dlpack").
         target : Union[str, Target], optional
             Compilation target, either as a string or a TVM Target object (default: "auto").
         verbose : bool, optional
@@ -69,7 +69,7 @@ class JITKernel(object):
         target = Target(target)
 
         # Validate the execution backend.
-        assert execution_backend in ["dl_pack", "torch_cpp",
+        assert execution_backend in ["dlpack", "torch_cpp",
                                      "ctypes"], f"Invalid execution backend. {execution_backend}"
 
         # Compile the TileLang function and create a kernel adapter for execution.
@@ -125,7 +125,7 @@ class JITKernel(object):
         self.rt_params = params
 
         # Create an adapter based on the specified execution backend.
-        if execution_backend == "dl_pack":
+        if execution_backend == "dlpack":
             # Use TorchDLPackKernelAdapter for interoperability with PyTorch via DLPack.
             adapter = TorchDLPackKernelAdapter(rt_mod, params=params, result_idx=out_idx)
         elif execution_backend == "torch_cpp":
@@ -194,3 +194,6 @@ class JITKernel(object):
             The source code of the compiled kernel function.
         """
         return self.rt_module.imported_modules[0].get_source()
+
+    def run_once(self, func: Optional[Callable] = None) -> None:
+        return self.get_profiler().run_once(func)

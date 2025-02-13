@@ -11,6 +11,8 @@ using cutlass::bfloat16_t;
 using cutlass::half_t;
 using cutlass::tfloat32_t;
 
+using int4_t = int4;
+
 #define hexp cutlass::fast_exp
 #define hlog cutlass::fast_log
 #define hsqrt cutlass::fast_sqrt
@@ -44,9 +46,40 @@ TL_DEVICE unsigned __pack_half2(const bfloat16_t x, const bfloat16_t y) {
   return (v1 << 16) | v0;
 }
 
-/// Helper to cast SMEM pointer to unsigned
+// Pack four char values
+TL_DEVICE int make_int(signed char x0, signed char x1, signed char x2,
+                       signed char x3) {
+  return (x3 << 24) | (x2 << 16) | (x1 << 8) | x0;
+}
+
+// Pack sixteen char values.
+TL_DEVICE int4_t make_int4(signed char x0, signed char x1, signed char x2,
+                           signed char x3, signed char y0, signed char y1,
+                           signed char y2, signed char y3, signed char z0,
+                           signed char z1, signed char z2, signed char z3,
+                           signed char w0, signed char w1, signed char w2,
+                           signed char w3) {
+  int4_t result;
+  result.x = make_int(x0, x1, x2, x3);
+  result.y = make_int(y0, y1, y2, y3);
+  result.z = make_int(z0, z1, z2, z3);
+  result.w = make_int(w0, w1, w2, w3);
+  return result;
+}
+
+// Helper to cast SMEM pointer to unsigned
 TL_DEVICE uint32_t smem_ptr_to_uint(void const *const ptr) {
   return static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
+}
+
+// Helper to cast SMEM pointer to unsigned
+TL_DEVICE unsigned int cast_smem_ptr_to_int(const void *const smem_ptr) {
+  unsigned int smem_int;
+  asm volatile("{ .reg .u64 smem_int; cvta.to.shared.u64 smem_int, %1; "
+               "cvt.u32.u64 %0, smem_int; }"
+               : "=r"(smem_int)
+               : "l"(smem_ptr));
+  return smem_int;
 }
 
 // AtomicAdd Functions for FP16

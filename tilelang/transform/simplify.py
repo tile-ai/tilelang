@@ -37,3 +37,8 @@ def simplify_prim_func(func: Callable) -> Callable:
         return _Simplify(stmt)
 
     return wrapper
+
+
+def apply_simplify(stmt: Union[PrimFunc, IRModule]) -> Union[PrimFunc, IRModule]:
+    """Apply Simplify pass to a PrimFunc or IRModule."""
+    return _Simplify(stmt)

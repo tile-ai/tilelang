@@ -26,10 +26,10 @@ namespace codegen {
           << "HiprtcError: " #x " failed with error: "                         \
           << hiprtcGetErrorString(result);                                     \
       \  
-                                                                                                                                                         \
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   \
     }                                                                          \
     \  
-                                                                                                                                                           \
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   \
   }
 
 static std::string FindHIPIncludePath() {
@@ -163,12 +163,12 @@ runtime::Module BuildTileLangHIP(IRModule mod, Target target) {
   }
 
   std::string code = cg.Finish();
-  if (const auto *f = Registry::Get("tvm_callback_hip_postproc")) {
+  if (const auto *f = Registry::Get("tilelang_callback_hip_postproc")) {
     code = (*f)(code, target).operator std::string();
   }
   std::string fmt = "ptx";
   std::string ptx;
-  if (const auto *f = Registry::Get("tvm_callback_hip_compile")) {
+  if (const auto *f = Registry::Get("tilelang_callback_hip_compile")) {
     ptx = (*f)(code, target).operator std::string();
     if (ptx[0] != '/')
       fmt = "hsaco";

@@ -42,6 +42,9 @@ def tl_matmul(
 ):
     assert in_dtype in [
         "float16",
+        "bfloat16",
+        "e4m3_float8",
+        "e5m2_float8",
         "int8",
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
@@ -52,16 +55,16 @@ def tl_matmul(
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if out_dtype == "int32":
+    is_float8 = in_dtype in ["e4m3_float8", "e5m2_float8"]
+    if out_dtype == "int32" or is_float8:
         micro_size_k = 32
 
     # This is a debug config
-    block_row_warps = 1
-    block_col_warps = 1
-    warp_row_tiles = 16
-    warp_col_tiles = 16
-    # chunk = 32 if in_dtype == "float16" else 64
-    chunk = 32
+    block_row_warps = 2
+    block_col_warps = 2
+    warp_row_tiles = 32
+    warp_col_tiles = 32
+    chunk = 32 if in_dtype == "float16" else 64
     shared_scope = "shared.dyn"
 
     # Pipeline Stage
@@ -118,8 +121,6 @@ def tl_matmul(
             A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
-
-            thread_binding = T.thread_binding(0, threads, "threadIdx.x")
 
             T.annotate_layout({
                 A_shared: make_swizzle_layout(A_shared),
@@ -185,14 +186,31 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     # src_code is the generated cuda source
     assert src_code is not None
 
-    if in_dtype == "int8":
-        A = torch.randint(-128, 127, (M, K), device="cuda", dtype=torch.int8)
-        B = torch.randint(-128, 127, (N, K), device="cuda", dtype=torch.int8)
-    else:
-        A = torch.rand(M, K, device="cuda", dtype=getattr(torch, in_dtype))
-        B = torch.rand(N, K, device="cuda", dtype=getattr(torch, in_dtype))
+    def map_torch_type(intype):
+        typemap = {
+            'e4m3_float8': torch.float8_e4m3fn,
+            'e5m2_float8': torch.float8_e5m2,
+        }
+        if intype in typemap:
+            return typemap[intype]
+        else:
+            return getattr(torch, intype)
 
-    C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, accum_dtype))
+    in_dtype = map_torch_type(in_dtype)
+    out_dtype = map_torch_type(out_dtype)
+    accum_dtype = map_torch_type(accum_dtype)
+
+    if in_dtype in {torch.int8, torch.int32}:
+        A = torch.randint(-128, 128, (M, K), dtype=torch.int8).to(in_dtype).cuda()
+        B = torch.randint(-128, 128, (N, K), dtype=torch.int8).to(in_dtype).cuda()
+    elif in_dtype in {torch.float8_e4m3fn, torch.float8_e5m2}:
+        A = torch.randn(M, K).to(in_dtype).cuda()
+        B = torch.randn(N, K).to(in_dtype).cuda()
+    else:
+        A = torch.randn(M, K).to(in_dtype).cuda() - 0.5
+        B = torch.randn(N, K).to(in_dtype).cuda() - 0.5
+
+    C = torch.zeros(M, N, device="cuda", dtype=accum_dtype)
 
     mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
 
@@ -204,16 +222,24 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     assert latency is not None
 
     # Get Reference Result
-    ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(getattr(torch, accum_dtype))
-    print(C)
-    print(ref_c)
-    torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
+    ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(out_dtype)
+    tilelang.testing.torch_assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(8, 0)
 def test_assert_tl_matmul():
     assert_tl_matmul_correctness(128, 128, 128, "float16", "float16", "float16")
     assert_tl_matmul_correctness(128, 256, 256, "float16", "float32", "float32")
+    assert_tl_matmul_correctness(128, 128, 128, "bfloat16", "float32", "float32")
     assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", "int32")
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(8, 9)
+def test_assert_tl_matmul_fp8():
+    assert_tl_matmul_correctness(128, 128, 128, "e4m3_float8", "float32", "float32")
+    assert_tl_matmul_correctness(128, 128, 128, "e5m2_float8", "float32", "float32")
 
 
 if __name__ == "__main__":

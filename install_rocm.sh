@@ -3,9 +3,17 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# install requirements
-pip install -r requirements.txt
+echo "Starting installation script..."
 
+# install requirements
+pip install -r requirements-build.txt
+pip install -r requirements.txt
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to install Python requirements."
+    exit 1
+else
+    echo "Python requirements installed successfully."
+fi
 # determine if root
 USER_IS_ROOT=false
 if [ "$EUID" -eq 0 ]; then

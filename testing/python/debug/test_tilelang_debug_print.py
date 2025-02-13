@@ -68,9 +68,9 @@ def debug_print_register_files(M=16, N=16):
     @T.prim_func
     def program(Q: T.Buffer((M, N), dtype)):
         with T.Kernel(4, 4, 2, threads=128 * 2) as (bx, by, bz):
-            shared_buf = T.alloc_fragment([M, N], dtype)
+            register_buf = T.alloc_fragment([M, N], dtype)
             for i, j in T.Parallel(M, N):
-                T.print(shared_buf[i, j])
+                T.print(register_buf[i, j])
 
     jit_kernel = tilelang.JITKernel(program, target="cuda")
     profiler = jit_kernel.get_profiler()

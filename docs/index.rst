@@ -17,6 +17,32 @@ low-level optimizations necessary for state-of-the-art performance.
    get_started/overview.rst
 
 .. toctree::
+   :maxdepth: 1
+   :caption: TUTORIALS
+
+   tutorials/writing_kernels_with_tilelibrary.rst
+   tutorials/writint_kernels_with_thread_primitives.rst
+   tutorials/annotate_memory_layout.rst
+   tutorials/debug_tools_for_tilelang.rst
+   tutorials/auto_tuning.rst
+   tutorials/jit_compilation.rst
+   tutorials/pipelining_computations_and_data_movements.rst
+
+
+.. toctree::
+   :maxdepth: 1
+   :caption: DEEP LEARNING OPERATORS
+
+   deeplearning_operators/elementwise.rst
+   deeplearning_operators/gemv.rst
+   deeplearning_operators/matmul.rst
+   deeplearning_operators/matmul_dequant.rst
+   deeplearning_operators/flash_attention.rst
+   deeplearning_operators/flash_linear_attention.rst
+   deeplearning_operators/convolution.rst
+   deeplearning_operators/tmac_gpu.rst
+
+.. toctree::
    :maxdepth: 2
    :caption: LANGUAGE REFERENCE
 

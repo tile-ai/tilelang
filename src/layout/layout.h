@@ -34,6 +34,8 @@ public:
 
   Array<PrimExpr> GetForwardIndex() const { return forward_index_; }
 
+  virtual Array<PrimExpr> GetForwardVars() const;
+
   virtual Array<PrimExpr> Forward(const Array<PrimExpr> &vars) const;
 
   virtual Layout Inverse() const;
@@ -71,6 +73,8 @@ public:
                PrimExpr forward_thread, PrimExpr replicate_size);
 
   PrimExpr GetForwardThread() const { return forward_thread_; }
+
+  Array<PrimExpr> GetForwardVars() const final;
 
   Layout Inverse() const final;
 

@@ -31,8 +31,8 @@ def is_host_call(func: tir.PrimFunc):
     return not is_device_call(func)
 
 
-@tvm.register_func("tvm_callback_cuda_compile", override=True)
-def tvm_callback_cuda_compile(code, target):
+@tvm.register_func("tilelang_callback_cuda_compile", override=True)
+def tilelang_callback_cuda_compile(code, target):
     project_root = osp.join(osp.dirname(__file__), "../..")
     if "TL_TEMPLATE_PATH" in os.environ:
         tl_template_path = os.environ["TL_TEMPLATE_PATH"]
@@ -73,8 +73,8 @@ def tvm_callback_cuda_compile(code, target):
     return ptx
 
 
-@tvm.register_func("tvm_callback_hip_compile", override=True)
-def tvm_callback_hip_compile(code, target):
+@tvm.register_func("tilelang_callback_hip_compile", override=True)
+def tilelang_callback_hip_compile(code, target):
     project_root = osp.join(osp.dirname(__file__), "../..")
     tl_template_path = osp.abspath(osp.join(project_root, "src"))
 
@@ -144,7 +144,6 @@ def lower(
     mod = tl.transform.LegalizeSafeMemoryAccess()(mod)
     # Inject Simplify to remove the duplicated conditions
     mod = tir.transform.Simplify()(mod)
-    mod = tir.transform.VectorizeLoop()(mod)
 
     # which may be introduced by the LegalizeSafeMemoryAccess
     if target.arch == "sm_90":
@@ -163,6 +162,7 @@ def lower(
     mod = tir.transform.FlattenBuffer()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tir.transform.Simplify()(mod)
+    mod = tl.transform.VectorizeLoop()(mod)
     mod = tir.transform.StorageRewrite()(mod)
     mod = tir.transform.UnrollLoop()(mod)
     mod = tir.transform.RenormalizeSplitPattern()(mod)

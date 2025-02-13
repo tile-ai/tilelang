@@ -1,26 +1,11 @@
-# build requirements
-cmake>=3.26
 # runtime requirements
-cffi
-cpplint
 Cython
 decorator
-docutils
-dtlib
 numpy>=1.23.5
-pytest>=6.2.4
-pytest_xdist>=2.2.1
-packaging>=21.0
-PyYAML
 tqdm>=4.62.3
 typing_extensions>=4.10.0
-requests
 attrs
 cloudpickle
 ml_dtypes
 psutil
-scipy
-tornado
 torch
-thefuzz
-tabulate

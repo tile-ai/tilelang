@@ -40,15 +40,15 @@ def matmul_ssr(
             B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.clear(C_local)
-            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 if trans_A:
-                    T.copy(A[k * block_K, by * block_M], A_shared)
+                    T.copy(A[ko * block_K, by * block_M], A_shared)
                 else:
-                    T.copy(A[by * block_M, k * block_K], A_shared)
+                    T.copy(A[by * block_M, ko * block_K], A_shared)
                 if trans_B:
-                    T.copy(B[bx * block_N, k * block_K], B_shared)
+                    T.copy(B[bx * block_N, ko * block_K], B_shared)
                 else:
-                    T.copy(B[k * block_K, bx * block_N], B_shared)
+                    T.copy(B[ko * block_K, bx * block_N], B_shared)
                 P.gemm(A_shared, B_shared, C_local, trans_A, trans_B)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
@@ -105,6 +105,10 @@ def run_matmul_ssr(
 
 def test_gemm_f16f16f16_nt_ssr():
     run_matmul_ssr(
+        16, 16, 16, False, True, "float16", "float16", "float16", 16, 16, 16, 0, num_threads=32)
+    run_matmul_ssr(
+        128, 128, 128, False, True, "float16", "float16", "float16", 32, 32, 32, 0, num_threads=64)
+    run_matmul_ssr(
         1024,
         1024,
         1024,
@@ -117,7 +121,7 @@ def test_gemm_f16f16f16_nt_ssr():
         128,
         32,
         2,
-    )
+        num_threads=128)
 
 
 def matmul_rsr(
@@ -155,15 +159,15 @@ def matmul_rsr(
             A_local = T.alloc_fragment(A_local_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.clear(C_local)
-            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 if trans_A:
-                    T.copy(A[k * block_K, by * block_M], A_shared)
+                    T.copy(A[ko * block_K, by * block_M], A_shared)
                 else:
-                    T.copy(A[by * block_M, k * block_K], A_shared)
+                    T.copy(A[by * block_M, ko * block_K], A_shared)
                 if trans_B:
-                    T.copy(B[bx * block_N, k * block_K], B_shared)
+                    T.copy(B[bx * block_N, ko * block_K], B_shared)
                 else:
-                    T.copy(B[k * block_K, bx * block_N], B_shared)
+                    T.copy(B[ko * block_K, bx * block_N], B_shared)
                 T.copy(A_shared, A_local)
                 P.gemm(A_local, B_shared, C_local, trans_A, trans_B)
                 # T.gemm(A_local, B_shared, C_local, trans_A, trans_B)
@@ -359,4 +363,19 @@ def run_matmul_rrr(
 #     )
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    run_matmul_rsr(
+        128,
+        128,
+        128,
+        False,
+        True,
+        "float16",
+        "float16",
+        "float16",
+        128,
+        128,
+        32,
+        0,
+        num_threads=128,
+    )
