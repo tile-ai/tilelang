@@ -253,11 +253,14 @@ class TileLangBuilPydCommand(build_py):
                     break
 
             if source_lib_file:
-                target_dir = os.path.join(PACKAGE_NAME, "lib")
-                os.makedirs(target_dir, exist_ok=True)
-                shutil.copy2(source_lib_file, target_dir)
-                print(f"Copied {source_lib_file} to {target_dir}")
-                # remove old files
+                target_dir_release = os.path.join(self.build_lib, PACKAGE_NAME, "lib")
+                target_dir_develop = os.path.join(PACKAGE_NAME, "lib")
+                os.makedirs(target_dir_release, exist_ok=True)
+                os.makedirs(target_dir_develop, exist_ok=True)
+                shutil.copy2(source_lib_file, target_dir_release)
+                print(f"Copied {source_lib_file} to {target_dir_release}")
+                shutil.copy2(source_lib_file, target_dir_develop)
+                print(f"Copied {source_lib_file} to {target_dir_develop}")
                 os.remove(source_lib_file)
             else:
                 print(f"WARNING: {item} not found in any expected directories!")
