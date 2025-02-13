@@ -71,7 +71,8 @@ After installing the prerequisites, you can clone the TileLang repository and in
 If you want to install TileLang in development mode, you can run the following command:
 
 .. code:: bash
-
+   sudo apt-get update
+   sudo apt-get install -y python3-setuptools gcc libtinfo-dev zlib1g-dev build-essential cmake libedit-dev libxml2-dev
    pip install -e .
 
 We currently provide three methods to install **TileLang**:

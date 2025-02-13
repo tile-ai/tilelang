@@ -66,6 +66,10 @@ pip install git+https://github.com/tile-ai/tilelang
 Or install locally:
 
 ```bash
+# install required system dependencies
+sudo apt-get update
+sudo apt-get install -y python3-setuptools gcc libtinfo-dev zlib1g-dev build-essential cmake libedit-dev libxml2-dev
+
 pip install .  # with -e option if you want to install in editable mode
 ```
 

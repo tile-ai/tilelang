@@ -212,6 +212,7 @@ class TileLangBuilPydCommand(build_py):
 
         ext_output_dir = os.path.dirname(extdir)
         print(f"Extension output directory (parent): {ext_output_dir}")
+        print(f"Build temp directory: {build_temp_dir}")
 
         TILELANG_SRC = [
             "src/tl_templates",
@@ -227,28 +228,39 @@ class TileLangBuilPydCommand(build_py):
                 if not os.path.exists(target_dir):
                     os.makedirs(target_dir)
                 shutil.copy2(source_dir, target_dir)
-        # Copy the built TVM to the package directory
-        TVM_PREBUILD_ITEMS = [
-            f"{ext_output_dir}/libtvm_runtime.so",
-            f"{ext_output_dir}/libtvm.so",
-            f"{ext_output_dir}/libtilelang.so",
-            f"{ext_output_dir}/libtilelang_module.so",
+
+
+        potential_dirs = [
+            ext_output_dir,
+            self.build_lib,
+            build_temp_dir,
+            os.path.join(ROOT_DIR, "build"),
         ]
+
+        TVM_PREBUILD_ITEMS = [
+            "libtvm_runtime.so",
+            "libtvm.so",
+            "libtilelang.so",
+            "libtilelang_module.so",
+        ]
+        
         for item in TVM_PREBUILD_ITEMS:
-            source_lib_file = os.path.join(ROOT_DIR, item)
-            # only copy the file
-            file_name = os.path.basename(item)
-            target_dir = os.path.join(self.build_lib, PACKAGE_NAME, file_name)
-            target_dir = os.path.dirname(target_dir)
-            target_dir = os.path.join(target_dir, "lib")
-            if not os.path.exists(target_dir):
-                os.makedirs(target_dir)
-            if os.path.exists(source_lib_file):
+            source_lib_file = None
+            for dir in potential_dirs:
+                candidate = os.path.join(dir, item)
+                if os.path.exists(candidate):
+                    source_lib_file = candidate
+                    break
+
+            if source_lib_file:
+                target_dir = os.path.join(PACKAGE_NAME, "lib")
+                os.makedirs(target_dir, exist_ok=True)
                 shutil.copy2(source_lib_file, target_dir)
-                # remove the original file
+                print(f"Copied {source_lib_file} to {target_dir}")
+                # remove old files
                 os.remove(source_lib_file)
             else:
-                print(f"INFO: {source_lib_file} does not exist.")
+                print(f"WARNING: {item} not found in any expected directories!")
 
         TVM_CONFIG_ITEMS = [
             f"{build_temp_dir}/config.cmake",
