@@ -31,15 +31,26 @@ extensions = [
     "sphinx_reredirects",
     "sphinx.ext.mathjax",
     "sphinx.ext.autosummary",
+    "myst_parser",
+]
+
+source_suffix = {
+    '.rst': 'restructuredtext',
+    '.md': 'markdown',
+}
+
+myst_enable_extensions = [
+    "colon_fence",
+    "deflist",
 ]
 
 redirects = {"get_started/try_out": "../index.html#getting-started"}
 
-source_suffix = [".rst"]
+source_suffix = [".md"]
 
 language = "en"
 
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md"]
 
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = "sphinx"

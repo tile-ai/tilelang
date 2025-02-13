@@ -10,6 +10,7 @@ from contextlib import suppress
 import tvm
 from tvm.relay import TensorType
 
+from tilelang.engine import lower
 from tilelang.jit.adapter import TorchDLPackKernelAdapter
 from tilelang.utils.tensor import (
     get_tensor_supply,
@@ -244,3 +245,17 @@ def do_bench(
             ret = ret[0]
         return ret
     return getattr(torch, return_mode)(times).item()
+
+
+_cached = {}
+
+
+def cached(func, result_idx: List[int], *args):
+    global _cached
+    key = (func, tuple(result_idx), *args)
+    if key not in _cached:
+        program = func(*args)
+        mod, params = lower(program)
+        mod = TorchDLPackKernelAdapter(mod, params, result_idx)
+        _cached[key] = mod
+    return _cached[key]
