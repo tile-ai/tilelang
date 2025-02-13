@@ -8,3 +8,4 @@ sphinxcontrib-napoleon==0.7
 sphinxcontrib_httpdomain==1.8.1
 furo
 uvicorn
+myst-parser
