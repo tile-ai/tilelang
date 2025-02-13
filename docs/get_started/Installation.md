@@ -1,5 +1,3 @@
-(install)=
-
 # Installation Guide
 
 ## Installing with pip
