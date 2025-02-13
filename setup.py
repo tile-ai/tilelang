@@ -229,7 +229,6 @@ class TileLangBuilPydCommand(build_py):
                     os.makedirs(target_dir)
                 shutil.copy2(source_dir, target_dir)
 
-
         potential_dirs = [
             ext_output_dir,
             self.build_lib,
@@ -243,7 +242,7 @@ class TileLangBuilPydCommand(build_py):
             "libtilelang.so",
             "libtilelang_module.so",
         ]
-        
+
         for item in TVM_PREBUILD_ITEMS:
             source_lib_file = None
             for dir in potential_dirs:
