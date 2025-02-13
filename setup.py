@@ -160,7 +160,19 @@ EXTRACT_PATH = "3rdparty"  # Default extraction path
 
 
 def update_submodules():
-    """Updates git submodules."""
+    """Updates git submodules if in a git repository."""
+    def is_git_repo():
+        try:
+            # Check if current directory is a git repository
+            subprocess.check_output(["git", "rev-parse", "--is-inside-work-tree"], stderr=subprocess.STDOUT)
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return False
+
+    if not is_git_repo():
+        print("Info: Not a git repository, skipping submodule update.")
+        return
+
     try:
         subprocess.check_call(["git", "submodule", "update", "--init", "--recursive"])
     except subprocess.CalledProcessError as error:

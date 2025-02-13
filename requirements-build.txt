@@ -4,3 +4,4 @@ packaging
 setuptools>=61
 torch
 wheel
+tox
