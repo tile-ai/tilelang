@@ -65,10 +65,19 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Locate TVM prebuild path
+if(NOT DEFINED TVM_PREBUILD_PATH)
+  if(DEFINED ENV{TVM_PREBUILD_PATH})
+    set(TVM_PREBUILD_PATH "$ENV{TVM_PREBUILD_PATH}")
+  endif()
+endif()
+
 # Locate TVM source directory
 if(NOT DEFINED TVM_SOURCE_DIR)
   if(DEFINED ENV{TVM_SOURCE_DIR})
     set(TVM_SOURCE_DIR "$ENV{TVM_SOURCE_DIR}")
+  elseif(DEFINED TVM_PREBUILD_PATH)
+    set(TVM_SOURCE_DIR "${TVM_PREBUILD_PATH}/..")
   else()
     set(TVM_SOURCE_DIR ${PROJECT_SOURCE_DIR}/3rdparty/tvm)
   endif()
@@ -127,6 +136,7 @@ message(STATUS "Collected source files: ${TILE_LANG_SRCS}")
 # Add TileLang object library
 add_library(tilelang_objs OBJECT ${TILE_LANG_SRCS})
 
+message(STATUS "TVM_SOURCE_DIR: ${TVM_SOURCE_DIR}")
 # Include directories for TileLang
 set(TILE_LANG_INCLUDES
   ${TVM_SOURCE_DIR}/include
