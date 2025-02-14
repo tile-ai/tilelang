@@ -510,7 +510,7 @@ class ThreadSyncInserter : public StmtExprMutator {
   PrimExpr is_lead_;
 };
 
-Stmt ThreadSync(Stmt stmt, std::string storage_scope) {
+Stmt TileLangThreadSync(Stmt stmt, std::string storage_scope) {
   StorageScope sync_scope = StorageScope::Create(storage_scope);
   if (sync_scope.rank == StorageRank::kShared && sync_scope.tag == "") {
     stmt = ThreadSyncAfterWaitQueueInserter(sync_scope)(stmt);
@@ -521,11 +521,14 @@ Stmt ThreadSync(Stmt stmt, std::string storage_scope) {
                             planner.partial_syncs_inserted_)(std::move(stmt));
 }
 
-tvm::transform::Pass TileLangThreadSync(String storage_scope) {
-  using namespace tir::transform;
+using namespace tir::transform;
+
+namespace transform {
+
+tvm::transform::Pass ThreadSync(String storage_scope) {
   auto pass_func = [storage_scope](PrimFunc f, IRModule m, PassContext ctx) {
     auto* n = f.CopyOnWrite();
-    n->body = ThreadSync(std::move(n->body), storage_scope);
+    n->body = tl::TileLangThreadSync(std::move(n->body), storage_scope);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ThreadSync", {});
@@ -533,5 +536,6 @@ tvm::transform::Pass TileLangThreadSync(String storage_scope) {
 
 TVM_REGISTER_GLOBAL("tl.transform.ThreadSync").set_body_typed(TileLangThreadSync);
 
+}  // namespace transform
 }  // namespace tl
 }  // namespace tvm

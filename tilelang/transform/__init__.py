@@ -96,7 +96,12 @@ def WarpSpecializedPipeline():
 
 
 def ThreadSync(storage_scope: str):
-    """Insert thread sync.
+    """Insert sync between parallel read/write of shared buffers.
+
+    Parameters
+    ----------
+    storage_scope: str
+        The target storage scope.
 
     Returns
     -------
