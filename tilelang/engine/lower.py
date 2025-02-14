@@ -228,6 +228,8 @@ def lower(
         device_mod = tvm._ffi.get_global_func("target.build.tilelang_cpp")(device_mod, target)
     elif target.kind.name == "llvm":
         device_mod = tvm._ffi.get_global_func("target.build.llvm")(device_mod, target)
+    elif target.kind.name == "webgpu":
+        device_mod = tvm._ffi.get_global_func("target.build.tilelang_webgpu")(device_mod, target)
     else:
         raise ValueError("Target is not supported")
 

@@ -119,7 +119,7 @@ private:
 
     const DataType &access_type = buffer->dtype;
     // i // 2, i % 8 can also be vectorized as factor 16
-    int max_vector_size = 128 / access_type.bits();
+    int max_vector_size = vector_load_bits_max_ / access_type.bits();
     // so we should disable this GCD optimization
     max_vector_size = arith::ZeroAwareGCD(max_vector_size, extent_ptr->value);
 
@@ -159,7 +159,7 @@ private:
     }
   }
 
-  static const int vector_load_bits_max_ = 128;
+  const int vector_load_bits_max_ = 128;
 
   const ForNode *inner_for_;
   Map<Var, Range> iter_map_;
