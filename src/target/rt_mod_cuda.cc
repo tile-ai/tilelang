@@ -21,7 +21,7 @@ ExtractFuncInfo(const IRModule &mod) {
       if (f->params[i]->dtype.is_handle()) {
         auto ptr = f->params[i]->type_annotation.as<PointerTypeNode>();
         if (ptr && ptr->storage_scope == "grid_constant") {
-          info.arg_types.push_back(DataType(kTVMGridConstant, 64, 1));
+          info.arg_types.push_back(DataType(tvm::runtime::kTVMGridConstant, 64, 1));
           continue;
         }
       }
