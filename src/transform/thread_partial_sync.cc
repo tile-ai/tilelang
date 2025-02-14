@@ -15,9 +15,9 @@
 #include <unordered_set>
 
 #include "../op/builtin.h"
+#include "./storage_access.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
-#include "./storage_access.h"
 
 namespace tvm {
 namespace tl {

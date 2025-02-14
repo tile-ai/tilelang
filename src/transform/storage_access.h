@@ -45,7 +45,7 @@ using runtime::StorageScope;
  * \brief Base class of storage access analysis
  */
 class TileLangStorageAccessVisitor : public StmtExprVisitor {
- public:
+public:
   /*! \brief Storage access type */
   enum AccessType {
     kRead,
@@ -78,36 +78,38 @@ class TileLangStorageAccessVisitor : public StmtExprVisitor {
   /*! \brief Access pattern about a single statement */
   struct StmtEntry {
     /*! \brief The statement */
-    const Object* stmt;
+    const Object *stmt;
     /*! \brief access patterns in the statement */
     std::vector<AccessEntry> access;
   };
   // override visitor pattern
-  void VisitExpr_(const BufferLoadNode* op) final;
-  void VisitStmt_(const BufferStoreNode* op) final;
-  void VisitStmt_(const EvaluateNode* op) final;
-  void VisitStmt_(const LetStmtNode* op) final;
-  void VisitStmt_(const AttrStmtNode* op) override;
-  void VisitStmt_(const ForNode* op) final;
-  void VisitStmt_(const IfThenElseNode* op) final;
-  void VisitStmt_(const WhileNode* op) final;
-  void VisitExpr_(const CallNode* op) final;
+  void VisitExpr_(const BufferLoadNode *op) final;
+  void VisitStmt_(const BufferStoreNode *op) final;
+  void VisitStmt_(const EvaluateNode *op) final;
+  void VisitStmt_(const LetStmtNode *op) final;
+  void VisitStmt_(const AttrStmtNode *op) override;
+  void VisitStmt_(const ForNode *op) final;
+  void VisitStmt_(const IfThenElseNode *op) final;
+  void VisitStmt_(const WhileNode *op) final;
+  void VisitExpr_(const CallNode *op) final;
 
- protected:
+protected:
   TileLangStorageAccessVisitor() { scope_.push_back(std::vector<StmtEntry>()); }
   /*! \return number of conditions in the current scope. */
   int condition_counter() const { return condition_counter_; }
   /*! \return whether we are in device environment. */
   bool in_device_env() const { return in_device_env_; }
   /*! \return environment threads */
-  const Array<IterVar>& env_threads() const { return env_threads_; }
+  const Array<IterVar> &env_threads() const { return env_threads_; }
   /*!
    * \brief Whether we need analyze the buffer in current scope.
    * \param buffer The buffer to be checked
    * \param scope The scope of the buffer.
    * \return Whether the analysis of buffer is enabled.
    */
-  virtual bool Enabled(const VarNode* buffer, const StorageScope& scope) const { return true; }
+  virtual bool Enabled(const VarNode *buffer, const StorageScope &scope) const {
+    return true;
+  }
   /*!
    * \brief Summarize the sequence of operations into parent.
    *
@@ -119,7 +121,8 @@ class TileLangStorageAccessVisitor : public StmtExprVisitor {
    * \return The summarized sequence that represent access that
    *  the parent should taken care of to synchronize.
    */
-  virtual std::vector<AccessEntry> Summarize(std::vector<StmtEntry> seq, const ForNode* loop) = 0;
+  virtual std::vector<AccessEntry> Summarize(std::vector<StmtEntry> seq,
+                                             const ForNode *loop) = 0;
   /*!
    * \brief Get the scope of the buffer array.
    * \return The scope of the final buffer array.
@@ -128,7 +131,7 @@ class TileLangStorageAccessVisitor : public StmtExprVisitor {
   // access scope
   std::vector<std::vector<StmtEntry>> scope_;
 
- private:
+private:
   // whether access appending is enabled.
   bool allow_append_{false};
   // Whether we are in device environment
@@ -136,12 +139,12 @@ class TileLangStorageAccessVisitor : public StmtExprVisitor {
   // Whether we are inside condition.
   int condition_counter_{0};
   // The current double buffer write scope.
-  const VarNode* double_buffer_write_{nullptr};
+  const VarNode *double_buffer_write_{nullptr};
   // the current free stmt entry.
   StmtEntry curr_stmt_;
   // The involving threads
   Array<IterVar> env_threads_;
 };
-}  // namespace tl
-}  // namespace tvm
-#endif  // TVM_TL_TRANSFORMS_STORAGE_ACCESS_H_
+} // namespace tl
+} // namespace tvm
+#endif // TVM_TL_TRANSFORMS_STORAGE_ACCESS_H_

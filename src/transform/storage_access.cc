@@ -35,7 +35,7 @@ namespace tl {
 
 using namespace tir;
 
-void TileLangStorageAccessVisitor::VisitExpr_(const BufferLoadNode* op) {
+void TileLangStorageAccessVisitor::VisitExpr_(const BufferLoadNode *op) {
   Var buf = op->buffer->data;
   StorageScope scope = GetScope(buf);
   if (Enabled(buf.get(), scope)) {
@@ -44,7 +44,7 @@ void TileLangStorageAccessVisitor::VisitExpr_(const BufferLoadNode* op) {
     e.threads = env_threads();
     e.buffer = buf;
     e.dtype = op->dtype.element_of();
-    for (const auto& index : op->indices) {
+    for (const auto &index : op->indices) {
       e.touched.push_back(arith::IntSet::Vector(index));
     }
     e.type = kRead;
@@ -55,7 +55,7 @@ void TileLangStorageAccessVisitor::VisitExpr_(const BufferLoadNode* op) {
   StmtExprVisitor::VisitExpr_(op);
 }
 
-void TileLangStorageAccessVisitor::VisitStmt_(const BufferStoreNode* op) {
+void TileLangStorageAccessVisitor::VisitStmt_(const BufferStoreNode *op) {
   allow_append_ = true;
   ICHECK_EQ(curr_stmt_.access.size(), 0U);
   curr_stmt_.stmt = op;
@@ -67,7 +67,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const BufferStoreNode* op) {
     e.threads = env_threads();
     e.buffer = buf;
     e.dtype = op->value.dtype().element_of();
-    for (const auto& index : op->indices) {
+    for (const auto &index : op->indices) {
       e.touched.push_back(arith::IntSet::Vector(index));
     }
     e.type = kWrite;
@@ -83,7 +83,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const BufferStoreNode* op) {
   allow_append_ = false;
 }
 
-void TileLangStorageAccessVisitor::VisitStmt_(const EvaluateNode* op) {
+void TileLangStorageAccessVisitor::VisitStmt_(const EvaluateNode *op) {
   allow_append_ = true;
   ICHECK_EQ(curr_stmt_.access.size(), 0U);
   curr_stmt_.stmt = op;
@@ -96,7 +96,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const EvaluateNode* op) {
   allow_append_ = false;
 }
 
-void TileLangStorageAccessVisitor::VisitStmt_(const LetStmtNode* op) {
+void TileLangStorageAccessVisitor::VisitStmt_(const LetStmtNode *op) {
   allow_append_ = true;
   ICHECK_EQ(curr_stmt_.access.size(), 0U);
   curr_stmt_.stmt = op;
@@ -110,7 +110,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const LetStmtNode* op) {
   this->VisitStmt(op->body);
 }
 
-void TileLangStorageAccessVisitor::VisitStmt_(const AttrStmtNode* op) {
+void TileLangStorageAccessVisitor::VisitStmt_(const AttrStmtNode *op) {
   if (op->attr_key == tvm::tir::attr::double_buffer_write) {
     ICHECK(double_buffer_write_ == nullptr);
     double_buffer_write_ = op->node.as<VarNode>();
@@ -121,7 +121,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const AttrStmtNode* op) {
     s.access = Summarize(std::move(scope_.back()), nullptr);
     scope_.pop_back();
     if (!s.access.empty()) {
-      for (AccessEntry& e : s.access) {
+      for (AccessEntry &e : s.access) {
         if (e.type == kWrite && e.buffer.get() == double_buffer_write_) {
           e.double_buffer_write = true;
         }
@@ -158,7 +158,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const AttrStmtNode* op) {
   }
 }
 
-void TileLangStorageAccessVisitor::VisitStmt_(const ForNode* op) {
+void TileLangStorageAccessVisitor::VisitStmt_(const ForNode *op) {
   scope_.push_back(std::vector<StmtEntry>());
   StmtExprVisitor::VisitStmt_(op);
   StmtEntry s;
@@ -167,14 +167,14 @@ void TileLangStorageAccessVisitor::VisitStmt_(const ForNode* op) {
   scope_.pop_back();
   if (s.access.size() != 0) {
     // relax the touched set to contain all ranges in the loop.
-    std::unordered_map<const VarNode*, arith::IntSet> relax_map;
+    std::unordered_map<const VarNode *, arith::IntSet> relax_map;
     relax_map[op->loop_var.get()] =
         arith::IntSet::FromRange(Range::FromMinExtent(op->min, op->extent));
-    for (AccessEntry& e : s.access) {
+    for (AccessEntry &e : s.access) {
       if (e.buffer.defined()) {
         ICHECK(e.touched.size());
         Array<arith::IntSet> new_touched;
-        for (const auto& touched : e.touched) {
+        for (const auto &touched : e.touched) {
           new_touched.push_back(arith::EvalSet(touched, relax_map));
         }
         e.touched = std::move(new_touched);
@@ -186,7 +186,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const ForNode* op) {
   }
 }
 
-bool IsThreadInvariant(const PrimExpr& cond) {
+bool IsThreadInvariant(const PrimExpr &cond) {
   if (auto call = cond.as<CallNode>()) {
     if (auto opt_call_op = call->op.as<Op>()) {
       auto call_op = opt_call_op.value();
@@ -198,7 +198,7 @@ bool IsThreadInvariant(const PrimExpr& cond) {
   return false;
 }
 
-void TileLangStorageAccessVisitor::VisitStmt_(const IfThenElseNode* op) {
+void TileLangStorageAccessVisitor::VisitStmt_(const IfThenElseNode *op) {
   bool is_thread_invariant = IsThreadInvariant(op->condition);
   if (!is_thread_invariant) {
     ++condition_counter_;
@@ -223,7 +223,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const IfThenElseNode* op) {
   }
 }
 
-void TileLangStorageAccessVisitor::VisitStmt_(const WhileNode* op) {
+void TileLangStorageAccessVisitor::VisitStmt_(const WhileNode *op) {
   bool is_thread_invariant = IsThreadInvariant(op->condition);
   if (!is_thread_invariant) {
     ++condition_counter_;
@@ -241,13 +241,13 @@ void TileLangStorageAccessVisitor::VisitStmt_(const WhileNode* op) {
   }
 }
 
-void TileLangStorageAccessVisitor::VisitExpr_(const CallNode* op) {
+void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
   if (op->op.same_as(builtin::address_of())) {
     ICHECK_EQ(op->args.size(), 1U);
-    const BufferLoadNode* load = op->args[0].as<BufferLoadNode>();
+    const BufferLoadNode *load = op->args[0].as<BufferLoadNode>();
     Buffer buffer = load->buffer;
     DataType dtype = buffer->dtype;
-    const VarNode* buffer_var = buffer->data.as<VarNode>();
+    const VarNode *buffer_var = buffer->data.as<VarNode>();
     StorageScope scope = GetScope(GetRef<Var>(buffer_var));
     if (Enabled(buffer_var, scope)) {
       ICHECK(allow_append_);
@@ -255,7 +255,7 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode* op) {
       e.threads = env_threads();
       e.dtype = dtype;
       e.buffer = Downcast<Var>(buffer->data);
-      for (const auto& index : load->indices) {
+      for (const auto &index : load->indices) {
         e.touched.push_back(arith::IntSet::Vector(index));
       }
       e.type = kRead;
@@ -266,10 +266,10 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode* op) {
   } else if (op->op.same_as(builtin::tvm_access_ptr())) {
     ICHECK_EQ(op->args.size(), 5U);
     DataType dtype = op->args[0].dtype();
-    const VarNode* buffer = op->args[1].as<VarNode>();
+    const VarNode *buffer = op->args[1].as<VarNode>();
     PrimExpr offset = op->args[2];
     PrimExpr extent = op->args[3];
-    const IntImmNode* flag = op->args[4].as<IntImmNode>();
+    const IntImmNode *flag = op->args[4].as<IntImmNode>();
     StorageScope scope = GetScope(GetRef<Var>(buffer));
     // The buffer scope.
     if (Enabled(buffer, scope)) {
@@ -278,7 +278,8 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode* op) {
       e.threads = env_threads();
       e.dtype = dtype;
       e.buffer = Downcast<Var>(op->args[1]);
-      e.touched = {arith::IntSet::FromRange(Range::FromMinExtent(offset, extent))};
+      e.touched = {
+          arith::IntSet::FromRange(Range::FromMinExtent(offset, extent))};
       e.scope = scope;
       if (flag->value & 1) {
         e.type = kRead;
@@ -292,7 +293,7 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode* op) {
     StmtExprVisitor::VisitExpr_(op);
   } else if (op->op.same_as(builtin::tvm_storage_sync())) {
     ICHECK(allow_append_);
-    const std::string& s = op->args[0].as<StringImmNode>()->value;
+    const std::string &s = op->args[0].as<StringImmNode>()->value;
     if (s != "warp") {
       StorageScope scope = StorageScope::Create(s);
       AccessEntry e;
@@ -310,8 +311,8 @@ StorageScope TileLangStorageAccessVisitor::GetScope(Var buffer_var) const {
   if (buffer_var->type_annotation.as<PointerTypeNode>()) {
     return StorageScope::Create(GetPtrStorageScope(buffer_var));
   }
-  return StorageScope();  // global by default
+  return StorageScope(); // global by default
 }
 
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl
+} // namespace tvm
