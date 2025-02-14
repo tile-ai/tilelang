@@ -555,8 +555,7 @@ tvm::transform::Pass ThreadSync(String storage_scope) {
   return CreatePrimFuncPass(pass_func, 0, "tl.ThreadSync", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.ThreadSync")
-    .set_body_typed(ThreadSync);
+TVM_REGISTER_GLOBAL("tl.transform.ThreadSync").set_body_typed(ThreadSync);
 
 } // namespace transform
 } // namespace tl
