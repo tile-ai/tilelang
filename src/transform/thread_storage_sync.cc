@@ -556,7 +556,7 @@ tvm::transform::Pass ThreadSync(String storage_scope) {
 }
 
 TVM_REGISTER_GLOBAL("tl.transform.ThreadSync")
-    .set_body_typed(TileLangThreadSync);
+    .set_body_typed(ThreadSync);
 
 } // namespace transform
 } // namespace tl
