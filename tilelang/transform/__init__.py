@@ -95,6 +95,17 @@ def WarpSpecializedPipeline():
     return _ffi_api.WarpSpecializedPipeline()  # type: ignore
 
 
+def ThreadSync(storage_scope: str):
+    """Insert thread sync.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.ThreadSync(storage_scope)  # type: ignore
+
+
 def ThreadPartialSync(storage_scope: str):
     """Insert partial sync.
 

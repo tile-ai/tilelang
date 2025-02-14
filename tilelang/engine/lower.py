@@ -191,8 +191,8 @@ def lower(
     mod = tl.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
     mod = tir.transform.MergeSharedMemoryAllocations()(mod)
-    mod = tir.transform.ThreadSync("shared")(mod)
-    mod = tir.transform.ThreadSync("shared.dyn")(mod)
+    mod = tl.transform.ThreadSync("shared")(mod)
+    mod = tl.transform.ThreadSync("shared.dyn")(mod)
 
     mod = tl.transform.MakePackedAPI()(mod)
     mod = tir.transform.LowerDeviceKernelLaunch()(mod)
