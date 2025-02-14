@@ -82,3 +82,6 @@ build_sdist/
 
 # ignore lib with develop mode
 tilelang/lib
+
+# tox
+.tox/
