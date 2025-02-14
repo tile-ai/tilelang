@@ -51,15 +51,15 @@ struct WebGPUWorkGroupInfo {
 };
 
 class WebGPUWorkgroupInfoCollector : public StmtExprVisitor {
- public:
-  static WebGPUWorkGroupInfo Collect(const Stmt& stmt) {
+public:
+  static WebGPUWorkGroupInfo Collect(const Stmt &stmt) {
     WebGPUWorkgroupInfoCollector collector;
     collector(stmt);
     return collector.info_;
   }
 
- private:
-  void VisitExpr_(const VarNode* op) final {
+private:
+  void VisitExpr_(const VarNode *op) final {
     StmtExprVisitor::VisitExpr_(op);
     Var buffer_var = GetRef<Var>(op);
     if (buffer_var.dtype().is_handle()) {
@@ -67,24 +67,27 @@ class WebGPUWorkgroupInfoCollector : public StmtExprVisitor {
     }
   }
 
-  void VisitStmt_(const BufferStoreNode* op) final {
+  void VisitStmt_(const BufferStoreNode *op) final {
     StmtExprVisitor::VisitStmt_(op);
     info_.write_access_set.insert(op->buffer->data);
   }
 
-  void VisitStmt_(const AttrStmtNode* op) final {
+  void VisitStmt_(const AttrStmtNode *op) final {
     // record workgroup size
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag.length() != 0) {
         runtime::ThreadScope ts = runtime::ThreadScope::Create(iv->thread_tag);
         if (ts.rank == 1) {
-          ICHECK_GE(ts.dim_index, 0) << "vthread should have been optimized out by here";
+          ICHECK_GE(ts.dim_index, 0)
+              << "vthread should have been optimized out by here";
           ICHECK_LT(ts.dim_index, 3);
-          auto* sizeptr = op->value.as<tir::IntImmNode>();
-          ICHECK(sizeptr) << "CodeGenTileLangWebGPU: only allows constant thread group size "
+          auto *sizeptr = op->value.as<tir::IntImmNode>();
+          ICHECK(sizeptr) << "CodeGenTileLangWebGPU: only allows constant "
+                             "thread group size "
                           << " get " << op->value;
-          info_.workgroup_size[ts.dim_index] = static_cast<uint32_t>(sizeptr->value);
+          info_.workgroup_size[ts.dim_index] =
+              static_cast<uint32_t>(sizeptr->value);
         } else if (ts.rank == 0) {
           if (ts.dim_index == 2) {
             info_.has_block_index_z = true;
@@ -105,10 +108,11 @@ std::string CodeGenTileLangWebGPU::Finish() {
   }
   // WebGPU WGSL doesn't support #include.
   // We must explicitly include all the templates here.
-  return header_stream.str() + decl_stream.str() + this->fwd_decl_stream.str() + stream.str();
+  return header_stream.str() + decl_stream.str() + this->fwd_decl_stream.str() +
+         stream.str();
 }
 
-void CodeGenTileLangWebGPU::InitFuncState(const PrimFunc& f) {
+void CodeGenTileLangWebGPU::InitFuncState(const PrimFunc &f) {
   CodeGenC::InitFuncState(f);
   // analyze the data;
   for (Var arg : f->params) {
@@ -120,7 +124,8 @@ void CodeGenTileLangWebGPU::InitFuncState(const PrimFunc& f) {
 
 CodeGenTileLangWebGPU::CodeGenTileLangWebGPU(Target target) : target_(target) {}
 
-runtime::FunctionInfo CodeGenTileLangWebGPU::AddFunction(const PrimFunc& f, bool skip_readonly_decl) {
+runtime::FunctionInfo
+CodeGenTileLangWebGPU::AddFunction(const PrimFunc &f, bool skip_readonly_decl) {
   // clear previous generated state.
   this->InitFuncState(f);
   // reserve keywords
@@ -137,8 +142,8 @@ runtime::FunctionInfo CodeGenTileLangWebGPU::AddFunction(const PrimFunc& f, bool
 
   // add to alloc buffer type.
   auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
-  ICHECK(global_symbol.defined())
-      << "CodeGenTileLangWebGPU: Expect PrimFunc to have the global_symbol attribute";
+  ICHECK(global_symbol.defined()) << "CodeGenTileLangWebGPU: Expect PrimFunc "
+                                     "to have the global_symbol attribute";
 
   header_stream << "//----------------------------------------\n"
                 << "// Function: " << global_symbol.value() << "\n"
@@ -160,19 +165,23 @@ runtime::FunctionInfo CodeGenTileLangWebGPU::AddFunction(const PrimFunc& f, bool
     func_info.arg_types.push_back(t);
 
     if (t.is_handle()) {
-      auto* ptr = arg->type_annotation.as<PointerTypeNode>();
-      ICHECK(ptr) << "All handles passed to the CodeGenTileLangWebGPU must have a type_annotation as a "
+      auto *ptr = arg->type_annotation.as<PointerTypeNode>();
+      ICHECK(ptr) << "All handles passed to the CodeGenTileLangWebGPU must "
+                     "have a type_annotation as a "
                      "PointerType, "
                   << "and must point to a PrimType";
-      auto* prim = ptr->element_type.as<PrimTypeNode>();
-      ICHECK(prim) << "All handles passed to the CodeGenTileLangWebGPU must have a type_annotation as a "
+      auto *prim = ptr->element_type.as<PrimTypeNode>();
+      ICHECK(prim) << "All handles passed to the CodeGenTileLangWebGPU must "
+                      "have a type_annotation as a "
                       "PointerType, "
                    << "and must point to a PrimType";
       DataType value_storage_type = prim->dtype;
       if (value_storage_type == DataType::Bool()) {
-        // We need a physically addressable buffer type to support boolean tensors.
-        // The loaded byte is cast to bool inside the LoadNode visitor below.
-        value_storage_type = boolean_storage_type_.with_lanes(value_storage_type.lanes());
+        // We need a physically addressable buffer type to support boolean
+        // tensors. The loaded byte is cast to bool inside the LoadNode visitor
+        // below.
+        value_storage_type =
+            boolean_storage_type_.with_lanes(value_storage_type.lanes());
       }
       std::string vid = AllocVarID(arg.get());
       std::string access_mode;
@@ -188,7 +197,8 @@ runtime::FunctionInfo CodeGenTileLangWebGPU::AddFunction(const PrimFunc& f, bool
       }
       // add extra access mode info to launch params
       this->decl_stream << "@group(0) @binding(" << num_buffer++ << ") "
-                        << "var<storage, " << access_mode << "> " << vid << " : array<";
+                        << "var<storage, " << access_mode << "> " << vid
+                        << " : array<";
       this->PrintType(value_storage_type, this->decl_stream);
       this->decl_stream << ">;\n";
     } else {
@@ -229,11 +239,12 @@ runtime::FunctionInfo CodeGenTileLangWebGPU::AddFunction(const PrimFunc& f, bool
   this->decl_stream << "  " << packGridDimX << ": u32\n}\n";
 
   this->decl_stream << "@group(0) @binding(" << num_buffer++ << ") "
-                    << "var<uniform> " << val_pod_args << " : " << type_pod_args << ";\n\n";
+                    << "var<uniform> " << val_pod_args << " : " << type_pod_args
+                    << ";\n\n";
 
   // setup thread tags and param access in launch param tags;
   if (auto opt = f->GetAttr<Array<String>>(tir::attr::kKernelLaunchParams)) {
-    for (const auto& thread_tag : opt.value()) {
+    for (const auto &thread_tag : opt.value()) {
       func_info.launch_param_tags.push_back(thread_tag);
     }
   }
@@ -244,7 +255,8 @@ runtime::FunctionInfo CodeGenTileLangWebGPU::AddFunction(const PrimFunc& f, bool
       << "blockIdx.z is not supported in WebGPU to accomodate large blockIdx.x";
   // anotate workgroup
   this->stream << "@compute @workgroup_size(" << info.workgroup_size[0] << ", "
-               << info.workgroup_size[1] << ", " << info.workgroup_size[2] << ")\n";
+               << info.workgroup_size[1] << ", " << info.workgroup_size[2]
+               << ")\n";
 
   // add to alloc buffer type.
   // Function header.
@@ -254,7 +266,7 @@ runtime::FunctionInfo CodeGenTileLangWebGPU::AddFunction(const PrimFunc& f, bool
                << "  @builtin(local_invocation_id) threadIdx : vec3<u32>\n"
                << ") {\n";
   // skip out of bound grids
-  this->stream << "  if (blockIdx.z * gridDim.x + blockIdx.x > "  // NOLINT(*)
+  this->stream << "  if (blockIdx.z * gridDim.x + blockIdx.x > " // NOLINT(*)
                << val_pod_args << "." << packGridDimX << ") { return; }\n";
   // the function scope.
   int func_scope = this->BeginScope();
@@ -265,13 +277,14 @@ runtime::FunctionInfo CodeGenTileLangWebGPU::AddFunction(const PrimFunc& f, bool
   return func_info;
 }
 
-void CodeGenTileLangWebGPU::BindThreadIndex(const IterVar& iv) {
+void CodeGenTileLangWebGPU::BindThreadIndex(const IterVar &iv) {
   ICHECK(!var_idmap_.count(iv->var.get()));
   std::ostringstream os;
   PrintType(iv->var.dtype(), os);
   if (iv->thread_tag == "blockIdx.x") {
-    // WebGPU have restriction to limit the maximum size of blockId.x to be 65535
-    // We allow runtime to spread the load out to blockIdx.z so it can be a large number.
+    // WebGPU have restriction to limit the maximum size of blockId.x to be
+    // 65535 We allow runtime to spread the load out to blockIdx.z so it can be
+    // a large number.
     os << "(blockIdx.z * gridDim.x + blockIdx.x)";
     std::string tidx = os.str();
     std::string aggregated_bidx = SSAGetID(os.str(), iv->var.dtype());
@@ -284,7 +297,8 @@ void CodeGenTileLangWebGPU::BindThreadIndex(const IterVar& iv) {
   }
 }
 
-void CodeGenTileLangWebGPU::PrintType(DataType t, std::ostream& os) {  // NOLINT(*)
+void CodeGenTileLangWebGPU::PrintType(DataType t,
+                                      std::ostream &os) { // NOLINT(*)
   int lanes = t.lanes();
   if (t.is_handle()) {
     LOG(FATAL) << "Cannot print handle type in WebGPU";
@@ -299,12 +313,14 @@ void CodeGenTileLangWebGPU::PrintType(DataType t, std::ostream& os) {  // NOLINT
   }
 
   if (lanes != 1) {
-    // ICHECK(lanes >= 2 && lanes <= 4) << "CodeGenTileLangWebGPU: only allows vector with lanes in {2, 3, 4} " << " while lanes is " << lanes;
+    // ICHECK(lanes >= 2 && lanes <= 4) << "CodeGenTileLangWebGPU: only allows
+    // vector with lanes in {2, 3, 4} " << " while lanes is " << lanes;
     os << "vec" << lanes << "<";
   }
 
   if (t.is_float()) {
-    ICHECK(t.bits() == 16 || t.bits() == 32) << "CodeGenTileLangWebGPU: only support f16 or f32";
+    ICHECK(t.bits() == 16 || t.bits() == 32)
+        << "CodeGenTileLangWebGPU: only support f16 or f32";
     if (t.bits() == 16) {
       // Using f16 requires enable directive
       enable_fp16_ = true;
@@ -317,15 +333,16 @@ void CodeGenTileLangWebGPU::PrintType(DataType t, std::ostream& os) {  // NOLINT
     ICHECK(t.bits() != 64) << "CodeGenTileLangWebGPU: do not support i64";
     os << "i" << t.bits();
   } else {
-    LOG(FATAL) << "CodeGenTileLangWebGPU: Cannot convert type " << t << " to WebGPU type";
+    LOG(FATAL) << "CodeGenTileLangWebGPU: Cannot convert type " << t
+               << " to WebGPU type";
   }
   if (lanes != 1) {
     os << ">";
   }
 }
 
-void CodeGenTileLangWebGPU::PrintStorageSync(const CallNode* op) {
-  const std::string& sync = op->args[0].as<StringImmNode>()->value;
+void CodeGenTileLangWebGPU::PrintStorageSync(const CallNode *op) {
+  const std::string &sync = op->args[0].as<StringImmNode>()->value;
   if (sync == "warp") {
     this->PrintIndent();
     this->stream << "workgroupBarrier();\n";
@@ -337,20 +354,23 @@ void CodeGenTileLangWebGPU::PrintStorageSync(const CallNode* op) {
   }
 }
 
-void CodeGenTileLangWebGPU::PrintSSAAssign(const std::string& target, const std::string& src,
-                                   DataType type) {
+void CodeGenTileLangWebGPU::PrintSSAAssign(const std::string &target,
+                                           const std::string &src,
+                                           DataType type) {
   stream << "let " << target << " : ";
   PrintType(type, stream);
   stream << " = " << src << ";\n";
 }
 
-void CodeGenTileLangWebGPU::VisitExpr_(const BroadcastNode* op, std::ostream& os) {  // NOLINT(*)
+void CodeGenTileLangWebGPU::VisitExpr_(const BroadcastNode *op,
+                                       std::ostream &os) { // NOLINT(*)
   std::string v = PrintExpr(op->value);
   int lanes = op->dtype.lanes();
   PrintType(op->dtype, os);
   os << "(";
   for (int i = 0; i < lanes; ++i) {
-    if (i != 0) os << ", ";
+    if (i != 0)
+      os << ", ";
     os << v;
   }
   os << ')';
@@ -360,7 +380,8 @@ PrimExpr CodeGenTileLangWebGPU::EnforceU32(PrimExpr value) {
   return cast(DataType::UInt(32, value.dtype().lanes()), value);
 }
 
-void CodeGenTileLangWebGPU::VisitExpr_(const CallNode* op, std::ostream& os) {  // NOLINT(*)
+void CodeGenTileLangWebGPU::VisitExpr_(const CallNode *op,
+                                       std::ostream &os) { // NOLINT(*)
   if (op->op.same_as(builtin::reinterpret())) {
     // generate bitcast<TYPE>(ARG)
     os << "bitcast<";
@@ -412,17 +433,20 @@ void CodeGenTileLangWebGPU::VisitExpr_(const CallNode* op, std::ostream& os) {  
   }
 }
 
-void CodeGenTileLangWebGPU::VisitExpr_(const CastNode* op, std::ostream& os) {  // NOLINT(*)
+void CodeGenTileLangWebGPU::VisitExpr_(const CastNode *op,
+                                       std::ostream &os) { // NOLINT(*)
   PrintType(op->dtype, os);
   os << "(" << PrintExpr(op->value) << ")";
 }
 
-void CodeGenTileLangWebGPU::VisitExpr_(const SelectNode* op, std::ostream& os) {  // NOLINT(*)
-  os << "select(" << PrintExpr(op->false_value) << ", " << PrintExpr(op->true_value) << ", "
-     << PrintExpr(op->condition) << ")";
+void CodeGenTileLangWebGPU::VisitExpr_(const SelectNode *op,
+                                       std::ostream &os) { // NOLINT(*)
+  os << "select(" << PrintExpr(op->false_value) << ", "
+     << PrintExpr(op->true_value) << ", " << PrintExpr(op->condition) << ")";
 }
 
-void CodeGenTileLangWebGPU::VisitExpr_(const IntImmNode* op, std::ostream& os) {  // NOLINT(*)
+void CodeGenTileLangWebGPU::VisitExpr_(const IntImmNode *op,
+                                       std::ostream &os) { // NOLINT(*)
   if (op->dtype.bits() == 32) {
     std::ostringstream temp;
     if (op->dtype.is_int()) {
@@ -439,7 +463,8 @@ void CodeGenTileLangWebGPU::VisitExpr_(const IntImmNode* op, std::ostream& os) {
   }
 }
 
-void CodeGenTileLangWebGPU::VisitExpr_(const FloatImmNode* op, std::ostream& os) {  // NOLINT(*)
+void CodeGenTileLangWebGPU::VisitExpr_(const FloatImmNode *op,
+                                       std::ostream &os) { // NOLINT(*)
   std::ostringstream temp;
   temp << std::scientific << op->value;
   if (op->dtype.bits() == 32) {
@@ -455,12 +480,14 @@ void CodeGenTileLangWebGPU::VisitExpr_(const FloatImmNode* op, std::ostream& os)
   os << temp.str();
 }
 
-void CodeGenTileLangWebGPU::VisitExpr_(const BufferLoadNode* op, std::ostream& os) {  // NOLINT(*)
+void CodeGenTileLangWebGPU::VisitExpr_(const BufferLoadNode *op,
+                                       std::ostream &os) { // NOLINT(*)
   // NOTE: direct impl of load/store for correctness
   // Each printing stmt must stand on their own after all preprocessing steps
   // to ensure correctness in the case of nested-expression
   // do not try to lift common printings from each case
-  ICHECK_EQ(op->indices.size(), 1) << "Load from non-flat memory not supported.";
+  ICHECK_EQ(op->indices.size(), 1)
+      << "Load from non-flat memory not supported.";
 
   DataType value_dtype = op->dtype;
   PrimExpr index = op->indices[0];
@@ -493,11 +520,13 @@ void CodeGenTileLangWebGPU::VisitExpr_(const BufferLoadNode* op, std::ostream& o
     arith::PVar<PrimExpr> base;
     if (arith::ramp(base, 1, op->dtype.lanes()).Match(index)) {
       // vec3<f32>(buf[base + 0], buf[base + 1], buf[base + 2]);
-      std::string base_vid = SSAGetID(PrintExpr(base.Eval()), base.Eval().dtype());
+      std::string base_vid =
+          SSAGetID(PrintExpr(base.Eval()), base.Eval().dtype());
       PrintType(element_dtype.with_lanes(value_dtype.lanes()), os);
       os << "(";
       for (int i = 0; i < lanes; ++i) {
-        if (i != 0) os << ", ";
+        if (i != 0)
+          os << ", ";
         os << buffer_vid << "[" << base_vid << " + " << i << "]";
       }
       os << ")";
@@ -507,7 +536,8 @@ void CodeGenTileLangWebGPU::VisitExpr_(const BufferLoadNode* op, std::ostream& o
       PrintType(element_dtype.with_lanes(value_dtype.lanes()), os);
       os << "(";
       for (int i = 0; i < lanes; ++i) {
-        if (i != 0) os << ", ";
+        if (i != 0)
+          os << ", ";
         os << buffer_vid << "[" << index_vid << "[" << i << "]]";
       }
       os << ")";
@@ -515,7 +545,7 @@ void CodeGenTileLangWebGPU::VisitExpr_(const BufferLoadNode* op, std::ostream& o
   }
 }
 
-void CodeGenTileLangWebGPU::VisitStmt_(const LetStmtNode* op) {
+void CodeGenTileLangWebGPU::VisitStmt_(const LetStmtNode *op) {
   // use ssa form.
   if (print_ssa_form_) {
     std::string value = PrintExpr(op->value);
@@ -531,7 +561,7 @@ void CodeGenTileLangWebGPU::VisitStmt_(const LetStmtNode* op) {
   PrintStmt(op->body);
 }
 
-void CodeGenTileLangWebGPU::VisitStmt_(const BufferStoreNode* op) {
+void CodeGenTileLangWebGPU::VisitStmt_(const BufferStoreNode *op) {
   CHECK_EQ(op->indices.size(), 1) << "Store to non-flat memory not supported.";
   DataType value_dtype = op->value.dtype();
   DataType element_dtype = op->buffer->dtype;
@@ -571,11 +601,12 @@ void CodeGenTileLangWebGPU::VisitStmt_(const BufferStoreNode* op) {
     if (arith::ramp(base, 1, value_dtype.lanes()).Match(index)) {
       // buf[base + 0] = value[0]
       // buf[base + 1] = value[1]
-      std::string base_vid = SSAGetID(PrintExpr(base.Eval()), base.Eval().dtype());
+      std::string base_vid =
+          SSAGetID(PrintExpr(base.Eval()), base.Eval().dtype());
       for (int i = 0; i < value_dtype.lanes(); ++i) {
         this->PrintIndent();
-        stream << buffer_vid << "[" << base_vid << " + " << i << "] = " << value_vid << "[" << i
-               << "];\n";
+        stream << buffer_vid << "[" << base_vid << " + " << i
+               << "] = " << value_vid << "[" << i << "];\n";
       }
     } else {
       // buf[index[0]] = value[0]
@@ -583,41 +614,44 @@ void CodeGenTileLangWebGPU::VisitStmt_(const BufferStoreNode* op) {
       std::string index_vid = SSAGetID(PrintExpr(index), index.dtype());
       for (int i = 0; i < value_dtype.lanes(); ++i) {
         this->PrintIndent();
-        stream << buffer_vid << "[" << index_vid << "[" << i << "]] = " << value_vid << "[" << i
-               << "];\n";
+        stream << buffer_vid << "[" << index_vid << "[" << i
+               << "]] = " << value_vid << "[" << i << "];\n";
       }
     }
   }
 }
 
-void CodeGenTileLangWebGPU::VisitStmt_(const AllocateNode* op) {
+void CodeGenTileLangWebGPU::VisitStmt_(const AllocateNode *op) {
   ICHECK(!is_zero(op->condition));
   std::string vid = AllocVarID(op->buffer_var.get());
   size_t constant_size = op->ConstantAllocationSize();
-  ICHECK_GT(constant_size, 0) << "Can only handle constant size stack allocation for now";
-  auto storage_scope = runtime::StorageScope::Create(GetPtrStorageScope(op->buffer_var));
+  ICHECK_GT(constant_size, 0)
+      << "Can only handle constant size stack allocation for now";
+  auto storage_scope =
+      runtime::StorageScope::Create(GetPtrStorageScope(op->buffer_var));
 
   if (storage_scope.rank == runtime::StorageRank::kShared) {
     this->decl_stream << "var<workgroup> " << vid << " : array<";
     PrintType(op->dtype, this->decl_stream);
     this->decl_stream << ", " << constant_size << ">;\n";
   } else if (storage_scope.rank == runtime::StorageRank::kLocal) {
-    // TODO(Charlie): These code would cause non-uniformity as it introduces variables in module
-    // scope rather than function scope; but it was included for some unknown reasons; kept for now.
-    // this->decl_stream << "var<private> " << vid << " : array<";
-    // PrintType(op->dtype, this->decl_stream);
-    // this->decl_stream << ", " << constant_size << ">;\n";
+    // TODO(Charlie): These code would cause non-uniformity as it introduces
+    // variables in module scope rather than function scope; but it was included
+    // for some unknown reasons; kept for now. this->decl_stream <<
+    // "var<private> " << vid << " : array<"; PrintType(op->dtype,
+    // this->decl_stream); this->decl_stream << ", " << constant_size << ">;\n";
     this->PrintIndent();
     this->stream << "var " << vid << " : array<";
     PrintType(op->dtype, this->stream);
     this->stream << ", " << constant_size << ">;\n";
   } else {
-    LOG(FATAL) << "WebGPU: Do not support storage scope: " << storage_scope.to_string();
+    LOG(FATAL) << "WebGPU: Do not support storage scope: "
+               << storage_scope.to_string();
   }
   this->PrintStmt(op->body);
 }
 
-void CodeGenTileLangWebGPU::VisitStmt_(const ForNode* op) {
+void CodeGenTileLangWebGPU::VisitStmt_(const ForNode *op) {
   std::string extent = PrintExpr(op->extent);
   std::string vid = AllocVarID(op->loop_var.get());
   ICHECK(is_zero(op->min));
@@ -632,16 +666,16 @@ void CodeGenTileLangWebGPU::VisitStmt_(const ForNode* op) {
   stream << "}\n";
 }
 
-void CodeGenTileLangWebGPU::VisitStmt_(const AssertStmtNode* op) {
+void CodeGenTileLangWebGPU::VisitStmt_(const AssertStmtNode *op) {
   // skip assert
   PrintStmt(op->body);
 }
 
-void CodeGenTileLangWebGPU::VisitStmt_(const AllocateConstNode* op) {
+void CodeGenTileLangWebGPU::VisitStmt_(const AllocateConstNode *op) {
   LOG(FATAL) << "WebGPU: do not support alloc const";
 }
 
-void CodeGenTileLangWebGPU::VisitStmt_(const WhileNode* op) {
+void CodeGenTileLangWebGPU::VisitStmt_(const WhileNode *op) {
   PrintIndent();
   stream << "while (true) {\n";
   int while_scope = BeginScope();
@@ -658,26 +692,31 @@ void CodeGenTileLangWebGPU::VisitStmt_(const WhileNode* op) {
 // WebGPUSourceModule to enable export
 //-------------------------------------------------
 class WebGPUSourceModuleNode final : public runtime::ModuleNode {
- public:
-  explicit WebGPUSourceModuleNode(std::unordered_map<std::string, std::string> smap,
-                                  std::unordered_map<std::string, runtime::FunctionInfo> fmap)
+public:
+  explicit WebGPUSourceModuleNode(
+      std::unordered_map<std::string, std::string> smap,
+      std::unordered_map<std::string, runtime::FunctionInfo> fmap)
       : smap_(smap), fmap_(fmap) {}
 
-  const char* type_key() const final { return "webgpu"; }
+  const char *type_key() const final { return "webgpu"; }
   /*! \brief Get the property of the runtime module .*/
-  int GetPropertyMask() const final { return runtime::ModulePropertyMask::kBinarySerializable; }
+  int GetPropertyMask() const final {
+    return runtime::ModulePropertyMask::kBinarySerializable;
+  }
 
-  PackedFunc GetFunction(const String& name, const ObjectPtr<Object>& sptr_to_self) final {
-    LOG(FATAL) << "WebGPUSourceModule is not directly runnable, export and run through tvmjs";
+  PackedFunc GetFunction(const String &name,
+                         const ObjectPtr<Object> &sptr_to_self) final {
+    LOG(FATAL) << "WebGPUSourceModule is not directly runnable, export and run "
+                  "through tvmjs";
     return PackedFunc(nullptr);
   }
 
-  void SaveToBinary(dmlc::Stream* stream) final {
+  void SaveToBinary(dmlc::Stream *stream) final {
     stream->Write(fmap_);
     stream->Write(smap_);
   }
 
-  String GetSource(const String& format) final {
+  String GetSource(const String &format) final {
     if (format == "func_info") {
       std::ostringstream stream;
       dmlc::JSONWriter(&stream).Write(fmap_);
@@ -691,7 +730,7 @@ class WebGPUSourceModuleNode final : public runtime::ModuleNode {
     }
   }
 
- private:
+private:
   // function shader code table.
   std::unordered_map<std::string, std::string> smap_;
   // function information table.
@@ -713,14 +752,16 @@ runtime::Module BuildTileLangWebGPU(IRModule mod, Target target) {
 
   for (auto kv : mod->functions) {
     CodeGenTileLangWebGPU cg(target);
-    ICHECK(kv.second->IsInstance<PrimFuncNode>()) << "CodeGenTileLangWebGPU: Can only take PrimFunc";
+    ICHECK(kv.second->IsInstance<PrimFuncNode>())
+        << "CodeGenTileLangWebGPU: Can only take PrimFunc";
     auto f = Downcast<PrimFunc>(kv.second);
     auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
     ICHECK(calling_conv == CallingConv::kDeviceKernelLaunch)
-        << "CodeGenTileLangWebGPU: expect calling_conv equals CallingConv::kDeviceKernelLaunch";
+        << "CodeGenTileLangWebGPU: expect calling_conv equals "
+           "CallingConv::kDeviceKernelLaunch";
     auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
-    ICHECK(global_symbol.defined())
-        << "CodeGenTileLangWebGPU: Expect PrimFunc to have the global_symbol attribute";
+    ICHECK(global_symbol.defined()) << "CodeGenTileLangWebGPU: Expect PrimFunc "
+                                       "to have the global_symbol attribute";
     std::string f_name = global_symbol.value();
     cg.Init(output_ssa);
     fmap[f_name] = cg.AddFunction(f, skip_readonly_decl);
@@ -732,9 +773,10 @@ runtime::Module BuildTileLangWebGPU(IRModule mod, Target target) {
   return runtime::Module(n);
 }
 
-TVM_REGISTER_GLOBAL("target.build.tilelang_webgpu").set_body_typed([](IRModule mod, Target target) {
-  return BuildTileLangWebGPU(mod, target);
-});
+TVM_REGISTER_GLOBAL("target.build.tilelang_webgpu")
+    .set_body_typed([](IRModule mod, Target target) {
+      return BuildTileLangWebGPU(mod, target);
+    });
 
-}  // namespace codegen
-}  // namespace tvm
+} // namespace codegen
+} // namespace tvm
