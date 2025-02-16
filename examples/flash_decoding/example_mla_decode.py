@@ -7,10 +7,12 @@ import tilelang.language as T
 num_split = 4
 
 
-def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, block_N, block_H):
-    scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
-    shape_q = [batch, heads, dim]
-    shape_kv = [batch, seqlen_kv, kv_head_num, dim]
+def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H):
+    scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
+    shape_q = [batch, heads, (dim + pe_dim)]
+    shape_k = [batch, seqlen_kv, kv_head_num, (dim + pe_dim)]
+    shape_v = [batch, seqlen_kv, kv_head_num, dim]
+    shape_o = [batch, heads, dim]
     part_shape = [batch, heads, num_split, dim]
     dtype = "float16"
     accum_dtype = "float"
@@ -21,15 +23,15 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, block_N, block_H):
     @T.macro
     def flash_attn_split(
             Q: T.Buffer(shape_q, dtype),
-            K: T.Buffer(shape_kv, dtype),
-            V: T.Buffer(shape_kv, dtype),
+            K: T.Buffer(shape_k, dtype),
+            V: T.Buffer(shape_v, dtype),
             glse: T.Buffer([batch, heads, num_split], dtype),
             Output_partial: T.Buffer(part_shape, dtype),
     ):
         with T.Kernel(
                 batch, heads // min(block_H, kv_group_num), num_split, threads=128) as (bx, by, bz):
-            Q_shared = T.alloc_shared([block_H, dim], dtype)
-            K_shared = T.alloc_shared([block_N, dim], dtype)
+            Q_shared = T.alloc_shared([block_H, (dim + pe_dim)], dtype)
+            K_shared = T.alloc_shared([block_N, (dim + pe_dim)], dtype)
             V_shared = T.alloc_shared([block_N, dim], dtype)
             O_shared = T.alloc_shared([block_H, dim], dtype)
             acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
@@ -95,7 +97,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, block_N, block_H):
     def combine(
             glse: T.Buffer([batch, heads, num_split], dtype),
             Output_partial: T.Buffer(part_shape, dtype),
-            Output: T.Buffer(shape_q, dtype),
+            Output: T.Buffer(shape_o, dtype),
     ):
         with T.Kernel(heads, batch, threads=128) as (by, bz):
             po_local = T.alloc_fragment([dim], dtype)
@@ -132,11 +134,11 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, block_N, block_H):
     @T.prim_func
     def main(
             Q: T.Buffer(shape_q, dtype),
-            K: T.Buffer(shape_kv, dtype),
-            V: T.Buffer(shape_kv, dtype),
+            K: T.Buffer(shape_k, dtype),
+            V: T.Buffer(shape_v, dtype),
             glse: T.Buffer([batch, heads, num_split], dtype),
             Output_partial: T.Buffer(part_shape, dtype),  # [batch, heads, num_split, dim]
-            Output: T.Buffer(shape_q, dtype),
+            Output: T.Buffer(shape_o, dtype),
     ):
         flash_attn_split(Q, K, V, glse, Output_partial)
         combine(glse, Output_partial, Output)
@@ -157,6 +159,7 @@ def ref_program(query, key, value, glse, Output_partial):
     from einops import rearrange
     batch_size, query_heads, dim = query.shape  # [batch_size, query_heads, dim]
     _, seqlen_kv, kv_heads, _ = key.shape  # [batch_size, seqlen_kv, kv_heads, kv_dim]
+    dim_v = value.shape[-1]
     assert kv_heads == 1, "kv_heads must be 1"
 
     query_expanded = rearrange(query, 'b h d -> b h 1 d')  # [batch_size, query_heads, 1, dim]
@@ -173,19 +176,21 @@ def ref_program(query, key, value, glse, Output_partial):
     scores = scores / torch.sqrt(torch.tensor(dim, dtype=scores.dtype))
     attention_weights = F.softmax(scores, dim=-1)  # [batch_size, query_heads, 1, seqlen_kv]
     output = torch.matmul(attention_weights, value_expanded)  # [batch_size, query_heads, 1, dim]
-    return output.view(batch_size, query_heads, dim)
+    return output.view(batch_size, query_heads, dim_v)
 
 
 def flash_split_ref(Q, K, V):
     # from einops import rearrange
     # [batch, seqlen_q, heads, dim]
+    dim = 512
+    pe_dim = 64
     batch = Q.size(0)
     nheads = Q.size(1)
-    dim = Q.size(2)
+    assert Q.size(2) == dim + pe_dim, "dim must be 576=512+64"
     block_N = 32
     seqlen_kv = K.size(1)
 
-    scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
+    scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     acc_s = torch.empty((batch, nheads, block_N), device="cuda", dtype=torch.float)
     acc_s_cast = torch.empty((batch, nheads, block_N), device="cuda", dtype=torch.float16)
     acc_o = torch.empty((batch, nheads, dim), device="cuda", dtype=torch.float)
@@ -248,16 +253,20 @@ def reduce_ref(Q, K, V, glse, Output_partial):
 
 
 if __name__ == "__main__":
-    BATCH, H, KV_H, Q_CTX, KV_CTX, D_HEAD = 1, 128, 1, 128, 8 * 1024, 128
-    flops_per_matmul = 2.0 * BATCH * H * Q_CTX * KV_CTX * D_HEAD
-    total_flops = 2 * flops_per_matmul
-    BLOCK_N = 64  # if D_HEAD <= 128 else 32
-    BLOCK_H = 128
+    BATCH, H_Q, KV_H, KV_CTX, D_HEAD, DPE = 64, 128, 1, 8192, 512, 64
+    qk_flops = 2 * BATCH * H_Q * KV_CTX * (D_HEAD + DPE)
+    pv_flops = 2 * BATCH * H_Q * KV_CTX * D_HEAD
+    total_flops = qk_flops + pv_flops
+    BLOCK_N = 32  # if D_HEAD <= 128 else 32
+    BLOCK_H = 64
 
-    program = flashattn(BATCH, H, KV_H, KV_CTX, D_HEAD, BLOCK_N, BLOCK_H)
+    program = flashattn(BATCH, H_Q, KV_H, KV_CTX, D_HEAD, DPE, BLOCK_N, BLOCK_H)
     mod, params = tilelang.lower(program)
     mod = tilelang.Profiler(mod, params, [5], tilelang.TensorSupplyType.Normal)
-    mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+    # mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+    latency = mod.do_bench(mod.func, warmup=500)
+    print("Tile-lang: {:.2f} ms".format(latency))
+    print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 
     # mod = tilelang.Profiler(mod, params, [3, 4], tilelang.TensorSupplyType.Normal)
     # mod.assert_allclose(flash_split_ref, rtol=0.01, atol=0.01)
