@@ -13,8 +13,10 @@ from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
 from tilelang.utils.target import determine_target
 
+
 def is_cpu_device_backend(target: Target, target_host: Target):
     return target.kind.name == "c" and target_host.kind.name == "c"
+
 
 def is_device_call(func: tir.PrimFunc):
     return bool(func.attrs and "calling_conv" in func.attrs and
@@ -127,16 +129,16 @@ def lower(
 
     target_host = tvm.target.Target.canon_target(target_host)
     target = tvm.target.Target(target, target_host)
-    
+
     _is_host_call = is_host_call
     _is_device_call = is_device_call
-    
+
     if is_cpu_device_backend(target, target_host):
         # CPU backend with C Codegeneration is special
         # we need to treat all the calls as host calls
         # and disable the device calls
-        _is_host_call = lambda func: True
-        _is_device_call = lambda func: False
+        _is_host_call = lambda _: True  # noqa: E731
+        _is_device_call = lambda _: False  # noqa: E731
 
     mod = tir.transform.BindTarget(target)(mod)
 

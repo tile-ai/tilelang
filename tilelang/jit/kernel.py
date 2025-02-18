@@ -199,7 +199,7 @@ class JITKernel(object):
             The source code of the compiled kernel function.
         """
         return self.rt_module.imported_modules[0].get_source()
-    
+
     def get_host_source(self) -> str:
         """
         Returns the source code of the host function.
