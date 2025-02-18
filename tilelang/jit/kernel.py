@@ -36,6 +36,7 @@ class JITKernel(object):
         out_idx: Union[List[int], int] = None,
         execution_backend: Literal["dlpack", "torch_cpp", "ctypes"] = "dlpack",
         target: Union[str, Target] = "auto",
+        target_host: Union[str, Target] = None,
         verbose: bool = False,
     ):
         """
@@ -51,6 +52,8 @@ class JITKernel(object):
             Execution backend to use for kernel execution (default: "dlpack").
         target : Union[str, Target], optional
             Compilation target, either as a string or a TVM Target object (default: "auto").
+        target_host : Union[str, Target], optional
+            Target host for cross-compilation (default: None).
         verbose : bool, optional
             Whether to enable verbose output (default: False).
         """
@@ -58,6 +61,7 @@ class JITKernel(object):
         self.out_idx = out_idx
         self.execution_backend = execution_backend
         self.target = target
+        self.target_host = target_host
         self.verbose = verbose
 
         # If the target is specified as a string, validate it and convert it to a TVM Target.
@@ -113,12 +117,13 @@ class JITKernel(object):
         """
         verbose = self.verbose
         target = self.target
+        target_host = self.target_host
         out_idx = self.out_idx
         execution_backend = self.execution_backend
 
         # Compile the function with TVM, optimizing with shared memory lowering.
         with tvm.transform.PassContext(opt_level=3):
-            rt_mod, params = tilelang.lower(tilelang_func, target=target)
+            rt_mod, params = tilelang.lower(tilelang_func, target=target, target_host=target_host)
 
         # Store the runtime module and parameters for later use.
         self.rt_module = rt_mod
@@ -194,6 +199,12 @@ class JITKernel(object):
             The source code of the compiled kernel function.
         """
         return self.rt_module.imported_modules[0].get_source()
+    
+    def get_host_source(self) -> str:
+        """
+        Returns the source code of the host function.
+        """
+        return self.rt_module.get_source()
 
     def run_once(self, func: Optional[Callable] = None) -> None:
         return self.get_profiler().run_once(func)

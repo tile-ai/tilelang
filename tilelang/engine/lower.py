@@ -13,16 +13,10 @@ from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
 from tilelang.utils.target import determine_target
 
+def is_cpu_device_backend(target: Target, target_host: Target):
+    return target.kind.name == "c" and target_host.kind.name == "c"
 
 def is_device_call(func: tir.PrimFunc):
-    attrs = func.attrs
-
-    # consider c source as a device call
-    if "target" in attrs:
-        target = attrs["target"]
-        if target.kind.name == "c":
-            return True
-
     return bool(func.attrs and "calling_conv" in func.attrs and
                 func.attrs["calling_conv"] == CallingConv.DEVICE_KERNEL_LAUNCH)
 
@@ -133,6 +127,16 @@ def lower(
 
     target_host = tvm.target.Target.canon_target(target_host)
     target = tvm.target.Target(target, target_host)
+    
+    _is_host_call = is_host_call
+    _is_device_call = is_device_call
+    
+    if is_cpu_device_backend(target, target_host):
+        # CPU backend with C Codegeneration is special
+        # we need to treat all the calls as host calls
+        # and disable the device calls
+        _is_host_call = lambda func: True
+        _is_device_call = lambda func: False
 
     mod = tir.transform.BindTarget(target)(mod)
 
@@ -196,7 +200,7 @@ def lower(
 
     mod = tl.transform.MakePackedAPI()(mod)
     mod = tir.transform.LowerDeviceKernelLaunch()(mod)
-    host_mod = tir.transform.Filter(is_host_call)(mod)
+    host_mod = tir.transform.Filter(_is_host_call)(mod)
     host_mod = tir.transform.BindTarget(target_host)(host_mod)
     host_mod = tir.transform.FP8StorageLegalize()(host_mod)
     host_mod = tir.transform.BF16StorageLegalize()(host_mod)
@@ -209,11 +213,15 @@ def lower(
     if target_host.kind.name == "llvm":
         host_mod = tvm._ffi.get_global_func("target.build.llvm")(host_mod, target_host)
     elif target_host.kind.name == "c":
-        host_mod = tvm._ffi.get_global_func("target.build.tilelang_cpp")(host_mod, target_host)
+        if is_cpu_device_backend(target, target_host):
+            host_mod = tvm._ffi.get_global_func("target.build.tilelang_cpp")(host_mod, target_host)
+        else:
+            print("build c host")
+            host_mod = tvm._ffi.get_global_func("target.build.c")(host_mod, target_host)
     else:
         raise ValueError("Target host is not supported")
 
-    device_mod = tir.transform.Filter(is_device_call)(mod)
+    device_mod = tir.transform.Filter(_is_device_call)(mod)
     device_mod = tir.transform.LowerDeviceStorageAccessInfo()(device_mod)
     device_mod = tir.transform.LowerIntrin()(device_mod)
     device_mod = tir.transform.Simplify()(device_mod)
