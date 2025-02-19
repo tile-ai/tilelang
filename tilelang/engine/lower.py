@@ -50,7 +50,10 @@ def get_host_call(is_device_c: bool = False) -> Callable[[tir.PrimFunc], bool]:
 def tilelang_callback_cuda_compile(code, target):
     project_root = osp.join(osp.dirname(__file__), "../..")
     if "TL_TEMPLATE_PATH" in os.environ:
+        tl_template_path = os.environ["TL_TEMPLATE_PATH"]
+    else:
         tl_template_path = osp.abspath(osp.join(project_root, "src"))
+    # TODO(lei): this indeed should be renamed into
     # TL_CUTLASS_INCLUDE_PATH in the future
     if "TL_CUTLASS_PATH" in os.environ:
         cutlass_path = os.environ["TL_CUTLASS_PATH"]
