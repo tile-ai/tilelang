@@ -17,8 +17,8 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             bx,
             by,
         ):
-            A_shared = T.alloc_shared((block_M, block_K), dtype, scope="shared")
-            B_shared = T.alloc_shared((block_N, block_K), dtype, scope="shared")
+            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_N, block_K), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
             T.clear(C_local)
