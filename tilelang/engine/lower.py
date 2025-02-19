@@ -203,14 +203,14 @@ def lower(
     mod = tl.transform.ThreadPartialSync("shared.dyn")(mod)
     mod = tir.transform.InferFragment()(mod)
     mod = tir.transform.LowerThreadAllreduce()(mod)
-    mod = tl.transform.LowerHopperIntrin()(mod)
-    mod = tir.transform.InjectPTXAsyncCopy()(mod)
 
     mod = tl.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
     mod = tir.transform.MergeSharedMemoryAllocations()(mod)
     mod = tl.transform.ThreadSync("shared")(mod)
     mod = tl.transform.ThreadSync("shared.dyn")(mod)
+    mod = tl.transform.LowerHopperIntrin()(mod)
+    mod = tir.transform.InjectPTXAsyncCopy()(mod)
 
     mod = tl.transform.MakePackedAPI()(mod)
     mod = tir.transform.LowerDeviceKernelLaunch()(mod)
