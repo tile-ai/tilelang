@@ -232,7 +232,7 @@ def lower(
         else:
             host_mod = tvm._ffi.get_global_func("target.build.c")(host_mod, target_host)
     else:
-        raise ValueError("Target host is not supported")
+        raise ValueError(f"Target host {target_host.kind.name} is not supported")
 
     device_mod = tir.transform.Filter(_is_device_call)(mod)
     device_mod = tir.transform.LowerDeviceStorageAccessInfo()(device_mod)
@@ -252,7 +252,7 @@ def lower(
     elif target.kind.name == "webgpu":
         device_mod = tvm._ffi.get_global_func("target.build.tilelang_webgpu")(device_mod, target)
     else:
-        raise ValueError("Target is not supported")
+        raise ValueError(f"Target {target.kind.name} is not supported")
 
     host_mod.import_module(device_mod)
 
