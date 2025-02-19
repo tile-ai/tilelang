@@ -17,25 +17,30 @@ from tilelang.utils.target import determine_target
 def is_cpu_device_backend(target: Target):
     return target.kind.name == "c"
 
+
 def has_device_kernel_launch(attrs) -> bool:
     """Check if the attributes indicate a device kernel launch."""
-    return bool(attrs and "calling_conv" in attrs and 
-               attrs["calling_conv"] == CallingConv.DEVICE_KERNEL_LAUNCH)
+    return bool(attrs and "calling_conv" in attrs and
+                attrs["calling_conv"] == CallingConv.DEVICE_KERNEL_LAUNCH)
+
 
 def is_device_call_c_device(func: tir.PrimFunc):
     attrs = func.attrs
-    
+
     # Check if it's a C target
     if "target" in attrs and attrs["target"].kind.name == "c":
         return True
-        
+
     return has_device_kernel_launch(attrs)
+
 
 def is_device_call(func: tir.PrimFunc):
     return has_device_kernel_launch(func.attrs)
 
+
 def get_device_call(is_device_c: bool = False) -> Callable[[tir.PrimFunc], bool]:
     return is_device_call_c_device if is_device_c else is_device_call
+
 
 def get_host_call(is_device_c: bool = False) -> Callable[[tir.PrimFunc], bool]:
     return lambda func: not get_device_call(is_device_c)(func)
@@ -250,7 +255,7 @@ def lower(
         raise ValueError("Target is not supported")
 
     host_mod.import_module(device_mod)
-    
+
     if target_host.kind.name == "c":
         # cpu host should be recompiled
         # TODO(lei): this is a hack to make the C host backend work

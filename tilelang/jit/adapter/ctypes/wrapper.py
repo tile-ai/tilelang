@@ -10,7 +10,6 @@ from .utils import match_global_kernel, is_cuda_target, is_hip_target, get_annot
 import re
 import logging
 
-
 PREDEF_ARRTIBUTE_SET_DYNAMIC_MEMORY = """
     cudaFuncSetAttribute({}, cudaFuncAttributeMaxDynamicSharedMemorySize, {});
 """
@@ -417,6 +416,7 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
 
     def get_stream_type(self, function_args):
         function_args.append({"name": "stream=hipStreamDefault", "type": "hipStream_t"},)
+
 
 class TLWrapper(BaseWrapper):
 

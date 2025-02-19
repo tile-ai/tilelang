@@ -7,12 +7,11 @@ from tilelang.contrib.nvcc import get_target_compute_version
 from tvm.target import Target
 import ctypes
 import os
-import os.path as osp
-import sys
 import tempfile
 import subprocess
 import logging
 from tilelang.env import TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,8 +34,7 @@ class LibraryGenerator(object):
         target = self.target
         if is_cuda_target(target):
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
-            compute_version = "".join(
-                get_target_compute_version(target).split("."))
+            compute_version = "".join(get_target_compute_version(target).split("."))
             libpath = src.name.replace(".cu", ".so")
 
             command = [

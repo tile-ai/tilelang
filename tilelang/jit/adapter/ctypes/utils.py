@@ -12,6 +12,7 @@ from tilelang.engine.lower import (
     canon_target_host,
 )
 
+
 def match_global_kernel(source: str) -> int:
     pattern = r"__global__\s+void\s+[__launch_bounds__\(\d+\)\s+]\w+"
     matched = re.findall(pattern, source)
@@ -22,15 +23,17 @@ def match_global_kernel(source: str) -> int:
 def is_cuda_target(target: Target) -> bool:
     return target.kind.name == "cuda"
 
+
 def is_hip_target(target: Target) -> bool:
     return target.kind.name == "hip"
 
+
 def get_annotated_device_mod(
-        func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-        target: Union[str, Target] = "auto",
-        target_host: Optional[Union[str, Target]] = None,
-    ) -> "IRModule":
-    
+    func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+    target: Union[str, Target] = "auto",
+    target_host: Optional[Union[str, Target]] = None,
+) -> "IRModule":
+
     mod = func_or_mod
     if isinstance(func_or_mod, tir.PrimFunc):
         func = func_or_mod

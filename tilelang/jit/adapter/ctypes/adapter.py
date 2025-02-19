@@ -14,6 +14,7 @@ from .wrapper import TLWrapper
 from .libgen import LibraryGenerator
 from tilelang.utils.target import determine_target
 
+
 class CtypesKernelAdapter(BaseKernelAdapter):
 
     target = "cuda"
@@ -43,18 +44,17 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         self.verbose = verbose
         self.wrapper = TLWrapper(self.target)
         self.lib_generator = LibraryGenerator(self.target)
-        
+
         self.wrapper.assign_optimized_module(self.ir_module)
-        wrapped_source = self.wrapper.wrap(
-            self.get_kernel_source(), is_dynamic)
-        
+        wrapped_source = self.wrapper.wrap(self.get_kernel_source(), is_dynamic)
+
         self.lib_generator.update_lib_code(wrapped_source)
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
         self.lib.init()
-        
+
         self._post_init()
-    
+
     def _forward_from_prebuild_lib(self, *args, stream=0):
         ctypes_args = [
             ctypes.c_void_p(arr.data_ptr()) if not isinstance(arr, int) else arr for arr in args
