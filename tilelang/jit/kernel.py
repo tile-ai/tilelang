@@ -7,7 +7,7 @@ import tilelang
 from tilelang import tvm as tvm
 from tvm.tir import PrimFunc
 
-from tilelang.jit.adapter import TorchCPPKernelAdapter, TorchDLPackKernelAdapter, BaseKernelAdapter
+from tilelang.jit.adapter import TorchCPPKernelAdapter, TorchDLPackKernelAdapter, BaseKernelAdapter, CtypesKernelAdapter
 from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
 from tilelang.profiler import Profiler, TensorSupplyType
 
@@ -145,8 +145,15 @@ class JITKernel(object):
             )
             raise NotImplementedError("Torch CPP backend is not fully implemented.")
         elif execution_backend == "ctypes":
-            # CTYPES backend (not implemented yet).
-            raise NotImplementedError("CTypes backend is not implemented.")
+            # CTYPES backend (not fully tested yet).
+            adapter = CtypesKernelAdapter(
+                rt_mod,
+                params=params,
+                result_idx=out_idx,
+                target=target,
+                func_or_mod=tilelang_func,
+                verbose=verbose,
+            )
         else:
             # Handle invalid backend.
             raise ValueError(f"Invalid execution backend: {execution_backend}")
