@@ -136,14 +136,14 @@ def tl_matmul(
                         A_local,
                         A_shared,
                         ki,
-                        )
+                    )
 
                     # Load B into fragment
                     mma_emitter.ldmatrix_b(
                         B_local,
                         B_shared,
                         ki,
-                        )
+                    )
 
                     # Perform Matrix Multiplication
                     mma_emitter.mma(A_local, B_local, C_local)
@@ -321,14 +321,14 @@ def tl_matmul_weight_only_transform(
                         A_local,
                         A_shared,
                         ki,
-                        )
+                    )
 
                     # Load B into fragment
                     mma_emitter.ldmatrix_b(
                         B_local,
                         B_shared,
                         ki,
-                        )
+                    )
 
                     # Perform Matrix Multiplication
                     mma_emitter.mma(A_local, B_local, C_local)
