@@ -35,6 +35,10 @@ from .customize import (
 from .builtin import *  # noqa: F401
 
 
+def symbolic(name: str, dtype: str = "int32"):
+    return tir.Var(name, dtype)
+
+
 def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
     # If order is row, use rasterization2DRow, otherwise use rasterization2DColumn
     # The panel size is the number of threads in a warp

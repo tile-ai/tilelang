@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 from tilelang import tvm as tvm
+import tilelang.language as T
 import tilelang.testing
 import tilelang
 import torch
@@ -26,8 +27,6 @@ def matmul(
     B_shape = (N, K) if trans_B else (K, N)
     A_shared_shape = (block_K, block_M) if trans_A else (block_M, block_K)
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
-
-    import tilelang.language as T
 
     @T.prim_func
     def main(
@@ -233,6 +232,172 @@ def test_gemm_jit_kernel():
         32,
         2,
     )
+
+
+def run_ctypes_kernel_do_bench(M,
+                               N,
+                               K,
+                               trans_A,
+                               trans_B,
+                               in_dtype,
+                               out_dtype,
+                               dtypeAccum,
+                               block_M,
+                               block_N,
+                               block_K,
+                               num_stages=3,
+                               num_threads=128):
+    program = matmul(
+        M,
+        N,
+        K,
+        block_M,
+        block_N,
+        block_K,
+        trans_A,
+        trans_B,
+        in_dtype,
+        out_dtype,
+        dtypeAccum,
+        num_stages,
+        num_threads,
+    )
+
+    matmul_kernel = tilelang.JITKernel(program, execution_backend="ctypes")
+
+    profiler = matmul_kernel.get_profiler()
+
+    ctypes_latency = profiler.do_bench(func=matmul_kernel, profiler="torch")
+    print(f"Ctypes Latency: {ctypes_latency} ms")
+
+    assert ctypes_latency is not None
+
+    tvm_latency = profiler.do_bench()
+    print(f"TVM Latency: {tvm_latency} ms")
+
+    assert tvm_latency is not None
+
+
+def test_ctypes_kernel_do_bench():
+    run_ctypes_kernel_do_bench(512, 1024, 768, False, False, "float16", "float16", "float16", 128,
+                               256, 32, 2)
+
+
+def run_ctypes_kernel_multi_stream(M,
+                                   N,
+                                   K,
+                                   trans_A,
+                                   trans_B,
+                                   in_dtype,
+                                   out_dtype,
+                                   dtypeAccum,
+                                   block_M,
+                                   block_N,
+                                   block_K,
+                                   num_stages=3,
+                                   num_threads=128):
+    program = matmul(
+        M,
+        N,
+        K,
+        block_M,
+        block_N,
+        block_K,
+        trans_A,
+        trans_B,
+        in_dtype,
+        out_dtype,
+        dtypeAccum,
+        num_stages,
+        num_threads,
+    )
+
+    matmul_kernel = tilelang.JITKernel(program, execution_backend="ctypes")
+
+    tensor_a = torch.randn(M, K, dtype=torch.__getattribute__(in_dtype)).cuda()
+    tensor_b = torch.randn(K, N, dtype=torch.__getattribute__(in_dtype)).cuda()
+
+    if trans_A:
+        tensor_a = tensor_a.T
+    if trans_B:
+        tensor_b = tensor_b.T
+    tensor_c = torch.randn(M, N, dtype=torch.__getattribute__(out_dtype)).cuda()
+
+    num_streams = 4
+    for _ in range(num_streams):
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            matmul_kernel(tensor_a, tensor_b, tensor_c)
+
+
+def test_ctypes_kernel_multi_stream():
+    run_ctypes_kernel_multi_stream(512, 1024, 768, False, False, "float16", "float16", "float16",
+                                   128, 256, 32, 2)
+
+
+def run_ctypes_dynamic_shape(M,
+                             N,
+                             K,
+                             trans_A,
+                             trans_B,
+                             in_dtype,
+                             out_dtype,
+                             dtypeAccum,
+                             block_M,
+                             block_N,
+                             block_K,
+                             num_stages=3,
+                             num_threads=128):
+    program = matmul(
+        M,
+        N,
+        K,
+        block_M,
+        block_N,
+        block_K,
+        trans_A,
+        trans_B,
+        in_dtype,
+        out_dtype,
+        dtypeAccum,
+        num_stages,
+        num_threads,
+    )
+
+    matmul_kernel = tilelang.JITKernel(program, execution_backend="ctypes")
+    if isinstance(M, T.Var):
+        M = 1024
+    if isinstance(N, T.Var):
+        N = 1024
+    if isinstance(K, T.Var):
+        K = 768
+    tensor_a = torch.randn(M, K, dtype=torch.__getattribute__(in_dtype)).cuda()
+    tensor_b = torch.randn(K, N, dtype=torch.__getattribute__(in_dtype)).cuda()
+
+    if trans_A:
+        tensor_a = tensor_a.T
+    if trans_B:
+        tensor_b = tensor_b.T
+    tensor_c = torch.randn(M, N, dtype=torch.__getattribute__(out_dtype)).cuda()
+
+    matmul_kernel(tensor_a, tensor_b, tensor_c)
+
+    tensor_ref_c = torch.matmul(tensor_a.to(torch.float), tensor_b.to(torch.float))
+    tilelang.testing.torch_assert_close(
+        tensor_c, tensor_ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
+
+
+def test_ctypes_dynamic_shape():
+    run_ctypes_dynamic_shape(
+        T.symbolic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+
+    run_ctypes_dynamic_shape(
+        T.symbolic("m"), T.symbolic("n"), 768, False, False, "float16", "float16", "float16", 128,
+        256, 32, 2)
+
+    run_ctypes_dynamic_shape(
+        T.symbolic("m"), T.symbolic("n"), T.symbolic("k"), False, False, "float16", "float16",
+        "float16", 128, 256, 32, 2)
 
 
 if __name__ == "__main__":

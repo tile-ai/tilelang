@@ -89,12 +89,12 @@ class TLCUDASourceWrapper(object):
 
     def get_dynamic_symbolic_set(self, prim_func):
         # Determine the set of dynamic symbols used in the function
-        dynamic_symbolic_set = set()
+        dynamic_symbolic_set: List[str] = []
         for param in prim_func.params:
             buffer = prim_func.buffer_map[param]
             for dim in buffer.shape:
-                if isinstance(dim, tvm.tir.Var):
-                    dynamic_symbolic_set.add(dim.name)
+                if isinstance(dim, tvm.tir.Var) and (dim.name not in dynamic_symbolic_set):
+                    dynamic_symbolic_set.append(dim.name)
         return dynamic_symbolic_set
 
     def get_cuda_init_func(self):
@@ -201,203 +201,6 @@ class TLCUDASourceWrapper(object):
             raise ValueError("Cannot find primary function in the module.")
 
 
-class TLCUDASourceWrapperWithDynamic(TLCUDASourceWrapper):
-
-    def __init__(self, scheduled_ir_module: IRModule, source: str, target: Target):
-        super().__init__(scheduled_ir_module, source, target)
-
-    def get_cuda_init_func(self):
-        # Initialize an empty string to accumulate CUDA function calls for setting dynamic shared memory
-        call_str = """"""
-        # Iterate over functions and their dynamic shared memory requirements
-        for function_name, dynamic_smem_buf in self.dynamic_smem_buf.items():
-            if dynamic_smem_buf is not None:
-                # Format the cudaFuncSetAttribute call for dynamic shared memory
-                call_str += PREDEF_ARRTIBUTE_SET_DYNAMIC_MEMORY.format(
-                    function_name, dynamic_smem_buf)
-        # Define the init function that will set the attributes for each kernel
-        init_funcs = PREDEF_INIT_FUNC.format(call_str)
-        return init_funcs
-
-    def create_dispatch_func(self, code, function_informations):
-        # Extract the set of dynamic symbolic names used in the primary function
-        dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
-
-        # Find the location of the global kernel function in the code
-        index = match_global_kernel(code)
-
-        # Analyze the function declaration to prepare for argument extraction
-        dummy_declaration = code[index:].split(";")[0]
-
-        function_name = self.function_name
-
-        # Identify the start of the function body to insert arguments
-        index = code.index("{", index)
-        function_args = []
-        # Collect function arguments based on primary function's parameters and buffer mappings
-        for param in self.prim_func.params:
-            buffer = self.prim_func.buffer_map[param]
-            function_args.append({
-                "name": buffer.name,
-                "type": self._TYPE_MAP[buffer.dtype] + "* __restrict__",
-            })
-        # Add dynamic symbols as integer arguments
-        for dyn_sym in dynamic_symbolic_set:
-            function_args.append({"name": dyn_sym, "type": "int"})
-
-        function_args.append({"name": "stream=cudaStreamDefault", "type": "cudaStream_t"},)
-
-        # Format the argument definitions for function declaration
-        def_args = ", ".join([f"{arg['type']} {arg['name']}" for arg in function_args])
-
-        def func_call_args(s: str, function_args):
-            # Extract and clean the function call arguments to match the declaration
-            pattern = r"[,\s]*(?:\w+\s*\*+\s*__restrict__\s+)?(\w+)"
-            matches = re.findall(pattern, s)
-            call_args = []
-            for match in matches:
-                match = re.sub(r"\d+", "", match)  # Remove numbers
-                match = re.sub(r"_", "", match)  # Remove underscores
-                for arg in function_args:
-                    if arg["name"] == match:
-                        call_args.append(match)
-            return call_args
-
-        call_args = ", ".join(func_call_args(dummy_declaration, function_args))
-
-        def legalize_c(p):
-            # Convert TIR expressions to legal C expressions
-            # Directly convert to string since the special case handling
-            # does not alter the string representation for `tvm.tir.Var` and `IntImm`.
-            # Replace Python's floor division operator with C's division operator
-            if isinstance(p, tvm.tir.IntImm):
-                p = int(p)
-            return str(p).replace("//", "/")
-
-        last_range = 0
-        num_items = len(function_informations)
-        _call_str = """"""
-        for last_range, (function_name, info) in enumerate(function_informations.items()):
-            # Prepare block and grid configurations for kernel launches
-            block_info, grid_info = info["block_info"], info["grid_info"]
-            block_str = "dim3({}, {}, {})".format(
-                legalize_c(block_info[0]),
-                legalize_c(block_info[1]),
-                legalize_c(block_info[2]),
-            )
-            grid_str = "dim3({}, {}, {})".format(
-                legalize_c(grid_info[0]),
-                legalize_c(grid_info[1]),
-                legalize_c(grid_info[2]),
-            )
-            # Handle dynamic shared memory specification
-            smem_str = (0 if info["dynamic_smem_buf"] is None else info["dynamic_smem_buf"])
-            opt_shapes = info["opt_shapes"]
-            # Generate conditional kernel launch code based on dynamic symbolic ranges
-            (symbolic,) = list(dynamic_symbolic_set)
-            range_str = opt_shapes[symbolic]
-            if last_range == 0:
-                call_str = "  if ({} == 0) return; \n".format(symbolic,)
-                call_str += "  if ({} <= {}) {{\n    {}<<<{}, {}, {}, stream>>>({}); \n  }}\n".format(
-                    symbolic,
-                    range_str,
-                    function_name,
-                    grid_str,
-                    block_str,
-                    smem_str,
-                    call_args,
-                )
-            else:
-                call_str = "  else if ({} <= {}) {{\n    {}<<<{}, {}, {}, stream>>>({}); \n  }}\n".format(
-                    symbolic,
-                    range_str,
-                    function_name,
-                    grid_str,
-                    block_str,
-                    smem_str,
-                    call_args,
-                )
-            if last_range == num_items - 1:
-                call_str += "  else {{\n    {}<<<{}, {}, {}, stream>>>({}); \n  }}\n".format(
-                    function_name, grid_str, block_str, smem_str, call_args)
-            _call_str += call_str
-
-        # Wrap the kernel dispatch logic in an external C function
-        host_func = PREDEF_HOST_FUNC.format(def_args, _call_str)
-        return host_func
-
-    def parse_source_information(self):
-        # Parse device module to extract execution configurations for each function
-        device_mod = get_annotated_device_mod(self.mod, self.target, backend=self.backend)
-        block_info_map = {}
-        grid_info_map = {}
-        dynamic_smem_buf_map = {}
-        for g_var, func in device_mod.functions.items():
-            # Default block and grid configurations
-            block_info = [1, 1, 1]
-            grid_info = [1, 1, 1]
-            function_name = g_var.name_hint
-            attrs = func.attrs
-            dynamic_smem_buf = None
-            if "dyn_shared_memory_buf" in attrs:
-                dynamic_smem_buf = int(attrs["dyn_shared_memory_buf"])
-            if "thread_extent" in attrs:
-                # Extract block and grid sizes from thread extents
-                thread_extent = attrs["thread_extent"]
-                for tag, extent in thread_extent.items():
-                    if "threadIdx" in tag:
-                        block_info["xyz".index(tag[-1])] = extent
-                    elif "blockIdx" in tag:
-                        grid_info["xyz".index(tag[-1])] = extent
-            # Map the extracted configurations to each function
-            block_info_map[function_name] = block_info
-            grid_info_map[function_name] = grid_info
-            dynamic_smem_buf_map[function_name] = dynamic_smem_buf
-        # Store the mappings for use in code generation
-        self.block_info = block_info_map
-        self.grid_info = grid_info_map
-        self.dynamic_smem_buf = dynamic_smem_buf_map
-
-    def update_lib_code(self, code: str):
-        # Organize function information for code generation
-        function_informations = {}
-        for g_var, func in self.mod.functions.items():
-            function_name = g_var.name_hint
-            # Do not update function with dispatch host function
-            if (function_name not in self.block_info) or (function_name not in self.grid_info):
-                continue
-
-            attrs = func.attrs
-            assert "opt_shapes" in attrs
-            opt_shapes = attrs["opt_shapes"]
-            function_informations[function_name] = {
-                "function_name": function_name,
-                "opt_shapes": opt_shapes,
-                "block_info": self.block_info[function_name],
-                "grid_info": self.grid_info[function_name],
-                "dynamic_smem_buf": self.dynamic_smem_buf[function_name],
-            }
-
-        def compare_map_objects(map_obj):
-            comparable_representation = list(map_obj.values())
-            return comparable_representation
-
-        function_informations = dict(
-            sorted(
-                function_informations.items(),
-                key=lambda item: compare_map_objects(item[1]["opt_shapes"]),
-            ))
-
-        self.lib_code = code
-
-        # Generate the initialization and dispatch functions
-        init_func = self.get_cuda_init_func()
-        host_func = self.create_dispatch_func(code, function_informations)
-        # Concatenate source code with generated code segments
-        lib_code = self.source + init_func + host_func
-        return lib_code
-
-
 class TLHIPSourceWrapper(TLCUDASourceWrapper):
 
     def __init__(self, scheduled_ir_module: IRModule, source: str, target: Target):
@@ -430,11 +233,10 @@ class TLWrapper(BaseWrapper):
         self.scheduled_ir_module = scheduled_ir_module
 
     # Get Scheduled Rt Module and return source to be compiled
-    def wrap(self, c_source: str, is_dynamic: bool = False):
+    def wrap(self, c_source: str):
         assert self.scheduled_ir_module is not None, "Please assign optimized module first."
         if is_cuda_target(self.target):
-            wrapper_class = (
-                TLCUDASourceWrapper if not is_dynamic else TLCUDASourceWrapperWithDynamic)
+            wrapper_class = TLCUDASourceWrapper
         elif is_hip_target(self.target):
             wrapper_class = TLHIPSourceWrapper
         else:
