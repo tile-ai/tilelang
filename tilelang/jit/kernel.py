@@ -75,6 +75,10 @@ class JITKernel(object):
         # Validate the execution backend.
         assert execution_backend in ["dlpack", "torch_cpp", "ctypes",
                                      "cython"], f"Invalid execution backend. {execution_backend}"
+        if execution_backend == "cython":
+            from tilelang.contrib.cc import get_cplus_compiler
+            assert get_cplus_compiler(
+            ) is not None, "Cython backend requires a C++ compiler, please install or use other backends."
 
         # Compile the TileLang function and create a kernel adapter for execution.
         adapter = self._compile_and_create_adapter(func)

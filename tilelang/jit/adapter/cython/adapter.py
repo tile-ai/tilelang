@@ -13,6 +13,7 @@ from .wrapper import TLWrapper
 from .libgen import LibraryGenerator
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
+from tilelang.contrib.cc import get_cplus_compiler
 
 import sys
 import sysconfig
@@ -81,7 +82,8 @@ with open(cython_wrapper_path, "r") as f:
         os.system(f"cython {cython_wrapper_path} --cplus -o {source_path}")
         # compile the .cpp file into .so
         python_include_path = sysconfig.get_path("include")
-        command = f"g++ -shared -pthread -fPIC -fwrapv -O2 -Wall -fno-strict-aliasing -I{python_include_path} {source_path} -o {library_path}"
+        cc = get_cplus_compiler()
+        command = f"{cc} -shared -pthread -fPIC -fwrapv -O2 -Wall -fno-strict-aliasing -I{python_include_path} {source_path} -o {library_path}"
         try:
             os.system(command)
         except Exception as e:
