@@ -24,8 +24,6 @@ Modified from flashinfer
 """
 
 import pathlib
-import re
-import warnings
 
 from tilelang.env import (
     CUTLASS_INCLUDE_DIR,  # noqa: F401
