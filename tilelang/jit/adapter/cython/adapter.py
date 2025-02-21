@@ -25,6 +25,25 @@ import logging
 logger = logging.getLogger("tilelang")
 
 
+def get_cython_compiler() -> Optional[str]:
+    """Return the path to the Cython compiler.
+
+    Returns
+    -------
+    out: Optional[str]
+        The path to the Cython compiler, or None if none was found.
+    """
+
+    cython_names = ["cython", "cython3"]
+    dirs_in_path = os.get_exec_path()
+    for cython_name in cython_names:
+        for d in dirs_in_path:
+            cython_path = os.path.join(d, cython_name)
+            if os.path.isfile(cython_path) and os.access(cython_path, os.X_OK):
+                return cython_path
+    return None
+
+
 # Add cache management functions at module level
 def get_cache_dir() -> Path:
     """Get the cache directory for the current Python version."""
@@ -79,7 +98,10 @@ with open(cython_wrapper_path, "r") as f:
         with open(md5_path, "w") as f:
             f.write(code_hash)
         # compile the cython_wrapper.pyx file into .cpp
-        os.system(f"cython {cython_wrapper_path} --cplus -o {source_path}")
+        cython = get_cython_compiler()
+        if cython is None:
+            raise Exception("Cython is not installed, please install it first.")
+        os.system(f"{cython} {cython_wrapper_path} --cplus -o {source_path}")
         # compile the .cpp file into .so
         python_include_path = sysconfig.get_path("include")
         cc = get_cplus_compiler()

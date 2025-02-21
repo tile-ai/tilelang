@@ -37,7 +37,7 @@ def adapt_torch2tvm(arg):
     }
     if isinstance(arg, torch.Tensor):
         if arg.dtype in {
-            torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz
+                torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz
         }:
             return ndarray.from_dlpack(to_dlpack(arg.view(torch.int8)))._create_view(
                 shape=arg.shape, dtype=float8_dtype_map[arg.dtype])

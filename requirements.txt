@@ -8,4 +8,4 @@ attrs
 cloudpickle
 ml_dtypes
 psutil
-torch
+torch>=2.2.0
