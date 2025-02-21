@@ -243,5 +243,4 @@ class TLWrapper(BaseWrapper):
         else:
             raise ValueError(f"Unsupported platform: {self.arch.platform}")
         wrapper = wrapper_class(self.scheduled_ir_module, c_source, self.target)
-        print(wrapper.lib_code)
         return wrapper.lib_code
