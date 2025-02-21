@@ -63,7 +63,7 @@ func = matmul(1024, 1024, 1024, 128, 128, 32)
 # out_idx specifies the index of the output buffer in the argument list
 # if out_idx is specified, the tensor will be created during runtime
 # target currently can be "cuda" or "hip" or "cpu".
-jit_kernel = tilelang.JITKernel(func, out_idx=[2], target="cuda")
+jit_kernel = tilelang.compile(func, out_idx=[2], target="cuda")
 
 # 3. Test the kernel in Python with PyTorch data
 import torch

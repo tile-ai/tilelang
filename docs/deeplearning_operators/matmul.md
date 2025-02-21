@@ -109,7 +109,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 func = matmul(1024, 1024, 1024, 128, 128, 32)
 
 # 2. JIT-compile the kernel for NVIDIA GPU
-jit_kernel = tilelang.JITKernel(func, out_idx=[2], target="cuda")
+jit_kernel = tilelang.compile(func, out_idx=[2], target="cuda")
 
 import torch
 

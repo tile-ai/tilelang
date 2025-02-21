@@ -92,7 +92,7 @@ def run_gemm(
         code = f"// {stramp}\n" + code
         return code
 
-    matmul_kernel = tilelang.JITKernel(program, out_idx=-1, execution_backend="cython")
+    matmul_kernel = tilelang.compile(program, out_idx=-1, execution_backend="cython")
 
     kernel_source = matmul_kernel.get_kernel_source()
 
@@ -195,7 +195,7 @@ def run_gemm_jit_kernel(
         num_threads,
     )
 
-    matmul_kernel = tilelang.JITKernel(program, out_idx=-1, execution_backend="cython")
+    matmul_kernel = tilelang.compile(program, out_idx=-1, execution_backend="cython")
 
     A = torch.randn(M, K, dtype=torch.__getattribute__(in_dtype)).cuda()
     B = torch.randn(K, N, dtype=torch.__getattribute__(in_dtype)).cuda()
@@ -263,8 +263,8 @@ def run_cython_kernel_do_bench(M,
         num_threads,
     )
 
-    cython_matmul_kernel = tilelang.JITKernel(program, execution_backend="cython")
-    ctypes_matmul_kernel = tilelang.JITKernel(program, execution_backend="ctypes")
+    cython_matmul_kernel = tilelang.compile(program, execution_backend="cython")
+    ctypes_matmul_kernel = tilelang.compile(program, execution_backend="ctypes")
 
     cython_profiler = cython_matmul_kernel.get_profiler()
     ctypes_profiler = ctypes_matmul_kernel.get_profiler()
@@ -319,7 +319,7 @@ def run_cython_kernel_multi_stream(M,
         num_threads,
     )
 
-    matmul_kernel = tilelang.JITKernel(program, execution_backend="cython")
+    matmul_kernel = tilelang.compile(program, execution_backend="cython")
 
     tensor_a = torch.randn(M, K, dtype=torch.__getattribute__(in_dtype)).cuda()
     tensor_b = torch.randn(K, N, dtype=torch.__getattribute__(in_dtype)).cuda()
@@ -371,7 +371,7 @@ def run_cython_dynamic_shape(M,
         num_threads,
     )
 
-    matmul_kernel = tilelang.JITKernel(program, execution_backend="cython")
+    matmul_kernel = tilelang.compile(program, execution_backend="cython")
     if isinstance(M, T.Var):
         M = 1024
     if isinstance(N, T.Var):

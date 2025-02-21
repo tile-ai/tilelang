@@ -227,7 +227,22 @@ class TileLangBuilPydCommand(build_py):
         ext_output_dir = os.path.dirname(extdir)
         print(f"Extension output directory (parent): {ext_output_dir}")
         print(f"Build temp directory: {build_temp_dir}")
-
+        # copy cython files
+        CYTHON_SRC = [
+            "tilelang/jit/adapter/cython/cython_wrapper.pyx",
+        ]
+        for item in CYTHON_SRC:
+            source_dir = os.path.join(ROOT_DIR, item)
+            target_dir = os.path.join(self.build_lib, item)
+            if os.path.isdir(source_dir):
+                self.mkpath(target_dir)
+                distutils.dir_util.copy_tree(source_dir, target_dir)
+            else:
+                target_dir = os.path.dirname(target_dir)
+                if not os.path.exists(target_dir):
+                    os.makedirs(target_dir)
+                shutil.copy2(source_dir, target_dir)
+        # copy the tl_templates
         TILELANG_SRC = [
             "src/tl_templates",
         ]

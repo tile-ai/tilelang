@@ -213,6 +213,8 @@ class JITKernel(object):
         str
             The source code of the compiled kernel function.
         """
+        if self.execution_backend == "ctypes":
+            return self.adapter.get_kernel_source()
         return self.rt_module.imported_modules[0].get_source()
 
     def get_host_source(self) -> str:

@@ -67,7 +67,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         self.lib_generator = LibraryGenerator(self.target)
 
         self.wrapper.assign_optimized_module(self.ir_module)
-        self.wrapped_source = self.wrapper.wrap(self.get_kernel_source())
+        self.wrapped_source = self.wrapper.wrap(self.get_kernel_source(kernel_only=True))
 
         self.lib_generator.update_lib_code(self.wrapped_source)
         self.lib_generator.compile_lib()
@@ -185,3 +185,11 @@ class CtypesKernelAdapter(BaseKernelAdapter):
     def is_dynamic(self):
         """Indicates whether the kernel handles dynamic shapes."""
         return (self.dynamic_symbolic_map is not None and len(self.dynamic_symbolic_map) > 0)
+
+    def get_kernel_source(self, kernel_only: bool = False):
+        """Returns the source code of the compiled kernel."""
+        if kernel_only:
+            return self.mod.imported_modules[0].get_source()
+        else:
+            assert self.wrapped_source is not None, "Wrapped source is not available"
+            return self.wrapped_source

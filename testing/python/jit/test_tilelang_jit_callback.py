@@ -93,7 +93,7 @@ def run_gemm(
         code = f"// {stramp}\n" + code
         return code
 
-    matmul_kernel = tilelang.JITKernel(program, out_idx=-1, execution_backend="dlpack")
+    matmul_kernel = tilelang.compile(program, out_idx=-1, execution_backend="dlpack")
 
     kernel_source = matmul_kernel.get_kernel_source()
 
@@ -196,7 +196,7 @@ def run_gemm_jit_kernel(
         num_threads,
     )
 
-    matmul_kernel = tilelang.JITKernel(program, out_idx=-1, execution_backend="dlpack")
+    matmul_kernel = tilelang.compile(program, out_idx=-1, execution_backend="dlpack")
 
     A = torch.randn(M, K, dtype=torch.__getattribute__(in_dtype)).cuda()
     B = torch.randn(K, N, dtype=torch.__getattribute__(in_dtype)).cuda()
