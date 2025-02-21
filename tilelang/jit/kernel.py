@@ -7,7 +7,7 @@ import tilelang
 from tilelang import tvm as tvm
 from tvm.tir import PrimFunc
 
-from tilelang.jit.adapter import TorchCPPKernelAdapter, TorchDLPackKernelAdapter, BaseKernelAdapter, CtypesKernelAdapter
+from tilelang.jit.adapter import TorchCPPKernelAdapter, TorchDLPackKernelAdapter, BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter
 from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
 from tilelang.profiler import Profiler, TensorSupplyType
 
@@ -34,7 +34,7 @@ class JITKernel(object):
         self,
         func: PrimFunc = None,
         out_idx: Union[List[int], int] = None,
-        execution_backend: Literal["dlpack", "torch_cpp", "ctypes"] = "dlpack",
+        execution_backend: Literal["dlpack", "torch_cpp", "ctypes", "cython"] = "cython",
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
         verbose: bool = False,
@@ -73,8 +73,8 @@ class JITKernel(object):
         target = Target(target)
 
         # Validate the execution backend.
-        assert execution_backend in ["dlpack", "torch_cpp",
-                                     "ctypes"], f"Invalid execution backend. {execution_backend}"
+        assert execution_backend in ["dlpack", "torch_cpp", "ctypes",
+                                     "cython"], f"Invalid execution backend. {execution_backend}"
 
         # Compile the TileLang function and create a kernel adapter for execution.
         adapter = self._compile_and_create_adapter(func)
@@ -145,8 +145,16 @@ class JITKernel(object):
             )
             raise NotImplementedError("Torch CPP backend is not fully implemented.")
         elif execution_backend == "ctypes":
-            # CTYPES backend (not fully tested yet).
             adapter = CtypesKernelAdapter(
+                rt_mod,
+                params=params,
+                result_idx=out_idx,
+                target=target,
+                func_or_mod=tilelang_func,
+                verbose=verbose,
+            )
+        elif execution_backend == "cython":
+            adapter = CythonKernelAdapter(
                 rt_mod,
                 params=params,
                 result_idx=out_idx,

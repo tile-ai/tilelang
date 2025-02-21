@@ -85,3 +85,6 @@ tilelang/lib
 
 # tox
 .tox/
+
+# cython
+tilelang/jit/adapter/cython/.cycache
