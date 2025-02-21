@@ -106,6 +106,7 @@ def jit(
 
     return real_decorator
 
+
 def compile(
     func: PrimFunc = None,
     out_idx: Union[List[int], int] = None,
@@ -117,4 +118,10 @@ def compile(
     """
     Compile the given TileLang PrimFunc with TVM and build a JITKernel.
     """
-    return JITKernel(func, out_idx=out_idx, execution_backend=execution_backend, target=target, target_host=target_host, verbose=verbose)
+    return JITKernel(
+        func,
+        out_idx=out_idx,
+        execution_backend=execution_backend,
+        target=target,
+        target_host=target_host,
+        verbose=verbose)
