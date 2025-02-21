@@ -23,7 +23,7 @@ cdef class CythonKernelWrapper:
         self.params = params
         self.lib = lib
 
-    cpdef forward(self, list inputs, int stream = -1):
+    cpdef forward(self, list inputs, int64_t stream = -1):
         # Validate input dimensions and prepare for kernel execution
         cdef int total_params = len(self.params)
         cdef int total_inputs = len(inputs)
@@ -38,7 +38,7 @@ cdef class CythonKernelWrapper:
 
         # Use current CUDA stream if none specified
         if stream == -1:
-            stream = <uintptr_t>torch.cuda.current_stream().cuda_stream
+            stream = torch.cuda.current_stream().cuda_stream
 
         cdef int ins_idx = 0
         cdef list tensor_list = []
