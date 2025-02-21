@@ -408,5 +408,4 @@ def test_cython_dynamic_shape():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_cython_kernel_multi_stream()
+    tilelang.testing.main()
