@@ -23,6 +23,7 @@ import logging
 
 logger = logging.getLogger("tilelang")
 
+
 # Add cache management functions at module level
 def get_cache_dir() -> Path:
     """Get the cache directory for the current Python version."""
@@ -33,6 +34,7 @@ def get_cache_dir() -> Path:
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 
+
 def get_cached_lib(source_code: str) -> Tuple[Optional[ctypes.CDLL], Path]:
     """Try to load cached library or return None if not found."""
     code_hash = hashlib.sha256(source_code.encode()).hexdigest()
@@ -40,9 +42,11 @@ def get_cached_lib(source_code: str) -> Tuple[Optional[ctypes.CDLL], Path]:
     if cache_path.exists():
         try:
             return ctypes.CDLL(str(cache_path)), cache_path
-        except:
+        except Exception as e:
+            logger.error(f"Failed to load cached library: {e}")
             return None, cache_path
     return None, cache_path
+
 
 # read the cython_wrapper.pyx file
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -55,22 +59,22 @@ with open(cython_wrapper_path, "r") as f:
     library_path = cache_dir / "cython_wrapper.so"
     md5_path = cache_dir / "md5.txt"
     code_hash = hashlib.sha256(cython_wrapper_code.encode()).hexdigest()
-    
+
     # Check if cached version exists and is valid
     need_compile = True
     if md5_path.exists() and library_path.exists():
         with open(md5_path, "r") as f:
             cached_hash = f.read().strip()
             if cached_hash == code_hash:
-                logger.debug(f"Cython jit adapter is up to date, no need to compile...")
+                logger.debug("Cython jit adapter is up to date, no need to compile...")
                 need_compile = False
             else:
-                logger.info(f"Cython jit adapter is out of date, need to compile...")
+                logger.info("Cython jit adapter is out of date, need to compile...")
     else:
-        logger.info(f"No cached version found for cython jit adapter, need to compile...")
-    
+        logger.info("No cached version found for cython jit adapter, need to compile...")
+
     if need_compile:
-        logger.info(f"Compiling cython jit adapter...")
+        logger.info("Compiling cython jit adapter...")
         with open(md5_path, "w") as f:
             f.write(code_hash)
         # compile the cython_wrapper.pyx file into .cpp
@@ -81,14 +85,15 @@ with open(cython_wrapper_path, "r") as f:
         try:
             os.system(command)
         except Exception as e:
-            raise f"Failed to compile cython jit adapter" from e
-    
+            raise Exception(f"Failed to compile cython jit adapter: {e}") from e
+
     # add the .so file to the sys.path
     cache_dir_str = str(cache_dir)
     if cache_dir_str not in sys.path:
         sys.path.append(cache_dir_str)
 
 from cython_wrapper import CythonKernelWrapper
+
 
 class CythonKernelAdapter(BaseKernelAdapter):
     """Adapter class that converts TVM/TIR functions to callable CUDA kernels using ctypes.
@@ -148,7 +153,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.lib = self.lib_generator.load_lib()
         self.lib.init()
 
-        self.cython_wrapper = CythonKernelWrapper(self.dynamic_symbolic_map, self.result_idx, self.params, self.lib)
+        self.cython_wrapper = CythonKernelWrapper(self.dynamic_symbolic_map, self.result_idx,
+                                                  self.params, self.lib)
 
         self._post_init()
 
@@ -182,8 +188,10 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
     def _convert_torch_func(self) -> Callable:
         """Returns a PyTorch-compatible function wrapper for the kernel."""
+
         def lambda_forward(*args, stream: int = -1):
             return self.cython_wrapper.forward([*args], stream=stream)
+
         return lambda_forward
 
     @property
