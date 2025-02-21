@@ -24,7 +24,7 @@ def jit(
     func: Callable = None,
     *,  # Enforce keyword-only arguments from here on
     out_idx: Union[List[int], int] = None,
-    execution_backend: Literal["dlpack", "torch_cpp", "ctypes"] = "dlpack",
+    execution_backend: Literal["dlpack", "ctypes"] = "dlpack",
     target: Union[str, Target] = "auto",
     verbose: bool = False,
 ) -> BaseKernelAdapter:
@@ -42,9 +42,9 @@ def jit(
     out_idx : Union[List[int], int], optional
         The index (or list of indices) of the function outputs. This can be used
         to specify which outputs from the compiled function will be returned.
-    execution_backend : Literal["dlpack", "torch_cpp", "ctypes"], optional
+    execution_backend : Literal["dlpack", "ctypes"], optional
         The wrapper type to use for the kernel adapter. Currently, only "dlpack"
-        and "torch_cpp" are supported.
+        and "ctypes" are supported.
     target : Union[str, Target], optional
         The compilation target for TVM. If set to "auto", an appropriate target
         will be inferred automatically. Otherwise, must be one of the supported
@@ -69,7 +69,7 @@ def jit(
 
     target = Target(target)
 
-    assert execution_backend in ["dlpack", "torch_cpp", "ctypes"], "Invalid execution backend."
+    assert execution_backend in ["dlpack", "ctypes", "cython"], "Invalid execution backend."
 
     def _compile_and_create_adapter(tilelang_func: PrimFunc) -> BaseKernelAdapter:
         """
@@ -110,7 +110,7 @@ def jit(
 def compile(
     func: PrimFunc = None,
     out_idx: Union[List[int], int] = None,
-    execution_backend: Literal["dlpack", "torch_cpp", "ctypes", "cython"] = "cython",
+    execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
     target: Union[str, Target] = "auto",
     target_host: Union[str, Target] = None,
     verbose: bool = False,

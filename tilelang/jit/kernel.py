@@ -7,7 +7,7 @@ import tilelang
 from tilelang import tvm as tvm
 from tvm.tir import PrimFunc
 
-from tilelang.jit.adapter import TorchCPPKernelAdapter, TorchDLPackKernelAdapter, BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter
+from tilelang.jit.adapter import TorchDLPackKernelAdapter, BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter
 from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
 from tilelang.profiler import Profiler, TensorSupplyType
 
@@ -34,7 +34,7 @@ class JITKernel(object):
         self,
         func: PrimFunc = None,
         out_idx: Union[List[int], int] = None,
-        execution_backend: Literal["dlpack", "torch_cpp", "ctypes", "cython"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
         verbose: bool = False,
@@ -48,7 +48,7 @@ class JITKernel(object):
             The TileLang TIR function to compile and wrap.
         out_idx : Union[List[int], int], optional
             Index(es) of the output tensors to return (default: None).
-        execution_backend : Literal["dlpack", "torch_cpp", "ctypes"], optional
+        execution_backend : Literal["dlpack", "ctypes"], optional
             Execution backend to use for kernel execution (default: "dlpack").
         target : Union[str, Target], optional
             Compilation target, either as a string or a TVM Target object (default: "auto").
@@ -73,7 +73,7 @@ class JITKernel(object):
         target = Target(target)
 
         # Validate the execution backend.
-        assert execution_backend in ["dlpack", "torch_cpp", "ctypes",
+        assert execution_backend in ["dlpack", "ctypes",
                                      "cython"], f"Invalid execution backend. {execution_backend}"
         if execution_backend == "cython":
             from tilelang.contrib.cc import get_cplus_compiler
@@ -137,17 +137,6 @@ class JITKernel(object):
         if execution_backend == "dlpack":
             # Use TorchDLPackKernelAdapter for interoperability with PyTorch via DLPack.
             adapter = TorchDLPackKernelAdapter(rt_mod, params=params, result_idx=out_idx)
-        elif execution_backend == "torch_cpp":
-            # Torch CPP backend adapter (not fully implemented yet).
-            adapter = TorchCPPKernelAdapter(
-                rt_mod,
-                params=params,
-                result_idx=out_idx,
-                target=target,
-                prim_func=tilelang_func,
-                verbose=verbose,
-            )
-            raise NotImplementedError("Torch CPP backend is not fully implemented.")
         elif execution_backend == "ctypes":
             adapter = CtypesKernelAdapter(
                 rt_mod,
