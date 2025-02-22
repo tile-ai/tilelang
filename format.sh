@@ -35,9 +35,9 @@ tool_version_check() {
     fi
 }
 
-tool_version_check "yapf" $YAPF_VERSION "$(grep yapf requirements-dev.txt | cut -d'=' -f3)"
-tool_version_check "ruff" $RUFF_VERSION "$(grep "ruff==" requirements-dev.txt | cut -d'=' -f3)"
-tool_version_check "codespell" "$CODESPELL_VERSION" "$(grep codespell requirements-dev.txt | cut -d'=' -f3)"
+tool_version_check "yapf" $YAPF_VERSION "$(grep yapf requirements-lint.txt | cut -d'=' -f3)"
+tool_version_check "ruff" $RUFF_VERSION "$(grep "ruff==" requirements-lint.txt | cut -d'=' -f3)"
+tool_version_check "codespell" "$CODESPELL_VERSION" "$(grep codespell requirements-lint.txt | cut -d'=' -f3)"
 
 echo 'tile-lang yapf: Check Start'
 
@@ -196,7 +196,7 @@ echo 'tile-lang clang-format: Check Start'
 # If clang-format is available, run it; otherwise, skip
 if command -v clang-format &>/dev/null; then
     CLANG_FORMAT_VERSION=$(clang-format --version | awk '{print $3}')
-    tool_version_check "clang-format" "$CLANG_FORMAT_VERSION" "$(grep clang-format requirements-dev.txt | cut -d'=' -f3)"
+    tool_version_check "clang-format" "$CLANG_FORMAT_VERSION" "$(grep clang-format requirements-lint.txt | cut -d'=' -f3)"
 
     CLANG_FORMAT_FLAGS=("-i")
 
