@@ -228,6 +228,34 @@ class TileLangBuilPydCommand(build_py):
         print(f"Extension output directory (parent): {ext_output_dir}")
         print(f"Build temp directory: {build_temp_dir}")
 
+        potential_dirs = [
+            ext_output_dir,
+            self.build_lib,
+            build_temp_dir,
+            os.path.join(ROOT_DIR, "build"),
+        ]
+
+        # copy cython files
+        CYTHON_SRC = [
+            "tilelang/jit/adapter/cython/cython_wrapper.pyx",
+        ]
+        for item in CYTHON_SRC:
+            print(f"Copying {item} to {self.build_lib}")
+            source_cython_file = None
+            for dir in potential_dirs:
+                candidate = os.path.join(dir, item)
+                if os.path.exists(candidate):
+                    source_cython_file = candidate
+                    break
+
+            if source_cython_file:
+                source_dir = os.path.dirname(source_cython_file)
+                target_file = os.path.join(self.build_lib, item)
+                if not os.path.exists(target_file):
+                    shutil.copy2(source_cython_file, target_file)
+            else:
+                print(f"WARNING: {item} not found in any expected directories!")
+
         # copy the tl_templates
         TILELANG_SRC = [
             "src/tl_templates",
@@ -249,13 +277,6 @@ class TileLangBuilPydCommand(build_py):
             "libtvm.so",
             "libtilelang.so",
             "libtilelang_module.so",
-        ]
-
-        potential_dirs = [
-            ext_output_dir,
-            self.build_lib,
-            build_temp_dir,
-            os.path.join(ROOT_DIR, "build"),
         ]
 
         for item in TVM_PREBUILD_ITEMS:
