@@ -254,6 +254,11 @@ class TileLangBuilPydCommand(build_py):
                 if os.path.isdir(source_dir):
                     self.mkpath(target_dir)
                     distutils.dir_util.copy_tree(source_dir, target_dir)
+                else:
+                    target_dir = os.path.dirname(target_dir)
+                    if not os.path.exists(target_dir):
+                        os.makedirs(target_dir)
+                    shutil.copy2(source_cython_file, target_dir)
             else:
                 print(f"WARNING: {item} not found in any expected directories!")
 
