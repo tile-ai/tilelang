@@ -236,31 +236,31 @@ class TileLangBuilPydCommand(build_py):
         ]
 
         # copy cython files
-        CYTHON_SRC = [
-            "tilelang/jit/adapter/cython/cython_wrapper.pyx",
-        ]
-        for item in CYTHON_SRC:
-            print(f"Copying {item} to {self.build_lib}")
-            source_cython_file = None
-            for dir in potential_dirs:
-                candidate = os.path.join(dir, item)
-                if os.path.exists(candidate):
-                    source_cython_file = candidate
-                    break
+        # CYTHON_SRC = [
+        #     "tilelang/jit/adapter/cython/cython_wrapper.pyx",
+        # ]
+        # for item in CYTHON_SRC:
+        #     print(f"Copying {item} to {self.build_lib}")
+        #     source_cython_file = None
+        #     for dir in potential_dirs:
+        #         candidate = os.path.join(dir, item)
+        #         if os.path.exists(candidate):
+        #             source_cython_file = candidate
+        #             break
 
-            if source_cython_file:
-                source_dir = os.path.dirname(source_cython_file)
-                target_dir = os.path.join(self.build_lib, item)
-                if os.path.isdir(source_dir):
-                    self.mkpath(target_dir)
-                    distutils.dir_util.copy_tree(source_dir, target_dir)
-                else:
-                    target_dir = os.path.dirname(target_dir)
-                    if not os.path.exists(target_dir):
-                        os.makedirs(target_dir)
-                    shutil.copy2(source_cython_file, target_dir)
-            else:
-                print(f"WARNING: {item} not found in any expected directories!")
+        #     if source_cython_file:
+        #         source_dir = os.path.dirname(source_cython_file)
+        #         target_dir = os.path.join(self.build_lib, item)
+        #         if os.path.isdir(source_dir):
+        #             self.mkpath(target_dir)
+        #             distutils.dir_util.copy_tree(source_dir, target_dir)
+        #         else:
+        #             target_dir = os.path.dirname(target_dir)
+        #             if not os.path.exists(target_dir):
+        #                 os.makedirs(target_dir)
+        #             shutil.copy2(source_cython_file, target_dir)
+        #     else:
+        #         print(f"WARNING: {item} not found in any expected directories!")
 
         # copy the tl_templates
         TILELANG_SRC = [
