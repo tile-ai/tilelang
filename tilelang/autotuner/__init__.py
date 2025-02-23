@@ -81,7 +81,8 @@ class Autotuner:
                 "tvm") if self.jit_input_tensors is None else self.jit_input_tensors
 
             if (not skip_check) and (ref_prog is not None):
-                mod.assert_allclose(ref_prog, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio)
+                mod.assert_allclose(
+                    ref_prog, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio)
 
             latency = mod.do_bench(
                 mod.func,
