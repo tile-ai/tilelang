@@ -325,59 +325,59 @@ def test_topk_sparse_attention():
     print("Pass topk sparse attention test with qlen == klen")
 
 
-# def test_topk_sparse_attention_qlt_kl():
-#     BATCH, N_HEADS = 2, 4
-#     Q_LEN, K_LEN, D_HEAD = 128, 256, 64  # qlen < klen; here, past_len = 256 - 128 = 128.
-#     TOPK = 1
-#     BLOCK = 64  # block size used in downsampling
-#     torch.manual_seed(0)
+def test_topk_sparse_attention_qlt_kl():
+    BATCH, N_HEADS = 2, 4
+    Q_LEN, K_LEN, D_HEAD = 128, 256, 64  # qlen < klen; here, past_len = 256 - 128 = 128.
+    TOPK = 1
+    BLOCK = 64  # block size used in downsampling
+    torch.manual_seed(0)
 
-#     # Create inputs.
-#     q = torch.randn(BATCH, N_HEADS, Q_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
-#     k = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
-#     v = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
-#     # softmax scale
-#     sm_scale = 1.0 / (D_HEAD ** 0.5)
+    # Create inputs.
+    q = torch.randn(BATCH, N_HEADS, Q_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
+    k = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
+    v = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
+    # softmax scale
+    sm_scale = 1.0 / (D_HEAD ** 0.5)
 
-#     downsample_factor = BLOCK
-#     print("downsample_factor", downsample_factor)
-#     downsample_len = math.ceil(K_LEN / downsample_factor)  # number of blocks along one dimension
-#     print("downsample_len", downsample_len)
-#     x_ds = torch.randn(BATCH, N_HEADS, downsample_len, downsample_len,
-#                         device='cuda', dtype=torch.bfloat16)
-#     # Force the first column to be high so that the first block is always selected.
-#     x_ds[:, :, :, 0] = 100
-#     block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
-#     print("block_mask", block_mask)
-#     print("block_mask.shape", block_mask.shape)
-#     # Run Triton kernel.
-#     triton_output = block_sparse_triton_fn(q, k, v, block_mask, sm_scale)
+    downsample_factor = BLOCK
+    print("downsample_factor", downsample_factor)
+    downsample_len = math.ceil(K_LEN / downsample_factor)  # number of blocks along one dimension
+    print("downsample_len", downsample_len)
+    x_ds = torch.randn(BATCH, N_HEADS, downsample_len, downsample_len,
+                        device='cuda', dtype=torch.bfloat16)
+    # Force the first column to be high so that the first block is always selected.
+    x_ds[:, :, :, 0] = 100
+    block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
+    print("block_mask", block_mask)
+    print("block_mask.shape", block_mask.shape)
+    # Run Triton kernel.
+    triton_output = block_sparse_triton_fn(q, k, v, block_mask, sm_scale)
 
-#     past_len = K_LEN - Q_LEN
+    past_len = K_LEN - Q_LEN
 
-#     attn = torch.einsum('bhsd,bhtd->bhst', q, k) * sm_scale
+    attn = torch.einsum('bhsd,bhtd->bhst', q, k) * sm_scale
 
-#     full_mask_full = torch.kron(block_mask.float(), torch.ones(BLOCK, BLOCK, device='cuda')).bool()
-#     full_mask_full = full_mask_full[..., :K_LEN, :K_LEN]
+    full_mask_full = torch.kron(block_mask.float(), torch.ones(BLOCK, BLOCK, device='cuda')).bool()
+    full_mask_full = full_mask_full[..., :K_LEN, :K_LEN]
 
-#     effective_mask = full_mask_full[..., past_len:K_LEN, :]  # shape: (B, H, Q_LEN, K_LEN)
+    effective_mask = full_mask_full[..., past_len:K_LEN, :]  # shape: (B, H, Q_LEN, K_LEN)
 
-#     i_global = torch.arange(past_len, K_LEN, device=k.device).unsqueeze(1)  # shape: (Q_LEN, 1)
-#     j_global = torch.arange(K_LEN, device=k.device).unsqueeze(0)              # shape: (1, K_LEN)
-#     causal_mask = (j_global <= i_global)  # shape: (Q_LEN, K_LEN)
+    i_global = torch.arange(past_len, K_LEN, device=k.device).unsqueeze(1)  # shape: (Q_LEN, 1)
+    j_global = torch.arange(K_LEN, device=k.device).unsqueeze(0)              # shape: (1, K_LEN)
+    causal_mask = (j_global <= i_global)  # shape: (Q_LEN, K_LEN)
 
-#     final_mask = effective_mask & causal_mask  # shape: (B, H, Q_LEN, K_LEN)
+    final_mask = effective_mask & causal_mask  # shape: (B, H, Q_LEN, K_LEN)
 
-#     attn = attn.masked_fill(~final_mask, float('-inf'))
-#     attn = F.softmax(attn, dim=-1)
-#     ref_output = torch.einsum('bhst,bhtd->bhsd', attn, v)
+    attn = attn.masked_fill(~final_mask, float('-inf'))
+    attn = F.softmax(attn, dim=-1)
+    ref_output = torch.einsum('bhst,bhtd->bhsd', attn, v)
 
-#     # Verify accuracy.
-#     assert torch.allclose(triton_output, ref_output, atol=1e-2, rtol=1e-2), \
-#         "Triton output doesn't match reference when qlen < klen"
+    # Verify accuracy.
+    assert torch.allclose(triton_output, ref_output, atol=1e-2, rtol=1e-2), \
+        "Triton output doesn't match reference when qlen < klen"
 
-#     print("Pass topk sparse attention test with qlen < klen")
+    print("Pass topk sparse attention test with qlen < klen")
 
 if __name__ == "__main__":
     test_topk_sparse_attention()
-    # test_topk_sparse_attention_qlt_kl()
+    test_topk_sparse_attention_qlt_kl()
