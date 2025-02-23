@@ -180,8 +180,6 @@ def ref_program(query, key, value, glse, Output_partial):
 
 
 def flash_split_ref(Q, K, V):
-    # from einops import rearrange
-    # [batch, seqlen_q, heads, dim]
     dim = 512
     pe_dim = 64
     batch = Q.size(0)
@@ -239,7 +237,7 @@ def flash_split_ref(Q, K, V):
 
 def reduce_ref(Q, K, V, glse, Output_partial):
     o = torch.empty_like(Output_partial[:, :, 0, :]).fill_(0)
-    lse_logsum = torch.empty_like(glse[:, :, 0]).fill_(0)  # [batch, heads]
+    lse_logsum = torch.empty_like(glse[:, :, 0]).fill_(0)
     lse_max = glse.max(dim=2, keepdim=False).values
     for ks in range(num_split):
         lse = glse[:, :, ks]
@@ -247,7 +245,7 @@ def reduce_ref(Q, K, V, glse, Output_partial):
     lse_logsum = torch.log2(lse_logsum) + lse_max
     for ks in range(num_split):
         lse = glse[:, :, ks]
-        scale = torch.exp2(lse - lse_logsum)  # [batch, heads]
+        scale = torch.exp2(lse - lse_logsum)
         o += Output_partial[:, :, ks, :] * scale[:, :, None]
     return o.to(torch.float16)
 
@@ -263,20 +261,7 @@ if __name__ == "__main__":
     program = flashattn(BATCH, H_Q, KV_H, KV_CTX, D_HEAD, DPE, BLOCK_N, BLOCK_H)
     mod, params = tilelang.lower(program)
     mod = tilelang.Profiler(mod, params, [5], tilelang.TensorSupplyType.Normal)
-    # mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+    mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
     latency = mod.do_bench(mod.func, warmup=500)
     print("Tile-lang: {:.2f} ms".format(latency))
     print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-
-    # mod = tilelang.Profiler(mod, params, [3, 4], tilelang.TensorSupplyType.Normal)
-    # mod.assert_allclose(flash_split_ref, rtol=0.01, atol=0.01)
-
-    # ins = mod._get_inputs()
-    # outs = mod.func(*ins)
-    # ref_outs = reduce_ref(*ins)
-
-    # print("outs:", outs)
-    # print("ref_outs:", ref_outs)
-
-    # mod.assert_allclose(reduce_ref, rtol=0.01, atol=0.01)
-    # print("All checks passed!")

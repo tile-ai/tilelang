@@ -100,7 +100,7 @@ class Profiler(TorchDLPackKernelAdapter):
         rep: int = 100,
         n_warmup: int = 1,
         n_repeat: int = 1,
-        profiler: Literal["torch", "tvm", "auto"] = "auto",
+        profiler: Literal["torch", "tvm", "auto"] = "torch",
         input_tensors: List[torch.Tensor] = None,
     ):
         if func is None:
