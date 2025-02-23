@@ -39,9 +39,7 @@ total_tiles = num_block_m * num_block_n
 
 # Two-tile SK + DP
 streamk_tiles = total_tiles % streamk_programs
-if (
-    total_tiles - streamk_tiles > streamk_programs
-):  # (total_tiles // total_programs > 1)
+if (total_tiles - streamk_tiles > streamk_programs):  # (total_tiles // total_programs > 1)
     streamk_tiles += streamk_programs
 
 blocking_tiles = total_tiles - streamk_tiles
@@ -92,9 +90,7 @@ def tl_matmul_streamk(
         end_iter = T.alloc_fragment((1,), "int32", "local")
 
         start_iter[0] = pid * streamk_full_tiles + T.min(pid, streamk_partial_tiles)
-        last_iter = (pid + 1) * streamk_full_tiles + T.min(
-            pid + 1, streamk_partial_tiles
-        )
+        last_iter = (pid + 1) * streamk_full_tiles + T.min(pid + 1, streamk_partial_tiles)
 
         while start_iter[0] < last_iter:
             end_iter[0] = T.min(
@@ -124,9 +120,7 @@ def tl_matmul_streamk(
                 T.copy(C_local, C[pid_m * block_M, pid_n * block_N])
             else:
                 for i, j in T.Parallel(block_M, block_N):
-                    T.atomic_add(
-                        C[pid_m * block_M + i, pid_n * block_N + j], C_local[i, j]
-                    )
+                    T.atomic_add(C[pid_m * block_M + i, pid_n * block_N + j], C_local[i, j])
 
             start_iter[0] = end_iter[0]
 
@@ -155,9 +149,9 @@ def tl_matmul_streamk(
 
     @T.prim_func
     def main(
-        A: T.Buffer(A_shape, dtypeAB),
-        B: T.Buffer(B_shape, dtypeAB),
-        C: T.Buffer((M, N), dtypeC),
+            A: T.Buffer(A_shape, dtypeAB),
+            B: T.Buffer(B_shape, dtypeAB),
+            C: T.Buffer((M, N), dtypeC),
     ):
         with T.Kernel(streamk_programs, threads=threads) as pid:
 
@@ -166,9 +160,9 @@ def tl_matmul_streamk(
             A_shared_full_tiles = T.alloc_shared(A_shared_shape, dtypeAB)
             B_shared_full_tiles = T.alloc_shared(B_shared_shape, dtypeAB)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-            
+
             compute_first_wave(pid, A, A_shared, B, B_shared, C, C_local)
-            
+
             if sm_patition_factor > 0:
                 compute_full_tiles(pid, A, A_shared_full_tiles, B, B_shared_full_tiles, C, C_local)
 

@@ -2,12 +2,12 @@
 # Licensed under the MIT License.
 
 import tilelang
-from tilelang import Profiler
 import tilelang.language as T
 from tvm import DataType
 
+
 def matmul(M, N, K, block_M, block_N, block_K, split_k, dtype="float16", accum_dtype="float"):
-    
+
     splitK = K // split_k
 
     @T.prim_func
@@ -16,7 +16,8 @@ def matmul(M, N, K, block_M, block_N, block_K, split_k, dtype="float16", accum_d
             B: T.Buffer((N, K), dtype),
             C: T.Buffer((M, N), dtype),
     ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), split_k, threads=128) as (bx, by, bz):
+        with T.Kernel(
+                T.ceildiv(N, block_N), T.ceildiv(M, block_M), split_k, threads=128) as (bx, by, bz):
             A_shared = T.alloc_shared((block_M, block_K), dtype, "shared")
             B_shared = T.alloc_shared((block_K, block_N), dtype, "shared")
             C_shared = T.alloc_shared((block_M, block_N), dtype, "shared")
@@ -33,20 +34,17 @@ def matmul(M, N, K, block_M, block_N, block_K, split_k, dtype="float16", accum_d
                 T.copy(A[by * block_M, bz * splitK + ko * block_K], A_shared)
                 T.copy(B[bz * splitK + ko * block_K, bx * block_N], B_shared)
                 T.gemm(A_shared, B_shared, C_local)
-        
+
             T.copy(C_local, C_shared)
 
             if DataType(dtype).bits == 16:
                 for i, j in T.Parallel(block_M, block_N // 2):
                     m, n = by * block_M + i, bx * block_N + j * 2
                     # vectorized atomic
-                    T.atomic_addx2(
-                        C[m, n], C_shared[i, j * 2])
+                    T.atomic_addx2(C[m, n], C_shared[i, j * 2])
                 else:
                     for i, j in T.Parallel(block_M, block_N):
-                        T.atomic_add(
-                            C[by * block_M + i, bx * block_N + j], C_shared[i, j])
-            
+                        T.atomic_add(C[by * block_M + i, bx * block_N + j], C_shared[i, j])
 
     return main
 
