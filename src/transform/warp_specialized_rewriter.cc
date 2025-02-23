@@ -972,7 +972,7 @@ private:
         DataType::Handle(), CreateListofMBarrierOp(), barrier_num_threads));
     Stmt body = IfThenElse(GE(thread_iv_->var, consumer_thread_extent),
                            producer_code, consumer_code);
-    // Add an attr here to handle the partial thread count in THreadSync pass.
+    // Add an attr here to handle the partial thread count in ThreadSync pass.
     Array<IntImm> ws_partition = {Downcast<IntImm>(producer_thread_extent),
                                   Downcast<IntImm>(consumer_thread_extent)};
     body = AttrStmt(ws_partition, "kWarpSpecializationScope", 0, body);

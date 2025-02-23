@@ -5,7 +5,7 @@
 import tilelang as tl
 import os
 import os.path as osp
-from typing import Union, Optional
+from typing import Union, Optional, Callable
 from tilelang import tvm as tvm
 from tvm import tir, relay
 from tvm.ir import CallingConv
@@ -14,21 +14,36 @@ from tilelang.contrib import hipcc, nvcc
 from tilelang.utils.target import determine_target
 
 
-def is_device_call(func: tir.PrimFunc):
+def is_cpu_device_backend(target: Target):
+    return target.kind.name == "c"
+
+
+def has_device_kernel_launch(attrs) -> bool:
+    """Check if the attributes indicate a device kernel launch."""
+    return bool(attrs and "calling_conv" in attrs and
+                attrs["calling_conv"] == CallingConv.DEVICE_KERNEL_LAUNCH)
+
+
+def is_device_call_c_device(func: tir.PrimFunc):
     attrs = func.attrs
 
-    # consider c source as a device call
-    if "target" in attrs:
-        target = attrs["target"]
-        if target.kind.name == "c":
-            return True
+    # Check if it's a C target
+    if "target" in attrs and attrs["target"].kind.name == "c":
+        return True
 
-    return bool(func.attrs and "calling_conv" in func.attrs and
-                func.attrs["calling_conv"] == CallingConv.DEVICE_KERNEL_LAUNCH)
+    return has_device_kernel_launch(attrs)
 
 
-def is_host_call(func: tir.PrimFunc):
-    return not is_device_call(func)
+def is_device_call(func: tir.PrimFunc):
+    return has_device_kernel_launch(func.attrs)
+
+
+def get_device_call(is_device_c: bool = False) -> Callable[[tir.PrimFunc], bool]:
+    return is_device_call_c_device if is_device_c else is_device_call
+
+
+def get_host_call(is_device_c: bool = False) -> Callable[[tir.PrimFunc], bool]:
+    return lambda func: not get_device_call(is_device_c)(func)
 
 
 @tvm.register_func("tilelang_callback_cuda_compile", override=True)
@@ -134,6 +149,9 @@ def lower(
     target_host = tvm.target.Target.canon_target(target_host)
     target = tvm.target.Target(target, target_host)
 
+    _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
+    _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
+
     mod = tir.transform.BindTarget(target)(mod)
 
     mod = tl.transform.FrontendLegalize()(mod)
@@ -185,18 +203,18 @@ def lower(
     mod = tl.transform.ThreadPartialSync("shared.dyn")(mod)
     mod = tir.transform.InferFragment()(mod)
     mod = tir.transform.LowerThreadAllreduce()(mod)
-    mod = tl.transform.LowerHopperIntrin()(mod)
-    mod = tir.transform.InjectPTXAsyncCopy()(mod)
 
     mod = tl.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
     mod = tir.transform.MergeSharedMemoryAllocations()(mod)
-    mod = tir.transform.ThreadSync("shared")(mod)
-    mod = tir.transform.ThreadSync("shared.dyn")(mod)
+    mod = tl.transform.ThreadSync("shared")(mod)
+    mod = tl.transform.ThreadSync("shared.dyn")(mod)
+    mod = tl.transform.LowerHopperIntrin()(mod)
+    mod = tir.transform.InjectPTXAsyncCopy()(mod)
 
     mod = tl.transform.MakePackedAPI()(mod)
     mod = tir.transform.LowerDeviceKernelLaunch()(mod)
-    host_mod = tir.transform.Filter(is_host_call)(mod)
+    host_mod = tir.transform.Filter(_is_host_call)(mod)
     host_mod = tir.transform.BindTarget(target_host)(host_mod)
     host_mod = tir.transform.FP8StorageLegalize()(host_mod)
     host_mod = tir.transform.BF16StorageLegalize()(host_mod)
@@ -209,11 +227,14 @@ def lower(
     if target_host.kind.name == "llvm":
         host_mod = tvm._ffi.get_global_func("target.build.llvm")(host_mod, target_host)
     elif target_host.kind.name == "c":
-        host_mod = tvm._ffi.get_global_func("target.build.tilelang_cpp")(host_mod, target_host)
+        if is_cpu_device_backend(target):
+            host_mod = tvm._ffi.get_global_func("target.build.tilelang_cpp")(host_mod, target_host)
+        else:
+            host_mod = tvm._ffi.get_global_func("target.build.c")(host_mod, target_host)
     else:
-        raise ValueError("Target host is not supported")
+        raise ValueError(f"Target host {target_host.kind.name} is not supported")
 
-    device_mod = tir.transform.Filter(is_device_call)(mod)
+    device_mod = tir.transform.Filter(_is_device_call)(mod)
     device_mod = tir.transform.LowerDeviceStorageAccessInfo()(device_mod)
     device_mod = tir.transform.LowerIntrin()(device_mod)
     device_mod = tir.transform.Simplify()(device_mod)
@@ -228,10 +249,20 @@ def lower(
         device_mod = tvm._ffi.get_global_func("target.build.tilelang_cpp")(device_mod, target)
     elif target.kind.name == "llvm":
         device_mod = tvm._ffi.get_global_func("target.build.llvm")(device_mod, target)
+    elif target.kind.name == "webgpu":
+        device_mod = tvm._ffi.get_global_func("target.build.tilelang_webgpu")(device_mod, target)
     else:
-        raise ValueError("Target is not supported")
+        raise ValueError(f"Target {target.kind.name} is not supported")
 
     host_mod.import_module(device_mod)
+
+    if target_host.kind.name == "c":
+        # cpu host should be recompiled
+        # TODO(lei): this is a hack to make the C host backend work
+        temp_dir = tvm.contrib.utils.tempdir()
+        tmp_lib_path = temp_dir.relpath("tmp.so")
+        host_mod.export_library(tmp_lib_path)
+        host_mod = tvm.runtime.load_module(tmp_lib_path)
 
     if runtime_only is True:
         return host_mod

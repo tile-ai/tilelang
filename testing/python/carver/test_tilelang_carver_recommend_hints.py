@@ -110,5 +110,41 @@ def test_gemv_recommend_hints():
     run_gemv_recommend_hints(1024, 1024, "float16", "float32", "float16")
 
 
+def run_fmha_recommend_hints(
+    batch_size: int = 4,
+    num_heads: int = 32,
+    seq_length: int = 512,
+    seq_kv_length: int = 512,
+    head_dim: int = 128,
+    in_dtype: str = "float16",
+    accum_dtype: str = "float16",
+    out_dtype: str = "float16",
+):
+    arch = auto_infer_current_arch()
+    carve_template = carver.FlashAttentionTemplate(
+        batch_size=batch_size,
+        num_heads=num_heads,
+        seq_length=seq_length,
+        seq_kv_length=seq_kv_length,
+        head_dim=head_dim,
+        in_dtype=in_dtype,
+        accum_dtype=accum_dtype,
+        out_dtype=out_dtype,
+    ).with_arch(arch)
+
+    func = carve_template.equivalent_function()
+    assert func is not None, "Function is None"
+
+    hints = carve_template.recommend_hints(topk=20)
+    for hint in hints:
+        print(hint)
+    assert len(hints) > 0, "Hints length should be greater than 0"
+
+
+def test_fmha_recommend_hints():
+    run_fmha_recommend_hints(4, 32, 512, 512, 128, "float16", "float16", "float16")
+    run_fmha_recommend_hints(4, 32, 512, 512, 128, "int8", "int32", "int32")
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

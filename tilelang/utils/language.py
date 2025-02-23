@@ -4,6 +4,8 @@
 from tvm.tir import Buffer
 from typing import List
 from functools import reduce
+from tvm import IRModule
+from tvm.tir import PrimFunc
 
 # Scope Checkers for TVM Buffers
 # These utility functions check the memory scope of a given TVM buffer.
@@ -89,3 +91,26 @@ def array_reduce(array: List[int]) -> int:
         int: The reduced integer.
     """
     return reduce(lambda x, y: x * y, array)
+
+
+def retrieve_func_from_module(ir_module: IRModule) -> PrimFunc:
+    """
+    Retrieve the single PrimFunc from an IRModule.
+
+    Args:
+        ir_module (IRModule): The TVM IRModule to extract the function from.
+            The module should contain exactly one global function.
+
+    Returns:
+        PrimFunc: The single function contained in the module.
+
+    Raises:
+        ValueError: If ir_module is not an IRModule.
+        AssertionError: If the module contains more than one global function.
+    """
+    if not isinstance(ir_module, IRModule):
+        raise ValueError("Not supported type: ", type(ir_module))
+    assert len(ir_module.get_global_vars()) == 1, (
+        "The optimized module should only have one global variable for default schedule.")
+    func = list(ir_module.functions.values())[0]
+    return func

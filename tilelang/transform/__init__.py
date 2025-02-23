@@ -95,6 +95,22 @@ def WarpSpecializedPipeline():
     return _ffi_api.WarpSpecializedPipeline()  # type: ignore
 
 
+def ThreadSync(storage_scope: str):
+    """Insert sync between parallel read/write of shared buffers.
+
+    Parameters
+    ----------
+    storage_scope: str
+        The target storage scope.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.ThreadSync(storage_scope)  # type: ignore
+
+
 def ThreadPartialSync(storage_scope: str):
     """Insert partial sync.
 

@@ -24,9 +24,9 @@ def get_dll_directories():
     source_dir = os.path.abspath(os.path.join(curr_dir, ".."))
     dll_path = [
         curr_dir,
-        os.path.join(curr_dir, "lib"),  # pypi build
         os.path.join(source_dir, "build"),  # local build
         os.path.join(source_dir, "build", "Release"),
+        os.path.join(curr_dir, "lib"),  # pypi build
     ]
     if TILELANG_LIBRARY_PATH:
         dll_path.append(TILELANG_LIBRARY_PATH)

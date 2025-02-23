@@ -7,6 +7,7 @@ import shutil
 from setuptools import setup, find_packages, Extension
 from setuptools.command.build_py import build_py
 from setuptools.command.sdist import sdist
+from setuptools.command.develop import develop
 import distutils.dir_util
 from typing import List
 import re
@@ -150,7 +151,7 @@ def download_and_extract_llvm(version, is_aarch64=False, extract_path="3rdparty"
 
 
 package_data = {
-    "tilelang": ["py.typed"],
+    "tilelang": ["py.typed", "*pyx"],
 }
 
 LLVM_VERSION = "10.0.1"
@@ -159,7 +160,21 @@ EXTRACT_PATH = "3rdparty"  # Default extraction path
 
 
 def update_submodules():
-    """Updates git submodules."""
+    """Updates git submodules if in a git repository."""
+
+    def is_git_repo():
+        try:
+            # Check if current directory is a git repository
+            subprocess.check_output(["git", "rev-parse", "--is-inside-work-tree"],
+                                    stderr=subprocess.STDOUT)
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return False
+
+    if not is_git_repo():
+        print("Info: Not a git repository, skipping submodule update.")
+        return
+
     try:
         subprocess.check_call(["git", "submodule", "update", "--init", "--recursive"])
     except subprocess.CalledProcessError as error:
@@ -204,14 +219,36 @@ class TileLangBuilPydCommand(build_py):
         self.run_command("build_ext")
         build_ext_cmd = self.get_finalized_command("build_ext")
         build_temp_dir = build_ext_cmd.build_temp
-        ext_modules = build_ext_cmd.extensions  # 列出所有扩展模块
+        ext_modules = build_ext_cmd.extensions
         for ext in ext_modules:
-            extdir = build_ext_cmd.get_ext_fullpath(ext.name)  # 获取扩展模块的完整路径
+            extdir = build_ext_cmd.get_ext_fullpath(ext.name)
             print(f"Extension {ext.name} output directory: {extdir}")
 
         ext_output_dir = os.path.dirname(extdir)
         print(f"Extension output directory (parent): {ext_output_dir}")
+        print(f"Build temp directory: {build_temp_dir}")
 
+        # copy cython files
+        CYTHON_SRC = [
+            "tilelang/jit/adapter/cython/cython_wrapper.pyx",
+        ]
+        for item in CYTHON_SRC:
+            source_dir = os.path.join(ROOT_DIR, item)
+            target_dir = os.path.join(self.build_lib, item)
+            if os.path.isdir(source_dir):
+                self.mkpath(target_dir)
+                distutils.dir_util.copy_tree(source_dir, target_dir)
+            else:
+                target_dir = os.path.dirname(target_dir)
+                if not os.path.exists(target_dir):
+                    os.makedirs(target_dir)
+                if not os.path.exists(os.path.join(target_dir, os.path.basename(source_dir))):
+                    # if not exists, copy the file
+                    # as tox will copy the file to the build
+                    # directory based on manifest file
+                    shutil.copy2(source_dir, target_dir)
+
+        # copy the tl_templates
         TILELANG_SRC = [
             "src/tl_templates",
         ]
@@ -226,28 +263,41 @@ class TileLangBuilPydCommand(build_py):
                 if not os.path.exists(target_dir):
                     os.makedirs(target_dir)
                 shutil.copy2(source_dir, target_dir)
-        # Copy the built TVM to the package directory
+
         TVM_PREBUILD_ITEMS = [
-            f"{ext_output_dir}/libtvm_runtime.so",
-            f"{ext_output_dir}/libtvm.so",
-            f"{ext_output_dir}/libtilelang.so",
-            f"{ext_output_dir}/libtilelang_module.so",
+            "libtvm_runtime.so",
+            "libtvm.so",
+            "libtilelang.so",
+            "libtilelang_module.so",
         ]
+
+        potential_dirs = [
+            ext_output_dir,
+            self.build_lib,
+            build_temp_dir,
+            os.path.join(ROOT_DIR, "build"),
+        ]
+
         for item in TVM_PREBUILD_ITEMS:
-            source_lib_file = os.path.join(ROOT_DIR, item)
-            # only copy the file
-            file_name = os.path.basename(item)
-            target_dir = os.path.join(self.build_lib, PACKAGE_NAME, file_name)
-            target_dir = os.path.dirname(target_dir)
-            target_dir = os.path.join(target_dir, "lib")
-            if not os.path.exists(target_dir):
-                os.makedirs(target_dir)
-            if os.path.exists(source_lib_file):
-                shutil.copy2(source_lib_file, target_dir)
-                # remove the original file
+            source_lib_file = None
+            for dir in potential_dirs:
+                candidate = os.path.join(dir, item)
+                if os.path.exists(candidate):
+                    source_lib_file = candidate
+                    break
+
+            if source_lib_file:
+                target_dir_release = os.path.join(self.build_lib, PACKAGE_NAME, "lib")
+                target_dir_develop = os.path.join(PACKAGE_NAME, "lib")
+                os.makedirs(target_dir_release, exist_ok=True)
+                os.makedirs(target_dir_develop, exist_ok=True)
+                shutil.copy2(source_lib_file, target_dir_release)
+                print(f"Copied {source_lib_file} to {target_dir_release}")
+                shutil.copy2(source_lib_file, target_dir_develop)
+                print(f"Copied {source_lib_file} to {target_dir_develop}")
                 os.remove(source_lib_file)
             else:
-                print(f"INFO: {source_lib_file} does not exist.")
+                print(f"WARNING: {item} not found in any expected directories!")
 
         TVM_CONFIG_ITEMS = [
             f"{build_temp_dir}/config.cmake",
@@ -292,7 +342,8 @@ class TileLangBuilPydCommand(build_py):
 
         # Copy CUTLASS to the package directory
         CUTLASS_PREBUILD_ITEMS = [
-            "3rdparty/cutlass",
+            "3rdparty/cutlass/include",
+            "3rdparty/cutlass/tools",
         ]
         for item in CUTLASS_PREBUILD_ITEMS:
             source_dir = os.path.join(ROOT_DIR, item)
@@ -307,7 +358,8 @@ class TileLangBuilPydCommand(build_py):
                 shutil.copy2(source_dir, target_dir)
         # copy compoable kernel to the package directory
         CK_PREBUILD_ITEMS = [
-            "3rdparty/composable_kernel",
+            "3rdparty/composable_kernel/include",
+            "3rdparty/composable_kernel/library",
         ]
         for item in CK_PREBUILD_ITEMS:
             source_dir = os.path.join(ROOT_DIR, item)
@@ -344,6 +396,52 @@ class TileLangSdistCommand(sdist):
         self.distribution.metadata.version = get_tilelang_version(
             with_cuda=False, with_system_info=False)
         super().make_distribution()
+
+
+# ------------------------------------------------------------------------
+# NEW: Add a custom 'develop' command so that `pip install -e .` works.
+# ------------------------------------------------------------------------
+class TileLangDevelopCommand(develop):
+    """
+    Customized setuptools 'develop' command for an editable install.
+    Ensures the extension is built and all necessary assets are copied.
+    """
+
+    def run(self):
+        # 1. Build the C/C++ extension modules
+        self.run_command("build_ext")
+
+        build_ext_cmd = self.get_finalized_command("build_ext")
+        ext_modules = build_ext_cmd.extensions
+        for ext in ext_modules:
+            extdir = build_ext_cmd.get_ext_fullpath(ext.name)
+            print(f"Extension {ext.name} output directory: {extdir}")
+
+        ext_output_dir = os.path.dirname(extdir)
+        print(f"Extension output directory (parent): {ext_output_dir}")
+
+        # Copy the built TVM to the package directory
+        TVM_PREBUILD_ITEMS = [
+            f"{ext_output_dir}/libtvm_runtime.so",
+            f"{ext_output_dir}/libtvm.so",
+            f"{ext_output_dir}/libtilelang.so",
+            f"{ext_output_dir}/libtilelang_module.so",
+        ]
+        for item in TVM_PREBUILD_ITEMS:
+            source_lib_file = os.path.join(ROOT_DIR, item)
+            # only copy the file
+            file_name = os.path.basename(item)
+            target_dir = os.path.join(PACKAGE_NAME, file_name)
+            target_dir = os.path.dirname(target_dir)
+            target_dir = os.path.join(target_dir, "lib")
+            if not os.path.exists(target_dir):
+                os.makedirs(target_dir)
+            if os.path.exists(source_lib_file):
+                shutil.copy2(source_lib_file, target_dir)
+                # remove the original file
+                os.remove(source_lib_file)
+            else:
+                print(f"INFO: {source_lib_file} does not exist.")
 
 
 class CMakeExtension(Extension):
@@ -464,5 +562,6 @@ setup(
         "build_py": TileLangBuilPydCommand,
         "sdist": TileLangSdistCommand,
         "build_ext": CMakeBuild,
+        "develop": TileLangDevelopCommand,
     },
 )

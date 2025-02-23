@@ -15,18 +15,18 @@
 #include <unordered_set>
 
 #include "../op/builtin.h"
+#include "./storage_access.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
-#include "tir/transforms/storage_access.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
 
-class ThreadPartialSyncPlanner : public StorageAccessVisitor {
+class TileLangThreadPartialSyncPlanner : public TileLangStorageAccessVisitor {
 public:
-  explicit ThreadPartialSyncPlanner(StorageScope sync_scope)
+  explicit TileLangThreadPartialSyncPlanner(StorageScope sync_scope)
       : sync_scope_(sync_scope) {}
 
   // The syncs inserted before each statement
@@ -274,7 +274,7 @@ private:
 
       num_partial_threads_ = NullOpt;
     } else {
-      StorageAccessVisitor::VisitStmt_(op);
+      TileLangStorageAccessVisitor::VisitStmt_(op);
     }
   }
 
@@ -352,9 +352,9 @@ private:
   const std::unordered_map<const Object *, int> &partial_syncs_;
 };
 
-Stmt ThreadPartialSync(Stmt stmt, std::string storage_scope) {
+Stmt TileLangThreadPartialSync(Stmt stmt, std::string storage_scope) {
   StorageScope sync_scope = StorageScope::Create(storage_scope);
-  ThreadPartialSyncPlanner planner(sync_scope);
+  TileLangThreadPartialSyncPlanner planner(sync_scope);
   planner(stmt);
   return ThreadPartialSyncInserter(sync_scope, planner.syncs_inserted_,
                                    planner.partial_syncs_inserted_)(
@@ -365,17 +365,17 @@ using namespace tir::transform;
 
 namespace transform {
 
-Pass ThreadPartialSync(String storage_scope) {
+Pass TileLangThreadPartialSync(String storage_scope) {
   auto pass_func = [storage_scope](PrimFunc f, IRModule m, PassContext ctx) {
     auto *n = f.CopyOnWrite();
-    n->body = tl::ThreadPartialSync(std::move(n->body), storage_scope);
+    n->body = tl::TileLangThreadPartialSync(std::move(n->body), storage_scope);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ThreadPartialSync", {});
 }
 
 TVM_REGISTER_GLOBAL("tl.transform.ThreadPartialSync")
-    .set_body_typed(ThreadPartialSync);
+    .set_body_typed(TileLangThreadPartialSync);
 
 } // namespace transform
 } // namespace tl

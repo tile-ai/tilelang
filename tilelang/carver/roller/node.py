@@ -13,6 +13,7 @@ from ..analysis import BlockInfo, get_reduction_blocks
 from .. import analysis
 from .. import normalize_prim_func
 from .shape_inference import get_analyzer_by_tir
+from dataclasses import dataclass
 
 
 def pre_order_traverse(block_analyzer, blocks, func):
@@ -83,13 +84,28 @@ class BlockAnalyzer(object):
         return self.sch.get_consumers(block)
 
 
+@dataclass
+class Edge:
+    src_node: 'Node'
+    dst_node: 'Node'
+    src_id: int
+    dst_id: int
+
+
 class Node(object):
 
-    def __init__(self, tags: Optional[Dict] = None) -> None:
+    def __init__(self, tags: Optional[Dict] = None, name: str = "Node") -> None:
+        self.name = name
         if tags is None:
             tags = {}
+        self._out_edges = []
+        self._in_edges = []
+        self._shapes = []
         self._dtypes = []
         self._tag: Dict = {}
+        self.update_tags(tags)
+
+    def update_tags(self, tags: Dict) -> None:
         for tag in tags:
             self.add_tag(tag, tags[tag])
 
@@ -104,11 +120,82 @@ class Node(object):
             return None
         return self._tag[k]
 
+    def is_placeholder(self):
+        return False
+
+    def is_output(self):
+        return False
+
+    @property
+    def inputs(self) -> List[Edge]:
+        return self._in_edges
+
+    @property
+    def outputs(self) -> List[Edge]:
+        return self._out_edges
+
+    def set_inputs(self, i: int, edge: Edge):
+        assert i < len(self._in_edges)
+        self._in_edges[i] = edge
+
+    def set_outputs(self, i: int, edge: Edge):
+        assert i < len(self._out_edges)
+        self._out_edges[i] = edge
+
+    def get_dtype(self, id=0) -> tvm.DataType:
+        return self._dtypes[id]
+
+    def set_dtype(self, dtype: tvm.DataType, id=0) -> None:
+        assert isinstance(dtype, tvm.DataType), type(dtype)
+        if dtype == tvm.DataType("bool"):
+            dtype = tvm.DataType("int8")
+        if len(self._dtypes) <= id:
+            self._dtypes.extend([None for _ in range(id - len(self._dtypes) + 1)])
+        elif self._dtypes[id] is not None:
+            assert self._dtypes[id] == dtype, (self._dtypes, dtype)
+        self._dtypes[id] = dtype
+
+    def get_shape(self, id: int = 0) -> List[int]:
+        return self._shapes[id]
+
+    def set_shape(self, shape: List[int], id=0, overwrite=False) -> None:
+        if len(self._shapes) <= id:
+            self._shapes.extend([None for _ in range(id - len(self._shapes) + 1)])
+        # elif self._shapes[id] is not None and not overwrite:
+        #     assert self._shapes[id] == list(map(int, shape)), (self._shapes, list(map(int, shape)))
+        self._shapes[id] = list(map(int, shape))
+
+    def num_outputs(self) -> int:
+        if len(self.outputs) == 0:
+            return 0
+        return max([e.src_id for e in self.outputs]) + 1
+
+    def get_ir(self) -> str:
+        raise NotImplementedError()
+
+    def __repr__(self) -> str:
+        return "<Node, " + self.name + ">"
+
+
+class PlaceHolderNode(Node):
+
+    def __init__(self, name=""):
+        super().__init__(name="PlaceHolder_" + name)
+
+    def is_placeholder(self):
+        return True
+
+    def get_ir(self) -> str:
+        return "placeholder"
+
 
 class PrimFuncNode(Node):
 
-    def __init__(self, prim_func: PrimFunc, tags: Optional[Dict] = None) -> None:
-        super().__init__(tags)
+    def __init__(self,
+                 prim_func: PrimFunc,
+                 tags: Optional[Dict] = None,
+                 name: str = "PrimFuncNode") -> None:
+        super().__init__(tags, name=name)
         self.prim_func = self._specialize_func(prim_func)
         self.sch: tir.Schedule = tir.Schedule(self.prim_func)
         self.block_analyzer: BlockAnalyzer = BlockAnalyzer(self.sch)
@@ -122,7 +209,30 @@ class PrimFuncNode(Node):
         self.buffers = []
         self.args = []
         self._analysis_funcinfo()
+        self._assign_placeholder_node()
         self.ana = get_analyzer_by_tir(self.block_analyzer, self.blocks)
+
+        # set input shapes and dtypes
+        for edge, buffer in zip(self.inputs, self.input_buffers):
+            edge.src_node.set_shape(buffer.shape, edge.src_id)
+            edge.src_node.set_dtype(tvm.DataType(buffer.dtype), edge.src_id)
+        for output_id, buffer in enumerate(self.output_buffers):
+            self.set_shape(buffer.shape, output_id)
+            self.set_dtype(tvm.DataType(buffer.dtype), output_id)
+
+    def _assign_placeholder_node(self):
+        inputs: List[Node] = []
+        for buffer in self.input_buffers:
+            inputs.append(PlaceHolderNode(buffer.name))
+
+        for dst_id, n in enumerate(inputs):
+            if isinstance(n, Node):
+                n = (n, 0)
+            assert (len(n) == 2)
+            src_node, src_id = n[0], n[1]
+            edge = Edge(src_node, self, src_id, dst_id)
+            self._in_edges.append(edge)
+            src_node._out_edges.append(edge)
 
     def _specialize_func(self, func: PrimFunc):
         # Specialize the function to make it more friendly for analysis.
@@ -221,9 +331,6 @@ class PrimFuncNode(Node):
         elif self._dtypes[id] is not None:
             assert self._dtypes[id] == dtype, (self._dtypes, dtype)
         self._dtypes[id] = dtype
-
-    def get_dtype(self, id=0) -> tvm.DataType:
-        return self._dtypes[id]
 
     def get_buffer_dtype(self, buffer: tir.Buffer) -> tvm.DataType:
         return tvm.DataType(buffer.dtype)
@@ -407,3 +514,97 @@ class PrimFuncNode(Node):
 
     def get_input_buffers(self) -> List[tir.Buffer]:
         return self.block_analyzer.input_buffers
+
+
+class OutputNode(Node):
+
+    def __init__(self, node, id=0):
+        super().__init__(name="OutputNode")
+        # connect node and output node
+        assert isinstance(node, PrimFuncNode), "OutputNode should connect to PrimFuncNode"
+
+        # initialize edge and connect
+        src_node, src_id = node, id
+        edge = Edge(src_node, self, src_id, 0)
+        self._in_edges.append(edge)
+        src_node._out_edges.append(edge)
+
+        self.set_shape(node.get_shape(id))
+        self.set_dtype(node.get_dtype(id))
+
+    def is_output(self):
+        return True
+
+    def get_ir(self) -> str:
+        return "output"
+
+
+def topo_order(list_of_nodes) -> List[Node]:
+    input_ready_count = {node: len(node.inputs) for node in list_of_nodes}
+    ready = list(filter(lambda node: input_ready_count[node] == 0, list_of_nodes))
+    output_list = []
+    while len(ready) > 0:
+        node = ready.pop(0)
+        output_list.append(node)
+        for edge in node.outputs:
+            dst_node = edge.dst_node
+            if dst_node not in input_ready_count:
+                input_ready_count[dst_node] = len(dst_node.inputs)
+                list_of_nodes.append(dst_node)
+            input_ready_count[dst_node] -= 1
+            assert (input_ready_count[dst_node] >= 0)
+            if input_ready_count[dst_node] == 0:
+                ready.append(dst_node)
+    assert (len(list_of_nodes) == len(output_list))
+    return output_list
+
+
+def find_topo_sort_priority(output_node_list) -> List[Node]:
+    import sys
+    sys.setrecursionlimit(10000)
+
+    def topo_sort_get_layer(node, topo_layer):
+        if node in topo_layer:
+            return
+        topo_layer[node] = 0
+        for edge in node.inputs:
+            topo_sort_get_layer(edge.src_node, topo_layer)
+            topo_layer[node] = max(topo_layer[node], topo_layer[edge.src_node] + 1)
+
+    topo_layer = {}
+    for node in output_node_list:
+        topo_sort_get_layer(node, topo_layer)
+
+    def topo_sort_dfs(node, visited, topo_order):
+        if node in visited:
+            return
+        visited.add(node)
+        ordered_input_nodes = sorted([edge.src_node for edge in node.inputs],
+                                     key=lambda n: topo_layer[n],
+                                     reverse=True)
+        for n in ordered_input_nodes:
+            topo_sort_dfs(n, visited, topo_order)
+        topo_order.append(node)
+
+    visited = set()
+    topo_order = []
+    for node in output_node_list:
+        topo_sort_dfs(node, visited, topo_order)
+    return topo_order
+
+
+def find_topo_sort(output_node_list) -> List[Node]:
+
+    def topo_sort_dfs(node, visited, topo_order):
+        if node in visited:
+            return
+        visited.add(node)
+        for edge in node.inputs:
+            topo_sort_dfs(edge.src_node, visited, topo_order)
+        topo_order.append(node)
+
+    visited = set()
+    topo_order = []
+    for node in output_node_list:
+        topo_sort_dfs(node, visited, topo_order)
+    return topo_order

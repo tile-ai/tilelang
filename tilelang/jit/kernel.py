@@ -7,7 +7,7 @@ import tilelang
 from tilelang import tvm as tvm
 from tvm.tir import PrimFunc
 
-from tilelang.jit.adapter import TorchCPPKernelAdapter, TorchDLPackKernelAdapter, BaseKernelAdapter
+from tilelang.jit.adapter import TorchDLPackKernelAdapter, BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter
 from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
 from tilelang.profiler import Profiler, TensorSupplyType
 
@@ -34,8 +34,9 @@ class JITKernel(object):
         self,
         func: PrimFunc = None,
         out_idx: Union[List[int], int] = None,
-        execution_backend: Literal["dlpack", "torch_cpp", "ctypes"] = "dlpack",
+        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
         target: Union[str, Target] = "auto",
+        target_host: Union[str, Target] = None,
         verbose: bool = False,
     ):
         """
@@ -47,10 +48,12 @@ class JITKernel(object):
             The TileLang TIR function to compile and wrap.
         out_idx : Union[List[int], int], optional
             Index(es) of the output tensors to return (default: None).
-        execution_backend : Literal["dlpack", "torch_cpp", "ctypes"], optional
+        execution_backend : Literal["dlpack", "ctypes"], optional
             Execution backend to use for kernel execution (default: "dlpack").
         target : Union[str, Target], optional
             Compilation target, either as a string or a TVM Target object (default: "auto").
+        target_host : Union[str, Target], optional
+            Target host for cross-compilation (default: None).
         verbose : bool, optional
             Whether to enable verbose output (default: False).
         """
@@ -58,6 +61,7 @@ class JITKernel(object):
         self.out_idx = out_idx
         self.execution_backend = execution_backend
         self.target = target
+        self.target_host = target_host
         self.verbose = verbose
 
         # If the target is specified as a string, validate it and convert it to a TVM Target.
@@ -69,8 +73,12 @@ class JITKernel(object):
         target = Target(target)
 
         # Validate the execution backend.
-        assert execution_backend in ["dlpack", "torch_cpp",
-                                     "ctypes"], f"Invalid execution backend. {execution_backend}"
+        assert execution_backend in ["dlpack", "ctypes",
+                                     "cython"], f"Invalid execution backend. {execution_backend}"
+        if execution_backend == "cython":
+            from tilelang.contrib.cc import get_cplus_compiler
+            assert get_cplus_compiler(
+            ) is not None, "Cython backend requires a C++ compiler, please install or use other backends."
 
         # Compile the TileLang function and create a kernel adapter for execution.
         adapter = self._compile_and_create_adapter(func)
@@ -113,12 +121,13 @@ class JITKernel(object):
         """
         verbose = self.verbose
         target = self.target
+        target_host = self.target_host
         out_idx = self.out_idx
         execution_backend = self.execution_backend
 
         # Compile the function with TVM, optimizing with shared memory lowering.
         with tvm.transform.PassContext(opt_level=3):
-            rt_mod, params = tilelang.lower(tilelang_func, target=target)
+            rt_mod, params = tilelang.lower(tilelang_func, target=target, target_host=target_host)
 
         # Store the runtime module and parameters for later use.
         self.rt_module = rt_mod
@@ -128,20 +137,24 @@ class JITKernel(object):
         if execution_backend == "dlpack":
             # Use TorchDLPackKernelAdapter for interoperability with PyTorch via DLPack.
             adapter = TorchDLPackKernelAdapter(rt_mod, params=params, result_idx=out_idx)
-        elif execution_backend == "torch_cpp":
-            # Torch CPP backend adapter (not fully implemented yet).
-            adapter = TorchCPPKernelAdapter(
+        elif execution_backend == "ctypes":
+            adapter = CtypesKernelAdapter(
                 rt_mod,
                 params=params,
                 result_idx=out_idx,
                 target=target,
-                prim_func=tilelang_func,
+                func_or_mod=tilelang_func,
                 verbose=verbose,
             )
-            raise NotImplementedError("Torch CPP backend is not fully implemented.")
-        elif execution_backend == "ctypes":
-            # CTYPES backend (not implemented yet).
-            raise NotImplementedError("CTypes backend is not implemented.")
+        elif execution_backend == "cython":
+            adapter = CythonKernelAdapter(
+                rt_mod,
+                params=params,
+                result_idx=out_idx,
+                target=target,
+                func_or_mod=tilelang_func,
+                verbose=verbose,
+            )
         else:
             # Handle invalid backend.
             raise ValueError(f"Invalid execution backend: {execution_backend}")
@@ -193,7 +206,15 @@ class JITKernel(object):
         str
             The source code of the compiled kernel function.
         """
+        if self.execution_backend == "ctypes":
+            return self.adapter.get_kernel_source()
         return self.rt_module.imported_modules[0].get_source()
+
+    def get_host_source(self) -> str:
+        """
+        Returns the source code of the host function.
+        """
+        return self.rt_module.get_source()
 
     def run_once(self, func: Optional[Callable] = None) -> None:
         return self.get_profiler().run_once(func)

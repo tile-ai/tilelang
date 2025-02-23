@@ -11,6 +11,7 @@ AVALIABLE_TARGETS = {
     "auto",
     "cuda",
     "hip",
+    "webgpu",
     "c",  # represent c source backend
     "llvm",
 }

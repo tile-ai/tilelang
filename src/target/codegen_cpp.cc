@@ -24,7 +24,6 @@
 
 #include <tvm/relay/executor.h>
 #include <tvm/relay/runtime.h>
-#include <tvm/runtime/crt/error_codes.h>
 #include <tvm/runtime/module.h>
 #include <tvm/target/codegen.h>
 

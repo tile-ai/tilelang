@@ -11,6 +11,9 @@ Tile Language (**tile-lang**) is a concise domain-specific language designed to 
 <img src=./images/MatmulExample.png />
 
 ## Latest News
+- 02/15/2025 ✨: Added WebGPU Codegen support, see [Pull Request #86](https://github.com/tile-ai/tilelang/pull/86)!
+- 02/12/2025 ✨: Excited to announce the release of [v0.1.0](https://github.com/tile-ai/tilelang/releases/tag/v0.1.0)!
+- 02/10/2025 🚀: Added debug tools for TileLang—`T.print` for printing variables/buffers ([docs](https://tilelang.tile-ai.cn/tutorials/debug_tools_for_tilelang.html)) and a memory layout plotter ([examples/plot_layout](./examples/plot_layout)).
 - 01/20/2025 ✨: We are excited to announce that tile-lang, a dsl for high performance AI workloads, is now open source and available to the public!
 
 ## Tested Devices
@@ -66,6 +69,10 @@ pip install git+https://github.com/tile-ai/tilelang
 Or install locally:
 
 ```bash
+# install required system dependencies
+sudo apt-get update
+sudo apt-get install -y python3-setuptools gcc libtinfo-dev zlib1g-dev build-essential cmake libedit-dev libxml2-dev
+
 pip install .  # with -e option if you want to install in editable mode
 ```
 
@@ -147,7 +154,7 @@ func = matmul(1024, 1024, 1024, 128, 128, 32)
 # out_idx specifies the index of the output buffer in the argument list
 # if out_idx is specified, the tensor will be created during runtime
 # target currently can be "cuda" or "hip" or "cpu".
-jit_kernel = tilelang.JITKernel(func, out_idx=[2], target="cuda")
+jit_kernel = tilelang.compile(func, out_idx=[2], target="cuda")
 
 # 3. Test the kernel in Python with PyTorch data
 import torch
@@ -187,6 +194,10 @@ In addition to GEMM, we provide a variety of examples to showcase the versatilit
 - [FlashAttention](./examples/flash_attention/): Enable cross-operator fusion with simple and intuitive syntax, and we also provide an example of auto tuning.
 - [LinearAttention](./examples/linear_attention/): Examples include RetNet and Mamba implementations.
 - [Convolution](./examples/convolution/): Implementations of Convolution with IM2Col.
+
+## Upcoming Features
+
+Check our [tilelang v0.2.0 release plan](https://github.com/tile-ai/tilelang/issues/79) for upcoming features.
 
 ---
 

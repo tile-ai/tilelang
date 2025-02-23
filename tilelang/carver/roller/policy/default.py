@@ -13,7 +13,7 @@ from ...arch import TileDevice
 from ..bestfit import BestFit
 from ..hint import Hint, Stride, TileDict
 from .common import coalesced_factor, coalesced_tensor_shape, factorize, get_all_factors
-from ..node import PrimFuncNode
+from ..node import PrimFuncNode, OutputNode, find_topo_sort
 from ..rasterization import NoRasterization
 
 
@@ -23,23 +23,69 @@ class DefaultPolicy:
     minimize memory traffic and maximize parallelism.for BitBLAS Schedule.
     """
 
-    def __init__(self,
-                 func: tvm.tir.PrimFunc,
-                 arch: TileDevice,
-                 tags: Optional[Dict] = None) -> None:
+    func: tvm.tir.PrimFunc
+    nodes: List[PrimFuncNode] = []
+    arch: TileDevice
+    tags: Dict
+
+    def __init__(self, arch: TileDevice, tags: Optional[Dict] = None) -> None:
         if tags is None:
             tags = {}
+
         self.arch = arch
-        self.prim_func_node = PrimFuncNode(func, tags)
-        self.ordered_nodes = [self.prim_func_node]
-        self.output_nodes = [self.prim_func_node]
+        self.tags = tags
+        self.rasterization = NoRasterization()
+
+    @classmethod
+    def from_prim_func(cls,
+                       func: tvm.tir.PrimFunc,
+                       arch: TileDevice,
+                       tags: Optional[Dict] = None,
+                       name: str = "PrimFuncNode"):
+        return cls(arch, tags)._init_with_prim_func(func, name)
+
+    @classmethod
+    def from_output_nodes(cls,
+                          nodes: List[OutputNode],
+                          arch: TileDevice,
+                          tags: Optional[Dict] = None):
+        return cls(arch, tags)._init_with_output_nodes(nodes)
+
+    def _init_with_prim_func(self,
+                             func: tvm.tir.PrimFunc,
+                             name: str = "PrimFuncNode") -> "DefaultPolicy":
+        if func is not None and isinstance(func, tvm.tir.PrimFunc):
+            self.func = func
+            self.prim_func_node = PrimFuncNode(self.func, tags=self.tags, name=name)
+        else:
+            raise NotImplementedError("Only support PrimFunc for now")
+        output_nodes = [OutputNode(self.prim_func_node)]
+        self._init_with_output_nodes(output_nodes)
+        return self
+
+    def _init_with_output_nodes(self, output_nodes: List[OutputNode]):
+        self.ordered_nodes = list(
+            filter(lambda n: not n.is_placeholder() and not n.is_output(),
+                   find_topo_sort(output_nodes)))
+        for node in self.ordered_nodes:
+            node.update_tags(self.tags)
+
+        self.output_nodes = []
+        for node in self.ordered_nodes:
+            is_topo_output = True
+            for edge in node.outputs:
+                if not edge.dst_node.is_output():
+                    is_topo_output = False
+            if is_topo_output:
+                self.output_nodes.append(node)
+        return self
 
     def emit_config(self, topk: int) -> List[Hint]:
         base_tile = self.get_base_tile()
         if base_tile is None:
             return []
 
-        rstep_map = self._assign_reduce_step(self.prim_func_node)
+        rstep_map = {node: self._assign_reduce_step(node) for node in self.ordered_nodes}
         smem_tile_condidates = self.dfs_smem_tile(base_tile, rstep_map)
         results = []
         for td in smem_tile_condidates:
@@ -56,7 +102,7 @@ class DefaultPolicy:
         return results
 
     def dfs_smem_tile(self, init_tile, rstep_map) -> Iterable[TileDict]:
-        _steps = [get_all_factors(n) for n in self.prim_func_node.get_space_dim()]
+        _steps = [get_all_factors(n) for n in self.output_nodes[0].get_space_dim()]
         steps = [step[step.index(t):] for step, t in zip(_steps, init_tile)]
         for i in range(len(steps)):
             added = list(
@@ -104,8 +150,26 @@ class DefaultPolicy:
             The base tile configuration, which is a list of 1s equal in length to the space dimensions
             of the primary function node.
         """
-        shape = self.prim_func_node.get_space_dim()
+        if len(set([len(node.get_space_dim()) for node in self.output_nodes])) > 1:
+            # If output dim sizes are not same, don't know how to handle them
+            return None
+
+        out_node = self.output_nodes[0]
+        shape = out_node.get_space_dim()
         base_tile = [1 for _ in shape]
+        wpi = self.compute_workload_per_item(base_tile)
+        for dim, n in enumerate(shape):
+            factors = [n]
+            for factor in factors:
+                if factor == base_tile[dim]:
+                    continue
+                tile = base_tile.copy()
+                tile[dim] = factor
+                new_wpi = self.compute_workload_per_item(tile)
+                if new_wpi < wpi:
+                    wpi, base_tile = new_wpi, tile
+                else:
+                    break
 
         return base_tile
 
@@ -126,11 +190,24 @@ class DefaultPolicy:
             based on the output nodes' space dimensions.
         """
         tile_map = {}
-        tile_map[self.prim_func_node] = [
-            tile[i] * self.prim_func_node.get_space_dim()[i] //
-            self.output_nodes[0].get_space_dim()[i] for i in range(len(tile))
-        ]
+        for node in self.output_nodes:
+            tile_map[node] = [
+                tile[i] * node.get_space_dim()[i] // self.output_nodes[0].get_space_dim()[i]
+                for i in range(len(tile))
+            ]
         return tile_map
+
+    def compute_workload_per_item(self, output_tile) -> float:
+        op_tile_map = self._get_output_tile_map(output_tile)
+        compute = 0
+        num_item = int(np.prod(output_tile))
+        for node in reversed(self.ordered_nodes):
+            tile = op_tile_map[node]
+            dep = node.propagate_inputs(tile)
+            compute += int(np.prod(tile))
+            for i, edge in enumerate(node.inputs):
+                op_tile_map[edge.src_node] = dep[i]
+        return float(compute / num_item)
 
     def score_block_size(self, n):
         """
@@ -312,7 +389,7 @@ class DefaultPolicy:
                 new_rstep_id = _enlarge(cur_rstep_id)
                 if new_rstep_id is None:
                     break
-                new_rstep_map = {
+                new_rstep_map[node] = {
                     k.var.name: all_steps[k.var.name][new_rstep_id[k.var.name]] for k in node.raxis
                 }
                 old_rstep_map = td.rstep_map
@@ -328,8 +405,8 @@ class DefaultPolicy:
 
         for node in self.ordered_nodes:
             if len(node.raxis) > 0:
-                rstep = _optimize(node, rstep_map)
-                rstep_map = rstep
+                rstep = _optimize(node, rstep_map[node])
+                rstep_map[node] = rstep
         td.rstep_map = rstep_map
         td.smem_cost, td.cached_tensors_map = self._compute_shared_memory_usage(td)
 
@@ -353,18 +430,21 @@ class DefaultPolicy:
             tile = op_tile_map[node]
             input_shapes = node.propagate_inputs(tile)
             output_shapes = node.propagate_outputs(tile)
-            for i, buffer in enumerate(node.input_buffers):
-                nbytes = (node.get_buffer_dtype(buffer).bits + 7) // 8
-                read_transaction_elements = self.arch.transaction_size[1] // nbytes
-                traffic += (
-                    coalesced_tensor_shape(input_shapes[i], buffer.shape, read_transaction_elements)
-                    * nbytes)
-            for i, buffer in enumerate(node.output_buffers):
-                nbytes = (node.get_buffer_dtype(buffer).bits + 7) // 8
-                write_transaction_elements = self.arch.transaction_size[0] // nbytes
-                traffic += (
-                    coalesced_tensor_shape(output_shapes[i], buffer.shape,
-                                           write_transaction_elements) * nbytes)
+            for i, edge in enumerate(node.inputs):
+                op_tile_map[edge.src_node] = input_shapes[i]
+                if edge.src_node.is_placeholder():
+                    nbytes = (edge.src_node.get_dtype().bits + 7) // 8
+                    read_transaction_elements = self.arch.transaction_size[1] // nbytes
+                    traffic += coalesced_tensor_shape(input_shapes[i], edge.src_node.get_shape(),
+                                                      read_transaction_elements) * nbytes
+            for edge in node.outputs:
+                if edge.dst_node.is_output():
+                    nbytes = (edge.src_node.get_dtype().bits + 7) // 8
+                    write_transaction_elements = self.arch.transaction_size[0] // nbytes
+                    traffic += coalesced_tensor_shape(output_shapes[edge.src_id],
+                                                      node.get_shape(edge.src_id),
+                                                      write_transaction_elements) * nbytes
+
         return traffic, op_tile_map
 
     def infer_node_smem_usage(self, td: TileDict, node: PrimFuncNode):
@@ -404,12 +484,32 @@ class DefaultPolicy:
         self._compute_stride_map(td)
         allocator = BestFit()
         block_map = {}
+        processed = set()
         cached_tensors_map = {}
 
-        node_internal_bytes, cached_tensors_map[self.prim_func_node] = self.infer_node_smem_usage(
-            td, self.prim_func_node)
-        block = allocator.malloc(node_internal_bytes)
-        allocator.free(block)
+        def can_free(node, out_id):
+            for edge in node.outputs:
+                if edge.src_id == out_id and edge.dst_node not in processed:
+                    return False
+            return True
+
+        for node in self.ordered_nodes:
+            node_internal_bytes, cached_tensors_map[node] = self.infer_node_smem_usage(td, node)
+            block = allocator.malloc(node_internal_bytes)
+            allocator.free(block)
+            # free inputs
+            processed.add(node)
+            for edge in node.inputs:
+                if not edge.src_node.is_placeholder() and can_free(edge.src_node, edge.src_id):
+                    allocator.free(block_map.pop((edge.src_node, edge.src_id)))
+            # alloc outputs
+            for edge in node.outputs:
+                if not edge.dst_node.is_output() and (node, edge.src_id) not in block_map:
+                    dtype_bytes = (node.get_dtype(edge.src_id).bits + 7) // 8
+                    stride = td.output_strides_map[node][len(node.inputs) + edge.src_id]
+                    output_elem = stride.compute_elements_from_shape(td.get_tile(node))
+                    block_map[(node, edge.src_id)] = allocator.malloc(output_elem * dtype_bytes)
+
         assert len(block_map) == 0
         return allocator.limit, cached_tensors_map
 
@@ -585,10 +685,11 @@ class DefaultPolicy:
         for block_size in block_size_ordered:
             result = {}
             failed = False
-            result = self._assign_block_size(self.prim_func_node, td, block_size)
-            if result is None:
-                failed = True
-                break
+            for node in self.ordered_nodes:
+                result[node] = self._assign_block_size(node, td, block_size)
+                if result[node] is None:
+                    failed = True
+                    break
             if failed:
                 continue
             else:
@@ -678,7 +779,7 @@ class DefaultPolicy:
         # Plan vectorize
         codegen_dict.vectorize = self._plan_vectorize(node, td, block_size)
         codegen_dict.arch = self.arch
-        codegen_dict.opt_shapes = self.prim_func_node.get_tag("opt_shapes")
+        codegen_dict.opt_shapes = node.get_tag("opt_shapes")
         return codegen_dict
 
     def _plan_vectorize(self, node: PrimFuncNode, td: TileDict, block_size: int):
