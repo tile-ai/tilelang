@@ -1,5 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
+# ruff: noqa
 import math
 import torch
 
@@ -7,8 +8,10 @@ import tilelang
 from tilelang import language as T
 from tilelang.profiler import do_bench
 
+
 def is_hip():
     return False
+
 
 def get_sparse_attn_mask_from_topk(x, topk, use_dense_for_last_block=False):
     bsz, num_head, downsample_len, _ = x.shape
@@ -190,12 +193,14 @@ def benchmark_topk_sparse_attention():
         downsample_factor = BLOCK
         downsample_len = math.ceil(SEQ_LEN / downsample_factor)
         x_ds = torch.randn([BATCH, N_HEADS, downsample_len, downsample_len],
-                        device='cuda',
-                        dtype=torch.bfloat16)
+                           device='cuda',
+                           dtype=torch.bfloat16)
         x_ds[:, :, :, 0] = 100
         block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
-        program = blocksparse_flashattn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
+        program = blocksparse_flashattn(
+            BATCH, N_HEADS, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
         kernel = tilelang.compile(program, out_idx=4)
+
         def benchmark_fn():
             # Compute reference
             # Expand block mask to full attention matrix
@@ -206,7 +211,9 @@ def benchmark_topk_sparse_attention():
             warmup=10,
             rep=100,
         )
-        print(f"BATCH: {BATCH}, N_HEADS: {N_HEADS}, SEQ_LEN: {SEQ_LEN}, D_HEAD: {D_HEAD}, TOPK: {TOPK}, BLOCK: {BLOCK}, ref_latency: {ref_latency}")
+        print(
+            f"BATCH: {BATCH}, N_HEADS: {N_HEADS}, SEQ_LEN: {SEQ_LEN}, D_HEAD: {D_HEAD}, TOPK: {TOPK}, BLOCK: {BLOCK}, ref_latency: {ref_latency}"
+        )
 
 
 if __name__ == "__main__":

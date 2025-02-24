@@ -1,9 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-import math
+# ruff: noqa
 import torch
-
-import torch.nn.functional as F
 from tilelang.profiler import do_bench
 
 def get_sparse_attn_mask_from_topk(x, topk, use_dense_for_last_block=False):
@@ -42,6 +40,7 @@ def benchmark_topk_sparse_attention():
         v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
 
         import flash_attn
+
         def benchmark_fn():
             flash_attn.flash_attn_func(q, k, v, causal=True)
 
@@ -50,7 +49,9 @@ def benchmark_topk_sparse_attention():
             warmup=10,
             rep=100,
         )
-        print(f"BATCH: {BATCH}, N_HEADS: {N_HEADS}, SEQ_LEN: {SEQ_LEN}, D_HEAD: {D_HEAD}, TOPK: {TOPK}, BLOCK: {BLOCK}, ref_latency: {ref_latency}")
+        print(
+            f"BATCH: {BATCH}, N_HEADS: {N_HEADS}, SEQ_LEN: {SEQ_LEN}, D_HEAD: {D_HEAD}, TOPK: {TOPK}, BLOCK: {BLOCK}, ref_latency: {ref_latency}"
+        )
 
 
 if __name__ == "__main__":
