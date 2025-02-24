@@ -114,7 +114,8 @@ TL_DEVICE void AtomicAdd(half_t *address, float val) {
 
 // AtomicAdd Functions for BFLOAT16
 TL_DEVICE void AtomicAdd(bfloat16_t *address, bfloat16_t *val) {
-  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address), static_cast<__nv_bfloat16>(*val));
+  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address),
+            static_cast<__nv_bfloat16>(*val));
 }
 
 TL_DEVICE void AtomicAdd(bfloat16_t *address, float val) {
@@ -122,13 +123,15 @@ TL_DEVICE void AtomicAdd(bfloat16_t *address, float val) {
 }
 
 TL_DEVICE void AtomicAdd(bfloat16_t *address, bfloat16_t val) {
-  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address), static_cast<__nv_bfloat16>(val));
+  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address),
+            static_cast<__nv_bfloat16>(val));
 }
 
 // AtomicAdd Functions for BFLOAT16x2
 TL_DEVICE void AtomicAddx2(bfloat16_t *address, bfloat16_t *val) {
-  atomicAdd(reinterpret_cast<__nv_bfloat162 *>(address),
-            static_cast<__nv_bfloat162>(*reinterpret_cast<__nv_bfloat162 *>(val)));
+  atomicAdd(
+      reinterpret_cast<__nv_bfloat162 *>(address),
+      static_cast<__nv_bfloat162>(*reinterpret_cast<__nv_bfloat162 *>(val)));
 }
 
 // DP4A
