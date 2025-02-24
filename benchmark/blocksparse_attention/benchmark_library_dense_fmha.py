@@ -4,6 +4,7 @@
 import torch
 from tilelang.profiler import do_bench
 
+
 def get_sparse_attn_mask_from_topk(x, topk, use_dense_for_last_block=False):
     bsz, num_head, downsample_len, _ = x.shape
     # N_CTX = downsample_len * BLOCK
