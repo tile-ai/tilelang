@@ -112,7 +112,7 @@ class Profiler(TorchDLPackKernelAdapter):
         n_repeat: int = 1,
         profiler: Literal["torch", "tvm", "auto"] = "auto",
         input_tensors: List[torch.Tensor] = None,
-    ):
+    ) -> float:
         profiler = self.determine_profiler(func, profiler)
         if profiler == "torch":
             ins = self._get_inputs() if input_tensors is None else input_tensors
@@ -156,7 +156,7 @@ def do_bench(
     quantiles=None,
     fast_flush=True,
     return_mode="mean",
-):
+) -> float:
     """
     Benchmark the runtime of the provided function. By default, return the median runtime of :code:`fn` along with
     the 20-th and 80-th performance percentile.
@@ -173,6 +173,10 @@ def do_bench(
     :type quantiles: list[float]
     :param fast_flush: Use faster kernel to flush L2 between measurements
     :type fast_flush: bool
+    
+    Returns:
+        float: The median runtime of :code:`fn` along with
+        the 20-th and 80-th performance percentile.
     """
     assert return_mode in ["min", "max", "mean", "median"]
     fn()
