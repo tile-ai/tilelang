@@ -5,7 +5,6 @@ from typing import Union, Optional
 from tilelang import tvm as tvm
 from tvm import IRModule, tir
 from tvm.target import Target
-import tilelang.transform
 from tilelang.engine.lower import (
     is_device_call,
     determine_target,

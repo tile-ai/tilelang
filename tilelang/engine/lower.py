@@ -2,7 +2,6 @@
 # Licensed under the MIT License.
 """The compiler for TL programs."""
 
-import tilelang as tl
 import os
 import os.path as osp
 from typing import Union, Optional, Callable
@@ -16,6 +15,7 @@ from tilelang.engine.phase import (
     LowerAndLegalize,
     OptimizeForTarget,
 )
+
 
 def is_cpu_device_backend(target: Target):
     return target.kind.name == "c"

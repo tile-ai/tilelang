@@ -5,6 +5,7 @@ from tvm import tir, IRModule
 from tvm.target import Target
 import tilelang as tl
 
+
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
     mod = tir.transform.BindTarget(target)(mod)
