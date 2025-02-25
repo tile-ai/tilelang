@@ -80,7 +80,7 @@ def torch_assert_close(tensor_a,
         return True
 
 
-def set_random_seed(seed: int) -> None:
+def set_random_seed(seed: int = 42) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

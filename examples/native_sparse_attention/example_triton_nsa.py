@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-
+# ruff: noqa
 import torch
 from typing import Optional
 
@@ -9,17 +9,14 @@ import triton
 import triton.language as tl
 from einops import rearrange
 
-from fla.ops.common.utils import (prepare_chunk_indices, prepare_lens,
-                                  prepare_token_indices)
+from fla.ops.common.utils import (prepare_chunk_indices, prepare_lens, prepare_token_indices)
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
 
 from reference import naive_nsa
 
+
 @triton.autotune(
-    configs=[
-        triton.Config({}, num_warps=num_warps)
-        for num_warps in [1, 2, 4, 8, 16]
-    ],
+    configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8, 16]],
     key=['BS', 'BK', 'BV'],
 )
 @triton.jit
@@ -49,13 +46,14 @@ def parallel_nsa_fwd_kernel(
 
     k += (bos * H + i_h) * K
     v += (bos * H + i_h) * V
-    block_indices += (bos + i_t) * H*S + i_h * S
+    block_indices += (bos + i_t) * H * S + i_h * S
 
-  
     NS = S
 
-    p_q = tl.make_block_ptr(q + (bos + i_t) * HQ*K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0))
-    p_o = tl.make_block_ptr(o + (bos + i_t) * HQ*V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0))
+    p_q = tl.make_block_ptr(q + (bos + i_t) * HQ * K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK),
+                            (1, 0))
+    p_o = tl.make_block_ptr(o + (bos + i_t) * HQ * V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV),
+                            (1, 0))
     p_lse = lse + (bos + i_t) * HQ + i_h * G + tl.arange(0, G)
 
     # the Q block is kept in the shared memory throughout the whole kernel
@@ -70,8 +68,8 @@ def parallel_nsa_fwd_kernel(
     for i in range(NS):
         i_s = tl.load(block_indices + i).to(tl.int32) * BS
         if i_s <= i_t:
-            p_k = tl.make_block_ptr(k, (K, T), (1, H*K), (0, i_s), (BK, BS), (0, 1))
-            p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
+            p_k = tl.make_block_ptr(k, (K, T), (1, H * K), (0, i_s), (BK, BS), (0, 1))
+            p_v = tl.make_block_ptr(v, (T, V), (H * V, 1), (i_s, i_v * BV), (BS, BV), (1, 0))
             # [BK, BS]
             b_k = tl.load(p_k, boundary_check=(0, 1))
             # [BS, BV]
@@ -95,6 +93,7 @@ def parallel_nsa_fwd_kernel(
     b_m += tl.log(b_acc)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_lse, b_m.to(p_lse.dtype.element_ty))
+
 
 def parallel_nsa_fwd(
     q: torch.Tensor,
@@ -143,6 +142,7 @@ def parallel_nsa_fwd(
     )
     return o, lse
 
+
 class ParallelNSAFunction(torch.autograd.Function):
 
     @staticmethod
@@ -158,13 +158,7 @@ class ParallelNSAFunction(torch.autograd.Function):
         token_indices = prepare_token_indices(offsets) if offsets is not None else None
 
         o, lse = parallel_nsa_fwd(
-            q=q,
-            k=k,
-            v=v,
-            block_indices=block_indices,
-            block_size=block_size,
-            scale=scale
-        )
+            q=q, k=k, v=v, block_indices=block_indices, block_size=block_size, scale=scale)
         ctx.save_for_backward(q, k, v, o, lse)
         ctx.block_indices = block_indices
         ctx.block_size = block_size
@@ -172,16 +166,14 @@ class ParallelNSAFunction(torch.autograd.Function):
         return o.to(q.dtype)
 
 
-def parallel_nsa(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    block_indices: torch.LongTensor,
-    block_size: int = 64,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False
-) -> torch.Tensor:
+def parallel_nsa(q: torch.Tensor,
+                 k: torch.Tensor,
+                 v: torch.Tensor,
+                 block_indices: torch.LongTensor,
+                 block_size: int = 64,
+                 scale: Optional[float] = None,
+                 cu_seqlens: Optional[torch.LongTensor] = None,
+                 head_first: bool = False) -> torch.Tensor:
     r"""
     Args:
         q (torch.Tensor):
@@ -210,15 +202,17 @@ def parallel_nsa(
             Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
     """
     if scale is None:
-        scale = k.shape[-1] ** -0.5
+        scale = k.shape[-1]**-0.5
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     if head_first:
-        q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, block_indices))
+        q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'),
+                                     (q, k, v, block_indices))
     o = ParallelNSAFunction.apply(q, k, v, block_indices, block_size, scale, cu_seqlens)
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')
     return o
+
 
 if __name__ == "__main__":
     B, T, H, HQ, D, S, block_size, dtype, scale = 1, 64, 1, 16, 32, 1, 64, torch.float16, 0.1
@@ -235,7 +229,7 @@ if __name__ == "__main__":
                 i_i = torch.randperm(max(1, (t // block_size)))[:S]
                 block_indices[b, t, h, :len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
-    
+
     block_counts = torch.randint(1, S + 1, (B, T, H), device='cuda')
 
     ref = naive_nsa(
@@ -245,31 +239,24 @@ if __name__ == "__main__":
         block_indices=block_indices,
         block_counts=block_counts,
         block_size=block_size,
-        scale=scale
-    )
+        scale=scale)
 
     # print(ref)
 
     tri = parallel_nsa(
-        q=q,
-        k=k,
-        v=v,
-        block_indices=block_indices,
-        block_size=block_size,
-        scale=scale
-    )
-    
+        q=q, k=k, v=v, block_indices=block_indices, block_size=block_size, scale=scale)
+
     # print(tri)
-    
+
     torch.testing.assert_close(ref, tri, atol=1e-2, rtol=1e-2)
-    
+
     # import flash_attn
     # # gqa
     # o_gqa = flash_attn.flash_attn_func(
     #     q,
     #     k,
     #     v,
-    #     softmax_scale=scale,   
+    #     softmax_scale=scale,
     # )
     # print(o_gqa)
 

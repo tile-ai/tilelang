@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-
+# ruff: noqa
 from typing import Optional
 
 import torch
@@ -8,17 +8,15 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 
 
-def naive_nsa(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    block_indices: torch.LongTensor,
-    block_counts: torch.LongTensor,
-    block_size: int = 64,
-    scale: Optional[float] = None,
-    head_first: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None
-) -> torch.Tensor:
+def naive_nsa(q: torch.Tensor,
+              k: torch.Tensor,
+              v: torch.Tensor,
+              block_indices: torch.LongTensor,
+              block_counts: torch.LongTensor,
+              block_size: int = 64,
+              scale: Optional[float] = None,
+              head_first: bool = False,
+              cu_seqlens: Optional[torch.LongTensor] = None) -> torch.Tensor:
     r"""
     Args:
         q (torch.Tensor):
@@ -49,12 +47,14 @@ def naive_nsa(
             Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
     """
     if scale is None:
-        scale = k.shape[-1] ** -0.5
+        scale = k.shape[-1]**-0.5
     if cu_seqlens is not None:
         if head_first:
-            raise RuntimeError("Sequences with variable lengths are not supported for head-first mode")
+            raise RuntimeError(
+                "Sequences with variable lengths are not supported for head-first mode")
     if head_first:
-        q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, block_indices))
+        q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'),
+                                     (q, k, v, block_indices))
         block_counts = rearrange(block_counts, 'b h t -> b t h')
 
     dtype = q.dtype
@@ -71,17 +71,17 @@ def naive_nsa(
     if cu_seqlens is None:
         varlen = False
         B, T = q.shape[:2]
-        cu_seqlens = torch.cat([block_indices.new_tensor(range(0, B*T, T)), block_indices.new_tensor([B*T])])
+        cu_seqlens = torch.cat(
+            [block_indices.new_tensor(range(0, B * T, T)),
+             block_indices.new_tensor([B * T])])
 
     for i in range(len(cu_seqlens) - 1):
         if not varlen:
             q_b, k_b, v_b, i_b, s_b = q[i], k[i], v[i], block_indices[i], block_counts[i]
         else:
-            T = cu_seqlens[i+1] - cu_seqlens[i]
-            q_b, k_b, v_b, i_b, s_b = map(
-                lambda x: x[0][cu_seqlens[i]:cu_seqlens[i+1]],
-                (q, k, v, block_indices, block_counts)
-            )
+            T = cu_seqlens[i + 1] - cu_seqlens[i]
+            q_b, k_b, v_b, i_b, s_b = map(lambda x: x[0][cu_seqlens[i]:cu_seqlens[i + 1]],
+                                          (q, k, v, block_indices, block_counts))
 
         i_b = i_b.unsqueeze(-1) * BS + i_b.new_tensor(range(BS))
         # [T, S*BS, HQ]
@@ -94,13 +94,17 @@ def naive_nsa(
             # [1, HQ]
             s_i = s_b[i_q]
             # [S*BS, HQ, -1]
-            k_i, v_i = map(lambda x: x.gather(0, i_i.clamp(0, T-1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])), (k_b, v_b))
+            k_i, v_i = map(
+                lambda x: x.gather(
+                    0,
+                    i_i.clamp(0, T - 1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])), (k_b, v_b))
             # [S*BS, HQ]
-            attn = torch.einsum('h d, n h d -> n h', q_i, k_i).masked_fill((i_i > i_q) | (c >= s_i), float('-inf')).softmax(0)
+            attn = torch.einsum('h d, n h d -> n h', q_i, k_i).masked_fill((i_i > i_q) | (c >= s_i),
+                                                                           float('-inf')).softmax(0)
             if not varlen:
                 o[i, i_q] = torch.einsum('n h, n h v -> h v', attn, v_i)
             else:
-                o[0][cu_seqlens[i]+i_q] = torch.einsum('n h, n h v -> h v', attn, v_i)
+                o[0][cu_seqlens[i] + i_q] = torch.einsum('n h, n h v -> h v', attn, v_i)
 
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')

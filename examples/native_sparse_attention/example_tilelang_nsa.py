@@ -6,9 +6,18 @@ from reference import naive_nsa
 import tilelang
 from tilelang import language as T
 import tilelang.testing
+
 tilelang.testing.set_random_seed(0)
 
-def native_sparse_attention(batch, heads, seq_len, dim, is_causal, scale=None, groups=1, selected_blocks=16):
+
+def native_sparse_attention(batch,
+                            heads,
+                            seq_len,
+                            dim,
+                            is_causal,
+                            scale=None,
+                            groups=1,
+                            selected_blocks=16):
     if scale is None:
         scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     head_kv = heads // groups
@@ -20,7 +29,7 @@ def native_sparse_attention(batch, heads, seq_len, dim, is_causal, scale=None, g
     accum_dtype = "float"
     block_S = 64
     block_T = min(128, tilelang.math.next_power_of_2(dim))
-    
+
     S = selected_blocks
     NS = S
     G = groups
@@ -42,27 +51,26 @@ def native_sparse_attention(batch, heads, seq_len, dim, is_causal, scale=None, g
             i_h: T.int32,
             i_t: T.int32,
         ):
-            T.copy(K[i_b, i_s * BS : (i_s + 1) * BS, i_h, :], K_shared)
+            T.copy(K[i_b, i_s * BS:(i_s + 1) * BS, i_h, :], K_shared)
 
             if is_causal:
                 for i, j in T.Parallel(G, BS):
-                    acc_s[i, j] = T.if_then_else(i_t >= (i_s * BS + j), 0,
-                                                -T.infinity(acc_s.dtype))
+                    acc_s[i, j] = T.if_then_else(i_t >= (i_s * BS + j), 0, -T.infinity(acc_s.dtype))
             else:
                 T.clear(acc_s)
             T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
         @T.macro
         def MMA1(
-            V: T.Buffer(kv_shape, dtype),
-            V_shared: T.Buffer([G, BV], dtype),
-            acc_s_cast: T.Buffer([G, BS], dtype),
-            acc_o: T.Buffer([G, BV], accum_dtype),
-            i_s: T.int32,
-            i_b: T.int32,
-            i_h: T.int32,
+                V: T.Buffer(kv_shape, dtype),
+                V_shared: T.Buffer([G, BV], dtype),
+                acc_s_cast: T.Buffer([G, BS], dtype),
+                acc_o: T.Buffer([G, BV], accum_dtype),
+                i_s: T.int32,
+                i_b: T.int32,
+                i_h: T.int32,
         ):
-            T.copy(V[i_b, i_s * BS : (i_s + 1) * BS, i_h, :], V_shared)
+            T.copy(V[i_b, i_s * BS:(i_s + 1) * BS, i_h, :], V_shared)
             T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
         @T.macro
@@ -111,7 +119,8 @@ def native_sparse_attention(batch, heads, seq_len, dim, is_causal, scale=None, g
                 BlockIndices: T.Buffer(block_indices_shape, block_indices_dtype),
                 Output: T.Buffer(q_shape, dtype),
         ):
-            with T.Kernel(dim // block_T, seq_len, batch * head_kv, threads=threads) as (bx, by, bz):
+            with T.Kernel(
+                    dim // block_T, seq_len, batch * head_kv, threads=threads) as (bx, by, bz):
                 Q_shared = T.alloc_shared([G, BK], dtype)
                 K_shared = T.alloc_shared([BS, BK], dtype)
                 V_shared = T.alloc_shared([BS, BV], dtype)
@@ -124,13 +133,12 @@ def native_sparse_attention(batch, heads, seq_len, dim, is_causal, scale=None, g
                 scores_max_prev = T.alloc_fragment([G], accum_dtype)
                 scores_scale = T.alloc_fragment([G], accum_dtype)
                 scores_sum = T.alloc_fragment([G], accum_dtype)
-                logsum = T.alloc_fragment([G], accum_dtype)                
-                
+                logsum = T.alloc_fragment([G], accum_dtype)
+
                 i_v, i_t, i_bh = bx, by, bz
                 i_b, i_h = i_bh // heads, i_bh % heads
 
-
-                T.copy(Q[i_b, i_t, i_h * G : (i_h + 1) * G, :], Q_shared)
+                T.copy(Q[i_b, i_t, i_h * G:(i_h + 1) * G, :], Q_shared)
 
                 T.fill(acc_o, 0)
                 T.fill(logsum, 0)
@@ -148,7 +156,7 @@ def native_sparse_attention(batch, heads, seq_len, dim, is_causal, scale=None, g
                 for i, j in T.Parallel(G, BV):
                     acc_o[i, j] /= logsum[i]
                 T.copy(acc_o, O_shared)
-                T.copy(O_shared, Output[i_b, i_t, i_h * G : (i_h + 1) * G, :])
+                T.copy(O_shared, Output[i_b, i_t, i_h * G:(i_h + 1) * G, :])
 
         return main
 
@@ -157,9 +165,10 @@ def native_sparse_attention(batch, heads, seq_len, dim, is_causal, scale=None, g
 
     return kernel(block_S, block_T, num_stages, threads)
 
+
 if __name__ == "__main__":
-    B, SEQ_LEN, H, HQ, D, S, block_size, dtype, scale = 1, 64, 1, 16, 32, 1, 64, torch.float16, None
-    
+    B, SEQ_LEN, H, HQ, D, S, block_size, dtype, scale = 1, 64, 4, 64, 32, 16, 64, torch.float16, None
+
     program = native_sparse_attention(
         batch=B,
         heads=HQ,
@@ -177,7 +186,6 @@ if __name__ == "__main__":
     V = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
     DO = torch.randn((B, SEQ_LEN, HQ, D), dtype=dtype, device='cuda')
 
-    
     block_indices = torch.full((B, SEQ_LEN, H, S), SEQ_LEN, dtype=torch.long, device='cuda')
     for b in range(B):
         for t in range(SEQ_LEN):
@@ -187,11 +195,10 @@ if __name__ == "__main__":
     block_indices = block_indices.sort(-1)[0]
     block_counts = torch.randint(1, S + 1, (B, SEQ_LEN, H), device='cuda')
 
-
     out = kernel(Q, K, V, block_indices.to(torch.int32))
-    
+
     print(out)
-    
+
     ref = naive_nsa(
         q=Q,
         k=K,
@@ -199,8 +206,7 @@ if __name__ == "__main__":
         block_indices=block_indices,
         block_counts=block_counts,
         block_size=block_size,
-        scale=scale
-    )
+        scale=scale)
 
     print(ref)
     torch.testing.assert_close(ref, out, atol=1e-2, rtol=1e-2)
