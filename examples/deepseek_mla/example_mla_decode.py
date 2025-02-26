@@ -3,17 +3,13 @@ import torch.nn.functional as F
 import tilelang
 from tilelang.autotuner import *
 import tilelang.language as T
+from einops import rearrange, einsum
 
-num_split = 4
+num_split = 1
 
 
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
-    shape_q = [batch, heads, (dim + pe_dim)]
-    shape_k = [batch, seqlen_kv, kv_head_num, (dim + pe_dim)]
-    shape_v = [batch, seqlen_kv, kv_head_num, dim]
-    shape_o = [batch, heads, dim]
-    part_shape = [batch, heads, num_split, dim]
     dtype = "float16"
     accum_dtype = "float"
     kv_group_num = heads // kv_head_num
@@ -22,19 +18,23 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
     @T.macro
     def flash_attn_split(
-            Q: T.Buffer(shape_q, dtype),
-            K: T.Buffer(shape_k, dtype),
-            V: T.Buffer(shape_v, dtype),
+            Q: T.Buffer([batch, heads, dim], dtype),
+            Q_pe: T.Buffer([batch, heads, pe_dim], dtype),
+            KV: T.Buffer([batch, seqlen_kv, kv_head_num, dim], dtype),
+            K_pe: T.Buffer([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
             glse: T.Buffer([batch, heads, num_split], dtype),
-            Output_partial: T.Buffer(part_shape, dtype),
+            Output_partial: T.Buffer([batch, heads, num_split, dim], dtype),
     ):
         with T.Kernel(
-                batch, heads // min(block_H, kv_group_num), num_split, threads=128) as (bx, by, bz):
-            Q_shared = T.alloc_shared([block_H, (dim + pe_dim)], dtype)
-            K_shared = T.alloc_shared([block_N, (dim + pe_dim)], dtype)
-            V_shared = T.alloc_shared([block_N, dim], dtype)
+                batch, heads // min(block_H, kv_group_num), num_split, threads=256) as (bx, by, bz):
+            Q_shared = T.alloc_shared([block_H, dim], dtype)
+            S_shared = T.alloc_shared([block_H, block_N], dtype)
+            Q_pe_shared = T.alloc_shared([block_H, pe_dim], dtype)
+            KV_shared = T.alloc_shared([block_N, dim], dtype)
+            K_pe_shared = T.alloc_shared([block_N, pe_dim], dtype)
             O_shared = T.alloc_shared([block_H, dim], dtype)
             acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
+            acc_s_0 = T.alloc_fragment([block_H, block_N], accum_dtype)
             acc_s_cast = T.alloc_fragment([block_H, block_N], dtype)
             acc_o = T.alloc_fragment([block_H, dim], accum_dtype)
             scores_max = T.alloc_fragment([block_H], accum_dtype)
@@ -53,20 +53,32 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             })
 
             T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :], Q_shared)
+            T.copy(Q_pe[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :], Q_pe_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
 
             loop_range = T.ceildiv((seqlen_kv // num_split), block_N)
-            for k in T.Pipelined(loop_range, num_stages=1):
-                T.copy(
-                    K[bid, (seqlen_kv // num_split) * sid +
-                      k * block_N:(seqlen_kv // num_split) * sid + (k + 1) * block_N,
-                      cur_kv_head, :], K_shared)
-                T.clear(acc_s)
-                T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+            for k in T.Pipelined(loop_range, num_stages=2):
+                kv_start = (seqlen_kv // num_split) * sid + k * block_N
+                kv_end = (seqlen_kv // num_split) * sid + (k + 1) * block_N
+
+                T.copy(KV[bid, kv_start:kv_end, cur_kv_head, :], KV_shared)
+                T.copy(K_pe[bid, kv_start:kv_end, cur_kv_head, :], K_pe_shared)
+
+                T.clear(acc_s_0)
+                T.gemm(
+                    Q_shared, KV_shared, acc_s_0, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
+                T.gemm(
+                    Q_pe_shared,
+                    K_pe_shared,
+                    acc_s_0,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullCol)
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
+                T.copy(acc_s_0, S_shared)
+                T.copy(S_shared, acc_s)
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                 for i in T.Parallel(block_H):
                     scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
@@ -78,11 +90,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.copy(acc_s, acc_s_cast)
                 for i, j in T.Parallel(block_H, dim):
                     acc_o[i, j] *= scores_scale[i]
-                T.copy(
-                    V[bid, (seqlen_kv // num_split) * sid +
-                      k * block_N:(seqlen_kv // num_split) * sid + (k + 1) * block_N,
-                      cur_kv_head, :], V_shared)
-                T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(acc_s_cast, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullCol)
             for i, j in T.Parallel(block_H, dim):
                 acc_o[i, j] /= logsum[i]
             for i in T.Parallel(block_H):
@@ -96,8 +104,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
     @T.macro
     def combine(
             glse: T.Buffer([batch, heads, num_split], dtype),
-            Output_partial: T.Buffer(part_shape, dtype),
-            Output: T.Buffer(shape_o, dtype),
+            Output_partial: T.Buffer([batch, heads, num_split, dim], dtype),
+            Output: T.Buffer([batch, heads, dim], dtype),
     ):
         with T.Kernel(heads, batch, threads=128) as (by, bz):
             po_local = T.alloc_fragment([dim], dtype)
@@ -133,50 +141,61 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
     @T.prim_func
     def main(
-            Q: T.Buffer(shape_q, dtype),
-            K: T.Buffer(shape_k, dtype),
-            V: T.Buffer(shape_v, dtype),
+            Q: T.Buffer([batch, heads, dim], dtype),
+            Q_pe: T.Buffer([batch, heads, pe_dim], dtype),
+            KV: T.Buffer([batch, seqlen_kv, kv_head_num, dim], dtype),
+            K_pe: T.Buffer([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
             glse: T.Buffer([batch, heads, num_split], dtype),
-            Output_partial: T.Buffer(part_shape, dtype),  # [batch, heads, num_split, dim]
-            Output: T.Buffer(shape_o, dtype),
+            Output_partial: T.Buffer([batch, heads, num_split, dim], dtype),
+            Output: T.Buffer([batch, heads, dim], dtype),
     ):
-        flash_attn_split(Q, K, V, glse, Output_partial)
+        flash_attn_split(Q, Q_pe, KV, K_pe, glse, Output_partial)
         combine(glse, Output_partial, Output)
 
     return main
 
 
-def ref_program(query, key, value, glse, Output_partial):
+def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     #     """
     #     Inputs:
-    #     - query (Tensor): [batch, heads, dim]
-    #     - key (Tensor): [batch, seqlen_kv, kv_head_num, dim]
-    #     - value (Tensor): [batch, seqlen_kv, kv_head_num, dim]
-
+    #     - q (Tensor): [batch, heads, dim]
+    #     - q_pe (Tensor): [batch, heads, pe_dim]
+    #     - kv (Tensor): [batch, seqlen_kv, kv_head_num, dim]
+    #     - k_pe (Tensor): [batch, seqlen_kv, kv_head_num, pe_dim]
+    #     - glse (Tensor): [batch, heads, num_split]
+    #     - Output_partial (Tensor): [batch, heads, num_split, dim]
     #     Outputs:
     #     - output (Tensor): [batch, heads, dim]
     #     """
-    from einops import rearrange
-    batch_size, query_heads, dim = query.shape  # [batch_size, query_heads, dim]
-    _, seqlen_kv, kv_heads, _ = key.shape  # [batch_size, seqlen_kv, kv_heads, kv_dim]
-    dim_v = value.shape[-1]
-    assert kv_heads == 1, "kv_heads must be 1"
+    dim = q.shape[-1]
+    pe_dim = q_pe.shape[-1]
+    num_head_groups = q.shape[1] // kv.shape[2]
+    scale = (dim + pe_dim)**0.5
+    q = rearrange(
+        q, 'b (h g) d -> b g h d', g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
 
-    query_expanded = rearrange(query, 'b h d -> b h 1 d')  # [batch_size, query_heads, 1, dim]
-    key_expanded = key.expand(-1, -1, query_heads, -1)  # [batch_size, query_heads, seqlen_kv, dim]
-    value_expanded = value.expand(-1, -1, query_heads,
-                                  -1)  # [batch_size, query_heads, seqlen_kv, dim]
-    key_expanded = rearrange(key_expanded,
-                             'b n h d -> b h n d')  # [batch_size, kv_head_num, seqlen_kv, dim]
-    value_expanded = rearrange(value_expanded,
-                               'b n h d -> b h n d')  # [batch_size, query_heads, seqlen_kv, dim]
+    q_pe = rearrange(
+        q_pe, 'b (h g) d -> b g h d',
+        g=num_head_groups)  # [batch_size, num_head_groups, groups, pe_dim]
 
-    scores = torch.matmul(query_expanded,
-                          key_expanded.transpose(-1, -2))  # [batch_size, query_heads, 1, seqlen_kv]
-    scores = scores / torch.sqrt(torch.tensor(dim, dtype=scores.dtype))
-    attention_weights = F.softmax(scores, dim=-1)  # [batch_size, query_heads, 1, seqlen_kv]
-    output = torch.matmul(attention_weights, value_expanded)  # [batch_size, query_heads, 1, dim]
-    return output.view(batch_size, query_heads, dim_v)
+    kv = rearrange(kv, 'b n h d -> b h n d')  # [batch_size, groups, seqlen_kv, dim]
+
+    k_pe = rearrange(k_pe, 'b n h d -> b h n d')  # [batch_size, num_head_groups, groups, pe_dim]
+
+    query = torch.concat([q, q_pe], dim=-1)
+    key = torch.concat([kv, k_pe], dim=-1)
+
+    scores = einsum(
+        query, key,
+        'b g h d, b h s d -> b g h s')  # [batch_size, num_head_groups, groups, seqlen_kv]
+
+    attention = F.softmax(
+        scores / scale, dim=-1)  # [batch_size, num_head_groups, groups, seqlen_kv]
+
+    out = einsum(attention, kv,
+                 'b g h s, b h s d -> b g h d')  # [batch_size, num_head_groups, groups, dim]
+    out = rearrange(out, 'b g h d -> b (h g) d')  # [batch_size, heads, dim]
+    return out
 
 
 def flash_split_ref(Q, K, V):
@@ -251,7 +270,7 @@ def reduce_ref(Q, K, V, glse, Output_partial):
 
 
 if __name__ == "__main__":
-    BATCH, H_Q, KV_H, KV_CTX, D_HEAD, DPE = 64, 128, 1, 8192, 512, 64
+    BATCH, H_Q, KV_H, KV_CTX, D_HEAD, DPE = 128, 128, 1, 8192, 512, 64
     qk_flops = 2 * BATCH * H_Q * KV_CTX * (D_HEAD + DPE)
     pv_flops = 2 * BATCH * H_Q * KV_CTX * D_HEAD
     total_flops = qk_flops + pv_flops
@@ -260,8 +279,9 @@ if __name__ == "__main__":
 
     program = flashattn(BATCH, H_Q, KV_H, KV_CTX, D_HEAD, DPE, BLOCK_N, BLOCK_H)
     mod, params = tilelang.lower(program)
-    mod = tilelang.Profiler(mod, params, [5], tilelang.TensorSupplyType.Normal)
+    mod = tilelang.Profiler(mod, params, [6], tilelang.TensorSupplyType.Normal)
     mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
-    latency = mod.do_bench(mod.func, warmup=500)
+    print("All close")
+    latency = mod.do_bench(mod.func, n_warmup=10, n_repeat=10, profiler="torch")
     print("Tile-lang: {:.2f} ms".format(latency))
     print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
