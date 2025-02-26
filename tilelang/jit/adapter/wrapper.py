@@ -6,7 +6,7 @@ from tilelang import tvm as tvm
 from typing import Optional, List, Dict, Union
 from tvm import IRModule
 from tvm.target import Target
-from .utils import match_global_kernel, is_cuda_target, is_hip_target, get_annotated_device_mod
+from .utils import match_global_kernel, is_cuda_target, is_hip_target, get_annotated_mod
 import re
 import logging
 
@@ -65,15 +65,19 @@ class TLCUDASourceWrapper(object):
         self.dynamic_smem_buf: Optional[int] = None
         self.block_info: Union[List[int], Dict] = [1, 1, 1]
         self.grid_info: Union[List[int], Dict] = [1, 1, 1]
+        self.tma_descriptor_args: Optional[Dict] = None
         self.parse_source_information()
         self.srcpath: Optional[str] = None
         self.libpath: Optional[str] = None
         self.lib_code: Optional[str] = self.update_lib_code(source)
 
     def parse_source_information(self):
-        device_mod = get_annotated_device_mod(self.mod, self.target)
+        device_mod, host_mod = get_annotated_mod(self.mod, self.target)
         assert (len(device_mod.functions) == 1
                ), "Only support one function in the module for static shape kernel."
+        assert (len(host_mod.functions) == 1
+               ), "Only support one function in the module for static shape kernel."
+        
         for g_var, func in device_mod.functions.items():
             self.function_name = g_var.name_hint
             attrs = func.attrs
@@ -86,6 +90,10 @@ class TLCUDASourceWrapper(object):
                         self.block_info["xyz".index(tag[-1])] = extent
                     elif "blockIdx" in tag:
                         self.grid_info["xyz".index(tag[-1])] = extent
+
+        for g_var, func in host_mod.functions.items():
+            if "tma_descriptor_args" in func.attrs:
+                self.tma_descriptor_args = func.attrs["tma_descriptor_args"]
 
     def get_dynamic_symbolic_set(self, prim_func):
         # Determine the set of dynamic symbols used in the function
@@ -143,12 +151,25 @@ class TLCUDASourceWrapper(object):
 
         def func_call_args(s, function_args):
             # Extract the function call arguments matching the function definition
+            def maybe_desc(name:str, matches:List[str], i:int):
+                match = matches[i]
+                if not (match == name + "_desc"):
+                    return False
+                desc_decls = []
+                if i > 0:
+                    desc_decls.append(matches[i - 1])
+                if i < len(matches) - 1:
+                    desc_decls.append(matches[i + 1])
+                return any([decl == "CUtensorMap" for decl in desc_decls])
+
             pattern = r"[,\s]*(?:\w+\s*\*+\s*__restrict__\s+)?(\w+)"
             matches = re.findall(pattern, s)
             call_args = []
-            for match in matches:
+            for i, match in enumerate(matches):
                 for arg in function_args:
                     if arg["name"] == match:
+                        call_args.append(match)
+                    elif maybe_desc(arg["name"], matches, i):
                         call_args.append(match)
             return call_args
 
@@ -243,4 +264,5 @@ class TLWrapper(BaseWrapper):
         else:
             raise ValueError(f"Unsupported platform: {self.arch.platform}")
         wrapper = wrapper_class(self.scheduled_ir_module, c_source, self.target)
+        print(wrapper.lib_code)
         return wrapper.lib_code

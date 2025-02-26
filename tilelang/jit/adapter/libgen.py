@@ -35,8 +35,12 @@ class LibraryGenerator(object):
         if is_cuda_target(target):
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
             compute_version = "".join(get_target_compute_version(target).split("."))
+            if compute_version == "90":
+                compute_version = "90a"
             libpath = src.name.replace(".cu", ".so")
-
+            
+            # arch = f"arch=compute_{compute_version},code=sm_{compute_version}"
+            arch = f"--arch=sm_{compute_version}"
             command = [
                 "nvcc",
                 "-std=c++17",
@@ -49,7 +53,7 @@ class LibraryGenerator(object):
                 src.name,
                 "-lcuda",
                 "-gencode",
-                f"arch=compute_{compute_version},code=sm_{compute_version}",
+                arch,
             ]
 
         elif is_hip_target(target):
@@ -74,6 +78,8 @@ class LibraryGenerator(object):
             ]
             command += ["-diag-suppress=20013"]
         command += ["-o", libpath]
+
+        print(" ".join(command))
 
         src.write(self.lib_code)
         src.flush()

@@ -9,8 +9,8 @@ from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.relay import TensorType
 from tvm import tir
-from .wrapper import TLWrapper
-from .libgen import LibraryGenerator
+from tilelang.jit.adapter.wrapper import TLWrapper
+from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.contrib.cc import get_cplus_compiler
@@ -175,6 +175,10 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.lib_generator.update_lib_code(self.wrapped_source)
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
+
+        if self.lib is None:
+            raise Exception(f"Failed to load the compiled library for {self.target}")
+
         self.lib.init()
 
         self.cython_wrapper = CythonKernelWrapper(self.dynamic_symbolic_map, self.result_idx,
