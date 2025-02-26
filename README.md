@@ -26,6 +26,8 @@ Although tile-lang aims to be portable across a range of Devices, it has been sp
 - [Dequantization GEMM](./examples/dequantize_gemm/)
 - [Flash Attention](./examples/flash_attention/)
 - [Flash Linear Attention](./examples/linear_attention/)
+- [Flash MLA Decoding](./examples/flash_decoding/example_mla_decode.py)
+- [Native Sparse Attention](./examples/native_sparse_attention/)
 
 Within the `examples` directory, you will also find additional complex kernels—such as convolutions, forward/backward passes for FlashAttention, more operators will continuously be added.
 
