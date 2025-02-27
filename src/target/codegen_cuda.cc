@@ -1633,9 +1633,9 @@ void CodeGenTileLangCUDA::PrintVecElemLoadExpr(DataType t, int i,
   return;
 }
 
-
-void CodeGenTileLangCUDA::PrintFunctionSignature(const String& function_name, const PrimFunc& func,
-                                      std::ostream& os) {
+void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
+                                                 const PrimFunc &func,
+                                                 std::ostream &os) {
   PrintFuncPrefix(os);
   CodeGenC::PrintType(func->ret_type, os);
   CodeGenC::PrintExtraAttrs(func, os);
@@ -1650,52 +1650,52 @@ void CodeGenTileLangCUDA::PrintFunctionSignature(const String& function_name, co
     }
 
     if (v.dtype().is_handle()) {
-        // work around for grid constant parameters.
-        if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
-          if (ptr->storage_scope == "grid_constant") {
-            os << "__grid_constant__ const ";
-            CodeGenC::PrintType(ptr->element_type, os);
-            os << ' ' << vid;
-            continue;
-          }
+      // work around for grid constant parameters.
+      if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
+        if (ptr->storage_scope == "grid_constant") {
+          os << "__grid_constant__ const ";
+          CodeGenC::PrintType(ptr->element_type, os);
+          os << ' ' << vid;
+          continue;
         }
-
-        auto it = alloc_storage_scope_.find(v.get());
-        if (it != alloc_storage_scope_.end()) {
-          PrintStorageScope(it->second, os);
-        }
-
-        CodeGenC::PrintType(GetType(v), os);
-        if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
-          if (auto *prim = ptr->element_type.as<PrimTypeNode>()) {
-            RegisterHandleType(v.get(), prim->dtype);
-          }
-        }
-
-        if (no_alias) {
-          PrintRestrict(v, os);
-        }
-      } else {
-        CodeGenC::PrintType(GetType(v), os);
       }
-      os << ' ' << vid;
-  }  
+
+      auto it = alloc_storage_scope_.find(v.get());
+      if (it != alloc_storage_scope_.end()) {
+        PrintStorageScope(it->second, os);
+      }
+
+      CodeGenC::PrintType(GetType(v), os);
+      if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
+        if (auto *prim = ptr->element_type.as<PrimTypeNode>()) {
+          RegisterHandleType(v.get(), prim->dtype);
+        }
+      }
+
+      if (no_alias) {
+        PrintRestrict(v, os);
+      }
+    } else {
+      CodeGenC::PrintType(GetType(v), os);
+    }
+    os << ' ' << vid;
+  }
   os << ")";
 
   // Register handle data type
   // TODO(tvm-team): consider simply keep type info in the
   // type annotation(via a normalizing rewriting).
-  for (const auto& param : func->params) {
-    if (auto* ptr = param->type_annotation.as<PointerTypeNode>()) {
-      if (auto* prim = ptr->element_type.as<PrimTypeNode>()) {
+  for (const auto &param : func->params) {
+    if (auto *ptr = param->type_annotation.as<PointerTypeNode>()) {
+      if (auto *prim = ptr->element_type.as<PrimTypeNode>()) {
         RegisterHandleType(param.get(), prim->dtype);
       }
     }
   }
 }
 
-
-void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar, const PrimFunc &f) {
+void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
+                                      const PrimFunc &f) {
   // If the function has already been forward-declared, this is a
   // no-op.
   CodeGenC::DeclareFunction(gvar, f);

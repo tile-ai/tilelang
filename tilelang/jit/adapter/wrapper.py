@@ -93,9 +93,7 @@ class TLCUDASourceWrapper(object):
         self.lib_code: Optional[str] = self.update_lib_code(source)
 
     def is_tma_descriptor_arg(self, arg_name: str) -> bool:
-        if arg_name in self.prim_func.buffer_map:
-            return True
-        return False
+        return arg_name in self.prim_func.buffer_map
 
     def create_dispatch_func(self, code, function_informations):
         # Extract the set of dynamic symbolic names used in the primary function
@@ -122,7 +120,7 @@ class TLCUDASourceWrapper(object):
             # Extract the function call arguments matching the function definition
             def maybe_desc(name: str, matches: List[str], i: int):
                 match = matches[i]
-                if not (match == name + "_desc"):
+                if match != name + "_desc":
                     return False
                 desc_decls = []
                 if i > 0:
@@ -136,9 +134,7 @@ class TLCUDASourceWrapper(object):
             call_args = []
             for i, match in enumerate(matches):
                 for arg in function_args:
-                    if arg["name"] == match:
-                        call_args.append(match)
-                    elif maybe_desc(arg["name"], matches, i):
+                    if arg["name"] == match or maybe_desc(arg["name"], matches, i):
                         call_args.append(match)
             return call_args
 
@@ -190,7 +186,7 @@ class TLCUDASourceWrapper(object):
         if self.tma_descriptor_args is None:
             return tma_descripter_init
 
-        for func_name, args in self.tma_descriptor_args.items():
+        for _, args in self.tma_descriptor_args.items():
             # Skip __tvm_tensormap_create_tiled
             if len(args) < 3:
                 raise ValueError(
@@ -222,10 +218,10 @@ class TLCUDASourceWrapper(object):
             try:
                 interleave, swizzle, l2Promotion, oobFill = remaining_args[4 * tensor_rank:4 *
                                                                            tensor_rank + 4]
-            except ValueError:
+            except ValueError as e:
                 raise ValueError(
                     "Failed to unpack the final 4 TMA parameters (interleave, swizzle, l2Promotion, oobFill)"
-                )
+                ) from e
 
             tma_descripter_init += TMA_DESC_INIT_FUNC.format(desc_name, dtype, tensor_rank,
                                                              globalAddress, ",".join(global_dim),
