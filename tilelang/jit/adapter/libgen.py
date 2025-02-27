@@ -38,12 +38,11 @@ class LibraryGenerator(object):
             if compute_version == "90":
                 compute_version = "90a"
             libpath = src.name.replace(".cu", ".so")
-            
-            # arch = f"arch=compute_{compute_version},code=sm_{compute_version}"
-            arch = f"--arch=sm_{compute_version}"
+
             command = [
                 "nvcc",
-                "-std=c++17",
+                "-std=c++17", 
+                "-w", # Disable all warning messages
                 "-Xcudafe",
                 "--diag_suppress=177",
                 "--compiler-options",
@@ -53,7 +52,7 @@ class LibraryGenerator(object):
                 src.name,
                 "-lcuda",
                 "-gencode",
-                arch,
+                f"arch=compute_{compute_version},code=sm_{compute_version}",
             ]
 
         elif is_hip_target(target):
@@ -78,8 +77,6 @@ class LibraryGenerator(object):
             ]
             command += ["-diag-suppress=20013"]
         command += ["-o", libpath]
-
-        print(" ".join(command))
 
         src.write(self.lib_code)
         src.flush()

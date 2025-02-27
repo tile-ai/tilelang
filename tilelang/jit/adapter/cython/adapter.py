@@ -176,10 +176,10 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
 
-        if self.lib is None:
-            raise Exception(f"Failed to load the compiled library for {self.target}")
-
-        self.lib.init()
+        try:
+            self.lib.init()
+        except Exception as e:
+            raise Exception(f"Failed to initialize the compiled library for {self.target}: {e}") from e
 
         self.cython_wrapper = CythonKernelWrapper(self.dynamic_symbolic_map, self.result_idx,
                                                   self.params, self.lib)

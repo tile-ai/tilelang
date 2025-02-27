@@ -18,12 +18,23 @@ from tilelang.engine.phase import (
 )
 
 
-def match_global_kernel(source: str) -> int:
+def match_global_kernel(source: str, annotation: str = "__global__") -> int:
     pattern = r"__global__\s+void\s+[__launch_bounds__\(\d+\)\s+]\w+"
-    matched = re.findall(pattern, source)
-    assert len(matched) >= 1  # may have statement before kernel
-    return source.index(matched[0])
+    for line in source.split("\n"):
+        if annotation in line:
+            matched = re.findall(pattern, line)
+            if len(matched) >= 1:
+                return source.index(matched[0])
+    raise ValueError("No global kernel found in the source code")
 
+def match_declare_kernel(source: str, annotation: str = "__global__") -> int:
+    pattern = r"__global__\s+void\s+\w+"
+    for line in source.split("\n"):
+        if annotation in line:
+            matched = re.findall(pattern, line)
+            if len(matched) >= 1:
+                return source.index(matched[0] + "(")
+    raise ValueError("No global kernel found in the source code")
 
 def is_cuda_target(target: Target) -> bool:
     return target.kind.name == "cuda"
