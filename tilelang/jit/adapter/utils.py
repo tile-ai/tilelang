@@ -27,6 +27,7 @@ def match_global_kernel(source: str, annotation: str = "__global__") -> int:
                 return source.index(matched[0])
     raise ValueError("No global kernel found in the source code")
 
+
 def match_declare_kernel(source: str, annotation: str = "__global__") -> int:
     pattern = r"__global__\s+void\s+\w+"
     for line in source.split("\n"):
@@ -35,6 +36,7 @@ def match_declare_kernel(source: str, annotation: str = "__global__") -> int:
             if len(matched) >= 1:
                 return source.index(matched[0] + "(")
     raise ValueError("No global kernel found in the source code")
+
 
 def is_cuda_target(target: Target) -> bool:
     return target.kind.name == "cuda"
@@ -50,7 +52,6 @@ def get_annotated_mod(
     target_host: Optional[Union[str, Target]] = None,
     model_type: Literal["device", "host", "all"] = "all",
 ) -> Union[IRModule, tuple[IRModule, IRModule]]:
-    
 
     # Validate model_type early
     if model_type not in {"device", "host", "all"}:
@@ -76,12 +77,13 @@ def get_annotated_mod(
 
     # Define dispatch dictionary for different model types
     dispatch = {
-        "device": lambda m: tir.transform.Filter(_is_device_call)(m),
-        "host": lambda m: tir.transform.Filter(_is_host_call)(m),
-        "all": lambda m: (
-            tir.transform.Filter(_is_device_call)(m),
-            tir.transform.Filter(_is_host_call)(m)
-        ),
+        "device":
+            lambda m: tir.transform.Filter(_is_device_call)(m),
+        "host":
+            lambda m: tir.transform.Filter(_is_host_call)(m),
+        "all":
+            lambda m: (tir.transform.Filter(_is_device_call)(m), tir.transform.Filter(_is_host_call)
+                       (m)),
     }
 
     return dispatch[model_type](mod)

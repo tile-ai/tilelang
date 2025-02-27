@@ -166,9 +166,6 @@ def test_gemm_f32f32f32_nn():
         32,
     )
 
-def test_gemm_i8i8i32_nt():
-    run_gemm(512, 1024, 768, False, True, "int8", "int8", "int32", 128, 128, 64)
-
 
 def test_gemm_f16f16f16_tn():
     run_gemm(

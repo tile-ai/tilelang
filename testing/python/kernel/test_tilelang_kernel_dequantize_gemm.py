@@ -176,7 +176,8 @@ def matmul_fp16xfp4(M,
 
         return main
 
-    return kernel_func(block_M=block_M, block_N=block_N, block_K=block_K, num_stages=num_stages, threads=threads)
+    return kernel_func(
+        block_M=block_M, block_N=block_N, block_K=block_K, num_stages=num_stages, threads=threads)
 
 
 def ref_program(A, qB):

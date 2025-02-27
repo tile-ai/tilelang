@@ -361,9 +361,9 @@ def assert_tl_matmul_block_all_dynamic_correctness(
         num_stages,
         num_threads,
     )
-    
+
     kernel = tilelang.compile(program)
-    
+
     if trans_A:
         A = torch.rand(K, M, device="cuda", dtype=getattr(torch, in_dtype))
     else:

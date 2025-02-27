@@ -120,7 +120,7 @@ class TLCUDASourceWrapper(object):
 
         def func_call_args(s, function_args):
             # Extract the function call arguments matching the function definition
-            def maybe_desc(name:str, matches:List[str], i:int):
+            def maybe_desc(name: str, matches: List[str], i: int):
                 match = matches[i]
                 if not (match == name + "_desc"):
                     return False
@@ -157,16 +157,16 @@ class TLCUDASourceWrapper(object):
             block_info = function_info["block_info"]
             grid_info = function_info["grid_info"]
             dynamic_smem_buf = function_info["dynamic_smem_buf"]
-            
+
             # Find the location of the global kernel function in the code
             index = match_declare_kernel(code, function_name + "(")
-            
+
             # Analyze the function declaration to prepare for argument extraction
             declaration = code[index:].split(";")[0]
 
             # Identify the start of the function body to insert arguments
             index = code.index("{", index)
-            
+
             call_args = ", ".join(func_call_args(declaration, function_args))
 
             block_str = "dim3({}, {}, {})".format(
@@ -177,8 +177,9 @@ class TLCUDASourceWrapper(object):
             grid_str = "dim3({}, {}, {})".format(
                 legalize_c(grid_info[0]), legalize_c(grid_info[1]), legalize_c(grid_info[2]))
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
-            _call_str += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(function_name, grid_str, block_str,
-                                                             smem_str, call_args)
+            _call_str += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(function_name, grid_str,
+                                                                      block_str, smem_str,
+                                                                      call_args)
 
         # Wrap the kernel dispatch logic in an external C function
         host_func = PREDEF_HOST_FUNC.format(def_args, _call_str)
@@ -192,26 +193,25 @@ class TLCUDASourceWrapper(object):
         for func_name, args in self.tma_descriptor_args.items():
             # Skip __tvm_tensormap_create_tiled
             if len(args) < 3:
-                raise ValueError(f"TMA descriptor args too short: {len(args)} elements, expected at least 3")
+                raise ValueError(
+                    f"TMA descriptor args too short: {len(args)} elements, expected at least 3")
             desc_name, dtype, tensor_rank, globalAddress, *remaining_args = args[1:]
             tensor_rank = int(tensor_rank)
             # Validate tensor_rank
             if not isinstance(tensor_rank, int) or tensor_rank <= 0:
                 raise ValueError(f"Invalid tensor_rank: {tensor_rank}. Must be a positive integer")
-            
+
             # Calculate required length for remaining_args
             expected_args_len = 4 * tensor_rank + 4  # 4 groups of tensor_rank size + 4 parameters
             if len(remaining_args) < expected_args_len:
-                raise ValueError(
-                    f"Insufficient remaining args: got {len(remaining_args)}, "
-                    f"expected {expected_args_len} for tensor_rank {tensor_rank}"
-                )
-            
+                raise ValueError(f"Insufficient remaining args: got {len(remaining_args)}, "
+                                 f"expected {expected_args_len} for tensor_rank {tensor_rank}")
+
             # Extract dimensions and strides using list slicing
             global_dim = remaining_args[:tensor_rank]
-            global_stride = remaining_args[tensor_rank:2*tensor_rank]
-            box_dim = remaining_args[2*tensor_rank:3*tensor_rank]
-            element_strides = remaining_args[3*tensor_rank:4*tensor_rank]
+            global_stride = remaining_args[tensor_rank:2 * tensor_rank]
+            box_dim = remaining_args[2 * tensor_rank:3 * tensor_rank]
+            element_strides = remaining_args[3 * tensor_rank:4 * tensor_rank]
 
             global_dim = [str(i) for i in global_dim]
             global_stride = [str(i) for i in global_stride]
@@ -220,20 +220,26 @@ class TLCUDASourceWrapper(object):
 
             # Extract remaining parameters
             try:
-                interleave, swizzle, l2Promotion, oobFill = remaining_args[4*tensor_rank:4*tensor_rank+4]
+                interleave, swizzle, l2Promotion, oobFill = remaining_args[4 * tensor_rank:4 *
+                                                                           tensor_rank + 4]
             except ValueError:
-                raise ValueError("Failed to unpack the final 4 TMA parameters (interleave, swizzle, l2Promotion, oobFill)")
-            
-            tma_descripter_init += TMA_DESC_INIT_FUNC.format(desc_name, dtype, tensor_rank, globalAddress, ",".join(global_dim), ",".join(global_stride), ",".join(box_dim), ",".join(element_strides), interleave, swizzle, l2Promotion, oobFill)
+                raise ValueError(
+                    "Failed to unpack the final 4 TMA parameters (interleave, swizzle, l2Promotion, oobFill)"
+                )
+
+            tma_descripter_init += TMA_DESC_INIT_FUNC.format(desc_name, dtype, tensor_rank,
+                                                             globalAddress, ",".join(global_dim),
+                                                             ",".join(global_stride),
+                                                             ",".join(box_dim),
+                                                             ",".join(element_strides), interleave,
+                                                             swizzle, l2Promotion, oobFill)
         return tma_descripter_init
 
     def parse_source_information(self):
         device_mod, host_mod = get_annotated_mod(self.mod, self.target)
-        assert (len(device_mod.functions) >= 1
-               ), "Device module should have at least one function."
-        assert (len(host_mod.functions) == 1
-               ), "Only support one function in host module."
-        
+        assert (len(device_mod.functions) >= 1), "Device module should have at least one function."
+        assert (len(host_mod.functions) == 1), "Only support one function in host module."
+
         block_info_map = {}
         grid_info_map = {}
         dynamic_smem_buf_map = {}
@@ -260,14 +266,14 @@ class TLCUDASourceWrapper(object):
             grid_info_map[function_name] = grid_info
             dynamic_smem_buf_map[function_name] = dynamic_smem_buf
             function_names.append(function_name)
-        
+
         # Store the mappings for use in code generation
         self.block_info = block_info_map
         self.grid_info = grid_info_map
         self.dynamic_smem_buf = dynamic_smem_buf_map
 
         function_names_index = {}
-        for g_var, func in host_mod.functions.items():
+        for _, func in host_mod.functions.items():
             if "tma_descriptor_args" in func.attrs:
                 self.tma_descriptor_args = func.attrs["tma_descriptor_args"]
             host_code = str(func)
@@ -308,7 +314,7 @@ class TLCUDASourceWrapper(object):
         function_names = self.function_names
         # Get the CUDA initialization function
         init_func = self.get_cuda_init_func()
-        
+
         # Organize function information for code generation
         function_informations = {}
         for function_name in function_names:
