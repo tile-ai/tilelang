@@ -40,11 +40,12 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
                 # Copy tile of A
                 # This is a sugar syntax for parallelized copy
+                # for i, k in T.Parallel(M, block_K):
+                #     A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
                 T.copy(A[by * block_M, ko * block_K], A_shared)
 
-                # Demonstrate parallelized copy from global to shared for B
-                for k, j in T.Parallel(block_K, block_N):
-                    B_shared[k, j] = B[ko * block_K + k, bx * block_N + j]
+                # Copy tile of B
+                T.copy(B[ko * block_K, bx * block_N], B_shared)
 
                 # Perform a tile-level GEMM on the shared buffers
                 # Currently we dispatch to the cute/hip on Nvidia/AMD GPUs
@@ -63,7 +64,8 @@ func = matmul(1024, 1024, 1024, 128, 128, 32)
 # out_idx specifies the index of the output buffer in the argument list
 # if out_idx is specified, the tensor will be created during runtime
 # target currently can be "cuda" or "hip" or "cpu".
-jit_kernel = tilelang.compile(func, out_idx=[2], target="cuda")
+jit_kernel = tilelang.compile(func, out_idx=[2], target="cuda", execution_backend="cython")
+# jit_kernel = tilelang.compile(func, out_idx=[2], target="cuda", execution_backend="dlpack")
 
 # 3. Test the kernel in Python with PyTorch data
 import torch
@@ -75,6 +77,7 @@ b = torch.randn(1024, 1024, device="cuda", dtype=torch.float16)
 # Run the kernel through the Profiler
 c = jit_kernel(a, b)
 
+print(c)
 # Reference multiplication using PyTorch
 ref_c = a @ b
 
@@ -83,11 +86,11 @@ torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
 print("Kernel output matches PyTorch reference.")
 
 # 4. Retrieve and inspect the generated CUDA source (optional)
-cuda_source = jit_kernel.get_kernel_source()
-print("Generated CUDA kernel:\n", cuda_source)
+# cuda_source = jit_kernel.get_kernel_source()
+# print("Generated CUDA kernel:\n", cuda_source)
 
 # 5.Profile latency with kernel
-profiler = jit_kernel.get_profiler()
+profiler = jit_kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 
 latency = profiler.do_bench()
 
