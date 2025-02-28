@@ -9,6 +9,7 @@ from tvm import tir
 from typing import Any
 from tilelang.language.kernel import get_thread_bindings
 from tilelang.language import macro, serial
+from tilelang.intrinsics.utils import index_to_coordinates
 
 
 @macro
@@ -62,8 +63,8 @@ def print_flat_buffer_with_condition(condition: tir.PrimExpr,
     if condition:
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
-            tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[i])
-
+            coords = index_to_coordinates(i, buffer.shape)
+            tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 def print(obj: Any, msg: str = "") -> tir.PrimExpr:
     """
@@ -88,13 +89,14 @@ def print(obj: Any, msg: str = "") -> tir.PrimExpr:
         tx, ty, tz = get_thread_bindings()
 
         # Flatten the buffer for consistent printing. This assumes a 1D flattened buffer.
-        buffer = obj.get_flattened_buffer()
+        buffer = obj
         if buffer.scope() == "local.fragment":
             raise NotImplementedError("Printing fragment buffers currently is not supported.")
-        assert len(buffer.shape) == 1, "Buffer must be flattened into a 1D shape."
 
         # Get the number of elements in the buffer.
-        elems = buffer.shape[-1]
+        elems = 1
+        for dim in buffer.shape:
+            elems *= dim
 
         # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
         condition = (tx == 0 and ty == 0 and tz == 0)
