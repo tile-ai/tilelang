@@ -878,9 +878,12 @@ public:
 private:
   void VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tir::attr::thread_extent) {
-      auto iter_var = Downcast<IterVar>(op->node);
-      if (iter_var->thread_tag.length() > 0 &&
-          iter_var->thread_tag != "threadIdx.x") {
+      IterVar iter_var = Downcast<IterVar>(op->node);
+      String thread_tag = iter_var->thread_tag;
+      bool is_y_or_z =
+          thread_tag == "threadIdx.y" || thread_tag == "threadIdx.z";
+
+      if (!thread_tag.empty() && is_y_or_z && !is_one(iter_var->dom->extent)) {
         is_valid_ = false;
       }
     }
@@ -891,8 +894,14 @@ private:
     if (op->kind == ForKind::kThreadBinding) {
       ICHECK(op->thread_binding.defined());
       String thread_tag = op->thread_binding.value()->thread_tag;
-      if (thread_tag.length() > 0 && thread_tag != "threadIdx.x") {
-        is_valid_ = false;
+      bool is_y_or_z =
+          thread_tag == "threadIdx.y" || thread_tag == "threadIdx.z";
+      if (!thread_tag.empty() && is_y_or_z) {
+        auto iter_var = Downcast<IterVar>(op->thread_binding);
+        if (iter_var.defined() && iter_var->dom.defined() &&
+            !is_one(iter_var->dom->extent)) {
+          is_valid_ = false;
+        }
       }
     }
     StmtExprVisitor::VisitStmt_(op);

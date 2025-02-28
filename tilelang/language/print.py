@@ -66,6 +66,7 @@ def print_shared_buffer_with_condition(condition: tir.PrimExpr,
             coords = index_to_coordinates(i, buffer.shape)
             tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i,
                             buffer[coords])
+<<<<<<< HEAD
 
 
 @macro

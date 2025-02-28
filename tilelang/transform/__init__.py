@@ -95,6 +95,17 @@ def WarpSpecializedPipeline():
     return _ffi_api.WarpSpecializedPipeline()  # type: ignore
 
 
+def RewriteWgmmaSync():
+    """RewriteWgmmaSync
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.RewriteWgmmaSync()  # type: ignore
+
+
 def ThreadSync(storage_scope: str):
     """Insert sync between parallel read/write of shared buffers.
 
