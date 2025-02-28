@@ -36,6 +36,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tl.transform.WarpSpecialized()(mod)
         mod = tl.transform.InjectSoftwarePipeline()(mod)
         mod = tir.transform.LowerOpaqueBlock()(mod)
+        mod = tl.transform.RewriteWgmmaSync()(mod)
         # mod = tl.transform.WarpSpecializedPipeline()(mod)
         mod = tl.transform.InjectFenceProxy()(mod)
     else:
