@@ -880,8 +880,9 @@ private:
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iter_var = Downcast<IterVar>(op->node);
       String thread_tag = iter_var->thread_tag;
-      bool is_y_or_z = thread_tag == "threadIdx.y" || thread_tag == "threadIdx.z";
-      
+      bool is_y_or_z =
+          thread_tag == "threadIdx.y" || thread_tag == "threadIdx.z";
+
       if (!thread_tag.empty() && is_y_or_z && !is_one(iter_var->dom->extent)) {
         is_valid_ = false;
       }
@@ -893,10 +894,11 @@ private:
     if (op->kind == ForKind::kThreadBinding) {
       ICHECK(op->thread_binding.defined());
       String thread_tag = op->thread_binding.value()->thread_tag;
-      bool is_y_or_z = thread_tag == "threadIdx.y" || thread_tag == "threadIdx.z";
+      bool is_y_or_z =
+          thread_tag == "threadIdx.y" || thread_tag == "threadIdx.z";
       if (!thread_tag.empty() && is_y_or_z) {
         auto iter_var = Downcast<IterVar>(op->thread_binding);
-        if (iter_var.defined() && iter_var->dom.defined() && 
+        if (iter_var.defined() && iter_var->dom.defined() &&
             !is_one(iter_var->dom->extent)) {
           is_valid_ = false;
         }

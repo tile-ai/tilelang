@@ -79,19 +79,20 @@ bool isArriveBarrier(Stmt stmt) {
 }
 
 class WgmmaSyncRewriter : public StmtExprMutator {
- public:
+public:
   static PrimFunc Substitute(PrimFunc f) {
     auto T = WgmmaSyncRewriter();
     T.buffer_lca_ = DetectBufferAccessLCA(f);
-    for (auto [buffer, _] : T.buffer_lca_) T.buffer_data_to_buffer_.Set(buffer->data, buffer);
+    for (auto [buffer, _] : T.buffer_lca_)
+      T.buffer_data_to_buffer_.Set(buffer->data, buffer);
     f.CopyOnWrite()->body = T(f->body);
     return f;
   }
 
- private:
-  void CollectWgmmaInfo(const SeqStmtNode* op) {
+private:
+  void CollectWgmmaInfo(const SeqStmtNode *op) {
     for (int i = 0; i < static_cast<int>(op->seq.size()); i++) {
-      auto stmt= op->seq[i];
+      auto stmt = op->seq[i];
       if (isGemm(stmt)) {
         gemm_stmts_.push_back(stmt);
         gemm_stmt_ids_.push_back(i);
@@ -109,22 +110,26 @@ class WgmmaSyncRewriter : public StmtExprMutator {
         }
         // ICHECK(op->seq.size() > i + 1);
         // auto release_stmt = op->seq[i + 1];
-        // auto next_call = Downcast<Evaluate>(release_stmt)->value.as<CallNode>();
+        // auto next_call =
+        // Downcast<Evaluate>(release_stmt)->value.as<CallNode>();
         // ICHECK(next_call);
         // ICHECK(next_call->op.same_as(Op::Get("tir.ptx_arrive_barrier")));
-        Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
-                  /*body*/ op->seq[i]);
+        Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+                    /*name_hint=*/"",
+                    /*body*/ op->seq[i]);
         auto access = GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
-        std::set<const BufferNode*> read_set, write_set;
-        for (auto region : access[0]) read_set.insert(region->buffer.get());
-        for (auto region : access[1]) write_set.insert(region->buffer.get());
+        std::set<const BufferNode *> read_set, write_set;
+        for (auto region : access[0])
+          read_set.insert(region->buffer.get());
+        for (auto region : access[1])
+          write_set.insert(region->buffer.get());
         gemm_read_buffers_.push_back(read_set);
         gemm_write_buffers_.push_back(write_set);
       }
     }
   }
 
-  Stmt VisitStmt_(const ForNode* op) final {
+  Stmt VisitStmt_(const ForNode *op) final {
     auto order_anno = op->annotations.Get("tl_pipeline_order");
     if (!order_anno.defined()) {
       return StmtExprMutator::VisitStmt_(op);
@@ -134,10 +139,11 @@ class WgmmaSyncRewriter : public StmtExprMutator {
     auto stmt_node = (op->body).as<SeqStmtNode>();
     ICHECK(stmt_node);
 
-    auto intersect_fn = [](const std::set<const BufferNode*>& lhs,
-                           const std::set<const BufferNode*>& rhs) {
+    auto intersect_fn = [](const std::set<const BufferNode *> &lhs,
+                           const std::set<const BufferNode *> &rhs) {
       for (auto ptr : lhs)
-        if (rhs.count(ptr)) return true;
+        if (rhs.count(ptr))
+          return true;
       return false;
     };
 
@@ -150,15 +156,19 @@ class WgmmaSyncRewriter : public StmtExprMutator {
           last_stmt = stmt_node->seq[i];
           continue;
         }
-        if (!found) continue;
-        Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
-                  /*body*/ stmt_node->seq[i]);
+        if (!found)
+          continue;
+        Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+                    /*name_hint=*/"",
+                    /*body*/ stmt_node->seq[i]);
         auto access = GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
-        std::set<const BufferNode*> read_set, write_set;
-        for (auto region : access[0]) read_set.insert(region->buffer.get());
-        for (auto region : access[1]) write_set.insert(region->buffer.get());
+        std::set<const BufferNode *> read_set, write_set;
+        for (auto region : access[0])
+          read_set.insert(region->buffer.get());
+        for (auto region : access[1])
+          write_set.insert(region->buffer.get());
         if (intersect_fn(read_set, gemm_write_buffers_[r]) ||
-            intersect_fn(write_set, gemm_read_buffers_[r]) || 
+            intersect_fn(write_set, gemm_read_buffers_[r]) ||
             intersect_fn(write_set, gemm_write_buffers_[r])) {
           break;
         }
@@ -176,7 +186,8 @@ class WgmmaSyncRewriter : public StmtExprMutator {
           continue;
         }
       }
-      if (remove_) continue;
+      if (remove_)
+        continue;
       auto stmt = stmt_node->seq[i];
       for (int j = 0; j < static_cast<int>(gemm_stmts_.size()); j++) {
         if (stmt_node->seq[i].same_as(gemm_stmts_[j])) {
@@ -191,7 +202,8 @@ class WgmmaSyncRewriter : public StmtExprMutator {
           for (int k = 1; k < static_cast<int>(call->args.size()); k++) {
             new_args.push_back(call->args[k]);
           }
-          stmt = Evaluate(Call(DataType::Handle(), builtin::call_extern(), new_args));
+          stmt = Evaluate(
+              Call(DataType::Handle(), builtin::call_extern(), new_args));
           break;
         }
       }
@@ -202,9 +214,11 @@ class WgmmaSyncRewriter : public StmtExprMutator {
           Array<PrimExpr> new_args;
           new_args.push_back(StringImm("cute::warpgroup_wait<0>"));
           new_args.push_back(Integer(j));
-          auto new_call = Call(DataType::Handle(), builtin::call_extern(), new_args);
+          auto new_call =
+              Call(DataType::Handle(), builtin::call_extern(), new_args);
           new_seq.push_back(Evaluate(new_call));
-          if (std::count(gemm_release_stmts_.begin(), gemm_release_stmts_.end(), gemm_release_stmts_[j]) == 1) {
+          if (std::count(gemm_release_stmts_.begin(), gemm_release_stmts_.end(),
+                         gemm_release_stmts_[j]) == 1) {
             new_seq.push_back(gemm_release_stmts_[j]);
           } else {
             gemm_release_stmts_[j] = Evaluate(0);
@@ -222,19 +236,25 @@ class WgmmaSyncRewriter : public StmtExprMutator {
         auto call = Downcast<Evaluate>(new_seq[i])->value.as<CallNode>();
         auto sync_index = Downcast<IntImm>(call->args[1])->value;
         auto wait_count = gemm_count - sync_index - 1;
-        if (sync_index > max_sync_index) max_sync_index = sync_index;
+        if (sync_index > max_sync_index)
+          max_sync_index = sync_index;
         if (sync_index < max_sync_index) {
           // new_seq.erase(new_seq.begin() + i);
           new_seq.Set(i, Evaluate(0));
         } else {
           Array<PrimExpr> new_args;
-          std::string call_str = "cute::warpgroup_wait<" + std::to_string(wait_count) + ">";
+          std::string call_str =
+              "cute::warpgroup_wait<" + std::to_string(wait_count) + ">";
           new_args.push_back(StringImm(call_str));
-          new_seq.Set(i, Evaluate(Call(DataType::Handle(), builtin::call_extern(), new_args)));
+          new_seq.Set(i, Evaluate(Call(DataType::Handle(),
+                                       builtin::call_extern(), new_args)));
         }
       }
     }
-    auto new_for = For(op->loop_var, op->min, op->extent, op->kind, new_seq.size() == 1 ? new_seq[0] : SeqStmt(std::move(new_seq)), op->thread_binding, op->annotations);
+    auto new_for =
+        For(op->loop_var, op->min, op->extent, op->kind,
+            new_seq.size() == 1 ? new_seq[0] : SeqStmt(std::move(new_seq)),
+            op->thread_binding, op->annotations);
     return new_for;
   }
 
@@ -242,11 +262,12 @@ class WgmmaSyncRewriter : public StmtExprMutator {
 
   Map<Buffer, Optional<Stmt>> buffer_lca_;
   Map<Var, Buffer> buffer_data_to_buffer_;
-  std::vector<std::set<const BufferNode*>> gemm_read_buffers_;
-  std::vector<std::set<const BufferNode*>> gemm_write_buffers_;
+  std::vector<std::set<const BufferNode *>> gemm_read_buffers_;
+  std::vector<std::set<const BufferNode *>> gemm_write_buffers_;
   std::vector<Stmt> gemm_stmts_;
   std::vector<Stmt> gemm_release_stmts_;
   std::vector<Stmt> last_stmts_;
+
   std::vector<int32_t> gemm_stmt_ids_;
   friend class WgmmaReleaseCollector;
 };
@@ -260,7 +281,8 @@ tvm::transform::Pass RewriteWgmmaSync() {
   return CreatePrimFuncPass(pass_func, 0, "tl.RewriteWgmmaSync", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.RewriteWgmmaSync").set_body_typed(RewriteWgmmaSync);
+TVM_REGISTER_GLOBAL("tl.transform.RewriteWgmmaSync")
+    .set_body_typed(RewriteWgmmaSync);
 
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl
+} // namespace tvm
