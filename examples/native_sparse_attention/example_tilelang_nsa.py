@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-
+# ruff: noqa
 import torch
 from reference import naive_nsa
 import tilelang
@@ -39,6 +39,7 @@ def native_sparse_attention(batch,
     threads = 32
 
     def kernel_func(block_S, block_T, num_stages, threads):
+
         @T.prim_func
         def main(
                 Q: T.Buffer(q_shape, dtype),
@@ -80,11 +81,17 @@ def native_sparse_attention(batch,
 
                         if is_causal:
                             for i, j in T.Parallel(G, BS):
-                                acc_s[i, j] = T.if_then_else(i_t >= (i_s * BS + j), 0, -T.infinity(acc_s.dtype))
+                                acc_s[i, j] = T.if_then_else(i_t >= (i_s * BS + j), 0,
+                                                             -T.infinity(acc_s.dtype))
                         else:
                             T.clear(acc_s)
-                        T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-                        
+                        T.gemm(
+                            Q_shared,
+                            K_shared,
+                            acc_s,
+                            transpose_B=True,
+                            policy=T.GemmWarpPolicy.FullRow)
+
                         # Softmax
                         T.copy(scores_max, scores_max_prev)
                         T.fill(scores_max, -T.infinity(accum_dtype))
@@ -95,7 +102,8 @@ def native_sparse_attention(batch,
                         # for i in T.Parallel(block_M):
                         #     scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0, scores_max[i])
                         for i in T.Parallel(G):
-                            scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+                            scores_scale[i] = T.exp2(scores_max_prev[i] * scale -
+                                                     scores_max[i] * scale)
                         for i, j in T.Parallel(G, BS):
                             # Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
                             # max * log_2(e)) This allows the compiler to use the ffma

@@ -30,6 +30,7 @@
 #include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/op.h"
+
 #include "arith/ir_mutator_with_analyzer.h"
 #include "loop_partition.h"
 
@@ -205,9 +206,13 @@ private:
   }
 
   PrimExpr VisitExpr_(const tir::CallNode *op) final {
-    if (!op->op.same_as(builtin::ptx_ldmatrix()) &&
-        !op->op.same_as(builtin::mma_store())) {
-      return Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
+    Array<RelayExpr> ptx_instructions = {builtin::ptx_ldmatrix(),
+                                         builtin::mma_store()};
+
+    if (std::find(ptx_instructions.begin(), ptx_instructions.end(), op->op) ==
+        ptx_instructions.end()) {
+      auto call = Downcast<Call>(IRMutatorWithAnalyzer::VisitExpr_(op));
+      return call;
     } else {
       is_ptx_ = true;
     }
@@ -252,6 +257,7 @@ private:
     if (is_ptx_) {
       return load;
     }
+
     if (buffer_remap_.count(load->buffer)) {
       auto new_indices = layout_map_[load->buffer]->Forward(load->indices);
       auto new_buffer = buffer_remap_[load->buffer];

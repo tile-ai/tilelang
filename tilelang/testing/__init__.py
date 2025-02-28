@@ -82,11 +82,9 @@ def torch_assert_close(tensor_a,
         b_val = tensor_b.view(-1)[flat_idx].item()
         abs_diff = abs(a_val - b_val)
         rel_diff = abs_diff / (abs(b_val) + 1e-12)
-        mismatch_info = (
-            f"\nFirst mismatch at index {idx}: "
-            f"lhs={a_val:.6f}, rhs={b_val:.6f}, "
-            f"abs_diff={abs_diff:.6f}, rel_diff={rel_diff:.6f}"
-        )
+        mismatch_info = (f"\nFirst mismatch at index {idx}: "
+                         f"lhs={a_val:.6f}, rhs={b_val:.6f}, "
+                         f"abs_diff={abs_diff:.6f}, rel_diff={rel_diff:.6f}")
     else:
         mismatch_info = ""
 
