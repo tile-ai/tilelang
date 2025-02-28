@@ -1,17 +1,17 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-
+# ruff: noqa
 import torch
 import tilelang
 from tilelang.autotuner import *
 import tilelang.language as T
 import tilelang.testing
-import itertools
 import argparse
 
 import torch
 from einops import rearrange, repeat
 from flash_attn.bert_padding import pad_input, unpad_input
+
 
 def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random"):
     assert mode in ["full", "random", "third"]
@@ -19,19 +19,21 @@ def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random"):
         lengths = torch.full((batch_size, 1), max_seqlen, device=device, dtype=torch.int32)
     elif mode == "random":
         lengths = torch.randint(
-            max(1, max_seqlen - 20), max_seqlen + 1, (batch_size, 1), device=device
-        )
+            max(1, max_seqlen - 20), max_seqlen + 1, (batch_size, 1), device=device)
     elif mode == "third":
         lengths = torch.randint(max_seqlen // 3, max_seqlen + 1, (batch_size, 1), device=device)
     padding_mask = (
-        repeat(torch.arange(max_seqlen, device=device), "s -> b s", b=batch_size) < lengths
-    )
+        repeat(torch.arange(max_seqlen, device=device), "s -> b s", b=batch_size) < lengths)
     return padding_mask
 
 
-def generate_qkv(
-    q, k, v, query_padding_mask=None, key_padding_mask=None, kvpacked=False, qkvpacked=False
-):
+def generate_qkv(q,
+                 k,
+                 v,
+                 query_padding_mask=None,
+                 key_padding_mask=None,
+                 kvpacked=False,
+                 qkvpacked=False):
     """
     Arguments:
         q: (batch_size, seqlen_q, nheads, d)
@@ -47,19 +49,16 @@ def generate_qkv(
     assert v.shape == (batch_size, seqlen_k, nheads_k, d)
 
     if query_padding_mask is not None:
-        q_unpad, indices_q, cu_seqlens_q, max_seqlen_q  = unpad_input(q, query_padding_mask)
-        output_pad_fn = lambda output_unpad: pad_input(
-            output_unpad, indices_q, batch_size, seqlen_q
-        )
+        q_unpad, indices_q, cu_seqlens_q, max_seqlen_q = unpad_input(q, query_padding_mask)
+        output_pad_fn = lambda output_unpad: pad_input(output_unpad, indices_q, batch_size, seqlen_q
+                                                      )
     else:
         q_unpad = rearrange(q, "b s h d -> (b s) h d")
         cu_seqlens_q = torch.arange(
-            0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32, device=q_unpad.device
-        )
+            0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32, device=q_unpad.device)
         max_seqlen_q = seqlen_q
         output_pad_fn = lambda output_unpad: rearrange(
-            output_unpad, "(b s) h d -> b s h d", b=batch_size
-        )
+            output_unpad, "(b s) h d -> b s h d", b=batch_size)
 
     if key_padding_mask is not None:
         k_unpad, indices_k, cu_seqlens_k, max_seqlen_k = unpad_input(k, key_padding_mask)
@@ -68,8 +67,7 @@ def generate_qkv(
         k_unpad = rearrange(k, "b s h d -> (b s) h d")
         v_unpad = rearrange(v, "b s h d -> (b s) h d")
         cu_seqlens_k = torch.arange(
-            0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32, device=k_unpad.device
-        )
+            0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32, device=k_unpad.device)
         max_seqlen_k = seqlen_k
 
     if qkvpacked:
@@ -81,8 +79,7 @@ def generate_qkv(
             dqkv_pad_fn = lambda dqkv_unpad: pad_input(dqkv_unpad, indices_q, batch_size, seqlen_q)
         else:
             dqkv_pad_fn = lambda dqkv_unpad: rearrange(
-                dqkv_unpad, "(b s) t h d -> b s t h d", b=batch_size
-            )
+                dqkv_unpad, "(b s) t h d -> b s t h d", b=batch_size)
         return (
             qkv_unpad.detach().requires_grad_(),
             cu_seqlens_q,
@@ -99,8 +96,7 @@ def generate_qkv(
             dkv_pad_fn = lambda dkv_unpad: pad_input(dkv_unpad, indices_k, batch_size, seqlen_k)
         else:
             dkv_pad_fn = lambda dkv_unpad: rearrange(
-                dkv_unpad, "(b s) t h d -> b s t h d", b=batch_size
-            )
+                dkv_unpad, "(b s) t h d -> b s t h d", b=batch_size)
         return (
             q_unpad.detach().requires_grad_(),
             kv_unpad.detach().requires_grad_(),
@@ -153,15 +149,11 @@ def construct_local_mask(
         col_idx = repeat(col_idx, "s -> b 1 1 s", b=key_leftpad.shape[0])
         col_idx = torch.where(col_idx >= key_leftpad, col_idx - key_leftpad, 2**32)
     sk = (
-        seqlen_k
-        if key_padding_mask is None
-        else rearrange(key_padding_mask.sum(-1), "b -> b 1 1 1")
-    )
+        seqlen_k if key_padding_mask is None else rearrange(
+            key_padding_mask.sum(-1), "b -> b 1 1 1"))
     sq = (
-        seqlen_q
-        if query_padding_mask is None
-        else rearrange(query_padding_mask.sum(-1), "b -> b 1 1 1")
-    )
+        seqlen_q if query_padding_mask is None else rearrange(
+            query_padding_mask.sum(-1), "b -> b 1 1 1"))
     if window_size[0] < 0:
         return col_idx > row_idx + sk - sq + window_size[1]
     else:
@@ -173,14 +165,14 @@ def construct_local_mask(
 
 
 def attention_ref(
-    q,
-    k,
-    v,
-    query_padding_mask=None,
-    key_padding_mask=None,
-    causal=False,
-    window_size=(-1, -1),  # -1 means infinite window size
-    upcast=True,
+        q,
+        k,
+        v,
+        query_padding_mask=None,
+        key_padding_mask=None,
+        causal=False,
+        window_size=(-1, -1),  # -1 means infinite window size
+        upcast=True,
 ):
     """
     Arguments:
@@ -227,6 +219,7 @@ def attention_ref(
         output.masked_fill_(rearrange(~query_padding_mask, "b s -> b s 1 1"), 0.0)
     return output.to(dtype=dtype_og), attention.to(dtype=dtype_og)
 
+
 def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, max_seqlen_q):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     q_shape = [UQ, heads, dim]
@@ -245,15 +238,16 @@ def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, max_seqlen_q):
 
         @T.prim_func
         def main(
-            Q_unpad: T.Buffer(q_shape, dtype),
-            K_unpad: T.Buffer(k_shape, dtype),
-            V_unpad: T.Buffer(v_shape, dtype),
-            cu_seqlens_q: T.Buffer([batch_size + 1], "int32"),
-            cu_seqlens_k: T.Buffer([batch_size + 1], "int32"),
-            Output_unpad: T.Buffer(o_shape, dtype),
+                Q_unpad: T.Buffer(q_shape, dtype),
+                K_unpad: T.Buffer(k_shape, dtype),
+                V_unpad: T.Buffer(v_shape, dtype),
+                cu_seqlens_q: T.Buffer([batch_size + 1], "int32"),
+                cu_seqlens_k: T.Buffer([batch_size + 1], "int32"),
+                Output_unpad: T.Buffer(o_shape, dtype),
         ):
             with T.Kernel(
-                    T.ceildiv(max_seqlen_q, block_M), heads, batch_size, threads=threads) as (bx, by, bz):
+                    T.ceildiv(max_seqlen_q, block_M), heads, batch_size,
+                    threads=threads) as (bx, by, bz):
                 Q_shared = T.alloc_shared([block_M, dim], dtype, "shared")
                 K_shared = T.alloc_shared([block_N, dim], dtype, "shared")
                 V_shared = T.alloc_shared([block_N, dim], dtype, "shared")
@@ -269,14 +263,14 @@ def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, max_seqlen_q):
 
                 batch_idx = bz
                 head_idx = by
-                
+
                 q_start_idx = cu_seqlens_q[batch_idx]
                 k_start_idx = cu_seqlens_k[batch_idx]
                 v_start_idx = cu_seqlens_k[batch_idx]
                 q_end_idx = cu_seqlens_q[batch_idx + 1]
                 k_end_idx = cu_seqlens_k[batch_idx + 1]
                 v_end_idx = cu_seqlens_k[batch_idx + 1]
-                
+
                 q_current_seqlen = q_end_idx - q_start_idx
                 k_current_seqlen = k_end_idx - k_start_idx
                 v_current_seqlen = v_end_idx - v_start_idx
@@ -302,17 +296,22 @@ def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, max_seqlen_q):
                             K_shared[i, d] = 0
                     if is_causal:
                         for i, j in T.Parallel(block_M, block_N):
-                            acc_s[i, j] = T.if_then_else(
-                                (bx * block_M + i >= k * block_N + j) and 
-                                (bx * block_M + i >= q_current_seqlen or k * block_N + j >= k_current_seqlen), 
-                                -T.infinity(acc_s.dtype), 0
-                            )
+                            acc_s[i, j] = T.if_then_else((bx * block_M + i >= k * block_N + j) and
+                                                         (bx * block_M + i >= q_current_seqlen or
+                                                          k * block_N + j >= k_current_seqlen),
+                                                         -T.infinity(acc_s.dtype), 0)
                     else:
                         for i, j in T.Parallel(block_M, block_N):
-                            acc_s[i, j] = T.if_then_else((bx * block_M + i >= q_current_seqlen or k * block_N + j >= k_current_seqlen), 
+                            acc_s[i, j] = T.if_then_else((bx * block_M + i >= q_current_seqlen or
+                                                          k * block_N + j >= k_current_seqlen),
                                                          -T.infinity(acc_s.dtype), 0)
 
-                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                    T.gemm(
+                        Q_shared,
+                        K_shared,
+                        acc_s,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullRow)
 
                     # Softmax
                     T.copy(scores_max, scores_max_prev)
@@ -351,15 +350,15 @@ def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, max_seqlen_q):
                 for i, j in T.Parallel(block_M, dim):
                     acc_o[i, j] /= logsum[i]
                 T.copy(acc_o, O_shared)
-                    
+
                 for i, d in T.Parallel(block_M, dim):
                     if bx * block_M + i < q_current_seqlen:
                         Output_unpad[q_start_idx + bx * block_M + i, head_idx, d] = O_shared[i, d]
 
-
         return main
 
     return kernel_func(block_M, block_N, num_stages, threads)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -372,7 +371,7 @@ if __name__ == "__main__":
     batch, heads, seq_len, dim = args.batch, args.heads, args.seq_len, args.dim
     flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
     total_flops = 2 * flops_per_matmul
-    
+
     tilelang.testing.set_random_seed(0)
 
     causal = False
@@ -387,14 +386,12 @@ if __name__ == "__main__":
     # k = torch.randn(
     #     batch, seq_len, heads, dim, dtype=dtype, requires_grad=True
     # ).to(device)
-    v = torch.randn(
-        batch, seq_len, heads, dim, dtype=dtype, requires_grad=True
-    ).to(device)
+    v = torch.randn(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
 
     q = torch.ones(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
     k = torch.ones(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
     # v = torch.ones(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
-    
+
     query_padding_mask = generate_random_padding_mask(seq_len, batch, device, mode="random")
     key_padding_mask = generate_random_padding_mask(seq_len, batch, device, mode="random")
     (
@@ -411,12 +408,13 @@ if __name__ == "__main__":
         output_pad_fn,
         dq_pad_fn,
         dk_pad_fn,
-    ) = generate_qkv(q, k, v, query_padding_mask, key_padding_mask, kvpacked=False)
+    ) = generate_qkv(
+        q, k, v, query_padding_mask, key_padding_mask, kvpacked=False)
 
-    UQ = q_unpad.shape[0] # unpadded query length
-    UK = k_unpad.shape[0] # unpadded key length
-    UKV = k_unpad.shape[0] # unpadded query key length
-    
+    UQ = q_unpad.shape[0]  # unpadded query length
+    UK = k_unpad.shape[0]  # unpadded key length
+    UKV = k_unpad.shape[0]  # unpadded query key length
+
     # TODO(lei): max_seqlen_q should be a dynamic argument.
     program = flashattn(batch, UQ, UKV, heads, dim, causal, max_seqlen_q)
     # print(program)
@@ -424,7 +422,7 @@ if __name__ == "__main__":
     # print(kernel.get_kernel_source())
 
     profiler = kernel.get_profiler()
-    
+
     tilelang_latency = profiler.do_bench()
     print(f"Tilelang latency: {tilelang_latency} ms")
     # tflops
@@ -456,4 +454,3 @@ if __name__ == "__main__":
     # TODO: Benchmark flash_attn and tilelang
     fla_out = output_pad_fn(fla_out_unpad)
     torch.testing.assert_close(out, out_ref, rtol=1e-2, atol=1e-2)
-    
