@@ -867,9 +867,53 @@ private:
   friend class WarpSpecializedRewriter;
 };
 
+class ThreadTagChecker : public StmtExprVisitor {
+public:
+  static bool HasOnlyThreadIdxX(const PrimFunc &f) {
+    ThreadTagChecker checker;
+    checker(f->body);
+    return checker.is_valid_;
+  }
+
+private:
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tir::attr::thread_extent) {
+      auto iter_var = Downcast<IterVar>(op->node);
+      if (iter_var->thread_tag.length() > 0 &&
+          iter_var->thread_tag != "threadIdx.x") {
+        is_valid_ = false;
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForNode *op) final {
+    if (op->kind == ForKind::kThreadBinding) {
+      ICHECK(op->thread_binding.defined());
+      String thread_tag = op->thread_binding.value()->thread_tag;
+      if (thread_tag.length() > 0 && thread_tag != "threadIdx.x") {
+        is_valid_ = false;
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  bool is_valid_ = true;
+};
+
 class WarpSpecializedRewriter : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc f) {
+    // Check if function only uses threadIdx.x before proceeding
+    if (!ThreadTagChecker::HasOnlyThreadIdxX(f)) {
+      LOG(WARNING) << "WarpSpecialize will be disabled because the program "
+                      "uses thread tags other than threadIdx.x\n"
+                   << "If you want to use warp specialization, please refactor "
+                      "your program to use threadIdx.x only";
+      // Return original function unchanged if other thread tags are found
+      return f;
+    }
+
     auto T = WarpSpecializedRewriter();
     T.buffer_lca_ = DetectBufferAccessLCA(f);
     for (auto [buffer, _] : T.buffer_lca_)

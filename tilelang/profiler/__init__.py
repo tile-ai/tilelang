@@ -127,7 +127,8 @@ class Profiler(TorchDLPackKernelAdapter):
         elif profiler == "tvm":
             if func is None:
                 func = self.mod
-            assert isinstance(func, tvm.runtime.Module), "func should be a TVM module"
+            assert isinstance(
+                func, tvm.runtime.Module), f"func should be a TVM module, but got {type(func)}"
             ins = (self._get_inputs(with_output=True) if input_tensors is None else input_tensors)
             target = "cuda"
 

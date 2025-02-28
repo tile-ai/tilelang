@@ -176,7 +176,8 @@ def matmul_fp16xfp4(M,
 
         return main
 
-    return kernel_func(block_M=64, block_N=64, block_K=64, num_stages=1, threads=128)
+    return kernel_func(
+        block_M=block_M, block_N=block_N, block_K=block_K, num_stages=num_stages, threads=threads)
 
 
 def ref_program(A, qB):
@@ -640,4 +641,6 @@ def test_assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    assert_simple_impl_float16xfp4_gemm(256, 256, 256, "float16", "float16", "float32", 64, 64, 64,
+                                        1, 128)

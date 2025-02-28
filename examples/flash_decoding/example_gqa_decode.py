@@ -347,14 +347,13 @@ if __name__ == "__main__":
         program = flashattn(
             batch, heads, groups, kv_seqlen, dim, tune=args.tune)(
                 block_N=128, block_H=64, num_split=8, num_stages=2, threads=128)
-        mod, params = tilelang.lower(program)
-        mod = tilelang.Profiler(mod, params, [6], tilelang.TensorSupplyType.Auto)
-        mod.assert_allclose(ref_program, rtol=0.01, atol=0.01, max_mismatched_ratio=0.01)
+        kernel = tilelang.compile(program, out_idx=[6])
+        profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
         print("All checks pass.")
-        latency = mod.do_bench(ref_program, warmup=500)
+        latency = profiler.do_bench(ref_program, warmup=500)
         print("Ref: {:.2f} ms".format(latency))
         print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-        latency = mod.do_bench(mod.func, warmup=500, profiler="auto")
+        latency = profiler.do_bench(kernel.rt_module, warmup=500, profiler="auto")
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:
