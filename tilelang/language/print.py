@@ -8,7 +8,7 @@ It includes functionality to print variables, print values in buffers, and condi
 from tvm import tir
 from typing import Any
 from tilelang.language.kernel import get_thread_bindings
-from tilelang.language import macro, serial
+from tilelang.language import copy, macro, serial, alloc_shared
 from tilelang.intrinsics.utils import index_to_coordinates
 
 
@@ -45,10 +45,10 @@ def print_var_with_condition(condition: tir.PrimExpr,
 
 
 @macro
-def print_flat_buffer_with_condition(condition: tir.PrimExpr,
-                                     buffer: tir.Buffer,
-                                     elems: int,
-                                     msg: str = "") -> tir.PrimExpr:
+def print_shared_buffer_with_condition(condition: tir.PrimExpr,
+                                       buffer: tir.Buffer,
+                                       elems: int,
+                                       msg: str = "") -> tir.PrimExpr:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
     
@@ -66,6 +66,31 @@ def print_flat_buffer_with_condition(condition: tir.PrimExpr,
             coords = index_to_coordinates(i, buffer.shape)
             tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i,
                             buffer[coords])
+
+
+@macro
+def print_fragment_buffer_with_condition(condition: tir.PrimExpr,
+                                         buffer: tir.Buffer,
+                                         elems: int,
+                                         msg: str = "") -> tir.PrimExpr:
+    """
+    Conditionally prints the values of a flattened TIR buffer if the condition is True.
+    
+    Parameters:
+        condition (tir.PrimExpr): A TIR expression representing the condition to check.
+        buffer (tir.Buffer): The buffer whose values need to be printed.
+        elems (int): The number of elements in the buffer to print.
+        
+    Returns:
+        tir.PrimExpr: The TIR expression for the debug print operation.
+    """
+    smem = alloc_shared(buffer.shape, buffer.dtype, "shared")
+    copy(buffer, smem)
+    if condition:
+        # Iterate through the buffer elements and print each one.
+        for i in serial(elems):
+            coords = index_to_coordinates(i, buffer.shape)
+            tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, smem[coords])
 
 
 def print(obj: Any, msg: str = "") -> tir.PrimExpr:
@@ -93,18 +118,27 @@ def print(obj: Any, msg: str = "") -> tir.PrimExpr:
         # Flatten the buffer for consistent printing. This assumes a 1D flattened buffer.
         buffer = obj
         if buffer.scope() == "local.fragment":
-            raise NotImplementedError("Printing fragment buffers currently is not supported.")
+            # Get the number of elements in the buffer.
+            elems = 1
+            for dim in buffer.shape:
+                elems *= dim
 
-        # Get the number of elements in the buffer.
-        elems = 1
-        for dim in buffer.shape:
-            elems *= dim
+            # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
+            condition = (tx == 0 and ty == 0 and tz == 0)
+            if not msg:
+                msg = f"buffer<{buffer.name}, {buffer.dtype}>"
+            return print_fragment_buffer_with_condition(condition, buffer, elems, msg)
+        elif buffer.scope() in {"shared", "shared.dyn"}:
+            # Get the number of elements in the buffer.
+            elems = 1
+            for dim in buffer.shape:
+                elems *= dim
 
-        # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
-        condition = (tx == 0 and ty == 0 and tz == 0)
-        if not msg:
-            msg = f"buffer<{buffer.name}, {buffer.dtype}>"
-        return print_flat_buffer_with_condition(condition, buffer, elems, msg)
+            # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
+            condition = (tx == 0 and ty == 0 and tz == 0)
+            if not msg:
+                msg = f"buffer<{buffer.name}, {buffer.dtype}>"
+            return print_shared_buffer_with_condition(condition, buffer, elems, msg)
 
     elif isinstance(obj, tir.PrimExpr):
         if not msg:
