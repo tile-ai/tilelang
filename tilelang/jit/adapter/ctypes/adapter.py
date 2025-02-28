@@ -10,8 +10,8 @@ from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.relay import TensorType
 from tvm import tir
-from .wrapper import TLWrapper
-from .libgen import LibraryGenerator
+from tilelang.jit.adapter.wrapper import TLWrapper
+from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 

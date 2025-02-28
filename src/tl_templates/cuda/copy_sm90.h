@@ -229,7 +229,7 @@ TL_DEVICE void fence_proxy_async() {
 
 TL_DEVICE void syncthreads_partial(uint64_t &smem_barrier) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
-  uint64_t state;
+  uint64_t state = 0;
   asm volatile("{\n"
                ".reg .pred                P1;\n"
                "mbarrier.arrive.shared.b64 %1, [%0];\n"

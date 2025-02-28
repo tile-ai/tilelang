@@ -47,10 +47,11 @@ runtime::Module BuildTileLangCUDA(IRModule mod, Target target) {
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>())
         << "CodeGenTileLangCUDA: Can only take PrimFunc";
+    auto gvar = Downcast<GlobalVar>(kv.first);
     auto f = Downcast<PrimFunc>(kv.second);
     auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
     ICHECK(calling_conv == CallingConv::kDeviceKernelLaunch);
-    cg.AddFunction(f);
+    cg.AddFunction(gvar, f);
   }
 
   std::string code = cg.Finish();
@@ -78,10 +79,11 @@ String BuildTLDebug(IRModule mod, Target target) {
   for (auto kv : mod->functions) {
     ICHECK(kv.second->IsInstance<PrimFuncNode>())
         << "CodeGenTileLangCUDA: Can only take PrimFunc";
+    auto gvar = Downcast<GlobalVar>(kv.first);
     auto f = Downcast<PrimFunc>(kv.second);
     auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
     ICHECK(calling_conv == CallingConv::kDeviceKernelLaunch);
-    cg.AddFunction(f);
+    cg.AddFunction(gvar, f);
   }
 
   std::string code = cg.Finish();
