@@ -51,7 +51,7 @@ def _init_logger():
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     logger.propagate = False
-    set_log_level("WARNING")
+    set_log_level("INFO")
 
 
 _init_logger()
