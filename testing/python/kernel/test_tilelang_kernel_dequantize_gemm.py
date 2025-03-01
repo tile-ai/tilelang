@@ -350,8 +350,8 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
     accum_dtype,
     transform_b,
 ):
-    from bitblas.tl.utils import make_mma_swizzle_layout as make_swizzle_layout
-    from bitblas.tl.mma_macro_generator import (
+    from tilelang.intrinsics.mma_layout import make_mma_swizzle_layout as make_swizzle_layout
+    from tilelang.intrinsics.mma_macro_generator import (
         TensorCoreIntrinEmitterWithLadderTransform,)
 
     from bitblas.gpu.intrin.lop3 import decode_i4_to_f16
@@ -641,6 +641,4 @@ def test_assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    assert_simple_impl_float16xfp4_gemm(256, 256, 256, "float16", "float16", "float32", 64, 64, 64,
-                                        1, 128)
+    tilelang.testing.main()
