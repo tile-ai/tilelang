@@ -383,9 +383,7 @@ if __name__ == "__main__":
     window_size = (-1, -1)
 
     q = torch.randn(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
-    k = torch.randn(
-        batch, seq_len, heads, dim, dtype=dtype, requires_grad=True
-    ).to(device)
+    k = torch.randn(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
     v = torch.randn(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
 
     query_padding_mask = generate_random_padding_mask(seq_len, batch, device, mode="random")

@@ -111,7 +111,8 @@ class TLCUDASourceWrapper(object):
             elif isinstance(param, tvm.tir.Var):
                 function_args.append({"name": param.name, "type": self._TYPE_MAP[param.dtype]})
             else:
-                raise ValueError(f"Parameter {param} is not in the buffer map of the primary function.")
+                raise ValueError(
+                    f"Parameter {param} is not in the buffer map of the primary function.")
         # Add dynamic symbols as integer arguments
         for dyn_sym in dynamic_symbolic_set:
             function_args.append({"name": dyn_sym, "type": "int"})

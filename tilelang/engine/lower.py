@@ -121,7 +121,8 @@ def extrac_params(func: tir.PrimFunc):
     tensor_types = []
     for var in func.params:
         if var in func.buffer_map:
-            tensor_types.append(relay.TensorType(func.buffer_map[var].shape, func.buffer_map[var].dtype))
+            tensor_types.append(
+                relay.TensorType(func.buffer_map[var].shape, func.buffer_map[var].dtype))
         else:
             tensor_types.append(relay.scalar_type(var.dtype))
     return tensor_types
