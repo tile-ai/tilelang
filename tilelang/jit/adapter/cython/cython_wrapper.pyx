@@ -59,7 +59,15 @@ cdef class CythonKernelWrapper:
             tensor_list.append(tensor)
         
         # Convert tensor pointers to C void pointers for kernel call
-        call_args = [ctypes.c_void_p(tensor_list[i].data_ptr()) for i in range(len(tensor_list))]
+        call_args = []
+        for i in range(len(tensor_list)):
+            if isinstance(tensor_list[i], torch.Tensor):
+                call_args.append(ctypes.c_void_p(tensor_list[i].data_ptr()))
+            elif isinstance(tensor_list[i], int):
+                # Dynamic symbolics which are passed as integer arguments
+                call_args.append(tensor_list[i])
+            else:
+                raise ValueError(f"Unsupported tensor type: {type(tensor_list[i])}")
 
         # Add dynamic dimension values to kernel arguments
         for _, (buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():

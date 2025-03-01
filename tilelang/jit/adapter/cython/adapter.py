@@ -22,7 +22,7 @@ import os
 from pathlib import Path
 import logging
 
-logger = logging.getLogger("tilelang")
+logger = logging.getLogger(__name__)
 
 
 def get_cython_compiler() -> Optional[str]:
@@ -198,10 +198,11 @@ class CythonKernelAdapter(BaseKernelAdapter):
         buffer_map = func.buffer_map
         dynamic_symbolic_map = {}
         for i, param in enumerate(params):
-            buffer = buffer_map[param]
-            for j, shape in enumerate(buffer.shape):
-                if isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map):
-                    dynamic_symbolic_map[shape] = (i, j)
+            if param in buffer_map:
+                buffer = buffer_map[param]
+                for j, shape in enumerate(buffer.shape):
+                    if isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map):
+                        dynamic_symbolic_map[shape] = (i, j)
         return dynamic_symbolic_map
 
     def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):

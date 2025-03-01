@@ -3,7 +3,6 @@
 # ruff: noqa
 import torch
 import tilelang
-from tilelang.autotuner import *
 import tilelang.language as T
 import tilelang.testing
 import argparse
@@ -220,7 +219,7 @@ def attention_ref(
     return output.to(dtype=dtype_og), attention.to(dtype=dtype_og)
 
 
-def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, max_seqlen_q):
+def flashattn(batch_size, UQ, UKV, heads, dim, is_causal):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     q_shape = [UQ, heads, dim]
     k_shape = [UKV, heads, dim]
@@ -243,6 +242,7 @@ def flashattn(batch_size, UQ, UKV, heads, dim, is_causal, max_seqlen_q):
                 V_unpad: T.Buffer(v_shape, dtype),
                 cu_seqlens_q: T.Buffer([batch_size + 1], "int32"),
                 cu_seqlens_k: T.Buffer([batch_size + 1], "int32"),
+                max_seqlen_q: T.int32,
                 Output_unpad: T.Buffer(o_shape, dtype),
         ):
             with T.Kernel(
@@ -382,15 +382,11 @@ if __name__ == "__main__":
     device = torch.device("cuda")
     window_size = (-1, -1)
 
-    # q = torch.randn(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
-    # k = torch.randn(
-    #     batch, seq_len, heads, dim, dtype=dtype, requires_grad=True
-    # ).to(device)
+    q = torch.randn(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
+    k = torch.randn(
+        batch, seq_len, heads, dim, dtype=dtype, requires_grad=True
+    ).to(device)
     v = torch.randn(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
-
-    q = torch.ones(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
-    k = torch.ones(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
-    # v = torch.ones(batch, seq_len, heads, dim, dtype=dtype, requires_grad=True).to(device)
 
     query_padding_mask = generate_random_padding_mask(seq_len, batch, device, mode="random")
     key_padding_mask = generate_random_padding_mask(seq_len, batch, device, mode="random")
@@ -415,20 +411,11 @@ if __name__ == "__main__":
     UK = k_unpad.shape[0]  # unpadded key length
     UKV = k_unpad.shape[0]  # unpadded query key length
 
-    # TODO(lei): max_seqlen_q should be a dynamic argument.
-    program = flashattn(batch, UQ, UKV, heads, dim, causal, max_seqlen_q)
-    # print(program)
-    kernel = tilelang.compile(program, out_idx=-1)
-    # print(kernel.get_kernel_source())
+    program = flashattn(batch, UQ, UKV, heads, dim, causal)
+    kernel = tilelang.compile(program, out_idx=-1, execution_backend="cython")
+    print(kernel.get_kernel_source())
 
-    profiler = kernel.get_profiler()
-
-    tilelang_latency = profiler.do_bench()
-    print(f"Tilelang latency: {tilelang_latency} ms")
-    # tflops
-    tflops = total_flops / tilelang_latency / 1e9
-
-    out_unpad = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k)
+    out_unpad = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q)
     out = output_pad_fn(out_unpad)
 
     out_ref, _ = attention_ref(
@@ -451,6 +438,6 @@ if __name__ == "__main__":
         0.0,
         causal=causal,
     )
-    # TODO: Benchmark flash_attn and tilelang
     fla_out = output_pad_fn(fla_out_unpad)
     torch.testing.assert_close(out, out_ref, rtol=1e-2, atol=1e-2)
+    print("Assert Equal Passed")
