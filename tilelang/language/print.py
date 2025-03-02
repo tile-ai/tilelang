@@ -93,6 +93,30 @@ def print_fragment_buffer_with_condition(condition: tir.PrimExpr,
             tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, smem[coords])
 
 
+@macro
+def print_local_buffer_with_condition(condition: tir.PrimExpr,
+                                      buffer: tir.Buffer,
+                                      elems: int,
+                                      msg: str = "") -> tir.PrimExpr:
+    """
+    Conditionally prints the values of a flattened TIR buffer if the condition is True.
+    
+    Parameters:
+        condition (tir.PrimExpr): A TIR expression representing the condition to check.
+        buffer (tir.Buffer): The buffer whose values need to be printed.
+        elems (int): The number of elements in the buffer to print.
+        
+    Returns:
+        tir.PrimExpr: The TIR expression for the debug print operation.
+    """
+    if condition:
+        # Iterate through the buffer elements and print each one.
+        for i in serial(elems):
+            coords = index_to_coordinates(i, buffer.shape)
+            tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i,
+                            buffer[coords])
+
+
 def print(obj: Any, msg: str = "") -> tir.PrimExpr:
     """
     A generic print function that handles both TIR buffers and primitive expressions.
@@ -117,7 +141,16 @@ def print(obj: Any, msg: str = "") -> tir.PrimExpr:
 
         # Flatten the buffer for consistent printing. This assumes a 1D flattened buffer.
         buffer = obj
-        if buffer.scope() == "local.fragment":
+        if buffer.scope() == "local":
+            # Get the number of elements in the buffer.
+            elems = 1
+            for dim in buffer.shape:
+                elems *= dim
+            condition = True
+            if not msg:
+                msg = f"buffer<{buffer.name}, {buffer.dtype}>"
+            return print_local_buffer_with_condition(condition, buffer, elems, msg)
+        elif buffer.scope() == "local.fragment":
             # Get the number of elements in the buffer.
             elems = 1
             for dim in buffer.shape:
