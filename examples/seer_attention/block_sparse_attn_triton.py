@@ -71,8 +71,7 @@ def _fwd_kernel_inner(
         qk *= sm_scale
 
         # the following is needed only when LAST_K_BLOCK or BLOCK_M < BLOCK_N
-        qk += tl.where(offs_m[:, None] + past_len >= (start_n + offs_n[None, :]), 0,
-                        float('-inf'))
+        qk += tl.where(offs_m[:, None] + past_len >= (start_n + offs_n[None, :]), 0, float('-inf'))
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]

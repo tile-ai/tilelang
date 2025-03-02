@@ -93,8 +93,7 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
                 BlockSparseMask: T.Buffer(block_mask_shape, block_mask_dtype),
                 Output: T.Buffer(q_shape, dtype),
         ):
-            with T.Kernel(
-                    T.ceildiv(seq_q, block_M), heads, batch, threads=threads) as (bx, by, bz):
+            with T.Kernel(T.ceildiv(seq_q, block_M), heads, batch, threads=threads) as (bx, by, bz):
                 Q_shared = T.alloc_shared([block_M, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
@@ -125,11 +124,17 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
                         if is_causal:
                             past_len = seq_kv - seq_q
                             for i, j in T.Parallel(block_M, block_N):
-                                acc_s[i, j] = T.if_then_else(bx * block_M + i + past_len >= k * block_N + j, 0,
-                                                            -T.infinity(acc_s.dtype))
+                                acc_s[i, j] = T.if_then_else(
+                                    bx * block_M + i + past_len >= k * block_N + j, 0,
+                                    -T.infinity(acc_s.dtype))
                         else:
                             T.clear(acc_s)
-                        T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                        T.gemm(
+                            Q_shared,
+                            K_shared,
+                            acc_s,
+                            transpose_B=True,
+                            policy=T.GemmWarpPolicy.FullRow)
 
                         Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale,
                                 scores_sum, logsum)
@@ -172,7 +177,8 @@ def test_topk_sparse_attention():
     block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
 
     # Run Triton kernel
-    program = blocksparse_flashattn(BATCH, N_HEADS, SEQ_LEN, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
+    program = blocksparse_flashattn(
+        BATCH, N_HEADS, SEQ_LEN, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
     kernel = tilelang.compile(program, out_idx=[4])
     print(kernel.get_kernel_source())
     tilelang_output = kernel(q, k, v, block_mask)
@@ -197,6 +203,7 @@ def test_topk_sparse_attention():
         "TileLang output doesn't match reference"
     print("Pass topk sparse attention test with qlen == klen")
 
+
 def test_topk_sparse_attention_qlen_lt_klen():
     # Config
     BATCH, N_HEADS = 1, 1
@@ -209,24 +216,25 @@ def test_topk_sparse_attention_qlen_lt_klen():
     q = torch.randn(BATCH, N_HEADS, Q_LEN, D_HEAD, device='cuda', dtype=torch.float16)
     k = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device='cuda', dtype=torch.float16)
     v = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device='cuda', dtype=torch.float16)
-    sm_scale = 1.0 / (D_HEAD ** 0.5)
+    sm_scale = 1.0 / (D_HEAD**0.5)
 
     downsample_factor = BLOCK
     downsample_len = math.ceil(K_LEN / downsample_factor)  # number of blocks along one dimension
-    x_ds = torch.randn(BATCH, N_HEADS, downsample_len, downsample_len, 
-                        device='cuda', dtype=torch.float16)
+    x_ds = torch.randn(
+        BATCH, N_HEADS, downsample_len, downsample_len, device='cuda', dtype=torch.float16)
     # Force the first column to be high so that the first block is always selected.
     x_ds[:, :, :, 0] = 100
     block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
-    
-    program = blocksparse_flashattn(BATCH, N_HEADS, Q_LEN, K_LEN, D_HEAD, downsample_len, is_causal=True)
+
+    program = blocksparse_flashattn(
+        BATCH, N_HEADS, Q_LEN, K_LEN, D_HEAD, downsample_len, is_causal=True)
     print(program)
     kernel = tilelang.compile(program, out_idx=[4])
     print(kernel.get_kernel_source())
     tilelang_output = kernel(q, k, v, block_mask)
-    
+
     # import flash_attn
-    
+
     # ref_out = flash_attn.flash_attn_func(q, k, v, causal=True)
     # torch.testing.assert_close(tilelang_output, ref_out, atol=1e-2, rtol=1e-2)
     # exit()
@@ -240,9 +248,8 @@ def test_topk_sparse_attention_qlen_lt_klen():
 
     effective_mask = full_mask_full[..., past_len:K_LEN, :]  # shape: (B, H, Q_LEN, K_LEN)
 
-
     i_global = torch.arange(past_len, K_LEN, device=k.device).unsqueeze(1)  # shape: (Q_LEN, 1)
-    j_global = torch.arange(K_LEN, device=k.device).unsqueeze(0)              # shape: (1, K_LEN)
+    j_global = torch.arange(K_LEN, device=k.device).unsqueeze(0)  # shape: (1, K_LEN)
     causal_mask = (j_global <= i_global)  # shape: (Q_LEN, K_LEN)
 
     final_mask = effective_mask & causal_mask  # shape: (B, H, Q_LEN, K_LEN)
@@ -250,14 +257,15 @@ def test_topk_sparse_attention_qlen_lt_klen():
     attn = attn.masked_fill(~final_mask, float('-inf'))
     attn = F.softmax(attn, dim=-1)
     ref_output = torch.einsum('bhst,bhtd->bhsd', attn, v)
-    
+
     print("ref_output", ref_output)
     print("tilelang_output", tilelang_output)
 
     # Verify accuracy.
     torch.testing.assert_close(tilelang_output, ref_output, atol=1e-2, rtol=1e-2)
-    
+
     print("Pass topk sparse attention test with qlen < klen")
+
 
 if __name__ == "__main__":
     # test_topk_sparse_attention()
