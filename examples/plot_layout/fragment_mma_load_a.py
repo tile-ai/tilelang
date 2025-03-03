@@ -102,15 +102,15 @@ from tilelang.tools import plot_layout
 # ldmatrix layout 16x16
 base_layout = make_mma_load_base_layout(dtype="float16", matrix="A", transposed=False)
 print(base_layout)
-
 plot_layout(base_layout, name="base_layout")
 
-# # warp layout 32x16
-# warp_layout = base_layout.repeat([block_rows, 1],
-#                                              repeat_on_thread=True).replicate(block_cols)
-# print(warp_layout)
-# plot_layout(warp_layout, name="warp_layout")
+# warp layout 32x16
+warp_layout = base_layout.repeat([block_rows, 1],
+                                             repeat_on_thread=True).replicate(block_cols)
+print(warp_layout)
+plot_layout(warp_layout, name="warp_layout")
 
-# # block layout 128x32
-# block_layout = warp_layout.repeat([warp_rows, chunk], repeat_on_thread=False, lower_dim_first=False)
+# block layout 128x32
+block_layout = warp_layout.repeat([warp_rows, chunk], repeat_on_thread=False, lower_dim_first=False)
+print(block_layout)
 # plot_layout(block_layout, name="block_layout")
