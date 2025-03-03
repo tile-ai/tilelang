@@ -52,6 +52,11 @@ def get_tensor_supply(supply_type: TensorSupplyType):
         dtype = map_torch_type(str(tensor.dtype))
         device = torch.cuda.current_device()
 
+        if hasattr(tensor, "shape") and not tensor.shape:
+            raise ValueError(
+                f"TensorType must have a shape, but got {type(tensor)}, "
+                "likely you are trying to generate a random tensor with a dynamic symbolic shape.")
+
         shape = list(map(int, tensor.shape))
         if supply_type == TensorSupplyType.Auto:
             if dtype == torch.float16 or dtype == torch.float32:

@@ -4,7 +4,6 @@
 import torch
 import torch.nn.functional as F
 import tilelang
-from tilelang import Profiler
 from tilelang.autotuner import *
 import tilelang.language as T
 import itertools
@@ -28,9 +27,10 @@ def get_configs():
     return configs
 
 
-def flashattn(batch, heads, seq_len, dim, is_causal, tune=False):
+def flashattn(batch, heads, seq_q, seq_kv, dim, is_causal, tune=False):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
-    shape = [batch, heads, seq_len, dim]
+    q_shape = [batch, heads, seq_q, dim]
+    kv_shape = [batch, heads, seq_kv, dim]
     dtype = "float16"
     accum_dtype = "float"
 
@@ -38,7 +38,7 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False):
 
         @T.macro
         def MMA0(
-            K: T.Buffer(shape, dtype),
+            K: T.Buffer(kv_shape, dtype),
             Q_shared: T.Buffer([block_M, dim], dtype),
             K_shared: T.Buffer([block_N, dim], dtype),
             acc_s: T.Buffer([block_M, block_N], accum_dtype),
@@ -47,18 +47,20 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False):
             by: T.int32,
             bz: T.int32,
         ):
+            past_len = seq_kv - seq_q
             T.copy(K[bz, by, k * block_N:(k + 1) * block_N, :], K_shared)
             if is_causal:
                 for i, j in T.Parallel(block_M, block_N):
-                    acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0,
-                                                 -T.infinity(acc_s.dtype))
+                    q_idx = bx * block_M + i + past_len
+                    k_idx = k * block_N + j
+                    acc_s[i, j] = T.if_then_else(q_idx >= k_idx, 0, -T.infinity(acc_s.dtype))
             else:
                 T.clear(acc_s)
             T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
         @T.macro
         def MMA1(
-                V: T.Buffer(shape, dtype),
+                V: T.Buffer(kv_shape, dtype),
                 V_shared: T.Buffer([block_M, dim], dtype),
                 acc_s_cast: T.Buffer([block_M, block_N], dtype),
                 acc_o: T.Buffer([block_M, dim], accum_dtype),
@@ -89,6 +91,7 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False):
             #     scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0, scores_max[i])
             for i in T.Parallel(block_M):
                 scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+
             for i, j in T.Parallel(block_M, block_N):
                 # Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
                 # max * log_2(e)) This allows the compiler to use the ffma
@@ -109,13 +112,12 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False):
 
         @T.prim_func
         def main(
-                Q: T.Buffer(shape, dtype),
-                K: T.Buffer(shape, dtype),
-                V: T.Buffer(shape, dtype),
-                Output: T.Buffer(shape, dtype),
+                Q: T.Buffer(q_shape, dtype),
+                K: T.Buffer(kv_shape, dtype),
+                V: T.Buffer(kv_shape, dtype),
+                Output: T.Buffer(q_shape, dtype),
         ):
-            with T.Kernel(
-                    T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
+            with T.Kernel(T.ceildiv(seq_q, block_M), heads, batch, threads=threads) as (bx, by, bz):
                 Q_shared = T.alloc_shared([block_M, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
@@ -135,8 +137,8 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False):
                 T.fill(scores_max, -T.infinity(accum_dtype))
 
                 loop_range = (
-                    T.min(T.ceildiv(seq_len, block_N), T.ceildiv(
-                        (bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(seq_len, block_N))
+                    T.min(T.ceildiv(seq_kv, block_N), T.ceildiv(
+                        (bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(seq_kv, block_N))
 
                 for k in T.Pipelined(loop_range, num_stages=num_stages):
                     MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
@@ -180,8 +182,9 @@ def ref_program(Q, K, V, is_causal):
     scores = torch.einsum('bhqd,bhkd->bhqk', Q, K)
     scores = scores / torch.sqrt(torch.tensor(dim, dtype=scores.dtype))
     if is_causal:
-        seq_len = Q.size(1)
-        mask = torch.tril(torch.ones(seq_len, seq_len, device=scores.device))
+        seq_q = Q.size(2)
+        seq_kv = K.size(2)
+        mask = torch.tril(torch.ones(seq_q, seq_kv, device=scores.device))
         mask = mask.unsqueeze(0).unsqueeze(0)
         scores = scores.masked_fill(mask == 0, float('-inf'))
     attention_weights = F.softmax(scores, dim=-1)
@@ -191,37 +194,38 @@ def ref_program(Q, K, V, is_causal):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=8, help='batch size')
-    parser.add_argument('--heads', type=int, default=32, help='heads')
-    parser.add_argument('--seq_len', type=int, default=4096, help='sequence length')
-    parser.add_argument('--dim', type=int, default=128, help='dim')
+    parser.add_argument('--batch', type=int, default=1, help='batch size')
+    parser.add_argument('--heads', type=int, default=1, help='heads')
+    parser.add_argument('--seq_q', type=int, default=256, help='query sequence length')
+    parser.add_argument('--seq_kv', type=int, default=256, help='key/value sequence length')
+    parser.add_argument('--dim', type=int, default=64, help='dim')
     parser.add_argument('--is_causal', action='store_true', help='causal')
     parser.add_argument('--tune', action='store_true', help='tune configs')
     args = parser.parse_args()
-    batch, heads, seq_len, dim, is_causal = args.batch, args.heads, args.seq_len, args.dim, args.is_causal
-    flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
+    batch, heads, seq_q, seq_kv, dim, is_causal = args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.is_causal
+    flops_per_matmul = 2.0 * batch * heads * seq_q * seq_kv * dim
     total_flops = 2 * flops_per_matmul
     if is_causal:
         total_flops *= 0.5
 
     if (not args.tune):
         program = flashattn(
-            batch, heads, seq_len, dim, is_causal, tune=args.tune)(
-                block_M=128, block_N=128, num_stages=1, threads=128)
+            batch, heads, seq_q, seq_kv, dim, is_causal, tune=args.tune)(
+                block_M=64, block_N=64, num_stages=0, threads=128)
         ref_program = partial(ref_program, is_causal=is_causal)
-        mod, params = tilelang.lower(program)
-        mod = Profiler(mod, params, [3], tilelang.TensorSupplyType.Normal)
-        mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+        kernel = tilelang.compile(program, out_idx=[3])
+        profiler = kernel.get_profiler()
+        profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")
-        latency = mod.do_bench(ref_program, warmup=500)
+        latency = profiler.do_bench(ref_program, warmup=500)
         print("Ref: {:.2f} ms".format(latency))
         print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-        latency = mod.do_bench(mod.func, warmup=500)
+        latency = profiler.do_bench(profiler.mod, warmup=500)
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:
         best_latency, best_config, _ = flashattn(
-            batch, heads, seq_len, dim, is_causal, tune=args.tune)
+            batch, heads, seq_q, seq_kv, dim, is_causal, tune=args.tune)
         print(f"Best latency: {best_latency}")
         print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
         print(f"Best config: {best_config}")

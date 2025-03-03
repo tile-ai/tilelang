@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-
+# ruff: noqa
 import torch
 from reference import naive_nsa
 import tilelang
@@ -40,77 +40,6 @@ def native_sparse_attention(batch,
 
     def kernel_func(block_S, block_T, num_stages, threads):
 
-        @T.macro
-        def MMA0(
-            K: T.Buffer(kv_shape, dtype),
-            Q_shared: T.Buffer([G, BK], dtype),
-            K_shared: T.Buffer([BS, BK], dtype),
-            acc_s: T.Buffer([G, BS], accum_dtype),
-            i_s: T.int32,
-            i_b: T.int32,
-            i_h: T.int32,
-            i_t: T.int32,
-        ):
-            T.copy(K[i_b, i_s * BS:(i_s + 1) * BS, i_h, :], K_shared)
-
-            if is_causal:
-                for i, j in T.Parallel(G, BS):
-                    acc_s[i, j] = T.if_then_else(i_t >= (i_s * BS + j), 0, -T.infinity(acc_s.dtype))
-            else:
-                T.clear(acc_s)
-            T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-
-        @T.macro
-        def MMA1(
-                V: T.Buffer(kv_shape, dtype),
-                V_shared: T.Buffer([G, BV], dtype),
-                acc_s_cast: T.Buffer([G, BS], dtype),
-                acc_o: T.Buffer([G, BV], accum_dtype),
-                i_s: T.int32,
-                i_b: T.int32,
-                i_h: T.int32,
-        ):
-            T.copy(V[i_b, i_s * BS:(i_s + 1) * BS, i_h, :], V_shared)
-            T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
-
-        @T.macro
-        def Softmax(
-                acc_s: T.Buffer([G, BS], accum_dtype),
-                acc_s_cast: T.Buffer([G, BS], dtype),
-                scores_max: T.Buffer([G], accum_dtype),
-                scores_max_prev: T.Buffer([G], accum_dtype),
-                scores_scale: T.Buffer([G], accum_dtype),
-                scores_sum: T.Buffer([G], accum_dtype),
-                logsum: T.Buffer([G], accum_dtype),
-        ):
-            T.copy(scores_max, scores_max_prev)
-            T.fill(scores_max, -T.infinity(accum_dtype))
-            T.reduce_max(acc_s, scores_max, dim=1, clear=True)
-            # To do causal softmax, we need to set the scores_max to 0 if it is -inf
-            # This process is called Check_inf in FlashAttention3 code, and it only need to be done
-            # in the first ceil_div(kBlockM, kBlockN) steps.
-            # for i in T.Parallel(block_M):
-            #     scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0, scores_max[i])
-            for i in T.Parallel(G):
-                scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
-            for i, j in T.Parallel(G, BS):
-                # Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
-                # max * log_2(e)) This allows the compiler to use the ffma
-                # instruction instead of fadd and fmul separately.
-                acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
-            T.reduce_sum(acc_s, scores_sum, dim=1)
-            for i in T.Parallel(G):
-                logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-            T.copy(acc_s, acc_s_cast)
-
-        @T.macro
-        def Rescale(
-                acc_o: T.Buffer([G, BV], accum_dtype),
-                scores_scale: T.Buffer([G], accum_dtype),
-        ):
-            for i, j in T.Parallel(G, BV):
-                acc_o[i, j] *= scores_scale[i]
-
         @T.prim_func
         def main(
                 Q: T.Buffer(q_shape, dtype),
@@ -147,11 +76,51 @@ def native_sparse_attention(batch,
                 for i in T.Pipelined(NS, num_stages=num_stages):
                     i_s = BlockIndices[i_b, i_t, i_h, i]
                     if i_s <= i_t:
-                        MMA0(K, Q_shared, K_shared, acc_s, i_s, i_b, i_h, i_t)
-                        Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale,
-                                scores_sum, logsum)
-                        Rescale(acc_o, scores_scale)
-                        MMA1(V, V_shared, acc_s_cast, acc_o, i_s, i_b, i_h)
+                        # Q * K
+                        T.copy(K[i_b, i_s * BS:(i_s + 1) * BS, i_h, :], K_shared)
+
+                        if is_causal:
+                            for i, j in T.Parallel(G, BS):
+                                acc_s[i, j] = T.if_then_else(i_t >= (i_s * BS + j), 0,
+                                                             -T.infinity(acc_s.dtype))
+                        else:
+                            T.clear(acc_s)
+                        T.gemm(
+                            Q_shared,
+                            K_shared,
+                            acc_s,
+                            transpose_B=True,
+                            policy=T.GemmWarpPolicy.FullRow)
+
+                        # Softmax
+                        T.copy(scores_max, scores_max_prev)
+                        T.fill(scores_max, -T.infinity(accum_dtype))
+                        T.reduce_max(acc_s, scores_max, dim=1, clear=True)
+                        # To do causal softmax, we need to set the scores_max to 0 if it is -inf
+                        # This process is called Check_inf in FlashAttention3 code, and it only need to be done
+                        # in the first ceil_div(kBlockM, kBlockN) steps.
+                        # for i in T.Parallel(block_M):
+                        #     scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0, scores_max[i])
+                        for i in T.Parallel(G):
+                            scores_scale[i] = T.exp2(scores_max_prev[i] * scale -
+                                                     scores_max[i] * scale)
+                        for i, j in T.Parallel(G, BS):
+                            # Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
+                            # max * log_2(e)) This allows the compiler to use the ffma
+                            # instruction instead of fadd and fmul separately.
+                            acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+                        T.reduce_sum(acc_s, scores_sum, dim=1)
+                        for i in T.Parallel(G):
+                            logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
+                        T.copy(acc_s, acc_s_cast)
+
+                        # Rescale
+                        for i, j in T.Parallel(G, BV):
+                            acc_o[i, j] *= scores_scale[i]
+
+                        # V * softmax(Q * K)
+                        T.copy(V[i_b, i_s * BS:(i_s + 1) * BS, i_h, :], V_shared)
+                        T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
                 for i, j in T.Parallel(G, BV):
                     acc_o[i, j] /= logsum[i]

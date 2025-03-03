@@ -118,8 +118,13 @@ def tilelang_callback_hip_compile(code, target):
 
 
 def extrac_params(func: tir.PrimFunc):
-    buffers = [func.buffer_map[var] for var in func.params]
-    tensor_types = [relay.TensorType(buffer.shape, buffer.dtype) for buffer in buffers]
+    tensor_types = []
+    for var in func.params:
+        if var in func.buffer_map:
+            tensor_types.append(
+                relay.TensorType(func.buffer_map[var].shape, func.buffer_map[var].dtype))
+        else:
+            tensor_types.append(relay.scalar_type(var.dtype))
     return tensor_types
 
 

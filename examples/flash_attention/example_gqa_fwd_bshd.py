@@ -204,13 +204,13 @@ def ref_program(Q, K, V, is_causal, groups=1):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=8, help='batch size')
-    parser.add_argument('--heads', type=int, default=32, help='heads')
-    parser.add_argument('--seq_len', type=int, default=4096, help='sequence length')
+    parser.add_argument('--batch', type=int, default=1, help='batch size')
+    parser.add_argument('--heads', type=int, default=64, help='heads')
+    parser.add_argument('--seq_len', type=int, default=256, help='sequence length')
     parser.add_argument('--dim', type=int, default=128, help='dim')
     parser.add_argument('--is_causal', action='store_true', help='causal')
     parser.add_argument('--tune', action='store_true', help='tune configs')
-    parser.add_argument('--groups', type=int, default=8, help='groups')
+    parser.add_argument('--groups', type=int, default=16, help='groups')
     args = parser.parse_args()
     batch, heads, seq_len, dim, is_causal, groups = args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups
     flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
