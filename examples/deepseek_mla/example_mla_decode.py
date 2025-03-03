@@ -17,6 +17,88 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
     assert kv_head_num == 1, "kv_head_num must be 1"
 
     @T.macro
+    def flash_attn(
+            Q: T.Buffer([batch, heads, dim], dtype),
+            Q_pe: T.Buffer([batch, heads, pe_dim], dtype),
+            KV: T.Buffer([batch, seqlen_kv, kv_head_num, dim], dtype),
+            K_pe: T.Buffer([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+            Output: T.Buffer([batch, heads, dim], dtype),
+    ):
+        with T.Kernel(
+                batch, heads // min(block_H, kv_group_num), threads=256) as (bx, by):
+            Q_shared = T.alloc_shared([block_H, dim], dtype)
+            S_shared = T.alloc_shared([block_H, block_N], dtype)
+            Q_pe_shared = T.alloc_shared([block_H, pe_dim], dtype)
+            KV_shared = T.alloc_shared([block_N, dim], dtype)
+            K_pe_shared = T.alloc_shared([block_N, pe_dim], dtype)
+            O_shared = T.alloc_shared([block_H, dim], dtype)
+            acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
+            acc_s_0 = T.alloc_fragment([block_H, block_N], accum_dtype)
+            acc_s_cast = T.alloc_fragment([block_H, block_N], dtype)
+            acc_o = T.alloc_fragment([block_H, dim], accum_dtype)
+            scores_max = T.alloc_fragment([block_H], accum_dtype)
+            scores_max_prev = T.alloc_fragment([block_H], accum_dtype)
+            scores_scale = T.alloc_fragment([block_H], accum_dtype)
+            scores_sum = T.alloc_fragment([block_H], accum_dtype)
+            logsum = T.alloc_fragment([block_H], accum_dtype)
+
+            bid = bx
+            hid = by
+            cur_kv_head = hid // (kv_group_num // block_H)
+
+            T.use_swizzle(10)
+            
+            T.annotate_layout({
+                O_shared: tilelang.layout.make_swizzled_layout(O_shared),
+                S_shared: tilelang.layout.make_swizzled_layout(S_shared),
+            })
+
+            T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :], Q_shared)
+            T.copy(Q_pe[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :], Q_pe_shared)
+            T.fill(acc_o, 0)
+            T.fill(logsum, 0)
+            T.fill(scores_max, -T.infinity(accum_dtype))
+
+            loop_range = T.ceildiv(seqlen_kv, block_N)
+            for k in T.Pipelined(loop_range, num_stages=2):
+                kv_start = k * block_N
+                kv_end = (k + 1) * block_N
+
+                T.copy(KV[bid, kv_start:kv_end, cur_kv_head, :], KV_shared)
+                T.copy(K_pe[bid, kv_start:kv_end, cur_kv_head, :], K_pe_shared)
+
+                T.clear(acc_s_0)
+                T.gemm(
+                    Q_shared, KV_shared, acc_s_0, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
+                T.gemm(
+                    Q_pe_shared,
+                    K_pe_shared,
+                    acc_s_0,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullCol)
+                T.copy(scores_max, scores_max_prev)
+                T.fill(scores_max, -T.infinity(accum_dtype))
+                T.copy(acc_s_0, S_shared)
+                T.copy(S_shared, acc_s)
+                T.reduce_max(acc_s, scores_max, dim=1, clear=False)
+                for i in T.Parallel(block_H):
+                    scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+                for i, j in T.Parallel(block_H, block_N):
+                    acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
+                T.reduce_sum(acc_s, scores_sum, dim=1)
+                for i in T.Parallel(block_H):
+                    logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
+                T.copy(acc_s, acc_s_cast)
+                for i, j in T.Parallel(block_H, dim):
+                    acc_o[i, j] *= scores_scale[i]
+                T.gemm(acc_s_cast, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullCol)
+            for i, j in T.Parallel(block_H, dim):
+                acc_o[i, j] /= logsum[i]
+
+            T.copy(acc_o, O_shared)
+            T.copy(O_shared, Output[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :])
+
+    @T.macro
     def flash_attn_split(
             Q: T.Buffer([batch, heads, dim], dtype),
             Q_pe: T.Buffer([batch, heads, pe_dim], dtype),
@@ -140,7 +222,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 Output[bz, by, i] = o_accum_local[i]
 
     @T.prim_func
-    def main(
+    def main_split(
             Q: T.Buffer([batch, heads, dim], dtype),
             Q_pe: T.Buffer([batch, heads, pe_dim], dtype),
             KV: T.Buffer([batch, seqlen_kv, kv_head_num, dim], dtype),
@@ -151,11 +233,24 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
     ):
         flash_attn_split(Q, Q_pe, KV, K_pe, glse, Output_partial)
         combine(glse, Output_partial, Output)
+    
+    @T.prim_func
+    def main_non_split(
+            Q: T.Buffer([batch, heads, dim], dtype),
+            Q_pe: T.Buffer([batch, heads, pe_dim], dtype),
+            KV: T.Buffer([batch, seqlen_kv, kv_head_num, dim], dtype),
+            K_pe: T.Buffer([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+            Output: T.Buffer([batch, heads, dim], dtype),
+    ):
+        flash_attn(Q, Q_pe, KV, K_pe, Output)
 
-    return main
+    if num_split > 1:
+        return main_split
+    else:
+        return main_non_split
 
 
-def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
+def ref_program(q, q_pe, kv, k_pe):
     #     """
     #     Inputs:
     #     - q (Tensor): [batch, heads, dim]
@@ -274,12 +369,12 @@ if __name__ == "__main__":
     qk_flops = 2 * BATCH * H_Q * KV_CTX * (D_HEAD + DPE)
     pv_flops = 2 * BATCH * H_Q * KV_CTX * D_HEAD
     total_flops = qk_flops + pv_flops
-    BLOCK_N = 32  # if D_HEAD <= 128 else 32
+    BLOCK_N = 64  # if D_HEAD <= 128 else 32
     BLOCK_H = 64
 
     program = flashattn(BATCH, H_Q, KV_H, KV_CTX, D_HEAD, DPE, BLOCK_N, BLOCK_H)
     mod, params = tilelang.lower(program)
-    mod = tilelang.Profiler(mod, params, [6], tilelang.TensorSupplyType.Normal)
+    mod = tilelang.Profiler(mod, params, [4], tilelang.TensorSupplyType.Integer)
     mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
     print("All close")
     latency = mod.do_bench(mod.func, n_warmup=10, n_repeat=10, profiler="torch")
