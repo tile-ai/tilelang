@@ -11,17 +11,17 @@ DeepSeek's MLA (Multi-Head Latent Attention) is a novel attention mechanism know
 We benchmarked the performance of FlashMLA, TileLang, Torch, Triton, and FlashInfer under batch sizes of 64 and 128, with float16 data type, as shown in the figures below.
 
 <figure style="text-align: center">
-  <a href="./bs64_float16.png">
-    <img src="./bs64_float16.png" alt="bs64_float16">
+  <a href="./figures/bs64_float16.png">
+    <img src="./figures/bs64_float16.png" alt="bs64_float16">
    </a>
-  <figcaption>Figure 1：Performance under batch size=64</figcaption>
+  <figcaption style="text-align: center;">Figure 1：Performance under batch size=64</figcaption>
 </figure>
 
 <figure style="text-align: center">
-  <a href="./bs128_float16.png">
-    <img src="./bs128_float16.png" alt="bs128_float16">
+  <a href="./figures/bs128_float16.png">
+    <img src="./figures/bs128_float16.png" alt="bs128_float16">
    </a>
-  <figcaption>Figure 2：Performance under batch size=128</figcaption>
+  <figcaption style="text-align: center;">Figure 2：Performance under batch size=128</figcaption>
 </figure>
 
 As shown in the results, TileLang achieves performance comparable to FlashMLA in most cases, significantly outperforming both FlashInfer and Triton. 
@@ -65,17 +65,17 @@ While the above process may seem complex, but don't worry - TileLang will handle
 Figure 3 and Figure 4 illustrate the frontend TileLang script and its corresponding execution plan for MLA. Here, `T.gemm` represents matrix multiplication operations, `transpose_B=True` indicates transposition of matrix B, and `policy=FullCol` specifies that each warpgroup computes one column (e.g., split the result matrix in vertical dimension). `T.copy` represents buffer-to-buffer copying operations.
 
 <figure style="text-align: center">
-  <a href="./qk_layout.jpg">
-    <img src="./qk_layout.jpg" alt="QK Layout">
+  <a href="./figures/qk_layout.jpg">
+    <img src="./figures/qk_layout.jpg" alt="QK Layout">
    </a>
-  <figcaption>Figure 3：Buffer shapes in Q @ K</figcaption>
+  <figcaption style="text-align: center;">Figure 3：Buffer shapes in Q @ K</figcaption>
 </figure>
 
 <figure style="text-align: center">
-  <a href="./qk_layout.jpg">
-    <img src="./pv_layout.jpg" alt="PV Layout">
+  <a href="./figures/pv_layout.jpg">
+    <img src="./figures/pv_layout.jpg" alt="PV Layout">
   </a>
-  <figcaption>Figure 4：Buffer shapes in acc_s @ V</figcaption>
+  <figcaption style="text-align: center;">Figure 4：Buffer shapes in acc_s @ V</figcaption>
 </figure>
 
 The mapping from TileLang frontend code to execution plan is accomplished through Layout Inference. Layout inference is a core optimization technique in TileLang. It automatically deduces the required buffer shapes and optimal layouts based on Tile-Operators (like `T.gemm`, `T.copy`, etc.), then generates the corresponding code. Here, we demonstrate a concrete example of buffer shape inference in MLA.
