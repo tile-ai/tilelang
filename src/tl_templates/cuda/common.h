@@ -89,42 +89,54 @@ TL_DEVICE unsigned int cast_smem_ptr_to_int(const void *const smem_ptr) {
   return smem_int;
 }
 
+template <typename T1, typename T2>
+TL_DEVICE void AtomicAdd(T1 *address, T2 val) {
+  atomicAdd(reinterpret_cast<T1 *>(address), static_cast<T1>(val));
+}
+
+// // AtomicAdd Functions for FP32
+// TL_DEVICE void AtomicAdd(float *address, float val) {
+//   atomicAdd(reinterpret_cast<float *>(address), val);
+// }
+
 // AtomicAdd Functions for FP16
-TL_DEVICE void AtomicAdd(half_t *address, half_t val) {
+template <> TL_DEVICE void AtomicAdd(half_t *address, half_t val) {
   // Use atomicCAS with built-in cuda_fp16 support
   atomicAdd(reinterpret_cast<half *>(address), static_cast<half>(val));
 }
 
 // AtomicAdd Functions for FP16
-TL_DEVICE void AtomicAdd(half_t *address, half_t *val) {
+template <> TL_DEVICE void AtomicAdd(half_t *address, half_t *val) {
   atomicAdd(reinterpret_cast<half *>(address), static_cast<half>(*val));
+}
+
+// AtomicAdd Functions for FP16
+template <> TL_DEVICE void AtomicAdd(half_t *address, float val) {
+  // Use atomicCAS with built-in cuda_fp16 support
+  atomicAdd(reinterpret_cast<half *>(address), __float2half(val));
+}
+
+// AtomicAdd Functions for BFLOAT16
+template <> TL_DEVICE void AtomicAdd(bfloat16_t *address, bfloat16_t *val) {
+  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address),
+            static_cast<__nv_bfloat16>(*val));
+}
+
+// AtomicAdd Functions for BFLOAT16
+template <> TL_DEVICE void AtomicAdd(bfloat16_t *address, float val) {
+  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address), __float2bfloat16(val));
+}
+
+// AtomicAdd Functions for BFLOAT16
+template <> TL_DEVICE void AtomicAdd(bfloat16_t *address, bfloat16_t val) {
+  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address),
+            static_cast<__nv_bfloat16>(val));
 }
 
 // AtomicAdd Functions for FP16x2
 TL_DEVICE void AtomicAddx2(half_t *address, half_t *val) {
   atomicAdd(reinterpret_cast<half2 *>(address),
             static_cast<half2>(*reinterpret_cast<half2 *>(val)));
-}
-
-// AtomicAdd Functions for FP16
-TL_DEVICE void AtomicAdd(half_t *address, float val) {
-  // Use atomicCAS with built-in cuda_fp16 support
-  atomicAdd(reinterpret_cast<half *>(address), __float2half(val));
-}
-
-// AtomicAdd Functions for BFLOAT16
-TL_DEVICE void AtomicAdd(bfloat16_t *address, bfloat16_t *val) {
-  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address),
-            static_cast<__nv_bfloat16>(*val));
-}
-
-TL_DEVICE void AtomicAdd(bfloat16_t *address, float val) {
-  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address), __float2bfloat16(val));
-}
-
-TL_DEVICE void AtomicAdd(bfloat16_t *address, bfloat16_t val) {
-  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address),
-            static_cast<__nv_bfloat16>(val));
 }
 
 // AtomicAdd Functions for BFLOAT16x2

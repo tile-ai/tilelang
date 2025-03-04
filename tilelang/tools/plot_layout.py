@@ -49,7 +49,7 @@ def plot_layout(layout: T.Layout,
     thread_map = np.empty(input_shape, dtype=object)
     for idx in np.ndindex(thread_map.shape):
         thread_map[idx] = []
-    
+
     # Initialize a 2D array to store value mappings
     value_map = np.zeros(input_shape, dtype=object)
     for idx in np.ndindex(value_map.shape):
@@ -119,16 +119,28 @@ def plot_layout(layout: T.Layout,
             local_id = local_ids[0]
             # assert local id in local_ids is equal
             assert all(local_id == local_id for local_id in local_ids)
-            
+
             # Calculate thread font size based on string length
             thread_fontsize = min(font_size, font_size * (4 / len(thread_str)))
-            
+
             # Add thread ID text with adjusted font size
-            ax.text(j + 0.5, i + 0.3, thread_str, 
-                   ha='center', va='center', color='black', fontsize=thread_fontsize)
+            ax.text(
+                j + 0.5,
+                i + 0.3,
+                thread_str,
+                ha='center',
+                va='center',
+                color='black',
+                fontsize=thread_fontsize)
             # Add local ID text with original font size
-            ax.text(j + 0.5, i + 0.7, f"L{local_id}", 
-                   ha='center', va='center', color='black', fontsize=font_size)
+            ax.text(
+                j + 0.5,
+                i + 0.7,
+                f"L{local_id}",
+                ha='center',
+                va='center',
+                color='black',
+                fontsize=font_size)
 
     # Add row labels to the left side of the plot
     for i in range(nrows):
@@ -161,7 +173,7 @@ def plot_layout(layout: T.Layout,
     fig_height = fig.get_size_inches()[1]
     legend_x = 1.0 + (0.5 / fig_width)  # Adjust x position based on figure width
     legend_y = 1.0 + (1.7 / fig_height)  # Adjust y position based on figure height
-    
+
     legend_patches = [
         patches.Patch(color='black', label="T: Thread ID"),
         patches.Patch(color='black', label="L: Local ID")
