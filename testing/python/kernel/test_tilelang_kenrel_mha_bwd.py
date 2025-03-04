@@ -7,7 +7,6 @@ import tilelang
 from tilelang.profiler import cached
 from tilelang.autotuner import *
 import tilelang.language as T
-import argparse
 
 import tilelang.testing
 
@@ -282,6 +281,7 @@ def ref_program(Q, K, V, is_causal):
     attention_weights = F.softmax(scores, dim=-1)
     output = torch.einsum('bhqk,bkhd->bqhd', attention_weights, V)
     return output
+
 
 def assert_mha_equal(batch, h, n_ctx, d_head, causal):
     Q = (
