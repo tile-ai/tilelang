@@ -105,8 +105,7 @@ print(base_layout)
 plot_layout(base_layout, name="base_layout")
 
 # warp layout 32x16
-warp_layout = base_layout.repeat([block_rows, 1],
-                                             repeat_on_thread=True).replicate(block_cols)
+warp_layout = base_layout.repeat([block_rows, 1], repeat_on_thread=True).replicate(block_cols)
 print(warp_layout)
 plot_layout(warp_layout, name="warp_layout")
 
