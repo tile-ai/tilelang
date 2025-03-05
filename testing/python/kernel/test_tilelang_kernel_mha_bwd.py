@@ -302,10 +302,10 @@ def assert_mha_equal(batch, h, n_ctx, d_head, causal):
     dK_ref, K.grad = K.grad.clone(), None
     dV_ref, V.grad = V.grad.clone(), None
 
-    assert torch.allclose(O, O_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dV, dV_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dK, dK_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dQ, dQ_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(O, O_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(dV, dV_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(dK, dK_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(dQ, dQ_ref, rtol=1e-2, atol=1e-2)
 
 
 def test_mha_bwd():
