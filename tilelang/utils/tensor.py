@@ -18,7 +18,7 @@ class TensorSupplyType(Enum):
     Auto = 7
 
 
-def map_torch_type(intype):
+def map_torch_type(intype: str) -> torch.dtype:
     typemap = {
         'e4m3_float8': torch.float8_e4m3fn,
         'e5m2_float8': torch.float8_e5m2,

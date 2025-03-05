@@ -13,8 +13,9 @@ from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
+from tilelang.utils.tensor import map_torch_type
 from tilelang.contrib.cc import get_cplus_compiler
-
+import torch
 import sys
 import sysconfig
 import hashlib
@@ -89,7 +90,7 @@ with open(cython_wrapper_path, "r") as f:
                 logger.debug("Cython jit adapter is up to date, no need to compile...")
                 need_compile = False
             else:
-                logger.info("Cython jit adapter is out of date, need to compile...")
+                logger.info("Cython jit adapter is out of date, need to recompile...")
     else:
         logger.info("No cached version found for cython jit adapter, need to compile...")
 
@@ -135,6 +136,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
     wrapped_source: Optional[str] = None  # Generated C++ wrapper code
     # Maps symbolic variables to their corresponding buffer and shape indices
     dynamic_symbolic_map: Optional[Dict[tir.Var, Tuple[int, int]]] = None
+    # Maps buffer variables to their corresponding dtypes
+    buffer_dtype_map: Optional[Dict[tir.Var, Tuple[int, torch.dtype]]] = None
 
     def __init__(self,
                  rt_mod,
@@ -163,6 +166,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             self.ir_module = func_or_mod
 
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
+        self.buffer_dtype_map = self._process_buffer_dtype()
 
         self.target = Target.canon_target(determine_target(target))
         self.verbose = verbose
@@ -182,8 +186,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
             raise Exception(
                 f"Failed to initialize the compiled library for {self.target}: {e}") from e
 
-        self.cython_wrapper = CythonKernelWrapper(self.dynamic_symbolic_map, self.result_idx,
-                                                  self.params, self.lib)
+        self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib)
+        self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
+        self.cython_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
 
         self._post_init()
 
@@ -204,6 +209,22 @@ class CythonKernelAdapter(BaseKernelAdapter):
                     if isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map):
                         dynamic_symbolic_map[shape] = (i, j)
         return dynamic_symbolic_map
+
+    def _process_buffer_dtype(self):
+        """Extract information about buffer dtypes from the TIR function.
+        
+        Maps buffer variables to their corresponding dtypes.
+        """
+        func = self.prim_func
+        params = func.params
+        buffer_map = func.buffer_map
+        buffer_dtype_map = {}
+        for i, param in enumerate(params):
+            if param in buffer_map:
+                buffer = buffer_map[param]
+                name, dtype = buffer.name, buffer.dtype
+                buffer_dtype_map[name] = (i, map_torch_type(dtype))
+        return buffer_dtype_map
 
     def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):
         """Low-level function to call the compiled CUDA kernel.

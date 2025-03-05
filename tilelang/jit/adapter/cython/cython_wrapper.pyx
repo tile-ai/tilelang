@@ -12,16 +12,24 @@ cdef class CythonKernelWrapper:
     # Class attributes to store kernel configuration and library reference
     cdef:
         object dynamic_symbolic_map  # Maps dynamic dimensions to their corresponding tensor indices
+        object buffer_dtype_map     # Maps buffer variables to their corresponding dtypes
         list result_idx             # Indices of output tensors in the params list
         list params                 # List of parameter specifications (includes both inputs and outputs)
         object lib                  # Reference to the compiled library containing the kernel
 
-    def __cinit__(self, dynamic_symbolic_map, result_idx, params, lib):
+    def __cinit__(self, result_idx, params, lib):
         # Initialize wrapper with kernel configuration
-        self.dynamic_symbolic_map = dynamic_symbolic_map
         self.result_idx = result_idx
         self.params = params
         self.lib = lib
+    
+    def set_dynamic_symbolic_map(self, dynamic_symbolic_map):
+        self.dynamic_symbolic_map = dynamic_symbolic_map
+        return self
+
+    def set_buffer_dtype_map(self, buffer_dtype_map):
+        self.buffer_dtype_map = buffer_dtype_map
+        return self
 
     cpdef forward(self, list inputs, int64_t stream = -1):
         # Validate input dimensions and prepare for kernel execution
@@ -68,6 +76,11 @@ cdef class CythonKernelWrapper:
                 call_args.append(tensor_list[i])
             else:
                 raise ValueError(f"Unsupported tensor type: {type(tensor_list[i])}")
+
+        # Check buffer dtype map
+        for param, (buffer_idx, shape_idx) in self.buffer_dtype_map.items():
+            if tensor_list[buffer_idx].dtype != self.buffer_dtype_map[param]:
+                raise ValueError(f"Buffer dtype mismatch for parameter {param}: expected {self.buffer_dtype_map[param]}, got {tensor_list[buffer_idx].dtype}")
 
         # Add dynamic dimension values to kernel arguments
         for _, (buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():
