@@ -13,6 +13,7 @@ cdef class CythonKernelWrapper:
     cdef:
         object dynamic_symbolic_map  # Maps dynamic dimensions to their corresponding tensor indices
         object buffer_dtype_map     # Maps buffer variables to their corresponding dtypes
+        object static_shape_map     # Maps buffer variables to their corresponding static shapes
         list result_idx             # Indices of output tensors in the params list
         list params                 # List of parameter specifications (includes both inputs and outputs)
         object lib                  # Reference to the compiled library containing the kernel
@@ -29,6 +30,10 @@ cdef class CythonKernelWrapper:
 
     def set_buffer_dtype_map(self, buffer_dtype_map):
         self.buffer_dtype_map = buffer_dtype_map
+        return self
+
+    def set_static_shape_map(self, static_shape_map):
+        self.static_shape_map = static_shape_map
         return self
 
     cpdef forward(self, list inputs, int64_t stream = -1):
@@ -78,9 +83,15 @@ cdef class CythonKernelWrapper:
                 raise ValueError(f"Unsupported tensor type: {type(tensor_list[i])}")
 
         # Check buffer dtype map
-        for param, (buffer_idx, shape_idx) in self.buffer_dtype_map.items():
-            if tensor_list[buffer_idx].dtype != self.buffer_dtype_map[param]:
-                raise ValueError(f"Buffer dtype mismatch for parameter {param}: expected {self.buffer_dtype_map[param]}, got {tensor_list[buffer_idx].dtype}")
+        for param, (buffer_idx, torch_dtype) in self.buffer_dtype_map.items():
+            if tensor_list[buffer_idx].dtype != torch_dtype:
+                raise ValueError(f"Buffer dtype mismatch for parameter {param}: expected {torch_dtype}, got {tensor_list[buffer_idx].dtype}")
+        
+        # Check static shape map
+        for param, (buffer_idx, shape_list) in self.static_shape_map.items():
+            for shape_idx, shape in shape_list:
+                if tensor_list[buffer_idx].shape[shape_idx] != shape:
+                    raise ValueError(f"Static shape mismatch for parameter {param}: expected {shape}, got {tensor_list[buffer_idx].shape}")
 
         # Add dynamic dimension values to kernel arguments
         for _, (buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():

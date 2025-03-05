@@ -138,6 +138,11 @@ class CythonKernelAdapter(BaseKernelAdapter):
     dynamic_symbolic_map: Optional[Dict[tir.Var, Tuple[int, int]]] = None
     # Maps buffer variables to their corresponding dtypes
     buffer_dtype_map: Optional[Dict[tir.Var, Tuple[int, torch.dtype]]] = None
+    # Maps buffer variables to their corresponding static shapes
+    # {
+    #     "A": [(0, 16), (1, 16)] -> represents A.shape = (16, 16)
+    # }
+    static_shape_map: Optional[Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]]] = None
 
     def __init__(self,
                  rt_mod,
@@ -167,6 +172,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
         self.buffer_dtype_map = self._process_buffer_dtype()
+        self.static_shape_map = self._process_static_shape()
 
         self.target = Target.canon_target(determine_target(target))
         self.verbose = verbose
@@ -189,10 +195,11 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib)
         self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
         self.cython_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
+        self.cython_wrapper.set_static_shape_map(self.static_shape_map)
 
         self._post_init()
 
-    def _process_dynamic_symbolic(self):
+    def _process_dynamic_symbolic(self) -> Dict[tir.Var, Tuple[int, int]]:
         """Extract information about dynamic shapes from the TIR function.
         
         Maps symbolic variables to their corresponding (buffer_index, shape_dimension)
@@ -210,7 +217,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                         dynamic_symbolic_map[shape] = (i, j)
         return dynamic_symbolic_map
 
-    def _process_buffer_dtype(self):
+    def _process_buffer_dtype(self) -> Dict[tir.Var, Tuple[int, torch.dtype]]:
         """Extract information about buffer dtypes from the TIR function.
         
         Maps buffer variables to their corresponding dtypes.
@@ -225,6 +232,27 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 name, dtype = buffer.name, buffer.dtype
                 buffer_dtype_map[name] = (i, map_torch_type(dtype))
         return buffer_dtype_map
+
+    def _process_static_shape(self) -> Dict[tir.Var, List[Tuple[int, int]]]:
+        """Extract information about static shapes from the TIR function.
+        
+        Maps buffer variables to their corresponding static shapes.
+        """
+        func = self.prim_func
+        params = func.params
+        buffer_map = func.buffer_map
+        static_shape_map = {}
+        for i, param in enumerate(params):
+            if param in buffer_map:
+                buffer = buffer_map[param]
+                name = buffer.name
+                shape = buffer.shape
+                static_shape = []
+                for j, s in enumerate(shape):
+                    if isinstance(s, tir.IntImm):
+                        static_shape.append((j, s.value))
+                static_shape_map[name] = (i, static_shape)
+        return static_shape_map
 
     def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):
         """Low-level function to call the compiled CUDA kernel.
