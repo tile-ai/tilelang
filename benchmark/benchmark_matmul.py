@@ -46,33 +46,29 @@ def get_configs(M, N, K, with_roller=False):
         thread numbers, and other parameters to explore during autotuning.
     """
     if with_roller:
-        from bitblas.base.utils import get_roller_hints_from_func
-        from bitblas.ops.general_matmul.tirscript import matmul_select_implementation
-        from bitblas.base.arch import CUDA
-        from bitblas.base.roller.rasterization import NoRasterization
+        from tilelang.carver.template import MatmulTemplate
+        from tilelang.carver.arch import CUDA
+        from tilelang.carver.roller.rasterization import NoRasterization
         arch = CUDA("cuda")
         topk = 20
 
-        # Simple TIR Compute Expression
-        ir_module = matmul_select_implementation(
+        carve_template = MatmulTemplate(
             M=M,
             N=N,
             K=K,
             in_dtype="float16",
             out_dtype="float16",
             accum_dtype="float16",
-        )
+        ).with_arch(arch)
 
-        roller_hints = get_roller_hints_from_func(
-            ir_module,
-            arch,
-            topk,
-            tensorcore_only=True,
-            allow_gemv=True,
-        )
+        func = carve_template.equivalent_function()
+        assert func is not None, "Function is None"
+
+        roller_hints = carve_template.recommend_hints(topk=topk)
 
         if roller_hints is None:
             raise ValueError("No Roller Hints Found for TensorCore Scheduling")
+
         configs = []
         for hint in roller_hints:
             config = {}

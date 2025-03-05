@@ -44,6 +44,7 @@ def get_roller_hints_from_func(func_or_module: Union[tir.PrimFunc, IRModule],
 
     assert func is not None, "The function should not be None"
 
+    roller_hints = None
     if tensorcore_only:
         try:
             tensorized_func, tags = get_tensorized_func_and_tags(
@@ -53,9 +54,9 @@ def get_roller_hints_from_func(func_or_module: Union[tir.PrimFunc, IRModule],
             tags = None
         if tags and tensorized_func:
             policy = TensorCorePolicy(func=tensorized_func, arch=arch, tags=tags)
-            return policy.emit_config(topk)
+            roller_hints = policy.emit_config(topk)
         else:
-            return None
+            roller_hints = None
     else:
         policy = DefaultPolicy.from_prim_func(func=func, arch=arch)
         tensorized_func = None
@@ -67,7 +68,10 @@ def get_roller_hints_from_func(func_or_module: Union[tir.PrimFunc, IRModule],
             tags = None
         if tags and tensorized_func:
             policy = TensorCorePolicy.from_prim_func(func=tensorized_func, arch=arch, tags=tags)
-        return policy.emit_config(topk)
+            roller_hints = policy.emit_config(topk)
+        else:
+            roller_hints = None
+    return roller_hints
 
 
 def get_roller_hints_from_output_nodes(

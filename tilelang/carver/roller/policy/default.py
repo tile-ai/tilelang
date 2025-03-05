@@ -94,7 +94,10 @@ class DefaultPolicy:
 
             self._expand_reduce_axis(td)
             for codegen_dicts in self.assign_block_size(td):
-                results.append(codegen_dicts)
+                if isinstance(codegen_dicts, dict) and len(codegen_dicts) == 1:
+                    results.append(list(codegen_dicts.values())[0])
+                else:
+                    results.append(codegen_dicts)
                 if len(results) >= topk:
                     break
             if len(results) >= topk:
