@@ -1,8 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-"""The auto-tune module for tl programs."""
+"""The auto-tune module for tilelang programs."""
 
-import tilelang as tl
+import tilelang
 from tilelang import tvm as tvm
 import inspect
 from functools import wraps
@@ -21,9 +21,9 @@ logging.basicConfig(
 
 @dataclass(frozen=True)
 class JITContext:
-    mod: tl.Profiler
+    mod: tilelang.Profiler
     out_idx: List[int]
-    supply_type: tl.TensorSupplyType
+    supply_type: tilelang.TensorSupplyType
     ref_prog: Callable
     rtol: float
     atol: float
@@ -144,7 +144,7 @@ def autotune(configs: Any,
              rep: int = 100,
              timeout: int = 100) -> Callable:
     """
-    Decorator for tl program
+    Decorator for tilelang program
     """
 
     def decorator(fn: Callable) -> Autotuner:
@@ -154,7 +154,7 @@ def autotune(configs: Any,
 
 
 def jit(out_idx: List[int],
-        supply_type: tl.TensorSupplyType = tl.TensorSupplyType.Normal,
+        supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Normal,
         ref_prog: Callable = None,
         rtol: float = 1e-2,
         atol: float = 1e-2,
@@ -169,9 +169,9 @@ def jit(out_idx: List[int],
         def decorator(*args, **kwargs) -> float:
             # Enabling Efficient Fusion
             with tvm.transform.PassContext(config={"tir.merge_static_smem": True}):
-                mod, params = tl.lower(fn(*args, **kwargs), target=target)
+                mod, params = tilelang.lower(fn(*args, **kwargs), target=target)
 
-            mod = tl.Profiler(mod, params, out_idx, supply_type)
+            mod = tilelang.Profiler(mod, params, out_idx, supply_type)
 
             return JITContext(
                 mod=mod,
