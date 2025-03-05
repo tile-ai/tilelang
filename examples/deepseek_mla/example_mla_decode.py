@@ -31,7 +31,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             K_pe_shared = T.alloc_shared([block_N, pe_dim], dtype)
             O_shared = T.alloc_shared([block_H, dim], dtype)
             acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
-            acc_s_0 = T.alloc_fragment([block_H, block_N], accum_dtype)
             acc_s_cast = T.alloc_fragment([block_H, block_N], dtype)
             acc_o = T.alloc_fragment([block_H, dim], accum_dtype)
             scores_max = T.alloc_fragment([block_H], accum_dtype)
@@ -57,28 +56,27 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             for k in T.Pipelined(loop_range, num_stages=2):
                 T.copy(KV[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], KV_shared)
                 T.copy(K_pe[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_pe_shared)
-                T.clear(acc_s_0)
+                T.clear(acc_s)
                 T.gemm(
-                    Q_shared, KV_shared, acc_s_0, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
+                    Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
                 T.gemm(
                     Q_pe_shared,
                     K_pe_shared,
-                    acc_s_0,
+                    acc_s,
                     transpose_B=True,
                     policy=T.GemmWarpPolicy.FullCol)
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
-                T.copy(acc_s_0, S_shared)
-                T.copy(S_shared, acc_s)
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                 for i in T.Parallel(block_H):
                     scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
                 for i, j in T.Parallel(block_H, block_N):
                     acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
                 T.reduce_sum(acc_s, scores_sum, dim=1)
+                T.copy(acc_s, S_shared)
+                T.copy(S_shared, acc_s_cast)
                 for i in T.Parallel(block_H):
                     logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-                T.copy(acc_s, acc_s_cast)
                 for i, j in T.Parallel(block_H, dim):
                     acc_o[i, j] *= scores_scale[i]
                 T.gemm(acc_s_cast, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullCol)
@@ -105,7 +103,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             K_pe_shared = T.alloc_shared([block_N, pe_dim], dtype)
             O_shared = T.alloc_shared([block_H, dim], dtype)
             acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
-            acc_s_0 = T.alloc_fragment([block_H, block_N], accum_dtype)
             acc_s_cast = T.alloc_fragment([block_H, block_N], dtype)
             acc_o = T.alloc_fragment([block_H, dim], accum_dtype)
             scores_max = T.alloc_fragment([block_H], accum_dtype)
@@ -131,31 +128,29 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             for k in T.Pipelined(loop_range, num_stages=2):
                 kv_start = (seqlen_kv // num_split) * bz + k * block_N
                 kv_end = (seqlen_kv // num_split) * bz + (k + 1) * block_N
-
                 T.copy(KV[bx, kv_start:kv_end, cur_kv_head, :], KV_shared)
                 T.copy(K_pe[bx, kv_start:kv_end, cur_kv_head, :], K_pe_shared)
-                T.clear(acc_s_0)
+                T.clear(acc_s)
                 T.gemm(
-                    Q_shared, KV_shared, acc_s_0, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
+                    Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
                 T.gemm(
                     Q_pe_shared,
                     K_pe_shared,
-                    acc_s_0,
+                    acc_s,
                     transpose_B=True,
                     policy=T.GemmWarpPolicy.FullCol)
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
-                T.copy(acc_s_0, S_shared)
-                T.copy(S_shared, acc_s)
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                 for i in T.Parallel(block_H):
                     scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
                 for i, j in T.Parallel(block_H, block_N):
                     acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
                 T.reduce_sum(acc_s, scores_sum, dim=1)
+                T.copy(acc_s, S_shared)
+                T.copy(S_shared, acc_s_cast)
                 for i in T.Parallel(block_H):
                     logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-                T.copy(acc_s, acc_s_cast)
                 for i, j in T.Parallel(block_H, dim):
                     acc_o[i, j] *= scores_scale[i]
                 T.gemm(acc_s_cast, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullCol)
