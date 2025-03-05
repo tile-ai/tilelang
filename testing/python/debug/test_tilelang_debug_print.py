@@ -5,8 +5,7 @@ import tilelang.testing
 import tilelang.language as T
 
 
-def debug_print_buffer(M=16, N=16):
-    dtype = "float16"
+def debug_print_buffer(M=16, N=16, dtype="float16"):
 
     @T.prim_func
     def program(Q: T.Buffer((M, N), dtype)):
@@ -20,7 +19,9 @@ def debug_print_buffer(M=16, N=16):
 
 
 def test_debug_print_buffer():
-    debug_print_buffer(16, 16)
+    debug_print_buffer(16, 16, dtype="float")
+    debug_print_buffer(16, 16, dtype="float16")
+    debug_print_buffer(16, 16, dtype="uint8")
 
 
 def debug_print_buffer_conditional(M=16, N=16):
