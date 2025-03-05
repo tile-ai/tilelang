@@ -161,8 +161,13 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         continue;
       int reducing_threads = (*extent) * (*scale);
       std::stringstream ss;
-      ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-         << reducing_threads << ", " << (*scale) << ">::run";
+      if (Downcast<String>(T.target->attrs["arch"]) == "sm_90") {
+        ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+           << reducing_threads << ", " << (*scale) << ">::run_hopper";
+      } else {
+        ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+           << reducing_threads << ", " << (*scale) << ">::run";
+      }
       Array<PrimExpr> thread_reduce_args = {
           StringImm(ss.str()), BufferLoad(dst_buffer, dst_indices)};
       if (reducing_threads >= 32) {
