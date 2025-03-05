@@ -10,6 +10,8 @@ import tilelang.language as T
 
 import tilelang.testing
 
+tilelang.testing.set_random_seed(42)
+
 
 def flashattn_fwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
