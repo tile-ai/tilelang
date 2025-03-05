@@ -149,13 +149,6 @@ def matmul(M, N, K, with_roller):
     #  - A reference program for correctness verification
     #  - The "tvm" profiler backend
     #  - HIP as the compilation target (modify as needed for your hardware)
-    if with_roller:
-        # check out bitblas is installed
-        try:
-            import bitblas  # noqa: F401
-        except ImportError as e:
-            raise ImportError(
-                "BitBlas is not installed. Please install it via 'pip install bitblas'.") from e
 
     @autotune(
         configs=get_configs(M, N, K, with_roller),
