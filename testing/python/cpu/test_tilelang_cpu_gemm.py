@@ -67,8 +67,6 @@ def test_matmul_compile():
 
     def matmul_jit_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
         # a simple kernel just for jit test
-        num_stages = 0
-
         @T.prim_func
         def matmul(
                 A: T.Buffer((M, K), dtype),
