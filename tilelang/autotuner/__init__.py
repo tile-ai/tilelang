@@ -60,7 +60,6 @@ class Autotuner:
     
     def jit_compile(self, args: Any, **kwds: Any) -> JITContext:
         jit_context = self.fn(*args, **kwds)
-        print("Compiled", args)
         return jit_context
 
     def run(self, *args: Any, **kwds: Any) -> Any:
@@ -129,7 +128,7 @@ class Autotuner:
         # 90% utilization
         num_processes = max(1, int(os.cpu_count() * 0.9))
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_processes)
-        results = pool.map(worker, config_args)
+        results = tqdm(pool.map(worker, config_args, ), desc="Compiling configurations")
         for result in results:
             jit_contexts.append(result)
 
