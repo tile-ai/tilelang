@@ -20,6 +20,7 @@ import itertools
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+
 def make_swizzle_layout(shared_buf):
     dtype = shared_buf.dtype
     shape = shared_buf.shape
@@ -165,6 +166,7 @@ def ref_program(A, B):
     """Reference matrix multiplication program."""
     return torch.matmul(A, B.T)
 
+
 def get_configs(M, N, K, with_roller=False):
     """
     Generate a list of configuration dictionaries that will be used for tuning.
@@ -228,24 +230,31 @@ def get_configs(M, N, K, with_roller=False):
         chunk = [32, 64, 128, 256]
         stage = [0, 2]
         enable_rasteration = [True, False]
-        _configs = list(itertools.product(block_rows_warps, block_col_warps, warp_row_tiles, warp_col_tiles, chunk, stage, enable_rasteration))
-        configs = [
-            {
-                "block_row_warps": c[0],
-                "block_col_warps": c[1],
-                "warp_row_tiles": c[2],
-                "warp_col_tiles": c[3],
-                "chunk": c[4],
-                "stage": c[5],
-                "enable_rasteration": c[6],
-            } for c in _configs
-        ]
-        
+        _configs = list(
+            itertools.product(block_rows_warps, block_col_warps, warp_row_tiles, warp_col_tiles,
+                              chunk, stage, enable_rasteration))
+        configs = [{
+            "block_row_warps": c[0],
+            "block_col_warps": c[1],
+            "warp_row_tiles": c[2],
+            "warp_col_tiles": c[3],
+            "chunk": c[4],
+            "stage": c[5],
+            "enable_rasteration": c[6],
+        } for c in _configs]
+
     return configs
 
 
-def matmul(M, N, K, in_dtype="float16", out_dtype="float16", accum_dtype="float16", with_roller=False):
+def matmul(M,
+           N,
+           K,
+           in_dtype="float16",
+           out_dtype="float16",
+           accum_dtype="float16",
+           with_roller=False):
     """Create an autotuned tensor core matrix multiplication kernel."""
+
     @autotune(
         configs=get_configs(M, N, K, with_roller),
         keys=[
@@ -278,7 +287,9 @@ def matmul(M, N, K, in_dtype="float16", out_dtype="float16", accum_dtype="float1
         enable_rasteration=None,
     ):
         return tl_matmul(
-            M, N, K,
+            M,
+            N,
+            K,
             in_dtype=in_dtype,
             out_dtype=out_dtype,
             accum_dtype=accum_dtype,
@@ -290,16 +301,22 @@ def matmul(M, N, K, in_dtype="float16", out_dtype="float16", accum_dtype="float1
             stage=stage,
             enable_rasteration=enable_rasteration,
         )
+
     return kernel()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autotuned TensorCore MatMul Benchmark")
     parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
     parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
     parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
-    parser.add_argument("--with_roller", type=bool, default=False, help="Whether to use roller to deduce search spaces")
-    parser.add_argument("--dtype", type=str, default="float16", 
-                       choices=["float16", "int8"], help="Input data type")
+    parser.add_argument(
+        "--with_roller",
+        type=bool,
+        default=False,
+        help="Whether to use roller to deduce search spaces")
+    parser.add_argument(
+        "--dtype", type=str, default="float16", choices=["float16", "int8"], help="Input data type")
     args = parser.parse_args()
 
     M, N, K = args.m, args.n, args.k
@@ -312,8 +329,8 @@ if __name__ == "__main__":
     total_flops = 2 * M * N * K
 
     # Run autotuning
-    best_latency, best_config, ref_latency = matmul(
-        M, N, K, in_dtype, out_dtype, accum_dtype, with_roller)
+    best_latency, best_config, ref_latency = matmul(M, N, K, in_dtype, out_dtype, accum_dtype,
+                                                    with_roller)
 
     # Print benchmark results
     print(f"Best latency (s): {best_latency}")

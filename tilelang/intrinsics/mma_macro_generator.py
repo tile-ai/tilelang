@@ -338,12 +338,13 @@ class TensorCoreIntrinEmitter(object):
                         row, col = T.meta_var(mma_store_index_map(tx, local_id))
                         if C_buf_dims == 2:
                             C_buf[(warp_m * warp_rows + i) * M_DIM + row,
-                                  (warp_n * warp_cols + j) * N_DIM + col] = C_local_buf[i * (warp_cols * local_size_out) +
-                                                 j * local_size_out + local_id]
+                                  (warp_n * warp_cols + j) * N_DIM +
+                                  col] = C_local_buf[i * (warp_cols * local_size_out) +
+                                                     j * local_size_out + local_id]
                         else:
                             C_buf[warp_m * warp_rows + i, warp_n * warp_cols + j, row,
                                   col] = C_local_buf[i * (warp_cols * local_size_out) +
-                                                 j * local_size_out + local_id]
+                                                     j * local_size_out + local_id]
 
         @T.macro
         def _warp_stmatrix_global(C_local_buf, C_buf, thread_binding):
