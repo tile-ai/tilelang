@@ -2,13 +2,8 @@
 # Licensed under the MIT License.
 """The language interface for tl programs."""
 
+from tilelang.primitives.gemm.base import GemmWarpPolicy
 from tvm import tir
-
-
-class GemmWarpPolicy:
-    Square = 0
-    FullRow = 1
-    FullCol = 2
 
 
 def gemm(
