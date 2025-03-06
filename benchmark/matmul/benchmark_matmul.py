@@ -61,7 +61,7 @@ def get_configs(M, N, K, with_roller=False):
             K=K,
             in_dtype="float16",
             out_dtype="float16",
-            accum_dtype="float16",
+            accum_dtype="float",
         ).with_arch(arch)
 
         func = carve_template.equivalent_function()
@@ -217,7 +217,7 @@ def matmul(M, N, K, with_roller):
         # Use half-precision for input data to reduce memory bandwidth,
         # accumulate in float for better numerical accuracy
         dtype = "float16"
-        accum_dtype = "float16"
+        accum_dtype = "float"
 
         @T.prim_func
         def main(
@@ -246,6 +246,7 @@ def matmul(M, N, K, with_roller):
                 B_shared = T.alloc_shared((block_N, block_K), dtype)
                 # Allocate a local fragment for intermediate accumulation
                 C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+                # Allocate a shared memory for C sub-block of shape (block_M, block_N)
                 C_shared = T.alloc_shared((block_M, block_N), dtype)
 
                 # Enable (or disable) swizzling optimization
