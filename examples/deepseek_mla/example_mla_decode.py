@@ -182,6 +182,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
             T.clear(lse_logsum_local)
             T.clear(o_accum_local)
+            lse_max_local[0] = -T.infinity(accum_dtype)
             for k in T.serial(num_split):
                 lse_max_local[0] = T.max(lse_max_local[0], glse[bz, by, k])
             for k in T.Pipelined(num_split, num_stages=1):
