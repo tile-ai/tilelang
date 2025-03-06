@@ -72,7 +72,7 @@ def get_configs(M, N, K, with_roller=False):
 
         if roller_hints is None:
             raise ValueError("No Roller Hints Found for TensorCore Scheduling")
-        
+
         configs = []
         for hint in roller_hints:
             config = {}
