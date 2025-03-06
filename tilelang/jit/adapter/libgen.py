@@ -41,8 +41,8 @@ class LibraryGenerator(object):
 
             command = [
                 "nvcc",
-                "-std=c++17", 
-                "-w", # Disable all warning messages
+                "-std=c++17",
+                "-w",  # Disable all warning messages
                 "-Xcudafe",
                 "--diag_suppress=177",
                 "--compiler-options",
@@ -70,15 +70,11 @@ class LibraryGenerator(object):
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)
             libpath = src.name.replace(".cpp", ".so")
 
-            command = [
-                "g++",  
-                "-std=c++17",
-                "-fPIC",  
-                "-shared",  
-                src.name
+            command = ["g++", "-std=c++17", "-fPIC", "-shared", src.name]
+            with_tl = False
+            command += [
+                "-I" + TILELANG_TEMPLATE_PATH,
             ]
-            with_tl=False
-            command +=["-I" + TILELANG_TEMPLATE_PATH,]
         else:
             raise ValueError(f"Unsupported target: {target}")
 

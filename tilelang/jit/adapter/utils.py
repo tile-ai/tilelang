@@ -37,6 +37,7 @@ def match_declare_kernel(source: str, annotation: str = "__global__") -> int:
                 return source.index(matched[0] + "(")
     raise ValueError("No global kernel found in the source code")
 
+
 def match_declare_kernel_cpu(source: str, annotation: str = "int32_t") -> int:
     pattern = r"int32_t\s+\w+"
     for line in source.split("\n"):
@@ -54,8 +55,10 @@ def is_cuda_target(target: Target) -> bool:
 def is_hip_target(target: Target) -> bool:
     return target.kind.name == "hip"
 
+
 def is_cpu_target(target: Target) -> bool:
     return target.kind.name in ["c"]
+
 
 def get_annotated_mod(
     func_or_mod: Union[tir.PrimFunc, tvm.IRModule],

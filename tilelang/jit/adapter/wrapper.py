@@ -373,24 +373,14 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
     def get_stream_type(self, function_args):
         function_args.append({"name": "stream=hipStreamDefault", "type": "hipStream_t"},)
 
+
 class TLCPUSourceWrapper(object):
     _TYPE_MAP = {
         "float32": "float",
         "float16": "half",
-        # "bfloat16": "bfloat16_t",
-        # "e4m3_float8": "__nv_fp8_e4m3",
-        # "e5m2_float8": "__nv_fp8_e5m2",
-        # "float64": "double",
-        # "int64": "int64_t",
         "int32": "int32_t",
-        # "uint32": "unsigned int",
-        # "bool": "int8_t",
-        # "int8": "int8_t",
-        # "uint8": "uint8_t",
-        # "int16": "int16_t",
-        # "uchar": "uint8_t",
     }
-    INIT_FUNC='''
+    INIT_FUNC = '''
 #ifdef __cplusplus
 extern "C"
 #endif
@@ -398,7 +388,7 @@ int32_t init() {
     return 0;
 }
 '''
-    CALL_PREFIX="""
+    CALL_PREFIX = """
 #ifdef __cplusplus
 extern "C"
 #endif
@@ -407,7 +397,6 @@ int32_t call({}) {{
 }}
 """
     backend = "tl"
-
 
     def __init__(self, scheduled_ir_module: IRModule, source: str, target: Target):
         self.mod = scheduled_ir_module
@@ -431,7 +420,7 @@ int32_t call({}) {{
                 buffer = self.prim_func.buffer_map[param]
                 function_args.append({
                     "name": buffer.name,
-                    "type": self._TYPE_MAP[buffer.dtype]+"*",
+                    "type": self._TYPE_MAP[buffer.dtype] + "*",
                 })
             elif isinstance(param, tvm.tir.Var):
                 function_args.append({"name": param.name, "type": self._TYPE_MAP[param.dtype]})
@@ -477,7 +466,7 @@ int32_t call({}) {{
 
         _call_str = """"""
 
-        for function_name, function_info in function_informations.items():
+        for function_name, _ in function_informations.items():
 
             # Find the location of the global kernel function in the code
             index = match_declare_kernel_cpu(code, function_name + "(")
@@ -495,16 +484,13 @@ int32_t call({}) {{
         host_func = self.CALL_PREFIX.format(def_args, _call_str)
         return host_func
 
-
     def parse_source_information(self):
         device_mod, host_mod = get_annotated_mod(self.mod, self.target)
         assert (len(device_mod.functions) >= 1), "Device module should have at least one function."
         assert (len(host_mod.functions) == 1), "Only support one function in host module."
 
         function_names = []
-        function_params_map = {}  # 用于存储每个函数的参数信息
-
-        for g_var, func in device_mod.functions.items():
+        for g_var, _ in device_mod.functions.items():
             function_name = g_var.name_hint
             function_names.append(function_name)
 
@@ -522,7 +508,7 @@ int32_t call({}) {{
         return dynamic_symbolic_set
 
     def get_cpu_init_func(self):
-        init_funcs=self.INIT_FUNC
+        init_funcs = self.INIT_FUNC
         return init_funcs
 
     def update_lib_code(self, code: str):
@@ -536,19 +522,13 @@ int32_t call({}) {{
         # Organize function information for code generation
         function_informations = {}
         for function_name in function_names:
-            # Do not update function with dispatch host function
-            # if (function_name not in self.block_info) or (function_name not in self.grid_info):
-            #     continue
-
             function_informations[function_name] = {
                 "function_name": function_name,
-                # "function_params": self.function_params_map[function_name],
             }
-
 
         # Create the call function wrapper for the CPU kernel
         call_func = self.create_call_func(code, function_informations)
-        # Combine the source, initialization function, and host function to form the complete library code
+        # Combine the source, initialization function, and call function to form the complete library code
         lib_code = self.source + init_func + call_func
         return lib_code
 
@@ -584,7 +564,7 @@ class TLWrapper(BaseWrapper):
             wrapper_class = TLCUDASourceWrapper
         elif is_hip_target(self.target):
             wrapper_class = TLHIPSourceWrapper
-        elif is_cpu_target( self.target):
+        elif is_cpu_target(self.target):
             wrapper_class = TLCPUSourceWrapper
         else:
             raise ValueError(f"Unsupported platform: {self.arch.platform}")

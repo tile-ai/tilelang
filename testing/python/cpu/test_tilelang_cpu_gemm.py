@@ -7,6 +7,7 @@ from tilelang import tvm as tvm
 import tilelang.language as T
 import torch
 
+
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
     num_stages = 0
 
@@ -23,7 +24,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
             for p in T.serial(block_M):
                 for w in T.serial(block_N):
-                            C_local[p, w] = 0
+                    C_local[p, w] = 0
             for ko in T.serial(K // block_K):
                 # T.copy(A[by * block_M, ko * block_K], A_local)
                 for i in T.serial(block_M):
@@ -60,17 +61,18 @@ def assert_matmul_codegen(M=1024, N=1024, K=1024, block_M=128, block_N=128, bloc
 def test_matmul_codegen():
     assert_matmul_codegen(M=1024, N=1024, K=1024, block_M=128, block_N=128, block_K=32)
 
-def test_matmul_compile():
-    M,N,K=1024,512,512
-    block_M,block_N,block_K=M//4,N//4,K//4
-    cpu_func = matmul(M, N, K, block_M, block_N, block_K)
-    complied_fun =  tilelang.compile(cpu_func,-1,execution_backend="ctypes",target="c")
 
-    in_dtype="float16"
+def test_matmul_compile():
+    M, N, K = 1024, 512, 512
+    block_M, block_N, block_K = M // 4, N // 4, K // 4
+    cpu_func = matmul(M, N, K, block_M, block_N, block_K)
+    complied_fun = tilelang.compile(cpu_func, -1, execution_backend="ctypes", target="c")
+
+    in_dtype = "float16"
     A = torch.randn(M, K, dtype=torch.__getattribute__(in_dtype))
     B = torch.randn(K, N, dtype=torch.__getattribute__(in_dtype))
 
-    C = complied_fun(A,B)
+    C = complied_fun(A, B)
     C_torch = torch.matmul(A, B)
 
     tilelang.testing.torch_assert_close(C, C_torch, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
