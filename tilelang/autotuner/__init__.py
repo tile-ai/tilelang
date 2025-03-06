@@ -11,6 +11,8 @@ from tqdm import tqdm
 import logging
 from dataclasses import dataclass
 import concurrent.futures
+import os
+from functools import partial
 
 logging.basicConfig(
     filename='out.log',
@@ -55,6 +57,11 @@ class Autotuner:
         self.ref_latency_cache = None
         self.jit_input_tensors = None
         self.ref_input_tensors = None
+    
+    def jit_compile(self, args: Any, **kwds: Any) -> JITContext:
+        jit_context = self.fn(*args, **kwds)
+        print("Compiled", args)
+        return jit_context
 
     def run(self, *args: Any, **kwds: Any) -> Any:
         sig = inspect.signature(self.fn)
@@ -64,9 +71,7 @@ class Autotuner:
         best_latency = 1e8
         best_config = None
 
-        def target_fn(*new_args, **kwds):
-            jit_context = self.fn(*new_args, **kwds)
-
+        def target_fn(jit_context):
             # Unpack the context
             mod = jit_context.mod
             profiler = jit_context.profiler
@@ -101,9 +106,12 @@ class Autotuner:
                     input_tensors=self.ref_input_tensors)
 
             return latency, self.ref_latency_cache
+        
+        # Parallel compilation
+        config_args = []
+        jit_contexts = []
 
-        progress_bar = tqdm(self.configs, desc="Running configurations")
-        for config in progress_bar:
+        for config in self.configs:
             new_args = []
             for name, value in bound_args.arguments.items():
                 if name not in self.keys:
@@ -111,11 +119,29 @@ class Autotuner:
                 else:
                     new_args.append(config[name])
             new_args = tuple(new_args)
-            ref_latency = None
+            config_args.append(new_args)
+        
+        worker = partial(
+            self.jit_compile,
+            **kwds,
+        )
+        
+        # 90% utilization
+        num_processes = max(1, int(os.cpu_count() * 0.9))
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_processes)
+        results = pool.map(worker, config_args)
+        for result in results:
+            jit_contexts.append(result)
+
+        ref_latency = None
+        progress_bar = tqdm(range(len(config_args)), desc="Bench configurations")
+        for i in progress_bar:
+            jit_context = jit_contexts[i]
+            config = config_args[i]
             try:
                 # Use ThreadPoolExecutor to enforce timeout on target_fn execution
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(target_fn, *new_args, **kwds)
+                    future = executor.submit(target_fn, jit_context)
                     latency, ref_latency = future.result(timeout=self.timeout)
             except concurrent.futures.TimeoutError:
                 logging.error(f"Timeout exceeded for config {config}. Skipping this configuration.")

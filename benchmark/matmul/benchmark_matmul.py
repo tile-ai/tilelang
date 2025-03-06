@@ -170,7 +170,7 @@ def matmul(M, N, K, with_roller):
             "enable_rasteration",
         ],
         warmup=3,
-        rep=5,
+        rep=20,
     )
     @jit(
         out_idx=[2],
