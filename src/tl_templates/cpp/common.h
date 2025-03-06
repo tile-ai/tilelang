@@ -2,9 +2,9 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include "half.hpp"
 #include <math.h>
 #include <stdbool.h>
-#include "half.hpp"
 
 using half_float::half;
 // Not Implemented
