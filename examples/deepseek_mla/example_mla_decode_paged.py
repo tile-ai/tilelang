@@ -73,7 +73,7 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
                     policy=T.GemmWarpPolicy.FullCol)
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
-                with T.If(kr == 0), T.Then():
+                if kr == 0:
                     for i, j in T.Parallel(block_H, block_N):
                         acc_s[i, j] = T.if_then_else(k * block_N + j >= CACHE_SEQLENS[bx], -T.infinity(accum_dtype), acc_s[i, j])
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
