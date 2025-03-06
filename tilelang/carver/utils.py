@@ -68,9 +68,7 @@ def get_roller_hints_from_func(func_or_module: Union[tir.PrimFunc, IRModule],
             tags = None
         if tags and tensorized_func:
             policy = TensorCorePolicy.from_prim_func(func=tensorized_func, arch=arch, tags=tags)
-            roller_hints = policy.emit_config(topk)
-        else:
-            roller_hints = None
+        roller_hints = policy.emit_config(topk)
     return roller_hints
 
 
