@@ -57,7 +57,7 @@ class Autotuner:
         self.ref_latency_cache = None
         self.jit_input_tensors = None
         self.ref_input_tensors = None
-    
+
     def jit_compile(self, args: Any, **kwds: Any) -> JITContext:
         jit_context = self.fn(*args, **kwds)
         return jit_context
@@ -105,7 +105,7 @@ class Autotuner:
                     input_tensors=self.ref_input_tensors)
 
             return latency, self.ref_latency_cache
-        
+
         # Parallel compilation
         config_args = []
         jit_contexts = []
@@ -119,16 +119,20 @@ class Autotuner:
                     new_args.append(config[name])
             new_args = tuple(new_args)
             config_args.append(new_args)
-        
+
         worker = partial(
             self.jit_compile,
             **kwds,
         )
-        
+
         # 90% utilization
-        num_processes = max(1, int(os.cpu_count() * 0.9))
-        pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_processes)
-        results = tqdm(pool.map(worker, config_args, ), desc="Compiling configurations")
+        num_workers = max(1, int(os.cpu_count() * 0.9))
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
+        results = tqdm(
+            pool.map(
+                worker,
+                config_args,
+            ), desc="Compiling configurations")
         for result in results:
             jit_contexts.append(result)
 
