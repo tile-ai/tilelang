@@ -8,6 +8,7 @@ from tvm import DataType
 import tilelang.language as T
 from tilelang import JITKernel
 from tilelang.transform.simplify import apply_simplify
+from tilelang.utils.tensor import map_torch_type
 from typing import Optional
 
 tilelang.testing.set_random_seed(0)
@@ -130,16 +131,6 @@ def evaluate_gemv_simt(
     program = gemv_simt(M, N, K, in_dtype, out_dtype, accum_dtype, trans_A, trans_B, with_bias)
 
     kernel = JITKernel(program, target="cuda")
-
-    def map_torch_type(intype):
-        typemap = {
-            'e4m3_float8': torch.float8_e4m3fn,
-            'e5m2_float8': torch.float8_e5m2,
-        }
-        if intype in typemap:
-            return typemap[intype]
-        else:
-            return getattr(torch, intype)
 
     in_dtype = map_torch_type(in_dtype)
     out_dtype = map_torch_type(out_dtype)

@@ -13,8 +13,9 @@ from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
+from tilelang.utils.tensor import map_torch_type
 from tilelang.contrib.cc import get_cplus_compiler
-
+import torch
 import sys
 import sysconfig
 import hashlib
@@ -89,7 +90,7 @@ with open(cython_wrapper_path, "r") as f:
                 logger.debug("Cython jit adapter is up to date, no need to compile...")
                 need_compile = False
             else:
-                logger.info("Cython jit adapter is out of date, need to compile...")
+                logger.info("Cython jit adapter is out of date, need to recompile...")
     else:
         logger.info("No cached version found for cython jit adapter, need to compile...")
 
@@ -135,6 +136,13 @@ class CythonKernelAdapter(BaseKernelAdapter):
     wrapped_source: Optional[str] = None  # Generated C++ wrapper code
     # Maps symbolic variables to their corresponding buffer and shape indices
     dynamic_symbolic_map: Optional[Dict[tir.Var, Tuple[int, int]]] = None
+    # Maps buffer variables to their corresponding dtypes
+    buffer_dtype_map: Optional[Dict[tir.Var, Tuple[int, torch.dtype]]] = None
+    # Maps buffer variables to their corresponding static shapes
+    # {
+    #     "A": [(0, 16), (1, 16)] -> represents A.shape = (16, 16)
+    # }
+    static_shape_map: Optional[Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]]] = None
 
     def __init__(self,
                  rt_mod,
@@ -163,6 +171,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
             self.ir_module = func_or_mod
 
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
+        self.buffer_dtype_map = self._process_buffer_dtype()
+        self.static_shape_map = self._process_static_shape()
 
         self.target = Target.canon_target(determine_target(target))
         self.verbose = verbose
@@ -182,12 +192,14 @@ class CythonKernelAdapter(BaseKernelAdapter):
             raise Exception(
                 f"Failed to initialize the compiled library for {self.target}: {e}") from e
 
-        self.cython_wrapper = CythonKernelWrapper(self.dynamic_symbolic_map, self.result_idx,
-                                                  self.params, self.lib)
+        self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib)
+        self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
+        self.cython_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
+        self.cython_wrapper.set_static_shape_map(self.static_shape_map)
 
         self._post_init()
 
-    def _process_dynamic_symbolic(self):
+    def _process_dynamic_symbolic(self) -> Dict[tir.Var, Tuple[int, int]]:
         """Extract information about dynamic shapes from the TIR function.
         
         Maps symbolic variables to their corresponding (buffer_index, shape_dimension)
@@ -204,6 +216,43 @@ class CythonKernelAdapter(BaseKernelAdapter):
                     if isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map):
                         dynamic_symbolic_map[shape] = (i, j)
         return dynamic_symbolic_map
+
+    def _process_buffer_dtype(self) -> Dict[tir.Var, Tuple[int, torch.dtype]]:
+        """Extract information about buffer dtypes from the TIR function.
+        
+        Maps buffer variables to their corresponding dtypes.
+        """
+        func = self.prim_func
+        params = func.params
+        buffer_map = func.buffer_map
+        buffer_dtype_map = {}
+        for i, param in enumerate(params):
+            if param in buffer_map:
+                buffer = buffer_map[param]
+                name, dtype = buffer.name, buffer.dtype
+                buffer_dtype_map[name] = (i, map_torch_type(dtype))
+        return buffer_dtype_map
+
+    def _process_static_shape(self) -> Dict[tir.Var, List[Tuple[int, int]]]:
+        """Extract information about static shapes from the TIR function.
+        
+        Maps buffer variables to their corresponding static shapes.
+        """
+        func = self.prim_func
+        params = func.params
+        buffer_map = func.buffer_map
+        static_shape_map = {}
+        for i, param in enumerate(params):
+            if param in buffer_map:
+                buffer = buffer_map[param]
+                name = buffer.name
+                shape = buffer.shape
+                static_shape = []
+                for j, s in enumerate(shape):
+                    if isinstance(s, tir.IntImm):
+                        static_shape.append((j, s.value))
+                static_shape_map[name] = (i, static_shape)
+        return static_shape_map
 
     def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):
         """Low-level function to call the compiled CUDA kernel.

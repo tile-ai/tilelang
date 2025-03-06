@@ -1,3 +1,6 @@
+# Copyright (c) Tile-AI Corporation.
+# Licensed under the MIT License.
+
 import argparse
 import itertools
 import logging
@@ -46,43 +49,42 @@ def get_configs(M, N, K, with_roller=False):
         thread numbers, and other parameters to explore during autotuning.
     """
     if with_roller:
-        from bitblas.base.utils import get_roller_hints_from_func
-        from bitblas.ops.general_matmul.tirscript import matmul_select_implementation
-        from bitblas.base.arch import CUDA
-        from bitblas.base.roller.rasterization import NoRasterization
+        from tilelang.carver.template import MatmulTemplate
+        from tilelang.carver.arch import CUDA
+        from tilelang.carver.roller.rasterization import NoRasterization
         arch = CUDA("cuda")
-        topk = 20
+        topk = 10
 
-        # Simple TIR Compute Expression
-        ir_module = matmul_select_implementation(
+        carve_template = MatmulTemplate(
             M=M,
             N=N,
             K=K,
             in_dtype="float16",
             out_dtype="float16",
-            accum_dtype="float16",
-        )
+            accum_dtype="float",
+        ).with_arch(arch)
 
-        roller_hints = get_roller_hints_from_func(
-            ir_module,
-            arch,
-            topk,
-            tensorcore_only=True,
-            allow_gemv=True,
-        )
+        func = carve_template.equivalent_function()
+        assert func is not None, "Function is None"
+
+        roller_hints = carve_template.recommend_hints(topk=topk)
 
         if roller_hints is None:
             raise ValueError("No Roller Hints Found for TensorCore Scheduling")
+
         configs = []
         for hint in roller_hints:
             config = {}
             block_m, block_n = hint.block
             warp_m, warp_n = hint.warp
+            # block_rows, block_cols represents warp partitioning
+            block_rows, block_cols = block_m // warp_m, block_n // warp_n
             config["block_M"] = block_m
             config["block_N"] = block_n
             config["block_K"] = hint.rstep[0]
-            config["num_stages"] = 0
-            config["thread_num"] = (block_m * block_n) // (warp_m * warp_n) * 32
+            config["num_stages"] = hint.pipeline_stage
+            config["thread_num"] = block_rows * block_cols * 32
+            config["policy"] = T.GemmWarpPolicy.from_warp_partition(block_rows, block_cols)
             config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
             configs.append(config)
         for config in configs:
@@ -94,8 +96,8 @@ def get_configs(M, N, K, with_roller=False):
         block_K = [32, 64]
         num_stages = [0, 1, 2, 3]
         thread_num = [128, 256]
+        policy = [T.GemmWarpPolicy.Square]
         enable_rasterization = [True, False]
-
         _configs = list(
             itertools.product(
                 block_M,
@@ -103,6 +105,7 @@ def get_configs(M, N, K, with_roller=False):
                 block_K,
                 num_stages,
                 thread_num,
+                policy,
                 enable_rasterization,
             ))
 
@@ -113,7 +116,8 @@ def get_configs(M, N, K, with_roller=False):
                 "block_K": c[2],
                 "num_stages": c[3],
                 "thread_num": c[4],
-                "enable_rasteration": c[5],  # keep param name for backward-compat
+                "policy": c[5],
+                "enable_rasteration": c[6],  # keep param name for backward-compat
             } for c in _configs
         ]
     return configs
@@ -153,13 +157,6 @@ def matmul(M, N, K, with_roller):
     #  - A reference program for correctness verification
     #  - The "tvm" profiler backend
     #  - HIP as the compilation target (modify as needed for your hardware)
-    if with_roller:
-        # check out bitblas is installed
-        try:
-            import bitblas  # noqa: F401
-        except ImportError as e:
-            raise ImportError(
-                "BitBlas is not installed. Please install it via 'pip install bitblas'.") from e
 
     @autotune(
         configs=get_configs(M, N, K, with_roller),
@@ -169,6 +166,7 @@ def matmul(M, N, K, with_roller):
             "block_K",
             "num_stages",
             "thread_num",
+            "policy",
             "enable_rasteration",
         ],
         warmup=3,
@@ -188,6 +186,7 @@ def matmul(M, N, K, with_roller):
         block_K=None,
         num_stages=None,
         thread_num=None,
+        policy=None,
         enable_rasteration=None,
     ):
         """
@@ -247,6 +246,8 @@ def matmul(M, N, K, with_roller):
                 B_shared = T.alloc_shared((block_N, block_K), dtype)
                 # Allocate a local fragment for intermediate accumulation
                 C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+                # Allocate a shared memory for C sub-block of shape (block_M, block_N)
+                C_shared = T.alloc_shared((block_M, block_N), dtype)
 
                 # Enable (or disable) swizzling optimization
                 T.use_swizzle(panel_size=10, enable=enable_rasteration)
@@ -257,15 +258,9 @@ def matmul(M, N, K, with_roller):
                 # Loop over sub-blocks in K dimension, pipelined by num_stages
                 for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                     # Load a sub-block of A from global memory into A_shared
-                    T.copy(
-                        A[by * block_M, k * block_K],
-                        A_shared,
-                    )
+                    T.copy(A[by * block_M, k * block_K], A_shared)
                     # Load a sub-block of B from global memory into B_shared
-                    T.copy(
-                        B[bx * block_N, k * block_K],
-                        B_shared,
-                    )
+                    T.copy(B[bx * block_N, k * block_K], B_shared)
                     # Perform a partial matrix multiplication:
                     #   C_local += A_shared @ B_shared^T
                     T.gemm(
@@ -273,9 +268,11 @@ def matmul(M, N, K, with_roller):
                         B_shared,
                         C_local,
                         transpose_B=True,
+                        policy=policy,
                     )
                 # Write back the results from C_local to the global memory C
-                T.copy(C_local, C[by * block_M, bx * block_N])
+                T.copy(C_local, C_shared)
+                T.copy(C_shared, C[by * block_M, bx * block_N])
 
         return main
 
@@ -285,9 +282,9 @@ def matmul(M, N, K, with_roller):
 if __name__ == "__main__":
     # Parse command-line arguments for matrix dimensions
     parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
-    parser.add_argument("--m", type=int, default=8192, help="Matrix dimension M")
-    parser.add_argument("--n", type=int, default=8192, help="Matrix dimension N")
-    parser.add_argument("--k", type=int, default=8192, help="Matrix dimension K")
+    parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
+    parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
+    parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
     parser.add_argument(
         "--with_roller",
         action="store_true",
@@ -296,7 +293,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     M, N, K = args.m, args.n, args.k
-    with_roller = args.with_roller
+    # with_roller = args.with_roller
+    with_roller = True
 
     # Compute total floating-point operations to measure throughput
     total_flops = 2 * M * N * K

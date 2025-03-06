@@ -126,6 +126,33 @@ class GemmWarpPolicy(IntEnum):
 
         return m_warp, n_warp
 
+    @classmethod
+    def from_warp_partition(cls, m_warp: int, n_warp: int) -> 'GemmWarpPolicy':
+        """
+        Determine the warp policy based on the given warp partitioning.
+
+        Args:
+            m_warp (int): Number of warps in the row dimension
+            n_warp (int): Number of warps in the column dimension
+
+        Returns:
+            GemmWarpPolicy: The corresponding warp policy
+
+        Examples:
+            >>> GemmWarpPolicy.from_block_row_cols(4, 1)  # All warps in rows
+            GemmWarpPolicy.FullRow
+            >>> GemmWarpPolicy.from_block_row_cols(1, 4)  # All warps in columns
+            GemmWarpPolicy.FullCol
+            >>> GemmWarpPolicy.from_block_row_cols(2, 2)  # Balanced distribution
+            GemmWarpPolicy.Square
+        """
+        if n_warp == 1 and m_warp > 1:
+            return cls.FullRow
+        elif m_warp == 1 and n_warp > 1:
+            return cls.FullCol
+        else:
+            return cls.Square
+
 
 @dataclass
 class GemmBaseParams:
