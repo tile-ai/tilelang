@@ -22,28 +22,29 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             B_local = T.alloc_local((block_K, block_N), dtype)
             C_local = T.alloc_local((block_M, block_N), accum_dtype)
 
-            for p in T.serial(block_M):
-                for w in T.serial(block_N):
-                    C_local[p, w] = 0
-            for ko in T.serial(K // block_K):
-                # T.copy(A[by * block_M, ko * block_K], A_local)
-                for i in T.serial(block_M):
-                    for k in T.serial(block_K):
-                        A_local[i, k] = A[by * block_M + i, ko * block_K + k]
+            T.clear(C_local)
 
-                for k in T.serial(block_K):
-                    for j in T.serial(block_N):
-                        B_local[k, j] = B[ko * block_K + k, bx * block_N + j]
+            # Apply layout optimizations or define your own layout
+            # (Optional).
+            # T.annotate_layout(
+            #     {
+            #         A_local: make_swizzle_layout(A_local),
+            #         B_local: make_swizzle_layout(B_local),
+            #     }
+            # )
 
-                for i in T.serial(block_M):
-                    for j in T.serial(block_N):
-                        for k in T.serial(block_K):
-                            C_local[i, j] += A_local[i, k] * B_local[k, j]
+            for ko in T.Pipelined(K // block_K, num_stages=num_stages):
 
-            # T.copy(C_local, C[by * block_M, bx * block_N])
-            for i in T.serial(block_M):
-                for j in T.serial(block_N):
-                    C[by * block_M + i, bx * block_N + j] = C_local[i, j]
+                T.copy(A[by * block_M, ko * block_K], A_local)
+
+                # Or Copy with Parallel
+                for k, j in T.Parallel(block_K, block_N):
+                    B_local[k, j] = B[ko * block_K + k, by * block_N + j]
+
+                for i, j, k in T.grid(block_M, block_N, block_K):
+                    C_local[i, j] += A_local[i, k] * B_local[k, j]
+
+            T.copy(C_local, C[by * block_M, bx * block_N])
 
     return matmul
 
@@ -63,9 +64,48 @@ def test_matmul_codegen():
 
 
 def test_matmul_compile():
+
+    def matmul_jit_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+        # a simple kernel just for jit test
+        num_stages = 0
+
+        @T.prim_func
+        def matmul(
+                A: T.Buffer((M, K), dtype),
+                B: T.Buffer((K, N), dtype),
+                C: T.Buffer((M, N), dtype),
+        ):
+            with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), is_cpu=True) as (bx, by):
+                A_local = T.alloc_local((block_M, block_K), dtype)
+                B_local = T.alloc_local((block_K, block_N), dtype)
+                C_local = T.alloc_local((block_M, block_N), accum_dtype)
+
+                for p in T.serial(block_M):
+                    for w in T.serial(block_N):
+                        C_local[p, w] = 0
+                for ko in T.serial(K // block_K):
+                    for i in T.serial(block_M):
+                        for k in T.serial(block_K):
+                            A_local[i, k] = A[by * block_M + i, ko * block_K + k]
+
+                    for k in T.serial(block_K):
+                        for j in T.serial(block_N):
+                            B_local[k, j] = B[ko * block_K + k, bx * block_N + j]
+
+                    for i in T.serial(block_M):
+                        for j in T.serial(block_N):
+                            for k in T.serial(block_K):
+                                C_local[i, j] += A_local[i, k] * B_local[k, j]
+
+                for i in T.serial(block_M):
+                    for j in T.serial(block_N):
+                        C[by * block_M + i, bx * block_N + j] = C_local[i, j]
+
+        return matmul
+
     M, N, K = 1024, 512, 512
     block_M, block_N, block_K = M // 4, N // 4, K // 4
-    cpu_func = matmul(M, N, K, block_M, block_N, block_K)
+    cpu_func = matmul_jit_test(M, N, K, block_M, block_N, block_K)
     complied_fun = tilelang.compile(cpu_func, -1, execution_backend="ctypes", target="c")
 
     in_dtype = "float16"

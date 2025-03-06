@@ -9,6 +9,7 @@ from tvm.target import Target
 from .utils import match_declare_kernel, match_declare_kernel_cpu, is_cuda_target, is_hip_target, is_cpu_target, get_annotated_mod
 import re
 import logging
+import textwrap
 
 PREDEF_ARRTIBUTE_SET_DYNAMIC_MEMORY = """
     cudaFuncSetAttribute({}, cudaFuncAttributeMaxDynamicSharedMemorySize, {});
@@ -380,22 +381,26 @@ class TLCPUSourceWrapper(object):
         "float16": "half",
         "int32": "int32_t",
     }
-    INIT_FUNC = '''
-#ifdef __cplusplus
-extern "C"
-#endif
-int32_t init() {
-    return 0;
-}
-'''
-    CALL_PREFIX = """
-#ifdef __cplusplus
-extern "C"
-#endif
-int32_t call({}) {{
-  return {};
-}}
-"""
+
+    INIT_FUNC = textwrap.dedent('''
+        #ifdef __cplusplus
+        extern "C"
+        #endif
+        int32_t init() {
+            return 0;
+        }
+    ''')
+
+    CALL_PREFIX = textwrap.dedent("""
+        #ifdef __cplusplus
+        extern "C"
+        #endif
+        int32_t call({}) {{
+          return {};
+        }}
+    """)
+
+    backend = "tl"
     backend = "tl"
 
     def __init__(self, scheduled_ir_module: IRModule, source: str, target: Target):
