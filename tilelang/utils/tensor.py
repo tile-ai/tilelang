@@ -15,9 +15,10 @@ class TensorSupplyType(Enum):
     Randn = 4
     Zero = 5
     One = 6
+    Auto = 7
 
 
-def map_torch_type(intype):
+def map_torch_type(intype: str) -> torch.dtype:
     typemap = {
         'e4m3_float8': torch.float8_e4m3fn,
         'e5m2_float8': torch.float8_e5m2,
@@ -51,7 +52,20 @@ def get_tensor_supply(supply_type: TensorSupplyType):
         dtype = map_torch_type(str(tensor.dtype))
         device = torch.cuda.current_device()
 
+        if hasattr(tensor, "shape") and not tensor.shape:
+            raise ValueError(
+                f"TensorType must have a shape, but got {type(tensor)}, "
+                "likely you are trying to generate a random tensor with a dynamic symbolic shape.")
+
         shape = list(map(int, tensor.shape))
+        if supply_type == TensorSupplyType.Auto:
+            if dtype == torch.float16 or dtype == torch.float32:
+                return torch.empty(*shape, device=device, dtype=dtype).normal_(-1.0, 1.0)
+            elif dtype == torch.uint8:
+                return torch.randint(0, 2, size=shape, device=device, dtype=dtype)
+            else:
+                raise NotImplementedError(dtype)
+
         if dtype == torch.int8 and supply_type in [
                 TensorSupplyType.Uniform,
                 TensorSupplyType.Normal,

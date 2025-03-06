@@ -91,9 +91,3 @@ def c2d_im2col(
         dilation,
         pad,
     )
-
-
-class GemmWarpPolicy:
-    Square = 0
-    FullRow = 1
-    FullCol = 2

@@ -1,11 +1,13 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
+# ruff: noqa: E712
 import math
 import torch
 
 import triton
 import triton.language as tl
 import torch.nn.functional as F
+
 
 def is_hip():
     return triton.runtime.driver.active.get_current_target().backend == "hip"
@@ -15,33 +17,40 @@ def get_sparse_attn_mask_from_topk(x, topk, use_dense_for_last_block=False):
     bsz, num_head, downsample_len, _ = x.shape
     # N_CTX = downsample_len * BLOCK
     sparse_index = torch.topk(x, topk, dim=-1).indices
-    dense_mask = torch.full([bsz, num_head, downsample_len, downsample_len], False, dtype=torch.bool, device=x.device)
+    dense_mask = torch.full([bsz, num_head, downsample_len, downsample_len],
+                            False,
+                            dtype=torch.bool,
+                            device=x.device)
     dense_mask.scatter_(-1, sparse_index, True)
     if use_dense_for_last_block:
-        dense_mask[:, :,-2:,:] = True 
+        dense_mask[:, :, -2:, :] = True
     dense_mask.tril_()
-    return  dense_mask
+    return dense_mask
 
 
 def get_sparse_attn_mask_from_threshold(x, threshold, use_dense_for_last_block=False):
-    dense_mask = x > threshold 
+    dense_mask = x > threshold
     if use_dense_for_last_block:
-        dense_mask[:, :,-2:,:] = True 
+        dense_mask[:, :, -2:, :] = True
     dense_mask.tril_()
-    return  dense_mask
-
-
+    return dense_mask
 
 
 @triton.jit
 def _fwd_kernel_inner(
-    acc, l_i, m_i,
+    acc,
+    l_i,
+    m_i,
     q,
     k_block_col_idx,
     block_mask_ptr,
-    k_ptrs, v_ptrs,
-    offs_m, offs_n,
-    stride_kt, stride_vt, stride_bmask_n,
+    k_ptrs,
+    v_ptrs,
+    offs_m,
+    offs_n,
+    stride_kt,
+    stride_vt,
+    stride_bmask_n,
     sm_scale,
     seqlen_k,
     past_len,
@@ -51,8 +60,8 @@ def _fwd_kernel_inner(
 ):
 
     mask_val = tl.load(block_mask_ptr + k_block_col_idx * stride_bmask_n)
-    # print 
-    
+    # print
+
     if k_block_col_idx == 3:
         print("mask_val", mask_val)
     if mask_val == True:
@@ -67,9 +76,9 @@ def _fwd_kernel_inner(
         qk *= sm_scale
 
         # the following is needed only when LAST_K_BLOCK or BLOCK_M < BLOCK_N
-        if LAST_K_BLOCK :
-            qk += tl.where(offs_m[:, None] + past_len >= (start_n + offs_n[None, :]), 0, float('-inf'))
-
+        if LAST_K_BLOCK:
+            qk += tl.where(offs_m[:, None] + past_len >= (start_n + offs_n[None, :]), 0,
+                           float('-inf'))
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
@@ -78,7 +87,7 @@ def _fwd_kernel_inner(
         alpha = tl.exp(m_i - m_ij)
         l_i = l_i * alpha + l_ij
         acc = acc * alpha[:, None]
-        
+
         # update acc
         v = tl.load(v_ptrs + start_n * stride_vt)
 
@@ -90,21 +99,38 @@ def _fwd_kernel_inner(
     return acc, l_i, m_i
 
 
-
-
 @triton.jit
 def _fwd_kernel(
-    Q, K, V, sm_scale,
+    Q,
+    K,
+    V,
+    sm_scale,
     block_mask_ptr,
     Out,
-    stride_qz, stride_qh, stride_qm, stride_qd,
-    stride_kz, stride_kh, stride_kn, stride_kd,
-    stride_vz, stride_vh, stride_vn, stride_vd,
-    stride_bmz, stride_bmh, stride_bmm, stride_bmn,
-    stride_oz, stride_oh, stride_om, stride_od,
-    H, N_CTX,
+    stride_qz,
+    stride_qh,
+    stride_qm,
+    stride_qd,
+    stride_kz,
+    stride_kh,
+    stride_kn,
+    stride_kd,
+    stride_vz,
+    stride_vh,
+    stride_vn,
+    stride_vd,
+    stride_bmz,
+    stride_bmh,
+    stride_bmm,
+    stride_bmn,
+    stride_oz,
+    stride_oh,
+    stride_om,
+    stride_od,
+    H,
+    N_CTX,
     PAST_LEN,
-    BLOCK_M: tl.constexpr, 
+    BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
 ):
@@ -144,13 +170,19 @@ def _fwd_kernel(
     # loop over k, v and update accumulator
     for col_idx in range(k_block_start, k_block_end):
         acc, l_i, m_i = _fwd_kernel_inner(
-            acc, l_i, m_i,
+            acc,
+            l_i,
+            m_i,
             q,
             col_idx,
             mask_ptrs,
-            k_ptrs, v_ptrs,
-            offs_m, offs_n,
-            stride_kn, stride_vn, stride_bmn,
+            k_ptrs,
+            v_ptrs,
+            offs_m,
+            offs_n,
+            stride_kn,
+            stride_vn,
+            stride_bmn,
             sm_scale,
             N_CTX,
             PAST_LEN,
@@ -162,27 +194,25 @@ def _fwd_kernel(
     m_i += tl.math.log(l_i)
     l_recip = 1 / l_i[:, None]
     acc = acc * l_recip
-    acc = acc.to(Out.dtype.element_ty) 
+    acc = acc.to(Out.dtype.element_ty)
 
-
-    off_o = off_z * stride_oz + off_h * stride_oh + offs_m[:, None] * stride_om + offs_d[None, :] * stride_od
+    off_o = off_z * stride_oz + off_h * stride_oh + offs_m[:, None] * stride_om + offs_d[
+        None, :] * stride_od
     out_ptrs = Out + off_o
     tl.store(out_ptrs, acc, mask=offs_m[:, None] < N_CTX)
 
-def _forward(
-        ctx, 
-        q, 
-        k, 
-        v, 
-        block_sparse_mask, 
-        sm_scale, 
-        BLOCK_M=64, 
-        BLOCK_N=64, 
-        num_warps=None, 
-        num_stages=1, 
-        out=None
-    ):
 
+def _forward(ctx,
+             q,
+             k,
+             v,
+             block_sparse_mask,
+             sm_scale,
+             BLOCK_M=64,
+             BLOCK_N=64,
+             num_warps=None,
+             num_stages=1,
+             out=None):
 
     assert q.shape[-1] == k.shape[-1] == v.shape[-1]
     assert k.shape[2] == v.shape[2]
@@ -200,19 +230,22 @@ def _forward(
     N_CTX = k.shape[2]
     PAST_LEN = N_CTX - q.shape[2]
 
-
     H = q.shape[1]
 
     _fwd_kernel[grid](
-        q, k, v, sm_scale,
+        q,
+        k,
+        v,
+        sm_scale,
         block_sparse_mask,
         o,
-        *q.stride(), 
-        *k.stride(), 
-        *v.stride(), 
-        *block_sparse_mask.stride(), 
+        *q.stride(),
+        *k.stride(),
+        *v.stride(),
+        *block_sparse_mask.stride(),
         *o.stride(),
-        H, N_CTX,
+        H,
+        N_CTX,
         PAST_LEN,
         BLOCK_M,
         BLOCK_N,
@@ -222,8 +255,6 @@ def _forward(
     )
 
     return o
-
-
 
 
 class _sparse_attention(torch.autograd.Function):
@@ -239,8 +270,8 @@ class _sparse_attention(torch.autograd.Function):
         raise NotImplementedError("It does not support gradient propagation yet")
         return None, None, None, None, None
 
-block_sparse_triton_fn = _sparse_attention.apply
 
+block_sparse_triton_fn = _sparse_attention.apply
 
 
 def test_topk_sparse_attention():
@@ -254,43 +285,39 @@ def test_topk_sparse_attention():
     q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
     k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
     v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
-    sm_scale = 1.0 / (D_HEAD ** 0.5)
+    sm_scale = 1.0 / (D_HEAD**0.5)
 
     # Create sparse mask (downsampled to block level)
     downsample_factor = BLOCK
     downsample_len = math.ceil(SEQ_LEN / downsample_factor)
     print("downsample_len", downsample_len)
-    
-    x_ds = torch.randn([BATCH, N_HEADS, downsample_len, downsample_len], device='cuda', dtype=torch.bfloat16)
-    x_ds[:,:,:,0] = 100
+
+    x_ds = torch.randn([BATCH, N_HEADS, downsample_len, downsample_len],
+                       device='cuda',
+                       dtype=torch.bfloat16)
+    x_ds[:, :, :, 0] = 100
     print("x_ds.shape", x_ds.shape)
-    block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=downsample_len)
+    block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
     # print("block_mask", block_mask)
     print("block_mask.shape", block_mask.shape)
 
     # Run Triton kernel
-    triton_output = block_sparse_triton_fn(
-        q, k, v, 
-        block_mask,
-        sm_scale
-    )
+    triton_output = block_sparse_triton_fn(q, k, v, block_mask, sm_scale)
 
     # Compute reference
     # Expand block mask to full attention matrix
-    full_mask = torch.kron(block_mask.float(), 
-                         torch.ones(BLOCK, BLOCK, device='cuda'))
+    full_mask = torch.kron(block_mask.float(), torch.ones(BLOCK, BLOCK, device='cuda'))
     full_mask = full_mask[..., :SEQ_LEN, :SEQ_LEN].bool()
     full_mask = full_mask & torch.tril(torch.ones_like(full_mask))  # Apply causal
-    
+
     # PyTorch reference implementation
     attn = torch.einsum('bhsd,bhtd->bhst', q, k) * sm_scale
     attn = attn.masked_fill(~full_mask, float('-inf'))
     attn = F.softmax(attn, dim=-1)
     ref_output = torch.einsum('bhst,bhtd->bhsd', attn, v)
-    
+
     # print("ref_output", ref_output)
     # print("triton_output", triton_output)
-
 
     # Verify accuracy
     assert torch.allclose(triton_output, ref_output, atol=1e-2, rtol=1e-2), \
@@ -298,62 +325,60 @@ def test_topk_sparse_attention():
     print("Pass topk sparse attention test with qlen == klen")
 
 
+def test_topk_sparse_attention_qlt_kl():
+    BATCH, N_HEADS = 2, 4
+    Q_LEN, K_LEN, D_HEAD = 128, 256, 64  # qlen < klen; here, past_len = 256 - 128 = 128.
+    TOPK = 1
+    BLOCK = 64  # block size used in downsampling
+    torch.manual_seed(0)
 
-# def test_topk_sparse_attention_qlt_kl():
-#     BATCH, N_HEADS = 2, 4
-#     Q_LEN, K_LEN, D_HEAD = 128, 256, 64  # qlen < klen; here, past_len = 256 - 128 = 128.
-#     TOPK = 1  
-#     BLOCK = 64  # block size used in downsampling
-#     torch.manual_seed(0)
+    # Create inputs.
+    q = torch.randn(BATCH, N_HEADS, Q_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
+    k = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
+    v = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
+    # softmax scale
+    sm_scale = 1.0 / (D_HEAD**0.5)
 
-#     # Create inputs.
-#     q = torch.randn(BATCH, N_HEADS, Q_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
-#     k = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
-#     v = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device='cuda', dtype=torch.bfloat16)
-#     # softmax scale
-#     sm_scale = 1.0 / (D_HEAD ** 0.5)
+    downsample_factor = BLOCK
+    print("downsample_factor", downsample_factor)
+    downsample_len = math.ceil(K_LEN / downsample_factor)  # number of blocks along one dimension
+    print("downsample_len", downsample_len)
+    x_ds = torch.randn(
+        BATCH, N_HEADS, downsample_len, downsample_len, device='cuda', dtype=torch.bfloat16)
+    # Force the first column to be high so that the first block is always selected.
+    x_ds[:, :, :, 0] = 100
+    block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
+    print("block_mask", block_mask)
+    print("block_mask.shape", block_mask.shape)
+    # Run Triton kernel.
+    triton_output = block_sparse_triton_fn(q, k, v, block_mask, sm_scale)
 
-#     downsample_factor = BLOCK
-#     print("downsample_factor", downsample_factor)
-#     downsample_len = math.ceil(K_LEN / downsample_factor)  # number of blocks along one dimension
-#     print("downsample_len", downsample_len)
-#     x_ds = torch.randn(BATCH, N_HEADS, downsample_len, downsample_len, 
-#                         device='cuda', dtype=torch.bfloat16)
-#     # Force the first column to be high so that the first block is always selected.
-#     x_ds[:, :, :, 0] = 100
-#     block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
-#     print("block_mask", block_mask)
-#     print("block_mask.shape", block_mask.shape)
-#     # Run Triton kernel.
-#     triton_output = block_sparse_triton_fn(q, k, v, block_mask, sm_scale)
+    past_len = K_LEN - Q_LEN
 
-#     past_len = K_LEN - Q_LEN
+    attn = torch.einsum('bhsd,bhtd->bhst', q, k) * sm_scale
 
-#     attn = torch.einsum('bhsd,bhtd->bhst', q, k) * sm_scale
+    full_mask_full = torch.kron(block_mask.float(), torch.ones(BLOCK, BLOCK, device='cuda')).bool()
+    full_mask_full = full_mask_full[..., :K_LEN, :K_LEN]
 
-#     full_mask_full = torch.kron(block_mask.float(), torch.ones(BLOCK, BLOCK, device='cuda')).bool()
-#     full_mask_full = full_mask_full[..., :K_LEN, :K_LEN]
+    effective_mask = full_mask_full[..., past_len:K_LEN, :]  # shape: (B, H, Q_LEN, K_LEN)
 
-#     effective_mask = full_mask_full[..., past_len:K_LEN, :]  # shape: (B, H, Q_LEN, K_LEN)
+    i_global = torch.arange(past_len, K_LEN, device=k.device).unsqueeze(1)  # shape: (Q_LEN, 1)
+    j_global = torch.arange(K_LEN, device=k.device).unsqueeze(0)  # shape: (1, K_LEN)
+    causal_mask = (j_global <= i_global)  # shape: (Q_LEN, K_LEN)
 
+    final_mask = effective_mask & causal_mask  # shape: (B, H, Q_LEN, K_LEN)
 
-#     i_global = torch.arange(past_len, K_LEN, device=k.device).unsqueeze(1)  # shape: (Q_LEN, 1)
-#     j_global = torch.arange(K_LEN, device=k.device).unsqueeze(0)              # shape: (1, K_LEN)
-#     causal_mask = (j_global <= i_global)  # shape: (Q_LEN, K_LEN)
+    attn = attn.masked_fill(~final_mask, float('-inf'))
+    attn = F.softmax(attn, dim=-1)
+    ref_output = torch.einsum('bhst,bhtd->bhsd', attn, v)
 
-#     final_mask = effective_mask & causal_mask  # shape: (B, H, Q_LEN, K_LEN)
+    # Verify accuracy.
+    assert torch.allclose(triton_output, ref_output, atol=1e-2, rtol=1e-2), \
+        "Triton output doesn't match reference when qlen < klen"
 
-#     attn = attn.masked_fill(~final_mask, float('-inf'))
-#     attn = F.softmax(attn, dim=-1)
-#     ref_output = torch.einsum('bhst,bhtd->bhsd', attn, v)
-
-#     # Verify accuracy.
-#     assert torch.allclose(triton_output, ref_output, atol=1e-2, rtol=1e-2), \
-#         "Triton output doesn't match reference when qlen < klen"
-    
-#     print("Pass topk sparse attention test with qlen < klen")
+    print("Pass topk sparse attention test with qlen < klen")
 
 
 if __name__ == "__main__":
     test_topk_sparse_attention()
-    # test_topk_sparse_attention_qlt_kl()
+    test_topk_sparse_attention_qlt_kl()

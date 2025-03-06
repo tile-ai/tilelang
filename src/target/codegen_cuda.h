@@ -26,7 +26,7 @@ public:
   std::string Finish();
   // override behavior
   void PrintFuncPrefix(std::ostream &os) final;
-  void PrintExtraAttrs(const PrimFunc &f, std::ostream &os) final;
+  void PrintExtraAttrs(const PrimFunc &f);
   void VisitStmt_(const ForNode *op) final;
   void PrintStorageSync(const CallNode *op) final;
   void PrintStorageScope(const std::string &scope,
@@ -54,7 +54,9 @@ public:
   void VisitStmt_(const AttrStmtNode *op) final;
 
   // Override this as a work around for __grid_constant__ parameter
-  void AddFunction(const PrimFunc &f);
+  void AddFunction(const GlobalVar &gvar, const PrimFunc &f);
+  void PrintFunctionSignature(const String &function_name, const PrimFunc &func,
+                              std::ostream &os);
 
 protected:
   virtual std::string GetBufferRef(DataType t, const BufferNode *buffer,

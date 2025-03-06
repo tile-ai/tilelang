@@ -84,7 +84,7 @@ public:
   PrimExpr threadIdx_z_ext = Integer(1);
 };
 
-void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {
+void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
   LaunchConfigExtractor extractor;
   extractor(f->body);
   arith::Analyzer analyzer;
@@ -1633,7 +1633,72 @@ void CodeGenTileLangCUDA::PrintVecElemLoadExpr(DataType t, int i,
   return;
 }
 
-void CodeGenTileLangCUDA::AddFunction(const PrimFunc &f) {
+void CodeGenTileLangCUDA::PrintFunctionSignature(const String &function_name,
+                                                 const PrimFunc &func,
+                                                 std::ostream &os) {
+  PrintFuncPrefix(os);
+  CodeGenC::PrintType(func->ret_type, os);
+  CodeGenC::PrintExtraAttrs(func, os);
+  bool no_alias = func->HasNonzeroAttr(tir::attr::kNoAlias);
+  os << " " << function_name << "(";
+  for (size_t i = 0; i < func->params.size(); ++i) {
+    tir::Var v = func->params[i];
+    std::string vid = AllocVarID(v.get());
+
+    if (i > 0) {
+      os << ", ";
+    }
+
+    if (v.dtype().is_handle()) {
+      // work around for grid constant parameters.
+      if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
+        if (ptr->storage_scope == "grid_constant") {
+          os << "__grid_constant__ const ";
+          CodeGenC::PrintType(ptr->element_type, os);
+          os << ' ' << vid;
+          continue;
+        }
+      }
+
+      auto it = alloc_storage_scope_.find(v.get());
+      if (it != alloc_storage_scope_.end()) {
+        PrintStorageScope(it->second, os);
+      }
+
+      CodeGenC::PrintType(GetType(v), os);
+      if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
+        if (auto *prim = ptr->element_type.as<PrimTypeNode>()) {
+          RegisterHandleType(v.get(), prim->dtype);
+        }
+      }
+
+      if (no_alias) {
+        PrintRestrict(v, os);
+      }
+    } else {
+      CodeGenC::PrintType(GetType(v), os);
+    }
+    os << ' ' << vid;
+  }
+  os << ")";
+
+  // Register handle data type
+  // TODO(tvm-team): consider simply keep type info in the
+  // type annotation(via a normalizing rewriting).
+  for (const auto &param : func->params) {
+    if (auto *ptr = param->type_annotation.as<PointerTypeNode>()) {
+      if (auto *prim = ptr->element_type.as<PrimTypeNode>()) {
+        RegisterHandleType(param.get(), prim->dtype);
+      }
+    }
+  }
+}
+
+void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
+                                      const PrimFunc &f) {
+  // If the function has already been forward-declared, this is a
+  // no-op.
+  CodeGenC::DeclareFunction(gvar, f);
   // clear previous generated state.
   this->InitFuncState(f);
   // reserve keywords
@@ -1646,7 +1711,8 @@ void CodeGenTileLangCUDA::AddFunction(const PrimFunc &f) {
 
   this->PrintFuncPrefix(stream);
   CodeGenC::PrintType(f->ret_type, stream);
-  this->PrintExtraAttrs(f, stream);
+  this->PrintExtraAttrs(f);
+
   this->stream << " " << static_cast<std::string>(global_symbol.value()) << "(";
 
   for (size_t i = 0; i < f->params.size(); ++i) {

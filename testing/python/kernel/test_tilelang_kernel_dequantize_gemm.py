@@ -176,7 +176,8 @@ def matmul_fp16xfp4(M,
 
         return main
 
-    return kernel_func(block_M=64, block_N=64, block_K=64, num_stages=1, threads=128)
+    return kernel_func(
+        block_M=block_M, block_N=block_N, block_K=block_K, num_stages=num_stages, threads=threads)
 
 
 def ref_program(A, qB):
@@ -349,8 +350,8 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
     accum_dtype,
     transform_b,
 ):
-    from bitblas.tl.utils import make_mma_swizzle_layout as make_swizzle_layout
-    from bitblas.tl.mma_macro_generator import (
+    from tilelang.intrinsics.mma_layout import make_mma_swizzle_layout as make_swizzle_layout
+    from tilelang.intrinsics.mma_macro_generator import (
         TensorCoreIntrinEmitterWithLadderTransform,)
 
     from bitblas.gpu.intrin.lop3 import decode_i4_to_f16

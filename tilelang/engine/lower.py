@@ -2,7 +2,6 @@
 # Licensed under the MIT License.
 """The compiler for TL programs."""
 
-import tilelang as tl
 import os
 import os.path as osp
 from typing import Union, Optional, Callable
@@ -12,6 +11,10 @@ from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
 from tilelang.utils.target import determine_target
+from tilelang.engine.phase import (
+    LowerAndLegalize,
+    OptimizeForTarget,
+)
 
 
 def is_cpu_device_backend(target: Target):
@@ -115,8 +118,13 @@ def tilelang_callback_hip_compile(code, target):
 
 
 def extrac_params(func: tir.PrimFunc):
-    buffers = [func.buffer_map[var] for var in func.params]
-    tensor_types = [relay.TensorType(buffer.shape, buffer.dtype) for buffer in buffers]
+    tensor_types = []
+    for var in func.params:
+        if var in func.buffer_map:
+            tensor_types.append(
+                relay.TensorType(func.buffer_map[var].shape, func.buffer_map[var].dtype))
+        else:
+            tensor_types.append(relay.scalar_type(var.dtype))
     return tensor_types
 
 
@@ -152,68 +160,12 @@ def lower(
     _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
     _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
 
-    mod = tir.transform.BindTarget(target)(mod)
+    # Phase 1: Lower and legalize the IR
+    mod = LowerAndLegalize(mod, target)
 
-    mod = tl.transform.FrontendLegalize()(mod)
-    mod = tir.transform.Simplify()(mod)
-    mod = tl.transform.LayoutInference()(mod)
-    mod = tl.transform.LowerTileOp()(mod)
-    mod = tl.transform.LegalizeVectorizedLoop()(mod)
-    mod = tl.transform.LegalizeSafeMemoryAccess()(mod)
-    # Inject Simplify to remove the duplicated conditions
-    mod = tir.transform.Simplify()(mod)
+    # Phase 2: Optimize the IR for the target
+    mod = OptimizeForTarget(mod, target)
 
-    # which may be introduced by the LegalizeSafeMemoryAccess
-    if target.arch == "sm_90":
-        mod = tl.transform.MultiVersionBuffer()(mod)
-        mod = tl.transform.WarpSpecialized()(mod)
-        mod = tl.transform.InjectSoftwarePipeline()(mod)
-        mod = tir.transform.LowerOpaqueBlock()(mod)
-        # mod = tl.transform.WarpSpecializedPipeline()(mod)
-        mod = tl.transform.InjectFenceProxy()(mod)
-    else:
-        mod = tir.transform.PlanAndUpdateBufferAllocationLocation()(mod)
-        mod = tl.transform.PipelinePlanning()(mod)
-        mod = tl.transform.InjectSoftwarePipeline()(mod)
-
-    mod = tir.transform.LowerOpaqueBlock()(mod)
-    mod = tir.transform.FlattenBuffer()(mod)
-    mod = tir.transform.NarrowDataType(32)(mod)
-    mod = tir.transform.Simplify()(mod)
-    mod = tl.transform.VectorizeLoop()(mod)
-    mod = tir.transform.StorageRewrite()(mod)
-    mod = tir.transform.UnrollLoop()(mod)
-    mod = tir.transform.RenormalizeSplitPattern()(mod)
-    mod = tir.transform.Simplify()(mod)
-    mod = tir.transform.RemoveNoOp()(mod)
-    mod = tir.transform.RewriteUnsafeSelect()(mod)
-    mod = tir.transform.HoistIfThenElse()(mod)
-
-    mod = tir.transform.VerifyMemory()(mod)
-    mod = tir.transform.AnnotateEntryFunc()(mod)
-    # TODO(lei): This is a hack to make sure the
-    # thread level allreduce pass can be applied
-    # in TL. As Tl only use one thread dimension
-    # the var binding information will be lost
-    # in the lowering process with Legalization
-    # and Simplify pass.
-    # We can find a way better to create var instead
-    # of putting the LowerThreadAllreduce before
-    # the Legalization.
-    mod = tl.transform.ThreadPartialSync("shared.dyn")(mod)
-    mod = tir.transform.InferFragment()(mod)
-    mod = tir.transform.LowerThreadAllreduce()(mod)
-
-    mod = tl.transform.AnnotateDeviceRegions()(mod)
-    mod = tir.transform.SplitHostDevice()(mod)
-    mod = tir.transform.MergeSharedMemoryAllocations()(mod)
-    mod = tl.transform.ThreadSync("shared")(mod)
-    mod = tl.transform.ThreadSync("shared.dyn")(mod)
-    mod = tl.transform.LowerHopperIntrin()(mod)
-    mod = tir.transform.InjectPTXAsyncCopy()(mod)
-
-    mod = tl.transform.MakePackedAPI()(mod)
-    mod = tir.transform.LowerDeviceKernelLaunch()(mod)
     host_mod = tir.transform.Filter(_is_host_call)(mod)
     host_mod = tir.transform.BindTarget(target_host)(host_mod)
     host_mod = tir.transform.FP8StorageLegalize()(host_mod)

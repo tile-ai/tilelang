@@ -229,7 +229,7 @@ TL_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
 }
 
 template <int num_mma> TL_DEVICE void wait_wgmma() {
-  warpgroup_wait<num_mma>();
+  cute::warpgroup_wait<num_mma>();
 }
 
 template <int NumMmaThreads> TL_DEVICE void warp_scheduler_barrier_sync() {

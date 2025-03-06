@@ -33,10 +33,8 @@ template <class Reducer, int threads, int scale> struct AllReduce {
     constexpr int offset = threads / 2;
     if constexpr (offset >= 32) {
       __syncthreads();
-      // asm volatile("bar.sync %0, %1;" : : "r"(1), "r"(256));
       red_buf[threadIdx.x] = x;
       __syncthreads();
-      // asm volatile("bar.sync %0, %1;" : : "r"(2), "r"(256));
       x = Reducer()(x, red_buf[threadIdx.x ^ offset]);
     } else {
       x = Reducer()(x, T(__shfl_xor_sync(uint32_t(-1), x, offset)));
@@ -45,6 +43,24 @@ template <class Reducer, int threads, int scale> struct AllReduce {
       return x;
     } else {
       return AllReduce<Reducer, offset, scale>::run(x, red_buf);
+    }
+  }
+
+  template <typename T>
+  static TL_DEVICE T run_hopper(T x, T *red_buf = nullptr) {
+    constexpr int offset = threads / 2;
+    if constexpr (offset >= 32) {
+      asm volatile("bar.sync %0, %1;" : : "r"(1), "r"(threads));
+      red_buf[threadIdx.x] = x;
+      asm volatile("bar.sync %0, %1;" : : "r"(2), "r"(threads));
+      x = Reducer()(x, red_buf[threadIdx.x ^ offset]);
+    } else {
+      x = Reducer()(x, T(__shfl_xor_sync(uint32_t(-1), x, offset)));
+    }
+    if constexpr (offset == scale) {
+      return x;
+    } else {
+      return AllReduce<Reducer, offset, scale>::run_hopper(x, red_buf);
     }
   }
 };

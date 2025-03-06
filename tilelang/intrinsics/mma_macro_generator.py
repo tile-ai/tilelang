@@ -318,6 +318,8 @@ class TensorCoreIntrinEmitter(object):
         BLOCK_M = block_row_warps * warp_rows
         BLOCK_N = block_col_warps * warp_cols
         M_DIM, N_DIM = self.M_DIM, self.N_DIM
+        C_buf_dims = len(C_buf.shape)
+        assert C_buf_dims in {2, 4}, "C_buf should be 2D or 4D"
 
         current_frame = T.KernelLaunchFrame.Current()
         thread_binding = current_frame.get_thread_binding()
@@ -334,9 +336,15 @@ class TensorCoreIntrinEmitter(object):
                     for local_id_i in T.vectorized(2):
                         local_id = local_id_o * 2 + local_id_i
                         row, col = T.meta_var(mma_store_index_map(tx, local_id))
-                        C_buf[warp_m * warp_rows + i, warp_n * warp_cols + j, row,
-                              col] = C_local_buf[i * (warp_cols * local_size_out) +
-                                                 j * local_size_out + local_id]
+                        if C_buf_dims == 2:
+                            C_buf[(warp_m * warp_rows + i) * M_DIM + row,
+                                  (warp_n * warp_cols + j) * N_DIM +
+                                  col] = C_local_buf[i * (warp_cols * local_size_out) +
+                                                     j * local_size_out + local_id]
+                        else:
+                            C_buf[warp_m * warp_rows + i, warp_n * warp_cols + j, row,
+                                  col] = C_local_buf[i * (warp_cols * local_size_out) +
+                                                     j * local_size_out + local_id]
 
         @T.macro
         def _warp_stmatrix_global(C_local_buf, C_buf, thread_binding):

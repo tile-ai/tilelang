@@ -103,7 +103,14 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "Building TileLang with make..."
-make -j
+
+# Calculate 75% of available CPU cores
+# Other wise, make will use all available cores
+# and it may cause the system to be unresponsive
+CORES=$(nproc)
+MAKE_JOBS=$(( CORES * 75 / 100 ))
+make -j${MAKE_JOBS}
+
 if [ $? -ne 0 ]; then
     echo "Error: TileLang build failed."
     exit 1

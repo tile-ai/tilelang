@@ -31,7 +31,7 @@ def reduce_max(buffer: tir.Buffer, out: tir.Buffer, dim: int, clear: bool = True
     dim : int
         The dimension to perform reduce on
     clear : bool
-        If set to False, the output buffer will first be initialized to -inf.
+        If set to True, the output buffer will first be initialized to -inf.
     Returns
     -------
     handle : PrimExpr

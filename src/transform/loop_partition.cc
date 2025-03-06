@@ -125,7 +125,9 @@ public:
     PrimExpr flattened = 0;
     for (size_t i = 0; i < loop_vars_.size(); i++) {
       auto ext_ptr = as_const_int(loop_vars_[i]->dom->extent);
-      ICHECK(ext_ptr);
+      ICHECK(ext_ptr)
+          << "Loop partitioner only works with constant loop sizes, but got "
+          << loop_vars_[i]->dom->extent;
       int extent = *ext_ptr;
       loop_size_full *= extent;
       flattened = flattened * extent + loop_vars_[i]->var;

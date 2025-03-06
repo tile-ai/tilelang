@@ -35,11 +35,14 @@ class LibraryGenerator(object):
         if is_cuda_target(target):
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
             compute_version = "".join(get_target_compute_version(target).split("."))
+            if compute_version == "90":
+                compute_version = "90a"
             libpath = src.name.replace(".cu", ".so")
 
             command = [
                 "nvcc",
-                "-std=c++17",
+                "-std=c++17", 
+                "-w", # Disable all warning messages
                 "-Xcudafe",
                 "--diag_suppress=177",
                 "--compiler-options",

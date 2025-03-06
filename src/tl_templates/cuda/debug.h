@@ -101,9 +101,9 @@ debug_print_buffer_value<signed char>(const char *msg, const char *buf_name,
 
 // Specialization for unsiged char type
 template <>
-__device__ void debug_print_buffer_value<char>(const char *msg,
-                                               const char *buf_name, int index,
-                                               char var) {
+__device__ void
+debug_print_buffer_value<unsigned char>(const char *msg, const char *buf_name,
+                                        int index, unsigned char var) {
   printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): buffer=%s, "
          "index=%d, dtype=char value=%d\n",
          msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,

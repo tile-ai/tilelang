@@ -51,7 +51,7 @@ def _init_logger():
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     logger.propagate = False
-    set_log_level("WARNING")
+    set_log_level("INFO")
 
 
 _init_logger()
@@ -125,3 +125,5 @@ from . import (
 from .engine import lower  # noqa: F401
 
 from .version import __version__  # noqa: F401
+
+from .math import *  # noqa: F403

@@ -42,6 +42,7 @@ public:
     PrimFuncNode *fptr = f.CopyOnWrite();
     LowerHopperIntrin substituter;
     fptr->body = substituter.VisitStmt(f->body);
+    Map<String, Array<PrimExpr>> init_desc_arg_map;
     for (auto [call, var] : substituter.desc_map_) {
       // Should allocate 128 bytes for TensorMap on stack
       Call alloc_desc = Call(DataType::Handle(), builtin::tvm_stack_alloca(),
@@ -57,11 +58,14 @@ public:
       init_desc_args.push_back(var);
       init_desc_args.insert(init_desc_args.end(), call->args.begin(),
                             call->args.end());
+      // add to function attribute
       Call init_desc =
           Call(DataType::Handle(), builtin::tvm_call_packed(), init_desc_args);
       fptr->body =
           LetStmt(var, alloc_desc, SeqStmt({Evaluate(init_desc), fptr->body}));
+      init_desc_arg_map.Set(var->name_hint, init_desc_args);
     }
+    f = WithAttr(std::move(f), "tma_descriptor_args", init_desc_arg_map);
     return f;
   }
 

@@ -27,6 +27,7 @@ class JITContext:
     ref_prog: Callable
     rtol: float
     atol: float
+    max_mismatched_ratio: float
     skip_check: bool
     profiler: Literal['torch', 'tvm']
     target: Literal['cuda', 'hip']
@@ -73,13 +74,15 @@ class Autotuner:
             ref_prog = jit_context.ref_prog
             rtol = jit_context.rtol
             atol = jit_context.atol
+            max_mismatched_ratio = jit_context.max_mismatched_ratio
 
             self.jit_input_tensors = mod._get_inputs(
                 with_output=profiler ==
                 "tvm") if self.jit_input_tensors is None else self.jit_input_tensors
 
             if (not skip_check) and (ref_prog is not None):
-                mod.assert_allclose(ref_prog, rtol=rtol, atol=atol)
+                mod.assert_allclose(
+                    ref_prog, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio)
 
             latency = mod.do_bench(
                 mod.func,
@@ -155,6 +158,7 @@ def jit(out_idx: List[int],
         ref_prog: Callable = None,
         rtol: float = 1e-2,
         atol: float = 1e-2,
+        max_mismatched_ratio: float = 0.01,
         skip_check: bool = False,
         profiler: Literal['auto', 'torch', 'tvm'] = 'auto',
         target: Literal['auto', 'cuda', 'hip'] = 'auto') -> Callable:
@@ -176,6 +180,7 @@ def jit(out_idx: List[int],
                 ref_prog=ref_prog,
                 rtol=rtol,
                 atol=atol,
+                max_mismatched_ratio=max_mismatched_ratio,
                 skip_check=skip_check,
                 profiler=profiler,
                 target=target)

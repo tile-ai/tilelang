@@ -867,9 +867,62 @@ private:
   friend class WarpSpecializedRewriter;
 };
 
+class ThreadTagChecker : public StmtExprVisitor {
+public:
+  static bool HasOnlyThreadIdxX(const PrimFunc &f) {
+    ThreadTagChecker checker;
+    checker(f->body);
+    return checker.is_valid_;
+  }
+
+private:
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tir::attr::thread_extent) {
+      IterVar iter_var = Downcast<IterVar>(op->node);
+      String thread_tag = iter_var->thread_tag;
+      bool is_y_or_z =
+          thread_tag == "threadIdx.y" || thread_tag == "threadIdx.z";
+
+      if (!thread_tag.empty() && is_y_or_z && !is_one(iter_var->dom->extent)) {
+        is_valid_ = false;
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForNode *op) final {
+    if (op->kind == ForKind::kThreadBinding) {
+      ICHECK(op->thread_binding.defined());
+      String thread_tag = op->thread_binding.value()->thread_tag;
+      bool is_y_or_z =
+          thread_tag == "threadIdx.y" || thread_tag == "threadIdx.z";
+      if (!thread_tag.empty() && is_y_or_z) {
+        auto iter_var = Downcast<IterVar>(op->thread_binding);
+        if (iter_var.defined() && iter_var->dom.defined() &&
+            !is_one(iter_var->dom->extent)) {
+          is_valid_ = false;
+        }
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  bool is_valid_ = true;
+};
+
 class WarpSpecializedRewriter : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc f) {
+    // Check if function only uses threadIdx.x before proceeding
+    if (!ThreadTagChecker::HasOnlyThreadIdxX(f)) {
+      LOG(WARNING) << "WarpSpecialize will be disabled because the program "
+                      "uses thread tags other than threadIdx.x\n"
+                   << "If you want to use warp specialization, please refactor "
+                      "your program to use threadIdx.x only";
+      // Return original function unchanged if other thread tags are found
+      return f;
+    }
+
     auto T = WarpSpecializedRewriter();
     T.buffer_lca_ = DetectBufferAccessLCA(f);
     for (auto [buffer, _] : T.buffer_lca_)

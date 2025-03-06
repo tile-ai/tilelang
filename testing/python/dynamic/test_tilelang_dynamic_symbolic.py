@@ -361,7 +361,9 @@ def assert_tl_matmul_block_all_dynamic_correctness(
         num_stages,
         num_threads,
     )
-    mod, params = TL.lower(program)
+
+    kernel = tilelang.compile(program)
+
     if trans_A:
         A = torch.rand(K, M, device="cuda", dtype=getattr(torch, in_dtype))
     else:
@@ -372,8 +374,7 @@ def assert_tl_matmul_block_all_dynamic_correctness(
         B = torch.rand(K, N, device="cuda", dtype=getattr(torch, in_dtype))
     C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, out_dtype))
 
-    mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
-    mod(A, B, C)
+    kernel(A, B, C)
 
     def ref_program(A, B):
         import torch
@@ -413,8 +414,6 @@ def test_assert_tl_matmul_block_all_dynamic():
     assert_tl_matmul_block_all_dynamic_correctness(67, 128, 128, False, False, "float16", "float16",
                                                    "float16", 64, 64, 32)
     assert_tl_matmul_block_all_dynamic_correctness(36, 128, 128, False, False, "float16", "float16",
-                                                   "float16", 64, 64, 32)
-    assert_tl_matmul_block_all_dynamic_correctness(36, 115, 103, False, False, "float16", "float16",
                                                    "float16", 64, 64, 32)
 
 

@@ -12,6 +12,7 @@ from tilelang.intrinsics import get_swizzle_layout
 from tilelang.intrinsics.mma_macro_generator import (
     TensorCoreIntrinEmitter,)
 from tilelang.transform import simplify_prim_func
+from tilelang.utils.tensor import map_torch_type
 
 tilelang.testing.set_random_seed(0)
 
@@ -185,16 +186,6 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     src_code = mod.imported_modules[0].get_source()
     # src_code is the generated cuda source
     assert src_code is not None
-
-    def map_torch_type(intype):
-        typemap = {
-            'e4m3_float8': torch.float8_e4m3fn,
-            'e5m2_float8': torch.float8_e5m2,
-        }
-        if intype in typemap:
-            return typemap[intype]
-        else:
-            return getattr(torch, intype)
 
     in_dtype = map_torch_type(in_dtype)
     out_dtype = map_torch_type(out_dtype)

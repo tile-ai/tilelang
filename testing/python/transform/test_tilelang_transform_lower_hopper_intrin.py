@@ -19,6 +19,7 @@ def _check(original, transformed):
     transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
     transformed = tvm.tir.transform.BindTarget(auto_target)(transformed)
     transformed = tir.transform.LowerOpaqueBlock()(transformed)
+    transformed["main"] = transformed["main"].with_attr("tma_descriptor_args", {})
 
     tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
 
