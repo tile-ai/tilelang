@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 from typing import Optional
-from .utils import is_cuda_target, is_hip_target
+from .utils import is_cuda_target, is_hip_target, is_cpu_target
 from tilelang import tvm as tvm
 from tilelang.contrib.nvcc import get_target_compute_version
 from tvm.target import Target
@@ -41,8 +41,8 @@ class LibraryGenerator(object):
 
             command = [
                 "nvcc",
-                "-std=c++17", 
-                "-w", # Disable all warning messages
+                "-std=c++17",
+                "-w",  # Disable all warning messages
                 "-Xcudafe",
                 "--diag_suppress=177",
                 "--compiler-options",
@@ -66,7 +66,15 @@ class LibraryGenerator(object):
                 "--shared",
                 src.name,
             ]
+        elif is_cpu_target(target):
+            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)
+            libpath = src.name.replace(".cpp", ".so")
 
+            command = ["g++", "-std=c++17", "-fPIC", "-shared", src.name]
+            with_tl = False
+            command += [
+                "-I" + TILELANG_TEMPLATE_PATH,
+            ]
         else:
             raise ValueError(f"Unsupported target: {target}")
 

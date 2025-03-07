@@ -3,7 +3,7 @@
 
 from tvm import tir, IRModule
 from tvm.target import Target
-import tilelang as tl
+import tilelang
 
 
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
@@ -11,17 +11,17 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.BindTarget(target)(mod)
 
     # Legalize the frontend IR to make it compatible with TVM
-    mod = tl.transform.FrontendLegalize()(mod)
+    mod = tilelang.transform.FrontendLegalize()(mod)
     # Simplify the IR expressions
     mod = tir.transform.Simplify()(mod)
     # Infer memory layouts for fragments and shared memory
-    mod = tl.transform.LayoutInference()(mod)
+    mod = tilelang.transform.LayoutInference()(mod)
     # Lower high-level tile operations to low-level operations
-    mod = tl.transform.LowerTileOp()(mod)
+    mod = tilelang.transform.LowerTileOp()(mod)
     # Legalize vectorized loops to ensure they are valid
-    mod = tl.transform.LegalizeVectorizedLoop()(mod)
+    mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
     # Add safety checks for memory accesses
-    mod = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
     # Simplify again to clean up any duplicated conditions
     # that may have been introduced by safety checks
     mod = tir.transform.Simplify()(mod)
@@ -32,23 +32,23 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # which may be introduced by the LegalizeSafeMemoryAccess
     if target.arch == "sm_90":
-        mod = tl.transform.MultiVersionBuffer()(mod)
-        mod = tl.transform.WarpSpecialized()(mod)
-        mod = tl.transform.InjectSoftwarePipeline()(mod)
+        mod = tilelang.transform.MultiVersionBuffer()(mod)
+        mod = tilelang.transform.WarpSpecialized()(mod)
+        mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tir.transform.LowerOpaqueBlock()(mod)
-        mod = tl.transform.RewriteWgmmaSync()(mod)
-        # mod = tl.transform.WarpSpecializedPipeline()(mod)
-        mod = tl.transform.InjectFenceProxy()(mod)
+        mod = tilelang.transform.RewriteWgmmaSync()(mod)
+        # mod = tilelang.transform.WarpSpecializedPipeline()(mod)
+        mod = tilelang.transform.InjectFenceProxy()(mod)
     else:
         mod = tir.transform.PlanAndUpdateBufferAllocationLocation()(mod)
-        mod = tl.transform.PipelinePlanning()(mod)
-        mod = tl.transform.InjectSoftwarePipeline()(mod)
+        mod = tilelang.transform.PipelinePlanning()(mod)
+        mod = tilelang.transform.InjectSoftwarePipeline()(mod)
 
     mod = tir.transform.LowerOpaqueBlock()(mod)
     mod = tir.transform.FlattenBuffer()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tir.transform.Simplify()(mod)
-    mod = tl.transform.VectorizeLoop()(mod)
+    mod = tilelang.transform.VectorizeLoop()(mod)
     mod = tir.transform.StorageRewrite()(mod)
     mod = tir.transform.UnrollLoop()(mod)
     mod = tir.transform.RenormalizeSplitPattern()(mod)
@@ -68,19 +68,19 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # We can find a way better to create var instead
     # of putting the LowerThreadAllreduce before
     # the Legalization.
-    mod = tl.transform.ThreadPartialSync("shared.dyn")(mod)
+    mod = tilelang.transform.ThreadPartialSync("shared.dyn")(mod)
     mod = tir.transform.InferFragment()(mod)
     mod = tir.transform.LowerThreadAllreduce()(mod)
-    mod = tl.transform.LowerHopperIntrin()(mod)
-    mod = tl.transform.ThreadSync("shared")(mod)
-    mod = tl.transform.ThreadSync("shared.dyn")(mod)
+    mod = tilelang.transform.LowerHopperIntrin()(mod)
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     mod = tir.transform.InjectPTXAsyncCopy()(mod)
 
-    mod = tl.transform.AnnotateDeviceRegions()(mod)
+    mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
     mod = tir.transform.MergeSharedMemoryAllocations()(mod)
 
-    mod = tl.transform.MakePackedAPI()(mod)
+    mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tir.transform.LowerDeviceKernelLaunch()(mod)
 
     return mod

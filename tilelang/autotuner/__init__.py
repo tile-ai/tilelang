@@ -1,8 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-"""The auto-tune module for tl programs."""
+"""The auto-tune module for tilelang programs."""
 
-import tilelang as tl
+import tilelang
 from tilelang import tvm as tvm
 import inspect
 from functools import wraps
@@ -11,6 +11,8 @@ from tqdm import tqdm
 import logging
 from dataclasses import dataclass
 import concurrent.futures
+import os
+from functools import partial
 
 logging.basicConfig(
     filename='out.log',
@@ -21,9 +23,9 @@ logging.basicConfig(
 
 @dataclass(frozen=True)
 class JITContext:
-    mod: tl.Profiler
+    mod: tilelang.Profiler
     out_idx: List[int]
-    supply_type: tl.TensorSupplyType
+    supply_type: tilelang.TensorSupplyType
     ref_prog: Callable
     rtol: float
     atol: float
@@ -56,6 +58,10 @@ class Autotuner:
         self.jit_input_tensors = None
         self.ref_input_tensors = None
 
+    def jit_compile(self, args: Any, **kwds: Any) -> JITContext:
+        jit_context = self.fn(*args, **kwds)
+        return jit_context
+
     def run(self, *args: Any, **kwds: Any) -> Any:
         sig = inspect.signature(self.fn)
         bound_args = sig.bind(*args, **kwds)
@@ -64,9 +70,7 @@ class Autotuner:
         best_latency = 1e8
         best_config = None
 
-        def target_fn(*new_args, **kwds):
-            jit_context = self.fn(*new_args, **kwds)
-
+        def target_fn(jit_context):
             # Unpack the context
             mod = jit_context.mod
             profiler = jit_context.profiler
@@ -102,8 +106,11 @@ class Autotuner:
 
             return latency, self.ref_latency_cache
 
-        progress_bar = tqdm(self.configs, desc="Running configurations")
-        for config in progress_bar:
+        # Parallel compilation
+        config_args = []
+        jit_contexts = []
+
+        for config in self.configs:
             new_args = []
             for name, value in bound_args.arguments.items():
                 if name not in self.keys:
@@ -111,11 +118,33 @@ class Autotuner:
                 else:
                     new_args.append(config[name])
             new_args = tuple(new_args)
-            ref_latency = None
+            config_args.append(new_args)
+
+        worker = partial(
+            self.jit_compile,
+            **kwds,
+        )
+
+        # 90% utilization
+        num_workers = max(1, int(os.cpu_count() * 0.9))
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
+        results = tqdm(
+            pool.map(
+                worker,
+                config_args,
+            ), desc="Compiling configurations")
+        for result in results:
+            jit_contexts.append(result)
+
+        ref_latency = None
+        progress_bar = tqdm(range(len(config_args)), desc="Bench configurations")
+        for i in progress_bar:
+            jit_context = jit_contexts[i]
+            config = config_args[i]
             try:
                 # Use ThreadPoolExecutor to enforce timeout on target_fn execution
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(target_fn, *new_args, **kwds)
+                    future = executor.submit(target_fn, jit_context)
                     latency, ref_latency = future.result(timeout=self.timeout)
             except concurrent.futures.TimeoutError:
                 logging.error(f"Timeout exceeded for config {config}. Skipping this configuration.")
@@ -144,7 +173,7 @@ def autotune(configs: Any,
              rep: int = 100,
              timeout: int = 100) -> Callable:
     """
-    Decorator for tl program
+    Decorator for tilelang program
     """
 
     def decorator(fn: Callable) -> Autotuner:
@@ -154,7 +183,7 @@ def autotune(configs: Any,
 
 
 def jit(out_idx: List[int],
-        supply_type: tl.TensorSupplyType = tl.TensorSupplyType.Normal,
+        supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Normal,
         ref_prog: Callable = None,
         rtol: float = 1e-2,
         atol: float = 1e-2,
@@ -169,9 +198,9 @@ def jit(out_idx: List[int],
         def decorator(*args, **kwargs) -> float:
             # Enabling Efficient Fusion
             with tvm.transform.PassContext(config={"tir.merge_static_smem": True}):
-                mod, params = tl.lower(fn(*args, **kwargs), target=target)
+                mod, params = tilelang.lower(fn(*args, **kwargs), target=target)
 
-            mod = tl.Profiler(mod, params, out_idx, supply_type)
+            mod = tilelang.Profiler(mod, params, out_idx, supply_type)
 
             return JITContext(
                 mod=mod,
