@@ -9,14 +9,15 @@ import tilelang.testing
 
 tilelang.testing.set_random_seed(42)
 
+
 def native_sparse_attention(
     batch,
     heads,
     seq_len,  # Length of K/V sequences (context window size)
-    dim,      # Embedding dimension per head
+    dim,  # Embedding dimension per head
     scale=None,
     block_size=64,  # Tile size for attention computation
-    groups=1,       # Grouped query attention (GQA) groups
+    groups=1,  # Grouped query attention (GQA) groups
     selected_blocks=16  # Number of blocks to select per attention head
 ):
     if scale is None:
@@ -45,22 +46,23 @@ def native_sparse_attention(
 
     @T.prim_func
     def native_sparse_attention(
-            Q: T.Buffer(q_shape, dtype),        # [batch, 1, heads, dim] 
-            K: T.Buffer(kv_shape, dtype),       # [batch, seq_len, head_kv, dim]
-            V: T.Buffer(kv_shape, dtype),       # Same shape as K
-            BlockIndices: T.Buffer(block_indices_shape, block_indices_dtype),  # Selected block indices
-            Output: T.Buffer(q_shape, dtype),   # Output attention tensor
+            Q: T.Buffer(q_shape, dtype),  # [batch, 1, heads, dim] 
+            K: T.Buffer(kv_shape, dtype),  # [batch, seq_len, head_kv, dim]
+            V: T.Buffer(kv_shape, dtype),  # Same shape as K
+            BlockIndices: T.Buffer(block_indices_shape,
+                                   block_indices_dtype),  # Selected block indices
+            Output: T.Buffer(q_shape, dtype),  # Output attention tensor
     ):
         with T.Kernel(1, NV, batch * head_kv, threads=threads) as (bx, by, bz):
             # Shared memory allocations for tile storage
             Q_shared = T.alloc_shared([G, BK], dtype)  # Current query block
-            K_shared = T.alloc_shared([BS, BK], dtype) # Current key block
-            V_shared = T.alloc_shared([BS, BV], dtype) # Current value block
+            K_shared = T.alloc_shared([BS, BK], dtype)  # Current key block
+            V_shared = T.alloc_shared([BS, BV], dtype)  # Current value block
             O_shared = T.alloc_shared([G, BV], dtype)  # Output accumulator
 
             # Attention computation buffers
             acc_s = T.alloc_fragment([G, BS], accum_dtype)  # QK^T scores
-            acc_s_cast = T.alloc_fragment([G, BS], dtype)   # Casted scores for softmax
+            acc_s_cast = T.alloc_fragment([G, BS], dtype)  # Casted scores for softmax
             acc_o = T.alloc_fragment([G, BV], accum_dtype)  # Output accumulator
             scores_max = T.alloc_fragment([G], accum_dtype)
             scores_max_prev = T.alloc_fragment([G], accum_dtype)
@@ -85,10 +87,15 @@ def native_sparse_attention(
                 if i_s >= 0:  # Skip invalid/padding blocks
                     # Load current key block to shared memory
                     T.copy(K[i_b, i_s:i_s + BS, i_h, :], K_shared)
-                    
+
                     # Compute QK^T attention scores
                     T.clear(acc_s)
-                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                    T.gemm(
+                        Q_shared,
+                        K_shared,
+                        acc_s,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullRow)
 
                     # Online softmax with numerical stability
                     # 1. Compute max for scaling
@@ -97,7 +104,7 @@ def native_sparse_attention(
                     T.copy(scores_max, scores_max_prev)
                     T.fill(scores_max, -T.infinity(accum_dtype))
                     T.reduce_max(acc_s, scores_max, dim=1, clear=True)
-                    
+
                     for i in T.Parallel(G):
                         scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
                     for i, j in T.Parallel(G, BS):
@@ -115,10 +122,10 @@ def native_sparse_attention(
             for i, j in T.Parallel(G, BV):
                 acc_o[i, j] /= logsum[i]  # Normalize by logsum
             T.copy(acc_o, O_shared)
-            T.copy(O_shared, Output[i_b, 0, i_h * G:(i_h + 1) * G, i_v * BV:(i_v + 1) * BV])  # Changed i_t to 0
+            T.copy(O_shared, Output[i_b, 0, i_h * G:(i_h + 1) * G,
+                                    i_v * BV:(i_v + 1) * BV])  # Changed i_t to 0
 
     return native_sparse_attention
-
 
 
 if __name__ == "__main__":

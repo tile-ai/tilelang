@@ -83,11 +83,17 @@ def native_sparse_attention(batch,
 
                     if is_causal:
                         for i, j in T.Parallel(G, BS):
-                            acc_s[i, j] = T.if_then_else(i_t >= (i_s + j), 0, -T.infinity(acc_s.dtype))
+                            acc_s[i, j] = T.if_then_else(i_t >= (i_s + j), 0,
+                                                         -T.infinity(acc_s.dtype))
                     else:
                         T.clear(acc_s)
 
-                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                    T.gemm(
+                        Q_shared,
+                        K_shared,
+                        acc_s,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullRow)
 
                     # Softmax
                     T.copy(scores_max, scores_max_prev)
@@ -156,8 +162,7 @@ if __name__ == "__main__":
         v=V,
         block_indices=block_indices,
         block_counts=block_counts,
-        block_size=block_size
-    )
+        block_size=block_size)
 
     print("out", out)
     print("ref", ref)
