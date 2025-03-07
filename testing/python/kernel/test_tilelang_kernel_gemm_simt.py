@@ -93,10 +93,10 @@ def tl_matmul_simt(
             B_local = T.alloc_local((local_size_b, micro_size_k), in_dtype)
             C_local = T.alloc_local((local_size_c,), accum_dtype)
 
-            thread_binding = T.thread_binding(threads, "threadIdx.x")
+            tid = T.get_thread_binding()
 
-            warp_m = thread_binding % thread_row_tiles
-            warp_n = thread_binding // thread_row_tiles
+            warp_m = tid % thread_row_tiles
+            warp_n = tid // thread_row_tiles
 
             T.clear(C_local)
 

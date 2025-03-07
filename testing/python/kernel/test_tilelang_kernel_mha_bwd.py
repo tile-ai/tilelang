@@ -5,7 +5,6 @@ import torch
 import torch.nn.functional as F
 import tilelang
 from tilelang.profiler import cached
-from tilelang.autotuner import *
 import tilelang.language as T
 
 import tilelang.testing
@@ -303,7 +302,6 @@ def assert_mha_equal(batch, h, n_ctx, d_head, causal):
     dQ_ref, Q.grad = Q.grad.clone(), None
     dK_ref, K.grad = K.grad.clone(), None
     dV_ref, V.grad = V.grad.clone(), None
-
     torch.testing.assert_close(O, O_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dV, dV_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dK, dK_ref, rtol=1e-2, atol=1e-2)

@@ -256,7 +256,7 @@ def matmul(
             B_dequantize_shared = T.alloc_shared(B_dequantize_shared_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
-            tx = T.thread_binding(0, threads, thread="threadIdx.x")
+            tx = T.get_thread_binding()
 
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
@@ -458,8 +458,8 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
             B_dequantize_local = T.alloc_local((warp_cols * local_size), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size), accum_dtype)
             reduced_accum_res = T.alloc_local(0, accum_dtype)
-            thread_binding = T.thread_binding(0, threads, "threadIdx.x")
-            rk = T.thread_binding(0, reduce_k, "threadIdx.y")
+            thread_binding = T.get_thread_binding(0)
+            rk = T.get_thread_binding(1)
 
             T.annotate_layout({
                 A_shared: make_swizzle_layout(A_shared),
