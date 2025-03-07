@@ -91,7 +91,7 @@ cdef class CythonKernelWrapper:
         for param, (buffer_idx, shape_list) in self.static_shape_map.items():
             for shape_idx, shape in shape_list:
                 if tensor_list[buffer_idx].shape[shape_idx] != shape:
-                    raise ValueError(f"Static shape mismatch for parameter {param}: expected {shape}, got {tensor_list[buffer_idx].shape}")
+                    raise ValueError(f"Static shape mismatch for parameter {param}: expected {shape} at index {shape_idx}, got {tensor_list[buffer_idx].shape}")
 
         # Add dynamic dimension values to kernel arguments
         for _, (buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():

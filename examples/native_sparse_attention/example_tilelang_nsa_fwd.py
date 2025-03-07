@@ -1,8 +1,8 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 # ruff: noqa
 import torch
-from reference import naive_nsa, naive_nsa_simple
+from reference import naive_nsa
 import tilelang
 from tilelang import language as T
 import tilelang.testing
@@ -142,7 +142,8 @@ if __name__ == "__main__":
     Q = torch.randn((B, SEQ_LEN, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
     K = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
     V = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-
+    g_slc = torch.ones((B, SEQ_LEN, HQ), dtype=dtype, device='cuda').requires_grad_(True)
+    g_swa = torch.ones((B, SEQ_LEN, HQ), dtype=dtype, device='cuda').requires_grad_(True)
     DO = torch.randn((B, SEQ_LEN, HQ, D), dtype=dtype, device='cuda')
 
     block_indices = torch.full((B, SEQ_LEN, H, S), SEQ_LEN, dtype=torch.long, device='cuda')
@@ -156,13 +157,16 @@ if __name__ == "__main__":
 
     out = kernel(Q, K, V, block_indices.to(torch.int32))
 
-    ref = naive_nsa_simple(
+    ref = naive_nsa(
         q=Q,
         k=K,
         v=V,
+        g_slc=g_slc,
+        g_swa=g_swa,
         block_indices=block_indices,
         block_counts=block_counts,
-        block_size=block_size)
+        block_size=block_size
+    )
 
     print("out", out)
     print("ref", ref)
