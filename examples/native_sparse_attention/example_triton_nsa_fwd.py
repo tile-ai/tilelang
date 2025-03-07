@@ -197,8 +197,7 @@ class ParallelNSAFunction(torch.autograd.Function):
             window_size=window_size,
             scale=scale,
             offsets=offsets,
-            token_indices=token_indices
-        )
+            token_indices=token_indices)
         ctx.save_for_backward(q, k, v, o_slc, lse_slc, o_swa, lse_swa)
         ctx.block_indices = block_indices
         ctx.block_counts = block_counts
@@ -210,20 +209,18 @@ class ParallelNSAFunction(torch.autograd.Function):
         return o_slc.to(q.dtype), o_swa.to(q.dtype) if o_swa is not None else o_swa
 
 
-def parallel_nsa(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g_slc: torch.Tensor,
-    g_swa: torch.Tensor,
-    block_indices: torch.LongTensor,
-    block_counts: Optional[Union[torch.LongTensor, int]] = None,
-    block_size: int = 64,
-    window_size: int = 0,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False
-) -> torch.Tensor:
+def parallel_nsa(q: torch.Tensor,
+                 k: torch.Tensor,
+                 v: torch.Tensor,
+                 g_slc: torch.Tensor,
+                 g_swa: torch.Tensor,
+                 block_indices: torch.LongTensor,
+                 block_counts: Optional[Union[torch.LongTensor, int]] = None,
+                 block_size: int = 64,
+                 window_size: int = 0,
+                 scale: Optional[float] = None,
+                 cu_seqlens: Optional[torch.LongTensor] = None,
+                 head_first: bool = False) -> torch.Tensor:
     r"""
     Args:
         q (torch.Tensor):
@@ -263,11 +260,12 @@ def parallel_nsa(
             Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
     """
     if scale is None:
-        scale = k.shape[-1] ** -0.5
+        scale = k.shape[-1]**-0.5
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     if head_first:
-        q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, block_indices))
+        q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'),
+                                     (q, k, v, block_indices))
         g_slc, g_swa = map(lambda x: rearrange(x, 'b h t -> b t h'), (g_slc, g_swa))
         if isinstance(block_counts, torch.Tensor):
             block_counts = rearrange(block_counts, 'b h t -> b t h')
@@ -277,7 +275,8 @@ def parallel_nsa(
         block_indices = block_indices[:, :, :, :block_counts]
         block_counts = None
 
-    o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, window_size, scale, cu_seqlens)
+    o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size,
+                                             window_size, scale, cu_seqlens)
     if window_size > 0:
         o = torch.addcmul(o_slc * g_slc.unsqueeze(-1), o_swa, g_swa.unsqueeze(-1))
     else:
@@ -285,6 +284,7 @@ def parallel_nsa(
     if head_first:
         o = rearrange(o, 'b t h d -> b h t d')
     return o
+
 
 if __name__ == "__main__":
     B, T, H, HQ, D, S, block_size, dtype = 2, 64, 1, 16, 32, 1, 32, torch.float16

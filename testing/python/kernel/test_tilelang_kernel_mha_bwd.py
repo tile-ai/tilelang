@@ -290,13 +290,13 @@ def assert_mha_equal(batch, h, n_ctx, d_head, causal):
     dO = torch.randn_like(Q)
     O = attention(Q, K, V, causal)
     O.backward(dO, retain_graph=True)
-    dQ, Q.grad = Q.grad.clone(), None
+
     dK, K.grad = K.grad.clone(), None
     dV, V.grad = V.grad.clone(), None
 
     O_ref = ref_program(Q, K, V, causal)
     O_ref.backward(dO, retain_graph=True)
-    dQ_ref, Q.grad = Q.grad.clone(), None
+
     dK_ref, K.grad = K.grad.clone(), None
     dV_ref, V.grad = V.grad.clone(), None
     torch.testing.assert_close(O, O_ref, rtol=1e-2, atol=1e-2)

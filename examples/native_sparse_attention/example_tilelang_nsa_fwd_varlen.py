@@ -13,14 +13,14 @@ from einops import rearrange
 
 
 def native_sparse_attention_varlen(batch,
-                            heads,
-                            c_seq_len,
-                            dim,
-                            is_causal,
-                            scale=None,
-                            block_size=64,
-                            groups=1,
-                            selected_blocks=16):
+                                   heads,
+                                   c_seq_len,
+                                   dim,
+                                   is_causal,
+                                   scale=None,
+                                   block_size=64,
+                                   groups=1,
+                                   selected_blocks=16):
     if scale is None:
         scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     head_kv = heads // groups
@@ -82,7 +82,7 @@ def native_sparse_attention_varlen(batch,
 
             i_c, i_v, i_bh = bx, by, bz
             i_b, i_h = i_bh // head_kv, i_bh % head_kv
-            
+
             i_n, i_t = TokenIndices[i_c, 0], TokenIndices[i_c, 1]
 
             bos = Offsets[i_n]
@@ -102,7 +102,7 @@ def native_sparse_attention_varlen(batch,
                     # [BS, BK]
                     # Lei: may have some padding issues
                     # we should learn from mha varlen templates to handle this
-                    T.copy(K[bos + i_s: bos + i_s + BS, i_h, :BK], K_shared)
+                    T.copy(K[bos + i_s:bos + i_s + BS, i_h, :BK], K_shared)
 
                     if is_causal:
                         for i, j in T.Parallel(G, BS):
@@ -116,8 +116,7 @@ def native_sparse_attention_varlen(batch,
                         K_shared,
                         acc_s,
                         transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullRow
-                    )
+                        policy=T.GemmWarpPolicy.FullRow)
 
                     # Softmax
                     T.copy(scores_max, scores_max_prev)
@@ -137,7 +136,7 @@ def native_sparse_attention_varlen(batch,
                         acc_o[i, j] *= scores_scale[i]
 
                     # V * softmax(Q * K)
-                    T.copy(V[bos + i_s: bos + i_s + BS, i_h, i_v * BV:(i_v + 1) * BV], V_shared)
+                    T.copy(V[bos + i_s:bos + i_s + BS, i_h, i_v * BV:(i_v + 1) * BV], V_shared)
                     T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
             for i, j in T.Parallel(G, BV):
@@ -178,12 +177,18 @@ def parallel_nsa_fwd(
         groups=G,
         selected_blocks=S,
     )
-    
+
     kernel = tilelang.compile(program)
 
     o_slc = torch.empty(B, C_SEQ_LEN, HQ, V, dtype=v.dtype, device=q.device)
-    kernel(q.view(C_SEQ_LEN, HQ, D), k.view(C_SEQ_LEN, H, D), v.view(C_SEQ_LEN, H, D), o_slc.view(C_SEQ_LEN, HQ, V), block_indices.to(torch.int32).view(C_SEQ_LEN, H, S), block_counts.to(torch.int32).view(C_SEQ_LEN, H), offsets.to(torch.int32), token_indices.to(torch.int32))
+    kernel(
+        q.view(C_SEQ_LEN, HQ, D), k.view(C_SEQ_LEN, H, D), v.view(C_SEQ_LEN, H, D),
+        o_slc.view(C_SEQ_LEN, HQ, V),
+        block_indices.to(torch.int32).view(C_SEQ_LEN, H, S),
+        block_counts.to(torch.int32).view(C_SEQ_LEN, H), offsets.to(torch.int32),
+        token_indices.to(torch.int32))
     return o_slc
+
 
 @torch.compile
 class ParallelNSAFunction(torch.autograd.Function):
@@ -208,26 +213,22 @@ class ParallelNSAFunction(torch.autograd.Function):
             window_size=window_size,
             scale=scale,
             offsets=offsets,
-            token_indices=token_indices
-        )
+            token_indices=token_indices)
         return o_slc.to(q.dtype)
 
 
-
-def parallel_nsa(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g_slc: torch.Tensor,
-    g_swa: torch.Tensor,
-    block_indices: torch.LongTensor,
-    block_counts: Optional[Union[torch.LongTensor, int]] = None,
-    block_size: int = 64,
-    window_size: int = 0,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False
-) -> torch.Tensor:
+def parallel_nsa(q: torch.Tensor,
+                 k: torch.Tensor,
+                 v: torch.Tensor,
+                 g_slc: torch.Tensor,
+                 g_swa: torch.Tensor,
+                 block_indices: torch.LongTensor,
+                 block_counts: Optional[Union[torch.LongTensor, int]] = None,
+                 block_size: int = 64,
+                 window_size: int = 0,
+                 scale: Optional[float] = None,
+                 cu_seqlens: Optional[torch.LongTensor] = None,
+                 head_first: bool = False) -> torch.Tensor:
     r"""
     Args:
         q (torch.Tensor):
@@ -267,11 +268,12 @@ def parallel_nsa(
             Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
     """
     if scale is None:
-        scale = k.shape[-1] ** -0.5
+        scale = k.shape[-1]**-0.5
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     if head_first:
-        q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'), (q, k, v, block_indices))
+        q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'),
+                                     (q, k, v, block_indices))
         g_slc, g_swa = map(lambda x: rearrange(x, 'b h t -> b t h'), (g_slc, g_swa))
         if isinstance(block_counts, torch.Tensor):
             block_counts = rearrange(block_counts, 'b h t -> b t h')
@@ -281,7 +283,8 @@ def parallel_nsa(
         block_indices = block_indices[:, :, :, :block_counts]
         block_counts = None
 
-    o_slc = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, window_size, scale, cu_seqlens)
+    o_slc = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size, window_size,
+                                      scale, cu_seqlens)
     if window_size > 0:
         assert False, "Window size is not supported yet"
     else:
@@ -297,7 +300,7 @@ if __name__ == "__main__":
     # randomly split the sequence into N segments
     offsets = torch.cat([
         torch.tensor([0], dtype=torch.long),
-        torch.arange(16, C_SEQ_LEN)[torch.randperm(C_SEQ_LEN - 1)[:N-1]],
+        torch.arange(16, C_SEQ_LEN)[torch.randperm(C_SEQ_LEN - 1)[:N - 1]],
         torch.tensor([C_SEQ_LEN], dtype=torch.long)
     ], 0).cuda().sort()[0]
 
@@ -305,9 +308,18 @@ if __name__ == "__main__":
     perm_q = torch.randperm(C_SEQ_LEN, device='cuda')
     perm_k = torch.randperm(C_SEQ_LEN, device='cuda')
     perm_v = torch.randperm(C_SEQ_LEN, device='cuda')
-    q = torch.linspace(0, 1, steps=C_SEQ_LEN, dtype=dtype, device='cuda')[perm_q].view(1, C_SEQ_LEN, 1, 1).expand(1, C_SEQ_LEN, HQ, D).clone().requires_grad_(True)
-    k = torch.linspace(0, 1, steps=C_SEQ_LEN, dtype=dtype, device='cuda')[perm_k].view(1, C_SEQ_LEN, 1, 1).expand(1, C_SEQ_LEN, H, D).clone().requires_grad_(True)
-    v = torch.linspace(0, 1, steps=C_SEQ_LEN, dtype=dtype, device='cuda')[perm_v].view(1, C_SEQ_LEN, 1, 1).expand(1, C_SEQ_LEN, H, D).clone().requires_grad_(True)
+    q = torch.linspace(
+        0, 1, steps=C_SEQ_LEN, dtype=dtype,
+        device='cuda')[perm_q].view(1, C_SEQ_LEN, 1, 1).expand(1, C_SEQ_LEN, HQ,
+                                                               D).clone().requires_grad_(True)
+    k = torch.linspace(
+        0, 1, steps=C_SEQ_LEN, dtype=dtype,
+        device='cuda')[perm_k].view(1, C_SEQ_LEN, 1, 1).expand(1, C_SEQ_LEN, H,
+                                                               D).clone().requires_grad_(True)
+    v = torch.linspace(
+        0, 1, steps=C_SEQ_LEN, dtype=dtype,
+        device='cuda')[perm_v].view(1, C_SEQ_LEN, 1, 1).expand(1, C_SEQ_LEN, H,
+                                                               D).clone().requires_grad_(True)
     g_slc = torch.rand((1, C_SEQ_LEN, HQ), dtype=dtype, device='cuda').requires_grad_(True)
     g_swa = torch.rand((1, C_SEQ_LEN, HQ), dtype=dtype, device='cuda').requires_grad_(True)
     do = torch.randn((1, C_SEQ_LEN, HQ, D), dtype=dtype, device='cuda')
@@ -331,8 +343,7 @@ if __name__ == "__main__":
         block_indices=block_indices,
         block_counts=block_counts,
         block_size=block_size,
-        cu_seqlens=offsets
-    )
+        cu_seqlens=offsets)
 
     tri = parallel_nsa(
         q=q,
@@ -343,8 +354,7 @@ if __name__ == "__main__":
         block_indices=block_indices,
         block_counts=block_counts,
         block_size=block_size,
-        cu_seqlens=offsets
-    )
+        cu_seqlens=offsets)
 
     print("tri", tri)
     print("ref", ref)

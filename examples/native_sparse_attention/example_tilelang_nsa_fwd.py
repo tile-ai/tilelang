@@ -165,8 +165,7 @@ if __name__ == "__main__":
         g_swa=g_swa,
         block_indices=block_indices,
         block_counts=block_counts,
-        block_size=block_size
-    )
+        block_size=block_size)
 
     print("out", out)
     print("ref", ref)
