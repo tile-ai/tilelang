@@ -181,7 +181,7 @@ def test_topk_sparse_attention():
         BATCH, N_HEADS, SEQ_LEN, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
     kernel = tilelang.compile(program, out_idx=[4])
     print(kernel.get_kernel_source())
-    tilelang_output = kernel(q, k, v, block_mask)
+    tilelang_output = kernel(q, k, v, block_mask.to(torch.int8))
 
     # Compute reference
     # Expand block mask to full attention matrix
@@ -231,13 +231,7 @@ def test_topk_sparse_attention_qlen_lt_klen():
     print(program)
     kernel = tilelang.compile(program, out_idx=[4])
     print(kernel.get_kernel_source())
-    tilelang_output = kernel(q, k, v, block_mask)
-
-    # import flash_attn
-
-    # ref_out = flash_attn.flash_attn_func(q, k, v, causal=True)
-    # torch.testing.assert_close(tilelang_output, ref_out, atol=1e-2, rtol=1e-2)
-    # exit()
+    tilelang_output = kernel(q, k, v, block_mask.to(torch.int8))
 
     past_len = K_LEN - Q_LEN
 
@@ -268,5 +262,5 @@ def test_topk_sparse_attention_qlen_lt_klen():
 
 
 if __name__ == "__main__":
-    # test_topk_sparse_attention()
+    test_topk_sparse_attention()
     test_topk_sparse_attention_qlen_lt_klen()
