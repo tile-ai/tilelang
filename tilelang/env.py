@@ -2,8 +2,37 @@ import sys
 import os
 import pathlib
 import logging
+import shutil
+import glob
 
 logger = logging.getLogger(__name__)
+
+
+def _find_cuda_home() -> str:
+    """Find the CUDA install path.
+    
+    Adapted from https://github.com/pytorch/pytorch/blob/main/torch/utils/cpp_extension.py
+    """
+    # Guess #1
+    cuda_home = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')
+    if cuda_home is None:
+        # Guess #2
+        nvcc_path = shutil.which("nvcc")
+        if nvcc_path is not None and "cuda" in nvcc_path.lower():
+            cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
+        else:
+            # Guess #3
+            if sys.platform == 'win32':
+                cuda_homes = glob.glob('C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*.*')
+                cuda_home = '' if len(cuda_homes) == 0 else cuda_homes[0]
+            else:
+                cuda_home = '/usr/local/cuda'
+            if not os.path.exists(cuda_home):
+                cuda_home = None
+    return cuda_home if cuda_home is not None else ""
+
+
+CUDA_HOME = _find_cuda_home()
 
 CUTLASS_INCLUDE_DIR: str = os.environ.get("TL_CUTLASS_PATH", None)
 TVM_PYTHON_PATH: str = os.environ.get("TVM_IMPORT_PYTHON_PATH", None)
@@ -85,4 +114,5 @@ __all__ = [
     "TVM_PYTHON_PATH",
     "TVM_LIBRARY_PATH",
     "TILELANG_TEMPLATE_PATH",
+    "CUDA_HOME",
 ]

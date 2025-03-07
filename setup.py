@@ -20,11 +20,26 @@ from distutils.version import LooseVersion
 import platform
 import multiprocessing
 from setuptools.command.build_ext import build_ext
+import importlib
 
 # Environment variables False/True
 PYPI_BUILD = os.environ.get("PYPI_BUILD", "False").lower() == "true"
 PACKAGE_NAME = "tilelang"
 ROOT_DIR = os.path.dirname(__file__)
+
+
+def load_module_from_path(module_name, path):
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+envs = load_module_from_path('env', os.path.join(ROOT_DIR, PACKAGE_NAME, 'env.py'))
+CUDA_HOME = envs.CUDA_HOME
+
+assert CUDA_HOME, "Failed to automatically detect CUDA installation. Please set the CUDA_HOME environment variable manually (e.g., export CUDA_HOME=/usr/local/cuda)."
 
 # TileLang only supports Linux platform
 assert sys.platform.startswith("linux"), "TileLang only supports Linux platform (including WSL)."
@@ -193,7 +208,7 @@ def build_csrc(llvm_config_path):
     # Set LLVM path and enable CUDA in config.cmake
     with open("config.cmake", "a") as config_file:
         config_file.write(f"set(USE_LLVM {llvm_config_path})\n")
-        config_file.write("set(USE_CUDA /usr/local/cuda)\n")
+        config_file.write(f"set(USE_CUDA {CUDA_HOME})\n")
     # Run CMake and make
     try:
         subprocess.check_call(["cmake", ".."])
@@ -519,7 +534,7 @@ class CMakeBuild(build_ext):
         # Here, we set USE_LLVM and USE_CUDA, for example.
         with open(dst_config_cmake, "a") as config_file:
             config_file.write(f"set(USE_LLVM {llvm_config_path})\n")
-            config_file.write("set(USE_CUDA /usr/local/cuda)\n")
+            config_file.write(f"set(USE_CUDA {CUDA_HOME})\n")
 
         # Run CMake to configure the project with the given arguments.
         subprocess.check_call(["cmake", ext.sourcedir] + cmake_args, cwd=build_temp)

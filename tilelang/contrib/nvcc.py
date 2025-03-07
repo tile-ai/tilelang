@@ -8,6 +8,7 @@ from __future__ import absolute_import as _abs
 import os
 import subprocess
 import warnings
+from ..env import CUDA_HOME
 
 import tvm._ffi
 from tvm.target import Target
@@ -126,24 +127,17 @@ def compile_cuda(code,
 
 def find_cuda_path():
     """Utility function to find cuda path
-
+    
     Returns
     -------
     path : str
         Path to cuda root.
     """
-    if "CUDA_PATH" in os.environ:
-        return os.environ["CUDA_PATH"]
-    cmd = ["which", "nvcc"]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    (out, _) = proc.communicate()
-    out = py_str(out)
-    if proc.returncode == 0:
-        return os.path.realpath(os.path.join(str(out).strip(), "../.."))
-    cuda_path = "/usr/local/cuda"
-    if os.path.exists(os.path.join(cuda_path, "bin/nvcc")):
-        return cuda_path
-    raise RuntimeError("Cannot find cuda path")
+    if CUDA_HOME:
+        return CUDA_HOME
+    raise RuntimeError(
+        "Failed to automatically detect CUDA installation. Please set the CUDA_HOME environment variable manually (e.g., export CUDA_HOME=/usr/local/cuda)."
+    )
 
 
 def get_cuda_version(cuda_path=None):

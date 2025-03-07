@@ -93,7 +93,11 @@ cd build
 
 
 echo "Configuring TVM build with LLVM and CUDA paths..."
-echo "set(USE_LLVM $LLVM_CONFIG_PATH)" >> config.cmake && echo "set(USE_CUDA /usr/local/cuda)" >> config.cmake
+echo "set(USE_LLVM \"$LLVM_CONFIG_PATH\")" >> config.cmake && \
+    CUDA_HOME=$(python -c "import sys; sys.path.append('../tilelang'); from env import CUDA_HOME; print(CUDA_HOME)") || \
+    { echo "ERROR: Failed to retrieve CUDA_HOME via Python script." >&2; exit 1; } && \
+    { [ -n "$CUDA_HOME" ] || { echo "ERROR: CUDA_HOME is empty, check CUDA installation or _find_cuda_home() in setup.py" >&2; exit 1; }; } && \
+    echo "set(USE_CUDA \"$CUDA_HOME\")" >> config.cmake
 
 echo "Running CMake for TileLang..."
 cmake ..
