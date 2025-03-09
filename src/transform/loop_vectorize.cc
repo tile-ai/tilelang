@@ -70,23 +70,17 @@ private:
   }
 
   void VisitExpr_(const BufferLoadNode *node) final {
-    LOG(INFO) << "VisitExpr_(const BufferLoadNode *node)";
     if (node->buffer.scope() == "shared" || node->buffer.scope() == "global" ||
         node->buffer.scope() == "shared.dyn")
       has_nonlocal_memory_access_ = true;
-    LOG(INFO) << "VisitExpr_(const BufferLoadNode *node) 2";
-    LOG(INFO) << "node->buffer->shape.size(): " << node->buffer->shape.size();
-    LOG(INFO) << "node->buffer->shape: " << node->buffer->shape;
     if (node->buffer->shape.size() == 1) {
       // TODO(lei): This should be improved as
       // constant buffer that tl hack to use as local register.
       auto boundary_check = node->buffer->shape[0].as<IntImmNode>();
       if (boundary_check && boundary_check->value == 1) {
-        LOG(INFO) << "VisitExpr_(const BufferLoadNode *node) 2.1";
         return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
       }
     }
-    LOG(INFO) << "VisitExpr_(const BufferLoadNode *node) 3";
     UpdateVectorSize(node->indices, node->buffer);
     return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
   }
