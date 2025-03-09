@@ -575,14 +575,14 @@ def get_tensorized_func_and_tags(
         # analysis pipeline stage
         # todo(lei): maybe we can integrate this into policy in the future
         tags["pipeline_stage"] = 1
-        if target.kind.name == "cuda" and check_sm_version(target.arch) == 80:
+        if target.kind.name == "cuda" and check_sm_version(target.arch) in {80, 90}:
             # enable pipeline stage only for sm_80 devices
             tags["pipeline_stage"] = 2
 
         # analysis async copy
         # todo(lei): maybe we can integrate this into policy in the future
         tags["use_async_copy"] = False
-        if tags["pipeline_stage"] == 2 and check_sm_version(target.arch) >= 80:
+        if tags["pipeline_stage"] == 2 and check_sm_version(target.arch) in {80, 90}:
             # async copy only works in software pipeline.
             tags["use_async_copy"] = True
 

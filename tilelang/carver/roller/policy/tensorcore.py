@@ -33,7 +33,7 @@ class TensorCorePolicy(DefaultPolicy):
         if pipleline_stage:
             self.pipeline_stage = pipleline_stage
         else:
-            if self.arch.compute_capability == "sm_80":
+            if self.arch.compute_capability in {"sm_80", "sm_90", "sm_90a"}:
                 self.pipeline_stage = 2
             else:
                 self.pipeline_stage = 1
@@ -41,7 +41,7 @@ class TensorCorePolicy(DefaultPolicy):
         if use_async_copy:
             self.use_async_copy = use_async_copy
         else:
-            if self.arch.compute_capability == "sm_80":
+            if self.arch.compute_capability in {"sm_80", "sm_90", "sm_90a"}:
                 self.use_async_copy = True
             else:
                 self.use_async_copy = False
