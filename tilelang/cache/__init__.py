@@ -12,11 +12,13 @@ from tvm.tir import PrimFunc
 _cached = {}
 
 
-def cached(func: Callable,
-           out_idx: List[int] = None,
-           target: Union[str, Target] = "auto",
-           target_host: Union[str, Target] = None,
-           *args) -> JITKernel:
+def cached(
+    func: Callable,
+    out_idx: List[int] = None,
+    *args,
+    target: Union[str, Target] = "auto",
+    target_host: Union[str, Target] = None,
+) -> JITKernel:
     """
     Cache and reuse compiled kernels to avoid redundant compilation.
     
