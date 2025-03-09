@@ -24,7 +24,7 @@ def jit(
     func: Callable = None,
     *,  # Enforce keyword-only arguments from here on
     out_idx: Union[List[int], int] = None,
-    execution_backend: Literal["dlpack", "ctypes"] = "dlpack",
+    execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
     target: Union[str, Target] = "auto",
     verbose: bool = False,
 ) -> BaseKernelAdapter:
