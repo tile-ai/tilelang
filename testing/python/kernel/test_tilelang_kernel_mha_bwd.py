@@ -4,7 +4,7 @@
 import torch
 import torch.nn.functional as F
 import tilelang
-from tilelang.profiler import cached
+from tilelang import cached
 import tilelang.language as T
 
 import tilelang.testing
