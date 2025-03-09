@@ -1,4 +1,4 @@
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Tile-AI Corporation.
 // Licensed under the MIT License.
 
 /*!
@@ -18,6 +18,8 @@
 
 namespace tvm {
 namespace tl {
+
+TVM_REGISTER_PASS_CONFIG_OPTION(kDisableTMALower, Bool);
 
 #define TIR_DEFINE_TL_BUILTIN(OpName)                                          \
   const Op &OpName() {                                                         \

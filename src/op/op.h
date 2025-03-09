@@ -1,4 +1,4 @@
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Tile-AI Corporation.
 // Licensed under the MIT License.
 
 /*!
@@ -52,6 +52,7 @@ struct LowerArgs {
   AddWorkspaceCallback AddWorkspace;
   LayoutMap layout_map;
   Map<Buffer, Buffer> buffer_remap;
+  bool disable_tma_lower;
 };
 
 struct LayoutInferArgs {

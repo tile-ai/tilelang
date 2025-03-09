@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 """
 This module provides an auto-tuning infrastructure for TileLang (tl) programs. 
@@ -6,7 +6,7 @@ It includes functionality to JIT-compile TileLang programs into a runnable
 kernel adapter using TVM.
 """
 
-from typing import Callable, List, Literal, Union
+from typing import Callable, List, Literal, Union, Any, Optional, Dict
 
 from tilelang import tvm as tvm
 from tvm.tir import PrimFunc
@@ -27,6 +27,7 @@ def jit(
     execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
     target: Union[str, Target] = "auto",
     verbose: bool = False,
+    **pass_config_kwargs: Optional[Dict[str, Any]],
 ) -> BaseKernelAdapter:
     """
     A decorator (or decorator factory) that JIT-compiles a given TileLang PrimFunc 
@@ -94,6 +95,7 @@ def jit(
             verbose=verbose,
             execution_backend=execution_backend,
             out_idx=out_idx,
+            **pass_config_kwargs,
         ).adapter
 
     # If `func` was given, compile it immediately and return the adapter.
@@ -114,6 +116,7 @@ def compile(
     target: Union[str, Target] = "auto",
     target_host: Union[str, Target] = None,
     verbose: bool = False,
+    pass_configs: Optional[Dict[str, Any]] = None,
 ) -> JITKernel:
     """
     Compile the given TileLang PrimFunc with TVM and build a JITKernel.
@@ -124,4 +127,6 @@ def compile(
         execution_backend=execution_backend,
         target=target,
         target_host=target_host,
-        verbose=verbose)
+        verbose=verbose,
+        pass_configs=pass_configs,
+    )
