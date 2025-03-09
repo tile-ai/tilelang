@@ -122,9 +122,10 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   ICHECK(desc.rank >= 1 && desc.rank <= 5) << desc.rank;
 
   // Verify datatype
-  ICHECK(global_tensor->dtype == shared_tensor->dtype) << "Copy between buffer " 
-  << global_tensor->name << " and " << shared_tensor->name << " with different data type " 
-  << global_tensor->dtype << " and " << shared_tensor->dtype;
+  ICHECK(global_tensor->dtype == shared_tensor->dtype)
+      << "Copy between buffer " << global_tensor->name << " and "
+      << shared_tensor->name << " with different data type "
+      << global_tensor->dtype << " and " << shared_tensor->dtype;
 
   desc.data_type = to_CUtensorMapDataType(global_tensor->dtype);
 

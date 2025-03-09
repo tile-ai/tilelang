@@ -1,7 +1,7 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
-from typing import List, Union, Any, Callable, Literal, Optional, Dict, Any
+from typing import List, Union, Any, Callable, Literal, Optional, Dict
 from tvm.target import Target
 import tilelang
 from tilelang import tvm as tvm
@@ -69,7 +69,7 @@ class JITKernel(object):
         self.target = target
         self.target_host = target_host
         self.verbose = verbose
-        
+
         if pass_configs is None:
             pass_configs = {}
         self.pass_configs = pass_configs

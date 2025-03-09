@@ -1,7 +1,6 @@
 // Copyright (c) Tile-AI Corporation.
 // Licensed under the MIT License.
 
-
 /*!
  * \file lower_tile_op.cc
  * \brief Lower the tile op for further codegen.
@@ -14,8 +13,8 @@
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
-#include "../op/op.h"
 #include "../op/builtin.h"
+#include "../op/op.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "loop_partition.h"
@@ -290,13 +289,14 @@ private:
 
     // Get pass config `tl.disable_tma_lower`
     tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
-    Optional<Bool> opt_disable_tma_lower = ctxt->GetConfig(kDisableTMALower, Optional<Bool>());
+    Optional<Bool> opt_disable_tma_lower =
+        ctxt->GetConfig(kDisableTMALower, Optional<Bool>());
     bool disable_tma_lower = opt_disable_tma_lower.value_or(Bool(false));
 
-    auto lowered =
-        tile_op->Lower(LowerArgs{target_, thread_block_size_, thread_var_,
-                                 callback, layout_map_, buffer_remap_, disable_tma_lower},
-                       analyzer_);
+    auto lowered = tile_op->Lower(LowerArgs{target_, thread_block_size_,
+                                            thread_var_, callback, layout_map_,
+                                            buffer_remap_, disable_tma_lower},
+                                  analyzer_);
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
 

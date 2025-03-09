@@ -145,7 +145,6 @@ class CythonKernelAdapter(BaseKernelAdapter):
     static_shape_map: Optional[Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]]] = None
     # Pass configs for the compiler
     pass_configs: Optional[Dict[str, Any]] = None
-    
 
     def __init__(self,
                  rt_mod,

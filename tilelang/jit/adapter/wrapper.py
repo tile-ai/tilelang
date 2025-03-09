@@ -79,7 +79,11 @@ class TLCUDASourceWrapper(object):
 
     backend = "tl"
 
-    def __init__(self, scheduled_ir_module: IRModule, source: str, target: Target, pass_configs: Optional[Dict[str, Any]] = None):
+    def __init__(self,
+                 scheduled_ir_module: IRModule,
+                 source: str,
+                 target: Target,
+                 pass_configs: Optional[Dict[str, Any]] = None):
         self.mod = scheduled_ir_module
         self.target = target
         self.source = source
@@ -359,7 +363,11 @@ class TLCUDASourceWrapper(object):
 
 class TLHIPSourceWrapper(TLCUDASourceWrapper):
 
-    def __init__(self, scheduled_ir_module: IRModule, source: str, target: Target, pass_configs: Optional[Dict[str, Any]] = None):
+    def __init__(self,
+                 scheduled_ir_module: IRModule,
+                 source: str,
+                 target: Target,
+                 pass_configs: Optional[Dict[str, Any]] = None):
         super().__init__(scheduled_ir_module, source, target, pass_configs)
 
     def get_hip_init_func(self):
@@ -405,7 +413,11 @@ class TLCPUSourceWrapper(object):
     backend = "tl"
     backend = "tl"
 
-    def __init__(self, scheduled_ir_module: IRModule, source: str, target: Target, pass_configs: Optional[Dict[str, Any]] = None):
+    def __init__(self,
+                 scheduled_ir_module: IRModule,
+                 source: str,
+                 target: Target,
+                 pass_configs: Optional[Dict[str, Any]] = None):
         self.mod = scheduled_ir_module
         self.target = target
         self.source = source
