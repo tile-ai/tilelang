@@ -129,7 +129,7 @@ class Autotuner:
         # 90% utilization
         num_workers = max(1, int(os.cpu_count() * 0.9))
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
-        
+
         # Submit all compilation jobs
         futures = []
         future_to_index = {}  # Track which future corresponds to which config
@@ -140,15 +140,16 @@ class Autotuner:
 
         # Process results with error handling
         results_with_configs = []
-        for future in tqdm(concurrent.futures.as_completed(futures), 
-                          total=len(futures), 
-                          desc="Compiling configurations"):
+        for future in tqdm(
+                concurrent.futures.as_completed(futures),
+                total=len(futures),
+                desc="Compiling configurations"):
             idx = future_to_index[future]
             config = config_args[idx]
             try:
                 result = future.result()
                 results_with_configs.append((result, config))
-            except Exception as e:
+            except Exception:
                 logger.debug(f"Compilation failed for config {config} at index {idx}")
                 continue
 
@@ -176,7 +177,7 @@ class Autotuner:
 
             progress_bar.set_postfix({"best_latency": best_latency})
             tqdm.write(f"Tuned Latency {latency} with config {config} at index {i}")
-        
+
         pool.shutdown()
         return best_latency, best_config, ref_latency
 
