@@ -86,7 +86,7 @@ def run_cache_matmul(
     )
 
     kernel = cached(program, [2])
-    
+
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -120,6 +120,5 @@ def test_cache_matmul_f16f16f16_nn():
     )
 
 
-
 if __name__ == "__main__":
-    test_cache_matmul_f16f16f16_nn()
+    tilelang.testing.main()

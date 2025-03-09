@@ -11,10 +11,11 @@ from tvm.tir import PrimFunc
 # Dictionary to store cached kernels
 _cached = {}
 
+
 def cached(func: Callable,
            out_idx: List[int] = None,
            target: Union[str, Target] = "auto",
-           target_host: Union[str, Target] = None, 
+           target_host: Union[str, Target] = None,
            *args) -> JITKernel:
     """
     Cache and reuse compiled kernels to avoid redundant compilation.
@@ -32,22 +33,19 @@ def cached(func: Callable,
     global _cached
     # Create a unique key based on the function, output indices and arguments
     key = (func, tuple(out_idx), *args)
-    
+
     # Return cached kernel if available
     if key not in _cached:
         # Handle both PrimFunc objects and callable functions
-        if isinstance(func, PrimFunc):
-            program = func
-        else:
-            # Execute the function to get the program
-            program = func(*args)
-            
+        program = func if isinstance(func, PrimFunc) else func(*args)
+
         # Compile the program to a kernel
         kernel = compile(program, out_idx=out_idx, target=target, target_host=target_host)
         # Store in cache for future use
         _cached[key] = kernel
-        
+
     return _cached[key]
+
 
 def clear_cache():
     """
