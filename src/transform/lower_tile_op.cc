@@ -1,21 +1,5 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership. The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
+// Copyright (c) Tile-AI Corporation.
+// Licensed under the MIT License.
 
 /*!
  * \file lower_tile_op.cc
@@ -29,6 +13,7 @@
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
+#include "../op/builtin.h"
 #include "../op/op.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
@@ -302,10 +287,16 @@ private:
       return workspace.access_ptr(2); // write
     };
 
-    auto lowered =
-        tile_op->Lower(LowerArgs{target_, thread_block_size_, thread_var_,
-                                 callback, layout_map_, buffer_remap_},
-                       analyzer_);
+    // Get pass config `tl.disable_tma_lower`
+    tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
+    Optional<Bool> opt_disable_tma_lower =
+        ctxt->GetConfig(kDisableTMALower, Optional<Bool>());
+    bool disable_tma_lower = opt_disable_tma_lower.value_or(Bool(false));
+
+    auto lowered = tile_op->Lower(LowerArgs{target_, thread_block_size_,
+                                            thread_var_, callback, layout_map_,
+                                            buffer_remap_, disable_tma_lower},
+                                  analyzer_);
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
 

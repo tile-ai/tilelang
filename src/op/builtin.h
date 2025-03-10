@@ -1,4 +1,4 @@
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Tile-AI Corporation.
 // Licensed under the MIT License.
 
 /*!
@@ -11,9 +11,12 @@
 #define TVM_TL_OP_BUILTIN_H_
 
 #include "op.h"
+#include <tvm/ir/transform.h>
 
 namespace tvm {
 namespace tl {
+
+static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
 
 /*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load

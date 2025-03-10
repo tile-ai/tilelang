@@ -1,10 +1,10 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 """The profiler and convert to torch utils"""
 
 from ..base import BaseKernelAdapter
 import ctypes
-from typing import List, Optional, Union, Callable, Dict, Tuple
+from typing import List, Optional, Union, Callable, Dict, Tuple, Any
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tvm.relay import TensorType
@@ -143,6 +143,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
     #     "A": [(0, 16), (1, 16)] -> represents A.shape = (16, 16)
     # }
     static_shape_map: Optional[Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]]] = None
+    # Pass configs for the compiler
+    pass_configs: Optional[Dict[str, Any]] = None
 
     def __init__(self,
                  rt_mod,
@@ -150,7 +152,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
                  result_idx: List[int],
                  target,
                  func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-                 verbose: bool = False):
+                 verbose: bool = False,
+                 pass_configs: Optional[Dict[str, Any]] = None):
         """Initialize the adapter with the given TIR function or module.
         
         Args:
@@ -180,6 +183,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.lib_generator = LibraryGenerator(self.target)
 
         self.wrapper.assign_optimized_module(self.ir_module)
+        self.wrapper.assign_pass_configs(pass_configs)
         self.wrapped_source = self.wrapper.wrap(self.get_kernel_source(kernel_only=True))
 
         self.lib_generator.update_lib_code(self.wrapped_source)

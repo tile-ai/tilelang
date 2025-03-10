@@ -1,7 +1,7 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
-from typing import List, Union, Any, Callable, Literal, Optional
+from typing import List, Union, Any, Callable, Literal, Optional, Dict
 from tvm.target import Target
 import tilelang
 from tilelang import tvm as tvm
@@ -38,6 +38,7 @@ class JITKernel(object):
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
         verbose: bool = False,
+        pass_configs: Optional[Dict[str, Any]] = None,
     ):
         """
         Initializes a TorchFunction instance.
@@ -56,6 +57,11 @@ class JITKernel(object):
             Target host for cross-compilation (default: None).
         verbose : bool, optional
             Whether to enable verbose output (default: False).
+        pass_configs : dict, optional
+            Additional keyword arguments to pass to the Compiler PassContext.
+            Available options: 
+                "tir.disable_vectorize": bool, default: False
+                "tl.disable_tma_lower": bool, default: False
         """
         self.func = func
         self.out_idx = out_idx
@@ -63,6 +69,10 @@ class JITKernel(object):
         self.target = target
         self.target_host = target_host
         self.verbose = verbose
+
+        if pass_configs is None:
+            pass_configs = {}
+        self.pass_configs = pass_configs
 
         # If the target is specified as a string, validate it and convert it to a TVM Target.
         if isinstance(target, str):
@@ -124,9 +134,10 @@ class JITKernel(object):
         target_host = self.target_host
         out_idx = self.out_idx
         execution_backend = self.execution_backend
+        pass_configs = self.pass_configs
 
         # Compile the function with TVM, optimizing with shared memory lowering.
-        with tvm.transform.PassContext(opt_level=3):
+        with tvm.transform.PassContext(opt_level=3, config=pass_configs):
             rt_mod, params = tilelang.lower(tilelang_func, target=target, target_host=target_host)
 
         # Store the runtime module and parameters for later use.
@@ -145,6 +156,7 @@ class JITKernel(object):
                 target=target,
                 func_or_mod=tilelang_func,
                 verbose=verbose,
+                pass_configs=pass_configs,
             )
         elif execution_backend == "cython":
             adapter = CythonKernelAdapter(
@@ -154,6 +166,7 @@ class JITKernel(object):
                 target=target,
                 func_or_mod=tilelang_func,
                 verbose=verbose,
+                pass_configs=pass_configs,
             )
         else:
             # Handle invalid backend.

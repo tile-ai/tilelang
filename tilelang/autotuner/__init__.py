@@ -14,6 +14,8 @@ import concurrent.futures
 import os
 from functools import partial
 
+logger = logging.getLogger(__name__)
+
 logging.basicConfig(
     filename='out.log',
     filemode='w',
@@ -108,7 +110,6 @@ class Autotuner:
 
         # Parallel compilation
         config_args = []
-        jit_contexts = []
 
         for config in self.configs:
             new_args = []
@@ -128,39 +129,56 @@ class Autotuner:
         # 90% utilization
         num_workers = max(1, int(os.cpu_count() * 0.9))
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
-        results = tqdm(
-            pool.map(
-                worker,
-                config_args,
-            ), desc="Compiling configurations")
-        for result in results:
-            jit_contexts.append(result)
+
+        # Submit all compilation jobs
+        futures = []
+        future_to_index = {}  # Track which future corresponds to which config
+        for i, config_arg in enumerate(config_args):
+            future = pool.submit(worker, config_arg)
+            futures.append(future)
+            future_to_index[future] = i
+
+        # Process results with error handling
+        results_with_configs = []
+        for future in tqdm(
+                concurrent.futures.as_completed(futures),
+                total=len(futures),
+                desc="Compiling configurations"):
+            idx = future_to_index[future]
+            config = config_args[idx]
+            try:
+                result = future.result()
+                results_with_configs.append((result, config))
+            except Exception:
+                logger.debug(f"Compilation failed for config {config} at index {idx}")
+                continue
 
         ref_latency = None
-        progress_bar = tqdm(range(len(config_args)), desc="Bench configurations")
+        progress_bar = tqdm(range(len(results_with_configs)), desc="Bench configurations")
         for i in progress_bar:
-            jit_context = jit_contexts[i]
-            config = config_args[i]
+            jit_context, config = results_with_configs[i]
             try:
                 # Use ThreadPoolExecutor to enforce timeout on target_fn execution
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(target_fn, jit_context)
                     latency, ref_latency = future.result(timeout=self.timeout)
             except concurrent.futures.TimeoutError:
-                logging.error(f"Timeout exceeded for config {config}. Skipping this configuration.")
+                logger.debug(f"Timeout exceeded for config {config}. Skipping this configuration.")
                 continue
             except Exception as e:
-                logging.error(f"An error occurred while testing config {config}: {e}")
+                logger.debug(f"An error occurred while testing config {config}: {e}")
                 continue
 
-            logging.info(f"Config {config} latency: {latency}")
-
-            progress_bar.set_postfix({"best_latency": best_latency})
+            logging.debug(f"Config {config} latency: {latency} at index {i}")
 
             if latency < best_latency:
                 best_latency = latency
                 best_config = config
-            tqdm.write(f"Tuned Latency {latency} with config {config}")
+
+            progress_bar.set_postfix({"best_latency": best_latency})
+            tqdm.write(f"Tuned Latency {latency} with config {config} at index {i}")
+
+        pool.shutdown()
         return best_latency, best_config, ref_latency
 
     def __call__(self, *args: Any, **kwds: Any) -> Any:

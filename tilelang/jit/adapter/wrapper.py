@@ -1,9 +1,9 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 from abc import ABC, abstractmethod
 from tilelang import tvm as tvm
-from typing import Optional, List, Dict, Union
+from typing import Optional, List, Dict, Union, Any
 from tvm import IRModule
 from tvm.target import Target
 from .utils import match_declare_kernel, match_declare_kernel_cpu, is_cuda_target, is_hip_target, is_cpu_target, get_annotated_mod
@@ -79,10 +79,15 @@ class TLCUDASourceWrapper(object):
 
     backend = "tl"
 
-    def __init__(self, scheduled_ir_module: IRModule, source: str, target: Target):
+    def __init__(self,
+                 scheduled_ir_module: IRModule,
+                 source: str,
+                 target: Target,
+                 pass_configs: Optional[Dict[str, Any]] = None):
         self.mod = scheduled_ir_module
         self.target = target
         self.source = source
+        self.pass_configs = pass_configs
         self.function_names: Optional[str] = None
         self.dynamic_smem_buf: Optional[int] = None
         self.block_info: Union[List[int], Dict] = [1, 1, 1]
@@ -239,7 +244,8 @@ class TLCUDASourceWrapper(object):
         return tma_descripter_init
 
     def parse_source_information(self):
-        device_mod, host_mod = get_annotated_mod(self.mod, self.target)
+        with tvm.transform.PassContext(opt_level=3, config=self.pass_configs):
+            device_mod, host_mod = get_annotated_mod(self.mod, self.target)
         assert (len(device_mod.functions) >= 1), "Device module should have at least one function."
         assert (len(host_mod.functions) == 1), "Only support one function in host module."
 
@@ -357,8 +363,12 @@ class TLCUDASourceWrapper(object):
 
 class TLHIPSourceWrapper(TLCUDASourceWrapper):
 
-    def __init__(self, scheduled_ir_module: IRModule, source: str, target: Target):
-        super().__init__(scheduled_ir_module, source, target)
+    def __init__(self,
+                 scheduled_ir_module: IRModule,
+                 source: str,
+                 target: Target,
+                 pass_configs: Optional[Dict[str, Any]] = None):
+        super().__init__(scheduled_ir_module, source, target, pass_configs)
 
     def get_hip_init_func(self):
         # Initialize an empty string for the CUDA function call
@@ -403,10 +413,15 @@ class TLCPUSourceWrapper(object):
     backend = "tl"
     backend = "tl"
 
-    def __init__(self, scheduled_ir_module: IRModule, source: str, target: Target):
+    def __init__(self,
+                 scheduled_ir_module: IRModule,
+                 source: str,
+                 target: Target,
+                 pass_configs: Optional[Dict[str, Any]] = None):
         self.mod = scheduled_ir_module
         self.target = target
         self.source = source
+        self.pass_configs = pass_configs
         self.function_names: Optional[str] = None
         self.dynamic_smem_buf: Optional[int] = None
         self.parse_source_information()
@@ -490,7 +505,8 @@ class TLCPUSourceWrapper(object):
         return host_func
 
     def parse_source_information(self):
-        device_mod, host_mod = get_annotated_mod(self.mod, self.target)
+        with tvm.transform.PassContext(opt_level=3, config=self.pass_configs):
+            device_mod, host_mod = get_annotated_mod(self.mod, self.target)
         assert (len(device_mod.functions) >= 1), "Device module should have at least one function."
         assert (len(host_mod.functions) == 1), "Only support one function in host module."
 
@@ -556,11 +572,15 @@ class TLWrapper(BaseWrapper):
     def __init__(self, target: Target):
         super().__init__()
         self.scheduled_ir_module = None
+        self.pass_configs = None
         self.target = target
         self.lib = None
 
     def assign_optimized_module(self, scheduled_ir_module: IRModule):
         self.scheduled_ir_module = scheduled_ir_module
+
+    def assign_pass_configs(self, pass_configs: Dict[str, Any]):
+        self.pass_configs = pass_configs
 
     # Get Scheduled Rt Module and return source to be compiled
     def wrap(self, c_source: str):
@@ -573,5 +593,5 @@ class TLWrapper(BaseWrapper):
             wrapper_class = TLCPUSourceWrapper
         else:
             raise ValueError(f"Unsupported platform: {self.arch.platform}")
-        wrapper = wrapper_class(self.scheduled_ir_module, c_source, self.target)
+        wrapper = wrapper_class(self.scheduled_ir_module, c_source, self.target, self.pass_configs)
         return wrapper.lib_code
