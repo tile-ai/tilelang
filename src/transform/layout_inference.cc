@@ -225,7 +225,12 @@ public:
     // Collect layout info for For nodes
     Map<For, Fragment> for_map;
     Map<For, PrimExpr> predicate_map;
-    for (auto &base_infer : infer_list_) {
+    ICHECK(infer_list_.size() == thread_var_vec_.size())
+        << "infer_list_ and thread_var_vec_ size mismatch";
+    for (int i = 0; i < infer_list_.size(); i++) {
+      std::unique_ptr<Operator> base_infer = std::move(infer_list_[i]);
+      auto thread_var = thread_var_vec_[i];
+
       // Check if base_infer is valid
       ICHECK(base_infer != nullptr) << "Null pointer encountered in "
                                        "infer_list_ while collecting for_map.";
@@ -238,10 +243,10 @@ public:
         for_map.Set(for_infer->GetRoot(), for_infer->GetLoopLayout());
 
         // thread_var_ should be defined if we rely on it
-        ICHECK(thread_var_.defined())
-            << "thread_var_ is not defined. Cannot retrieve predicate.";
+        ICHECK(thread_var.defined())
+            << "thread_var is not defined. Cannot retrieve predicate.";
 
-        if (auto predicate = for_infer->GetPredicate(thread_var_->var)) {
+        if (auto predicate = for_infer->GetPredicate(thread_var->var)) {
           predicate_map.Set(for_infer->GetRoot(), predicate.value());
         }
       }
@@ -426,7 +431,8 @@ tvm::transform::Pass LayoutInference() {
     collector(f->body);
     bool has_thread_binding = collector.thread_binding_.size() > 0;
     bool skip_thread_partition = !has_thread_binding;
-    return LayoutInferencer::Substitute(std::move(f), skip_thread_partition);
+    auto _f = LayoutInferencer::Substitute(std::move(f), skip_thread_partition);
+    return _f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LayoutInference", {});
 }
