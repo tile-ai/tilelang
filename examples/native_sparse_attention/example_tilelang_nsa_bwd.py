@@ -30,7 +30,7 @@ def tilelang_kernel_fwd(
     from tilelang import language as T
 
     if scale is None:
-        scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
+        scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     else:
         scale = scale * 1.44269504  # log2(e)
 
@@ -60,12 +60,12 @@ def tilelang_kernel_fwd(
     @tilelang.jit
     @T.prim_func
     def native_sparse_attention(
-        Q: T.Buffer(q_shape, dtype),
-        K: T.Buffer(kv_shape, dtype),
-        V: T.Buffer(kv_shape, dtype),
-        BlockIndices: T.Buffer(block_indices_shape, block_indices_dtype),
-        O_slc: T.Buffer(o_slc_shape, dtype),
-        LSE_slc: T.Buffer(lse_slc_shape, accum_dtype),
+            Q: T.Buffer(q_shape, dtype),
+            K: T.Buffer(kv_shape, dtype),
+            V: T.Buffer(kv_shape, dtype),
+            BlockIndices: T.Buffer(block_indices_shape, block_indices_dtype),
+            O_slc: T.Buffer(o_slc_shape, dtype),
+            LSE_slc: T.Buffer(lse_slc_shape, accum_dtype),
     ):
         with T.Kernel(seq_len, NV, batch * head_kv, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([G, BK], dtype)
@@ -86,7 +86,7 @@ def tilelang_kernel_fwd(
             i_b, i_h = i_bh // head_kv, i_bh % head_kv
 
             NS = S
-            T.copy(Q[i_b, i_t, i_h * G : (i_h + 1) * G, :], Q_shared)
+            T.copy(Q[i_b, i_t, i_h * G:(i_h + 1) * G, :], Q_shared)
 
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
@@ -96,13 +96,12 @@ def tilelang_kernel_fwd(
                 i_s = BlockIndices[i_b, i_t, i_h, i] * BS
                 if i_s <= i_t and i_s >= 0:
                     # [BS, BK]
-                    T.copy(K[i_b, i_s : i_s + BS, i_h, :], K_shared)
+                    T.copy(K[i_b, i_s:i_s + BS, i_h, :], K_shared)
 
                     if is_causal:
                         for i, j in T.Parallel(G, BS):
-                            acc_s[i, j] = T.if_then_else(
-                                i_t >= (i_s + j), 0, -T.infinity(acc_s.dtype)
-                            )
+                            acc_s[i, j] = T.if_then_else(i_t >= (i_s + j), 0,
+                                                         -T.infinity(acc_s.dtype))
                     else:
                         T.clear(acc_s)
 
@@ -119,13 +118,9 @@ def tilelang_kernel_fwd(
                     T.fill(scores_max, -T.infinity(accum_dtype))
                     T.reduce_max(acc_s, scores_max, dim=1, clear=True)
                     for i in T.Parallel(G):
-                        scores_scale[i] = T.exp2(
-                            scores_max_prev[i] * scale - scores_max[i] * scale
-                        )
+                        scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
                     for i, j in T.Parallel(G, BS):
-                        acc_s[i, j] = T.exp2(
-                            acc_s[i, j] * scale - scores_max[i] * scale
-                        )
+                        acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
                     T.reduce_sum(acc_s, scores_sum, dim=1)
                     for i in T.Parallel(G):
                         logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
@@ -136,9 +131,7 @@ def tilelang_kernel_fwd(
                         acc_o[i, j] *= scores_scale[i]
 
                     # V * softmax(Q * K)
-                    T.copy(
-                        V[i_b, i_s : i_s + BS, i_h, i_v * BV : (i_v + 1) * BV], V_shared
-                    )
+                    T.copy(V[i_b, i_s:i_s + BS, i_h, i_v * BV:(i_v + 1) * BV], V_shared)
                     T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
             for i, j in T.Parallel(G, BV):
@@ -146,11 +139,11 @@ def tilelang_kernel_fwd(
             T.copy(acc_o, O_shared)
             T.copy(
                 O_shared,
-                O_slc[i_b, i_t, i_h * G : (i_h + 1) * G, i_v * BV : (i_v + 1) * BV],
+                O_slc[i_b, i_t, i_h * G:(i_h + 1) * G, i_v * BV:(i_v + 1) * BV],
             )
             for i in T.Parallel(G):
                 logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
-            T.copy(logsum, LSE_slc[i_b, i_t, i_h * G : (i_h + 1) * G])
+            T.copy(logsum, LSE_slc[i_b, i_t, i_h * G:(i_h + 1) * G])
 
     return native_sparse_attention
 
@@ -169,7 +162,7 @@ def tilelang_kernel_bwd_dkv(
     accum_dtype="float",
 ):
     if scale is None:
-        sm_scale = (1.0 / dim) ** 0.5
+        sm_scale = (1.0 / dim)**0.5
     else:
         sm_scale = scale
 
@@ -205,15 +198,15 @@ def tilelang_kernel_bwd_dkv(
     @tilelang.jit
     @T.prim_func
     def flash_bwd_dkv(
-        Q: T.Buffer(q_shape, dtype),
-        K: T.Buffer(k_shape, dtype),
-        V: T.Buffer(v_shape, dtype),
-        LSE_slc: T.Buffer(lse_slc_shape, accum_dtype),
-        Delta_slc: T.Buffer(delta_slc_shape, accum_dtype),
-        DO_slc: T.Buffer(do_slc_shape, dtype),
-        DK: T.Buffer(dk_shape, dtype),
-        DV: T.Buffer(dv_shape, dtype),
-        BlockMask: T.Buffer(block_mask_shape, "int32"),
+            Q: T.Buffer(q_shape, dtype),
+            K: T.Buffer(k_shape, dtype),
+            V: T.Buffer(v_shape, dtype),
+            LSE_slc: T.Buffer(lse_slc_shape, accum_dtype),
+            Delta_slc: T.Buffer(delta_slc_shape, accum_dtype),
+            DO_slc: T.Buffer(do_slc_shape, dtype),
+            DK: T.Buffer(dk_shape, dtype),
+            DV: T.Buffer(dv_shape, dtype),
+            BlockMask: T.Buffer(block_mask_shape, "int32"),
     ):
         with T.Kernel(NV, NS, B * H, threads=num_threads) as (i_v, i_s, i_bh):
             K_shared = T.alloc_shared([BS, BK], dtype)
@@ -236,33 +229,31 @@ def tilelang_kernel_bwd_dkv(
 
             i_b, i_h = i_bh // H, i_bh % H
 
-            T.copy(K[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BK], K_shared)
-            T.copy(V[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BV], V_shared)
+            T.copy(K[i_b, i_s * BS:(i_s + 1) * BS, i_h, :BK], K_shared)
+            T.copy(V[i_b, i_s * BS:(i_s + 1) * BS, i_h, :BV], V_shared)
 
             # [BS, BK]
             T.clear(dk)
             # [BS, BV]
             T.clear(dv)
 
-            T.annotate_layout(
-                {
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
-                }
-            )
+            T.annotate_layout({
+                K_shared: tilelang.layout.make_swizzled_layout(K_shared),
+                dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
+                dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
+            })
 
             loop_st = i_s * BS
             loop_ed = seq_len
             for i in T.Pipelined(
-                start=loop_st,
-                stop=loop_ed,
-                num_stages=0,
+                    start=loop_st,
+                    stop=loop_ed,
+                    num_stages=0,
             ):
                 b_m_slc = BlockMask[i_b, i, i_h, i_s]
                 if b_m_slc != 0:
                     # [G, BK]
-                    T.copy(Q[i_b, i, i_h * G : (i_h + 1) * G, :BK], Q_shared)
+                    T.copy(Q[i_b, i, i_h * G:(i_h + 1) * G, :BK], Q_shared)
                     T.clear(qkT)
                     # [BS, BK] @ [G, BK] -> [BS, G]
                     T.gemm(
@@ -273,18 +264,16 @@ def tilelang_kernel_bwd_dkv(
                         policy=T.GemmWarpPolicy.FullRow,
                     )
                     # [G]
-                    T.copy(LSE_slc[i_b, i, i_h * G : (i_h + 1) * G], lse_shared)
+                    T.copy(LSE_slc[i_b, i, i_h * G:(i_h + 1) * G], lse_shared)
 
                     for _i, _j in T.Parallel(BS, G):
                         qkT[_i, _j] = T.exp2(qkT[_i, _j] * scale - lse_shared[_j])
 
                     for _i, _j in T.Parallel(BS, G):
-                        qkT[_i, _j] = T.if_then_else(
-                            i >= (i_s * BS + _i), qkT[_i, _j], 0
-                        )
+                        qkT[_i, _j] = T.if_then_else(i >= (i_s * BS + _i), qkT[_i, _j], 0)
 
                     # [G, BV]
-                    T.copy(DO_slc[i_b, i, i_h * G : (i_h + 1) * G, :BV], do)
+                    T.copy(DO_slc[i_b, i, i_h * G:(i_h + 1) * G, :BV], do)
                     T.clear(dsT)
                     # [BS, BV] @ [G, BV] -> [BS, G]
                     T.gemm(
@@ -298,7 +287,7 @@ def tilelang_kernel_bwd_dkv(
                     # [BS, G] @ [G, BV] -> [BS, BV]
                     T.gemm(qkT_cast, do, dv, policy=T.GemmWarpPolicy.FullRow)
                     # [G]
-                    T.copy(Delta_slc[i_b, i, i_h * G : (i_h + 1) * G], delta)
+                    T.copy(Delta_slc[i_b, i, i_h * G:(i_h + 1) * G], delta)
                     for i, j in T.Parallel(BS, G):
                         dsT_cast[i, j] = qkT[i, j] * (dsT[i, j] - delta[j]) * sm_scale
 
@@ -307,8 +296,8 @@ def tilelang_kernel_bwd_dkv(
 
             T.copy(dv, dv_shared)
             T.copy(dk, dk_shared)
-            T.copy(dv_shared, DV[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BV])
-            T.copy(dk_shared, DK[i_v, i_b, i_s * BS : (i_s + 1) * BS, i_h, :BK])
+            T.copy(dv_shared, DV[i_b, i_s * BS:(i_s + 1) * BS, i_h, :BV])
+            T.copy(dk_shared, DK[i_v, i_b, i_s * BS:(i_s + 1) * BS, i_h, :BK])
 
     return flash_bwd_dkv
 
@@ -337,7 +326,7 @@ def tilelang_kernel_bwd_dqkv(
     accum_dtype="float",
 ):
     if scale is None:
-        sm_scale = (1.0 / dim) ** 0.5
+        sm_scale = (1.0 / dim)**0.5
     else:
         sm_scale = scale
 
@@ -373,16 +362,16 @@ def tilelang_kernel_bwd_dqkv(
     @tilelang.jit
     @T.prim_func
     def flash_bwd_dqkv(
-        Q: T.Buffer(q_shape, dtype),
-        K: T.Buffer(k_shape, dtype),
-        V: T.Buffer(v_shape, dtype),
-        LSE_slc: T.Buffer(lse_slc_shape, accum_dtype),
-        Delta_slc: T.Buffer(delta_slc_shape, accum_dtype),
-        DO_slc: T.Buffer(do_slc_shape, dtype),
-        DQ: T.Buffer(dq_shape, dtype),
-        DK: T.Buffer(dk_shape, dtype),
-        DV: T.Buffer(dv_shape, dtype),
-        BlockMask: T.Buffer(block_mask_shape, "int32"),
+            Q: T.Buffer(q_shape, dtype),
+            K: T.Buffer(k_shape, dtype),
+            V: T.Buffer(v_shape, dtype),
+            LSE_slc: T.Buffer(lse_slc_shape, accum_dtype),
+            Delta_slc: T.Buffer(delta_slc_shape, accum_dtype),
+            DO_slc: T.Buffer(do_slc_shape, dtype),
+            DQ: T.Buffer(dq_shape, dtype),
+            DK: T.Buffer(dk_shape, dtype),
+            DV: T.Buffer(dv_shape, dtype),
+            BlockMask: T.Buffer(block_mask_shape, "int32"),
     ):
         with T.Kernel(NV, NS, B * H, threads=num_threads) as (i_v, i_s, i_bh):
             K_shared = T.alloc_shared([BS, BK], dtype)
@@ -406,33 +395,31 @@ def tilelang_kernel_bwd_dqkv(
 
             i_b, i_h = i_bh // H, i_bh % H
 
-            T.copy(K[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BK], K_shared)
-            T.copy(V[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BV], V_shared)
+            T.copy(K[i_b, i_s * BS:(i_s + 1) * BS, i_h, :BK], K_shared)
+            T.copy(V[i_b, i_s * BS:(i_s + 1) * BS, i_h, :BV], V_shared)
 
             # [BS, BK]
             T.clear(dk)
             # [BS, BV]
             T.clear(dv)
 
-            T.annotate_layout(
-                {
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                    dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
-                }
-            )
+            T.annotate_layout({
+                K_shared: tilelang.layout.make_swizzled_layout(K_shared),
+                dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
+                dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
+            })
 
             loop_st = i_s * BS
             loop_ed = seq_len
             for i in T.Pipelined(
-                start=loop_st,
-                stop=loop_ed,
-                num_stages=0,
+                    start=loop_st,
+                    stop=loop_ed,
+                    num_stages=0,
             ):
                 b_m_slc = BlockMask[i_b, i, i_h, i_s]
                 if b_m_slc != 0:
                     # [G, BK]
-                    T.copy(Q[i_b, i, i_h * G : (i_h + 1) * G, :BK], Q_shared)
+                    T.copy(Q[i_b, i, i_h * G:(i_h + 1) * G, :BK], Q_shared)
                     T.clear(qkT)
                     # [BS, BK] @ [G, BK] -> [BS, G]
                     T.gemm(
@@ -443,18 +430,16 @@ def tilelang_kernel_bwd_dqkv(
                         policy=T.GemmWarpPolicy.FullRow,
                     )
                     # [G]
-                    T.copy(LSE_slc[i_b, i, i_h * G : (i_h + 1) * G], lse_shared)
+                    T.copy(LSE_slc[i_b, i, i_h * G:(i_h + 1) * G], lse_shared)
 
                     for _i, _j in T.Parallel(BS, G):
                         qkT[_i, _j] = T.exp2(qkT[_i, _j] * scale - lse_shared[_j])
 
                     for _i, _j in T.Parallel(BS, G):
-                        qkT[_i, _j] = T.if_then_else(
-                            i >= (i_s * BS + _i), qkT[_i, _j], 0
-                        )
+                        qkT[_i, _j] = T.if_then_else(i >= (i_s * BS + _i), qkT[_i, _j], 0)
 
                     # [G, BV]
-                    T.copy(DO_slc[i_b, i, i_h * G : (i_h + 1) * G, :BV], do)
+                    T.copy(DO_slc[i_b, i, i_h * G:(i_h + 1) * G, :BV], do)
                     T.clear(dsT)
                     # [BS, BV] @ [G, BV] -> [BS, G]
                     T.gemm(
@@ -468,7 +453,7 @@ def tilelang_kernel_bwd_dqkv(
                     # [BS, G] @ [G, BV] -> [BS, BV]
                     T.gemm(qkT_cast, do, dv, policy=T.GemmWarpPolicy.FullRow)
                     # [G]
-                    T.copy(Delta_slc[i_b, i, i_h * G : (i_h + 1) * G], delta)
+                    T.copy(Delta_slc[i_b, i, i_h * G:(i_h + 1) * G], delta)
                     for i, j in T.Parallel(BS, G):
                         dsT_cast[i, j] = qkT[i, j] * (dsT[i, j] - delta[j]) * sm_scale
 
@@ -484,8 +469,8 @@ def tilelang_kernel_bwd_dqkv(
 
             T.copy(dv, dv_shared)
             T.copy(dk, dk_shared)
-            T.copy(dv_shared, DV[i_b, i_s * BS : (i_s + 1) * BS, i_h, :BV])
-            T.copy(dk_shared, DK[i_v, i_b, i_s * BS : (i_s + 1) * BS, i_h, :BK])
+            T.copy(dv_shared, DV[i_b, i_s * BS:(i_s + 1) * BS, i_h, :BV])
+            T.copy(dk_shared, DK[i_v, i_b, i_s * BS:(i_s + 1) * BS, i_h, :BK])
 
     return flash_bwd_dqkv
 
@@ -506,9 +491,9 @@ def tilelang_kernel_preprocess(
     @tilelang.jit(out_idx=[2], execution_backend="cython")
     @T.prim_func
     def flash_bwd_prep(
-        O: T.Buffer(shape, dtype),  # type: ignore
-        dO: T.Buffer(shape, dtype),  # type: ignore
-        Delta: T.Buffer([batch, seq_len, heads], accum_dtype),  # type: ignore
+            O: T.Buffer(shape, dtype),  # type: ignore
+            dO: T.Buffer(shape, dtype),  # type: ignore
+            Delta: T.Buffer([batch, seq_len, heads], accum_dtype),  # type: ignore
     ):
         with T.Kernel(heads, T.ceildiv(seq_len, blk), batch) as (bx, by, bz):
             o = T.alloc_fragment([blk, blk], dtype)
@@ -517,14 +502,12 @@ def tilelang_kernel_preprocess(
             delta = T.alloc_fragment([blk], accum_dtype)
             T.clear(acc)
             for k in range(T.ceildiv(dim, blk)):
-                T.copy(O[bz, by * blk : (by + 1) * blk, bx, k * blk : (k + 1) * blk], o)
-                T.copy(
-                    dO[bz, by * blk : (by + 1) * blk, bx, k * blk : (k + 1) * blk], do
-                )
+                T.copy(O[bz, by * blk:(by + 1) * blk, bx, k * blk:(k + 1) * blk], o)
+                T.copy(dO[bz, by * blk:(by + 1) * blk, bx, k * blk:(k + 1) * blk], do)
                 for i, j in T.Parallel(blk, blk):
                     acc[i, j] += o[i, j] * do[i, j]
             T.reduce_sum(acc, delta, 1)
-            T.copy(delta, Delta[bz, by * blk : (by + 1) * blk, bx])
+            T.copy(delta, Delta[bz, by * blk:(by + 1) * blk, bx])
 
     return flash_bwd_prep
 
@@ -551,18 +534,16 @@ def tilelang_kernel_block_mask(
     @tilelang.jit(out_idx=[2], execution_backend="cython")
     @T.prim_func
     def flash_bwd_block_mask(
-        BlockIndices: T.Buffer(block_indices_shape, dtype),  # type: ignore
-        BlockCounts: T.Buffer(block_counts_shape, dtype),  # type: ignore
-        BlockMask: T.Buffer(block_mask_shape, dtype),  # type: ignore
+            BlockIndices: T.Buffer(block_indices_shape, dtype),  # type: ignore
+            BlockCounts: T.Buffer(block_counts_shape, dtype),  # type: ignore
+            BlockMask: T.Buffer(block_mask_shape, dtype),  # type: ignore
     ):
         with T.Kernel(seq_len, batch, heads * S) as (bx, by, bz):
             i_t, i_b, i_hs = bx, by, bz
             i_h, i_s = i_hs // S, i_hs % S
             b_i = BlockIndices[i_b, i_t, i_h, i_s]
             if USE_BLOCK_COUNTS:
-                b_m = b_i * BS <= i_t and i_s < BlockCounts[i_b, i_t, i_h].astype(
-                    i_s.dtype
-                )
+                b_m = b_i * BS <= i_t and i_s < BlockCounts[i_b, i_t, i_h].astype(i_s.dtype)
                 BlockMask[i_b, i_t, i_h, i_s] = b_m
             else:
                 b_m = b_i * BS <= i_t
@@ -601,15 +582,13 @@ def parallel_nsa_bwd(
     assert window_size == 0, "Window size is not supported yet"
     delta_slc = tilelang_kernel_preprocess(B, HQ, T, K)(o_slc, do_slc)
 
-    dq = torch.zeros(
-        NV, *q.shape, dtype=q.dtype if NV == 1 else torch.float, device=q.device
-    )
+    dq = torch.zeros(NV, *q.shape, dtype=q.dtype if NV == 1 else torch.float, device=q.device)
     dk = torch.empty(NV, *k.shape, dtype=k.dtype, device=q.device)
     dv = torch.empty(v.shape, dtype=v.dtype, device=q.device)
 
-    block_mask = tilelang_kernel_block_mask(B, H, T, S, BS)(
-        block_indices.to(torch.int32), block_counts.to(torch.int32)
-    ).to(torch.bool)
+    block_mask = tilelang_kernel_block_mask(B, H, T, S,
+                                            BS)(block_indices.to(torch.int32),
+                                                block_counts.to(torch.int32)).to(torch.bool)
 
     fused_qkv_bwd_kernel = tilelang_kernel_bwd_dqkv(
         batch=B,
@@ -622,9 +601,8 @@ def parallel_nsa_bwd(
         selected_blocks=S,
         scale=scale,
     )
-    fused_qkv_bwd_kernel(
-        q, k, v, lse_slc, delta_slc, do_slc, dq, dk, dv, block_mask.to(torch.int32)
-    )
+    fused_qkv_bwd_kernel(q, k, v, lse_slc, delta_slc, do_slc, dq, dk, dv,
+                         block_mask.to(torch.int32))
 
     dq = dq.sum(0)
     dk = dk.sum(0)
@@ -778,27 +756,23 @@ def parallel_nsa(
             Outputs of shape `[B, SEQLEN, HQ, V]` if `head_first=False` else `[B, HQ, SEQLEN, V]`.
     """
     if scale is None:
-        scale = k.shape[-1] ** -0.5
+        scale = k.shape[-1]**-0.5
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     if head_first:
-        q, k, v, block_indices = map(
-            lambda x: rearrange(x, "b h t d -> b t h d"), (q, k, v, block_indices)
-        )
+        q, k, v, block_indices = map(lambda x: rearrange(x, "b h t d -> b t h d"),
+                                     (q, k, v, block_indices))
         g_slc, g_swa = map(lambda x: rearrange(x, "b h t -> b t h"), (g_slc, g_swa))
         if isinstance(block_counts, torch.Tensor):
             block_counts = rearrange(block_counts, "b h t -> b t h")
-    assert (
-        q.shape[2] % (k.shape[2] * 16) == 0
-    ), "Group size must be a multiple of 16 in NSA"
+    assert (q.shape[2] % (k.shape[2] * 16) == 0), "Group size must be a multiple of 16 in NSA"
 
     if isinstance(block_counts, int):
         block_indices = block_indices[:, :, :, :block_counts]
         block_counts = None
 
-    o_slc, o_swa = ParallelNSAFunction.apply(
-        q, k, v, block_indices, block_counts, block_size, window_size, scale, cu_seqlens
-    )
+    o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size,
+                                             window_size, scale, cu_seqlens)
     if window_size > 0:
         o = torch.addcmul(o_slc * g_slc.unsqueeze(-1), o_swa, g_swa.unsqueeze(-1))
     else:
@@ -823,7 +797,7 @@ if __name__ == "__main__":
         for t in range(T):
             for h in range(H):
                 i_i = torch.randperm(max(1, (t // block_size)))[:S]
-                block_indices[b, t, h, : len(i_i)] = i_i
+                block_indices[b, t, h, :len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
 
     block_counts = torch.randint(1, S + 1, (B, T, H), device="cuda")
