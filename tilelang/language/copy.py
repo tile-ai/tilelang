@@ -5,6 +5,7 @@
 from typing import Union, List, Optional
 from tvm import tir
 from tvm.script import tir as T
+import tvm.ir
 
 
 def region(buffer: tir.BufferLoad, access_type: str, *args: tir.PrimExpr):
@@ -33,6 +34,8 @@ def copy(
     dst: Union[tir.Buffer, tir.BufferLoad],
     coalesced_width: Optional[int] = None,
 ):
+    if isinstance(src, tir.Buffer) and isinstance(dst, tir.Buffer):
+        tvm.ir.assert_structural_equal(src.shape, dst.shape)
 
     def get_extent(data):
         if isinstance(data, tir.Buffer):
@@ -44,8 +47,7 @@ def copy(
 
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
-    # if src_extent and dst_extent:
-    #     ir.assert_structural_equal(src_extent, dst_extent)
+
     if src_extent:
         extent = src_extent
     elif dst_extent:
