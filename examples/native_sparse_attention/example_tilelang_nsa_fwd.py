@@ -21,6 +21,9 @@ def native_sparse_attention(batch,
                             selected_blocks=16):
     if scale is None:
         scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
+    else:
+        scale = scale * 1.44269504  # log2(e)
+
     head_kv = heads // groups
     q_shape = [batch, seq_len, heads, dim]
     kv_shape = [batch, seq_len, head_kv, dim]
@@ -125,7 +128,7 @@ def native_sparse_attention(batch,
 
 
 if __name__ == "__main__":
-    B, SEQ_LEN, H, HQ, D, S, block_size, dtype = 2, 64, 1, 16, 32, 1, 32, torch.float16
+    B, SEQ_LEN, H, HQ, D, S, block_size, dtype, scale = 2, 64, 1, 16, 32, 1, 32, torch.float16, 0.1
 
     program = native_sparse_attention(
         batch=B,
@@ -136,6 +139,7 @@ if __name__ == "__main__":
         block_size=block_size,
         groups=HQ // H,
         selected_blocks=S,
+        scale=scale,
     )
     kernel = tilelang.compile(program, out_idx=-1)
     torch.random.manual_seed(0)
@@ -165,7 +169,9 @@ if __name__ == "__main__":
         g_swa=g_swa,
         block_indices=block_indices,
         block_counts=block_counts,
-        block_size=block_size)
+        block_size=block_size,
+        scale=scale,
+    )
 
     print("out", out)
     print("ref", ref)
