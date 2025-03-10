@@ -42,15 +42,15 @@ def tl_matmul(
     accum_dtype,
 ):
     assert in_dtype in [
-        "float16",
+        # "float16",
         "e4m3_float8",
         "e5m2_float8",
-        "int8",
+        # "int8",
     ], "Currently only float16 and int8 are supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
+        "bfloat16",
+        # "float32",
+        # "int32",
     ], "Currently only float16, float32 and int32 are supported"
 
     micro_size_x = micro_size_y = micro_size_k = 16
@@ -75,7 +75,9 @@ def tl_matmul(
     block_K = chunk
 
     A_shape = (M, K)
+    Scales_A_shape = (M, T.cdiv(K / block_K))
     B_shape = (N, K)
+    Scales_B_shape = (T.cdiv(K / block_K), T.cdiv(N / block_N))
     A_shared_shape = (block_M, block_K)
     B_shared_shape = (block_N, block_K)
     C_shared_shape = (
@@ -112,19 +114,24 @@ def tl_matmul(
             A: T.Buffer(A_shape, in_dtype),
             B: T.Buffer(B_shape, in_dtype),
             C: T.Buffer((M, N), out_dtype),
+            scales_a: T.Buffer(Scales_A_shape, "float32"),
+            scales_b: T.Buffer(Scales_B_shape, "float32"),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
 
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
+            Scale_A = T.alloc_shared((block_M), "float32", scope=shared_scope)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
             A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
+            C_local_final = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
 
             T.annotate_layout({
                 A_shared: make_swizzle_layout(A_shared),
                 B_shared: make_swizzle_layout(B_shared),
+                Scale_A: make_swizzle_layout(Scale_A),
             })
 
             # Improve L2 Cache
@@ -141,6 +148,11 @@ def tl_matmul(
                 # Load B into shared memory
                 for j, k in T.Parallel(block_N, block_K):
                     B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
+
+                for i in T.parallel(block_M):
+                    Scale_A[i] = scales_a[by * block_M + i, ko]
+
+                Scale_B = scales_b[bx, ko]
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
 
@@ -161,9 +173,12 @@ def tl_matmul(
                     # Perform Matrix Multiplication
                     mma_emitter.mma(A_local, B_local, C_local)
 
+                    C_local_final = C_local * Scale_A[ki * micro_size_k] * Scale_B
+
+
             # Perform STMatrix
             mma_emitter.stmatrix(
-                C_local,
+                C_local_final,
                 C_shared,
             )
 
