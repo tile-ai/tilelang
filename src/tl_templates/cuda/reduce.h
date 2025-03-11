@@ -24,7 +24,8 @@ struct MinOp {
   }
 };
 
-template <class Reducer, int threads, int scale> struct AllReduce {
+template <class Reducer, int threads, int scale, int all_threads = threads>
+struct AllReduce {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
                 threads == 128 or threads == 64 or threads == 32 or
                 threads == 16 or threads == 8 or threads == 4 or threads == 2);
@@ -50,9 +51,9 @@ template <class Reducer, int threads, int scale> struct AllReduce {
   static TL_DEVICE T run_hopper(T x, T *red_buf = nullptr) {
     constexpr int offset = threads / 2;
     if constexpr (offset >= 32) {
-      asm volatile("bar.sync %0, %1;" : : "r"(1), "r"(threads));
+      asm volatile("bar.sync %0, %1;" : : "r"(1), "r"(all_threads));
       red_buf[threadIdx.x] = x;
-      asm volatile("bar.sync %0, %1;" : : "r"(2), "r"(threads));
+      asm volatile("bar.sync %0, %1;" : : "r"(2), "r"(all_threads));
       x = Reducer()(x, red_buf[threadIdx.x ^ offset]);
     } else {
       x = Reducer()(x, T(__shfl_xor_sync(uint32_t(-1), x, offset)));
@@ -60,7 +61,8 @@ template <class Reducer, int threads, int scale> struct AllReduce {
     if constexpr (offset == scale) {
       return x;
     } else {
-      return AllReduce<Reducer, offset, scale>::run_hopper(x, red_buf);
+      return AllReduce<Reducer, offset, scale, all_threads>::run_hopper(
+          x, red_buf);
     }
   }
 };
