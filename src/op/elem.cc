@@ -71,8 +71,9 @@ Array<PrimExpr> Copy::MakeIndices(const Array<IterVar> &ivs,
       idx++;
     }
   }
-  ICHECK(idx == ivs.size()) << "idx = " << idx << ", ivs.size() = " << ivs.size()
-  << "src name = " << src->name << ", dst name = " << dst->name;
+  ICHECK(idx == ivs.size())
+      << "idx = " << idx << ", ivs.size() = " << ivs.size()
+      << "src name = " << src->name << ", dst name = " << dst->name;
   return indices;
 }
 
@@ -110,9 +111,10 @@ For Copy::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.size() == 0;
   if (is_scalar) {
-    return For(Var("i"), 0, 1, ForKind::kSerial, BufferStore(dst, BufferLoad(src, {0}), {0}));
+    return For(Var("i"), 0, 1, ForKind::kSerial,
+               BufferStore(dst, BufferLoad(src, {0}), {0}));
   }
-  
+
   for (const auto &iv : loop_vars)
     analyzer->Bind(iv->var, iv->dom);
 
