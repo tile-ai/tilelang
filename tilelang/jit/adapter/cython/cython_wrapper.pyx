@@ -67,7 +67,8 @@ cdef class CythonKernelWrapper:
                 for s in self.params[i].shape:
                     if isinstance(s, tir.Var):
                         # find the corresponding input tensor and shape dimension
-                        assert s in self.dynamic_symbolic_map
+                        assert s in self.dynamic_symbolic_map, f"Dynamic symbolic dimension \
+                                                                    {s} not found in dynamic_symbolic_map"
                         ref_tensor_idx, ref_shape_idx = self.dynamic_symbolic_map[s]
                         shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
                     elif isinstance(s, (tir.IntImm, int)):
