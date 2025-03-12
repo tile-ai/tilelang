@@ -2,13 +2,16 @@
 // Licensed under the MIT License.
 #pragma once
 
-#include <cute/algorithm/copy.hpp>
+#include <cute/arch/mma_sm90.hpp>
+#include <cute/atom/mma_atom.hpp>
 #include <cutlass/arch/barrier.h>
 #include <cutlass/cutlass.h>
 
 #include "common.h"
 
 namespace cute {
+
+using namespace SM90;
 
 template <GMMA::Major major, class ElementType, class BLK_MN, class BLK_K>
 CUTE_HOST_DEVICE constexpr auto ss_smem_selector() {
