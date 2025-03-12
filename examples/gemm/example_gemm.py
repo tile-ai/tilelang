@@ -1,8 +1,7 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 import tilelang
-from tilelang import Profiler
 import tilelang.language as T
 
 
@@ -34,16 +33,14 @@ func = matmul(1024, 1024, 1024, 128, 128, 32)
 
 print(func)
 
-rt_mod, params = tilelang.lower(func)
-
-profiler = Profiler(rt_mod, params, result_idx=[2])
+kernel = tilelang.compile(func, out_idx=-1)
 
 import torch
 
 a = torch.randn(1024, 1024).cuda().half()
 b = torch.randn(1024, 1024).cuda().half()
 
-c = profiler(a, b)
+c = kernel(a, b)
 
 ref_c = a @ b
 
@@ -53,4 +50,4 @@ print(ref_c)
 torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
 
 # Get CUDA Source
-print(rt_mod.imported_modules[0].get_source())
+print(kernel.get_kernel_source())
