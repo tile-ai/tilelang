@@ -227,6 +227,15 @@ TL_DEVICE void fence_proxy_async() {
   asm volatile("fence.proxy.async.shared::cta;" : :);
 }
 
+// Indicate arrival of warp issuing TMA_STORE
+TL_DEVICE void tma_store_arrive() {
+  asm volatile("cp.async.bulk.commit_group;");
+}
+
+template <int Count> TL_DEVICE void tma_store_wait() {
+  asm volatile("cp.async.bulk.wait_group.read %0;" : : "n"(Count) : "memory");
+}
+
 TL_DEVICE void syncthreads_partial(uint64_t &smem_barrier) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
   uint64_t state = 0;

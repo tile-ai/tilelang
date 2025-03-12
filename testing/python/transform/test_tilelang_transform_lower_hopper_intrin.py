@@ -57,5 +57,4 @@ def test_lower_hopper_intrin_barrier():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_lower_hopper_intrin_barrier()
+    tilelang.testing.main()
