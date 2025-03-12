@@ -14,6 +14,7 @@ from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
+from tilelang.utils.tensor import map_torch_type
 
 
 class CtypesKernelAdapter(BaseKernelAdapter):
@@ -136,7 +137,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         # tensor pointers
         for i in range(len(self.params)):
             if i in self.result_idx:
-                dtype = torch.__getattribute__(str(self.params[i].dtype))
+                dtype = map_torch_type(self.params[i].dtype)
                 shape = list(map(int, self.params[i].shape))
                 # use the device of the first input tensor if available
                 device = ins[0].device if len(ins) > 0 else torch.cuda.current_device()
