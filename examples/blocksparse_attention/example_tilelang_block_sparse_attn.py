@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 import math
 import torch
@@ -34,7 +34,7 @@ def get_sparse_attn_mask_from_threshold(x, threshold, use_dense_for_last_block=F
 def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal):
     block_M = 64
     block_N = 64
-    num_stages = 0
+    num_stages = 1
     threads = 128
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     shape = [batch, heads, seq_len, dim]
@@ -42,7 +42,7 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
 
     dtype = "float16"
     accum_dtype = "float"
-    block_mask_dtype = "int8"
+    block_mask_dtype = "bool"
 
     def kernel_func(block_M, block_N, num_stages, threads):
 
@@ -196,7 +196,7 @@ def test_topk_sparse_attention():
     # Run Triton kernel
     program = blocksparse_flashattn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
     kernel = tilelang.compile(program, out_idx=[4])
-    print(kernel.get_kernel_source())
+
     tilelang_output = kernel(q, k, v, block_mask)
 
     # Compute reference
@@ -215,8 +215,7 @@ def test_topk_sparse_attention():
     print("tilelang_output", tilelang_output)
 
     # Verify accuracy
-    assert torch.allclose(tilelang_output, ref_output, atol=1e-2, rtol=1e-2), \
-        "TileLang output doesn't match reference"
+    torch.testing.assert_close(tilelang_output, ref_output, atol=1e-2, rtol=1e-2)
     print("Pass topk sparse attention test with qlen == klen")
 
 

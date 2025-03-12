@@ -211,9 +211,10 @@ if __name__ == "__main__":
     if (not args.tune):
         program = flashattn(
             batch, heads, seq_q, seq_kv, dim, is_causal, tune=args.tune)(
-                block_M=64, block_N=64, num_stages=0, threads=128)
+                block_M=64, block_N=64, num_stages=1, threads=128)
         ref_program = partial(ref_program, is_causal=is_causal)
         kernel = tilelang.compile(program, out_idx=[3])
+
         profiler = kernel.get_profiler()
         profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")
