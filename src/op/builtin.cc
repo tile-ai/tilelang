@@ -92,6 +92,15 @@ TIR_DEFINE_TL_BUILTIN(FenceProxyAsyncOp)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(TMAStoreArrive)
+    .set_num_inputs(0)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(TMAStoreWait)
+    .set_num_inputs(0)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
 TIR_DEFINE_TL_BUILTIN(SetMaxNReg)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",

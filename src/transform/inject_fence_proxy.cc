@@ -112,6 +112,31 @@ private:
   std::unordered_map<const StmtNode *, Proxy> map_;
 };
 
+class TMAStoreSyncInjector : public StmtExprMutator {
+public:
+  static PrimFunc Substitute(PrimFunc f) {
+    auto T = TMAStoreSyncInjector();
+    f.CopyOnWrite()->body = T(f->body);
+    return f;
+  }
+
+private:
+  Stmt VisitStmt_(const EvaluateNode *op) final {
+    if (auto call = op->value.as<CallNode>()) {
+      if (call->op.same_as(TMAStoreOp())) {
+        Array<Stmt> new_body;
+        new_body.push_back(GetRef<Evaluate>(op));
+        new_body.push_back(
+            Evaluate(Call(DataType::Handle(), TMAStoreArrive(), {})));
+        new_body.push_back(
+            Evaluate(Call(DataType::Handle(), TMAStoreWait(), {})));
+        return SeqStmt(std::move(new_body));
+      }
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+};
+
 class InjectFenceProxy : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc f) {
@@ -161,6 +186,7 @@ using namespace tir::transform;
 
 tvm::transform::Pass InjectFenceProxy() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+    f = TMAStoreSyncInjector::Substitute(f);
     return InjectFenceProxy::Substitute(f);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectFenceProxy", {});

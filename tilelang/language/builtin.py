@@ -25,6 +25,14 @@ def FenceProxyAsyncOp(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.FenceProxyAsyncOp"), *args)
 
 
+def TMAStoreArrive(*args):
+    return tir.call_intrin("handle", tir.op.Op.get("tl.TMAStoreArrive"), *args)
+
+
+def TMAStoreWait(*args):
+    return tir.call_intrin("handle", tir.op.Op.get("tl.TMAStoreWait"), *args)
+
+
 def SetMaxNReg(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.SetMaxNReg"), *args)
 
