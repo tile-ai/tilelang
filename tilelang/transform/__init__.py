@@ -226,8 +226,9 @@ def VectorizeLoop(enable_vectorize: bool = True):
     """
     return _ffi_api.VectorizeLoop(enable_vectorize)  # type: ignore
 
+
 def InjectPTXAsyncCopy():
-    """Rewrite global to shared memory copy on CUDA with asyncronous copy.
+    """Rewrite global to shared memory copy on CUDA with asynchronous copy.
 
     Returns
     -------

@@ -1,5 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
+# ruff: noqa
 
 import torch
 import time
@@ -13,6 +14,7 @@ import triton
 import triton.language as tl
 from fla.ops.common.utils import prepare_token_indices
 from fla.utils import autocast_custom_fwd, contiguous
+
 
 @triton.heuristics({
     'USE_OFFSETS': lambda args: args['offsets'] is not None,
@@ -84,7 +86,7 @@ def parallel_nsa_fwd_kernel(q, k, v, o_slc, o_swa, lse_slc, lse_swa, scale, bloc
             b_mp_slc = b_m_slc
     b_o_slc = b_o_slc / b_acc_slc[:, None]
     b_m_slc += tl.log(b_acc_slc)
-    
+
     tl.store(p_o_slc, b_o_slc.to(p_o_slc.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_lse_slc, b_m_slc.to(p_lse_slc.dtype.element_ty))
 
@@ -438,15 +440,16 @@ def naive_nsa(q: torch.Tensor,
 
     return o_slc.to(dtype) + o_swa.to(dtype) if o_swa is not None else o_slc.to(dtype)
 
+
 def tilelang_sparse_attention(batch,
-                            heads,
-                            seq_len,
-                            dim,
-                            is_causal,
-                            scale=None,
-                            block_size=64,
-                            groups=1,
-                            selected_blocks=16):
+                              heads,
+                              seq_len,
+                              dim,
+                              is_causal,
+                              scale=None,
+                              block_size=64,
+                              groups=1,
+                              selected_blocks=16):
     if scale is None:
         scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     else:
@@ -515,7 +518,7 @@ def tilelang_sparse_attention(batch,
                     if is_causal:
                         for i, j in T.Parallel(G, BS):
                             acc_s[i, j] = T.if_then_else(i_t >= (i_s + j), 0,
-                                                            -T.infinity(acc_s.dtype))
+                                                         -T.infinity(acc_s.dtype))
                     else:
                         T.clear(acc_s)
 
@@ -557,26 +560,38 @@ def tilelang_sparse_attention(batch,
 
 def generate_block_indices(batch, seq_len, heads, selected_blocks, block_size):
     """Generate random block indices for the benchmark."""
-    block_indices = torch.full((batch, seq_len, heads, selected_blocks), 
-                              seq_len, dtype=torch.long, device='cuda')
-    
+    block_indices = torch.full((batch, seq_len, heads, selected_blocks),
+                               seq_len,
+                               dtype=torch.long,
+                               device='cuda')
+
     for b in range(batch):
         for t in range(seq_len):
             for h in range(heads):
                 i_i = torch.randperm(max(1, (t // block_size)))[:selected_blocks]
                 block_indices[b, t, h, :len(i_i)] = i_i
-    
+
     return block_indices.sort(-1)[0]
 
 
-def benchmark_nsa(batch_size, seq_len, heads, head_query, dim, selected_blocks, 
-                 block_size, dtype, scale, warmup=10, iterations=100, validate=False):
+def benchmark_nsa(batch_size,
+                  seq_len,
+                  heads,
+                  head_query,
+                  dim,
+                  selected_blocks,
+                  block_size,
+                  dtype,
+                  scale,
+                  warmup=10,
+                  iterations=100,
+                  validate=False):
     """Benchmark the TileLang Sparse Attention implementation."""
-    
+
     # Set random seed for reproducibility
     tilelang.testing.set_random_seed(0)
     torch.random.manual_seed(0)
-    
+
     # Compile the NSA kernel
     program = tilelang_sparse_attention(
         batch=batch_size,
@@ -592,33 +607,33 @@ def benchmark_nsa(batch_size, seq_len, heads, head_query, dim, selected_blocks,
     print(program)
     kernel = tilelang.compile(program, out_idx=-1)
     print(kernel.get_kernel_source())
-    
+
     # Create input tensors
     Q = torch.randn((batch_size, seq_len, head_query, dim), dtype=dtype, device='cuda')
     K = torch.randn((batch_size, seq_len, heads, dim), dtype=dtype, device='cuda')
     V = torch.randn((batch_size, seq_len, heads, dim), dtype=dtype, device='cuda')
-    
+
     # Generate block indices
     block_indices = generate_block_indices(batch_size, seq_len, heads, selected_blocks, block_size)
-    
+
     # Warmup
     for _ in range(warmup):
         out = kernel(Q, K, V, block_indices.to(torch.int32))
-    
+
     # Synchronize before timing
     torch.cuda.synchronize()
-    
+
     # Benchmark
     start_time = time.time()
     for _ in range(iterations):
         out = kernel(Q, K, V, block_indices.to(torch.int32))
     torch.cuda.synchronize()
     end_time = time.time()
-    
+
     # Calculate metrics
     elapsed_time = end_time - start_time
     avg_time = elapsed_time / iterations * 1000  # ms
-    
+
     # Calculate FLOPs (approximate for NSA)
     # Each token attends to selected_blocks * block_size tokens
     # Each attention calculation involves 2*dim FLOPs for QK
@@ -627,14 +642,14 @@ def benchmark_nsa(batch_size, seq_len, heads, head_query, dim, selected_blocks,
     total_flops = batch_size * seq_len * head_query * flops_per_token
     flops_per_sec = total_flops / (elapsed_time / iterations)
     tflops = flops_per_sec / 1e12
-    
+
     # Validate result against reference if requested
     if validate:
         g_slc = torch.ones((batch_size, seq_len, head_query), dtype=dtype, device='cuda')
         g_swa = torch.ones((batch_size, seq_len, head_query), dtype=dtype, device='cuda')
-        block_counts = torch.randint(1, selected_blocks + 1, 
-                                   (batch_size, seq_len, heads), device='cuda')
-        
+        block_counts = torch.randint(
+            1, selected_blocks + 1, (batch_size, seq_len, heads), device='cuda')
+
         ref = naive_nsa(
             q=Q,
             k=K,
@@ -646,14 +661,14 @@ def benchmark_nsa(batch_size, seq_len, heads, head_query, dim, selected_blocks,
             block_size=block_size,
             scale=scale,
         )
-        
+
         is_valid = torch.allclose(ref, out, atol=1e-2, rtol=1e-2)
         if is_valid:
             print("Validation: PASSED")
         else:
             print("Validation: FAILED")
             print(f"Max difference: {(ref - out).abs().max().item()}")
-    
+
     # Return benchmark results
     return {
         "avg_time_ms": avg_time,
@@ -667,72 +682,98 @@ def benchmark_nsa(batch_size, seq_len, heads, head_query, dim, selected_blocks,
         "block_size": block_size
     }
 
-def benchmark_triton_nsa(batch_size, seq_len, heads, head_query, dim, selected_blocks, 
-                       block_size, dtype, scale, warmup=10, iterations=100, validate=False):
+
+def benchmark_triton_nsa(batch_size,
+                         seq_len,
+                         heads,
+                         head_query,
+                         dim,
+                         selected_blocks,
+                         block_size,
+                         dtype,
+                         scale,
+                         warmup=10,
+                         iterations=100,
+                         validate=False):
     """Benchmark the Triton-based TileLang Sparse Attention implementation."""
-    
+
     # Set random seed for reproducibility
     tilelang.testing.set_random_seed(0)
     torch.random.manual_seed(0)
-    
+
     # Create input tensors
     Q = torch.randn((batch_size, seq_len, head_query, dim), dtype=dtype, device='cuda')
     K = torch.randn((batch_size, seq_len, heads, dim), dtype=dtype, device='cuda')
     V = torch.randn((batch_size, seq_len, heads, dim), dtype=dtype, device='cuda')
     g_slc = torch.ones((batch_size, seq_len, head_query), dtype=dtype, device='cuda')
     g_swa = torch.ones((batch_size, seq_len, head_query), dtype=dtype, device='cuda')
-    
+
     # Generate block indices
     block_indices = generate_block_indices(batch_size, seq_len, heads, selected_blocks, block_size)
-    block_counts = torch.randint(1, selected_blocks + 1, (batch_size, seq_len, heads), device='cuda')
-    
+    block_counts = torch.randint(
+        1, selected_blocks + 1, (batch_size, seq_len, heads), device='cuda')
+
     # Warmup
     for _ in range(warmup):
         out = parallel_nsa_fwd(
-            q=Q, k=K, v=V,
-            block_indices=block_indices, block_counts=block_counts,
-            block_size=block_size, window_size=0, scale=scale
-        )
-    
+            q=Q,
+            k=K,
+            v=V,
+            block_indices=block_indices,
+            block_counts=block_counts,
+            block_size=block_size,
+            window_size=0,
+            scale=scale)
+
     # Synchronize before timing
     torch.cuda.synchronize()
-    
+
     # Benchmark
     start_time = time.time()
     for _ in range(iterations):
         out = parallel_nsa_fwd(
-            q=Q, k=K, v=V,
-            block_indices=block_indices, block_counts=block_counts,
-            block_size=block_size, window_size=0, scale=scale
-        )
+            q=Q,
+            k=K,
+            v=V,
+            block_indices=block_indices,
+            block_counts=block_counts,
+            block_size=block_size,
+            window_size=0,
+            scale=scale)
     torch.cuda.synchronize()
     end_time = time.time()
-    
+
     # Calculate metrics
     elapsed_time = end_time - start_time
     avg_time = elapsed_time / iterations * 1000  # ms
-    
+
     # Calculate FLOPs (approximate for NSA)
     flops_per_token = 4 * dim * selected_blocks * block_size
     total_flops = batch_size * seq_len * head_query * flops_per_token
     flops_per_sec = total_flops / (elapsed_time / iterations)
     tflops = flops_per_sec / 1e12
-    
+
     # Validate result against reference if requested
     if validate:
         ref = naive_nsa(
-            q=Q, k=K, v=V, g_slc=g_slc, g_swa=g_swa,
-            block_indices=block_indices, block_counts=block_counts,
-            block_size=block_size, scale=scale,
+            q=Q,
+            k=K,
+            v=V,
+            g_slc=g_slc,
+            g_swa=g_swa,
+            block_indices=block_indices,
+            block_counts=block_counts,
+            block_size=block_size,
+            scale=scale,
         )
-        
+
         is_valid = torch.allclose(ref, out, atol=1e-2, rtol=1e-2)
         if is_valid:
             print("Validation: PASSED")
         else:
             print("Validation: FAILED")
             print(f"Max difference: {(ref - out).abs().max().item()}")
-    
+
     # Return benchmark results
     return {
         "avg_time_ms": avg_time,
@@ -746,28 +787,50 @@ def benchmark_triton_nsa(batch_size, seq_len, heads, head_query, dim, selected_b
         "block_size": block_size
     }
 
+
 def run_benchmark_suite(impl='all'):
     """Run a suite of benchmarks with different configurations."""
-    
+
     # Define configurations to benchmark
     configs = [
         # Small model config - Note: head_query must be a multiple of heads*16 for Triton
-        {"batch_size": 2, "seq_len": 1024, "heads": 8, "head_query": 8*16, "dim": 64, 
-         "selected_blocks": 8, "block_size": 32},
-        
+        {
+            "batch_size": 2,
+            "seq_len": 1024,
+            "heads": 8,
+            "head_query": 8 * 16,
+            "dim": 64,
+            "selected_blocks": 8,
+            "block_size": 32
+        },
+
         # Medium model config
-        {"batch_size": 2, "seq_len": 2048, "heads": 16, "head_query": 16*16, "dim": 64, 
-         "selected_blocks": 16, "block_size": 64},
-        
+        {
+            "batch_size": 2,
+            "seq_len": 2048,
+            "heads": 16,
+            "head_query": 16 * 16,
+            "dim": 64,
+            "selected_blocks": 16,
+            "block_size": 64
+        },
+
         # Large model config
-        {"batch_size": 1, "seq_len": 4096, "heads": 32, "head_query": 32*16, "dim": 128, 
-         "selected_blocks": 32, "block_size": 128},
+        {
+            "batch_size": 1,
+            "seq_len": 4096,
+            "heads": 32,
+            "head_query": 32 * 16,
+            "dim": 128,
+            "selected_blocks": 32,
+            "block_size": 128
+        },
     ]
-    
+
     results = []
     for config in configs:
         print(f"Running benchmark with config: {config}")
-        
+
         if impl in ['all', 'tilelang']:
             print("Benchmarking TileLang implementation:")
             result = benchmark_nsa(
@@ -780,12 +843,11 @@ def run_benchmark_suite(impl='all'):
                 block_size=config["block_size"],
                 dtype=torch.float16,
                 scale=0.1,
-                validate=False
-            )
+                validate=False)
             results.append({"impl": "tilelang", **result})
             print(f"Average time: {result['avg_time_ms']:.2f} ms")
             print(f"Performance: {result['tflops']:.2f} TFLOPs")
-        
+
         if impl in ['all', 'triton']:
             print("Benchmarking Triton implementation:")
             result = benchmark_triton_nsa(
@@ -798,26 +860,26 @@ def run_benchmark_suite(impl='all'):
                 block_size=config["block_size"],
                 dtype=torch.float16,
                 scale=0.1,
-                validate=False
-            )
+                validate=False)
             results.append({"impl": "triton", **result})
             print(f"Average time: {result['avg_time_ms']:.2f} ms")
             print(f"Performance: {result['tflops']:.2f} TFLOPs")
-        
+
         if impl in ['all']:
             # Print comparison if both implementations were run
-            tilelang_result = next(r for r in results if r["impl"] == "tilelang" and 
-                              r["batch_size"] == config["batch_size"] and
-                              r["seq_len"] == config["seq_len"])
-            triton_result = next(r for r in results if r["impl"] == "triton" and 
-                               r["batch_size"] == config["batch_size"] and
-                               r["seq_len"] == config["seq_len"])
+            tilelang_result = next(
+                r for r in results if r["impl"] == "tilelang" and
+                r["batch_size"] == config["batch_size"] and r["seq_len"] == config["seq_len"])
+            triton_result = next(
+                r for r in results if r["impl"] == "triton" and
+                r["batch_size"] == config["batch_size"] and r["seq_len"] == config["seq_len"])
             speedup = tilelang_result["avg_time_ms"] / triton_result["avg_time_ms"]
             print(f"Speedup (Triton vs TileLang): {speedup:.2f}x")
-            
+
         print("-" * 50)
-    
+
     return results
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark TileLang Sparse Attention")
@@ -828,28 +890,34 @@ if __name__ == "__main__":
     parser.add_argument("--dim", type=int, default=64, help="Head dimension")
     parser.add_argument("--selected_blocks", type=int, default=8, help="Number of selected blocks")
     parser.add_argument("--block_size", type=int, default=64, help="Block size")
-    parser.add_argument("--dtype", type=str, default="float16", help="Data type (float16 or float32)")
+    parser.add_argument(
+        "--dtype", type=str, default="float16", help="Data type (float16 or float32)")
     parser.add_argument("--scale", type=float, default=0.1, help="Attention scale factor")
     parser.add_argument("--iterations", type=int, default=100, help="Number of iterations")
     parser.add_argument("--warmup", type=int, default=10, help="Warmup iterations")
     parser.add_argument("--validate", action="store_true", help="Validate against reference")
     parser.add_argument("--suite", action="store_true", help="Run benchmark suite")
-    parser.add_argument("--impl", type=str, default="tilelang", choices=["tilelang", "triton", "all"], 
-                      help="Implementation to benchmark (tilelang, triton, or all)")
-    
+    parser.add_argument(
+        "--impl",
+        type=str,
+        default="tilelang",
+        choices=["tilelang", "triton", "all"],
+        help="Implementation to benchmark (tilelang, triton, or all)")
+
     args = parser.parse_args()
-    
+
     # For Triton impl, ensure head_query is a multiple of heads*16
     if args.impl in ["triton", "all"] and args.head_query % (args.heads * 16) != 0:
         # Adjust head_query to nearest valid value
         args.head_query = ((args.head_query // (args.heads * 16)) + 1) * (args.heads * 16)
-        print(f"Adjusted head_query to {args.head_query} to be compatible with Triton implementation")
-    
+        print(
+            f"Adjusted head_query to {args.head_query} to be compatible with Triton implementation")
+
     if args.suite:
         run_benchmark_suite(impl=args.impl)
     else:
         dtype = torch.float16 if args.dtype == "float16" else torch.float32
-        
+
         if args.impl in ["tilelang", "all"]:
             print("Benchmarking TileLang implementation:")
             result = benchmark_nsa(
@@ -864,15 +932,15 @@ if __name__ == "__main__":
                 scale=args.scale,
                 warmup=args.warmup,
                 iterations=args.iterations,
-                validate=args.validate
-            )
+                validate=args.validate)
             print("\nBenchmark Results (TileLang):")
-            print(f"Configuration: batch={args.batch}, seq_len={args.seq_len}, heads={args.heads}, " +
-                 f"head_query={args.head_query}, dim={args.dim}, blocks={args.selected_blocks}, " +
-                 f"block_size={args.block_size}")
+            print(
+                f"Configuration: batch={args.batch}, seq_len={args.seq_len}, heads={args.heads}, " +
+                f"head_query={args.head_query}, dim={args.dim}, blocks={args.selected_blocks}, " +
+                f"block_size={args.block_size}")
             print(f"Average time: {result['avg_time_ms']:.2f} ms")
             print(f"Performance: {result['tflops']:.2f} TFLOPs")
-        
+
         if args.impl in ["triton", "all"]:
             print("Benchmarking Triton implementation:")
             result = benchmark_triton_nsa(
@@ -887,11 +955,11 @@ if __name__ == "__main__":
                 scale=args.scale,
                 warmup=args.warmup,
                 iterations=args.iterations,
-                validate=args.validate
-            )
+                validate=args.validate)
             print("\nBenchmark Results (Triton):")
-            print(f"Configuration: batch={args.batch}, seq_len={args.seq_len}, heads={args.heads}, " +
-                 f"head_query={args.head_query}, dim={args.dim}, blocks={args.selected_blocks}, " +
-                 f"block_size={args.block_size}")
+            print(
+                f"Configuration: batch={args.batch}, seq_len={args.seq_len}, heads={args.heads}, " +
+                f"head_query={args.head_query}, dim={args.dim}, blocks={args.selected_blocks}, " +
+                f"block_size={args.block_size}")
             print(f"Average time: {result['avg_time_ms']:.2f} ms")
             print(f"Performance: {result['tflops']:.2f} TFLOPs")

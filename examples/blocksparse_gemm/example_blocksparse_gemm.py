@@ -4,11 +4,14 @@
 import tilelang
 import tilelang.language as T
 import torch
+
 torch.random.manual_seed(0)
+
+
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
 
     block_mask_shape = (M // block_M, N // block_N, K // block_K)
-    
+
     @T.prim_func
     def main(
             A: T.Buffer((M, K), dtype),
@@ -20,7 +23,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-            
+
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
                 if BlockMask[by, bx, k]:
@@ -53,7 +56,9 @@ for i in range(1024 // 128):
         accu = torch.zeros((128, 128), dtype=torch.float32, device=a.device)
         for k in range(1024 // 32):
             if block_mask[i, j, k]:
-                accu += (a[i * 128:(i + 1) * 128, k * 32:(k + 1) * 32].to(torch.float32) @ b[k * 32:(k + 1) * 32, j * 128:(j + 1) * 128].to(torch.float32))
+                accu += (
+                    a[i * 128:(i + 1) * 128, k * 32:(k + 1) * 32].to(torch.float32)
+                    @ b[k * 32:(k + 1) * 32, j * 128:(j + 1) * 128].to(torch.float32))
         ref_c[i * 128:(i + 1) * 128, j * 128:(j + 1) * 128] = accu.to(torch.float16)
 
 # ref_c = a @ b

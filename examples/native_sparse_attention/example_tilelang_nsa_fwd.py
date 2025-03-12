@@ -87,7 +87,7 @@ def native_sparse_attention(batch,
                     if is_causal:
                         for i, j in T.Parallel(G, BS):
                             acc_s[i, j] = T.if_then_else(i_t >= (i_s + j), 0,
-                                                            -T.infinity(acc_s.dtype))
+                                                         -T.infinity(acc_s.dtype))
                     else:
                         T.clear(acc_s)
 

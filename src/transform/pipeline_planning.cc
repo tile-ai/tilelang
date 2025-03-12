@@ -54,7 +54,6 @@ bool MayConflict(Region region1, Region region2) {
   return true;
 }
 
-
 class PipelinePlanner : public StmtExprMutator {
 public:
   static Stmt Substitute(const PrimFunc &f) {
@@ -98,7 +97,8 @@ private:
       if (region->buffer.scope() == "global")
         read_from_global = true;
     for (auto region : pinfo.writes)
-      if (region->buffer.scope() == "shared" || region->buffer.scope() == "shared.dyn")
+      if (region->buffer.scope() == "shared" ||
+          region->buffer.scope() == "shared.dyn")
         write_to_shared = true;
 
     pinfo.copy_stage = write_to_shared && read_from_global;
