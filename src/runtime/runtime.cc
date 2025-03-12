@@ -17,7 +17,7 @@ namespace tl {
 
 using namespace runtime;
 
-#if (__CUDACC_VER_MAJOR__ >= 12)
+#if (CUDA_MAJOR_VERSION >= 12)
 template <typename T> static std::string ArrayToStr(const T *ptr, size_t n) {
   std::stringstream ss;
   ss << "[";
@@ -203,7 +203,7 @@ TVM_REGISTER_GLOBAL(tvm_tensormap_create_im2col)
       }
       *ret = static_cast<int>(result);
     });
-#endif // (__CUDACC_VER_MAJOR__ >= 12)
+#endif // (CUDA_MAJOR_VERSION >= 12)
 
 } // namespace tl
 } // namespace tvm
