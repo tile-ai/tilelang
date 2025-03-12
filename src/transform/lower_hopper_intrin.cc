@@ -36,6 +36,7 @@ namespace tl {
 
 using namespace tir;
 
+#if (__CUDACC_VER_MAJOR__ >= 12)
 class LowerHopperIntrin : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc &f) {
@@ -168,6 +169,7 @@ tvm::transform::Pass LowerHopperIntrin() {
 
 TVM_REGISTER_GLOBAL("tl.transform.LowerHopperIntrin")
     .set_body_typed(LowerHopperIntrin);
+#endif // (__CUDACC_VER_MAJOR__ >= 12)
 
 } // namespace tl
 } // namespace tvm

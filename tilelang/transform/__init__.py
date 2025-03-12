@@ -81,7 +81,8 @@ def LowerHopperIntrin():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.LowerHopperIntrin()  # type: ignore
+    return _ffi_api.LowerHopperIntrin() \
+        if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f # type: ignore
 
 
 def WarpSpecializedPipeline():
