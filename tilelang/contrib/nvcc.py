@@ -113,9 +113,10 @@ def compile_cuda(code,
         print(py_str(out))
 
     if proc.returncode != 0:
-        msg = code
-        msg += "\nCompilation error:\n"
-        msg += py_str(out)
+        msg = f"{code}\n" \
+            f"Compilation error:\n" \
+            f"{py_str(out)}\n" \
+            f"Command: {' '.join(cmd)}\n"
         raise RuntimeError(msg)
 
     with open(file_target, "rb") as f:
