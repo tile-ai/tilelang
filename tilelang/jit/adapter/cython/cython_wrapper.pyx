@@ -7,6 +7,8 @@ cimport cython
 import ctypes
 from libc.stdint cimport int64_t, uintptr_t
 from libc.stdlib cimport malloc, free
+from tvm import tir
+from tilelang.utils.tensor import map_torch_type
 
 cdef class CythonKernelWrapper:
     # Class attributes to store kernel configuration and library reference
@@ -61,8 +63,19 @@ cdef class CythonKernelWrapper:
         for i in range(len(self.params)):
             if i in self.result_idx:
                 # Create empty output tensor with specified dtype and shape
-                dtype = torch.__getattribute__(str(self.params[i].dtype))
-                shape = list(map(int, self.params[i].shape))
+                dtype = map_torch_type(self.params[i].dtype)
+                shape = []
+                for s in self.params[i].shape:
+                    if isinstance(s, tir.Var):
+                        # find the corresponding input tensor and shape dimension
+                        assert s in self.dynamic_symbolic_map, f"Dynamic symbolic dimension \
+                                                                    {s} not found in dynamic_symbolic_map"
+                        ref_tensor_idx, ref_shape_idx = self.dynamic_symbolic_map[s]
+                        shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
+                    elif isinstance(s, (tir.IntImm, int)):
+                        shape.append(int(s))
+                    else:
+                        raise ValueError(f"Unsupported shape type: {type(s)}")
                 device = inputs[0].device if len(inputs) > 0 else torch.cuda.current_device()
                 tensor = torch.empty(*shape, dtype=dtype, device=device)
             else:

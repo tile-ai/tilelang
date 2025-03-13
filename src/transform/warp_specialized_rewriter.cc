@@ -910,6 +910,36 @@ private:
   bool is_valid_ = true;
 };
 
+class SetMaxNRegCollector : public StmtExprVisitor {
+public:
+  static Array<IntImm> Collect(const PrimFunc &f) {
+    SetMaxNRegCollector collector;
+    collector(f->body);
+    return collector.nreg_;
+  }
+
+private:
+  void VisitStmt_(const EvaluateNode *op) final {
+    if (const CallNode *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(SetMaxNReg())) {
+        int reg_hint = call->args[0].as<IntImmNode>()->value;
+        int is_inc = call->args[1].as<IntImmNode>()->value;
+        ICHECK(reg_hint <= 240 && reg_hint >= 24)
+            << "Invalid reg hint: " << reg_hint;
+        ICHECK(is_inc == 0 || is_inc == 1) << "Invalid is_inc: " << is_inc;
+
+        // producer should decrease register hint while consumer should increase
+        // register hint
+        nreg_.Set(is_inc, IntImm(DataType::Int(32), reg_hint));
+      }
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  Array<IntImm> nreg_{IntImm(DataType::Int(32), 0),
+                      IntImm(DataType::Int(32), 0)};
+};
+
 class WarpSpecializedRewriter : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc f) {
@@ -924,6 +954,7 @@ public:
     }
 
     auto T = WarpSpecializedRewriter();
+    T.nreg_ = SetMaxNRegCollector::Collect(f);
     T.buffer_lca_ = DetectBufferAccessLCA(f);
     for (auto [buffer, _] : T.buffer_lca_)
       T.buffer_data_to_buffer_.Set(buffer->data, buffer);
@@ -948,6 +979,15 @@ private:
     } else {
       return StmtExprMutator::VisitStmt_(op);
     }
+  }
+
+  Stmt VisitStmt_(const EvaluateNode *op) final {
+    if (const CallNode *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(SetMaxNReg())) {
+        return Evaluate(0);
+      }
+    }
+    return StmtExprMutator::VisitStmt_(op);
   }
 
   // If users define a thread binding, we will replace the thread binding with
@@ -995,10 +1035,14 @@ private:
       producer_thread_extent = 128;
 
     // TODO: estimate the correct reg usage.
-    auto inc_reg_stmt =
-        Evaluate(Call(DataType::Handle(), SetMaxNReg(), {240, 1}));
-    auto dec_reg_stmt =
-        Evaluate(Call(DataType::Handle(), SetMaxNReg(), {24, 0}));
+
+    int dec_reg = nreg_[0].as<IntImmNode>()->value;
+    int inc_reg = nreg_[1].as<IntImmNode>()->value;
+
+    auto inc_reg_stmt = Evaluate(Call(DataType::Handle(), SetMaxNReg(),
+                                      {inc_reg == 0 ? 240 : inc_reg, 1}));
+    auto dec_reg_stmt = Evaluate(Call(DataType::Handle(), SetMaxNReg(),
+                                      {dec_reg == 0 ? 24 : dec_reg, 0}));
 
     producer_code = SeqStmt({dec_reg_stmt, producer_code});
     consumer_code = SeqStmt({inc_reg_stmt, consumer_code});
@@ -1043,6 +1087,7 @@ private:
   IterVar thread_iv_;
   Optional<PrimExpr> updated_thread_extent_;
   bool need_update_thread_extent_ = false;
+  Array<IntImm> nreg_;
 };
 
 using namespace tir::transform;

@@ -843,6 +843,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt(func_name, 2);
   } else if (op->op.same_as(tl::FenceProxyAsyncOp())) {
     print_extern_call_stmt("tl::fence_proxy_async");
+  } else if (op->op.same_as(tl::TMAStoreArrive())) {
+    print_extern_call_stmt("tl::tma_store_arrive");
+  } else if (op->op.same_as(tl::TMAStoreWait())) {
+    print_extern_call_stmt("tl::tma_store_wait<0>");
   } else if (op->op.same_as(tl::SetMaxNReg())) {
     this->PrintIndent();
     int nreg = Downcast<IntImm>(op->args[0])->value;

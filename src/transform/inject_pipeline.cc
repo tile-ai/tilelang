@@ -81,6 +81,35 @@ struct BufferAccessInfo {
 };
 
 /*!
+ * \brief Replace IfThenElse nodes with their then_case, preserving attribute
+ * nodes \param body The statement to process \param condition The condition to
+ * match in IfThenElse nodes \return The transformed statement
+ */
+Stmt replace_if_then_else(Stmt body, PrimExpr condition) {
+  if (const auto *if_node = body.as<IfThenElseNode>()) {
+    // If this is an IfThenElse with the matching condition, replace it with its
+    // then_case
+    if (if_node->condition.same_as(condition)) {
+      return if_node->then_case;
+    }
+  } else if (const auto *attr_node = body.as<AttrStmtNode>()) {
+    // For attribute nodes, preserve the attribute but process its body
+    AttrStmt attr_stmt = GetRef<AttrStmt>(attr_node);
+    attr_stmt.CopyOnWrite()->body =
+        replace_if_then_else(attr_node->body, condition);
+    return attr_stmt;
+  } else if (const auto *block_node = body.as<BlockNode>()) {
+    // For block nodes, process the body
+    Block block = GetRef<Block>(block_node);
+    block.CopyOnWrite()->body =
+        replace_if_then_else(block_node->body, condition);
+    return block;
+  }
+  // For any other node type, return it unchanged
+  return body;
+}
+
+/*!
  * \brief Rewriter for the body of the software pipeline. This pass inserts
  * `floormod` to indices of the remapped buffer to select the version
  * corresponding to the pipeline stage.
@@ -227,11 +256,12 @@ class PipelineRewriter : public StmtExprMutator {
 public:
   PipelineRewriter(Map<Var, Buffer> buffer_data_to_buffer,
                    const Array<Buffer> &pipeline_allocs,
-                   const For &pipeline_loop, const PipelineInfo &pipeline_info)
-
+                   const For &pipeline_loop, const PipelineInfo &pipeline_info,
+                   PrimExpr predicate_condition = PrimExpr())
       : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
         pipeline_allocs_(pipeline_allocs), pipeline_loop_(pipeline_loop),
-        pipeline_info_(pipeline_info) {}
+        pipeline_info_(pipeline_info),
+        predicate_condition_(predicate_condition) {}
 
   Stmt BuildPipeline() {
     // Step 1: Analyze accesses to the buffers in the pipeline and compute the
@@ -619,7 +649,6 @@ private:
                 bool need_bound_check) {
     PrimExpr new_loop_var;
     PrimExpr extent = end - start;
-
     auto make_nop = []() {
       return BlockRealize({}, Bool(true), MakeBlock(Evaluate(0), {}));
     };
@@ -636,6 +665,7 @@ private:
 
     // Async related
     std::map<int, AsyncStateLocal> async_states_local;
+    PrimExpr normalized_access_index;
 
     for (const Block &block : ordered_stmts_) {
       int stage = pipeline_info_.at(block).stage;
@@ -658,7 +688,7 @@ private:
       // - "producer_head" if this stage is an async producer
       // - "consumer_head" if this stage reads from asynchronously written
       // buffers.
-      PrimExpr normalized_access_index =
+      normalized_access_index =
           is_unit_loop ? skewed_loop_var : skewed_loop_var + delta;
 
       // Adjust the block predicate and the body according to the final loop
@@ -668,10 +698,15 @@ private:
         Var loop_iter = Downcast<Var>(new_loop_var);
         inbound = Substitute(inbound, {{loop_iter, loop_iter + delta}});
       }
-
       new_block = Downcast<Block>(Substitute(
           new_block, {{pipeline_loop_->loop_var, normalized_access_index}}));
-
+      if (predicate_condition_.defined()) {
+        BlockNode *n = new_block.CopyOnWrite();
+        n->body = IfThenElse(
+            Substitute(predicate_condition_,
+                       {{pipeline_loop_->loop_var, normalized_access_index}}),
+            n->body);
+      }
       if (pipeline_info_[block].async) {
         auto &local_state = async_states_local[stage];
         local_state.producer_head = normalized_access_index;
@@ -686,17 +721,125 @@ private:
     }
 
     PopulateWaitCounts(new_blocks, &async_states_local);
+
     auto stmts = CompletePipelineLoopStatements(new_blocks, async_states_local);
 
+    // Group blocks by their predicate conditions
+    PrimExpr current_condition = Bool(true);
+    Array<Stmt> current_stmts;
+    Array<PrimExpr> ordered_conditions;
+    Array<Array<Stmt>> condition_to_stmts;
+
+    for (const auto &stmt : stmts) {
+      if (const auto *realize = stmt.as<BlockRealizeNode>()) {
+        // Helper function to find IfThenElse through potential AttrStmt nodes
+        auto find_if_then_else =
+            [](Stmt body) -> std::pair<bool, const IfThenElseNode *> {
+          while (true) {
+            if (const auto *if_node = body.as<IfThenElseNode>()) {
+              return {true, if_node};
+            } else if (const auto *attr_node = body.as<AttrStmtNode>()) {
+              // Continue traversing through attributes
+              body = attr_node->body;
+            } else {
+              // No IfThenElse found
+              return {false, nullptr};
+            }
+          }
+        };
+
+        auto [has_if, if_then_else] = find_if_then_else(realize->block->body);
+
+        if (has_if) {
+          if (if_then_else->else_case.defined()) {
+            // IfThenElse nodes with else case are treated individually
+            if (!current_stmts.empty()) {
+              ordered_conditions.push_back(current_condition);
+              condition_to_stmts.push_back(current_stmts);
+              current_stmts = {};
+            }
+            current_condition = Bool(true);
+            current_stmts.push_back(stmt);
+          } else {
+            // If we encounter a new condition
+            if (!StructuralEqual()(if_then_else->condition,
+                                   current_condition)) {
+              // Store the current group if it's not empty
+              if (!current_stmts.empty()) {
+                ordered_conditions.push_back(current_condition);
+                condition_to_stmts.push_back(current_stmts);
+                current_stmts = {};
+              }
+              current_condition = if_then_else->condition;
+            }
+            BlockRealize new_realize = Downcast<BlockRealize>(stmt);
+            new_realize.CopyOnWrite()->block.CopyOnWrite()->body =
+                replace_if_then_else(new_realize->block->body,
+                                     if_then_else->condition);
+            current_stmts.push_back(new_realize);
+          }
+        } else {
+          if (!current_stmts.empty()) {
+            ordered_conditions.push_back(current_condition);
+            condition_to_stmts.push_back(current_stmts);
+            current_stmts = {};
+          }
+          current_condition = Bool(true);
+          current_stmts.push_back(stmt);
+        }
+      } else {
+        // Non-BlockRealize statements are treated individually
+        if (!current_stmts.empty()) {
+          ordered_conditions.push_back(current_condition);
+          condition_to_stmts.push_back(current_stmts);
+          current_stmts = {};
+        }
+        current_condition = Bool(true);
+        current_stmts.push_back(stmt);
+      }
+    }
+
+    // Add the last group if not empty
+    if (!current_stmts.empty()) {
+      ordered_conditions.push_back(current_condition);
+      condition_to_stmts.push_back(current_stmts);
+    }
+
+    // Build the final statement sequence with proper conditionals
+    Array<Stmt> final_stmts;
+    for (auto i = 0; i < ordered_conditions.size(); i++) {
+      Array<Stmt> condition_stmts = condition_to_stmts[i];
+      if (condition_stmts.empty())
+        continue;
+
+      // Create a sequence from the statements with this condition
+      Stmt stmt_block;
+      if (condition_stmts.size() == 1) {
+        stmt_block = condition_stmts[0];
+      } else {
+        stmt_block = SeqStmt(condition_stmts);
+      }
+
+      // If condition is not trivially true, wrap in if-then-else
+      if (!is_one(ordered_conditions[i]) &&
+          !analyzer_.CanProve(ordered_conditions[i] == true)) {
+        stmt_block = IfThenElse(ordered_conditions[i], stmt_block);
+      }
+
+      final_stmts.push_back(stmt_block);
+    }
+
+    // Use final_stmts instead of the original stmts
     Stmt new_loop{nullptr};
 
-    if (stmts.empty()) {
+    if (final_stmts.empty()) {
       return make_nop();
     }
-    if (stmts.size() == 1) {
-      new_loop = stmts[0];
+
+    if (final_stmts.size() == 1) {
+      new_loop = final_stmts[0];
     } else {
-      new_loop = SeqStmt(stmts);
+      new_loop = SeqStmt(final_stmts);
     }
 
     if (!is_unit_loop) {
@@ -713,7 +856,6 @@ private:
                      unroll_loop ? ForKind::kUnrolled : pipeline_loop_->kind,
                      std::move(new_loop), NullOpt, preserved_annotations);
     }
-
     // Update producer heads in the global async states.
     for (const auto &[stage_id, state] : async_states_local) {
       async_states[stage_id].producer_head += extent;
@@ -728,6 +870,7 @@ private:
   Array<Buffer> pipeline_allocs_;
   For pipeline_loop_;
   PipelineInfo pipeline_info_;
+  PrimExpr predicate_condition_;
   int max_stage_ = -1;
   Map<Buffer, Buffer> buffer_remap_;
   Array<Block> ordered_stmts_;
@@ -842,6 +985,7 @@ private:
     // can be direct child of the for-loop. If the for-loop has BlockRealize as
     // its child, the pipeline body will be the child of the block.
     Stmt pipeline_body{nullptr};
+    PrimExpr predicate_condition{nullptr};
     Array<Buffer> pipeline_allocs;
     if (const auto *realize = for_node->body.as<BlockRealizeNode>()) {
       const auto &block = realize->block;
@@ -849,7 +993,15 @@ private:
         ICHECK(buffer->IsInstance<BufferNode>());
         buffer_data_to_buffer_.Set(buffer->data, buffer);
       }
-      pipeline_body = block->body;
+      if (const auto *if_then_else = block->body.as<IfThenElseNode>()) {
+        ICHECK(!if_then_else->else_case.defined())
+            << "Pipeline_Planning: Can't handle the body of the loop because "
+               "it is not a SeqStmt";
+        pipeline_body = if_then_else->then_case;
+        predicate_condition = if_then_else->condition;
+      } else {
+        pipeline_body = block->body;
+      }
       pipeline_allocs = block->alloc_buffers;
     } else {
       pipeline_body = for_node->body;
@@ -927,9 +1079,10 @@ private:
     ValidatePipelineBody(pipeline_info, original_order);
 
     // Step 4: Rewrite the pipeline body.
-    Stmt pipeline = PipelineRewriter(buffer_data_to_buffer_, pipeline_allocs,
-                                     GetRef<For>(op), pipeline_info)
-                        .BuildPipeline();
+    Stmt pipeline =
+        PipelineRewriter(buffer_data_to_buffer_, pipeline_allocs,
+                         GetRef<For>(op), pipeline_info, predicate_condition)
+            .BuildPipeline();
 
     if (const auto *realize = op->body.as<BlockRealizeNode>()) {
       const auto &block = realize->block;
@@ -963,11 +1116,11 @@ private:
     }
     if (has_stage) {
       LOG(FATAL)
-          << "ValueError: Order of the software pipeline is not defined.";
+          << "ValueError: Stage of the software pipeline is not defined.";
     }
     if (has_order) {
       LOG(FATAL)
-          << "ValueError: Stage of the software pipeline is not defined.";
+          << "ValueError: Order of the software pipeline is not defined.";
     }
     return false;
   }

@@ -71,7 +71,9 @@ Array<PrimExpr> Copy::MakeIndices(const Array<IterVar> &ivs,
       idx++;
     }
   }
-  ICHECK(idx == ivs.size());
+  ICHECK(idx == ivs.size())
+      << "idx = " << idx << ", ivs.size() = " << ivs.size()
+      << "src name = " << src->name << ", dst name = " << dst->name;
   return indices;
 }
 
@@ -107,6 +109,12 @@ PrimExpr Copy::MakePredicate(arith::Analyzer *analyzer,
 
 For Copy::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
+  bool is_scalar = loop_vars.size() == 0;
+  if (is_scalar) {
+    return For(Var("i"), 0, 1, ForKind::kSerial,
+               BufferStore(dst, BufferLoad(src, {0}), {0}));
+  }
+
   for (const auto &iv : loop_vars)
     analyzer->Bind(iv->var, iv->dom);
 
@@ -125,7 +133,6 @@ For Copy::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Stmt body = BufferStore(dst, value, dst_indices);
   if (dst_predicate.defined())
     body = IfThenElse(dst_predicate, body);
-
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
     Map<String, ObjectRef> annotations = {};
     if (coalesced_width.defined()) {

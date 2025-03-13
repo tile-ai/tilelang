@@ -206,7 +206,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=1, help='batch size')
     parser.add_argument('--heads', type=int, default=64, help='heads')
-    parser.add_argument('--seq_len', type=int, default=256, help='sequence length')
+    parser.add_argument('--seq_len', type=int, default=8192, help='sequence length')
     parser.add_argument('--dim', type=int, default=128, help='dim')
     parser.add_argument('--is_causal', action='store_true', help='causal')
     parser.add_argument('--tune', action='store_true', help='tune configs')
@@ -221,7 +221,7 @@ if __name__ == "__main__":
     if (not args.tune):
         program = flashattn(
             batch, heads, seq_len, dim, is_causal, tune=args.tune, groups=groups)(
-                block_M=128, block_N=128, num_stages=1, threads=128)
+                block_M=128, block_N=128, num_stages=2, threads=128)
         ref_program = partial(ref_program, is_causal=is_causal, groups=groups)
         mod, params = tilelang.lower(program)
         mod = Profiler(mod, params, [3], tilelang.TensorSupplyType.Normal)

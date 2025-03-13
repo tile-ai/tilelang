@@ -13,10 +13,12 @@
 namespace tvm {
 namespace tl {
 
+#if (CUDA_MAJOR_VERSION >= 12)
 constexpr const char *tvm_tensormap_create_tiled =
     "__tvm_tensormap_create_tiled";
 constexpr const char *tvm_tensormap_create_im2col =
     "__tvm_tensormap_create_im2col";
+#endif // (CUDA_MAJOR_VERSION >= 12)
 } // namespace tl
 } // namespace tvm
 

@@ -212,7 +212,7 @@ def build_csrc(llvm_config_path):
     # Run CMake and make
     try:
         subprocess.check_call(["cmake", ".."])
-        num_jobs = multiprocessing.cpu_count()
+        num_jobs = max(1, int(multiprocessing.cpu_count() * 0.9))
         subprocess.check_call(["make", f"-j{num_jobs}"])
     except subprocess.CalledProcessError as error:
         raise RuntimeError("Failed to build TileLang C Source") from error

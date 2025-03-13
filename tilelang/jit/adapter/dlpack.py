@@ -6,6 +6,7 @@ import torch
 from typing import List
 from tilelang.contrib.dlpack import to_pytorch_func
 from .base import BaseKernelAdapter
+from tilelang.utils.tensor import map_torch_type
 
 
 class TorchDLPackKernelAdapter(BaseKernelAdapter):
@@ -26,7 +27,7 @@ class TorchDLPackKernelAdapter(BaseKernelAdapter):
 
             for i in range(len(self.params)):
                 if i in self.result_idx:
-                    dtype = torch.__getattribute__(str(self.params[i].dtype))
+                    dtype = map_torch_type(self.params[i].dtype)
                     shape = list(map(int, self.params[i].shape))
                     tensor = torch.empty(*shape, dtype=dtype, device=device)
                 else:

@@ -407,5 +407,62 @@ def test_cython_dynamic_shape():
         "float16", 128, 256, 32, 2)
 
 
+def run_cython_dynamic_shape_with_out_idx(M,
+                                          N,
+                                          K,
+                                          trans_A,
+                                          trans_B,
+                                          in_dtype,
+                                          out_dtype,
+                                          dtypeAccum,
+                                          block_M,
+                                          block_N,
+                                          block_K,
+                                          num_stages=3,
+                                          num_threads=128):
+    program = matmul(
+        M,
+        N,
+        K,
+        block_M,
+        block_N,
+        block_K,
+        trans_A,
+        trans_B,
+        in_dtype,
+        out_dtype,
+        dtypeAccum,
+        num_stages,
+        num_threads,
+    )
+
+    matmul_kernel = tilelang.compile(program, execution_backend="cython", out_idx=-1)
+    if isinstance(M, T.Var):
+        M = 1024
+    if isinstance(N, T.Var):
+        N = 1024
+    if isinstance(K, T.Var):
+        K = 768
+    tensor_a = torch.randn(M, K, dtype=torch.__getattribute__(in_dtype)).cuda()
+    tensor_b = torch.randn(K, N, dtype=torch.__getattribute__(in_dtype)).cuda()
+
+    if trans_A:
+        tensor_a = tensor_a.T
+    if trans_B:
+        tensor_b = tensor_b.T
+
+    tensor_c = matmul_kernel(tensor_a, tensor_b)
+
+    tensor_ref_c = torch.matmul(tensor_a.to(torch.float), tensor_b.to(torch.float))
+
+    tilelang.testing.torch_assert_close(
+        tensor_c, tensor_ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
+
+
+def test_cython_dynamic_shape_with_out_idx():
+    run_cython_dynamic_shape_with_out_idx(
+        T.symbolic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

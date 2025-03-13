@@ -81,7 +81,8 @@ def LowerHopperIntrin():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.LowerHopperIntrin()  # type: ignore
+    return _ffi_api.LowerHopperIntrin() \
+        if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f # type: ignore
 
 
 def WarpSpecializedPipeline():
@@ -224,3 +225,14 @@ def VectorizeLoop(enable_vectorize: bool = True):
         The result pass
     """
     return _ffi_api.VectorizeLoop(enable_vectorize)  # type: ignore
+
+
+def InjectPTXAsyncCopy():
+    """Rewrite global to shared memory copy on CUDA with asynchronous copy.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.InjectPTXAsyncCopy()  # type: ignore

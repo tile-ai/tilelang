@@ -34,8 +34,6 @@ namespace tl {
 
 using namespace tir;
 
-namespace {
-
 /*!
  * \brief Check whether two regions have intersections.
  * \param region1 The first region.
@@ -55,8 +53,6 @@ bool MayConflict(Region region1, Region region2) {
   }
   return true;
 }
-
-} // namespace
 
 class PipelinePlanner : public StmtExprMutator {
 public:
@@ -88,20 +84,24 @@ private:
                 /*body*/ stmt);
     Array<Array<BufferRegion>> access =
         GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
+
     PipelineStageInfo pinfo;
     pinfo.reads = std::move(access[0]);
     pinfo.writes = std::move(access[1]);
     pinfo.original_order = idx;
 
     // copy stage should only have one reads and one writes
-    if (pinfo.reads.size() == 1 && pinfo.writes.size() == 1) {
-      for (auto region : pinfo.reads)
-        if (region->buffer.scope() == "global")
-          pinfo.copy_stage = true;
-      for (auto region : pinfo.writes)
-        if (region->buffer.scope() == "global")
-          pinfo.copy_stage = true;
-    }
+    bool write_to_shared = false;
+    bool read_from_global = false;
+    for (auto region : pinfo.reads)
+      if (region->buffer.scope() == "global")
+        read_from_global = true;
+    for (auto region : pinfo.writes)
+      if (region->buffer.scope() == "shared" ||
+          region->buffer.scope() == "shared.dyn")
+        write_to_shared = true;
+
+    pinfo.copy_stage = write_to_shared && read_from_global;
 
     return std::move(pinfo);
   }
@@ -118,14 +118,26 @@ private:
         ICHECK(buffer->IsInstance<BufferNode>());
         buffer_data_to_buffer_.Set(buffer->data, buffer);
       }
-      pipeline_body = block->body;
+      if (const auto *seq_stmt = block->body.as<SeqStmtNode>()) {
+        pipeline_body = block->body;
+      } else if (const auto *if_then_else = block->body.as<IfThenElseNode>()) {
+        // should assert else case is nullptr
+        ICHECK(!if_then_else->else_case.defined())
+            << "Pipeline_Planning: Can't handle the body of the loop because "
+               "it is not a SeqStmt";
+        pipeline_body = if_then_else->then_case;
+      } else {
+        LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
+                      "because it is not a SeqStmt or IfThenElse";
+      }
     } else {
       pipeline_body = loop->body;
     }
     const SeqStmtNode *pipeline_body_seq = pipeline_body.as<SeqStmtNode>();
-    CHECK(pipeline_body_seq) << "ValueError: The body of the software pipeline "
-                                "should be SeqStmt, got "
-                             << loop->body->GetTypeKey();
+    CHECK(pipeline_body_seq)
+        << "ValueError: The body of the software pipeline "
+           "should be SeqStmt, got "
+        << pipeline_body->GetTypeKey() << " " << pipeline_body;
     CHECK(num_stages >= 1);
     CHECK(loop->kind == ForKind::kSerial);
 
@@ -156,10 +168,12 @@ private:
                              return r->buffer == write->buffer &&
                                     MayConflict(r->region, write->region);
                            }) != pinfo.writes.end()) {
-            CHECK(false) << "Can't handle multiple write on overlap buffer "
-                            "region in the pipeline "
-                            "planning pass: "
-                         << pipeline_body_seq->seq[pinfo.original_order];
+            LOG(FATAL) << "Pipeline planning error: Multiple writes to "
+                          "overlapping buffer regions detected. "
+                       << "Stage " << pinfo.original_order << " and stage " << i
+                       << " are both writing to buffer '" << write->buffer->name
+                       << "' with overlapping regions. This is not supported "
+                          "in pipeline planning.";
           }
         }
       }

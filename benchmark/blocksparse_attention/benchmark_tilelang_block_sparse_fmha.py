@@ -39,7 +39,7 @@ def get_sparse_attn_mask_from_threshold(x, threshold, use_dense_for_last_block=F
 def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal):
     block_M = 64
     block_N = 64
-    num_stages = 0
+    num_stages = 2
     threads = 128
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     shape = [batch, heads, seq_len, dim]
@@ -47,7 +47,7 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
 
     dtype = "float16"
     accum_dtype = "float"
-    block_mask_dtype = "int8"
+    block_mask_dtype = "bool"
 
     def kernel_func(block_M, block_N, num_stages, threads):
 
@@ -159,7 +159,7 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
                         (bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(seq_len, block_N))
 
                 for k in T.Pipelined(loop_range, num_stages=num_stages):
-                    if block_mask[k] != 0:
+                    if block_mask[k]:
                         MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
                         Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale,
                                 scores_sum, logsum)
@@ -186,8 +186,6 @@ def benchmark_topk_sparse_attention():
         q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
         k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
         v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
-
-        sm_scale = 1.0 / (D_HEAD**0.5)
 
         # Create sparse mask (downsampled to block level)
         downsample_factor = BLOCK

@@ -42,7 +42,7 @@ def native_sparse_attention(batch,
     G = groups
     BS = block_S
     BK = BV = block_T
-    num_stages = 0
+    num_stages = 2
     threads = 32
 
     @T.prim_func
@@ -142,6 +142,7 @@ if __name__ == "__main__":
         scale=scale,
     )
     kernel = tilelang.compile(program, out_idx=-1)
+    print(kernel.get_kernel_source())
     torch.random.manual_seed(0)
     Q = torch.randn((B, SEQ_LEN, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
     K = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
