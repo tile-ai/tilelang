@@ -2,44 +2,58 @@
 // Licensed under the MIT License.
 #pragma once
 
-#include <cute/algorithm/copy.hpp>
+#include <cute/arch/mma_sm80.hpp>
+#include <cute/atom/mma_atom.hpp>
+#include <cute/underscore.hpp>
 
 #include "common.h"
 
 namespace cute {
 
-template <typename A_type, typename B_type, typename C_type>
+template <typename A_type, typename B_type, typename C_type, int num_warp_m,
+          int num_warp_n>
 struct DispatchInstruction;
 
+using _X = Underscore;
+
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 800))
-template <> struct DispatchInstruction<half_t, half_t, half_t> {
+template <int num_warp_m, int num_warp_n>
+struct DispatchInstruction<half_t, half_t, half_t, num_warp_m, num_warp_n> {
   using MMA = MMA_Atom<SM80_16x8x16_F16F16F16F16_TN>;
-  using MMA_Group = Layout<Shape<_1, _2, _1>>;
+  using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _X>;
 };
-template <> struct DispatchInstruction<half_t, half_t, float> {
+template <int num_warp_m, int num_warp_n>
+struct DispatchInstruction<half_t, half_t, float, num_warp_m, num_warp_n> {
   using MMA = MMA_Atom<SM80_16x8x16_F32F16F16F32_TN>;
-  using MMA_Group = Layout<Shape<_1, _2, _1>>;
+  using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _X>;
 };
-template <> struct DispatchInstruction<bfloat16_t, bfloat16_t, float> {
+template <int num_warp_m, int num_warp_n>
+struct DispatchInstruction<bfloat16_t, bfloat16_t, float, num_warp_m,
+                           num_warp_n> {
   using MMA = MMA_Atom<SM80_16x8x16_F32BF16BF16F32_TN>;
-  using MMA_Group = Layout<Shape<_1, _2, _1>>;
+  using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _X>;
 };
-template <> struct DispatchInstruction<tfloat32_t, tfloat32_t, float> {
+template <int num_warp_m, int num_warp_n>
+struct DispatchInstruction<tfloat32_t, tfloat32_t, float, num_warp_m,
+                           num_warp_n> {
   using MMA = MMA_Atom<SM80_16x8x8_F32TF32TF32F32_TN>;
-  using MMA_Group = Layout<Shape<_1, _2, _1>>;
+  using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _X>;
 };
-template <> struct DispatchInstruction<int8_t, int8_t, int> {
+template <int num_warp_m, int num_warp_n>
+struct DispatchInstruction<int8_t, int8_t, int, num_warp_m, num_warp_n> {
   using MMA = MMA_Atom<SM80_16x8x32_S32S8S8S32_TN>;
-  using MMA_Group = Layout<Shape<_1, _2, _1>>;
+  using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _X>;
 };
-template <> struct DispatchInstruction<double, double, double> {
+template <int num_warp_m, int num_warp_n>
+struct DispatchInstruction<double, double, double, num_warp_m, num_warp_n> {
   using MMA = MMA_Atom<SM80_8x8x4_F64F64F64F64_TN>;
-  using MMA_Group = Layout<Shape<_2, _2, _1>>;
+  using MMA_Group = Tile<Int<num_warp_m * 16>, Int<num_warp_n * 16>, _X>;
 };
 #elif (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 750))
-template <> struct DispatchInstruction<half_t, half_t, float> {
+template <int num_warp_m, int num_warp_n>
+struct DispatchInstruction<half_t, half_t, float, num_warp_m, num_warp_n> {
   using MMA = MMA_Atom<SM75_16x8x8_F32F16F16F32_TN>;
-  using MMA_Group = Layout<Shape<_1, _2, _2>>;
+  using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _16>;
 };
 #endif
 
@@ -180,7 +194,8 @@ public:
       typename std::conditional<std::is_same<B_type_raw, float>::value,
                                 tfloat32_t, A_type_raw>::type;
   using C_type = C_type_raw;
-  using Instruction = DispatchInstruction<A_type, B_type, C_type>;
+  using Instruction =
+      DispatchInstruction<A_type, B_type, C_type, num_warp_m, num_warp_n>;
 
   using OperandATraits =
       OperandTraits<sizeof_bits<A_type>::value, M, K, !trans_A>;

@@ -122,6 +122,9 @@ private:
     const DataType &access_type = buffer->dtype;
     // i // 2, i % 8 can also be vectorized as factor 16
     int max_vector_size = vector_load_bits_max_ / access_type.bits();
+    if (access_type.is_e4m3_float8() or access_type.is_e5m2_float8()) {
+      max_vector_size = 1; // [temporarily] do not vectorize float8
+    }
     // so we should disable this GCD optimization
     max_vector_size = arith::ZeroAwareGCD(max_vector_size, extent_ptr->value);
 

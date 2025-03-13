@@ -8,6 +8,7 @@ import ctypes
 from libc.stdint cimport int64_t, uintptr_t
 from libc.stdlib cimport malloc, free
 from tvm import tir
+from tilelang.utils.tensor import map_torch_type
 
 cdef class CythonKernelWrapper:
     # Class attributes to store kernel configuration and library reference
@@ -62,7 +63,7 @@ cdef class CythonKernelWrapper:
         for i in range(len(self.params)):
             if i in self.result_idx:
                 # Create empty output tensor with specified dtype and shape
-                dtype = torch.__getattribute__(str(self.params[i].dtype))
+                dtype = map_torch_type(self.params[i].dtype)
                 shape = []
                 for s in self.params[i].shape:
                     if isinstance(s, tir.Var):
