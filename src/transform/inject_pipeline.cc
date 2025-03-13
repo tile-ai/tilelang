@@ -762,11 +762,16 @@ private:
             current_stmts.push_back(stmt);
           } else {
             // If we encounter a new condition
-            if (!StructuralEqual()(if_then_else->condition, current_condition)) {
-              LOG(INFO) << "Condition changed: The current condition is: " << current_condition << " and the new condition is: " << if_then_else->condition;
+            if (!StructuralEqual()(if_then_else->condition,
+                                   current_condition)) {
+              LOG(INFO) << "Condition changed: The current condition is: "
+                        << current_condition << " and the new condition is: "
+                        << if_then_else->condition;
               // Store the current group if it's not empty
               if (!current_stmts.empty()) {
-                LOG(INFO) << "Pushing back the current condition into ordered_conditions: " << current_condition;
+                LOG(INFO) << "Pushing back the current condition into "
+                             "ordered_conditions: "
+                          << current_condition;
                 ordered_conditions.push_back(current_condition);
                 condition_to_stmts.push_back(current_stmts);
                 current_stmts = {};
@@ -779,7 +784,8 @@ private:
                 replace_if_then_else(new_realize->block->body,
                                      if_then_else->condition);
             LOG(INFO) << "The new realize is: " << new_realize;
-            LOG(INFO) << "Before pushing back, the current stmts are: " << current_stmts.size();
+            LOG(INFO) << "Before pushing back, the current stmts are: "
+                      << current_stmts.size();
             current_stmts.push_back(new_realize);
             LOG(INFO) << "The current stmts are: " << current_stmts.size();
           }
@@ -839,16 +845,16 @@ private:
       }
 
       // If condition is not trivially true, wrap in if-then-else
-      if (!is_one(ordered_conditions[i]) && !analyzer_.CanProve(ordered_conditions[i] == true)) {
+      if (!is_one(ordered_conditions[i]) &&
+          !analyzer_.CanProve(ordered_conditions[i] == true)) {
         stmt_block = IfThenElse(ordered_conditions[i], stmt_block);
       }
 
       final_stmts.push_back(stmt_block);
     }
 
-
     LOG(INFO) << "The final stmts are: ";
-    for (const auto& stmt : final_stmts) {
+    for (const auto &stmt : final_stmts) {
       LOG(INFO) << stmt;
     }
 
@@ -864,7 +870,6 @@ private:
     } else {
       new_loop = SeqStmt(stmts);
     }
-
 
     if (!is_unit_loop) {
       Map<String, ObjectRef> preserved_annotations;
