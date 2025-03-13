@@ -728,7 +728,7 @@ private:
     PrimExpr current_condition = Bool(true);
     Array<Stmt> current_stmts;
     Array<PrimExpr> ordered_conditions;
-    Map<PrimExpr, Array<Stmt>> condition_to_stmts;
+    Array<Array<Stmt>> condition_to_stmts;
 
     for (const auto &stmt : stmts) {
       if (const auto *realize = stmt.as<BlockRealizeNode>()) {
@@ -755,42 +755,49 @@ private:
             // IfThenElse nodes with else case are treated individually
             if (!current_stmts.empty()) {
               ordered_conditions.push_back(current_condition);
-              condition_to_stmts.Set(current_condition, current_stmts);
+              condition_to_stmts.push_back(current_stmts);
               current_stmts = {};
             }
             current_condition = Bool(true);
             current_stmts.push_back(stmt);
           } else {
             // If we encounter a new condition
-            if (!if_then_else->condition.same_as(current_condition)) {
-              current_condition = if_then_else->condition;
+            if (!StructuralEqual()(if_then_else->condition, current_condition)) {
+              LOG(INFO) << "Condition changed: The current condition is: " << current_condition << " and the new condition is: " << if_then_else->condition;
               // Store the current group if it's not empty
               if (!current_stmts.empty()) {
+                LOG(INFO) << "Pushing back the current condition into ordered_conditions: " << current_condition;
                 ordered_conditions.push_back(current_condition);
-                condition_to_stmts.Set(current_condition, current_stmts);
+                condition_to_stmts.push_back(current_stmts);
                 current_stmts = {};
               }
+              current_condition = if_then_else->condition;
             }
+            LOG(INFO) << "The current condition is: " << current_condition;
             BlockRealize new_realize = Downcast<BlockRealize>(stmt);
             new_realize.CopyOnWrite()->block.CopyOnWrite()->body =
                 replace_if_then_else(new_realize->block->body,
                                      if_then_else->condition);
+            LOG(INFO) << "The new realize is: " << new_realize;
+            LOG(INFO) << "Before pushing back, the current stmts are: " << current_stmts.size();
             current_stmts.push_back(new_realize);
+            LOG(INFO) << "The current stmts are: " << current_stmts.size();
           }
         } else {
           if (!current_stmts.empty()) {
             ordered_conditions.push_back(current_condition);
-            condition_to_stmts.Set(current_condition, current_stmts);
+            condition_to_stmts.push_back(current_stmts);
             current_stmts = {};
           }
           current_condition = Bool(true);
           current_stmts.push_back(stmt);
         }
       } else {
+        LOG(INFO) << "Find a non-BlockRealize statement";
         // Non-BlockRealize statements are treated individually
         if (!current_stmts.empty()) {
           ordered_conditions.push_back(current_condition);
-          condition_to_stmts.Set(current_condition, current_stmts);
+          condition_to_stmts.push_back(current_stmts);
           current_stmts = {};
         }
         current_condition = Bool(true);
@@ -801,13 +808,25 @@ private:
     // Add the last group if not empty
     if (!current_stmts.empty()) {
       ordered_conditions.push_back(current_condition);
-      condition_to_stmts.Set(current_condition, current_stmts);
+      condition_to_stmts.push_back(current_stmts);
+    }
+
+    // Print the condition to stmts map
+    LOG(INFO) << "Condition to stmts map:";
+    // ordered_conditions is empty
+    LOG(INFO) << "The ordered conditions are: " << ordered_conditions.size();
+    for (auto i = 0; i < ordered_conditions.size(); i++) {
+      LOG(INFO) << "Condition " << i << ": " << ordered_conditions[i];
+      LOG(INFO) << "The stmts are: " << condition_to_stmts[i].size();
+      for (auto j = 0; j < condition_to_stmts[i].size(); j++) {
+        LOG(INFO) << "Stmt " << j << ": " << condition_to_stmts[i][j];
+      }
     }
 
     // Build the final statement sequence with proper conditionals
     Array<Stmt> final_stmts;
-    for (const auto &condition : ordered_conditions) {
-      Array<Stmt> condition_stmts = condition_to_stmts[condition];
+    for (auto i = 0; i < ordered_conditions.size(); i++) {
+      Array<Stmt> condition_stmts = condition_to_stmts[i];
       if (condition_stmts.empty())
         continue;
 
@@ -820,25 +839,32 @@ private:
       }
 
       // If condition is not trivially true, wrap in if-then-else
-      if (!is_one(condition) && !analyzer_.CanProve(condition == true)) {
-        stmt_block = IfThenElse(condition, stmt_block);
+      if (!is_one(ordered_conditions[i]) && !analyzer_.CanProve(ordered_conditions[i] == true)) {
+        stmt_block = IfThenElse(ordered_conditions[i], stmt_block);
       }
 
       final_stmts.push_back(stmt_block);
     }
 
+
+    LOG(INFO) << "The final stmts are: ";
+    for (const auto& stmt : final_stmts) {
+      LOG(INFO) << stmt;
+    }
+
     // Use final_stmts instead of the original stmts
     Stmt new_loop{nullptr};
 
-    if (final_stmts.empty()) {
+    if (stmts.empty()) {
       return make_nop();
     }
 
-    if (final_stmts.size() == 1) {
-      new_loop = final_stmts[0];
+    if (stmts.size() == 1) {
+      new_loop = stmts[0];
     } else {
-      new_loop = SeqStmt(final_stmts);
+      new_loop = SeqStmt(stmts);
     }
+
 
     if (!is_unit_loop) {
       Map<String, ObjectRef> preserved_annotations;
