@@ -764,30 +764,19 @@ private:
             // If we encounter a new condition
             if (!StructuralEqual()(if_then_else->condition,
                                    current_condition)) {
-              LOG(INFO) << "Condition changed: The current condition is: "
-                        << current_condition << " and the new condition is: "
-                        << if_then_else->condition;
               // Store the current group if it's not empty
               if (!current_stmts.empty()) {
-                LOG(INFO) << "Pushing back the current condition into "
-                             "ordered_conditions: "
-                          << current_condition;
                 ordered_conditions.push_back(current_condition);
                 condition_to_stmts.push_back(current_stmts);
                 current_stmts = {};
               }
               current_condition = if_then_else->condition;
             }
-            LOG(INFO) << "The current condition is: " << current_condition;
             BlockRealize new_realize = Downcast<BlockRealize>(stmt);
             new_realize.CopyOnWrite()->block.CopyOnWrite()->body =
                 replace_if_then_else(new_realize->block->body,
                                      if_then_else->condition);
-            LOG(INFO) << "The new realize is: " << new_realize;
-            LOG(INFO) << "Before pushing back, the current stmts are: "
-                      << current_stmts.size();
             current_stmts.push_back(new_realize);
-            LOG(INFO) << "The current stmts are: " << current_stmts.size();
           }
         } else {
           if (!current_stmts.empty()) {
@@ -799,7 +788,6 @@ private:
           current_stmts.push_back(stmt);
         }
       } else {
-        LOG(INFO) << "Find a non-BlockRealize statement";
         // Non-BlockRealize statements are treated individually
         if (!current_stmts.empty()) {
           ordered_conditions.push_back(current_condition);
@@ -815,18 +803,6 @@ private:
     if (!current_stmts.empty()) {
       ordered_conditions.push_back(current_condition);
       condition_to_stmts.push_back(current_stmts);
-    }
-
-    // Print the condition to stmts map
-    LOG(INFO) << "Condition to stmts map:";
-    // ordered_conditions is empty
-    LOG(INFO) << "The ordered conditions are: " << ordered_conditions.size();
-    for (auto i = 0; i < ordered_conditions.size(); i++) {
-      LOG(INFO) << "Condition " << i << ": " << ordered_conditions[i];
-      LOG(INFO) << "The stmts are: " << condition_to_stmts[i].size();
-      for (auto j = 0; j < condition_to_stmts[i].size(); j++) {
-        LOG(INFO) << "Stmt " << j << ": " << condition_to_stmts[i][j];
-      }
     }
 
     // Build the final statement sequence with proper conditionals
@@ -853,22 +829,17 @@ private:
       final_stmts.push_back(stmt_block);
     }
 
-    LOG(INFO) << "The final stmts are: ";
-    for (const auto &stmt : final_stmts) {
-      LOG(INFO) << stmt;
-    }
-
     // Use final_stmts instead of the original stmts
     Stmt new_loop{nullptr};
 
-    if (stmts.empty()) {
+    if (final_stmts.empty()) {
       return make_nop();
     }
 
-    if (stmts.size() == 1) {
-      new_loop = stmts[0];
+    if (final_stmts.size() == 1) {
+      new_loop = final_stmts[0];
     } else {
-      new_loop = SeqStmt(stmts);
+      new_loop = SeqStmt(final_stmts);
     }
 
     if (!is_unit_loop) {
