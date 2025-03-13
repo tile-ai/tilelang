@@ -14,7 +14,7 @@ namespace cute {
 
 using namespace SM90;
 
-namespace tl_wgmma{
+namespace tl_wgmma {
 template <GMMA::Major major, class ElementType, class BLK_MN, class BLK_K>
 CUTE_HOST_DEVICE constexpr auto ss_smem_selector() {
   auto BLK_MN0 = size<0>(BLK_MN{});
@@ -210,7 +210,7 @@ public:
   }
 };
 
-}
+} // namespace tl_wgmma
 
 namespace tl_mma {
 
@@ -533,7 +533,7 @@ public:
   }
 };
 
-}
+} // namespace tl_mma
 
 } // namespace cute
 
@@ -544,7 +544,8 @@ namespace tl_mma {
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, typename A_type, typename B_type, typename C_type>
 CUTLASS_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
-  using MMA = cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
+  using MMA =
+      cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
                                  trans_B, A_type, B_type, C_type>;
   MMA::body(pA, pB, accum);
 }
@@ -552,7 +553,8 @@ CUTLASS_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, typename A_type, typename B_type, typename C_type>
 CUTLASS_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
-  using MMA = cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
+  using MMA =
+      cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
                                  trans_B, A_type, B_type, C_type>;
   MMA::body_rs(pA, pB, accum);
 }
@@ -560,39 +562,44 @@ CUTLASS_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, typename A_type, typename B_type, typename C_type>
 CUTLASS_DEVICE void gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
-  using MMA = cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
+  using MMA =
+      cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
                                  trans_B, A_type, B_type, C_type>;
   MMA::body_sr(pA, pB, accum);
 }
 
-}
+} // namespace tl_mma
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool use_wgmma = true, int wg_wait = 0, typename A_type, typename B_type,
-          typename C_type>
+          bool trans_B, bool use_wgmma = true, int wg_wait = 0, typename A_type,
+          typename B_type, typename C_type>
 TL_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
   if constexpr (use_wgmma) {
-    using MMA = cute::tl_wgmma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, A_type, B_type, C_type>;
+    using MMA =
+        cute::tl_wgmma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
+                                     trans_B, A_type, B_type, C_type>;
     MMA::body<wg_wait>(pA, pB, accum);
   } else {
-    using MMA = cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, A_type, B_type, C_type>;
+    using MMA =
+        cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
+                                   trans_B, A_type, B_type, C_type>;
     MMA::body(pA, pB, accum);
   }
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool use_wgmma = true, int wg_wait = 0, typename A_type, typename B_type,
-          typename C_type>
+          bool trans_B, bool use_wgmma = true, int wg_wait = 0, typename A_type,
+          typename B_type, typename C_type>
 TL_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
   if constexpr (use_wgmma) {
-    using MMA = cute::tl_wgmma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, A_type, B_type, C_type>;
+    using MMA =
+        cute::tl_wgmma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
+                                     trans_B, A_type, B_type, C_type>;
     MMA::body_rs<wg_wait>(pA, pB, accum);
   } else {
-    using MMA = cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, A_type, B_type, C_type>;
+    using MMA =
+        cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
+                                   trans_B, A_type, B_type, C_type>;
     MMA::body_rs(pA, pB, accum);
   }
 }
