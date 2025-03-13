@@ -100,7 +100,7 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
     // Use the Hopper TMA bulk copy instructions
     is_load = true;
   } else if (dst.scope() == "global" &&
-            (src.scope() == "shared.dyn" || src.scope() == "shared")) {
+             (src.scope() == "shared.dyn" || src.scope() == "shared")) {
     is_load = false;
   } else {
     return Stmt();
@@ -173,13 +173,13 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
     auto continuous = as_const_int(shared_layout->InputShape()[1]);
     ICHECK(stride != nullptr && continuous != nullptr);
     if (StructuralEqual()(shared_layout, makeHalfBankSwizzleLayout(
-                                            *stride, *continuous,
-                                            shared_tensor->dtype.bits()))) {
+                                             *stride, *continuous,
+                                             shared_tensor->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
     } else if (StructuralEqual()(
-                  shared_layout,
-                  makeFullBankSwizzleLayout(*stride, *continuous,
-                                            shared_tensor->dtype.bits()))) {
+                   shared_layout,
+                   makeFullBankSwizzleLayout(*stride, *continuous,
+                                             shared_tensor->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
     } else {
       ICHECK(0) << "Cannot detect TMA layout.";
@@ -217,13 +217,13 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
       total_elements *= e;
     PrimExpr shared_addr =
         shared_tensor.access_ptr(is_load ? 2 : 1, DataType::Handle(), 1,
-                                total_elements * loop_var, total_elements);
+                                 total_elements * loop_var, total_elements);
     args.push_back(shared_addr);
     global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
     for (auto coord : global_coords)
       args.push_back(coord);
     tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
-                  Evaluate(Call(DataType::Handle(), op, args)));
+                   Evaluate(Call(DataType::Handle(), op, args)));
   } else {
     PrimExpr shared_addr = shared_tensor.access_ptr(is_load ? 2 : 1);
     args.push_back(shared_addr);
@@ -273,10 +273,10 @@ Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args, BufferMap vmap) {
 }
 
 Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
-                          arith::Analyzer *analyzer) const {
+                           arith::Analyzer *analyzer) const {
   ICHECK(TargetIsHopper(T.target));
   ICHECK(src.scope() == "global" &&
-        (dst.scope() == "shared.dyn" || dst.scope() == "shared"));
+         (dst.scope() == "shared.dyn" || dst.scope() == "shared"));
   ICHECK(src->shape.size() == 4);
   ICHECK(dst->shape.size() == 2);
   ICHECK(src->dtype == dst->dtype);
@@ -350,17 +350,17 @@ Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
   image_offset.push_back(
       dilation *
       FloorMod(FloorDiv(c_step * desc.smem_box_channel, desc.global_shape[0]),
-              kernel));
+               kernel));
   image_offset.push_back(dilation * FloorDiv(c_step * desc.smem_box_channel,
-                                            desc.global_shape[0] * kernel));
+                                             desc.global_shape[0] * kernel));
 
   PrimExpr h_dim =
       FloorDiv(src->shape[1] + 2 * padding - (kernel - 1) * dilation - 1,
-              stride) +
+               stride) +
       1;
   PrimExpr w_dim =
       FloorDiv(src->shape[2] + 2 * padding - (kernel - 1) * dilation - 1,
-              stride) +
+               stride) +
       1;
   global_coords.push_back(
       stride * FloorMod(nhw_step * desc.smem_box_pixel, w_dim) - padding);
@@ -385,7 +385,7 @@ Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
 
   Stmt tma_copy =
       IfThenElse(EQ(T.thread_var, 0),
-                Evaluate(Call(DataType::Handle(), TMALoadIm2ColOp(), args)));
+                 Evaluate(Call(DataType::Handle(), TMALoadIm2ColOp(), args)));
   return tma_copy;
 }
 
@@ -419,7 +419,7 @@ Array<PrimExpr> TMAIm2ColDesc::EncodeCallArgs() const {
 TIR_REGISTER_TL_OP(Conv2DIm2ColOp, c2d_im2col)
     .set_num_inputs(8)
     .set_attr<TCallEffectKind>("TCallEffectKind",
-                              Integer(CallEffectKind::kOpaque));
+                               Integer(CallEffectKind::kOpaque));
 
 } // namespace tl
 } // namespace tvm

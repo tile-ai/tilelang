@@ -152,8 +152,8 @@ private:
         stride = stride * buffer->shape[i];
       }
       while (!IndiceCanVectorize(elem_offset, inner_for_->loop_var,
-                                inner_for_->extent, vector_size_,
-                                &analyzer_)) {
+                                 inner_for_->extent, vector_size_,
+                                 &analyzer_)) {
         vector_size_ /= 2;
       }
     } else if (vector_size_ <= vector_load_bits_max_ / buffer->dtype.bits()) {
@@ -231,7 +231,7 @@ private:
           Stmt body = Substitute(fnode->body, vmap);
           body = For(inner_var, 0, vector_size_, ForKind::kVectorized, body);
           body = For(outer_var, 0, extent / vector_size_, fnode->kind, body,
-                    fnode->thread_binding, fnode->annotations, fnode->span);
+                     fnode->thread_binding, fnode->annotations, fnode->span);
           return body;
         }
       } else {
@@ -254,7 +254,7 @@ private:
             For(inner_var, 0, vector_size_, ForKind::kSerial, body);
         body = IfThenElse(condition, vectorize_for, serial_for);
         body = For(outer_var, 0, extent / vector_size_, fnode->kind, body,
-                  fnode->thread_binding, fnode->annotations, fnode->span);
+                   fnode->thread_binding, fnode->annotations, fnode->span);
         return body;
       }
     } else {
@@ -284,7 +284,7 @@ bool IndiceCanVectorize(PrimExpr expr, Var var, PrimExpr iter_var_size,
   if (target_vectorized_size == 1)
     return true;
   if (!analyzer->CanProveEqual(FloorMod(iter_var_size, target_vectorized_size),
-                              0))
+                               0))
     return false;
   Var v0("v0"), v1("v1");
   analyzer->Bind(v0, Range(0, target_vectorized_size));
