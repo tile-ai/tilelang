@@ -15,6 +15,7 @@
 #include <queue>
 
 #include "../op/parallel.h"
+#include "../op/builtin.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "common/loop_fusion_utils.h"
 #include "loop_partition.h"
