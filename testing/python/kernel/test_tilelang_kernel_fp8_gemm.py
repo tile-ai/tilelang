@@ -13,16 +13,14 @@ def calc_diff(x, y):
     sim = 2 * (x * y).sum() / denominator
     return 1 - sim
 
-def matmul_nt(
-    M, N, K,
-    bM, bN, bK,
-    in_dtype, out_dtype, accum_dtype
-):
+
+def matmul_nt(M, N, K, bM, bN, bK, in_dtype, out_dtype, accum_dtype):
+
     @T.prim_func
     def main(
-        A: T.Buffer((M, K), in_dtype),
-        B: T.Buffer((N, K), in_dtype),
-        C: T.Buffer((M, N), out_dtype),
+            A: T.Buffer((M, K), in_dtype),
+            B: T.Buffer((N, K), in_dtype),
+            C: T.Buffer((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, bN), T.ceildiv(M, bM), threads=128) as (bx, by):
             A_shared = T.alloc_shared((bM, bK), in_dtype)
@@ -39,25 +37,24 @@ def matmul_nt(
 
     return main
 
-def assert_matmul_correctness(
-    M, N, K,
-    block_M, block_N, block_K,
-    in_dtype, out_dtype, accum_dtype
-):
+
+def assert_matmul_correctness(M, N, K, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype):
     func = matmul_nt(M, N, K, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype)
     kernel = tilelang.compile(func, out_idx=-1)
-    
+
     A = torch.randn(M, K).to(map_torch_type(in_dtype)).cuda()
     B = torch.randn(N, K).to(map_torch_type(in_dtype)).cuda()
 
     C = kernel(A, B)
 
-    ref_c = torch.matmul(A.to(map_torch_type(accum_dtype)), B.T.to(map_torch_type(accum_dtype))).to(map_torch_type(out_dtype))
+    ref_c = torch.matmul(A.to(map_torch_type(accum_dtype)),
+                         B.T.to(map_torch_type(accum_dtype))).to(map_torch_type(out_dtype))
     print(C)
     print(ref_c)
     diff = calc_diff(C, ref_c)
     print(f"diff: {diff}")
     assert diff < 1e-3
+
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9)
