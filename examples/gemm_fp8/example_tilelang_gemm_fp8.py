@@ -6,19 +6,21 @@ import tilelang
 import tilelang.language as T
 from tilelang.utils.tensor import map_torch_type
 
+
 def calc_diff(x, y):
     x, y = x.double(), y.double()
     denominator = (x * x + y * y).sum()
     sim = 2 * (x * y).sum() / denominator
     return 1 - sim
 
+
 def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
 
     @T.prim_func
     def main(
-        A: T.Buffer((M, K), dtype),
-        B: T.Buffer((N, K), dtype),
-        C: T.Buffer((M, N), dtype),
+            A: T.Buffer((M, K), dtype),
+            B: T.Buffer((N, K), dtype),
+            C: T.Buffer((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -35,6 +37,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
 
     return main
 
+
 def test_gemm_fp8(M, N, K, dtype):
     torch_dtype = map_torch_type(dtype)
 
@@ -47,7 +50,6 @@ def test_gemm_fp8(M, N, K, dtype):
 
     c = kernel(a, b)
 
-
     ref_c = (a.half() @ b.half().T).to(dtype=torch_dtype)
 
     print(c)
@@ -56,6 +58,7 @@ def test_gemm_fp8(M, N, K, dtype):
     diff = calc_diff(c, ref_c)
     print(f"diff: {diff}")
     assert diff < 1e-3
+
 
 if __name__ == "__main__":
     test_gemm_fp8(1024, 1024, 1024, 'e4m3_float8')
