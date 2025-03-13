@@ -195,14 +195,14 @@ class JITKernel(object):
         return cls(func=tilelang_func, **kwargs)
 
     def get_profiler(self,
-                     tensor_supply_type: TensorSupplyType = TensorSupplyType.Integer) -> Profiler:
+                     tensor_supply_type: TensorSupplyType = TensorSupplyType.Auto) -> Profiler:
         """
         Creates a profiler to benchmark the compiled runtime module.
 
         Parameters
         ----------
         tensor_supply_type : TensorSupplyType, optional
-            The type of input tensors to supply for profiling (default: TensorSupplyType.Integer).
+            The type of input tensors to supply for profiling (default: TensorSupplyType.Auto).
 
         Returns
         -------
