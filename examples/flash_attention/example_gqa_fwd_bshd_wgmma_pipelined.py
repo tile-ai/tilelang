@@ -140,7 +140,12 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False, groups=1):
                     T.min(T.ceildiv(seq_len, block_N), T.ceildiv(
                         (bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(seq_len, block_N))
 
-                for k in T.Pipelined(loop_range, num_stages=num_stages):
+                for k in T.Pipelined(
+                        loop_range,
+                        num_stages=num_stages,
+                        order=[-1, 0, 3, 1, -1, 2],
+                        stage=[-1, 0, 0, 1, -1, 1],
+                        group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]]):
                     MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
                     Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale,
                             scores_sum, logsum)
@@ -221,7 +226,7 @@ if __name__ == "__main__":
     if (not args.tune):
         program = flashattn(
             batch, heads, seq_len, dim, is_causal, tune=args.tune, groups=groups)(
-                block_M=128, block_N=128, num_stages=2, threads=128)
+                block_M=128, block_N=128, num_stages=2, threads=256)
         ref_program = partial(ref_program, is_causal=is_causal, groups=groups)
         mod, params = tilelang.lower(program)
         mod = Profiler(mod, params, [3], tilelang.TensorSupplyType.Normal)
