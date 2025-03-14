@@ -12,20 +12,53 @@ import argparse
 from functools import partial
 
 
-def get_configs():
-    block_M = [128]
-    block_N = [128]
-    num_stages = [2]
-    threads = [256]
-    _configs = list(itertools.product(block_M, block_N, num_stages, threads))
+class FlashAttentionTuneSpace:
 
-    configs = [{
-        'block_M': c[0],
-        'block_N': c[1],
-        'num_stages': c[2],
-        'threads': c[3]
-    } for c in _configs]
-    return configs
+    def __init__(
+        self,
+        block_sizes=(64, 128, 256),
+        thread_options=(128, 256, 512),
+        num_stages_range=(2, 3),
+        max_shared_mem=100 * 1024,
+        warp_alignment=16,
+        dim=128,
+        dtype_bytes=2,
+    ):
+        self.block_sizes = block_sizes
+        self.thread_options = thread_options
+        self.num_stages_range = num_stages_range
+        self.max_shared_mem = max_shared_mem
+        self.warp_alignment = warp_alignment
+        self.dim = dim
+        self.dtype_bytes = dtype_bytes
+
+
+def get_configs(user_config=None):
+    config = user_config or FlashAttentionTuneSpace()
+    valid_configs = []
+
+    for block_M, block_N in itertools.product(config.block_sizes, repeat=2):
+        for threads in config.thread_options:
+            assert threads % 32 == 0
+            warp_count = threads // 32
+            warp_M = block_M // warp_count
+            warp_N = block_N // warp_count
+
+            if (warp_M % config.warp_alignment != 0 or warp_N % config.warp_alignment != 0):
+                continue
+
+            shared_mem = 2 * config.dtype_bytes * config.dim * (block_M + block_N)
+            if shared_mem > config.max_shared_mem:
+                continue
+
+            for num_stages in config.num_stages_range:
+                valid_configs.append({
+                    "block_M": block_M,
+                    "block_N": block_N,
+                    "num_stages": num_stages,
+                    "threads": threads,
+                })
+    return valid_configs
 
 
 def flashattn(batch, heads, seq_len, dim, is_causal, tune=False, groups=1):
