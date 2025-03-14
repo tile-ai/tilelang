@@ -201,7 +201,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
         A = torch.randn(M, K).to(in_dtype).cuda() - 0.5
         B = torch.randn(N, K).to(in_dtype).cuda() - 0.5
 
-    C = torch.zeros(M, N, device="cuda", dtype=accum_dtype)
+    C = torch.zeros(M, N, device="cuda", dtype=out_dtype)
 
     mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
 

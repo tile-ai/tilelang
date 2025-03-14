@@ -1,9 +1,12 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+from typing import Tuple
+
 import torch
 import torch.backends
 from tilelang import tvm as tvm
+import tilelang.testing
 from tvm import DataType
 import tilelang as TL
 import tilelang.language as T
@@ -11,6 +14,9 @@ from tilelang.intrinsics import get_swizzle_layout
 from tilelang.intrinsics.mma_macro_generator import (
     TensorCoreIntrinEmitter,)
 from tilelang.transform import simplify_prim_func
+from tilelang.utils.tensor import map_torch_type
+
+tilelang.testing.set_random_seed(0)
 
 
 def make_swizzle_layout(shared_buf):
@@ -29,36 +35,30 @@ def make_swizzle_layout(shared_buf):
 
 
 @simplify_prim_func
-def tl_matmul(
+def tl_gemm(
     M,
     N,
     K,
+    num_groups,
     in_dtype,
     out_dtype,
     accum_dtype,
 ):
     assert in_dtype in [
-        "float16",
-        "int8",
-    ], "Currently only float16 and int8 are supported"
+        "e4m3_float8",
+    ], "Currently only e4m3_float8 is supported"
     assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
-    ], "Currently only float16, float32 and int32 are supported"
+        "bfloat16",
+    ], "Currently only float16 is supported"
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if out_dtype == "int32":
-        micro_size_k = 32
-
     # This is a debug config
-    block_row_warps = 1
-    block_col_warps = 1
-    warp_row_tiles = 16
-    warp_col_tiles = 16
-    # chunk = 32 if in_dtype == "float16" else 64
-    chunk = 32
+    block_row_warps = 2
+    block_col_warps = 2
+    warp_row_tiles = 32
+    warp_col_tiles = 32
+    chunk = 64
     shared_scope = "shared.dyn"
 
     # Pipeline Stage
@@ -69,7 +69,9 @@ def tl_matmul(
     block_K = chunk
 
     A_shape = (M, K)
+    Scales_A_shape = (M, T.ceildiv(K, block_K) * num_groups)
     B_shape = (N, K)
+    Scales_B_shape = (T.ceildiv(K, block_K), T.ceildiv(N, block_N))
     A_shared_shape = (block_M, block_K)
     B_shared_shape = (block_N, block_K)
     C_shared_shape = (
@@ -106,19 +108,25 @@ def tl_matmul(
             A: T.Buffer(A_shape, in_dtype),
             B: T.Buffer(B_shape, in_dtype),
             C: T.Buffer((M, N), out_dtype),
+            scales_a: T.Buffer(Scales_A_shape, "float32"),
+            scales_b: T.Buffer(Scales_B_shape, "float32"),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
 
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
+            # Assume num_groups == 1
+            Scale_A = T.alloc_shared((block_M), "float32", scope=shared_scope)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
             A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
+            C_local_final = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
 
             T.annotate_layout({
                 A_shared: make_swizzle_layout(A_shared),
                 B_shared: make_swizzle_layout(B_shared),
+                Scale_A: make_swizzle_layout(Scale_A),
             })
 
             # Improve L2 Cache
@@ -136,19 +144,38 @@ def tl_matmul(
                 for j, k in T.Parallel(block_N, block_K):
                     B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
 
+                for i in T.parallel(block_M):
+                    Scale_A[i] = scales_a[by * block_M + i, ko]
+
+                Scale_B = scales_b[bx, ko]
+
                 for ki in T.serial(0, (block_K // micro_size_k)):
 
                     # Load A into fragment
-                    mma_emitter.ldmatrix_a(A_local, A_shared, ki)
+                    mma_emitter.ldmatrix_a(
+                        A_local,
+                        A_shared,
+                        ki,
+                    )
 
                     # Load B into fragment
-                    mma_emitter.ldmatrix_b(B_local, B_shared, ki)
+                    mma_emitter.ldmatrix_b(
+                        B_local,
+                        B_shared,
+                        ki,
+                    )
 
                     # Perform Matrix Multiplication
                     mma_emitter.mma(A_local, B_local, C_local)
 
+                    C_local_final = C_local * Scale_A[ki * micro_size_k] * Scale_B
+
+
             # Perform STMatrix
-            mma_emitter.stmatrix(C_local, C_shared)
+            mma_emitter.stmatrix(
+                C_local_final,
+                C_shared,
+            )
 
             # Store shared into global
             for i, j in T.Parallel(block_M, block_N):
@@ -162,34 +189,78 @@ def tl_matmul(
     return main
 
 
-M, N, K = 128, 128, 128
-in_dtype, out_dtype, accum_dtype = "float16", "float16", "float16"
-matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
-mod, params = TL.lower(matmul)
-src_code = mod.imported_modules[0].get_source()
-# src_code is the generated cuda source
-assert src_code is not None
+def per_token_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert x.dim() == 2 and x.size(1) % 128 == 0
+    m, n = x.shape
+    x_view = x.view(m, -1, 128)
+    x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
+    return (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn).view(
+        m, n
+    ), (x_amax / 448.0).view(m, -1)
 
-if in_dtype == "int8":
-    A = torch.randint(-128, 127, (M, K), device="cuda", dtype=torch.int8)
-    B = torch.randint(-128, 127, (N, K), device="cuda", dtype=torch.int8)
-else:
-    A = torch.rand(M, K, device="cuda", dtype=getattr(torch, in_dtype))
-    B = torch.rand(N, K, device="cuda", dtype=getattr(torch, in_dtype))
 
-C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, out_dtype))
+def per_block_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert x.dim() == 2
+    m, n = x.shape
+    x_padded = torch.zeros(
+        (T.ceildiv(m, 128) * 128, T.ceildiv(n, 128) * 128), dtype=x.dtype, device=x.device
+    )
+    x_padded[:m, :n] = x
+    x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
+    x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
+    x_scaled = (x_view * (448.0 / x_amax)).to(torch.float8_e4m3fn)
+    return x_scaled.view_as(x_padded)[:m, :n].contiguous(), (x_amax / 448.0).view(
+        x_view.size(0), x_view.size(2)
+    )
 
-mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
 
-mod(A, B, C)
+def assert_tl_gemm_correctness(M, N, K, num_groups, in_dtype, out_dtype, accum_dtype):
+    gemm = tl_gemm(M, N, K, num_groups, in_dtype, out_dtype, accum_dtype)
+    mod, params = TL.lower(gemm)
+    src_code = mod.imported_modules[0].get_source()
+    print(src_code)
+    # src_code is the generated cuda source
+    assert src_code is not None
 
-latency = mod.do_bench(mod.func, warmup=25)
+    in_dtype = map_torch_type(in_dtype)
+    out_dtype = map_torch_type(out_dtype)
+    accum_dtype = map_torch_type(accum_dtype)
 
-# Ensure that the latency is not None
-assert latency is not None
+    A = torch.randn(M, K).to(torch.bfloat16).cuda()
+    B = torch.randn(N, K).to(torch.bfloat16).cuda()
+    A_fp8, A_scale = per_token_cast_to_fp8(A.clone())
+    B_fp8, B_scale = per_block_cast_to_fp8(B.clone())
 
-# Get Reference Result
-ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(getattr(torch, out_dtype))
-print(C)
-print(ref_c)
-torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
+    C = torch.zeros(M, N, device="cuda", dtype=out_dtype)
+
+    mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
+
+    mod(A_fp8, B_fp8, C, A_scale, B_scale)
+
+    latency = mod.do_bench(mod.func, warmup=25)
+
+    # Ensure that the latency is not None
+    assert latency is not None
+
+    # Get Reference Result
+    ref_c = torch._scaled_mm(
+        A_fp8,
+        B_fp8,
+        scale_a=A_scale,
+        scale_b=B_scale,
+        out_dtype=out_dtype
+    )
+    print(C)
+    print(ref_c)
+    torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(8, 9)
+def test_assert_tl_gemm():
+    # only testing num_groups = 1 for now
+    assert_tl_gemm_correctness(128, 128, 128, 1, "e4m3_float8", "bfloat16", "float32")
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()
