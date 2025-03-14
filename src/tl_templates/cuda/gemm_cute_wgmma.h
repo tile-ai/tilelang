@@ -90,16 +90,21 @@ public:
 
   using TileShape = Shape<Int<M>, Int<N / num_warp_n>, Int<K>>;
   using ThrLayout = Layout<Shape<Int<num_warp_m / 4>, Int<num_warp_n>, _1>>;
-  using MMA = typename std::conditional<
-      is_rs,
-      decltype(make_tiled_mma(
+
+  static constexpr auto select_mma() {
+    if constexpr (is_rs) {
+      return make_tiled_mma(
           GMMA::rs_op_selector<A_type, B_type, C_type, TileShape, GmmaMajorA,
                                GmmaMajorB>(),
-          ThrLayout{})),
-      decltype(make_tiled_mma(
+          ThrLayout{});
+    } else {
+      return make_tiled_mma(
           GMMA::ss_op_selector<A_type, B_type, C_type, TileShape, GmmaMajorA,
                                GmmaMajorB>(),
-          ThrLayout{}))>::type;
+          ThrLayout{});
+    }
+  }
+  using MMA = decltype(select_mma());
 
   using SmemLayoutAtomA =
       decltype(ss_smem_selector<GmmaMajorA, A_type, Int<M>, Int<K>>());
