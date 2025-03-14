@@ -25,7 +25,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
             T.clear(C_local)
-            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=1):
+            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
                 if BlockMask[by, bx, k]:
                     T.copy(A[by * block_M, k * block_K], A_shared)
                     T.copy(B[k * block_K, bx * block_N], B_shared)
@@ -64,6 +64,6 @@ for i in range(1024 // 128):
 # ref_c = a @ b
 print(c)
 print(ref_c)
-print(kernel.get_kernel_source())
 
 torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+print(kernel.get_kernel_source())
