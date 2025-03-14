@@ -386,13 +386,13 @@ TL_DEVICE void gemm_cute(A_type_raw *pA, B_type_raw *pB, C_type_raw *accum) {
   using GemmOp =
       typename tl_cute::GemmOp<M, N, K, num_warp_m, num_warp_n, trans_A,
                                trans_B, A_type_raw, B_type_raw, C_type_raw>;
-  if (!from_reg_A && !from_reg_B) {
+  if constexpr (!from_reg_A && !from_reg_B) {
     tl_cute::gemm_ss<GemmOp>(pA, pB, accum);
   }
-  if (from_reg_A && !from_reg_B) {
+  if constexpr (from_reg_A && !from_reg_B) {
     tl_cute::gemm_rs<GemmOp>(pA, pB, accum);
   }
-  if (!from_reg_A && from_reg_B) {
+  if constexpr (!from_reg_A && from_reg_B) {
     tl_cute::gemm_sr<GemmOp>(pA, pB, accum);
   }
   static_assert(!(from_reg_A && from_reg_B), "Not supported");

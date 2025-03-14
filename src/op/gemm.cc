@@ -126,9 +126,18 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     ICHECK(0) << "Both local.fragment inputs is not supported";
   }
 
+  // Dispatch Policy (Could be further refined)
   std::string op_name = "tl::gemm";
-  op_name += "_cute";
-  // TODO: add suffix to gemm(cute, cutlass, cute_wgmma)
+  if (maybe_wgmma) {
+    op_name += "_cute_wgmma";
+  } else if (TargetIsHopper(T.target) || TargetIsAmpere(T.target) ||
+             TargetIsTuring(T.target)) {
+    op_name += "_cute";
+  } else if (TargetIsVolta(T.target)) {
+    op_name += "_cutlass";
+  } else {
+    ICHECK(0) << "Gemm is not dispatched for target " << T.target->str();
+  }
 
   ss << op_name << "<" << M << ", " << N << ", " << K << ", ";
   ss << warp_m << ", " << warp_n << ", ";
