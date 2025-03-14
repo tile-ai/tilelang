@@ -6,6 +6,7 @@
  * \brief infer the fragment/shared memory layout
  */
 
+#include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
@@ -13,7 +14,6 @@
 
 #include <queue>
 
-#include "../op/builtin.h"
 #include "../op/parallel.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "common/loop_fusion_utils.h"
