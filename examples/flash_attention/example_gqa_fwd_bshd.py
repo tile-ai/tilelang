@@ -13,6 +13,7 @@ from functools import partial
 
 
 class FlashAttentionTuneSpace:
+
     def __init__(
         self,
         block_sizes=(64, 128, 256),
@@ -43,10 +44,7 @@ def get_configs(user_config=None):
             warp_M = block_M // warp_count
             warp_N = block_N // warp_count
 
-            if (
-                warp_M % config.warp_alignment != 0
-                or warp_N % config.warp_alignment != 0
-            ):
+            if (warp_M % config.warp_alignment != 0 or warp_N % config.warp_alignment != 0):
                 continue
 
             shared_mem = 2 * config.dtype_bytes * config.dim * (block_M + block_N)
@@ -54,14 +52,12 @@ def get_configs(user_config=None):
                 continue
 
             for num_stages in config.num_stages_range:
-                valid_configs.append(
-                    {
-                        "block_M": block_M,
-                        "block_N": block_N,
-                        "num_stages": num_stages,
-                        "threads": threads,
-                    }
-                )
+                valid_configs.append({
+                    "block_M": block_M,
+                    "block_N": block_N,
+                    "num_stages": num_stages,
+                    "threads": threads,
+                })
     return valid_configs
 
 
