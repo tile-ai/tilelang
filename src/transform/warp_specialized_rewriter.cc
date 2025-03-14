@@ -182,6 +182,46 @@ static Stmt makeParityWait(PrimExpr barrier_id, PrimExpr parity) {
 //   return is_gemm;
 // }
 
+class TMAExpectTxRewriter : public StmtExprMutator {
+public:
+  TMAExpectTxRewriter(Stmt expect_tx) : expect_tx_(expect_tx) {}
+  static Stmt Rewrite(Stmt stmt, Stmt expect_tx) {
+    TMAExpectTxRewriter rewriter(expect_tx);
+    return rewriter(stmt);
+  }
+
+private:
+  Stmt VisitStmt_(const ForNode *op) final {
+    insert_in_evaluate_ = false;
+    StmtExprMutator::VisitStmt_(op);
+    insert_in_evaluate_ = true;
+    if (contain_tma_load_) {
+      Array<Stmt> new_seq = {expect_tx_, GetRef<For>(op)};
+      contain_tma_load_ = false;
+      return SeqStmt(std::move(new_seq));
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+
+  Stmt VisitStmt_(const EvaluateNode *op) final {
+    if (const CallNode *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(TMALoadOp()) ||
+          call->op.same_as(TMALoadIm2ColOp())) {
+        contain_tma_load_ = true;
+        if (insert_in_evaluate_) {
+          Array<Stmt> new_seq = {expect_tx_, GetRef<Evaluate>(op)};
+          return SeqStmt(std::move(new_seq));
+        }
+      }
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+
+  Stmt expect_tx_;
+  bool contain_tma_load_;
+  bool insert_in_evaluate_;
+};
+
 class ProducerTraitsCollector : public StmtExprVisitor {
 public:
   ProducerTraitsCollector() { Clear(); }
@@ -216,14 +256,29 @@ private:
     loop_extents = old_loop_evtents;
   }
 
+  void VisitStmt_(const IfThenElseNode *op) final {
+    bool old_in_if_cond = in_if_cond_;
+    in_if_cond_ = true;
+    VisitExpr(op->condition);
+    in_if_cond_ = old_in_if_cond;
+
+    VisitStmt(op->then_case);
+    if (op->else_case.defined()) {
+      VisitStmt(op->else_case.value());
+    }
+  }
+
   void VisitExpr_(const BufferLoadNode *op) final {
-    has_simt_copy = true;
+    if (!in_if_cond_) {
+      has_simt_copy = true;
+    }
     StmtExprVisitor::VisitExpr_(op);
   }
 
   bool has_simt_copy;
   PrimExpr bulk_copy_bytes;
   PrimExpr loop_extents;
+  bool in_if_cond_ = false;
 };
 
 // Rewrite the producer Stmt to use the correct barrier index
@@ -515,9 +570,10 @@ private:
           auto expect_tx = IfThenElse(
               EQ(thread_var_, 0),
               makeExpectTX(release_barrier_id, collector.BulkCopyBytes()));
-          block_stmt.push_back(expect_tx);
+          block_stmt.push_back(TMAExpectTxRewriter::Rewrite(stmt, expect_tx));
+        } else {
+          block_stmt.push_back(stmt);
         }
-        block_stmt.push_back(stmt);
         if (collector.HasSimtCopy() > 0) {
           block_stmt.push_back(makeCpAsyncBarrier(release_barrier_id));
         }

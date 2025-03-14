@@ -139,6 +139,28 @@ def ThreadPartialSync(storage_scope: str):
     return _ffi_api.ThreadPartialSync(storage_scope)  # type: ignore
 
 
+def IfStmtBinding():
+    """IfStmtBinding
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.IfStmtBinding()  # type: ignore
+
+
+def MergeIfStmt():
+    """MergeIfStmt
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.MergeIfStmt()  # type: ignore
+
+
 def MultiVersionBuffer():
     """WarpSpecializedPipeline
 
