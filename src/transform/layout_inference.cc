@@ -6,7 +6,6 @@
  * \brief infer the fragment/shared memory layout
  */
 
-#include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
