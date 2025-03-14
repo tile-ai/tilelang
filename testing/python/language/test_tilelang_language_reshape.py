@@ -37,6 +37,7 @@ def test_reshape_smem():
     run_reshape(1024, 32, "float32")
     run_reshape(2048, 64, "float16")
 
+
 def reshape_test_smem(N, M, dtype):
     import tilelang.language as T
 
@@ -49,13 +50,14 @@ def reshape_test_smem(N, M, dtype):
             A_shared = T.alloc_shared((N,), dtype)
             for i in range(N):
                 A_shared[i] = A[i]
-            
+
             A_smem_reshaped = T.reshape(A_shared, [N // M, M])
             for i in range(N // M):
                 for j in range(M):
                     B[i, j] = A_smem_reshaped[i, j]
 
     return main
+
 
 def run_reshape_smem(N, M, dtype):
     program = reshape_test_smem(N, M, dtype)
@@ -67,9 +69,11 @@ def run_reshape_smem(N, M, dtype):
 
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
+
 def test_reshape_smem_shared():
     run_reshape_smem(1024, 32, "float32")
     run_reshape_smem(2048, 64, "float16")
+
 
 if __name__ == "__main__":
     tilelang.testing.main()

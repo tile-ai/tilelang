@@ -18,7 +18,7 @@ def view_test(N, M, dtype, new_dtype=None):
         dst_bits = dtype_dst.bits
         scale = src_bits / dst_bits
         new_shape[-1] = int(M * scale)
-        
+
     @T.prim_func
     def main(
             A: T.Buffer((N,), dtype),
@@ -35,7 +35,7 @@ def run_view(N, M, dtype, new_dtype=None):
     program = view_test(N, M, dtype, new_dtype)
     jit_kernel = tl.compile(program, out_idx=-1)
     profiler = jit_kernel.get_profiler()
-    
+
     def ref_program(A):
         if new_dtype:
             from tilelang.utils.tensor import map_torch_type
@@ -47,15 +47,15 @@ def run_view(N, M, dtype, new_dtype=None):
 
 
 def test_reshape_view():
-    
+
     # Test view with same dtype
     run_view(1024, 32, "float32")
     run_view(2048, 64, "float16")
-    
+
     # Test view with dtype conversion
     run_view(1024, 32, "float32", "float16")
     run_view(2048, 64, "float16", "float32")
 
 
 if __name__ == "__main__":
-    tilelang.testing.main() 
+    tilelang.testing.main()
