@@ -32,10 +32,12 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # which may be introduced by the LegalizeSafeMemoryAccess
     if target.arch == "sm_90":
+        mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tilelang.transform.MultiVersionBuffer()(mod)
         mod = tilelang.transform.WarpSpecialized()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tir.transform.LowerOpaqueBlock()(mod)
+        mod = tilelang.transform.MergeIfStmt()(mod)
         mod = tilelang.transform.RewriteWgmmaSync()(mod)
         # mod = tilelang.transform.WarpSpecializedPipeline()(mod)
         mod = tilelang.transform.InjectFenceProxy()(mod)

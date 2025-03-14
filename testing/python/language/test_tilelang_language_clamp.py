@@ -1,7 +1,6 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
-from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang as tl
 

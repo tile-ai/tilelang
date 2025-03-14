@@ -182,8 +182,9 @@ public:
   }
 
   Stmt VisitStmt_(const BufferStoreNode *store) {
-    if (in_async && (store->buffer.scope() == "shared" ||
-                     store->buffer.scope() == "shared.dyn")) {
+    bool is_shared = (store->buffer.scope() == "shared" ||
+                      store->buffer.scope() == "shared.dyn");
+    if (in_async && is_shared) {
       if (auto *load = store->value.as<BufferLoadNode>()) {
         return InjectPTX(load, store);
       } else if (auto *call = store->value.as<CallNode>()) {
