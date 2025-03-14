@@ -39,6 +39,8 @@ class JITKernel(object):
         target_host: Union[str, Target] = None,
         verbose: bool = False,
         pass_configs: Optional[Dict[str, Any]] = None,
+        rt_module_src: Optional[str] = None,  # 新增可选参数 rt_module_src
+        rt_params: dict = None,             # 新增可选参数 rt_params
     ):
         """
         Initializes a TorchFunction instance.
@@ -73,6 +75,41 @@ class JITKernel(object):
         if pass_configs is None:
             pass_configs = {}
         self.pass_configs = pass_configs
+        
+        if rt_module_src is not None and rt_params is not None:
+            self.rt_params = rt_params
+            adapter = None
+             # Create an adapter based on the specified execution backend.
+            if execution_backend == "dlpack":
+                # Use TorchDLPackKernelAdapter for interoperability with PyTorch via DLPack.
+                adapter = TorchDLPackKernelAdapter(self.rt_module, params=self.rt_params, result_idx=out_idx)
+            elif execution_backend == "ctypes":
+                adapter = CtypesKernelAdapter(
+                    self.rt_module,
+                    params=self.rt_params,
+                    result_idx=out_idx,
+                    target=target,
+                    func_or_mod=func,
+                    verbose=verbose,
+                    pass_configs=pass_configs,
+                )
+            elif execution_backend == "cython":
+                adapter = CythonKernelAdapter.from_database(
+                    rt_mod_src=rt_module_src,
+                    params=self.rt_params,
+                    result_idx=out_idx,
+                    target=target,
+                    func_or_mod=func,
+                    verbose=verbose,
+                    pass_configs=pass_configs,
+                )
+            else:
+                # Handle invalid backend.
+                raise ValueError(f"Invalid execution backend: {execution_backend}")
+
+            self.adapter = adapter
+            self.torch_function = adapter.func
+            return 
 
         # If the target is specified as a string, validate it and convert it to a TVM Target.
         if isinstance(target, str):

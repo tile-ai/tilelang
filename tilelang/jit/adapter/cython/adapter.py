@@ -203,6 +203,57 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
         self._post_init()
 
+    @classmethod
+    def from_database(cls,
+                 rt_mod_src: str,
+                 params: List[TensorType],
+                 result_idx: List[int],
+                 target,
+                 func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+                 verbose: bool = False,
+                 pass_configs: Optional[Dict[str, Any]] = None):
+        adapter = cls.__new__(cls)
+        # mod is an empty instance of the runtime module
+        adapter.mod = None
+        adapter.params = params
+        adapter.result_idx = adapter._legalize_result_idx(result_idx)
+
+        if isinstance(func_or_mod, tir.PrimFunc):
+            adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
+        else:
+            adapter.ir_module = func_or_mod
+
+        adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
+        adapter.buffer_dtype_map = adapter._process_buffer_dtype()
+        adapter.static_shape_map = adapter._process_static_shape()
+
+        adapter.target = Target.canon_target(determine_target(target))
+        adapter.verbose = verbose
+        adapter.wrapper = TLWrapper(adapter.target)
+        adapter.lib_generator = LibraryGenerator(adapter.target)
+
+        adapter.wrapper.assign_optimized_module(adapter.ir_module)
+        adapter.wrapper.assign_pass_configs(pass_configs)
+        adapter.wrapped_source = rt_mod_src
+
+        adapter.lib_generator.update_lib_code(adapter.wrapped_source)
+        adapter.lib_generator.compile_lib()
+        adapter.lib = adapter.lib_generator.load_lib()
+
+        try:
+            adapter.lib.init()
+        except Exception as e:
+            raise Exception(
+                f"Failed to initialize the compiled library for {adapter.target}: {e}") from e
+
+        adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params, adapter.lib)
+        adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
+        adapter.cython_wrapper.set_buffer_dtype_map(adapter.buffer_dtype_map)
+        adapter.cython_wrapper.set_static_shape_map(adapter.static_shape_map)
+
+        adapter._post_init()
+        return adapter
+
     def _process_dynamic_symbolic(self) -> Dict[tir.Var, Tuple[int, int]]:
         """Extract information about dynamic shapes from the TIR function.
         
