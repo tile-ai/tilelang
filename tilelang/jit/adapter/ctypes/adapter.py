@@ -36,6 +36,10 @@ class CtypesKernelAdapter(BaseKernelAdapter):
     # Pass configs for the compiler
     pass_configs: Optional[Dict[str, Any]] = None
 
+    # Add new cache attributes
+    param_dtypes: Optional[List[torch.dtype]] = None  # Cache for parameter dtypes
+    param_shapes: Optional[List[List]] = None  # Cache for parameter shapes
+
     def __init__(self,
                  rt_mod,
                  params: List[TensorType],
@@ -62,6 +66,20 @@ class CtypesKernelAdapter(BaseKernelAdapter):
             self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
         else:
             self.ir_module = func_or_mod
+
+        # Cache parameter information during initialization
+        self.param_dtypes = [map_torch_type(param.dtype) for param in params]
+        self.param_shapes = []
+        for param in params:
+            native_shape = []
+            for dim in param.shape:
+                if isinstance(dim, tir.IntImm):
+                    native_shape.append(int(dim))
+                elif isinstance(dim, tir.Var):
+                    native_shape.append(dim)  # Keep tir.Var for dynamic dimensions
+                else:
+                    native_shape.append(dim)
+            self.param_shapes.append(native_shape)
 
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
 
@@ -137,9 +155,15 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         # tensor pointers
         for i in range(len(self.params)):
             if i in self.result_idx:
-                dtype = map_torch_type(self.params[i].dtype)
-                shape = list(map(int, self.params[i].shape))
-                # use the device of the first input tensor if available
+                dtype = self.param_dtypes[i]
+                shape = []
+                # Now working with native Python list, no FFI calls needed
+                for s in self.param_shapes[i]:
+                    if isinstance(s, tir.Var):
+                        ref_tensor_idx, ref_shape_idx = self.dynamic_symbolic_map[s]
+                        shape.append(ins[ref_tensor_idx].shape[ref_shape_idx])
+                    else:  # Already converted to Python int during initialization
+                        shape.append(s)
                 device = ins[0].device if len(ins) > 0 else torch.cuda.current_device()
                 tensor = torch.empty(*shape, dtype=dtype, device=device)
             else:
