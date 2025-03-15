@@ -16,7 +16,7 @@ def do_bench(
     quantiles: Optional[List[float]] = None,
     fast_flush: bool = True,
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
-) -> float | list[float]:
+) -> float | List[float]:
     """Benchmarks the runtime of a PyTorch function.
     
     This function handles:
