@@ -210,13 +210,13 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
     @classmethod
     def from_database(cls,
-                 rt_mod_src: str,
-                 params: List[TensorType],
-                 result_idx: List[int],
-                 target,
-                 func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-                 verbose: bool = False,
-                 pass_configs: Optional[Dict[str, Any]] = None):
+                      rt_mod_src: str,
+                      params: List[TensorType],
+                      result_idx: List[int],
+                      target,
+                      func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+                      verbose: bool = False,
+                      pass_configs: Optional[Dict[str, Any]] = None):
         adapter = cls.__new__(cls)
         # mod is an empty instance of the runtime module
         adapter.mod = None
@@ -251,7 +251,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
             raise Exception(
                 f"Failed to initialize the compiled library for {adapter.target}: {e}") from e
 
-        adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params, adapter.lib)
+        adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params,
+                                                     adapter.lib)
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_buffer_dtype_map(adapter.buffer_dtype_map)
         adapter.cython_wrapper.set_static_shape_map(adapter.static_shape_map)

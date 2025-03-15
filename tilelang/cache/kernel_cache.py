@@ -17,39 +17,44 @@ import logging
 
 from tilelang.env import TILELANG_CACHE_DIR  # noqa: F401
 
+
 class KernelCache:
     """
     Caches compiled kernels using a class and database persistence to avoid redundant compilation.
     """
     _instance = None  # For implementing singleton pattern
-    _lock = threading.Lock() # For thread safety
+    _lock = threading.Lock()  # For thread safety
 
     def __new__(cls, cache_dir=TILELANG_CACHE_DIR):
         """Singleton pattern to ensure only one KernelCache instance"""
-        with cls._lock:                
+        with cls._lock:
             if cls._instance is None:
                 cls._instance = super(KernelCache, cls).__new__(cls)
                 cls._instance._cache = {}  # In-memory cache
                 cls._instance.cache_dir = cache_dir  # Cache directory
-                os.makedirs(cls._instance.cache_dir, exist_ok=True) # Ensure cache directory exists
-                cls._instance.logger = logging.getLogger(__name__) # Initialize logger
-                cls._instance.logger.setLevel(logging.ERROR) # Set default logging level to ERROR, can be adjusted
+                os.makedirs(cls._instance.cache_dir, exist_ok=True)  # Ensure cache directory exists
+                cls._instance.logger = logging.getLogger(__name__)  # Initialize logger
+                cls._instance.logger.setLevel(
+                    logging.ERROR)  # Set default logging level to ERROR, can be adjusted
         return cls._instance
 
     def _generate_key(self, func: Callable, out_idx: List[int], args, target, target_host) -> str:
         """
         Generates a unique cache key.
         """
-        func_name = func.__name__ if hasattr(func, '__name__') else str(func) # Get function name, handle PrimFunc cases
+        func_name = func.__name__ if hasattr(func, '__name__') else str(
+            func)  # Get function name, handle PrimFunc cases
         key_data = {
             "func_name": func_name,
             "out_idx": tuple(out_idx) if out_idx else None,
-            "args_repr": tuple(repr(arg) for arg in args), # Use repr to serialize arguments, may need more robust serialization
+            "args_repr": tuple(
+                repr(arg) for arg in args
+            ),  # Use repr to serialize arguments, may need more robust serialization
             "target": str(target),
             "target_host": str(target_host),
         }
-        key_string = json.dumps(key_data, sort_keys=True) # Sort keys to ensure consistency
-        return sha256(key_string.encode()).hexdigest() # Use SHA256 to generate hash key
+        key_string = json.dumps(key_data, sort_keys=True)  # Sort keys to ensure consistency
+        return sha256(key_string.encode()).hexdigest()  # Use SHA256 to generate hash key
 
     def cached_kernel(
         self,
@@ -74,21 +79,21 @@ class KernelCache:
         """
         key = self._generate_key(func, out_idx, args, target, target_host)
 
-        with self._lock: # Thread-safe access to cache
+        with self._lock:  # Thread-safe access to cache
             if key in self._cache:
                 return self._cache[key]
 
             # Attempt to load from disk
             kernel = self._load_kernel_from_disk(key)
             if kernel:
-                self._cache[key] = kernel # Load to in-memory cache
+                self._cache[key] = kernel  # Load to in-memory cache
                 return kernel
 
             # Compile kernel if cache miss
             program = func if isinstance(func, PrimFunc) else func(*args)
             kernel = compile(program, out_idx=out_idx, target=target, target_host=target_host)
 
-            self._cache[key] = kernel # Store in in-memory cache
+            self._cache[key] = kernel  # Store in in-memory cache
             self._save_kernel_to_disk(key, kernel, func)
             return kernel
 
@@ -96,9 +101,9 @@ class KernelCache:
         """
         Clears the entire kernel cache, including both in-memory and disk cache.
         """
-        with self._lock: # Thread-safe operation
-            self._cache.clear() # Clear in-memory cache
-            self._clear_disk_cache() # Clear disk cache
+        with self._lock:  # Thread-safe operation
+            self._cache.clear()  # Clear in-memory cache
+            self._clear_disk_cache()  # Clear disk cache
 
     def _get_cache_path(self, key: str) -> str:
         """
@@ -111,7 +116,7 @@ class KernelCache:
         Saves the compiled kernel to disk.
         """
         cache_path = self._get_cache_path(key)
-        os.makedirs(cache_path, exist_ok=True) # Ensure directory exists
+        os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists
 
         # Save rt_mod as a str
         try:
@@ -150,11 +155,12 @@ class KernelCache:
                 "pass_configs": kernel.pass_configs,
             }
             with open(config_file, 'w') as f:
-                json.dump(config_data, f, indent=4) # Save with indent for readability
+                json.dump(config_data, f, indent=4)  # Save with indent for readability
         except Exception as e:
             self.logger.error(f"Error saving kernel config to disk: {e}")
 
-    def _load_kernel_from_disk(self, key: str) -> Union['JITKernel', None]: # Type hint for JITKernel
+    def _load_kernel_from_disk(self,
+                               key: str) -> Union['JITKernel', None]:  # Type hint for JITKernel
         """
         Loads kernel from disk.
         """
@@ -201,11 +207,10 @@ class KernelCache:
                 target_host=config_data["target_host"],
                 out_idx=config_data["out_idx"],
                 pass_configs=config_data["pass_configs"],
-                func = func,
+                func=func,
             )
         else:
             return None
-
 
     def _clear_disk_cache(self):
         """
@@ -213,7 +218,7 @@ class KernelCache:
         """
         try:
             if os.path.exists(self.cache_dir):
-                shutil.rmtree(self.cache_dir) # Delete entire cache directory
-            os.makedirs(self.cache_dir, exist_ok=True) # Re-create cache directory
+                shutil.rmtree(self.cache_dir)  # Delete entire cache directory
+            os.makedirs(self.cache_dir, exist_ok=True)  # Re-create cache directory
         except Exception as e:
             self.logger.error(f"Error clearing disk cache: {e}")

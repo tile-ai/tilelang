@@ -10,6 +10,7 @@ from .kernel_cache import KernelCache
 # Create singleton instance of KernelCache
 _kernel_cache_instance = KernelCache()
 
+
 def cached(
     func: Callable,
     out_idx: List[int] = None,
@@ -20,7 +21,9 @@ def cached(
     """
     Caches and reuses compiled kernels (using KernelCache class).
     """
-    return _kernel_cache_instance.cached_kernel(func, out_idx, *args, target=target, target_host=target_host)
+    return _kernel_cache_instance.cached_kernel(
+        func, out_idx, *args, target=target, target_host=target_host)
+
 
 def clear_cache():
     """
