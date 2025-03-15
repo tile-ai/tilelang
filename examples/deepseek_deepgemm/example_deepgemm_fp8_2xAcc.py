@@ -5,7 +5,6 @@ from typing import Tuple
 
 import torch
 import tilelang.testing
-from tvm import DataType
 import tilelang as TL
 import tilelang.language as T
 from tilelang.utils.tensor import map_torch_type
