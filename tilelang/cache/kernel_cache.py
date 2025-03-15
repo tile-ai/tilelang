@@ -15,6 +15,8 @@ import threading
 import cloudpickle
 import logging
 
+from tilelang.env import TILELANG_CACHE_DIR  # noqa: F401
+
 class KernelCache:
     """
     Caches compiled kernels using a class and database persistence to avoid redundant compilation.
@@ -22,9 +24,9 @@ class KernelCache:
     _instance = None  # For implementing singleton pattern
     _lock = threading.Lock() # For thread safety
 
-    def __new__(cls, cache_dir="/~/.tilelang/cache"):
+    def __new__(cls, cache_dir=TILELANG_CACHE_DIR):
         """Singleton pattern to ensure only one KernelCache instance"""
-        with cls._lock:
+        with cls._lock:                
             if cls._instance is None:
                 cls._instance = super(KernelCache, cls).__new__(cls)
                 cls._instance._cache = {}  # In-memory cache

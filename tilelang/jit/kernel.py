@@ -39,8 +39,8 @@ class JITKernel(object):
         target_host: Union[str, Target] = None,
         verbose: bool = False,
         pass_configs: Optional[Dict[str, Any]] = None,
-        rt_module_src: Optional[str] = None,  # 新增可选参数 rt_module_src
-        rt_params: dict = None,             # 新增可选参数 rt_params
+        rt_module_src: Optional[str] = None,  
+        rt_params: dict = None,            
     ):
         """
         Initializes a TorchFunction instance.
