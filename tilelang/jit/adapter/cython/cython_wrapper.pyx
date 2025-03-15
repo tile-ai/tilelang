@@ -14,6 +14,7 @@ cdef class CythonKernelWrapper:
     # Class attributes to store kernel configuration and library reference
     cdef:
         object dynamic_symbolic_map  # Maps dynamic dimensions to their corresponding tensor indices
+        object buffer_device_map     # Maps buffer variables to their corresponding devices
         object buffer_dtype_map     # Maps buffer variables to their corresponding dtypes
         object static_shape_map     # Maps buffer variables to their corresponding static shapes
         list result_idx             # Indices of output tensors in the params list
@@ -42,7 +43,7 @@ cdef class CythonKernelWrapper:
                 else:
                     native_shape.append(dim)
             self.param_shapes.append(native_shape)
-    
+
     def set_dynamic_symbolic_map(self, dynamic_symbolic_map):
         self.dynamic_symbolic_map = dynamic_symbolic_map
         return self
@@ -53,6 +54,10 @@ cdef class CythonKernelWrapper:
 
     def set_static_shape_map(self, static_shape_map):
         self.static_shape_map = static_shape_map
+        return self
+
+    def set_buffer_device_map(self, buffer_device_map):
+        self.buffer_device_map = buffer_device_map
         return self
 
     cpdef forward(self, list inputs, int64_t stream = -1):
@@ -104,6 +109,14 @@ cdef class CythonKernelWrapper:
                 call_args.append(tensor_list[i])
             else:
                 raise ValueError(f"Unsupported tensor type: {type(tensor_list[i])}")
+
+        # Check buffer device
+        for param, (buffer_idx, device) in self.buffer_device_map.items():
+            tensor_device = tensor_list[buffer_idx].device
+            # Compare device types and indices separately to handle both string and torch.device objects            
+            if (tensor_device.type != device.type or 
+                (tensor_device.index is not None and device.index is not None and tensor_device.index != device.index)):
+                raise ValueError(f"Buffer device mismatch for parameter {param}: expected {device}, got {tensor_device}")
 
         # Check buffer dtype map
         for param, (buffer_idx, torch_dtype) in self.buffer_dtype_map.items():
