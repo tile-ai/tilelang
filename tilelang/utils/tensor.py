@@ -6,6 +6,7 @@ import torch
 from tvm.runtime import ndarray
 from torch.utils.dlpack import to_dlpack
 
+
 class TensorSupplyType(Enum):
     Integer = 1
     Uniform = 2

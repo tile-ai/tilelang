@@ -12,6 +12,7 @@ from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.engine.param import KernelParam
 
+
 class JITKernel(object):
     """
     A wrapper class for compiling and invoking TileLang (TVM TIR) functions as PyTorch-compatible functions.
@@ -208,7 +209,8 @@ class JITKernel(object):
         Profiler
             A Profiler instance for benchmarking the runtime module.
         """
-        return Profiler(self.params, self.out_idx, tensor_supply_type).with_default_adapter(self.adapter)
+        return Profiler(self.params, self.out_idx,
+                        tensor_supply_type).with_default_adapter(self.adapter)
 
     def get_kernel_source(self) -> str:
         """
