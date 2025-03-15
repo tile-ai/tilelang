@@ -118,6 +118,10 @@ def parallel_nsa_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
+    o_slc: torch.Tensor,
+    o_swa: Optional[torch.Tensor],
+    lse_slc: torch.Tensor,
+    lse_swa: Optional[torch.Tensor],
     block_indices: torch.LongTensor,
     block_counts: Union[torch.LongTensor, int],
     block_size: int,
@@ -142,10 +146,6 @@ def parallel_nsa_fwd(
     assert NK == 1, "The key dimension can not be larger than 256"
 
     grid = (T, NV, B * H)
-    o_slc = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device)
-    o_swa = torch.empty(B, T, HQ, V, dtype=v.dtype, device=q.device) if window_size > 0 else None
-    lse_slc = torch.empty(B, T, HQ, dtype=torch.float, device=q.device)
-    lse_swa = torch.empty(B, T, HQ, dtype=torch.float, device=q.device) if window_size > 0 else None
 
     parallel_nsa_fwd_kernel[grid](
         q=q,
@@ -499,6 +499,12 @@ def tilelang_sparse_attention(batch,
             scores_sum = T.alloc_fragment([G], accum_dtype)
             logsum = T.alloc_fragment([G], accum_dtype)
 
+            # T.use_swizzle(10)
+
+            T.annotate_layout({Q_shared: tilelang.layout.make_swizzled_layout(Q_shared)})
+            T.annotate_layout({K_shared: tilelang.layout.make_swizzled_layout(K_shared)})
+            T.annotate_layout({V_shared: tilelang.layout.make_swizzled_layout(V_shared)})
+
             i_t, i_v, i_bh = bx, by, bz
             i_b, i_h = i_bh // head_kv, i_bh % head_kv
 
@@ -605,20 +611,27 @@ def benchmark_nsa(batch_size,
         scale=scale,
     )
     print(program)
-    kernel = tilelang.compile(program, out_idx=-1)
+    kernel = tilelang.compile(program, out_idx=None, execution_backend="cython")
     print(kernel.get_kernel_source())
+
+    profiler = kernel.get_profiler()
+
+    profiler_latency = profiler.do_bench(profiler.mod)
+    print(f"Profiler latency: {profiler_latency} ms")
 
     # Create input tensors
     Q = torch.randn((batch_size, seq_len, head_query, dim), dtype=dtype, device='cuda')
     K = torch.randn((batch_size, seq_len, heads, dim), dtype=dtype, device='cuda')
     V = torch.randn((batch_size, seq_len, heads, dim), dtype=dtype, device='cuda')
+    out = torch.empty((batch_size, seq_len, head_query, dim), dtype=dtype, device='cuda')
 
     # Generate block indices
-    block_indices = generate_block_indices(batch_size, seq_len, heads, selected_blocks, block_size)
+    block_indices = generate_block_indices(batch_size, seq_len, heads, selected_blocks,
+                                           block_size).to(torch.int32)
 
     # Warmup
     for _ in range(warmup):
-        out = kernel(Q, K, V, block_indices.to(torch.int32))
+        kernel(Q, K, V, block_indices, out)
 
     # Synchronize before timing
     torch.cuda.synchronize()
@@ -626,7 +639,7 @@ def benchmark_nsa(batch_size,
     # Benchmark
     start_time = time.time()
     for _ in range(iterations):
-        out = kernel(Q, K, V, block_indices.to(torch.int32))
+        kernel(Q, K, V, block_indices, out)
     torch.cuda.synchronize()
     end_time = time.time()
 
@@ -712,6 +725,8 @@ def benchmark_triton_nsa(batch_size,
     block_indices = generate_block_indices(batch_size, seq_len, heads, selected_blocks, block_size)
     block_counts = torch.randint(
         1, selected_blocks + 1, (batch_size, seq_len, heads), device='cuda')
+    o_slc = torch.empty((batch_size, seq_len, head_query, dim), dtype=dtype, device='cuda')
+    lse_slc = torch.empty((batch_size, seq_len, head_query), dtype=torch.float, device='cuda')
 
     # Warmup
     for _ in range(warmup):
@@ -719,6 +734,10 @@ def benchmark_triton_nsa(batch_size,
             q=Q,
             k=K,
             v=V,
+            o_slc=o_slc,
+            o_swa=None,
+            lse_slc=lse_slc,
+            lse_swa=None,
             block_indices=block_indices,
             block_counts=block_counts,
             block_size=block_size,
@@ -735,6 +754,10 @@ def benchmark_triton_nsa(batch_size,
             q=Q,
             k=K,
             v=V,
+            o_slc=o_slc,
+            o_swa=None,
+            lse_slc=lse_slc,
+            lse_swa=None,
             block_indices=block_indices,
             block_counts=block_counts,
             block_size=block_size,
@@ -883,13 +906,13 @@ def run_benchmark_suite(impl='all'):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark TileLang Sparse Attention")
-    parser.add_argument("--batch", type=int, default=2, help="Batch size")
+    parser.add_argument("--batch", type=int, default=32, help="Batch size")
     parser.add_argument("--seq_len", type=int, default=1024, help="Sequence length")
     parser.add_argument("--heads", type=int, default=1, help="Number of heads")
     parser.add_argument("--head_query", type=int, default=16, help="Number of query heads")
-    parser.add_argument("--dim", type=int, default=64, help="Head dimension")
-    parser.add_argument("--selected_blocks", type=int, default=8, help="Number of selected blocks")
-    parser.add_argument("--block_size", type=int, default=64, help="Block size")
+    parser.add_argument("--dim", type=int, default=128, help="Head dimension")
+    parser.add_argument("--selected_blocks", type=int, default=16, help="Number of selected blocks")
+    parser.add_argument("--block_size", type=int, default=32, help="Block size")
     parser.add_argument(
         "--dtype", type=str, default="float16", help="Data type (float16 or float32)")
     parser.add_argument("--scale", type=float, default=0.1, help="Attention scale factor")
@@ -900,7 +923,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--impl",
         type=str,
-        default="tilelang",
+        default="all",
         choices=["tilelang", "triton", "all"],
         help="Implementation to benchmark (tilelang, triton, or all)")
 

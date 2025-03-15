@@ -78,6 +78,8 @@ class TLCUDASourceWrapper(object):
     }
 
     backend = "tl"
+    device_mod: Optional[IRModule] = None
+    host_mod: Optional[IRModule] = None
 
     def __init__(self,
                  scheduled_ir_module: IRModule,
@@ -111,7 +113,7 @@ class TLCUDASourceWrapper(object):
             if param in self.prim_func.buffer_map:
                 buffer = self.prim_func.buffer_map[param]
                 function_args.append({
-                    "name": buffer.name,
+                    "name": buffer.data.name,
                     "type": self._TYPE_MAP[buffer.dtype] + "* __restrict__",
                 })
             elif isinstance(param, tvm.tir.Var):
@@ -246,8 +248,11 @@ class TLCUDASourceWrapper(object):
     def parse_source_information(self):
         with tvm.transform.PassContext(opt_level=3, config=self.pass_configs):
             device_mod, host_mod = get_annotated_mod(self.mod, self.target)
+
         assert (len(device_mod.functions) >= 1), "Device module should have at least one function."
         assert (len(host_mod.functions) == 1), "Only support one function in host module."
+        self.device_mod = device_mod
+        self.host_mod = host_mod
 
         block_info_map = {}
         grid_info_map = {}

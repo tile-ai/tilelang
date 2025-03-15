@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 # cython: language_level=3
 
@@ -19,12 +19,29 @@ cdef class CythonKernelWrapper:
         list result_idx             # Indices of output tensors in the params list
         list params                 # List of parameter specifications (includes both inputs and outputs)
         object lib                  # Reference to the compiled library containing the kernel
+        # Add new cache attributes
+        list param_dtypes    # Cache for parameter dtypes
+        list param_shapes    # Cache for parameter shapes as native Python lists
 
     def __cinit__(self, result_idx, params, lib):
         # Initialize wrapper with kernel configuration
         self.result_idx = result_idx
         self.params = params
         self.lib = lib
+        # Convert TVM types to native Python types during initialization
+        self.param_dtypes = [map_torch_type(param.dtype) for param in params]
+        # Convert TVM shape arrays to native Python lists
+        self.param_shapes = []
+        for param in params:
+            native_shape = []
+            for dim in param.shape:
+                if isinstance(dim, tir.IntImm):
+                    native_shape.append(int(dim))
+                elif isinstance(dim, tir.Var):
+                    native_shape.append(dim)  # Keep tir.Var for dynamic dimensions
+                else:
+                    native_shape.append(dim)
+            self.param_shapes.append(native_shape)
     
     def set_dynamic_symbolic_map(self, dynamic_symbolic_map):
         self.dynamic_symbolic_map = dynamic_symbolic_map
@@ -57,29 +74,22 @@ cdef class CythonKernelWrapper:
 
         cdef int ins_idx = 0
         cdef list tensor_list = []
-        cdef list call_args = []
 
         # Prepare input and output tensors
         for i in range(len(self.params)):
             if i in self.result_idx:
-                # Create empty output tensor with specified dtype and shape
-                dtype = map_torch_type(self.params[i].dtype)
+                dtype = self.param_dtypes[i]
                 shape = []
-                for s in self.params[i].shape:
+                # Now working with native Python list, no FFI calls needed
+                for s in self.param_shapes[i]:
                     if isinstance(s, tir.Var):
-                        # find the corresponding input tensor and shape dimension
-                        assert s in self.dynamic_symbolic_map, f"Dynamic symbolic dimension \
-                                                                    {s} not found in dynamic_symbolic_map"
                         ref_tensor_idx, ref_shape_idx = self.dynamic_symbolic_map[s]
                         shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
-                    elif isinstance(s, (tir.IntImm, int)):
-                        shape.append(int(s))
-                    else:
-                        raise ValueError(f"Unsupported shape type: {type(s)}")
+                    else:  # Already converted to Python int during initialization
+                        shape.append(s)
                 device = inputs[0].device if len(inputs) > 0 else torch.cuda.current_device()
                 tensor = torch.empty(*shape, dtype=dtype, device=device)
             else:
-                # Use provided input tensor
                 tensor = inputs[ins_idx]
                 ins_idx += 1
             tensor_list.append(tensor)

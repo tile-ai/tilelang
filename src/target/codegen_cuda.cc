@@ -1305,7 +1305,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
   } else {
     size_t constant_size = op->ConstantAllocationSize();
     ICHECK_GT(constant_size, 0)
-        << "Can only handle constant size stack allocation for now";
+        << "Can only handle constant size stack allocation for now, but get "
+        << constant_size << " for " << op->buffer_var->name_hint;
     if (scope.find("wmma.") == 0) {
       constant_size = GetWmmaFragmentSize(scope, buffer, constant_size);
     }
