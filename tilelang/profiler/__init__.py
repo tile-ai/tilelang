@@ -18,6 +18,7 @@ from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
 
+
 @dataclass
 class Profiler:
     """A profiler class for benchmarking and validating kernel implementations.

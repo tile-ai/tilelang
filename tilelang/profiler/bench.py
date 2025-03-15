@@ -12,8 +12,8 @@ def do_bench(
     rep: float = 100,
     _n_warmup: int = 0,
     _n_repeat: int = 0,
-    grad_to_none: List[torch.Tensor] | None = None,
-    quantiles: List[float] | None = None,
+    grad_to_none: Optional[List[torch.Tensor]] = None,
+    quantiles: Optional[List[float]] = None,
     fast_flush: bool = True,
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
 ) -> float | list[float]:
