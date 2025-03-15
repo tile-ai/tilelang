@@ -1,7 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
-from pathlib import Path
 from typing import Tuple
 
 import torch
@@ -30,12 +29,10 @@ def tl_gemm(
         "float32",
     ], "Currently only float16 and float32 are supported"
 
-    Tile_shape = (128, 128, 128)
-    # Pipeline Stage
-
-    block_M = Tile_shape[0]
-    block_N = Tile_shape[1]
-    block_K = Tile_shape[2]
+    TILE_SIZE = (128, 128, 128)
+    block_M = TILE_SIZE[0]
+    block_N = TILE_SIZE[1]
+    block_K = TILE_SIZE[2]
 
     A_shape = (M, K)
     Scales_A_shape = (M, T.ceildiv(K, block_K))
@@ -56,11 +53,9 @@ def tl_gemm(
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
 
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
-            # Assume num_groups == 1
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype)
-            Scale_A_shared = T.alloc_shared((block_M), "float32")
-            # Scale_A_local = T.alloc_fragment((block_M,1), "float32")
+            Scale_C_shared = T.alloc_shared((block_M), "float32")
             C_local = T.alloc_fragment(C_shared_shape, accum_dtype)
             C_local_accum = T.alloc_fragment(C_shared_shape, accum_dtype)
 
@@ -78,12 +73,12 @@ def tl_gemm(
                 # Load scale into shared memory
                 Scale_B = scales_b[bx, k]
                 for i in T.Parallel(block_M):
-                    Scale_A_shared[i] = scales_a[by * block_M+i, k] * Scale_B
+                    Scale_C_shared[i] = scales_a[by * block_M+i, k] * Scale_B
                 
                 T.gemm(A_shared, B_shared, C_local, transpose_B=True)
                 # Promote to enable 2xAcc
                 for i,j in T.Parallel(block_M, block_N):
-                    C_local_accum[i,j] += C_local[i,j] * Scale_A_shared[i]
+                    C_local_accum[i,j] += C_local[i,j] * Scale_C_shared[i]
                 T.clear(C_local)
             # TMA store
             T.copy(C_local_accum, C_shared)
