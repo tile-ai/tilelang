@@ -144,6 +144,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
     #     "A": [(0, 16), (1, 16)] -> represents A.shape = (16, 16)
     # }
     static_shape_map: Optional[Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]]] = None
+    # Maps buffer variables to their corresponding devices
+    buffer_device_map: Optional[Dict[tir.Var, Tuple[int, torch.device]]] = None
     # Pass configs for the compiler
     pass_configs: Optional[Dict[str, Any]] = None
 
@@ -174,11 +176,13 @@ class CythonKernelAdapter(BaseKernelAdapter):
         else:
             self.ir_module = func_or_mod
 
+        self.target = Target.canon_target(determine_target(target))
+
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
         self.buffer_dtype_map = self._process_buffer_dtype()
         self.static_shape_map = self._process_static_shape()
+        self.buffer_device_map = self._process_buffer_device()
 
-        self.target = Target.canon_target(determine_target(target))
         self.verbose = verbose
         self.wrapper = TLWrapper(self.target)
         self.lib_generator = LibraryGenerator(self.target)
@@ -201,13 +205,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
         self.cython_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
         self.cython_wrapper.set_static_shape_map(self.static_shape_map)
-        if is_cuda_target(self.target) or is_hip_target(self.target):
-            self.cython_wrapper.set_device(torch.device("cuda"))
-        elif is_cpu_target(self.target):
-            self.cython_wrapper.set_device(torch.device("cpu"))
-        else:
-            raise ValueError(f"Unsupported target: {self.target}")
-
+        self.cython_wrapper.set_buffer_device_map(self.buffer_device_map)
         self._post_init()
 
     def _process_dynamic_symbolic(self) -> Dict[tir.Var, Tuple[int, int]]:
@@ -264,6 +262,30 @@ class CythonKernelAdapter(BaseKernelAdapter):
                         static_shape.append((j, s.value))
                 static_shape_map[name] = (i, static_shape)
         return static_shape_map
+
+    def _process_buffer_device(self) -> Dict[tir.Var, Tuple[int, torch.device]]:
+        """Extract information about buffer devices from the TIR function.
+        
+        Maps buffer variables to their corresponding devices.
+        """
+        func = self.prim_func
+        params = func.params
+        buffer_map = func.buffer_map
+        buffer_device_map = {}
+        device = None
+        if is_cuda_target(self.target) or is_hip_target(self.target):
+            device = torch.device("cuda")
+        elif is_cpu_target(self.target):
+            device = torch.device("cpu")
+        else:
+            raise ValueError(f"Unsupported target: {self.target}")
+
+        for i, param in enumerate(params):
+            if param in buffer_map:
+                buffer = buffer_map[param]
+                name = buffer.name
+                buffer_device_map[name] = (i, device)
+        return buffer_device_map
 
     def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):
         """Low-level function to call the compiled CUDA kernel.
