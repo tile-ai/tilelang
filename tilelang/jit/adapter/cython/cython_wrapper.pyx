@@ -22,6 +22,7 @@ cdef class CythonKernelWrapper:
         # Add new cache attributes
         list param_dtypes    # Cache for parameter dtypes
         list param_shapes    # Cache for parameter shapes as native Python lists
+        object device         # Device to run the kernel on
 
     def __cinit__(self, result_idx, params, lib):
         # Initialize wrapper with kernel configuration
@@ -42,7 +43,8 @@ cdef class CythonKernelWrapper:
                 else:
                     native_shape.append(dim)
             self.param_shapes.append(native_shape)
-    
+        self.device = torch.device("cuda")
+
     def set_dynamic_symbolic_map(self, dynamic_symbolic_map):
         self.dynamic_symbolic_map = dynamic_symbolic_map
         return self
@@ -53,6 +55,10 @@ cdef class CythonKernelWrapper:
 
     def set_static_shape_map(self, static_shape_map):
         self.static_shape_map = static_shape_map
+        return self
+
+    def set_device(self, device):
+        self.device = device
         return self
 
     cpdef forward(self, list inputs, int64_t stream = -1):
@@ -90,6 +96,9 @@ cdef class CythonKernelWrapper:
                 device = inputs[0].device if len(inputs) > 0 else torch.cuda.current_device()
                 tensor = torch.empty(*shape, dtype=dtype, device=device)
             else:
+                # check if the tensor is on the same device as the wrapper
+                if inputs[ins_idx].device != self.device:
+                    raise ValueError(f"Tensor is on device {inputs[ins_idx].device}, expected device {self.device}")
                 tensor = inputs[ins_idx]
                 ins_idx += 1
             tensor_list.append(tensor)

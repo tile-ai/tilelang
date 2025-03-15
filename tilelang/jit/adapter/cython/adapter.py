@@ -11,6 +11,7 @@ from tvm.relay import TensorType
 from tvm import tir
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
+from tilelang.jit.adapter.utils import is_cuda_target, is_hip_target, is_cpu_target
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.utils.tensor import map_torch_type
@@ -130,7 +131,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
     """
 
     # Class attributes to store compiled kernel information
-    target: str = "cuda"
+    target: Union[str, Target] = "cuda"
     ir_module: Optional[tvm.IRModule] = None
     lib: Optional[ctypes.CDLL] = None  # Compiled library handle
     wrapped_source: Optional[str] = None  # Generated C++ wrapper code
@@ -150,7 +151,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                  rt_mod,
                  params: List[TensorType],
                  result_idx: List[int],
-                 target,
+                 target: Union[str, Target],
                  func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None):
@@ -200,6 +201,12 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
         self.cython_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
         self.cython_wrapper.set_static_shape_map(self.static_shape_map)
+        if is_cuda_target(self.target) or is_hip_target(self.target):
+            self.cython_wrapper.set_device(torch.device("cuda"))
+        elif is_cpu_target(self.target):
+            self.cython_wrapper.set_device(torch.device("cpu"))
+        else:
+            raise ValueError(f"Unsupported target: {self.target}")
 
         self._post_init()
 
