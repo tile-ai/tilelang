@@ -40,6 +40,9 @@ TVM_LIBRARY_PATH: str = os.environ.get("TVM_LIBRARY_PATH", None)
 TILELANG_TEMPLATE_PATH: str = os.environ.get("TL_TEMPLATE_PATH", None)
 TILELANG_PACKAGE_PATH: str = pathlib.Path(__file__).resolve().parents[0]
 
+TILELANG_CACHE_DIR: str = os.environ.get("TILELANG_CACHE_DIR",
+                                         os.path.expanduser("~/.tilelang/cache"))
+
 # SETUP ENVIRONMENT VARIABLES
 CUTLASS_NOT_FOUND_MESSAGE = ("CUTLASS is not installed or found in the expected path")
 ", which may lead to compilation bugs when utilize tilelang backend."
@@ -115,4 +118,5 @@ __all__ = [
     "TVM_LIBRARY_PATH",
     "TILELANG_TEMPLATE_PATH",
     "CUDA_HOME",
+    "TILELANG_CACHE_DIR",
 ]
