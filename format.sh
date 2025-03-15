@@ -65,19 +65,25 @@ format_changed() {
     #
     # `diff-filter=ACM` and $MERGEBASE is to ensure we only format files that
     # exist on both branches.
-    if git show-ref --verify --quiet refs/remotes/origin/main; then
+    UPSTREAM_REPO="https://github.com/tile-ai/tilelang"
+    
+    if git ls-remote --exit-code "$UPSTREAM_REPO" main &>/dev/null; then
+        # First try to use the upstream repository directly
+        MERGEBASE="$(git fetch "$UPSTREAM_REPO" main &>/dev/null && git merge-base FETCH_HEAD HEAD)"
+    elif git show-ref --verify --quiet refs/remotes/origin/main; then
+        # Fall back to origin/main if available
         BASE_BRANCH="origin/main"
+        MERGEBASE="$(git merge-base $BASE_BRANCH HEAD)"
     else
+        # Last resort, use local main
         BASE_BRANCH="main"
+        MERGEBASE="$(git merge-base $BASE_BRANCH HEAD)"
     fi
-
-    MERGEBASE="$(git merge-base $BASE_BRANCH HEAD)"
 
     if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
         git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs -P 5 \
              yapf --in-place "${YAPF_EXCLUDES[@]}" "${YAPF_FLAGS[@]}"
     fi
-
 }
 
 # Format all files
