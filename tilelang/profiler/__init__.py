@@ -6,29 +6,31 @@ from typing import List, Literal, Optional, Callable
 from functools import partial
 import torch
 from contextlib import suppress
-
+from dataclasses import dataclass
 import tvm
-from tvm.relay import TensorType
-from tilelang.jit.adapter import TorchDLPackKernelAdapter
 from tilelang.utils.tensor import (
     get_tensor_supply,
     TensorSupplyType,
     torch_assert_close,
     adapt_torch2tvm,
 )
+from tilelang.engine.param import KernelParam
+from tilelang.jit.adapter import BaseKernelAdapter
 
+@dataclass
+class Profiler:
 
-class Profiler(TorchDLPackKernelAdapter):
+    params: List[KernelParam]
+    result_idx: List[int]
+    supply_type: TensorSupplyType
+    adapter: Optional[BaseKernelAdapter] = None
 
-    def __init__(
-        self,
-        mod,
-        params: List[TensorType],
-        result_idx: List[int],
-        supply_type: TensorSupplyType = TensorSupplyType.Normal,
-    ):
-        super().__init__(mod, params, result_idx)
-        self.supply = get_tensor_supply(supply_type)
+    def __post_init__(self):
+        self.supply = get_tensor_supply(self.supply_type)
+
+    def with_default_adapter(self, adapter: BaseKernelAdapter) -> "Profiler":
+        self.adapter = adapter
+        return self
 
     def _get_inputs(self, with_output=False):
         ins = []
@@ -95,7 +97,7 @@ class Profiler(TorchDLPackKernelAdapter):
                            func: Optional[Callable] = None,
                            profiler: Literal["torch", "tvm", "auto"] = "auto"):
         if profiler == "auto":
-            if func is None or isinstance(func, tvm.runtime.Module):
+            if isinstance(func, tvm.runtime.Module):
                 return "tvm"
             else:
                 return "torch"
@@ -113,6 +115,9 @@ class Profiler(TorchDLPackKernelAdapter):
     ) -> float:
         profiler = self.determine_profiler(func, profiler)
         if profiler == "torch":
+            if func is None:
+                assert self.adapter is not None, "benchmarking function should be provided"
+                func = self.adapter
             ins = self._get_inputs() if input_tensors is None else input_tensors
             bench_func = partial(func, *ins)
             return do_bench(
@@ -123,10 +128,10 @@ class Profiler(TorchDLPackKernelAdapter):
                 _n_repeat=n_repeat,
             )
         elif profiler == "tvm":
-            if func is None:
-                func = self.mod
+            assert func is not None, "func should not be None"
             assert isinstance(
                 func, tvm.runtime.Module), f"func should be a TVM module, but got {type(func)}"
+
             ins = (self._get_inputs(with_output=True) if input_tensors is None else input_tensors)
             target = "cuda"
 

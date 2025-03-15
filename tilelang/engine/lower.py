@@ -4,12 +4,13 @@
 
 import os
 import os.path as osp
-from typing import Union, Optional, Callable
+from typing import Union, Optional, Callable, List
 from tilelang import tvm as tvm
-from tvm import tir, relay
+from tvm import tir
 from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
+from tilelang.engine.param import KernelParam
 from tilelang.utils.target import determine_target
 from tilelang.engine.phase import (
     LowerAndLegalize,
@@ -117,14 +118,13 @@ def tilelang_callback_hip_compile(code, target):
     return hsaco
 
 
-def extrac_params(func: tir.PrimFunc):
+def extrac_params(func: tir.PrimFunc) -> List[KernelParam]:
     tensor_types = []
     for var in func.params:
         if var in func.buffer_map:
-            tensor_types.append(
-                relay.TensorType(func.buffer_map[var].shape, func.buffer_map[var].dtype))
+            tensor_types.append(KernelParam.from_buffer(func.buffer_map[var]))
         else:
-            tensor_types.append(relay.scalar_type(var.dtype))
+            tensor_types.append(KernelParam.from_var(var))
     return tensor_types
 
 

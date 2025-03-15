@@ -1,4 +1,4 @@
-# Copyright (c) Tile-AI Corporation.
+# Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
 """The profiler and convert to torch utils"""
 
@@ -7,7 +7,7 @@ import ctypes
 from typing import List, Optional, Union, Callable, Dict, Tuple, Any
 from tilelang import tvm as tvm
 from tvm.target import Target
-from tvm.relay import TensorType
+from tilelang.engine.param import KernelParam
 from tvm import tir
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
@@ -151,7 +151,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
     def __init__(self,
                  rt_mod,
-                 params: List[TensorType],
+                 params: List[KernelParam],
                  result_idx: List[int],
                  target: Union[str, Target],
                  func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
