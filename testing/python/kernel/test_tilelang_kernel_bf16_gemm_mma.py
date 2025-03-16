@@ -204,7 +204,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
     C = torch.zeros(M, N, device="cuda", dtype=accum_dtype)
 
-    kernel(A, B, C)
+    C = kernel(A, B)
 
     latency = profiler.do_bench()
 
