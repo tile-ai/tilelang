@@ -1,9 +1,6 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 """The profiler and convert to torch utils"""
 from enum import Enum
 import torch
-from tvm.relay import TensorType
 from tvm.runtime import ndarray
 from torch.utils.dlpack import to_dlpack
 
@@ -48,16 +45,18 @@ def adapt_torch2tvm(arg):
 
 def get_tensor_supply(supply_type: TensorSupplyType):
 
-    def get_tensor(tensor: TensorType) -> torch.Tensor:
-        dtype = map_torch_type(str(tensor.dtype))
-        device = torch.cuda.current_device()
+    from tilelang.engine.param import KernelParam
 
-        if hasattr(tensor, "shape") and not tensor.shape:
+    def get_tensor(param: KernelParam) -> torch.Tensor:
+        dtype: torch.dtype = param.dtype
+        device: torch.device = torch.cuda.current_device()
+
+        if hasattr(param, "shape") and not param.shape:
             raise ValueError(
-                f"TensorType must have a shape, but got {type(tensor)}, "
+                f"TensorType must have a shape, but got {type(param)}, "
                 "likely you are trying to generate a random tensor with a dynamic symbolic shape.")
 
-        shape = list(map(int, tensor.shape))
+        shape = list(map(int, param.shape))
         if supply_type == TensorSupplyType.Auto:
             if dtype == torch.float16 or dtype == torch.float32:
                 return torch.empty(*shape, device=device, dtype=dtype).normal_(-1.0, 1.0)
@@ -73,8 +72,8 @@ def get_tensor_supply(supply_type: TensorSupplyType):
             return torch.ones(*shape, device=device, dtype=dtype)
 
         if supply_type == TensorSupplyType.Integer:
-            is_unsigned = tensor.dtype.startswith("uint")
-            is_float8 = tensor.dtype.endswith("float8")
+            is_unsigned = str(dtype).removeprefix("torch.").startswith("uint")
+            is_float8 = str(dtype).removeprefix("torch.").startswith("float8")
             if is_unsigned:
                 return torch.randint(low=0, high=3, size=shape, device=device, dtype=dtype)
             elif is_float8:

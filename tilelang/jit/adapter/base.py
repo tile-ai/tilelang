@@ -4,14 +4,14 @@
 
 from abc import ABC, abstractmethod
 from typing import Any, List, Callable, Optional
-from tvm.relay import TensorType
+from tilelang.engine.param import KernelParam
 
 
 class BaseKernelAdapter(ABC):
 
     func: Optional[Callable] = None
 
-    def __init__(self, mod, params: List[TensorType], result_idx: List[int]) -> None:
+    def __init__(self, mod, params: List[KernelParam], result_idx: List[int]) -> None:
         self.mod = mod
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)

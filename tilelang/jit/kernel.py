@@ -7,6 +7,7 @@ from tvm.tir import PrimFunc
 from tilelang.jit.adapter import TorchDLPackKernelAdapter, BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter
 from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
 from tilelang.profiler import Profiler, TensorSupplyType
+from tilelang.engine.param import KernelParam
 
 
 class JITKernel(object):
@@ -15,15 +16,15 @@ class JITKernel(object):
 
     Attributes
     ----------
-    rt_module : tvm.runtime.Module
+    rt_mod : tvm.runtime.Module
         The runtime module compiled by TVM.
-    rt_params : dict
+    params : List[KernelParam]
         Parameters for the compiled runtime module (e.g., weights or constants).
     torch_function : Callable
         The compiled function that can be invoked as a PyTorch-compatible function.
     """
-    rt_module: tvm.runtime.Module = None
-    rt_params: dict = None
+    rt_mod: tvm.runtime.Module = None
+    params: List[KernelParam] = None
     adapter: BaseKernelAdapter = None
     torch_function: Callable = None
 
@@ -138,8 +139,8 @@ class JITKernel(object):
             rt_mod, params = tilelang.lower(tilelang_func, target=target, target_host=target_host)
 
         # Store the runtime module and parameters for later use.
-        self.rt_module = rt_mod
-        self.rt_params = params
+        self.rt_mod = rt_mod
+        self.params = params
 
         # Create an adapter based on the specified execution backend.
         if execution_backend == "dlpack":
@@ -205,7 +206,8 @@ class JITKernel(object):
         Profiler
             A Profiler instance for benchmarking the runtime module.
         """
-        return Profiler(self.rt_module, self.rt_params, self.out_idx, tensor_supply_type)
+        return Profiler(self.params, self.out_idx,
+                        tensor_supply_type).with_default_adapter(self.adapter)
 
     def get_kernel_source(self) -> str:
         """
@@ -218,13 +220,13 @@ class JITKernel(object):
         """
         if self.execution_backend in {"ctypes", "cython"}:
             return self.adapter.get_kernel_source()
-        return self.rt_module.imported_modules[0].get_source()
+        return self.rt_mod.imported_modules[0].get_source()
 
     def get_host_source(self) -> str:
         """
         Returns the source code of the host function.
         """
-        return self.rt_module.get_source()
+        return self.rt_mod.get_source()
 
     def run_once(self, func: Optional[Callable] = None) -> None:
         return self.get_profiler().run_once(func)

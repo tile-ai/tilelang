@@ -1,5 +1,4 @@
 import tilelang.testing
-import tilelang as tl
 
 
 def clamp(
@@ -35,8 +34,8 @@ def run_clamp(
 ):
     program = clamp(N, block_N, dtype, min, max)
 
-    mod, params = tl.lower(program)
-    profiler = tl.Profiler(mod, params, [1], tl.TensorSupplyType.Integer)
+    kernel = tilelang.compile(program, out_idx=[1])
+    profiler = kernel.get_profiler()
 
     def ref_program(A):
         import torch
@@ -86,8 +85,8 @@ def run_clamp_v2(
         block_N,
         dtype,
     )
-    mod, params = tl.lower(program)
-    profiler = tl.Profiler(mod, params, [1], tl.TensorSupplyType.Integer)
+    kernel = tilelang.compile(program, out_idx=[1])
+    profiler = kernel.get_profiler()
 
     def ref_program(A):
         import torch

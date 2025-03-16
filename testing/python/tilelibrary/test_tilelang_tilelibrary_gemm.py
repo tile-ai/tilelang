@@ -1,9 +1,5 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 from tilelang import tvm as tvm
 import tilelang.testing
-import tilelang as tl
 
 
 def matmul(
@@ -85,8 +81,8 @@ def run_gemm(
         num_threads,
     )
 
-    mod, params = tl.lower(program)
-    profiler = tl.Profiler(mod, params, [2], tl.TensorSupplyType.Integer)
+    kernel = tilelang.compile(program, out_idx=[2])
+    profiler = kernel.get_profiler()
 
     def ref_program(A, B):
         import torch
@@ -226,8 +222,8 @@ def run_gemm_rs(
         num_threads,
     )
 
-    mod, params = tl.lower(program)
-    profiler = tl.Profiler(mod, params, [2], tl.TensorSupplyType.Integer)
+    kernel = tilelang.compile(program, out_idx=[2])
+    profiler = kernel.get_profiler()
 
     def ref_program(A, B):
         import torch

@@ -1,9 +1,5 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 from tilelang import tvm as tvm
 import tilelang.testing
-import tilelang as tl
 from tilelang import primitives as P
 
 
@@ -85,9 +81,9 @@ def run_matmul_ssr(
         num_stages,
         num_threads,
     )
-    mod, params = tl.lower(program)
-    mod = tl.Profiler(mod, params, [2], tl.TensorSupplyType.Integer)
-    print(mod.get_kernel_source())
+    kernel = tilelang.compile(program, out_idx=[2])
+    profiler = kernel.get_profiler()
+    print(kernel.get_kernel_source())
 
     def ref_program(A, B):
         import torch
@@ -100,7 +96,7 @@ def run_matmul_ssr(
         C = C.to(torch.__getattribute__(out_dtype))
         return C
 
-    mod.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
 def test_gemm_f16f16f16_nt_ssr():
@@ -206,9 +202,9 @@ def run_matmul_rsr(
         num_stages,
         num_threads,
     )
-    mod, params = tl.lower(program)
-    mod = tl.Profiler(mod, params, [2], tl.TensorSupplyType.Integer)
-    print(mod.get_kernel_source())
+    kernel = tilelang.compile(program, out_idx=[2])
+    profiler = kernel.get_profiler()
+    print(kernel.get_kernel_source())
 
     def ref_program(A, B):
         import torch
@@ -221,7 +217,7 @@ def run_matmul_rsr(
         C = C.to(torch.__getattribute__(out_dtype))
         return C
 
-    mod.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
 # TODO(lei): Fix the test case in future release
@@ -329,8 +325,8 @@ def run_matmul_rrr(
         num_stages,
         num_threads,
     )
-    mod, params = tl.lower(program)
-    mod = tl.Profiler(mod, params, [2], tl.TensorSupplyType.Integer)
+    kernel = tilelang.compile(program, out_idx=[2])
+    profiler = kernel.get_profiler()
 
     def ref_program(A, B):
         import torch
@@ -343,7 +339,7 @@ def run_matmul_rrr(
         C = C.to(torch.__getattribute__(out_dtype))
         return C
 
-    mod.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
 # def test_gemm_f16f16f16_nt_rrr():

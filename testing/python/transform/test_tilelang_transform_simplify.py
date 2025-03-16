@@ -76,15 +76,12 @@ def test_matmul():
     func = matmul(1024, 1024, 1024, 128, 128, 32)
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     mod = tl.transform.Simplify()(mod)
-
-    rt_mod, params = tl.lower(mod.functions_items()[0][1], runtime_only=False)
-    # TODO Profiler only support TensorType, not dynamic variable
-    profiler = tl.Profiler(rt_mod, params, result_idx=[2])
+    kernel = tl.compile(mod["main"], out_idx=[2])
 
     import torch
     a = torch.randn(1024, 1024, dtype=torch.float16).cuda().half()
     b = torch.randn(1024, 1024, dtype=torch.float16).cuda().half()
-    c = profiler(a, b)
+    c = kernel(a, b)
 
     ref_c = a @ b
     ref_c = ref_c.float()

@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
@@ -84,8 +81,8 @@ def run_gemm(
         num_threads,
         k_pack=k_pack,
     )
-    mod, params = tl.lower(program)
-    mod = tl.Profiler(mod, params, [2], tl.TensorSupplyType.Integer)
+    kernel = tl.compile(program, out_idx=[2])
+    profiler = kernel.get_profiler()
 
     def ref_program(A, B):
         import torch
@@ -98,7 +95,7 @@ def run_gemm(
         C = C.to(torch.__getattribute__(out_dtype))
         return C
 
-    mod.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
 @tilelang.testing.requires_rocm
