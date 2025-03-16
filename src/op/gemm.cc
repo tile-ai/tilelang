@@ -186,9 +186,11 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     results.Set(C, fragment);
 
     if (A.scope() == "shared" || A.scope() == "shared.dyn") {
-      results.Set(A, makeGemmABLayout(*as_const_int(A->shape[0]),
-                                      *as_const_int(A->shape[1]),
-                                      A->dtype.bits(), trans_A ? 1 : 2));
+      const int64_t mat_stride = *as_const_int(A->shape[0]);
+      const int64_t mat_continuous = *as_const_int(A->shape[1]);
+      results.Set(A,
+                  makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                   A->dtype.bits(), trans_A ? 1 : 2));
     } else if (A.scope() == "local.fragment") {
       ICHECK(trans_A == false);
       results.Set(A, makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
@@ -197,9 +199,11 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       ICHECK(0);
     }
     if (B.scope() == "shared" || B.scope() == "shared.dyn") {
-      results.Set(B, makeGemmABLayout(*as_const_int(B->shape[0]),
-                                      *as_const_int(B->shape[1]),
-                                      B->dtype.bits(), trans_B ? 2 : 1));
+      const int64_t mat_stride = *as_const_int(B->shape[0]);
+      const int64_t mat_continuous = *as_const_int(B->shape[1]);
+      results.Set(B,
+                  makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                   B->dtype.bits(), trans_B ? 2 : 1));
     } else if (B.scope() == "local.fragment") {
       ICHECK(trans_B == false);
       results.Set(B, makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n));
@@ -222,8 +226,11 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
             : makeGemmFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
     results.Set(C, fragment);
     if (A.scope() == "shared" || A.scope() == "shared.dyn") {
-      results.Set(A, makeGemmABLayout(*as_const_int(A->shape[0]),
-                                      *as_const_int(A->shape[1]),
+      const int64_t mat_stride = *as_const_int(A->shape[0]);
+      const int64_t mat_continuous = *as_const_int(A->shape[1]);
+      const int64_t continuity =
+          trans_A ? mat_continuous / (warp_m / 4) : mat_continuous;
+      results.Set(A, makeGemmABLayout(mat_stride, mat_continuous, continuity,
                                       A->dtype.bits(), trans_A ? 1 : 2));
     } else {
       ICHECK(trans_A == false);
@@ -231,8 +238,11 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
                                        A->dtype.bits()));
     }
     if (B.scope() == "shared" || B.scope() == "shared.dyn") {
-      results.Set(B, makeGemmABLayout(*as_const_int(B->shape[0]),
-                                      *as_const_int(B->shape[1]),
+      const int64_t mat_stride = *as_const_int(B->shape[0]);
+      const int64_t mat_continuous = *as_const_int(B->shape[1]);
+      const int64_t continuity =
+          trans_B ? mat_continuous : mat_continuous / warp_n;
+      results.Set(B, makeGemmABLayout(mat_stride, mat_continuous, continuity,
                                       B->dtype.bits(), trans_B ? 2 : 1));
     } else {
       ICHECK(0) << "WGMMA only support B in shared.";

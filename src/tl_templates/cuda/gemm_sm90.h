@@ -7,6 +7,7 @@
 #include <cute/atom/mma_atom.hpp>
 #include <cutlass/arch/barrier.h>
 #include <cutlass/cutlass.h>
+#include <cutlass/gemm/collective/collective_builder.hpp>
 
 #include "common.h"
 
@@ -15,65 +16,8 @@ namespace cute {
 using namespace SM90;
 
 namespace tl_wgmma {
-template <GMMA::Major major, class ElementType, class BLK_MN, class BLK_K>
-CUTE_HOST_DEVICE constexpr auto ss_smem_selector() {
-  auto BLK_MN0 = size<0>(BLK_MN{});
-  auto BLK_K0 = size<0>(BLK_K{});
 
-  static_assert(BLK_MN0 % 8 == 0, "BLK_MN0 must be a multiple of 8.");
-  static_assert(BLK_K0 % 8 == 0, "BLK_K0 must be a multiple of 8.");
-
-  if constexpr (major == GMMA::Major::MN) {
-    if constexpr (BLK_MN0 %
-                      size<0>(GMMA::Layout_MN_SW128_Atom<ElementType>{}) ==
-                  0) {
-      return GMMA::Layout_MN_SW128_Atom<ElementType>{};
-    } else if constexpr (BLK_MN0 %
-                             size<0>(
-                                 GMMA::Layout_MN_SW64_Atom<ElementType>{}) ==
-                         0) {
-      return GMMA::Layout_MN_SW64_Atom<ElementType>{};
-    } else if constexpr (BLK_MN0 %
-                             size<0>(
-                                 GMMA::Layout_MN_SW32_Atom<ElementType>{}) ==
-                         0) {
-      return GMMA::Layout_MN_SW32_Atom<ElementType>{};
-    } else if constexpr (BLK_MN0 %
-                             size<0>(
-                                 GMMA::Layout_MN_INTER_Atom<ElementType>{}) ==
-                         0) {
-      return GMMA::Layout_MN_INTER_Atom<ElementType>{};
-    } else {
-      static_assert(
-          BLK_MN0 % size<0>(GMMA::Layout_MN_INTER_Atom<ElementType>{}) == 0,
-          "BLK_MN0 must be a multiple of "
-          "size<0>(GMMA::Layout_MN_INTER_Atom<ElementType>{})");
-    }
-  } else if constexpr (major == GMMA::Major::K) {
-    if constexpr (BLK_K0 % size<1>(GMMA::Layout_K_SW128_Atom<ElementType>{}) ==
-                  0) {
-      return GMMA::Layout_K_SW128_Atom<ElementType>{};
-    } else if constexpr (BLK_K0 %
-                             size<1>(GMMA::Layout_K_SW64_Atom<ElementType>{}) ==
-                         0) {
-      return GMMA::Layout_K_SW64_Atom<ElementType>{};
-    } else if constexpr (BLK_K0 %
-                             size<1>(GMMA::Layout_K_SW32_Atom<ElementType>{}) ==
-                         0) {
-      return GMMA::Layout_K_SW32_Atom<ElementType>{};
-    } else if constexpr (BLK_K0 %
-                             size<1>(
-                                 GMMA::Layout_K_INTER_Atom<ElementType>{}) ==
-                         0) {
-      return GMMA::Layout_K_INTER_Atom<ElementType>{};
-    } else {
-      static_assert(
-          BLK_K0 % size<1>(GMMA::Layout_K_INTER_Atom<ElementType>{}) == 0,
-          "BLK_K0 must be a multiple of "
-          "size<1>(GMMA::Layout_K_INTER_Atom<ElementType>{})");
-    }
-  }
-}
+using namespace cutlass::gemm::collective::detail; // ss_smem_selector
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, typename A_type_raw, typename B_type_raw,
@@ -92,9 +36,11 @@ public:
       trans_B ? GMMA::Major::K : GMMA::Major::MN;
 
   using SmemLayoutAtomA =
-      decltype(ss_smem_selector<GmmaMajorA, A_type, Int<M>, Int<K>>());
+      decltype(ss_smem_selector<GmmaMajorA, A_type, Int<M / (num_warp_m / 4)>,
+                                Int<K>>());
   using SmemLayoutAtomB =
-      decltype(ss_smem_selector<GmmaMajorB, B_type, Int<N>, Int<K>>());
+      decltype(ss_smem_selector<GmmaMajorB, B_type, Int<N / num_warp_n>,
+                                Int<K>>());
 
   using SmemLayoutA = decltype(tile_to_shape(
       SmemLayoutAtomA{}, Shape<Int<M>, Int<K>>{},
@@ -113,9 +59,10 @@ public:
     Tensor sB = make_tensor(make_smem_ptr(reinterpret_cast<B_type *>(pB)),
                             SmemLayoutB{});
     auto tiled_mma = make_tiled_mma(
-        GMMA::ss_op_selector<A_type, B_type, C_type,
-                             Shape<Int<M>, Int<N / num_warp_n>, Int<K>>,
-                             GmmaMajorA, GmmaMajorB>(),
+        GMMA::ss_op_selector<
+            A_type, B_type, C_type,
+            Shape<Int<M / (num_warp_m / 4)>, Int<N / num_warp_n>, Int<K>>,
+            GmmaMajorA, GmmaMajorB>(),
         Layout<Shape<Int<num_warp_m / 4>, Int<num_warp_n>, _1>>{});
     auto thr_mma = tiled_mma.get_thread_slice(tid);
 
@@ -165,9 +112,10 @@ public:
     Tensor sB = make_tensor(make_smem_ptr(reinterpret_cast<B_type *>(pB)),
                             SmemLayoutB{});
     auto tiled_mma = make_tiled_mma(
-        GMMA::rs_op_selector<A_type, B_type, C_type,
-                             Shape<Int<M>, Int<N / num_warp_n>, Int<K>>,
-                             GmmaMajorA, GmmaMajorB>(),
+        GMMA::rs_op_selector<
+            A_type, B_type, C_type,
+            Shape<Int<M / (num_warp_m / 4)>, Int<N / num_warp_n>, Int<K>>,
+            GmmaMajorA, GmmaMajorB>(),
         Layout<Shape<Int<num_warp_m / 4>, Int<num_warp_n>, _1>>{});
     auto thr_mma = tiled_mma.get_thread_slice(tid);
 

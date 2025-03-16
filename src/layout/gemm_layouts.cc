@@ -132,7 +132,7 @@ Fragment makeGemmFragmentCHopper(const int block_m, const int block_n,
                                  const int element_size) {
   ICHECK(block_m % warp_m == 0);
   // ICHECK(block_n == warp_n);
-  ICHECK(warp_m % 16 == 0);
+  ICHECK(warp_m % 16 == 0) << "warp_m=" << warp_m;
   auto warp_layout = makeGemmFragment8x8()->Repeat({2, warp_n / 8}, false,
                                                    false); // 16 x N (1 warp)
   auto block_layout = warp_layout->Repeat({block_m / warp_m, block_n / warp_n},
@@ -478,24 +478,24 @@ Layout makeGemmVoltaABLayout(int stride, int continuous, bool is_a,
   return makeGemmABLayoutPadded(stride, continuous, 16);
 }
 
-Layout makeGemmABLayout(int stride, int continuous, int element_size,
-                        int kfactor) {
+Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
+                        int element_size, int kfactor) {
   if (element_size == 64) {
-    if (kfactor == 1 && continuous % 16 == 0) // float64 KxN
-      return makeGemmABLayoutF64_Kouter(stride, continuous);
-    if (kfactor == 2 && continuous % 16 == 0) // float64 NxK
-      return makeGemmABLayoutF64_Kinner(stride, continuous);
-    return makeGemmABLayoutPadded(stride, continuous, element_size);
+    if (kfactor == 1 && continuity % 16 == 0) // float64 KxN
+      return makeGemmABLayoutF64_Kouter(mat_stride, mat_continuous);
+    if (kfactor == 2 && continuity % 16 == 0) // float64 NxK
+      return makeGemmABLayoutF64_Kinner(mat_stride, mat_continuous);
+    return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   }
   int vector_size = 128 / element_size;
   if (kfactor == 1 && element_size == 8) // int8 KxN
-    return makeGemmABLayoutPadded(stride, continuous, element_size);
-  else if (continuous % (vector_size * 8) == 0)
-    return makeFullBankSwizzleLayout(stride, continuous, element_size);
-  else if (continuous % (vector_size * 4) == 0)
-    return makeHalfBankSwizzleLayout(stride, continuous, element_size);
+    return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
+  else if (continuity % (vector_size * 8) == 0)
+    return makeFullBankSwizzleLayout(mat_stride, mat_continuous, element_size);
+  else if (continuity % (vector_size * 4) == 0)
+    return makeHalfBankSwizzleLayout(mat_stride, mat_continuous, element_size);
   else {
-    return makeGemmABLayoutPadded(stride, continuous, element_size);
+    return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   }
 }
 
