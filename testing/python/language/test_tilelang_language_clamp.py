@@ -2,7 +2,6 @@
 # Licensed under the MIT License.
 
 import tilelang.testing
-import tilelang as tl
 
 
 def clamp(

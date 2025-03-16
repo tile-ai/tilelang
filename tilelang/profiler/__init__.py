@@ -56,6 +56,7 @@ class Profiler:
             raise ValueError("result_idx should be a list of integers")
 
         return result_idx
+
     def with_default_adapter(self, adapter: BaseKernelAdapter) -> "Profiler":
         self.adapter = adapter
         return self

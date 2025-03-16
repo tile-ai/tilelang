@@ -6,7 +6,6 @@ import torch
 from typing import List
 from tilelang.contrib.dlpack import to_pytorch_func
 from .base import BaseKernelAdapter
-from tilelang.utils.tensor import map_torch_type
 
 
 class TorchDLPackKernelAdapter(BaseKernelAdapter):

@@ -6,7 +6,6 @@ import torch.backends
 import tilelang
 from tilelang import tvm as tvm
 import tilelang.testing
-import tilelang as TL
 import tilelang.language as T
 from tilelang.intrinsics import (
     make_mma_swizzle_layout as make_swizzle_layout,)
@@ -383,8 +382,8 @@ def assert_tl_matmul_weight_only_transform_correctness(M, N, K, in_dtype, out_dt
     )
 
     ladder_permutate = tilelang.ops.LadderPermutate(ladder_permutate_config)
-
-    kernel(compressed_A, compressed_B, C)
+    LB = ladder_permutate(compressed_B.cpu()).cuda()
+    kernel(compressed_A, LB, C)
 
     latency = profiler.do_bench()
     print(f"Latency: {latency}")

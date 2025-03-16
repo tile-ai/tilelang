@@ -5,9 +5,7 @@ import torch.backends
 import tilelang.testing
 from tilelang import tvm as tvm
 from tvm import DataType, tir
-import tilelang as TL
 import tilelang.language as T
-from tilelang import JITKernel, Profiler
 
 tilelang.testing.set_random_seed(0)
 
@@ -201,7 +199,7 @@ def assert_simple_impl_float16xfp4_gemm(M,
     func = matmul_fp16xfp4(M, N, K, in_dtype, out_dtype, accum_dtype, block_M, block_N, block_K,
                            num_stages, threads)
 
-    torch_func = JITKernel(func, [2])
+    torch_func = tilelang.compile(func, out_idx=[2])
     profiler = torch_func.get_profiler()
     profiler.assert_allclose(ref_program)
 
@@ -336,7 +334,7 @@ def run_gemm(
         C = C.to(torch.__getattribute__(out_dtype))
         return C
 
-    mod.assert_allclose(ref_program)
+    profiler.assert_allclose(ref_program)
 
 
 @tvm.testing.requires_package("bitblas")

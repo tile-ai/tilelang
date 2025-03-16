@@ -14,7 +14,6 @@ from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
-from tilelang.utils.tensor import map_torch_type
 
 
 class CtypesKernelAdapter(BaseKernelAdapter):

@@ -3,7 +3,6 @@
 
 from tilelang import tvm as tvm
 import tilelang.testing
-import tilelang as tl
 from tilelang import primitives as P
 
 
