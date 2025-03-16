@@ -176,11 +176,10 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
     A = torch.randint(0, 4, (M, K), device="cuda", dtype=getattr(torch, in_dtype))
     B = torch.randint(0, 4, (N, K), device="cuda", dtype=getattr(torch, in_dtype))
-    C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, accum_dtype))
 
     compressed_A = (A[:, ::2] & 0x0F) + ((A[:, 1::2] & 0x0F) << 4)
     compressed_B = (B[:, ::2] & 0x0F) + ((B[:, 1::2] & 0x0F) << 4)
-    kernel(compressed_A, compressed_B, C)
+    C = kernel(compressed_A, compressed_B)
     print(C)
     latency = profiler.do_bench()
     print(latency)
@@ -368,7 +367,6 @@ def assert_tl_matmul_weight_only_transform_correctness(M, N, K, in_dtype, out_dt
 
     A = torch.randint(0, 4, (M, K), device="cuda", dtype=getattr(torch, in_dtype))
     B = torch.randint(0, 4, (N, K), device="cuda", dtype=getattr(torch, in_dtype))
-    C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, accum_dtype))
     compressed_A = (A[:, ::2] & 0x0F) + ((A[:, 1::2] & 0x0F) << 4)
     compressed_B = (B[:, ::2] & 0x0F) + ((B[:, 1::2] & 0x0F) << 4)
 
@@ -383,7 +381,7 @@ def assert_tl_matmul_weight_only_transform_correctness(M, N, K, in_dtype, out_dt
 
     ladder_permutate = tilelang.ops.LadderPermutate(ladder_permutate_config)
     LB = ladder_permutate(compressed_B.cpu()).cuda()
-    kernel(compressed_A, LB, C)
+    C = kernel(compressed_A, LB)
 
     latency = profiler.do_bench()
     print(f"Latency: {latency}")
