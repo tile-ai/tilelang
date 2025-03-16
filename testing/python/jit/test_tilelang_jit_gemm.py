@@ -31,7 +31,6 @@ def matmul(
 
     @tilelang.jit(
         out_idx=-1,  # create the output tensor during runtime
-        execution_backend="dlpack",
     )
     @T.prim_func
     def main(
@@ -206,7 +205,7 @@ def run_gemm_jit_kernel(
         num_threads,
     )
 
-    matmul_kernel = tilelang.compile(program, out_idx=-1, execution_backend="dlpack")
+    matmul_kernel = tilelang.compile(program, out_idx=-1)
 
     A = torch.randn(M, K, dtype=torch.__getattribute__(in_dtype)).cuda()
     B = torch.randn(K, N, dtype=torch.__getattribute__(in_dtype)).cuda()
