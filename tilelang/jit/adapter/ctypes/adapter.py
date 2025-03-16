@@ -68,7 +68,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
             self.ir_module = func_or_mod
 
         # Cache parameter information during initialization
-        self.param_dtypes = [map_torch_type(param.dtype) for param in params]
+        self.param_dtypes = [param.dtype for param in params]
         self.param_shapes = []
         for param in params:
             native_shape = []

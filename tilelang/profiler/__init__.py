@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 """The profiler and convert to torch utils"""
 
-from typing import List, Literal, Optional, Callable
+from typing import List, Literal, Optional, Callable, Any
 from functools import partial
 import torch
 from contextlib import suppress
@@ -37,8 +37,25 @@ class Profiler:
 
     def __post_init__(self):
         """Initialize tensor supply after dataclass initialization"""
+        self.result_idx = self._legalize_result_idx(self.result_idx)
         self.supply = get_tensor_supply(self.supply_type)
 
+    def _legalize_result_idx(self, result_idx: Optional[List[int]] = None) -> List[int]:
+        params = self.params
+        # result_idx is a list of indices of the output tensors
+        if result_idx is None:
+            result_idx = []
+        elif isinstance(result_idx, int):
+            if result_idx > len(params) or result_idx < -len(params):
+                raise ValueError(
+                    f"result_idx should be an integer between {-len(params)} and {len(params) - 1}")
+            if result_idx < 0:
+                result_idx = len(params) + result_idx
+            result_idx = [result_idx]
+        elif not isinstance(result_idx, list):
+            raise ValueError("result_idx should be a list of integers")
+
+        return result_idx
     def with_default_adapter(self, adapter: BaseKernelAdapter) -> "Profiler":
         self.adapter = adapter
         return self
@@ -200,3 +217,6 @@ class Profiler:
     def func(self):
         assert self.adapter is not None, "adapter should be provided"
         return self.adapter
+
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        return self.func(*args, **kwds)

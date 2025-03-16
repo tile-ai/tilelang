@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
 
 import torch
@@ -168,8 +168,10 @@ def tl_matmul(
 
 def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
-    mod, params = TL.lower(matmul)
-    src_code = mod.imported_modules[0].get_source()
+    kernel = tilelang.compile(matmul, out_idx=[2])
+    profiler = kernel.get_profiler()
+
+    src_code = kernel.get_kernel_source()
     # src_code is the generated cuda source
     assert src_code is not None
 
@@ -179,10 +181,9 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
     compressed_A = (A[:, ::2] & 0x0F) + ((A[:, 1::2] & 0x0F) << 4)
     compressed_B = (B[:, ::2] & 0x0F) + ((B[:, 1::2] & 0x0F) << 4)
-    mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
-    mod(compressed_A, compressed_B, C)
+    kernel(compressed_A, compressed_B, C)
     print(C)
-    latency = mod.do_bench(mod.func, warmup=25)
+    latency = profiler.do_bench()
     print(latency)
     # Ensure that the latency is not None
     assert latency is not None
@@ -358,8 +359,10 @@ def tl_matmul_weight_only_transform(
 
 def assert_tl_matmul_weight_only_transform_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     matmul = tl_matmul_weight_only_transform(M, N, K, in_dtype, out_dtype, accum_dtype)
-    mod, params = TL.lower(matmul)
-    src_code = mod.imported_modules[0].get_source()
+    kernel = tilelang.compile(matmul, out_idx=[2])
+    profiler = kernel.get_profiler()
+
+    src_code = kernel.get_kernel_source()
     # src_code is the generated cuda source
     assert src_code is not None
     transform_b = 3
@@ -381,12 +384,9 @@ def assert_tl_matmul_weight_only_transform_correctness(M, N, K, in_dtype, out_dt
 
     ladder_permutate = tilelang.ops.LadderPermutate(ladder_permutate_config)
 
-    mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
-    LB = ladder_permutate(compressed_B.cpu()).cuda()
+    kernel(compressed_A, compressed_B, C)
 
-    mod(compressed_A, LB, C)
-
-    latency = mod.do_bench(mod.func, warmup=25)
+    latency = profiler.do_bench()
     print(f"Latency: {latency}")
     # Ensure that the latency is not None
     assert latency is not None

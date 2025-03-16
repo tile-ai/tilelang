@@ -50,8 +50,8 @@ def get_tensor_supply(supply_type: TensorSupplyType):
     from tilelang.engine.param import KernelParam
 
     def get_tensor(param: KernelParam) -> torch.Tensor:
-        dtype = param.dtype
-        device = torch.cuda.current_device()
+        dtype: torch.dtype = param.dtype
+        device: torch.device = torch.cuda.current_device()
 
         if hasattr(param, "shape") and not param.shape:
             raise ValueError(
@@ -74,8 +74,8 @@ def get_tensor_supply(supply_type: TensorSupplyType):
             return torch.ones(*shape, device=device, dtype=dtype)
 
         if supply_type == TensorSupplyType.Integer:
-            is_unsigned = str(dtype).startswith("uint")
-            is_float8 = str(dtype).endswith("float8")
+            is_unsigned = str(dtype).removeprefix("torch.").startswith("uint")
+            is_float8 = str(dtype).removeprefix("torch.").startswith("float8")
             if is_unsigned:
                 return torch.randint(low=0, high=3, size=shape, device=device, dtype=dtype)
             elif is_float8:
