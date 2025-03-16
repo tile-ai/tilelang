@@ -44,10 +44,12 @@ def run_gemm_threads_test(threads, M=1024, N=192, K=1024, block_M=64, block_N=19
 
     tilelang.testing.torch_assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
 
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_gemm_threads_2wgs():
     run_gemm_threads_test(128 * 2)
+
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
