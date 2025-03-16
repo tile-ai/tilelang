@@ -195,3 +195,8 @@ class Profiler:
             return time_evaluator(*tvm_inputs).mean * 1e3
         else:
             raise ValueError(f"Unknown profiler: {profiler}")
+
+    @property
+    def func(self):
+        assert self.adapter is not None, "adapter should be provided"
+        return self.adapter
