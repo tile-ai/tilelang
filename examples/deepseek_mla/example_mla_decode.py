@@ -288,10 +288,9 @@ if __name__ == "__main__":
     num_split = 1
 
     program = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split)
-    mod, params = tilelang.lower(program)
-    mod = tilelang.Profiler(mod, params, [6], tilelang.TensorSupplyType.Randn)
-    mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
-    print("All close")
-    latency = mod.do_bench(mod.func, n_warmup=10, n_repeat=10, profiler="torch")
-    print("Tile-lang: {:.2f} ms".format(latency))
-    print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    kernel = tilelang.compile(program, out_idx=[6])
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+    profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+    latency = profiler.do_bench(warmup=500)
+    print(f"Latency: {latency} ms")
+    print(f"TFlops: {total_flops / latency * 1e-9} TFlops")
