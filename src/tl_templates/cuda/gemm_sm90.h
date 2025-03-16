@@ -36,9 +36,11 @@ public:
       trans_B ? GMMA::Major::K : GMMA::Major::MN;
 
   using SmemLayoutAtomA =
-      decltype(ss_smem_selector<GmmaMajorA, A_type, Int<M>, Int<K>>());
+      decltype(ss_smem_selector<GmmaMajorA, A_type, Int<M / (num_warp_m / 4)>,
+                                Int<K>>());
   using SmemLayoutAtomB =
-      decltype(ss_smem_selector<GmmaMajorB, B_type, Int<N>, Int<K>>());
+      decltype(ss_smem_selector<GmmaMajorB, B_type, Int<N / num_warp_n>,
+                                Int<K>>());
 
   using SmemLayoutA = decltype(tile_to_shape(
       SmemLayoutAtomA{}, Shape<Int<M>, Int<K>>{},
@@ -57,9 +59,10 @@ public:
     Tensor sB = make_tensor(make_smem_ptr(reinterpret_cast<B_type *>(pB)),
                             SmemLayoutB{});
     auto tiled_mma = make_tiled_mma(
-        GMMA::ss_op_selector<A_type, B_type, C_type,
-                             Shape<Int<M>, Int<N / num_warp_n>, Int<K>>,
-                             GmmaMajorA, GmmaMajorB>(),
+        GMMA::ss_op_selector<
+            A_type, B_type, C_type,
+            Shape<Int<M / (num_warp_m / 4)>, Int<N / num_warp_n>, Int<K>>,
+            GmmaMajorA, GmmaMajorB>(),
         Layout<Shape<Int<num_warp_m / 4>, Int<num_warp_n>, _1>>{});
     auto thr_mma = tiled_mma.get_thread_slice(tid);
 
@@ -109,9 +112,10 @@ public:
     Tensor sB = make_tensor(make_smem_ptr(reinterpret_cast<B_type *>(pB)),
                             SmemLayoutB{});
     auto tiled_mma = make_tiled_mma(
-        GMMA::rs_op_selector<A_type, B_type, C_type,
-                             Shape<Int<M>, Int<N / num_warp_n>, Int<K>>,
-                             GmmaMajorA, GmmaMajorB>(),
+        GMMA::rs_op_selector<
+            A_type, B_type, C_type,
+            Shape<Int<M / (num_warp_m / 4)>, Int<N / num_warp_n>, Int<K>>,
+            GmmaMajorA, GmmaMajorB>(),
         Layout<Shape<Int<num_warp_m / 4>, Int<num_warp_n>, _1>>{});
     auto thr_mma = tiled_mma.get_thread_slice(tid);
 
