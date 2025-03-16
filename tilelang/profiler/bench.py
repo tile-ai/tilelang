@@ -3,7 +3,7 @@
 """The profiler and convert to torch utils"""
 
 import torch
-from typing import Callable, List, Literal, Optional
+from typing import Callable, List, Literal, Optional, Union
 
 
 def do_bench(
@@ -16,7 +16,7 @@ def do_bench(
     quantiles: Optional[List[float]] = None,
     fast_flush: bool = True,
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
-) -> float | List[float]:
+) -> Union[float, List[float]]:
     """Benchmarks the runtime of a PyTorch function.
     
     This function handles:
