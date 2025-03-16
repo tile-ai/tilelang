@@ -98,6 +98,7 @@ def get_tensor_supply(supply_type: TensorSupplyType):
 
     return get_tensor
 
+
 # TODO: Align with torch.testing.assert_close
 def torch_assert_close(
     tensor_a,
