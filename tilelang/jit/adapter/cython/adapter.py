@@ -133,6 +133,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
     # Class attributes to store compiled kernel information
     target: Union[str, Target] = "cuda"
     ir_module: Optional[tvm.IRModule] = None
+    # The global source code of the kernel -> global means the source code of the kernel
+    # that is not wrapped by the wrapper code
+    kernel_global_source: Optional[str] = None
     lib: Optional[ctypes.CDLL] = None  # Compiled library handle
     wrapped_source: Optional[str] = None  # Generated C++ wrapper code
     # Maps symbolic variables to their corresponding buffer and shape indices
@@ -150,11 +153,11 @@ class CythonKernelAdapter(BaseKernelAdapter):
     pass_configs: Optional[Dict[str, Any]] = None
 
     def __init__(self,
-                 rt_mod,
                  params: List[KernelParam],
                  result_idx: List[int],
                  target: Union[str, Target],
                  func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+                 kernel_global_source: str,
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None):
         """Initialize the adapter with the given TIR function or module.
@@ -167,9 +170,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
             func_or_mod: TIR function or module to be compiled
             verbose: Enable verbose logging
         """
-        self.mod = rt_mod
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
+        self.kernel_global_source = kernel_global_source
 
         if isinstance(func_or_mod, tir.PrimFunc):
             self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
@@ -334,7 +337,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
     def get_kernel_source(self, kernel_only: bool = False):
         """Returns the source code of the compiled kernel."""
         if kernel_only:
-            return self.mod.imported_modules[0].get_source()
+            return self.kernel_global_source
         else:
             assert self.wrapped_source is not None, "Wrapped source is not available"
             return self.wrapped_source

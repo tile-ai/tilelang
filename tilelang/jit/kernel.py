@@ -150,22 +150,26 @@ class JITKernel(object):
             # Use TorchDLPackKernelAdapter for interoperability with PyTorch via DLPack.
             adapter = TorchDLPackKernelAdapter(rt_mod, params=params, result_idx=out_idx)
         elif execution_backend == "ctypes":
+            # TODO(Lei): global source extraction can be simplified
+            kernel_global_source = rt_mod.imported_modules[0].get_source()
             adapter = CtypesKernelAdapter(
-                rt_mod,
                 params=params,
                 result_idx=out_idx,
                 target=target,
                 func_or_mod=tilelang_func,
+                kernel_global_source=kernel_global_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
             )
         elif execution_backend == "cython":
+            # TODO(Lei): global source extraction can be simplified
+            kernel_global_source = rt_mod.imported_modules[0].get_source()
             adapter = CythonKernelAdapter(
-                rt_mod,
                 params=params,
                 result_idx=out_idx,
                 target=target,
                 func_or_mod=tilelang_func,
+                kernel_global_source=kernel_global_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
             )
