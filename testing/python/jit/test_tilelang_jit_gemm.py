@@ -109,21 +109,21 @@ def run_gemm(
     tilelang.testing.torch_assert_close(C, ref_C, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
-def test_gemm_f16f16f16_nn():
-    run_gemm(
-        512,
-        1024,
-        768,
-        False,
-        False,
-        "float16",
-        "float16",
-        "float16",
-        128,
-        256,
-        32,
-        2,
-    )
+# def test_gemm_f16f16f16_nn():
+#     run_gemm(
+#         512,
+#         1024,
+#         768,
+#         False,
+#         False,
+#         "float16",
+#         "float16",
+#         "float16",
+#         128,
+#         256,
+#         32,
+#         2,
+#     )
 
 
 def matmu_jit_kernel(

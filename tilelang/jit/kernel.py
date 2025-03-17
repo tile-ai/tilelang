@@ -104,6 +104,7 @@ class JITKernel(object):
                     verbose=verbose,
                     pass_configs=pass_configs,
                 )
+                print(adapter)
             else:
                 # Handle invalid backend.
                 raise ValueError(f"Invalid execution backend: {execution_backend}")

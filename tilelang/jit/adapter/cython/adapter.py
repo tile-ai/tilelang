@@ -222,10 +222,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
                       verbose: bool = False,
                       pass_configs: Optional[Dict[str, Any]] = None):
         adapter = cls.__new__(cls)
-        # mod is an empty instance of the runtime module
-        adapter.mod = None
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
+        adapter.kernel_global_source = rt_mod_src
 
         if isinstance(func_or_mod, tir.PrimFunc):
             adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
@@ -239,14 +238,13 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.static_shape_map = adapter._process_static_shape()
         adapter.buffer_device_map = adapter._process_buffer_device()
 
-        adapter.target = Target.canon_target(determine_target(target))
         adapter.verbose = verbose
         adapter.wrapper = TLWrapper(adapter.target)
         adapter.lib_generator = LibraryGenerator(adapter.target)
 
         adapter.wrapper.assign_optimized_module(adapter.ir_module)
         adapter.wrapper.assign_pass_configs(pass_configs)
-        adapter.wrapped_source = rt_mod_src
+        adapter.wrapped_source = adapter.wrapper.wrap(adapter.get_kernel_source(kernel_only=True))
 
         adapter.lib_generator.update_lib_code(adapter.wrapped_source)
         adapter.lib_generator.compile_lib()
@@ -258,13 +256,11 @@ class CythonKernelAdapter(BaseKernelAdapter):
             raise Exception(
                 f"Failed to initialize the compiled library for {adapter.target}: {e}") from e
 
-        adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params,
-                                                     adapter.lib)
+        adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params, adapter.lib)
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_buffer_dtype_map(adapter.buffer_dtype_map)
         adapter.cython_wrapper.set_static_shape_map(adapter.static_shape_map)
         adapter.cython_wrapper.set_buffer_device_map(adapter.buffer_device_map)
-
         adapter._post_init()
         return adapter
 

@@ -9,7 +9,6 @@ from hashlib import sha256
 from typing import Callable, List, Literal, Union
 from tvm.target import Target
 from tvm.tir import PrimFunc
-from tilelang import compile
 from tilelang.jit import JITKernel
 import threading
 import cloudpickle
@@ -38,7 +37,9 @@ class KernelCache:
                     logging.ERROR)  # Set default logging level to ERROR, can be adjusted
         return cls._instance
 
-    def _generate_key(self, func: Callable, out_idx: List[int], args, target, target_host) -> str:
+    def _generate_key(self, func: Callable, out_idx: List[int], 
+                      execution_backend: Literal["dlpack", "ctypes", "cython"], 
+                      args, target: Union[str, Target], target_host: Union[str, Target]) -> str:
         """
         Generates a unique cache key.
         """
@@ -46,12 +47,13 @@ class KernelCache:
             func)  # Get function name, handle PrimFunc cases
         key_data = {
             "func_name": func_name,
-            "out_idx": tuple(out_idx) if out_idx else None,
+            "out_idx": tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx],
             "args_repr": tuple(
                 repr(arg) for arg in args
             ),  # Use repr to serialize arguments, may need more robust serialization
             "target": str(target),
-            "target_host": str(target_host),
+            "target_host": str(target_host) if target_host else None,
+            "execution_backend": execution_backend,
         }
         key_string = json.dumps(key_data, sort_keys=True)  # Sort keys to ensure consistency
         return sha256(key_string.encode()).hexdigest()  # Use SHA256 to generate hash key
@@ -80,7 +82,8 @@ class KernelCache:
         Returns:
             JITKernel: The compiled kernel, either freshly compiled or from cache
         """
-        key = self._generate_key(func, out_idx, args, target, target_host)
+        key = self._generate_key(func, out_idx, execution_backend, args, target, target_host)   
+        print(key)
 
         with self._lock:  # Thread-safe access to cache
             if key in self._cache:
