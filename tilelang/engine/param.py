@@ -66,3 +66,21 @@ class KernelParam:
             bool: True if parameter has no dimensions (empty shape), False otherwise
         """
         return len(self.shape) == 0
+
+    def is_unsigned(self) -> bool:
+        """
+        Checks if the parameter represents an unsigned integer type.
+        
+        Returns:
+            bool: True if parameter is an unsigned integer type, False otherwise
+        """
+        return str(self.dtype).removeprefix("torch.").startswith("uint")
+
+    def is_float8(self) -> bool:
+        """
+        Checks if the parameter represents a float8 type.
+        
+        Returns:
+            bool: True if parameter is a float8 type, False otherwise
+        """
+        return str(self.dtype).removeprefix("torch.").startswith("float8")

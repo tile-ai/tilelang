@@ -60,8 +60,8 @@ def get_tensor_supply(supply_type: TensorSupplyType):
 
         shape = list(map(int, param.shape))
         if supply_type == TensorSupplyType.Auto:
-            is_unsigned = str(dtype).removeprefix("torch.").startswith("uint")
-            is_float8 = str(dtype).removeprefix("torch.").startswith("float8")
+            is_unsigned = param.is_unsigned()
+            is_float8 = param.is_float8()
             if is_unsigned:
                 return torch.randint(low=0, high=3, size=shape, device=device, dtype=dtype)
             elif is_float8:
@@ -79,8 +79,8 @@ def get_tensor_supply(supply_type: TensorSupplyType):
             return torch.ones(*shape, device=device, dtype=dtype)
 
         if supply_type == TensorSupplyType.Integer:
-            is_unsigned = str(dtype).removeprefix("torch.").startswith("uint")
-            is_float8 = str(dtype).removeprefix("torch.").startswith("float8")
+            is_unsigned = param.is_unsigned()
+            is_float8 = param.is_float8()
             if is_unsigned:
                 return torch.randint(low=0, high=3, size=shape, device=device, dtype=dtype)
             elif is_float8:
