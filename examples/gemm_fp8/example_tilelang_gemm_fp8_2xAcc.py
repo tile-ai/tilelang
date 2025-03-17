@@ -6,6 +6,7 @@ import tilelang
 import tilelang.language as T
 from tilelang.utils.tensor import map_torch_type
 
+
 def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
     # for fp8 gemm, do one promote after 4 wgmma inst, i.e. block_K = 128.
     # if block_K < 128, promote after 128/block_K iters.
@@ -33,25 +34,27 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
                 T.copy(B[bx * block_N, k * block_K], B_shared)
                 T.gemm(A_shared, B_shared, C_local, transpose_B=True)
                 # Promote to enable 2xAcc
-                if (k+1) % update_interval == 0:
-                    for i,j in T.Parallel(block_M, block_N):
-                        C_local_accum[i,j] += C_local[i,j]
+                if (k + 1) % update_interval == 0:
+                    for i, j in T.Parallel(block_M, block_N):
+                        C_local_accum[i, j] += C_local[i, j]
                     T.clear(C_local)
             # Tail processing
             if K_iters % update_interval != 0:
-                for i,j in T.Parallel(block_M, block_N):
-                    C_local_accum[i,j] += C_local[i,j]
+                for i, j in T.Parallel(block_M, block_N):
+                    C_local_accum[i, j] += C_local[i, j]
             # TMA store
             T.copy(C_local_accum, C_shared)
             T.copy(C_shared, C[by * block_M, bx * block_N])
 
     return main
 
+
 def calc_diff(x, y):
     x, y = x.double(), y.double()
     denominator = (x * x + y * y).sum()
     sim = 2 * (x * y).sum() / denominator
     return 1 - sim
+
 
 def test_gemm_fp8(M, N, K, dtype):
     torch_dtype = map_torch_type(dtype)
@@ -61,9 +64,9 @@ def test_gemm_fp8(M, N, K, dtype):
     kernel = tilelang.compile(func, out_idx=-1)
 
     a = torch.rand(M, K, dtype=torch.float16, device='cuda')
-    a = (100*(2*a-1)).to(dtype=torch_dtype)
+    a = (100 * (2 * a - 1)).to(dtype=torch_dtype)
     b = torch.rand(N, K, dtype=torch.float16, device='cuda')
-    b = (100*(2*b-1)).to(dtype=torch_dtype)
+    b = (100 * (2 * b - 1)).to(dtype=torch_dtype)
 
     c = kernel(a, b)
 
