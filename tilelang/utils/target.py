@@ -64,7 +64,6 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
     return_var: Union[str, Target] = target
 
     if target == "auto":
-        print("auto")
         # Check for CUDA and HIP availability
         is_cuda_available = check_cuda_availability()
         is_hip_available = check_hip_availability()
@@ -84,5 +83,4 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
 
     if return_object:
         return Target(return_var)
-
     return return_var

@@ -231,6 +231,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         else:
             adapter.ir_module = func_or_mod
 
+        target = determine_target(target, return_object=True)
         adapter.target = Target.canon_target(determine_target(target))
 
         adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()

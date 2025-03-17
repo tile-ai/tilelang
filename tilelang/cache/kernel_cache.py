@@ -83,14 +83,13 @@ class KernelCache:
             JITKernel: The compiled kernel, either freshly compiled or from cache
         """
         key = self._generate_key(func, out_idx, execution_backend, args, target, target_host)   
-        print(key)
 
         with self._lock:  # Thread-safe access to cache
             if key in self._cache:
                 return self._cache[key]
 
             # Attempt to load from disk
-            kernel = self._load_kernel_from_disk(key)
+            kernel = self._load_kernel_from_disk(key, target, target_host)
             if kernel:
                 self._cache[key] = kernel  # Load to in-memory cache
                 return kernel
@@ -173,7 +172,8 @@ class KernelCache:
             self.logger.error(f"Error saving kernel config to disk: {e}")
 
     def _load_kernel_from_disk(self,
-                               key: str) -> Union['JITKernel', None]:  # Type hint for JITKernel
+                               key: str, target: Union[str, Target] = "auto",
+                               target_host: Union[str, Target] = None) -> JITKernel:
         """
         Loads kernel from disk.
         """
@@ -216,8 +216,8 @@ class KernelCache:
                 rt_module_src=rt_module,
                 rt_params=rt_params,
                 execution_backend=config_data["execution_backend"],
-                target=config_data["target"],
-                target_host=config_data["target_host"],
+                target=target,
+                target_host=target_host,
                 out_idx=config_data["out_idx"],
                 pass_configs=config_data["pass_configs"],
                 func=func,
