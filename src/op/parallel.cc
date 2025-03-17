@@ -225,8 +225,16 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   // Step 3: Infer other fragment's layout from the loop's partition
   LayoutMap results;
   for (const auto &[buffer, _] : indice_map_) {
-    if (!T.layout_map.count(buffer))
+    if (!T.layout_map.count(buffer)) {
       results.Set(buffer, CompleteBufferFragment(buffer));
+    } else {
+      auto src_layout = T.layout_map[buffer];
+      auto dst_layout = CompleteBufferFragment(buffer);
+      ICHECK(StructuralEqual()(src_layout, dst_layout))
+          << "Layout infer conflict for " << buffer << " " << source_buffer
+          << "\nLHS = " << src_layout->DebugOutput()
+          << "\nRHS = " << dst_layout->DebugOutput();
+    }
   }
   return results;
 }

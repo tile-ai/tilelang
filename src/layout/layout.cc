@@ -364,17 +364,21 @@ Fragment FragmentNode::CondenseReplicateVar() const {
                   new_thread_replicate->dom->extent, new_thread_replicate->var);
 }
 
-void LayoutNode::DebugOutput() const {
-  LOG_DEBUG << "Layout Shape: " << InputShape() << " -> " << OutputShape();
-  LOG_DEBUG << "Layout Index: " << forward_index_;
+std::string LayoutNode::DebugOutput() const {
+  std::stringstream ss;
+  ss << "Layout Shape: " << InputShape() << " -> " << OutputShape()
+     << " -> " << GetForwardIndex();
+  return ss.str();
 }
 
-void FragmentNode::DebugOutput() const {
-  LOG_DEBUG << "Fragment Shape: " << InputShape() << " -> " << OutputShape();
-  LOG_DEBUG << "Fragment Replicate: " << ReplicateExtent();
-  LOG_DEBUG << "Fragment ThreadExtent: " << ThreadExtent();
-  LOG_DEBUG << "Fragment Index: " << forward_index_;
-  LOG_DEBUG << "Fragment ThreadIndex: " << forward_thread_;
+std::string FragmentNode::DebugOutput() const {
+  std::stringstream ss;
+  ss << "Fragment Shape: " << InputShape() << " -> " << OutputShape();
+  ss << " -> replicate: " << ReplicateExtent();
+  ss << " -> thread: " << ThreadExtent();
+  ss << " -> forward_thread: " << forward_thread_;
+  ss << " -> forward_index: " << GetForwardIndex();
+  return ss.str();
 }
 
 bool LayoutNode::SEqualReduce(const LayoutNode *other,

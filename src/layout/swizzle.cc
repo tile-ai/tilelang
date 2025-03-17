@@ -58,10 +58,12 @@ Array<PrimExpr> SwizzledLayoutNode::Forward(const Array<PrimExpr> &vars) const {
   return expr_list;
 }
 
-void SwizzledLayoutNode::DebugOutput() const {
-  LayoutNode::DebugOutput();
-  std::cout << "Layout Swizzle: " << pattern_.Base() << " " << pattern_.Bits()
-            << " " << pattern_.Shift();
+std::string SwizzledLayoutNode::DebugOutput() const {
+  std::stringstream ss;
+  ss << LayoutNode::DebugOutput();
+  ss << "Layout Swizzle: " << pattern_.Base() << " " << pattern_.Bits()
+     << " " << pattern_.Shift();
+  return ss.str();
 }
 
 Layout SwizzledLayoutNode::Inverse() const {

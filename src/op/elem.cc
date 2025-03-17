@@ -340,6 +340,12 @@ LayoutMap Copy::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     arith::Analyzer analyzer;
     par_op_ = std::make_unique<ParallelOp>(MakeSIMTLoop(&analyzer));
   }
+  if (T.layout_map.count(src) && T.layout_map.count(dst)) {
+    ICHECK(StructuralEqual()(T.layout_map[src], T.layout_map[dst]))
+        << "Get different layout for " << src
+        << " src layout: " << T.layout_map[src]->DebugOutput()
+        << " dst layout: " << T.layout_map[dst]->DebugOutput();
+  }
   return par_op_->InferLayout(T, level);
 }
 
