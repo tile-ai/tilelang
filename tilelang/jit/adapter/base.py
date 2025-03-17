@@ -17,7 +17,7 @@ class BaseKernelAdapter(ABC):
         self.result_idx = self._legalize_result_idx(result_idx)
         self._post_init()
 
-    def _legalize_result_idx(self, result_idx: List[int]) -> List[int]:
+    def _legalize_result_idx(self, result_idx: Optional[List[int]]) -> List[int]:
         params = self.params
         # result_idx is a list of indices of the output tensors
         if result_idx is None:
