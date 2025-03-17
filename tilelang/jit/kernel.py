@@ -35,7 +35,7 @@ class JITKernel(object):
         self,
         func: PrimFunc = None,
         out_idx: Union[List[int], int] = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython"] = "ctypes",
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
         verbose: bool = False,
@@ -66,7 +66,6 @@ class JITKernel(object):
                 "tir.disable_vectorize": bool, default: False
                 "tl.disable_tma_lower": bool, default: False
         """
-        self.func = func
         self.out_idx = out_idx
         self.execution_backend = execution_backend
         self.target = target
@@ -77,28 +76,28 @@ class JITKernel(object):
             pass_configs = {}
         self.pass_configs = pass_configs
 
-        if rt_module_src is not None and rt_params is not None:
-            self.rt_params = rt_params
+        if rt_module_src and rt_params:
+            self.rt_mod = None
+            self.params = rt_params
             adapter = None
             # Create an adapter based on the specified execution backend.
             if execution_backend == "dlpack":
-                # Use TorchDLPackKernelAdapter for interoperability with PyTorch via DLPack.
-                adapter = TorchDLPackKernelAdapter(
-                    self.rt_module, params=self.rt_params, result_idx=out_idx)
+                # assert dlpack not supported
+                raise ValueError(f"Invalid execution backend: {execution_backend}")
             elif execution_backend == "ctypes":
-                adapter = CtypesKernelAdapter(
-                    self.rt_module,
-                    params=self.rt_params,
+                adapter = CtypesKernelAdapter.from_database(
+                    params=self.params,
                     result_idx=out_idx,
                     target=target,
                     func_or_mod=func,
+                    kernel_global_source=rt_module_src,
                     verbose=verbose,
                     pass_configs=pass_configs,
                 )
             elif execution_backend == "cython":
                 adapter = CythonKernelAdapter.from_database(
                     rt_mod_src=rt_module_src,
-                    params=self.rt_params,
+                    params=self.params,
                     result_idx=out_idx,
                     target=target,
                     func_or_mod=func,

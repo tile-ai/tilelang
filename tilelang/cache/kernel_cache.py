@@ -6,7 +6,7 @@ import os
 import json
 import shutil
 from hashlib import sha256
-from typing import Callable, List, Union
+from typing import Callable, List, Literal, Union
 from tvm.target import Target
 from tvm.tir import PrimFunc
 from tilelang import compile
@@ -63,6 +63,9 @@ class KernelCache:
         *args,
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
+        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        verbose: bool = False,
+        pass_configs: dict = None,
     ) -> JITKernel:
         """
         Caches and reuses compiled kernels to avoid redundant compilation.
@@ -91,8 +94,15 @@ class KernelCache:
 
             # Compile kernel if cache miss
             program = func if isinstance(func, PrimFunc) else func(*args)
-            kernel = compile(program, out_idx=out_idx, target=target, target_host=target_host)
-
+            kernel = JITKernel(
+                        func,
+                        out_idx=out_idx,
+                        execution_backend=execution_backend,
+                        target=target,
+                        target_host=target_host,
+                        verbose=verbose,
+                        pass_configs=pass_configs,
+                    )
             self._cache[key] = kernel  # Store in in-memory cache
             self._save_kernel_to_disk(key, kernel, func)
             return kernel
@@ -122,7 +132,7 @@ class KernelCache:
         try:
             artifact_path = os.path.join(cache_path, "tvm_tmp_mod.txt")
             with open(artifact_path, "w") as f:
-                f.write(kernel.adapter.get_kernel_source())
+                f.write(kernel.rt_mod.imported_modules[0].get_source())
         except Exception as e:
             self.logger.error(f"Error saving kernel module to disk: {e}")
 
@@ -138,7 +148,7 @@ class KernelCache:
         try:
             dump_path = os.path.join(cache_path, "tvm_params.pkl")
             with open(dump_path, "wb") as f:
-                cloudpickle.dump(kernel.rt_params, f)
+                cloudpickle.dump(kernel.params, f)
         except Exception as e:
             self.logger.error(f"Error saving kernel parameters to disk: {e}")
 

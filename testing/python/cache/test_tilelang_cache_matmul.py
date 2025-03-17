@@ -6,7 +6,6 @@ import tilelang.testing
 from tilelang import cached
 import tilelang.language as T
 
-
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
     """
     Defines a matrix multiplication primitive function using tilelang.
@@ -50,7 +49,6 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
     return main
 
-
 def run_cache_matmul():
     """
     Demonstrates the usage of the cached matrix multiplication kernel.
@@ -71,12 +69,8 @@ def run_cache_matmul():
         return C
 
     func = matmul(1024, 1024, 1024, 128, 128, 32)
-    print("TileLang Primitive Function:")
-    print(func)
 
     kernel = cached(func, [2])
-    print("\nCached Kernel:")
-
     import torch
 
     a = torch.randn(1024, 1024).cuda().half()

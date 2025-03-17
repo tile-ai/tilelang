@@ -9,6 +9,7 @@ from tilelang import tvm as tvm
 from tvm.target import Target
 from tilelang.engine.param import KernelParam
 from tvm import tir
+from tvm.relay import TensorType
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import is_cuda_target, is_hip_target, is_cpu_target
@@ -231,9 +232,12 @@ class CythonKernelAdapter(BaseKernelAdapter):
         else:
             adapter.ir_module = func_or_mod
 
+        adapter.target = Target.canon_target(determine_target(target))
+
         adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
         adapter.buffer_dtype_map = adapter._process_buffer_dtype()
         adapter.static_shape_map = adapter._process_static_shape()
+        adapter.buffer_device_map = adapter._process_buffer_device()
 
         adapter.target = Target.canon_target(determine_target(target))
         adapter.verbose = verbose
@@ -259,6 +263,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_buffer_dtype_map(adapter.buffer_dtype_map)
         adapter.cython_wrapper.set_static_shape_map(adapter.static_shape_map)
+        adapter.cython_wrapper.set_buffer_device_map(adapter.buffer_device_map)
 
         adapter._post_init()
         return adapter
