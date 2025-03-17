@@ -58,12 +58,17 @@ def get_tensor_supply(supply_type: TensorSupplyType):
 
         shape = list(map(int, param.shape))
         if supply_type == TensorSupplyType.Auto:
-            if dtype == torch.float16 or dtype == torch.float32:
+            is_unsigned = param.is_unsigned()
+            is_float8 = param.is_float8()
+            if is_unsigned:
+                return torch.randint(low=0, high=3, size=shape, device=device, dtype=dtype)
+            elif is_float8:
+                return torch.randint(
+                    low=-128, high=128, size=shape, device=device, dtype=torch.int8).to(dtype)
+            elif dtype in {torch.float16, torch.float32, torch.bfloat16}:
                 return torch.empty(*shape, device=device, dtype=dtype).normal_(-1.0, 1.0)
-            elif dtype == torch.uint8:
-                return torch.randint(0, 2, size=shape, device=device, dtype=dtype)
             else:
-                raise NotImplementedError(dtype)
+                return torch.randint(low=-2, high=3, size=shape, device=device, dtype=dtype)
 
         if dtype == torch.int8 and supply_type in [
                 TensorSupplyType.Uniform,
@@ -72,8 +77,8 @@ def get_tensor_supply(supply_type: TensorSupplyType):
             return torch.ones(*shape, device=device, dtype=dtype)
 
         if supply_type == TensorSupplyType.Integer:
-            is_unsigned = str(dtype).removeprefix("torch.").startswith("uint")
-            is_float8 = str(dtype).removeprefix("torch.").startswith("float8")
+            is_unsigned = param.is_unsigned()
+            is_float8 = param.is_float8()
             if is_unsigned:
                 return torch.randint(low=0, high=3, size=shape, device=device, dtype=dtype)
             elif is_float8:
@@ -97,6 +102,7 @@ def get_tensor_supply(supply_type: TensorSupplyType):
     return get_tensor
 
 
+# TODO: Align with torch.testing.assert_close
 def torch_assert_close(
     tensor_a,
     tensor_b,

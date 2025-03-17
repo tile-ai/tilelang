@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 from tvm import tir, IRModule
 from tvm.target import Target
 import tilelang
@@ -39,7 +36,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tir.transform.LowerOpaqueBlock()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
         mod = tilelang.transform.RewriteWgmmaSync()(mod)
-        # mod = tilelang.transform.WarpSpecializedPipeline()(mod)
         mod = tilelang.transform.InjectFenceProxy()(mod)
     else:
         mod = tir.transform.PlanAndUpdateBufferAllocationLocation()(mod)
