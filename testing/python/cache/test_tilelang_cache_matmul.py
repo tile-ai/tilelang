@@ -70,7 +70,7 @@ def run_cache_matmul():
 
     func = matmul(1024, 1024, 1024, 128, 128, 32)
 
-    kernel = compile(func, [2])
+    kernel = compile(func, [2], execution_backend="cython")
     import torch
 
     a = torch.randn(1024, 1024).cuda().half()
