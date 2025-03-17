@@ -17,7 +17,7 @@ def reduce_max_test(M, N, dtype="float16"):
         with T.Kernel(1) as _:
             A_local = T.alloc_fragment((M, N), dtype)
             B_local = T.alloc_fragment((M,), dtype)
-            
+
             # Copy input to local
             T.copy(A, A_local)
             # Perform reduce_max operation
@@ -44,7 +44,7 @@ def test_reduce_max():
     run_reduce_max(256, 256)
     run_reduce_max(512, 128)
     run_reduce_max(128, 512)
-    
+
     # Test different dtypes
     run_reduce_max(256, 256, "float32")
     run_reduce_max(256, 256, "float16")
