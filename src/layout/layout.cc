@@ -366,8 +366,8 @@ Fragment FragmentNode::CondenseReplicateVar() const {
 
 std::string LayoutNode::DebugOutput() const {
   std::stringstream ss;
-  ss << "Layout Shape: " << InputShape() << " -> " << OutputShape()
-     << " -> " << GetForwardIndex();
+  ss << "Layout Shape: " << InputShape() << " -> " << OutputShape() << " -> "
+     << GetForwardIndex();
   return ss.str();
 }
 
