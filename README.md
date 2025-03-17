@@ -96,6 +96,16 @@ We currently provide three ways to install **tile-lang** from source:
  - [Install from Source (using the bundled TVM submodule)](./docs/get_started/Installation.md#method-2-install-from-source-using-the-bundled-tvm-submodule)
  - [Install Using the Provided Script](./docs/get_started/Installation.md#method-3-install-using-the-provided-script)
 
+### Method 3: Install with Nightly Version
+
+For users who want access to the latest features and improvements before official releases, we provide nightly builds of **tile-lang**.
+
+```bash
+pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu121/
+# or pip install tilelang --find-links https://tile-ai.github.io/whl/nightly/cu121/
+```
+
+> **Note:** Nightly builds contain the most recent code changes but may be less stable than official releases. They're ideal for testing new features or if you need a specific bugfix that hasn't been released yet.
 
 ## Quick Start
 

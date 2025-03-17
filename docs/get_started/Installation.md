@@ -8,25 +8,25 @@
 - **Python Version**: >= 3.8
 - **CUDA Version**: >= 11.0
 
-The easiest way to install TileLang is directly from PyPI using pip. To install the latest version, run the following command in your terminal:
+The easiest way to install **tile-lang** is directly from PyPI using pip. To install the latest version, run the following command in your terminal:
 
 ```bash
 pip install tilelang
 ```
 
-Alternatively, you may choose to install TileLang using prebuilt packages available on the Release Page:
+Alternatively, you may choose to install **tile-lang** using prebuilt packages available on the Release Page:
 
 ```bash
 pip install tilelang-0.0.0.dev0+ubuntu.20.4.cu120-py3-none-any.whl
 ```
 
-To install the latest version of TileLang from the GitHub repository, you can run the following command:
+To install the latest version of **tile-lang** from the GitHub repository, you can run the following command:
 
 ```bash
 pip install git+https://github.com/tile-ai/tilelang.git
 ```
 
-After installing TileLang, you can verify the installation by running:
+After installing **tile-lang**, you can verify the installation by running:
 
 ```bash
 python -c "import tilelang; print(tilelang.__version__)"
@@ -40,20 +40,20 @@ python -c "import tilelang; print(tilelang.__version__)"
 - **Python Version**: >= 3.7
 - **CUDA Version**: >= 10.0
 
-We recommend using a Docker container with the necessary dependencies to build TileLang from source. You can use the following command to run a Docker container with the required dependencies:
+We recommend using a Docker container with the necessary dependencies to build **tile-lang** from source. You can use the following command to run a Docker container with the required dependencies:
 
 ```bash
 docker run --gpus all -it --rm --ipc=host nvcr.io/nvidia/pytorch:23.01-py3
 ```
 
-To build and install TileLang directly from source, follow these steps. This process requires certain pre-requisites from Apache TVM, which can be installed on Ubuntu/Debian-based systems using the following commands:
+To build and install **tile-lang** directly from source, follow these steps. This process requires certain pre-requisites from Apache TVM, which can be installed on Ubuntu/Debian-based systems using the following commands:
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y python3 python3-dev python3-setuptools gcc libtinfo-dev zlib1g-dev build-essential cmake libedit-dev libxml2-dev
 ```
 
-After installing the prerequisites, you can clone the TileLang repository and install it using pip:
+After installing the prerequisites, you can clone the **tile-lang** repository and install it using pip:
 
 ```bash
 git clone --recursive https://github.com/tile-ai/tilelang.git
@@ -61,13 +61,13 @@ cd tileLang
 pip install .  # Please be patient, this may take some time.
 ```
 
-If you want to install TileLang in development mode, you can run the following command:
+If you want to install **tile-lang** in development mode, you can run the following command:
 
 ```bash
 pip install -e .
 ```
 
-We currently provide three methods to install **TileLang**:
+We currently provide three methods to install **tile-lang**:
 
 1. [Install from Source (using your own TVM installation)](#install-method-1)
 2. [Install from Source (using the bundled TVM submodule)](#install-method-2)
@@ -167,3 +167,15 @@ cd tilelang
 ```bash
 bash install_cuda.sh
 # or bash `install_amd.sh` if you want to enable ROCm runtime
+```
+
+## Install with Nightly Version
+
+For users who want access to the latest features and improvements before official releases, we provide nightly builds of **tile-lang**.
+
+```bash
+pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu121/
+# or pip install tilelang --find-links https://tile-ai.github.io/whl/nightly/cu121/
+```
+
+> **Note:** Nightly builds contain the most recent code changes but may be less stable than official releases. They're ideal for testing new features or if you need a specific bugfix that hasn't been released yet.
