@@ -227,13 +227,21 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   for (const auto &[buffer, _] : indice_map_) {
     if (!T.layout_map.count(buffer)) {
       results.Set(buffer, CompleteBufferFragment(buffer));
-    } else {
-      auto src_layout = T.layout_map[buffer];
-      auto dst_layout = CompleteBufferFragment(buffer);
-      ICHECK(StructuralEqual()(src_layout, dst_layout))
-          << "Layout infer conflict for " << buffer << " " << source_buffer
-          << "\nLHS = " << src_layout->DebugOutput()
-          << "\nRHS = " << dst_layout->DebugOutput();
+    }
+    // Though they may exist some conflicts, but it's fine.
+
+    // Layout infer conflict for local.fragment can noy be handled here
+    // because the source_buffer is not always available
+    if (buffer.scope() == "local.fragment" && source_buffer.defined() &&
+        source_buffer.scope() == "local.fragment") {
+      if (T.layout_map.count(buffer)) {
+        auto src_layout = T.layout_map[buffer];
+        auto dst_layout = CompleteBufferFragment(buffer);
+        ICHECK(StructuralEqual()(src_layout, dst_layout))
+            << "Layout infer conflict for " << buffer
+            << "\nLHS = " << src_layout->DebugOutput()
+            << "\nRHS = " << dst_layout->DebugOutput();
+      }
     }
   }
   return results;
