@@ -153,7 +153,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
     pass_configs: Optional[Dict[str, Any]] = None
 
     def __init__(self,
-                 params: List[TensorType],
+                 params: List[KernelParam],
                  result_idx: List[int],
                  target: Union[str, Target],
                  func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
