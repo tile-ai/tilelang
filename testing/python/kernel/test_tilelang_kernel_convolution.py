@@ -1,9 +1,8 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
 
 from tilelang import tvm as tvm
 import tilelang.testing
-import tilelang as tl
 import tilelang.language as T
 
 
@@ -69,8 +68,8 @@ def run_conv(N,
     program = convolution(N, C, H, W, F, K, S, D, P, in_dtype, out_dtype, dtypeAccum, block_M,
                           block_N, block_K, num_stages, threads)
 
-    mod, params = tl.lower(program)
-    mod = tl.Profiler(mod, params, [2], tl.TensorSupplyType.Integer)
+    kernel = tilelang.compile(program, out_idx=[2])
+    profiler = kernel.get_profiler()
 
     def ref_program(A, B):
         import torch
@@ -81,7 +80,7 @@ def run_conv(N,
         C = C.permute(0, 2, 3, 1)  # N, C, H, W -> N, H, W, C
         return C.to(torch.__getattribute__(out_dtype))
 
-    mod.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
 def test_conv_f16f16f16_k3s1d1p1():

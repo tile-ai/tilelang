@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
 
 import torch
@@ -6,7 +6,6 @@ import torch.backends
 from tilelang import tvm as tvm
 import tilelang.testing
 from tvm import DataType
-import tilelang as TL
 import tilelang.language as T
 from tilelang.intrinsics.utils import get_swizzle_layout
 from tilelang.intrinsics.mma_macro_generator import (TensorCoreIntrinEmitter)
@@ -173,8 +172,8 @@ def tl_matmul_macro(
 def assert_tl_matmul_macro_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     matmul = tl_matmul_macro(N, K, in_dtype, out_dtype, accum_dtype)
 
-    mod, params = TL.lower(matmul)
-    src_code = mod.imported_modules[0].get_source()
+    kernel = tilelang.compile(matmul, out_idx=[2])
+    src_code = kernel.get_kernel_source()
 
     # src_code is the generated cuda source
     assert src_code is not None
@@ -183,9 +182,7 @@ def assert_tl_matmul_macro_correctness(M, N, K, in_dtype, out_dtype, accum_dtype
     B = torch.rand(N, K, device="cuda", dtype=getattr(torch, in_dtype))
     C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, accum_dtype))
 
-    mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
-
-    mod(A, B, C)
+    C = kernel(A, B)
 
     # Get Reference Result
     ref_c = torch.matmul(A, B.T).to(getattr(torch, accum_dtype))
@@ -264,14 +261,14 @@ def assert_tl_matmul_block_correctness(
         num_stages,
         num_threads,
     )
-    mod, params = TL.lower(program)
+
+    kernel = tilelang.compile(program, out_idx=[2])
 
     A = torch.rand(M, K, device="cuda", dtype=getattr(torch, in_dtype))
     B = torch.rand(N, K, device="cuda", dtype=getattr(torch, in_dtype))
     C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, out_dtype))
 
-    mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
-    mod(A, B, C)
+    C = kernel(A, B)
 
     def ref_program(A, B):
         import torch

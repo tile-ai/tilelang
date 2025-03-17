@@ -4,7 +4,6 @@
 import torch
 import torch.nn.functional as F
 import tilelang
-from tilelang import Profiler
 from tilelang.autotuner import *
 import tilelang.language as T
 import itertools
@@ -214,14 +213,14 @@ if __name__ == "__main__":
             batch, heads, seq_len, dim, is_causal, tune=args.tune)(
                 block_M=128, block_N=128, num_stages=2, threads=256)
         ref_program = partial(ref_program, is_causal=is_causal)
-        mod, params = tilelang.lower(program)
-        mod = Profiler(mod, params, [3], tilelang.TensorSupplyType.Normal)
-        mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+        kernel = tilelang.compile(program, out_idx=[3])
+        profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+        profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")
-        latency = mod.do_bench(ref_program, warmup=500)
+        latency = profiler.do_bench(ref_program, warmup=500)
         print("Ref: {:.2f} ms".format(latency))
         print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-        latency = mod.do_bench(mod.func, warmup=500)
+        latency = profiler.do_bench(warmup=500)
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:

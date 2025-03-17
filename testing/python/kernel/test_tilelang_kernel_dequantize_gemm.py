@@ -1,13 +1,11 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
 import torch
 import torch.backends
 import tilelang.testing
 from tilelang import tvm as tvm
 from tvm import DataType, tir
-import tilelang as TL
 import tilelang.language as T
-from tilelang import JITKernel, Profiler
 
 tilelang.testing.set_random_seed(0)
 
@@ -102,11 +100,10 @@ def test_fp4_fp16_convert_close():
         "float16",
     )
 
-    mod, params = tilelang.lower(program)
-    mod = Profiler(mod, params, [1], tilelang.TensorSupplyType.Integer)
+    kernel = tilelang.compile(program, out_idx=[1])
 
     B = torch.randint(0, 16, (N, K // 2), dtype=torch.uint8, device="cuda").to(torch.uint8)
-    tl_out = mod.func(B)
+    tl_out = kernel(B)
     ref_out = torch_convert(B)
     assert torch.allclose(tl_out, ref_out, rtol=0.01, atol=0.01), (tl_out, ref_out)
     print("Pass")
@@ -202,7 +199,7 @@ def assert_simple_impl_float16xfp4_gemm(M,
     func = matmul_fp16xfp4(M, N, K, in_dtype, out_dtype, accum_dtype, block_M, block_N, block_K,
                            num_stages, threads)
 
-    torch_func = JITKernel(func, [2])
+    torch_func = tilelang.compile(func, out_idx=[2])
     profiler = torch_func.get_profiler()
     profiler.assert_allclose(ref_program)
 
@@ -318,10 +315,10 @@ def run_gemm(
         num_threads,
     )
 
-    mod, params = TL.lower(program)
-    mod = TL.Profiler(mod, params, [2], TL.TensorSupplyType.Integer)
+    kernel = tilelang.compile(program, out_idx=[2])
+    profiler = kernel.get_profiler()
 
-    out = mod.run_once()
+    out = profiler.run_once()
     assert out is not None
 
     def ref_program(A, qB):
@@ -337,7 +334,7 @@ def run_gemm(
         C = C.to(torch.__getattribute__(out_dtype))
         return C
 
-    mod.assert_allclose(ref_program)
+    profiler.assert_allclose(ref_program)
 
 
 @tvm.testing.requires_package("bitblas")
@@ -566,8 +563,10 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
     matmul = tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
         M, N, K, in_dtype, out_dtype, accum_dtype, transform_b)
 
-    mod, params = TL.lower(matmul)
-    src_code = mod.imported_modules[0].get_source()
+    kernel = tilelang.compile(matmul, out_idx=[2])
+    profiler = kernel.get_profiler()
+
+    src_code = kernel.get_kernel_source()
 
     # src_code is the generated cuda source
     assert src_code is not None
@@ -605,11 +604,9 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
     QLB = ladder_permutate(qB.cpu()).cuda()
     QLB = lop3_permutate(QLB.cpu()).cuda()
 
-    mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
+    kernel(A, QLB, C)
 
-    mod(A, QLB, C)
-
-    latency = mod.do_bench(mod.func, warmup=25)
+    latency = profiler.do_bench()
 
     # Ensure that the latency is not None
     assert latency is not None

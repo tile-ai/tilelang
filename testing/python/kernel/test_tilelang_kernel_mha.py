@@ -1,9 +1,8 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
 
 from tilelang import tvm as tvm
 import tilelang.testing
-import tilelang as tl
 import tilelang.language as T
 
 
@@ -132,8 +131,8 @@ def run_mha(batch, heads, seq_len, dim, is_causal, block_M, block_N, num_stages=
     program = flashattn(batch, heads, seq_len, dim, is_causal, block_M, block_N, num_stages,
                         threads)
 
-    mod, params = tl.lower(program)
-    mod = tl.Profiler(mod, params, [3], tl.TensorSupplyType.Integer)
+    kernel = tilelang.compile(program, out_idx=[3])
+    profiler = kernel.get_profiler()
 
     def ref_program(Q, K, V):
         import torch
@@ -150,7 +149,7 @@ def run_mha(batch, heads, seq_len, dim, is_causal, block_M, block_N, num_stages=
         output = torch.einsum('bhqk,bkhd->bqhd', attention_weights, V)
         return output
 
-    mod.assert_allclose(ref_program, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
+    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
 def test_mha_causal_dim64():

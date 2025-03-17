@@ -1,14 +1,14 @@
 import torch
-import torch.nn.functional as F
 import tilelang
 from tilelang.autotuner import *
 import tilelang.language as T
-from einops import rearrange, einsum
 import argparse
 from tilelang.profiler import do_bench
 import math
 
-def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, block_H, num_split, block_size):
+
+def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, block_H, num_split,
+                        block_size):
     scale = (1.0 / (dv + dpe))**0.5 * 1.44269504  # log2(e)
     dtype = "float16"
     accum_dtype = "float"
@@ -59,7 +59,8 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
             loop_range = T.ceildiv(CACHE_SEQLENS[bx], block_N)
             for kr in T.Pipelined(loop_range, num_stages=2):
                 k = loop_range - 1 - kr
-                kv_start = BLOCK_TABLE[bx, (k * block_N) // block_size] * block_size + (k * block_N) % block_size
+                kv_start = BLOCK_TABLE[bx, (k * block_N) //
+                                       block_size] * block_size + (k * block_N) % block_size
                 T.copy(KV[kv_start:kv_start + block_N, cur_kv_head, :], KV_shared)
                 T.copy(K_pe[kv_start:kv_start + block_N, cur_kv_head, :], K_pe_shared)
                 T.clear(acc_s)
@@ -75,7 +76,8 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 if kr == 0:
                     for i, j in T.Parallel(block_H, block_N):
-                        acc_s[i, j] = T.if_then_else(k * block_N + j >= CACHE_SEQLENS[bx], -T.infinity(accum_dtype), acc_s[i, j])
+                        acc_s[i, j] = T.if_then_else(k * block_N + j >= CACHE_SEQLENS[bx],
+                                                     -T.infinity(accum_dtype), acc_s[i, j])
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                 for i in T.Parallel(block_H):
                     scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
@@ -105,7 +107,8 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
             glse: T.Buffer([batch, h_q, num_split], dtype),
             Output_partial: T.Buffer([batch, h_q, num_split, dv], dtype),
     ):
-        with T.Kernel(batch, h_q // min(block_H, kv_group_num), num_split, threads=256) as (bx, by, bz):
+        with T.Kernel(
+                batch, h_q // min(block_H, kv_group_num), num_split, threads=256) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_H, dv], dtype)
             S_shared = T.alloc_shared([block_H, block_N], dtype)
             Q_pe_shared = T.alloc_shared([block_H, dpe], dtype)
@@ -141,7 +144,8 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
             start = (blocks_per_split * bz + T.min(bz, remaining_blocks)) * block_N
 
             for k in T.Pipelined(loop_range, num_stages=2):
-                kv_start = BLOCK_TABLE[bx, (start + k * block_N) // block_size] * block_size + (k * block_N) % block_size
+                kv_start = BLOCK_TABLE[bx, (start + k * block_N) //
+                                       block_size] * block_size + (k * block_N) % block_size
                 T.copy(KV[kv_start:kv_start + block_N, cur_kv_head, :], KV_shared)
                 T.copy(K_pe[kv_start:kv_start + block_N, cur_kv_head, :], K_pe_shared)
                 T.clear(acc_s)
@@ -156,7 +160,8 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 for i, j in T.Parallel(block_H, block_N):
-                    acc_s[i, j] = T.if_then_else(start + k * block_N + j >= CACHE_SEQLENS[bx], -T.infinity(accum_dtype), acc_s[i, j])
+                    acc_s[i, j] = T.if_then_else(start + k * block_N + j >= CACHE_SEQLENS[bx],
+                                                 -T.infinity(accum_dtype), acc_s[i, j])
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                 for i in T.Parallel(block_H):
                     scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
@@ -227,7 +232,8 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
             Output_partial: T.Buffer([batch, h_q, num_split, dv], dtype),
             Output: T.Buffer([batch, h_q, dv], dtype),
     ):
-        flash_mla_split_kv_kernel(Q, Q_pe, KV, K_pe, block_table, cache_seqlens, glse, Output_partial)
+        flash_mla_split_kv_kernel(Q, Q_pe, KV, K_pe, block_table, cache_seqlens, glse,
+                                  Output_partial)
         combine(glse, Output_partial, Output)
 
     @T.prim_func
@@ -249,6 +255,7 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
     else:
         return main_no_split
 
+
 def scaled_dot_product_attention(query, key, value, h_q, h_kv, is_causal=False):
     query = query.float()
     key = key.float()
@@ -260,7 +267,8 @@ def scaled_dot_product_attention(query, key, value, h_q, h_kv, is_causal=False):
         s_q = query.shape[-2]
         s_k = key.shape[-2]
         attn_bias = torch.zeros(s_q, s_k, dtype=query.dtype, device=query.device)
-        temp_mask = torch.ones(s_q, s_k, dtype=torch.bool, device=query.device).tril(diagonal=s_k - s_q)
+        temp_mask = torch.ones(
+            s_q, s_k, dtype=torch.bool, device=query.device).tril(diagonal=s_k - s_q)
         attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
         attn_bias.to(query.dtype)
         attn_weight += attn_bias
@@ -270,7 +278,8 @@ def scaled_dot_product_attention(query, key, value, h_q, h_kv, is_causal=False):
 
 
 @torch.inference_mode()
-def run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
+def run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q,
+                  h_kv, d, dv, causal, dtype):
     # q: [b, s_q, h_q, d]
     # block_table: [b, max_seqlen_pad // block_size]
     # blocked_k: [b * max_seqlen_pad // block_size, block_size, h_kv, d]
@@ -287,7 +296,8 @@ def run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q,
                 q[i].transpose(0, 1),
                 blocked_k.view(-1, h_kv, d)[begin:end].transpose(0, 1),
                 blocked_v.view(-1, h_kv, dv)[begin:end].transpose(0, 1),
-                h_q, h_kv,
+                h_q,
+                h_kv,
                 is_causal=causal,
             )
             out[i] = O.transpose(0, 1)
@@ -298,31 +308,33 @@ def run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q,
     return out_torch
 
 
-def run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
-    
+def run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens,
+                     h_q, h_kv, d, dv, causal, dtype):
+
     assert d > dv, "mla with rope dim should be larger than no rope dim"
     q_nope, q_pe = q[..., :dv].contiguous(), q[..., dv:].contiguous()
-    blocked_k_nope, blocked_k_pe = blocked_k[..., :dv].contiguous(), blocked_k[..., dv:].contiguous()
+    blocked_k_nope, blocked_k_pe = blocked_k[..., :dv].contiguous(), blocked_k[...,
+                                                                               dv:].contiguous()
 
     dpe = d - dv
     num_kv_splits = 1
     BLOCK_N = 64
     BLOCK_H = 64
-    
+
     out_partial = torch.empty(b, h_q, num_kv_splits, dv, dtype=dtype, device=q.device)
     glse = torch.empty(b, h_q, num_kv_splits, dtype=dtype, device=q.device)
-    out = torch.empty(b, h_q, dv, dtype=dtype, device=q.device)
-    program = mla_decode_tilelang(b, h_q, h_kv, max_seqlen_pad, dv, dpe, BLOCK_N, BLOCK_H, num_kv_splits, block_size)
-    mod, params = tilelang.lower(program)
-    mod = tilelang.Profiler(mod, params, [8], tilelang.TensorSupplyType.Randn)
+    program = mla_decode_tilelang(b, h_q, h_kv, max_seqlen_pad, dv, dpe, BLOCK_N, BLOCK_H,
+                                  num_kv_splits, block_size)
+    kernel = tilelang.compile(program, out_idx=[8])
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
 
     def flash_mla_tilelang():
-        out = mod.func(
-            q_nope.view(-1, h_q, dv), 
-            q_pe.view(-1, h_q, dpe), 
-            blocked_k_nope.view(-1, h_kv, dv), 
-            blocked_k_pe.view(-1, h_kv, dpe), 
-            block_table, 
+        out = profiler.func(
+            q_nope.view(-1, h_q, dv),
+            q_pe.view(-1, h_q, dpe),
+            blocked_k_nope.view(-1, h_kv, dv),
+            blocked_k_pe.view(-1, h_kv, dpe),
+            block_table,
             cache_seqlens,
             glse,
             out_partial,
@@ -331,10 +343,12 @@ def run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s
 
     out_flash = flash_mla_tilelang()
     t = do_bench(flash_mla_tilelang)
-    out_ref = run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
+    out_ref = run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q,
+                            cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
     torch.testing.assert_close(out_flash, out_ref, rtol=0.01, atol=0.01)
     print("All close")
     return out_flash, t
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -349,10 +363,12 @@ if __name__ == "__main__":
 
     device = "cuda"
     dtype = torch.float16
-    
-    s_q = 1 # for decode, s_q = 1
+
+    s_q = 1  # for decode, s_q = 1
     block_size = 64
-    cache_seqlens = torch.tensor([cache_seqlen + 2 * i for i in range(b)], dtype=torch.int32, device=device)
+    cache_seqlens = torch.tensor([cache_seqlen + 2 * i for i in range(b)],
+                                 dtype=torch.int32,
+                                 device=device)
     dpe = d - dv
     causal = True
 
@@ -364,9 +380,12 @@ if __name__ == "__main__":
     total_flops = s_q * total_seqlens * h_q * (d + dv) * 2
 
     q = torch.randn(b, s_q, h_q, d, dtype=dtype, device=device)
-    block_table = torch.arange(b * max_seqlen_pad // block_size, dtype=torch.int32, device=device).view(b, max_seqlen_pad // block_size)
+    block_table = torch.arange(
+        b * max_seqlen_pad // block_size, dtype=torch.int32,
+        device=device).view(b, max_seqlen_pad // block_size)
     blocked_k = torch.randn(block_table.numel(), block_size, h_kv, d, dtype=dtype, device=device)
-    out_flash, latency = run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
+    out_flash, latency = run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b,
+                                          s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
 
     print("Tile-lang: {:.2f} ms".format(latency))
     print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))

@@ -1,9 +1,8 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
 
 from tilelang import tvm as tvm
 import tilelang.testing
-import tilelang as tl
 import tilelang.language as T
 
 tilelang.testing.set_random_seed(0)
@@ -130,8 +129,8 @@ def run_chunk_scan(batch,
     program = chunk_scan_fwd(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate, block_M,
                              block_N, block_K, block_Dstate, num_stages, threads)
 
-    mod, params = tl.lower(program)
-    mod = tl.Profiler(mod, params, [7], tl.TensorSupplyType.Integer)
+    kernel = tilelang.compile(program, out_idx=[7])
+    profiler = kernel.get_profiler()
 
     def ref_program(cb, x, dt, dA_cumsum, C, prev_states, D):
         import torch
@@ -182,7 +181,7 @@ def run_chunk_scan(batch,
             out = out + x * D
         return out
 
-    mod.assert_allclose(ref_program, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
+    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
 def chunk_state_fwd(batch,
@@ -275,8 +274,8 @@ def run_chunk_state(batch,
     program = chunk_state_fwd(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate, block_M,
                               block_N, block_K, num_stages, threads)
 
-    mod, params = tl.lower(program)
-    mod = tl.Profiler(mod, params, [4], tl.TensorSupplyType.Integer)
+    kernel = tilelang.compile(program, out_idx=[4])
+    profiler = kernel.get_profiler()
 
     def ref_program(B, x, dt, dA_cumsum):
         """
@@ -313,7 +312,7 @@ def run_chunk_state(batch,
         return torch.einsum("bclhn,bhcl,bhcl,bclhp->bchpn", B.to(x.dtype), decay_states.to(x.dtype),
                             dt.to(x.dtype), x)
 
-    mod.assert_allclose(ref_program, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
+    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
 def test_chunk_scan():

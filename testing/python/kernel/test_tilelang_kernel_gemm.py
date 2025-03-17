@@ -1,9 +1,8 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
 
 from tilelang import tvm as tvm
 import tilelang.testing
-import tilelang as tl
 
 
 def matmul(
@@ -85,8 +84,8 @@ def run_gemm(
         num_threads,
     )
 
-    mod, params = tl.lower(program)
-    mod = tl.Profiler(mod, params, [2], tl.TensorSupplyType.Integer)
+    kernel = tilelang.compile(program, out_idx=[2])
+    profiler = kernel.get_profiler()
 
     def ref_program(A, B):
         import torch
@@ -99,7 +98,7 @@ def run_gemm(
         C = C.to(torch.__getattribute__(out_dtype))
         return C
 
-    mod.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
 def test_gemm_f16f16f16_nn():
