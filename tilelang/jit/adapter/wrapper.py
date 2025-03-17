@@ -212,7 +212,7 @@ class TLCUDASourceWrapper(object):
                 raise ValueError(
                     f"TMA descriptor args too short: {len(args)} elements, expected at least 3")
             _, dtype, tensor_rank, globalAddress, *remaining_args = args[1:]
-            
+
             tensor_rank = int(tensor_rank)
             # Validate tensor_rank
             if not isinstance(tensor_rank, int) or tensor_rank <= 0:
@@ -467,7 +467,7 @@ class TLCPUSourceWrapper(object):
             pattern = r"[,\s]*(?:\w+\s*\*+\s*\s+)?(\w+)"
             matches = re.findall(pattern, s)
             call_args = []
-            for i, match in enumerate(matches):
+            for match in matches:
                 for arg in function_args:
                     if arg["name"] == match:
                         call_args.append(match)
