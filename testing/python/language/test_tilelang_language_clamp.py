@@ -2,9 +2,9 @@
 # Licensed under the MIT License.
 
 import tilelang.testing
+from tilelang.utils.tensor import map_torch_type
 
-
-def clamp(
+def clamp_within_bounds(
     N,
     block_N,
     dtype,
@@ -35,7 +35,7 @@ def run_clamp(
     min=None,
     max=None,
 ):
-    program = clamp(N, block_N, dtype, min, max)
+    program = clamp_within_bounds(N, block_N, dtype, min, max)
 
     kernel = tilelang.compile(program, out_idx=[1])
     profiler = kernel.get_profiler()
@@ -49,7 +49,7 @@ def run_clamp(
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
-def clamp_v2(
+def clamp_value_range(
     N,
     block_N,
     dtype,
@@ -64,8 +64,8 @@ def clamp_v2(
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             # A_shared = T.alloc_shared([1, block_N], dtype=dtype)
             A_frag = T.alloc_fragment([1, block_N], dtype=dtype)
-            min_frag = T.alloc_fragment([1], dtype="float32")
-            max_frag = T.alloc_fragment([1], dtype="float32")
+            min_frag = T.alloc_fragment([1], dtype=dtype)
+            max_frag = T.alloc_fragment([1], dtype=dtype)
             T.copy(A[0, bx * block_N], A_frag)
             T.reduce_min(A_frag, min_frag, dim=1)
             T.reduce_max(A_frag, max_frag, dim=1)
@@ -78,35 +78,41 @@ def clamp_v2(
     return main
 
 
-def run_clamp_v2(
+def run_clamp_value_range(
     N,
     block_N,
     dtype,
 ):
-    program = clamp_v2(
+    program = clamp_value_range(
         N,
         block_N,
         dtype,
     )
     kernel = tilelang.compile(program, out_idx=[1])
-    profiler = kernel.get_profiler()
 
+    import torch
+
+    # Convert string dtype to torch.dtype
+    torch_dtype = map_torch_type(dtype)
+    
     def ref_program(A):
-        import torch
         min_val = torch.min(A) * 0.5
         max_val = torch.max(A) * 0.5
         output = torch.clamp(A, min_val, max_val)
         return output
 
-    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+    A = torch.randint(-5, 5, (1, N)).cuda().to(dtype=torch_dtype)
+    B = kernel(A)
+    ref_b = ref_program(A)
+    torch.testing.assert_close(B, ref_b)
 
 
 def test_clamp():
     # clamp tests for float16 and float32
     run_clamp(1024, 128, "float16", -0.05, 0.05)
     run_clamp(1024, 128, "float32", -0.06, 0.05)
-    run_clamp_v2(1024, 128, "float16")
-    run_clamp_v2(1024, 128, "float32")
+    run_clamp_value_range(1024, 128, "float16")
+    run_clamp_value_range(1024, 128, "float32")
 
 
 if __name__ == "__main__":
