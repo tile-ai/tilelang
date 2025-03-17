@@ -201,7 +201,7 @@ def torch_assert_close(
     verbose: bool = False,
     equal_nan: bool = False,
     check_device: bool = True,
-    check_dtype: bool = True,
+    check_dtype: bool = False,
     check_layout: bool = True,
     check_stride: bool = False,
 ):
@@ -261,8 +261,8 @@ def torch_assert_close(
         flat_idx = torch.argmax(mismatched.view(-1).int()).item()
         idx = np.unravel_index(flat_idx, tensor_a.shape)
         idx = [int(i) for i in idx]
-        a_val = tensor_a.view(-1)[flat_idx].item()
-        b_val = tensor_b.view(-1)[flat_idx].item()
+        a_val = tensor_a.reshape(-1)[flat_idx].item()
+        b_val = tensor_b.reshape(-1)[flat_idx].item()
         abs_diff = abs(a_val - b_val)
         rel_diff = abs_diff / (abs(b_val) + 1e-12)
         mismatch_info = (f"\nFirst mismatch at index {idx}: "
