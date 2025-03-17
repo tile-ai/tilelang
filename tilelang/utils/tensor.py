@@ -5,6 +5,7 @@ from enum import Enum
 import torch
 from tvm.runtime import ndarray
 from torch.utils.dlpack import to_dlpack
+import numpy as np
 
 
 class TensorSupplyType(Enum):
@@ -254,12 +255,29 @@ def torch_assert_close(
         print(f"Number of mismatched elements: {num_mismatched} / {total_elements} "
               f"(allowed: {max_allowed_mismatched})")
 
-    # Check if the number of mismatched elements exceeds the allowed threshold
+    # If there are mismatched elements, print the first mismatch
+    if num_mismatched > 0:
+        # Find the first mismatch index
+        flat_idx = torch.argmax(mismatched.view(-1).int()).item()
+        idx = np.unravel_index(flat_idx, tensor_a.shape)
+        idx = [int(i) for i in idx]
+        a_val = tensor_a.view(-1)[flat_idx].item()
+        b_val = tensor_b.view(-1)[flat_idx].item()
+        abs_diff = abs(a_val - b_val)
+        rel_diff = abs_diff / (abs(b_val) + 1e-12)
+        mismatch_info = (f"\nFirst mismatch at index {idx}: "
+                         f"lhs={a_val:.6f}, rhs={b_val:.6f}, "
+                         f"abs_diff={abs_diff:.6f}, rel_diff={rel_diff:.6f}")
+    else:
+        mismatch_info = ""
+
+    # Modify the exception information
     if num_mismatched > max_allowed_mismatched:
         raise AssertionError(
             f"Too many mismatched elements: {num_mismatched} > {max_allowed_mismatched} "
-            f"({max_mismatched_ratio * 100:.2f}% allowed). "
-            f"Greatest absolute difference: {diff.max().item()}, "
+            f"({max_mismatched_ratio * 100:.2f}% allowed, but get {num_mismatched / total_elements * 100:.2f}%)."
+            f"{mismatch_info}"
+            f"\nGreatest absolute difference: {diff.max().item()}, "
             f"Greatest relative difference: {(diff / (torch.abs(tensor_b) + 1e-12)).max().item()}.")
     else:
         return True
