@@ -41,6 +41,7 @@ private:
   // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
   // only will be enabled under cdna mfma instructions
   int kPack = 1;
+  int wg_wait = 0;
   bool completed_ = false;
 };
 

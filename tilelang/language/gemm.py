@@ -14,6 +14,7 @@ def gemm(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     k_pack: int = 1,
+    wg_wait: int = 0,
 ):
     """
     k_pack: int
@@ -41,4 +42,5 @@ def gemm(
         K,
         policy,
         k_pack,
+        wg_wait,
     )
