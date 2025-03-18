@@ -343,8 +343,8 @@ LayoutMap Copy::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   if (T.layout_map.count(src) && T.layout_map.count(dst)) {
     // Only compare fragment layout
     if (src.scope() == "local.fragment" && dst.scope() == "local.fragment") {
-      const FragmentNode* src_layout = T.layout_map[src].as<Fragment>().get();
-      const FragmentNode* dst_layout = T.layout_map[dst].as<Fragment>().get();
+      const FragmentNode *src_layout = T.layout_map[src].as<Fragment>().get();
+      const FragmentNode *dst_layout = T.layout_map[dst].as<Fragment>().get();
       if (src_layout && dst_layout) {
         ICHECK(src_layout->IsEqual(dst_layout, true))
             << "Get different layout for " << src << " and " << dst
