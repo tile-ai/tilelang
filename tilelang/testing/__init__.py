@@ -8,7 +8,7 @@ import torch
 import numpy as np
 from tvm.testing.utils import *
 
-from ..utils.tensor import torch_assert_close as torch_assert_close
+from tilelang.utils.tensor import torch_assert_close as torch_assert_close
 
 
 # pytest.main() wrapper to allow running single test file
