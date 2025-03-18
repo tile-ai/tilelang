@@ -15,7 +15,7 @@ from tvm.target import Target
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.jit.kernel import JITKernel
 from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
-from tilelang.cache import cached_kernel
+from tilelang.cache import cached
 from logging import getLogger
 
 logger = getLogger(__name__)
@@ -121,12 +121,12 @@ def compile(
     """
     Compile the given TileLang PrimFunc with TVM and build a JITKernel.
     """
-    return cached_kernel(
-        func=func,
+    return cached(
+        func,
         out_idx=out_idx,
+        execution_backend=execution_backend,
         target=target,
         target_host=target_host,
-        execution_backend=execution_backend,
         verbose=verbose,
         pass_configs=pass_configs,
     )

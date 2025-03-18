@@ -12,7 +12,7 @@ from typing import Callable, List, Literal, Union
 _kernel_cache_instance = KernelCache()
 
 
-def cached_kernel(
+def cached(
         func: Callable,
         out_idx: List[int] = None,
         *args,
@@ -25,7 +25,7 @@ def cached_kernel(
     """
     Caches and reuses compiled kernels (using KernelCache class).
     """
-    return _kernel_cache_instance.cached_kernel(
+    return _kernel_cache_instance.cached(
         func,
         out_idx=out_idx,
         *args,
