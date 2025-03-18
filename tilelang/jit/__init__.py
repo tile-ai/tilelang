@@ -122,7 +122,7 @@ def compile(
     Compile the given TileLang PrimFunc with TVM and build a JITKernel.
     """
     return cached(
-        func,
+        func=func,
         out_idx=out_idx,
         execution_backend=execution_backend,
         target=target,

@@ -26,7 +26,6 @@ def cached(
     """
     Caches and reuses compiled kerne(ls (using KernelCache class).
     """
-    print(type(func))
     return _kernel_cache_instance.cached(
         func,
         out_idx,

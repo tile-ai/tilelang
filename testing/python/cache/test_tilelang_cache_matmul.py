@@ -3,7 +3,7 @@
 
 from tilelang import tvm as tvm
 import tilelang.testing
-from tilelang import compile
+from tilelang import compile, cached
 import tilelang.language as T
 
 
@@ -71,8 +71,7 @@ def run_cache_matmul():
         return C
 
     func = matmul(1024, 1024, 1024, 128, 128, 32)
-
-    kernel = compile(func, [2], execution_backend="cython")
+    kernel = cached(func, [2], execution_backend="cython")
     import torch
 
     a = torch.randn(1024, 1024).cuda().half()
