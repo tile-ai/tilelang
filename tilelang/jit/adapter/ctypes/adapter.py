@@ -100,10 +100,9 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         self.lib.init()
 
         self._post_init()
-    
+
     @classmethod
     def from_database(cls,
-
                       params: List[TensorType],
                       result_idx: List[int],
                       target: str,
@@ -153,7 +152,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
         adapter._post_init()
         return adapter
-    
+
     def _process_dynamic_symbolic(self):
         """Extract information about dynamic shapes from the TIR function.
         

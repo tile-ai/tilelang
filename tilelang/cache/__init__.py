@@ -13,15 +13,15 @@ _kernel_cache_instance = KernelCache()
 
 
 def cached(
-        func: Callable,
-        out_idx: List[int] = None,
-        *args,
-        target: Union[str, Target] = "auto",
-        target_host: Union[str, Target] = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
-        verbose: bool = False,
-        pass_configs: dict = None,
-    ) -> JITKernel:
+    func: Callable,
+    out_idx: List[int] = None,
+    *args,
+    target: Union[str, Target] = "auto",
+    target_host: Union[str, Target] = None,
+    execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+    verbose: bool = False,
+    pass_configs: dict = None,
+) -> JITKernel:
     """
     Caches and reuses compiled kerne(ls (using KernelCache class).
     """

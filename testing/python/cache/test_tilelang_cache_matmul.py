@@ -6,6 +6,7 @@ import tilelang.testing
 from tilelang import compile
 import tilelang.language as T
 
+
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
     """
     Defines a matrix multiplication primitive function using tilelang.
@@ -48,6 +49,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
+
 
 def run_cache_matmul():
     """

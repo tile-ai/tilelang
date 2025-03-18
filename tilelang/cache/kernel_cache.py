@@ -37,9 +37,9 @@ class KernelCache:
                     logging.ERROR)  # Set default logging level to ERROR, can be adjusted
         return cls._instance
 
-    def _generate_key(self, func: Callable, out_idx: List[int], 
-                      execution_backend: Literal["dlpack", "ctypes", "cython"], 
-                      args, target: Union[str, Target], target_host: Union[str, Target]) -> str:
+    def _generate_key(self, func: Callable, out_idx: List[int],
+                      execution_backend: Literal["dlpack", "ctypes", "cython"], args,
+                      target: Union[str, Target], target_host: Union[str, Target]) -> str:
         """
         Generates a unique cache key.
         """
@@ -81,27 +81,28 @@ class KernelCache:
         Returns:
             JITKernel: The compiled kernel, either freshly compiled or from cache
         """
-        key = self._generate_key(func, out_idx, execution_backend, args, target, target_host)   
+        key = self._generate_key(func, out_idx, execution_backend, args, target, target_host)
         with self._lock:  # Thread-safe access to cache
             if key in self._cache:
                 return self._cache[key]
 
             # Attempt to load from disk
-            kernel = self._load_kernel_from_disk(key, target, target_host, out_idx, execution_backend, pass_configs, func)
+            kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
+                                                 execution_backend, pass_configs, func)
             if kernel:
                 self._cache[key] = kernel  # Load to in-memory cache
                 return kernel
 
             # Compile kernel if cache miss
             kernel = JITKernel(
-                        func,
-                        out_idx=out_idx,
-                        execution_backend=execution_backend,
-                        target=target,
-                        target_host=target_host,
-                        verbose=verbose,
-                        pass_configs=pass_configs,
-                    )
+                func,
+                out_idx=out_idx,
+                execution_backend=execution_backend,
+                target=target,
+                target_host=target_host,
+                verbose=verbose,
+                pass_configs=pass_configs,
+            )
             self._cache[key] = kernel  # Store in in-memory cache
             self._save_kernel_to_disk(key, kernel, func)
             return kernel
@@ -143,13 +144,13 @@ class KernelCache:
             self.logger.error(f"Error saving kernel parameters to disk: {e}")
 
     def _load_kernel_from_disk(self,
-                               key: str, target: Union[str, Target] = "auto",
+                               key: str,
+                               target: Union[str, Target] = "auto",
                                target_host: Union[str, Target] = None,
                                out_idx: List[int] = None,
                                execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
                                pass_configs: dict = None,
-                               func: Callable = None
-                               ) -> JITKernel:
+                               func: Callable = None) -> JITKernel:
         """
         Loads kernel from disk.
         """

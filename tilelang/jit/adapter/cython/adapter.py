@@ -257,7 +257,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
             raise Exception(
                 f"Failed to initialize the compiled library for {adapter.target}: {e}") from e
 
-        adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params, adapter.lib)
+        adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params,
+                                                     adapter.lib)
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_buffer_dtype_map(adapter.buffer_dtype_map)
         adapter.cython_wrapper.set_static_shape_map(adapter.static_shape_map)
