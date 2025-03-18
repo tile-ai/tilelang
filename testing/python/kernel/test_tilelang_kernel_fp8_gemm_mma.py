@@ -15,6 +15,7 @@ from tilelang.utils.tensor import map_torch_type
 
 tilelang.testing.set_random_seed(0)
 
+
 def make_swizzle_layout(shared_buf):
     dtype = shared_buf.dtype
     shape = shared_buf.shape

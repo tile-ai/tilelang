@@ -2,19 +2,18 @@
 # Licensed under the MIT License.
 """The cache utils with class and database persistence - Init file"""
 
-from typing import Callable, List, Union
+from typing import List, Union, Literal, Optional
 from tvm.target import Target
 from tvm.tir import PrimFunc
 from tilelang.jit import JITKernel
 from .kernel_cache import KernelCache
-from typing import Callable, List, Literal, Union, Optional
 
 # Create singleton instance of KernelCache
 _kernel_cache_instance = KernelCache()
 
 
 def cached(
-    func: PrimFunc=None,
+    func: PrimFunc = None,
     out_idx: List[int] = None,
     *args,
     target: Union[str, Target] = "auto",

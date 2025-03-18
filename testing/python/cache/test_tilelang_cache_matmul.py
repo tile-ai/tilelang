@@ -3,7 +3,7 @@
 
 from tilelang import tvm as tvm
 import tilelang.testing
-from tilelang import compile, cached
+from tilelang import cached
 import tilelang.language as T
 
 

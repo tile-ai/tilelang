@@ -235,7 +235,7 @@ class _attention(torch.autograd.Function):
         BATCH, N_CTX, H, D_HEAD = q.shape
         block_M = 64
         block_N = 64 if D_HEAD <= 128 else 32
-        mod = cached(flashattn_fwd(BATCH, H, N_CTX, D_HEAD, causal, block_M, block_N),[3, 4])
+        mod = cached(flashattn_fwd(BATCH, H, N_CTX, D_HEAD, causal, block_M, block_N), [3, 4])
         o, lse = mod(q, k, v)
         ctx.save_for_backward(q, k, v, o, lse)
         ctx.causal = causal
@@ -257,8 +257,8 @@ class _attention(torch.autograd.Function):
         mod_prep = cached(flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD), [2])
         mod_post = cached(flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD), [1])
         delta = mod_prep(o, do)
-        mod = cached(flashattn_bwd(BATCH, H, N_CTX, D_HEAD, ctx.causal, block_M,
-                     block_N), [6, 7, 8])
+        mod = cached(
+            flashattn_bwd(BATCH, H, N_CTX, D_HEAD, ctx.causal, block_M, block_N), [6, 7, 8])
         dq, dk, dv = mod(q, k, v, do, lse, delta)
         dq = mod_post(dq)
         return dq, dk, dv, None
