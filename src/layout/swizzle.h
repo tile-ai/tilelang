@@ -46,7 +46,7 @@ public:
   Array<PrimExpr> Forward(const Array<PrimExpr> &vars) const final;
   Layout Inverse() const final;
   std::string DebugOutput() const final;
-
+  bool IsEqual(const SwizzledLayoutNode *other, bool skip_index = false) const;
   static constexpr const char *_type_key = "tl.SwizzledLayout";
   bool SEqualReduce(const SwizzledLayoutNode *other, SEqualReducer equal) const;
   void VisitAttrs(tvm::AttrVisitor *v);

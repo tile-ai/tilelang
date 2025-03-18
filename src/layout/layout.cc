@@ -396,6 +396,30 @@ bool FragmentNode::SEqualReduce(const FragmentNode *other,
          equal(this->forward_thread_, other->forward_thread_);
 }
 
+bool LayoutNode::IsEqual(const LayoutNode *other, bool skip_index) const {
+  bool ret = StructuralEqual()(this->InputShape(), other->InputShape());
+  ret &= StructuralEqual()(this->OutputShape(), other->OutputShape());
+  if (!skip_index) {
+    ret &= StructuralEqual()(this->forward_index_, other->forward_index_);
+  }
+  return ret;
+}
+
+bool FragmentNode::IsEqual(const FragmentNode *other, bool skip_index) const {
+  // Fragment Layout Comparison can skip the index comparison
+  // when the output shape is the same, as we can do
+  // a[i, j] = b[j, i] in register level.
+
+  bool ret = StructuralEqual()(this->InputShape(), other->InputShape());
+  ret &= StructuralEqual()(this->OutputShape(), other->OutputShape());
+  ret &= StructuralEqual()(this->ReplicateExtent(), other->ReplicateExtent());
+  ret &= StructuralEqual()(this->ThreadExtent(), other->ThreadExtent());
+  if (!skip_index) {
+    ret &= StructuralEqual()(this->forward_index_, other->forward_index_);
+  }
+  return ret;
+}
+
 TVM_REGISTER_NODE_TYPE(LayoutNode);
 TVM_REGISTER_NODE_TYPE(FragmentNode);
 

@@ -71,6 +71,12 @@ Layout SwizzledLayoutNode::Inverse() const {
   return {};
 }
 
+bool SwizzledLayoutNode::IsEqual(const SwizzledLayoutNode *other,
+                                 bool skip_index) const {
+  return LayoutNode::IsEqual(other, skip_index) &&
+         pattern_ == other->pattern_;
+}
+
 SwizzledLayout::SwizzledLayout(Array<IterVar> forward_var,
                                Array<PrimExpr> forward_index,
                                SwizzlePattern pattern) {
