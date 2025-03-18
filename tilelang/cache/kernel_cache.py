@@ -43,10 +43,9 @@ class KernelCache:
         """
         Generates a unique cache key.
         """
-        func_name = func.__name__ if hasattr(func, '__name__') else str(
-            func)  # Get function name, handle PrimFunc cases
+        func_binary = cloudpickle.dumps(func)
         key_data = {
-            "func_name": func_name,
+            "func": sha256(func_binary).hexdigest(),  # Use SHA256 to generate hash key
             "out_idx": tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx],
             "args_repr": tuple(
                 repr(arg) for arg in args
@@ -58,7 +57,7 @@ class KernelCache:
         key_string = json.dumps(key_data, sort_keys=True)  # Sort keys to ensure consistency
         return sha256(key_string.encode()).hexdigest()  # Use SHA256 to generate hash key
 
-    def cached_kernel(
+    def cached(
         self,
         func: Callable,
         out_idx: List[int] = None,
@@ -83,19 +82,17 @@ class KernelCache:
             JITKernel: The compiled kernel, either freshly compiled or from cache
         """
         key = self._generate_key(func, out_idx, execution_backend, args, target, target_host)   
-
         with self._lock:  # Thread-safe access to cache
             if key in self._cache:
                 return self._cache[key]
 
             # Attempt to load from disk
-            kernel = self._load_kernel_from_disk(key, target, target_host)
+            kernel = self._load_kernel_from_disk(key, target, target_host, out_idx, execution_backend, pass_configs, func)
             if kernel:
                 self._cache[key] = kernel  # Load to in-memory cache
                 return kernel
 
             # Compile kernel if cache miss
-            program = func if isinstance(func, PrimFunc) else func(*args)
             kernel = JITKernel(
                         func,
                         out_idx=out_idx,
@@ -139,41 +136,20 @@ class KernelCache:
             self.logger.error(f"Error saving kernel module to disk: {e}")
 
         try:
-            if func:
-                # Save the function to disk
-                func_path = os.path.join(cache_path, "tvm_primfunc")
-                with open(func_path, "wb") as f:
-                    cloudpickle.dump(func, f)
-        except Exception as e:
-            self.logger.error(f"Error saving PrimFunc to disk: {e}")
-
-        try:
             dump_path = os.path.join(cache_path, "tvm_params.pkl")
             with open(dump_path, "wb") as f:
                 cloudpickle.dump(kernel.params, f)
         except Exception as e:
             self.logger.error(f"Error saving kernel parameters to disk: {e}")
 
-        # Save configuration to config.json
-        try:
-            config_file = os.path.join(cache_path, "config.json")
-            config_data = {
-                "key": key,
-                "cache_dir": self.cache_dir,
-                "execution_backend": kernel.execution_backend,
-                "target": str(kernel.target),
-                "target_host": str(kernel.target_host) if kernel.target_host else None,
-                "out_idx": kernel.out_idx,
-                "pass_configs": kernel.pass_configs,
-            }
-            with open(config_file, 'w') as f:
-                json.dump(config_data, f, indent=4)  # Save with indent for readability
-        except Exception as e:
-            self.logger.error(f"Error saving kernel config to disk: {e}")
-
     def _load_kernel_from_disk(self,
                                key: str, target: Union[str, Target] = "auto",
-                               target_host: Union[str, Target] = None) -> JITKernel:
+                               target_host: Union[str, Target] = None,
+                               out_idx: List[int] = None,
+                               execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+                               pass_configs: dict = None,
+                               func: Callable = None
+                               ) -> JITKernel:
         """
         Loads kernel from disk.
         """
@@ -182,14 +158,6 @@ class KernelCache:
             return None
         rt_module = None
         rt_params = None
-        config_data = None
-        func = None
-        try:
-            func_path = os.path.join(cache_path, "tvm_primfunc")
-            with open(func_path, "rb") as f:
-                func = cloudpickle.load(f)
-        except Exception as e:
-            self.logger.error(f"Error loading PrimFunc from disk: {e}")
         try:
             artifact_path = os.path.join(cache_path, "tvm_tmp_mod.txt")
             with open(artifact_path, "r") as f:
@@ -203,23 +171,15 @@ class KernelCache:
         except Exception as e:
             self.logger.error(f"Error loading kernel parameters from disk: {e}")
 
-        try:
-            config_file = os.path.join(cache_path, "config.json")
-            if os.path.exists(config_file):
-                with open(config_file, 'r') as f:
-                    config_data = json.load(f)
-        except Exception as e:
-            self.logger.error(f"Error loading kernel config from disk: {e}")
-
-        if rt_module and rt_params and config_data:
+        if rt_module and rt_params:
             return JITKernel(
                 rt_module_src=rt_module,
                 rt_params=rt_params,
-                execution_backend=config_data["execution_backend"],
+                execution_backend=execution_backend,
                 target=target,
                 target_host=target_host,
-                out_idx=config_data["out_idx"],
-                pass_configs=config_data["pass_configs"],
+                out_idx=out_idx,
+                pass_configs=pass_configs,
                 func=func,
             )
         else:

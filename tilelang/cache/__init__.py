@@ -23,7 +23,7 @@ def cached(
         pass_configs: dict = None,
     ) -> JITKernel:
     """
-    Caches and reuses compiled kernels (using KernelCache class).
+    Caches and reuses compiled kerne(ls (using KernelCache class).
     """
     return _kernel_cache_instance.cached(
         func,

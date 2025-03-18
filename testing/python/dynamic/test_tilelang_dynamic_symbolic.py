@@ -390,10 +390,10 @@ def assert_tl_matmul_block_all_dynamic_correctness(
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
 
-# def test_assert_tl_matmul_macro():
-#     assert_tl_matmul_macro_correctness(128, 128, 128, "float16", "float16", "float16")
-#     assert_tl_matmul_macro_correctness(66, 128, 128, "float16", "float16", "float16")
-#     assert_tl_matmul_macro_correctness(32, 128, 128, "float16", "float16", "float16")
+def test_assert_tl_matmul_macro():
+    assert_tl_matmul_macro_correctness(128, 128, 128, "float16", "float16", "float16")
+    assert_tl_matmul_macro_correctness(66, 128, 128, "float16", "float16", "float16")
+    assert_tl_matmul_macro_correctness(32, 128, 128, "float16", "float16", "float16")
 
 
 def test_assert_tl_matmul_block():
@@ -405,13 +405,13 @@ def test_assert_tl_matmul_block():
                                        64, 64, 32)
 
 
-# def test_assert_tl_matmul_block_all_dynamic():
-#     assert_tl_matmul_block_all_dynamic_correctness(128, 128, 128, False, False, "float16",
-#                                                    "float16", "float16", 64, 64, 32)
-#     assert_tl_matmul_block_all_dynamic_correctness(67, 128, 128, False, False, "float16", "float16",
-#                                                    "float16", 64, 64, 32)
-#     assert_tl_matmul_block_all_dynamic_correctness(36, 128, 128, False, False, "float16", "float16",
-#                                                    "float16", 64, 64, 32)
+def test_assert_tl_matmul_block_all_dynamic():
+    assert_tl_matmul_block_all_dynamic_correctness(128, 128, 128, False, False, "float16",
+                                                   "float16", "float16", 64, 64, 32)
+    assert_tl_matmul_block_all_dynamic_correctness(67, 128, 128, False, False, "float16", "float16",
+                                                   "float16", 64, 64, 32)
+    assert_tl_matmul_block_all_dynamic_correctness(36, 128, 128, False, False, "float16", "float16",
+                                                   "float16", 64, 64, 32)
 
 
 if __name__ == "__main__":
