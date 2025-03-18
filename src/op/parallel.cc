@@ -235,14 +235,15 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     if (buffer.scope() == "local.fragment" && source_buffer.defined() &&
         source_buffer.scope() == "local.fragment") {
       if (T.layout_map.count(buffer)) {
-        auto src_layout = T.layout_map[buffer].as<Fragment>().get();
-        auto dst_layout = CompleteBufferFragment(buffer).as<Fragment>().get();
+        const FragmentNode* src_layout = T.layout_map[buffer].as<Fragment>().get();
+        Fragment dst_layout_fragment = CompleteBufferFragment(buffer);
+        const FragmentNode* dst_layout = dst_layout_fragment.as<Fragment>().get();
         if (src_layout && dst_layout) {
           ICHECK(src_layout->IsEqual(dst_layout, true))
               << "Layout may conflict with ParallelOp for buffer "
               << buffer << "\nLHS = " << src_layout->DebugOutput()
-                         << "\nRHS = " << dst_layout->DebugOutput()
-                         << "\nYou may need to use a shared memory to transform the layout";
+              << "\nRHS = " << dst_layout->DebugOutput()
+              << "\nYou may need to use a shared memory to transform the layout";
         }
       }
     }
