@@ -52,6 +52,9 @@ Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
       ICHECK(false) << "kPack must be 1 or 2";
     }
   }
+  if (args.size() > 10) {
+    wg_wait = args[10].as<IntImm>().value()->value;
+  }
 }
 
 std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
@@ -134,6 +137,9 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     ss << ", " << kPack;
   } else if (TargetIsHopper(T.target)) {
     ss << ", " << (maybe_wgmma ? "true" : "false");
+  }
+  if (wg_wait != 0) {
+    ss << ", " << wg_wait;
   }
   ss << ">";
   auto A_buffer = T.buffer_remap.count(A) ? T.buffer_remap[A] : A;

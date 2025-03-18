@@ -616,7 +616,7 @@ def benchmark_nsa(batch_size,
 
     profiler = kernel.get_profiler()
 
-    profiler_latency = profiler.do_bench(profiler.mod)
+    profiler_latency = profiler.do_bench()
     print(f"Profiler latency: {profiler_latency} ms")
 
     # Create input tensors

@@ -364,17 +364,21 @@ Fragment FragmentNode::CondenseReplicateVar() const {
                   new_thread_replicate->dom->extent, new_thread_replicate->var);
 }
 
-void LayoutNode::DebugOutput() const {
-  LOG_DEBUG << "Layout Shape: " << InputShape() << " -> " << OutputShape();
-  LOG_DEBUG << "Layout Index: " << forward_index_;
+std::string LayoutNode::DebugOutput() const {
+  std::stringstream ss;
+  ss << "Layout Shape: " << InputShape() << " -> " << OutputShape() << " -> "
+     << GetForwardIndex();
+  return ss.str();
 }
 
-void FragmentNode::DebugOutput() const {
-  LOG_DEBUG << "Fragment Shape: " << InputShape() << " -> " << OutputShape();
-  LOG_DEBUG << "Fragment Replicate: " << ReplicateExtent();
-  LOG_DEBUG << "Fragment ThreadExtent: " << ThreadExtent();
-  LOG_DEBUG << "Fragment Index: " << forward_index_;
-  LOG_DEBUG << "Fragment ThreadIndex: " << forward_thread_;
+std::string FragmentNode::DebugOutput() const {
+  std::stringstream ss;
+  ss << "Fragment Shape: " << InputShape() << " -> " << OutputShape();
+  ss << " -> replicate: " << ReplicateExtent();
+  ss << " -> thread: " << ThreadExtent();
+  ss << " -> forward_thread: " << forward_thread_;
+  ss << " -> forward_index: " << GetForwardIndex();
+  return ss.str();
 }
 
 bool LayoutNode::SEqualReduce(const LayoutNode *other,
@@ -390,6 +394,30 @@ bool FragmentNode::SEqualReduce(const FragmentNode *other,
          equal(this->ThreadExtent(), other->ThreadExtent()) &&
          equal(this->forward_index_, other->forward_index_) &&
          equal(this->forward_thread_, other->forward_thread_);
+}
+
+bool LayoutNode::IsEqual(const LayoutNode *other, bool skip_index) const {
+  bool ret = StructuralEqual()(this->InputShape(), other->InputShape());
+  ret &= StructuralEqual()(this->OutputShape(), other->OutputShape());
+  if (!skip_index) {
+    ret &= StructuralEqual()(this->forward_index_, other->forward_index_);
+  }
+  return ret;
+}
+
+bool FragmentNode::IsEqual(const FragmentNode *other, bool skip_index) const {
+  // Fragment Layout Comparison can skip the index comparison
+  // when the output shape is the same, as we can do
+  // a[i, j] = b[j, i] in register level.
+
+  bool ret = StructuralEqual()(this->InputShape(), other->InputShape());
+  ret &= StructuralEqual()(this->OutputShape(), other->OutputShape());
+  ret &= StructuralEqual()(this->ReplicateExtent(), other->ReplicateExtent());
+  ret &= StructuralEqual()(this->ThreadExtent(), other->ThreadExtent());
+  if (!skip_index) {
+    ret &= StructuralEqual()(this->forward_index_, other->forward_index_);
+  }
+  return ret;
 }
 
 TVM_REGISTER_NODE_TYPE(LayoutNode);
