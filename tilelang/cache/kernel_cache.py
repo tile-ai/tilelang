@@ -8,7 +8,6 @@ import shutil
 from hashlib import sha256
 from typing import Callable, List, Literal, Union
 from tvm.target import Target
-from tvm.tir import PrimFunc
 from tilelang.jit import JITKernel
 import threading
 import cloudpickle
