@@ -225,8 +225,31 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   // Step 3: Infer other fragment's layout from the loop's partition
   LayoutMap results;
   for (const auto &[buffer, _] : indice_map_) {
-    if (!T.layout_map.count(buffer))
+    if (!T.layout_map.count(buffer)) {
       results.Set(buffer, CompleteBufferFragment(buffer));
+    }
+    // Though they may exist some conflicts, but it's fine.
+
+    // Layout infer conflict for local.fragment can noy be handled here
+    // because the source_buffer is not always available
+    if (buffer.scope() == "local.fragment" && source_buffer.defined() &&
+        source_buffer.scope() == "local.fragment") {
+      if (T.layout_map.count(buffer)) {
+        const FragmentNode *src_layout =
+            T.layout_map[buffer].as<Fragment>().get();
+        Fragment dst_layout_fragment = CompleteBufferFragment(buffer);
+        const FragmentNode *dst_layout =
+            dst_layout_fragment.as<Fragment>().get();
+        if (src_layout && dst_layout) {
+          ICHECK(src_layout->IsEqual(dst_layout, true))
+              << "Layout may conflict with ParallelOp for buffer " << buffer
+              << "\nLHS = " << src_layout->DebugOutput()
+              << "\nRHS = " << dst_layout->DebugOutput()
+              << "\nYou may need to use a shared memory to transform the "
+                 "layout";
+        }
+      }
+    }
   }
   return results;
 }

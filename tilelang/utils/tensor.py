@@ -5,6 +5,7 @@ from enum import Enum
 import torch
 from tvm.runtime import ndarray
 from torch.utils.dlpack import to_dlpack
+import numpy as np
 
 
 class TensorSupplyType(Enum):
@@ -104,14 +105,105 @@ def get_tensor_supply(supply_type: TensorSupplyType):
     return get_tensor
 
 
-# TODO: Align with torch.testing.assert_close
+# Adapted from https://github.com/pytorch/pytorch/blob/main/torch/testing/_comparison.py
+def _compare_attributes(
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+    check_device: bool = True,
+    check_dtype: bool = True,
+    check_layout: bool = True,
+    check_stride: bool = False,
+) -> None:
+    """Checks if the attributes of two tensors match.
+    Always checks
+    - the :attr:`~torch.Tensor.shape`,
+    - whether both inputs are quantized or not,
+    - and if they use the same quantization scheme.
+    Checks for
+    - :attr:`~torch.Tensor.layout`,
+    - :meth:`~torch.Tensor.stride`,
+    - :attr:`~torch.Tensor.device`, and
+    - :attr:`~torch.Tensor.dtype`
+    are optional and can be disabled through the corresponding ``check_*`` flag during construction of the pair.
+    """
+
+    def raise_mismatch_error(attribute_name: str, actual_value, expected_value):
+        raise AssertionError(
+            f"The values for attribute '{attribute_name}' do not match: {actual_value} != {expected_value}."
+        )
+
+    if actual.shape != expected.shape:
+        raise_mismatch_error("shape", actual.shape, expected.shape)
+    if actual.is_quantized != expected.is_quantized:
+        raise_mismatch_error("is_quantized", actual.is_quantized, expected.is_quantized)
+    elif actual.is_quantized and actual.qscheme() != expected.qscheme():
+        raise_mismatch_error("qscheme()", actual.qscheme(), expected.qscheme())
+    if actual.layout != expected.layout:
+        if check_layout:
+            raise_mismatch_error("layout", actual.layout, expected.layout)
+    elif (actual.layout == torch.strided and check_stride and actual.stride() != expected.stride()):
+        raise_mismatch_error("stride()", actual.stride(), expected.stride())
+    if check_device and actual.device != expected.device:
+        raise_mismatch_error("device", actual.device, expected.device)
+    if check_dtype and actual.dtype != expected.dtype:
+        raise_mismatch_error("dtype", actual.dtype, expected.dtype)
+
+
+def _equalize_attributes(actual: torch.Tensor,
+                         expected: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Equalizes some attributes of two tensors for value comparison.
+    If ``actual`` and ``expected`` are ...
+    - ... not on the same :attr:`~torch.Tensor.device`, they are moved CPU memory.
+    - ... not of the same ``dtype``, they are promoted  to a common ``dtype`` (according to
+        :func:`torch.promote_types`).
+    - ... not of the same ``layout``, they are converted to strided tensors.
+    Args:
+        actual (Tensor): Actual tensor.
+        expected (Tensor): Expected tensor.
+    Returns:
+        (Tuple[Tensor, Tensor]): Equalized tensors.
+    """
+    # The comparison logic uses operators currently not supported by the MPS backends.
+    #  See https://github.com/pytorch/pytorch/issues/77144 for details.
+    # TODO: Remove this conversion as soon as all operations are supported natively by the MPS backend
+    if actual.is_mps or expected.is_mps:  # type: ignore[attr-defined]
+        actual = actual.cpu()
+        expected = expected.cpu()
+    if actual.device != expected.device:
+        actual = actual.cpu()
+        expected = expected.cpu()
+    if actual.dtype != expected.dtype:
+        actual_dtype = actual.dtype
+        expected_dtype = expected.dtype
+        # For uint64, this is not sound in general, which is why promote_types doesn't
+        # allow it, but for easy testing, we're unlikely to get confused
+        # by large uint64 overflowing into negative int64
+        if actual_dtype in [torch.uint64, torch.uint32, torch.uint16]:
+            actual_dtype = torch.int64
+        if expected_dtype in [torch.uint64, torch.uint32, torch.uint16]:
+            expected_dtype = torch.int64
+        dtype = torch.promote_types(actual_dtype, expected_dtype)
+        actual = actual.to(dtype)
+        expected = expected.to(dtype)
+    if actual.layout != expected.layout:
+        # These checks are needed, since Tensor.to_dense() fails on tensors that are already strided
+        actual = actual.to_dense() if actual.layout != torch.strided else actual
+        expected = (expected.to_dense() if expected.layout != torch.strided else expected)
+    return actual, expected
+
+
 def torch_assert_close(
     tensor_a,
     tensor_b,
     rtol=1e-2,
     atol=1e-3,
     max_mismatched_ratio=0.001,
-    verbose=False,
+    verbose: bool = False,
+    equal_nan: bool = True,
+    check_device: bool = True,
+    check_dtype: bool = False,
+    check_layout: bool = True,
+    check_stride: bool = False,
 ):
     """
     Custom function to assert that two tensors are "close enough," allowing a specified
@@ -136,17 +228,19 @@ def torch_assert_close(
     AssertionError:
         If the ratio of mismatched elements exceeds `max_mismatched_ratio`.
     """
-    import torch
 
+    _compare_attributes(
+        tensor_a,
+        tensor_b,
+        check_device=check_device,
+        check_dtype=check_dtype,
+        check_layout=check_layout,
+        check_stride=check_stride)
+    tensor_a, tensor_b = _equalize_attributes(tensor_a, tensor_b)
+
+    mismatched = ~torch.isclose(tensor_a, tensor_b, rtol=rtol, atol=atol, equal_nan=equal_nan)
     # Compute the absolute difference between the two tensors
     diff = torch.abs(tensor_a - tensor_b)
-
-    # Compute the maximum allowable difference for each element
-    max_diff = atol + rtol * torch.abs(tensor_b)
-
-    # Identify elements where the difference exceeds the maximum allowable difference
-    mismatched = diff > max_diff
-
     # Count the number of mismatched elements
     num_mismatched = mismatched.sum().item()
 
@@ -161,12 +255,29 @@ def torch_assert_close(
         print(f"Number of mismatched elements: {num_mismatched} / {total_elements} "
               f"(allowed: {max_allowed_mismatched})")
 
-    # Check if the number of mismatched elements exceeds the allowed threshold
+    # If there are mismatched elements, print the first mismatch
+    if num_mismatched > 0:
+        # Find the first mismatch index
+        flat_idx = torch.argmax(mismatched.view(-1).int()).item()
+        idx = np.unravel_index(flat_idx, tensor_a.shape)
+        idx = [int(i) for i in idx]
+        a_val = tensor_a.reshape(-1)[flat_idx].item()
+        b_val = tensor_b.reshape(-1)[flat_idx].item()
+        abs_diff = abs(a_val - b_val)
+        rel_diff = abs_diff / (abs(b_val) + 1e-12)
+        mismatch_info = (f"\nFirst mismatch at index {idx}: "
+                         f"lhs={a_val:.6f}, rhs={b_val:.6f}, "
+                         f"abs_diff={abs_diff:.6f}, rel_diff={rel_diff:.6f}")
+    else:
+        mismatch_info = ""
+
+    # Modify the exception information
     if num_mismatched > max_allowed_mismatched:
         raise AssertionError(
             f"Too many mismatched elements: {num_mismatched} > {max_allowed_mismatched} "
-            f"({max_mismatched_ratio * 100:.2f}% allowed). "
-            f"Greatest absolute difference: {diff.max().item()}, "
+            f"({max_mismatched_ratio * 100:.2f}% allowed, but get {num_mismatched / total_elements * 100:.2f}%)."
+            f"{mismatch_info}"
+            f"\nGreatest absolute difference: {diff.max().item()}, "
             f"Greatest relative difference: {(diff / (torch.abs(tensor_b) + 1e-12)).max().item()}.")
     else:
         return True

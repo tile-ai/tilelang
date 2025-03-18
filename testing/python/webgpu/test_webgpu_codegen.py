@@ -27,7 +27,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
                 T.copy(A[by * block_M, ko * block_K], A_shared, coalesced_width=2)
                 T.copy(B[ko * block_K, bx * block_N], B_shared, coalesced_width=2)
 
-                for i, j, k in T.Parallel(block_M, block_N, block_K):
+                for i, j, k in T.grid(block_M, block_N, block_K):
                     C_local[i, j] += A_shared[i, k] * B_shared[k, j]
 
             T.copy(C_local, C[by * block_M, bx * block_N], coalesced_width=2)
