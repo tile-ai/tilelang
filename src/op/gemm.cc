@@ -122,21 +122,33 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       ComputeWarpPartition(T.block_size / warp_size, T.target, maybe_wgmma);
 
   std::stringstream ss;
-  std::string op_name = "tl::gemm_ss";
-  if (A.scope() == "local.fragment") {
-    ICHECK(B.scope() != "local.fragment");
-    op_name = "tl::gemm_rs";
-  } else if (B.scope() == "local.fragment") {
-    op_name = "tl::gemm_sr";
+
+  bool from_reg_A = (A.scope() == "local.fragment");
+  bool from_reg_B = (B.scope() == "local.fragment");
+  if (from_reg_A && from_reg_B) {
+    ICHECK(0) << "Both local.fragment inputs is not supported";
   }
+
+  // Dispatch Policy (Could be further refined)
+  std::string op_name = "tl::gemm";
+  if (maybe_wgmma) {
+    op_name += "_cute_wgmma";
+  } else if (TargetIsHopper(T.target) || TargetIsAmpere(T.target) ||
+             TargetIsTuring(T.target)) {
+    op_name += "_cute";
+  } else if (TargetIsVolta(T.target)) {
+    op_name += "_cutlass";
+  } else {
+    ICHECK(0) << "Gemm is not dispatched for target " << T.target->str();
+  }
+
   ss << op_name << "<" << M << ", " << N << ", " << K << ", ";
   ss << warp_m << ", " << warp_n << ", ";
-  ss << trans_A << ", " << trans_B;
+  ss << trans_A << ", " << trans_B << ", ";
+  ss << from_reg_A << ", " << from_reg_B;
   if (TargetIsCDNA(T.target)) {
     // for cdna gemm, we need to specify kPack
     ss << ", " << kPack;
-  } else if (TargetIsHopper(T.target)) {
-    ss << ", " << (maybe_wgmma ? "true" : "false");
   }
   if (wg_wait != 0) {
     ss << ", " << wg_wait;
