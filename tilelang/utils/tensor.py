@@ -199,7 +199,7 @@ def torch_assert_close(
     atol=1e-3,
     max_mismatched_ratio=0.001,
     verbose: bool = False,
-    equal_nan: bool = False,
+    equal_nan: bool = True,
     check_device: bool = True,
     check_dtype: bool = False,
     check_layout: bool = True,
