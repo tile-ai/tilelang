@@ -93,6 +93,8 @@ class Profiler:
             lib_outs = [lib_outs]
         if isinstance(ref_outs, torch.Tensor):
             ref_outs = [ref_outs]
+        elif ref_outs is None:
+            ref_outs = []
         assert len(lib_outs) == len(ref_outs), "len(lib_outs) not equals to len(ref_outs) !"
         # torch.set_printoptions(edgeitems=torch.inf)
         for lhs, rhs in zip(lib_outs, ref_outs):

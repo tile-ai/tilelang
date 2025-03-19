@@ -11,8 +11,8 @@ from tilelang.carver.arch import CUDA
 from tilelang.carver.roller.rasterization import NoRasterization
 
 def ref_program(A, B, C):
-    C = A @ B.T + C
-    return []
+    C += A @ B.T
+    return None
 
 def get_configs(M, N, K, with_roller=False):
     if with_roller:
@@ -44,7 +44,6 @@ def get_configs(M, N, K, with_roller=False):
             config["block_K"] = hint.rstep[0]
             config["num_stages"] = hint.pipeline_stage
             config["thread_num"] = block_rows * block_cols * 32
-            config["policy"] = T.GemmWarpPolicy.from_warp_partition(block_rows, block_cols)
             config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
             configs.append(config)
         for config in configs:
@@ -55,7 +54,6 @@ def get_configs(M, N, K, with_roller=False):
         block_K = [32, 64]
         num_stages = [0, 1, 2, 3]
         thread_num = [128, 256]
-        policy = [T.GemmWarpPolicy.Square]
         enable_rasterization = [True, False]
         _configs = list(
             itertools.product(
@@ -64,7 +62,6 @@ def get_configs(M, N, K, with_roller=False):
                 block_K,
                 num_stages,
                 thread_num,
-                policy,
                 enable_rasterization,
             ))
 
@@ -75,8 +72,7 @@ def get_configs(M, N, K, with_roller=False):
                 "block_K": c[2],
                 "num_stages": c[3],
                 "thread_num": c[4],
-                "policy": c[5],
-                "enable_rasteration": c[6],  # keep param name for backward-compat
+                "enable_rasteration": c[5],  # keep param name for backward-compat
             } for c in _configs
         ]
     return configs
@@ -90,7 +86,6 @@ def get_best_config(M, N, K, with_roller=False):
             "block_K",
             "num_stages",
             "thread_num",
-            "policy",
             "enable_rasteration",
         ],
         warmup=3,
@@ -110,7 +105,6 @@ def get_best_config(M, N, K, with_roller=False):
         block_K=None,
         num_stages=None,
         thread_num=None,
-        policy=None,
         enable_rasteration=None,
     ):
         dtype = "float16"
@@ -137,14 +131,13 @@ def get_best_config(M, N, K, with_roller=False):
                         B_shared,
                         C_local,
                         transpose_B=True,
-                        policy=policy,
                     )
                 T.copy(C_local, C_shared)
                 T.copy(C_shared, C[by * block_M, bx * block_N])
         return main
     return kernel()
 
-def matmul(M, N, K, block_M, block_N, block_K, num_stages, thread_num, policy, enable_rasteration, dtype="float16", accum_dtype="float"):
+def matmul(M, N, K, block_M, block_N, block_K, num_stages, thread_num, enable_rasteration, dtype="float16", accum_dtype="float"):
     @T.prim_func
     def main(
             A: T.Buffer((M, K), dtype),
@@ -166,7 +159,6 @@ def matmul(M, N, K, block_M, block_N, block_K, num_stages, thread_num, policy, e
                     B_shared,
                     C_local,
                     transpose_B=True,
-                    policy=policy,
                 )
             T.copy(C_local, C_shared)
             T.copy(C_shared, C[by * block_M, bx * block_N])
@@ -193,7 +185,7 @@ if __name__ == "__main__":
         best_latency, best_config, ref_latency = get_best_config(M, N, K, with_roller)
         func = matmul(M, N, K, *best_config)
     else:
-        func = matmul(M, N, K, 128, 128, 32, 3, 128, 0, True)
+        func = matmul(M, N, K, 128, 128, 32, 3, 128, True)
         
     # print(func)
     kernel = tl.compile(func, out_idx=-1)
