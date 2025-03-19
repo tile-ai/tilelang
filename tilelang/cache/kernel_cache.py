@@ -17,6 +17,9 @@ import logging
 from tilelang.env import TILELANG_CACHE_DIR
 
 
+ARTIFACT_PATH = "artifact.txt"
+PARAMS_PATH = "params.pkl"
+
 class KernelCache:
     """
     Caches compiled kernels using a class and database persistence to avoid redundant compilation.
@@ -130,14 +133,14 @@ class KernelCache:
 
         # Save rt_mod as a str
         try:
-            artifact_path = os.path.join(cache_path, "tvm_tmp_mod.txt")
+            artifact_path = os.path.join(cache_path, ARTIFACT_PATH)
             with open(artifact_path, "w") as f:
-                f.write(kernel.rt_mod.imported_modules[0].get_source())
+                f.write(kernel.get_kernel_source())
         except Exception as e:
             self.logger.error(f"Error saving kernel module to disk: {e}")
 
         try:
-            dump_path = os.path.join(cache_path, "tvm_params.pkl")
+            dump_path = os.path.join(cache_path, PARAMS_PATH)
             with open(dump_path, "wb") as f:
                 cloudpickle.dump(kernel.params, f)
         except Exception as e:
@@ -160,13 +163,13 @@ class KernelCache:
         rt_module = None
         rt_params = None
         try:
-            artifact_path = os.path.join(cache_path, "tvm_tmp_mod.txt")
+            artifact_path = os.path.join(cache_path, ARTIFACT_PATH)
             with open(artifact_path, "r") as f:
                 rt_module = f.read()
         except Exception as e:
             self.logger.error(f"Error loading kernel module from disk: {e}")
         try:
-            dump_path = os.path.join(cache_path, "tvm_params.pkl")
+            dump_path = os.path.join(cache_path, PARAMS_PATH)
             with open(dump_path, "rb") as f:
                 rt_params = cloudpickle.load(f)
         except Exception as e:

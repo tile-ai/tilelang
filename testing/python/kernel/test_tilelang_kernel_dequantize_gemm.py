@@ -604,7 +604,7 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
     QLB = ladder_permutate(qB.cpu()).cuda()
     QLB = lop3_permutate(QLB.cpu()).cuda()
 
-    kernel(A, QLB, C)
+    C = kernel(A, QLB)
 
     latency = profiler.do_bench()
 
