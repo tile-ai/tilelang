@@ -98,7 +98,7 @@ void CodeGenTileLangCUDA::PrintExtraAttrs(const PrimFunc &f) {
       // return
       return;
     }
-    stream << " __launch_bounds__(" << threadIdx_ext_int->value << ")";
+    stream << " __launch_bounds__(" << threadIdx_ext_int->value << ", 1)";
   }
 }
 
