@@ -35,7 +35,7 @@ class JITKernel(object):
         self,
         func: PrimFunc = None,
         out_idx: Union[List[int], int] = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "ctypes",
+        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
         verbose: bool = False,
