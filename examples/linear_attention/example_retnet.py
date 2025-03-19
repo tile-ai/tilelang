@@ -180,18 +180,18 @@ if __name__ == "__main__":
     BLOCK_M = 64
     BLOCK_N = 64
     program = retnet(BATCH, H, N_CTX, dim_qk, dim_v, BLOCK_M, BLOCK_N)
-    mod, params = tilelang.lower(program)
-    mod = tilelang.Profiler(mod, params, [4], tilelang.TensorSupplyType.Normal)
+    kernel = tilelang.compile(program, out_idx=[4])
+    profiler = kernel.get_profiler(tilelang.TensorSupplyType.Normal)
 
     ins = []
-    for i in range(len(mod.params)):
-        if i not in mod.result_idx:
-            shape = [int(x) for x in mod.params[i].shape]
+    for i in range(len(kernel.params)):
+        if i not in kernel.result_idx:
+            shape = [int(x) for x in kernel.params[i].shape]
             ins.append(torch.empty(shape, device="cuda", dtype=torch.float16).normal_(-0.1, 0.1))
 
     ref_outs = ref_program(*ins)
     torch.cuda.synchronize()
-    lib_outs = mod.func(*ins)
+    lib_outs = kernel(*ins)
     torch.cuda.synchronize()
 
     if isinstance(lib_outs, torch.Tensor):

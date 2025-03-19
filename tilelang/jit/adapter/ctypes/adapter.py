@@ -53,7 +53,6 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         """Initialize the adapter with the given TIR function or module.
         
         Args:
-            rt_mod: Runtime module
             params: List of tensor types for inputs/outputs
             result_idx: Indices of output tensors
             target: Target platform (e.g., 'cuda')

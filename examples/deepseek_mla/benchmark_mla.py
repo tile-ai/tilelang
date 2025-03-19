@@ -409,13 +409,11 @@ def run_flash_mla_tilelang(q, block_table, blocked_k, max_seqlen_pad, block_size
     
     out_partial = torch.empty(b, h_q, num_kv_splits, dv, dtype=dtype, device=q.device)
     glse = torch.empty(b, h_q, num_kv_splits, dtype=dtype, device=q.device)
-    out = torch.empty(b, h_q, dv, dtype=dtype, device=q.device)
     program = mla_decode_tilelang(b, h_q, h_kv, max_seqlen_pad, dv, dpe, BLOCK_N, BLOCK_H, num_kv_splits, block_size)
-    mod, params = tilelang.lower(program)
-    mod = tilelang.Profiler(mod, params, [8], tilelang.TensorSupplyType.Randn)
+    kernel = tilelang.compile(program, out_idx=[8])
 
     def flash_mla_tilelang():
-        out = mod.func(
+        out = kernel.func(
             q_nope.view(-1, h_q, dv), 
             q_pe.view(-1, h_q, dpe), 
             blocked_k_nope.view(-1, h_kv, dv), 

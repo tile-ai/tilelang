@@ -148,8 +148,8 @@ def calc_diff(x, y):
 
 def assert_tl_gemm_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     gemm = tl_gemm(M, N, K, in_dtype, out_dtype, accum_dtype)
-    mod, params = TL.lower(gemm)
-    src_code = mod.imported_modules[0].get_source()
+    kernel = TL.compile(gemm, out_idx=[])
+    src_code = kernel.get_kernel_source()
 
     # src_code is the generated cuda source
     assert src_code is not None
@@ -165,16 +165,15 @@ def assert_tl_gemm_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
     C = torch.zeros(M, N, device="cuda", dtype=out_dtype)
 
-    mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
-
-    mod(A_fp8, B_fp8, C, A_scale, B_scale)
+    kernel(A_fp8, B_fp8, C, A_scale, B_scale)
     # Get Reference Result
     ref_c = ref_deepgemm_fp8(A_fp8, B_fp8, A_scale, B_scale, out_dtype)
     diff = calc_diff(C, ref_c)
     print(f"diff: {diff}")
     assert diff < 1e-3
 
-    latency = mod.do_bench(mod.func, warmup=25)
+    profiler = kernel.get_profiler()
+    latency = profiler.do_bench(warmup=25)
     # Ensure that the latency is not None
     assert latency is not None
     print(f"latency: {latency} ms")

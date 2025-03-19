@@ -10,7 +10,7 @@ from tvm.tir import PrimFunc
 from tilelang.jit.adapter import TorchDLPackKernelAdapter, BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter
 from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
 from tilelang.profiler import Profiler, TensorSupplyType
-from tilelang.engine.param import KernelParam
+from tilelang.engine.param import KernelParam, CompiledArtifact
 
 
 class JITKernel(object):
@@ -19,15 +19,14 @@ class JITKernel(object):
 
     Attributes
     ----------
-    rt_mod : tvm.runtime.Module
-        The runtime module compiled by TVM.
-    params : List[KernelParam]
-        Parameters for the compiled runtime module (e.g., weights or constants).
+    artifact : CompiledArtifact
+        The compiled artifact containing the runtime module and parameters.
+    adapter : BaseKernelAdapter
+        The adapter for the compiled function.
     torch_function : Callable
         The compiled function that can be invoked as a PyTorch-compatible function.
     """
-    rt_mod: tvm.runtime.Module = None
-    params: List[KernelParam] = None
+    artifact: CompiledArtifact = None
     adapter: BaseKernelAdapter = None
     torch_function: Callable = None
 
@@ -139,37 +138,32 @@ class JITKernel(object):
 
         # Compile the function with TVM, optimizing with shared memory lowering.
         with tvm.transform.PassContext(opt_level=3, config=pass_configs):
-            rt_mod, params = tilelang.lower(tilelang_func, target=target, target_host=target_host)
-
-        # Store the runtime module and parameters for later use.
-        self.rt_mod = rt_mod
-        self.params = params
+            artifact = tilelang.lower(tilelang_func, target=target, target_host=target_host)
 
         # Create an adapter based on the specified execution backend.
         if execution_backend == "dlpack":
             # Use TorchDLPackKernelAdapter for interoperability with PyTorch via DLPack.
-            adapter = TorchDLPackKernelAdapter(rt_mod, params=params, result_idx=out_idx)
+            # But we need to ensure that the runtime is enabled and the runtime module is not None.
+            assert tvm.runtime.enabled("llvm"), "DLPack backend requires LLVM runtime."
+            assert artifact.rt_mod is not None, "DLPack backend requires a runtime module."
+            adapter = TorchDLPackKernelAdapter(artifact.rt_mod, params=artifact.params, result_idx=out_idx)
         elif execution_backend == "ctypes":
-            # TODO(Lei): global source extraction can be simplified
-            kernel_global_source = rt_mod.imported_modules[0].get_source()
             adapter = CtypesKernelAdapter(
-                params=params,
+                params=artifact.params,
                 result_idx=out_idx,
                 target=target,
                 func_or_mod=tilelang_func,
-                kernel_global_source=kernel_global_source,
+                kernel_global_source=self.kernel_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
             )
         elif execution_backend == "cython":
-            # TODO(Lei): global source extraction can be simplified
-            kernel_global_source = rt_mod.imported_modules[0].get_source()
             adapter = CythonKernelAdapter(
-                params=params,
+                params=artifact.params,
                 result_idx=out_idx,
                 target=target,
                 func_or_mod=tilelang_func,
-                kernel_global_source=kernel_global_source,
+                kernel_global_source=self.kernel_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
             )
@@ -227,13 +221,25 @@ class JITKernel(object):
         """
         if self.execution_backend in {"ctypes", "cython"}:
             return self.adapter.get_kernel_source()
-        return self.rt_mod.imported_modules[0].get_source()
+        return self.artifact.kernel_source
 
     def get_host_source(self) -> str:
         """
         Returns the source code of the host function.
         """
-        return self.rt_mod.get_source()
+        return str(self.artifact.host_mod)
 
     def run_once(self, func: Optional[Callable] = None) -> None:
         return self.get_profiler().run_once(func)
+
+    @property
+    def params(self) -> List[KernelParam]:
+        return self.artifact.params
+
+    @property
+    def kernel_source(self) -> str:
+        return self.artifact.kernel_source
+
+    @property
+    def host_source(self) -> str:
+        return str(self.artifact.host_mod)
