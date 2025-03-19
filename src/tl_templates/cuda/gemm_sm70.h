@@ -61,8 +61,8 @@ struct DispatchSharedMemoryLayoutB<half_t, false, N, K,
 };
 
 template <typename Shape, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, typename A_type_raw, typename B_type_raw,
-          typename C_type_raw>
+          bool trans_B, bool clear_accum, typename A_type_raw,
+          typename B_type_raw, typename C_type_raw>
 class GemmTensorOp {
 public:
   using A_type = A_type_raw;
@@ -125,6 +125,9 @@ public:
     IteratorB iter_B(ref_B, lane_id);
     iter_A.add_tile_offset({warp_idx_m, 0});
     iter_B.add_tile_offset({0, warp_idx_n});
+    if constexpr (clear_accum) {
+      accum.clear();
+    }
     CUTLASS_PRAGMA_UNROLL
     for (int k = 0; k < kKgroups; ++k) {
       iter_A.load(frag_A);
@@ -143,6 +146,9 @@ public:
     const TensorRefB ref_B((B_type *)pB, stride_B);
     IteratorB iter_B(ref_B, lane_id);
     iter_B.add_tile_offset({0, warp_idx_n});
+    if constexpr (clear_accum) {
+      accum.clear();
+    }
     CUTLASS_PRAGMA_UNROLL
     for (int k = 0; k < kKgroups; ++k) {
       iter_B.load(frag_B);
@@ -155,10 +161,11 @@ public:
 namespace tl {
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, typename A_type, typename B_type, typename C_type>
+          bool trans_B, bool clear_accum, typename A_type, typename B_type,
+          typename C_type>
 CUTLASS_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
   using MMA = GemmTensorOp<GemmShape<M, N, K>, num_warp_m, num_warp_n, trans_A,
-                           trans_B, A_type, B_type, C_type>;
+                           trans_B, clear_accum, A_type, B_type, C_type>;
   using FragmentC = typename MMA::FragmentC;
   int warp_id = threadIdx.x / 32;
   int lane_id = threadIdx.x % 32;
@@ -167,10 +174,11 @@ CUTLASS_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, typename A_type, typename B_type, typename C_type>
+          bool trans_B, bool clear_accum, typename A_type, typename B_type,
+          typename C_type>
 CUTLASS_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
   using MMA = GemmTensorOp<GemmShape<M, N, K>, num_warp_m, num_warp_n, trans_A,
-                           trans_B, A_type, B_type, C_type>;
+                           trans_B, clear_accum, A_type, B_type, C_type>;
   using FragmentA = typename MMA::FragmentA;
   using FragmentC = typename MMA::FragmentC;
   int warp_id = threadIdx.x / 32;

@@ -159,7 +159,7 @@ def evaluate_gemv_simt(
     ref_c = torch.mm(A.to(torch.float32), B.T.to(torch.float32))
     if with_bias:
         ref_c += Bias.to(torch.float32)
-
+    ref_c = ref_c.to(out_dtype)
     print(C)
     print(ref_c)
     tilelang.testing.torch_assert_close(C, ref_c, rtol=1e-2, atol=1e-2)

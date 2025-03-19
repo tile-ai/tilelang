@@ -43,3 +43,7 @@ def MBarrierWaitParity(*args):
 
 def MBarrierExpectTX(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.MBarrierExpectTX"), *args)
+
+
+def WaitWgmma(*args):
+    return tir.call_intrin("handle", tir.op.Op.get("tl.WaitWgmma"), *args)
