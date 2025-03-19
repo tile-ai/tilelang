@@ -81,6 +81,8 @@ else:
             os.environ["TVM_LIBRARY_PATH"] = install_tvm_library_path
         else:
             logger.warning(TVM_LIBRARY_NOT_FOUND_MESSAGE)
+        # Pypi build library path
+        os.environ["TVM_LIBRARY_PATH"] = os.environ.get("TVM_LIBRARY_PATH", None) + ":" + os.path.join(TILELANG_PACKAGE_PATH, "lib")
         TVM_LIBRARY_PATH = os.environ.get("TVM_LIBRARY_PATH", None)
 
 if os.environ.get("TL_CUTLASS_PATH", None) is None:

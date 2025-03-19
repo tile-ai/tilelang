@@ -513,6 +513,8 @@ class CMakeBuild(build_ext):
             if not os.path.exists(target_lib_dir):
                 os.makedirs(target_lib_dir)
             shutil.copy(file, target_lib_dir)
+            # remove the original file
+            os.remove(file)
 
     def build_cmake(self, ext):
         """
