@@ -157,7 +157,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
                  result_idx: List[int],
                  target: Union[str, Target],
                  func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-                 kernel_global_source: str,
+                 host_mod: Optional[tvm.IRModule] = None,
+                 device_mod: Optional[tvm.IRModule] = None,
+                 kernel_global_source: Optional[str] = None,
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None):
         """Initialize the adapter with the given TIR function or module.
@@ -191,6 +193,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
         self.wrapper.assign_optimized_module(self.ir_module)
         self.wrapper.assign_pass_configs(pass_configs)
+        self.wrapper.assign_host_module(host_mod)
+        self.wrapper.assign_device_module(device_mod)
         self.wrapped_source = self.wrapper.wrap(self.get_kernel_source(kernel_only=True))
 
         self.lib_generator.update_lib_code(self.wrapped_source)

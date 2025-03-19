@@ -76,8 +76,31 @@ runtime::Module BuildTileLangHIP(IRModule mod, Target target) {
   return ROCMModuleCreate(ptx, fmt, ExtractFuncInfo(mod), code, std::string());
 }
 
+String BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
+  using tvm::runtime::Registry;
+  bool output_ssa = false;
+  CodeGenTileLangHIP cg;
+  cg.Init(output_ssa);
+
+  for (auto kv : mod->functions) {
+    ICHECK(kv.second->IsInstance<PrimFuncNode>())
+        << "CodeGenTileLangHIP: Can only take PrimFunc";
+    auto f = Downcast<PrimFunc>(kv.second);
+    auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
+    ICHECK(calling_conv == CallingConv::kDeviceKernelLaunch);
+    cg.AddFunction(f);
+  }
+
+  std::string code = cg.Finish();
+  if (const auto *f = Registry::Get("tilelang_callback_hip_postproc")) {
+    code = (*f)(code, target).operator std::string();
+  }
+  return String(code);
+}
 TVM_REGISTER_GLOBAL("target.build.tilelang_hip")
     .set_body_typed(BuildTileLangHIP);
+TVM_REGISTER_GLOBAL("target.build.tilelang_hip_without_compile")
+    .set_body_typed(BuildTileLangHIPWithoutCompile);
 
 } // namespace codegen
 } // namespace tvm

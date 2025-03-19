@@ -70,7 +70,7 @@ runtime::Module BuildTileLangCUDA(IRModule mod, Target target) {
   return runtime::CUDAModuleCreate(ptx, fmt, ExtractFuncInfo(mod), code);
 }
 
-String BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
+runtime::Module BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
   using tvm::runtime::Registry;
   bool output_ssa = false;
   CodeGenTileLangCUDA cg;
@@ -90,7 +90,7 @@ String BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
   if (const auto *f = Registry::Get("tilelang_callback_cuda_postproc")) {
     code = (*f)(code, target).operator std::string();
   }
-  return String(code);
+  return runtime::CUDAModuleCreate("ptx", "ptx", ExtractFuncInfo(mod), code);
 }
 
 TVM_REGISTER_GLOBAL("target.build.tilelang_cuda")

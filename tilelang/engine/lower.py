@@ -137,6 +137,14 @@ def canon_target_host(target: Union[str, Target], target_host: Optional[Union[st
 
 
 def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
+    host_mod = tir.transform.BindTarget(target_host)(host_mod)
+    host_mod = tir.transform.FP8StorageLegalize()(host_mod)
+    host_mod = tir.transform.BF16StorageLegalize()(host_mod)
+    host_mod = tir.transform.LowerTVMBuiltin()(host_mod)
+    host_mod = tir.transform.LowerCustomDatatypes()(host_mod)
+    host_mod = tir.transform.LowerIntrin()(host_mod)
+    host_mod = tir.transform.LowerDeviceStorageAccessInfo()(host_mod)
+    host_mod = tir.transform.CombineContextCall()(host_mod)
     if target_host.kind.name == "llvm":
         host_mod = tvm._ffi.get_global_func("target.build.llvm")(host_mod, target_host)
     elif target_host.kind.name == "c":
@@ -147,20 +155,36 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
 
 
 def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
+    device_mod = tir.transform.LowerDeviceStorageAccessInfo()(device_mod)
+    device_mod = tir.transform.LowerIntrin()(device_mod)
+    device_mod = tir.transform.Simplify()(device_mod)
+
     if target.kind.name == "cuda":
         device_mod = tvm._ffi.get_global_func("target.build.tilelang_cuda")(device_mod, target)
     elif target.kind.name == "hip":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
-    elif target.kind.name == "c":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_cpp")(device_mod, target)
+        device_mod = tvm._ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)        
+    else:
+        raise ValueError(f"Target {target.kind.name} is not supported")
+
+    return device_mod
+
+def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
+    device_mod = tir.transform.LowerDeviceStorageAccessInfo()(device_mod)
+    device_mod = tir.transform.LowerIntrin()(device_mod)
+    device_mod = tir.transform.Simplify()(device_mod)
+  
+    if target.kind.name == "cuda":
+        device_mod = tvm._ffi.get_global_func("target.build.tilelang_cuda_without_compile")(device_mod, target)
+    elif target.kind.name == "hip":
+        device_mod = tvm._ffi.get_global_func("target.build.tilelang_hip_without_compile")(device_mod, target)
     elif target.kind.name == "llvm":
         device_mod = tvm._ffi.get_global_func("target.build.llvm")(device_mod, target)
     elif target.kind.name == "webgpu":
         device_mod = tvm._ffi.get_global_func("target.build.tilelang_webgpu")(device_mod, target)
     else:
         raise ValueError(f"Target {target.kind.name} is not supported")
-    return device_mod
 
+    return device_mod
 
 def lower(
     func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
@@ -168,11 +192,12 @@ def lower(
     target_host: Optional[Union[str, Target]] = None,
     runtime_only=False,
     enable_host_codegen=False,
+    enable_device_compile=False,
 ) -> CompiledArtifact:
     '''
         enable_host_codegen: whether to enable host codegen, default is False, as we have our
         own host codegen implementation in jit.
-        enable_device_codegen: whether to enable device codegen, default is False, as we have our
+        enable_device_compile: whether to enable device codegen, default is False, as we have our
         own device codegen implementation in jit.
     '''
 
@@ -200,21 +225,9 @@ def lower(
     mod = OptimizeForTarget(mod, target)
 
     host_mod = tir.transform.Filter(_is_host_call)(mod)
-    host_mod = tir.transform.BindTarget(target_host)(host_mod)
-    host_mod = tir.transform.FP8StorageLegalize()(host_mod)
-    host_mod = tir.transform.BF16StorageLegalize()(host_mod)
-    host_mod = tir.transform.LowerTVMBuiltin()(host_mod)
-    host_mod = tir.transform.LowerCustomDatatypes()(host_mod)
-    host_mod = tir.transform.LowerIntrin()(host_mod)
-    host_mod = tir.transform.LowerDeviceStorageAccessInfo()(host_mod)
-    host_mod = tir.transform.CombineContextCall()(host_mod)
-
     device_mod = tir.transform.Filter(_is_device_call)(mod)
-    device_mod = tir.transform.LowerDeviceStorageAccessInfo()(device_mod)
-    device_mod = tir.transform.LowerIntrin()(device_mod)
-    device_mod = tir.transform.Simplify()(device_mod)
 
-    codegen_mod = device_codegen(device_mod, target)
+    codegen_mod = device_codegen(device_mod, target) if enable_device_compile else device_codegen_without_compile(device_mod, target)
 
     if enable_host_codegen:
         host_mod = host_codegen(host_mod, target_host)
