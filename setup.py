@@ -508,13 +508,14 @@ class CMakeBuild(build_ext):
         # we need to copy the lib*.so files to the tilelang/lib directory
         import glob
         files = glob.glob("*.so")
-        target_lib_dir = os.path.join(PACKAGE_NAME, "lib")
-        for file in files:
-            if not os.path.exists(target_lib_dir):
-                os.makedirs(target_lib_dir)
-            shutil.copy(file, target_lib_dir)
-            # remove the original file
-            os.remove(file)
+        if os.path.exists(PACKAGE_NAME):
+            target_lib_dir = os.path.join(PACKAGE_NAME, "lib")
+            for file in files:
+                if not os.path.exists(target_lib_dir):
+                    os.makedirs(target_lib_dir)
+                shutil.copy(file, target_lib_dir)
+                # remove the original file
+                os.remove(file)
 
     def build_cmake(self, ext):
         """
