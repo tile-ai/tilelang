@@ -2232,11 +2232,12 @@ typedef struct CUgraphEdgeData_st {
       to_port;        /**< This indicates what portion of the downstream node is
                          dependent on        the upstream node or portion thereof
                          (indicated        by \c from_port). The        meaning is
-                         specific to        the node type. A        value of 0 in all cases
-                         means        the        entirety of the downstream        node is
-                         dependent on the upstream        work.        <br>        Currently
-                         no node        types define        non-zero ports. Accordingly, this
-                         field        must be        set to        zero. */
+                         specific to        the node type. A        value of 0 in all
+                         cases        means        the        entirety of the
+                         downstream        node        is        dependent on the upstream
+                         work.        <br>        Currently        no node        types define
+                         non-zero ports.        Accordingly, this        field        must be
+                         set to        zero. */
   unsigned char type; /**< This should be populated with a value from
                          ::CUgraphDependencyType. (It is typed as char due to
                          compiler-specific layout of bitfields.) See
