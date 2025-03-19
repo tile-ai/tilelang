@@ -16,9 +16,9 @@ import logging
 
 from tilelang.env import TILELANG_CACHE_DIR
 
-
 ARTIFACT_PATH = "artifact.txt"
 PARAMS_PATH = "params.pkl"
+
 
 class KernelCache:
     """
