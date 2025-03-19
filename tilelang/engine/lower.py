@@ -162,21 +162,24 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     if target.kind.name == "cuda":
         device_mod = tvm._ffi.get_global_func("target.build.tilelang_cuda")(device_mod, target)
     elif target.kind.name == "hip":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)        
+        device_mod = tvm._ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
     else:
         raise ValueError(f"Target {target.kind.name} is not supported")
 
     return device_mod
 
+
 def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     device_mod = tir.transform.LowerDeviceStorageAccessInfo()(device_mod)
     device_mod = tir.transform.LowerIntrin()(device_mod)
     device_mod = tir.transform.Simplify()(device_mod)
-  
+
     if target.kind.name == "cuda":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_cuda_without_compile")(device_mod, target)
+        device_mod = tvm._ffi.get_global_func("target.build.tilelang_cuda_without_compile")(
+            device_mod, target)
     elif target.kind.name == "hip":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_hip_without_compile")(device_mod, target)
+        device_mod = tvm._ffi.get_global_func("target.build.tilelang_hip_without_compile")(
+            device_mod, target)
     elif target.kind.name == "llvm":
         device_mod = tvm._ffi.get_global_func("target.build.llvm")(device_mod, target)
     elif target.kind.name == "webgpu":
@@ -185,6 +188,7 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
         raise ValueError(f"Target {target.kind.name} is not supported")
 
     return device_mod
+
 
 def lower(
     func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
@@ -227,7 +231,9 @@ def lower(
     host_mod = tir.transform.Filter(_is_host_call)(mod)
     device_mod = tir.transform.Filter(_is_device_call)(mod)
 
-    codegen_mod = device_codegen(device_mod, target) if enable_device_compile else device_codegen_without_compile(device_mod, target)
+    codegen_mod = device_codegen(
+        device_mod, target) if enable_device_compile else device_codegen_without_compile(
+            device_mod, target)
 
     if enable_host_codegen:
         host_mod = host_codegen(host_mod, target_host)

@@ -263,7 +263,8 @@ class TLCUDASourceWrapper(object):
                 device_mod, host_mod = get_annotated_mod(self.mod, self.target)
             self.device_mod = device_mod
             self.host_mod = host_mod
-        assert (len(self.device_mod.functions) >= 1), "Device module should have at least one function."
+        assert (len(self.device_mod.functions)
+                >= 1), "Device module should have at least one function."
         assert (len(self.host_mod.functions) == 1), "Only support one function in host module."
 
         block_info_map = {}
@@ -603,7 +604,7 @@ class TLWrapper(BaseWrapper):
 
     def assign_pass_configs(self, pass_configs: Dict[str, Any]):
         self.pass_configs = pass_configs
-    
+
     def assign_host_module(self, host_mod: IRModule):
         self.host_mod = host_mod
 
@@ -627,6 +628,5 @@ class TLWrapper(BaseWrapper):
             target=self.target,
             device_mod=self.device_mod,
             host_mod=self.host_mod,
-            pass_configs=self.pass_configs
-        )
+            pass_configs=self.pass_configs)
         return wrapper.lib_code
