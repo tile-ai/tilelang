@@ -43,6 +43,9 @@ TILELANG_PACKAGE_PATH: str = pathlib.Path(__file__).resolve().parents[0]
 TILELANG_CACHE_DIR: str = os.environ.get("TILELANG_CACHE_DIR",
                                          os.path.expanduser("~/.tilelang/cache"))
 
+# Auto-clear cache if environment variable is set
+TILELANG_CLEAR_CACHE = os.environ.get("TILELANG_CLEAR_CACHE", "0")
+
 # SETUP ENVIRONMENT VARIABLES
 CUTLASS_NOT_FOUND_MESSAGE = ("CUTLASS is not installed or found in the expected path")
 ", which may lead to compilation bugs when utilize tilelang backend."

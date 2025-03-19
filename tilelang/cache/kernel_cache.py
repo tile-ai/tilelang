@@ -14,7 +14,7 @@ import threading
 import cloudpickle
 import logging
 
-from tilelang.env import TILELANG_CACHE_DIR  # noqa: F401
+from tilelang.env import TILELANG_CACHE_DIR
 
 
 class KernelCache:
