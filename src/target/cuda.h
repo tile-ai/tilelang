@@ -1,4 +1,4 @@
-// Copyright (c) Tile-AI Corporation..
+// Copyright (c) Tile-AI Corporation.
 // Licensed under the MIT License.
 /*
  * Copyright 1993-2023 NVIDIA Corporation.  All rights reserved.

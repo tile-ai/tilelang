@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright (c) Tile-AI Corporation..
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 echo "Add MIT license boilerplate..."
@@ -13,7 +13,7 @@ EXITCODE=0
 for SRC_FILE in $(find . -path './3rdparty' -prune -false -o -path './build' -prune -false -o -type f -not -name \
     '*apply_mit_liscense.sh' -not -name '*check_mit_liscense.sh' -and \( -name '*.cpp' -or -name '*.h*' -or -name '*.cu' -or -name '*.in' \) ); do
     sed -i '/\/\/\s*Microsoft\s*(c)/Id' ${SRC_FILE}
-    if !(grep -q "Copyright (c) Tile-AI Corporation.." "${SRC_FILE}"); then
+    if !(grep -q "Copyright (c) Tile-AI Corporation." "${SRC_FILE}"); then
         cat maint/scripts/mit_liscense1.txt ${SRC_FILE} > ${SRC_FILE}.new
         mv ${SRC_FILE}.new ${SRC_FILE}
     fi

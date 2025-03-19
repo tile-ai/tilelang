@@ -1,4 +1,4 @@
-# Copyright (c) Tile-AI Corporation..
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 from typing import Optional
 from .utils import is_cuda_target, is_hip_target, is_cpu_target
