@@ -140,6 +140,8 @@ class JITKernel(object):
         with tvm.transform.PassContext(opt_level=3, config=pass_configs):
             artifact = tilelang.lower(tilelang_func, target=target, target_host=target_host)
 
+        self.artifact = artifact            
+
         # Create an adapter based on the specified execution backend.
         if execution_backend == "dlpack":
             # Use TorchDLPackKernelAdapter for interoperability with PyTorch via DLPack.
@@ -154,7 +156,7 @@ class JITKernel(object):
                 result_idx=out_idx,
                 target=target,
                 func_or_mod=tilelang_func,
-                kernel_global_source=self.kernel_source,
+                kernel_global_source=artifact.kernel_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
             )
@@ -164,7 +166,7 @@ class JITKernel(object):
                 result_idx=out_idx,
                 target=target,
                 func_or_mod=tilelang_func,
-                kernel_global_source=self.kernel_source,
+                kernel_global_source=artifact.kernel_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
             )
