@@ -131,7 +131,6 @@ public:
           LayoutInferArgs{target_, static_cast<size_t>(*extent_ptr),
                           layout_map},
           level);
-
       // Process the returned updates
       for (const auto &[buffer, layout] : updates) {
         // Basic validity checks
@@ -142,7 +141,8 @@ public:
           // If already in map, ensure they are structurally equal
           ICHECK(StructuralEqual()(layout, layout_map[buffer]))
               << "Get different layout for " << buffer
-              << " in cur_infer_id = " << cur_infer_id;
+              << " current layout: " << layout->DebugOutput()
+              << " previous layout: " << layout_map[buffer]->DebugOutput();
         } else {
           // Otherwise, update map
           layout_map.Set(buffer, layout);
@@ -191,9 +191,10 @@ public:
     for (int i = 0; i < num_infer; i++) {
       run_infer_step(i, InferLevel::kStrict, false);
     }
-    // step 2: infer common layout with BFS
 
+    // step 2: infer common layout with BFS
     finish_infer_queue();
+
     // step 3: relax constraints to free and re-run
     for (int i = 0; i < num_infer; i++) {
       run_infer_step(i, InferLevel::kFree, true);

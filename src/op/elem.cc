@@ -340,6 +340,20 @@ LayoutMap Copy::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     arith::Analyzer analyzer;
     par_op_ = std::make_unique<ParallelOp>(MakeSIMTLoop(&analyzer));
   }
+  if (T.layout_map.count(src) && T.layout_map.count(dst)) {
+    // Only compare fragment layout
+    if (src.scope() == "local.fragment" && dst.scope() == "local.fragment") {
+      const FragmentNode *src_layout = T.layout_map[src].as<Fragment>().get();
+      const FragmentNode *dst_layout = T.layout_map[dst].as<Fragment>().get();
+      if (src_layout && dst_layout) {
+        ICHECK(src_layout->IsEqual(dst_layout, true))
+            << "Get different layout for " << src << " and " << dst
+            << "\nLHS = " << src_layout->DebugOutput()
+            << "\nRHS = " << dst_layout->DebugOutput()
+            << "\nYou may need to use a shared memory to transform the layout";
+      }
+    }
+  }
   return par_op_->InferLayout(T, level);
 }
 

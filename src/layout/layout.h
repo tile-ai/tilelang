@@ -40,7 +40,9 @@ public:
 
   virtual Layout Inverse() const;
 
-  virtual void DebugOutput() const;
+  virtual std::string DebugOutput() const;
+
+  virtual bool IsEqual(const LayoutNode *other, bool skip_index = false) const;
 
   static constexpr bool _type_has_method_sequal_reduce = true;
   static constexpr const char *_type_key = "tl.Layout";
@@ -94,7 +96,9 @@ public:
 
   Fragment CondenseReplicateVar() const;
 
-  void DebugOutput() const final;
+  std::string DebugOutput() const final;
+
+  bool IsEqual(const FragmentNode *other, bool skip_index = false) const;
 
   void VisitAttrs(tvm::AttrVisitor *v);
   bool SEqualReduce(const FragmentNode *other, SEqualReducer equal) const;
