@@ -4,120 +4,100 @@
 from tilelang import tvm as tvm
 import tilelang.testing
 from tilelang import cached
+import tilelang.language as T
 
 
-def matmul(
-    M,
-    N,
-    K,
-    block_M,
-    block_N,
-    block_K,
-    trans_A,
-    trans_B,
-    in_dtype,
-    out_dtype,
-    accum_dtype,
-    num_stages,
-    threads,
-):
-    A_shape = (K, M) if trans_A else (M, K)
-    B_shape = (N, K) if trans_B else (K, N)
-    A_shared_shape = (block_K, block_M) if trans_A else (block_M, block_K)
-    B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
+def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+    """
+    Defines a matrix multiplication primitive function using tilelang.
 
-    import tilelang.language as T
+    This function constructs a tilelang primitive function for matrix multiplication,
+    optimized for execution on hardware accelerators. It utilizes shared memory and
+    fragment memory for performance.
+
+    Args:
+        M (int): Number of rows in matrix A and C.
+        N (int): Number of columns in matrix B and C.
+        K (int): Number of columns in matrix A and rows in matrix B.
+        block_M (int): Block size for M dimension in shared memory and fragment.
+        block_N (int): Block size for N dimension in shared memory and fragment.
+        block_K (int): Block size for K dimension in shared memory.
+        dtype (str, optional): Data type for input matrices A and B, and output C. Defaults to "float16".
+        accum_dtype (str, optional): Accumulation data type for internal computations. Defaults to "float".
+
+    Returns:
+        T.PrimFunc: A tilelang primitive function representing the matrix multiplication.
+    """
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, in_dtype),
-            C: T.Buffer((M, N), out_dtype),
+            A: T.Buffer((M, K), dtype),
+            B: T.Buffer((K, N), dtype),
+            C: T.Buffer((M, N), dtype),
     ):
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-            A_shared = T.alloc_shared(A_shared_shape, in_dtype)
-            B_shared = T.alloc_shared(B_shared_shape, in_dtype)
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+
             T.clear(C_local)
-            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
-                if trans_A:
-                    T.copy(A[k * block_K, by * block_M], A_shared)
-                else:
-                    T.copy(A[by * block_M, k * block_K], A_shared)
-                if trans_B:
-                    T.copy(B[bx * block_N, k * block_K], B_shared)
-                else:
-                    T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm(A_shared, B_shared, C_local, trans_A, trans_B)
+            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
+                T.copy(A[by * block_M, k * block_K], A_shared)
+                T.copy(B[k * block_K, bx * block_N], B_shared)
+                T.gemm(A_shared, B_shared, C_local)
+
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
 
 
-def run_cache_matmul(
-    M,
-    N,
-    K,
-    trans_A,
-    trans_B,
-    in_dtype,
-    out_dtype,
-    dtypeAccum,
-    block_M,
-    block_N,
-    block_K,
-    num_stages=3,
-    num_threads=128,
-):
-    program = matmul(
-        M,
-        N,
-        K,
-        block_M,
-        block_N,
-        block_K,
-        trans_A,
-        trans_B,
-        in_dtype,
-        out_dtype,
-        dtypeAccum,
-        num_stages,
-        num_threads,
-    )
+def run_cache_matmul():
+    """
+    Demonstrates the usage of the cached matrix multiplication kernel.
 
-    kernel = cached(program, [2])
-
-    profiler = kernel.get_profiler()
+    This function defines a reference PyTorch matrix multiplication,
+    creates a cached kernel from the tilelang matmul function,
+    runs the kernel with random input tensors, compares the output with the reference,
+    and prints the CUDA kernel source code.
+    """
 
     def ref_program(A, B):
+        """
+        Reference PyTorch matrix multiplication for comparison.
+        """
         import torch
-
-        if trans_A:
-            A = A.T
-        if trans_B:
-            B = B.T
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
-        C = C.to(torch.__getattribute__(out_dtype))
+        C = C.to(torch.half)  # Assuming dtype="float16" in matmul
         return C
 
-    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+    func = matmul(1024, 1024, 1024, 128, 128, 32)
+    kernel = cached(func, [2], execution_backend="cython")
+    import torch
+
+    a = torch.randn(1024, 1024).cuda().half()
+    b = torch.randn(1024, 1024).cuda().half()
+
+    c = kernel(a, b)
+    print("\nOutput from Cached Kernel:")
+    print(c)
+
+    ref_c = ref_program(a, b)
+    print("\nReference PyTorch Output:")
+    print(ref_c)
+
+    torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+    print("\nOutputs are close (within tolerance).")
+
+    # Get CUDA Source
+    print("\nCUDA Kernel Source:")
+    print(kernel.get_kernel_source())
 
 
 def test_cache_matmul_f16f16f16_nn():
-    run_cache_matmul(
-        512,
-        1024,
-        768,
-        False,
-        False,
-        "float16",
-        "float16",
-        "float16",
-        128,
-        256,
-        32,
-        2,
-    )
+    """
+    Test function for cached matrix multiplication (float16 inputs, float16 output, no transpose).
+    """
+    run_cache_matmul()
 
 
 if __name__ == "__main__":

@@ -83,5 +83,4 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
 
     if return_object:
         return Target(return_var)
-
     return return_var

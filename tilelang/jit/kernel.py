@@ -37,6 +37,8 @@ class JITKernel(object):
         target_host: Union[str, Target] = None,
         verbose: bool = False,
         pass_configs: Optional[Dict[str, Any]] = None,
+        rt_module_src: Optional[str] = None,
+        rt_params: dict = None,
     ):
         """
         Initializes a TorchFunction instance.
@@ -61,7 +63,6 @@ class JITKernel(object):
                 "tir.disable_vectorize": bool, default: False
                 "tl.disable_tma_lower": bool, default: False
         """
-        self.func = func
         self.out_idx = out_idx
         self.execution_backend = execution_backend
         self.target = target
@@ -71,6 +72,42 @@ class JITKernel(object):
         if pass_configs is None:
             pass_configs = {}
         self.pass_configs = pass_configs
+
+        if rt_module_src and rt_params:
+            self.rt_mod = None
+            self.params = rt_params
+            adapter = None
+            # Create an adapter based on the specified execution backend.
+            if execution_backend == "dlpack":
+                # assert dlpack not supported
+                raise ValueError(f"Invalid execution backend: {execution_backend}")
+            elif execution_backend == "ctypes":
+                adapter = CtypesKernelAdapter.from_database(
+                    params=self.params,
+                    result_idx=out_idx,
+                    target=target,
+                    func_or_mod=func,
+                    kernel_global_source=rt_module_src,
+                    verbose=verbose,
+                    pass_configs=pass_configs,
+                )
+            elif execution_backend == "cython":
+                adapter = CythonKernelAdapter.from_database(
+                    rt_mod_src=rt_module_src,
+                    params=self.params,
+                    result_idx=out_idx,
+                    target=target,
+                    func_or_mod=func,
+                    verbose=verbose,
+                    pass_configs=pass_configs,
+                )
+            else:
+                # Handle invalid backend.
+                raise ValueError(f"Invalid execution backend: {execution_backend}")
+
+            self.adapter = adapter
+            self.torch_function = adapter.func
+            return
 
         # If the target is specified as a string, validate it and convert it to a TVM Target.
         if isinstance(target, str):
@@ -234,3 +271,22 @@ class JITKernel(object):
 
     def run_once(self, func: Optional[Callable] = None) -> None:
         return self.get_profiler().run_once(func)
+
+    def export_library(self, kernel_file: str) -> None:
+        """
+        Exports the compiled kernel function to a shared library file.
+
+        Parameters
+        ----------
+        kernel_file : str
+            The path to the shared library file to create.
+        """
+        # rt_module: tvm.runtime.Module = None
+        # rt_params: dict = None
+        # adapter: BaseKernelAdapter = None
+        # torch_function: Callable = None
+        # rt_module: use export_library to export
+        # rt_params: use cloudpickle to serialize
+
+        # Export the compiled kernel function to a shared library file.
+        self.rt_module.export_library(kernel_file)

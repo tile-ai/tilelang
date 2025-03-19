@@ -99,6 +99,58 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
         self._post_init()
 
+    @classmethod
+    def from_database(cls,
+                      params: List[TensorType],
+                      result_idx: List[int],
+                      target: str,
+                      func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+                      kernel_global_source: Optional[str] = None,
+                      verbose: bool = False,
+                      pass_configs: Optional[Dict[str, Any]] = None):
+        adapter = cls.__new__(cls)
+        adapter.params = params
+        adapter.result_idx = adapter._legalize_result_idx(result_idx)
+        adapter.kernel_global_source = kernel_global_source
+
+        if isinstance(func_or_mod, tir.PrimFunc):
+            adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
+        else:
+            adapter.ir_module = func_or_mod
+
+        # Cache parameter information during initialization
+        adapter.param_dtypes = [param.dtype for param in params]
+        adapter.param_shapes = []
+        for param in params:
+            native_shape = []
+            for dim in param.shape:
+                if isinstance(dim, tir.IntImm):
+                    native_shape.append(int(dim))
+                elif isinstance(dim, tir.Var):
+                    native_shape.append(dim)  # Keep tir.Var for dynamic dimensions
+                else:
+                    native_shape.append(dim)
+            adapter.param_shapes.append(native_shape)
+
+        adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
+
+        adapter.target = Target.canon_target(determine_target(target))
+        adapter.verbose = verbose
+        adapter.wrapper = TLWrapper(adapter.target)
+        adapter.lib_generator = LibraryGenerator(adapter.target)
+
+        adapter.wrapper.assign_optimized_module(adapter.ir_module)
+        adapter.wrapper.assign_pass_configs(pass_configs)
+        adapter.wrapped_source = adapter.wrapper.wrap(adapter.get_kernel_source(kernel_only=True))
+
+        adapter.lib_generator.update_lib_code(adapter.wrapped_source)
+        adapter.lib_generator.compile_lib()
+        adapter.lib = adapter.lib_generator.load_lib()
+        adapter.lib.init()
+
+        adapter._post_init()
+        return adapter
+
     def _process_dynamic_symbolic(self):
         """Extract information about dynamic shapes from the TIR function.
         
