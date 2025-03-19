@@ -13,6 +13,7 @@ def gemm(
     transpose_A: bool = False,
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
+    clear_accum: bool = False,
     k_pack: int = 1,
     wg_wait: int = 0,
 ):
@@ -41,6 +42,7 @@ def gemm(
         N,
         K,
         policy,
+        clear_accum,
         k_pack,
         wg_wait,
     )

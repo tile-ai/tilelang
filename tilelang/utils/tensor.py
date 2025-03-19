@@ -201,7 +201,7 @@ def torch_assert_close(
     verbose: bool = False,
     equal_nan: bool = True,
     check_device: bool = True,
-    check_dtype: bool = False,
+    check_dtype: bool = True,
     check_layout: bool = True,
     check_stride: bool = False,
 ):
