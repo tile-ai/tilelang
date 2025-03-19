@@ -2,39 +2,32 @@ import tilelang
 import tilelang.language as T
 
 
-def elewise_add(N, NUM_ELE_PER_THREAD=8, threads=256, dtype="bfloat16"):
+# copied from https://github.com/tile-ai/tilelang/blob/main/testing/python/kernel/test_tilelang_kernel_element_wise_add.py
+def elementwise_add(
+    M,
+    N,
+    block_M,
+    block_N,
+    in_dtype,
+    out_dtype,
+    threads,
+):
 
     @T.prim_func
-    def main(A: T.Buffer((N), dtype), B: T.Buffer((N), dtype), C: T.Buffer((N), dtype)):
-        with T.Kernel(T.ceildiv(N, threads * NUM_ELE_PER_THREAD), threads=threads) as (b_x):
-            A_register = T.alloc_fragment((threads * NUM_ELE_PER_THREAD), dtype)
-            B_register = T.alloc_fragment((threads * NUM_ELE_PER_THREAD), dtype)
-            C_register = T.alloc_fragment((threads * NUM_ELE_PER_THREAD), dtype)
+    def main(
+            A: T.Buffer((M, N), in_dtype),
+            B: T.Buffer((M, N), in_dtype),
+            C: T.Buffer((M, N), out_dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+            start_x = bx * block_N
+            start_y = by * block_M
 
-            s_start = b_x * threads * NUM_ELE_PER_THREAD
-            s_end = (b_x + 1) * threads * NUM_ELE_PER_THREAD
+            for (local_y, local_x) in T.Parallel(block_M, block_N):
+                y = start_y + local_y
+                x = start_x + local_x
 
-            # LDG. 128
-            T.copy(
-                A[s_start:s_end],
-                A_register,
-            )
-            T.copy(
-                B[s_start:s_end],
-                B_register,
-            )
-
-            # vector add.
-            for tid, i in T.Parallel(threads, NUM_ELE_PER_THREAD):
-                C_register[tid * NUM_ELE_PER_THREAD + i] = (
-                    A_register[tid * NUM_ELE_PER_THREAD + i] +
-                    B_register[tid * NUM_ELE_PER_THREAD + i])
-
-            # STG. 128
-            T.copy(
-                C_register,
-                C[s_start:s_end],
-            )
+                C[y, x] = A[y, x] + B[y, x]
 
     return main
 
@@ -44,8 +37,7 @@ def ref_program(x, y):
 
 
 if __name__ == "__main__":
-    N = 8192**2
-    program = elewise_add(N)
+    program = elementwise_add(512, 1024, 128, 256, "float32", "float32", 128)
     kernel = tilelang.compile(program, out_idx=-1, target="cuda", execution_backend="cython")
     profiler = kernel.get_profiler()
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
