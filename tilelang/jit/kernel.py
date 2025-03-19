@@ -140,7 +140,7 @@ class JITKernel(object):
         with tvm.transform.PassContext(opt_level=3, config=pass_configs):
             artifact = tilelang.lower(tilelang_func, target=target, target_host=target_host)
 
-        self.artifact = artifact            
+        self.artifact = artifact
 
         # Create an adapter based on the specified execution backend.
         if execution_backend == "dlpack":
