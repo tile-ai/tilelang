@@ -2235,9 +2235,9 @@ typedef struct CUgraphEdgeData_st {
                          specific to        the node type. A        value of 0 in all
                          cases        means        the        entirety of the
                          downstream        node        is        dependent on the
-                         upstream        work.        <br>        Currently        no node
-                         types define        non-zero ports.        Accordingly, this        field
-                         must be        set to        zero. */
+                         upstream        work.        <br>        Currently        no
+                         node        types define        non-zero ports.        Accordingly,
+                         this        field        must be        set to        zero. */
   unsigned char type; /**< This should be populated with a value from
                          ::CUgraphDependencyType. (It is typed as char due to
                          compiler-specific layout of bitfields.) See
