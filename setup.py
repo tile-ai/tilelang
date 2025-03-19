@@ -30,6 +30,7 @@ ROOT_DIR = os.path.dirname(__file__)
 # Add LLVM control environment variable
 USE_LLVM = os.environ.get("USE_LLVM", "False").lower() == "true"
 
+
 def load_module_from_path(module_name, path):
     spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
@@ -502,8 +503,8 @@ class CMakeBuild(build_ext):
         # Build each extension (of type CMakeExtension) using our custom method.
         for ext in self.extensions:
             self.build_cmake(ext)
-        
-        # To make it works with editable install, 
+
+        # To make it works with editable install,
         # we need to copy the lib*.so files to the tilelang/lib directory
         import glob
         files = glob.glob("*.so")

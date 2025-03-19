@@ -1,6 +1,7 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
 import torch
 import tilelang
-from tilelang import Profiler
 from tilelang.autotuner import *
 import tilelang.language as T
 import itertools

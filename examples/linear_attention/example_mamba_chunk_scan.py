@@ -4,7 +4,6 @@
 import argparse
 import torch
 import tilelang
-from tilelang import Profiler
 from tilelang.autotuner import *
 import tilelang.language as T
 from einops import rearrange, repeat

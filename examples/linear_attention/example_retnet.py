@@ -210,7 +210,7 @@ if __name__ == "__main__":
             max_mismatched_ratio=0.01,
         )
 
-    mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
-    latency = mod.do_bench(mod, n_warmup=10, n_repeat=10, profiler="torch")
+    profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+    latency = profiler.do_bench(n_warmup=10, n_repeat=10, profiler="torch")
     print("tilelang: {:.2f} ms".format(latency))
     print("tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))

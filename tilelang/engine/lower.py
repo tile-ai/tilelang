@@ -135,6 +135,7 @@ def canon_target_host(target: Union[str, Target], target_host: Optional[Union[st
 
     return target_host
 
+
 def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
     if target_host.kind.name == "llvm":
         host_mod = tvm._ffi.get_global_func("target.build.llvm")(host_mod, target_host)
@@ -143,6 +144,8 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
     else:
         raise ValueError(f"Target host {target_host.kind.name} is not supported")
     return host_mod
+
+
 def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     if target.kind.name == "cuda":
         device_mod = tvm._ffi.get_global_func("target.build.tilelang_cuda")(device_mod, target)
@@ -157,6 +160,7 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     else:
         raise ValueError(f"Target {target.kind.name} is not supported")
     return device_mod
+
 
 def lower(
     func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
@@ -205,17 +209,15 @@ def lower(
     host_mod = tir.transform.LowerDeviceStorageAccessInfo()(host_mod)
     host_mod = tir.transform.CombineContextCall()(host_mod)
 
-
     device_mod = tir.transform.Filter(_is_device_call)(mod)
     device_mod = tir.transform.LowerDeviceStorageAccessInfo()(device_mod)
     device_mod = tir.transform.LowerIntrin()(device_mod)
     device_mod = tir.transform.Simplify()(device_mod)
 
     codegen_mod = device_codegen(device_mod, target)
-    
+
     if enable_host_codegen:
         host_mod = host_codegen(host_mod, target_host)
         host_mod.import_module(codegen_mod)
 
     return CompiledArtifact(host_mod, device_mod, params, codegen_mod.get_source())
-

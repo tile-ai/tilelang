@@ -146,7 +146,8 @@ class JITKernel(object):
             # But we need to ensure that the runtime is enabled and the runtime module is not None.
             assert tvm.runtime.enabled("llvm"), "DLPack backend requires LLVM runtime."
             assert artifact.rt_mod is not None, "DLPack backend requires a runtime module."
-            adapter = TorchDLPackKernelAdapter(artifact.rt_mod, params=artifact.params, result_idx=out_idx)
+            adapter = TorchDLPackKernelAdapter(
+                artifact.rt_mod, params=artifact.params, result_idx=out_idx)
         elif execution_backend == "ctypes":
             adapter = CtypesKernelAdapter(
                 params=artifact.params,

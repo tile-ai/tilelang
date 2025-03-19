@@ -96,4 +96,5 @@ class CompiledArtifact:
     device_mod: tvm.IRModule  # Device-side TVM IR module containing the actual kernel code
     params: List[KernelParam]  # List of parameters (tensors/scalars) used by the kernel
     kernel_source: str  # Raw source code of the generated kernel
-    rt_mod: Optional[tvm.runtime.Module] = None  # Runtime module for execution, may be lazily initialized
+    rt_mod: Optional[
+        tvm.runtime.Module] = None  # Runtime module for execution, may be lazily initialized

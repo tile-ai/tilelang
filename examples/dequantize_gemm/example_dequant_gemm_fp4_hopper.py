@@ -2,15 +2,12 @@
 # Licensed under the MIT License.
 
 import tilelang
-from tilelang import Profiler
 import tilelang.language as T
 from tilelang.autotuner import *
-from tilelang import tvm
 from tvm import tir
 import itertools
 import torch
 import argparse
-from functools import partial
 
 
 def _tir_u8_to_f4_to_f16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, dtype: str):
