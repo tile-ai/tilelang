@@ -70,7 +70,7 @@ runtime::Module BuildTileLangCUDA(IRModule mod, Target target) {
   return runtime::CUDAModuleCreate(ptx, fmt, ExtractFuncInfo(mod), code);
 }
 
-String BuildTLDebug(IRModule mod, Target target) {
+String BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
   using tvm::runtime::Registry;
   bool output_ssa = false;
   CodeGenTileLangCUDA cg;
@@ -95,8 +95,8 @@ String BuildTLDebug(IRModule mod, Target target) {
 
 TVM_REGISTER_GLOBAL("target.build.tilelang_cuda")
     .set_body_typed(BuildTileLangCUDA);
-TVM_REGISTER_GLOBAL("target.build.tl_debug_codegen")
-    .set_body_typed(BuildTLDebug);
+TVM_REGISTER_GLOBAL("target.build.tilelang_cuda_without_compile")
+    .set_body_typed(BuildTileLangCUDAWithoutCompile);
 
 } // namespace codegen
 } // namespace tvm
