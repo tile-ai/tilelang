@@ -227,6 +227,18 @@ Check our [tilelang v0.2.0 release plan](https://github.com/tile-ai/tilelang/iss
 
 TileLang has now been used in project [BitBLAS](https://github.com/microsoft/BitBLAS) and [AttentionEngine](https://github.com/microsoft/AttentionEngine).
 
+## Citation
+If you find this repository helpful, please cite our work:
+```bib
+@software{tileai2025tilelang,
+  title  = {TileLang: A Composable Tiled Programming Model for AI Systems},
+  author = {Wang, Lei and Cheng, Yu and Shi, Yining and Tang, Zhengju and Mo, Zhiwen and Ma, Lingxiao and Xia, Yuqing and Xue, Jilong and Yang, Fan and Yang, Zhi},
+  url    = {https://github.com/tile-ai/tilelang},
+  month  = jan,
+  year   = {2025}
+}
+```
+
 ## Join the Discussion
 
 Welcome to join our Discord community for discussions, support, and collaboration!
