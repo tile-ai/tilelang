@@ -219,7 +219,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(8, 0)
 def test_assert_tl_matmul_bfloat16():
-    assert_tl_matmul_correctness(128, 128, 128, "bfloat16", "float32", "float32")
+    assert_tl_matmul_correctness(256, 256, 256, "bfloat16", "float32", "float32")
 
 
 if __name__ == "__main__":
