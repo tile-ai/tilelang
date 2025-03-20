@@ -92,12 +92,12 @@ class LibraryGenerator(object):
         src.flush()
         try:
             ret = subprocess.run(command, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            logger.warning(f"Compilation Timeout! {command}")
-            return None
+        except Exception as e:
+            raise RuntimeError(f"Compile kernel failed because of {e}") from e
+
         if ret.returncode != 0:
-            logger.warning(f"Compilation Failed! {command}")
-            return None
+            raise RuntimeError(f"Compilation Failed! {command}")
+
         self.srcpath = src.name
         self.libpath = libpath
 

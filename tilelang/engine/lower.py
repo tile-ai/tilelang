@@ -240,5 +240,7 @@ def lower(
     if enable_host_codegen:
         host_mod = host_codegen(host_mod, target_host)
         host_mod.import_module(codegen_mod)
+        return CompiledArtifact(
+            host_mod, device_mod, params, codegen_mod.get_source(), rt_mod=host_mod)
 
     return CompiledArtifact(host_mod, device_mod, params, codegen_mod.get_source())
