@@ -151,9 +151,7 @@ class Autotuner:
                 logger.debug(f"Compilation failed for config {config} at index {idx}")
                 continue
 
-        # jit_context = self.jit_compile(config_args[0])
-        # latency, ref_latency = target_fn(jit_context)
-        ref_latency = None        
+        ref_latency = None
         progress_bar = tqdm(range(len(results_with_configs)), desc="Bench configurations")
         for i in progress_bar:
             jit_context, config = results_with_configs[i]
@@ -215,7 +213,8 @@ def jit(out_idx: List[int],
         @wraps(fn)
         def decorator(*args, **kwargs) -> float:
             # Enabling Efficient Fusion
-            kernel = tilelang.compile(fn(*args, **kwargs), target=target, pass_configs={"tir.merge_static_smem": True})
+            kernel = tilelang.compile(
+                fn(*args, **kwargs), target=target, pass_configs={"tir.merge_static_smem": True})
             profiler = kernel.get_profiler()
 
             return JITContext(

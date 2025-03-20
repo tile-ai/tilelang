@@ -5,14 +5,14 @@ import torch
 import itertools
 import tilelang as tl
 import tilelang.language as T
-from tilelang.autotuner import autotune, jit
 from tilelang.carver.template import MatmulTemplate
 from tilelang.carver.arch import CUDA
 from tilelang.carver.roller.rasterization import NoRasterization
 
+
 def ref_program(A, B, C):
     C += A @ B.T
-    return None
+
 
 def get_configs(M, N, K, with_roller=False):
     if with_roller:
@@ -77,67 +77,23 @@ def get_configs(M, N, K, with_roller=False):
         ]
     return configs
 
+
 def get_best_config(M, N, K, with_roller=False):
-    @autotune(
-        configs=get_configs(M, N, K, with_roller),
-        keys=[
-            "block_M",
-            "block_N",
-            "block_K",
-            "num_stages",
-            "thread_num",
-            "enable_rasteration",
-        ],
-        warmup=3,
-        rep=20,
-    )
-    @jit(
-        out_idx=[2],
-        supply_type=tl.TensorSupplyType.Integer,
-        ref_prog=ref_program,
-        skip_check=False,
-        profiler="auto",
-        target="auto",
-    )
-    def kernel(
-        block_M=None,
-        block_N=None,
-        block_K=None,
-        num_stages=None,
-        thread_num=None,
-        enable_rasteration=None,
-    ):
-        dtype = "float16"
-        accum_dtype = "float"
-        @T.prim_func
-        def main(
-                A: T.Buffer((M, K), dtype),
-                B: T.Buffer((N, K), dtype),
-                C: T.Buffer((M, N), dtype),
-        ):
-            with T.Kernel(
-                    T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
-                A_shared = T.alloc_shared((block_M, block_K), dtype)
-                B_shared = T.alloc_shared((block_N, block_K), dtype)
-                C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-                C_shared = T.alloc_shared((block_M, block_N), dtype)
-                T.use_swizzle(panel_size=10, enable=enable_rasteration)
-                T.clear(C_local)
-                for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
-                    T.copy(A[by * block_M, k * block_K], A_shared)
-                    T.copy(B[bx * block_N, k * block_K], B_shared)
-                    T.gemm(
-                        A_shared,
-                        B_shared,
-                        C_local,
-                        transpose_B=True,
-                    )
-                T.copy(C_local, C_shared)
-                T.copy(C_shared, C[by * block_M, bx * block_N])
-        return main
     return kernel()
 
-def matmul(M, N, K, block_M, block_N, block_K, num_stages, thread_num, enable_rasteration, dtype="float16", accum_dtype="float"):
+
+def matmul(M,
+           N,
+           K,
+           block_M,
+           block_N,
+           block_K,
+           num_stages,
+           thread_num,
+           enable_rasteration,
+           dtype="float16",
+           accum_dtype="float"):
+
     @T.prim_func
     def main(
             A: T.Buffer((M, K), dtype),
@@ -162,18 +118,28 @@ def matmul(M, N, K, block_M, block_N, block_K, num_stages, thread_num, enable_ra
                 )
             T.copy(C_local, C_shared)
             T.copy(C_shared, C[by * block_M, bx * block_N])
+
     return main
 
     return kernel()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
     parser.add_argument("--m", type=int, default=1024, help="Matrix dimension M")
     parser.add_argument("--n", type=int, default=1024, help="Matrix dimension N")
     parser.add_argument("--k", type=int, default=1024, help="Matrix dimension K")
-    parser.add_argument("--use_autotune", action="store_true", default=True, help="Whether to use autotune for matmul configs")
-    parser.add_argument("--with_roller", action="store_true", default=True, help="Whether to enable BitBLAS roller for search space")
-    args = parser.parse_args() 
+    parser.add_argument(
+        "--use_autotune",
+        action="store_true",
+        default=True,
+        help="Whether to use autotune for matmul configs")
+    parser.add_argument(
+        "--with_roller",
+        action="store_true",
+        default=True,
+        help="Whether to enable BitBLAS roller for search space")
+    args = parser.parse_args()
     M, N, K = args.m, args.n, args.k
     a = torch.randn(M, K).cuda().half()
     b = torch.randn(N, K).cuda().half()
@@ -186,10 +152,10 @@ if __name__ == "__main__":
         func = matmul(M, N, K, *best_config)
     else:
         func = matmul(M, N, K, 128, 128, 32, 3, 128, True)
-        
+
     # print(func)
     kernel = tl.compile(func, out_idx=-1)
     out_c = kernel(a, b)
-    ref_c = a@b.T + c
+    ref_c = a @ b.T + c
     torch.testing.assert_close(out_c, ref_c, rtol=1e-2, atol=1e-2)
     # print(kernel.get_kernel_source())
