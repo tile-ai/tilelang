@@ -17,7 +17,6 @@ PREDEF_ARRTIBUTE_SET_DYNAMIC_MEMORY = """
         snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed dynamic shared memory size to %d with error: %s", {1}, cudaGetErrorString(result));
         return -1;
     }}
-    return 0;
 """
 
 PREDEF_INIT_FUNC = """
@@ -29,9 +28,9 @@ extern "C" const char* get_last_error() {{
 }}
 
 extern "C" int init() {{
-    error_buf[0] = '\\0';  // Clear error buffer
+    error_buf[0] = '\\0';
     {0}
-    return 0;  // Success
+    return 0;
 }}
 """
 
