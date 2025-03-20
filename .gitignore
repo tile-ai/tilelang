@@ -4,7 +4,6 @@
 *.o
 *.obj
 *.pyc
-*.so
 
 # Precompiled Headers
 *.gch
@@ -89,4 +88,3 @@ tilelang/lib
 
 # cython
 tilelang/jit/adapter/cython/.cycache
-3rdparty/tvm
