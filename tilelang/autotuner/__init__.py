@@ -25,7 +25,6 @@ logging.basicConfig(
 
 @dataclass(frozen=True)
 class JITContext:
-    mod: tilelang.Profiler
     out_idx: List[int]
     supply_type: tilelang.TensorSupplyType
     ref_prog: Callable
@@ -33,7 +32,7 @@ class JITContext:
     atol: float
     max_mismatched_ratio: float
     skip_check: bool
-    profiler: Literal['torch', 'tvm']
+    profiler: tilelang.Profiler
     target: Literal['cuda', 'hip']
 
 
@@ -74,7 +73,6 @@ class Autotuner:
 
         def target_fn(jit_context):
             # Unpack the context
-            mod = jit_context.mod
             profiler = jit_context.profiler
             skip_check = jit_context.skip_check
             ref_prog = jit_context.ref_prog
@@ -82,24 +80,23 @@ class Autotuner:
             atol = jit_context.atol
             max_mismatched_ratio = jit_context.max_mismatched_ratio
 
-            self.jit_input_tensors = mod._get_inputs(
+            self.jit_input_tensors = profiler._get_inputs(
                 with_output=profiler ==
                 "tvm") if self.jit_input_tensors is None else self.jit_input_tensors
 
             if (not skip_check) and (ref_prog is not None):
-                mod.assert_allclose(
+                profiler.assert_allclose(
                     ref_prog, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio)
 
-            latency = mod.do_bench(
-                mod.func,
+            latency = profiler.do_bench(
+                profiler.func,
                 n_warmup=self.warmup,
                 n_repeat=self.rep,
-                profiler=profiler,
                 input_tensors=self.jit_input_tensors)
             if self.ref_latency_cache is None and ref_prog is not None:
-                self.ref_input_tensors = mod._get_inputs(
+                self.ref_input_tensors = profiler._get_inputs(
                     with_output=False) if self.ref_input_tensors is None else self.ref_input_tensors
-                self.ref_latency_cache = mod.do_bench(
+                self.ref_latency_cache = profiler.do_bench(
                     ref_prog,
                     n_warmup=self.warmup,
                     n_repeat=self.rep,
@@ -215,13 +212,11 @@ def jit(out_idx: List[int],
         @wraps(fn)
         def decorator(*args, **kwargs) -> float:
             # Enabling Efficient Fusion
-            with tvm.transform.PassContext(config={"tir.merge_static_smem": True}):
-                mod, params = tilelang.lower(fn(*args, **kwargs), target=target)
-
-            mod = tilelang.Profiler(mod, params, out_idx, supply_type)
+            kernel = tilelang.compile(
+                fn(*args, **kwargs), target=target, pass_configs={"tir.merge_static_smem": True})
+            profiler = kernel.get_profiler()
 
             return JITContext(
-                mod=mod,
                 out_idx=out_idx,
                 supply_type=supply_type,
                 ref_prog=ref_prog,
