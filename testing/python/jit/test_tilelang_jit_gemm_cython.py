@@ -7,9 +7,6 @@ import tilelang.testing
 import tilelang
 import torch
 from tilelang.utils.tensor import map_torch_type
-from tilelang.cache import clear_cache
-
-clear_cache()
 
 
 def matmul(
@@ -627,6 +624,4 @@ def test_matmul_float_variable():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    run_matmul_float_variable(1024, 1024, 1024, 128, 128, 32, False, False, "float16", "float16",
-                              "float32", 0, 128)
+    tilelang.testing.main()
