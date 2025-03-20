@@ -16,13 +16,20 @@ import logging
 
 from tilelang.env import TILELANG_CACHE_DIR
 
-ARTIFACT_PATH = "artifact.txt"
+KERNEL_PATH = "kernel.cu"
+WRAPPED_KERNEL_PATH = "warpped_kernel.cu"
+KERNEL_LIB_PATH = "kernel_lib.so"
 PARAMS_PATH = "params.pkl"
 
 
 class KernelCache:
     """
     Caches compiled kernels using a class and database persistence to avoid redundant compilation.
+    Cache files:
+        kernel.cu: The compiled kernel source code
+        warpped_kernel.cu: The compiled warpped kernel source code
+        kernel_lib.so: The compiled kernel library
+        params.pkl: The compiled kernel parameters
     """
     _instance = None  # For implementing singleton pattern
     _lock = threading.Lock()  # For thread safety
@@ -131,17 +138,34 @@ class KernelCache:
         cache_path = self._get_cache_path(key)
         os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists
 
-        # Save rt_mod as a str
+        # Save kernel source code
         try:
-            artifact_path = os.path.join(cache_path, ARTIFACT_PATH)
-            with open(artifact_path, "w") as f:
-                f.write(kernel.get_kernel_source())
+            kernel_path = os.path.join(cache_path, KERNEL_PATH)
+            with open(kernel_path, "w") as f:
+                f.write(kernel.artifact.kernel_source)
         except Exception as e:
-            self.logger.error(f"Error saving kernel module to disk: {e}")
+            self.logger.error(f"Error saving kernel source code to disk: {e}")
 
+        # Save wrapped kernel source code
         try:
-            dump_path = os.path.join(cache_path, PARAMS_PATH)
-            with open(dump_path, "wb") as f:
+            wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
+            with open(wrapped_kernel_path, "w") as f:
+                f.write(kernel.adapter.get_kernel_source())
+        except Exception as e:
+            self.logger.error(f"Error saving wrapped kernel source code to disk: {e}")
+
+        # Save kernel library
+        try:
+            kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
+            src_lib_path = kernel.adapter.libpath
+            shutil.copy(src_lib_path, kernel_lib_path)
+        except Exception as e:
+            self.logger.error(f"Error saving kernel library to disk: {e}")
+
+        # Save kernel parameters
+        try:
+            params_path = os.path.join(cache_path, PARAMS_PATH)
+            with open(params_path, "wb") as f:
                 cloudpickle.dump(kernel.params, f)
         except Exception as e:
             self.logger.error(f"Error saving kernel parameters to disk: {e}")
@@ -160,31 +184,43 @@ class KernelCache:
         cache_path = self._get_cache_path(key)
         if not os.path.exists(cache_path):
             return None
-        rt_module = None
-        rt_params = None
+
+        kernel_global_source: Optional[str] = None
+        kernel_params: Optional[List[KernelParam]] = None
+
         try:
-            artifact_path = os.path.join(cache_path, ARTIFACT_PATH)
-            with open(artifact_path, "r") as f:
-                rt_module = f.read()
+            wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
+            with open(wrapped_kernel_path, "r") as f:
+                kernel_global_source = f.read()
         except Exception as e:
-            self.logger.error(f"Error loading kernel module from disk: {e}")
+            self.logger.error(f"Error loading wrapped kernel source code from disk: {e}")
+
         try:
-            dump_path = os.path.join(cache_path, PARAMS_PATH)
-            with open(dump_path, "rb") as f:
-                rt_params = cloudpickle.load(f)
+            kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
+            if not os.path.exists(kernel_lib_path):
+                self.logger.error(f"Error loading kernel library from disk: {e}")
+        except Exception as e:
+            self.logger.error(f"Error loading kernel library from disk: {e}")
+
+        # Load kernel parameters
+        try:
+            params_path = os.path.join(cache_path, PARAMS_PATH)
+            with open(params_path, "rb") as f:
+                kernel_params = cloudpickle.load(f)
         except Exception as e:
             self.logger.error(f"Error loading kernel parameters from disk: {e}")
 
-        if rt_module and rt_params:
-            return JITKernel(
-                rt_module_src=rt_module,
-                rt_params=rt_params,
-                execution_backend=execution_backend,
+        if kernel_global_source and kernel_params:
+            return JITKernel.from_database(
+                func=func,
+                kernel_global_source=kernel_global_source,
+                kernel_lib_path=kernel_lib_path,
+                params=kernel_params,
                 target=target,
                 target_host=target_host,
                 out_idx=out_idx,
+                execution_backend=execution_backend,
                 pass_configs=pass_configs,
-                func=func,
             )
         else:
             return None

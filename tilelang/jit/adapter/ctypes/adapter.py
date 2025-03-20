@@ -110,13 +110,15 @@ class CtypesKernelAdapter(BaseKernelAdapter):
                       result_idx: List[int],
                       target: str,
                       func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-                      kernel_global_source: Optional[str] = None,
+                      kernel_global_source: str,
+                      kernel_lib_path: str,
                       verbose: bool = False,
                       pass_configs: Optional[Dict[str, Any]] = None):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
         adapter.kernel_global_source = kernel_global_source
+        adapter.wrapped_source = kernel_global_source
 
         if isinstance(func_or_mod, tir.PrimFunc):
             adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
@@ -141,16 +143,8 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
         adapter.target = Target.canon_target(determine_target(target))
         adapter.verbose = verbose
-        adapter.wrapper = TLWrapper(adapter.target)
         adapter.lib_generator = LibraryGenerator(adapter.target)
-
-        adapter.wrapper.assign_optimized_module(adapter.ir_module)
-        adapter.wrapper.assign_pass_configs(pass_configs)
-        adapter.wrapped_source = adapter.wrapper.wrap(adapter.get_kernel_source(kernel_only=True))
-
-        adapter.lib_generator.update_lib_code(adapter.wrapped_source)
-        adapter.lib_generator.compile_lib()
-        adapter.lib = adapter.lib_generator.load_lib()
+        adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
         adapter.lib.init()
 
         adapter._post_init()

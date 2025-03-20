@@ -7,7 +7,12 @@ import tilelang
 from tilelang import tvm as tvm
 from tvm.tir import PrimFunc
 
-from tilelang.jit.adapter import TorchDLPackKernelAdapter, BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter
+from tilelang.jit.adapter import (
+    TorchDLPackKernelAdapter,
+    BaseKernelAdapter,
+    CtypesKernelAdapter,
+    CythonKernelAdapter,
+)
 from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.engine.param import KernelParam, CompiledArtifact
@@ -26,6 +31,7 @@ class JITKernel(object):
     torch_function : Callable
         The compiled function that can be invoked as a PyTorch-compatible function.
     """
+
     artifact: CompiledArtifact = None
     adapter: BaseKernelAdapter = None
     torch_function: Callable = None
@@ -39,8 +45,7 @@ class JITKernel(object):
         target_host: Union[str, Target] = None,
         verbose: bool = False,
         pass_configs: Optional[Dict[str, Any]] = None,
-        rt_module_src: Optional[str] = None,
-        rt_params: dict = None,
+        from_database: bool = False,
     ):
         """
         Initializes a TorchFunction instance.
@@ -61,9 +66,11 @@ class JITKernel(object):
             Whether to enable verbose output (default: False).
         pass_configs : dict, optional
             Additional keyword arguments to pass to the Compiler PassContext.
-            Available options: 
+            Available options:
                 "tir.disable_vectorize": bool, default: False
                 "tl.disable_tma_lower": bool, default: False
+        from_database : bool, optional
+            Whether to create a TorchFunction from a database.
         """
         self.out_idx = out_idx
         self.execution_backend = execution_backend
@@ -75,42 +82,6 @@ class JITKernel(object):
             pass_configs = {}
         self.pass_configs = pass_configs
 
-        if rt_module_src and rt_params:
-            self.rt_mod = None
-            self.params = rt_params
-            adapter = None
-            # Create an adapter based on the specified execution backend.
-            if execution_backend == "dlpack":
-                # assert dlpack not supported
-                raise ValueError(f"Invalid execution backend: {execution_backend}")
-            elif execution_backend == "ctypes":
-                adapter = CtypesKernelAdapter.from_database(
-                    params=self.params,
-                    result_idx=out_idx,
-                    target=target,
-                    func_or_mod=func,
-                    kernel_global_source=rt_module_src,
-                    verbose=verbose,
-                    pass_configs=pass_configs,
-                )
-            elif execution_backend == "cython":
-                adapter = CythonKernelAdapter.from_database(
-                    rt_mod_src=rt_module_src,
-                    params=self.params,
-                    result_idx=out_idx,
-                    target=target,
-                    func_or_mod=func,
-                    verbose=verbose,
-                    pass_configs=pass_configs,
-                )
-            else:
-                # Handle invalid backend.
-                raise ValueError(f"Invalid execution backend: {execution_backend}")
-
-            self.adapter = adapter
-            self.torch_function = adapter.func
-            return
-
         # If the target is specified as a string, validate it and convert it to a TVM Target.
         if isinstance(target, str):
             assert target in AVALIABLE_TARGETS, f"Invalid target: {target}"
@@ -120,12 +91,20 @@ class JITKernel(object):
         target = Target(target)
 
         # Validate the execution backend.
-        assert execution_backend in ["dlpack", "ctypes",
-                                     "cython"], f"Invalid execution backend. {execution_backend}"
+        assert execution_backend in [
+            "dlpack",
+            "ctypes",
+            "cython",
+        ], f"Invalid execution backend. {execution_backend}"
         if execution_backend == "cython":
             from tilelang.contrib.cc import get_cplus_compiler
-            assert get_cplus_compiler(
-            ) is not None, "Cython backend requires a C++ compiler, please install or use other backends."
+
+            assert (
+                get_cplus_compiler() is not None
+            ), "Cython backend requires a C++ compiler, please install or use other backends."
+
+        if from_database:
+            return
 
         # Compile the TileLang function and create a kernel adapter for execution.
         adapter = self._compile_and_create_adapter(func)
@@ -133,6 +112,43 @@ class JITKernel(object):
         # The adapter's function is assigned as the callable function for this instance.
         self.adapter = adapter
         self.torch_function = adapter.func
+
+    @classmethod
+    def from_database(
+        cls,
+        func: PrimFunc,
+        kernel_global_source: str,
+        kernel_lib_path: str,
+        params: List[KernelParam],
+        target: Union[str, Target],
+        target_host: Union[str, Target],
+        out_idx: Union[List[int], int],
+        execution_backend: Literal["dlpack", "ctypes", "cython"],
+        pass_configs: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        Alternative constructor to create a TorchFunction directly from a database.
+        """
+        instance = cls(
+            func=func,
+            out_idx=out_idx,
+            execution_backend=execution_backend,
+            target=target,
+            target_host=target_host,
+            pass_configs=pass_configs,
+            from_database=True,
+        )
+
+        instance.adapter = instance._create_adapter_from_database(
+            func_or_mod=func,
+            params=params,
+            result_idx=out_idx,
+            target=target,
+            kernel_global_source=kernel_global_source,
+            kernel_lib_path=kernel_lib_path,
+        )
+        instance.torch_function = instance.adapter.func
+        return instance
 
     def __call__(self, *args: Any, **kwds: Any) -> Any:
         """
@@ -184,7 +200,7 @@ class JITKernel(object):
             # Use TorchDLPackKernelAdapter for interoperability with PyTorch via DLPack.
             # But we need to ensure that the runtime is enabled and the runtime module is not None.
             assert tvm.runtime.enabled("llvm"), "DLPack backend requires LLVM runtime."
-            assert artifact.rt_mod is not None, "DLPack backend requires a runtime module."
+            assert (artifact.rt_mod is not None), "DLPack backend requires a runtime module."
             adapter = TorchDLPackKernelAdapter(
                 artifact.rt_mod, params=artifact.params, result_idx=out_idx)
         elif execution_backend == "ctypes":
@@ -210,6 +226,48 @@ class JITKernel(object):
                 kernel_global_source=artifact.kernel_source,
                 verbose=verbose,
                 pass_configs=pass_configs,
+            )
+        else:
+            # Handle invalid backend.
+            raise ValueError(f"Invalid execution backend: {execution_backend}")
+
+        return adapter
+
+    def _create_adapter_from_database(
+        self,
+        params: List[KernelParam],
+        result_idx: Union[List[int], int],
+        target: Union[str, Target],
+        func_or_mod: Union[PrimFunc, tvm.runtime.Module],
+        kernel_global_source: str,
+        kernel_lib_path: str,
+    ) -> BaseKernelAdapter:
+        verbose = self.verbose
+        target = self.target
+        target_host = self.target_host
+        out_idx = self.out_idx
+        execution_backend = self.execution_backend
+
+        # Create an adapter based on the specified execution backend.
+        if execution_backend == "dlpack":
+            raise ValueError("DLPack backend is not supported for TileLang JIT.")
+        elif execution_backend == "ctypes":
+            adapter = CtypesKernelAdapter.from_database(
+                params=params,
+                result_idx=result_idx,
+                target=target,
+                func_or_mod=func_or_mod,
+                kernel_global_source=kernel_global_source,
+                kernel_lib_path=kernel_lib_path,
+            )
+        elif execution_backend == "cython":
+            adapter = CythonKernelAdapter.from_database(
+                params=params,
+                result_idx=result_idx,
+                target=target,
+                func_or_mod=func_or_mod,
+                kernel_global_source=kernel_global_source,
+                kernel_lib_path=kernel_lib_path,
             )
         else:
             # Handle invalid backend.
@@ -278,15 +336,15 @@ class JITKernel(object):
 
     @property
     def params(self) -> List[KernelParam]:
-        return self.artifact.params
+        return self.artifact.params if self.artifact else self.adapter.params
 
     @property
     def kernel_source(self) -> str:
-        return self.artifact.kernel_source
+        return self.artifact.kernel_source if self.artifact else self.adapter.kernel_global_source
 
     @property
     def host_source(self) -> str:
-        return str(self.artifact.host_mod)
+        return str(self.artifact.host_mod) if self.artifact else ""
 
     def export_library(self, kernel_file: str) -> None:
         """
