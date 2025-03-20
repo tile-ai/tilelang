@@ -229,6 +229,15 @@ def setup_llvm_for_tvm():
     return extract_path, llvm_config_path
 
 
+def patch_libs(libpath):
+    """
+    tvm and tilelang libs are copied from elsewhere into wheels
+    and have a hard-coded rpath.
+    Set rpath to the directory of libs so auditwheel works well.
+    """
+    subprocess.run(['patchelf', '--set-rpath', '$ORIGIN', libpath])
+
+
 class TileLangBuilPydCommand(build_py):
     """Customized setuptools install command - builds TVM after setting up LLVM."""
 
@@ -305,6 +314,7 @@ class TileLangBuilPydCommand(build_py):
                     break
 
             if source_lib_file:
+                patch_libs(source_lib_file)
                 target_dir_release = os.path.join(self.build_lib, PACKAGE_NAME, "lib")
                 target_dir_develop = os.path.join(PACKAGE_NAME, "lib")
                 os.makedirs(target_dir_release, exist_ok=True)
@@ -456,6 +466,7 @@ class TileLangDevelopCommand(develop):
             if not os.path.exists(target_dir):
                 os.makedirs(target_dir)
             if os.path.exists(source_lib_file):
+                patch_libs(source_lib_file)
                 shutil.copy2(source_lib_file, target_dir)
                 # remove the original file
                 os.remove(source_lib_file)

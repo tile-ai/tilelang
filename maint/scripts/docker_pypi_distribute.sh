@@ -16,6 +16,6 @@ install_cmake="wget https://github.com/Kitware/CMake/releases/download/v3.28.4/c
 
 install_pip="python3.8 -m pip install --upgrade pip && python3.8 -m pip install -r requirements-build.txt"
 
-tox_command="python3.8 -m tox -e py38-pypi,py39-pypi,py310-pypi,py311-pypi,py312-pypi"
+tox_command="python3.8 -m tox -e py38-pypi,py39-pypi,py310-pypi,py311-pypi,py312-pypi,audit_2_27"
 
 docker run --rm -v $(pwd):/tilelang ${IMAGE} /bin/bash -c "$apt_command && $install_python_env && $install_cmake && $install_pip && $tox_command"
