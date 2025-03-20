@@ -92,7 +92,6 @@ class Autotuner:
                 profiler.func,
                 n_warmup=self.warmup,
                 n_repeat=self.rep,
-                profiler="auto",
                 input_tensors=self.jit_input_tensors)
             if self.ref_latency_cache is None and ref_prog is not None:
                 self.ref_input_tensors = profiler._get_inputs(
