@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 # pylint: disable=missing-docstring, invalid-name
 """A GEMM schedule rule for GPU operators."""
 from dataclasses import dataclass

@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 from tvm import DataType
 from tvm.runtime import convert
 import tilelang.language as T

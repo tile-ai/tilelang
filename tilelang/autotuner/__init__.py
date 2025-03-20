@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 """The auto-tune module for tilelang programs."""
 
 import tilelang

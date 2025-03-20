@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 import tilelang
 import tilelang.testing
 from tilelang import language as T

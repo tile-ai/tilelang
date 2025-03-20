@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 """Policy for tensorcore schedule"""
 import tvm
 from typing import Dict, List, Tuple, Optional

@@ -1,8 +1,3 @@
-#!/bin/bash
-
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 multi_python_version=("3.8" "3.9" "3.10" "3.11" "3.12")
 for python_version in "${multi_python_version[@]}"; do
     echo "Installing Python ${python_version}..."

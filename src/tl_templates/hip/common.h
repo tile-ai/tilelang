@@ -1,5 +1,3 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
 #pragma once
 
 #include <ck_tile/core.hpp>

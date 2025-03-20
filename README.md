@@ -87,7 +87,7 @@ Or install locally:
 sudo apt-get update
 sudo apt-get install -y python3-setuptools gcc libtinfo-dev zlib1g-dev build-essential cmake libedit-dev libxml2-dev
 
-pip install .  # with -e option if you want to install in editable mode
+pip install -e . -v # remove -e option if you don't want to install in editable mode, -v for verbose output
 ```
 
 ### Method 2: Build from Source

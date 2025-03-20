@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 # ruff: noqa
 import torch
 from reference import naive_nsa_simple_inference

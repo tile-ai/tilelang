@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 import tilelang.language as T
 from typing import Literal, Callable
 from tvm import DataType

@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 from typing import Dict, List, Tuple, Set, Mapping
 from tvm.tir.schedule.schedule import BlockRV
 from tvm.ir import structural_equal

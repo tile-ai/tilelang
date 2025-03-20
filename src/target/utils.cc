@@ -1,6 +1,3 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
 /*!
  * \file tl/target/utils.cc
  * \brief helper functions for target attributes.

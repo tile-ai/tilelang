@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 from .arch_base import TileDevice
 from .cuda import CUDA
 from .cpu import CPU

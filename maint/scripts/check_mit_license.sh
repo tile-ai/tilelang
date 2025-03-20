@@ -1,8 +1,3 @@
-#!/bin/bash
-
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 echo "Check MIT License boilerplate..."
 PWD="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 # To source code root
@@ -19,7 +14,7 @@ for SRC_FILE in $(find . -path './3rdparty' -prune -false -o -path './build' -pr
         continue
     fi
 
-    if !(grep -q "Copyright (c) Microsoft Corporation." "${SRC_FILE}") || !(grep -q "Licensed under the MIT License." "${SRC_FILE}") \
+    if !(grep -q "Copyright (c) Tile-AI." "${SRC_FILE}") || !(grep -q "Licensed under the MIT License." "${SRC_FILE}") \
     || (grep -q -i -P "Microsoft( |)\(c\)" "${SRC_FILE}"); then
         echo "[ERROR] Require: MIT License boilerplate" "${SRC_FILE}"
         EXITCODE=1

@@ -1,11 +1,7 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 import argparse
 import torch
 import torch.nn.functional as F
 import tilelang
-from tilelang import Profiler
 from tilelang.autotuner import *
 import tilelang.language as T
 from einops import rearrange, repeat
@@ -181,14 +177,14 @@ if __name__ == "__main__":
         program = chunk_state_fwd(
             batch, seq_len, chunk_size, groups, heads, dim, dstate, tune=args.tune)(
                 block_M=64, block_N=128, block_K=64, num_stages=4, threads=128)
-        mod, params = tilelang.lower(program)
-        mod = Profiler(mod, params, [4], tilelang.TensorSupplyType.Normal)
-        mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+        kernel = tilelang.compile(program, out_idx=[4])
+        profiler = kernel.get_profiler(tilelang.TensorSupplyType.Normal)
+        profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")
-        latency = mod.do_bench(ref_program, warmup=500)
+        latency = profiler.do_bench(ref_program, warmup=500)
         print("Ref: {:.2f} ms".format(latency))
         print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-        latency = mod.do_bench(mod.func, warmup=500)
+        latency = profiler.do_bench(warmup=500)
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:

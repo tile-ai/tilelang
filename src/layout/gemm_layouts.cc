@@ -1,6 +1,3 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
 /*!
  * \file layout/gemm_layouts.cc
  * \brief Define Layout used in MMA and other operations.

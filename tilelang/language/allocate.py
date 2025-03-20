@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 """The language interface for tl programs."""
 
 from tvm.script import tir as T

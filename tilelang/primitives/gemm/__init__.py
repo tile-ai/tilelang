@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 from typing import Optional
 from tvm import tir
 from tilelang.utils import is_local, is_fragment, is_shared

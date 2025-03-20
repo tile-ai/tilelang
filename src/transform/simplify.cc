@@ -1,6 +1,3 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
 /*!
  * \file simplify.cc
  * \brief Remove useless parameters of TL PrimFunc.

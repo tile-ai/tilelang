@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 import tilelang
 import tilelang.language as T
 # `make_mma_swizzle_layout` is a python defined layout function

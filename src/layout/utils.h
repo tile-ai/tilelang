@@ -1,6 +1,3 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
 /*!
  * \file layout/utils.h
  * \brief Some arith tools for layout & fragment inference

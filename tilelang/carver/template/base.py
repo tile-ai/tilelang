@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 # Import necessary modules and classes
 from abc import ABC, abstractmethod  # For defining abstract base classes
 from dataclasses import dataclass, field  # For defining data classes

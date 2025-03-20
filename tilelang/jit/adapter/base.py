@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 """The profiler and convert to torch utils"""
 
 from abc import ABC, abstractmethod

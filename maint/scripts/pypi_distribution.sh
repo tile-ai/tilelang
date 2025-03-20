@@ -1,8 +1,3 @@
-#!/bin/bash
-
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 # if dist and build directories exist, remove them
 if [ -d dist ]; then
     rm -r dist

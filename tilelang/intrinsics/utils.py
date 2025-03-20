@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 from tvm import DataType
 from typing import Literal
 from .mma_layout import (

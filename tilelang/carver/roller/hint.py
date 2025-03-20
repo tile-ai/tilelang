@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 """Hint definition for schedule"""
 from tvm import DataType
 from typing import Dict, List, Tuple

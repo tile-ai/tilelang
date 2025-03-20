@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 """Wrapping Layouts."""
 # pylint: disable=invalid-name, unsupported-binary-operation
 

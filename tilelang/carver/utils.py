@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 from typing import List, Optional, Union
 from tvm import tir, IRModule
 from tvm.tir import PrimFunc

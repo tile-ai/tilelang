@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 from tilelang import tvm as tvm
 from tilelang.utils.target import determine_target
 import tilelang as tl

@@ -1,5 +1,3 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
 #pragma once
 
 #include <cute/arch/mma_sm80.hpp>

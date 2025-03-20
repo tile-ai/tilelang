@@ -1,6 +1,3 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
 #include "codegen_cpp.h"
 
 namespace tvm {

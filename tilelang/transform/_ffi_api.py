@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 """FFI APIs for tilelang"""
 
 import tvm._ffi

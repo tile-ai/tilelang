@@ -1,8 +1,3 @@
-#!/usr/bin/env bash
-
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 # Usage:
 #    # Do work and commit your work.
 

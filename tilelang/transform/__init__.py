@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 """Wrapping transformations."""
 # pylint: disable=invalid-name, unsupported-binary-operation
 

@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 from tilelang import tvm as tvm
 import tilelang.testing
 from tilelang import cached

@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 """PrimFunc Wrapper and Block information Analaysis"""
 
 import tvm

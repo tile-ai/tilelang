@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 import tilelang.testing
 from tilelang import carver
 from tilelang.carver.roller import PrimFuncNode, OutputNode, Edge

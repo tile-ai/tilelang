@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 # Import necessary modules
 from dataclasses import dataclass  # Used for defining data classes
 from .base import BaseTemplate  # Importing the base class for templates

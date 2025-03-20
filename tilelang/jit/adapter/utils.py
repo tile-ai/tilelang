@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 import re
 from typing import Union, Optional, Literal
 from tilelang import tvm as tvm

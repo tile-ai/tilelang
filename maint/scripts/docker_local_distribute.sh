@@ -1,8 +1,3 @@
-#!/bin/bash
-
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 # Get the CUDA version from the command line
 IMAGE=nvidia/cuda:12.1.0-devel-ubuntu18.04
 

@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 from dataclasses import dataclass
 from .base import BaseTemplate
 from tvm import te

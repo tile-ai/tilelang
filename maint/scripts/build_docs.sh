@@ -1,8 +1,3 @@
-#!/bin/bash
-
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 cd docs
 
 pip install -r requirements.txt

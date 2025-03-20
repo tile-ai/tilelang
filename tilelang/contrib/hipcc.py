@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 # pylint: disable=invalid-name
 """Utility to invoke hipcc compiler in the system"""
 # File is copied from a modified version of hipcc.py to support

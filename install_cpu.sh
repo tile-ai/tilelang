@@ -1,8 +1,3 @@
-#!/bin/bash
-
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 echo "Starting installation script..."
 
 # Step 1: Install Python requirements

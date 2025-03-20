@@ -156,13 +156,14 @@ class CythonKernelAdapter(BaseKernelAdapter):
                  result_idx: List[int],
                  target: Union[str, Target],
                  func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-                 kernel_global_source: str,
+                 host_mod: Optional[tvm.IRModule] = None,
+                 device_mod: Optional[tvm.IRModule] = None,
+                 kernel_global_source: Optional[str] = None,
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None):
         """Initialize the adapter with the given TIR function or module.
         
         Args:
-            rt_mod: Runtime module
             params: List of tensor types for inputs/outputs
             result_idx: Indices of output tensors
             target: Target platform (e.g., 'cuda')
@@ -191,6 +192,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
         self.wrapper.assign_optimized_module(self.ir_module)
         self.wrapper.assign_pass_configs(pass_configs)
+        self.wrapper.assign_host_module(host_mod)
+        self.wrapper.assign_device_module(device_mod)
         self.wrapped_source = self.wrapper.wrap(self.get_kernel_source(kernel_only=True))
 
         self.lib_generator.update_lib_code(self.wrapped_source)
@@ -212,17 +215,19 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
     @classmethod
     def from_database(cls,
-                      rt_mod_src: str,
                       params: List[TensorType],
                       result_idx: List[int],
-                      target,
+                      target: str,
                       func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+                      kernel_global_source: str,
+                      kernel_lib_path: str,
                       verbose: bool = False,
                       pass_configs: Optional[Dict[str, Any]] = None):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
-        adapter.kernel_global_source = rt_mod_src
+        adapter.kernel_global_source = kernel_global_source
+        adapter.wrapped_source = kernel_global_source
 
         if isinstance(func_or_mod, tir.PrimFunc):
             adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
@@ -238,16 +243,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.buffer_device_map = adapter._process_buffer_device()
 
         adapter.verbose = verbose
-        adapter.wrapper = TLWrapper(adapter.target)
         adapter.lib_generator = LibraryGenerator(adapter.target)
-
-        adapter.wrapper.assign_optimized_module(adapter.ir_module)
-        adapter.wrapper.assign_pass_configs(pass_configs)
-        adapter.wrapped_source = adapter.wrapper.wrap(adapter.get_kernel_source(kernel_only=True))
-
-        adapter.lib_generator.update_lib_code(adapter.wrapped_source)
-        adapter.lib_generator.compile_lib()
-        adapter.lib = adapter.lib_generator.load_lib()
+        adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
 
         try:
             adapter.lib.init()

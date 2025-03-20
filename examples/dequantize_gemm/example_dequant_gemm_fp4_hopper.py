@@ -1,16 +1,10 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 import tilelang
-from tilelang import Profiler
 import tilelang.language as T
 from tilelang.autotuner import *
-from tilelang import tvm
 from tvm import tir
 import itertools
 import torch
 import argparse
-from functools import partial
 
 
 def _tir_u8_to_f4_to_f16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, dtype: str):
@@ -103,11 +97,10 @@ def test_fp4_fp16_convert_close():
         "float16",
     )
 
-    mod, params = tilelang.lower(program)
-    mod = Profiler(mod, params, [1], tilelang.TensorSupplyType.Integer)
+    kernel = tilelang.compile(program, out_idx=[1])
 
     B = torch.randint(0, 16, (N, K // 2), dtype=torch.uint8, device="cuda").to(torch.uint8)
-    tl_out = mod.func(B)
+    tl_out = kernel(B)
     ref_out = torch_convert(B)
     assert torch.allclose(tl_out, ref_out, rtol=0.01, atol=0.01), (tl_out, ref_out)
     print("Pass")
@@ -291,14 +284,14 @@ if __name__ == "__main__":
         program = matmul(
             M, N, K, "float16", "float16", "float32", num_bits=4, tune=args.tune)(
                 block_M=128, block_N=128, block_K=128, num_stages=2, threads=256, split=1)
-        mod, params = tilelang.lower(program)
-        mod = Profiler(mod, params, [2], tilelang.TensorSupplyType.Integer)
-        mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+        kernel = tilelang.compile(program, out_idx=[2])
+        profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
+        profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")
-        latency = mod.do_bench(ref_program, warmup=500)
+        latency = profiler.do_bench(ref_program, warmup=500)
         print("Ref: {:.2f} ms".format(latency))
         print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-        latency = mod.do_bench(mod.func, warmup=500)
+        latency = profiler.do_bench(warmup=500)
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:

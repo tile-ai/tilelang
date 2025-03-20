@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 from dataclasses import dataclass
 from tvm import tir
 import tilelang.language as T

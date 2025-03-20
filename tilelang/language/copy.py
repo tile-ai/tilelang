@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 """The language interface for tl programs."""
 
 from typing import Union, List, Optional

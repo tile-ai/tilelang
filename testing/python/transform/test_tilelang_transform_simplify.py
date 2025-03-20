@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
@@ -88,7 +85,7 @@ def test_matmul():
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
 
     # Get CUDA Source
-    # print(rt_mod.imported_modules[0].get_source())
+    print(kernel.get_kernel_source())
 
 
 if __name__ == "__main__":

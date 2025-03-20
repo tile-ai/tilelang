@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 """Rasteration Plan For L2 Cache Locality"""
 
 from typing import List

@@ -1,5 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
 """Analysis on TIR blocks, loops and functions."""
 from typing import List, Optional, Set, Union
 from typing_extensions import Literal

@@ -1,6 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 from tvm.tir import Buffer
 from typing import List
 from functools import reduce
