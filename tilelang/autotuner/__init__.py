@@ -6,7 +6,7 @@ import tilelang
 from tilelang import tvm as tvm
 import inspect
 from functools import wraps
-from typing import Any, Callable, List, Literal, Dict
+from typing import Any, Callable, List, Literal
 from tqdm import tqdm
 import logging
 from dataclasses import dataclass
@@ -117,10 +117,7 @@ class Autotuner:
             new_args = tuple(new_args)
             config_args.append(new_args)
 
-        worker = partial(
-            self.jit_compile,
-            **kwds
-        )
+        worker = partial(self.jit_compile, **kwds)
 
         # 90% utilization
         num_workers = max(1, int(os.cpu_count() * 0.9))
