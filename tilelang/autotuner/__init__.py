@@ -151,8 +151,6 @@ class Autotuner:
                 logger.debug(f"Compilation failed for config {config} at index {idx}")
                 continue
 
-        # jit_context = self.jit_compile(config_args[0])
-        # latency, ref_latency = target_fn(jit_context)
         ref_latency = None        
         progress_bar = tqdm(range(len(results_with_configs)), desc="Bench configurations")
         for i in progress_bar:

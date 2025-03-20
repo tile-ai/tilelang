@@ -12,8 +12,7 @@ from tilelang.carver.roller.rasterization import NoRasterization
 
 def ref_program(A, B, C):
     C += A @ B.T
-    return None
-
+    
 def get_configs(M, N, K, with_roller=False):
     if with_roller:
         arch = CUDA("cuda")
@@ -92,7 +91,7 @@ def get_best_config(M, N, K, with_roller=False):
         rep=20,
     )
     @jit(
-        out_idx=[2],
+        out_idx=[-1],
         supply_type=tl.TensorSupplyType.Integer,
         ref_prog=ref_program,
         skip_check=False,
