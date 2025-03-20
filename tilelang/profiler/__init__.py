@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 """The profiler and convert to torch utils"""
 
-from typing import List, Literal, Optional, Callable, Any
+from typing import List, Optional, Callable, Any
 from functools import partial
 import torch
 from contextlib import suppress
