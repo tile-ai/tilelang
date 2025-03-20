@@ -242,10 +242,7 @@ class JITKernel(object):
         kernel_global_source: str,
         kernel_lib_path: str,
     ) -> BaseKernelAdapter:
-        verbose = self.verbose
         target = self.target
-        target_host = self.target_host
-        out_idx = self.out_idx
         execution_backend = self.execution_backend
 
         # Create an adapter based on the specified execution backend.

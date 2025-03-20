@@ -6,10 +6,11 @@ import os
 import json
 import shutil
 from hashlib import sha256
-from typing import Callable, List, Literal, Union
+from typing import Callable, List, Literal, Union, Optional
 from tvm.target import Target
 from tvm.tir import PrimFunc
 from tilelang.jit import JITKernel
+from tilelang.engine.param import KernelParam
 import threading
 import cloudpickle
 import logging
@@ -27,7 +28,7 @@ class KernelCache:
     Caches compiled kernels using a class and database persistence to avoid redundant compilation.
     Cache files:
         kernel.cu: The compiled kernel source code
-        warpped_kernel.cu: The compiled warpped kernel source code
+        warpped_kernel.cu: The compiled wrapped kernel source code
         kernel_lib.so: The compiled kernel library
         params.pkl: The compiled kernel parameters
     """
@@ -195,12 +196,7 @@ class KernelCache:
         except Exception as e:
             self.logger.error(f"Error loading wrapped kernel source code from disk: {e}")
 
-        try:
-            kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
-            if not os.path.exists(kernel_lib_path):
-                self.logger.error(f"Error loading kernel library from disk: {e}")
-        except Exception as e:
-            self.logger.error(f"Error loading kernel library from disk: {e}")
+        kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
 
         # Load kernel parameters
         try:
