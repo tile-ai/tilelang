@@ -5,7 +5,6 @@ import torch
 import itertools
 import tilelang as tl
 import tilelang.language as T
-from tilelang.autotuner import autotune, jit
 from tilelang.carver.template import MatmulTemplate
 from tilelang.carver.arch import CUDA
 from tilelang.carver.roller.rasterization import NoRasterization
@@ -80,7 +79,6 @@ def get_configs(M, N, K, with_roller=False):
 
 
 def get_best_config(M, N, K, with_roller=False):
-
     @autotune(
         configs=get_configs(M, N, K, with_roller),
         keys=[
@@ -140,7 +138,6 @@ def get_best_config(M, N, K, with_roller=False):
                 T.copy(C_shared, C[by * block_M, bx * block_N])
 
         return main
-
     return kernel()
 
 

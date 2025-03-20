@@ -219,7 +219,7 @@ private:
 
   Stmt expect_tx_;
   bool contain_tma_load_;
-  bool insert_in_evaluate_;
+  bool insert_in_evaluate_ = true;
 };
 
 class ProducerTraitsCollector : public StmtExprVisitor {
