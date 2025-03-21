@@ -246,8 +246,7 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
         @jit(
             out_idx=[2],
             supply_type=tilelang.TensorSupplyType.Integer,
-            ref_prog=None,
-            profiler="auto")
+            ref_prog=None)
         def kernel(block_M=None,
                    block_N=None,
                    block_K=None,

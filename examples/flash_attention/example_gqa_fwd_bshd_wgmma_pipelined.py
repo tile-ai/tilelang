@@ -167,8 +167,7 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False, groups=1):
         @jit(
             out_idx=[3],
             supply_type=tilelang.TensorSupplyType.Integer,
-            ref_prog=None,
-            profiler="auto")
+            ref_prog=None)
         def kernel(block_M=None, block_N=None, num_stages=None, threads=None):
             return kernel_func(block_M, block_N, num_stages, threads)
 

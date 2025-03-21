@@ -206,8 +206,7 @@ def chunk_scan_fwd(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate, 
         @jit(
             out_idx=[7],
             supply_type=tilelang.TensorSupplyType.Normal,
-            ref_prog=None,
-            profiler="auto")
+            ref_prog=None)
         def kernel(block_M=None,
                    block_N=None,
                    block_K=None,

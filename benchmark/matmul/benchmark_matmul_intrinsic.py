@@ -162,7 +162,7 @@ def tl_matmul(
     return main
 
 
-def ref_program(A, B):
+def ref_program(A, B, C):
     """Reference matrix multiplication program."""
     return torch.matmul(A, B.T)
 
@@ -274,7 +274,6 @@ def matmul(M,
         supply_type=tl.TensorSupplyType.Integer,
         ref_prog=ref_program,
         skip_check=True,
-        profiler="auto",
         target="auto",
     )
     def kernel(

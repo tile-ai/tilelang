@@ -101,8 +101,7 @@ def convolution(N, C, H, W, F, K, S, D, P, tune=False):
         @jit(
             out_idx=[2],
             supply_type=tilelang.TensorSupplyType.Integer,
-            ref_prog=None,
-            profiler="auto")
+            ref_prog=None)
         def kernel(block_M=None, block_N=None, block_K=None, num_stages=None, threads=None):
             return kernel_func(block_M, block_N, block_K, num_stages, threads)
 

@@ -160,6 +160,7 @@ class Autotuner:
                 continue
             except Exception as e:
                 logger.debug(f"An error occurred while testing config {config}: {e}")
+                print(e)
                 continue
 
             logging.debug(f"Config {config} latency: {latency} at index {i}")
