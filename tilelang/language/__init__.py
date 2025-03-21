@@ -37,6 +37,7 @@ from .customize import (
 )
 from .builtin import *  # noqa: F401
 
+from .memscope import *  # noqa: F401
 
 def symbolic(name: str, dtype: str = "int32"):
     return tir.Var(name, dtype)

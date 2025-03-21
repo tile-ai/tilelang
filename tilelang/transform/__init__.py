@@ -258,3 +258,18 @@ def InjectPTXAsyncCopy():
         The result pass
     """
     return _ffi_api.InjectPTXAsyncCopy()  # type: ignore
+
+
+def LowerDeviceStorageAccessInfo():
+    """Lower attached storage access information on device.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+
+    Note
+    ----
+    Run this pass after all storage access analysis finish.
+    """
+    return _ffi_api.LowerDeviceStorageAccessInfo()  # type: ignore
