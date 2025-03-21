@@ -74,7 +74,7 @@ if $USE_LLVM; then
 
     # Step 6: Download LLVM
     echo "Downloading $FILE_NAME from $DOWNLOAD_URL..."
-    # curl -L -o "${EXTRACT_PATH}/${FILE_NAME}" "$DOWNLOAD_URL"
+    curl -L -o "${EXTRACT_PATH}/${FILE_NAME}" "$DOWNLOAD_URL"
     if [ $? -ne 0 ]; then
         echo "Error: Download failed!"
         exit 1
@@ -83,14 +83,14 @@ if $USE_LLVM; then
     fi
 
     # Step 7: Extract LLVM
-    # echo "Extracting $FILE_NAME to $EXTRACT_PATH..."
-    # tar -xJf "${EXTRACT_PATH}/${FILE_NAME}" -C "$EXTRACT_PATH"
-    # if [ $? -ne 0 ]; then
-    #     echo "Error: Extraction failed!"
-    #     exit 1
-    # else
-    #     echo "Extraction completed successfully."
-    # fi
+    echo "Extracting $FILE_NAME to $EXTRACT_PATH..."
+    tar -xJf "${EXTRACT_PATH}/${FILE_NAME}" -C "$EXTRACT_PATH"
+    if [ $? -ne 0 ]; then
+        echo "Error: Extraction failed!"
+        exit 1
+    else
+        echo "Extraction completed successfully."
+    fi
 
     # Step 8: Determine LLVM config path
     LLVM_CONFIG_PATH="$(realpath ${EXTRACT_PATH}/$(basename ${FILE_NAME} .tar.xz)/bin/llvm-config)"
