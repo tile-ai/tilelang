@@ -13,6 +13,7 @@ from .allocate import (
     alloc_local,  # noqa: F401
     alloc_shared,  # noqa: F401
     alloc_fragment,  # noqa: F401
+    alloc_var,  # noqa: F401
 )
 from .copy import copy, c2d_im2col  # noqa: F401
 from .gemm import GemmWarpPolicy, gemm  # noqa: F401
@@ -34,6 +35,8 @@ from .customize import (
     view,  # noqa: F401
 )
 from .builtin import *  # noqa: F401
+
+from .memscope import *  # noqa: F401
 
 
 def symbolic(name: str, dtype: str = "int32"):
