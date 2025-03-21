@@ -4,7 +4,7 @@
 import tilelang.testing
 
 
-def alloc_variable(
+def alloc_var(
     N,
     block_N,
     dtype,
@@ -18,7 +18,7 @@ def alloc_variable(
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             A_shared = T.alloc_shared([block_N], dtype)
-            tmp = T.alloc_variable(dtype)
+            tmp = T.alloc_var(dtype)
             tmp = 1  # noqa: F841
             T.copy(A[bx * block_N], A_shared)
             T.copy(A_shared, B[bx * block_N])
@@ -26,25 +26,25 @@ def alloc_variable(
     return main
 
 
-def run_alloc_variable(
+def run_alloc_var(
     N,
     block_N,
     dtype,
     min=None,
     max=None,
 ):
-    program = alloc_variable(N, block_N, dtype)
+    program = alloc_var(N, block_N, dtype)
 
     kernel = tilelang.compile(program, out_idx=[1])
     code = kernel.get_kernel_source()
     assert "tmp =" in code
 
 
-def test_alloc_variable():
-    run_alloc_variable(1024, 128, "float16")
+def test_alloc_var():
+    run_alloc_var(1024, 128, "float16")
 
 
-def alloc_variable_add(
+def alloc_var_add(
     N,
     block_N,
     dtype,
@@ -58,7 +58,7 @@ def alloc_variable_add(
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             A_shared = T.alloc_shared([block_N], dtype)
-            tmp = T.alloc_variable(dtype)
+            tmp = T.alloc_var(dtype)
             tmp = 1  # noqa: F841
             T.copy(A[bx * block_N], A_shared)
             for i in T.Parallel(block_N):
@@ -68,20 +68,20 @@ def alloc_variable_add(
     return main
 
 
-def run_alloc_variable_add(
+def run_alloc_var_add(
     N,
     block_N,
     dtype,
 ):
-    program = alloc_variable_add(N, block_N, dtype)
+    program = alloc_var_add(N, block_N, dtype)
 
     kernel = tilelang.compile(program, out_idx=[1])
     code = kernel.get_kernel_source()
     assert "tmp =" in code
 
 
-def test_alloc_variable_add():
-    run_alloc_variable_add(1024, 128, "float16")
+def test_alloc_var_add():
+    run_alloc_var_add(1024, 128, "float16")
 
 
 if __name__ == "__main__":
