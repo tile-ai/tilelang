@@ -1,6 +1,6 @@
 """The profiler and convert to torch utils"""
 
-from typing import List, Literal, Optional, Callable, Any
+from typing import List, Optional, Callable, Any
 from functools import partial
 import torch
 from contextlib import suppress
@@ -91,7 +91,9 @@ class Profiler:
             lib_outs = [lib_outs]
         if isinstance(ref_outs, torch.Tensor):
             ref_outs = [ref_outs]
-        assert len(lib_outs) == len(ref_outs)
+        elif ref_outs is None:
+            ref_outs = []
+        assert len(lib_outs) == len(ref_outs), "len(lib_outs) not equals to len(ref_outs) !"
         # torch.set_printoptions(edgeitems=torch.inf)
         for lhs, rhs in zip(lib_outs, ref_outs):
             # close_mask = torch.isclose(lhs, rhs, rtol=rtol, atol=atol)
@@ -133,9 +135,7 @@ class Profiler:
             func = self.__call__
         return func(*ins)
 
-    def determine_profiler(self,
-                           func: Optional[Callable] = None,
-                           profiler: Literal["torch", "tvm", "auto"] = "auto"):
+    def determine_profiler(self, func: Optional[Callable] = None):
         """Determines which profiler backend to use based on function type.
         
         Args:
@@ -145,12 +145,10 @@ class Profiler:
         Returns:
             str: The determined profiler type ("torch" or "tvm")
         """
-        if profiler == "auto":
-            if isinstance(func, tvm.runtime.Module):
-                return "tvm"
-            else:
-                return "torch"
-        return profiler
+        if isinstance(func, tvm.runtime.Module):
+            return "tvm"
+        else:
+            return "torch"
 
     def do_bench(
         self,
@@ -159,7 +157,6 @@ class Profiler:
         rep: int = 100,
         n_warmup: int = 1,
         n_repeat: int = 1,
-        profiler: Literal["torch", "tvm", "auto"] = "auto",
         input_tensors: List[torch.Tensor] = None,
     ) -> float:
         """Benchmarks the execution time of a given function.
@@ -176,7 +173,7 @@ class Profiler:
         Returns:
             float: Average execution time in milliseconds
         """
-        profiler = self.determine_profiler(func, profiler)
+        profiler = self.determine_profiler(func)
         if profiler == "torch":
             if func is None:
                 assert self.adapter is not None, "benchmarking function should be provided"

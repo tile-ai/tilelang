@@ -169,7 +169,6 @@ def matmul(M, N, K, with_roller):
         supply_type=tl.TensorSupplyType.Integer,
         ref_prog=ref_program,
         skip_check=True,
-        profiler="auto",
         target="auto",
     )
     def kernel(
