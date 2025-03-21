@@ -18,8 +18,8 @@
 
 #include "../op/builtin.h"
 #include "../op/bulk_copy.h"
-#include "target/source/ptx.h"
 #include "arith/pattern_match.h"
+#include "target/source/ptx.h"
 
 namespace tvm {
 namespace codegen {
@@ -1283,7 +1283,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
 
 void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
   ICHECK(!is_zero(op->condition));
-  std::string vid = AllocVarID(op->buffer_var.get());  
+  std::string vid = AllocVarID(op->buffer_var.get());
   this->PrintIndent();
   std::string scope = GetPtrStorageScope(op->buffer_var);
   const VarNode *buffer = op->buffer_var.as<VarNode>();
@@ -1326,8 +1326,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
     } else if (scope == "local") {
       stream << ' ' << vid << '[' << constant_size << "];\n";
     } else if (scope == "local.var") {
-      stream << ' ' << vid << " = "
-             << PrintExpr(tir::make_const(op->dtype, 0)) << ";\n";
+      stream << ' ' << vid << " = " << PrintExpr(tir::make_const(op->dtype, 0))
+             << ";\n";
     } else {
       ICHECK(false) << "Unsupported scope: " << scope;
     }

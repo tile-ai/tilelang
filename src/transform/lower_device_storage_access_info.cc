@@ -40,12 +40,13 @@ using runtime::StorageRank;
 using runtime::StorageScope;
 
 class StorageAccessInfoLower : public StmtExprMutator {
- public:
-  Stmt VisitStmt_(const AllocateNode* op) final {
+public:
+  Stmt VisitStmt_(const AllocateNode *op) final {
     auto scope = StorageScope::Create(GetPtrStorageScope(op->buffer_var));
     if (scope.tag.length() != 0 && scope.tag != ".dyn" && scope.tag != ".var") {
       auto info = GetMemoryInfo(GetPtrStorageScope(op->buffer_var));
-      ICHECK(info.defined()) << "Cannot find memory info of " << scope.to_string();
+      ICHECK(info.defined())
+          << "Cannot find memory info of " << scope.to_string();
       ICHECK(storage_info_.find(op->buffer_var.get()) == storage_info_.end())
           << "Double allocation of " << scope.to_string();
       storage_info_[op->buffer_var.get()] = info;
@@ -63,7 +64,7 @@ class StorageAccessInfoLower : public StmtExprMutator {
     }
   }
 
-  Stmt VisitStmt_(const DeclBufferNode* op) final {
+  Stmt VisitStmt_(const DeclBufferNode *op) final {
     auto node = Downcast<DeclBuffer>(StmtExprMutator::VisitStmt_(op));
     if (auto it = storage_info_.find(node->buffer->data.get());
         it != storage_info_.end() && !it->second->head_address.defined()) {
@@ -73,7 +74,7 @@ class StorageAccessInfoLower : public StmtExprMutator {
     }
   }
 
-  PrimExpr VisitExpr_(const CallNode* op) final {
+  PrimExpr VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(builtin::tvm_access_ptr())) {
       return MakeAccessPtr(op);
     } else {
@@ -81,61 +82,68 @@ class StorageAccessInfoLower : public StmtExprMutator {
     }
   }
 
- private:
+private:
   // tvm_access_ptr
-  PrimExpr MakeAccessPtr(const CallNode* op) {
+  PrimExpr MakeAccessPtr(const CallNode *op) {
     // Specially handle the buffer packed intrinsic
     PrimExpr expr = StmtExprMutator::VisitExpr_(op);
     op = expr.as<CallNode>();
     ICHECK_EQ(op->args.size(), 5U);
     DataType dtype = op->args[0].dtype();
-    const VarNode* buffer = op->args[1].as<VarNode>();
+    const VarNode *buffer = op->args[1].as<VarNode>();
     Var buffer_var = Downcast<Var>(op->args[1]);
     PrimExpr offset = op->args[2];
     auto it = storage_info_.find(buffer);
     if (it != storage_info_.end() && it->second.defined()) {
-      return MakeTaggedAccessPtr(op->dtype, buffer_var, dtype, offset, it->second);
+      return MakeTaggedAccessPtr(op->dtype, buffer_var, dtype, offset,
+                                 it->second);
     }
     ICHECK(op->dtype.is_handle());
     // Change to address_of
     return AddressOffset(buffer_var, dtype, offset);
   }
 
-  PrimExpr MakeTaggedAccessPtr(DataType ptr_type, Var buffer_var, DataType dtype, PrimExpr offset,
-                               const MemoryInfo& info) {
+  PrimExpr MakeTaggedAccessPtr(DataType ptr_type, Var buffer_var,
+                               DataType dtype, PrimExpr offset,
+                               const MemoryInfo &info) {
     if (ptr_type.is_handle()) {
-      ICHECK(info->head_address.defined()) << buffer_var << " is not adddressable.";
+      ICHECK(info->head_address.defined())
+          << buffer_var << " is not adddressable.";
       return AddressOffset(buffer_var, dtype, offset);
     }
     int dtype_bits = dtype.bits() * dtype.lanes();
     ICHECK_EQ(info->unit_bits % dtype_bits, 0);
-    return cast(ptr_type, analyzer_.Simplify(
-                              offset / make_const(offset.dtype(), info->unit_bits / dtype_bits)));
+    return cast(
+        ptr_type,
+        analyzer_.Simplify(
+            offset / make_const(offset.dtype(), info->unit_bits / dtype_bits)));
   }
   // The storage scope of each buffer
-  std::unordered_map<const VarNode*, MemoryInfo> storage_info_;
+  std::unordered_map<const VarNode *, MemoryInfo> storage_info_;
   // analyzer
   arith::Analyzer analyzer_;
 };
 
-Stmt LowerStorageAccessInfo(Stmt stmt) { return StorageAccessInfoLower()(std::move(stmt)); }
+Stmt LowerStorageAccessInfo(Stmt stmt) {
+  return StorageAccessInfoLower()(std::move(stmt));
+}
 
 namespace transform {
 using namespace tir::transform;
 
 Pass LowerDeviceStorageAccessInfo() {
-  auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx)
-  {
+  auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) {
     auto *n = f.CopyOnWrite();
     n->body = StorageAccessInfoLower()(std::move(n->body));
     return f;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LowerDeviceStorageAccessInfo", {});
+  return CreatePrimFuncPass(pass_func, 0, "tl.LowerDeviceStorageAccessInfo",
+                            {});
 }
 
 TVM_REGISTER_GLOBAL("tl.transform.LowerDeviceStorageAccessInfo")
     .set_body_typed(LowerDeviceStorageAccessInfo);
 
-}  // namespace transform
-}  // namespace tl
-}  // namespace tvm
+} // namespace transform
+} // namespace tl
+} // namespace tvm

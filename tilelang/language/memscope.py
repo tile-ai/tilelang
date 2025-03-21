@@ -3,7 +3,7 @@
 
 from tvm._ffi.registry import register_func
 from tvm.ir import make_node
-import tvm
+
 
 @register_func("tvm.info.mem.local.var")
 def mem_info_local_var():
