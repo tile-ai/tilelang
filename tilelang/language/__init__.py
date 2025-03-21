@@ -15,6 +15,7 @@ from .allocate import (
     alloc_local,  # noqa: F401
     alloc_shared,  # noqa: F401
     alloc_fragment,  # noqa: F401
+    alloc_variable,  # noqa: F401
 )
 from .copy import copy, c2d_im2col  # noqa: F401
 from .gemm import GemmWarpPolicy, gemm  # noqa: F401
