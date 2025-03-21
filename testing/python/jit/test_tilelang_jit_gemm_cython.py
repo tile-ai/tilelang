@@ -273,7 +273,7 @@ def run_cython_kernel_do_bench(M,
     cython_profiler = cython_matmul_kernel.get_profiler()
     ctypes_profiler = ctypes_matmul_kernel.get_profiler()
 
-    cython_latency = cython_profiler.do_bench(func=cython_matmul_kernel, profiler="torch")
+    cython_latency = cython_profiler.do_bench(func=cython_matmul_kernel)
     print(f"cython Latency: {cython_latency} ms")
 
     # assert ctypes_latency is not None
@@ -283,7 +283,7 @@ def run_cython_kernel_do_bench(M,
 
     assert tvm_latency is not None
 
-    ctypes_latency = ctypes_profiler.do_bench(func=ctypes_matmul_kernel, profiler="torch")
+    ctypes_latency = ctypes_profiler.do_bench(func=ctypes_matmul_kernel)
     print(f"ctypes Latency: {ctypes_latency} ms")
 
     assert cython_latency is not None

@@ -271,7 +271,7 @@ def run_ctypes_kernel_do_bench(M,
 
     profiler = matmul_kernel.get_profiler()
 
-    ctypes_latency = profiler.do_bench(func=matmul_kernel, profiler="torch")
+    ctypes_latency = profiler.do_bench(func=matmul_kernel)
     print(f"Ctypes Latency: {ctypes_latency} ms")
 
     assert ctypes_latency is not None
