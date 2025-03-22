@@ -180,8 +180,6 @@ def matmul(M,
 
     return main
 
-    return kernel()
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")

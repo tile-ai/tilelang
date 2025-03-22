@@ -1,6 +1,7 @@
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang
+from tilelang.engine.callback import register_cuda_postproc_callback
 import torch
 
 
@@ -85,7 +86,7 @@ def run_gemm(
 
     stramp = "&*(XS)"
 
-    @tvm.register_func("tilelang_callback_cuda_postproc", override=True)
+    @register_cuda_postproc_callback
     def tilelang_callback_cuda_postproc(code, _):
         code = f"// {stramp}\n" + code
         return code
@@ -233,5 +234,4 @@ def test_gemm_jit_kernel():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_gemm_jit_kernel()
+    tilelang.testing.main()
