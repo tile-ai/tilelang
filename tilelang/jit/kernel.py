@@ -72,7 +72,6 @@ class JITKernel(object):
         from_database : bool, optional
             Whether to create a TorchFunction from a database.
         """
-        self.out_idx = out_idx
         self.execution_backend = execution_backend
         self.target = target
         self.target_host = target_host
@@ -107,7 +106,7 @@ class JITKernel(object):
             return
 
         # Compile the TileLang function and create a kernel adapter for execution.
-        adapter = self._compile_and_create_adapter(func)
+        adapter = self._compile_and_create_adapter(func, out_idx)
 
         # The adapter's function is assigned as the callable function for this instance.
         self.adapter = adapter
@@ -168,7 +167,8 @@ class JITKernel(object):
         """
         return self.torch_function(*args, **kwds)
 
-    def _compile_and_create_adapter(self, tilelang_func: PrimFunc) -> BaseKernelAdapter:
+    def _compile_and_create_adapter(self, tilelang_func: PrimFunc,
+                                    out_idx: List[int]) -> BaseKernelAdapter:
         """
         Compiles the given TileLang PrimFunc using TVM and creates a kernel adapter.
 
@@ -185,7 +185,7 @@ class JITKernel(object):
         verbose = self.verbose
         target = self.target
         target_host = self.target_host
-        out_idx = self.out_idx
+
         execution_backend = self.execution_backend
         pass_configs = self.pass_configs
 
@@ -337,6 +337,10 @@ class JITKernel(object):
 
     def run_once(self, func: Optional[Callable] = None) -> None:
         return self.get_profiler().run_once(func)
+
+    @property
+    def out_idx(self) -> List[int]:
+        return self.adapter.result_idx
 
     @property
     def params(self) -> List[KernelParam]:
