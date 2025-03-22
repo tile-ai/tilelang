@@ -155,6 +155,12 @@ class KernelLaunchFrame(TIRFrame):
         """
         return self.frames[dim].iter_var.var
 
+    def get_block_bindings(self) -> List[Var]:
+        """
+        Returns all three block bindings.
+        """
+        return [frame.iter_var.var for frame in self.frames[0:-4]]
+
     @property
     def blocks(self) -> List[Var]:
         """
@@ -246,3 +252,8 @@ def get_block_binding(dim: int = 0) -> Var:
     """
     return KernelLaunchFrame.Current().get_block_binding(dim)
 
+
+def get_block_bindings() -> List[Var]:
+    """Returns all three block bindings.
+    """
+    return KernelLaunchFrame.Current().get_block_bindings()

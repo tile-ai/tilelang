@@ -5,14 +5,13 @@ import math
 from typing import Optional
 
 import torch
-import numpy as np
-import math
 
-from tvm.script import tir as T
-from tvm.tir import PrimFunc
+import tilelang
+import tilelang.language as T
 from tilelang.cache import clear_cache
 
 clear_cache()
+
 
 def _is_power_of_two(n: int):
     """Check if n is a power of 2."""
@@ -24,22 +23,24 @@ def gpu_2d_continuous_cumsum(
     N: int,
     ty_len: int = 4,
     tx_len: int = 32,
-    thread_elem: int = 4,
     in_dtype: str = "int32",
     out_dtype: Optional[str] = None,
-) -> PrimFunc:
+):
     """Generate GPU kernel for 2D continuous cumsum, i.e. The cumsum axis is -1
 
     Parameters
     ----------
+    M : int
+        The number of rows of the input tensor
+
+    N : int
+        The number of columns of the input tensor
+
     ty_len : int
         The length of thread.y
 
     tx_len : int
         The length of thread.x
-
-    thread_elem : int
-        The number of elements processed by single thread
 
     in_dtype : str
         The input data type
@@ -58,7 +59,7 @@ def gpu_2d_continuous_cumsum(
     # Configuration for GPU kernel
     TX = T.int32(tx_len)  # thread.x
     TY = T.int32(ty_len)  # thread.y
-    N = T.int32(thread_elem)  # number of elements in single thread
+    thread_elem = N  # number of elements in single thread
 
     if not _is_power_of_two(TX) or not _is_power_of_two(TY) or not _is_power_of_two(N):
         raise ValueError("Configuration of TX, TY, N must be power of 2")
@@ -87,7 +88,7 @@ def gpu_2d_continuous_cumsum(
         by = T.get_block_binding(1)
         tx = T.get_thread_binding(0)
         ty = T.get_thread_binding(1)
-       
+
         tx_idx = bx * block_elem + ty * warp_elem + tx * thread_elem
         # Load data from global memory
         for i in T.vectorized(N):
@@ -97,21 +98,19 @@ def gpu_2d_continuous_cumsum(
                 T.Cast(out_dtype, 0),
             )
         # Inclusive scan inside thread
-        for i in T.unroll(1, N):
+        for i in T.serial(1, N):
             local_buf[i] += local_buf[i - 1]
         # Store data to shared memory
         for i in T.vectorized(N):
             shared_buf[ty * warp_elem + tx * thread_elem + i] = local_buf[i]
         # Inclusive scan inside warp
-        for i in T.unroll(LOG_TX):
+        for i in T.serial(LOG_TX):
             for j in T.vectorized(N):
                 idx: T.int32 = ty * warp_elem + tx * thread_elem
                 if tx >= (1 << i):
-                    shared_buf[idx + j] += shared_buf[
-                        idx - (1 << i) * thread_elem + N - 1
-                    ]
+                    shared_buf[idx + j] += shared_buf[idx - (1 << i) * thread_elem + N - 1]
         # Inclusive scan inside block
-        for i in T.unroll(1, TY):
+        for i in T.serial(1, TY):
             for j in T.vectorized(N):
                 if ty == 0:
                     idx: T.int32 = i * warp_elem + tx * thread_elem
@@ -122,7 +121,7 @@ def gpu_2d_continuous_cumsum(
             if bx * block_elem + idx < cur_len:
                 output[by, src_offset + bx * block_elem + idx] = shared_buf[idx]
         if tx == 0 and ty == 0:
-            for i in T.vectorized(N):
+            for i in T.vectorized(N):  # noqa: B007
                 tmp_buf[by, tmp_offset + bx] = shared_buf[block_elem - 1]
 
     @T.macro
@@ -141,18 +140,17 @@ def gpu_2d_continuous_cumsum(
         for i in T.serial(N):
             idx: T.int32 = bx * block_elem + ty * warp_elem + i * TX + tx
             if idx < cur_len:
-                output[by, out_offset + idx] += T.if_then_else(
-                    bx > 0, source[by, src_offset + bx - 1], 0
-                )
+                output[by, out_offset + idx] += T.if_then_else(bx > 0,
+                                                               source[by, src_offset + bx - 1], 0)
 
     @T.prim_func
-    def cumsum(A: T.Buffer((M, N), dtype="int32"), Out: T.Buffer((M, N), dtype="int32"), Tmp: T.Buffer((M, N), dtype="int32")):
+    def cumsum(A: T.Buffer((M, N), dtype="int32"), Out: T.Buffer((M, N), dtype="int32"),
+               Tmp: T.Buffer((M, N), dtype="int32")):
         ceil_log2 = T.Cast("int32", T.ceil(T.log2(T.Cast("float32", N))))
         total_rounds = ceil_log2 // LOG_BLOCK_N
         with T.Kernel(T.ceildiv(N, block_elem), M, threads=[tx_len, ty_len]) as (bx, by):
             block_inclusive_inside_block(
-                M, N, A, Out, Tmp, src_offset=T.int32(0), tmp_offset=T.int32(0)
-            )
+                M, N, A, Out, Tmp, src_offset=T.int32(0), tmp_offset=T.int32(0))
         for i in range(total_rounds):
             cur_len = T.ceildiv(N, 1 << (LOG_BLOCK_N * (i + 1)))
             with T.Kernel(T.ceildiv(cur_len, block_elem), M) as (bx, by):
@@ -188,15 +186,14 @@ def torch_cumsum(A: torch.Tensor, dim: int = -1):
 
 
 if __name__ == "__main__":
-    import tilelang
-    import tilelang.language as T
-    M = N = 128
-    program = gpu_2d_continuous_cumsum(M, N)
-    kernel = tilelang.compile(program, execution_backend="cython", out_idx=[1])
-    code = kernel.get_kernel_source()
-    
 
-    A = torch.randint(0, 10, (M, math.ceil(math.log2(N)))).cuda().to(torch.int32)
+    M = 128
+    N = 32
+    program = gpu_2d_continuous_cumsum(M, N)
+    kernel = tilelang.compile(program, execution_backend="dlpack", out_idx=[1])
+    code = kernel.get_kernel_source()
+
+    A = torch.randint(0, 10, (M, N)).cuda().to(torch.int32)
     tmp = torch.zeros_like(A).cuda().to(torch.int32)
     tilelang_output = kernel(A, tmp)
     torch_output = torch_cumsum(A).cuda().to(torch.int32)

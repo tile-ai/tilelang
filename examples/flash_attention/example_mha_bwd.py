@@ -4,7 +4,6 @@
 import torch
 import torch.nn.functional as F
 import tilelang
-from tilelang import cached
 from tilelang.autotuner import *
 import tilelang.language as T
 import argparse
@@ -236,7 +235,11 @@ class _attention(torch.autograd.Function):
         BATCH, N_CTX, H, D_HEAD = q.shape
         block_M = 64
         block_N = 64 if D_HEAD <= 128 else 32
-        kernel = tilelang.compile(flashattn_fwd(BATCH, H, N_CTX, D_HEAD, causal, block_M, block_N), out_idx=[3, 4], target="cuda", execution_backend="cython")
+        kernel = tilelang.compile(
+            flashattn_fwd(BATCH, H, N_CTX, D_HEAD, causal, block_M, block_N),
+            out_idx=[3, 4],
+            target="cuda",
+            execution_backend="cython")
         o, lse = kernel(q, k, v)
         ctx.save_for_backward(q, k, v, o, lse)
         ctx.causal = causal
@@ -254,10 +257,22 @@ class _attention(torch.autograd.Function):
         do, q, k, v, o = [maybe_contiguous(x) for x in (do, q, k, v, o)]
         block_M = 128
         block_N = 128 if D_HEAD <= 64 else 32
-        kernel_prep = tilelang.compile(flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD), out_idx=[2], target="cuda", execution_backend="cython")
-        kernel_post = tilelang.compile(flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD), out_idx=[1], target="cuda", execution_backend="cython")
+        kernel_prep = tilelang.compile(
+            flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD),
+            out_idx=[2],
+            target="cuda",
+            execution_backend="cython")
+        kernel_post = tilelang.compile(
+            flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD),
+            out_idx=[1],
+            target="cuda",
+            execution_backend="cython")
         delta = kernel_prep(o, do)
-        kernel = tilelang.compile(flashattn_bwd(BATCH, H, N_CTX, D_HEAD, ctx.causal, block_M, block_N), out_idx=[6, 7, 8], target="cuda", execution_backend="cython")
+        kernel = tilelang.compile(
+            flashattn_bwd(BATCH, H, N_CTX, D_HEAD, ctx.causal, block_M, block_N),
+            out_idx=[6, 7, 8],
+            target="cuda",
+            execution_backend="cython")
         dq, dk, dv = kernel(q, k, v, do, lse, delta)
         dq = kernel_post(dq)
         return dq, dk, dv, None
