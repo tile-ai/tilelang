@@ -277,8 +277,7 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
             out_idx=[6],
             supply_type=tilelang.TensorSupplyType.Auto,
             ref_prog=ref_program,
-            max_mismatched_ratio=0.05,
-            profiler="auto")
+            max_mismatched_ratio=0.05)
         def kernel(block_N=None, block_H=None, num_split=None, num_stages=None, threads=None):
             return kernel_func(block_N, block_H, num_split, num_stages, threads)
 
