@@ -10,7 +10,13 @@ from tvm.script.parser.tir import *
 from tilelang.layout import Layout, Fragment  # noqa: F401
 from .parallel import Parallel  # noqa: F401
 from .pipeline import Pipelined  # noqa: F401
-from .kernel import Kernel, KernelLaunchFrame, get_thread_binding  # noqa: F401
+from .kernel import (
+    Kernel,
+    KernelLaunchFrame,
+    get_thread_binding,
+    get_thread_bindings,
+    get_block_binding,
+)  # noqa: F401
 from .allocate import (
     alloc_local,  # noqa: F401
     alloc_shared,  # noqa: F401

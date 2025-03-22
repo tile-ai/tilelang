@@ -148,6 +148,13 @@ class KernelLaunchFrame(TIRFrame):
             num_threads *= self.get_thread_extent(thread_dim)
         return num_threads
 
+    def get_block_binding(self, dim: int = 0) -> Var:
+        """
+        Returns the block binding for the given dimension.
+        dim=0 corresponds to blockIdx.x, dim=1 to blockIdx.y, and dim=2 to blockIdx.z.
+        """
+        return self.frames[dim].iter_var.var
+
     @property
     def blocks(self) -> List[Var]:
         """
@@ -232,3 +239,10 @@ def get_thread_bindings() -> List[Var]:
     """Returns all three thread bindings.
     """
     return KernelLaunchFrame.Current().get_thread_bindings()
+
+
+def get_block_binding(dim: int = 0) -> Var:
+    """Returns the block binding for the given dimension.
+    """
+    return KernelLaunchFrame.Current().get_block_binding(dim)
+
