@@ -38,7 +38,6 @@ class KernelCache:
         with cls._lock:
             if cls._instance is None:
                 cls._instance = super(KernelCache, cls).__new__(cls)
-                cls._instance._cache = {}  # In-memory cache
                 cls._instance.cache_dir = cache_dir  # Cache directory
                 os.makedirs(cls._instance.cache_dir, exist_ok=True)  # Ensure cache directory exists
                 cls._instance.logger = logging.getLogger(__name__)  # Initialize logger
@@ -91,40 +90,38 @@ class KernelCache:
             JITKernel: The compiled kernel, either freshly compiled or from cache
         """
         key = self._generate_key(func, out_idx, execution_backend, args, target, target_host)
-        with self._lock:  # Thread-safe access to cache
-            if key in self._cache:
-                return self._cache[key]
-
+        with self._lock:  # TODO: use filelock
             # Attempt to load from disk
             kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
                                                  execution_backend, pass_configs, func)
-            if kernel:
-                self._cache[key] = kernel  # Load to in-memory cache
+            if kernel is not None:
                 return kernel
 
-            # Compile kernel if cache miss
-            kernel = JITKernel(
-                func,
-                out_idx=out_idx,
-                execution_backend=execution_backend,
-                target=target,
-                target_host=target_host,
-                verbose=verbose,
-                pass_configs=pass_configs,
-            )
-            self._cache[key] = kernel  # Store in in-memory cache
-            if execution_backend == "dlpack":
-                self.logger.warning("DLPack backend does not support cache saving to disk.")
-            else:
-                self._save_kernel_to_disk(key, kernel, func)
-            return kernel
+        # Compile kernel if cache miss; leave critical section
+        kernel = JITKernel(
+            func,
+            out_idx=out_idx,
+            execution_backend=execution_backend,
+            target=target,
+            target_host=target_host,
+            verbose=verbose,
+            pass_configs=pass_configs,
+        )
+        if execution_backend == "dlpack":
+            self.logger.warning("DLPack backend does not support cache saving to disk.")
+        else:
+            with self._lock:  # enter critical section again to check and update disk cache
+                disk_kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
+                                                          execution_backend, pass_configs, func)
+                if disk_kernel is None:
+                    self._save_kernel_to_disk(key, kernel, func)
+        return kernel
 
     def clear_cache(self):
         """
         Clears the entire kernel cache, including both in-memory and disk cache.
         """
-        with self._lock:  # Thread-safe operation
-            self._cache.clear()  # Clear in-memory cache
+        with self._lock:
             self._clear_disk_cache()  # Clear disk cache
 
     def _get_cache_path(self, key: str) -> str:
