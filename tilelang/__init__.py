@@ -82,6 +82,7 @@ def deprecated(reason):
 logger = logging.getLogger(__name__)
 
 from .env import SKIP_LOADING_TILELANG_SO
+from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
 
 import tvm
 import tvm._ffi.base
