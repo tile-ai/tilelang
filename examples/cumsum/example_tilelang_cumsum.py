@@ -148,9 +148,11 @@ def gpu_2d_continuous_cumsum(
                Tmp: T.Buffer((M, N), dtype="int32")):
         ceil_log2 = T.Cast("int32", T.ceil(T.log2(T.Cast("float32", N))))
         total_rounds = ceil_log2 // LOG_BLOCK_N
+
         with T.Kernel(T.ceildiv(N, block_elem), M, threads=[tx_len, ty_len]) as (bx, by):
             block_inclusive_inside_block(
                 M, N, A, Out, Tmp, src_offset=T.int32(0), tmp_offset=T.int32(0))
+
         for i in range(total_rounds):
             cur_len = T.ceildiv(N, 1 << (LOG_BLOCK_N * (i + 1)))
             with T.Kernel(T.ceildiv(cur_len, block_elem), M) as (bx, by):
@@ -163,6 +165,7 @@ def gpu_2d_continuous_cumsum(
                     src_offset=i * T.ceildiv(N, block_elem),
                     tmp_offset=(i + 1) * T.ceildiv(N, block_elem),
                 )
+
         for i in range(total_rounds - 1):
             real_idx = total_rounds - 1 - i - 1
             cur_len = T.ceildiv(N, 1 << (LOG_BLOCK_N * (real_idx + 1)))
@@ -175,6 +178,7 @@ def gpu_2d_continuous_cumsum(
                     src_offset=(real_idx + 1) * T.ceildiv(N, block_elem),
                     out_offset=real_idx * T.ceildiv(N, block_elem),
                 )
+
         with T.Kernel(T.ceildiv(N, block_elem), M) as (bx, by):
             update_cross_block(M, N, Tmp, Out, src_offset=0, out_offset=0)
 
