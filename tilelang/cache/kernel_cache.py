@@ -115,7 +115,10 @@ class KernelCache:
                 pass_configs=pass_configs,
             )
             self._cache[key] = kernel  # Store in in-memory cache
-            self._save_kernel_to_disk(key, kernel, func)
+            if execution_backend == "dlpack":
+                self.logger.warning("DLPack backend does not support cache saving to disk.")
+            else:
+                self._save_kernel_to_disk(key, kernel, func)
             return kernel
 
     def clear_cache(self):

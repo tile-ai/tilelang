@@ -190,8 +190,15 @@ class JITKernel(object):
         pass_configs = self.pass_configs
 
         # Compile the function with TVM, optimizing with shared memory lowering.
+        enable_host_codegen = execution_backend == "dlpack"
+        enable_device_compile = execution_backend == "dlpack"
         with tvm.transform.PassContext(opt_level=3, config=pass_configs):
-            artifact = tilelang.lower(tilelang_func, target=target, target_host=target_host)
+            artifact = tilelang.lower(
+                tilelang_func,
+                target=target,
+                target_host=target_host,
+                enable_host_codegen=enable_host_codegen,
+                enable_device_compile=enable_device_compile)
 
         self.artifact = artifact
 

@@ -18,6 +18,7 @@
 
 #include "../op/builtin.h"
 #include "../op/bulk_copy.h"
+#include "arith/pattern_match.h"
 #include "target/source/ptx.h"
 
 namespace tvm {
@@ -738,7 +739,13 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
     temp << "(" << ptr_cast(buffer_element_dtype) << vid << ")";
     buffer_str = temp.str();
   }
-
+  if (scope.empty()) {
+    scope = GetPtrStorageScope(buffer->data);
+  }
+  if (scope == "local.var") {
+    os << vid;
+    return os.str();
+  }
   std::string index_str = PrintExpr(index);
   if (t.bits() == 4 || (t.bits() == 1 && t.is_int())) {
     // This is a special case, because CodegenCUDA::PrintType()
@@ -1277,7 +1284,6 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
 void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
   ICHECK(!is_zero(op->condition));
   std::string vid = AllocVarID(op->buffer_var.get());
-
   this->PrintIndent();
   std::string scope = GetPtrStorageScope(op->buffer_var);
   const VarNode *buffer = op->buffer_var.as<VarNode>();
@@ -1315,7 +1321,16 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
         scope == "shared") {
       constant_size = constant_size / (32 / op->dtype.bits());
     }
-    stream << ' ' << vid << '[' << constant_size << "];\n";
+    if (scope == "shared") {
+      stream << ' ' << vid << '[' << constant_size << "];\n";
+    } else if (scope == "local") {
+      stream << ' ' << vid << '[' << constant_size << "];\n";
+    } else if (scope == "local.var") {
+      stream << ' ' << vid << " = " << PrintExpr(tir::make_const(op->dtype, 0))
+             << ";\n";
+    } else {
+      ICHECK(false) << "Unsupported scope: " << scope;
+    }
   }
 
   RegisterHandleType(op->buffer_var.get(), op->dtype);
