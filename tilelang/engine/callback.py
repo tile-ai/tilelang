@@ -4,7 +4,7 @@
 from typing import Callable, Union
 from tvm import register_func
 from tvm.target import Target
-from functools import partial
+
 
 def register_cuda_postproc(func: Callable[[str, Target], str], override: bool = True):
     """Register a post-processing function for CUDA code generation.
@@ -16,6 +16,7 @@ def register_cuda_postproc(func: Callable[[str, Target], str], override: bool = 
     """
     register_func("tilelang_callback_cuda_postproc", f=func, override=override)
 
+
 def register_hip_postproc(func: Callable[[str, Target], str], override: bool = True):
     """Register a post-processing function for HIP code generation.
     
@@ -25,6 +26,7 @@ def register_hip_postproc(func: Callable[[str, Target], str], override: bool = T
         override: Whether to override existing registered function. Defaults to True.
     """
     register_func("tilelang_callback_hip_postproc", f=func, override=override)
+
 
 def register_cuda_postproc_callback(func: Union[Callable, bool] = None, override: bool = True):
     """Decorator for registering CUDA post-processing callback function.
@@ -46,15 +48,18 @@ def register_cuda_postproc_callback(func: Union[Callable, bool] = None, override
     if callable(func):
         register_cuda_postproc(func, override)
         return func
-    
+
     if func is None or isinstance(func, bool):
         _override = func if isinstance(func, bool) else override
+
         def _register(fn: Callable[[str, Target], str]):
             register_cuda_postproc(fn, _override)
             return fn
+
         return _register
-    
+
     raise TypeError("Invalid decorator usage")
+
 
 def register_hip_postproc_callback(func: Union[Callable, bool] = None, override: bool = True):
     """Decorator for registering HIP post-processing callback function.
@@ -76,12 +81,14 @@ def register_hip_postproc_callback(func: Union[Callable, bool] = None, override:
     if callable(func):
         register_hip_postproc(func, override)
         return func
-    
+
     if func is None or isinstance(func, bool):
         _override = func if isinstance(func, bool) else override
+
         def _register(fn: Callable[[str, Target], str]):
             register_hip_postproc(fn, _override)
             return fn
+
         return _register
-    
+
     raise TypeError("Invalid decorator usage")
