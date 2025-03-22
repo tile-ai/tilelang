@@ -76,6 +76,7 @@ _let_frame_stack = FrameStack()
 
 @_register_object("script.ir_builder.tir.LetFrame")
 class LetFrame(TIRFrame):
+
     def __enter__(self) -> Var:
         super().__enter__()
         if isinstance(self.value, BufferLoad):
@@ -86,7 +87,8 @@ class LetFrame(TIRFrame):
                     is_block_load = True
                     break
             if is_block_load:
-                self.value = BufferRegion(self.value.buffer, [Range(x.base, x.lanes) for x in indices])
+                self.value = BufferRegion(self.value.buffer,
+                                          [Range(x.base, x.lanes) for x in indices])
 
         _let_frame_stack.push(self)
         return self.var
@@ -119,11 +121,13 @@ class LetFrame(TIRFrame):
         """
         return _let_frame_stack.has_value(var)
 
+
 def has_let_value(var: Var) -> bool:
     """
     Check if a variable has an associated value in the let frame stack.
     """
     return _let_frame_stack.has_value(var)
+
 
 def get_let_value(var: Var) -> Optional[PrimExpr]:
     """

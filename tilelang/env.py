@@ -125,19 +125,23 @@ if os.environ.get("TL_TEMPLATE_PATH", None) is None:
 # Cache control
 _ENABLE_TILELANG_KERNEL_CACHE = True  # Default cache state
 
+
 def enable_cache():
     """Enable kernel caching globally."""
     global _ENABLE_TILELANG_KERNEL_CACHE
     _ENABLE_TILELANG_KERNEL_CACHE = True
+
 
 def disable_cache():
     """Disable kernel caching globally."""
     global _ENABLE_TILELANG_KERNEL_CACHE
     _ENABLE_TILELANG_KERNEL_CACHE = False
 
+
 def is_cache_enabled() -> bool:
     """Return current cache state."""
     return _ENABLE_TILELANG_KERNEL_CACHE
+
 
 __all__ = [
     "CUTLASS_INCLUDE_DIR",
