@@ -3,8 +3,6 @@
 
 import argparse
 import logging
-import torch
-import torch.backends
 from tilelang import tvm as tvm
 from tvm import DataType
 import tilelang as tl
@@ -162,9 +160,9 @@ def tl_matmul(
     return main
 
 
-def ref_program(A, B, C):
+def ref_program(A, B):
     """Reference matrix multiplication program."""
-    return torch.matmul(A, B.T)
+    return A @ B.T
 
 
 def get_configs(M, N, K, with_roller=False):
