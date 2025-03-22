@@ -112,9 +112,9 @@ class KernelCache:
         if execution_backend == "dlpack":
             self.logger.warning("DLPack backend does not support cache saving to disk.")
         else:
-            with self._lock: # enter critical section again to check and update disk cache
+            with self._lock:  # enter critical section again to check and update disk cache
                 disk_kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
-                                                 execution_backend, pass_configs, func)
+                                                          execution_backend, pass_configs, func)
                 if disk_kernel is None:
                     self._save_kernel_to_disk(key, kernel, func)
         return kernel
