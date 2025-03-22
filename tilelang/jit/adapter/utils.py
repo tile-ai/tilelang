@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import re
-from typing import Union, Optional, Literal
+from typing import Union, Optional, Literal, Tuple
 from tilelang import tvm as tvm
 from tvm import IRModule, tir
 from tvm.target import Target
@@ -68,7 +68,7 @@ def get_annotated_mod(
     target: Union[str, Target] = "auto",
     target_host: Optional[Union[str, Target]] = None,
     model_type: Literal["device", "host", "all"] = "all",
-) -> Union[IRModule, tuple[IRModule, IRModule]]:
+) -> Union[IRModule, Tuple[IRModule, IRModule]]:
 
     # Validate model_type early
     if model_type not in {"device", "host", "all"}:

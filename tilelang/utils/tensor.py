@@ -1,14 +1,13 @@
 # Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
 
-from __future__ import annotations
-
 """The profiler and convert to torch utils"""
 from enum import Enum
 import torch
 from tvm.runtime import ndarray
 from torch.utils.dlpack import to_dlpack
 import numpy as np
+from typing import Tuple
 
 
 class TensorSupplyType(Enum):
@@ -153,7 +152,7 @@ def _compare_attributes(
 
 
 def _equalize_attributes(actual: torch.Tensor,
-                         expected: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+                         expected: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Equalizes some attributes of two tensors for value comparison.
     If ``actual`` and ``expected`` are ...
     - ... not on the same :attr:`~torch.Tensor.device`, they are moved CPU memory.
