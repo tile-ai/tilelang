@@ -724,122 +724,16 @@ private:
 
     auto stmts = CompletePipelineLoopStatements(new_blocks, async_states_local);
 
-    // Group blocks by their predicate conditions
-    PrimExpr current_condition = Bool(true);
-    Array<Stmt> current_stmts;
-    Array<PrimExpr> ordered_conditions;
-    Array<Array<Stmt>> condition_to_stmts;
-
-    for (const auto &stmt : stmts) {
-      if (const auto *realize = stmt.as<BlockRealizeNode>()) {
-        // Helper function to find IfThenElse through potential AttrStmt nodes
-        auto find_if_then_else =
-            [](Stmt body) -> std::pair<bool, const IfThenElseNode *> {
-          while (true) {
-            if (const auto *if_node = body.as<IfThenElseNode>()) {
-              return {true, if_node};
-            } else if (const auto *attr_node = body.as<AttrStmtNode>()) {
-              // Continue traversing through attributes
-              body = attr_node->body;
-            } else {
-              // No IfThenElse found
-              return {false, nullptr};
-            }
-          }
-        };
-
-        auto [has_if, if_then_else] = find_if_then_else(realize->block->body);
-
-        if (has_if) {
-          if (if_then_else->else_case.defined()) {
-            // IfThenElse nodes with else case are treated individually
-            if (!current_stmts.empty()) {
-              ordered_conditions.push_back(current_condition);
-              condition_to_stmts.push_back(current_stmts);
-              current_stmts = {};
-            }
-            current_condition = Bool(true);
-            current_stmts.push_back(stmt);
-          } else {
-            // If we encounter a new condition
-            if (!StructuralEqual()(if_then_else->condition,
-                                   current_condition)) {
-              // Store the current group if it's not empty
-              if (!current_stmts.empty()) {
-                ordered_conditions.push_back(current_condition);
-                condition_to_stmts.push_back(current_stmts);
-                current_stmts = {};
-              }
-              current_condition = if_then_else->condition;
-            }
-            BlockRealize new_realize = Downcast<BlockRealize>(stmt);
-            new_realize.CopyOnWrite()->block.CopyOnWrite()->body =
-                replace_if_then_else(new_realize->block->body,
-                                     if_then_else->condition);
-            current_stmts.push_back(new_realize);
-          }
-        } else {
-          if (!current_stmts.empty()) {
-            ordered_conditions.push_back(current_condition);
-            condition_to_stmts.push_back(current_stmts);
-            current_stmts = {};
-          }
-          current_condition = Bool(true);
-          current_stmts.push_back(stmt);
-        }
-      } else {
-        // Non-BlockRealize statements are treated individually
-        if (!current_stmts.empty()) {
-          ordered_conditions.push_back(current_condition);
-          condition_to_stmts.push_back(current_stmts);
-          current_stmts = {};
-        }
-        current_condition = Bool(true);
-        current_stmts.push_back(stmt);
-      }
-    }
-
-    // Add the last group if not empty
-    if (!current_stmts.empty()) {
-      ordered_conditions.push_back(current_condition);
-      condition_to_stmts.push_back(current_stmts);
-    }
-
-    // Build the final statement sequence with proper conditionals
-    Array<Stmt> final_stmts;
-    for (auto i = 0; i < ordered_conditions.size(); i++) {
-      Array<Stmt> condition_stmts = condition_to_stmts[i];
-      if (condition_stmts.empty())
-        continue;
-
-      // Create a sequence from the statements with this condition
-      Stmt stmt_block;
-      if (condition_stmts.size() == 1) {
-        stmt_block = condition_stmts[0];
-      } else {
-        stmt_block = SeqStmt(condition_stmts);
-      }
-
-      // If condition is not trivially true, wrap in if-then-else
-      if (!is_one(ordered_conditions[i]) &&
-          !analyzer_.CanProve(ordered_conditions[i] == true)) {
-        stmt_block = IfThenElse(ordered_conditions[i], stmt_block);
-      }
-
-      final_stmts.push_back(stmt_block);
-    }
-
-    // Use final_stmts instead of the original stmts
     Stmt new_loop{nullptr};
 
-    if (final_stmts.empty()) {
+    if (stmts.empty()) {
       return make_nop();
     }
 
-    if (final_stmts.size() == 1) {
-      new_loop = final_stmts[0];
+    if (stmts.size() == 1) {
+      new_loop = stmts[0];
     } else {
-      new_loop = SeqStmt(final_stmts);
+      new_loop = SeqStmt(stmts);
     }
 
     if (!is_unit_loop) {
