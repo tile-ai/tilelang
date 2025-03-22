@@ -1,6 +1,5 @@
 # Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
-
 """The profiler and convert to torch utils"""
 from enum import Enum
 import torch
