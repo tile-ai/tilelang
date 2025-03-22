@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 from typing import Union, Optional, Literal
 from tilelang import tvm as tvm
