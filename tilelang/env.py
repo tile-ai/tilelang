@@ -122,6 +122,27 @@ if os.environ.get("TL_TEMPLATE_PATH", None) is None:
     else:
         logger.warning(TL_TEMPLATE_NOT_FOUND_MESSAGE)
 
+# Cache control
+_ENABLE_TILELANG_KERNEL_CACHE = True  # Default cache state
+
+
+def enable_cache():
+    """Enable kernel caching globally."""
+    global _ENABLE_TILELANG_KERNEL_CACHE
+    _ENABLE_TILELANG_KERNEL_CACHE = True
+
+
+def disable_cache():
+    """Disable kernel caching globally."""
+    global _ENABLE_TILELANG_KERNEL_CACHE
+    _ENABLE_TILELANG_KERNEL_CACHE = False
+
+
+def is_cache_enabled() -> bool:
+    """Return current cache state."""
+    return _ENABLE_TILELANG_KERNEL_CACHE
+
+
 __all__ = [
     "CUTLASS_INCLUDE_DIR",
     "TVM_PYTHON_PATH",
@@ -129,4 +150,7 @@ __all__ = [
     "TILELANG_TEMPLATE_PATH",
     "CUDA_HOME",
     "TILELANG_CACHE_DIR",
+    "enable_cache",
+    "disable_cache",
+    "is_cache_enabled",
 ]

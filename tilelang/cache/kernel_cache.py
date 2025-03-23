@@ -13,7 +13,7 @@ import threading
 import cloudpickle
 import logging
 
-from tilelang.env import TILELANG_CACHE_DIR
+from tilelang.env import TILELANG_CACHE_DIR, is_cache_enabled
 
 KERNEL_PATH = "kernel.cu"
 WRAPPED_KERNEL_PATH = "warpped_kernel.cu"
@@ -89,6 +89,17 @@ class KernelCache:
         Returns:
             JITKernel: The compiled kernel, either freshly compiled or from cache
         """
+        if not is_cache_enabled():
+            return JITKernel(
+                func,
+                out_idx=out_idx,
+                execution_backend=execution_backend,
+                target=target,
+                target_host=target_host,
+                verbose=verbose,
+                pass_configs=pass_configs,
+            )
+
         key = self._generate_key(func, out_idx, execution_backend, args, target, target_host)
         with self._lock:  # TODO: use filelock
             # Attempt to load from disk
