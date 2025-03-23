@@ -7,6 +7,7 @@ import tilelang.language as T
 import itertools
 import argparse
 
+
 def check_hopper():
     # if not torch.cuda.is_available():
     #     return None
@@ -33,14 +34,18 @@ def get_configs():
     } for c in _configs]
     return configs
 
+
 def ref_program(stride, padding, dilation):
+
     def main(A, B):
         A = A.permute(0, 3, 1, 2)  # N, H, W, C -> N, C, H, W
         B = B.permute(3, 2, 0, 1)  # H, W, C, F -> F, C, H, W
         C = torch.conv2d(A, B, stride=stride, padding=padding, dilation=dilation)
         C = C.permute(0, 2, 3, 1)  # N, C, H, W -> N, H, W, C
         return C
+
     return main
+
 
 def get_best_config(N, C, H, W, F, K, S, D, P):
     KH, KW = K, K
@@ -51,7 +56,6 @@ def get_best_config(N, C, H, W, F, K, S, D, P):
     accum_dtype = "float"
     is_hopper = check_hopper()
 
-
     def kernel(
         block_M=None,
         block_N=None,
@@ -59,6 +63,7 @@ def get_best_config(N, C, H, W, F, K, S, D, P):
         num_stages=None,
         thread_num=None,
     ):
+
         @T.prim_func
         def main(
                 data: T.Tensor((N, H, W, C), dtype),
@@ -103,7 +108,7 @@ def get_best_config(N, C, H, W, F, K, S, D, P):
                 T.copy(out_shared, out_flat[by * block_M, bx * block_N])
 
         return main
- 
+
     autotuner = AutoTuner.from_kernel(
         kernel=kernel, configs=get_configs()).set_compile_args(
             out_idx=[2],
@@ -114,19 +119,20 @@ def get_best_config(N, C, H, W, F, K, S, D, P):
         )
     return autotuner.run(warmup=10, rep=10)
 
-def convolution(N, 
-                C, 
+
+def convolution(N,
+                C,
                 H,
-                W, 
-                F, 
-                K, 
-                S, 
-                D, 
+                W,
+                F,
+                K,
+                S,
+                D,
                 P,
-                block_M, 
-                block_N, 
-                block_K, 
-                num_stages, 
+                block_M,
+                block_N,
+                block_K,
+                num_stages,
                 threads,
                 dtype="float16",
                 accum_dtype="float"):
@@ -136,7 +142,7 @@ def convolution(N,
     dtype = "float16"
     accum_dtype = "float"
     is_hopper = check_hopper()
-    
+
     @T.prim_func
     def main(
             data: T.Tensor((N, H, W, C), dtype),
@@ -199,7 +205,7 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="Whether to use autotune for matmul configs")
-    
+
     args = parser.parse_args()
     N, C, H, W, F, K, S, D, P = args.n, args.c, args.h, args.w, args.f, args.k, args.s, args.d, args.p
     a = torch.randn(N, H, W, C).cuda().half()
@@ -210,8 +216,9 @@ if __name__ == "__main__":
         print(f"best latency {result.latency}")
         kernel = result.kernel
     else:
-        kernel = tilelang.compile(convolution(N, C, H, W, F, K, S, D, P, 64, 128, 32, 3, 256), out_idx=[2])
-        
+        kernel = tilelang.compile(
+            convolution(N, C, H, W, F, K, S, D, P, 64, 128, 32, 3, 256), out_idx=[2])
+
     out_c = kernel(a, b)
     ref_c = ref_program(S, P, D)(a, b)
     torch.testing.assert_close(out_c, ref_c, rtol=1e-2, atol=1e-2)
