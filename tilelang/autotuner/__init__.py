@@ -68,9 +68,6 @@ class AutotuneResult:
     config: dict
     ref_latency: float
     libcode: str
-    func: Callable
-    kernel: Callable
-
 
 class AutoTuner:
     """Auto-tuner for tilelang programs.
