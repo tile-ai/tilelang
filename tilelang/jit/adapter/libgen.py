@@ -11,7 +11,6 @@ import tempfile
 import subprocess
 import logging
 from tilelang.env import TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +90,6 @@ class LibraryGenerator(object):
 
         src.write(self.lib_code)
         src.flush()
-        logger.info("worker start subproc at {}".format(datetime.now().strftime("%H:%M:%S")))
         try:
             ret = subprocess.run(command, timeout=timeout)
         except Exception as e:
