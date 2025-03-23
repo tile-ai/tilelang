@@ -7,7 +7,7 @@ import logging
 import tilelang as tl
 import tilelang.testing
 import tilelang.language as T
-from tilelang.autotuner import autotune, jit
+from tilelang.autotuner import AutoTuner
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -154,26 +154,6 @@ def matmul(M, N, K, with_roller):
     #  - The "tvm" profiler backend
     #  - HIP as the compilation target (modify as needed for your hardware)
 
-    @autotune(
-        configs=get_configs(M, N, K, with_roller),
-        keys=[
-            "block_M",
-            "block_N",
-            "block_K",
-            "num_stages",
-            "thread_num",
-            "enable_rasteration",
-        ],
-        warmup=3,
-        rep=5,
-    )
-    @jit(
-        out_idx=[2],
-        supply_type=tl.TensorSupplyType.Integer,
-        ref_prog=ref_program,
-        skip_check=True,
-        target="auto",
-    )
     def kernel(
         block_M=None,
         block_N=None,
@@ -271,7 +251,26 @@ def matmul(M, N, K, with_roller):
 
         return main
 
-    return kernel()
+    autotuner = AutoTuner(
+        fn=kernel,
+        configs=get_configs(M, N, K, with_roller),
+        keys=[
+            "block_M",
+            "block_N",
+            "block_K",
+            "num_stages",
+            "thread_num",
+            "enable_rasteration",
+        ])
+    autotuner.set_compile_args(
+        out_idx=[-1],
+        supply_type=tl.TensorSupplyType.Integer,
+        ref_prog=ref_program,
+        skip_check=False,
+        target="auto",
+    )
+    return autotuner.do_bench(warmup=3, rep=20)
+
 
 
 def test_autotune_get_configs():
