@@ -143,7 +143,10 @@ cdef class CythonKernelWrapper:
         call_args.append(ctypes.c_void_p(stream))
 
         # Execute the kernel
-        self.lib.call(*call_args)
+        result = self.lib.call(*call_args)
+        if result != 0:
+            error_msg = self.lib.get_last_error().decode('utf-8')
+            raise RuntimeError(f"Kernel call failed: {error_msg}")
 
         # Return output tensor(s)
         if len(self.result_idx) == 1:
