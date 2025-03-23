@@ -11,7 +11,6 @@ import tempfile
 import subprocess
 import logging
 from tilelang.env import TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR
-import time
 from datetime import datetime
 logger = logging.getLogger(__name__)
 

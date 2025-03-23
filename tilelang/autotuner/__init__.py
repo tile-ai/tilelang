@@ -33,20 +33,18 @@ class JITContext:
     profiler: tilelang.Profiler
     target: Literal['cuda', 'hip']
 
+
 @dataclass(frozen=True)
 class AutotuneResult:
-    latency: float 
+    latency: float
     config: dict
     ref_latency: float
     libcode: str
 
+
 class AutoTuner:
-    def __init__(
-        self,
-        fn: Callable,
-        configs,
-        keys
-    ):
+
+    def __init__(self, fn: Callable, configs, keys):
         self.fn = fn
         self.configs = configs
         self.keys = keys
@@ -54,46 +52,41 @@ class AutoTuner:
         self.jit_input_tensors = None
         self.ref_input_tensors = None
 
-    def set_compile_args(
-        self, 
-        out_idx: List[int],
-        supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Normal,
-        ref_prog: Callable = None,
-        rtol: float = 1e-2,
-        atol: float = 1e-2,
-        max_mismatched_ratio: float = 0.01,
-        skip_check: bool = False,
-        target: Literal['auto', 'cuda', 'hip'] = 'auto'
-    ):
+    def set_compile_args(self,
+                         out_idx: List[int],
+                         supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Normal,
+                         ref_prog: Callable = None,
+                         rtol: float = 1e-2,
+                         atol: float = 1e-2,
+                         max_mismatched_ratio: float = 0.01,
+                         skip_check: bool = False,
+                         target: Literal['auto', 'cuda', 'hip'] = 'auto'):
+
         def _compile(config_arg):
             kernel = tilelang.compile(self.fn(*config_arg), out_idx=out_idx, target=target)
             profiler = kernel.get_profiler()
             jit_context = JITContext(
-                    out_idx=out_idx,
-                    supply_type=supply_type,
-                    ref_prog=ref_prog,
-                    rtol=rtol,
-                    atol=atol,
-                    max_mismatched_ratio=max_mismatched_ratio,
-                    skip_check=skip_check,
-                    profiler=profiler,
-                    target=target)
+                out_idx=out_idx,
+                supply_type=supply_type,
+                ref_prog=ref_prog,
+                rtol=rtol,
+                atol=atol,
+                max_mismatched_ratio=max_mismatched_ratio,
+                skip_check=skip_check,
+                profiler=profiler,
+                target=target)
             return jit_context
+
         self.jit_compile = _compile
-    
-    def do_bench(
-        self,
-        warmup: int = 25,
-        rep: int = 100,
-        timeout: int = 100
-    ):
+
+    def do_bench(self, warmup: int = 25, rep: int = 100, timeout: int = 100):
         sig = inspect.signature(self.fn)
         bound_args = sig.bind()
         bound_args.apply_defaults()
         best_latency = 1e8
         best_config = None
         best_jit_context = None
-        
+
         def target_fn(jit_context):
             # Unpack the context
             profiler = jit_context.profiler
@@ -112,18 +105,12 @@ class AutoTuner:
                     ref_prog, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio)
 
             latency = profiler.do_bench(
-                profiler.func,
-                n_warmup=warmup,
-                n_repeat=rep,
-                input_tensors=self.jit_input_tensors)
+                profiler.func, n_warmup=warmup, n_repeat=rep, input_tensors=self.jit_input_tensors)
             if self.ref_latency_cache is None and ref_prog is not None:
                 self.ref_input_tensors = profiler._get_inputs(
                     with_output=False) if self.ref_input_tensors is None else self.ref_input_tensors
                 self.ref_latency_cache = profiler.do_bench(
-                    ref_prog,
-                    n_warmup=warmup,
-                    n_repeat=rep,
-                    input_tensors=self.ref_input_tensors)
+                    ref_prog, n_warmup=warmup, n_repeat=rep, input_tensors=self.ref_input_tensors)
 
             return latency, self.ref_latency_cache
 
@@ -137,7 +124,7 @@ class AutoTuner:
                     new_args.append(config[name])
             new_args = tuple(new_args)
             config_args.append(new_args)
-            
+
         num_workers = max(1, int(os.cpu_count() * 0.9))
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
         futures = []
@@ -149,13 +136,12 @@ class AutoTuner:
             )
             futures.append(future)
             future_to_index[future] = i
-            
+
         results_with_configs = []
         for future in tqdm(
-            concurrent.futures.as_completed(futures),
-            total=len(futures),
-            desc="Compiling configurations"
-        ):
+                concurrent.futures.as_completed(futures),
+                total=len(futures),
+                desc="Compiling configurations"):
             idx = future_to_index[future]
             config = config_args[idx]
             try:
@@ -164,8 +150,8 @@ class AutoTuner:
             except Exception:
                 logger.debug(f"Compilation failed for config {config} at index {idx}")
                 continue
-             
-        ref_latency = None        
+
+        ref_latency = None
         progress_bar = tqdm(range(len(results_with_configs)), desc="Bench configurations")
         for i in progress_bar:
             jit_context, config = results_with_configs[i]
@@ -196,5 +182,4 @@ class AutoTuner:
             latency=best_latency,
             config=best_config,
             ref_latency=ref_latency,
-            libcode=best_jit_context.profiler.func.lib_code
-        )
+            libcode=best_jit_context.profiler.func.lib_code)

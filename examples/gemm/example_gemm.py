@@ -10,8 +10,10 @@ from tilelang.carver.template import MatmulTemplate
 from tilelang.carver.arch import CUDA
 from tilelang.carver.roller.rasterization import NoRasterization
 
+
 def ref_program(A, B):
     return A @ B.T
+
 
 def get_configs(M, N, K, with_roller=False):
     if with_roller:
@@ -78,7 +80,7 @@ def get_configs(M, N, K, with_roller=False):
 
 
 def get_best_config(M, N, K, with_roller=False):
-    
+
     def kernel(
         block_M=None,
         block_N=None,
@@ -117,7 +119,7 @@ def get_best_config(M, N, K, with_roller=False):
                 T.copy(C_shared, C[by * block_M, bx * block_N])
 
         return main
-    
+
     autotuner = AutoTuner(
         fn=kernel,
         configs=get_configs(M, N, K, with_roller),
@@ -136,8 +138,7 @@ def get_best_config(M, N, K, with_roller=False):
         skip_check=False,
         target="auto",
     )
-    return autotuner.do_bench(warmup=3,rep=20)
-
+    return autotuner.do_bench(warmup=3, rep=20)
 
 
 def matmul(M,
@@ -179,6 +180,7 @@ def matmul(M,
 
     return main
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
     parser.add_argument("--m", type=int, default=1024, help="Matrix dimension M")
@@ -212,5 +214,3 @@ if __name__ == "__main__":
     out_c = kernel(a, b)
     ref_c = a @ b.T + c
     torch.testing.assert_close(out_c, ref_c, rtol=1e-2, atol=1e-2)
-    
-    
