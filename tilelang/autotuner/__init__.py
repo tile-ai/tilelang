@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(
     filename='autotuner.log',
     filemode='w',
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s %(levelname)s:%(message)s')
 
 
@@ -151,15 +151,14 @@ class Autotuner:
         for i in progress_bar:
             jit_context, config = results_with_configs[i]
             try:
-                # Use ThreadPoolExecutor to enforce timeout on target_fn execution
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(target_fn, jit_context)
-                    latency, ref_latency = future.result(timeout=self.timeout)
-            except concurrent.futures.TimeoutError:
-                logger.debug(f"Timeout exceeded for config {config}. Skipping this configuration.")
-                continue
+                # Cannot ThreadPoolExecutor to enforce timeout on target_fn execution
+                # Because tma init may behave strangely with one thread
+                latency, ref_latency = target_fn(jit_context)
             except Exception as e:
-                logger.debug(f"An error occurred while testing config {config}: {e}")
+                logger.info(
+                    f"An error occurred while testing config {config}, checkout autotuner.log for more details"
+                )
+                logger.debug(f"Error: {e}")
                 continue
 
             logging.debug(f"Config {config} latency: {latency} at index {i}")

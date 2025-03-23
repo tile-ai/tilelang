@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 
-def ref_program(A, B, C):
+def ref_program(A, B):
     """
     A reference matrix multiplication program, used to compare performance.
 
@@ -292,8 +292,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     M, N, K = args.m, args.n, args.k
-    # with_roller = args.with_roller
-    with_roller = True
+    with_roller = args.with_roller
 
     # Compute total floating-point operations to measure throughput
     total_flops = 2 * M * N * K
