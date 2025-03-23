@@ -11,4 +11,4 @@ install_pip="python3.8 -m pip install --upgrade pip && python3.8 -m pip install 
 
 tox_command="python3.8 -m tox -e py38,py39,py310,py311,py312"
 
-docker run --rm -v $(pwd):/tilelang ${IMAGE} /bin/bash -c "$apt_command && $install_python_env && $install_cmake && $install_pip && $tox_command"
+docker run --rm -v $(pwd):/tilelang ${IMAGE} /bin/bash -c "$install_pip && $tox_command"
