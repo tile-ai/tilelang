@@ -11,10 +11,8 @@ from tilelang.carver.arch import CUDA
 from tilelang.carver.roller.rasterization import NoRasterization
 
 
-
 def ref_program(A, B):
     return A @ B.T
-
 
 
 def get_configs(M, N, K, with_roller=False):
@@ -82,7 +80,6 @@ def get_configs(M, N, K, with_roller=False):
 
 
 def get_best_config(M, N, K, with_roller=False):
-
 
     def kernel(
         block_M=None,
