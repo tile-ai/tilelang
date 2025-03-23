@@ -5,10 +5,12 @@ import torch
 import itertools
 import tilelang as tl
 import tilelang.language as T
-from tilelang.autotuner import autotune, jit
+from tilelang.autotuner import BaseTuner
 from tilelang.carver.template import MatmulTemplate
 from tilelang.carver.arch import CUDA
 from tilelang.carver.roller.rasterization import NoRasterization
+from tilelang.cache import clear_cache
+clear_cache()
 
 def ref_program(A, B):
     return A @ B.T
@@ -78,27 +80,7 @@ def get_configs(M, N, K, with_roller=False):
 
 
 def get_best_config(M, N, K, with_roller=False):
-
-    @autotune(
-        configs=get_configs(M, N, K, with_roller),
-        keys=[
-            "block_M",
-            "block_N",
-            "block_K",
-            "num_stages",
-            "thread_num",
-            "enable_rasteration",
-        ],
-        warmup=3,
-        rep=20,
-    )
-    @jit(
-        out_idx=[-1],
-        supply_type=tl.TensorSupplyType.Integer,
-        ref_prog=ref_program,
-        skip_check=False,
-        target="auto",
-    )
+    
     def kernel(
         block_M=None,
         block_N=None,
@@ -137,8 +119,27 @@ def get_best_config(M, N, K, with_roller=False):
                 T.copy(C_shared, C[by * block_M, bx * block_N])
 
         return main
+    
+    autotuner = BaseTuner(
+        fn=kernel,
+        configs=get_configs(M, N, K, with_roller),
+        keys=[
+            "block_M",
+            "block_N",
+            "block_K",
+            "num_stages",
+            "thread_num",
+            "enable_rasteration",
+        ])
+    autotuner.set_compile_args(
+        out_idx=[-1],
+        supply_type=tl.TensorSupplyType.Integer,
+        ref_prog=ref_program,
+        skip_check=False,
+        target="auto",
+    )
+    return autotuner.do_bench(warmup=3,rep=20)
 
-    return kernel()
 
 
 def matmul(M,
@@ -204,14 +205,12 @@ if __name__ == "__main__":
     use_autotune = args.use_autotune
     with_roller = args.with_roller
     if use_autotune:
-        best_latency, best_config, ref_latency = get_best_config(M, N, K, with_roller)
-        func = matmul(M, N, K, *best_config)
+        result = get_best_config(M, N, K, with_roller)
+        func = matmul(M, N, K, *result.config)
     else:
         func = matmul(M, N, K, 128, 128, 32, 3, 128, True)
 
-    # print(func)
     kernel = tl.compile(func, out_idx=-1)
     out_c = kernel(a, b)
     ref_c = a @ b.T + c
     torch.testing.assert_close(out_c, ref_c, rtol=1e-2, atol=1e-2)
-    # print(kernel.get_kernel_source())
