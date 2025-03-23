@@ -10,6 +10,7 @@ from tvm.script.parser.tir import *
 from tilelang.layout import Layout, Fragment  # noqa: F401
 from .parallel import Parallel  # noqa: F401
 from .pipeline import Pipelined  # noqa: F401
+from .frame import has_let_value, get_let_value  # noqa: F401
 from .kernel import (
     Kernel,  # noqa: F401
     KernelLaunchFrame,  # noqa: F401

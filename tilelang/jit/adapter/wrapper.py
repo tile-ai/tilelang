@@ -35,8 +35,9 @@ extern "C" int init() {{
 """
 
 PREDEF_HOST_FUNC = """
-extern "C" void call({}) {{
+extern "C" int call({}) {{
 {}
+return 0;
 }}
 """
 
@@ -53,12 +54,28 @@ TMA_DESC_INIT_FUNC = """
 \tCUtensorMapSwizzle {0}_swizzle= (CUtensorMapSwizzle){9};
 \tCUtensorMapL2promotion {0}_l2Promotion= (CUtensorMapL2promotion){10};
 \tCUtensorMapFloatOOBfill {0}_oobFill= (CUtensorMapFloatOOBfill){11};
-\tCUresult {0}_result = cuTensorMapEncodeTiled(
+
+\tCUresult {0}_result = CUTLASS_CUDA_DRIVER_WRAPPER_CALL(cuTensorMapEncodeTiled)(
     &{0}, {0}_type, {0}_tensorRank, {0}_globalAddress, {0}_globalDim, {0}_globalStride + 1, {0}_boxDim, {0}_elementStrides, {0}_interleave, {0}_swizzle, {0}_l2Promotion, {0}_oobFill);
+
 \tif ({0}_result != CUDA_SUCCESS) {{
-\t\tprintf("Failed to initialize the TMA descriptor {0} with error code %d\\n", {0}_result);
-\t\texit(-1);
-\t}}
+    std::stringstream ss;
+    ss << "TMA Desc Addr:   " << &{0}
+       << "\\nformat         " << {0}_type
+       << "\\ndim            " << {0}_tensorRank
+       << "\\ngmem_address   " << {0}_globalAddress
+       << "\\nglobalDim      " << {0}_globalDim
+       << "\\nglobalStrides  " << {0}_globalStride + 1
+       << "\\nboxDim         " << {0}_boxDim
+       << "\\nelementStrides " << {0}_elementStrides
+       << "\\ninterleave     " << {0}_interleave
+       << "\\nswizzle        " << {0}_swizzle
+       << "\\nl2Promotion    " << {0}_l2Promotion
+       << "\\noobFill        " << {0}_oobFill
+       << "\\nError: Failed to initialize the TMA descriptor {0}";
+    snprintf(error_buf, ERROR_BUF_SIZE, "%s", ss.str().c_str());
+    return -1;
+}}
 """
 
 

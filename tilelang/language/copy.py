@@ -3,9 +3,8 @@
 """The language interface for tl programs."""
 
 from typing import Union, List, Optional
-from tvm import tir
-from tvm.script import tir as T
-import tvm.ir
+from tilelang import language as T
+from tvm import ir, tir
 
 
 def region(buffer: tir.BufferLoad, access_type: str, *args: tir.PrimExpr):
@@ -35,9 +34,11 @@ def copy(
     coalesced_width: Optional[int] = None,
 ):
     if isinstance(src, tir.Buffer) and isinstance(dst, tir.Buffer):
-        tvm.ir.assert_structural_equal(src.shape, dst.shape)
+        ir.assert_structural_equal(src.shape, dst.shape)
 
     def get_extent(data):
+        if isinstance(data, tir.Var) and T.has_let_value(data):
+            data = T.get_let_value(data)
         if isinstance(data, tir.Buffer):
             return data.shape
         elif isinstance(data, tir.BufferRegion):
@@ -56,6 +57,8 @@ def copy(
         raise TypeError("Can't deduce copy extents from args")
 
     def _to_region(data, access_type):
+        if isinstance(data, tir.Var) and T.has_let_value(data):
+            data = T.get_let_value(data)
         if isinstance(data, tir.Buffer):
             return buffer_to_tile_region(data, access_type)
         elif isinstance(data, tir.BufferRegion):
