@@ -5,14 +5,12 @@
 import tilelang
 from tilelang import tvm as tvm
 import inspect
-from functools import wraps
-from typing import Any, Callable, List, Literal
+from typing import Callable, List, Literal
 from tqdm import tqdm
 import logging
 from dataclasses import dataclass
 import concurrent.futures
 import os
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +35,12 @@ class JITContext:
 
 @dataclass(frozen=True)
 class AutotuneResult:
-    best_latency: float 
-    best_config: dict
+    latency: float 
+    config: dict
     ref_latency: float
-    best_libcode: str
+    libcode: str
 
-class BaseTuner:
+class AutoTuner:
     def __init__(
         self,
         fn: Callable,
@@ -166,10 +164,7 @@ class BaseTuner:
             except Exception:
                 logger.debug(f"Compilation failed for config {config} at index {idx}")
                 continue
-        
-        jit_context = self.jit_compile(config_args[0])
-        
-        
+             
         ref_latency = None        
         progress_bar = tqdm(range(len(results_with_configs)), desc="Bench configurations")
         for i in progress_bar:
@@ -203,4 +198,3 @@ class BaseTuner:
             ref_latency=ref_latency,
             libcode=best_jit_context.profiler.func.lib_code
         )
-

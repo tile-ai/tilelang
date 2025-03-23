@@ -5,12 +5,10 @@ import torch
 import itertools
 import tilelang as tl
 import tilelang.language as T
-from tilelang.autotuner import BaseTuner
+from tilelang.autotuner import AutoTuner
 from tilelang.carver.template import MatmulTemplate
 from tilelang.carver.arch import CUDA
 from tilelang.carver.roller.rasterization import NoRasterization
-from tilelang.cache import clear_cache
-clear_cache()
 
 def ref_program(A, B):
     return A @ B.T
@@ -120,7 +118,7 @@ def get_best_config(M, N, K, with_roller=False):
 
         return main
     
-    autotuner = BaseTuner(
+    autotuner = AutoTuner(
         fn=kernel,
         configs=get_configs(M, N, K, with_roller),
         keys=[
@@ -214,3 +212,5 @@ if __name__ == "__main__":
     out_c = kernel(a, b)
     ref_c = a @ b.T + c
     torch.testing.assert_close(out_c, ref_c, rtol=1e-2, atol=1e-2)
+    
+    
