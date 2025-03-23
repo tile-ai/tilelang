@@ -109,6 +109,10 @@ cdef class CythonKernelWrapper:
             elif isinstance(tensor_list[i], int):
                 # Dynamic symbolics which are passed as integer arguments
                 call_args.append(tensor_list[i])
+            elif isinstance(tensor_list[i], float):
+                call_args.append(ctypes.c_float(tensor_list[i]))
+            elif isinstance(tensor_list[i], bool):
+                call_args.append(ctypes.c_bool(tensor_list[i]))
             else:
                 raise ValueError(f"Unsupported tensor type: {type(tensor_list[i])}")
 

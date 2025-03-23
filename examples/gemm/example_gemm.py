@@ -10,10 +10,8 @@ from tilelang.carver.template import MatmulTemplate
 from tilelang.carver.arch import CUDA
 from tilelang.carver.roller.rasterization import NoRasterization
 
-
-def ref_program(A, B, C):
-    C += A @ B.T
-
+def ref_program(A, B):
+    return A @ B.T
 
 def get_configs(M, N, K, with_roller=False):
     if with_roller:
@@ -181,9 +179,6 @@ def matmul(M,
             T.copy(C_shared, C[by * block_M, bx * block_N])
 
     return main
-
-    return kernel()
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")

@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 
-def ref_program(A, B):
+def ref_program(A, B, C):
     """
     A reference matrix multiplication program, used to compare performance.
 
@@ -177,7 +177,6 @@ def matmul(M, N, K, with_roller):
         supply_type=tl.TensorSupplyType.Integer,
         ref_prog=ref_program,
         skip_check=True,
-        profiler="auto",
         target="auto",
     )
     def kernel(

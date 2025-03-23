@@ -17,7 +17,7 @@ from functools import partial
 logger = logging.getLogger(__name__)
 
 logging.basicConfig(
-    filename='out.log',
+    filename='autotuner.log',
     filemode='w',
     level=logging.INFO,
     format='%(asctime)s %(levelname)s:%(message)s')
@@ -206,9 +206,9 @@ def jit(out_idx: List[int],
 
         @wraps(fn)
         def decorator(*args, **kwargs) -> float:
-            # Enabling Efficient Fusion
-            kernel = tilelang.compile(
-                fn(*args, **kwargs), target=target, pass_configs={"tir.merge_static_smem": True})
+
+            kernel = tilelang.compile(fn(*args, **kwargs), out_idx=out_idx, target=target)
+
             profiler = kernel.get_profiler()
 
             return JITContext(

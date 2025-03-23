@@ -202,11 +202,11 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
 
-        try:
-            self.lib.init()
-        except Exception as e:
-            raise Exception(
-                f"Failed to initialize the compiled library for {self.target}: {e}") from e
+        self.lib.get_last_error.restype = ctypes.c_char_p
+        result = self.lib.init()
+        if result != 0:
+            error_msg = self.lib.get_last_error().decode('utf-8')
+            raise RuntimeError(f"Initialization failed: {error_msg}")
 
         self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib)
         self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
@@ -248,11 +248,11 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.lib_generator = LibraryGenerator(adapter.target)
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
 
-        try:
-            adapter.lib.init()
-        except Exception as e:
-            raise Exception(
-                f"Failed to initialize the compiled library for {adapter.target}: {e}") from e
+        adapter.lib.get_last_error.restype = ctypes.c_char_p
+        result = adapter.lib.init()
+        if result != 0:
+            error_msg = adapter.lib.get_last_error().decode('utf-8')
+            raise RuntimeError(f"Initialization failed: {error_msg}")
 
         adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params,
                                                      adapter.lib)

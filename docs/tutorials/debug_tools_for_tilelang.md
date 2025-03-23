@@ -108,10 +108,22 @@ Hence, by registering a Python function named `tilelang_callback_cuda_postproc`,
 import tilelang
 import tilelang.language as T
 from tilelang import tvm
+from tilelang.engine.callback import register_cuda_postproc_callback
 
-@tvm.register_func
+@register_cuda_postproc_callback
 def tilelang_callback_cuda_postproc(code, _):
-    # ...existing code...
+    print(code) # print the final CUDA code
+    code = "// modified by tilelang_callback_cuda_postproc\n" + code
+    return code
+
+kernel = tilelang.compile(matmul, target="cuda")
+kernel_source = kernel.get_kernel_source()
+print(kernel_source)
+'''
+// modified by tilelang_callback_cuda_postproc
+#include "cuda_runtime.h"
+...
+'''
 ```
 
 ### Runtime Debug Prints with `T.print`

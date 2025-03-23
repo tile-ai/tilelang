@@ -12,12 +12,25 @@ import logging
 import textwrap
 
 PREDEF_ARRTIBUTE_SET_DYNAMIC_MEMORY = """
-    cudaFuncSetAttribute({}, cudaFuncAttributeMaxDynamicSharedMemorySize, {});
+    cudaError_t result = cudaFuncSetAttribute({0}, cudaFuncAttributeMaxDynamicSharedMemorySize, {1});
+    if (result != CUDA_SUCCESS) {{
+        snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed dynamic shared memory size to %d with error: %s", {1}, cudaGetErrorString(result));
+        return -1;
+    }}
 """
 
 PREDEF_INIT_FUNC = """
-extern "C" void init() {{
-    {}
+#define ERROR_BUF_SIZE 1024
+static char error_buf[ERROR_BUF_SIZE];
+
+extern "C" const char* get_last_error() {{
+    return error_buf;
+}}
+
+extern "C" int init() {{
+    error_buf[0] = '\\0';
+    {0}
+    return 0;
 }}
 """
 

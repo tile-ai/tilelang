@@ -15,3 +15,7 @@ def alloc_local(shape, dtype, scope="local"):
 
 def alloc_fragment(shape, dtype, scope="local.fragment"):
     return T.alloc_buffer(shape, dtype, scope=scope)
+
+
+def alloc_var(dtype, scope="local.var"):
+    return T.alloc_buffer([1], dtype, scope=scope)
