@@ -206,6 +206,7 @@ if __name__ == "__main__":
     with_roller = args.with_roller
     if use_autotune:
         result = get_best_config(M, N, K, with_roller)
+        print(f"best latency {result.latency}")
         func = matmul(M, N, K, *result.config)
     else:
         func = matmul(M, N, K, 128, 128, 32, 3, 128, True)
