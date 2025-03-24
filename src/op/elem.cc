@@ -361,21 +361,20 @@ Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
 
   if (args[0]->IsInstance<BufferLoadNode>()) {
     auto buffer_load = Downcast<BufferLoad>(args[0]);
-    for (const auto& index : buffer_load->indices) {
-      if (const auto* ramp = index.as<RampNode>()) {
+    for (const auto &index : buffer_load->indices) {
+      if (const auto *ramp = index.as<RampNode>()) {
         CHECK(ramp->stride.as<IntImmNode>()->value == 1)
             << "Only stride 1 ramps are supported";
-        const auto* lanes = ramp->lanes.as<IntImmNode>();
-        CHECK(lanes) << "Scalable vectors not supported in BufferRegion conversion";
+        const auto *lanes = ramp->lanes.as<IntImmNode>();
+        CHECK(lanes)
+            << "Scalable vectors not supported in BufferRegion conversion";
         region.push_back(Range::FromMinExtent(ramp->base, ramp->lanes));
       } else {
         region.push_back(Range::FromMinExtent(index, 1));
       }
     }
     dst = buffer_load->buffer;
-  }
-  else
-  {
+  } else {
     dst = vmap[GetVarFromAccessPtr(args[0])];
     for (int i = 0; i < dst->shape.size(); i++) {
       region.push_back(Range(0, dst->shape[i]));
@@ -388,7 +387,8 @@ Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
     value = args[1];
   }
 
-  ICHECK(region.size() == dst->shape.size()) << "region size = " << region.size() << " != " << dst->shape.size();
+  ICHECK(region.size() == dst->shape.size())
+      << "region size = " << region.size() << " != " << dst->shape.size();
   for (int i = 0; i < region.size(); i++) {
     // bound check if region is static
     if (region[i]->min.as<IntImm>()) {
