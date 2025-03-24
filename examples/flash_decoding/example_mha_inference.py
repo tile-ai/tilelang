@@ -167,7 +167,6 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
 
             T.annotate_layout({
                 o_accum_local: T.Fragment(o_accum_local.shape, forward_thread_fn=lambda i, j: i),
-                lse_local_split: T.Fragment(lse_local_split.shape, forward_thread_fn=lambda i: i),
                 o_shared: tilelang.layout.make_swizzled_layout(o_shared),
                 po_shared: tilelang.layout.make_swizzled_layout(po_shared),
             })
@@ -190,7 +189,9 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
             for k in T.Pipelined(num_split, num_stages=2):
                 T.copy(Output_partial[bz, bx * block_M:(bx + 1) * block_M, by, k, :], po_shared)
                 T.copy(po_shared, po_local)
-                T.copy(lse_local[k, :], lse_local_split)
+                for i in T.Parallel(block_M):
+                    lse_local_split[i] = lse_local[k, i]
+                # T.copy(lse_local[k, :], lse_local_split)
                 for i in T.Parallel(block_M):
                     scale_local[i] = T.exp2(lse_local_split[i] - lse_logsum_local[i])
                 for i, j in T.Parallel(block_M, dim):
@@ -304,14 +305,15 @@ if __name__ == "__main__":
     BLOCK_N = 64  # if D_HEAD <= 128 else 32
     program = flashattn(BATCH, H, Q_CTX, KV_CTX, D_HEAD, causal, BLOCK_M, BLOCK_N)
     ref_program = partial(ref_program, causal=causal)
-    mod = tilelang.compile(program, out_idx=[5], target="cuda", execution_backend="dlpack")
-    profiler = mod.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+    kernel = tilelang.compile(program, out_idx=[5], target="cuda", execution_backend="dlpack")
+    print(kernel.get_kernel_source())
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
     print("All checks passed!")
 
     latency = profiler.do_bench(ref_program, warmup=500)
     print("{:.2f} ms".format(latency))
     print("{:.2f} TFlops".format(total_flops / latency * 1e-9))
-    latency = profiler.do_bench(profiler.mod, n_warmup=10, n_repeat=10, profiler="tvm")
+    latency = profiler.do_bench(n_warmup=10, n_repeat=10)
     print("{:.4f} ms".format(latency))
     print("{:.2f} TFlops".format(total_flops / latency * 1e-9))
