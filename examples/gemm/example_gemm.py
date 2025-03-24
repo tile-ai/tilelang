@@ -120,17 +120,10 @@ def get_best_config(M, N, K, with_roller=False):
 
         return main
 
-    autotuner = AutoTuner(
-        fn=kernel,
-        configs=get_configs(M, N, K, with_roller),
-        keys=[
-            "block_M",
-            "block_N",
-            "block_K",
-            "num_stages",
-            "thread_num",
-            "enable_rasteration",
-        ])
+    autotuner = AutoTuner.from_kernel(
+        kernel=kernel,
+        configs=get_configs(M, N, K, with_roller)
+    )
     autotuner.set_compile_args(
         out_idx=[-1],
         supply_type=tl.TensorSupplyType.Integer,
@@ -138,7 +131,7 @@ def get_best_config(M, N, K, with_roller=False):
         skip_check=False,
         target="auto",
     )
-    return autotuner.do_bench(warmup=3, rep=20)
+    return autotuner.run(warmup=3, rep=20)
 
 
 def matmul(M,

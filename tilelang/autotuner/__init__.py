@@ -43,14 +43,17 @@ class AutotuneResult:
 
 
 class AutoTuner:
-
-    def __init__(self, fn: Callable, configs, keys):
+        
+    def __init__(self, fn: Callable, configs):
         self.fn = fn
         self.configs = configs
-        self.keys = keys
         self.ref_latency_cache = None
         self.jit_input_tensors = None
         self.ref_input_tensors = None
+    
+    @classmethod
+    def from_kernel(cls, kernel: Callable, configs):
+        return cls(kernel, configs)
 
     def set_compile_args(self,
                          out_idx: List[int],
@@ -79,8 +82,9 @@ class AutoTuner:
 
         self.jit_compile = _compile
 
-    def do_bench(self, warmup: int = 25, rep: int = 100, timeout: int = 100):
+    def run(self, warmup: int = 25, rep: int = 100, timeout: int = 100):
         sig = inspect.signature(self.fn)
+        keys = list(sig.parameters.keys())
         bound_args = sig.bind()
         bound_args.apply_defaults()
         best_latency = 1e8
@@ -118,7 +122,7 @@ class AutoTuner:
         for config in self.configs:
             new_args = []
             for name, value in bound_args.arguments.items():
-                if name not in self.keys:
+                if name not in keys:
                     new_args.append(value)
                 else:
                     new_args.append(config[name])
