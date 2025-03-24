@@ -22,6 +22,7 @@
  * \brief Warp specialized Pipeline for cuda GPU (sm90+)
  */
 
+#include "tir/analysis/var_use_def_analysis.h"
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
@@ -37,10 +38,72 @@ using namespace tir;
 
 enum class Role { kConsumer, kProducer, kBoth };
 
+class TMAFinder : public StmtExprVisitor {
+public:
+  void clear() { has_tma_load_ = false; }
+
+  void VisitExpr_(const CallNode *call) final {
+    if (call->op.same_as(TMALoadOp()) || call->op.same_as(TMALoadIm2ColOp())) {
+      has_tma_load_ = true;
+    }
+  }
+
+  bool has_tma_load_ = false;
+};
+
+class ProducerUsedBufferFinder : public StmtExprVisitor {
+public:
+  auto FindProducerusedBuffer(Stmt stmt) {
+    VisitStmt(stmt);
+    return used_in_producer_cond_;
+  }
+
+  void InsertBuffer(const PrimExpr &expr) {
+    // Find the buffer that is used in the condition
+    VarUseDefAnalyzer usage(Array<Var>{});
+    usage(expr);
+    for (const auto &buffer : usage.buffer_use_count_) {
+      used_in_producer_cond_.insert(buffer.first);
+    }
+    for (const auto &buffer : used_in_producer_cond_) {
+    }
+  }
+
+  void VisitStmt_(const IfThenElseNode *op) final {
+    TMAFinder tma_finder;
+    tma_finder(op->then_case);
+    if (op->else_case.defined()) {
+      tma_finder(op->else_case.value());
+    }
+    if (tma_finder.has_tma_load_) {
+      InsertBuffer(op->condition);
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitStmt_(const ForNode *op) final {
+    TMAFinder tma_finder;
+    tma_finder(op->body);
+    if (tma_finder.has_tma_load_) {
+      InsertBuffer(op->min);
+      InsertBuffer(op->extent);
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+private:
+  std::unordered_set<const BufferNode *> used_in_producer_cond_;
+};
+
 class WarpSpecializedRoleMarker : public StmtVisitor {
 public:
   WarpSpecializedRoleMarker(Map<Var, Buffer> buffer_data_to_buffer)
       : buffer_data_to_buffer_(buffer_data_to_buffer) {}
+
+  void Prepare(const Stmt &stmt) {
+    ProducerUsedBufferFinder finder;
+    used_in_producer_cond_ = finder.FindProducerusedBuffer(stmt);
+  }
 
   Role GetRole(const StmtNode *stmt) const {
     auto it = map_.find(stmt);
@@ -65,6 +128,10 @@ public:
   void VisitStmt_(const BufferStoreNode *op) final {
     bool is_shared_store =
         op->buffer.scope() == "shared.dyn" || op->buffer.scope() == "shared";
+    if (used_in_producer_cond_.count(op->buffer.get())) {
+      SetRole(op, Role::kBoth);
+      return;
+    }
     if (!is_shared_store) {
       SetRole(op, Role::kConsumer);
       return;
@@ -136,6 +203,7 @@ private:
   std::unordered_map<const StmtNode *, Role> map_;
   bool has_simt_copy_ = false;
   bool has_bulk_copy_ = false;
+  std::unordered_set<const BufferNode *> used_in_producer_cond_;
 };
 
 static PrimExpr makeGetBarrier(PrimExpr barrier_id) {
@@ -1073,6 +1141,7 @@ private:
 
     Block block = block_realize->block;
     WarpSpecializedRoleMarker marker(buffer_data_to_buffer_);
+    marker.Prepare(block);
     marker(block);
     if (!marker.HasProducer()) {
       // Cannot detect any producer here, directly return.
