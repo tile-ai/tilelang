@@ -4,7 +4,6 @@
 import tilelang
 import tilelang.language as T
 
-
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
     # add decorator @tilelang.jit if you want to return a torch function
     @T.prim_func
@@ -22,6 +21,8 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             T.clear(C_local)
 
             X_shared = A_shared[:block_M, :block_K]
+            X_local = C_local[:block_M, :block_K]
+            T.clear(X_local)
 
             for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=0):
                 # Copy tile of A
