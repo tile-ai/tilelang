@@ -21,21 +21,19 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
             T.clear(C_local)
 
-            X_shared = A_shared[:block_M, :block_K]
-            X_local = C_local[:block_M, :block_K]
-            T.clear(X_local)
-
             for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=0):
                 # Copy tile of A
                 # This is a sugar syntax for parallelized copy
-                T.copy(A[by * block_M, ko * block_K], X_shared)
+                T.copy(A[by * block_M, ko * block_K], A_shared)
+
+                T.clear(A_shared)
 
                 # Demonstrate parallelized copy from global to shared for B
-                T.copy(B[bx * block_N, ko * block_K], B_shared[:block_N, :block_K])
+                T.copy(B[bx * block_N, ko * block_K], B_shared)
 
                 # Perform a tile-level GEMM on the shared buffers
                 # Currently we dispatch to the cute/hip on Nvidia/AMD GPUs
-                T.gemm(X_shared, B_shared, C_local, transpose_B=True)
+                T.gemm(A_shared, B_shared, C_local, transpose_B=True)
 
             # Copy result back to global memory
             T.copy(C_local, C[by * block_M, bx * block_N])
@@ -45,8 +43,14 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
 def run_matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
     program = matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype)
-    kernel = tilelang.compile(program, out_idx=[2], target="cuda")
-    kernel.run_once()
+    kernel = tilelang.compile(
+        program, out_idx=[2], target="cuda", pass_configs={"tl.disable_tma_lower": True})
+    import torch
+    from tilelang.utils import map_torch_type
+    a = torch.randn((M, K), dtype=map_torch_type(dtype)).cuda()
+    b = torch.randn((N, K), dtype=map_torch_type(dtype)).cuda()
+    c = kernel(a, b)
+    assert torch.allclose(c, torch.zeros_like(c))
 
 
 def test_matmul():

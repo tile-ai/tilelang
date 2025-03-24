@@ -59,6 +59,7 @@ private:
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;
   tir::Buffer dst;
   PrimExpr value;
+  Array<Range> region;
 };
 
 } // namespace tl
