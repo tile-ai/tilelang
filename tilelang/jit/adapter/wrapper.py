@@ -37,7 +37,7 @@ extern "C" int init() {{
 PREDEF_HOST_FUNC = """
 extern "C" int call({}) {{
 {}
-return 0;
+    return 0;
 }}
 """
 
