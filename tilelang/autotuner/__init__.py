@@ -41,7 +41,8 @@ class AutotuneResult:
     config: dict
     ref_latency: float
     libcode: str
-
+    func: Callable
+    kernel: Callable
 
 class AutoTuner:
 
@@ -187,7 +188,10 @@ class AutoTuner:
             latency=best_latency,
             config=best_config,
             ref_latency=ref_latency,
-            libcode=best_jit_context.profiler.func.lib_code)
+            libcode=best_jit_context.profiler.func.lib_code,
+            func=self.fn(*best_config),
+            kernel=best_jit_context.profiler.func
+        )
 
     def __call__(self) -> Any:
         return self.run()

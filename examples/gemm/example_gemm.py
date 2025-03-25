@@ -190,18 +190,16 @@ if __name__ == "__main__":
     M, N, K = args.m, args.n, args.k
     a = torch.randn(M, K).cuda().half()
     b = torch.randn(N, K).cuda().half()
-    c = torch.zeros(M, N).cuda().half()
     configs = []
     use_autotune = args.use_autotune
     with_roller = args.with_roller
     if use_autotune:
         result = get_best_config(M, N, K, with_roller)
         print(f"best latency {result.latency}")
-        func = matmul(M, N, K, *result.config)
+        kernel = result.kernel
     else:
-        func = matmul(M, N, K, 128, 128, 32, 3, 128, True)
+        kernel = tl.compile(matmul(M, N, K, 128, 128, 32, 3, 128, True), out_idx=-1)
 
-    kernel = tl.compile(func, out_idx=-1)
     out_c = kernel(a, b)
-    ref_c = a @ b.T + c
+    ref_c = ref_program(a, b)
     torch.testing.assert_close(out_c, ref_c, rtol=1e-2, atol=1e-2)
