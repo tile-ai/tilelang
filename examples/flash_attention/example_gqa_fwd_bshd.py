@@ -73,9 +73,9 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False, groups=1):
         @T.macro
         def MMA0(
             K: T.Tensor(kv_shape, dtype),
-            Q_shared: T.Tensor([block_M, dim], dtype),
-            K_shared: T.Tensor([block_N, dim], dtype),
-            acc_s: T.Tensor([block_M, block_N], accum_dtype),
+            Q_shared: T.SharedTensor([block_M, dim], dtype),
+            K_shared: T.SharedTensor([block_N, dim], dtype),
+            acc_s: T.FragmentTensor([block_M, block_N], accum_dtype),
             k: T.int32,
             bx: T.int32,
             by: T.int32,
@@ -93,9 +93,9 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False, groups=1):
         @T.macro
         def MMA1(
                 V: T.Tensor(kv_shape, dtype),
-                V_shared: T.Tensor([block_M, dim], dtype),
-                acc_s_cast: T.Tensor([block_M, block_N], dtype),
-                acc_o: T.Tensor([block_M, dim], accum_dtype),
+                V_shared: T.SharedTensor([block_M, dim], dtype),
+                acc_s_cast: T.FragmentTensor([block_M, block_N], dtype),
+                acc_o: T.FragmentTensor([block_M, dim], accum_dtype),
                 k: T.int32,
                 by: T.int32,
                 bz: T.int32,
@@ -105,13 +105,13 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False, groups=1):
 
         @T.macro
         def Softmax(
-                acc_s: T.Tensor([block_M, block_N], accum_dtype),
-                acc_s_cast: T.Tensor([block_M, block_N], dtype),
-                scores_max: T.Tensor([block_M], accum_dtype),
-                scores_max_prev: T.Tensor([block_M], accum_dtype),
-                scores_scale: T.Tensor([block_M], accum_dtype),
-                scores_sum: T.Tensor([block_M], accum_dtype),
-                logsum: T.Tensor([block_M], accum_dtype),
+                acc_s: T.FragmentTensor([block_M, block_N], accum_dtype),
+                acc_s_cast: T.FragmentTensor([block_M, block_N], dtype),
+                scores_max: T.FragmentTensor([block_M], accum_dtype),
+                scores_max_prev: T.FragmentTensor([block_M], accum_dtype),
+                scores_scale: T.FragmentTensor([block_M], accum_dtype),
+                scores_sum: T.FragmentTensor([block_M], accum_dtype),
+                logsum: T.FragmentTensor([block_M], accum_dtype),
         ):
             T.copy(scores_max, scores_max_prev)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -135,8 +135,8 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False, groups=1):
 
         @T.macro
         def Rescale(
-                acc_o: T.Tensor([block_M, dim], accum_dtype),
-                scores_scale: T.Tensor([block_M], accum_dtype),
+                acc_o: T.FragmentTensor([block_M, dim], accum_dtype),
+                scores_scale: T.FragmentTensor([block_M], accum_dtype),
         ):
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] *= scores_scale[i]

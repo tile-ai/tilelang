@@ -80,9 +80,9 @@ def tl_matmul_streamk(
     def compute_first_wave(
         pid: T.int32,
         A_buf: T.Tensor,
-        A_buf_shared: T.Tensor,
+        A_buf_shared: T.SharedTensor,
         B_buf: T.Tensor,
-        B_buf_shared: T.Tensor,
+        B_buf_shared: T.SharedTensor,
         C: T.Tensor,
         C_local: T.Tensor,
     ):
@@ -128,9 +128,9 @@ def tl_matmul_streamk(
     def compute_full_tiles(
         pid: T.int32,
         A_buf: T.Tensor,
-        A_shared: T.Tensor,
+        A_shared: T.SharedTensor,
         B_buf: T.Tensor,
-        B_shared: T.Tensor,
+        B_shared: T.SharedTensor,
         C: T.Tensor,
         C_local: T.Tensor,
     ):
