@@ -1,0 +1,63 @@
+name: Bot
+
+on: 
+  issue_comment:
+    types: [created]
+
+jobs:
+
+  performance-test:
+    if: |
+      (contains(github.event.comment.body, '/performance-report') || contains(github.event.comment.body, '/perf'))&&
+      github.event.issue.pull_request
+    permissions:
+      pull-requests: write
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          python -m venv tll
+          source tll/bin/activate
+          pip install -r requirements-test.txt
+          pip install .
+
+      - name: Build original version
+        run: |
+          echo "Check files to be deleted!"
+          git clean -dxn | grep -v 'tll/' | xargs -I{} echo {} 
+          git clean -dxn | grep -v 'tll/' | xargs -I{} rm -rf {}
+          echo "Delete files completed!"
+          git checkout main
+          python -m venv tl
+          source tl/bin/activate
+          pip install -r requirements-test.txt
+          pip install .
+
+      - name: Run performance test
+        id: perf-test
+        run: |
+          source tl/bin/activate
+          python ./maint/scripts/ci_performance.py >> report.txt
+
+      - name: Post Test Results to PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COMMENT_BODY=$'📊 ​**Performance Test Results** (triggered by @${{ github.event.comment.user.login }}):\n\n'"$(cat report.txt)"
+          JSON_PAYLOAD=$(jq -n --arg body "$COMMENT_BODY" '{body: $body}')
+          curl -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
+            -d "$JSON_PAYLOAD"
