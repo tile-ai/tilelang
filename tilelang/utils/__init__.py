@@ -12,3 +12,4 @@ from .language import (
     is_local,  # noqa: F401
     array_reduce,  # noqa: F401
 )
+from .deprecated import deprecated  # noqa: F401

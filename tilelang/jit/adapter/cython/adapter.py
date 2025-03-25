@@ -141,6 +141,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
     wrapped_source: Optional[str] = None  # Generated C++ wrapper code
     # Maps symbolic variables to their corresponding buffer and shape indices
     dynamic_symbolic_map: Optional[Dict[tir.Var, Tuple[int, int]]] = None
+    # Maps pointer arguments to their corresponding (buffer_index, shape_dimension)
+    ptr_map: Optional[Dict[int, str]] = None
     # Maps buffer variables to their corresponding dtypes
     buffer_dtype_map: Optional[Dict[tir.Var, Tuple[int, torch.dtype]]] = None
     # Maps buffer variables to their corresponding static shapes
@@ -185,6 +187,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
         self.buffer_dtype_map = self._process_buffer_dtype()
+        self.ptr_map = self._process_ptr_map()
         self.static_shape_map = self._process_static_shape()
         self.buffer_device_map = self._process_buffer_device()
 
@@ -213,6 +216,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.cython_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
         self.cython_wrapper.set_static_shape_map(self.static_shape_map)
         self.cython_wrapper.set_buffer_device_map(self.buffer_device_map)
+        self.cython_wrapper.set_ptr_map(self.ptr_map)
         self._post_init()
 
     @classmethod
@@ -242,6 +246,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
         adapter.buffer_dtype_map = adapter._process_buffer_dtype()
         adapter.static_shape_map = adapter._process_static_shape()
+        adapter.ptr_map = adapter._process_ptr_map()
         adapter.buffer_device_map = adapter._process_buffer_device()
 
         adapter.verbose = verbose
@@ -260,6 +265,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.cython_wrapper.set_buffer_dtype_map(adapter.buffer_dtype_map)
         adapter.cython_wrapper.set_static_shape_map(adapter.static_shape_map)
         adapter.cython_wrapper.set_buffer_device_map(adapter.buffer_device_map)
+        adapter.cython_wrapper.set_ptr_map(adapter.ptr_map)
+
         adapter._post_init()
         return adapter
 
@@ -277,7 +284,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, shape in enumerate(buffer.shape):
-                    if isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map):
+                    if (isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map) and
+                        (shape not in params)):
                         dynamic_symbolic_map[shape] = (i, j)
         return dynamic_symbolic_map
 
@@ -296,6 +304,20 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 name, dtype = buffer.name, buffer.dtype
                 buffer_dtype_map[name] = (i, map_torch_type(dtype))
         return buffer_dtype_map
+
+    def _process_ptr_map(self) -> Dict[int, str]:
+        """Extract information about pointer arguments from the TIR function.
+        
+        Maps pointer arguments to their corresponding (buffer_index, shape_dimension)
+        for runtime shape resolution.
+        """
+        func = self.prim_func
+        params = func.params
+        ptr_map = {}
+        for i, param in enumerate(params):
+            if param.dtype == 'handle':
+                ptr_map[i] = param.name
+        return ptr_map
 
     def _process_static_shape(self) -> Dict[tir.Var, List[Tuple[int, int]]]:
         """Extract information about static shapes from the TIR function.
