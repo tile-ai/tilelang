@@ -5,14 +5,13 @@
 import tilelang
 from tilelang import tvm as tvm
 import inspect
-from functools import wraps
-from typing import Any, Callable, List, Literal
+from functools import wraps, partial
+from typing import Callable, List, Literal, Any
 from tqdm import tqdm
 import logging
 from dataclasses import dataclass
 import concurrent.futures
 import os
-from functools import partial
 
 logger = logging.getLogger(__name__)
 
@@ -36,40 +35,65 @@ class JITContext:
     target: Literal['cuda', 'hip']
 
 
-class Autotuner:
+@dataclass(frozen=True)
+class AutotuneResult:
+    latency: float
+    config: dict
+    ref_latency: float
+    libcode: str
+    func: Callable
+    kernel: Callable
 
-    def __init__(
-        self,
-        fn: Callable,
-        configs: Any,
-        keys: List[str],
-        warmup: int = 25,
-        rep: int = 100,
-        timeout: int = 30,
-    ):
+
+class AutoTuner:
+
+    def __init__(self, fn: Callable, configs):
         self.fn = fn
         self.configs = configs
-        self.keys = keys
-        self.warmup = warmup
-        self.rep = rep
-        self.timeout = timeout
-
-        # Precompute cached variables
         self.ref_latency_cache = None
         self.jit_input_tensors = None
         self.ref_input_tensors = None
 
-    def jit_compile(self, config_arg) -> JITContext:
-        jit_context = self.fn(*config_arg)
-        return jit_context
+    @classmethod
+    def from_kernel(cls, kernel: Callable, configs):
+        return cls(kernel, configs)
 
-    def run(self, *args: Any, **kwds: Any) -> Any:
+    def set_compile_args(self,
+                         out_idx: List[int],
+                         supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Normal,
+                         ref_prog: Callable = None,
+                         rtol: float = 1e-2,
+                         atol: float = 1e-2,
+                         max_mismatched_ratio: float = 0.01,
+                         skip_check: bool = False,
+                         target: Literal['auto', 'cuda', 'hip'] = 'auto'):
+
+        def _compile(*config_arg):
+            kernel = tilelang.compile(self.fn(*config_arg), out_idx=out_idx, target=target)
+            profiler = kernel.get_profiler()
+            jit_context = JITContext(
+                out_idx=out_idx,
+                supply_type=supply_type,
+                ref_prog=ref_prog,
+                rtol=rtol,
+                atol=atol,
+                max_mismatched_ratio=max_mismatched_ratio,
+                skip_check=skip_check,
+                profiler=profiler,
+                target=target)
+            return jit_context
+
+        self.jit_compile = _compile
+        return self
+
+    def run(self, warmup: int = 25, rep: int = 100, timeout: int = 100):
         sig = inspect.signature(self.fn)
-        bound_args = sig.bind(*args, **kwds)
+        keys = list(sig.parameters.keys())
+        bound_args = sig.bind()
         bound_args.apply_defaults()
-
         best_latency = 1e8
         best_config = None
+        best_jit_context = None
 
         def target_fn(jit_context):
             # Unpack the context
@@ -89,49 +113,38 @@ class Autotuner:
                     ref_prog, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio)
 
             latency = profiler.do_bench(
-                profiler.func,
-                n_warmup=self.warmup,
-                n_repeat=self.rep,
-                input_tensors=self.jit_input_tensors)
+                profiler.func, n_warmup=warmup, n_repeat=rep, input_tensors=self.jit_input_tensors)
             if self.ref_latency_cache is None and ref_prog is not None:
                 self.ref_input_tensors = profiler._get_inputs(
                     with_output=False) if self.ref_input_tensors is None else self.ref_input_tensors
                 self.ref_latency_cache = profiler.do_bench(
-                    ref_prog,
-                    n_warmup=self.warmup,
-                    n_repeat=self.rep,
-                    input_tensors=self.ref_input_tensors)
+                    ref_prog, n_warmup=warmup, n_repeat=rep, input_tensors=self.ref_input_tensors)
 
             return latency, self.ref_latency_cache
 
-        # Parallel compilation
         config_args = []
-
         for config in self.configs:
             new_args = []
             for name, value in bound_args.arguments.items():
-                if name not in self.keys:
+                if name not in keys:
                     new_args.append(value)
                 else:
                     new_args.append(config[name])
             new_args = tuple(new_args)
             config_args.append(new_args)
 
-        worker = partial(self.jit_compile, **kwds)
-
-        # 90% utilization
         num_workers = max(1, int(os.cpu_count() * 0.9))
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
-
-        # Submit all compilation jobs
         futures = []
-        future_to_index = {}  # Track which future corresponds to which config
+        future_to_index = {}
         for i, config_arg in enumerate(config_args):
-            future = pool.submit(worker, config_arg)
+            future = pool.submit(
+                self.jit_compile,
+                *config_arg,
+            )
             futures.append(future)
             future_to_index[future] = i
 
-        # Process results with error handling
         results_with_configs = []
         for future in tqdm(
                 concurrent.futures.as_completed(futures),
@@ -166,28 +179,34 @@ class Autotuner:
             if latency < best_latency:
                 best_latency = latency
                 best_config = config
+                best_jit_context = jit_context
 
             progress_bar.set_postfix({"best_latency": best_latency})
             tqdm.write(f"Tuned Latency {latency} with config {config} at index {i}")
 
         pool.shutdown()
-        return best_latency, best_config, ref_latency
+        return AutotuneResult(
+            latency=best_latency,
+            config=best_config,
+            ref_latency=ref_latency,
+            libcode=best_jit_context.profiler.func.lib_code,
+            func=self.fn(*best_config),
+            kernel=best_jit_context.profiler.func)
 
-    def __call__(self, *args: Any, **kwds: Any) -> Any:
-        return self.run(*args, **kwds)
+    def __call__(self) -> Any:
+        return self.run()
 
 
-def autotune(configs: Any,
-             keys: List[str],
-             warmup: int = 25,
-             rep: int = 100,
-             timeout: int = 100) -> Callable:
+def autotune(configs: Any, warmup: int = 25, rep: int = 100, timeout: int = 100) -> Callable:
     """
     Decorator for tilelang program
     """
 
-    def decorator(fn: Callable) -> Autotuner:
-        return Autotuner(fn, configs=configs, keys=keys, warmup=warmup, rep=rep, timeout=timeout)
+    def decorator(fn: Callable) -> AutoTuner:
+        autotuner = AutoTuner(fn, configs=configs)
+        autotuner.jit_compile = fn
+        autotuner.run = partial(autotuner.run, warmup, rep, timeout)
+        return autotuner
 
     return decorator
 

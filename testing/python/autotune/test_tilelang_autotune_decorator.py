@@ -7,7 +7,7 @@ import logging
 import tilelang as tl
 import tilelang.testing
 import tilelang.language as T
-from tilelang.autotuner import AutoTuner
+from tilelang.autotuner import jit, autotune
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -146,14 +146,18 @@ def matmul(M, N, K, with_roller):
             The baseline latency of the reference program (for computing speedup).
     """
 
-    # Decorate the kernel with autotune & jit, specifying:
-    #  - Tuning config list
-    #  - Profiling keys
-    #  - Warmup and repetition counts for better measurement
-    #  - A reference program for correctness verification
-    #  - The "tvm" profiler backend
-    #  - HIP as the compilation target (modify as needed for your hardware)
-
+    @autotune(
+        configs=get_configs(M, N, K, with_roller),
+        warmup=3,
+        rep=20,
+    )
+    @jit(
+        out_idx=[-1],
+        supply_type=tl.TensorSupplyType.Integer,
+        ref_prog=ref_program,
+        skip_check=False,
+        target="auto",
+    )
     def kernel(
         block_M=None,
         block_N=None,
@@ -251,15 +255,7 @@ def matmul(M, N, K, with_roller):
 
         return main
 
-    autotuner = AutoTuner.from_kernel(
-        kernel=kernel, configs=get_configs(M, N, K, with_roller)).set_compile_args(
-            out_idx=[-1],
-            supply_type=tl.TensorSupplyType.Integer,
-            ref_prog=ref_program,
-            skip_check=False,
-            target="auto",
-        )
-    return autotuner.run(warmup=3, rep=20)
+    return kernel()
 
 
 def test_autotune_get_configs():
