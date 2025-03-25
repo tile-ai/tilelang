@@ -228,7 +228,10 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
         # if stream is not None, we need to pass the stream to the library
         if stream is None:
-            stream = torch.cuda.current_stream().cuda_stream
+            if str(self.target).startswith("cuda") and torch.cuda.is_available():
+                stream = torch.cuda.current_stream().cuda_stream
+            else:
+                stream = 0
 
         self._forward_from_prebuild_lib(*args, stream=stream)
 

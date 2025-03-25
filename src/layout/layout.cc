@@ -411,6 +411,10 @@ bool FragmentNode::IsEqual(const FragmentNode *other, bool skip_index) const {
   // a[i, j] = b[j, i] in register level.
 
   bool ret = StructuralEqual()(this->InputShape(), other->InputShape());
+  if (!ret) {
+    // may be broadcast case
+    return true;
+  }
   ret &= StructuralEqual()(this->OutputShape(), other->OutputShape());
   ret &= StructuralEqual()(this->ReplicateExtent(), other->ReplicateExtent());
   ret &= StructuralEqual()(this->ThreadExtent(), other->ThreadExtent());

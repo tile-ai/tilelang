@@ -75,7 +75,10 @@ cdef class CythonKernelWrapper:
 
         # Use current CUDA stream if none specified
         if stream == -1: 
-            stream = torch.cuda.current_stream().cuda_stream
+            if torch.cuda.is_available():
+                stream = torch.cuda.current_stream().cuda_stream
+            else:
+                stream = 0
 
         cdef int ins_idx = 0
         cdef list tensor_list = []
