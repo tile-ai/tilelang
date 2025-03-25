@@ -84,7 +84,7 @@ def tl_matmul_streamk(
         B_buf: T.Tensor,
         B_buf_shared: T.SharedTensor,
         C: T.Tensor,
-        C_local: T.Tensor,
+        C_local: T.LocalTensor,
     ):
         start_iter = T.alloc_fragment((1,), "int32", "local")
         end_iter = T.alloc_fragment((1,), "int32", "local")
@@ -132,7 +132,7 @@ def tl_matmul_streamk(
         B_buf: T.Tensor,
         B_shared: T.SharedTensor,
         C: T.Tensor,
-        C_local: T.Tensor,
+        C_local: T.LocalTensor,
     ):
 
         for p in T.serial(sm_patition_factor):
