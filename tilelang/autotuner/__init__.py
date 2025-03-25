@@ -260,3 +260,54 @@ class AutoTuner:
             config=best_config,
             ref_latency=ref_latency,
             libcode=best_jit_context.profiler.func.lib_code)
+
+    def __call__(self) -> Any:
+        return self.run()
+
+
+def autotune(configs: Any, warmup: int = 25, rep: int = 100, timeout: int = 100) -> Callable:
+    """
+    Decorator for tilelang program
+    """
+
+    def decorator(fn: Callable) -> AutoTuner:
+        autotuner = AutoTuner(fn, configs=configs)
+        autotuner.jit_compile = fn
+        autotuner.run = partial(autotuner.run, warmup, rep, timeout)
+        return autotuner
+
+    return decorator
+
+
+def jit(out_idx: List[int],
+        supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Normal,
+        ref_prog: Callable = None,
+        rtol: float = 1e-2,
+        atol: float = 1e-2,
+        max_mismatched_ratio: float = 0.01,
+        skip_check: bool = False,
+        target: Literal['auto', 'cuda', 'hip'] = 'auto') -> Callable:
+
+    def wrapper(fn: Callable):
+
+        @wraps(fn)
+        def decorator(*args, **kwargs) -> float:
+
+            kernel = tilelang.compile(fn(*args, **kwargs), out_idx=out_idx, target=target)
+
+            profiler = kernel.get_profiler()
+
+            return JITContext(
+                out_idx=out_idx,
+                supply_type=supply_type,
+                ref_prog=ref_prog,
+                rtol=rtol,
+                atol=atol,
+                max_mismatched_ratio=max_mismatched_ratio,
+                skip_check=skip_check,
+                profiler=profiler,
+                target=target)
+
+        return decorator
+
+    return wrapper

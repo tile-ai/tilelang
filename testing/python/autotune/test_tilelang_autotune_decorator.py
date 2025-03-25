@@ -145,6 +145,7 @@ def matmul(M, N, K, with_roller):
         ref_latency : float
             The baseline latency of the reference program (for computing speedup).
     """
+
     @autotune(
         configs=get_configs(M, N, K, with_roller),
         warmup=3,
