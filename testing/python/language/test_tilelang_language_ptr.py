@@ -20,9 +20,9 @@ def matmul_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype
         n: T.int32,
         k: T.int32,
     ):
-        A = T.Tensor.from_ptr(a_ptr, (m, k), dtype)
-        B = T.Tensor.from_ptr(b_ptr, (k, n), dtype)
-        C = T.Tensor.from_ptr(c_ptr, (m, n), accum_dtype)
+        A = T.make_tensor(a_ptr, (m, k), dtype)
+        B = T.make_tensor(b_ptr, (k, n), dtype)
+        C = T.make_tensor(c_ptr, (m, n), accum_dtype)
 
         # Initialize Kernel Context
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):

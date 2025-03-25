@@ -121,3 +121,6 @@ def ptr(dtype: Optional[str] = None,
         The new tir.Var with type handle or casted expression with type handle.
     """
     return handle(dtype=dtype, storage_scope=storage_scope, is_size_var=is_size_var)
+
+def make_tensor(ptr: Var, shape: tuple[PrimExpr, ...], dtype: str = "float32") -> tir.Buffer:
+    return Tensor.from_ptr(ptr, shape, dtype)
