@@ -61,6 +61,7 @@ class KernelCache:
         key_data = {
             "func": sha256(func_source
                           ).hexdigest(),  # Use SHA256 to generate hash key from function source
+            "func_params": sha256(cloudpickle.dumps(func.params)).hexdigest(),
             "out_idx": tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx],
             "args_repr": tuple(
                 repr(arg) for arg in args
