@@ -13,6 +13,7 @@ from tilelang.jit import JITKernel
 import threading
 import cloudpickle
 import logging
+import inspect
 
 from tilelang.env import TILELANG_CACHE_DIR  # noqa: F401
 
@@ -39,13 +40,17 @@ class KernelCache:
 
     def _generate_key(self, func: Callable, out_idx: List[int],
                       execution_backend: Literal["dlpack", "ctypes", "cython"], args,
-                      target: Union[str, Target], target_host: Union[str, Target]) -> str:
+                      target: Union[str, "Target"], target_host: Union[str, "Target"]) -> str:
         """
         Generates a unique cache key.
         """
-        func_binary = cloudpickle.dumps(func)
+        # Get the source code of the function
+        func_source = str(
+            func.body if isinstance(func, PrimFunc) else inspect.getsource(func)).encode()
+
         key_data = {
-            "func": sha256(func_binary).hexdigest(),  # Use SHA256 to generate hash key
+            "func": sha256(func_source
+                          ).hexdigest(),  # Use SHA256 to generate hash key from function source
             "out_idx": tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx],
             "args_repr": tuple(
                 repr(arg) for arg in args
