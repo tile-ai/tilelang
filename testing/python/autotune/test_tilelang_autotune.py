@@ -252,17 +252,14 @@ def matmul(M, N, K, with_roller):
         return main
 
     autotuner = AutoTuner.from_kernel(
-        kernel=kernel,
-        configs=get_configs(M, N, K, with_roller)
-    ).set_compile_args(
-        out_idx=[-1],
-        supply_type=tl.TensorSupplyType.Integer,
-        ref_prog=ref_program,
-        skip_check=False,
-        target="auto",
-    )
+        kernel=kernel, configs=get_configs(M, N, K, with_roller)).set_compile_args(
+            out_idx=[-1],
+            supply_type=tl.TensorSupplyType.Integer,
+            ref_prog=ref_program,
+            skip_check=False,
+            target="auto",
+        )
     return autotuner.run(warmup=3, rep=20)
-
 
 
 def test_autotune_get_configs():
@@ -273,7 +270,6 @@ def test_autotune_get_configs():
 def test_autotune_matmul():
     matmul(8192, 8192, 8192, with_roller=True)
     matmul(8192, 8192, 8192, with_roller=False)
-
 
 
 if __name__ == "__main__":

@@ -44,14 +44,14 @@ class AutotuneResult:
 
 
 class AutoTuner:
-        
+
     def __init__(self, fn: Callable, configs):
         self.fn = fn
         self.configs = configs
         self.ref_latency_cache = None
         self.jit_input_tensors = None
         self.ref_input_tensors = None
-    
+
     @classmethod
     def from_kernel(cls, kernel: Callable, configs):
         return cls(kernel, configs)
@@ -193,10 +193,7 @@ class AutoTuner:
         return self.run()
 
 
-def autotune(configs: Any,
-             warmup: int = 25,
-             rep: int = 100,
-             timeout: int = 100) -> Callable:
+def autotune(configs: Any, warmup: int = 25, rep: int = 100, timeout: int = 100) -> Callable:
     """
     Decorator for tilelang program
     """
@@ -223,7 +220,7 @@ def jit(out_idx: List[int],
 
         @wraps(fn)
         def decorator(*args, **kwargs) -> float:
-            
+
             kernel = tilelang.compile(fn(*args, **kwargs), out_idx=out_idx, target=target)
 
             profiler = kernel.get_profiler()

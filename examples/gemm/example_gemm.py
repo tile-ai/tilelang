@@ -121,15 +121,13 @@ def get_best_config(M, N, K, with_roller=False):
         return main
 
     autotuner = AutoTuner.from_kernel(
-        kernel=kernel,
-        configs=get_configs(M, N, K, with_roller)
-    ).set_compile_args(
-        out_idx=[-1],
-        supply_type=tl.TensorSupplyType.Integer,
-        ref_prog=ref_program,
-        skip_check=False,
-        target="auto",
-    )
+        kernel=kernel, configs=get_configs(M, N, K, with_roller)).set_compile_args(
+            out_idx=[-1],
+            supply_type=tl.TensorSupplyType.Integer,
+            ref_prog=ref_program,
+            skip_check=False,
+            target="auto",
+        )
     return autotuner.run(warmup=3, rep=20)
 
 
