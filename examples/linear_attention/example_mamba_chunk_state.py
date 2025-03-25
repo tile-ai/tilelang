@@ -187,8 +187,11 @@ if __name__ == "__main__":
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:
-        best_latency, best_config, _ = chunk_state_fwd(
+        best_result = chunk_state_fwd(
             batch, seq_len, chunk_size, groups, heads, dim, dstate, tune=args.tune)
+        best_latency = best_result.latency
+        best_config = best_result.config
+        ref_latency = best_result.ref_latency
         print(f"Best latency: {best_latency}")
         print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
         print(f"Best config: {best_config}")

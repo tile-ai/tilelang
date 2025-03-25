@@ -5,6 +5,7 @@ import tvm
 from tvm.target import Target
 from .arch_base import TileDevice
 from typing import List, Union
+from .driver import cuda_driver
 
 
 def check_sm_version(arch: str) -> int:
@@ -115,9 +116,11 @@ class CUDA(TileDevice):
         device = tvm.runtime.cuda(0)
         if not device.exist:
             raise RuntimeError("Cannot find cuda device 0.")
+        self.name = cuda_driver.get_device_name()
         self.device: tvm.runtime.Device = device
         self.platform: str = "CUDA"
-        self.smem_cap = device.max_shared_memory_per_block
+        # TODO(lei): maybe static shared memory, can be improved in future
+        self.smem_cap = cuda_driver.get_shared_memory_per_block()
         self.compute_max_core = device.multi_processor_count
         self.warp_size = device.warp_size
         self.compute_capability = device.compute_version.replace(".", "")

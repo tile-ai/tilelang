@@ -326,8 +326,10 @@ if __name__ == "__main__":
     total_flops = 2 * M * N * K
 
     # Run autotuning
-    best_latency, best_config, ref_latency = matmul(M, N, K, in_dtype, out_dtype, accum_dtype,
-                                                    with_roller)
+    best_result = matmul(M, N, K, in_dtype, out_dtype, accum_dtype, with_roller)
+    best_latency = best_result.latency
+    best_config = best_result.config
+    ref_latency = best_result.ref_latency
 
     # Print benchmark results
     print(f"Best latency (s): {best_latency}")

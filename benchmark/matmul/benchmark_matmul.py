@@ -160,15 +160,6 @@ def matmul(M, N, K, with_roller):
 
     @autotune(
         configs=get_configs(M, N, K, with_roller),
-        keys=[
-            "block_M",
-            "block_N",
-            "block_K",
-            "num_stages",
-            "thread_num",
-            "policy",
-            "enable_rasteration",
-        ],
         warmup=3,
         rep=20,
     )
@@ -298,7 +289,10 @@ if __name__ == "__main__":
     total_flops = 2 * M * N * K
 
     # matmul(...) returns (best_latency, best_config, ref_latency)
-    best_latency, best_config, ref_latency = matmul(M, N, K, with_roller)
+    best_result = matmul(M, N, K, with_roller)
+    best_latency = best_result.latency
+    best_config = best_result.config
+    ref_latency = best_result.ref_latency
 
     # Print out the benchmark results
     print(f"Best latency (s): {best_latency}")
