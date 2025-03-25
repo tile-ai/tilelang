@@ -14,6 +14,7 @@ from tilelang.engine.param import KernelParam
 import threading
 import cloudpickle
 import logging
+import inspect
 
 from tilelang.env import TILELANG_CACHE_DIR, is_cache_enabled
 
