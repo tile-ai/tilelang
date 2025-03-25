@@ -1,6 +1,7 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
+
 def deprecated(
     method_name: str,
     new_method_name: str,
@@ -18,6 +19,7 @@ def deprecated(
     import warnings  # pylint: disable=import-outside-toplevel
 
     def _deprecate(func):
+
         @functools.wraps(func)
         def _wrapper(*args, **kwargs):
             warnings.warn(
