@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 """The language interface for tl programs."""
 
-from tvm.script import tir as T
+import tilelang.language as T
 from tvm.tir import PrimExpr, Buffer
 from typing import List, Union
 
@@ -42,7 +42,7 @@ def reshape(src: Buffer, shape: List[PrimExpr]) -> Buffer:
         src: Input buffer to be reshaped
         shape: New shape for the buffer
     """
-    return T.Tensor(shape, src.dtype, src.data)
+    return T.Buffer(shape, src.dtype, src.data)
 
 
 def view(src: Buffer,
@@ -59,4 +59,4 @@ def view(src: Buffer,
         shape = src.shape
     if dtype is None:
         dtype = src.dtype
-    return T.Tensor(shape, dtype, src.data)
+    return T.Buffer(shape, dtype, src.data)
