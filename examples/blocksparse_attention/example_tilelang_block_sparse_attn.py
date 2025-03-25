@@ -68,13 +68,13 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
 
         @T.macro
         def MMA1(
-                V: T.Tensor(shape, dtype),
-                V_shared: T.SharedTensor([block_M, dim], dtype),
-                acc_s_cast: T.FragmentTensor([block_M, block_N], dtype),
-                acc_o: T.FragmentTensor([block_M, dim], accum_dtype),
-                k: T.int32,
-                by: T.int32,
-                bz: T.int32,
+            V: T.Tensor(shape, dtype),
+            V_shared: T.SharedTensor([block_M, dim], dtype),
+            acc_s_cast: T.FragmentTensor([block_M, block_N], dtype),
+            acc_o: T.FragmentTensor([block_M, dim], accum_dtype),
+            k: T.int32,
+            by: T.int32,
+            bz: T.int32,
         ):
             T.copy(V[bz, by, k * block_N:(k + 1) * block_N, :], V_shared)
             T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)

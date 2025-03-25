@@ -78,7 +78,7 @@ class BaseTensorProxy:
         scope = scope or self.default_scope
         align = align or self.default_align
         offset_factor = offset_factor or self.default_offset_factor
-        
+
         return buffer(
             shape,
             dtype=dtype,
@@ -122,7 +122,7 @@ class LocalTensorProxy(BaseTensorProxy):
 Buffer = BufferProxy()  # pylint: disable=invalid-name
 Tensor = TensorProxy()  # pylint: disable=invalid-name
 FragmentTensor = FragmentTensorProxy()  # pylint: disable=invalid-name
-SharedTensor = SharedTensorProxy()  # pylint: disable=invalid-name  
+SharedTensor = SharedTensorProxy()  # pylint: disable=invalid-name
 LocalTensor = LocalTensorProxy()  # pylint: disable=invalid-name
 
 
