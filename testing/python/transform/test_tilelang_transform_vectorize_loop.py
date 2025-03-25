@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 # ruff: noqa
 import tilelang
@@ -13,6 +13,7 @@ simple_target = tvm.target.Target("llvm -mtriple=x86_64-linux-gnu")
 sve_target = tvm.target.Target("llvm -device=arm_cpu -mtriple=aarch64-linux-gnu -mattr=+v8.2a,+sve")
 
 
+@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (T.vscale() * 4, sve_target)])
 def test_vectorize_loop(extent, target):
 
@@ -36,6 +37,7 @@ def test_vectorize_loop(extent, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
+@tilelang.testing.requires_llvm
 def test_vectorize_vector():
     n = te.var("n")
     ib = tvm.tir.ir_builder.create()
@@ -56,6 +58,7 @@ def test_vectorize_vector():
     assert isinstance(stmt.body.value, tvm.tir.Broadcast)
 
 
+@tilelang.testing.requires_llvm
 def test_vectorize_vector_scalable_error():
 
     @I.ir_module
@@ -72,6 +75,7 @@ def test_vectorize_vector_scalable_error():
             tilelang.transform.VectorizeLoop()(Module)
 
 
+@tilelang.testing.requires_llvm
 def test_vectorize_vector_scalable_error2():
 
     @I.ir_module
@@ -87,6 +91,7 @@ def test_vectorize_vector_scalable_error2():
         tilelang.transform.VectorizeLoop()(Module)
 
 
+@tilelang.testing.requires_llvm
 def test_vectorize_vector_scalable_error3():
 
     @I.ir_module
@@ -105,6 +110,7 @@ def test_vectorize_vector_scalable_error3():
             tilelang.transform.VectorizeLoop()(Module)
 
 
+@tilelang.testing.requires_llvm
 def test_vectorize_vector_scalable_error4():
 
     @I.ir_module
@@ -123,6 +129,7 @@ def test_vectorize_vector_scalable_error4():
             tilelang.transform.VectorizeLoop()(Module)
 
 
+@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (T.vscale() * 4, sve_target)])
 def test_vectorize_with_if(extent, target):
 
@@ -156,6 +163,7 @@ def test_vectorize_with_if(extent, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
+@tilelang.testing.requires_llvm
 def test_vectorize_with_if_cond_int64():
     m = te.size_var("m", dtype="int64")
     A = te.placeholder((m,), name="A", dtype="float32")
@@ -166,6 +174,7 @@ def test_vectorize_with_if_cond_int64():
     f = tvm.build(s, [A, B], "llvm")
 
 
+@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (T.vscale() * 4, sve_target)])
 def test_vectorize_let(extent, target):
 
@@ -191,6 +200,7 @@ def test_vectorize_let(extent, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
+@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (tvm.tir.vscale() * 4, sve_target)])
 def test_vectorize_with_le_cond(extent, target):
     n = te.var("n")
@@ -210,6 +220,7 @@ def test_vectorize_with_le_cond(extent, target):
         assert isinstance(stmt, tvm.tir.For)
 
 
+@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (tvm.tir.vscale() * 4, sve_target)])
 def test_vectorize_with_ge_cond(extent, target):
     n = te.var("n")
@@ -229,6 +240,7 @@ def test_vectorize_with_ge_cond(extent, target):
         assert isinstance(stmt, tvm.tir.For)
 
 
+@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (T.vscale() * 4, sve_target)])
 def test_vectorize_if_then_else_scalarize(extent, target):
 
@@ -253,6 +265,7 @@ def test_vectorize_if_then_else_scalarize(extent, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
+@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (T.vscale() * 4, sve_target)])
 def test_vectorize_if_then_else_vector(extent, target):
 
@@ -280,6 +293,7 @@ def test_vectorize_if_then_else_vector(extent, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
+@tilelang.testing.requires_llvm
 def test_vectorize_while_fail():
     """A while loop inside a vectorized loop should fail."""
 
@@ -327,6 +341,7 @@ def test_vectorize_while_fail():
         assert expected in error_msg
 
 
+@tilelang.testing.requires_llvm
 def test_vectorize_dtype_mismatch():
     n = tvm.tir.IntImm("int64", 4)
     A = te.compute((n,), lambda i: tvm.tir.IntImm("int64", 2**31 - 1) + i, name="A")
@@ -335,6 +350,7 @@ def test_vectorize_dtype_mismatch():
     tvm.lower(s, [A], "llvm", simple_mode=True)
 
 
+@tilelang.testing.requires_llvm
 @pytest.mark.parametrize(
     "extent, vec_str, target",
     [(16, "float32x16", simple_target), (T.vscale() * 8, "float32xvscalex8", sve_target)],
@@ -361,6 +377,7 @@ def test_vectorize_with_reinterpret(extent, vec_str, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
+@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (T.vscale() * 4, sve_target)])
 @pytest.mark.parametrize(
     "op",
@@ -404,6 +421,7 @@ def test_vectorize_binary(op, extent, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
+@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (T.vscale() * 4, sve_target)])
 @pytest.mark.parametrize("op", (T.And, T.Or))
 def test_vectorize_logical(op, extent, target):
@@ -428,6 +446,7 @@ def test_vectorize_logical(op, extent, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
+@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (T.vscale() * 4, sve_target)])
 def test_vectorize_select(extent, target):
 
@@ -455,6 +474,7 @@ def test_vectorize_select(extent, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
+@tilelang.testing.requires_llvm
 @pytest.mark.parametrize(
     "extent, vec_str, target",
     [(4, "int32x4", simple_target), (T.vscale() * 4, "int32xvscalex4", sve_target)],
@@ -481,6 +501,7 @@ def test_vectorize_cast(extent, vec_str, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
+@tilelang.testing.requires_llvm
 def test_illegal_extent():
 
     @I.ir_module(check_well_formed=False)
@@ -497,6 +518,7 @@ def test_illegal_extent():
         tilelang.transform.VectorizeLoop()(Mod)
 
 
+@tilelang.testing.requires_llvm
 def test_illegal_vscale_in_non_sve_compilation():
 
     @I.ir_module

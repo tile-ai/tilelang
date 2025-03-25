@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 echo "Starting installation script..."

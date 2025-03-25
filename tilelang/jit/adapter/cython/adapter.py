@@ -158,13 +158,14 @@ class CythonKernelAdapter(BaseKernelAdapter):
                  result_idx: List[int],
                  target: Union[str, Target],
                  func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-                 kernel_global_source: str,
+                 host_mod: Optional[tvm.IRModule] = None,
+                 device_mod: Optional[tvm.IRModule] = None,
+                 kernel_global_source: Optional[str] = None,
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None):
         """Initialize the adapter with the given TIR function or module.
         
         Args:
-            rt_mod: Runtime module
             params: List of tensor types for inputs/outputs
             result_idx: Indices of output tensors
             target: Target platform (e.g., 'cuda')
@@ -193,17 +194,19 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
         self.wrapper.assign_optimized_module(self.ir_module)
         self.wrapper.assign_pass_configs(pass_configs)
+        self.wrapper.assign_host_module(host_mod)
+        self.wrapper.assign_device_module(device_mod)
         self.wrapped_source = self.wrapper.wrap(self.get_kernel_source(kernel_only=True))
 
         self.lib_generator.update_lib_code(self.wrapped_source)
         self.lib_generator.compile_lib()
         self.lib = self.lib_generator.load_lib()
 
-        try:
-            self.lib.init()
-        except Exception as e:
-            raise Exception(
-                f"Failed to initialize the compiled library for {self.target}: {e}") from e
+        self.lib.get_last_error.restype = ctypes.c_char_p
+        result = self.lib.init()
+        if result != 0:
+            error_msg = self.lib.get_last_error().decode('utf-8')
+            raise RuntimeError(f"Initialization failed: {error_msg}")
 
         self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib)
         self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
@@ -214,17 +217,19 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
     @classmethod
     def from_database(cls,
-                      rt_mod_src: str,
                       params: List[TensorType],
                       result_idx: List[int],
-                      target,
+                      target: str,
                       func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+                      kernel_global_source: str,
+                      kernel_lib_path: str,
                       verbose: bool = False,
                       pass_configs: Optional[Dict[str, Any]] = None):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
-        adapter.kernel_global_source = rt_mod_src
+        adapter.kernel_global_source = kernel_global_source
+        adapter.wrapped_source = kernel_global_source
 
         if isinstance(func_or_mod, tir.PrimFunc):
             adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
@@ -240,22 +245,14 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.buffer_device_map = adapter._process_buffer_device()
 
         adapter.verbose = verbose
-        adapter.wrapper = TLWrapper(adapter.target)
         adapter.lib_generator = LibraryGenerator(adapter.target)
+        adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
 
-        adapter.wrapper.assign_optimized_module(adapter.ir_module)
-        adapter.wrapper.assign_pass_configs(pass_configs)
-        adapter.wrapped_source = adapter.wrapper.wrap(adapter.get_kernel_source(kernel_only=True))
-
-        adapter.lib_generator.update_lib_code(adapter.wrapped_source)
-        adapter.lib_generator.compile_lib()
-        adapter.lib = adapter.lib_generator.load_lib()
-
-        try:
-            adapter.lib.init()
-        except Exception as e:
-            raise Exception(
-                f"Failed to initialize the compiled library for {adapter.target}: {e}") from e
+        adapter.lib.get_last_error.restype = ctypes.c_char_p
+        result = adapter.lib.init()
+        if result != 0:
+            error_msg = adapter.lib.get_last_error().decode('utf-8')
+            raise RuntimeError(f"Initialization failed: {error_msg}")
 
         adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params,
                                                      adapter.lib)

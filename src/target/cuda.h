@@ -1,4 +1,4 @@
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Tile-AI Corporation.
 // Licensed under the MIT License.
 /*
  * Copyright 1993-2023 NVIDIA Corporation.  All rights reserved.
@@ -1150,7 +1150,7 @@ typedef enum CUpointer_attribute_enum {
              from a mempool. Otherwise returns NULL. **/
   CU_POINTER_ATTRIBUTE_MAPPING_SIZE =
       18, /**< Size of the actual underlying mapping that the pointer belongs to
-             **/
+           **/
   CU_POINTER_ATTRIBUTE_MAPPING_BASE_ADDR =
       19, /**< The start address of the mapping that the pointer belongs to **/
   CU_POINTER_ATTRIBUTE_MEMORY_BLOCK_ID =
@@ -2230,12 +2230,14 @@ typedef struct CUgraphEdgeData_st {
                     ::CU_GRAPH_KERNEL_NODE_PORT_LAUNCH_ORDER. */
   unsigned char
       to_port;        /**< This indicates what portion of the downstream node is
-                         dependent on        the upstream node or portion thereof (indicated
-                         by \c from_port). The        meaning is specific to the node type. A
-                         value of 0 in all cases means        the entirety of the downstream
-                         node is dependent on the upstream work.        <br>        Currently no node
-                         types define non-zero ports. Accordingly, this field        must be
-                         set to zero. */
+                         dependent on        the upstream node or portion thereof
+                         (indicated        by \c from_port). The        meaning is
+                         specific to        the node type. A        value of 0 in all
+                         cases        means        the        entirety of the
+                         downstream        node        is        dependent on the
+                         upstream        work.        <br>        Currently        no
+                         node        types define        non-zero ports.        Accordingly,
+                         this        field        must be        set to        zero. */
   unsigned char type; /**< This should be populated with a value from
                          ::CUgraphDependencyType. (It is typed as char due to
                          compiler-specific layout of bitfields.) See
@@ -2495,15 +2497,17 @@ typedef enum CUlaunchAttributeID_enum {
 typedef union CUlaunchAttributeValue_union {
   char pad[64]; /* Pad to 64 bytes */
   CUaccessPolicyWindow
-      accessPolicyWindow;             /**< Value of launch attribute
-                                         ::CU_LAUNCH_ATTRIBUTE_ACCESS_POLICY_WINDOW. */
-  int cooperative;                    /**< Value of launch attribute
-                                         ::CU_LAUNCH_ATTRIBUTE_COOPERATIVE. Nonzero indicates a
-                                         cooperative                    kernel (see ::cuLaunchCooperativeKernel). */
-  CUsynchronizationPolicy syncPolicy; /**< Value of launch attribute
-                                         ::CU_LAUNCH_ATTRIBUTE_SYNCHRONIZATION_POLICY.
-                                         ::CUsynchronizationPolicy for work
-                                         queued up in this stream */
+      accessPolicyWindow; /**< Value of launch attribute
+                             ::CU_LAUNCH_ATTRIBUTE_ACCESS_POLICY_WINDOW. */
+  int cooperative;        /**< Value of launch attribute
+                             ::CU_LAUNCH_ATTRIBUTE_COOPERATIVE. Nonzero indicates a
+                             cooperative                    kernel (see
+                             ::cuLaunchCooperativeKernel). */
+  CUsynchronizationPolicy
+      syncPolicy; /**< Value of launch attribute
+                     ::CU_LAUNCH_ATTRIBUTE_SYNCHRONIZATION_POLICY.
+                     ::CUsynchronizationPolicy for work
+                     queued up in this stream */
 
   /**
    *  Value of launch attribute ::CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION that
@@ -2524,8 +2528,8 @@ typedef union CUlaunchAttributeValue_union {
   CUclusterSchedulingPolicy
       clusterSchedulingPolicyPreference;      /**< Value of launch attribute
                                                  ::CU_LAUNCH_ATTRIBUTE_CLUSTER_SCHEDULING_POLICY_PREFERENCE.
-                                                 Cluster      scheduling policy preference
-                                                 for the kernel. */
+                                                 Cluster      scheduling policy
+                                                 preference      for the kernel. */
   int programmaticStreamSerializationAllowed; /**< Value of launch attribute
                                                 ::CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION.
                                               */
@@ -4844,7 +4848,7 @@ typedef struct CUgraphNodeParams_st {
     CUDA_CHILD_GRAPH_NODE_PARAMS graph;    /**< Child graph node parameters. */
     CUDA_EVENT_WAIT_NODE_PARAMS eventWait; /**< Event wait node parameters. */
     CUDA_EVENT_RECORD_NODE_PARAMS
-        eventRecord; /**< Event record node parameters. */
+    eventRecord; /**< Event record node parameters. */
     CUDA_EXT_SEM_SIGNAL_NODE_PARAMS_v2
         extSemSignal; /**< External semaphore signal node parameters. */
     CUDA_EXT_SEM_WAIT_NODE_PARAMS_v2
@@ -4854,7 +4858,7 @@ typedef struct CUgraphNodeParams_st {
     CUDA_MEM_FREE_NODE_PARAMS free; /**< Memory free node parameters. */
     CUDA_BATCH_MEM_OP_NODE_PARAMS_v2 memOp; /**< MemOp node parameters. */
     CUDA_CONDITIONAL_NODE_PARAMS
-        conditional; /**< Conditional node parameters. */
+    conditional; /**< Conditional node parameters. */
   };
 
   long long reserved2; /**< Reserved bytes. Must be zero. */

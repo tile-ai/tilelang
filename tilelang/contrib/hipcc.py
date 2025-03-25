@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 # pylint: disable=invalid-name
 """Utility to invoke hipcc compiler in the system"""

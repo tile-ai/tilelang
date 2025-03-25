@@ -1,5 +1,7 @@
+# Copyright (c) Tile-AI Corporation.
+# Licensed under the MIT License.
 # This benchmark script is modified based on: https://github.com/deepseek-ai/FlashMLA/blob/main/benchmark/bench_flash_mla.py
-
+# ruff: noqa
 import argparse
 import math
 import random
@@ -15,6 +17,7 @@ from flash_mla import flash_mla_with_kvcache, get_mla_metadata
 import tilelang
 from tilelang.profiler import do_bench
 from example_mla_decode_paged import mla_decode_tilelang
+
 
 def scaled_dot_product_attention(query, key, value, h_q, h_kv, is_causal=False):
     query = query.float()
@@ -37,7 +40,8 @@ def scaled_dot_product_attention(query, key, value, h_q, h_kv, is_causal=False):
 
 
 @torch.inference_mode()
-def run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
+def run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q,
+                  h_kv, d, dv, causal, dtype):
     blocked_v = blocked_k[..., :dv]
 
     def ref_mla():
@@ -50,7 +54,8 @@ def run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q,
                 q[i].transpose(0, 1),
                 blocked_k.view(-1, h_kv, d)[begin:end].transpose(0, 1),
                 blocked_v.view(-1, h_kv, dv)[begin:end].transpose(0, 1),
-                h_q, h_kv,
+                h_q,
+                h_kv,
                 is_causal=causal,
             )
             out[i] = O.transpose(0, 1)
@@ -61,16 +66,24 @@ def run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q,
     t = triton.testing.do_bench(ref_mla)
     return out_torch, lse_torch, t
 
+
 @torch.inference_mode()
-def run_flash_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
+def run_flash_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q,
+                  h_kv, d, dv, causal, dtype):
     blocked_v = blocked_k[..., :dv]
 
     tile_scheduler_metadata, num_splits = get_mla_metadata(cache_seqlens, s_q * h_q // h_kv, h_kv)
 
     def flash_mla():
         return flash_mla_with_kvcache(
-            q, blocked_k, block_table, cache_seqlens, dv,
-            tile_scheduler_metadata, num_splits, causal=causal,
+            q,
+            blocked_k,
+            block_table,
+            cache_seqlens,
+            dv,
+            tile_scheduler_metadata,
+            num_splits,
+            causal=causal,
         )
 
     out_flash, lse_flash = flash_mla()
@@ -79,13 +92,14 @@ def run_flash_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q,
 
 
 @torch.inference_mode()
-def run_flash_infer(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
-    
+def run_flash_infer(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens,
+                    h_q, h_kv, d, dv, causal, dtype):
+
     assert d > dv, "mla with rope dim should be larger than no rope dim"
     q_nope, q_pe = q[..., :dv].contiguous(), q[..., dv:].contiguous()
-    blocked_k_nope, blocked_k_pe = blocked_k[..., :dv].contiguous(), blocked_k[..., dv:].contiguous()
-    
-    
+    blocked_k_nope, blocked_k_pe = blocked_k[..., :dv].contiguous(), blocked_k[...,
+                                                                               dv:].contiguous()
+
     kv_indptr = [0]
     kv_indices = []
     for i in range(b):
@@ -96,15 +110,13 @@ def run_flash_infer(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_
         kv_indptr.append(kv_indptr[-1] + num_blocks)
     for seq_len in cache_seqlens[1:]:
         kv_indptr.append((seq_len + block_size - 1) // block_size + kv_indptr[-1])
-        
+
     q_indptr = torch.arange(0, b + 1).int() * s_q
     kv_indptr = torch.tensor(kv_indptr, dtype=torch.int32)
     kv_indices = torch.tensor(kv_indices, dtype=torch.int32)
 
     mla_wrapper = flashinfer.mla.BatchMLAPagedAttentionWrapper(
-        torch.empty(128 * 1024 * 1024, dtype=torch.int8),
-        backend="fa3"
-    )
+        torch.empty(128 * 1024 * 1024, dtype=torch.int8), backend="fa3")
     mla_wrapper.plan(
         q_indptr,
         kv_indptr,
@@ -112,7 +124,7 @@ def run_flash_infer(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_
         cache_seqlens,
         h_q,
         dv,
-        d-dv,
+        d - dv,
         block_size,
         causal,
         1 / math.sqrt(d),
@@ -121,7 +133,12 @@ def run_flash_infer(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_
     )
 
     def flash_infer():
-        output, lse = mla_wrapper.run(q_nope.view(-1, h_q, dv), q_pe.view(-1, h_q, d-dv), blocked_k_nope, blocked_k_pe, return_lse=True)
+        output, lse = mla_wrapper.run(
+            q_nope.view(-1, h_q, dv),
+            q_pe.view(-1, h_q, d - dv),
+            blocked_k_nope,
+            blocked_k_pe,
+            return_lse=True)
         return output.view(b, -1, h_q, dv), lse.view(b, h_q, 1)
 
     out_flash, lse_flash = flash_infer()
@@ -164,7 +181,8 @@ def _mla_attn_kernel(
 
     offs_d_ckv = tl.arange(0, HEAD_DIM_CKV)
     cur_head = cur_head_id * BLOCK_H + tl.arange(0, BLOCK_H)
-    offs_q_nope = cur_batch * stride_q_nope_bs + cur_head[:, None] * stride_q_nope_h + offs_d_ckv[None, :]
+    offs_q_nope = cur_batch * stride_q_nope_bs + cur_head[:, None] * stride_q_nope_h + offs_d_ckv[
+        None, :]
     q_nope = tl.load(Q_nope + offs_q_nope)
 
     offs_d_kpe = tl.arange(0, HEAD_DIM_KPE)
@@ -210,7 +228,9 @@ def _mla_attn_kernel(
 
         e_sum = e_sum * re_scale + tl.sum(p, 1)
         e_max = n_e_max
-    offs_o = cur_batch * stride_o_b + cur_head[:, None] * stride_o_h + split_kv_id * stride_o_s + offs_d_ckv[None, :]
+    offs_o = cur_batch * stride_o_b + cur_head[:,
+                                               None] * stride_o_h + split_kv_id * stride_o_s + offs_d_ckv[
+                                                   None, :]
     tl.store(O + offs_o, acc / e_sum[:, None])
     offs_o_1 = cur_batch * stride_o_b + cur_head * stride_o_h + split_kv_id * stride_o_s + HEAD_DIM_CKV
     tl.store(O + offs_o_1, e_max + tl.log(e_sum))
@@ -260,12 +280,13 @@ def _mla_attn(
         attn_logits.stride(1),
         attn_logits.stride(2),
         BLOCK_H=BLOCK_H,
-        BLOCK_N=BLOCK_N, 
+        BLOCK_N=BLOCK_N,
         NUM_KV_SPLITS=num_kv_splits,
         PAGE_SIZE=page_size,
         HEAD_DIM_CKV=head_dim_ckv,
         HEAD_DIM_KPE=head_dim_kpe,
     )
+
 
 @triton.jit
 def _mla_softmax_reducev_kernel(
@@ -310,7 +331,7 @@ def _mla_softmax_reducev_kernel(
 
             e_sum = e_sum * old_scale + exp_logic
             e_max = n_e_max
-    
+
     tl.store(
         O + cur_batch * stride_o_b + cur_head * stride_o_h + offs_d_ckv,
         acc / e_sum,
@@ -339,6 +360,7 @@ def _mla_softmax_reducev(
         num_warps=4,
         num_stages=2,
     )
+
 
 def mla_decode_triton(
     q_nope,
@@ -372,22 +394,27 @@ def mla_decode_triton(
         b_seq_len,
         num_kv_splits,
     )
-    
+
 
 @torch.inference_mode()
-def run_flash_mla_triton(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
-    
+def run_flash_mla_triton(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q,
+                         cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
+
     blocked_v = blocked_k[..., :dv]
-    
+
     assert d > dv, "mla with rope dim should be larger than no rope dim"
     q_nope, q_pe = q[..., :dv].contiguous(), q[..., dv:].contiguous()
-    blocked_k_nope, blocked_k_pe = blocked_k[..., :dv].contiguous(), blocked_k[..., dv:].contiguous()
+    blocked_k_nope, blocked_k_pe = blocked_k[..., :dv].contiguous(), blocked_k[...,
+                                                                               dv:].contiguous()
 
     def flash_mla_triton():
         num_kv_splits = 32
         o = torch.empty([b * s_q, h_q, dv])
         attn_logits = torch.empty([b * s_q, h_q, num_kv_splits, dv + 1])
-        mla_decode_triton(q_nope.view(-1, h_q, dv), q_pe.view(-1, h_q, d-dv), blocked_k_nope.view(-1, dv), blocked_k_pe.view(-1, d-dv), o, block_table, cache_seqlens, attn_logits, num_kv_splits, 1 / math.sqrt(d), block_size)
+        mla_decode_triton(
+            q_nope.view(-1, h_q, dv), q_pe.view(-1, h_q, d - dv), blocked_k_nope.view(-1, dv),
+            blocked_k_pe.view(-1, d - dv), o, block_table, cache_seqlens, attn_logits,
+            num_kv_splits, 1 / math.sqrt(d), block_size)
         return o.view([b, s_q, h_q, dv])
 
     out_flash = flash_mla_triton()
@@ -396,31 +423,32 @@ def run_flash_mla_triton(q, block_table, blocked_k, max_seqlen_pad, block_size, 
 
 
 @torch.inference_mode()
-def run_flash_mla_tilelang(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
-    
+def run_flash_mla_tilelang(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q,
+                           cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
+
     assert d > dv, "mla with rope dim should be larger than no rope dim"
     q_nope, q_pe = q[..., :dv].contiguous(), q[..., dv:].contiguous()
-    blocked_k_nope, blocked_k_pe = blocked_k[..., :dv].contiguous(), blocked_k[..., dv:].contiguous()
+    blocked_k_nope, blocked_k_pe = blocked_k[..., :dv].contiguous(), blocked_k[...,
+                                                                               dv:].contiguous()
 
     dpe = d - dv
     num_kv_splits = 1
     BLOCK_N = 64
     BLOCK_H = 64
-    
+
     out_partial = torch.empty(b, h_q, num_kv_splits, dv, dtype=dtype, device=q.device)
     glse = torch.empty(b, h_q, num_kv_splits, dtype=dtype, device=q.device)
-    out = torch.empty(b, h_q, dv, dtype=dtype, device=q.device)
-    program = mla_decode_tilelang(b, h_q, h_kv, max_seqlen_pad, dv, dpe, BLOCK_N, BLOCK_H, num_kv_splits, block_size)
-    mod, params = tilelang.lower(program)
-    mod = tilelang.Profiler(mod, params, [8], tilelang.TensorSupplyType.Randn)
+    program = mla_decode_tilelang(b, h_q, h_kv, max_seqlen_pad, dv, dpe, BLOCK_N, BLOCK_H,
+                                  num_kv_splits, block_size)
+    kernel = tilelang.compile(program, out_idx=[8])
 
     def flash_mla_tilelang():
-        out = mod.func(
-            q_nope.view(-1, h_q, dv), 
-            q_pe.view(-1, h_q, dpe), 
-            blocked_k_nope.view(-1, h_kv, dv), 
-            blocked_k_pe.view(-1, h_kv, dpe), 
-            block_table, 
+        out = kernel.func(
+            q_nope.view(-1, h_q, dv),
+            q_pe.view(-1, h_q, dpe),
+            blocked_k_nope.view(-1, h_kv, dv),
+            blocked_k_pe.view(-1, h_kv, dpe),
+            block_table,
             cache_seqlens,
             glse,
             out_partial,
@@ -431,6 +459,7 @@ def run_flash_mla_tilelang(q, block_table, blocked_k, max_seqlen_pad, block_size
     t = do_bench(flash_mla_tilelang)
     return out_flash, None, t
 
+
 FUNC_TABLE = {
     "torch": run_torch_mla,
     "tilelang": run_flash_mla_tilelang,
@@ -438,9 +467,12 @@ FUNC_TABLE = {
     "flash_infer": run_flash_infer,
     "flash_mla_triton": run_flash_mla_triton,
 }
-    
+
+
 def compare_ab(baseline, target, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
-    print(f"comparing {baseline} vs {target}: {b=}, {s_q=}, mean_seqlens={cache_seqlens.float().mean()}, {h_q=}, {h_kv=}, {d=}, {dv=}, {causal=}, {dtype=}")
+    print(
+        f"comparing {baseline} vs {target}: {b=}, {s_q=}, mean_seqlens={cache_seqlens.float().mean()}, {h_q=}, {h_kv=}, {d=}, {dv=}, {causal=}, {dtype=}"
+    )
     device = torch.device("cuda:0")
     torch.set_default_dtype(dtype)
     torch.set_default_device(device)
@@ -451,21 +483,23 @@ def compare_ab(baseline, target, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal
     assert target in FUNC_TABLE
     baseline_func = FUNC_TABLE[baseline]
     target_func = FUNC_TABLE[target]
-    
+
     total_seqlens = cache_seqlens.sum().item()
-    mean_seqlens = cache_seqlens.float().mean().int().item()
     max_seqlen = cache_seqlens.max().item()
     max_seqlen_pad = triton.cdiv(max_seqlen, 256) * 256
     # print(f"{total_seqlens=}, {mean_seqlens=}, {max_seqlen=}")
 
     q = torch.randn(b, s_q, h_q, d)
     block_size = 64
-    block_table = torch.arange(b * max_seqlen_pad // block_size, dtype=torch.int32).view(b, max_seqlen_pad // block_size)
+    block_table = torch.arange(
+        b * max_seqlen_pad // block_size, dtype=torch.int32).view(b, max_seqlen_pad // block_size)
     blocked_k = torch.randn(block_table.numel(), block_size, h_kv, d)
-    
-    out_a, lse_a, perf_a = baseline_func(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
-    out_b, lse_b, perf_b = target_func(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
-    
+
+    out_a, lse_a, perf_a = baseline_func(q, block_table, blocked_k, max_seqlen_pad, block_size, b,
+                                         s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
+    out_b, lse_b, perf_b = target_func(q, block_table, blocked_k, max_seqlen_pad, block_size, b,
+                                       s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
+
     torch.testing.assert_close(out_b.float(), out_a.float(), atol=1e-2, rtol=1e-2), "out"
     if target not in ["flash_infer", "flash_mla_triton", "flash_mla_tilelang"]:
         # flash_infer has a different lse return value
@@ -473,14 +507,21 @@ def compare_ab(baseline, target, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal
         torch.testing.assert_close(lse_b.float(), lse_a.float(), atol=1e-2, rtol=1e-2), "lse"
 
     FLOPS = s_q * total_seqlens * h_q * (d + dv) * 2
-    bytes = (total_seqlens * h_kv * d + b * s_q * h_q * d + b * s_q * h_q * dv) * (torch.finfo(dtype).bits // 8)
-    print(f"perf {baseline}: {perf_a:.3f} ms, {FLOPS / 10 ** 9 / perf_a:.0f} TFLOPS, {bytes / 10 ** 6 / perf_a:.0f} GB/s")
-    print(f"perf {target}: {perf_b:.3f} ms, {FLOPS / 10 ** 9 / perf_b:.0f} TFLOPS, {bytes / 10 ** 6 / perf_b:.0f} GB/s")
-    return bytes / 10 ** 6 / perf_a, bytes / 10 ** 6 / perf_b
+    bytes = (total_seqlens * h_kv * d + b * s_q * h_q * d + b * s_q * h_q * dv) * (
+        torch.finfo(dtype).bits // 8)
+    print(
+        f"perf {baseline}: {perf_a:.3f} ms, {FLOPS / 10 ** 9 / perf_a:.0f} TFLOPS, {bytes / 10 ** 6 / perf_a:.0f} GB/s"
+    )
+    print(
+        f"perf {target}: {perf_b:.3f} ms, {FLOPS / 10 ** 9 / perf_b:.0f} TFLOPS, {bytes / 10 ** 6 / perf_b:.0f} GB/s"
+    )
+    return bytes / 10**6 / perf_a, bytes / 10**6 / perf_b
 
 
 def compare_a(target, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
-    print(f"{target}: {b=}, {s_q=}, mean_seqlens={cache_seqlens.float().mean()}, {h_q=}, {h_kv=}, {d=}, {dv=}, {causal=}, {dtype=}")
+    print(
+        f"{target}: {b=}, {s_q=}, mean_seqlens={cache_seqlens.float().mean()}, {h_q=}, {h_kv=}, {d=}, {dv=}, {causal=}, {dtype=}"
+    )
     torch.set_default_dtype(dtype)
     device = torch.device("cuda:0")
     torch.set_default_device(device)
@@ -489,24 +530,28 @@ def compare_a(target, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype):
     random.seed(0)
     assert target in FUNC_TABLE
     target_func = FUNC_TABLE[target]
-    
+
     total_seqlens = cache_seqlens.sum().item()
-    mean_seqlens = cache_seqlens.float().mean().int().item()
     max_seqlen = cache_seqlens.max().item()
     max_seqlen_pad = triton.cdiv(max_seqlen, 256) * 256
     # print(f"{total_seqlens=}, {mean_seqlens=}, {max_seqlen=}")
 
     q = torch.randn(b, s_q, h_q, d)
     block_size = 64
-    block_table = torch.arange(b * max_seqlen_pad // block_size, dtype=torch.int32).view(b, max_seqlen_pad // block_size)
+    block_table = torch.arange(
+        b * max_seqlen_pad // block_size, dtype=torch.int32).view(b, max_seqlen_pad // block_size)
     blocked_k = torch.randn(block_table.numel(), block_size, h_kv, d)
-    
-    out_b, lse_b, perf_b = target_func(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
+
+    out_b, lse_b, perf_b = target_func(q, block_table, blocked_k, max_seqlen_pad, block_size, b,
+                                       s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
 
     FLOPS = s_q * total_seqlens * h_q * (d + dv) * 2
-    bytes = (total_seqlens * h_kv * d + b * s_q * h_q * d + b * s_q * h_q * dv) * (torch.finfo(dtype).bits // 8)
-    print(f"perf {target}: {perf_b:.3f} ms, {FLOPS / 10 ** 9 / perf_b:.0f} TFLOPS, {bytes / 10 ** 6 / perf_b:.0f} GB/s")
-    return bytes / 10 ** 6 / perf_b
+    bytes = (total_seqlens * h_kv * d + b * s_q * h_q * d + b * s_q * h_q * dv) * (
+        torch.finfo(dtype).bits // 8)
+    print(
+        f"perf {target}: {perf_b:.3f} ms, {FLOPS / 10 ** 9 / perf_b:.0f} TFLOPS, {bytes / 10 ** 6 / perf_b:.0f} GB/s"
+    )
+    return bytes / 10**6 / perf_b
 
 
 available_targets = [
@@ -517,10 +562,26 @@ available_targets = [
     "flash_mla_triton",
 ]
 
-shape_configs = [
-    {"b": batch, "s_q": 1, "cache_seqlens": torch.tensor([seqlen + 2 * i for i in range(batch)], dtype=torch.int32, device="cuda"), "h_q": head, "h_kv": 1, "d": 512+64, "dv": 512, "causal": True, "dtype": torch.float16}
-    for batch in [128] for seqlen in [1024, 2048, 4096, 8192, 16384, 32768] for head in [128]
-]
+shape_configs = [{
+    "b":
+        batch,
+    "s_q":
+        1,
+    "cache_seqlens":
+        torch.tensor([seqlen + 2 * i for i in range(batch)], dtype=torch.int32, device="cuda"),
+    "h_q":
+        head,
+    "h_kv":
+        1,
+    "d":
+        512 + 64,
+    "dv":
+        512,
+    "causal":
+        True,
+    "dtype":
+        torch.float16
+} for batch in [128] for seqlen in [1024, 2048, 4096, 8192, 16384, 32768] for head in [128]]
 
 
 def get_args():
@@ -533,7 +594,7 @@ def get_args():
     args = parser.parse_args()
     return args
 
-    
+
 if __name__ == "__main__":
     args = get_args()
     benchmark_type = "all" if args.all else f"{args.baseline}_vs_{args.target}" if args.compare else args.target
@@ -542,12 +603,26 @@ if __name__ == "__main__":
         for shape in shape_configs:
             if args.all:
                 for target in available_targets:
-                    perf = compare_a(target, shape["b"], shape["s_q"], shape["cache_seqlens"], shape["h_q"], shape["h_kv"], shape["d"], shape["dv"], shape["causal"], shape["dtype"])
-                    fout.write(f'{target},{shape["b"]},{shape["cache_seqlens"].float().mean().cpu().item():.0f},{shape["h_q"]},{perf:.0f}\n')
+                    perf = compare_a(target, shape["b"], shape["s_q"], shape["cache_seqlens"],
+                                     shape["h_q"], shape["h_kv"], shape["d"], shape["dv"],
+                                     shape["causal"], shape["dtype"])
+                    fout.write(
+                        f'{target},{shape["b"]},{shape["cache_seqlens"].float().mean().cpu().item():.0f},{shape["h_q"]},{perf:.0f}\n'
+                    )
             elif args.compare:
-                perfa, prefb = compare_ab(args.baseline, args.target, shape["b"], shape["s_q"], shape["cache_seqlens"], shape["h_q"], shape["h_kv"], shape["d"], shape["dv"], shape["causal"], shape["dtype"])
-                fout.write(f'{args.baseline},{shape["b"]},{shape["cache_seqlens"].float().mean().cpu().item():.0f},{shape["h_q"]},{perfa:.0f}\n')
-                fout.write(f'{args.target},{shape["b"]},{shape["cache_seqlens"].float().mean().cpu().item():.0f},{shape["h_q"]},{prefb:.0f}\n')
+                perfa, prefb = compare_ab(args.baseline, args.target, shape["b"], shape["s_q"],
+                                          shape["cache_seqlens"], shape["h_q"], shape["h_kv"],
+                                          shape["d"], shape["dv"], shape["causal"], shape["dtype"])
+                fout.write(
+                    f'{args.baseline},{shape["b"]},{shape["cache_seqlens"].float().mean().cpu().item():.0f},{shape["h_q"]},{perfa:.0f}\n'
+                )
+                fout.write(
+                    f'{args.target},{shape["b"]},{shape["cache_seqlens"].float().mean().cpu().item():.0f},{shape["h_q"]},{prefb:.0f}\n'
+                )
             elif args.one:
-                perf = compare_a(args.target, shape["b"], shape["s_q"], shape["cache_seqlens"], shape["h_q"], shape["h_kv"], shape["d"], shape["dv"], shape["causal"], shape["dtype"])
-                fout.write(f'{args.target},{shape["b"]},{shape["cache_seqlens"].float().mean().cpu().item():.0f},{shape["h_q"]},{perf:.0f}\n')
+                perf = compare_a(args.target, shape["b"], shape["s_q"], shape["cache_seqlens"],
+                                 shape["h_q"], shape["h_kv"], shape["d"], shape["dv"],
+                                 shape["causal"], shape["dtype"])
+                fout.write(
+                    f'{args.target},{shape["b"]},{shape["cache_seqlens"].float().mean().cpu().item():.0f},{shape["h_q"]},{perf:.0f}\n'
+                )

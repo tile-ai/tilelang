@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 multi_python_version=("3.8" "3.9" "3.10" "3.11" "3.12")

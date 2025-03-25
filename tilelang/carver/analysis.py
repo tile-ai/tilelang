@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 """Analysis on TIR blocks, loops and functions."""
 from typing import List, Optional, Set, Union

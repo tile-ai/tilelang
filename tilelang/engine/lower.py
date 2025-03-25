@@ -1,16 +1,17 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 """The compiler for TL programs."""
 
 import os
 import os.path as osp
 from typing import Union, Optional, Callable, List
+import tilelang.transform
 from tilelang import tvm as tvm
 from tvm import tir
 from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
-from tilelang.engine.param import KernelParam
+from tilelang.engine.param import KernelParam, CompiledArtifact
 from tilelang.utils.target import determine_target
 from tilelang.engine.phase import (
     LowerAndLegalize,
@@ -136,12 +137,75 @@ def canon_target_host(target: Union[str, Target], target_host: Optional[Union[st
     return target_host
 
 
+def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
+    host_mod = tir.transform.BindTarget(target_host)(host_mod)
+    host_mod = tir.transform.FP8StorageLegalize()(host_mod)
+    host_mod = tir.transform.BF16StorageLegalize()(host_mod)
+    host_mod = tir.transform.LowerTVMBuiltin()(host_mod)
+    host_mod = tir.transform.LowerCustomDatatypes()(host_mod)
+    host_mod = tir.transform.LowerIntrin()(host_mod)
+    host_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(host_mod)
+    host_mod = tir.transform.CombineContextCall()(host_mod)
+    if target_host.kind.name == "llvm":
+        host_mod = tvm._ffi.get_global_func("target.build.llvm")(host_mod, target_host)
+    elif target_host.kind.name == "c":
+        host_mod = tvm._ffi.get_global_func("target.build.c")(host_mod, target_host)
+    else:
+        raise ValueError(f"Target host {target_host.kind.name} is not supported")
+    return host_mod
+
+
+def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
+    device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
+    device_mod = tir.transform.LowerIntrin()(device_mod)
+    device_mod = tir.transform.Simplify()(device_mod)
+
+    if target.kind.name == "cuda":
+        device_mod = tvm._ffi.get_global_func("target.build.tilelang_cuda")(device_mod, target)
+    elif target.kind.name == "hip":
+        device_mod = tvm._ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
+    else:
+        raise ValueError(f"Target {target.kind.name} is not supported")
+
+    return device_mod
+
+
+def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
+    device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
+    device_mod = tir.transform.LowerIntrin()(device_mod)
+    device_mod = tir.transform.Simplify()(device_mod)
+    if target.kind.name == "cuda":
+        device_mod = tvm._ffi.get_global_func("target.build.tilelang_cuda_without_compile")(
+            device_mod, target)
+    elif target.kind.name == "hip":
+        device_mod = tvm._ffi.get_global_func("target.build.tilelang_hip_without_compile")(
+            device_mod, target)
+    elif target.kind.name == "c":
+        device_mod = tvm._ffi.get_global_func("target.build.tilelang_cpp")(device_mod, target)
+    elif target.kind.name == "llvm":
+        device_mod = tvm._ffi.get_global_func("target.build.llvm")(device_mod, target)
+    elif target.kind.name == "webgpu":
+        device_mod = tvm._ffi.get_global_func("target.build.tilelang_webgpu")(device_mod, target)
+    else:
+        raise ValueError(f"Target {target.kind.name} is not supported")
+
+    return device_mod
+
+
 def lower(
     func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
     target: Union[str, Target] = "auto",
     target_host: Optional[Union[str, Target]] = None,
     runtime_only=False,
-):
+    enable_host_codegen=False,
+    enable_device_compile=False,
+) -> CompiledArtifact:
+    '''
+        enable_host_codegen: whether to enable host codegen, default is False, as we have our
+        own host codegen implementation in jit.
+        enable_device_compile: whether to enable device codegen, default is False, as we have our
+        own device codegen implementation in jit.
+    '''
 
     mod = func_or_mod
     if isinstance(func_or_mod, tir.PrimFunc):
@@ -167,56 +231,16 @@ def lower(
     mod = OptimizeForTarget(mod, target)
 
     host_mod = tir.transform.Filter(_is_host_call)(mod)
-    host_mod = tir.transform.BindTarget(target_host)(host_mod)
-    host_mod = tir.transform.FP8StorageLegalize()(host_mod)
-    host_mod = tir.transform.BF16StorageLegalize()(host_mod)
-    host_mod = tir.transform.LowerTVMBuiltin()(host_mod)
-    host_mod = tir.transform.LowerCustomDatatypes()(host_mod)
-    host_mod = tir.transform.LowerIntrin()(host_mod)
-    host_mod = tir.transform.LowerDeviceStorageAccessInfo()(host_mod)
-    host_mod = tir.transform.CombineContextCall()(host_mod)
-
-    if target_host.kind.name == "llvm":
-        host_mod = tvm._ffi.get_global_func("target.build.llvm")(host_mod, target_host)
-    elif target_host.kind.name == "c":
-        if is_cpu_device_backend(target):
-            host_mod = tvm._ffi.get_global_func("target.build.tilelang_cpp")(host_mod, target_host)
-        else:
-            host_mod = tvm._ffi.get_global_func("target.build.c")(host_mod, target_host)
-    else:
-        raise ValueError(f"Target host {target_host.kind.name} is not supported")
-
     device_mod = tir.transform.Filter(_is_device_call)(mod)
-    device_mod = tir.transform.LowerDeviceStorageAccessInfo()(device_mod)
-    device_mod = tir.transform.LowerIntrin()(device_mod)
-    device_mod = tir.transform.Simplify()(device_mod)
 
-    if target.kind.name == "cuda":
-        # Debug comments to get the code
-        # code = tvm._ffi.get_global_func("target.build.tl_debug_codegen")(device_mod, target)
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_cuda")(device_mod, target)
-    elif target.kind.name == "hip":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
-    elif target.kind.name == "c":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_cpp")(device_mod, target)
-    elif target.kind.name == "llvm":
-        device_mod = tvm._ffi.get_global_func("target.build.llvm")(device_mod, target)
-    elif target.kind.name == "webgpu":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_webgpu")(device_mod, target)
-    else:
-        raise ValueError(f"Target {target.kind.name} is not supported")
+    codegen_mod = device_codegen(
+        device_mod, target) if enable_device_compile else device_codegen_without_compile(
+            device_mod, target)
 
-    host_mod.import_module(device_mod)
+    if enable_host_codegen:
+        host_mod = host_codegen(host_mod, target_host)
+        host_mod.import_module(codegen_mod)
+        return CompiledArtifact(
+            host_mod, device_mod, params, codegen_mod.get_source(), rt_mod=host_mod)
 
-    if target_host.kind.name == "c":
-        # cpu host should be recompiled
-        # TODO(lei): this is a hack to make the C host backend work
-        temp_dir = tvm.contrib.utils.tempdir()
-        tmp_lib_path = temp_dir.relpath("tmp.so")
-        host_mod.export_library(tmp_lib_path)
-        host_mod = tvm.runtime.load_module(tmp_lib_path)
-
-    if runtime_only is True:
-        return host_mod
-    else:
-        return host_mod, params
+    return CompiledArtifact(host_mod, device_mod, params, codegen_mod.get_source())

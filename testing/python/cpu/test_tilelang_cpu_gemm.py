@@ -52,9 +52,9 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 def assert_matmul_codegen(M=1024, N=1024, K=1024, block_M=128, block_N=128, block_K=32):
     func = matmul(M, N, K, block_M, block_N, block_K)
 
-    rt_mod, _ = tilelang.lower(func, target="c")
+    artifact = tilelang.lower(func, target="c")
 
-    code = rt_mod.imported_modules[0].get_source()
+    code = artifact.kernel_source
 
     assert code is not None, "Code generation failed"
 

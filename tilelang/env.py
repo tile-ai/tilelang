@@ -43,6 +43,9 @@ TILELANG_PACKAGE_PATH: str = pathlib.Path(__file__).resolve().parents[0]
 TILELANG_CACHE_DIR: str = os.environ.get("TILELANG_CACHE_DIR",
                                          os.path.expanduser("~/.tilelang/cache"))
 
+# Auto-clear cache if environment variable is set
+TILELANG_CLEAR_CACHE = os.environ.get("TILELANG_CLEAR_CACHE", "0")
+
 # SETUP ENVIRONMENT VARIABLES
 CUTLASS_NOT_FOUND_MESSAGE = ("CUTLASS is not installed or found in the expected path")
 ", which may lead to compilation bugs when utilize tilelang backend."
@@ -84,6 +87,13 @@ else:
             os.environ["TVM_LIBRARY_PATH"] = install_tvm_library_path
         else:
             logger.warning(TVM_LIBRARY_NOT_FOUND_MESSAGE)
+        # pip install build library path
+        lib_path = os.path.join(TILELANG_PACKAGE_PATH, "lib")
+        existing_path = os.environ.get("TVM_LIBRARY_PATH")
+        if existing_path:
+            os.environ["TVM_LIBRARY_PATH"] = f"{existing_path}:{lib_path}"
+        else:
+            os.environ["TVM_LIBRARY_PATH"] = lib_path
         TVM_LIBRARY_PATH = os.environ.get("TVM_LIBRARY_PATH", None)
 
 if os.environ.get("TL_CUTLASS_PATH", None) is None:
@@ -112,6 +122,27 @@ if os.environ.get("TL_TEMPLATE_PATH", None) is None:
     else:
         logger.warning(TL_TEMPLATE_NOT_FOUND_MESSAGE)
 
+# Cache control
+_ENABLE_TILELANG_KERNEL_CACHE = True  # Default cache state
+
+
+def enable_cache():
+    """Enable kernel caching globally."""
+    global _ENABLE_TILELANG_KERNEL_CACHE
+    _ENABLE_TILELANG_KERNEL_CACHE = True
+
+
+def disable_cache():
+    """Disable kernel caching globally."""
+    global _ENABLE_TILELANG_KERNEL_CACHE
+    _ENABLE_TILELANG_KERNEL_CACHE = False
+
+
+def is_cache_enabled() -> bool:
+    """Return current cache state."""
+    return _ENABLE_TILELANG_KERNEL_CACHE
+
+
 __all__ = [
     "CUTLASS_INCLUDE_DIR",
     "TVM_PYTHON_PATH",
@@ -119,4 +150,7 @@ __all__ = [
     "TILELANG_TEMPLATE_PATH",
     "CUDA_HOME",
     "TILELANG_CACHE_DIR",
+    "enable_cache",
+    "disable_cache",
+    "is_cache_enabled",
 ]

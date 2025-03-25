@@ -87,7 +87,7 @@ Or install locally:
 sudo apt-get update
 sudo apt-get install -y python3-setuptools gcc libtinfo-dev zlib1g-dev build-essential cmake libedit-dev libxml2-dev
 
-pip install .  # with -e option if you want to install in editable mode
+pip install -e . -v # remove -e option if you don't want to install in editable mode, -v for verbose output
 ```
 
 ### Method 2: Build from Source
@@ -226,6 +226,18 @@ Check our [tilelang v0.2.0 release plan](https://github.com/tile-ai/tilelang/iss
 ---
 
 TileLang has now been used in project [BitBLAS](https://github.com/microsoft/BitBLAS) and [AttentionEngine](https://github.com/microsoft/AttentionEngine).
+
+## Citation
+If you find this repository helpful, please cite our work:
+```bib
+@software{tileai2025tilelang,
+  title  = {TileLang: A Composable Tiled Programming Model for AI Systems},
+  author = {Wang, Lei and Cheng, Yu and Shi, Yining and Tang, Zhengju and Mo, Zhiwen and Ma, Lingxiao and Xia, Yuqing and Xue, Jilong and Yang, Fan and Yang, Zhi},
+  url    = {https://github.com/tile-ai/tilelang},
+  month  = jan,
+  year   = {2025}
+}
+```
 
 ## Join the Discussion
 

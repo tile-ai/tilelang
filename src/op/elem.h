@@ -1,4 +1,4 @@
-// Copyright (c) Microsoft Corporation.
+// Copyright (c) Tile-AI Corporation.
 // Licensed under the MIT License.
 
 /*!
@@ -59,6 +59,7 @@ private:
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;
   tir::Buffer dst;
   PrimExpr value;
+  Array<Range> region;
 };
 
 } // namespace tl

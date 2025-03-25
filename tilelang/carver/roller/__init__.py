@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 from .node import PrimFuncNode, OutputNode, Edge  # noqa: F401
 from .rasterization import NoRasterization, Rasterization2DRow, Rasterization2DColumn  # noqa: F401

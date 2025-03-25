@@ -1,6 +1,7 @@
+# Copyright (c) Tile-AI Corporation.
+# Licensed under the MIT License.
 import torch
 import tilelang
-from tilelang import Profiler
 from tilelang.autotuner import *
 import tilelang.language as T
 import itertools
@@ -97,11 +98,7 @@ def convolution(N, C, H, W, F, K, S, D, P, tune=False):
             keys=["block_M", "block_N", "block_K", "num_stages", "threads"],
             warmup=10,
             rep=10)
-        @jit(
-            out_idx=[2],
-            supply_type=tilelang.TensorSupplyType.Integer,
-            ref_prog=None,
-            profiler="auto")
+        @jit(out_idx=[2], supply_type=tilelang.TensorSupplyType.Integer, ref_prog=None)
         def kernel(block_M=None, block_N=None, block_K=None, num_stages=None, threads=None):
             return kernel_func(block_M, block_N, block_K, num_stages, threads)
 
@@ -145,14 +142,14 @@ if __name__ == "__main__":
             N, C, H, W, F, K, S, D, P, tune=args.tune)(
                 block_M=256, block_N=128, block_K=64, num_stages=4, threads=256)
         ref_program = partial(ref_program, stride=S, padding=P, dilation=D)
-        mod, params = tilelang.lower(program)
-        mod = Profiler(mod, params, [2], tilelang.TensorSupplyType.Normal)
-        mod.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+        kernel = tilelang.compile(program, out_idx=[2])
+        profiler = kernel.get_profiler(tilelang.TensorSupplyType.Normal)
+        profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")
-        latency = mod.do_bench(ref_program, warmup=500)
+        latency = profiler.do_bench(ref_program, warmup=500)
         print("Ref: {:.2f} ms".format(latency))
         print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-        latency = mod.do_bench(mod.func, warmup=500)
+        latency = profiler.do_bench(warmup=500)
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:

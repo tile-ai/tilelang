@@ -6,3 +6,5 @@ setuptools>=61
 torch
 wheel
 tox
+auditwheel
+patchelf

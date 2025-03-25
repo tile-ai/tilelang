@@ -3,7 +3,7 @@
 """The profiler and convert to torch utils"""
 
 from dataclasses import dataclass
-from typing import List, Union
+from typing import List, Union, Optional
 import torch
 from tilelang import tvm as tvm
 from tvm.tir import Buffer, IntImm, Var
@@ -84,3 +84,17 @@ class KernelParam:
             bool: True if parameter is a float8 type, False otherwise
         """
         return str(self.dtype).removeprefix("torch.").startswith("float8")
+
+
+@dataclass
+class CompiledArtifact:
+    """
+    Represents a compiled kernel artifact containing both host and device code.
+    Stores all necessary components for kernel execution in the TVM runtime.
+    """
+    host_mod: tvm.IRModule  # Host-side TVM IR module for managing kernel execution
+    device_mod: tvm.IRModule  # Device-side TVM IR module containing the actual kernel code
+    params: List[KernelParam]  # List of parameters (tensors/scalars) used by the kernel
+    kernel_source: str  # Raw source code of the generated kernel
+    rt_mod: Optional[
+        tvm.runtime.Module] = None  # Runtime module for execution, may be lazily initialized

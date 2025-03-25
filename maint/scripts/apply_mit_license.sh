@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 echo "Add MIT license boilerplate..."
@@ -13,7 +13,7 @@ EXITCODE=0
 for SRC_FILE in $(find . -path './3rdparty' -prune -false -o -path './build' -prune -false -o -type f -not -name \
     '*apply_mit_liscense.sh' -not -name '*check_mit_liscense.sh' -and \( -name '*.cpp' -or -name '*.h*' -or -name '*.cu' -or -name '*.in' \) ); do
     sed -i '/\/\/\s*Microsoft\s*(c)/Id' ${SRC_FILE}
-    if !(grep -q "Copyright (c) Microsoft Corporation." "${SRC_FILE}"); then
+    if !(grep -q "Copyright (c) Tile-AI Corporation." "${SRC_FILE}"); then
         cat maint/scripts/mit_liscense1.txt ${SRC_FILE} > ${SRC_FILE}.new
         mv ${SRC_FILE}.new ${SRC_FILE}
     fi
@@ -23,7 +23,7 @@ for SRC_FILE in $(find . -path './3rdparty' -prune -false -o -path './build' -pr
     '*apply_mit_liscense.sh' -not -name '*check_mit_liscense.sh' -and \( -name 'CMakeLists.txt' -or -name '*.cmake' \
     -or -name '*.py' -or -name '*.dockerfile' -or -name '*.yaml' \) ); do
     sed -i '/\#\s*Microsoft\s*(c)/Id' ${SRC_FILE} 
-    if !(grep -q "Copyright (c) Microsoft Corporation" "${SRC_FILE}"); then       
+    if !(grep -q "Copyright (c) Tile-AI Corporation." "${SRC_FILE}"); then       
         cat maint/scripts/mit_liscense2.txt ${SRC_FILE} > ${SRC_FILE}.new
         mv ${SRC_FILE}.new ${SRC_FILE}
     fi
@@ -32,7 +32,7 @@ done
 for SRC_FILE in $(find . -path './3rdparty' -prune -false -o -path './build' -prune -false -o -type f -not -name \
     '*apply_mit_liscense.sh' -not -name '*check_mit_liscense.sh' -name '*.sh' ); do
     sed -i '/\#\s*Microsoft\s*(c)/Id' ${SRC_FILE} 
-    if !(grep -q "Copyright (c) Microsoft Corporation" "${SRC_FILE}"); then
+    if !(grep -q "Copyright (c) Tile-AI Corporation." "${SRC_FILE}"); then
         line=$(head -n 1 ${SRC_FILE})
         if [[ $line == "#!/bin/bash"* ]]; then
             (echo ${line}; echo ''; cat maint/scripts/mit_liscense2.txt; echo "$(tail -n +2 "${SRC_FILE}")" ) > ${SRC_FILE}.new

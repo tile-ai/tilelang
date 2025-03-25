@@ -6,21 +6,31 @@ import os
 import json
 import shutil
 from hashlib import sha256
-from typing import Callable, List, Literal, Union
+from typing import Callable, List, Literal, Union, Optional
 from tvm.target import Target
 from tvm.tir import PrimFunc
 from tilelang.jit import JITKernel
+from tilelang.engine.param import KernelParam
 import threading
 import cloudpickle
 import logging
-import inspect
 
-from tilelang.env import TILELANG_CACHE_DIR  # noqa: F401
+from tilelang.env import TILELANG_CACHE_DIR, is_cache_enabled
+
+KERNEL_PATH = "kernel.cu"
+WRAPPED_KERNEL_PATH = "warpped_kernel.cu"
+KERNEL_LIB_PATH = "kernel_lib.so"
+PARAMS_PATH = "params.pkl"
 
 
 class KernelCache:
     """
     Caches compiled kernels using a class and database persistence to avoid redundant compilation.
+    Cache files:
+        kernel.cu: The compiled kernel source code
+        warpped_kernel.cu: The compiled wrapped kernel source code
+        kernel_lib.so: The compiled kernel library
+        params.pkl: The compiled kernel parameters
     """
     _instance = None  # For implementing singleton pattern
     _lock = threading.Lock()  # For thread safety
@@ -30,7 +40,6 @@ class KernelCache:
         with cls._lock:
             if cls._instance is None:
                 cls._instance = super(KernelCache, cls).__new__(cls)
-                cls._instance._cache = {}  # In-memory cache
                 cls._instance.cache_dir = cache_dir  # Cache directory
                 os.makedirs(cls._instance.cache_dir, exist_ok=True)  # Ensure cache directory exists
                 cls._instance.logger = logging.getLogger(__name__)  # Initialize logger
@@ -86,20 +95,8 @@ class KernelCache:
         Returns:
             JITKernel: The compiled kernel, either freshly compiled or from cache
         """
-        key = self._generate_key(func, out_idx, execution_backend, args, target, target_host)
-        with self._lock:  # Thread-safe access to cache
-            if key in self._cache:
-                return self._cache[key]
-
-            # Attempt to load from disk
-            kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
-                                                 execution_backend, pass_configs, func)
-            if kernel:
-                self._cache[key] = kernel  # Load to in-memory cache
-                return kernel
-
-            # Compile kernel if cache miss
-            kernel = JITKernel(
+        if not is_cache_enabled():
+            return JITKernel(
                 func,
                 out_idx=out_idx,
                 execution_backend=execution_backend,
@@ -108,16 +105,40 @@ class KernelCache:
                 verbose=verbose,
                 pass_configs=pass_configs,
             )
-            self._cache[key] = kernel  # Store in in-memory cache
-            self._save_kernel_to_disk(key, kernel, func)
-            return kernel
+
+        key = self._generate_key(func, out_idx, execution_backend, args, target, target_host)
+        with self._lock:  # TODO: use filelock
+            # Attempt to load from disk
+            kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
+                                                 execution_backend, pass_configs, func)
+            if kernel is not None:
+                return kernel
+
+        # Compile kernel if cache miss; leave critical section
+        kernel = JITKernel(
+            func,
+            out_idx=out_idx,
+            execution_backend=execution_backend,
+            target=target,
+            target_host=target_host,
+            verbose=verbose,
+            pass_configs=pass_configs,
+        )
+        if execution_backend == "dlpack":
+            self.logger.warning("DLPack backend does not support cache saving to disk.")
+        else:
+            with self._lock:  # enter critical section again to check and update disk cache
+                disk_kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
+                                                          execution_backend, pass_configs, func)
+                if disk_kernel is None:
+                    self._save_kernel_to_disk(key, kernel, func)
+        return kernel
 
     def clear_cache(self):
         """
         Clears the entire kernel cache, including both in-memory and disk cache.
         """
-        with self._lock:  # Thread-safe operation
-            self._cache.clear()  # Clear in-memory cache
+        with self._lock:
             self._clear_disk_cache()  # Clear disk cache
 
     def _get_cache_path(self, key: str) -> str:
@@ -133,17 +154,34 @@ class KernelCache:
         cache_path = self._get_cache_path(key)
         os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists
 
-        # Save rt_mod as a str
+        # Save kernel source code
         try:
-            artifact_path = os.path.join(cache_path, "tvm_tmp_mod.txt")
-            with open(artifact_path, "w") as f:
-                f.write(kernel.rt_mod.imported_modules[0].get_source())
+            kernel_path = os.path.join(cache_path, KERNEL_PATH)
+            with open(kernel_path, "w") as f:
+                f.write(kernel.artifact.kernel_source)
         except Exception as e:
-            self.logger.error(f"Error saving kernel module to disk: {e}")
+            self.logger.error(f"Error saving kernel source code to disk: {e}")
 
+        # Save wrapped kernel source code
         try:
-            dump_path = os.path.join(cache_path, "tvm_params.pkl")
-            with open(dump_path, "wb") as f:
+            wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
+            with open(wrapped_kernel_path, "w") as f:
+                f.write(kernel.adapter.get_kernel_source())
+        except Exception as e:
+            self.logger.error(f"Error saving wrapped kernel source code to disk: {e}")
+
+        # Save kernel library
+        try:
+            kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
+            src_lib_path = kernel.adapter.libpath
+            shutil.copy(src_lib_path, kernel_lib_path)
+        except Exception as e:
+            self.logger.error(f"Error saving kernel library to disk: {e}")
+
+        # Save kernel parameters
+        try:
+            params_path = os.path.join(cache_path, PARAMS_PATH)
+            with open(params_path, "wb") as f:
                 cloudpickle.dump(kernel.params, f)
         except Exception as e:
             self.logger.error(f"Error saving kernel parameters to disk: {e}")
@@ -162,31 +200,38 @@ class KernelCache:
         cache_path = self._get_cache_path(key)
         if not os.path.exists(cache_path):
             return None
-        rt_module = None
-        rt_params = None
+
+        kernel_global_source: Optional[str] = None
+        kernel_params: Optional[List[KernelParam]] = None
+
         try:
-            artifact_path = os.path.join(cache_path, "tvm_tmp_mod.txt")
-            with open(artifact_path, "r") as f:
-                rt_module = f.read()
+            wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
+            with open(wrapped_kernel_path, "r") as f:
+                kernel_global_source = f.read()
         except Exception as e:
-            self.logger.error(f"Error loading kernel module from disk: {e}")
+            self.logger.error(f"Error loading wrapped kernel source code from disk: {e}")
+
+        kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
+
+        # Load kernel parameters
         try:
-            dump_path = os.path.join(cache_path, "tvm_params.pkl")
-            with open(dump_path, "rb") as f:
-                rt_params = cloudpickle.load(f)
+            params_path = os.path.join(cache_path, PARAMS_PATH)
+            with open(params_path, "rb") as f:
+                kernel_params = cloudpickle.load(f)
         except Exception as e:
             self.logger.error(f"Error loading kernel parameters from disk: {e}")
 
-        if rt_module and rt_params:
-            return JITKernel(
-                rt_module_src=rt_module,
-                rt_params=rt_params,
-                execution_backend=execution_backend,
+        if kernel_global_source and kernel_params:
+            return JITKernel.from_database(
+                func=func,
+                kernel_global_source=kernel_global_source,
+                kernel_lib_path=kernel_lib_path,
+                params=kernel_params,
                 target=target,
                 target_host=target_host,
                 out_idx=out_idx,
+                execution_backend=execution_backend,
                 pass_configs=pass_configs,
-                func=func,
             )
         else:
             return None

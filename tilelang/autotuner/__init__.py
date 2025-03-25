@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 """The auto-tune module for tilelang programs."""
 
@@ -17,15 +17,14 @@ from functools import partial
 logger = logging.getLogger(__name__)
 
 logging.basicConfig(
-    filename='out.log',
+    filename='autotuner.log',
     filemode='w',
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s %(levelname)s:%(message)s')
 
 
 @dataclass(frozen=True)
 class JITContext:
-    mod: tilelang.Profiler
     out_idx: List[int]
     supply_type: tilelang.TensorSupplyType
     ref_prog: Callable
@@ -33,7 +32,7 @@ class JITContext:
     atol: float
     max_mismatched_ratio: float
     skip_check: bool
-    profiler: Literal['torch', 'tvm']
+    profiler: tilelang.Profiler
     target: Literal['cuda', 'hip']
 
 
@@ -60,8 +59,8 @@ class Autotuner:
         self.jit_input_tensors = None
         self.ref_input_tensors = None
 
-    def jit_compile(self, args: Any, **kwds: Any) -> JITContext:
-        jit_context = self.fn(*args, **kwds)
+    def jit_compile(self, config_arg) -> JITContext:
+        jit_context = self.fn(*config_arg)
         return jit_context
 
     def run(self, *args: Any, **kwds: Any) -> Any:
@@ -74,7 +73,6 @@ class Autotuner:
 
         def target_fn(jit_context):
             # Unpack the context
-            mod = jit_context.mod
             profiler = jit_context.profiler
             skip_check = jit_context.skip_check
             ref_prog = jit_context.ref_prog
@@ -82,28 +80,26 @@ class Autotuner:
             atol = jit_context.atol
             max_mismatched_ratio = jit_context.max_mismatched_ratio
 
-            self.jit_input_tensors = mod._get_inputs(
+            self.jit_input_tensors = profiler._get_inputs(
                 with_output=profiler ==
                 "tvm") if self.jit_input_tensors is None else self.jit_input_tensors
 
             if (not skip_check) and (ref_prog is not None):
-                mod.assert_allclose(
+                profiler.assert_allclose(
                     ref_prog, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio)
 
-            latency = mod.do_bench(
-                mod.func,
+            latency = profiler.do_bench(
+                profiler.func,
                 n_warmup=self.warmup,
                 n_repeat=self.rep,
-                profiler=profiler,
                 input_tensors=self.jit_input_tensors)
             if self.ref_latency_cache is None and ref_prog is not None:
-                self.ref_input_tensors = mod._get_inputs(
+                self.ref_input_tensors = profiler._get_inputs(
                     with_output=False) if self.ref_input_tensors is None else self.ref_input_tensors
-                self.ref_latency_cache = mod.do_bench(
+                self.ref_latency_cache = profiler.do_bench(
                     ref_prog,
                     n_warmup=self.warmup,
                     n_repeat=self.rep,
-                    profiler="torch",
                     input_tensors=self.ref_input_tensors)
 
             return latency, self.ref_latency_cache
@@ -121,10 +117,7 @@ class Autotuner:
             new_args = tuple(new_args)
             config_args.append(new_args)
 
-        worker = partial(
-            self.jit_compile,
-            **kwds,
-        )
+        worker = partial(self.jit_compile, **kwds)
 
         # 90% utilization
         num_workers = max(1, int(os.cpu_count() * 0.9))
@@ -158,15 +151,14 @@ class Autotuner:
         for i in progress_bar:
             jit_context, config = results_with_configs[i]
             try:
-                # Use ThreadPoolExecutor to enforce timeout on target_fn execution
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(target_fn, jit_context)
-                    latency, ref_latency = future.result(timeout=self.timeout)
-            except concurrent.futures.TimeoutError:
-                logger.debug(f"Timeout exceeded for config {config}. Skipping this configuration.")
-                continue
+                # Cannot ThreadPoolExecutor to enforce timeout on target_fn execution
+                # Because tma init may behave strangely with one thread
+                latency, ref_latency = target_fn(jit_context)
             except Exception as e:
-                logger.debug(f"An error occurred while testing config {config}: {e}")
+                logger.info(
+                    f"An error occurred while testing config {config}, checkout autotuner.log for more details"
+                )
+                logger.debug(f"Error: {e}")
                 continue
 
             logging.debug(f"Config {config} latency: {latency} at index {i}")
@@ -207,21 +199,18 @@ def jit(out_idx: List[int],
         atol: float = 1e-2,
         max_mismatched_ratio: float = 0.01,
         skip_check: bool = False,
-        profiler: Literal['auto', 'torch', 'tvm'] = 'auto',
         target: Literal['auto', 'cuda', 'hip'] = 'auto') -> Callable:
 
     def wrapper(fn: Callable):
 
         @wraps(fn)
         def decorator(*args, **kwargs) -> float:
-            # Enabling Efficient Fusion
-            with tvm.transform.PassContext(config={"tir.merge_static_smem": True}):
-                mod, params = tilelang.lower(fn(*args, **kwargs), target=target)
 
-            mod = tilelang.Profiler(mod, params, out_idx, supply_type)
+            kernel = tilelang.compile(fn(*args, **kwargs), out_idx=out_idx, target=target)
+
+            profiler = kernel.get_profiler()
 
             return JITContext(
-                mod=mod,
                 out_idx=out_idx,
                 supply_type=supply_type,
                 ref_prog=ref_prog,

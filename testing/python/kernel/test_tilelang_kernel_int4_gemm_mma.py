@@ -356,6 +356,7 @@ def tl_matmul_weight_only_transform(
 
 
 def assert_tl_matmul_weight_only_transform_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
+    import bitblas
     matmul = tl_matmul_weight_only_transform(M, N, K, in_dtype, out_dtype, accum_dtype)
     kernel = tilelang.compile(matmul, out_idx=[2])
     profiler = kernel.get_profiler()
@@ -370,7 +371,7 @@ def assert_tl_matmul_weight_only_transform_correctness(M, N, K, in_dtype, out_dt
     compressed_A = (A[:, ::2] & 0x0F) + ((A[:, 1::2] & 0x0F) << 4)
     compressed_B = (B[:, ::2] & 0x0F) + ((B[:, 1::2] & 0x0F) << 4)
 
-    ladder_permutate_config = tilelang.ops.LadderPermutateConfig(
+    ladder_permutate_config = bitblas.ops.LadderPermutateConfig(
         M=N,
         N=(K // 2),
         datatype="int8",
@@ -379,7 +380,7 @@ def assert_tl_matmul_weight_only_transform_correctness(M, N, K, in_dtype, out_dt
         transpose_matrix=True,
     )
 
-    ladder_permutate = tilelang.ops.LadderPermutate(ladder_permutate_config)
+    ladder_permutate = bitblas.ops.LadderPermutate(ladder_permutate_config)
     LB = ladder_permutate(compressed_B.cpu()).cuda()
     C = kernel(compressed_A, LB)
 
@@ -401,4 +402,5 @@ def test_assert_tl_matmul_weight_only_transform():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_assert_tl_matmul_weight_only_transform()

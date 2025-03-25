@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 # pylint: disable=invalid-name
 # modified from apache tvm python/tvm/contrib/nvcc.py

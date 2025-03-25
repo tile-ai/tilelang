@@ -12,18 +12,32 @@ import logging
 import textwrap
 
 PREDEF_ARRTIBUTE_SET_DYNAMIC_MEMORY = """
-    cudaFuncSetAttribute({}, cudaFuncAttributeMaxDynamicSharedMemorySize, {});
+    cudaError_t result_{0} = cudaFuncSetAttribute({0}, cudaFuncAttributeMaxDynamicSharedMemorySize, {1});
+    if (result_{0} != CUDA_SUCCESS) {{
+        snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed dynamic shared memory size to %d with error: %s", {1}, cudaGetErrorString(result_{0}));
+        return -1;
+    }}
 """
 
 PREDEF_INIT_FUNC = """
-extern "C" void init() {{
-    {}
+#define ERROR_BUF_SIZE 1024
+static char error_buf[ERROR_BUF_SIZE];
+
+extern "C" const char* get_last_error() {{
+    return error_buf;
+}}
+
+extern "C" int init() {{
+    error_buf[0] = '\\0';
+    {0}
+    return 0;
 }}
 """
 
 PREDEF_HOST_FUNC = """
-extern "C" void call({}) {{
+extern "C" int call({}) {{
 {}
+    return 0;
 }}
 """
 
@@ -40,12 +54,28 @@ TMA_DESC_INIT_FUNC = """
 \tCUtensorMapSwizzle {0}_swizzle= (CUtensorMapSwizzle){9};
 \tCUtensorMapL2promotion {0}_l2Promotion= (CUtensorMapL2promotion){10};
 \tCUtensorMapFloatOOBfill {0}_oobFill= (CUtensorMapFloatOOBfill){11};
-\tCUresult {0}_result = cuTensorMapEncodeTiled(
+
+\tCUresult {0}_result = CUTLASS_CUDA_DRIVER_WRAPPER_CALL(cuTensorMapEncodeTiled)(
     &{0}, {0}_type, {0}_tensorRank, {0}_globalAddress, {0}_globalDim, {0}_globalStride + 1, {0}_boxDim, {0}_elementStrides, {0}_interleave, {0}_swizzle, {0}_l2Promotion, {0}_oobFill);
+
 \tif ({0}_result != CUDA_SUCCESS) {{
-\t\tprintf("Failed to initialize the TMA descriptor {0} with error code %d\\n", {0}_result);
-\t\texit(-1);
-\t}}
+    std::stringstream ss;
+    ss << "TMA Desc Addr:   " << &{0}
+       << "\\nformat         " << {0}_type
+       << "\\ndim            " << {0}_tensorRank
+       << "\\ngmem_address   " << {0}_globalAddress
+       << "\\nglobalDim      " << {0}_globalDim
+       << "\\nglobalStrides  " << {0}_globalStride + 1
+       << "\\nboxDim         " << {0}_boxDim
+       << "\\nelementStrides " << {0}_elementStrides
+       << "\\ninterleave     " << {0}_interleave
+       << "\\nswizzle        " << {0}_swizzle
+       << "\\nl2Promotion    " << {0}_l2Promotion
+       << "\\noobFill        " << {0}_oobFill
+       << "\\nError: Failed to initialize the TMA descriptor {0}";
+    snprintf(error_buf, ERROR_BUF_SIZE, "%s", ss.str().c_str());
+    return -1;
+}}
 """
 
 
@@ -80,16 +110,21 @@ class TLCUDASourceWrapper(object):
     backend = "tl"
     device_mod: Optional[IRModule] = None
     host_mod: Optional[IRModule] = None
+    pass_configs: Optional[Dict[str, Any]] = None
 
     def __init__(self,
                  scheduled_ir_module: IRModule,
                  source: str,
                  target: Target,
+                 device_mod: Optional[IRModule] = None,
+                 host_mod: Optional[IRModule] = None,
                  pass_configs: Optional[Dict[str, Any]] = None):
         self.mod = scheduled_ir_module
         self.target = target
         self.source = source
         self.pass_configs = pass_configs
+        self.device_mod = device_mod
+        self.host_mod = host_mod
         self.function_names: Optional[str] = None
         self.dynamic_smem_buf: Optional[int] = None
         self.block_info: Union[List[int], Dict] = [1, 1, 1]
@@ -253,19 +288,20 @@ class TLCUDASourceWrapper(object):
         return tma_descripter_init
 
     def parse_source_information(self):
-        with tvm.transform.PassContext(opt_level=3, config=self.pass_configs):
-            device_mod, host_mod = get_annotated_mod(self.mod, self.target)
-
-        assert (len(device_mod.functions) >= 1), "Device module should have at least one function."
-        assert (len(host_mod.functions) == 1), "Only support one function in host module."
-        self.device_mod = device_mod
-        self.host_mod = host_mod
+        if self.device_mod is None or self.host_mod is None:
+            with tvm.transform.PassContext(opt_level=3, config=self.pass_configs):
+                device_mod, host_mod = get_annotated_mod(self.mod, self.target)
+            self.device_mod = device_mod
+            self.host_mod = host_mod
+        assert (len(self.device_mod.functions)
+                >= 1), "Device module should have at least one function."
+        assert (len(self.host_mod.functions) == 1), "Only support one function in host module."
 
         block_info_map = {}
         grid_info_map = {}
         dynamic_smem_buf_map = {}
         function_names = []
-        for g_var, func in device_mod.functions.items():
+        for g_var, func in self.device_mod.functions.items():
             # Default block and grid configurations
             block_info = [1, 1, 1]
             grid_info = [1, 1, 1]
@@ -294,7 +330,7 @@ class TLCUDASourceWrapper(object):
         self.dynamic_smem_buf = dynamic_smem_buf_map
 
         function_names_index = {}
-        for _, func in host_mod.functions.items():
+        for _, func in self.host_mod.functions.items():
             if "tma_descriptor_args" in func.attrs:
                 self.tma_descriptor_args = func.attrs["tma_descriptor_args"]
             host_code = str(func)
@@ -372,13 +408,18 @@ class TLCUDASourceWrapper(object):
 
 
 class TLHIPSourceWrapper(TLCUDASourceWrapper):
+    """
+    A wrapper class for the TileLang HIP backend.
+    """
 
     def __init__(self,
                  scheduled_ir_module: IRModule,
                  source: str,
                  target: Target,
+                 device_mod: Optional[IRModule] = None,
+                 host_mod: Optional[IRModule] = None,
                  pass_configs: Optional[Dict[str, Any]] = None):
-        super().__init__(scheduled_ir_module, source, target, pass_configs)
+        super().__init__(scheduled_ir_module, source, target, device_mod, host_mod, pass_configs)
 
     def get_hip_init_func(self):
         # Initialize an empty string for the CUDA function call
@@ -421,16 +462,22 @@ class TLCPUSourceWrapper(object):
     """)
 
     backend = "tl"
-    backend = "tl"
+    device_mod: Optional[IRModule] = None
+    host_mod: Optional[IRModule] = None
+    pass_configs: Optional[Dict[str, Any]] = None
 
     def __init__(self,
                  scheduled_ir_module: IRModule,
                  source: str,
                  target: Target,
+                 device_mod: Optional[IRModule] = None,
+                 host_mod: Optional[IRModule] = None,
                  pass_configs: Optional[Dict[str, Any]] = None):
         self.mod = scheduled_ir_module
         self.target = target
         self.source = source
+        self.device_mod = device_mod
+        self.host_mod = host_mod
         self.pass_configs = pass_configs
         self.function_names: Optional[str] = None
         self.dynamic_smem_buf: Optional[int] = None
@@ -566,6 +613,14 @@ class TLCPUSourceWrapper(object):
 
 
 class TLWrapper(BaseWrapper):
+    """
+    A wrapper class for the TileLang backend.
+    """
+    device_mod: Optional[IRModule] = None
+    host_mod: Optional[IRModule] = None
+    pass_configs: Optional[Dict[str, Any]] = None
+    target: Optional[Target] = None
+    lib: Optional[object] = None
 
     def __init__(self, target: Target):
         super().__init__()
@@ -580,6 +635,12 @@ class TLWrapper(BaseWrapper):
     def assign_pass_configs(self, pass_configs: Dict[str, Any]):
         self.pass_configs = pass_configs
 
+    def assign_host_module(self, host_mod: IRModule):
+        self.host_mod = host_mod
+
+    def assign_device_module(self, device_mod: IRModule):
+        self.device_mod = device_mod
+
     # Get Scheduled Rt Module and return source to be compiled
     def wrap(self, c_source: str):
         assert self.scheduled_ir_module is not None, "Please assign optimized module first."
@@ -591,5 +652,11 @@ class TLWrapper(BaseWrapper):
             wrapper_class = TLCPUSourceWrapper
         else:
             raise ValueError(f"Unsupported platform: {self.arch.platform}")
-        wrapper = wrapper_class(self.scheduled_ir_module, c_source, self.target, self.pass_configs)
+        wrapper = wrapper_class(
+            scheduled_ir_module=self.scheduled_ir_module,
+            source=c_source,
+            target=self.target,
+            device_mod=self.device_mod,
+            host_mod=self.host_mod,
+            pass_configs=self.pass_configs)
         return wrapper.lib_code

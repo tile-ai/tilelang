@@ -7,6 +7,7 @@ from tvm.target import Target
 from tvm.tir import PrimFunc
 from tilelang.jit import JITKernel
 from .kernel_cache import KernelCache
+from tilelang.env import TILELANG_CLEAR_CACHE
 
 # Create singleton instance of KernelCache
 _kernel_cache_instance = KernelCache()
@@ -42,3 +43,7 @@ def clear_cache():
     Clears the entire kernel cache (using KernelCache class).
     """
     _kernel_cache_instance.clear_cache()
+
+
+if TILELANG_CLEAR_CACHE.lower() in ("1", "true", "yes", "on"):
+    clear_cache()

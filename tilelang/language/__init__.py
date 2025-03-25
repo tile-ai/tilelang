@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 """The language interface for tl programs."""
 
@@ -10,11 +10,20 @@ from tvm.script.parser.tir import *
 from tilelang.layout import Layout, Fragment  # noqa: F401
 from .parallel import Parallel  # noqa: F401
 from .pipeline import Pipelined  # noqa: F401
-from .kernel import Kernel, KernelLaunchFrame, get_thread_binding  # noqa: F401
+from .frame import has_let_value, get_let_value  # noqa: F401
+from .kernel import (
+    Kernel,  # noqa: F401
+    KernelLaunchFrame,  # noqa: F401
+    get_thread_binding,  # noqa: F401
+    get_thread_bindings,  # noqa: F401
+    get_block_binding,  # noqa: F401
+    get_block_bindings,  # noqa: F401
+)
 from .allocate import (
     alloc_local,  # noqa: F401
     alloc_shared,  # noqa: F401
     alloc_fragment,  # noqa: F401
+    alloc_var,  # noqa: F401
 )
 from .copy import copy, c2d_im2col  # noqa: F401
 from .gemm import GemmWarpPolicy, gemm  # noqa: F401
@@ -36,6 +45,8 @@ from .customize import (
     view,  # noqa: F401
 )
 from .builtin import *  # noqa: F401
+
+from .memscope import *  # noqa: F401
 
 
 def symbolic(name: str, dtype: str = "int32"):

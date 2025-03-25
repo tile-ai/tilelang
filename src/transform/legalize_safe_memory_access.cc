@@ -181,22 +181,23 @@ private:
   // T.address_of(C_shared))
   Stmt VisitStmt_(const EvaluateNode *op) final {
     auto evaluate = Downcast<Evaluate>(StmtExprMutator::VisitStmt_(op));
-    auto call = Downcast<Call>(evaluate->value);
-    if (call.defined() && call->op == builtin::call_extern()) {
+    if (const CallNode *call_op = op->value.as<CallNode>()) {
+      auto call = Downcast<Call>(evaluate->value);
+      if (call->op == builtin::call_extern()) {
+        GlobalMemChecker checker(analyzer_);
+        checker(call);
+        Array<PrimExpr> conditions = checker.GetConditions();
 
-      GlobalMemChecker checker(analyzer_);
-      checker(call);
-      Array<PrimExpr> conditions = checker.GetConditions();
+        if (conditions.size() == 0) {
+          return evaluate;
+        }
 
-      if (conditions.size() == 0) {
-        return evaluate;
+        Stmt evaluate_with_conditions = evaluate;
+        for (auto cond : conditions) {
+          evaluate_with_conditions = IfThenElse(cond, evaluate_with_conditions);
+        }
+        return evaluate_with_conditions;
       }
-
-      Stmt evaluate_with_conditions = evaluate;
-      for (auto cond : conditions) {
-        evaluate_with_conditions = IfThenElse(cond, evaluate_with_conditions);
-      }
-      return evaluate_with_conditions;
     }
 
     return evaluate;

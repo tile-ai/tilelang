@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 # if dist and build directories exist, remove them

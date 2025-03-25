@@ -177,7 +177,6 @@ def matmul(M, N, K, with_roller):
         supply_type=tl.TensorSupplyType.Integer,
         ref_prog=ref_program,
         skip_check=True,
-        profiler="auto",
         target="auto",
     )
     def kernel(
@@ -293,8 +292,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     M, N, K = args.m, args.n, args.k
-    # with_roller = args.with_roller
-    with_roller = True
+    with_roller = args.with_roller
 
     # Compute total floating-point operations to measure throughput
     total_flops = 2 * M * N * K

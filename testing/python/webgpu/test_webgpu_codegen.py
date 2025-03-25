@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
 import tilelang
@@ -46,11 +46,10 @@ def assert_gemm_codegen(
     accum_dtype="float",
 ):
     func = matmul(M, N, K, block_M, block_N, block_K, dtype=dtype, accum_dtype=accum_dtype)
-    print(func)
 
-    rt_mod, _ = tilelang.lower(func, target="webgpu")
+    artifact = tilelang.lower(func, target="webgpu")
 
-    src_code = rt_mod.imported_modules[0].get_source()
+    src_code = artifact.kernel_source
 
     assert src_code is not None
 

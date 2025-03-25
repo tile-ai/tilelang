@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
 
 import io
@@ -26,6 +26,9 @@ import importlib
 PYPI_BUILD = os.environ.get("PYPI_BUILD", "False").lower() == "true"
 PACKAGE_NAME = "tilelang"
 ROOT_DIR = os.path.dirname(__file__)
+
+# Add LLVM control environment variable
+USE_LLVM = os.environ.get("USE_LLVM", "False").lower() == "true"
 
 
 def load_module_from_path(module_name, path):
@@ -212,7 +215,7 @@ def build_csrc(llvm_config_path):
     # Run CMake and make
     try:
         subprocess.check_call(["cmake", ".."])
-        num_jobs = max(1, int(multiprocessing.cpu_count() * 0.9))
+        num_jobs = max(1, int(multiprocessing.cpu_count() * 0.75))
         subprocess.check_call(["make", f"-j{num_jobs}"])
     except subprocess.CalledProcessError as error:
         raise RuntimeError("Failed to build TileLang C Source") from error
@@ -224,6 +227,15 @@ def setup_llvm_for_tvm():
     extract_path = download_and_extract_llvm(LLVM_VERSION, IS_AARCH64, EXTRACT_PATH)
     llvm_config_path = os.path.join(extract_path, "bin", "llvm-config")
     return extract_path, llvm_config_path
+
+
+def patch_libs(libpath):
+    """
+    tvm and tilelang libs are copied from elsewhere into wheels
+    and have a hard-coded rpath.
+    Set rpath to the directory of libs so auditwheel works well.
+    """
+    subprocess.run(['patchelf', '--set-rpath', '$ORIGIN', libpath])
 
 
 class TileLangBuilPydCommand(build_py):
@@ -302,6 +314,7 @@ class TileLangBuilPydCommand(build_py):
                     break
 
             if source_lib_file:
+                patch_libs(source_lib_file)
                 target_dir_release = os.path.join(self.build_lib, PACKAGE_NAME, "lib")
                 target_dir_develop = os.path.join(PACKAGE_NAME, "lib")
                 os.makedirs(target_dir_release, exist_ok=True)
@@ -423,6 +436,7 @@ class TileLangDevelopCommand(develop):
     """
 
     def run(self):
+        print("Running TileLangDevelopCommand")
         # 1. Build the C/C++ extension modules
         self.run_command("build_ext")
 
@@ -452,6 +466,7 @@ class TileLangDevelopCommand(develop):
             if not os.path.exists(target_dir):
                 os.makedirs(target_dir)
             if os.path.exists(source_lib_file):
+                patch_libs(source_lib_file)
                 shutil.copy2(source_lib_file, target_dir)
                 # remove the original file
                 os.remove(source_lib_file)
@@ -500,15 +515,30 @@ class CMakeBuild(build_ext):
         for ext in self.extensions:
             self.build_cmake(ext)
 
+        # To make it works with editable install,
+        # we need to copy the lib*.so files to the tilelang/lib directory
+        import glob
+        files = glob.glob("*.so")
+        if os.path.exists(PACKAGE_NAME):
+            target_lib_dir = os.path.join(PACKAGE_NAME, "lib")
+            for file in files:
+                if not os.path.exists(target_lib_dir):
+                    os.makedirs(target_lib_dir)
+                shutil.copy(file, target_lib_dir)
+                # remove the original file
+                os.remove(file)
+
     def build_cmake(self, ext):
         """
         Build a single CMake-based extension.
 
         :param ext: The extension (an instance of CMakeExtension).
         """
-        # Setup LLVM for TVM and retrieve the path to llvm-config.
-        # We assume the function returns (_, llvm_config_path).
-        _, llvm_config_path = setup_llvm_for_tvm()
+        # Only setup LLVM if it's enabled
+        llvm_config_path = "OFF"
+        if USE_LLVM:
+            # Setup LLVM for TVM and retrieve the path to llvm-config
+            _, llvm_config_path = setup_llvm_for_tvm()
 
         # Determine the directory where the final .so or .pyd library should go.
         extdir = os.path.abspath(os.path.dirname(self.get_ext_fullpath(ext.name)))
@@ -530,8 +560,7 @@ class CMakeBuild(build_ext):
         dst_config_cmake = os.path.join(build_temp, "config.cmake")
         shutil.copy(src_config_cmake, dst_config_cmake)
 
-        # Append some configuration variables to 'config.cmake'.
-        # Here, we set USE_LLVM and USE_CUDA, for example.
+        # Append some configuration variables to 'config.cmake'
         with open(dst_config_cmake, "a") as config_file:
             config_file.write(f"set(USE_LLVM {llvm_config_path})\n")
             config_file.write(f"set(USE_CUDA {CUDA_HOME})\n")

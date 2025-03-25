@@ -1,11 +1,10 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 import torch
 import torch.backends
 import tilelang.testing
 from tilelang import tvm as tvm
 from tvm import DataType
-import tilelang as TL
 import tilelang.language as T
 
 tilelang.testing.set_random_seed(0)
@@ -115,10 +114,10 @@ def run_gemm(
         num_threads,
     )
 
-    mod, params = TL.lower(program)
-    mod = TL.Profiler(mod, params, [2], TL.TensorSupplyType.Integer)
+    kernel = tilelang.compile(program, out_idx=[2])
+    profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
 
-    out = mod.run_once()
+    out = profiler.run_once()
     assert out is not None
 
     def ref_program(A, qB):
@@ -134,7 +133,7 @@ def run_gemm(
         C = C.to(torch.__getattribute__(out_dtype))
         return C
 
-    mod.assert_allclose(ref_program)
+    profiler.assert_allclose(ref_program)
 
 
 @tvm.testing.requires_package("bitblas")
@@ -363,8 +362,9 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
     matmul = tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
         M, N, K, in_dtype, out_dtype, accum_dtype, transform_b)
 
-    mod, params = TL.lower(matmul)
-    src_code = mod.imported_modules[0].get_source()
+    kernel = tilelang.compile(matmul, out_idx=[2])
+    src_code = kernel.get_kernel_source()
+    profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
 
     # src_code is the generated cuda source
     assert src_code is not None
@@ -402,11 +402,9 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
     QLB = ladder_permutate(qB.cpu()).cuda()
     QLB = lop3_permutate(QLB.cpu()).cuda()
 
-    mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
+    kernel(A, QLB, C)
 
-    mod(A, QLB, C)
-
-    latency = mod.do_bench(mod.func, warmup=25)
+    latency = profiler.do_bench(warmup=25)
 
     # Ensure that the latency is not None
     assert latency is not None

@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 """Wrapping Layouts."""
 # pylint: disable=invalid-name, unsupported-binary-operation
