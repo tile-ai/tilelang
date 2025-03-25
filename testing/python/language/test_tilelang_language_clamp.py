@@ -4,6 +4,7 @@
 import tilelang.testing
 from tilelang.utils.tensor import map_torch_type
 
+
 def clamp_within_bounds(
     N,
     block_N,
@@ -94,7 +95,7 @@ def run_clamp_value_range(
 
     # Convert string dtype to torch.dtype
     torch_dtype = map_torch_type(dtype)
-    
+
     def ref_program(A):
         min_val = torch.min(A) * 0.5
         max_val = torch.max(A) * 0.5
