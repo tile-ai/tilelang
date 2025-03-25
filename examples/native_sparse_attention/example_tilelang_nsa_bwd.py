@@ -60,12 +60,12 @@ def tilelang_kernel_fwd(
     @tilelang.jit
     @T.prim_func
     def native_sparse_attention(
-            Q: T.Buffer(q_shape, dtype),
-            K: T.Buffer(kv_shape, dtype),
-            V: T.Buffer(kv_shape, dtype),
-            BlockIndices: T.Buffer(block_indices_shape, block_indices_dtype),
-            O_slc: T.Buffer(o_slc_shape, dtype),
-            LSE_slc: T.Buffer(lse_slc_shape, accum_dtype),
+            Q: T.Tensor(q_shape, dtype),
+            K: T.Tensor(kv_shape, dtype),
+            V: T.Tensor(kv_shape, dtype),
+            BlockIndices: T.Tensor(block_indices_shape, block_indices_dtype),
+            O_slc: T.Tensor(o_slc_shape, dtype),
+            LSE_slc: T.Tensor(lse_slc_shape, accum_dtype),
     ):
         with T.Kernel(seq_len, NV, batch * head_kv, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([G, BK], dtype)
@@ -198,15 +198,15 @@ def tilelang_kernel_bwd_dkv(
     @tilelang.jit
     @T.prim_func
     def flash_bwd_dkv(
-            Q: T.Buffer(q_shape, dtype),
-            K: T.Buffer(k_shape, dtype),
-            V: T.Buffer(v_shape, dtype),
-            LSE_slc: T.Buffer(lse_slc_shape, accum_dtype),
-            Delta_slc: T.Buffer(delta_slc_shape, accum_dtype),
-            DO_slc: T.Buffer(do_slc_shape, dtype),
-            DK: T.Buffer(dk_shape, dtype),
-            DV: T.Buffer(dv_shape, dtype),
-            BlockMask: T.Buffer(block_mask_shape, "int32"),
+            Q: T.Tensor(q_shape, dtype),
+            K: T.Tensor(k_shape, dtype),
+            V: T.Tensor(v_shape, dtype),
+            LSE_slc: T.Tensor(lse_slc_shape, accum_dtype),
+            Delta_slc: T.Tensor(delta_slc_shape, accum_dtype),
+            DO_slc: T.Tensor(do_slc_shape, dtype),
+            DK: T.Tensor(dk_shape, dtype),
+            DV: T.Tensor(dv_shape, dtype),
+            BlockMask: T.Tensor(block_mask_shape, "int32"),
     ):
         with T.Kernel(NV, NS, B * H, threads=num_threads) as (i_v, i_s, i_bh):
             K_shared = T.alloc_shared([BS, BK], dtype)
@@ -362,16 +362,16 @@ def tilelang_kernel_bwd_dqkv(
     @tilelang.jit
     @T.prim_func
     def flash_bwd_dqkv(
-            Q: T.Buffer(q_shape, dtype),
-            K: T.Buffer(k_shape, dtype),
-            V: T.Buffer(v_shape, dtype),
-            LSE_slc: T.Buffer(lse_slc_shape, accum_dtype),
-            Delta_slc: T.Buffer(delta_slc_shape, accum_dtype),
-            DO_slc: T.Buffer(do_slc_shape, dtype),
-            DQ: T.Buffer(dq_shape, dtype),
-            DK: T.Buffer(dk_shape, dtype),
-            DV: T.Buffer(dv_shape, dtype),
-            BlockMask: T.Buffer(block_mask_shape, "int32"),
+            Q: T.Tensor(q_shape, dtype),
+            K: T.Tensor(k_shape, dtype),
+            V: T.Tensor(v_shape, dtype),
+            LSE_slc: T.Tensor(lse_slc_shape, accum_dtype),
+            Delta_slc: T.Tensor(delta_slc_shape, accum_dtype),
+            DO_slc: T.Tensor(do_slc_shape, dtype),
+            DQ: T.Tensor(dq_shape, dtype),
+            DK: T.Tensor(dk_shape, dtype),
+            DV: T.Tensor(dv_shape, dtype),
+            BlockMask: T.Tensor(block_mask_shape, "int32"),
     ):
         with T.Kernel(NV, NS, B * H, threads=num_threads) as (i_v, i_s, i_bh):
             K_shared = T.alloc_shared([BS, BK], dtype)
@@ -491,9 +491,9 @@ def tilelang_kernel_preprocess(
     @tilelang.jit(out_idx=[2], execution_backend="cython")
     @T.prim_func
     def flash_bwd_prep(
-            O: T.Buffer(shape, dtype),  # type: ignore
-            dO: T.Buffer(shape, dtype),  # type: ignore
-            Delta: T.Buffer([batch, seq_len, heads], accum_dtype),  # type: ignore
+            O: T.Tensor(shape, dtype),  # type: ignore
+            dO: T.Tensor(shape, dtype),  # type: ignore
+            Delta: T.Tensor([batch, seq_len, heads], accum_dtype),  # type: ignore
     ):
         with T.Kernel(heads, T.ceildiv(seq_len, blk), batch) as (bx, by, bz):
             o = T.alloc_fragment([blk, blk], dtype)
@@ -534,9 +534,9 @@ def tilelang_kernel_block_mask(
     @tilelang.jit(out_idx=[2], execution_backend="cython")
     @T.prim_func
     def flash_bwd_block_mask(
-            BlockIndices: T.Buffer(block_indices_shape, dtype),  # type: ignore
-            BlockCounts: T.Buffer(block_counts_shape, dtype),  # type: ignore
-            BlockMask: T.Buffer(block_mask_shape, dtype),  # type: ignore
+            BlockIndices: T.Tensor(block_indices_shape, dtype),  # type: ignore
+            BlockCounts: T.Tensor(block_counts_shape, dtype),  # type: ignore
+            BlockMask: T.Tensor(block_mask_shape, dtype),  # type: ignore
     ):
         with T.Kernel(seq_len, batch, heads * S) as (bx, by, bz):
             i_t, i_b, i_hs = bx, by, bz

@@ -15,9 +15,9 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
 
     @T.prim_func
     def main(
-            A: T.Buffer((M, K), dtype),
-            B: T.Buffer((N, K), dtype),
-            C: T.Buffer((M, N), accum_dtype),
+            A: T.Tensor((M, K), dtype),
+            B: T.Tensor((N, K), dtype),
+            C: T.Tensor((M, N), accum_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)

@@ -17,11 +17,11 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
     @T.macro
     def flash_attn(
-            Q: T.Buffer([batch, heads, dim], dtype),
-            Q_pe: T.Buffer([batch, heads, pe_dim], dtype),
-            KV: T.Buffer([batch, seqlen_kv, kv_head_num, dim], dtype),
-            K_pe: T.Buffer([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-            Output: T.Buffer([batch, heads, dim], dtype),
+            Q: T.Tensor([batch, heads, dim], dtype),
+            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+            Output: T.Tensor([batch, heads, dim], dtype),
     ):
         with T.Kernel(batch, heads // min(block_H, kv_group_num), threads=256) as (bx, by):
             Q_shared = T.alloc_shared([block_H, dim], dtype)
@@ -84,12 +84,12 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
     @T.macro
     def flash_attn_split(
-            Q: T.Buffer([batch, heads, dim], dtype),
-            Q_pe: T.Buffer([batch, heads, pe_dim], dtype),
-            KV: T.Buffer([batch, seqlen_kv, kv_head_num, dim], dtype),
-            K_pe: T.Buffer([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-            glse: T.Buffer([batch, heads, num_split], dtype),
-            Output_partial: T.Buffer([batch, heads, num_split, dim], dtype),
+            Q: T.Tensor([batch, heads, dim], dtype),
+            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+            glse: T.Tensor([batch, heads, num_split], dtype),
+            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
     ):
         with T.Kernel(
                 batch, heads // min(block_H, kv_group_num), num_split, threads=256) as (bx, by, bz):
@@ -161,9 +161,9 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
     @T.macro
     def combine(
-            glse: T.Buffer([batch, heads, num_split], dtype),
-            Output_partial: T.Buffer([batch, heads, num_split, dim], dtype),
-            Output: T.Buffer([batch, heads, dim], dtype),
+            glse: T.Tensor([batch, heads, num_split], dtype),
+            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+            Output: T.Tensor([batch, heads, dim], dtype),
     ):
         with T.Kernel(heads, batch, threads=128) as (by, bz):
             po_local = T.alloc_fragment([dim], dtype)
@@ -198,26 +198,26 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
     @T.prim_func
     def main_split(
-            Q: T.Buffer([batch, heads, dim], dtype),
-            Q_pe: T.Buffer([batch, heads, pe_dim], dtype),
-            KV: T.Buffer([batch, seqlen_kv, kv_head_num, dim], dtype),
-            K_pe: T.Buffer([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-            glse: T.Buffer([batch, heads, num_split], dtype),
-            Output_partial: T.Buffer([batch, heads, num_split, dim], dtype),
-            Output: T.Buffer([batch, heads, dim], dtype),
+            Q: T.Tensor([batch, heads, dim], dtype),
+            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+            glse: T.Tensor([batch, heads, num_split], dtype),
+            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+            Output: T.Tensor([batch, heads, dim], dtype),
     ):
         flash_attn_split(Q, Q_pe, KV, K_pe, glse, Output_partial)
         combine(glse, Output_partial, Output)
 
     @T.prim_func
     def main_no_split(
-            Q: T.Buffer([batch, heads, dim], dtype),
-            Q_pe: T.Buffer([batch, heads, pe_dim], dtype),
-            KV: T.Buffer([batch, seqlen_kv, kv_head_num, dim], dtype),
-            K_pe: T.Buffer([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-            glse: T.Buffer([batch, heads, num_split], dtype),
-            Output_partial: T.Buffer([batch, heads, num_split, dim], dtype),
-            Output: T.Buffer([batch, heads, dim], dtype),
+            Q: T.Tensor([batch, heads, dim], dtype),
+            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+            glse: T.Tensor([batch, heads, num_split], dtype),
+            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+            Output: T.Tensor([batch, heads, dim], dtype),
     ):
         flash_attn(Q, Q_pe, KV, K_pe, Output)
 

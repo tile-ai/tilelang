@@ -79,9 +79,9 @@ def tl_matmul_simt(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, in_dtype),
-            C: T.Buffer(C_shape, out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor(C_shape, out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
 

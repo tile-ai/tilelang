@@ -43,11 +43,11 @@ def tl_gemm(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, in_dtype),
-            C: T.Buffer((M, N), out_dtype),
-            scales_a: T.Buffer(Scales_A_shape, "float32"),
-            scales_b: T.Buffer(Scales_B_shape, "float32"),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
+            scales_a: T.Tensor(Scales_A_shape, "float32"),
+            scales_b: T.Tensor(Scales_B_shape, "float32"),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
 

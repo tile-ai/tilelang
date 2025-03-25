@@ -12,9 +12,9 @@ def matmul(M, N, K, block_M, block_N, block_K, split_k, dtype="float16", accum_d
 
     @T.prim_func
     def main(
-            A: T.Buffer((M, K), dtype),
-            B: T.Buffer((N, K), dtype),
-            C: T.Buffer((M, N), dtype),
+            A: T.Tensor((M, K), dtype),
+            B: T.Tensor((N, K), dtype),
+            C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(
                 T.ceildiv(N, block_N), T.ceildiv(M, block_M), split_k, threads=128) as (bx, by, bz):

@@ -105,10 +105,10 @@ def test_sync_else_branch():
 def test_sync_read_thread_id_independent_location():
 
     @T.prim_func
-    def func(p0_arg: T.Buffer((1, 2, 1, 1), "float32"), p1: T.Buffer(2, "float32")) -> None:
+    def func(p0_arg: T.Tensor((1, 2, 1, 1), "float32"), p1: T.Tensor(2, "float32")) -> None:
         threadIdx_x = T.env_thread("threadIdx.x")
         blockIdx_x = T.env_thread("blockIdx.x")
-        p0 = T.Buffer([2], dtype="float32", data=p0_arg.data)
+        p0 = T.Tensor([2], dtype="float32", data=p0_arg.data)
         result_local = T.alloc_buffer([1], dtype="float32", scope="local")
         temp_shared = T.alloc_buffer([1], dtype="float32", scope="shared")
         T.launch_thread(blockIdx_x, 8)
@@ -129,16 +129,16 @@ def test_sync_read_thread_id_independent_location():
 def test_sync_let_stmt():
 
     @T.prim_func(private=True)
-    def func(A: T.Buffer((16 * 512), "float32")):
+    def func(A: T.Tensor((16 * 512), "float32")):
         blockIdx_x = T.launch_thread("blockIdx.x", 16)
         A_shared = T.allocate([512], "float32", "shared")
         in_thread_A_temp = T.allocate([1], "float32", "local")
         cross_thread_A_temp = T.allocate([1], "float32", "local")
         threadIdx_x = T.launch_thread("threadIdx.x", 128)
-        A_shared_1 = T.Buffer((512,), data=A_shared, scope="shared")
+        A_shared_1 = T.Tensor((512,), data=A_shared, scope="shared")
         for ax0 in range(512):
             A_shared_1[ax0] = A[blockIdx_x * 512 + ax0]
-        in_thread_A_temp_1 = T.Buffer((1,), data=in_thread_A_temp, scope="local")
+        in_thread_A_temp_1 = T.Tensor((1,), data=in_thread_A_temp, scope="local")
         in_thread_A_temp_1[0] = T.float32(0)
         with T.LetStmt(in_thread_A_temp_1[0] + A_shared_1[threadIdx_x]) as A_temp:
             in_thread_A_temp_1[0] = A_temp
@@ -148,7 +148,7 @@ def test_sync_let_stmt():
             in_thread_A_temp_1[0] = A_temp
         with T.LetStmt(in_thread_A_temp_1[0] + A_shared_1[threadIdx_x + 384]) as A_temp:
             in_thread_A_temp_1[0] = A_temp
-        cross_thread_A_temp_1 = T.Buffer((1,), data=cross_thread_A_temp, scope="local")
+        cross_thread_A_temp_1 = T.Tensor((1,), data=cross_thread_A_temp, scope="local")
         with T.attr(
                 T.comm_reducer(lambda x0, y0: x0 + y0, [T.float32(0)]),
                 "reduce_scope",
@@ -163,16 +163,16 @@ def test_sync_let_stmt():
             )
 
     @T.prim_func(private=True)
-    def expected(A: T.Buffer((8192,), "float32")):
+    def expected(A: T.Tensor((8192,), "float32")):
         blockIdx_x = T.launch_thread("blockIdx.x", 16)
         A_shared_1 = T.allocate([512], "float32", "shared")
         in_thread_A_temp_1 = T.allocate([1], "float32", "local")
         cross_thread_A_temp_1 = T.allocate([1], "float32", "local")
         threadIdx_x = T.launch_thread("threadIdx.x", 128)
-        A_shared_1_1 = T.Buffer((512,), data=A_shared_1, scope="shared")
+        A_shared_1_1 = T.Tensor((512,), data=A_shared_1, scope="shared")
         for ax0 in range(512):
             A_shared_1_1[ax0] = A[blockIdx_x * 512 + ax0]
-        in_thread_A_temp_1_1 = T.Buffer((1,), data=in_thread_A_temp_1, scope="local")
+        in_thread_A_temp_1_1 = T.Tensor((1,), data=in_thread_A_temp_1, scope="local")
         in_thread_A_temp_1_1[0] = T.float32(0)
         T.tvm_storage_sync("shared")
         with T.LetStmt(in_thread_A_temp_1_1[0] + A_shared_1_1[threadIdx_x]) as A_temp:
@@ -188,7 +188,7 @@ def test_sync_let_stmt():
             "reduce_scope",
             T.reinterpret("handle", T.uint64(0)),
         )
-        cross_thread_A_temp_1_1 = T.Buffer((1,), data=cross_thread_A_temp_1, scope="local")
+        cross_thread_A_temp_1_1 = T.Tensor((1,), data=cross_thread_A_temp_1, scope="local")
         T.tvm_thread_allreduce(
             T.uint32(1),
             in_thread_A_temp_1_1[0],

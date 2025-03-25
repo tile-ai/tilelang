@@ -11,8 +11,8 @@ def reduce_max_test(M, N, dtype="float16"):
 
     @T.prim_func
     def main(
-            A: T.Buffer((M, N), dtype),
-            B: T.Buffer((M,), dtype),
+            A: T.Tensor((M, N), dtype),
+            B: T.Tensor((M,), dtype),
     ):
         with T.Kernel(1) as _:
             A_local = T.alloc_fragment((M, N), dtype)

@@ -14,11 +14,11 @@ def modify(
 
     @T.prim_func
     def main(
-            A: T.Buffer((64, 64)),
-            B: T.Buffer((64, 64)),
-            C: T.Buffer((64, 64)),
-            D: T.Buffer((64, 64)),
-            bias: T.Buffer((64, 64)),
+            A: T.Tensor((64, 64)),
+            B: T.Tensor((64, 64)),
+            C: T.Tensor((64, 64)),
+            D: T.Tensor((64, 64)),
+            bias: T.Tensor((64, 64)),
     ):
         if with_B:
             if with_bias:

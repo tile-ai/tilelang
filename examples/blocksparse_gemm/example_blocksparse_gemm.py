@@ -82,10 +82,10 @@ def blocksparse_matmul(M,
 
     @T.prim_func
     def main(
-            A: T.Buffer((M, K), dtype),
-            B: T.Buffer((K, N), dtype),
-            BlockMask: T.Buffer(block_mask_shape, "bool"),
-            C: T.Buffer((M, N), dtype),
+            A: T.Tensor((M, K), dtype),
+            B: T.Tensor((K, N), dtype),
+            BlockMask: T.Tensor(block_mask_shape, "bool"),
+            C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)

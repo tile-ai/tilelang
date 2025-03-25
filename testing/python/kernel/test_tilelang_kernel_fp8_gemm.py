@@ -18,9 +18,9 @@ def matmul_nt(M, N, K, bM, bN, bK, in_dtype, out_dtype, accum_dtype):
 
     @T.prim_func
     def main(
-            A: T.Buffer((M, K), in_dtype),
-            B: T.Buffer((N, K), in_dtype),
-            C: T.Buffer((M, N), out_dtype),
+            A: T.Tensor((M, K), in_dtype),
+            B: T.Tensor((N, K), in_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, bN), T.ceildiv(M, bM), threads=128) as (bx, by):
             A_shared = T.alloc_shared((bM, bK), in_dtype)

@@ -19,13 +19,13 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
 
     @T.macro
     def flash_mla_kernel(
-            Q: T.Buffer([batch, h_q, dv], dtype),
-            Q_pe: T.Buffer([batch, h_q, dpe], dtype),
-            KV: T.Buffer([batch * max_seqlen_pad, h_kv, dv], dtype),
-            K_pe: T.Buffer([batch * max_seqlen_pad, h_kv, dpe], dtype),
-            BLOCK_TABLE: T.Buffer([batch, max_seqlen_pad // block_size], "int32"),
-            CACHE_SEQLENS: T.Buffer([batch], "int32"),
-            Output: T.Buffer([batch, h_q, dv], dtype),
+            Q: T.Tensor([batch, h_q, dv], dtype),
+            Q_pe: T.Tensor([batch, h_q, dpe], dtype),
+            KV: T.Tensor([batch * max_seqlen_pad, h_kv, dv], dtype),
+            K_pe: T.Tensor([batch * max_seqlen_pad, h_kv, dpe], dtype),
+            BLOCK_TABLE: T.Tensor([batch, max_seqlen_pad // block_size], "int32"),
+            CACHE_SEQLENS: T.Tensor([batch], "int32"),
+            Output: T.Tensor([batch, h_q, dv], dtype),
     ):
         with T.Kernel(batch, h_q // min(block_H, kv_group_num), threads=256) as (bx, by):
             Q_shared = T.alloc_shared([block_H, dv], dtype)
@@ -98,14 +98,14 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
 
     @T.macro
     def flash_mla_split_kv_kernel(
-            Q: T.Buffer([batch, h_q, dv], dtype),
-            Q_pe: T.Buffer([batch, h_q, dpe], dtype),
-            KV: T.Buffer([batch * max_seqlen_pad, h_kv, dv], dtype),
-            K_pe: T.Buffer([batch * max_seqlen_pad, h_kv, dpe], dtype),
-            BLOCK_TABLE: T.Buffer([batch, max_seqlen_pad // block_size], "int32"),
-            CACHE_SEQLENS: T.Buffer([batch], "int32"),
-            glse: T.Buffer([batch, h_q, num_split], dtype),
-            Output_partial: T.Buffer([batch, h_q, num_split, dv], dtype),
+            Q: T.Tensor([batch, h_q, dv], dtype),
+            Q_pe: T.Tensor([batch, h_q, dpe], dtype),
+            KV: T.Tensor([batch * max_seqlen_pad, h_kv, dv], dtype),
+            K_pe: T.Tensor([batch * max_seqlen_pad, h_kv, dpe], dtype),
+            BLOCK_TABLE: T.Tensor([batch, max_seqlen_pad // block_size], "int32"),
+            CACHE_SEQLENS: T.Tensor([batch], "int32"),
+            glse: T.Tensor([batch, h_q, num_split], dtype),
+            Output_partial: T.Tensor([batch, h_q, num_split, dv], dtype),
     ):
         with T.Kernel(
                 batch, h_q // min(block_H, kv_group_num), num_split, threads=256) as (bx, by, bz):
@@ -185,9 +185,9 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
 
     @T.macro
     def combine(
-            glse: T.Buffer([batch, h_q, num_split], dtype),
-            Output_partial: T.Buffer([batch, h_q, num_split, dv], dtype),
-            Output: T.Buffer([batch, h_q, dv], dtype),
+            glse: T.Tensor([batch, h_q, num_split], dtype),
+            Output_partial: T.Tensor([batch, h_q, num_split, dv], dtype),
+            Output: T.Tensor([batch, h_q, dv], dtype),
     ):
         with T.Kernel(h_q, batch, threads=128) as (by, bz):
             po_local = T.alloc_fragment([dv], dtype)
@@ -222,15 +222,15 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
 
     @T.prim_func
     def main_split(
-            Q: T.Buffer([batch, h_q, dv], dtype),
-            Q_pe: T.Buffer([batch, h_q, dpe], dtype),
-            KV: T.Buffer([batch * max_seqlen_pad, h_kv, dv], dtype),
-            K_pe: T.Buffer([batch * max_seqlen_pad, h_kv, dpe], dtype),
-            block_table: T.Buffer([batch, max_seqlen_pad // block_size], "int32"),
-            cache_seqlens: T.Buffer([batch], "int32"),
-            glse: T.Buffer([batch, h_q, num_split], dtype),
-            Output_partial: T.Buffer([batch, h_q, num_split, dv], dtype),
-            Output: T.Buffer([batch, h_q, dv], dtype),
+            Q: T.Tensor([batch, h_q, dv], dtype),
+            Q_pe: T.Tensor([batch, h_q, dpe], dtype),
+            KV: T.Tensor([batch * max_seqlen_pad, h_kv, dv], dtype),
+            K_pe: T.Tensor([batch * max_seqlen_pad, h_kv, dpe], dtype),
+            block_table: T.Tensor([batch, max_seqlen_pad // block_size], "int32"),
+            cache_seqlens: T.Tensor([batch], "int32"),
+            glse: T.Tensor([batch, h_q, num_split], dtype),
+            Output_partial: T.Tensor([batch, h_q, num_split, dv], dtype),
+            Output: T.Tensor([batch, h_q, dv], dtype),
     ):
         flash_mla_split_kv_kernel(Q, Q_pe, KV, K_pe, block_table, cache_seqlens, glse,
                                   Output_partial)
@@ -238,15 +238,15 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
 
     @T.prim_func
     def main_no_split(
-            Q: T.Buffer([batch, h_q, dv], dtype),
-            Q_pe: T.Buffer([batch, h_q, dpe], dtype),
-            KV: T.Buffer([batch * max_seqlen_pad, h_kv, dv], dtype),
-            K_pe: T.Buffer([batch * max_seqlen_pad, h_kv, dpe], dtype),
-            block_table: T.Buffer([batch, max_seqlen_pad // block_size], "int32"),
-            cache_seqlens: T.Buffer([batch], "int32"),
-            glse: T.Buffer([batch, h_q, num_split], dtype),
-            Output_partial: T.Buffer([batch, h_q, num_split, dv], dtype),
-            Output: T.Buffer([batch, h_q, dv], dtype),
+            Q: T.Tensor([batch, h_q, dv], dtype),
+            Q_pe: T.Tensor([batch, h_q, dpe], dtype),
+            KV: T.Tensor([batch * max_seqlen_pad, h_kv, dv], dtype),
+            K_pe: T.Tensor([batch * max_seqlen_pad, h_kv, dpe], dtype),
+            block_table: T.Tensor([batch, max_seqlen_pad // block_size], "int32"),
+            cache_seqlens: T.Tensor([batch], "int32"),
+            glse: T.Tensor([batch, h_q, num_split], dtype),
+            Output_partial: T.Tensor([batch, h_q, num_split, dv], dtype),
+            Output: T.Tensor([batch, h_q, dv], dtype),
     ):
         flash_mla_kernel(Q, Q_pe, KV, K_pe, block_table, cache_seqlens, Output)
 

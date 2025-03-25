@@ -11,7 +11,7 @@ def vectorize_access_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_off
     dtype = "float32"
 
     @T.prim_func
-    def main(A: T.Buffer((M, N), dtype="float32"),):
+    def main(A: T.Tensor((M, N), dtype="float32"),):
         with T.Kernel(1, 1, threads=M) as (bx, by):
             A_shared = T.alloc_shared((M, N), dtype=dtype)
             tid = T.get_thread_binding()
@@ -19,7 +19,7 @@ def vectorize_access_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_off
                 A_shared[tid, j] = A[tid + M_offset, j + N_offset]
 
     @T.prim_func
-    def expected(A: T.Buffer((M, N), dtype="float32"),):
+    def expected(A: T.Tensor((M, N), dtype="float32"),):
         with T.Kernel(1, 1, threads=M) as (bx, by):
             A_shared = T.alloc_shared((M, N), dtype=dtype)
             tid = T.get_thread_binding()

@@ -56,14 +56,14 @@ def native_sparse_attention_varlen(batch,
 
     @T.prim_func
     def native_sparse_attention_varlen(
-            Q: T.Buffer(q_shape, dtype),
-            K: T.Buffer(kv_shape, dtype),
-            V: T.Buffer(kv_shape, dtype),
-            O_slc: T.Buffer(o_slc_shape, dtype),
-            BlockIndices: T.Buffer(block_indices_shape, block_indices_dtype),
-            BlockCounts: T.Buffer(block_counts_shape, block_counts_dtype),
-            Offsets: T.Buffer(offsets_shape, offsets_dtype),
-            TokenIndices: T.Buffer(token_indices_shape, token_indices_dtype),
+            Q: T.Tensor(q_shape, dtype),
+            K: T.Tensor(kv_shape, dtype),
+            V: T.Tensor(kv_shape, dtype),
+            O_slc: T.Tensor(o_slc_shape, dtype),
+            BlockIndices: T.Tensor(block_indices_shape, block_indices_dtype),
+            BlockCounts: T.Tensor(block_counts_shape, block_counts_dtype),
+            Offsets: T.Tensor(offsets_shape, offsets_dtype),
+            TokenIndices: T.Tensor(token_indices_shape, token_indices_dtype),
     ):
         with T.Kernel(c_seq_len, NV, batch * head_kv, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([G, BK], dtype)

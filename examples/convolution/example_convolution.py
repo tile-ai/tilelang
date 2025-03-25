@@ -48,9 +48,9 @@ def convolution(N, C, H, W, F, K, S, D, P, tune=False):
 
         @T.prim_func
         def main(
-                data: T.Buffer((N, H, W, C), dtype),
-                kernel: T.Buffer((KH, KW, C, F), dtype),
-                out: T.Buffer((N, OH, OW, F), dtype),
+                data: T.Tensor((N, H, W, C), dtype),
+                kernel: T.Tensor((KH, KW, C, F), dtype),
+                out: T.Tensor((N, OH, OW, F), dtype),
         ):
             with T.Kernel(
                     T.ceildiv(F, block_N), T.ceildiv(N * OH * OW, block_M),
@@ -60,8 +60,8 @@ def convolution(N, C, H, W, F, K, S, D, P, tune=False):
                 out_local = T.alloc_fragment((block_M, block_N), accum_dtype)
                 out_shared = T.alloc_shared((block_M, block_N), dtype)
 
-                kernel_flat = T.Buffer((KH * KW * C, F), dtype, kernel.data)
-                out_flat = T.Buffer((N * OH * OW, F), dtype, out.data)
+                kernel_flat = T.Tensor((KH * KW * C, F), dtype, kernel.data)
+                out_flat = T.Tensor((N * OH * OW, F), dtype, out.data)
 
                 T.annotate_layout({
                     out_shared: tilelang.layout.make_swizzled_layout(out_shared),

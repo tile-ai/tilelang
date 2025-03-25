@@ -18,9 +18,9 @@ def elementwise_add(
 
     @T.prim_func
     def main(
-            A: T.Buffer((M, N), in_dtype),
-            B: T.Buffer((M, N), in_dtype),
-            C: T.Buffer((M, N), out_dtype),
+            A: T.Tensor((M, N), in_dtype),
+            B: T.Tensor((M, N), in_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             start_x = bx * block_N

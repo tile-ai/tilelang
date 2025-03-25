@@ -27,7 +27,7 @@ Please note that this tutorial does not delve deeply into the design principles 
 def elementwise_add(N, threads=256, dtype="bfloat16"):
 
     @T.prim_func
-    def main(A: T.Buffer((N), dtype), B: T.Buffer((N), dtype), C: T.Buffer((N), dtype)):
+    def main(A: T.Tensor((N), dtype), B: T.Tensor((N), dtype), C: T.Tensor((N), dtype)):
         with T.Kernel(T.ceildiv(N, threads), threads=threads) as (b_x):
             # vector add.
             for i in T.Parallel(threads):
@@ -67,9 +67,9 @@ def elementwise_add(
 ):
     @T.prim_func
     def main(
-            A: T.Buffer((M, N), in_dtype),
-            B: T.Buffer((M, N), in_dtype),
-            C: T.Buffer((M, N), out_dtype),
+            A: T.Tensor((M, N), in_dtype),
+            B: T.Tensor((M, N), in_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             start_x = bx * block_N
@@ -105,7 +105,7 @@ When compiling the example below, let's set `N` to 2047:
 def elementwise_add(N, num_per_thread=8, threads=256, dtype="bfloat16"):
 
     @T.prim_func
-    def main(A: T.Buffer((N), dtype), B: T.Buffer((N), dtype), C: T.Buffer((N), dtype)):
+    def main(A: T.Tensor((N), dtype), B: T.Tensor((N), dtype), C: T.Tensor((N), dtype)):
         with T.Kernel(T.ceildiv(N, threads * num_per_thread), threads=threads) as (b_x):
             # vector add.
             for i, j in T.Parallel(threads, num_per_thread):
@@ -179,7 +179,7 @@ In such scenarios, explicitly specifying the number of elements computed per thr
 def elementwise_add(N, num_per_thread=8, threads=256, dtype="bfloat16"):
 
     @T.prim_func
-    def main(A: T.Buffer((N), dtype), B: T.Buffer((N), dtype), C: T.Buffer((N), dtype)):
+    def main(A: T.Tensor((N), dtype), B: T.Tensor((N), dtype), C: T.Tensor((N), dtype)):
         with T.Kernel(T.ceildiv(N, threads * num_per_thread), threads=threads) as (b_x):
             # vector add.
             for i, j in T.Parallel(threads, num_per_thread):
@@ -215,7 +215,7 @@ But what happens if we provide additional hints to TileLang? For instance, by ex
 def elementwise_add(N, NUM_ELE_PER_THREAD=8, threads=256, dtype="bfloat16"):
 
     @T.prim_func
-    def main(A: T.Buffer((N), dtype), B: T.Buffer((N), dtype), C: T.Buffer((N), dtype)):
+    def main(A: T.Tensor((N), dtype), B: T.Tensor((N), dtype), C: T.Tensor((N), dtype)):
         with T.Kernel(T.ceildiv(N, threads * NUM_ELE_PER_THREAD), threads=threads) as (b_x):
             A_register = T.alloc_fragment((threads * NUM_ELE_PER_THREAD), dtype)
             B_register = T.alloc_fragment((threads * NUM_ELE_PER_THREAD), dtype)

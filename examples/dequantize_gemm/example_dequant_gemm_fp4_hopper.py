@@ -66,8 +66,8 @@ def test_convert(N, K, block_N, block_K, in_dtype, num_bits=4, threads=128):
 
     @T.prim_func
     def main(
-            B: T.Buffer(B_shape, storage_dtype),
-            C: T.Buffer((N, K), in_dtype),
+            B: T.Tensor(B_shape, storage_dtype),
+            C: T.Tensor((N, K), in_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=threads) as (bx):
             B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
@@ -144,9 +144,9 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
 
         @T.prim_func
         def main_split(
-                A: T.Buffer(A_shape, in_dtype),
-                B: T.Buffer(B_shape, storage_dtype),
-                Ct: T.Buffer((N, M), out_dtype),
+                A: T.Tensor(A_shape, in_dtype),
+                B: T.Tensor(B_shape, storage_dtype),
+                Ct: T.Tensor((N, M), out_dtype),
         ):
             SplitC = T.alloc_buffer([
                 split, (N + block_N - 1) // block_N * block_N,
@@ -194,9 +194,9 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
 
         @T.prim_func
         def main(
-                A: T.Buffer(A_shape, in_dtype),
-                B: T.Buffer(B_shape, storage_dtype),
-                Ct: T.Buffer((N, M), out_dtype),
+                A: T.Tensor(A_shape, in_dtype),
+                B: T.Tensor(B_shape, storage_dtype),
+                Ct: T.Tensor((N, M), out_dtype),
         ):
             with T.Kernel(
                     T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):

@@ -8,12 +8,13 @@ from typing import Optional
 from tvm import tir
 from tvm.tir import Var, PrimExpr
 from tvm.script.ir_builder.tir import buffer, handle, match_buffer
-
+from tilelang.utils import deprecated
 
 class BufferProxy:
     """Buffer proxy class for constructing tir buffer."""
 
     # Index via T.Buffer(...)
+    @deprecated("T.Buffer(...)", "T.Tensor(...)")
     def __call__(
         self,
         shape,
@@ -41,6 +42,7 @@ class BufferProxy:
         )
 
     # Index via T.Buffer[...]
+    @deprecated("T.Buffer[...]", "T.Tensor(...)")
     def __getitem__(self, keys) -> tir.Buffer:
         if not isinstance(keys, tuple):
             return self(keys)

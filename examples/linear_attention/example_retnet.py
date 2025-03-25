@@ -12,11 +12,11 @@ def retnet(batch, heads, seq_len, dim_qk, dim_v, block_M, block_N):
 
     @T.prim_func
     def main(
-            Q: T.Buffer(qk_shape, dtype),
-            K: T.Buffer(qk_shape, dtype),
-            V: T.Buffer(v_shape, dtype),
-            mask: T.Buffer([heads, seq_len, seq_len], dtype),
-            Output: T.Buffer(v_shape, dtype),
+            Q: T.Tensor(qk_shape, dtype),
+            K: T.Tensor(qk_shape, dtype),
+            V: T.Tensor(v_shape, dtype),
+            mask: T.Tensor([heads, seq_len, seq_len], dtype),
+            Output: T.Tensor(v_shape, dtype),
     ):
         with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=128 * 2) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim_qk], dtype)
@@ -118,13 +118,13 @@ def retnet_inference(batch, heads, dim_qk, dim_v, block_M):
 
     @T.prim_func
     def main(
-            Q: T.Buffer(qk_shape, dtype),
-            K: T.Buffer(qk_shape, dtype),
-            V: T.Buffer(v_shape, dtype),
-            prev_kv: T.Buffer([batch, heads, dim_v, dim_qk], dtype),
-            prev_scale: T.Buffer([heads], dtype),
-            decay: T.Buffer([heads], dtype),
-            Output: T.Buffer([batch, heads, dim_v], dtype),
+            Q: T.Tensor(qk_shape, dtype),
+            K: T.Tensor(qk_shape, dtype),
+            V: T.Tensor(v_shape, dtype),
+            prev_kv: T.Tensor([batch, heads, dim_v, dim_qk], dtype),
+            prev_scale: T.Tensor([heads], dtype),
+            decay: T.Tensor([heads], dtype),
+            Output: T.Tensor([batch, heads, dim_v], dtype),
     ):
         with T.Kernel(T.ceildiv(dim_v, block_M), heads, batch, threads=128) as (bx, by, bz):
             Q_local = T.alloc_fragment([1, dim_qk], dtype)

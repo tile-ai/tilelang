@@ -13,8 +13,8 @@ def alloc_var(
 
     @T.prim_func
     def main(
-            A: T.Buffer((N,), dtype),
-            B: T.Buffer((N,), dtype),
+            A: T.Tensor((N,), dtype),
+            B: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             A_shared = T.alloc_shared([block_N], dtype)
@@ -53,8 +53,8 @@ def alloc_var_add(
 
     @T.prim_func
     def main(
-            A: T.Buffer((N,), dtype),
-            B: T.Buffer((N,), dtype),
+            A: T.Tensor((N,), dtype),
+            B: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             A_shared = T.alloc_shared([block_N], dtype)
