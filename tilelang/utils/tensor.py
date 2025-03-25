@@ -3,6 +3,7 @@ from __future__ import annotations
 from enum import Enum
 import torch
 from tvm.runtime import ndarray
+from tvm import tir
 from torch.utils.dlpack import to_dlpack
 import numpy as np
 
@@ -57,6 +58,14 @@ def get_tensor_supply(supply_type: TensorSupplyType):
             raise ValueError(
                 f"TensorType must have a shape, but got {type(param)}, "
                 "likely you are trying to generate a random tensor with a dynamic symbolic shape.")
+
+        # Check if with dynamic symbolic shape
+        for shape in param.shape:
+            if isinstance(shape, tir.Var):
+                raise ValueError(
+                    f"TensorType must have a static shape, but got {shape}, "
+                    "likely you are trying to generate a random tensor with a dynamic symbolic shape."
+                )
 
         shape = list(map(int, param.shape))
         if supply_type == TensorSupplyType.Auto:
