@@ -2,7 +2,8 @@
 # Licensed under the MIT License.
 
 import tvm.script.ir_builder.ir as _ir
-from tvm.script.ir_builder.tir import frame, PrimExpr
+from tvm.script.ir_builder.tir import frame
+from tvm.tir import PrimExpr
 from typing import Any, Dict
 
 
