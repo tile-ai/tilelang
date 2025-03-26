@@ -51,12 +51,30 @@ class BufferProxy:
             return self(keys)
         return self(*keys)  # type: ignore[attr-defined] # pylint: disable=no-member
 
-    def from_ptr(self, ptr: Var, shape: tuple[PrimExpr, ...], dtype: str = "float32") -> Buffer:
-        return match_buffer(ptr, shape, dtype=dtype)
+    def from_ptr(self,
+                 pointer_var: Var,
+                 shape: tuple[PrimExpr, ...],
+                 dtype: str = "float32") -> Buffer:
+        """Create a buffer from a pointer, shape, and data type.
+
+        Args:
+            pointer_var: The pointer variable
+            shape: The shape of the buffer
+            dtype: The data type of the buffer (default: float32)
+
+        Returns:
+            A buffer created from the given parameters
+        """
+        return match_buffer(pointer_var, shape, dtype=dtype)
 
 
 class BaseTensorProxy:
-    """Base proxy class for tensor types with configurable defaults"""
+    """Base proxy class for tensor types with configurable defaults.
+    
+    This class serves as a foundation for different tensor proxy types, providing
+    customizable default values for scope, alignment, and offset factors. It implements
+    the core functionality for creating TIR buffers with specific memory configurations.
+    """
     default_scope = "global"
     default_align = 0
     default_offset_factor = 0
@@ -99,23 +117,55 @@ class BaseTensorProxy:
             return self(keys)
         return self(*keys)
 
-    def from_ptr(self, ptr: Var, shape: tuple[PrimExpr, ...], dtype: str = "float32") -> tir.Buffer:
-        return match_buffer(ptr, shape, dtype=dtype)
+    def from_ptr(self,
+                 pointer_var: Var,
+                 shape: tuple[PrimExpr, ...],
+                 dtype: str = "float32") -> tir.Buffer:
+        """Create a buffer from a pointer, shape, and data type.
+
+        Args:
+            pointer_var: The pointer variable
+            shape: The shape of the buffer
+            dtype: The data type of the buffer (default: float32)
+
+        Returns:
+            A buffer created from the given parameters
+        """
+        return match_buffer(pointer_var, shape, dtype=dtype)
 
 
 class TensorProxy(BaseTensorProxy):
-    """Main tensor proxy with default global scope"""
+    """Main tensor proxy class for global scope buffers.
+    
+    This class implements the default tensor proxy with global memory scope,
+    inheriting all functionality from BaseTensorProxy without modifications.
+    """
 
 
 class FragmentBufferProxy(BaseTensorProxy):
+    """Proxy class for fragment memory buffers.
+    
+    This class represents tensor proxies specifically for local fragment memory,
+    typically used in GPU tensor core operations.
+    """
     default_scope = "local.fragment"
 
 
 class SharedBufferProxy(BaseTensorProxy):
+    """Proxy class for shared memory buffers.
+    
+    This class represents tensor proxies for dynamic shared memory,
+    commonly used in GPU shared memory operations.
+    """
     default_scope = "shared.dyn"
 
 
 class LocalBufferProxy(BaseTensorProxy):
+    """Proxy class for local memory buffers.
+    
+    This class represents tensor proxies for local memory scope,
+    typically used for temporary computations in GPU kernels.
+    """
     default_scope = "local"
 
 
