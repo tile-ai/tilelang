@@ -5,6 +5,8 @@ from typing import Callable, Optional, Union
 
 from tvm.tir.function import PrimFunc
 import tvm.script.parser.tir.entry as _tir_entry
+import inspect
+from tvm.script.parser._core import parse, scan_macro, utils
 
 
 def prim_func(func: Optional[Callable] = None,
@@ -31,8 +33,30 @@ def prim_func(func: Optional[Callable] = None,
     res : Union[PrimFunc, Callable]
         The parsed tir prim func.
     """
+    # pylint: disable=unused-argument
+    # (private will be used in the parser, but not immediately)
 
-    return _tir_entry.prim_func(func, private, check_well_formed)
+    # need to capture this var outside the wrapper because the wrapper
+    # adds to the stack
+    outer_stack = inspect.stack()
+
+    def decorator_wrapper(func):
+        if not inspect.isfunction(func):
+            raise TypeError(f"Expect a function, but got: {func}")
+        if utils.is_defined_in_class(outer_stack, func):
+            return func
+        f = parse(func, utils.inspect_function_capture(func), check_well_formed=check_well_formed)
+        setattr(f, "__name__", func.__name__)  # noqa: B010
+        return f
+
+    if func is not None:
+        # no optional args given => use wrapper directly
+        return decorator_wrapper(func)
+    else:
+        # if there is an optional arg given, return a new decorator
+        # that will then be invoked
+        setattr(decorator_wrapper, "dispatch_token", "tir")  # noqa: B010
+        return decorator_wrapper
 
 
 setattr(prim_func, "dispatch_token", "tir")  # noqa: B010
@@ -77,7 +101,19 @@ def macro(*args, hygienic: bool = True) -> Callable:
         ```
     """
 
-    return _tir_entry.macro(*args, hygienic=hygienic)
+    def _decorator(func: Callable) -> _tir_entry.TIRMacro:
+        source, closure_vars = scan_macro(func, utils.inspect_function_capture(func))
+        obj = _tir_entry.TIRMacro(source, closure_vars, func, hygienic)
+        obj.__name__ = func.__name__
+        return obj
+
+    if len(args) == 0:
+        return _decorator
+    if len(args) == 1 and inspect.isfunction(args[0]):
+        return _decorator(args[0])
+
+    raise ValueError(
+        "Invalid use of T.macro. Usage: @T.macro, @T.macro(), @T.macro(hygienic=[True|False])")
 
 
 setattr(macro, "dispatch_token", "tir")  # noqa: B010
