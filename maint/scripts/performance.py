@@ -217,9 +217,9 @@ def matmul(M, N, K, with_roller):
 
         @T.prim_func
         def main(
-                A: T.Buffer((M, K), dtype),
-                B: T.Buffer((N, K), dtype),
-                C: T.Buffer((M, N), dtype),
+                A: T.Tensor((M, K), dtype),
+                B: T.Tensor((N, K), dtype),
+                C: T.Tensor((M, N), dtype),
         ):
             """
             The compiled TVM function for block-level matrix multiplication.

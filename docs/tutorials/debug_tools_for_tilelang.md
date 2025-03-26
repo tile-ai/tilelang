@@ -66,7 +66,7 @@ For example, consider a case where a simple `T.copy` in 1D causes the lowering p
 
 ```python
 @T.prim_func
-def main(Q: T.Buffer(shape_q, dtype)):
+def main(Q: T.Tensor(shape_q, dtype)):
     # ...existing code...
 ```
 

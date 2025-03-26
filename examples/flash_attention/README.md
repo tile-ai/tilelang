@@ -5,10 +5,10 @@ Using tile-lang, we can define buffers at different memory layers. For instance,
 ```python
 @T.prim_func
 def flash_attention(
-    Q: T.Buffer(shape, dtype),
-    K: T.Buffer(shape, dtype),
-    V: T.Buffer(shape, dtype),
-    Output: T.Buffer(shape, dtype),
+    Q: T.Tensor(shape, dtype),
+    K: T.Tensor(shape, dtype),
+    V: T.Tensor(shape, dtype),
+    Output: T.Tensor(shape, dtype),
 ):
     # Launch a specialized T.Kernel with 3D mapping: (bx, by, bz)
     #   bx: block index in sequence dimension
