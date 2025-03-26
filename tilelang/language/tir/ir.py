@@ -1,7 +1,7 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
-import tvm.script.ir_builder.ir as _ir
+import tvm.script.ir_builder.tir.ir as _ir
 from tvm.script.ir_builder.tir import frame
 from tvm.tir import PrimExpr
 from typing import Any, Dict
@@ -29,7 +29,7 @@ def serial(start: PrimExpr,
     res : frame.ForFrame
         The ForFrame.
     """
-    _ir.serial(start, stop, annotations)
+    return _ir.serial(start=start, stop=stop, annotations=annotations)
 
 
 def parallel(start: PrimExpr,
@@ -54,7 +54,7 @@ def parallel(start: PrimExpr,
     res : frame.ForFrame
         The ForFrame.
     """
-    _ir.parallel(start, stop, annotations)
+    return _ir.parallel(start=start, stop=stop, annotations=annotations)
 
 
 def vectorized(start: PrimExpr,
@@ -79,7 +79,7 @@ def vectorized(start: PrimExpr,
     res : frame.ForFrame
         The ForFrame.
     """
-    _ir.vectorized(start, stop, annotations)
+    return _ir.vectorized(start=start, stop=stop, annotations=annotations)
 
 
 def unroll(start: PrimExpr,
@@ -104,7 +104,7 @@ def unroll(start: PrimExpr,
     res : frame.ForFrame
         The ForFrame.
     """
-    _ir.unroll(start, stop, annotations)
+    return _ir.unroll(start=start, stop=stop, annotations=annotations)
 
 
 def thread_binding(
@@ -135,7 +135,7 @@ def thread_binding(
     res : frame.ForFrame
         The ForFrame.
     """
-    _ir.thread_binding(start, stop, thread, annotations)
+    return _ir.thread_binding(start=start, stop=stop, thread=thread, annotations=annotations)
 
 
 def grid(*extents: PrimExpr) -> frame.ForFrame:
@@ -151,4 +151,4 @@ def grid(*extents: PrimExpr) -> frame.ForFrame:
     res : frame.ForFrame
         The ForFrame.
     """
-    _ir.grid(*extents)
+    return _ir.grid(*extents)
