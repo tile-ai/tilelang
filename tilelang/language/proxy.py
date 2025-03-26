@@ -169,6 +169,22 @@ class LocalBufferProxy(BaseTensorProxy):
     default_scope = "local"
 
 
+class TensorProxy(BaseTensorProxy):
+    """Main tensor proxy with default global scope"""
+
+
+class FragmentBufferProxy(BaseTensorProxy):
+    default_scope = "local.fragment"
+
+
+class SharedBufferProxy(BaseTensorProxy):
+    default_scope = "shared.dyn"
+
+
+class LocalBufferProxy(BaseTensorProxy):
+    default_scope = "local"
+
+
 Buffer = BufferProxy()  # pylint: disable=invalid-name
 # Tensor is an alias for Buffer
 # Because when user do jit compile, the input and output will

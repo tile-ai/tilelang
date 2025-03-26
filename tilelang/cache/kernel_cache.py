@@ -53,7 +53,7 @@ class KernelCache:
         """
         Generates a unique cache key.
         """
-        func_binary = cloudpickle.dumps(func)
+        func_binary = cloudpickle.dumps(func.script())
         key_data = {
             "func": sha256(func_binary).hexdigest(),  # Use SHA256 to generate hash key
             "out_idx": tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx],
