@@ -104,6 +104,7 @@ class TLCUDASourceWrapper(object):
         "int8": "int8_t",
         "uint8": "uint8_t",
         "int16": "int16_t",
+        "uint16": "uint16_t",
         "uchar": "uint8_t",
     }
 
