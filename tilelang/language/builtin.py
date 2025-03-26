@@ -35,6 +35,10 @@ def SetMaxNReg(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.SetMaxNReg"), *args)
 
 
+def NoSetMaxNReg(*args):
+    return tir.call_intrin("handle", tir.op.Op.get("tl.NoSetMaxNReg"), *args)
+
+
 def MBarrierWaitParity(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.MBarrierWaitParity"), *args)
 

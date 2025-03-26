@@ -1039,7 +1039,10 @@ public:
   static Array<IntImm> Collect(const PrimFunc &f) {
     SetMaxNRegCollector collector;
     collector(f->body);
-    return collector.nreg_;
+    return collector.has_no_set_max_nreg_
+               ? Array<IntImm>({IntImm(DataType::Int(32), -1),
+                                IntImm(DataType::Int(32), -1)})
+               : collector.nreg_;
   }
 
 private:
@@ -1055,6 +1058,8 @@ private:
         // producer should decrease register hint while consumer should increase
         // register hint
         nreg_.Set(is_inc, IntImm(DataType::Int(32), reg_hint));
+      } else if (call->op.same_as(NoSetMaxNReg())) {
+        has_no_set_max_nreg_ = true;
       }
     }
     StmtExprVisitor::VisitStmt_(op);
@@ -1062,6 +1067,7 @@ private:
 
   Array<IntImm> nreg_{IntImm(DataType::Int(32), 0),
                       IntImm(DataType::Int(32), 0)};
+  bool has_no_set_max_nreg_ = false;
 };
 
 class WarpSpecializedRewriter : public StmtExprMutator {
@@ -1107,7 +1113,7 @@ private:
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(SetMaxNReg())) {
+      if (call->op.same_as(SetMaxNReg()) || call->op.same_as(NoSetMaxNReg())) {
         return Evaluate(0);
       }
     }
@@ -1164,10 +1170,14 @@ private:
     int dec_reg = nreg_[0].as<IntImmNode>()->value;
     int inc_reg = nreg_[1].as<IntImmNode>()->value;
 
-    auto inc_reg_stmt = Evaluate(Call(DataType::Handle(), SetMaxNReg(),
-                                      {inc_reg == 0 ? 240 : inc_reg, 1}));
-    auto dec_reg_stmt = Evaluate(Call(DataType::Handle(), SetMaxNReg(),
-                                      {dec_reg == 0 ? 24 : dec_reg, 0}));
+    auto inc_reg_stmt = Evaluate(0);
+    auto dec_reg_stmt = Evaluate(0);
+    if (dec_reg >= 0 && inc_reg >= 0) {
+      inc_reg_stmt = Evaluate(Call(DataType::Handle(), SetMaxNReg(),
+                                   {inc_reg == 0 ? 240 : inc_reg, 1}));
+      dec_reg_stmt = Evaluate(Call(DataType::Handle(), SetMaxNReg(),
+                                   {dec_reg == 0 ? 24 : dec_reg, 0}));
+    }
 
     producer_code = SeqStmt({dec_reg_stmt, producer_code});
     consumer_code = SeqStmt({inc_reg_stmt, consumer_code});
