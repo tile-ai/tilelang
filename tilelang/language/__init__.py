@@ -6,7 +6,7 @@ from typing import Optional
 # from .parser import *
 # now is fully compatible with the upstream
 # tir script
-# TODO(lei): remove this import once the 
+# TODO(lei): remove this import once the
 # upstream tir script is fully compatible
 from tvm.script.parser.tir import *
 from .tir import (

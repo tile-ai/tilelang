@@ -1,14 +1,14 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
-from typing import Any, Optional, Union, List, Callable
+from typing import Any, Optional
 import tvm
-from tvm.ir import Array, Op, PrimExpr
+from tvm.ir import PrimExpr
 from tvm.ir.base import Span
-from tvm.runtime import const, convert
-from tvm.tir.buffer import Buffer
-from tvm.tir.expr import Call, CommReducer, IntImm, PrimExprWithOp, StringImm, Var
+from tvm.runtime import const
+from tvm.tir.expr import IntImm, PrimExprWithOp
 import tvm.tir.op as _tvm_op
+
 
 def call_packed(*args, span=None):
     """Build expression by call an external packed function.
@@ -39,6 +39,7 @@ def call_packed(*args, span=None):
     """
     return _tvm_op.call_packed(*args, span=span)
 
+
 def call_cpacked(*args, span=None):
     """Build expression by call an external packed function.
 
@@ -64,12 +65,13 @@ def call_cpacked(*args, span=None):
     """
     return _tvm_op.call_cpacked(*args, span=span)
 
+
 def call_packed_lowered(*args, span=None):
     """Lowered version of call packed.
     The argument to packed function can be Expr or Buffer.
     The argument is the corresponding POD type when Expr is presented.
     When the argument is Buffer, the corresponding PackedFunc
-    will recieve an TVMArrayHandle whose content is valid during the callback period.
+    will receive an TVMArrayHandle whose content is valid during the callback period.
     If the PackedFunc is a python callback, then the corresponding argument is NDArray.
 
     Parameters
@@ -90,6 +92,7 @@ def call_packed_lowered(*args, span=None):
     te.extern : Create tensor with extern function call.
     """
     return _tvm_op.call_packed_lowered(*args, span=span)
+
 
 def call_cpacked_lowered(*args, span=None):
     """Lowered version of call c-packed.
@@ -114,6 +117,7 @@ def call_cpacked_lowered(*args, span=None):
     te.extern : Create tensor with extern function call.
     """
     return _tvm_op.call_cpacked_lowered(*args, span=span)
+
 
 def call_intrin(dtype, func_name, *args, span=None):
     """Build expression by calling an intrinsic function.
@@ -142,6 +146,7 @@ def call_intrin(dtype, func_name, *args, span=None):
     """
     return _tvm_op.call_intrin(dtype, func_name, *args, span=span)
 
+
 def call_pure_extern(dtype, func_name, *args, span=None):
     """Build expression by calling a pure extern function.
 
@@ -165,6 +170,7 @@ def call_pure_extern(dtype, func_name, *args, span=None):
         The call expression.
     """
     return _tvm_op.call_pure_extern(dtype, func_name, *args, span=span)
+
 
 def call_extern(dtype, func_name, *args, span=None):
     """Build expression by calling a extern function.
@@ -190,6 +196,7 @@ def call_extern(dtype, func_name, *args, span=None):
     """
     return _tvm_op.call_extern(dtype, func_name, *args, span=span)
 
+
 def call_llvm_intrin(dtype, name, *args, span=None):
     """Build expression by calling a llvm intrinsic function
 
@@ -213,6 +220,7 @@ def call_llvm_intrin(dtype, name, *args, span=None):
         The call expression.
     """
     return _tvm_op.call_llvm_intrin(dtype, name, *args, span=span)
+
 
 def call_llvm_pure_intrin(dtype, name, *args, span=None):
     """Build expression by calling a pure llvm intrinsic function
@@ -238,6 +246,7 @@ def call_llvm_pure_intrin(dtype, name, *args, span=None):
     """
     return _tvm_op.call_llvm_pure_intrin(dtype, name, *args, span=span)
 
+
 def tvm_check_return(expected, return_unexpected, nested_call):
     """Return new on stack dtype[num]
     Parameters
@@ -254,6 +263,7 @@ def tvm_check_return(expected, return_unexpected, nested_call):
         The call expression.
     """
     return _tvm_op.tvm_check_return(expected, return_unexpected, nested_call)
+
 
 def tvm_stack_alloca(dtype_str, num):
     """Return new on stack dtype[num]
@@ -273,6 +283,7 @@ def tvm_stack_alloca(dtype_str, num):
     """
     return _tvm_op.tvm_stack_alloca(dtype_str, num)
 
+
 def tvm_stack_make_shape(*args):
     """Allocate a shape tuple on stack, return the handle
 
@@ -287,6 +298,7 @@ def tvm_stack_make_shape(*args):
         The call expression.
     """
     return _tvm_op.tvm_stack_make_shape(*args)
+
 
 def tvm_stack_make_array(data, shape, strides, ndim, arr_dtype, elem_offset):
     """Allocate a NDArray(DLTensor) on stack, return the handle
@@ -318,6 +330,7 @@ def tvm_stack_make_array(data, shape, strides, ndim, arr_dtype, elem_offset):
     """
     return _tvm_op.tvm_stack_make_array(data, shape, strides, ndim, arr_dtype, elem_offset)
 
+
 def assume(cond=None):
     """Provide a true statement that can be used for simplifications
 
@@ -333,6 +346,7 @@ def assume(cond=None):
     """
     return _tvm_op.assume(cond)
 
+
 def undef():
     """Returns an initialized but arbitrary value
 
@@ -343,6 +357,7 @@ def undef():
     """
     return _tvm_op.undef()
 
+
 def call_tir(global_var: tvm.ir.GlobalVar, *args):
     """Performs a call into another PrimFunc in the same IRModule
 
@@ -352,6 +367,7 @@ def call_tir(global_var: tvm.ir.GlobalVar, *args):
         The call expression.
     """
     return _tvm_op.call_tir(global_var, *args)
+
 
 def start_profile_intrinsic(id):
     """Start profile intrinsic.
@@ -366,6 +382,7 @@ def start_profile_intrinsic(id):
     """
     return _tvm_op.start_profile_intrinsic(id)
 
+
 def end_profile_intrinsic(id):
     """End profile intrinsic.
     Parameters
@@ -378,6 +395,7 @@ def end_profile_intrinsic(id):
         The call expression.
     """
     return _tvm_op.end_profile_intrinsic(id)
+
 
 def tvm_tuple(*value):
     """Create a tuple structure in value field of AttrStmt
@@ -393,6 +411,7 @@ def tvm_tuple(*value):
         The call expression.
     """
     return _tvm_op.tvm_tuple(*value)
+
 
 def tvm_struct_get(arr, index, field, dtype):
     """Get struct field value in array
@@ -418,6 +437,7 @@ def tvm_struct_get(arr, index, field, dtype):
     """
     return _tvm_op.tvm_struct_get(arr, index, field, dtype)
 
+
 def tvm_struct_set(arr, index, field, value):
     """Set value in struct field in array
 
@@ -442,6 +462,7 @@ def tvm_struct_set(arr, index, field, value):
     """
     return _tvm_op.tvm_struct_set(arr, index, field, value)
 
+
 def address_of(buffer_load, span=None):
     """Returns the address of an element in the buffer
 
@@ -459,6 +480,7 @@ def address_of(buffer_load, span=None):
         The call expression.
     """
     return _tvm_op.address_of(buffer_load, span=span)
+
 
 def lookup_param(param_name, span=None):
     """Returns the param by name
@@ -478,6 +500,7 @@ def lookup_param(param_name, span=None):
     """
     return _tvm_op.lookup_param(param_name, span=span)
 
+
 def tvm_thread_allreduce(*freduce_args):
     """Perform allreduce inside threadblock.
 
@@ -492,6 +515,7 @@ def tvm_thread_allreduce(*freduce_args):
         The call expression.
     """
     return _tvm_op.tvm_thread_allreduce(*freduce_args)
+
 
 def tvm_thread_invariant(cond):
     """Mark condition as thread invariant.
@@ -508,6 +532,7 @@ def tvm_thread_invariant(cond):
     """
     return _tvm_op.tvm_thread_invariant(cond)
 
+
 def tvm_storage_sync(storage_scope):
     """Perform synchronization in specified scope.
 
@@ -522,6 +547,7 @@ def tvm_storage_sync(storage_scope):
         The call expression.
     """
     return _tvm_op.tvm_storage_sync(storage_scope)
+
 
 def tvm_warp_shuffle(mask, value, warp_id, width, warp_size):
     """Exchange value between threads inside a warp.
@@ -545,6 +571,7 @@ def tvm_warp_shuffle(mask, value, warp_id, width, warp_size):
         The call expression.
     """
     return _tvm_op.tvm_warp_shuffle(mask, value, warp_id, width, warp_size)
+
 
 def tvm_warp_shuffle_up(mask, value, offset, width, warp_size):
     """Copy value from a lane with lower (by offset) index relative to caller.
@@ -570,6 +597,7 @@ def tvm_warp_shuffle_up(mask, value, offset, width, warp_size):
     """
     return _tvm_op.tvm_warp_shuffle_up(mask, value, offset, width, warp_size)
 
+
 def tvm_warp_shuffle_down(mask, value, offset, width, warp_size):
     """Copy value from a lane with higher (by offset) index relative to caller.
 
@@ -594,6 +622,7 @@ def tvm_warp_shuffle_down(mask, value, offset, width, warp_size):
     """
     return _tvm_op.tvm_warp_shuffle_down(mask, value, offset, width, warp_size)
 
+
 def tvm_warp_activemask():
     """Return a 32-bit mask indicates currently active threads in a calling warp.
 
@@ -603,6 +632,7 @@ def tvm_warp_activemask():
         The call expression.
     """
     return _tvm_op.tvm_warp_activemask()
+
 
 def type_annotation(dtype):
     """Create a type annotation expression
@@ -618,6 +648,7 @@ def type_annotation(dtype):
         The call expression.
     """
     return _tvm_op.type_annotation(dtype)
+
 
 def tvm_access_ptr(ptype, data, offset, extent, rw_mask):
     """Get head access address with memory access pattern info
@@ -646,6 +677,7 @@ def tvm_access_ptr(ptype, data, offset, extent, rw_mask):
     """
     return _tvm_op.tvm_access_ptr(ptype, data, offset, extent, rw_mask)
 
+
 def tvm_throw_last_error():
     """Throw TVMGetLastError()
 
@@ -655,6 +687,7 @@ def tvm_throw_last_error():
         The return expression
     """
     return _tvm_op.tvm_throw_last_error()
+
 
 def tvm_load_matrix_sync(fragment, m, n, k, index, buffer_ptr, stride, layout):
     """TVM intrinsic for tensor core load operators
@@ -692,9 +725,9 @@ def tvm_load_matrix_sync(fragment, m, n, k, index, buffer_ptr, stride, layout):
     """
     return _tvm_op.tvm_load_matrix_sync(fragment, m, n, k, index, buffer_ptr, stride, layout)
 
-def tvm_mma_sync(
-    fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c
-):
+
+def tvm_mma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c,
+                 index_c):
     """TVM intrinsic for tensor core mma_sync operators
 
     Parameters
@@ -728,13 +761,12 @@ def tvm_mma_sync(
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.tvm_mma_sync(
-        fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c
-    )
+    return _tvm_op.tvm_mma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b,
+                                fragment_c, index_c)
 
-def tvm_bmma_sync(
-    fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c
-):
+
+def tvm_bmma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c,
+                  index_c):
     """TVM intrinsic for tensor core bmma_sync operators
 
     Parameters
@@ -768,9 +800,9 @@ def tvm_bmma_sync(
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.tvm_bmma_sync(
-        fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c
-    )
+    return _tvm_op.tvm_bmma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b,
+                                 fragment_c, index_c)
+
 
 def tvm_fill_fragment(fragment, m, n, k, index, value):
     """TVM intrinsic for tensor core fill_fragment operators
@@ -801,6 +833,7 @@ def tvm_fill_fragment(fragment, m, n, k, index, value):
         The call expression.
     """
     return _tvm_op.tvm_fill_fragment(fragment, m, n, k, index, value)
+
 
 def tvm_store_matrix_sync(fragment, m, n, k, index, buffer_ptr, stride, layout):
     """TVM intrinsic for tensor core store operators
@@ -837,6 +870,7 @@ def tvm_store_matrix_sync(fragment, m, n, k, index, buffer_ptr, stride, layout):
         The call expression.
     """
     return _tvm_op.tvm_store_matrix_sync(fragment, m, n, k, index, buffer_ptr, stride, layout)
+
 
 def ptx_mma(
     dtype,
@@ -927,6 +961,7 @@ def ptx_mma(
         saturate,
         operator,
     )
+
 
 def ptx_mma_sp(
     dtype,
@@ -1028,6 +1063,7 @@ def ptx_mma_sp(
         saturate,
     )
 
+
 def mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """TVM intrinsic for storing the result of PTX MMA into a destination pointer
 
@@ -1061,8 +1097,9 @@ def mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """
     return _tvm_op.mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride)
 
+
 def mma_fill(dtype, local_size, local_ptr, offset):
-    """TVM intrinsic for zero-initalizing an MMA accumulation registor
+    """TVM intrinsic for zero-initalizing an MMA accumulation register
 
     Parameters
     ----------
@@ -1084,6 +1121,7 @@ def mma_fill(dtype, local_size, local_ptr, offset):
         The call expression.
     """
     return _tvm_op.mma_fill(dtype, local_size, local_ptr, offset)
+
 
 def ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr, smem_offset):
     """TVM intrinsic for ptx load matrix from shared memory
@@ -1120,9 +1158,9 @@ def ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr, sme
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.ptx_ldmatrix(
-        dtype, trans, num, type, local_ptr, local_offset, smem_ptr, smem_offset
-    )
+    return _tvm_op.ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr,
+                                smem_offset)
+
 
 def ptx_cp_async(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes):
     """TVM intrinsic for ptx async copy from global to shared memory using cp.async
@@ -1153,13 +1191,11 @@ def ptx_cp_async(dtype, shared_ptr, shared_offset, global_ptr, global_offset, by
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.ptx_cp_async(
-        dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes
-    )
+    return _tvm_op.ptx_cp_async(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes)
 
-def ptx_cp_async_bulk(
-    dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes, barrier_id
-):
+
+def ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes,
+                      barrier_id):
     """TVM intrinsic for ptx async copy from global to shared memory using cp.async.bulk
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk
 
@@ -1191,9 +1227,9 @@ def ptx_cp_async_bulk(
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.ptx_cp_async_bulk(
-        dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes, barrier_id
-    )
+    return _tvm_op.ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offset,
+                                     bytes, barrier_id)
+
 
 def ptx_commit_group():
     """TVM intrinsic for ptx async copy commit
@@ -1205,6 +1241,7 @@ def ptx_commit_group():
         The call expression.
     """
     return _tvm_op.ptx_commit_group()
+
 
 def ptx_wait_group(num):
     """TVM intrinsic for ptx async copy wait
@@ -1221,6 +1258,7 @@ def ptx_wait_group(num):
         The call expression.
     """
     return _tvm_op.ptx_wait_group(num)
+
 
 def tvm_mfma(
     dtype,
@@ -1302,6 +1340,7 @@ def tvm_mfma(
         c_index,
     )
 
+
 def tvm_mfma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """TVM intrinsic for storing the result of PTX MMA into a destination pointer
 
@@ -1334,6 +1373,7 @@ def tvm_mfma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
         The call expression.
     """
     return _tvm_op.tvm_mfma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride)
+
 
 def tvm_rdna_wmma(
     dtype,
@@ -1415,6 +1455,7 @@ def tvm_rdna_wmma(
         c_index,
     )
 
+
 def tvm_rdna_wmma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """TVM intrinsic for storing the result of PTX MMA into a destination pointer
 
@@ -1448,6 +1489,7 @@ def tvm_rdna_wmma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """
     return _tvm_op.tvm_rdna_wmma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride)
 
+
 def ptx_cp_async_barrier(barrier_id):
     """TVM intrinsic for ptx async copy barrier using cp.async.mbarrier.arrive
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-cp-async-mbarrier-arrive
@@ -1463,6 +1505,7 @@ def ptx_cp_async_barrier(barrier_id):
         The call expression.
     """
     return _tvm_op.ptx_cp_async_barrier(barrier_id)
+
 
 def ptx_init_barrier_thread_count(barrier_id, thread_count):
     """TVM intrinsic for ptx barrier initialization of thread count using mbarrier.init
@@ -1483,6 +1526,7 @@ def ptx_init_barrier_thread_count(barrier_id, thread_count):
     """
     return _tvm_op.ptx_init_barrier_thread_count(barrier_id, thread_count)
 
+
 def ptx_arrive_barrier(barrier_id):
     """TVM intrinsic for ptx barrier arrival using mbarrier.arrive
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-arrive
@@ -1499,6 +1543,7 @@ def ptx_arrive_barrier(barrier_id):
     """
     return _tvm_op.ptx_arrive_barrier(barrier_id)
 
+
 def ptx_arrive_barrier_expect_tx(barrier_id, byte_count):
     """TVM intrinsic for ptx barrier arrival with expect tx using mbarrier.arrive.expect_tx
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-arrive
@@ -1511,7 +1556,7 @@ def ptx_arrive_barrier_expect_tx(barrier_id, byte_count):
 
     byte_count : int
         Increases the tx count of the mbarrier object to track completion of
-        addtional async transactions.
+        additional async transactions.
 
     Returns
     -------
@@ -1519,6 +1564,7 @@ def ptx_arrive_barrier_expect_tx(barrier_id, byte_count):
         The call expression.
     """
     return _tvm_op.ptx_arrive_barrier_expect_tx(barrier_id, byte_count)
+
 
 def ptx_wait_barrier(barrier_id):
     """TVM intrinsic for ptx barrier wait using mbarrier.try_wait
@@ -1536,6 +1582,7 @@ def ptx_wait_barrier(barrier_id):
     """
     return _tvm_op.ptx_wait_barrier(barrier_id)
 
+
 def create_barriers(barrier_count):
     """TVM intrinsic to create N barriers
 
@@ -1550,6 +1597,7 @@ def create_barriers(barrier_count):
         The call expression.
     """
     return _tvm_op.create_barriers(barrier_count)
+
 
 def vectorlow(dtype, vec):
     """Get the low level half of the vector
@@ -1569,6 +1617,7 @@ def vectorlow(dtype, vec):
     """
     return _tvm_op.vectorlow(dtype, vec)
 
+
 def vectorhigh(dtype, vec):
     """Get the high level half of the vector
 
@@ -1586,6 +1635,7 @@ def vectorhigh(dtype, vec):
         The call expression.
     """
     return _tvm_op.vectorhigh(dtype, vec)
+
 
 def vectorcombine(dtype, vec1, vec2):
     """Concat two vectors
@@ -1605,6 +1655,7 @@ def vectorcombine(dtype, vec1, vec2):
     """
     return _tvm_op.vectorcombine(dtype, vec1, vec2)
 
+
 def ret(val):
     """Create a tir return expression
 
@@ -1620,8 +1671,9 @@ def ret(val):
     """
     return _tvm_op.ret(val)
 
+
 def any(*args, span=None):
-    """Create a new experssion of the union of all conditions in the arguments
+    """Create a new expression of the union of all conditions in the arguments
 
     Parameters
     ----------
@@ -1637,6 +1689,7 @@ def any(*args, span=None):
         Expression
     """
     return _tvm_op.any(*args, span=span)
+
 
 def all(*args, span=None):
     """Create a new expression of the intersection of all conditions in the
@@ -1656,6 +1709,7 @@ def all(*args, span=None):
         Expression
     """
     return _tvm_op.all(*args, span=span)
+
 
 def trace(args, trace_action="tvm.default_trace_action"):
     """Trace tensor data at the runtime.
@@ -1684,6 +1738,7 @@ def trace(args, trace_action="tvm.default_trace_action"):
     """
     return _tvm_op.trace(args, trace_action)
 
+
 def min_value(dtype, span=None):
     """minimum value of dtype
 
@@ -1701,6 +1756,7 @@ def min_value(dtype, span=None):
         The minimum value of dtype.
     """
     return _tvm_op.min_value(dtype, span)
+
 
 def max_value(dtype: str, span: Optional[Span] = None) -> Any:
     """maximum value of dtype
@@ -1720,6 +1776,7 @@ def max_value(dtype: str, span: Optional[Span] = None) -> Any:
     """
     return _tvm_op.max_value(dtype, span)
 
+
 def infinity(dtype: str, span: Optional[Span] = None) -> Any:
     """infinity value of dtype
 
@@ -1737,6 +1794,7 @@ def infinity(dtype: str, span: Optional[Span] = None) -> Any:
         The infinity value of dtype.
     """
     return _tvm_op.infinity(dtype, span)
+
 
 def reinterpret(dtype, value, span: Optional[Span] = None) -> Any:
     """infinity value of dtype
@@ -1759,6 +1817,7 @@ def reinterpret(dtype, value, span: Optional[Span] = None) -> Any:
     """
     return _tvm_op.reinterpret(dtype, value, span)
 
+
 def exp(x):
     """Take exponential of input x.
 
@@ -1773,6 +1832,7 @@ def exp(x):
         The result.
     """
     return _tvm_op.exp(x)
+
 
 def exp2(x):
     """Calculate 2**x
@@ -1789,6 +1849,7 @@ def exp2(x):
     """
     return _tvm_op.exp2(x)
 
+
 def exp10(x):
     """Calculate 10**x
 
@@ -1803,6 +1864,7 @@ def exp10(x):
         The result.
     """
     return _tvm_op.exp10(x)
+
 
 def erf(x):
     """Take gauss error function of the input x.
@@ -1819,6 +1881,7 @@ def erf(x):
     """
     return _tvm_op.erf(x)
 
+
 def tanh(x):
     """Take hyperbolic tanh of input x.
 
@@ -1833,6 +1896,7 @@ def tanh(x):
         The result.
     """
     return _tvm_op.tanh(x)
+
 
 def sigmoid(x):
     """Quick function to get sigmoid
@@ -1849,6 +1913,7 @@ def sigmoid(x):
     """
     return _tvm_op.sigmoid(x)
 
+
 def log(x):
     """Take log of input x.
 
@@ -1863,6 +1928,7 @@ def log(x):
         The result.
     """
     return _tvm_op.log(x)
+
 
 def log2(x):
     """Take log2 of input x.
@@ -1879,6 +1945,7 @@ def log2(x):
     """
     return _tvm_op.log2(x)
 
+
 def log10(x):
     """Take log10 of input x.
 
@@ -1893,6 +1960,7 @@ def log10(x):
         The result.
     """
     return _tvm_op.log10(x)
+
 
 def log1p(x):
     """Take log(x + 1) with respect to input x.
@@ -1909,6 +1977,7 @@ def log1p(x):
     """
     return _tvm_op.log1p(x)
 
+
 def tan(x):
     """Take tan of input x.
 
@@ -1923,6 +1992,7 @@ def tan(x):
         The result.
     """
     return _tvm_op.tan(x)
+
 
 def cos(x):
     """Take cos of input x.
@@ -1939,6 +2009,7 @@ def cos(x):
     """
     return _tvm_op.cos(x)
 
+
 def cosh(x):
     """Take cosh of input x.
 
@@ -1953,6 +2024,7 @@ def cosh(x):
         The result.
     """
     return _tvm_op.cosh(x)
+
 
 def acos(x):
     """Take acos of input x.
@@ -1969,6 +2041,7 @@ def acos(x):
     """
     return _tvm_op.acos(x)
 
+
 def acosh(x):
     """Take acos of input x.
 
@@ -1983,6 +2056,7 @@ def acosh(x):
         The result.
     """
     return _tvm_op.acosh(x)
+
 
 def sin(x):
     """Take sin of input x.
@@ -1999,6 +2073,7 @@ def sin(x):
     """
     return _tvm_op.sin(x)
 
+
 def sinh(x):
     """Take sinh of input x.
 
@@ -2013,6 +2088,7 @@ def sinh(x):
         The result.
     """
     return _tvm_op.sinh(x)
+
 
 def asin(x):
     """Take asin of input x.
@@ -2029,6 +2105,7 @@ def asin(x):
     """
     return _tvm_op.asin(x)
 
+
 def asinh(x):
     """Take asinh of input x.
 
@@ -2043,6 +2120,7 @@ def asinh(x):
         The result.
     """
     return _tvm_op.asinh(x)
+
 
 def atan(x):
     """Take atan of input x.
@@ -2059,6 +2137,7 @@ def atan(x):
     """
     return _tvm_op.atan(x)
 
+
 def atanh(x):
     """Take atanh of input x.
 
@@ -2073,6 +2152,7 @@ def atanh(x):
         The result.
     """
     return _tvm_op.atanh(x)
+
 
 def atan2(x1, x2):
     """Take arctan2(x1, x2).
@@ -2092,6 +2172,7 @@ def atan2(x1, x2):
     """
     return _tvm_op.atan2(x1, x2)
 
+
 def sqrt(x):
     """Take square root of input x.
 
@@ -2106,6 +2187,7 @@ def sqrt(x):
         The result.
     """
     return _tvm_op.sqrt(x)
+
 
 def rsqrt(x):
     """Take reciprocal of square root of input x.
@@ -2122,6 +2204,7 @@ def rsqrt(x):
     """
     return _tvm_op.rsqrt(x)
 
+
 def clz(x):
     """Count leading zero bits of an integer x.
 
@@ -2137,6 +2220,7 @@ def clz(x):
         The result.
     """
     return _tvm_op.clz(x)
+
 
 def floor(x: PrimExprWithOp, span=None):
     """Take floor of float input x.
@@ -2156,6 +2240,7 @@ def floor(x: PrimExprWithOp, span=None):
     """
     return _tvm_op.floor(x, span)
 
+
 def ceil(x, span=None):
     """Take ceil of float input x.
 
@@ -2173,6 +2258,7 @@ def ceil(x, span=None):
         The result.
     """
     return _tvm_op.ceil(x, span)
+
 
 def trunc(x, span=None):
     """Get truncated value of the input.
@@ -2195,6 +2281,7 @@ def trunc(x, span=None):
     """
     return _tvm_op.trunc(x, span)
 
+
 def abs(x, span=None):
     """Get absolute value of the input element-wise.
 
@@ -2212,6 +2299,7 @@ def abs(x, span=None):
         The result.
     """
     return _tvm_op.abs(x, span)
+
 
 def bitwise_and(x, y, span=None):
     """Take bitwise and of two values
@@ -2234,6 +2322,7 @@ def bitwise_and(x, y, span=None):
     """
     return _tvm_op.bitwise_and(x, y, span)
 
+
 def bitwise_not(x, span=None):
     """Take bitwise not of input value
 
@@ -2251,6 +2340,7 @@ def bitwise_not(x, span=None):
         The result.
     """
     return _tvm_op.bitwise_not(x, span)
+
 
 def bitwise_or(x, y, span=None):
     """Take bitwise or of two values
@@ -2273,6 +2363,7 @@ def bitwise_or(x, y, span=None):
     """
     return _tvm_op.bitwise_or(x, y, span)
 
+
 def bitwise_xor(x, y, span=None):
     """Take bitwise xor of two values
 
@@ -2294,6 +2385,7 @@ def bitwise_xor(x, y, span=None):
     """
     return _tvm_op.bitwise_xor(x, y, span)
 
+
 def round(x, span=None):
     """Round elements of the array to the nearest integer.
 
@@ -2311,6 +2403,7 @@ def round(x, span=None):
         The result.
     """
     return _tvm_op.round(x, span)
+
 
 def nearbyint(x, span=None):
     """Round elements of the array to the nearest integer.
@@ -2337,6 +2430,7 @@ def nearbyint(x, span=None):
     """
     return _tvm_op.nearbyint(x, span)
 
+
 def nextafter(x1, x2):
     """Return the next floating-point value after x1 towards x2.
 
@@ -2354,6 +2448,7 @@ def nextafter(x1, x2):
         The result.
     """
     return _tvm_op.nextafter(x1, x2)
+
 
 def hypot(x1, x2):
     """Equivalent to sqrt(x1**2 + x2**2), element-wise.
@@ -2373,6 +2468,7 @@ def hypot(x1, x2):
     """
     return _tvm_op.hypot(x1, x2)
 
+
 def copysign(x1, x2):
     """Change the sign of x1 to that of x2, element-wise.
 
@@ -2391,6 +2487,7 @@ def copysign(x1, x2):
     """
     return _tvm_op.copysign(x1, x2)
 
+
 def ldexp(x1, x2):
     """Returns x1 * (2 ** x2).
 
@@ -2408,6 +2505,7 @@ def ldexp(x1, x2):
         The result.
     """
     return _tvm_op.ldexp(x1, x2)
+
 
 def likely(cond, span=None):
     """Mark condition as likely.
@@ -2428,6 +2526,7 @@ def likely(cond, span=None):
     """
     return _tvm_op.likely(cond, span)
 
+
 def isnan(x, span=None):
     """Check if input value is Nan.
 
@@ -2445,6 +2544,7 @@ def isnan(x, span=None):
         The result.
     """
     return _tvm_op.isnan(x, span)
+
 
 def isnullptr(x, span=None):
     """Check if input value is nullptr.
@@ -2464,6 +2564,7 @@ def isnullptr(x, span=None):
     """
     return _tvm_op.isnullptr(x, span)
 
+
 def isfinite(x, span=None):
     """Check if input value is finite.
 
@@ -2482,6 +2583,7 @@ def isfinite(x, span=None):
     """
     return _tvm_op.isfinite(x, span)
 
+
 def isinf(x, span=None):
     """Check if input value is infinite.
 
@@ -2499,6 +2601,7 @@ def isinf(x, span=None):
         The result.
     """
     return _tvm_op.isinf(x, span)
+
 
 def power(x, y, span=None):
     """x power y
@@ -2521,6 +2624,7 @@ def power(x, y, span=None):
     """
     return _tvm_op.power(x, y, span)
 
+
 def pow(x, y, span=None):
     """x power y
 
@@ -2542,6 +2646,7 @@ def pow(x, y, span=None):
     """
     return _tvm_op.pow(x, y, span)
 
+
 def popcount(x):
     """Count the number of set bits in input x.
 
@@ -2556,6 +2661,7 @@ def popcount(x):
         The result.
     """
     return _tvm_op.popcount(x)
+
 
 def q_multiply_shift(x, y, q, s):
     """Execute a multiplication between two Q-numbers x and y
@@ -2584,6 +2690,7 @@ def q_multiply_shift(x, y, q, s):
         The result.
     """
     return _tvm_op.q_multiply_shift(x, y, q, s)
+
 
 def q_multiply_shift_per_axis(
     x: PrimExpr,
@@ -2618,9 +2725,9 @@ def q_multiply_shift_per_axis(
     z : PrimExpr
         The result.
     """
-    return _tvm_op.q_multiply_shift_per_axis(
-        x, y, ls, rs, q, is_lshift_required, is_rshift_required
-    )
+    return _tvm_op.q_multiply_shift_per_axis(x, y, ls, rs, q, is_lshift_required,
+                                             is_rshift_required)
+
 
 def shift_left(x, y, span=None):
     """Return the result of x left shifted by y bits.
@@ -2640,6 +2747,7 @@ def shift_left(x, y, span=None):
     """
     return _tvm_op.shift_left(x, y, span)
 
+
 def shift_right(x, y, span=None):
     """Return the result of x right shifted by y bits.
 
@@ -2658,6 +2766,7 @@ def shift_right(x, y, span=None):
     """
     return _tvm_op.shift_right(x, y, span)
 
+
 def fmod(x, y):
     """Return the remainder of x divided by y with the same sign as x.
 
@@ -2674,6 +2783,7 @@ def fmod(x, y):
         The result.
     """
     return _tvm_op.fmod(x, y)
+
 
 def if_then_else(cond, t, f, span=None):
     """Conditional selection expression.
@@ -2707,6 +2817,7 @@ def if_then_else(cond, t, f, span=None):
     """
     return _tvm_op.if_then_else(cond, t, f, span)
 
+
 def div(a, b, span=None):
     """Compute a / b as in C/C++ semantics.
 
@@ -2730,6 +2841,7 @@ def div(a, b, span=None):
     When operands are integers, returns truncdiv(a, b, span).
     """
     return _tvm_op.div(a, b, span)
+
 
 def indexdiv(a, b, span=None):
     """Compute floor(a / b) where a and b are non-negative.
@@ -2758,6 +2870,7 @@ def indexdiv(a, b, span=None):
     """
     return _tvm_op.indexdiv(a, b, span)
 
+
 def indexmod(a, b, span=None):
     """Compute the remainder of indexdiv. a and b are non-negative.
 
@@ -2785,6 +2898,7 @@ def indexmod(a, b, span=None):
     """
     return _tvm_op.indexmod(a, b, span)
 
+
 def truncdiv(a, b, span=None):
     """Compute the truncdiv of two expressions.
 
@@ -2809,6 +2923,7 @@ def truncdiv(a, b, span=None):
     This is the default integer division behavior in C.
     """
     return _tvm_op.truncdiv(a, b, span)
+
 
 def truncmod(a, b, span=None):
     """Compute the truncmod of two expressions.
@@ -2835,6 +2950,7 @@ def truncmod(a, b, span=None):
     """
     return _tvm_op.truncmod(a, b, span)
 
+
 def floordiv(a, b, span=None):
     """Compute the floordiv of two expressions.
 
@@ -2855,6 +2971,7 @@ def floordiv(a, b, span=None):
         The result expression.
     """
     return _tvm_op.floordiv(a, b, span)
+
 
 def floormod(a, b, span=None):
     """Compute the floormod of two expressions.
@@ -2877,6 +2994,7 @@ def floormod(a, b, span=None):
     """
     return _tvm_op.floormod(a, b, span)
 
+
 def ceildiv(lhs, rhs, span=None):
     """Generic ceildiv operator.
 
@@ -2892,9 +3010,10 @@ def ceildiv(lhs, rhs, span=None):
     Returns
     -------
     op : tvm.Expr
-        The result Expr of ceildiv operaton.
+        The result Expr of ceildiv operation.
     """
     return _tvm_op.ceildiv(lhs, rhs, span)
+
 
 def comm_reducer(fcombine, fidentity, name="reduce"):
     """Create a commutative reducer for reduction.
@@ -2931,6 +3050,7 @@ def comm_reducer(fcombine, fidentity, name="reduce"):
     """
     return _tvm_op.comm_reducer(fcombine, fidentity, name)
 
+
 def TVMBackendAllocWorkspace(device_type, device_id, nbytes, dtype_code_hint, dtype_bits_hint):
     """Backend function to allocate temporal workspace
 
@@ -2956,9 +3076,9 @@ def TVMBackendAllocWorkspace(device_type, device_id, nbytes, dtype_code_hint, dt
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.TVMBackendAllocWorkspace(
-        device_type, device_id, nbytes, dtype_code_hint, dtype_bits_hint
-    )
+    return _tvm_op.TVMBackendAllocWorkspace(device_type, device_id, nbytes, dtype_code_hint,
+                                            dtype_bits_hint)
+
 
 def TVMBackendFreeWorkspace(device_type, device_id, ptr):
     """Backend function to free temporal workspace.
@@ -2981,6 +3101,7 @@ def TVMBackendFreeWorkspace(device_type, device_id, ptr):
     """
     return _tvm_op.TVMBackendFreeWorkspace(device_type, device_id, ptr)
 
+
 def anylist_getitem(list_handle, index):
     """Returns an item from any list.
     list_handle: Var
@@ -2994,6 +3115,7 @@ def anylist_getitem(list_handle, index):
     """
     return _tvm_op.anylist_getitem(list_handle, index)
 
+
 def anylist_resetitem(list_handle, index):
     """Reset an item from any list.
     list_handle: Var
@@ -3006,6 +3128,7 @@ def anylist_resetitem(list_handle, index):
         The call expression.
     """
     return _tvm_op.anylist_resetitem(list_handle, index)
+
 
 def anylist_setitem_call_packed(list_handle, index, func_name, *args):
     """Set anylist item by result of packed call.
@@ -3024,6 +3147,7 @@ def anylist_setitem_call_packed(list_handle, index, func_name, *args):
     """
     return _tvm_op.anylist_setitem_call_packed(list_handle, index, func_name, *args)
 
+
 def anylist_setitem_call_cpacked(list_handle, index, func_name, *args):
     """Set anylist item by result of packed call.
     list_handle: Var
@@ -3041,6 +3165,7 @@ def anylist_setitem_call_cpacked(list_handle, index, func_name, *args):
     """
     return _tvm_op.anylist_setitem_call_cpacked(list_handle, index, func_name, *args)
 
+
 def vscale():
     """Get the target's vscale value. It will be lowered to llvm.vscale intrinsic
     (https://llvm.org/docs/LangRef.html#llvm-vscale-intrinsic)
@@ -3051,8 +3176,8 @@ def vscale():
     """
     return _tvm_op.vscale()
 
+
 # pylint: disable=unnecessary-lambda
 sum = comm_reducer(lambda x, y: x + y, lambda t: const(0, dtype=t), name="sum")
 min = comm_reducer(lambda x, y: _tvm_op._OpMin(x, y, None), max_value, name="min")
 max = comm_reducer(lambda x, y: _tvm_op._OpMax(x, y, None), min_value, name="max")
-

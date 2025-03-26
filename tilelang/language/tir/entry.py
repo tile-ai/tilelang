@@ -3,15 +3,13 @@
 
 from typing import Callable, Optional, Union
 
-import tvm.script
 from tvm.tir.function import PrimFunc
 import tvm.script.parser.tir.entry as _tir_entry
-import inspect
-from tvm.script.parser._core import parse, scan_macro, utils 
 
-def prim_func(
-    func: Optional[Callable] = None, private: bool = False, check_well_formed=True
-) -> Union[PrimFunc, Callable]:
+
+def prim_func(func: Optional[Callable] = None,
+              private: bool = False,
+              check_well_formed=True) -> Union[PrimFunc, Callable]:
     """The parsing method for tir prim func, by using `@prim_func` as decorator.
 
     Parameters
@@ -36,7 +34,9 @@ def prim_func(
 
     return _tir_entry.prim_func(func, private, check_well_formed)
 
-setattr(prim_func, "dispatch_token", "tir")
+
+setattr(prim_func, "dispatch_token", "tir")  # noqa: B010
+
 
 def macro(*args, hygienic: bool = True) -> Callable:
     """Decorator for macro definitions.
@@ -79,4 +79,5 @@ def macro(*args, hygienic: bool = True) -> Callable:
 
     return _tir_entry.macro(*args, hygienic=hygienic)
 
-setattr(macro, "dispatch_token", "tir")
+
+setattr(macro, "dispatch_token", "tir")  # noqa: B010
