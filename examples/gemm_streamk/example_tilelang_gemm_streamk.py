@@ -80,11 +80,11 @@ def tl_matmul_streamk(
     def compute_first_wave(
         pid: T.int32,
         A_buf: T.Tensor,
-        A_buf_shared: T.SharedTensor,
+        A_buf_shared: T.SharedBuffer,
         B_buf: T.Tensor,
-        B_buf_shared: T.SharedTensor,
+        B_buf_shared: T.SharedBuffer,
         C: T.Tensor,
-        C_local: T.LocalTensor,
+        C_local: T.LocalBuffer,
     ):
         start_iter = T.alloc_fragment((1,), "int32", "local")
         end_iter = T.alloc_fragment((1,), "int32", "local")
@@ -128,11 +128,11 @@ def tl_matmul_streamk(
     def compute_full_tiles(
         pid: T.int32,
         A_buf: T.Tensor,
-        A_shared: T.SharedTensor,
+        A_shared: T.SharedBuffer,
         B_buf: T.Tensor,
-        B_shared: T.SharedTensor,
+        B_shared: T.SharedBuffer,
         C: T.Tensor,
-        C_local: T.LocalTensor,
+        C_local: T.LocalBuffer,
     ):
 
         for p in T.serial(sm_patition_factor):

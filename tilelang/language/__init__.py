@@ -13,9 +13,9 @@ from .proxy import (
     make_tensor,  # noqa: F401
     Buffer,  # noqa: F401
     Tensor,  # noqa: F401
-    FragmentTensor,  # noqa: F401
-    SharedTensor,  # noqa: F401
-    LocalTensor,  # noqa: F401
+    FragmentBuffer,  # noqa: F401
+    SharedBuffer,  # noqa: F401
+    LocalBuffer,  # noqa: F401
 )
 from .parallel import Parallel  # noqa: F401
 from .pipeline import Pipelined  # noqa: F401

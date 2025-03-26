@@ -49,9 +49,9 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
         @T.macro
         def MMA0(
             K: T.Tensor(shape, dtype),
-            Q_shared: T.SharedTensor([block_M, dim], dtype),
-            K_shared: T.SharedTensor([block_N, dim], dtype),
-            acc_s: T.FragmentTensor([block_M, block_N], accum_dtype),
+            Q_shared: T.SharedBuffer([block_M, dim], dtype),
+            K_shared: T.SharedBuffer([block_N, dim], dtype),
+            acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
             k: T.int32,
             bx: T.int32,
             by: T.int32,
@@ -69,9 +69,9 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
         @T.macro
         def MMA1(
             V: T.Tensor(shape, dtype),
-            V_shared: T.SharedTensor([block_M, dim], dtype),
-            acc_s_cast: T.FragmentTensor([block_M, block_N], dtype),
-            acc_o: T.FragmentTensor([block_M, dim], accum_dtype),
+            V_shared: T.SharedBuffer([block_M, dim], dtype),
+            acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
+            acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
             k: T.int32,
             by: T.int32,
             bz: T.int32,
@@ -81,13 +81,13 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
 
         @T.macro
         def Softmax(
-                acc_s: T.FragmentTensor([block_M, block_N], accum_dtype),
-                acc_s_cast: T.FragmentTensor([block_M, block_N], dtype),
-                scores_max: T.FragmentTensor([block_M], accum_dtype),
-                scores_max_prev: T.FragmentTensor([block_M], accum_dtype),
-                scores_scale: T.FragmentTensor([block_M], accum_dtype),
-                scores_sum: T.FragmentTensor([block_M], accum_dtype),
-                logsum: T.FragmentTensor([block_M], accum_dtype),
+                acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
+                acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
+                scores_max: T.FragmentBuffer([block_M], accum_dtype),
+                scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
+                scores_scale: T.FragmentBuffer([block_M], accum_dtype),
+                scores_sum: T.FragmentBuffer([block_M], accum_dtype),
+                logsum: T.FragmentBuffer([block_M], accum_dtype),
         ):
             T.copy(scores_max, scores_max_prev)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -111,8 +111,8 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
 
         @T.macro
         def Rescale(
-                acc_o: T.FragmentTensor([block_M, dim], accum_dtype),
-                scores_scale: T.FragmentTensor([block_M], accum_dtype),
+                acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
+                scores_scale: T.FragmentBuffer([block_M], accum_dtype),
         ):
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] *= scores_scale[i]

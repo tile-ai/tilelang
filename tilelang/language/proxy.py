@@ -107,23 +107,23 @@ class TensorProxy(BaseTensorProxy):
     """Main tensor proxy with default global scope"""
 
 
-class FragmentTensorProxy(BaseTensorProxy):
+class FragmentBufferProxy(BaseTensorProxy):
     default_scope = "local.fragment"
 
 
-class SharedTensorProxy(BaseTensorProxy):
+class SharedBufferProxy(BaseTensorProxy):
     default_scope = "shared.dyn"
 
 
-class LocalTensorProxy(BaseTensorProxy):
+class LocalBufferProxy(BaseTensorProxy):
     default_scope = "local"
 
 
 Buffer = BufferProxy()  # pylint: disable=invalid-name
 Tensor = TensorProxy()  # pylint: disable=invalid-name
-FragmentTensor = FragmentTensorProxy()  # pylint: disable=invalid-name
-SharedTensor = SharedTensorProxy()  # pylint: disable=invalid-name
-LocalTensor = LocalTensorProxy()  # pylint: disable=invalid-name
+FragmentBuffer = FragmentBufferProxy()  # pylint: disable=invalid-name
+SharedBuffer = SharedBufferProxy()  # pylint: disable=invalid-name
+LocalBuffer = LocalBufferProxy()  # pylint: disable=invalid-name
 
 
 def ptr(dtype: Optional[str] = None,
