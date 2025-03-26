@@ -120,6 +120,9 @@ class LocalBufferProxy(BaseTensorProxy):
 
 
 Buffer = BufferProxy()  # pylint: disable=invalid-name
+# Tensor is an alias for Buffer
+# Because when user do jit compile, the input and output will
+# be mapped with torch.Tensor.
 Tensor = TensorProxy()  # pylint: disable=invalid-name
 FragmentBuffer = FragmentBufferProxy()  # pylint: disable=invalid-name
 SharedBuffer = SharedBufferProxy()  # pylint: disable=invalid-name
