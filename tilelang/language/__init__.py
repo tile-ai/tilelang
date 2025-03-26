@@ -12,7 +12,6 @@ from tvm.script.parser.tir import *
 from .tir import (
     prim_func,  # noqa: F401
 )
-from .tir.op import *  # noqa: F401
 from .tir.ir import *  # noqa: F401
 from tilelang.layout import Layout, Fragment  # noqa: F401
 from .proxy import (
