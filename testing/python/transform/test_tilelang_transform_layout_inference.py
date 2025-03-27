@@ -92,5 +92,4 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_loop_tail_split(64, 64, 32, 128, 8, "float16")
+    tilelang.testing.main()
