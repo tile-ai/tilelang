@@ -10,11 +10,12 @@ from functools import partial
 
 
 def check_hopper():
-    if not torch.cuda.is_available():
-        return None
-    props = torch.cuda.get_device_properties(0)
-    compute_capability = props.major, props.minor
-    return compute_capability == (9, 0)
+    # if not torch.cuda.is_available():
+    #     return None
+    # props = torch.cuda.get_device_properties(0)
+    # compute_capability = props.major, props.minor
+    # return compute_capability == (9, 0)
+    return False
 
 
 def get_configs():

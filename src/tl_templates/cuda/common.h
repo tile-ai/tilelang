@@ -128,16 +128,18 @@ template <> TL_DEVICE void AtomicAdd(bfloat16_t *address, float val) {
   atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address), __float2bfloat16(val));
 }
 
-// AtomicAdd Functions for BFLOAT16
-template <> TL_DEVICE void AtomicAdd(bfloat16_t *address, bfloat16_t val) {
-  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address),
-            static_cast<__nv_bfloat16>(val));
-}
-
 // AtomicAdd Functions for FP16x2
 TL_DEVICE void AtomicAddx2(half_t *address, half_t *val) {
   atomicAdd(reinterpret_cast<half2 *>(address),
             static_cast<half2>(*reinterpret_cast<half2 *>(val)));
+}
+
+#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 750))
+
+// AtomicAdd Functions for BFLOAT16
+template <> TL_DEVICE void AtomicAdd(bfloat16_t *address, bfloat16_t val) {
+  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address),
+            static_cast<__nv_bfloat16>(val));
 }
 
 // AtomicAdd Functions for BFLOAT16x2
@@ -146,7 +148,7 @@ TL_DEVICE void AtomicAddx2(bfloat16_t *address, bfloat16_t *val) {
       reinterpret_cast<__nv_bfloat162 *>(address),
       static_cast<__nv_bfloat162>(*reinterpret_cast<__nv_bfloat162 *>(val)));
 }
-
+#endif
 // DP4A
 template <typename InDatatype, typename OutDatatype>
 TL_DEVICE void DP4A(InDatatype *a, InDatatype *b, OutDatatype *c) {
