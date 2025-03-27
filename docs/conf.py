@@ -8,7 +8,8 @@ import sys
 
 sys.path.insert(0, os.path.abspath("../tilelang"))
 sys.path.insert(0, os.path.abspath("../"))
-autodoc_mock_imports = ["torch"]
+
+autodoc_mock_imports = ["torch", "tilelang.language.ast", "tilelang.language.parser"]
 
 # General information about the project.
 project = "Tile Language <br>"
@@ -46,11 +47,11 @@ myst_enable_extensions = [
 
 redirects = {"get_started/try_out": "../index.html#getting-started"}
 
-source_suffix = [".md"]
+source_suffix = [".md", ".rst"]
 
 language = "en"
 
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md"]
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md", "**/*libinfo*", "**/*version*"]
 
 # The name of the Pygments (syntax highlighting) style to use.
 pygments_style = "sphinx"

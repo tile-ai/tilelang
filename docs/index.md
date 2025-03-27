@@ -53,6 +53,12 @@ language_ref/primitives
 language_ref/tilelibrary
 ::: 
 
+:::{toctree}
+:maxdepth: 1
+:caption: API Reference
+
+api/modules
+:::
 
 :::{toctree}
 :maxdepth: 1

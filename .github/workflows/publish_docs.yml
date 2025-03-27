@@ -12,18 +12,20 @@ permissions:
 jobs:
   docs:
     if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' }} || ${{ github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
       - name: Build docs
         run: |
           chmod +x ./maint/scripts/build_docs.sh
           ./maint/scripts/build_docs.sh
       - name: Configure git
         run: |
-          git config --global user.email "tilelang@outlook.com"
-          git config --global user.name "GitHub Actions"
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
       - name: Push to another repo
         env:
           TARGET_REPO: ${{ secrets.TARGET_REPO }}

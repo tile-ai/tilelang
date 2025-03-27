@@ -2,6 +2,11 @@ import subprocess
 import re
 from tabulate import tabulate
 
+import os
+
+env = os.environ.copy()
+env["TILELANG_CLEAR_CACHE"] = "1"
+
 
 def parse_output(output):
     data = {}
@@ -23,12 +28,14 @@ def parse_output(output):
 
 output_v1 = subprocess.run(['./tl/bin/python', './maint/scripts/performance.py'],
                            capture_output=True,
-                           text=True).stdout
+                           text=True,
+                           env=env).stdout
 data_v1 = parse_output(output_v1)
 
 output_v2 = subprocess.run(['./tll/bin/python', './maint/scripts/performance.py'],
                            capture_output=True,
-                           text=True).stdout
+                           text=True,
+                           env=env).stdout
 data_v2 = parse_output(output_v2)
 
 table = [[
