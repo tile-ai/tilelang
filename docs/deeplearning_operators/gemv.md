@@ -10,11 +10,12 @@ General Matrix-Vector Multiplication (GEMV)
    Suggestions and improvements are highly encouraged—please submit a PR!
 :::
 
-General matrix-vector multipliction (GEMV) as a specialized general matrix-matrix multiplication (GEMM) has its unique position in deep learning, especially for large language model inference decoding. In this tutorial, we are gonna optimize GEMV from thread prespective step by step in `TileLang`.
+General matrix-vector multiplication (GEMV) can be viewed as a specialized case of general matrix-matrix multiplication (GEMM). It plays a critical role in deep learning, especially during the inference phase of large language models. In this tutorial, we will optimize GEMV from a thread-level perspective step by step using `TileLang`.
 
 # Triton implementation
-To implement an gemv kernel, you might use convenient tools like `Triton` and write code like this:
+When implementing a GEMV kernel, you might start with a high-level approach using a tool like `Triton`.
 
+A simple Triton kernel for GEMV might look like this:
 ```python
 @triton.jit
 def _gemv_naive(
@@ -32,10 +33,10 @@ def _gemv_naive(
     tl.store(y_ptr + n, dot)
 ```
 
-`Triton` is easy to develop as it operates at block level. However, this could lack thread-level control and miss futher optimization possibilities In this tutorial, we are going write an optimized gemv kernel with `TileLang` and exploit its fine-grained controlbility.
+`Triton` is straightforward to use, as it operates at the block level. However, this approach may not allow for fine-grained thread-level optimization. In this tutorial, we will demonstrate how to write an optimized GEMV kernel in `TileLang` that exposes more low-level control.
 
 # Naive Implementation in TileLang
-Suppose that you know some basic CUDA C programming. Immediately, we can implement a naive gemv kernel following GEMM's tiling strategy like this (seeing GEMV as a `(1, k) * (k, n)` GEMM):
+If you have a basic understanding of CUDA C, it is natural to start with a naive GEMV kernel by adapting a GEMM tiling strategy. You can think of GEMV as a `(1, k) * (k, n)` GEMM. Below is a simple example:
 
 ```python
 def naive_gemv(
@@ -70,7 +71,7 @@ def naive_gemv(
     return main
 ```
 
-And your kernel will be compiled into CUDA by tilelang like this (can be found at `~/.tilelang/cache`):
+And your kernel will be compiled into CUDA by `TileLang` (in `~/.tilelang/cache`):
 
 ```C++
 extern "C" __global__ void __launch_bounds__(256, 1) main_kernel(half_t* __restrict__ A, half_t* __restrict__ B, half_t* __restrict__ C) {
@@ -116,13 +117,15 @@ return 0;
 }
 ```
 
-Where you see tilelang helps to generate a warp-specialized kernel with the first 128 threads as producer and last 128 threads as consumer in a block (when you are using 1D block). 
+In this design, the first 128 threads act as the data producer and the last 128 threads as the consumer within a block (assuming a 1D block).
 
-At this level, we only gain very little computation power from our GPU with around **~0.17 ms** compare with torch/cuBLAS's **~0.008 ms**, which is amost 20x slower.
+At this level, we only gain very little computation power from our GPU with around **~0.17 ms** compared to torch/cuBLAS's **~0.008 ms**, which is around 20x slower.
+
 # More concurrency
 
-To further increase the concurrency of our kernel, we can utilize the thread level control of `TileLang`: Instead of making each thread calculate each output element of C, we now add parallelism at K-dimension and let each thread to calculate a partial (or pre-accumulated) result, and reduce the partial value at the end to calculate the correct one. To reduce the partial value, we will have to use some low-level primitives like `atomicAdd` in CUDA.
+To further increase the concurrency of our kernel, we can exploit finer thread-level parallelism. Instead of assigning each thread to compute a single output element in C, you can introduce parallelism along the K dimension. Each thread computes a partial accumulation, and you then combine these partial results. This approach requires primitives like `atomicAdd` in CUDA.
 
+Here’s a simplified version:
 ```python
 def naive_splitk_gemv(
     N: int,
@@ -158,10 +161,10 @@ def naive_splitk_gemv(
     return main
 ```
 
-With the new implementation, our kernel now achieves **~0.024 ms**, which is till a bit far away from torch/cuBLAS.
+By introducing parallelism along K dimension, our kernel now achieves **~0.024 ms**, an improvement, but still not on par with torch/cuBLAS.
 
-## make k dimention custom
-Sometimes, the K dimension could be quite large and we can make each thread to calculate multiple partial results by introducing `reduce_threads`, which allows us to control the concurrency along K dimension:
+## Customizing Parallelism in K Dimension
+If your K dimension is large, you can further customize how many elements each thread processes by introducing a `reduce_threads` parameter. This way, each thread handles multiple elements per iteration:
 
 ```python
 def splitk_gemv(
@@ -206,9 +209,9 @@ def splitk_gemv(
 ```
 
 
-# Vectorilized Read
+# Vectorized Reads
 
-GEMV is less computation intensive than GEMM as the computation intensity and memory throuput will be our optimization bottleneck. One method to gain more throughput is to use vectorized read/write operation, instead of letting each k-reduce thread reading one element, we can make it read a "chunk" of elements, which can be achieved using `T.vectorize` primitive, which warps around `float2`, `float4`... data structures in CUDA C.
+GEMV is less computation intensive than GEMM as the computation intensity and memory throuput will be the optimization bottleneck. One effective strategy is to use vectorized load/store operations (e.g., `float2`, `float4`). In `TileLang`, you can specify vectorized operations via `T.vectorized`:
 
 ```python
 def splitk_gemv_vectorized(
@@ -252,12 +255,12 @@ def splitk_gemv_vectorized(
     return main
 ```
 
-With vectorized read, now the kernel finishs in **~0.084 ms**, we are almost there!
+With vectorized read, now the kernel finishs in **~0.084 ms**, which is getting close to cuBLAS performance.
 
 
 # Autotune
 
-`BLOCK_N`, `BLOCK_K`, `reduce_threads` are hyperparameters in our kernel, which can be tuned to improve performance. We can utilize the `autotune` in `tilelang.autotune` to get the best perfomance under this given input:
+`BLOCK_N`, `BLOCK_K`, `reduce_threads` are hyperparameters in our kernel, which can be tuned to improve performance. We can use the `tilelang.autotune` feature to automatically search for optimal configurations:
 
 ```python
 def get_best_config(N, K):
@@ -336,7 +339,7 @@ def get_best_config(N, K):
 
 After autotuning, now our kernel gets **~0.008 ms**, which is comparable to torch/cuBLAS (although still a bit slower in my case).
 
-Our final generated CUDA kernel will be like this:
+A final generated CUDA kernel might like this:
 
 ```C++
 extern "C" __global__ void __launch_bounds__(64, 1) main_kernel(half_t* __restrict__ A, half_t* __restrict__ B, half_t* __restrict__ C) {
@@ -362,7 +365,7 @@ extern "C" __global__ void __launch_bounds__(64, 1) main_kernel(half_t* __restri
 }
 ```
 
-Which is exactly what we wrote in `TileLang` with necessary synchonization inserted!
+This corresponds closely to our `TileLang` program, with necessary synchronization and low-level optimizations inserted automatically.
 
 # Conclusion
 
