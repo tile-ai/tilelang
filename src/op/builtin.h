@@ -164,6 +164,14 @@ const Op &TMAStoreWait();
 const Op &SetMaxNReg();
 
 /*!
+ * \brief No set reg hint for warp-specialized branched
+ *
+ * NoSetMaxNReg()
+ *
+ */
+const Op &NoSetMaxNReg();
+
+/*!
  * \brief Wait the previous wgmma to finish
  *
  * WaitWgmma(num_mma)
