@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """Util to invoke C/C++ compilers in the system."""
+import functools
 import os
 import shutil
 import subprocess
@@ -62,6 +63,7 @@ def get_cc():
     return None
 
 
+@functools.lru_cache(maxsize=None)
 def get_cplus_compiler():
     """Return the path to the default C/C++ compiler.
 
