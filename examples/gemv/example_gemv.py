@@ -2,18 +2,15 @@
 # Licensed under the MIT License.
 import argparse
 import itertools
-import torch
 import tilelang as tl
 import tilelang.language as T
 from tvm import DataType
-from functools import partial
 from tilelang.autotuner import autotune, jit
-from tilelang.carver.template import GEMVTemplate
-from tilelang.carver.arch import CUDA
-from tilelang.carver.roller.rasterization import NoRasterization
+
 
 def ref_program(A, B):
     return A @ B.T
+
 
 def naive_gemv(
     N: int,
@@ -23,6 +20,7 @@ def naive_gemv(
     dtype: str = "float16",
     accum_dtype: str = "float",
 ):
+
     @T.prim_func
     def main(
             A: T.Buffer((K,), dtype),
@@ -55,6 +53,7 @@ def naive_splitk_gemv(
     dtype: str = "float16",
     accum_dtype: str = "float",
 ):
+
     @T.prim_func
     def main(
             A: T.Buffer((K,), dtype),
@@ -111,8 +110,7 @@ def splitk_gemv(
             for bk in T.serial(T.ceildiv(K, BLOCK_K)):
                 for k in T.serial(TILE_K):
                     A_local[k] = A[bk * BLOCK_K + tk * TILE_K + k]
-                    B_local[k] = B[bn * BLOCK_N + tn,
-                                                    bk * BLOCK_K + tk * TILE_K + k]
+                    B_local[k] = B[bn * BLOCK_N + tn, bk * BLOCK_K + tk * TILE_K + k]
                 for k in T.serial(TILE_K):
                     C_accum[0] += A_local[k].astype(accum_dtype) * B_local[k].astype(accum_dtype)
             T.atomic_add(C_shared[tn], C_accum[0])
@@ -152,8 +150,7 @@ def splitk_gemv_vectorized(
             for bk in T.serial(T.ceildiv(K, BLOCK_K)):
                 for k in T.vectorized(TILE_K):
                     A_local[k] = A[bk * BLOCK_K + tk * TILE_K + k]
-                    B_local[k] = B[bn * BLOCK_N + tn,
-                                                    bk * BLOCK_K + tk * TILE_K + k]
+                    B_local[k] = B[bn * BLOCK_N + tn, bk * BLOCK_K + tk * TILE_K + k]
                 for k in T.serial(TILE_K):
                     C_accum[0] += A_local[k].astype(accum_dtype) * B_local[k].astype(accum_dtype)
             T.atomic_add(C_shared[tn], C_accum[0])
@@ -162,22 +159,19 @@ def splitk_gemv_vectorized(
     return main
 
 
-
 def get_best_config(N, K):
+
     def get_configs():
-        BLOCK_N = [ 2, 4, 8, 32, 64, 128]
+        BLOCK_N = [2, 4, 8, 32, 64, 128]
         reduce_threads = [4, 8, 32]
-        _configs = list(
-            itertools.product(
-                BLOCK_N,
-                reduce_threads,
-            ))
-        configs = [
-            {
-                "BLOCK_N": c[0],
-                "reduce_threads": c[1],
-            } for c in _configs
-        ]
+        _configs = list(itertools.product(
+            BLOCK_N,
+            reduce_threads,
+        ))
+        configs = [{
+            "BLOCK_N": c[0],
+            "reduce_threads": c[1],
+        } for c in _configs]
         return configs
 
     @autotune(
@@ -225,10 +219,10 @@ def get_best_config(N, K):
                 for bk in T.serial(T.ceildiv(K, BLOCK_K)):
                     for k in T.vectorized(TILE_K):
                         A_shared[k] = A[bk * BLOCK_K + tk * TILE_K + k]
-                        B_shared[k] = B[bn * BLOCK_N + tn,
-                                                        bk * BLOCK_K + tk * TILE_K + k]
+                        B_shared[k] = B[bn * BLOCK_N + tn, bk * BLOCK_K + tk * TILE_K + k]
                     for k in T.serial(TILE_K):
-                        C_reg[0] += A_shared[k].astype(accum_dtype) * B_shared[k].astype(accum_dtype)
+                        C_reg[0] += A_shared[k].astype(accum_dtype) * B_shared[k].astype(
+                            accum_dtype)
                 T.atomic_add(C_shared[tn], C_reg[0])
                 C[bn * BLOCK_N + tn] = C_shared[tn]
 
@@ -239,10 +233,6 @@ def get_best_config(N, K):
 
 def check_correctness_and_bench(kernel, N, K, bench_ref=True):
     kernel = tl.compile(kernel, out_idx=-1)
-    a = torch.randn(K).cuda().half()
-    b = torch.randn(N, K).cuda().half()
-    out_c = kernel(a, b)
-    ref_c = a @ b.T
     profiler = kernel.get_profiler()
     profiler.assert_allclose(lambda x, y: x @ y.T, atol=1e-2, rtol=1e-2)
     if bench_ref:
