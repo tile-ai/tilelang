@@ -10,6 +10,9 @@ General Matrix-Vector Multiplication (GEMV)
    Suggestions and improvements are highly encouraged—please submit a PR!
 :::
 
+:::{tip}
+Example code can be found at `examples/gemv/example_gemv.py`.
+::: 
 General matrix-vector multiplication (GEMV) can be viewed as a specialized case of general matrix-matrix multiplication (GEMM). It plays a critical role in deep learning, especially during the inference phase of large language models. In this tutorial, we will optimize GEMV from a thread-level perspective step by step using `TileLang`.
 
 # Triton implementation
