@@ -7,6 +7,7 @@
  */
 
 #include <tvm/tir/builtin.h>
+#include <tvm/tir/index_map.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
@@ -46,6 +47,121 @@ public:
 
 using namespace tir;
 using arith::IRMutatorWithAnalyzer;
+
+class ParallelLoopTransformer : public IRMutatorWithAnalyzer {
+public:
+  static Stmt Substitute(Stmt stmt, bool skip_thread_partition = false) {
+    arith::Analyzer analyzer;
+    ParallelLoopTransformer transformer(&analyzer);
+    return transformer.VisitStmt(stmt);
+  }
+
+  ParallelLoopTransformer(arith::Analyzer *analyzer)
+      : IRMutatorWithAnalyzer(analyzer) {}
+
+  Stmt VisitStmt_(const ForNode *op) final {
+    if (op->kind == ForKind::kParallel) {
+
+      // 收集循环变量和范围
+      auto for_node = GetRef<For>(op);
+      Array<Var> loop_vars;
+      Array<PrimExpr> loop_extents;
+      Stmt body = op->body;
+
+      // 绑定外层循环变量的范围
+      analyzer_->Bind(op->loop_var, Range::FromMinExtent(0, op->extent));
+      loop_vars.push_back(op->loop_var);
+      loop_extents.push_back(op->extent);
+
+      // 如果有内层循环，也绑定其范围
+      while (const ForNode *inner = body.as<ForNode>()) {
+        analyzer_->Bind(inner->loop_var,
+                        Range::FromMinExtent(0, inner->extent));
+        loop_vars.push_back(inner->loop_var);
+        loop_extents.push_back(inner->extent);
+        body = inner->body;
+      }
+
+      // 收集 buffer 访问信息
+      BufferAccessCollector collector;
+      collector(op->body);
+
+      PrimExpr condition;
+      // 现在分析indices的范围会更准确
+      for (const auto &[buffer, indices] : collector.buffer_indices) {
+        ICHECK(indices.size() == buffer->shape.size())
+            << "indices size mismatch with buffer shape";
+
+        for (size_t i = 0; i < indices.size(); ++i) {
+          auto index = indices[i];
+          auto loop_var = loop_vars[i];
+          auto bound = analyzer_->const_int_bound(index);
+          int64_t upper_bound = bound->max_value + 1;
+          int64_t shape = Downcast<IntImm>(buffer->shape[i])->value;
+
+          if (upper_bound < shape) {
+            PrimExpr predicate =
+                LT(indices[i], IntImm(indices[i].dtype(), upper_bound));
+            condition =
+                condition.defined() ? And(condition, predicate) : predicate;
+
+            // replace the buffer index from A[i, r * 2] with A[i, j]
+            // where r is the original index, j is the loop_var
+            auto index_map = tir::IndexMap({loop_var}, {index});
+            auto inverse_index_map = index_map.Inverse(
+                {Range::FromMinExtent(0, IntImm(index.dtype(), upper_bound))},
+                analyzer_);
+
+            loop_extents.Set(i, IntImm(index.dtype(), shape));
+            body = tir::Substitute(body,
+                                   {{loop_var, inverse_index_map->MapIndices(
+                                                   {loop_var}, analyzer_)[0]}});
+          }
+        }
+      }
+      if (condition.defined()) {
+        body = IfThenElse(condition, body);
+        for (int j = loop_vars.size() - 1; j >= 0; --j) {
+          auto loop_var = loop_vars[j];
+          auto loop_extent = loop_extents[j];
+          body = For(loop_var, 0, loop_extent, ForKind::kParallel, body);
+        }
+        return Downcast<For>(body);
+      }
+      // Only traverse the outer loop
+      return for_node;
+    }
+    return StmtMutator::VisitStmt_(op);
+  }
+
+private:
+  // 用于收集 buffer 访问信息的辅助类，只统计fragment buffer的访问
+  class BufferAccessCollector : public StmtExprVisitor {
+  public:
+    void VisitExpr_(const BufferLoadNode *op) final {
+      if (op->buffer.scope() == "local.fragment") {
+        if (buffer_indices.find(op->buffer) == buffer_indices.end()) {
+          buffer_indices[op->buffer] = op->indices;
+        } else {
+          // check equal
+          ICHECK(StructuralEqual()(buffer_indices[op->buffer], op->indices))
+              << "indices mismatch for buffer: " << op->buffer;
+        }
+      }
+      StmtExprVisitor::VisitExpr_(op);
+    }
+
+    void VisitStmt_(const BufferStoreNode *op) final {
+      if (buffer_indices.find(op->buffer) == buffer_indices.end()) {
+        buffer_indices[op->buffer] = op->indices;
+      }
+      StmtExprVisitor::VisitStmt_(op);
+    }
+
+    std::unordered_map<Buffer, Array<PrimExpr>, ObjectPtrHash, ObjectPtrEqual>
+        buffer_indices;
+  };
+};
 
 struct LayoutInferenceResult {
   Map<Buffer, Layout> layout_map;
@@ -222,14 +338,12 @@ public:
       // Check if base_infer is valid
       ICHECK(base_infer != nullptr) << "Null pointer encountered in "
                                        "infer_list_ while collecting for_map.";
-
       if (auto for_infer = dynamic_cast<ParallelOp *>(base_infer.get())) {
         // Check that the loop layout is defined
         ICHECK(for_infer->GetLoopLayout().defined())
             << "The Layout for Parallel for cannot be inferred correctly:\n"
             << for_infer->GetRoot();
         for_map.Set(for_infer->GetRoot(), for_infer->GetLoopLayout());
-
         // thread_var_ should be defined if we rely on it
         ICHECK(thread_var.defined())
             << "thread_var is not defined. Cannot retrieve predicate.";
@@ -379,13 +493,13 @@ private:
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
     if (result_.for_map.count(GetRef<For>(op))) {
       auto loop_layout = result_.for_map[GetRef<For>(op)];
-
       if (!skip_thread_partition_) {
         // If none thread bindings are provided, partition the loop
         for_node =
             PartitionLoop(for_node, thread_var_->var, analyzer_, loop_layout);
       }
       for_node = VectorizeLoop(for_node);
+
       if (result_.predicate_map.count(GetRef<For>(op))) {
         return IfThenElse(result_.predicate_map[GetRef<For>(op)], for_node);
       } else {
@@ -415,6 +529,7 @@ private:
 tvm::transform::Pass LayoutInference() {
   using namespace tir::transform;
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+    f.CopyOnWrite()->body = ParallelLoopTransformer::Substitute(f->body);
     ThreadBindingCollector collector;
     collector(f->body);
     bool has_thread_binding = collector.thread_binding_.size() > 0;
