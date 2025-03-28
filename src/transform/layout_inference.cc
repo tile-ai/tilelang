@@ -115,8 +115,8 @@ public:
 
           // find related loop vars
           Array<Var> related_loop_vars;
-          for (size_t i = 0; i < loop_vars.size(); ++i) {
-            auto loop_var = loop_vars[i];
+          for (size_t j = 0; j < loop_vars.size(); ++j) {
+            auto loop_var = loop_vars[j];
             // if find related, pop the loop_vars and loop_extents
             if (used_vars.count(loop_var)) {
               related_loop_vars.push_back(loop_var);
@@ -133,7 +133,7 @@ public:
             int64_t shape = Downcast<IntImm>(buffer->shape[i])->value;
             if (upper_bound < shape) {
               PrimExpr predicate =
-                  LT(indices[i], IntImm(indices[i].dtype(), upper_bound));
+                  LT(index, IntImm(index.dtype(), upper_bound));
               condition =
                   condition.defined() ? And(condition, predicate) : predicate;
 
