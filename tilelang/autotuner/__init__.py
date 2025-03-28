@@ -16,14 +16,26 @@ import logging
 from dataclasses import dataclass
 import concurrent.futures
 import os
+import sys
 
+# Configure logging for the autotuner module
+# TODO: Consider creating a common logger in utils
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+logger.propagate = False
 
-logging.basicConfig(
-    filename='autotuner.log',
-    filemode='w',
-    level=logging.DEBUG,
-    format='%(asctime)s %(levelname)s:%(message)s')
+formatter = logging.Formatter('%(asctime)s %(levelname)s:%(message)s')
+
+file_handler = logging.FileHandler('autotuner.log', mode='w')
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(formatter)
+
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
 
 
 @dataclass(frozen=True)
