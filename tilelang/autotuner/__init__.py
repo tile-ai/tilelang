@@ -186,9 +186,7 @@ class AutoTuner:
             atol = jit_context.atol
             max_mismatched_ratio = jit_context.max_mismatched_ratio
 
-            self.jit_input_tensors = profiler._get_inputs(
-                with_output=profiler ==
-                "tvm") if self.jit_input_tensors is None else self.jit_input_tensors
+            self.jit_input_tensors = profiler._get_inputs(with_output=(profiler == "tvm"))
 
             if (not skip_check) and (ref_prog is not None):
                 profiler.assert_allclose(
