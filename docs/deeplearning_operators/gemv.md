@@ -50,27 +50,28 @@ def naive_gemv(
     dtype: str = "float16",
     accum_dtype: str = "float",
 ):
+
     @T.prim_func
     def main(
-        A: T.Buffer((K, ), dtype),
-        B: T.Buffer((N, K), dtype),
-        C: T.Buffer((N, ), dtype),
-        
+            A: T.Buffer((K,), dtype),
+            B: T.Buffer((N, K), dtype),
+            C: T.Buffer((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N)) as bn:
             tn = T.get_thread_binding(0)  # tn = threadIdx.x
-            A_shared = T.alloc_shared((BLOCK_K, ), dtype)
+            A_shared = T.alloc_shared((BLOCK_K,), dtype)
             B_shared = T.alloc_shared((BLOCK_N, BLOCK_K), dtype)
-            C_reg = T.alloc_local((1, ), accum_dtype)
+            C_reg = T.alloc_local((1,), accum_dtype)
             T.clear(C_reg)
             for bk in T.serial(T.ceildiv(K, BLOCK_K)):
                 for tk in T.serial(BLOCK_K):
                     A_shared[tk] = A[bk * BLOCK_K + tk]
                     B_shared[tn, tk] = B[bn * BLOCK_N + tn, bk * BLOCK_K + tk]
                 for tk in T.serial(BLOCK_K):
-                    C_reg[0] += A_shared[tk].astype(accum_dtype) * B_shared[tn, tk].astype(
-                        accum_dtype)
+                    C_reg[0] += A_shared[tk].astype(accum_dtype) * B_shared[tn,
+                                                                            tk].astype(accum_dtype)
             C[bn * BLOCK_N + tn] = C_reg[0]
+
     return main
 ```
 
@@ -138,6 +139,7 @@ def naive_splitk_gemv(
     dtype: str = "float16",
     accum_dtype: str = "float",
 ):
+
     @T.prim_func
     def main(
             A: T.Buffer((K,), dtype),
@@ -179,35 +181,33 @@ def splitk_gemv(
     dtype: str = "float16",
     accum_dtype: str = "float",
 ):
-    """
-    Naive GEMV following GEMM tiling strategy in SIMD manner.
-    """
+    TILE_K = T.ceildiv(BLOCK_K, reduce_threads)
+
     @T.prim_func
     def main(
-        A: T.Buffer((K, ), dtype),
-        B: T.Buffer((N, K), dtype),
-        C: T.Buffer((N, ), dtype),
-        
+            A: T.Buffer((K,), dtype),
+            B: T.Buffer((N, K), dtype),
+            C: T.Buffer((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, reduce_threads)) as bn:
             tn = T.get_thread_binding(0)
             tk = T.get_thread_binding(1)
-            TILE_K = T.ceildiv(BLOCK_K, reduce_threads)
-            A_shared = T.alloc_shared((BLOCK_K, ), dtype)
-            B_shared = T.alloc_shared((BLOCK_N, BLOCK_K), dtype)
-            C_shared = T.alloc_shared((BLOCK_N, ), accum_dtype)
-            
+            A_local = T.alloc_local((TILE_K,), dtype)
+            B_local = T.alloc_local((TILE_K,), dtype)
+            C_shared = T.alloc_shared((BLOCK_N,), accum_dtype)
+            C_accum = T.alloc_local((1,), accum_dtype)
+            if tk == 0:
+                C_shared[tn] = 0
+            T.clear(C_accum)
             for bk in T.serial(T.ceildiv(K, BLOCK_K)):
                 for k in T.serial(TILE_K):
-                    A_shared[tk * TILE_K + k] = A[bk * BLOCK_K + tk * TILE_K + k]
-                    B_shared[tn, tk * TILE_K + k] = B[bn * BLOCK_N + tn, bk * BLOCK_K + tk * TILE_K + k]
-                C_reg = T.alloc_local((1,), accum_dtype)
-                T.clear(C_reg)
+                    A_local[k] = A[bk * BLOCK_K + tk * TILE_K + k]
+                    B_local[k] = B[bn * BLOCK_N + tn, bk * BLOCK_K + tk * TILE_K + k]
                 for k in T.serial(TILE_K):
-                    C_reg[0] += A_shared[tk * TILE_K + k].astype(accum_dtype) * B_shared[tn, tk * TILE_K + k].astype(
-                        accum_dtype)
-                T.atomic_add(C_shared[tn], C_reg[0])
+                    C_accum[0] += A_local[k].astype(accum_dtype) * B_local[k].astype(accum_dtype)
+            T.atomic_add(C_shared[tn], C_accum[0])
             C[bn * BLOCK_N + tn] = C_shared[tn]
+
     return main
 ```
 
@@ -248,8 +248,7 @@ def splitk_gemv_vectorized(
             for bk in T.serial(T.ceildiv(K, BLOCK_K)):
                 for k in T.vectorized(TILE_K):
                     A_local[k] = A[bk * BLOCK_K + tk * TILE_K + k]
-                    B_local[k] = B[bn * BLOCK_N + tn,
-                                                    bk * BLOCK_K + tk * TILE_K + k]
+                    B_local[k] = B[bn * BLOCK_N + tn, bk * BLOCK_K + tk * TILE_K + k]
                 for k in T.serial(TILE_K):
                     C_accum[0] += A_local[k].astype(accum_dtype) * B_local[k].astype(accum_dtype)
             T.atomic_add(C_shared[tn], C_accum[0])
@@ -267,20 +266,18 @@ With vectorized read, now the kernel finishs in **~0.084 ms**, which is getting 
 
 ```python
 def get_best_config(N, K):
+
     def get_configs():
-        BLOCK_N = [ 2, 4, 8, 32, 64, 128]
+        BLOCK_N = [2, 4, 8, 32, 64, 128]
         reduce_threads = [4, 8, 32]
-        _configs = list(
-            itertools.product(
-                BLOCK_N,
-                reduce_threads,
-            ))
-        configs = [
-            {
-                "BLOCK_N": c[0],
-                "reduce_threads": c[1],
-            } for c in _configs
-        ]
+        _configs = list(itertools.product(
+            BLOCK_N,
+            reduce_threads,
+        ))
+        configs = [{
+            "BLOCK_N": c[0],
+            "reduce_threads": c[1],
+        } for c in _configs]
         return configs
 
     @autotune(
@@ -318,21 +315,20 @@ def get_best_config(N, K):
             with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, reduce_threads)) as bn:
                 tn = T.get_thread_binding(0)
                 tk = T.get_thread_binding(1)
-                A_shared = T.alloc_local((TILE_K,), dtype)
-                B_shared = T.alloc_local((TILE_K,), dtype)
+                A_local = T.alloc_local((TILE_K,), dtype)
+                B_local = T.alloc_local((TILE_K,), dtype)
                 C_shared = T.alloc_shared((BLOCK_N,), accum_dtype)
-                C_reg = T.alloc_local((1,), accum_dtype)
+                C_accum = T.alloc_local((1,), accum_dtype)
                 if tk == 0:
                     C_shared[tn] = 0
-                T.clear(C_reg)
+                T.clear(C_accum)
                 for bk in T.serial(T.ceildiv(K, BLOCK_K)):
                     for k in T.vectorized(TILE_K):
-                        A_shared[k] = A[bk * BLOCK_K + tk * TILE_K + k]
-                        B_shared[k] = B[bn * BLOCK_N + tn,
-                                                        bk * BLOCK_K + tk * TILE_K + k]
+                        A_local[k] = A[bk * BLOCK_K + tk * TILE_K + k]
+                        B_local[k] = B[bn * BLOCK_N + tn, bk * BLOCK_K + tk * TILE_K + k]
                     for k in T.serial(TILE_K):
-                        C_reg[0] += A_shared[k].astype(accum_dtype) * B_shared[k].astype(accum_dtype)
-                T.atomic_add(C_shared[tn], C_reg[0])
+                        C_accum[0] += A_local[k].astype(accum_dtype) * B_local[k].astype(accum_dtype)
+                T.atomic_add(C_shared[tn], C_accum[0])
                 C[bn * BLOCK_N + tn] = C_shared[tn]
 
         return main
