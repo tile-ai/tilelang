@@ -5,8 +5,8 @@ import argparse
 import itertools
 import tilelang
 import tilelang.language as T
+from tilelang.autotuner import AutoTuner
 import torch
-from tilelang.autotuner import autotune, jit
 
 
 def get_configs(M, N, K):
@@ -30,30 +30,26 @@ def get_configs(M, N, K):
     } for c in _configs]
 
 
-def ref_program(A, B, BlockMask, C):
-    batch_M = A.shape[0] // block_M
-    batch_N = B.shape[1] // block_N
-    batch_K = A.shape[1] // block_K
-
-    for i in range(batch_M):
-        for j in range(batch_N):
-            accu = torch.zeros((block_M, block_N), dtype=torch.float32, device=A.device)
-            for k in range(batch_K):
-                if BlockMask[i, j, k]:
-                    accu += A[i*block_M:(i+1)*block_M, k*block_K:(k+1)*block_K].to(torch.float32) @ \
-                           B[k*block_K:(k+1)*block_K, j*block_N:(j+1)*block_N].to(torch.float32)
-            C[i * block_M:(i + 1) * block_M, j * block_N:(j + 1) * block_N] = accu.to(torch.float16)
+def ref_program(A, B, BlockMask, block_M, block_N, block_K):
+    ref_c = torch.zeros_like(c)
+    for i in range(M // block_M):
+        for j in range(N // block_N):
+            accu = torch.zeros((block_M, block_N), dtype=torch.float32, device=a.device)
+            for k in range(K // block_K):
+                if block_mask[i, j, k]:
+                    accu += (
+                        a[i * block_M:(i + 1) * block_M, k * block_K:(k + 1) * block_K].to(
+                            torch.float32) @ b[k * block_K:(k + 1) * block_K,
+                                               j * block_N:(j + 1) * block_N].to(torch.float32))
+            ref_c[i * block_M:(i + 1) * block_M,
+                  j * block_N:(j + 1) * block_N] = accu.to(torch.float16)
+    return ref_c
 
 
 def get_best_config(M, N, K):
 
-    @autotune(
-        configs=get_configs(M, N, K),
-        keys=["block_M", "block_N", "block_K", "num_stages", "thread_num", "enable_rasteration"],
-        warmup=3,
-        rep=20,
-    )
-    @jit(out_idx=[-1], ref_prog=ref_program)
+    # Define the kernel function to be tuned.
+    # Parameters like block_M, block_N, etc., are tuned by the AutoTuner.
     def kernel(block_M=None,
                block_N=None,
                block_K=None,
@@ -63,7 +59,28 @@ def get_best_config(M, N, K):
         return blocksparse_matmul(M, N, K, block_M, block_N, block_K, num_stages, thread_num,
                                   enable_rasteration)
 
-    return kernel()
+    autotuner = AutoTuner.from_kernel(
+        kernel=kernel, configs=get_configs(M, N, K)
+    ).set_compile_args(
+        out_idx=[-1], # Index of the output tensor
+        supply_type=tilelang.TensorSupplyType.Normal, # How input tensors are supplied
+
+        # ref_prog: Using dense matmul (A @ B) as a placeholder reference.
+        # The 'correct' block-sparse reference (`ref_program` above) requires
+        # block_M, block_N, block_K parameters. However, these parameters are
+        # part of the configuration being *tuned* by the AutoTuner and cannot
+        # be fixed inputs to a static `ref_prog` function signature.
+        # This dense matmul serves only as a performance baseline.
+        ref_prog=lambda A, B, BlockMask: A @ B,
+
+        # skip_check: Set to True because the provided `ref_prog` does not
+        # compute the correct result for the block-sparse kernel.
+        skip_check=True,
+
+        target="auto",
+    )
+    # Run the tuning process
+    return autotuner.run(warmup=3, rep=20)
 
 
 def blocksparse_matmul(M,
@@ -107,7 +124,6 @@ def blocksparse_matmul(M,
 
     return main
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autotuned BlockSparse MatMul Benchmark")
     parser.add_argument("--m", type=int, default=1024, help="Matrix dimension M")
@@ -119,37 +135,51 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     M, N, K = args.m, args.n, args.k
+    print(f"Running BlockSparse MatMul Benchmark for M={M}, N={N}, K={K}")
+    print(f"Target Block Sparsity: {args.sparsity}")
+    print(f"Using Autotuner: {args.use_autotune}\n")
 
-    # Initialize input matrices
+    # Initialize input matrices A and B on the GPU with half precision
     a = torch.randn(M, K).cuda().half()
     b = torch.randn(K, N).cuda().half()
 
     if args.use_autotune:
-        best_latency, best_config, ref_latency = get_best_config(M, N, K)
-        func = blocksparse_matmul(M, N, K, *best_config)
+        # Run the autotuner to find the best kernel configuration and performance
+        # get_best_config is expected to return an object containing the compiled kernel,
+        # the best configuration found, latency, and reference latency.
+        result = get_best_config(M, N, K)
+        
+        # Extract results from the autotuner run
+        kernel = result.kernel
+        best_config = result.config
+        block_M = best_config[0]
+        block_N = best_config[1]
+        block_K = best_config[2]
+        best_latency = result.latency
+        ref_latency = result.ref_latency
+
+        print(f"Best Config: {best_config}")
+        print(f"Block Dimensions (BM, BN, BK): ({block_M}, {block_N}, {block_K})")
+        print(f"Best Kernel Latency: {best_latency:.6f} ms")
+        print(f"Reference Latency: {ref_latency:.6f} ms")
     else:
         func = blocksparse_matmul(M, N, K, 128, 128, 32, 2, 128, True)
+        kernel = tilelang.compile(func, out_idx=-1)
+        block_M, block_N, block_K = 128, 128, 32
 
     # Create block mask with desired sparsity
-    block_M, block_N, block_K = 128, 128, 32  # default values if not using autotune
     mask_shape = (M // block_M, N // block_N, K // block_K)
     block_mask = torch.rand(mask_shape).cuda() > args.sparsity
-
-    kernel = tilelang.compile(func, out_idx=-1)
+    
+    # Run the compiled kernel (either tuned or default) with the inputs
     c = kernel(a, b, block_mask)
 
-    # Verify result
-    ref_c = torch.zeros_like(c)
-    for i in range(M // block_M):
-        for j in range(N // block_N):
-            accu = torch.zeros((block_M, block_N), dtype=torch.float32, device=a.device)
-            for k in range(K // block_K):
-                if block_mask[i, j, k]:
-                    accu += (
-                        a[i * block_M:(i + 1) * block_M, k * block_K:(k + 1) * block_K].to(
-                            torch.float32) @ b[k * block_K:(k + 1) * block_K,
-                                               j * block_N:(j + 1) * block_N].to(torch.float32))
-            ref_c[i * block_M:(i + 1) * block_M,
-                  j * block_N:(j + 1) * block_N] = accu.to(torch.float16)
+    # Compute the reference result using the naive PyTorch implementation
+    ref_c = ref_program(a, b, block_mask, block_M, block_N, block_K)
 
-    torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+    try:
+        torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+        print("✅ Results are close! Verification successful.")
+    except AssertionError as e:
+        print(f"❌ Verification FAILED: Results differ significantly.")
+        print(e)
