@@ -62,18 +62,18 @@ public:
   Stmt VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kParallel) {
 
-      // 收集循环变量和范围
+      // Collect loop variables and ranges
       auto for_node = GetRef<For>(op);
       Array<Var> loop_vars;
       Array<PrimExpr> loop_extents;
       Stmt body = op->body;
 
-      // 绑定外层循环变量的范围
+      // Bind the range of outer loop variables
       analyzer_->Bind(op->loop_var, Range::FromMinExtent(0, op->extent));
       loop_vars.push_back(op->loop_var);
       loop_extents.push_back(op->extent);
 
-      // 如果有内层循环，也绑定其范围
+      // If there are inner loops, bind their ranges as well
       while (const ForNode *inner = body.as<ForNode>()) {
         analyzer_->Bind(inner->loop_var,
                         Range::FromMinExtent(0, inner->extent));
@@ -82,12 +82,12 @@ public:
         body = inner->body;
       }
 
-      // 收集 buffer 访问信息
+      // Collect buffer access information
       BufferAccessCollector collector;
       collector(op->body);
 
       PrimExpr condition;
-      // 现在分析indices的范围会更准确
+
       for (const auto &[buffer, indices] : collector.buffer_indices) {
         ICHECK(indices.size() == buffer->shape.size())
             << "indices size mismatch with buffer shape";
@@ -98,7 +98,6 @@ public:
           auto bound = analyzer_->const_int_bound(index);
           int64_t upper_bound = bound->max_value + 1;
           int64_t shape = Downcast<IntImm>(buffer->shape[i])->value;
-
           if (upper_bound < shape) {
             PrimExpr predicate =
                 LT(indices[i], IntImm(indices[i].dtype(), upper_bound));
@@ -135,7 +134,8 @@ public:
   }
 
 private:
-  // 用于收集 buffer 访问信息的辅助类，只统计fragment buffer的访问
+  // Helper class for collecting buffer access information, only counts fragment
+  // buffer access
   class BufferAccessCollector : public StmtExprVisitor {
   public:
     void VisitExpr_(const BufferLoadNode *op) final {
@@ -152,8 +152,14 @@ private:
     }
 
     void VisitStmt_(const BufferStoreNode *op) final {
-      if (buffer_indices.find(op->buffer) == buffer_indices.end()) {
-        buffer_indices[op->buffer] = op->indices;
+      if (op->buffer.scope() == "local.fragment") {
+        if (buffer_indices.find(op->buffer) == buffer_indices.end()) {
+          buffer_indices[op->buffer] = op->indices;
+        } else {
+          // check equal
+          ICHECK(StructuralEqual()(buffer_indices[op->buffer], op->indices))
+              << "indices mismatch for buffer: " << op->buffer;
+        }
       }
       StmtExprVisitor::VisitStmt_(op);
     }
