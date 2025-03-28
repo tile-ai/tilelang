@@ -212,7 +212,6 @@ def splitk_gemv_vectorized_tvm(
     return main
 
 
-
 def get_best_config(N, K):
 
     def get_configs():
@@ -273,7 +272,8 @@ def get_best_config(N, K):
                         A_local[k] = A[bk * BLOCK_K + tk * TILE_K + k]
                         B_local[k] = B[bn * BLOCK_N + tn, bk * BLOCK_K + tk * TILE_K + k]
                     for k in T.serial(TILE_K):
-                        C_accum[0] += A_local[k].astype(accum_dtype) * B_local[k].astype(accum_dtype)
+                        C_accum[0] += A_local[k].astype(accum_dtype) * B_local[k].astype(
+                            accum_dtype)
                 C_reduced = T.alloc_local((1,), accum_dtype)
                 with T.attr(
                         T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
