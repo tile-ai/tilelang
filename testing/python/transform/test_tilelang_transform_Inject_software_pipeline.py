@@ -19,7 +19,7 @@ def _check(original, transformed):
 def test_trival_pipeline():
 
     @T.prim_func
-    def before(A: T.Buffer((16, 1), "float32"), C: T.Buffer((16, 1), "float32")):
+    def before(A: T.Tensor((16, 1), "float32"), C: T.Tensor((16, 1), "float32")):
         for tx in T.thread_binding(0, 16, thread="threadIdx.x"):
             for i in T.serial(
                     0,
@@ -42,7 +42,7 @@ def test_trival_pipeline():
                         C[tx, i] = B[tx, 0] + T.float32(1)
 
     @T.prim_func
-    def expected(A: T.Buffer((16, 1), "float32"), C: T.Buffer((16, 1), "float32")) -> None:
+    def expected(A: T.Tensor((16, 1), "float32"), C: T.Tensor((16, 1), "float32")) -> None:
         for tx in T.thread_binding(16, thread="threadIdx.x"):
             with T.block():
                 T.reads(A[tx, 0])

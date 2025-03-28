@@ -40,9 +40,9 @@ def matmul(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, storage_dtype),
-            C: T.Buffer((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, storage_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -238,9 +238,9 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, storage_dtype),
-            C: T.Buffer((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, storage_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(
                 T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads,

@@ -69,10 +69,11 @@ class LibraryGenerator(object):
                 src.name,
             ]
         elif is_cpu_target(target):
+            from tilelang.contrib.cc import get_cplus_compiler
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)
             libpath = src.name.replace(".cpp", ".so")
 
-            command = ["g++", "-std=c++17", "-fPIC", "-shared", src.name]
+            command = [get_cplus_compiler(), "-std=c++17", "-fPIC", "-shared", src.name]
             with_tl = False
             command += [
                 "-I" + TILELANG_TEMPLATE_PATH,

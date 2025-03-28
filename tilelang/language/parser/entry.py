@@ -127,12 +127,12 @@ def macro(*args, hygienic: bool = True) -> Callable:
 
 
         @T.prim_func
-        def use1(A: T.Buffer((1024,), "int32"), B: T.Buffer((), "int32")) -> None:
+        def use1(A: T.Tensor((1024,), "int32"), B: T.Tensor((), "int32")) -> None:
             for x_value in T.serial(10):
                 static_capture(A, B)    ### Produces B[()] = A[128]
 
         @T.prim_func
-        def use2(A: T.Buffer((1024,), "int32"), B: T.Buffer((), "int32")) -> None:
+        def use2(A: T.Tensor((1024,), "int32"), B: T.Tensor((), "int32")) -> None:
             for x_value in T.serial(10):
                 dynamic_capture(A, B)   ### Produces B[()] = A[x_value]
         ```
@@ -182,7 +182,7 @@ class BufferProxy:
             axis_separators=axis_separators,
         )
 
-    @deprecated("T.Buffer[...]", "T.Buffer(...)")
+    @deprecated("T.Tensor[...]", "T.Tensor(...)")
     def __getitem__(self, keys) -> Buffer:
         if not isinstance(keys, tuple):
             return self(keys)

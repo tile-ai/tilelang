@@ -42,11 +42,11 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
 
         @T.macro
         def flash_attn(
-                Q: T.Buffer(shape_q, dtype),
-                K: T.Buffer(shape_k, dtype),
-                V: T.Buffer(shape_v, dtype),
-                mask: T.Buffer([batch, seqlen_kv, groups], "uint8"),
-                Output: T.Buffer([batch, heads, dim], dtype),
+                Q: T.Tensor(shape_q, dtype),
+                K: T.Tensor(shape_k, dtype),
+                V: T.Tensor(shape_v, dtype),
+                mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
+                Output: T.Tensor([batch, heads, dim], dtype),
         ):
             with T.Kernel(
                     batch, heads // valid_block_H, num_split, threads=threads) as (bx, by, bz):
@@ -111,12 +111,12 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
 
         @T.macro
         def flash_attn_split(
-                Q: T.Buffer(shape_q, dtype),
-                K: T.Buffer(shape_k, dtype),
-                V: T.Buffer(shape_v, dtype),
-                mask: T.Buffer([batch, seqlen_kv, groups], "uint8"),
-                glse: T.Buffer([batch, heads, num_split], dtype),
-                Output_partial: T.Buffer(part_shape, dtype),
+                Q: T.Tensor(shape_q, dtype),
+                K: T.Tensor(shape_k, dtype),
+                V: T.Tensor(shape_v, dtype),
+                mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
+                glse: T.Tensor([batch, heads, num_split], dtype),
+                Output_partial: T.Tensor(part_shape, dtype),
         ):
             with T.Kernel(
                     batch, heads // valid_block_H, num_split, threads=threads) as (bx, by, bz):
@@ -195,9 +195,9 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
 
         @T.macro
         def combine(
-                glse: T.Buffer([batch, heads, num_split], dtype),
-                Output_partial: T.Buffer(part_shape, dtype),
-                Output: T.Buffer(shape_o, dtype),
+                glse: T.Tensor([batch, heads, num_split], dtype),
+                Output_partial: T.Tensor(part_shape, dtype),
+                Output: T.Tensor(shape_o, dtype),
         ):
             with T.Kernel(heads, batch, threads=128) as (by, bz):
                 po_local = T.alloc_fragment([dim], dtype)
@@ -238,26 +238,26 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
 
         @T.prim_func
         def main_split(
-                Q: T.Buffer(shape_q, dtype),
-                K: T.Buffer(shape_k, dtype),
-                V: T.Buffer(shape_v, dtype),
-                mask: T.Buffer([batch, seqlen_kv, groups], "uint8"),
-                glse: T.Buffer([batch, heads, num_split], dtype),
-                Output_partial: T.Buffer(part_shape, dtype),
-                Output: T.Buffer(shape_o, dtype),
+                Q: T.Tensor(shape_q, dtype),
+                K: T.Tensor(shape_k, dtype),
+                V: T.Tensor(shape_v, dtype),
+                mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
+                glse: T.Tensor([batch, heads, num_split], dtype),
+                Output_partial: T.Tensor(part_shape, dtype),
+                Output: T.Tensor(shape_o, dtype),
         ):
             flash_attn_split(Q, K, V, mask, glse, Output_partial)
             combine(glse, Output_partial, Output)
 
         @T.prim_func
         def main_no_split(
-                Q: T.Buffer(shape_q, dtype),
-                K: T.Buffer(shape_k, dtype),
-                V: T.Buffer(shape_v, dtype),
-                mask: T.Buffer([batch, seqlen_kv, groups], "uint8"),
-                glse: T.Buffer([batch, heads, num_split], dtype),
-                Output_partial: T.Buffer(part_shape, dtype),
-                Output: T.Buffer(shape_o, dtype),
+                Q: T.Tensor(shape_q, dtype),
+                K: T.Tensor(shape_k, dtype),
+                V: T.Tensor(shape_v, dtype),
+                mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
+                glse: T.Tensor([batch, heads, num_split], dtype),
+                Output_partial: T.Tensor(part_shape, dtype),
+                Output: T.Tensor(shape_o, dtype),
         ):
             flash_attn(Q, K, V, mask, Output)
 

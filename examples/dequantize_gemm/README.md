@@ -6,9 +6,9 @@ An example of implementing a dequantization GEMM:
 ```python
 @T.prim_func
 def dequant_matmul(
-    A: T.Buffer(A_shape, in_dtype),
-    B: T.Buffer(B_shape, storage_dtype),
-    Ct: T.Buffer((N, M), out_dtype),
+    A: T.Tensor(A_shape, in_dtype),
+    B: T.Tensor(B_shape, storage_dtype),
+    Ct: T.Tensor((N, M), out_dtype),
 ):
     with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
         A_shared = T.alloc_shared(A_shared_shape, in_dtype)

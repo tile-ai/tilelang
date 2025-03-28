@@ -18,6 +18,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v2
         with:
+          ref: refs/pull/${{ github.event.issue.number }}/merge
           fetch-depth: 0
 
       - name: Set up Python

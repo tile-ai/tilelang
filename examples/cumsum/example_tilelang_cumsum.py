@@ -76,9 +76,9 @@ def gpu_2d_continuous_cumsum(
     def block_inclusive_inside_block(
         batch: T.int32,
         cur_len: T.int32,
-        source: T.Buffer,
-        output: T.Buffer,
-        tmp_buf: T.Buffer,
+        source: T.Tensor,
+        output: T.Tensor,
+        tmp_buf: T.Tensor,
         src_offset: T.int32,
         tmp_offset: T.int32,
     ):
@@ -128,8 +128,8 @@ def gpu_2d_continuous_cumsum(
     def update_cross_block(
         batch: T.int32,
         cur_len: T.int32,
-        source: T.Buffer,
-        output: T.Buffer,
+        source: T.Tensor,
+        output: T.Tensor,
         src_offset: T.int32,
         out_offset: T.int32,
     ):
@@ -144,8 +144,8 @@ def gpu_2d_continuous_cumsum(
                                                                source[by, src_offset + bx - 1], 0)
 
     @T.prim_func
-    def cumsum(A: T.Buffer((M, N), dtype="int32"), Out: T.Buffer((M, N), dtype="int32"),
-               Tmp: T.Buffer((M, N), dtype="int32")):
+    def cumsum(A: T.Tensor((M, N), dtype="int32"), Out: T.Tensor((M, N), dtype="int32"),
+               Tmp: T.Tensor((M, N), dtype="int32")):
         ceil_log2 = T.Cast("int32", T.ceil(T.log2(T.Cast("float32", N))))
         total_rounds = ceil_log2 // LOG_BLOCK_N
 

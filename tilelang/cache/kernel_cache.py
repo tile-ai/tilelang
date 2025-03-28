@@ -54,10 +54,14 @@ class KernelCache:
         """
         Generates a unique cache key.
         """
+<<<<<<< HEAD
         # Get the source code of the function
         func_source = str(
             func.body if isinstance(func, PrimFunc) else inspect.getsource(func)).encode()
 
+=======
+        func_binary = cloudpickle.dumps(func.script())
+>>>>>>> upstream/main
         key_data = {
             "func": sha256(func_source
                           ).hexdigest(),  # Use SHA256 to generate hash key from function source

@@ -478,11 +478,11 @@ def tilelang_sparse_attention(batch,
 
     @T.prim_func
     def tilelang_sparse_attention(
-            Q: T.Buffer(q_shape, dtype),
-            K: T.Buffer(kv_shape, dtype),
-            V: T.Buffer(kv_shape, dtype),
-            BlockIndices: T.Buffer(block_indices_shape, block_indices_dtype),
-            Output: T.Buffer(q_shape, dtype),
+            Q: T.Tensor(q_shape, dtype),
+            K: T.Tensor(kv_shape, dtype),
+            V: T.Tensor(kv_shape, dtype),
+            BlockIndices: T.Tensor(block_indices_shape, block_indices_dtype),
+            Output: T.Tensor(q_shape, dtype),
     ):
         with T.Kernel(seq_len, NV, batch * head_kv, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([G, BK], dtype)

@@ -17,4 +17,6 @@ help:
 # Catch-all target: route all unknown targets to Sphinx using the new
 # "make mode" option.  $(O) is meant as a shortcut for $(SPHINXOPTS).
 %: Makefile
+	rm -rf api/
+	sphinx-apidoc --separate -H "Python API" -o ./api/ ../tilelang "../tilelang/language/ast*" "../tilelang/language/parser*" "../tilelang/libinfo*" "../tilelang/version*"
 	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)

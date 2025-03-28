@@ -95,9 +95,9 @@ def tl_matmul(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, in_dtype),
-            C: T.Buffer((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
 
@@ -283,9 +283,9 @@ def tl_matmul_weight_only_transform(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, in_dtype),
-            B: T.Buffer(B_shape, in_dtype),
-            C: T.Buffer((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
 

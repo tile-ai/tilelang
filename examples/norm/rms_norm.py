@@ -10,7 +10,7 @@ def rms_norm_splitk(M, N, blk_m, blk_k):
     dtype = "float"
 
     @T.prim_func
-    def main(A: T.Buffer((M, N), dtype), B: T.Buffer((M, N), dtype)):
+    def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype)):
         with T.Kernel(T.ceildiv(M, blk_m), threads=128) as bx:
             A_shared = T.alloc_shared((blk_m, blk_k), dtype)
             A_local = T.alloc_fragment((blk_m, blk_k), dtype)
@@ -40,7 +40,7 @@ def rms_norm(M, N, blk_m):
     dtype = "float"
 
     @T.prim_func
-    def main(A: T.Buffer((M, N), dtype), B: T.Buffer((M, N), dtype)):
+    def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M, N), dtype)):
         with T.Kernel(T.ceildiv(M, blk_m), threads=128) as bx:
             A_shared = T.alloc_shared((blk_m, N), dtype)
             A_local = T.alloc_fragment((blk_m, N), dtype)

@@ -21,7 +21,7 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
     class Before:
 
         @T.prim_func
-        def main(B: T.Buffer((K, N), dtype),):
+        def main(B: T.Tensor((K, N), dtype),):
             with T.Kernel(T.ceildiv(N, block_N), threads=threads) as (bx):
                 B_shared = T.alloc_shared((block_K, block_N), dtype)
                 thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
@@ -44,7 +44,7 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
     class After:
 
         @T.prim_func
-        def main(B: T.Buffer((K, N), dtype),):
+        def main(B: T.Tensor((K, N), dtype),):
             with T.Kernel(T.ceildiv(N, block_N), threads=threads) as (bx):
                 B_shared = T.alloc_shared((block_K, block_N), dtype)
                 thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
@@ -92,4 +92,5 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_loop_tail_split(64, 64, 32, 128, 8, "float16")

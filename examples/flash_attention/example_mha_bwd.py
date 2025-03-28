@@ -17,11 +17,11 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
 
     @T.prim_func
     def flash_fwd(
-            Q: T.Buffer(shape, dtype),  # type: ignore
-            K: T.Buffer(shape, dtype),  # type: ignore
-            V: T.Buffer(shape, dtype),  # type: ignore
-            Output: T.Buffer(shape, dtype),  # type: ignore
-            lse: T.Buffer([batch, heads, seq_len], accum_dtype),  # type: ignore
+            Q: T.Tensor(shape, dtype),  # type: ignore
+            K: T.Tensor(shape, dtype),  # type: ignore
+            V: T.Tensor(shape, dtype),  # type: ignore
+            Output: T.Tensor(shape, dtype),  # type: ignore
+            lse: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=128) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
@@ -89,9 +89,9 @@ def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
 
     @T.prim_func
     def flash_bwd_prep(
-            O: T.Buffer(shape, dtype),  # type: ignore
-            dO: T.Buffer(shape, dtype),  # type: ignore
-            Delta: T.Buffer([batch, heads, seq_len], accum_dtype),  # type: ignore
+            O: T.Tensor(shape, dtype),  # type: ignore
+            dO: T.Tensor(shape, dtype),  # type: ignore
+            Delta: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
     ):
         with T.Kernel(heads, T.ceildiv(seq_len, blk), batch) as (bx, by, bz):
             o = T.alloc_fragment([blk, blk], dtype)
@@ -124,8 +124,8 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
 
     @T.prim_func
     def flash_bwd_post(
-            dQ: T.Buffer(shape, accum_dtype),  # type: ignore
-            dQ_out: T.Buffer(shape, dtype),  # type: ignore
+            dQ: T.Tensor(shape, accum_dtype),  # type: ignore
+            dQ_out: T.Tensor(shape, dtype),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(seq_len, blk), heads, batch, threads=128) as (bx, by, bz):
             T.annotate_layout({dQ: make_dq_layout(dQ)})
@@ -146,15 +146,15 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
 
     @T.prim_func
     def flash_bwd(
-            Q: T.Buffer(shape, dtype),  # type: ignore
-            K: T.Buffer(shape, dtype),  # type: ignore
-            V: T.Buffer(shape, dtype),  # type: ignore
-            dO: T.Buffer(shape, dtype),  # type: ignore
-            lse: T.Buffer([batch, heads, seq_len], accum_dtype),  # type: ignore
-            Delta: T.Buffer([batch, heads, seq_len], accum_dtype),  # type: ignore
-            dQ: T.Buffer(shape, accum_dtype),  # type: ignore
-            dK: T.Buffer(shape, dtype),  # type: ignore
-            dV: T.Buffer(shape, dtype),  # type: ignore
+            Q: T.Tensor(shape, dtype),  # type: ignore
+            K: T.Tensor(shape, dtype),  # type: ignore
+            V: T.Tensor(shape, dtype),  # type: ignore
+            dO: T.Tensor(shape, dtype),  # type: ignore
+            lse: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
+            Delta: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
+            dQ: T.Tensor(shape, accum_dtype),  # type: ignore
+            dK: T.Tensor(shape, dtype),  # type: ignore
+            dV: T.Tensor(shape, dtype),  # type: ignore
     ):
         with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=256) as (bx, by, bz):
             K_shared = T.alloc_shared([block_M, dim], dtype)

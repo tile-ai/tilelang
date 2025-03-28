@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 """The language interface for tl programs."""
 
-from tvm.script import tir as T
+import tilelang.language as T
 from tvm.tir import PrimExpr, Buffer
 from typing import List, Union
 

@@ -23,7 +23,7 @@ def _check(original, transformed):
 def test_simple_pipeline():
 
     @T.prim_func
-    def before(A: T.Buffer((1024, 32), "float32"), B: T.Buffer((32, 1024), "float32"), C: T.Buffer(
+    def before(A: T.Tensor((1024, 32), "float32"), B: T.Tensor((32, 1024), "float32"), C: T.Tensor(
         (1024, 1024), "float32")):
         with T.Kernel(8, 8, threads=128) as (bx, by):
             A_shared = T.alloc_shared((128, 32), "float32")
@@ -41,7 +41,7 @@ def test_simple_pipeline():
             T.copy(C_local, C[by * 128, bx * 128])
 
     @T.prim_func
-    def after(A: T.Buffer((1024, 32), "float32"), B: T.Buffer((32, 1024), "float32"), C: T.Buffer(
+    def after(A: T.Tensor((1024, 32), "float32"), B: T.Tensor((32, 1024), "float32"), C: T.Tensor(
         (1024, 1024), "float32")):
         with T.Kernel(8, 8, threads=128) as (bx, by):
             A_shared = T.alloc_shared((128, 32), "float32")

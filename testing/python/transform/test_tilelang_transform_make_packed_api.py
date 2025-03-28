@@ -189,7 +189,7 @@ def test_target_host_removed():
     class before:
 
         @T.prim_func
-        def main(A: T.Buffer(1, "float32")):
+        def main(A: T.Tensor(1, "float32")):
             T.func_attr({"global_symbol": "main", "target": T.target("cuda", host=host)})
             T.evaluate(0)
 
@@ -211,7 +211,7 @@ def test_internal_subroutine_call():
     class before:
 
         @T.prim_func
-        def main(A: T.Buffer(1, "float32")):
+        def main(A: T.Tensor(1, "float32")):
             T.func_attr({"target": T.target("llvm", host="llvm")})
             before.subroutine(A.data)
 
@@ -244,7 +244,7 @@ def test_subroutine_call_to_externally_visible_subroutine():
     class before:
 
         @T.prim_func
-        def main(A: T.Buffer(1, "float32")):
+        def main(A: T.Tensor(1, "float32")):
             T.func_attr({"global_symbol": "main", "target": T.target("llvm", host="llvm")})
             before.subroutine(A.data)
 
@@ -274,10 +274,10 @@ def test_function_call_with_wrong_argument_count():
 
     @T.prim_func
     def func(
-            A: T.Buffer([16, 16], "int32"),
-            B: T.Buffer([16, 16], "int32"),
-            C: T.Buffer([16, 16], "int32"),
-            D: T.Buffer([16, 16], "int32"),
+            A: T.Tensor([16, 16], "int32"),
+            B: T.Tensor([16, 16], "int32"),
+            C: T.Tensor([16, 16], "int32"),
+            D: T.Tensor([16, 16], "int32"),
     ):
         pass
 
@@ -292,7 +292,7 @@ def test_function_call_with_wrong_type_code():
     """Type codes must be checked before accessing the arguments"""
 
     @T.prim_func
-    def func(A: T.Buffer([16, 16], "int32")):
+    def func(A: T.Tensor([16, 16], "int32")):
         pass
 
     built = tvm.build(func, target="llvm")
@@ -306,7 +306,7 @@ def test_function_call_with_null_data_pointer():
     """The data pointer must be checked before accessing the array"""
 
     @T.prim_func
-    def func(A: T.Buffer([16, 16], "int32"), B: T.Buffer([16, 16], "int32")):
+    def func(A: T.Tensor([16, 16], "int32"), B: T.Tensor([16, 16], "int32")):
         for i, j in T.grid(16, 16):
             B[i, j] = A[i, j]
 
@@ -326,7 +326,7 @@ def test_function_call_with_wrong_dimensionality():
     """The dimensionality must be checked before validating the shape"""
 
     @T.prim_func
-    def func(A: T.Buffer([16, 16], "int32"), B: T.Buffer([16, 16], "int32")):
+    def func(A: T.Tensor([16, 16], "int32"), B: T.Tensor([16, 16], "int32")):
         for i, j in T.grid(16, 16):
             B[i, j] = A[i, j]
 

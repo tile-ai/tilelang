@@ -237,13 +237,13 @@ def flashattn(batch_size, UQ, UKV, heads, dim, is_causal):
 
         @T.prim_func
         def main(
-                Q_unpad: T.Buffer(q_shape, dtype),
-                K_unpad: T.Buffer(k_shape, dtype),
-                V_unpad: T.Buffer(v_shape, dtype),
-                cu_seqlens_q: T.Buffer([batch_size + 1], "int32"),
-                cu_seqlens_k: T.Buffer([batch_size + 1], "int32"),
+                Q_unpad: T.Tensor(q_shape, dtype),
+                K_unpad: T.Tensor(k_shape, dtype),
+                V_unpad: T.Tensor(v_shape, dtype),
+                cu_seqlens_q: T.Tensor([batch_size + 1], "int32"),
+                cu_seqlens_k: T.Tensor([batch_size + 1], "int32"),
                 max_seqlen_q: T.int32,
-                Output_unpad: T.Buffer(o_shape, dtype),
+                Output_unpad: T.Tensor(o_shape, dtype),
         ):
             with T.Kernel(
                     T.ceildiv(max_seqlen_q, block_M), heads, batch_size,

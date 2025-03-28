@@ -25,7 +25,7 @@ def _check(original, transformed):
 def test_cluster_planning():
 
     @T.prim_func
-    def before(A: T.Buffer((1024, 32), "float16"), B: T.Buffer((32, 1024), "float16"), C: T.Buffer(
+    def before(A: T.Tensor((1024, 32), "float16"), B: T.Tensor((32, 1024), "float16"), C: T.Tensor(
         (1024, 1024), "float16")):
         with T.Kernel(8, 8, threads=128) as (bx, by):
             A_shared = T.alloc_shared((128, 32), "float16")
@@ -43,7 +43,7 @@ def test_cluster_planning():
             T.copy(C_local, C[by * 128, bx * 128])
 
     @T.prim_func
-    def after(A: T.Buffer((1024, 32), "float16"), B: T.Buffer((32, 1024), "float16"), C: T.Buffer(
+    def after(A: T.Tensor((1024, 32), "float16"), B: T.Tensor((32, 1024), "float16"), C: T.Tensor(
         (1024, 1024), "float16")):
         T.func_attr({"clusterIdx.y": 2})
         with T.Kernel(8, 8, threads=128) as (bx, by):

@@ -1,3 +1,6 @@
+# Copyright (c) Tile-AI Corporation.
+# Licensed under the MIT License.
+
 import sys
 import os
 import pathlib
@@ -59,7 +62,7 @@ SKIP_LOADING_TILELANG_SO = os.environ.get("SKIP_LOADING_TILELANG_SO", "0")
 TVM_IMPORT_PYTHON_PATH = os.environ.get("TVM_IMPORT_PYTHON_PATH", None)
 
 if TVM_IMPORT_PYTHON_PATH is not None:
-    os.environ["PYTHONPATH"] = (TVM_IMPORT_PYTHON_PATH + ":" + os.environ.get("PYTHONPATH", ""))
+    os.environ["PYTHONPATH"] = TVM_IMPORT_PYTHON_PATH + ":" + os.environ.get("PYTHONPATH", "")
     sys.path.insert(0, TVM_IMPORT_PYTHON_PATH)
 else:
     install_tvm_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "3rdparty", "tvm")
@@ -122,26 +125,32 @@ if os.environ.get("TL_TEMPLATE_PATH", None) is None:
     else:
         logger.warning(TL_TEMPLATE_NOT_FOUND_MESSAGE)
 
+
 # Cache control
-_ENABLE_TILELANG_KERNEL_CACHE = True  # Default cache state
+class CacheState:
+    """Class to manage global kernel caching state."""
+    _enabled = True
+
+    @classmethod
+    def enable(cls):
+        """Enable kernel caching globally."""
+        cls._enabled = True
+
+    @classmethod
+    def disable(cls):
+        """Disable kernel caching globally."""
+        cls._enabled = False
+
+    @classmethod
+    def is_enabled(cls) -> bool:
+        """Return current cache state."""
+        return cls._enabled
 
 
-def enable_cache():
-    """Enable kernel caching globally."""
-    global _ENABLE_TILELANG_KERNEL_CACHE
-    _ENABLE_TILELANG_KERNEL_CACHE = True
-
-
-def disable_cache():
-    """Disable kernel caching globally."""
-    global _ENABLE_TILELANG_KERNEL_CACHE
-    _ENABLE_TILELANG_KERNEL_CACHE = False
-
-
-def is_cache_enabled() -> bool:
-    """Return current cache state."""
-    return _ENABLE_TILELANG_KERNEL_CACHE
-
+# Replace the old functions with class methods
+enable_cache = CacheState.enable
+disable_cache = CacheState.disable
+is_cache_enabled = CacheState.is_enabled
 
 __all__ = [
     "CUTLASS_INCLUDE_DIR",

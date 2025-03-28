@@ -14,7 +14,7 @@ Tile Language (**tile-lang**) is a concise domain-specific language designed to 
 - 03/03/2025 🚀: Added high-performance MLA Decoding support using only 80 lines of Python code, achieving performance on par with FlashMLA on H100 (see [example_mla_decode.py](./examples/deepseek_mla/example_mla_decode.py))! We also provide [documentation](./examples/deepseek_mla/README.md) explaining how TileLang achieves this.
 - 02/15/2025 ✨: Added WebGPU Codegen support, see [Pull Request #86](https://github.com/tile-ai/tilelang/pull/86)!
 - 02/12/2025 ✨: Excited to announce the release of [v0.1.0](https://github.com/tile-ai/tilelang/releases/tag/v0.1.0)!
-- 02/10/2025 🚀: Added debug tools for TileLang—`T.print` for printing variables/buffers ([docs](https://tilelang.tile-ai.cn/tutorials/debug_tools_for_tilelang.html)) and a memory layout plotter ([examples/plot_layout](./examples/plot_layout)).
+- 02/10/2025 🚀: Added debug tools for TileLang—`T.print` for printing variables/buffers ([docs](https://tilelang.com/tutorials/debug_tools_for_tilelang.html)) and a memory layout plotter ([examples/plot_layout](./examples/plot_layout)).
 - 01/20/2025 ✨: We are excited to announce that tile-lang, a dsl for high performance AI workloads, is now open source and available to the public!
 
 ## Tested Devices
@@ -129,9 +129,9 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
     # add decorator @tilelang.jit if you want to return a torch function
     @T.prim_func
     def main(
-        A: T.Buffer((M, K), dtype),
-        B: T.Buffer((K, N), dtype),
-        C: T.Buffer((M, N), dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
     ):
         # Initialize Kernel Context
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
@@ -226,18 +226,6 @@ Check our [tilelang v0.2.0 release plan](https://github.com/tile-ai/tilelang/iss
 ---
 
 TileLang has now been used in project [BitBLAS](https://github.com/microsoft/BitBLAS) and [AttentionEngine](https://github.com/microsoft/AttentionEngine).
-
-## Citation
-If you find this repository helpful, please cite our work:
-```bib
-@software{tileai2025tilelang,
-  title  = {TileLang: A Composable Tiled Programming Model for AI Systems},
-  author = {Wang, Lei and Cheng, Yu and Shi, Yining and Tang, Zhengju and Mo, Zhiwen and Ma, Lingxiao and Xia, Yuqing and Xue, Jilong and Yang, Fan and Yang, Zhi},
-  url    = {https://github.com/tile-ai/tilelang},
-  month  = jan,
-  year   = {2025}
-}
-```
 
 ## Join the Discussion
 

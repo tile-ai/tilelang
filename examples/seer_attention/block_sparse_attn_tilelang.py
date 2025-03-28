@@ -49,13 +49,13 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
 
         @T.macro
         def Softmax(
-                acc_s: T.Buffer([block_M, block_N], accum_dtype),
-                acc_s_cast: T.Buffer([block_M, block_N], dtype),
-                scores_max: T.Buffer([block_M], accum_dtype),
-                scores_max_prev: T.Buffer([block_M], accum_dtype),
-                scores_scale: T.Buffer([block_M], accum_dtype),
-                scores_sum: T.Buffer([block_M], accum_dtype),
-                logsum: T.Buffer([block_M], accum_dtype),
+                acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
+                acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
+                scores_max: T.FragmentBuffer([block_M], accum_dtype),
+                scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
+                scores_scale: T.FragmentBuffer([block_M], accum_dtype),
+                scores_sum: T.FragmentBuffer([block_M], accum_dtype),
+                logsum: T.FragmentBuffer([block_M], accum_dtype),
         ):
             T.copy(scores_max, scores_max_prev)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -79,19 +79,19 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
 
         @T.macro
         def Rescale(
-                acc_o: T.Buffer([block_M, dim], accum_dtype),
-                scores_scale: T.Buffer([block_M], accum_dtype),
+                acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
+                scores_scale: T.FragmentBuffer([block_M], accum_dtype),
         ):
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] *= scores_scale[i]
 
         @T.prim_func
         def main(
-                Q: T.Buffer(q_shape, dtype),
-                K: T.Buffer(kv_shape, dtype),
-                V: T.Buffer(kv_shape, dtype),
-                BlockSparseMask: T.Buffer(block_mask_shape, block_mask_dtype),
-                Output: T.Buffer(q_shape, dtype),
+                Q: T.Tensor(q_shape, dtype),
+                K: T.Tensor(kv_shape, dtype),
+                V: T.Tensor(kv_shape, dtype),
+                BlockSparseMask: T.Tensor(block_mask_shape, block_mask_dtype),
+                Output: T.Tensor(q_shape, dtype),
         ):
             with T.Kernel(T.ceildiv(seq_q, block_M), heads, batch, threads=threads) as (bx, by, bz):
                 Q_shared = T.alloc_shared([block_M, dim], dtype)

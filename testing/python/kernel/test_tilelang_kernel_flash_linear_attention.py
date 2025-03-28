@@ -16,13 +16,13 @@ def chunk_scan_fwd(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate, 
     p = 1.44269504
 
     @T.prim_func
-    def main(cb: T.Buffer((batch, nchunks, ngroups, chunk_size, chunk_size), dtype), x: T.Buffer(
-        (batch, seqlen, nheads, headdim), dtype), dt: T.Buffer(
-            (batch, nheads, nchunks, chunk_size), dtype), dA_cumsum: T.Buffer(
+    def main(cb: T.Tensor((batch, nchunks, ngroups, chunk_size, chunk_size), dtype), x: T.Tensor(
+        (batch, seqlen, nheads, headdim), dtype), dt: T.Tensor(
+            (batch, nheads, nchunks, chunk_size), dtype), dA_cumsum: T.Tensor(
                 (batch, nheads, nchunks, chunk_size), dtype),
-             C: T.Buffer((batch, seqlen, ngroups, dstate), dtype), prev_states: T.Buffer(
-                 (batch, nchunks, nheads, headdim, dstate), dtype), D: T.Buffer(
-                     (nheads), dtype), Output: T.Buffer((batch, seqlen, nheads, headdim), dtype)):
+             C: T.Tensor((batch, seqlen, ngroups, dstate), dtype), prev_states: T.Tensor(
+                 (batch, nchunks, nheads, headdim, dstate), dtype), D: T.Tensor(
+                     (nheads), dtype), Output: T.Tensor((batch, seqlen, nheads, headdim), dtype)):
         with T.Kernel(
                 nheads,
                 T.ceildiv(chunk_size, block_M) * T.ceildiv(headdim, block_N),
@@ -202,10 +202,10 @@ def chunk_state_fwd(batch,
     p = 1.44269504
 
     @T.prim_func
-    def main(B: T.Buffer((batch, seqlen, ngroups, dstate), dtype), x: T.Buffer(
-        (batch, seqlen, nheads, headdim), dtype), dt: T.Buffer(
-            (batch, nheads, nchunks, chunk_size), dtype), dA_cumsum: T.Buffer(
-                (batch, nheads, nchunks, chunk_size), dtype), Output: T.Buffer(
+    def main(B: T.Tensor((batch, seqlen, ngroups, dstate), dtype), x: T.Tensor(
+        (batch, seqlen, nheads, headdim), dtype), dt: T.Tensor(
+            (batch, nheads, nchunks, chunk_size), dtype), dA_cumsum: T.Tensor(
+                (batch, nheads, nchunks, chunk_size), dtype), Output: T.Tensor(
                     (batch, nchunks, nheads, headdim, dstate), dtype)):
         with T.Kernel(
                 nheads,

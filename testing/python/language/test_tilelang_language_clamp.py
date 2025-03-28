@@ -4,6 +4,7 @@
 import tilelang.testing
 from tilelang.utils.tensor import map_torch_type
 
+
 def clamp_within_bounds(
     N,
     block_N,
@@ -15,8 +16,8 @@ def clamp_within_bounds(
 
     @T.prim_func
     def main(
-            A: T.Buffer((N,), dtype),
-            B: T.Buffer((N,), dtype),
+            A: T.Tensor((N,), dtype),
+            B: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             A_shared = T.alloc_shared([block_N], dtype)
@@ -58,8 +59,8 @@ def clamp_value_range(
 
     @T.prim_func
     def main(
-            A: T.Buffer((1, N), dtype),
-            B: T.Buffer((1, N), dtype),
+            A: T.Tensor((1, N), dtype),
+            B: T.Tensor((1, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
             # A_shared = T.alloc_shared([1, block_N], dtype=dtype)
@@ -94,7 +95,7 @@ def run_clamp_value_range(
 
     # Convert string dtype to torch.dtype
     torch_dtype = map_torch_type(dtype)
-    
+
     def ref_program(A):
         min_val = torch.min(A) * 0.5
         max_val = torch.max(A) * 0.5

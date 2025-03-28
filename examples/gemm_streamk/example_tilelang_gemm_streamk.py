@@ -79,12 +79,12 @@ def tl_matmul_streamk(
     @T.macro
     def compute_first_wave(
         pid: T.int32,
-        A_buf: T.Buffer,
-        A_buf_shared: T.Buffer,
-        B_buf: T.Buffer,
-        B_buf_shared: T.Buffer,
-        C: T.Buffer,
-        C_local: T.Buffer,
+        A_buf: T.Tensor,
+        A_buf_shared: T.SharedBuffer,
+        B_buf: T.Tensor,
+        B_buf_shared: T.SharedBuffer,
+        C: T.Tensor,
+        C_local: T.LocalBuffer,
     ):
         start_iter = T.alloc_fragment((1,), "int32", "local")
         end_iter = T.alloc_fragment((1,), "int32", "local")
@@ -127,12 +127,12 @@ def tl_matmul_streamk(
     @T.macro
     def compute_full_tiles(
         pid: T.int32,
-        A_buf: T.Buffer,
-        A_shared: T.Buffer,
-        B_buf: T.Buffer,
-        B_shared: T.Buffer,
-        C: T.Buffer,
-        C_local: T.Buffer,
+        A_buf: T.Tensor,
+        A_shared: T.SharedBuffer,
+        B_buf: T.Tensor,
+        B_shared: T.SharedBuffer,
+        C: T.Tensor,
+        C_local: T.LocalBuffer,
     ):
 
         for p in T.serial(sm_patition_factor):
@@ -149,9 +149,9 @@ def tl_matmul_streamk(
 
     @T.prim_func
     def main(
-            A: T.Buffer(A_shape, dtypeAB),
-            B: T.Buffer(B_shape, dtypeAB),
-            C: T.Buffer((M, N), dtypeC),
+            A: T.Tensor(A_shape, dtypeAB),
+            B: T.Tensor(B_shape, dtypeAB),
+            C: T.Tensor((M, N), dtypeC),
     ):
         with T.Kernel(streamk_programs, threads=threads) as pid:
 

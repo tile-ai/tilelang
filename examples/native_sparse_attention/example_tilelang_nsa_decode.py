@@ -46,12 +46,12 @@ def native_sparse_attention(
 
     @T.prim_func
     def native_sparse_attention(
-            Q: T.Buffer(q_shape, dtype),  # [batch, 1, heads, dim] 
-            K: T.Buffer(kv_shape, dtype),  # [batch, seq_len, head_kv, dim]
-            V: T.Buffer(kv_shape, dtype),  # Same shape as K
-            BlockIndices: T.Buffer(block_indices_shape,
+            Q: T.Tensor(q_shape, dtype),  # [batch, 1, heads, dim] 
+            K: T.Tensor(kv_shape, dtype),  # [batch, seq_len, head_kv, dim]
+            V: T.Tensor(kv_shape, dtype),  # Same shape as K
+            BlockIndices: T.Tensor(block_indices_shape,
                                    block_indices_dtype),  # Selected block indices
-            Output: T.Buffer(q_shape, dtype),  # Output attention tensor
+            Output: T.Tensor(q_shape, dtype),  # Output attention tensor
     ):
         with T.Kernel(1, NV, batch * head_kv, threads=threads) as (bx, by, bz):
             # Shared memory allocations for tile storage

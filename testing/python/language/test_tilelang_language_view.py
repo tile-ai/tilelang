@@ -21,8 +21,8 @@ def view_test(N, M, dtype, new_dtype=None):
 
     @T.prim_func
     def main(
-            A: T.Buffer((N,), dtype),
-            B: T.Buffer(new_shape, new_dtype if new_dtype else dtype),
+            A: T.Tensor((N,), dtype),
+            B: T.Tensor(new_shape, new_dtype if new_dtype else dtype),
     ):
         with T.Kernel(1) as _:
             A_viewed = T.view(A, new_shape, dtype=new_dtype)

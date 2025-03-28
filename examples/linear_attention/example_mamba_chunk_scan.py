@@ -91,13 +91,13 @@ def chunk_scan_fwd(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate, 
     def kernel_func(block_M, block_N, block_K, block_Dstate, num_stages, threads):
 
         @T.prim_func
-        def main(cb: T.Buffer((batch, nchunks, ngroups, chunk_size, chunk_size), dtype),
-                 x: T.Buffer((batch, seqlen, nheads, headdim), dtype), dt: T.Buffer(
-                     (batch, nheads, nchunks, chunk_size), dtype), dA_cumsum: T.Buffer(
-                         (batch, nheads, nchunks, chunk_size), dtype), C: T.Buffer(
-                             (batch, seqlen, ngroups, dstate), dtype), prev_states: T.Buffer(
-                                 (batch, nchunks, nheads, headdim, dstate), dtype), D: T.Buffer(
-                                     (nheads), dtype), Output: T.Buffer(
+        def main(cb: T.Tensor((batch, nchunks, ngroups, chunk_size, chunk_size), dtype),
+                 x: T.Tensor((batch, seqlen, nheads, headdim), dtype), dt: T.Tensor(
+                     (batch, nheads, nchunks, chunk_size), dtype), dA_cumsum: T.Tensor(
+                         (batch, nheads, nchunks, chunk_size), dtype), C: T.Tensor(
+                             (batch, seqlen, ngroups, dstate), dtype), prev_states: T.Tensor(
+                                 (batch, nchunks, nheads, headdim, dstate), dtype), D: T.Tensor(
+                                     (nheads), dtype), Output: T.Tensor(
                                          (batch, seqlen, nheads, headdim), dtype)):
             with T.Kernel(
                     nheads,

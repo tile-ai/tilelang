@@ -6,9 +6,23 @@ from typing import Optional
 # from .parser import *
 # now is fully compatible with the upstream
 # tir script
+# TODO(lei): remove this import once the
+# upstream tir script is fully compatible
 from tvm.script.parser.tir import *
+from .tir import (
+    prim_func,  # noqa: F401
+)
+from .tir.ir import *  # noqa: F401
 from tilelang.layout import Layout, Fragment  # noqa: F401
-from .proxy import Buffer, Tensor, ptr  # noqa: F401
+from .proxy import (
+    ptr,  # noqa: F401
+    make_tensor,  # noqa: F401
+    Buffer,  # noqa: F401
+    Tensor,  # noqa: F401
+    FragmentBuffer,  # noqa: F401
+    SharedBuffer,  # noqa: F401
+    LocalBuffer,  # noqa: F401
+)
 from .parallel import Parallel  # noqa: F401
 from .pipeline import Pipelined  # noqa: F401
 from .frame import has_let_value, get_let_value  # noqa: F401

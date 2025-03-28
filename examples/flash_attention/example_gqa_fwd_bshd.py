@@ -72,10 +72,10 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False, groups=1):
 
         @T.macro
         def MMA0(
-            K: T.Buffer(kv_shape, dtype),
-            Q_shared: T.Buffer([block_M, dim], dtype),
-            K_shared: T.Buffer([block_N, dim], dtype),
-            acc_s: T.Buffer([block_M, block_N], accum_dtype),
+            K: T.Tensor(kv_shape, dtype),
+            Q_shared: T.SharedBuffer([block_M, dim], dtype),
+            K_shared: T.SharedBuffer([block_N, dim], dtype),
+            acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
             k: T.int32,
             bx: T.int32,
             by: T.int32,
@@ -92,26 +92,26 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False, groups=1):
 
         @T.macro
         def MMA1(
-                V: T.Buffer(kv_shape, dtype),
-                V_shared: T.Buffer([block_M, dim], dtype),
-                acc_s_cast: T.Buffer([block_M, block_N], dtype),
-                acc_o: T.Buffer([block_M, dim], accum_dtype),
-                k: T.int32,
-                by: T.int32,
-                bz: T.int32,
+            V: T.Tensor(kv_shape, dtype),
+            V_shared: T.SharedBuffer([block_M, dim], dtype),
+            acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
+            acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
+            k: T.int32,
+            by: T.int32,
+            bz: T.int32,
         ):
             T.copy(V[bz, k * block_N:(k + 1) * block_N, by // groups, :], V_shared)
             T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
         @T.macro
         def Softmax(
-                acc_s: T.Buffer([block_M, block_N], accum_dtype),
-                acc_s_cast: T.Buffer([block_M, block_N], dtype),
-                scores_max: T.Buffer([block_M], accum_dtype),
-                scores_max_prev: T.Buffer([block_M], accum_dtype),
-                scores_scale: T.Buffer([block_M], accum_dtype),
-                scores_sum: T.Buffer([block_M], accum_dtype),
-                logsum: T.Buffer([block_M], accum_dtype),
+                acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
+                acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
+                scores_max: T.FragmentBuffer([block_M], accum_dtype),
+                scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
+                scores_scale: T.FragmentBuffer([block_M], accum_dtype),
+                scores_sum: T.FragmentBuffer([block_M], accum_dtype),
+                logsum: T.FragmentBuffer([block_M], accum_dtype),
         ):
             T.copy(scores_max, scores_max_prev)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -135,18 +135,18 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False, groups=1):
 
         @T.macro
         def Rescale(
-                acc_o: T.Buffer([block_M, dim], accum_dtype),
-                scores_scale: T.Buffer([block_M], accum_dtype),
+                acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
+                scores_scale: T.FragmentBuffer([block_M], accum_dtype),
         ):
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] *= scores_scale[i]
 
         @T.prim_func
         def main(
-                Q: T.Buffer(q_shape, dtype),
-                K: T.Buffer(kv_shape, dtype),
-                V: T.Buffer(kv_shape, dtype),
-                Output: T.Buffer(q_shape, dtype),
+                Q: T.Tensor(q_shape, dtype),
+                K: T.Tensor(kv_shape, dtype),
+                V: T.Tensor(kv_shape, dtype),
+                Output: T.Tensor(q_shape, dtype),
         ):
             with T.Kernel(
                     T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
