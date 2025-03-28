@@ -1,6 +1,10 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-"""The auto-tune module for tilelang programs."""
+"""The auto-tune module for tilelang programs.
+
+This module provides functionality for auto-tuning tilelang programs, including JIT compilation
+and performance optimization through configuration search.
+"""
 
 import tilelang
 from tilelang import tvm as tvm
@@ -24,6 +28,19 @@ logging.basicConfig(
 
 @dataclass(frozen=True)
 class JITContext:
+    """Context object for Just-In-Time compilation settings.
+
+    Attributes:
+        out_idx: List of output tensor indices.
+        supply_type: Type of tensor supply mechanism.
+        ref_prog: Reference program for correctness validation.
+        rtol: Relative tolerance for output validation.
+        atol: Absolute tolerance for output validation.
+        max_mismatched_ratio: Maximum allowed ratio of mismatched elements.
+        skip_check: Whether to skip validation checks.
+        profiler: Profiler instance for performance measurement.
+        target: Target platform ('cuda' or 'hip').
+    """
     out_idx: List[int]
     supply_type: tilelang.TensorSupplyType
     ref_prog: Callable
@@ -37,6 +54,16 @@ class JITContext:
 
 @dataclass(frozen=True)
 class AutotuneResult:
+    """Results from auto-tuning process.
+
+    Attributes:
+        latency: Best achieved execution latency.
+        config: Configuration that produced the best result.
+        ref_latency: Reference implementation latency.
+        libcode: Generated library code.
+        func: Optimized function.
+        kernel: Compiled kernel function.
+    """
     latency: float
     config: dict
     ref_latency: float
@@ -46,6 +73,15 @@ class AutotuneResult:
 
 
 class AutoTuner:
+    """Auto-tuner for tilelang programs.
+
+    This class handles the auto-tuning process by testing different configurations
+    and finding the optimal parameters for program execution.
+
+    Args:
+        fn: The function to be auto-tuned.
+        configs: List of configurations to try during auto-tuning.
+    """
 
     def __init__(self, fn: Callable, configs):
         self.fn = fn
@@ -56,6 +92,15 @@ class AutoTuner:
 
     @classmethod
     def from_kernel(cls, kernel: Callable, configs):
+        """Create an AutoTuner instance from a kernel function.
+
+        Args:
+            kernel: The kernel function to auto-tune.
+            configs: List of configurations to try.
+
+        Returns:
+            AutoTuner: A new AutoTuner instance.
+        """
         return cls(kernel, configs)
 
     def set_compile_args(self,
@@ -67,6 +112,21 @@ class AutoTuner:
                          max_mismatched_ratio: float = 0.01,
                          skip_check: bool = False,
                          target: Literal['auto', 'cuda', 'hip'] = 'auto'):
+        """Set compilation arguments for the auto-tuner.
+
+        Args:
+            out_idx: List of output tensor indices.
+            supply_type: Type of tensor supply mechanism.
+            ref_prog: Reference program for validation.
+            rtol: Relative tolerance for validation.
+            atol: Absolute tolerance for validation.
+            max_mismatched_ratio: Maximum allowed mismatch ratio.
+            skip_check: Whether to skip validation.
+            target: Target platform.
+
+        Returns:
+            AutoTuner: Self for method chaining.
+        """
 
         def _compile(*config_arg):
             kernel = tilelang.compile(self.fn(*config_arg), out_idx=out_idx, target=target)
@@ -87,6 +147,16 @@ class AutoTuner:
         return self
 
     def run(self, warmup: int = 25, rep: int = 100, timeout: int = 100):
+        """Run the auto-tuning process.
+
+        Args:
+            warmup: Number of warmup iterations.
+            rep: Number of repetitions for timing.
+            timeout: Maximum time per configuration.
+
+        Returns:
+            AutotuneResult: Results of the auto-tuning process.
+        """
         sig = inspect.signature(self.fn)
         keys = list(sig.parameters.keys())
         bound_args = sig.bind()
@@ -194,12 +264,25 @@ class AutoTuner:
             kernel=best_jit_context.profiler.func)
 
     def __call__(self) -> Any:
+        """Make the AutoTuner callable, running the auto-tuning process.
+
+        Returns:
+            AutotuneResult: Results of the auto-tuning process.
+        """
         return self.run()
 
 
 def autotune(configs: Any, warmup: int = 25, rep: int = 100, timeout: int = 100) -> Callable:
-    """
-    Decorator for tilelang program
+    """Decorator for auto-tuning tilelang programs.
+
+    Args:
+        configs: Configuration space to explore during auto-tuning.
+        warmup: Number of warmup iterations before timing.
+        rep: Number of repetitions for timing measurements.
+        timeout: Maximum time (in seconds) allowed for each configuration.
+
+    Returns:
+        Callable: Decorated function that performs auto-tuning.
     """
 
     def decorator(fn: Callable) -> AutoTuner:
@@ -219,6 +302,21 @@ def jit(out_idx: List[int],
         max_mismatched_ratio: float = 0.01,
         skip_check: bool = False,
         target: Literal['auto', 'cuda', 'hip'] = 'auto') -> Callable:
+    """Just-In-Time compilation decorator for tilelang programs.
+
+    Args:
+        out_idx: List of output tensor indices.
+        supply_type: Type of tensor supply mechanism.
+        ref_prog: Reference program for correctness validation.
+        rtol: Relative tolerance for output validation.
+        atol: Absolute tolerance for output validation.
+        max_mismatched_ratio: Maximum allowed ratio of mismatched elements.
+        skip_check: Whether to skip validation checks.
+        target: Target platform ('auto', 'cuda', or 'hip').
+
+    Returns:
+        Callable: Decorated function that performs JIT compilation.
+    """
 
     def wrapper(fn: Callable):
 

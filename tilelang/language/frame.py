@@ -12,47 +12,74 @@ from typing import Optional
 
 
 class FrameStack:
-    """
-    A stack-like wrapper around a deque that provides push, pop, and top methods,
-    along with a var-value mapping functionality.
+    """A stack-like container for managing TIR frame objects and their variable bindings.
+
+    This class implements a stack data structure using a deque and maintains a mapping
+    of variables to their values. It provides methods for stack operations and variable
+    value lookups.
     """
 
     def __init__(self):
+        """Initialize an empty frame stack and variable mapping."""
         self._stack = deque()
         self._var_value_map = {}
 
     def push(self, item):
-        """Pushes an item onto the top of the stack."""
+        """Push an item onto the stack and update variable mapping if applicable.
+
+        Args:
+            item: The frame object to push onto the stack
+        """
         self._stack.append(item)
-        # Store the var-value mapping if it's a LetFrame
         if hasattr(item, 'var') and hasattr(item, 'value'):
             self._var_value_map[item.var] = item.value
 
     def pop(self):
-        """
-        Pops and returns the top of the stack, or returns None
-        if the stack is empty.
+        """Remove and return the top item from the stack.
+
+        Returns:
+            The top frame object from the stack
+
+        Raises:
+            IndexError: If the stack is empty
         """
         if self._stack:
             item = self._stack.pop()
-            # Clean up the var-value mapping if it's a LetFrame
             if hasattr(item, 'var'):
                 self._var_value_map.pop(item.var, None)
             return item
         raise IndexError(f"{self.__class__.__name__} is empty")
 
     def get_value(self, var):
-        """Get the value associated with a variable."""
+        """Retrieve the value associated with a variable.
+
+        Args:
+            var: The variable to look up
+
+        Returns:
+            The value associated with the variable, or None if not found
+        """
         return self._var_value_map.get(var)
 
     def has_value(self, var):
-        """Check if a variable has an associated value."""
+        """Check if a variable has an associated value.
+
+        Args:
+            var: The variable to check
+
+        Returns:
+            bool: True if the variable has an associated value, False otherwise
+        """
         return var in self._var_value_map
 
     def top(self):
-        """
-        Returns the item on the top of the stack without removing it,
-        or None if the stack is empty.
+        """Return the top item of the stack without removing it.
+
+        Returns:
+            The top frame object from the stack
+
+        Raises:
+            IndexError: If the stack is empty
         """
         if self._stack:
             return self._stack[-1]
@@ -76,8 +103,18 @@ _let_frame_stack = FrameStack()
 
 @_register_object("script.ir_builder.tir.LetFrame")
 class LetFrame(TIRFrame):
+    """A TIR frame for let bindings that manages variable scope and value tracking.
+
+    This frame type extends TIRFrame to provide variable binding functionality and
+    maintains a global stack of active bindings.
+    """
 
     def __enter__(self) -> Var:
+        """Enter the let frame scope and process buffer loads.
+
+        Returns:
+            Var: The variable bound in this frame
+        """
         super().__enter__()
         if isinstance(self.value, BufferLoad):
             indices = self.value.indices
@@ -94,44 +131,73 @@ class LetFrame(TIRFrame):
         return self.var
 
     def __exit__(self, ptype, value, trace):
+        """Exit the let frame scope and clean up the stack.
+
+        Args:
+            ptype: Exception type if an exception occurred
+            value: Exception value if an exception occurred
+            trace: Exception traceback if an exception occurred
+        """
         if _let_frame_stack.top() is self:
             _let_frame_stack.pop()
         super().__exit__(ptype, value, trace)
 
     @classmethod
     def Current(cls) -> "LetFrame":
-        """
-        Returns the topmost (current) LetFrame from the stack if it exists,
-        or raises IndexError if the stack is empty.
+        """Get the current (topmost) let frame.
+
+        Returns:
+            LetFrame: The current let frame
+
+        Raises:
+            IndexError: If there are no active let frames
         """
         return _let_frame_stack.top()
 
     @staticmethod
     def get_value(var: Var):
-        """
-        Get the value associated with a variable.
-        Returns None if the variable is not found.
+        """Get the value bound to a variable in any active frame.
+
+        Args:
+            var (Var): The variable to look up
+
+        Returns:
+            The value bound to the variable, or None if not found
         """
         return _let_frame_stack.get_value(var)
 
     @staticmethod
     def has_value(var: Var) -> bool:
-        """
-        Check if a variable has an associated value.
+        """Check if a variable has a binding in any active frame.
+
+        Args:
+            var (Var): The variable to check
+
+        Returns:
+            bool: True if the variable has a binding, False otherwise
         """
         return _let_frame_stack.has_value(var)
 
 
 def has_let_value(var: Var) -> bool:
-    """
-    Check if a variable has an associated value in the let frame stack.
+    """Check if a variable has a binding in the current let frame stack.
+
+    Args:
+        var (Var): The variable to check
+
+    Returns:
+        bool: True if the variable has a binding, False otherwise
     """
     return _let_frame_stack.has_value(var)
 
 
 def get_let_value(var: Var) -> Optional[PrimExpr]:
-    """
-    Get the value associated with a variable from the let frame stack.
-    Returns None if the variable is not found.
+    """Get the value bound to a variable in the current let frame stack.
+
+    Args:
+        var (Var): The variable to look up
+
+    Returns:
+        Optional[PrimExpr]: The bound value if found, None otherwise
     """
     return _let_frame_stack.get_value(var)

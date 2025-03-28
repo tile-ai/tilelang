@@ -32,31 +32,38 @@ class KernelCache:
         kernel_lib.so: The compiled kernel library
         params.pkl: The compiled kernel parameters
     """
+
     _instance = None  # For implementing singleton pattern
     _lock = threading.Lock()  # For thread safety
 
     def __new__(cls, cache_dir=TILELANG_CACHE_DIR):
         """Singleton pattern to ensure only one KernelCache instance"""
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super(KernelCache, cls).__new__(cls)
-                cls._instance.cache_dir = cache_dir  # Cache directory
-                os.makedirs(cls._instance.cache_dir, exist_ok=True)  # Ensure cache directory exists
-                cls._instance.logger = logging.getLogger(__name__)  # Initialize logger
-                cls._instance.logger.setLevel(
-                    logging.ERROR)  # Set default logging level to ERROR, can be adjusted
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:  # 双重检查锁定
+                    instance = super().__new__(cls)
+                    instance.cache_dir = cache_dir
+                    os.makedirs(instance.cache_dir, exist_ok=True)
+
+                    instance.logger = logging.getLogger(__name__)
+                    instance.logger.setLevel(logging.ERROR)
+                    cls._instance = instance
         return cls._instance
 
-    def _generate_key(self, func: Callable, out_idx: List[int],
-                      execution_backend: Literal["dlpack", "ctypes", "cython"], args,
-                      target: Union[str, Target], target_host: Union[str, Target]) -> str:
-        """
-        Generates a unique cache key.
-        """
+    def _generate_key(
+        self,
+        func: Callable,
+        out_idx: List[int],
+        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        args=None,
+        target: Union[str, Target] = "auto",
+        target_host: Union[str, Target] = None,
+    ) -> str:
+
         func_binary = cloudpickle.dumps(func.script())
         key_data = {
             "func": sha256(func_binary).hexdigest(),  # Use SHA256 to generate hash key
-            "out_idx": tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx],
+            "out_idx": (tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx]),
             "args_repr": tuple(
                 repr(arg) for arg in args
             ),  # Use repr to serialize arguments, may need more robust serialization
@@ -102,7 +109,13 @@ class KernelCache:
                 pass_configs=pass_configs,
             )
 
-        key = self._generate_key(func, out_idx, execution_backend, args, target, target_host)
+        key = self._generate_key(
+            func=func,
+            out_idx=out_idx,
+            execution_backend=execution_backend,
+            args=args,
+            target=target,
+            target_host=target_host)
         with self._lock:  # TODO: use filelock
             # Attempt to load from disk
             kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
@@ -124,8 +137,15 @@ class KernelCache:
             self.logger.warning("DLPack backend does not support cache saving to disk.")
         else:
             with self._lock:  # enter critical section again to check and update disk cache
-                disk_kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
-                                                          execution_backend, pass_configs, func)
+                disk_kernel = self._load_kernel_from_disk(
+                    key,
+                    target,
+                    target_host,
+                    out_idx,
+                    execution_backend,
+                    pass_configs,
+                    func,
+                )
                 if disk_kernel is None:
                     self._save_kernel_to_disk(key, kernel, func)
         return kernel
@@ -182,14 +202,16 @@ class KernelCache:
         except Exception as e:
             self.logger.error(f"Error saving kernel parameters to disk: {e}")
 
-    def _load_kernel_from_disk(self,
-                               key: str,
-                               target: Union[str, Target] = "auto",
-                               target_host: Union[str, Target] = None,
-                               out_idx: List[int] = None,
-                               execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
-                               pass_configs: dict = None,
-                               func: Callable = None) -> JITKernel:
+    def _load_kernel_from_disk(
+        self,
+        key: str,
+        target: Union[str, Target] = "auto",
+        target_host: Union[str, Target] = None,
+        out_idx: List[int] = None,
+        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        pass_configs: dict = None,
+        func: Callable = None,
+    ) -> JITKernel:
         """
         Loads kernel from disk.
         """
