@@ -29,7 +29,7 @@ namespace tl {
 using namespace tir;
 
 /*!
- * \brief collect the mapping from the buffer var to its allocate
+ * \brief collect the mapping from the buffer var to it allocated buffer
  */
 class ThreadBindingCollector : public StmtExprVisitor {
 public:
@@ -82,6 +82,9 @@ public:
         body = inner->body;
       }
 
+      ICHECK(loop_vars.size() == loop_extents.size())
+          << "loop_vars and loop_extents size mismatch";
+
       // Collect buffer access information
       BufferAccessCollector collector;
       collector(op->body);
@@ -94,27 +97,58 @@ public:
 
         for (size_t i = 0; i < indices.size(); ++i) {
           auto index = indices[i];
-          auto loop_var = loop_vars[i];
           auto bound = analyzer_->const_int_bound(index);
           int64_t upper_bound = bound->max_value + 1;
           int64_t shape = Downcast<IntImm>(buffer->shape[i])->value;
-          if (upper_bound < shape) {
-            PrimExpr predicate =
-                LT(indices[i], IntImm(indices[i].dtype(), upper_bound));
-            condition =
-                condition.defined() ? And(condition, predicate) : predicate;
 
-            // replace the buffer index from A[i, r * 2] with A[i, j]
-            // where r is the original index, j is the loop_var
-            auto index_map = tir::IndexMap({loop_var}, {index});
-            auto inverse_index_map = index_map.Inverse(
-                {Range::FromMinExtent(0, IntImm(index.dtype(), upper_bound))},
-                analyzer_);
+          // Collect the variables that used in the index
+          std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> used_vars;
+          // post order visit the index
+          PostOrderVisit(index, [&](const ObjectRef &obj) {
+            if (const VarNode *v = obj.as<VarNode>()) {
+              used_vars.insert(GetRef<Var>(v));
+            }
+          });
+          if (used_vars.size() == 0) {
+            continue;
+          }
 
-            loop_extents.Set(i, IntImm(index.dtype(), shape));
-            body = tir::Substitute(body,
-                                   {{loop_var, inverse_index_map->MapIndices(
-                                                   {loop_var}, analyzer_)[0]}});
+          // find related loop vars
+          Array<Var> related_loop_vars;
+          for (size_t i = 0; i < loop_vars.size(); ++i) {
+            auto loop_var = loop_vars[i];
+            // if find related, pop the loop_vars and loop_extents
+            if (used_vars.count(loop_var)) {
+              related_loop_vars.push_back(loop_var);
+            }
+            ICHECK(related_loop_vars.size() <= 1)
+                << "Only one related loop var is supported currently, but got "
+                << related_loop_vars
+                << " implement multiple loop vars may not be "
+                << "too hard, please send an issue if you need "
+                << "came up with this message.";
+
+            auto bound = analyzer_->const_int_bound(index);
+            int64_t upper_bound = bound->max_value + 1;
+            int64_t shape = Downcast<IntImm>(buffer->shape[i])->value;
+            if (upper_bound < shape) {
+              PrimExpr predicate =
+                  LT(indices[i], IntImm(indices[i].dtype(), upper_bound));
+              condition =
+                  condition.defined() ? And(condition, predicate) : predicate;
+
+              // replace the buffer index from A[i, r * 2] with A[i, j]
+              // where r is the original index, j is the loop_var
+              auto index_map = tir::IndexMap({loop_var}, {index});
+              auto inverse_index_map = index_map.Inverse(
+                  {Range::FromMinExtent(0, IntImm(index.dtype(), upper_bound))},
+                  analyzer_);
+
+              loop_extents.Set(i, IntImm(index.dtype(), shape));
+              body = tir::Substitute(
+                  body, {{loop_var, inverse_index_map->MapIndices(
+                                        {loop_var}, analyzer_)[0]}});
+            }
           }
         }
       }
