@@ -12,7 +12,8 @@ General Matrix-Vector Multiplication (GEMV)
 
 :::{tip}
 Example code can be found at `examples/gemv/example_gemv.py`.
-::: 
+:::
+
 General matrix-vector multiplication (GEMV) can be viewed as a specialized case of general matrix-matrix multiplication (GEMM). It plays a critical role in deep learning, especially during the inference phase of large language models. In this tutorial, we will optimize GEMV from a thread-level perspective step by step using `TileLang`.
 
 # Triton implementation
@@ -451,4 +452,17 @@ This corresponds closely to our `TileLang` program, with necessary synchronizati
 
 # Conclusion
 
+## Benchmark Table on Hopper GPU
+
+| Kernel Name   | Latency   |
+|------------|------------|
+| torch/cuBLAS | 0.00784 ms |
+| Triton | 0.00773 ms |
+| naive_gemv | 0.16607 ms |
+| splitk_gemv | 0.02419 ms |
+| splitk_gemv_vectorized | 0.00809 ms |
+| splitk_gemv_vectorized_tvm | 0.00675 ms |
+
+
+Triton Time: 0.0077344514429569244
 In this tutorial, we implemented a simple GEMV kernel and learn that `TileLang` exposes low level control to user such as thread-level programming and CUDA primitives.
