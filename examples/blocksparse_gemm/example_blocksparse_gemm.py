@@ -62,8 +62,8 @@ def get_best_config(M, N, K):
     autotuner = AutoTuner.from_kernel(
         kernel=kernel, configs=get_configs(M, N, K)
     ).set_compile_args(
-        out_idx=[-1], # Index of the output tensor
-        supply_type=tilelang.TensorSupplyType.Normal, # How input tensors are supplied
+        out_idx=[-1],  # Index of the output tensor
+        supply_type=tilelang.TensorSupplyType.Normal,  # How input tensors are supplied
 
         # ref_prog: Using dense matmul (A @ B) as a placeholder reference.
         # The 'correct' block-sparse reference (`ref_program` above) requires
@@ -76,7 +76,6 @@ def get_best_config(M, N, K):
         # skip_check: Set to True because the provided `ref_prog` does not
         # compute the correct result for the block-sparse kernel.
         skip_check=True,
-
         target="auto",
     )
     # Run the tuning process
@@ -124,6 +123,7 @@ def blocksparse_matmul(M,
 
     return main
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autotuned BlockSparse MatMul Benchmark")
     parser.add_argument("--m", type=int, default=1024, help="Matrix dimension M")
@@ -148,7 +148,7 @@ if __name__ == "__main__":
         # get_best_config is expected to return an object containing the compiled kernel,
         # the best configuration found, latency, and reference latency.
         result = get_best_config(M, N, K)
-        
+
         # Extract results from the autotuner run
         kernel = result.kernel
         best_config = result.config
@@ -170,7 +170,7 @@ if __name__ == "__main__":
     # Create block mask with desired sparsity
     mask_shape = (M // block_M, N // block_N, K // block_K)
     block_mask = torch.rand(mask_shape).cuda() > args.sparsity
-    
+
     # Run the compiled kernel (either tuned or default) with the inputs
     c = kernel(a, b, block_mask)
 
@@ -181,5 +181,5 @@ if __name__ == "__main__":
         torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
         print("✅ Results are close! Verification successful.")
     except AssertionError as e:
-        print(f"❌ Verification FAILED: Results differ significantly.")
+        print("❌ Verification FAILED: Results differ significantly.")
         print(e)

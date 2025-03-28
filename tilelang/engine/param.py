@@ -84,7 +84,7 @@ class KernelParam:
             bool: True if parameter is a float8 type, False otherwise
         """
         return str(self.dtype).removeprefix("torch.").startswith("float8")
-    
+
     def is_boolean(self) -> bool:
         """
         Checks if the parameter represents a boolean type.
