@@ -113,12 +113,6 @@ extern "C" __global__ void __launch_bounds__(256, 1) main_kernel(half_t* __restr
     C[((((int)blockIdx.x) * 128) + ((int)threadIdx.x))] = ((half_t)C_reg[0]);
   }
 }
-
-extern "C" int call(half_t* __restrict__ A, half_t* __restrict__ B, half_t* __restrict__ C, cudaStream_t stream=cudaStreamDefault) {
-	main_kernel<<<dim3(8, 1, 1), dim3(256, 1, 1), 33024, stream>>>(A, B, C);
-
-return 0;
-}
 ```
 
 In this design, the first 128 threads act as the data producer and the last 128 threads as the consumer within a block (assuming a 1D block).
@@ -257,8 +251,68 @@ def splitk_gemv_vectorized(
     return main
 ```
 
-With vectorized read, now the kernel finishs in **~0.084 ms**, which is getting close to cuBLAS performance.
+With vectorized read, now the kernel finishs in **~0.0084 ms**, which is getting close to cuBLAS performance.
 
+
+# `tvm_thread_allreduce` Instead of `atomicAdd`
+
+[`tvm_thread_allreduce`](https://tvm.apache.org/docs/reference/api/python/tir/tir.html#tvm.tir.tvm_thread_allreduce) has implemented optimization when making an all-reduce across a number of threads, which should outperfrom out plain smem + `atomidAdd`:
+
+```python
+def splitk_gemv_vectorized_tvm(
+    N: int,
+    K: int,
+    BLOCK_N: int,
+    reduce_threads: int,
+    dtype: str = "float16",
+    accum_dtype: str = "float",
+):
+    MAX_TRANSACTION_SIZE_IN_BITS = 128
+    TILE_K = MAX_TRANSACTION_SIZE_IN_BITS // DataType(dtype).bits
+    BLOCK_K = reduce_threads * TILE_K
+
+    @T.prim_func
+    def main(
+            A: T.Buffer((K,), dtype),
+            B: T.Buffer((N, K), dtype),
+            C: T.Buffer((N,), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, reduce_threads)) as bn:
+            tn = T.get_thread_binding(0)
+            tk = T.get_thread_binding(1)
+            A_local = T.alloc_local((TILE_K,), dtype)
+            B_local = T.alloc_local((TILE_K,), dtype)
+            C_accum = T.alloc_local((1,), accum_dtype)
+
+            T.clear(C_accum)
+            for bk in T.serial(T.ceildiv(K, BLOCK_K)):
+                for k in T.vectorized(TILE_K):
+                    A_local[k] = A[bk * BLOCK_K + tk * TILE_K + k]
+                    B_local[k] = B[bn * BLOCK_N + tn, bk * BLOCK_K + tk * TILE_K + k]
+                for k in T.serial(TILE_K):
+                    C_accum[0] += A_local[k].astype(accum_dtype) * B_local[k].astype(accum_dtype)
+            C_reduced = T.alloc_local((1,), accum_dtype)
+            with T.attr(
+                    T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
+                    "reduce_scope",
+                    T.reinterpret(T.uint64(0), dtype="handle"),
+            ):
+                T.evaluate(
+                    T.tvm_thread_allreduce(
+                        T.uint32(1),
+                        C_accum[0],
+                        True,
+                        C_reduced[0],
+                        tk,
+                        dtype="handle",
+                    ))
+
+            C[bn * BLOCK_N + tn] = C_reduced[0]
+
+    return main
+```
+
+With this optimization, the kernel latency now reduces from **~0.0084 ms** to **~0.0069 ms**, which is faster than torch/cuBLAS!
 
 # Autotune
 
@@ -317,10 +371,8 @@ def get_best_config(N, K):
                 tk = T.get_thread_binding(1)
                 A_local = T.alloc_local((TILE_K,), dtype)
                 B_local = T.alloc_local((TILE_K,), dtype)
-                C_shared = T.alloc_shared((BLOCK_N,), accum_dtype)
                 C_accum = T.alloc_local((1,), accum_dtype)
-                if tk == 0:
-                    C_shared[tn] = 0
+
                 T.clear(C_accum)
                 for bk in T.serial(T.ceildiv(K, BLOCK_K)):
                     for k in T.vectorized(TILE_K):
@@ -328,27 +380,37 @@ def get_best_config(N, K):
                         B_local[k] = B[bn * BLOCK_N + tn, bk * BLOCK_K + tk * TILE_K + k]
                     for k in T.serial(TILE_K):
                         C_accum[0] += A_local[k].astype(accum_dtype) * B_local[k].astype(accum_dtype)
-                T.atomic_add(C_shared[tn], C_accum[0])
-                C[bn * BLOCK_N + tn] = C_shared[tn]
+                C_reduced = T.alloc_local((1,), accum_dtype)
+                with T.attr(
+                        T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
+                        "reduce_scope",
+                        T.reinterpret(T.uint64(0), dtype="handle"),
+                ):
+                    T.evaluate(
+                        T.tvm_thread_allreduce(
+                            T.uint32(1),
+                            C_accum[0],
+                            True,
+                            C_reduced[0],
+                            tk,
+                            dtype="handle",
+                        ))
+
+                C[bn * BLOCK_N + tn] = C_reduced[0]
 
         return main
 
     return kernel()
 ```
 
-After autotuning, now our kernel gets **~0.008 ms**, which is comparable to torch/cuBLAS (although still a bit slower in my case).
-
-A final generated CUDA kernel might like this:
+After autotuning, now our kernel gets **~0.0067 ms**, the final generated CUDA kernel might like this:
 
 ```C++
 extern "C" __global__ void __launch_bounds__(64, 1) main_kernel(half_t* __restrict__ A, half_t* __restrict__ B, half_t* __restrict__ C) {
-  extern __shared__ __align__(1024) float C_shared[];
   float C_accum[1];
   half_t A_local[8];
   half_t B_local[8];
-  if (((int)threadIdx.y) == 0) {
-    C_shared[((int)threadIdx.x)] = 0.000000e+00f;
-  }
+  __shared__ float red_buf0[64];
   C_accum[0] = 0.000000e+00f;
   for (int bk = 0; bk < 4; ++bk) {
     *(uint4*)(A_local + 0) = *(uint4*)(A + ((bk * 256) + (((int)threadIdx.y) * 8)));
@@ -359,8 +421,29 @@ extern "C" __global__ void __launch_bounds__(64, 1) main_kernel(half_t* __restri
   }
   tl::fence_proxy_async();
   __syncthreads();
-  AtomicAdd((&(C_shared[((int)threadIdx.x)])), C_accum[0]);
-  C[((((int)blockIdx.x) * 2) + ((int)threadIdx.x))] = ((half_t)C_shared[((int)threadIdx.x)]);
+  red_buf0[((((int)threadIdx.x) * 32) + ((int)threadIdx.y))] = C_accum[0];
+  __syncthreads();
+  if (((int)threadIdx.y) < 16) {
+    red_buf0[((((int)threadIdx.x) * 32) + ((int)threadIdx.y))] = (red_buf0[((((int)threadIdx.x) * 32) + ((int)threadIdx.y))] + red_buf0[(((((int)threadIdx.x) * 32) + ((int)threadIdx.y)) + 16)]);
+  }
+  __syncthreads();
+  if (((int)threadIdx.y) < 8) {
+    red_buf0[((((int)threadIdx.x) * 32) + ((int)threadIdx.y))] = (red_buf0[((((int)threadIdx.x) * 32) + ((int)threadIdx.y))] + red_buf0[(((((int)threadIdx.x) * 32) + ((int)threadIdx.y)) + 8)]);
+  }
+  __syncthreads();
+  if (((int)threadIdx.y) < 4) {
+    red_buf0[((((int)threadIdx.x) * 32) + ((int)threadIdx.y))] = (red_buf0[((((int)threadIdx.x) * 32) + ((int)threadIdx.y))] + red_buf0[(((((int)threadIdx.x) * 32) + ((int)threadIdx.y)) + 4)]);
+  }
+  __syncthreads();
+  if (((int)threadIdx.y) < 2) {
+    red_buf0[((((int)threadIdx.x) * 32) + ((int)threadIdx.y))] = (red_buf0[((((int)threadIdx.x) * 32) + ((int)threadIdx.y))] + red_buf0[(((((int)threadIdx.x) * 32) + ((int)threadIdx.y)) + 2)]);
+  }
+  __syncthreads();
+  if (((int)threadIdx.y) < 1) {
+    red_buf0[((((int)threadIdx.x) * 32) + ((int)threadIdx.y))] = (red_buf0[((((int)threadIdx.x) * 32) + ((int)threadIdx.y))] + red_buf0[(((((int)threadIdx.x) * 32) + ((int)threadIdx.y)) + 1)]);
+  }
+  __syncthreads();
+  C[((((int)blockIdx.x) * 2) + ((int)threadIdx.x))] = ((half_t)red_buf0[(((int)threadIdx.x) * 32)]);
 }
 ```
 
