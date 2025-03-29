@@ -15,15 +15,28 @@ from tqdm import tqdm
 import logging
 from dataclasses import dataclass
 import concurrent.futures
+import torch
 import os
+import sys
 
+# Configure logging for the autotuner module
+# TODO: Consider creating a common logger in utils
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+logger.propagate = False
 
-logging.basicConfig(
-    filename='autotuner.log',
-    filemode='w',
-    level=logging.DEBUG,
-    format='%(asctime)s %(levelname)s:%(message)s')
+formatter = logging.Formatter('%(asctime)s %(levelname)s:%(message)s')
+
+file_handler = logging.FileHandler('autotuner.log', mode='w')
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(formatter)
+
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+
+logger.addHandler(file_handler)
+logger.addHandler(console_handler)
 
 
 @dataclass(frozen=True)
@@ -32,22 +45,24 @@ class JITContext:
 
     Attributes:
         out_idx: List of output tensor indices.
-        supply_type: Type of tensor supply mechanism.
         ref_prog: Reference program for correctness validation.
+        supply_prog: Supply program for input tensors.
         rtol: Relative tolerance for output validation.
         atol: Absolute tolerance for output validation.
         max_mismatched_ratio: Maximum allowed ratio of mismatched elements.
         skip_check: Whether to skip validation checks.
+        cache_input_tensors: Whether to cache input tensors for each compilation.
         profiler: Profiler instance for performance measurement.
         target: Target platform ('cuda' or 'hip').
     """
     out_idx: List[int]
-    supply_type: tilelang.TensorSupplyType
     ref_prog: Callable
+    supply_prog: Callable
     rtol: float
     atol: float
     max_mismatched_ratio: float
     skip_check: bool
+    cache_input_tensors: bool
     profiler: tilelang.Profiler
     target: Literal['cuda', 'hip']
 
@@ -105,40 +120,51 @@ class AutoTuner:
 
     def set_compile_args(self,
                          out_idx: List[int],
-                         supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Normal,
+                         supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto,
                          ref_prog: Callable = None,
+                         supply_prog: Callable = None,
                          rtol: float = 1e-2,
                          atol: float = 1e-2,
                          max_mismatched_ratio: float = 0.01,
                          skip_check: bool = False,
+                         cache_input_tensors: bool = True,
                          target: Literal['auto', 'cuda', 'hip'] = 'auto'):
         """Set compilation arguments for the auto-tuner.
 
         Args:
             out_idx: List of output tensor indices.
-            supply_type: Type of tensor supply mechanism.
+            supply_type: Type of tensor supply mechanism. Ignored if `supply_prog` is provided.
             ref_prog: Reference program for validation.
+            supply_prog: Supply program for input tensors.
             rtol: Relative tolerance for validation.
             atol: Absolute tolerance for validation.
             max_mismatched_ratio: Maximum allowed mismatch ratio.
             skip_check: Whether to skip validation.
+            cache_input_tensors: Whether to cache input tensors.
             target: Target platform.
 
         Returns:
             AutoTuner: Self for method chaining.
         """
 
+        # If a custom `supply_prog`` is provided, the profiler's `supply_type` setting
+        # becomes ineffective. The custom supply program will be used instead.
+        if ref_prog is not None and supply_type != tilelang.TensorSupplyType.Auto:
+            logger.warning("Ignoring `supply_type` passed to `set_compile_args` because "
+                           "`ref_prog` is not None.")
+
         def _compile(*config_arg):
             kernel = tilelang.compile(self.fn(*config_arg), out_idx=out_idx, target=target)
-            profiler = kernel.get_profiler()
+            profiler = kernel.get_profiler(tensor_supply_type=supply_type)
             jit_context = JITContext(
                 out_idx=out_idx,
-                supply_type=supply_type,
                 ref_prog=ref_prog,
+                supply_prog=supply_prog,
                 rtol=rtol,
                 atol=atol,
                 max_mismatched_ratio=max_mismatched_ratio,
                 skip_check=skip_check,
+                cache_input_tensors=cache_input_tensors,
                 profiler=profiler,
                 target=target)
             return jit_context
@@ -165,28 +191,64 @@ class AutoTuner:
         best_config = None
         best_jit_context = None
 
-        def target_fn(jit_context):
+        def target_fn(jit_context: JITContext):
             # Unpack the context
             profiler = jit_context.profiler
             skip_check = jit_context.skip_check
+            cache_input_tensors = jit_context.cache_input_tensors
             ref_prog = jit_context.ref_prog
+            supply_prog = jit_context.supply_prog
             rtol = jit_context.rtol
             atol = jit_context.atol
             max_mismatched_ratio = jit_context.max_mismatched_ratio
 
-            self.jit_input_tensors = profiler._get_inputs(
-                with_output=profiler ==
-                "tvm") if self.jit_input_tensors is None else self.jit_input_tensors
+            # Factory functions for generating input tensors.
+            # This encapsulates the logic of using either a custom supply program (`supply_prog`)
+            # or the default profiler input generation (`profiler._get_inputs`).
+            def get_input_tensors_supply(with_output: bool):
+
+                def func():
+                    if supply_prog is not None:
+                        return supply_prog(profiler._get_params(with_output=with_output))
+                    else:
+                        return profiler._get_inputs(with_output=with_output)
+
+                return func
+
+            jit_input_tensors_supply = get_input_tensors_supply(with_output=(profiler == "tvm"))
+            ref_input_tensors_supply = get_input_tensors_supply(with_output=False)
+
+            if cache_input_tensors:
+                jit_input_tensors = jit_input_tensors_supply()
+                if self.jit_input_tensors is not None:
+                    if not check_tensor_list_compatibility(self.jit_input_tensors,
+                                                           jit_input_tensors):
+                        logger.warning(
+                            "Incompatible input tensor properties detected between cached tensors and "
+                            "tensors regenerated for the current configuration trial. "
+                            "This can happen if different tuning configurations require different input shapes/dtypes "
+                            "and input tensor caching is enabled.\n"
+                            "To ensure fresh, compatible inputs are generated for every trial "
+                            "you can disable caching by setting:\n"
+                            "  `cache_input_tensors=False`\n"
+                            "within your `.set_compile_args(...)` call.\n")
+                    self.jit_input_tensors = jit_input_tensors
+                self.jit_input_tensors = jit_input_tensors
+            else:
+                self.jit_input_tensors = jit_input_tensors_supply()
 
             if (not skip_check) and (ref_prog is not None):
                 profiler.assert_allclose(
-                    ref_prog, rtol=rtol, atol=atol, max_mismatched_ratio=max_mismatched_ratio)
+                    ref_prog,
+                    input_tensors=self.jit_input_tensors,
+                    rtol=rtol,
+                    atol=atol,
+                    max_mismatched_ratio=max_mismatched_ratio)
 
             latency = profiler.do_bench(
                 profiler.func, n_warmup=warmup, n_repeat=rep, input_tensors=self.jit_input_tensors)
             if self.ref_latency_cache is None and ref_prog is not None:
-                self.ref_input_tensors = profiler._get_inputs(
-                    with_output=False) if self.ref_input_tensors is None else self.ref_input_tensors
+                self.ref_input_tensors = ref_input_tensors_supply()
                 self.ref_latency_cache = profiler.do_bench(
                     ref_prog, n_warmup=warmup, n_repeat=rep, input_tensors=self.ref_input_tensors)
 
@@ -225,8 +287,9 @@ class AutoTuner:
             try:
                 result = future.result()
                 results_with_configs.append((result, config))
-            except Exception:
-                logger.debug(f"Compilation failed for config {config} at index {idx}")
+            except Exception as e:
+                logger.debug(
+                    f"Compilation failed for config {config} at index {idx} with error: {e}")
                 continue
 
         ref_latency = None
@@ -255,6 +318,13 @@ class AutoTuner:
             tqdm.write(f"Tuned Latency {latency} with config {config} at index {i}")
 
         pool.shutdown()
+
+        if best_jit_context is None:
+            error_msg = ("Auto-tuning failed: No configuration successfully "
+                         "compiled and passed benchmarking/validation.")
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
         return AutotuneResult(
             latency=best_latency,
             config=best_config,
@@ -295,28 +365,38 @@ def autotune(configs: Any, warmup: int = 25, rep: int = 100, timeout: int = 100)
 
 
 def jit(out_idx: List[int],
-        supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Normal,
+        supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto,
         ref_prog: Callable = None,
+        supply_prog: Callable = None,
         rtol: float = 1e-2,
         atol: float = 1e-2,
         max_mismatched_ratio: float = 0.01,
         skip_check: bool = False,
+        cache_input_tensors: bool = True,
         target: Literal['auto', 'cuda', 'hip'] = 'auto') -> Callable:
     """Just-In-Time compilation decorator for tilelang programs.
 
     Args:
         out_idx: List of output tensor indices.
-        supply_type: Type of tensor supply mechanism.
+        supply_type: Type of tensor supply mechanism. Ignored if `supply_prog` is provided.
         ref_prog: Reference program for correctness validation.
+        supply_prog: Supply program for input tensors.
         rtol: Relative tolerance for output validation.
         atol: Absolute tolerance for output validation.
         max_mismatched_ratio: Maximum allowed ratio of mismatched elements.
         skip_check: Whether to skip validation checks.
+        cache_input_tensors: Whether to cache input tensors for each compilation.
         target: Target platform ('auto', 'cuda', or 'hip').
 
     Returns:
         Callable: Decorated function that performs JIT compilation.
     """
+
+    # If a custom `supply_prog`` is provided, the profiler's `supply_type` setting
+    # becomes ineffective. The custom supply program will be used instead.
+    if supply_prog is not None and supply_type != tilelang.TensorSupplyType.Auto:
+        logger.warning("Ignoring `supply_type` passed to `autotune.jit` because "
+                       "`supply_prog` is not None.")
 
     def wrapper(fn: Callable):
 
@@ -324,20 +404,40 @@ def jit(out_idx: List[int],
         def decorator(*args, **kwargs) -> float:
 
             kernel = tilelang.compile(fn(*args, **kwargs), out_idx=out_idx, target=target)
-
-            profiler = kernel.get_profiler()
+            profiler = kernel.get_profiler(tensor_supply_type=supply_type)
 
             return JITContext(
                 out_idx=out_idx,
-                supply_type=supply_type,
                 ref_prog=ref_prog,
+                supply_prog=supply_prog,
                 rtol=rtol,
                 atol=atol,
                 max_mismatched_ratio=max_mismatched_ratio,
                 skip_check=skip_check,
+                cache_input_tensors=cache_input_tensors,
                 profiler=profiler,
                 target=target)
 
         return decorator
 
     return wrapper
+
+
+def check_tensor_list_compatibility(
+    list1: List[torch.Tensor],
+    list2: List[torch.Tensor],
+) -> bool:
+    """Checks if two lists of tensors are compatible.
+    
+    Compatibility checks performed include:
+    1. Lists have the same length.
+    2. Corresponding tensors have the same shape.
+
+    Args:
+        list1: First list of tensors.
+        list2: Second list of tensors.
+    """
+    if len(list1) != len(list2):
+        return False
+
+    return all(tensor1.shape == tensor2.shape for tensor1, tensor2 in zip(list1, list2))
