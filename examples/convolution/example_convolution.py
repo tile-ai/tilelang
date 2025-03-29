@@ -6,6 +6,9 @@ from tilelang.autotuner import *
 import tilelang.language as T
 import itertools
 import argparse
+from tilelang.carver.template import ConvTemplate
+from tilelang.carver.arch import CUDA
+from tilelang.carver.roller.rasterization import NoRasterization
 
 
 def check_hopper():
@@ -17,21 +20,60 @@ def check_hopper():
     return False
 
 
-def get_configs():
-    block_M = [64, 128, 256]
-    block_N = [64, 128, 256]
-    block_K = [32, 64]
-    num_stages = [1, 2, 3, 4]
-    threads = [128, 256]
-    _configs = list(itertools.product(block_M, block_N, block_K, num_stages, threads))
+def get_configs(N, C, H, W, F, K, S, D, P, with_roller=False):
+    if with_roller:
+        arch = CUDA("cuda")
+        topk = 10
+        carve_template = ConvTemplate(
+            N=N,
+            C=C,
+            H=H,
+            W=W,
+            F=F,
+            K=K,
+            S=S,
+            D=D,
+            P=P,
+            in_dtype="float16",
+            out_dtype="float16",
+            accum_dtype="float",
+        ).with_arch(arch)
+        
+        func = carve_template.equivalent_function()
+        assert func is not None, "Function is None"
+        roller_hints = carve_template.recommend_hints(topk=topk)
+        if roller_hints is None:
+            raise ValueError("No Roller Hints Found for TensorCore Scheduling")
+        configs = []
+        for hint in roller_hints:
+            config = {}
+            block_m, block_n = hint.block
+            warp_m, warp_n = hint.warp
+            block_rows, block_cols = block_m // warp_m, block_n // warp_n
+            config["block_M"] = block_m
+            config["block_N"] = block_n
+            config["block_K"] = hint.rstep[0]
+            config["num_stages"] = hint.pipeline_stage
+            config["thread_num"] = block_rows * block_cols * 32
+            config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
+            configs.append(config)
+        for config in configs:
+            print(config)
+    else:
+        block_M = [64, 128, 256]
+        block_N = [64, 128, 256]
+        block_K = [32, 64]
+        num_stages = [1, 2, 3, 4]
+        threads = [128, 256]
+        _configs = list(itertools.product(block_M, block_N, block_K, num_stages, threads))
 
-    configs = [{
-        'block_M': c[0],
-        'block_N': c[1],
-        'block_K': c[2],
-        'num_stages': c[3],
-        'thread_num': c[4]
-    } for c in _configs]
+        configs = [{
+            'block_M': c[0],
+            'block_N': c[1],
+            'block_K': c[2],
+            'num_stages': c[3],
+            'thread_num': c[4]
+        } for c in _configs]
     return configs
 
 
@@ -47,7 +89,7 @@ def ref_program(stride, padding, dilation):
     return main
 
 
-def get_best_config(N, C, H, W, F, K, S, D, P):
+def get_best_config(N, C, H, W, F, K, S, D, P, with_roller):
     KH, KW = K, K
     OH = (H + 2 * P - D * (K - 1) - 1) // S + 1
     OW = (W + 2 * P - D * (K - 1) - 1) // S + 1
@@ -110,7 +152,7 @@ def get_best_config(N, C, H, W, F, K, S, D, P):
         return main
 
     autotuner = AutoTuner.from_kernel(
-        kernel=kernel, configs=get_configs()).set_compile_args(
+        kernel=kernel, configs=get_configs(N, C, H, W, F, K, S, D, P, with_roller)).set_compile_args(
             out_idx=[2],
             supply_type=tilelang.TensorSupplyType.Integer,
             ref_prog=ref_program(S, P, D),
@@ -203,16 +245,22 @@ if __name__ == "__main__":
     parser.add_argument(
         "--use_autotune",
         action="store_true",
-        default=False,
+        default=True,
         help="Whether to use autotune for matmul configs")
+    parser.add_argument(
+        "--with_roller",
+        action="store_true",
+        default=True,
+        help="Whether to enable BitBLAS roller for search space")
 
     args = parser.parse_args()
     N, C, H, W, F, K, S, D, P = args.n, args.c, args.h, args.w, args.f, args.k, args.s, args.d, args.p
     a = torch.randn(N, H, W, C).cuda().half()
     b = torch.randn(K, K, C, F).cuda().half()
     use_autotune = args.use_autotune
+    with_roller = args.with_roller
     if use_autotune:
-        result = get_best_config(N, C, H, W, F, K, S, D, P)
+        result = get_best_config(N, C, H, W, F, K, S, D, P, with_roller)
         print(f"best latency {result.latency}")
         kernel = result.kernel
     else:
