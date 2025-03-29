@@ -63,7 +63,7 @@ def get_configs(N, C, H, W, F, K, S, D, P, with_roller=False):
         block_M = [64, 128, 256]
         block_N = [64, 128, 256]
         block_K = [32, 64]
-        num_stages = [1, 2, 3, 4]
+        num_stages = [0, 1, 2, 3]
         threads = [128, 256]
         _configs = list(itertools.product(block_M, block_N, block_K, num_stages, threads))
 
