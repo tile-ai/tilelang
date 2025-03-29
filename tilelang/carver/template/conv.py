@@ -4,7 +4,6 @@
 from dataclasses import dataclass
 from .base import BaseTemplate
 from tvm import te, tir
-from ..arch import TileDevice
 from ..roller import Hint
 from typing import List
 from ..utils import get_roller_hints_from_func
