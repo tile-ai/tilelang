@@ -48,7 +48,8 @@ struct VectorizePlanResult {
 };
 
 bool IndiceCanVectorizeDynamic(PrimExpr expr, Var var, PrimExpr iter_var_size,
-                        int target_vectorized_size, arith::Analyzer *analyzer) {
+                               int target_vectorized_size,
+                               arith::Analyzer *analyzer) {
   ICHECK(target_vectorized_size >= 1);
   if (target_vectorized_size == 1)
     return true;
@@ -180,8 +181,8 @@ private:
         stride = stride * buffer->shape[i];
       }
       while (!IndiceCanVectorizeDynamic(elem_offset, inner_for_->loop_var,
-                                 inner_for_->extent, vector_size_,
-                                 &analyzer_)) {
+                                        inner_for_->extent, vector_size_,
+                                        &analyzer_)) {
         vector_size_ /= 2;
       }
     } else if (vector_size_ <= vector_load_bits_max_ / buffer->dtype.bits()) {
@@ -206,17 +207,20 @@ private:
 
 class VectorizedBodyMutator : public StmtExprMutator {
 public:
-  VectorizedBodyMutator(Var inner_var, int vector_size, std::vector<PrimExpr> conditions)
-    : inner_var_(inner_var), vector_size_(vector_size), conditions_(conditions) {}
+  VectorizedBodyMutator(Var inner_var, int vector_size,
+                        std::vector<PrimExpr> conditions)
+      : inner_var_(inner_var), vector_size_(vector_size),
+        conditions_(conditions) {}
 
 private:
   PrimExpr VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(builtin::if_then_else())) {
-      // TODO: Currently not ramp, but only reserve the "then" part (because conditions are move outside this vectorized loop)
+      // TODO: Currently not ramp, but only reserve the "then" part (because
+      // conditions are move outside this vectorized loop)
       PrimExpr ifexpr = op->args[0];
       PrimExpr thenexpr = op->args[1];
       bool flag = false;
-      for (auto &cond: conditions_) {
+      for (auto &cond : conditions_) {
         if (ifexpr.get() == cond.get()) {
           flag = true;
         }
@@ -243,7 +247,7 @@ public:
     this->VisitStmt(body);
     return conditions_;
   }
-  
+
 private:
   void VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(builtin::if_then_else())) {
@@ -253,7 +257,7 @@ private:
     StmtExprVisitor::VisitExpr_(op);
   }
 
-  void VisitStmt_(const IfThenElseNode* node) final {
+  void VisitStmt_(const IfThenElseNode *node) final {
     conditions_.emplace_back(node->condition);
     StmtExprVisitor::VisitStmt_(node);
   }
@@ -268,6 +272,7 @@ public:
     this->VisitStmt(body);
     return loop_num_;
   }
+
 private:
   void VisitStmt_(const ForNode *node) final {
     loop_num_++;
@@ -305,7 +310,8 @@ private:
         VectorizedConditionExtracter extracter;
         std::vector<PrimExpr> conditions = extracter.GetConditions(body);
 
-        // Set vectorize variable to the max value of the extent (i.e. vector_size_ - 1)
+        // Set vectorize variable to the max value of the extent (i.e.
+        // vector_size_ - 1)
         PrimExpr condition = conditions[0];
         for (int i = 1; i < conditions.size(); ++i) {
           condition = condition && conditions[i];
@@ -320,8 +326,8 @@ private:
         VectorizedBodyMutator mutator(inner_var, vector_size_, conditions);
         Stmt vectorize_body = mutator(body);
 
-        For vectorize_for =
-            For(inner_var, 0, vector_size_, ForKind::kVectorized, vectorize_body);
+        For vectorize_for = For(inner_var, 0, vector_size_,
+                                ForKind::kVectorized, vectorize_body);
         For serial_for =
             For(inner_var, 0, vector_size_, ForKind::kSerial, body);
         body = IfThenElse(condition_bound, vectorize_for, serial_for);
@@ -361,7 +367,7 @@ public:
 
 private:
   LoopVectorizerDynamic(arith::Analyzer *analyzer)
-    : arith::IRMutatorWithAnalyzer(analyzer) {}
+      : arith::IRMutatorWithAnalyzer(analyzer) {}
 
   Stmt VisitStmt_(const ForNode *op) final {
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
