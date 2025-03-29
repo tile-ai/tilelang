@@ -8,7 +8,6 @@ import tilelang as tl
 import tilelang.testing
 import tilelang.language as T
 from tilelang.autotuner import AutoTuner
-from tilelang.autotuner import AutoTuner
 
 # Configure logger
 logger = logging.getLogger(__name__)
