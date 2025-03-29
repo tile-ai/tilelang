@@ -190,7 +190,6 @@ if __name__ == "__main__":
     M, N, K = args.m, args.n, args.k
     a = torch.randn(M, K).cuda().half()
     b = torch.randn(N, K).cuda().half()
-    configs = []
     use_autotune = args.use_autotune
     with_roller = args.with_roller
     if use_autotune:
