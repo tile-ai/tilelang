@@ -9,6 +9,7 @@ from ..roller import Hint
 from typing import List
 from ..utils import get_roller_hints_from_func
 
+
 @dataclass
 class ConvTemplate(BaseTemplate):
     """
@@ -33,21 +34,21 @@ class ConvTemplate(BaseTemplate):
         with_bias (bool): Whether to add a bias term.
     """
     # Operation-related configuration parameters
-    N :int # The number of input samples processed simultaneously in a batch.
-    C :int # The number of input feature maps.
-    H :int # The height of the input feature maps.
-    W :int # The width of the input feature maps.
-    F :int # The number of filters (kernels) applied, determining output depth.
-    K :int # The spatial dimensions of each convolutional filter.
-    S :int # The step size by which the kernel slides across the input.
-    D :int # The spacing between kernel elements, controlling receptive field expansion.
-    P :int # The number of pixels added to input borders to control output spatial dimensions.
+    N: int  # The number of input samples processed simultaneously in a batch.
+    C: int  # The number of input feature maps.
+    H: int  # The height of the input feature maps.
+    W: int  # The width of the input feature maps.
+    F: int  # The number of filters (kernels) applied, determining output depth.
+    K: int  # The spatial dimensions of each convolutional filter.
+    S: int  # The step size by which the kernel slides across the input.
+    D: int  # The spacing between kernel elements, controlling receptive field expansion.
+    P: int  # The number of pixels added to input borders to control output spatial dimensions.
     in_dtype: str = "float16"  # Data type of input matrices
     out_dtype: str = "float16"  # Data type of output matrix
     accum_dtype: str = "float16"  # Data type for accumulation
     with_bias: bool = False  # Whether to add a bias term
-    
-    def get_hardware_aware_configs(self, arch = None, topk = 10) -> List[Hint]:
+
+    def get_hardware_aware_configs(self, arch=None, topk=10) -> List[Hint]:
         """
         Retrieves optimized hardware-aware configurations.
 
@@ -60,7 +61,7 @@ class ConvTemplate(BaseTemplate):
         """
         roller_hints = get_roller_hints_from_func(self._func, arch=arch, topk=topk, allow_gemv=True)
         return roller_hints
-    
+
     def initialize_function(self) -> None:
         """
         Defines and initializes the convolution computation.
@@ -75,14 +76,15 @@ class ConvTemplate(BaseTemplate):
         N, C, H, W, F, K, S, D, P = self.N, self.C, self.H, self.W, self.F, self.K, self.S, self.D, self.P
         assert (isinstance(N, int) and isinstance(C, int) and isinstance(H, int) and
                 isinstance(W, int) and isinstance(F, int) and isinstance(K, int) and
-                isinstance(S, int) and isinstance(D, int) and isinstance(P, int)), "Only Support Integer Params"
-        assert (N > 0 and C > 0 and H > 0 and W > 0 and F > 0 and K > 0 and 
-                S > 0 and D > 0 and P > 0), "Params should be positive"
-        
+                isinstance(S, int) and isinstance(D, int) and
+                isinstance(P, int)), "Only Support Integer Params"
+        assert (N > 0 and C > 0 and H > 0 and W > 0 and F > 0 and K > 0 and S > 0 and D > 0 and
+                P > 0), "Params should be positive"
+
         # Load configuration parameters
         in_dtype, out_dtype, accum_dtype = self.in_dtype, self.out_dtype, self.accum_dtype
         with_bias = self.with_bias
-        
+
         # Calculate kernel dimensions and output dimensions
         KH, KW = K, K
         OH = (H + 2 * P - D * (KH - 1) - 1) // S + 1
@@ -120,16 +122,14 @@ class ConvTemplate(BaseTemplate):
             # Calculate input positions considering stride and dilation
             h_in = h * S - P + kh * D
             w_in = w * S - P + kw * D
-            
+
             # Check if the input position is within bounds (implicit padding with 0)
             return te.sum(
                 te.if_then_else(
                     te.all(h_in >= 0, h_in < H, w_in >= 0, w_in < W),
                     A[n, h_in, w_in, c].astype(accum_dtype) * B[kh, kw, c, f].astype(accum_dtype),
-                    tir.const(0, accum_dtype)
-                ),
-                axis=[kh, kw, c]
-            )
+                    tir.const(0, accum_dtype)),
+                axis=[kh, kw, c])
 
         # Compute convolution result
         C = te.compute(
@@ -157,7 +157,7 @@ class ConvTemplate(BaseTemplate):
         # Set function arguments (including bias if used)
         args = [A, B, Bias, C] if self.with_bias else [A, B, C]
         self.set_function(te.create_prim_func(args))
-    
+
     def params_as_dict(self):
         """
         Returns the template parameters as a dictionary.

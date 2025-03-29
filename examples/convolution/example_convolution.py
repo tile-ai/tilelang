@@ -38,7 +38,7 @@ def get_configs(N, C, H, W, F, K, S, D, P, with_roller=False):
             out_dtype="float16",
             accum_dtype="float",
         ).with_arch(arch)
-        
+
         func = carve_template.equivalent_function()
         assert func is not None, "Function is None"
         roller_hints = carve_template.recommend_hints(topk=topk)
@@ -152,13 +152,14 @@ def get_best_config(N, C, H, W, F, K, S, D, P, with_roller):
         return main
 
     autotuner = AutoTuner.from_kernel(
-        kernel=kernel, configs=get_configs(N, C, H, W, F, K, S, D, P, with_roller)).set_compile_args(
-            out_idx=[2],
-            supply_type=tilelang.TensorSupplyType.Integer,
-            ref_prog=ref_program(S, P, D),
-            skip_check=False,
-            target="auto",
-        )
+        kernel=kernel, configs=get_configs(N, C, H, W, F, K, S, D, P,
+                                           with_roller)).set_compile_args(
+                                               out_idx=[2],
+                                               supply_type=tilelang.TensorSupplyType.Integer,
+                                               ref_prog=ref_program(S, P, D),
+                                               skip_check=False,
+                                               target="auto",
+                                           )
     return autotuner.run(warmup=10, rep=10)
 
 
