@@ -118,6 +118,8 @@ template <> TL_DEVICE void AtomicAdd(half_t *address, float val) {
 }
 
 // AtomicAdd Functions for BFLOAT16
+#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 750))
+// AtomicAdd Functions for BFLOAT16
 template <> TL_DEVICE void AtomicAdd(bfloat16_t *address, bfloat16_t *val) {
   atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address),
             static_cast<__nv_bfloat16>(*val));
@@ -128,13 +130,15 @@ template <> TL_DEVICE void AtomicAdd(bfloat16_t *address, float val) {
   atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address), __float2bfloat16(val));
 }
 
+#endif
+
 // AtomicAdd Functions for FP16x2
 TL_DEVICE void AtomicAddx2(half_t *address, half_t *val) {
   atomicAdd(reinterpret_cast<half2 *>(address),
             static_cast<half2>(*reinterpret_cast<half2 *>(val)));
 }
 
-#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 750))
+#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 750))
 
 // AtomicAdd Functions for BFLOAT16
 template <> TL_DEVICE void AtomicAdd(bfloat16_t *address, bfloat16_t val) {
