@@ -62,7 +62,7 @@ def ref_program(A, B, BlockMask, block_M, block_N, block_K):
     ref_c = torch.zeros((M, N), dtype=torch.float16, device=A.device)
     for i in range(M // block_M):
         for j in range(N // block_N):
-            accu = torch.zeros((block_M, block_N), dtype=torch.float32, device=a.device)
+            accu = torch.zeros((block_M, block_N), dtype=torch.float32, device=A.device)
             for k in range(K // block_K):
                 if BlockMask[i, j, k]:
                     accu += (
