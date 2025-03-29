@@ -273,3 +273,15 @@ def LowerDeviceStorageAccessInfo():
     Run this pass after all storage access analysis finish.
     """
     return _ffi_api.LowerDeviceStorageAccessInfo()  # type: ignore
+
+
+def LoopVectorizeDynamic():
+    """Try to vectorize loop with dynamic shape.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    ----
+    """
+    return _ffi_api.LoopVectorizeDynamic()  # type: ignore
