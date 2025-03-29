@@ -89,7 +89,7 @@ def supply_program(params: List[KernelParam]):
             block_mask = torch.zeros(p.shape, dtype=torch.bool, device=torch.cuda.current_device())
             block_mask[:, :, :] = torch.rand(p.shape) > sparsity
             input_tensors.append(block_mask)
-    
+
     return input_tensors
 
 
@@ -136,8 +136,7 @@ def get_best_config(M, N, K):
         # different configurations. Reusing cached tensors from a previous
         # configuration would lead to shape mismatches.
         cache_input_tensors=False,
-
-        target="auto", # Automatically detect target
+        target="auto",  # Automatically detect target
     )
     # Run the tuning process
     return autotuner.run(warmup=3, rep=20)
@@ -186,7 +185,6 @@ def blocksparse_matmul(M,
 
 
 if __name__ == "__main__":
-    
 
     # Initialize input matrices A and B on the GPU with half precision
     a = torch.randn(M, K).cuda().half()
@@ -213,8 +211,8 @@ if __name__ == "__main__":
         print(f"Best Kernel Latency: {best_latency:.6f} ms")
         print(f"Reference Latency: {ref_latency:.6f} ms")
     else:
-        func = blocksparse_matmul(M, N, K, DEFAULT_BLOCK_M, DEFAULT_BLOCK_N,
-                                  DEFAULT_BLOCK_K, DEFAULT_NUM_STAGES, DEFAULT_THREAD_NUM,
+        func = blocksparse_matmul(M, N, K, DEFAULT_BLOCK_M, DEFAULT_BLOCK_N, DEFAULT_BLOCK_K,
+                                  DEFAULT_NUM_STAGES, DEFAULT_THREAD_NUM,
                                   DEFAULT_ENABLE_RASTERIZATION)
         kernel = tilelang.compile(func, out_idx=-1)
         block_M, block_N, block_K = DEFAULT_BLOCK_M, DEFAULT_BLOCK_N, DEFAULT_BLOCK_K
