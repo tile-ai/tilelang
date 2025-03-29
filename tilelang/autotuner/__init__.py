@@ -318,6 +318,13 @@ class AutoTuner:
             tqdm.write(f"Tuned Latency {latency} with config {config} at index {i}")
 
         pool.shutdown()
+
+        if best_jit_context is None:
+            error_msg = ("Auto-tuning failed: No configuration successfully "
+                         "compiled and passed benchmarking/validation.")
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
         return AutotuneResult(
             latency=best_latency,
             config=best_config,
