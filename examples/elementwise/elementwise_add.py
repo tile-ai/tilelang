@@ -44,5 +44,5 @@ if __name__ == "__main__":
     print("All checks pass.")
     latency = profiler.do_bench(ref_program, warmup=500)
     print("Ref: {:.2f} ms".format(latency))
-    latency = profiler.do_bench(profiler.mod, warmup=500)
+    latency = profiler.do_bench(warmup=500)
     print("Tile-lang: {:.2f} ms".format(latency))
