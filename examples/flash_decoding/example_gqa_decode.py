@@ -441,8 +441,7 @@ if __name__ == "__main__":
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:
-        best_result = flashattn(
-            batch, heads, groups, kv_seqlen, dim, tune=args.tune)
+        best_result = flashattn(batch, heads, groups, kv_seqlen, dim, tune=args.tune)
         best_latency = best_result.latency
         best_config = best_result.config
         ref_latency = best_result.ref_latency
