@@ -275,55 +275,54 @@ private:
   Stmt VisitStmt_(const ForNode *node) final {
     inner_for_ = node;
     auto ret = StmtExprMutator::VisitStmt_(node);
-    if (inner_for_ == node) {
-      For fnode = ret.as<For>().value();
-      auto old_var = fnode->loop_var;
-      auto extent_ptr = as_const_int(fnode->extent);
-      int extent = *extent_ptr;
-      if (dynamic_) { // only vectorize with dynamic
-        ICHECK(extent_ptr) << fnode->extent;
-        ICHECK(extent % vector_size_ == 0)
-            << "extent: " << extent << " vector_size_: " << vector_size_;
-        ICHECK(is_zero(fnode->min));
-        Var inner_var = Var("vec");
-        Var outer_var = Var(old_var->name_hint);
-        Map<Var, PrimExpr> vmap;
-        vmap.Set(fnode->loop_var, outer_var * vector_size_ + inner_var);
-        Stmt body = Substitute(fnode->body, vmap);
-
-        VectorizedConditionExtracter extracter;
-        std::vector<PrimExpr> conditions = extracter.GetConditions(body);
-
-        // Set vectorize variable to the max value of the extent (i.e.
-        // vector_size_ - 1)
-        PrimExpr condition = conditions[0];
-        for (int i = 1; i < conditions.size(); ++i) {
-          condition = condition && conditions[i];
-        }
-
-        // add condition ifthenelse here
-        Map<Var, PrimExpr> vmap_condition;
-        vmap_condition.Set(inner_var, vector_size_ - 1);
-        PrimExpr condition_bound = Substitute(condition, vmap_condition);
-
-        // modify body in the vectorized loop
-        VectorizedBodyMutator mutator(inner_var, vector_size_, conditions);
-        Stmt vectorize_body = mutator(body);
-
-        For vectorize_for = For(inner_var, 0, vector_size_,
-                                ForKind::kVectorized, vectorize_body);
-        For serial_for =
-            For(inner_var, 0, vector_size_, ForKind::kSerial, body);
-        body = IfThenElse(condition_bound, vectorize_for, serial_for);
-        body = For(outer_var, 0, extent / vector_size_, fnode->kind, body,
-                   fnode->thread_binding, fnode->annotations, fnode->span);
-        return body;
-      } else {
-        return fnode;
-      }
-    } else {
+    if (inner_for_ != node) {
       return ret;
     }
+    For fnode = ret.as<For>().value();
+    auto old_var = fnode->loop_var;
+    if (!fnode->extent.as<IntImmNode>()) {
+      return ret;
+    }
+    int extent = Downcast<IntImm>(fnode->extent)->value;
+
+    if (!dynamic_) {
+      return fnode;
+    }
+    ICHECK(extent % vector_size_ == 0)
+        << "extent: " << extent << " vector_size_: " << vector_size_;
+    ICHECK(is_zero(fnode->min));
+    Var inner_var = Var("vec");
+    Var outer_var = Var(old_var->name_hint);
+    Map<Var, PrimExpr> vmap;
+    vmap.Set(fnode->loop_var, outer_var * vector_size_ + inner_var);
+    Stmt body = Substitute(fnode->body, vmap);
+
+    VectorizedConditionExtracter extracter;
+    std::vector<PrimExpr> conditions = extracter.GetConditions(body);
+
+    // Set vectorize variable to the max value of the extent (i.e.
+    // vector_size_ - 1)
+    PrimExpr condition = conditions[0];
+    for (int i = 1; i < conditions.size(); ++i) {
+      condition = condition && conditions[i];
+    }
+
+    // add condition ifthenelse here
+    Map<Var, PrimExpr> vmap_condition;
+    vmap_condition.Set(inner_var, vector_size_ - 1);
+    PrimExpr condition_bound = Substitute(condition, vmap_condition);
+
+    // modify body in the vectorized loop
+    VectorizedBodyMutator mutator(inner_var, vector_size_, conditions);
+    Stmt vectorize_body = mutator(body);
+
+    For vectorize_for =
+        For(inner_var, 0, vector_size_, ForKind::kVectorized, vectorize_body);
+    For serial_for = For(inner_var, 0, vector_size_, ForKind::kSerial, body);
+    body = IfThenElse(condition_bound, vectorize_for, serial_for);
+    body = For(outer_var, 0, extent / vector_size_, fnode->kind, body,
+               fnode->thread_binding, fnode->annotations, fnode->span);
+    return body;
   }
 
   const ForNode *inner_for_;
@@ -344,6 +343,7 @@ class LoopVectorizerDynamic : public IRMutatorWithAnalyzer {
 public:
   static Stmt Substitute(Stmt stmt) {
     arith::Analyzer analyzer;
+    LOG(INFO) << "LoopVectorizerDynamic Substitute";
     LoopVectorizerDynamic substituter(&analyzer);
     stmt = substituter.VisitStmt(stmt);
     return stmt;
