@@ -22,16 +22,13 @@ jobs:
         run: |
           chmod +x ./maint/scripts/build_docs.sh
           ./maint/scripts/build_docs.sh
-      - name: Configure git
-        run: |
-          git config --local user.name "github-actions[bot]"
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
       - name: Push to another repo
         env:
           TARGET_REPO: ${{ secrets.TARGET_REPO }}
           TARGET_TOKEN: ${{ secrets.TARGET_TOKEN }}
         run: |
-          git config --global url."https://$TARGET_TOKEN@github.com".insteadOf "https://github.com"
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git clone https://github.com/${TARGET_REPO}.git target_repo
           cd target_repo
           git checkout main
@@ -41,7 +38,7 @@ jobs:
           if [[ -n "$(git status --porcelain)" ]]; then
           # If there are changes, commit and push
             git commit -m "Update docs"
-            git push https://github.com/${TARGET_REPO}.git main
+            git push https://github-actions[bot]:$TARGET_TOKEN@github.com/${TARGET_REPO}.git main
           else
             echo "No changes detected, skipping commit and push."
           fi
