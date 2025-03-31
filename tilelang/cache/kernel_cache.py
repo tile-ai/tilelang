@@ -49,7 +49,7 @@ class KernelCache:
         """
         if cls._instance is None:
             with cls._lock:
-                if cls._instance is None:   # Double-checked locking
+                if cls._instance is None:  # Double-checked locking
                     instance = super().__new__(cls)
                     instance.cache_dir = cache_dir
                     os.makedirs(instance.cache_dir, exist_ok=True)
