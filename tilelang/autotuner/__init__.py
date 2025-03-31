@@ -10,7 +10,7 @@ import tilelang
 from tilelang import tvm as tvm
 import inspect
 from functools import wraps, partial
-from typing import Callable, List, Literal, Any
+from typing import Callable, List, Literal, Any, Optional
 from tqdm import tqdm
 import logging
 from dataclasses import dataclass
@@ -342,7 +342,7 @@ class AutoTuner:
         return self.run()
 
 
-def autotune(configs: Any, warmup: int = 25, rep: int = 100, timeout: int = 100) -> Callable:
+def autotune(configs: Any, warmup: int = 25, rep: int = 100, timeout: int = 100) -> AutotuneResult:
     """Decorator for auto-tuning tilelang programs.
 
     Args:
@@ -364,7 +364,7 @@ def autotune(configs: Any, warmup: int = 25, rep: int = 100, timeout: int = 100)
     return decorator
 
 
-def jit(out_idx: List[int],
+def jit(out_idx: Optional[List[int]] = None,
         supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto,
         ref_prog: Callable = None,
         supply_prog: Callable = None,

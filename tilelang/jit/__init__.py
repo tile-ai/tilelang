@@ -111,7 +111,7 @@ def jit(
 
 def compile(
     func: PrimFunc = None,
-    out_idx: Union[List[int], int] = None,
+    out_idx: Union[List[int], int, None] = None,
     execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
     target: Union[str, Target] = "auto",
     target_host: Union[str, Target] = None,
