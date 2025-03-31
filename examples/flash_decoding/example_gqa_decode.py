@@ -209,8 +209,7 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
                 scale_local = T.alloc_local([1], accum_dtype)
 
                 T.annotate_layout({
-                    lse_max_local:
-                        T.Fragment(lse_max_local.shape, forward_thread_fn=lambda i: i),
+                    lse_max_local: T.Fragment(lse_max_local.shape, forward_thread_fn=lambda i: i),
                 })
 
                 # T.clear(lse_logsum_local)
@@ -423,7 +422,7 @@ if __name__ == "__main__":
     total_flops = qk_flops + pv_flops
 
     if (not args.tune):
-        
+
         def get_heuristic_config() -> dict:
             # Get CUDA device properties
             if not torch.cuda.is_available():
@@ -434,7 +433,7 @@ if __name__ == "__main__":
             print(f"CUDA device capability: {sm_version}")
             if sm_version == 89:
                 return {
-                    "block_N": 128, 
+                    "block_N": 128,
                     "block_H": 64,
                     "num_split": 8,
                     "num_stages": 0,
@@ -442,15 +441,15 @@ if __name__ == "__main__":
                 }
             else:
                 return {
-                    "block_N": 128, 
+                    "block_N": 128,
                     "block_H": 64,
                     "num_split": 8,
                     "num_stages": 2,
                     "threads": 128
                 }
+
         config = get_heuristic_config()
-        program = flashattn(
-            batch, heads, groups, kv_seqlen, dim, tune=args.tune)(**config)
+        program = flashattn(batch, heads, groups, kv_seqlen, dim, tune=args.tune)(**config)
         kernel = tilelang.compile(program, out_idx=[6])
         profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
         profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
