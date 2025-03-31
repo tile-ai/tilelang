@@ -340,7 +340,6 @@ class LoopVectorizerDynamic : public IRMutatorWithAnalyzer {
 public:
   static Stmt Substitute(Stmt stmt) {
     arith::Analyzer analyzer;
-    LOG(INFO) << "LoopVectorizerDynamic Substitute";
     LoopVectorizerDynamic substituter(&analyzer);
     stmt = substituter.VisitStmt(stmt);
     return stmt;

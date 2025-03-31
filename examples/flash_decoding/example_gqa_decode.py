@@ -203,34 +203,29 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
                 po_local = T.alloc_fragment([dim], dtype)
                 o_accum_local = T.alloc_fragment([dim], accum_dtype)
                 lse_local = T.alloc_fragment([num_split, 128], dtype)
-                lse_local_split = T.alloc_local([1], accum_dtype)
+                lse_local_split = T.alloc_var(accum_dtype)
                 lse_logsum_local = T.alloc_local([1], accum_dtype)
                 lse_max_local = T.alloc_fragment([128], accum_dtype)
                 scale_local = T.alloc_local([1], accum_dtype)
 
                 T.annotate_layout({
-                    lse_logsum_local:
-                        T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
-                    lse_max_local:
-                        T.Fragment(lse_max_local.shape, forward_thread_fn=lambda i: i),
-                    lse_local:
-                        T.Fragment(lse_local.shape, forward_thread_fn=lambda i, j: j),
+                    lse_max_local: T.Fragment(lse_max_local.shape, forward_thread_fn=lambda i: i),
                 })
 
-                T.clear(lse_logsum_local)
+                # T.clear(lse_logsum_local)
                 T.clear(o_accum_local)
                 for k in T.Parallel(num_split):
                     lse_local[k, 0] = glse[bz, by, k]
                 T.reduce_max(lse_local, lse_max_local, dim=0, clear=True)
                 for k in T.Pipelined(num_split, num_stages=1):
-                    lse_local_split[0] = glse[bz, by, k]
-                    lse_logsum_local[0] += T.exp2(lse_local_split[0] - lse_max_local[0])
+                    lse_local_split = glse[bz, by, k]
+                    lse_logsum_local[0] += T.exp2(lse_local_split - lse_max_local[0])
                 lse_logsum_local[0] = T.log2(lse_logsum_local[0]) + lse_max_local[0]
                 for k in T.serial(num_split):
                     for i in T.Parallel(dim):
                         po_local[i] = Output_partial[bz, by, k, i]
-                    lse_local_split[0] = glse[bz, by, k]
-                    scale_local[0] = T.exp2(lse_local_split[0] - lse_logsum_local[0])
+                    lse_local_split = glse[bz, by, k]
+                    scale_local[0] = T.exp2(lse_local_split - lse_logsum_local[0])
                     for i in T.Parallel(dim):
                         o_accum_local[i] += po_local[i] * scale_local[0]
                 for i in T.Parallel(dim):
@@ -427,9 +422,34 @@ if __name__ == "__main__":
     total_flops = qk_flops + pv_flops
 
     if (not args.tune):
-        program = flashattn(
-            batch, heads, groups, kv_seqlen, dim, tune=args.tune)(
-                block_N=128, block_H=64, num_split=8, num_stages=2, threads=128)
+
+        def get_heuristic_config() -> dict:
+            # Get CUDA device properties
+            if not torch.cuda.is_available():
+                raise RuntimeError("CUDA is not available")
+            device = torch.cuda.current_device()
+            sm_major, sm_minor = torch.cuda.get_device_capability(device)
+            sm_version = sm_major * 10 + sm_minor
+            print(f"CUDA device capability: {sm_version}")
+            if sm_version == 89:
+                return {
+                    "block_N": 128,
+                    "block_H": 64,
+                    "num_split": 8,
+                    "num_stages": 0,
+                    "threads": 128
+                }
+            else:
+                return {
+                    "block_N": 128,
+                    "block_H": 64,
+                    "num_split": 8,
+                    "num_stages": 2,
+                    "threads": 128
+                }
+
+        config = get_heuristic_config()
+        program = flashattn(batch, heads, groups, kv_seqlen, dim, tune=args.tune)(**config)
         kernel = tilelang.compile(program, out_idx=[6])
         profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
         profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
@@ -437,7 +457,7 @@ if __name__ == "__main__":
         latency = profiler.do_bench(ref_program, warmup=500)
         print("Ref: {:.2f} ms".format(latency))
         print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-        latency = profiler.do_bench(kernel.rt_module, warmup=500, profiler="auto")
+        latency = profiler.do_bench(warmup=500)
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:
