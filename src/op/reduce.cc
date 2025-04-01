@@ -161,7 +161,9 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         continue;
       int reducing_threads = (*extent) * (*scale);
       std::stringstream ss;
-      if (Downcast<String>(T.target->attrs["arch"]) == "sm_90") {
+
+      bool has_arch = T.target->attrs.count("arch") > 0;
+      if (has_arch && Downcast<String>(T.target->attrs["arch"]) == "sm_90") {
         ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
            << reducing_threads << ", " << (*scale) << ">::run_hopper";
       } else {
