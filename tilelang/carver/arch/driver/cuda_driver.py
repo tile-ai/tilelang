@@ -5,6 +5,7 @@ import ctypes
 import sys
 from typing import Optional
 
+
 class cudaDeviceProp(ctypes.Structure):
     _fields_ = [
         ("name", ctypes.c_char * 256),
@@ -77,9 +78,10 @@ class cudaDeviceProp(ctypes.Structure):
         ("reserved1", ctypes.c_int * 1),
         ("reserved", ctypes.c_int * 60)
     ]
-    
+
+
 def get_cuda_device_properties(device_id: int = 0) -> Optional[cudaDeviceProp]:
-    
+
     if sys.platform == "win32":
         libcudart = ctypes.windll.LoadLibrary("cudart64_110.dll")
     else:
@@ -95,12 +97,14 @@ def get_cuda_device_properties(device_id: int = 0) -> Optional[cudaDeviceProp]:
     else:
         return None
 
+
 def get_device_name(device_id: int = 0) -> Optional[str]:
     prop = get_cuda_device_properties(device_id)
     if prop:
         return prop.name.decode()
     else:
         raise RuntimeError("Failed to get device properties.")
+
 
 def get_shared_memory_per_block(device_id: int = 0, format: str = "bytes") -> Optional[int]:
     assert format in ["bytes", "kb", "mb"], "Invalid format. Must be one of: bytes, kb, mb"
@@ -119,6 +123,7 @@ def get_shared_memory_per_block(device_id: int = 0, format: str = "bytes") -> Op
     else:
         raise RuntimeError("Failed to get device properties.")
 
+
 def get_device_attribute(attr: int, device_id: int = 0) -> int:
     try:
         if sys.platform == "win32":
@@ -130,15 +135,16 @@ def get_device_attribute(attr: int, device_id: int = 0) -> int:
         cudaDeviceGetAttribute = libcudart.cudaDeviceGetAttribute
         cudaDeviceGetAttribute.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int]
         cudaDeviceGetAttribute.restype = ctypes.c_int
-        
+
         ret = cudaDeviceGetAttribute(ctypes.byref(value), attr, device_id)
         if ret != 0:
             raise RuntimeError(f"cudaDeviceGetAttribute failed with error {ret}")
-            
+
         return value.value
     except Exception as e:
         print(f"Error getting device attribute: {str(e)}")
         return None
+
 
 def get_max_dynamic_shared_size_bytes(device_id: int = 0, format: str = "bytes") -> Optional[int]:
     """获取设备支持的最大动态共享内存大小"""

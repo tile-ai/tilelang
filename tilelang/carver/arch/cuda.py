@@ -7,6 +7,7 @@ from .arch_base import TileDevice
 from typing import List, Union
 from .driver import cuda_driver
 
+
 def check_sm_version(arch: str) -> int:
     sm_version = arch.replace("sm_", "")
     return int(sm_version) if sm_version.isdigit() else -1
