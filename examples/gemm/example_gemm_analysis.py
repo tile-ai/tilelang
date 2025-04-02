@@ -1,12 +1,10 @@
-import numpy as np
-from dataclasses import dataclass
 import tilelang.language as T
 from tilelang.tools import Analyzer
 from tilelang.carver.arch import CUDA
-from tvm.tir.stmt_functor import ir_transform
-
 
 M = N = K = 1024
+
+
 def kernel(
     block_M=None,
     block_N=None,
@@ -24,8 +22,7 @@ def kernel(
             B: T.Tensor((N, K), dtype),
             C: T.Tensor((M, N), dtype),
     ):
-        with T.Kernel(
-                T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_N, block_K), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -45,6 +42,7 @@ def kernel(
             T.copy(C_shared, C[by * block_M, bx * block_N])
 
     return main
+
 
 my_func = kernel(128, 128, 32, 3, 128, True)
 cuda_device = CUDA("cuda")
