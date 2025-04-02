@@ -331,10 +331,14 @@ class AutoTuner:
             ref_latency=ref_latency,
             libcode=best_jit_context.profiler.func.lib_code,
             func=self.fn(*best_config),
-            kernel=best_jit_context.profiler.func
-        )
+            kernel=best_jit_context.profiler.func)
 
     def __call__(self) -> Any:
+        """Make the AutoTuner callable, running the auto-tuning process.
+
+        Returns:
+            AutotuneResult: Results of the auto-tuning process.
+        """
         return self.run()
 
 
