@@ -98,6 +98,7 @@ def get_cuda_device_properties(device_id: int = 0) -> Optional[cudaDeviceProp]:
         raise RuntimeError(f"cudaGetDeviceProperties failed with error {ret}")
 
 
+
 def get_device_name(device_id: int = 0) -> Optional[str]:
     prop = get_cuda_device_properties(device_id)
     if prop:
