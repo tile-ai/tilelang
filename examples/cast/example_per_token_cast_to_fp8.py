@@ -11,14 +11,13 @@ tilelang.disable_cache()
 
 def per_token_cast_to_fp8(M, N, blk_m):
     dtype = "float"
-    assert blk_m == 1, "blk_m must be 1"
     group_size = 128
     fp8_min = -448.0
     fp8_max = 448.0
 
     @T.prim_func
     def main(X: T.Tensor((M, N), dtype), X_fp8: T.Tensor((M, N), "e4m3_float8"), X_amax: T.Tensor(
-        (M, 1), dtype)):
+        (M, T.ceildiv(N, group_size)), dtype)):
         with T.Kernel(T.ceildiv(M, blk_m), T.ceildiv(N, group_size), threads=128) as (bx, by):
             row = bx
             row_g_id = by
@@ -28,15 +27,21 @@ def per_token_cast_to_fp8(M, N, blk_m):
             y_q_local = T.alloc_fragment((blk_m, group_size), dtype)
             y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), "e4m3_float8")
 
-            T.copy(X[row * blk_m, row_g_id * group_size:(row_g_id + 1) * group_size], y_local)
+            T.annotate_layout({
+                y_local: T.Fragment(y_local.shape, forward_thread_fn=lambda i, j: (i // (blk_m // 4)) * 32 + j % 32),
+            })
+
+            T.copy(X[row * blk_m:(row + 1) * blk_m, row_g_id * group_size:(row_g_id + 1) * group_size], y_local)
             T.reduce_absmax(y_local, y_amax_local, dim=1)
-            y_amax_local[0] = T.max(y_amax_local[0], 1e-4)
-            y_s_local[0] = y_amax_local[0] / fp8_max
-            for i in T.Parallel(group_size):
-                y_q_local[0, i] = T.clamp(y_local[0, i] / y_s_local[0], fp8_min, fp8_max)
+            for i in T.Parallel(blk_m):
+                y_amax_local[i] = T.max(y_amax_local[i], 1e-4)
+                y_s_local[i] = y_amax_local[i] / fp8_max
+            for i, j in T.Parallel(blk_m, group_size):
+                y_q_local[i, j] = T.clamp(y_local[i, j] / y_s_local[i], fp8_min, fp8_max)
             T.copy(y_q_local, y_q_local_fp8)
-            X_amax[row * blk_m, 0] = y_s_local[0]
-            T.copy(y_q_local_fp8, X_fp8[row * blk_m,
+            for i in T.Parallel(blk_m):
+                X_amax[row * blk_m + i, row_g_id] = y_s_local[i]
+            T.copy(y_q_local_fp8, X_fp8[row * blk_m:(row + 1) * blk_m,
                                         row_g_id * group_size:(row_g_id + 1) * group_size])
 
     return main
@@ -70,7 +75,7 @@ def ref_program(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
 
 if __name__ == "__main__":
-    M, N, blk_m = 128, 8192, 1
+    M, N, blk_m = 8192, 8192, 8
     program = per_token_cast_to_fp8(M, N, blk_m)
     kernel = tilelang.compile(
         program,
@@ -79,7 +84,7 @@ if __name__ == "__main__":
         execution_backend="cython",
         pass_configs={"tl.disable_tma_lower": True})
     print(kernel.get_kernel_source())
-    profiler = kernel.get_profiler()
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
 
     x = torch.randn(M, N, device="cuda", dtype=torch.float32)
 
@@ -98,7 +103,7 @@ if __name__ == "__main__":
 
     latency = profiler.do_bench(ref_program, warmup=500)
     print("Ref: {:.2f} ms".format(latency))
-    latency = profiler.do_bench(warmup=500)
+    latency = profiler.do_bench()
     print("Tile-lang: {:.2f} ms".format(latency))
 
     from tilelang.profiler import do_bench
@@ -106,11 +111,9 @@ if __name__ == "__main__":
 
     def run_triton():
         x_fp8_triton_, x_amax_triton_ = per_token_group_quant_fp8(
-            x, 128, 1e-4, dtype=torch.float8_e4m3fn)
+            x, 128, 1e-4, dtype=torch.float8_e4m3fn, column_major_scales=False)
         return x_fp8_triton_, x_amax_triton_
 
     x_fp8_triton, x_amax_triton = run_triton()
-    t = do_bench(run_triton)
-
-    latency = do_bench(run_triton, warmup=500)
+    latency = do_bench(run_triton)
     print("Triton: {:.2f} ms".format(latency))
