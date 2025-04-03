@@ -30,6 +30,8 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, BufferMap vmap) {
     type = ReduceType::kSum;
   else if (reduce_type == "abssum")
     type = ReduceType::kAbsSum;
+  else if (reduce_type == "absmax")
+    type = ReduceType::kAbsMax;
   else if (reduce_type == "max")
     type = ReduceType::kMax;
   else if (reduce_type == "min")
@@ -49,6 +51,8 @@ PrimExpr ReduceOp::MakeInitValue() const {
     return make_const(dst->dtype, -INFINITY);
   case ReduceType::kMin:
     return make_const(dst->dtype, INFINITY);
+  case ReduceType::kAbsMax:
+    return make_const(dst->dtype, 0);
   default:
     ICHECK(0);
   }
@@ -68,6 +72,8 @@ PrimExpr ReduceOp::MakeReduce(const PrimExpr &a, const PrimExpr &b) const {
     return Max(lhs, rhs);
   case ReduceType::kMin:
     return Min(lhs, rhs);
+  case ReduceType::kAbsMax:
+    return Max(Max(lhs, rhs), -Min(lhs, rhs));
   default:
     ICHECK(0);
     return PrimExpr(0);
@@ -84,6 +90,8 @@ std::string ReduceOp::MakeCodegenReducer() const {
     return "tl::MaxOp";
   case ReduceType::kMin:
     return "tl::MinOp";
+  case ReduceType::kAbsMax:
+    return "tl::MaxOp";
   default:
     ICHECK(0);
     return "";
@@ -161,7 +169,9 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
         continue;
       int reducing_threads = (*extent) * (*scale);
       std::stringstream ss;
-      if (Downcast<String>(T.target->attrs["arch"]) == "sm_90") {
+
+      bool has_arch = T.target->attrs.count("arch") > 0;
+      if (has_arch && Downcast<String>(T.target->attrs["arch"]) == "sm_90") {
         ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
            << reducing_threads << ", " << (*scale) << ">::run_hopper";
       } else {

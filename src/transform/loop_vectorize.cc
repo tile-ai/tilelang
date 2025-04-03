@@ -175,31 +175,6 @@ private:
   PrimExpr condition_;
 };
 
-class VectorizeDynamicCallRemover : public StmtExprMutator {
-public:
-  VectorizeDynamicCallRemover(Var inner_var, int vector_size)
-      : inner_var_(inner_var), vector_size_(vector_size) {}
-
-private:
-  PrimExpr VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(builtin::if_then_else())) {
-      PrimExpr cond = this->VisitExpr(op->args[0]);
-      Map<Var, PrimExpr> vmap;
-      // Currently remove upper bound check
-      vmap.Set(inner_var_, 0);
-      cond = Substitute(cond, vmap);
-      Array<PrimExpr> new_args{cond, op->args[1], op->args[2]};
-      return Call(op->dtype, op->op, new_args, op->span);
-    } else {
-      // TODO: For other calls
-      return GetRef<PrimExpr>(op);
-    }
-  }
-
-  Var inner_var_;
-  int vector_size_;
-};
-
 class VectorizeRewriter : public StmtExprMutator {
 public:
   VectorizeRewriter(VectorizePlanResult plan)
@@ -235,27 +210,7 @@ private:
           return body;
         }
       } else {
-        Var inner_var = Var("vec");
-        Var outer_var = Var(old_var->name_hint);
-        Map<Var, PrimExpr> vmap;
-        vmap.Set(fnode->loop_var, outer_var * vector_size_ + inner_var);
-        Stmt body = Substitute(fnode->body, vmap);
-        // add condition ifthenelse here
-        Map<Var, PrimExpr> vmap_condition;
-        vmap_condition.Set(fnode->loop_var, outer_var * vector_size_);
-        PrimExpr condition = Substitute(condition_, vmap_condition);
-
-        VectorizeDynamicCallRemover remover(inner_var, vector_size_);
-        body = remover(body);
-
-        For vectorize_for =
-            For(inner_var, 0, vector_size_, ForKind::kVectorized, body);
-        For serial_for =
-            For(inner_var, 0, vector_size_, ForKind::kSerial, body);
-        body = IfThenElse(condition, vectorize_for, serial_for);
-        body = For(outer_var, 0, extent / vector_size_, fnode->kind, body,
-                   fnode->thread_binding, fnode->annotations, fnode->span);
-        return body;
+        return fnode;
       }
     } else {
       return ret;

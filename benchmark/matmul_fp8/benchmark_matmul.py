@@ -30,7 +30,7 @@ def ref_program(A, B):
     np.ndarray
         The result of A @ B.T, shape (M, N).
     """
-    return A @ B.T
+    return A.float() @ B.T.float()
 
 
 def get_configs(M, N, K, with_roller=False):
@@ -93,7 +93,7 @@ def get_configs(M, N, K, with_roller=False):
 
         block_M = [64, 128, 256]
         block_N = [64, 128, 256]
-        block_K = [32, 64]
+        block_K = [64, 128]
         num_stages = [0, 1, 2, 3]
         thread_num = [128, 256]
         policy = [T.GemmWarpPolicy.Square]
@@ -206,7 +206,7 @@ def matmul(M, N, K, with_roller):
         """
         # Use half-precision for input data to reduce memory bandwidth,
         # accumulate in float for better numerical accuracy
-        dtype = "float16"
+        dtype = "e4m3_float8"
         accum_dtype = "float"
 
         @T.prim_func

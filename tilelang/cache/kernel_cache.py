@@ -33,40 +33,62 @@ class KernelCache:
         kernel_lib.so: The compiled kernel library
         params.pkl: The compiled kernel parameters
     """
+
     _instance = None  # For implementing singleton pattern
     _lock = threading.Lock()  # For thread safety
+    _memory_cache = {}  # In-memory cache dictionary
 
     def __new__(cls, cache_dir=TILELANG_CACHE_DIR):
-        """Singleton pattern to ensure only one KernelCache instance"""
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super(KernelCache, cls).__new__(cls)
-                cls._instance.cache_dir = cache_dir  # Cache directory
-                os.makedirs(cls._instance.cache_dir, exist_ok=True)  # Ensure cache directory exists
-                cls._instance.logger = logging.getLogger(__name__)  # Initialize logger
-                cls._instance.logger.setLevel(
-                    logging.ERROR)  # Set default logging level to ERROR, can be adjusted
+        """
+        Implements singleton pattern for KernelCache class.
+
+        Args:
+            cache_dir (str): Directory path for storing kernel cache. Defaults to TILELANG_CACHE_DIR.
+
+        Returns:
+            KernelCache: The singleton instance of KernelCache.
+        """
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:  # Double-checked locking
+                    instance = super().__new__(cls)
+                    instance.cache_dir = cache_dir
+                    os.makedirs(instance.cache_dir, exist_ok=True)
+
+                    instance.logger = logging.getLogger(__name__)
+                    instance.logger.setLevel(logging.ERROR)
+                    instance._memory_cache = {}  # Initialize memory cache
+                    cls._instance = instance
         return cls._instance
 
-    def _generate_key(self, func: Callable, out_idx: List[int],
-                      execution_backend: Literal["dlpack", "ctypes", "cython"], args,
-                      target: Union[str, "Target"], target_host: Union[str, "Target"]) -> str:
+    def _generate_key(
+        self,
+        func: Callable,
+        out_idx: List[int],
+        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        args=None,
+        target: Union[str, Target] = "auto",
+        target_host: Union[str, Target] = None,
+    ) -> str:
         """
-        Generates a unique cache key.
-        """
-<<<<<<< HEAD
-        # Get the source code of the function
-        func_source = str(
-            func.body if isinstance(func, PrimFunc) else inspect.getsource(func)).encode()
+        Generates a unique hash key for caching compiled kernels.
 
-=======
+        Args:
+            func (Callable): The function to be compiled.
+            out_idx (List[int]): Indices specifying which outputs to return.
+            execution_backend (Literal): Backend type for execution. Defaults to "cython".
+            args: Arguments passed to the function.
+            target (Union[str, Target]): Compilation target platform. Defaults to "auto".
+            target_host (Union[str, Target], optional): Host target platform.
+
+        Returns:
+            str: SHA256 hash key for the kernel configuration.
+        """
         func_binary = cloudpickle.dumps(func.script())
 >>>>>>> upstream/main
         key_data = {
-            "func": sha256(func_source
-                          ).hexdigest(),  # Use SHA256 to generate hash key from function source
-            "func_params": sha256(cloudpickle.dumps(func.params)).hexdigest(),
-            "out_idx": tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx],
+            "func": sha256(func_binary).hexdigest(),  # Use SHA256 to generate hash key
+            "out_idx": (tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx]),
             "args_repr": tuple(
                 repr(arg) for arg in args
             ),  # Use repr to serialize arguments, may need more robust serialization
@@ -112,12 +134,24 @@ class KernelCache:
                 pass_configs=pass_configs,
             )
 
-        key = self._generate_key(func, out_idx, execution_backend, args, target, target_host)
-        with self._lock:  # TODO: use filelock
-            # Attempt to load from disk
+        key = self._generate_key(
+            func=func,
+            out_idx=out_idx,
+            execution_backend=execution_backend,
+            args=args,
+            target=target,
+            target_host=target_host)
+        with self._lock:
+            # First check in-memory cache
+            if key in self._memory_cache:
+                return self._memory_cache[key]
+
+            # Then check disk cache
             kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
                                                  execution_backend, pass_configs, func)
             if kernel is not None:
+                # Populate memory cache with disk result
+                self._memory_cache[key] = kernel
                 return kernel
 
         # Compile kernel if cache miss; leave critical section
@@ -134,10 +168,20 @@ class KernelCache:
             self.logger.warning("DLPack backend does not support cache saving to disk.")
         else:
             with self._lock:  # enter critical section again to check and update disk cache
-                disk_kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
-                                                          execution_backend, pass_configs, func)
+                disk_kernel = self._load_kernel_from_disk(
+                    key,
+                    target,
+                    target_host,
+                    out_idx,
+                    execution_backend,
+                    pass_configs,
+                    func,
+                )
                 if disk_kernel is None:
                     self._save_kernel_to_disk(key, kernel, func)
+
+        # Store in memory cache after compilation
+        self._memory_cache[key] = kernel
         return kernel
 
     def clear_cache(self):
@@ -145,17 +189,36 @@ class KernelCache:
         Clears the entire kernel cache, including both in-memory and disk cache.
         """
         with self._lock:
+            self._memory_cache.clear()  # Clear in-memory cache
             self._clear_disk_cache()  # Clear disk cache
 
     def _get_cache_path(self, key: str) -> str:
         """
-        Gets the cache file path for a given key.
+        Gets the filesystem path for a cached kernel.
+
+        Args:
+            key (str): The hash key identifying the kernel.
+
+        Returns:
+            str: Absolute path to the cache directory for this kernel.
         """
         return os.path.join(self.cache_dir, key)
 
     def _save_kernel_to_disk(self, key: str, kernel: JITKernel, func: Callable = None):
         """
-        Saves the compiled kernel to disk.
+        Persists a compiled kernel to disk cache.
+
+        Args:
+            key (str): The hash key identifying the kernel.
+            kernel (JITKernel): The compiled kernel to be saved.
+            func (Callable, optional): The original function.
+
+        Note:
+            Saves the following files:
+            - kernel.cu: The compiled kernel source code
+            - wrapped_kernel.cu: The wrapped kernel source code
+            - kernel_lib.so: The compiled kernel library
+            - params.pkl: The serialized kernel parameters
         """
         cache_path = self._get_cache_path(key)
         os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists
@@ -192,16 +255,30 @@ class KernelCache:
         except Exception as e:
             self.logger.error(f"Error saving kernel parameters to disk: {e}")
 
-    def _load_kernel_from_disk(self,
-                               key: str,
-                               target: Union[str, Target] = "auto",
-                               target_host: Union[str, Target] = None,
-                               out_idx: List[int] = None,
-                               execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
-                               pass_configs: dict = None,
-                               func: Callable = None) -> JITKernel:
+    def _load_kernel_from_disk(
+        self,
+        key: str,
+        target: Union[str, Target] = "auto",
+        target_host: Union[str, Target] = None,
+        out_idx: List[int] = None,
+        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        pass_configs: dict = None,
+        func: Callable = None,
+    ) -> JITKernel:
         """
-        Loads kernel from disk.
+        Loads a previously compiled kernel from disk cache.
+
+        Args:
+            key (str): The hash key identifying the kernel.
+            target (Union[str, Target]): Compilation target platform. Defaults to "auto".
+            target_host (Union[str, Target], optional): Host target platform.
+            out_idx (List[int], optional): Indices specifying which outputs to return.
+            execution_backend (Literal): Backend type for execution. Defaults to "cython".
+            pass_configs (dict, optional): Configuration for compiler passes.
+            func (Callable, optional): The original function.
+
+        Returns:
+            JITKernel: The loaded kernel if found, None otherwise.
         """
         cache_path = self._get_cache_path(key)
         if not os.path.exists(cache_path):
@@ -244,7 +321,11 @@ class KernelCache:
 
     def _clear_disk_cache(self):
         """
-        Clears the cache directory on disk.
+        Removes all cached kernels from disk.
+        
+        Note:
+            This operation will delete the entire cache directory and recreate it empty.
+            Use with caution as this operation cannot be undone.
         """
         try:
             if os.path.exists(self.cache_dir):

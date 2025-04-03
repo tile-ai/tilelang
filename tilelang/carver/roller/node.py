@@ -495,7 +495,7 @@ class PrimFuncNode(Node):
             for buffer in self.block_analyzer.get_input_buffers(block):
                 cache = buffer.name not in cached_tensor and (
                     is_broadcast_pattern(buffer, output_buffer) or
-                    self.block_analyzer.get_block_info(block).is_reduction)
+                    self.block_analyzer.get_block_info(block).is_reduction())
                 if not cache:
                     continue
                 cached_tensor.append(buffer.name)

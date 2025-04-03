@@ -7,6 +7,11 @@ from tvm.ir import make_node
 
 @register_func("tvm.info.mem.local.var")
 def mem_info_local_var():
+    """Get memory information for local variable memory.
+
+    Returns:
+        tvm.ir.make_node: A node containing memory information
+    """
     return make_node(
         "MemoryInfo",
         unit_bits=8,

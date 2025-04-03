@@ -68,9 +68,17 @@ class Profiler:
                 ins.append(self.supply(self.params[i]))
         return ins
 
+    def _get_params(self, with_output=False):
+        params = []
+        for i in range(len(self.params)):
+            if with_output or i not in self.result_idx:
+                params.append(self.params[i])
+        return params
+
     def assert_allclose(
         self,
         reference_program: Callable,
+        input_tensors: Optional[List[torch.Tensor]] = None,
         atol: float = 1e-2,
         rtol: float = 1e-2,
         max_mismatched_ratio=0.01,
@@ -79,11 +87,12 @@ class Profiler:
         
         Args:
             reference_program: Reference implementation to compare against
+            input_tensors: Optional pre-generated input tensors
             atol: Absolute tolerance for comparison
             rtol: Relative tolerance for comparison
             max_mismatched_ratio: Maximum allowed ratio of mismatched elements
         """
-        ins = self._get_inputs()
+        ins = self._get_inputs() if input_tensors is None else input_tensors
         ref_outs = reference_program(*ins)
         torch.cuda.synchronize()
         lib_outs = self.func(*ins)

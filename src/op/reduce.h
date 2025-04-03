@@ -32,6 +32,7 @@ private:
     kAbsSum,
     kMax,
     kMin,
+    kAbsMax,
   } type;
   bool clear;
 

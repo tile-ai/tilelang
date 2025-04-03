@@ -31,8 +31,11 @@ private:
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
     auto condition = op->condition;
-    auto then_case = op->then_case;
-    auto else_case = op->else_case;
+    auto then_case = VisitStmt(op->then_case);
+    Optional<Stmt> else_case = op->else_case;
+    if (else_case.defined()) {
+      else_case = VisitStmt(else_case.value());
+    }
 
     auto bind_if_stmt = [](Optional<Stmt> body,
                            const PrimExpr condition) -> Stmt {

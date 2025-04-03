@@ -49,6 +49,7 @@ from .reduce import (
     reduce_min,  # noqa: F401
     reduce_sum,  # noqa: F401
     reduce_abssum,  # noqa: F401
+    reduce_absmax,  # noqa: F401
 )
 from .print import print  # noqa: F401
 from .customize import (

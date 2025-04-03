@@ -294,8 +294,10 @@ if __name__ == "__main__":
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:
-        best_latency, best_config, ref_latency = matmul(
-            M, N, K, "float16", "float16", "float32", num_bits=4, tune=args.tune)
+        best_result = matmul(M, N, K, "float16", "float16", "float32", num_bits=4, tune=args.tune)
+        best_latency = best_result.latency
+        best_config = best_result.config
+        ref_latency = best_result.ref_latency
         print(f"Best latency: {best_latency}")
         print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
         print(f"Best config: {best_config}")
