@@ -45,6 +45,9 @@ def kernel(
 
 
 my_func = kernel(128, 128, 32, 3, 128, True)
+
 cuda_device = CUDA("cuda")
 result = Analyzer.analysis(my_func, cuda_device)
-print(result)
+
+print(f"Analyzed FLOPs: {result.total_flops}")
+print(f"Expected FLOPs: {2 * M * N * K}")
