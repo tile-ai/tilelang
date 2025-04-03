@@ -27,6 +27,8 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, BufferMap vmap) {
     type = ReduceType::kSum;
   else if (reduce_type == "abssum")
     type = ReduceType::kAbsSum;
+  else if (reduce_type == "absmax")
+    type = ReduceType::kAbsMax;
   else if (reduce_type == "max")
     type = ReduceType::kMax;
   else if (reduce_type == "min")
@@ -46,6 +48,8 @@ PrimExpr ReduceOp::MakeInitValue() const {
     return make_const(dst->dtype, -INFINITY);
   case ReduceType::kMin:
     return make_const(dst->dtype, INFINITY);
+  case ReduceType::kAbsMax:
+    return make_const(dst->dtype, 0);
   default:
     ICHECK(0);
   }
@@ -65,6 +69,8 @@ PrimExpr ReduceOp::MakeReduce(const PrimExpr &a, const PrimExpr &b) const {
     return Max(lhs, rhs);
   case ReduceType::kMin:
     return Min(lhs, rhs);
+  case ReduceType::kAbsMax:
+    return Max(Max(lhs, rhs), -Min(lhs, rhs));
   default:
     ICHECK(0);
     return PrimExpr(0);
@@ -81,6 +87,8 @@ std::string ReduceOp::MakeCodegenReducer() const {
     return "tl::MaxOp";
   case ReduceType::kMin:
     return "tl::MinOp";
+  case ReduceType::kAbsMax:
+    return "tl::MaxOp";
   default:
     ICHECK(0);
     return "";
