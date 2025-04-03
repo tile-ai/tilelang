@@ -27,7 +27,8 @@ using int4_t = int4;
 #define TL_DEVICE_NOINLINE __noinline__ __device__
 #define TL_PATCH
 
-// abs function for bfloat_t and half_t since there is no implicit convertion method
+// abs function for bfloat_t and half_t since there is no implicit convertion
+// method
 TL_PATCH TL_DEVICE half_t __habs(const half_t x) {
   return half_t(__habs(x.to_half()));
 }
