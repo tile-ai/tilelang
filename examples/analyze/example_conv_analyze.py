@@ -23,22 +23,22 @@ def check_hopper():
     return False
 
 
-def kernel( N,
-            C,
-            H,
-            W,
-            F,
-            K,
-            S,
-            D,
-            P,
-            block_M,
-            block_N,
-            block_K,
-            num_stages,
-            threads,
-            dtype="float16",
-            accum_dtype="float"):
+def kernel(N,
+           C,
+           H,
+           W,
+           F,
+           K,
+           S,
+           D,
+           P,
+           block_M,
+           block_N,
+           block_K,
+           num_stages,
+           threads,
+           dtype="float16",
+           accum_dtype="float"):
     KH, KW = K, K
     OH = (H + 2 * P - D * (K - 1) - 1) // S + 1
     OW = (W + 2 * P - D * (K - 1) - 1) // S + 1
@@ -90,7 +90,6 @@ def kernel( N,
             T.copy(out_shared, out_flat[by * block_M, bx * block_N])
 
     return main
-
 
 
 my_func = kernel(N, C, H, W, F, K, S, D, P, 64, 128, 32, 3, 256)
