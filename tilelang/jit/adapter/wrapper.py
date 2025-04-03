@@ -11,7 +11,7 @@ import re
 import logging
 import textwrap
 
-PREDEF_ARRTIBUTE_SET_DYNAMIC_MEMORY = """
+PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY = """
     cudaError_t result_{0} = cudaFuncSetAttribute({0}, cudaFuncAttributeMaxDynamicSharedMemorySize, {1});
     if (result_{0} != CUDA_SUCCESS) {{
         snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed dynamic shared memory size to %d with error: %s", {1}, cudaGetErrorString(result_{0}));
@@ -369,7 +369,7 @@ class TLCUDASourceWrapper(object):
         for function_name, dynamic_smem_buf in self.dynamic_smem_buf.items():
             if dynamic_smem_buf is not None:
                 # Format the cudaFuncSetAttribute call for dynamic shared memory
-                call_str += PREDEF_ARRTIBUTE_SET_DYNAMIC_MEMORY.format(
+                call_str += PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY.format(
                     function_name, dynamic_smem_buf)
         # Format the initialization function using the call_str
         init_funcs = PREDEF_INIT_FUNC.format(call_str)
@@ -441,7 +441,7 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
         for function_name, dynamic_smem_buf in self.dynamic_smem_buf.items():
             if dynamic_smem_buf is not None:
                 # Format the cudaFuncSetAttribute call for dynamic shared memory
-                call_str += PREDEF_ARRTIBUTE_SET_DYNAMIC_MEMORY_HIP.format(
+                call_str += PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY_HIP.format(
                     function_name, dynamic_smem_buf)
         # Format the initialization function using the call_str
         init_funcs = PREDEF_INIT_FUNC.format(call_str)
