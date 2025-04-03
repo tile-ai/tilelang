@@ -8,7 +8,6 @@ import argparse
 import time
 import math
 from heuristic import num_splits_heuristic
-import tvm
 
 torch.manual_seed(0)
 tilelang.disable_cache()
@@ -46,7 +45,6 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
                 Q_shared = T.alloc_shared([block_H, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim_v], dtype)
-                O_shared = T.alloc_shared([valid_block_H, dim_v], dtype)
                 acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
                 acc_s_cast = T.alloc_fragment([block_H, block_N], dtype)
                 acc_o = T.alloc_fragment([block_H, dim_v], accum_dtype)
@@ -219,7 +217,6 @@ class SparseFlashAttn(torch.nn.Module):
         heads_kv = self.heads_kv
         dim_v = self.dim_v
         block_size = self.block_size
-        block_H = self.block_H
         max_selected_blocks = block_indices.shape[-1]
 
         # Compute static scheduling parameters
@@ -330,7 +327,6 @@ def ref_program_torch(query, key, value, block_indices, cache_seqlens, max_cache
 
     batch, heads, dim = query.shape
     heads_kv = key.shape[2]
-    dim_v = value.shape[-1]
     num_head_groups = query.shape[1] // key.shape[2]
     scale = dim**0.5
     key = rearrange(key, 'b n h d -> b h n d')  # [batch_size, heads_kv, seqlen_kv, dim]
@@ -372,7 +368,7 @@ def ref_program_fa(query, key, value, block_indices, cache_seqlens, max_cache_se
                    block_size):
     # latency reference
     # from flash_attn_interface import flash_attn_with_kvcache, flash_attn_func # fa3
-    from flash_attn import flash_attn_with_kvcache, flash_attn_func  #fa2
+    from flash_attn import flash_attn_with_kvcache, flash_attn_func  # noqa f401
     query = query.unsqueeze(1)
     output = flash_attn_with_kvcache(query, key, value, cache_seqlens=cache_seqlens)
     output = output.squeeze(1)
@@ -470,23 +466,23 @@ if __name__ == "__main__":
     debug("output", ref, out, atol=1e-3, rtol=1e-3)
 
     ## latency reference
-    for i in range(10):
+    for _i in range(10):
         ref = ref_program_fa(Q, K, V, block_indices, cache_seqlens, max_cache_seqlen,
                              max_num_blocks, block_size)
     torch.cuda.synchronize()
     start = time.time()
-    for i in range(100):
+    for _i in range(100):
         ref = ref_program_fa(Q, K, V, block_indices, cache_seqlens, max_cache_seqlen,
                              max_num_blocks, block_size)
     torch.cuda.synchronize()
     print("dense time: ", (time.time() - start) / 100 * 1000)
 
-    for i in range(10):
+    for _i in range(10):
         # out = sparse_gqa_decode_varlen_indice(Q, K, V, block_indices, cache_seqlens, max_cache_seqlen, block_size)
         out = sparse_kernel(Q, K, V, block_indices, cache_seqlens)
     torch.cuda.synchronize()
     start = time.time()
-    for i in range(100):
+    for _i in range(100):
         # out = sparse_gqa_decode_varlen_indice(Q, K, V, block_indices, cache_seqlens, max_cache_seqlen, block_size)
         out = sparse_kernel(Q, K, V, block_indices, cache_seqlens)
     torch.cuda.synchronize()
