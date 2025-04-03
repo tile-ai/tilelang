@@ -95,7 +95,7 @@ def get_cuda_device_properties(device_id: int = 0) -> Optional[cudaDeviceProp]:
     if ret == 0:
         return prop
     else:
-        return None
+        raise RuntimeError(f"cudaGetDeviceProperties failed with error {ret}")
 
 
 def get_device_name(device_id: int = 0) -> Optional[str]:
@@ -115,9 +115,9 @@ def get_shared_memory_per_block(device_id: int = 0, format: str = "bytes") -> Op
         if format == "bytes":
             return shared_mem
         elif format == "kb":
-            return shared_mem // 1024  # 使用整除
+            return shared_mem // 1024
         elif format == "mb":
-            return shared_mem // (1024 * 1024)  # 使用整除
+            return shared_mem // (1024 * 1024)
         else:
             raise RuntimeError("Invalid format. Must be one of: bytes, kb, mb")
     else:
@@ -147,7 +147,9 @@ def get_device_attribute(attr: int, device_id: int = 0) -> int:
 
 
 def get_max_dynamic_shared_size_bytes(device_id: int = 0, format: str = "bytes") -> Optional[int]:
-    """获取设备支持的最大动态共享内存大小"""
+    """
+    Get the maximum dynamic shared memory size in bytes, kilobytes, or megabytes.
+    """
     assert format in ["bytes", "kb", "mb"], "Invalid format. Must be one of: bytes, kb, mb"
     prop = get_cuda_device_properties(device_id)
     if prop:
@@ -156,9 +158,9 @@ def get_max_dynamic_shared_size_bytes(device_id: int = 0, format: str = "bytes")
         if format == "bytes":
             return shared_mem
         elif format == "kb":
-            return shared_mem // 1024  # 使用整除
+            return shared_mem // 1024
         elif format == "mb":
-            return shared_mem // (1024 * 1024)  # 使用整除
+            return shared_mem // (1024 * 1024)
         else:
             raise RuntimeError("Invalid format. Must be one of: bytes, kb, mb")
     else:
