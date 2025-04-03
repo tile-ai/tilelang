@@ -45,6 +45,7 @@ def kernel(
 
     return main
 
+
 my_func = kernel(128, 128, 32, 3, 128, True)
 
 cuda_device = CUDA("cuda")
