@@ -64,7 +64,7 @@ def run_gemm(
     block_M,
     block_N,
     block_K,
-    num_stages=3,
+    num_stages=0,
     num_threads=128,
     k_pack=1,
 ):
@@ -94,15 +94,14 @@ def run_gemm(
             A = A.T
         if trans_B:
             B = B.T
-        C = torch.matmul(A.to(torch.float), B.to(torch.float))
-        C = C.to(torch.__getattribute__(out_dtype))
-        return C
+        return (A @ B).to(torch.__getattribute__(out_dtype))
 
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
 @tilelang.testing.requires_rocm
 def test_gemm_f16f32f32_nt():
+    run_gemm(1024, 1024, 1024, False, False, "float16", "float32", "float32", 128, 128, 32)
     run_gemm(1024, 1024, 1024, False, True, "float16", "float32", "float32", 128, 128, 32)
     run_gemm(1024, 1024, 1024, False, True, "float16", "float32", "float32", 128, 128, 32, k_pack=2)
 
