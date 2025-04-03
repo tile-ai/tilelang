@@ -13,6 +13,7 @@ ARCH_CONFIGS = {"80": (128, 1.41, 2, 108), "86": (128, 1.70, 2, 84), "89": (128,
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 @dataclass(frozen=True)
 class AnalysisResult:
     """
@@ -179,7 +180,9 @@ class Analyzer:
             """
             arch_key = device.compute_capability[:2]
             if arch_key not in ARCH_CONFIGS:
-                logger.info(f"Unsupported compute capability: {device.compute_capability}, theoretical peak tflops will be None")
+                logger.info(
+                    f"Unsupported compute capability: {device.compute_capability}, theoretical peak tflops will be None"
+                )
                 return None
 
             cores_per_sm, default_clock, flops_per_cycle, compute_max_core = ARCH_CONFIGS[arch_key]
