@@ -3,7 +3,9 @@
 
 from . import CUDA
 
+
 class V100(CUDA):
+
     def __init__(self, target):
         super().__init__(target)
         self.core = "V100"

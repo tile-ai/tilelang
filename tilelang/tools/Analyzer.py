@@ -171,8 +171,10 @@ class Analyzer:
             Returns:
                 float: The peak TFLOPS.
             """
-            if not (hasattr(device, "tensor_core_flops") and hasattr(device, "tensor_cores_per_sm")):
-                raise ValueError("Device does not have tensor_core_flops or tensor_cores_per_sm attributes")
+            if not (hasattr(device, "tensor_core_flops") and
+                    hasattr(device, "tensor_cores_per_sm")):
+                raise ValueError(
+                    "Device does not have tensor_core_flops or tensor_cores_per_sm attributes")
             tensor_core_flops = device.tensor_core_flops
             tensor_cores_per_sm = device.tensor_cores_per_sm
             prop = get_cuda_device_properties()
