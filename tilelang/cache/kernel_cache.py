@@ -14,7 +14,6 @@ from tilelang.engine.param import KernelParam
 import threading
 import cloudpickle
 import logging
-import inspect
 
 from tilelang.env import TILELANG_CACHE_DIR, is_cache_enabled
 
@@ -85,7 +84,6 @@ class KernelCache:
             str: SHA256 hash key for the kernel configuration.
         """
         func_binary = cloudpickle.dumps(func.script())
->>>>>>> upstream/main
         key_data = {
             "func": sha256(func_binary).hexdigest(),  # Use SHA256 to generate hash key
             "out_idx": (tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx]),
