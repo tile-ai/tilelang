@@ -5,6 +5,7 @@ import torch
 import tilelang
 import tilelang.language as T
 from typing import Tuple
+from tilelang.utils.tensor import torch_assert_close
 
 tilelang.disable_cache()
 
@@ -102,9 +103,8 @@ if __name__ == "__main__":
     print("x_fp8_ref:", x_fp8_ref, x_fp8_ref.shape)
     print("x_amax_ref:", x_amax_ref, x_amax_ref.shape)
 
-    torch.testing.assert_close(
-        x_fp8.to(torch.float32), x_fp8_ref.to(torch.float32), rtol=0.01, atol=0.01)
-    torch.testing.assert_close(x_amax, x_amax_ref, rtol=0.01, atol=0.01)
+    torch_assert_close(x_fp8.to(torch.float32), x_fp8_ref.to(torch.float32), rtol=0.01, atol=0.01)
+    torch_assert_close(x_amax, x_amax_ref, rtol=0.01, atol=0.01)
     print("All checks pass.")
 
     latency = profiler.do_bench(ref_program, warmup=500)
