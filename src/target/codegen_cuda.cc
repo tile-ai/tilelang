@@ -42,9 +42,9 @@ static std::string GetFP8Type(DataType type) {
     LOG(FATAL) << "Only support scalar and vector types of width (2, 4, 8, 16) "
                   "for FP8";
   }
-  if (type.code() == DataType::kE4M3Float) {
+  if (type.code() == DataType::kFloat8_e4m3fn) {
     stream << "fp8_e4" << vec << "_t";
-  } else if (type.code() == DataType::kE5M2Float) {
+  } else if (type.code() == DataType::kFloat8_e5m2) {
     stream << "fp8_e5" << vec << "_t";
   } else {
     LOG(FATAL) << "Unsupported FP8 type in CUDA codegen";
@@ -1470,44 +1470,50 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
   os << ')';
 }
 
-inline void PrintConst(const FloatImmNode *op, std::ostream &os,
-                       CodeGenTileLangCUDA *p) { // NOLINT(*)
+inline void PrintConst(const FloatImmNode* op, std::ostream& os, CodeGenTileLangCUDA* p) {  // NOLINT(*)
   // Type code is kBFloat
   if (op->dtype.is_bfloat16()) {
-    os << "bfloat16_t";
+    os << "__float2bfloat16_rn";
+    os << '(' << std::scientific << op->value << 'f' << ')';
+    return;
+  }
+  // Type code is kFloat8_e5m2 or kE4M4Float
+  if (op->dtype.is_float8() || op->dtype.is_float4()) {
+    p->PrintType(op->dtype, os);
     os << '(' << std::scientific << op->value << 'f' << ')';
     return;
   }
   // Type code is kFloat
   switch (op->dtype.bits()) {
-  case 64:
-  case 32: {
-    std::ostringstream temp;
-    if (std::isinf(op->value)) {
-      if (op->value < 0) {
-        temp << "-";
+    case 64:
+    case 32: {
+      std::ostringstream temp;
+      if (std::isinf(op->value)) {
+        if (op->value < 0) {
+          temp << "-";
+        }
+        temp << ((op->dtype.bits() == 32) ? "CUDART_INF_F" : "CUDART_INF");
+        p->need_math_constants_h_ = true;
+      } else if (std::isnan(op->value)) {
+        temp << ((op->dtype.bits() == 32) ? "CUDART_NAN_F" : "CUDART_NAN");
+        p->need_math_constants_h_ = true;
+      } else {
+        temp << std::scientific << op->value;
+        if (op->dtype.bits() == 32) temp << 'f';
       }
-      temp << ((op->dtype.bits() == 32) ? "CUDART_INF_F" : "CUDART_INF");
-    } else if (std::isnan(op->value)) {
-      temp << ((op->dtype.bits() == 32) ? "CUDART_NAN_F" : "CUDART_NAN");
-    } else {
-      temp << std::scientific << op->value;
-      if (op->dtype.bits() == 32)
-        temp << 'f';
+      p->MarkConst(temp.str());
+      os << temp.str();
+      break;
     }
-    p->MarkConst(temp.str());
-    os << temp.str();
-    break;
-  }
-  case 16: {
-    os << "half_t" << '(';
-    FloatImm const_f32 = FloatImm(DataType::Float(32), op->value);
-    PrintConst(const_f32.get(), os, p);
-    os << ')';
-    break;
-  }
-  default:
-    LOG(FATAL) << "Bad bit-width for float: " << op->dtype << "\n";
+    case 16: {
+      os << "__float2half_rn" << '(';
+      FloatImm const_f32 = FloatImm(DataType::Float(32), op->value);
+      PrintConst(const_f32.get(), os, p);
+      os << ')';
+      break;
+    }
+    default:
+      LOG(FATAL) << "Bad bit-width for float: " << op->dtype << "\n";
   }
 }
 
