@@ -131,6 +131,43 @@ def get_best_config(M, N, K, with_roller=False):
     return autotuner.run(warmup=3, rep=20)
 
 
+def get_heuristic_config() -> dict:
+    # Get CUDA device properties
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available")
+    device = torch.cuda.current_device()
+    sm_major, sm_minor = torch.cuda.get_device_capability(device)
+    sm_version = sm_major * 10 + sm_minor
+    print(f"CUDA device capability: {sm_version}")
+    if sm_version in {80}:
+        return {
+            "block_M": 128,
+            "block_N": 256,
+            "block_K": 32,
+            "num_stages": 2,
+            "thread_num": 128,
+            "enable_rasteration": True
+        }
+    elif sm_version in {90}:
+        return {
+            "block_M": 128,
+            "block_N": 256,
+            "block_K": 64,
+            "num_stages": 3,
+            "thread_num": 256,
+            "enable_rasteration": True
+        }
+    else:
+        return {
+            "block_M": 128,
+            "block_N": 256,
+            "block_K": 32,
+            "num_stages": 0,
+            "thread_num": 128,
+            "enable_rasteration": True
+        }
+
+
 def matmul(M,
            N,
            K,
@@ -173,13 +210,13 @@ def matmul(M,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
-    parser.add_argument("--m", type=int, default=1024, help="Matrix dimension M")
-    parser.add_argument("--n", type=int, default=1024, help="Matrix dimension N")
-    parser.add_argument("--k", type=int, default=1024, help="Matrix dimension K")
+    parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
+    parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
+    parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
     parser.add_argument(
         "--use_autotune",
         action="store_true",
-        default=True,
+        default=False,
         help="Whether to use autotune for matmul configs")
     parser.add_argument(
         "--with_roller",
@@ -194,11 +231,21 @@ if __name__ == "__main__":
     with_roller = args.with_roller
     if use_autotune:
         result = get_best_config(M, N, K, with_roller)
-        print(f"best latency {result.latency}")
         kernel = result.kernel
     else:
-        kernel = tl.compile(matmul(M, N, K, 128, 128, 32, 3, 128, True), out_idx=-1)
+        config = get_heuristic_config()
+        kernel = tl.compile(matmul(M, N, K, **config), out_idx=-1)
 
     out_c = kernel(a, b)
     ref_c = ref_program(a, b)
     torch.testing.assert_close(out_c, ref_c, rtol=1e-2, atol=1e-2)
+
+    # benchmark
+    profiler = kernel.get_profiler(tensor_supply_type=tl.TensorSupplyType.Auto)
+    tilelang_latency = profiler.do_bench()
+    ref_latency = profiler.do_bench(ref_program)
+
+    print(f"TileLang latency: {tilelang_latency}")
+    print(f"Ref latency: {ref_latency}")
+    print(f"TileLang TFlops: {2 * M * N * K / tilelang_latency * 1e-9}")
+    print(f"Ref TFlops: {2 * M * N * K / ref_latency * 1e-9}")
