@@ -244,9 +244,9 @@ template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, int kPack, typename A_type,
           typename B_type, typename C_type>
 TL_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
-  using Compute = GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                               trans_B, clear_accum, kPack, A_type, B_type,
-                               C_type>;
+  using Compute =
+      GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A, trans_B,
+                   clear_accum, kPack, A_type, B_type, C_type>;
   Compute::body(pA, pB, accum);
 }
 
@@ -254,9 +254,9 @@ template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, int kPack, typename A_type,
           typename B_type, typename C_type>
 TL_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
-  using Compute = GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                               trans_B, clear_accum, kPack, A_type, B_type,
-                               C_type>;
+  using Compute =
+      GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A, trans_B,
+                   clear_accum, kPack, A_type, B_type, C_type>;
   Compute::body_rs(pA, pB, accum);
 }
 

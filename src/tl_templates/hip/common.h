@@ -3,8 +3,8 @@
 #pragma once
 
 #include <ck_tile/core.hpp>
-#include <hip/hip_fp16.h>
 #include <hip/hip_bf16.h>
+#include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <rocwmma/rocwmma.hpp>
 
@@ -48,19 +48,19 @@ using half_t = float16_t;
 using bfloat16_t = __hip_bfloat16;
 
 struct bfloat16x2 {
-    bfloat16_t data[2];
+  bfloat16_t data[2];
 };
 
 struct bfloat16x4 {
-    bfloat16_t data[4];
+  bfloat16_t data[4];
 };
 
 struct bfloat16x8 {
-    bfloat16_t data[8];
+  bfloat16_t data[8];
 };
 
 struct bfloat16x16 {
-    bfloat16_t data[16];
+  bfloat16_t data[16];
 };
 
 using int32x4 = __attribute__((__vector_size__(4 * sizeof(int)))) int;

@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """Utility for ROCm backend"""
+# ruff: noqa
 import re
 import subprocess
 import os

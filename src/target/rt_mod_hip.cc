@@ -95,7 +95,8 @@ runtime::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
   if (const auto *f = Registry::Get("tilelang_callback_hip_postproc")) {
     code = (*f)(code, target).operator std::string();
   }
-  return ROCMModuleCreate("ptx", "fmt", ExtractFuncInfo(mod), code, std::string());
+  return ROCMModuleCreate("ptx", "fmt", ExtractFuncInfo(mod), code,
+                          std::string());
 }
 TVM_REGISTER_GLOBAL("target.build.tilelang_hip")
     .set_body_typed(BuildTileLangHIP);
