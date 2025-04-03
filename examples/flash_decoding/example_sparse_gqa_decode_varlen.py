@@ -283,7 +283,7 @@ def sparse_gqa_decode_varlen_indice(query, key, value, block_indices, cache_seql
 
     actual_num_blocks = torch.sum(block_indices != -1, dim=-1).to(torch.int32)
     actual_num_blocks = actual_num_blocks[:,
-                                          0]  #[batch],  number of valid blocks, assum all groups in the same batch have the same number of blocks
+                                          0]  #[batch],  number of valid blocks, assume all groups in the same batch have the same number of blocks
 
     # get num_split
     num_m_blocks = 1 * (heads // heads_kv + block_H - 1) // block_H
