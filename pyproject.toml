@@ -35,6 +35,7 @@ select = [
     "SIM",
     # isort
     # "I",
+    "HSA,
 ]
 ignore = [
     # Module level import not at top of file

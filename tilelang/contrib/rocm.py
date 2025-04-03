@@ -254,11 +254,9 @@ def get_rocm_arch(rocm_path="/opt/rocm"):
             gpu_arch = match.group(1)
         return gpu_arch
     except subprocess.CalledProcessError:
-        print(
-            f"Unable to execute rocminfo command, \
+        print(f"Unable to execute rocminfo command, \
                 please ensure ROCm is installed and you have an AMD GPU on your system.\
-                    using default {gpu_arch}."
-        )
+                    using default {gpu_arch}.")
         return gpu_arch
 
 
