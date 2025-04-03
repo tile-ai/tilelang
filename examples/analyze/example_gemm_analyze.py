@@ -1,3 +1,5 @@
+# Copyright (c) Tile-AI Corporation.
+# Licensed under the MIT License.
 import tilelang.language as T
 from tilelang.tools import Analyzer
 from tilelang.carver.arch import CUDA
