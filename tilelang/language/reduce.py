@@ -92,3 +92,17 @@ def reduce_abssum(buffer: tir.Buffer, out: tir.Buffer, dim: int):
         tir.Call: Handle to the reduction operation
     """
     return reduce(buffer, out, "abssum", dim, True)
+
+
+def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int):
+    """Perform reduce absolute max on input buffer, store the result to output buffer.
+
+    Args:
+        buffer (tir.Buffer): The input buffer
+        out (tir.Buffer): The output buffer
+        dim (int): The dimension to perform reduce on
+
+    Returns:
+        tir.Call: Handle to the reduction operation
+    """
+    return reduce(buffer, out, "absmax", dim, True)
