@@ -9,8 +9,8 @@
 
 #include <tvm/arith/iter_affine_map.h>
 #include <tvm/tir/builtin.h>
-#include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/op.h>
+#include <tvm/tir/stmt_functor.h>
 
 #include <numeric>
 
@@ -266,11 +266,11 @@ private:
   int loop_num_;
 };
 
-// TODO modify every subexpression in the condition
+// Modify every subexpression in the condition
 class VectorizedConditionMutator : public StmtExprMutator {
 public:
   VectorizedConditionMutator(Var inner_var, int extent)
-    : inner_var_(inner_var), vector_size_(extent) {}
+      : inner_var_(inner_var), vector_size_(extent) {}
 
 private:
   PrimExpr VisitExpr_(const GENode *node) final {
