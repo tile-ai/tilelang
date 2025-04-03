@@ -69,13 +69,16 @@ class AnalysisResult:
     * device: Device configuration object
 * Returns: AnalysisResult
 #### Supported Architectures
+To estimate the peak tflops of the device, we need to know tensor cores per sm, as well as flops per cycle per tensor core. 
+Currently we support rtx3090, rtx4090, a100, h100 and v100. It is easy to add new device at `tilelang/carver/arch`.
 ```python
-# Extendable to custom hardware via: "compute_capability": (cores_per_SM, clock_GHz, flops_per_cycle, max_SM_count)
-ARCH_CONFIGS = {
-    "80": (128, 1.41, 2, 108),  # A100
-    "86": (128, 1.70, 2, 84),   # RTX 3080
-    "89": (128, 2.52, 2, 128)  # RTX 4090
-}
+from . import CUDA
+class YourDevice(CUDA):
+    def __init__(self, target):
+        super().__init__(target)
+        self.tensor_cores_per_sm = x
+        self.tensor_core_flops = y
+        # only two new attr are needed
 ```
 
 ## Implementation Details

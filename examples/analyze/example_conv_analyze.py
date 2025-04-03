@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 import tilelang.language as T
 from tilelang.tools import Analyzer
-from tilelang.carver.arch import CUDA
+from tilelang.carver.arch import RTX4090
 from tilelang.layout import make_swizzled_layout
 
 N = 64
@@ -95,6 +95,6 @@ def kernel(N,
 
 
 my_func = kernel(N, C, H, W, F, K, S, D, P, 64, 128, 32, 3, 256)
-cuda_device = CUDA("cuda")
+cuda_device = RTX4090("cuda")
 result = Analyzer.analysis(my_func, cuda_device)
 print(result)

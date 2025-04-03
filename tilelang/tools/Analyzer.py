@@ -3,11 +3,8 @@
 import numpy as np
 from dataclasses import dataclass
 from tilelang import tvm
+from tilelang.carver.arch.driver import get_cuda_device_properties
 from tvm.tir.stmt_functor import ir_transform
-
-# Configuration for different hardware architectures.
-# Each entry contains: (cores per SM, default clock (GHz), FLOPs per cycle, max SM count)
-ARCH_CONFIGS = {"80": (128, 1.41, 2, 108), "86": (128, 1.70, 2, 84), "89": (128, 2.52, 2, 128)}
 
 
 @dataclass(frozen=True)
@@ -174,13 +171,15 @@ class Analyzer:
             Returns:
                 float: The peak TFLOPS.
             """
-            arch_key = device.compute_capability[:2]
-            if arch_key not in ARCH_CONFIGS:
-                raise ValueError(f"Unsupported compute capability: {device.compute_capability}")
-
-            cores_per_sm, default_clock, flops_per_cycle, compute_max_core = ARCH_CONFIGS[arch_key]
-            total_cores = compute_max_core * cores_per_sm
-            tflops = (total_cores * default_clock * flops_per_cycle) / 1e3
+            if not (hasattr(device, "tensor_core_flops") and hasattr(device, "tensor_cores_per_sm")):
+                raise ValueError("Device does not have tensor_core_flops or tensor_cores_per_sm attributes")
+            tensor_core_flops = device.tensor_core_flops
+            tensor_cores_per_sm = device.tensor_cores_per_sm
+            prop = get_cuda_device_properties()
+            clock_rate = prop.clockRate
+            multiProcessorCount = prop.multiProcessorCount
+            total_cores = multiProcessorCount * tensor_cores_per_sm
+            tflops = (total_cores * clock_rate * tensor_core_flops) / 1e3
             return round(tflops, 1)
 
         # Calculate memory bandwidth and peak TFLOPS
