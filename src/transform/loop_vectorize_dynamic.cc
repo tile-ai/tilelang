@@ -420,8 +420,7 @@ private:
     }
     int vectorize_hint = res.vector_size;
     auto rewriter = VectorizeRewriterDynamic(res);
-    Stmt dynamic_vectorized_for = Downcast<For>(rewriter(for_node));
-    return dynamic_vectorized_for;
+    return Downcast<For>(rewriter(for_node));
   }
 };
 
