@@ -136,7 +136,7 @@ public:
             auto [row, col] = reverse_index_map_transposed(lane_id, local_id);
             A_local[i * kPack * local_size_a + local_id] =
                 A_shared[make_swizzle_layout<last_dim_a, sizeof(A_type)>(
-                    l + col, r + row)];
+                    r + row, l + col)];
           } else {
             auto [row, col] = reverse_index_map(lane_id, local_id);
             A_local[i * kPack * local_size_a + local_id] =
