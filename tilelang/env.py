@@ -38,6 +38,7 @@ def _find_cuda_home() -> str:
 CUDA_HOME = _find_cuda_home()
 
 CUTLASS_INCLUDE_DIR: str = os.environ.get("TL_CUTLASS_PATH", None)
+COMPOSABLE_KERNEL_INCLUDE_DIR: str = os.environ.get("TL_COMPOSABLE_KERNEL_PATH", None)
 TVM_PYTHON_PATH: str = os.environ.get("TVM_IMPORT_PYTHON_PATH", None)
 TVM_LIBRARY_PATH: str = os.environ.get("TVM_LIBRARY_PATH", None)
 TILELANG_TEMPLATE_PATH: str = os.environ.get("TL_TEMPLATE_PATH", None)
@@ -51,6 +52,9 @@ TILELANG_CLEAR_CACHE = os.environ.get("TILELANG_CLEAR_CACHE", "0")
 
 # SETUP ENVIRONMENT VARIABLES
 CUTLASS_NOT_FOUND_MESSAGE = ("CUTLASS is not installed or found in the expected path")
+", which may lead to compilation bugs when utilize tilelang backend."
+COMPOSABLE_KERNEL_NOT_FOUND_MESSAGE = (
+    "Composable Kernel is not installed or found in the expected path")
 ", which may lead to compilation bugs when utilize tilelang backend."
 TL_TEMPLATE_NOT_FOUND_MESSAGE = ("TileLang is not installed or found in the expected path")
 ", which may lead to compilation bugs when utilize tilelang backend."
@@ -113,6 +117,20 @@ if os.environ.get("TL_CUTLASS_PATH", None) is None:
     else:
         logger.warning(CUTLASS_NOT_FOUND_MESSAGE)
 
+if os.environ.get("TL_COMPOSABLE_KERNEL_PATH", None) is None:
+    install_ck_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "3rdparty", "composable_kernel")
+    develop_ck_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "3rdparty", "composable_kernel")
+    if os.path.exists(install_ck_path):
+        os.environ["TL_COMPOSABLE_KERNEL_PATH"] = install_ck_path + "/include"
+        COMPOSABLE_KERNEL_INCLUDE_DIR = install_ck_path + "/include"
+    elif (os.path.exists(develop_ck_path) and develop_ck_path not in sys.path):
+        os.environ["TL_COMPOSABLE_KERNEL_PATH"] = develop_ck_path + "/include"
+        COMPOSABLE_KERNEL_INCLUDE_DIR = develop_ck_path + "/include"
+    else:
+        logger.warning(COMPOSABLE_KERNEL_NOT_FOUND_MESSAGE)
+
 if os.environ.get("TL_TEMPLATE_PATH", None) is None:
     install_tl_template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
     develop_tl_template_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src")
@@ -154,6 +172,7 @@ is_cache_enabled = CacheState.is_enabled
 
 __all__ = [
     "CUTLASS_INCLUDE_DIR",
+    "COMPOSABLE_KERNEL_INCLUDE_DIR",
     "TVM_PYTHON_PATH",
     "TVM_LIBRARY_PATH",
     "TILELANG_TEMPLATE_PATH",
