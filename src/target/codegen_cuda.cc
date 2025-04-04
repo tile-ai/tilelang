@@ -1474,7 +1474,7 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
                        CodeGenTileLangCUDA *p) { // NOLINT(*)
   // Type code is kBFloat
   if (op->dtype.is_bfloat16()) {
-      os << "bfloat16_t";
+    os << "bfloat16_t";
     return;
   }
   // Type code is kFloat8_e5m2 or kE4M4Float
