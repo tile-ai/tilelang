@@ -1475,6 +1475,7 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
   // Type code is kBFloat
   if (op->dtype.is_bfloat16()) {
     os << "bfloat16_t";
+    os << '(' << std::scientific << op->value << 'f' << ')';
     return;
   }
   // Type code is kFloat8_e5m2 or kE4M4Float
@@ -1507,7 +1508,7 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     break;
   }
   case 16: {
-    os << "__float2half_rn" << '(';
+    os << "half_t" << '(';
     FloatImm const_f32 = FloatImm(DataType::Float(32), op->value);
     PrintConst(const_f32.get(), os, p);
     os << ')';
