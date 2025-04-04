@@ -3,11 +3,10 @@
 #pragma once
 
 #include <ck_tile/core.hpp>
+#include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <rocwmma/rocwmma.hpp>
-
-using ck_tile::half_t;
 
 #define HIPRT_INF_F __int_as_float(0x7f800000)
 #define HIPRT_NEGINF_F __int_as_float(0xff800000)
@@ -35,7 +34,6 @@ using ck_tile::half_t;
 #define hsqrt __ocml_sqrt_f16
 
 using float16_t = _Float16;
-
 using float16x2 =
     __attribute__((__vector_size__(2 * sizeof(float16_t)))) float16_t;
 using float16x4 =
@@ -44,6 +42,26 @@ using float16x8 =
     __attribute__((__vector_size__(8 * sizeof(float16_t)))) float16_t;
 using float16x16 =
     __attribute__((__vector_size__(16 * sizeof(float16_t)))) float16_t;
+
+using half_t = float16_t;
+
+using bfloat16_t = __hip_bfloat16;
+
+struct bfloat16x2 {
+  bfloat16_t data[2];
+};
+
+struct bfloat16x4 {
+  bfloat16_t data[4];
+};
+
+struct bfloat16x8 {
+  bfloat16_t data[8];
+};
+
+struct bfloat16x16 {
+  bfloat16_t data[16];
+};
 
 using int32x4 = __attribute__((__vector_size__(4 * sizeof(int)))) int;
 using float32x4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;

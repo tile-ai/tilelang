@@ -8,10 +8,12 @@ namespace tl {
 
 // ref to bitblas/tl/mfma_macro_generator.py::kPack
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool TransposeA,
-          bool TransposeB, int kPack, typename A_type, typename B_type,
-          typename C_type, typename AccDataType = float>
+          bool TransposeB, bool clear_accum, int kPack, typename A_type,
+          typename B_type, typename C_type, typename AccDataType = float>
 class GemmTensorOp {
 public:
+  static_assert(!clear_accum, "clear_accum=true is not supported yet");
+
   static constexpr int micro_size_x = 16;
   static constexpr int micro_size_y = 16;
   static constexpr int micro_size_k = 16;
@@ -130,25 +132,37 @@ public:
         const auto l = warp_m * warp_row_tiles + i * micro_size_x;
         const auto r = ki * (kPack * micro_size_k);
         for (int local_id = 0; local_id < (kPack * local_size_a); local_id++) {
-          auto [row, col] = reverse_index_map(lane_id, local_id);
-          A_local[i * kPack * local_size_a + local_id] =
-              A_shared[make_swizzle_layout<last_dim_a, sizeof(A_type)>(
-                  l + row, r + col)];
+          if constexpr (TransposeA) {
+            auto [row, col] = reverse_index_map_transposed(lane_id, local_id);
+            A_local[i * kPack * local_size_a + local_id] =
+                A_shared[make_swizzle_layout<last_dim_a, sizeof(A_type)>(
+                    l + col, r + row)];
+          } else {
+            auto [row, col] = reverse_index_map(lane_id, local_id);
+            A_local[i * kPack * local_size_a + local_id] =
+                A_shared[make_swizzle_layout<last_dim_a, sizeof(A_type)>(
+                    l + row, r + col)];
+          }
         }
       }
-
       // Fetch B into register
       for (int j = 0; j < warp_cols; j++) {
         const auto l = warp_n * warp_col_tiles + j * micro_size_y;
         const auto r = ki * (kPack * micro_size_k);
         for (int local_id = 0; local_id < (kPack * local_size_b); local_id++) {
-          auto [row, col] = reverse_index_map(lane_id, local_id);
-          B_local[j * kPack * local_size_b + local_id] =
-              B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
-                  l + row, r + col)];
+          if constexpr (TransposeB) {
+            auto [row, col] = reverse_index_map(lane_id, local_id);
+            B_local[j * kPack * local_size_b + local_id] =
+                B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
+                    l + row, r + col)];
+          } else {
+            auto [row, col] = reverse_index_map_transposed(lane_id, local_id);
+            B_local[j * kPack * local_size_b + local_id] =
+                B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
+                    r + row, l + col)];
+          }
         }
       }
-
       // Compute
       for (int kp = 0; kp < kPack; kp++) {
         for (int i = 0; i < warp_rows; ++i) {
@@ -191,10 +205,17 @@ public:
         const auto l = warp_n * warp_col_tiles + j * micro_size_y;
         const auto r = ki * kPack * micro_size_k;
         for (int local_id = 0; local_id < kPack * local_size_b; local_id++) {
-          auto [row, col] = reverse_index_map(lane_id, local_id);
-          B_local[j * local_size_b + local_id] =
-              B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
-                  l + row, r + col)];
+          if constexpr (TransposeB) {
+            auto [row, col] = reverse_index_map(lane_id, local_id);
+            B_local[j * local_size_b + local_id] =
+                B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
+                    l + row, r + col)];
+          } else {
+            auto [row, col] = reverse_index_map_transposed(lane_id, local_id);
+            B_local[j * local_size_b + local_id] =
+                B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
+                    r + row, l + col)];
+          }
         }
       }
 
@@ -220,20 +241,22 @@ public:
 namespace tl {
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, int kPack, typename A_type, typename B_type,
-          typename C_type>
+          bool trans_B, bool clear_accum, int kPack, typename A_type,
+          typename B_type, typename C_type>
 TL_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
-  using Compute = GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                               trans_B, kPack, A_type, B_type, C_type>;
+  using Compute =
+      GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A, trans_B,
+                   clear_accum, kPack, A_type, B_type, C_type>;
   Compute::body(pA, pB, accum);
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, int kPack, typename A_type, typename B_type,
-          typename C_type>
+          bool trans_B, bool clear_accum, int kPack, typename A_type,
+          typename B_type, typename C_type>
 TL_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
-  using Compute = GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                               trans_B, kPack, A_type, B_type, C_type>;
+  using Compute =
+      GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A, trans_B,
+                   clear_accum, kPack, A_type, B_type, C_type>;
   Compute::body_rs(pA, pB, accum);
 }
 

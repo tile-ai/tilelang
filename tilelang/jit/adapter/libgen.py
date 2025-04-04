@@ -11,6 +11,7 @@ import tempfile
 import subprocess
 import logging
 from tilelang.env import TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR
+from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
 
 logger = logging.getLogger(__name__)
 
@@ -60,11 +61,13 @@ class LibraryGenerator(object):
         elif is_hip_target(target):
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)
             libpath = src.name.replace(".cpp", ".so")
-
+            rocm_path = find_rocm_path()
+            arch = get_rocm_arch(rocm_path)
             command = [
                 "hipcc",
                 "-std=c++17",
                 "-fPIC",
+                f"--offload-arch={arch}",
                 "--shared",
                 src.name,
             ]
@@ -86,7 +89,6 @@ class LibraryGenerator(object):
                 "-I" + TILELANG_TEMPLATE_PATH,
                 "-I" + CUTLASS_INCLUDE_DIR,
             ]
-            command += ["-diag-suppress=20013"]
         command += ["-o", libpath]
 
         src.write(self.lib_code)
