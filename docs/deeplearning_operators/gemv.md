@@ -1,4 +1,4 @@
-General Matrix-Vector Multiplication (GEMV)
+# General Matrix-Vector Multiplication (GEMV)
 ===========================================
 
 <div style="text-align: left;">
@@ -16,7 +16,7 @@ Example code can be found at `examples/gemv/example_gemv.py`.
 
 General matrix-vector multiplication (GEMV) can be viewed as a specialized case of general matrix-matrix multiplication (GEMM). It plays a critical role in deep learning, especially during the inference phase of large language models. In this tutorial, we will optimize GEMV from a thread-level perspective step by step using `TileLang`.
 
-# Triton implementation
+## Triton implementation
 When implementing a GEMV kernel, you might start with a high-level approach using a tool like `Triton`.
 
 A simple Triton kernel for GEMV might look like this:
@@ -39,7 +39,7 @@ def _gemv_naive(
 
 `Triton` is straightforward to use, as it operates at the block level. However, this approach may not allow for fine-grained thread-level optimization. In this tutorial, we will demonstrate how to write an optimized GEMV kernel in `TileLang` that exposes more low-level control.
 
-# Naive Implementation in TileLang
+## Naive Implementation in TileLang
 If you have a basic understanding of CUDA C, it is natural to start with a naive GEMV kernel by adapting a GEMM tiling strategy. You can think of GEMV as a `(1, k) * (k, n)` GEMM. Below is a simple example:
 
 ```python
@@ -209,7 +209,7 @@ def splitk_gemv(
 
 # Vectorized Reads
 
-GEMV is less computation intensive than GEMM as the computation intensity and memory throuput will be the optimization bottleneck. One effective strategy is to use vectorized load/store operations (e.g., `float2`, `float4`). In `TileLang`, you can specify vectorized operations via `T.vectorized`:
+GEMV is less computation intensive than GEMM as the computation intensity and memory throughput will be the optimization bottleneck. One effective strategy is to use vectorized load/store operations (e.g., `float2`, `float4`). In `TileLang`, you can specify vectorized operations via `T.vectorized`:
 
 ```python
 def splitk_gemv_vectorized(
@@ -315,7 +315,7 @@ def splitk_gemv_vectorized_tvm(
 
 With this optimization, the kernel latency now reduces from **~0.0084 ms** to **~0.0069 ms**, which is faster than torch/cuBLAS!
 
-# Autotune
+## Autotune
 
 `BLOCK_N`, `BLOCK_K`, `reduce_threads` are hyperparameters in our kernel, which can be tuned to improve performance. We can use the `tilelang.autotune` feature to automatically search for optimal configurations:
 
@@ -450,9 +450,9 @@ extern "C" __global__ void __launch_bounds__(64, 1) main_kernel(half_t* __restri
 
 This corresponds closely to our `TileLang` program, with necessary synchronization and low-level optimizations inserted automatically.
 
-# Conclusion
+## Conclusion
 
-## Benchmark Table on Hopper GPU
+### Benchmark Table on Hopper GPU
 
 | Kernel Name   | Latency   |
 |------------|------------|
