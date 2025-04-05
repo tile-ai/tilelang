@@ -11,10 +11,18 @@ import re
 import logging
 import textwrap
 
-PREDEF_ARRTIBUTE_SET_DYNAMIC_MEMORY = """
+PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY = """
     cudaError_t result_{0} = cudaFuncSetAttribute({0}, cudaFuncAttributeMaxDynamicSharedMemorySize, {1});
     if (result_{0} != CUDA_SUCCESS) {{
         snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed dynamic shared memory size to %d with error: %s", {1}, cudaGetErrorString(result_{0}));
+        return -1;
+    }}
+"""
+
+PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY_HIP = """
+    hipError_t result_{0} = hipFuncSetAttribute((const void *){0}, hipFuncAttributeMaxDynamicSharedMemorySize, {1});
+    if (result_{0} != HIP_SUCCESS) {{
+        snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed dynamic shared memory size to %d with error: %s", {1}, hipGetErrorString(result_{0}));
         return -1;
     }}
 """
@@ -162,7 +170,7 @@ class TLCUDASourceWrapper(object):
             if dyn_sym not in [arg["name"] for arg in function_args]:
                 function_args.append({"name": dyn_sym, "type": "int"})
 
-        function_args.append({"name": "stream=cudaStreamDefault", "type": "cudaStream_t"},)
+        function_args.append(self.get_stream_type())
 
         # Format the function arguments for declaration
         def_args = ", ".join([f"{arg['type']} {arg['name']}" for arg in function_args])
@@ -354,14 +362,14 @@ class TLCUDASourceWrapper(object):
                         dynamic_symbolic_set.append(dim.name)
         return dynamic_symbolic_set
 
-    def get_cuda_init_func(self):
+    def get_init_func(self):
         # Initialize an empty string for the CUDA function call
         call_str = """"""
         # If dynamic shared memory buffer is specified, prepare the cudaFuncSetAttribute call
         for function_name, dynamic_smem_buf in self.dynamic_smem_buf.items():
             if dynamic_smem_buf is not None:
                 # Format the cudaFuncSetAttribute call for dynamic shared memory
-                call_str += PREDEF_ARRTIBUTE_SET_DYNAMIC_MEMORY.format(
+                call_str += PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY.format(
                     function_name, dynamic_smem_buf)
         # Format the initialization function using the call_str
         init_funcs = PREDEF_INIT_FUNC.format(call_str)
@@ -373,7 +381,7 @@ class TLCUDASourceWrapper(object):
         # Get the function names
         function_names = self.function_names
         # Get the CUDA initialization function
-        init_func = self.get_cuda_init_func()
+        init_func = self.get_init_func()
 
         # Organize function information for code generation
         function_informations = {}
@@ -394,6 +402,9 @@ class TLCUDASourceWrapper(object):
         # Combine the source, initialization function, and host function to form the complete library code
         lib_code = self.source + init_func + host_func
         return lib_code
+
+    def get_stream_type(self) -> Dict[str, str]:
+        return {"name": "stream=cudaStreamDefault", "type": "cudaStream_t"}
 
     @property
     def prim_func(self):
@@ -423,19 +434,21 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
                  pass_configs: Optional[Dict[str, Any]] = None):
         super().__init__(scheduled_ir_module, source, target, device_mod, host_mod, pass_configs)
 
-    def get_hip_init_func(self):
+    def get_init_func(self):
         # Initialize an empty string for the CUDA function call
         call_str = """"""
         # If dynamic shared memory buffer is specified, prepare the cudaFuncSetAttribute call
-        if self.dynamic_smem_buf is not None:
-            call_str = PREDEF_ARRTIBUTE_SET_DYNAMIC_MEMORY.format(self.function_name,
-                                                                  self.dynamic_smem_buf)
+        for function_name, dynamic_smem_buf in self.dynamic_smem_buf.items():
+            if dynamic_smem_buf is not None:
+                # Format the cudaFuncSetAttribute call for dynamic shared memory
+                call_str += PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY_HIP.format(
+                    function_name, dynamic_smem_buf)
         # Format the initialization function using the call_str
         init_funcs = PREDEF_INIT_FUNC.format(call_str)
         return init_funcs
 
-    def get_stream_type(self, function_args):
-        function_args.append({"name": "stream=hipStreamDefault", "type": "hipStream_t"},)
+    def get_stream_type(self) -> Dict[str, str]:
+        return {"name": "stream=hipStreamDefault", "type": "hipStream_t"}
 
 
 class TLCPUSourceWrapper(object):

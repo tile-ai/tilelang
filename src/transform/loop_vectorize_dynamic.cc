@@ -9,6 +9,7 @@
 
 #include <tvm/arith/iter_affine_map.h>
 #include <tvm/tir/builtin.h>
+#include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 
 #include <numeric>
@@ -265,6 +266,65 @@ private:
   int loop_num_;
 };
 
+// Modify every subexpression in the condition
+class VectorizedConditionMutator : public StmtExprMutator {
+public:
+  VectorizedConditionMutator(Var inner_var, int extent)
+      : inner_var_(inner_var), vector_size_(extent) {}
+
+private:
+  PrimExpr VisitExpr_(const GENode *node) final {
+    PrimExpr lhs = StmtExprMutator::VisitExpr(node->a);
+    PrimExpr rhs = StmtExprMutator::VisitExpr(node->b);
+    auto span = node->span;
+    Map<Var, PrimExpr> vmap_lhs, vmap_rhs;
+    vmap_lhs.Set(inner_var_, 0);
+    PrimExpr lhs_bound = Substitute(lhs, vmap_lhs);
+    vmap_rhs.Set(inner_var_, vector_size_ - 1);
+    PrimExpr rhs_bound = Substitute(rhs, vmap_rhs);
+    return GE(lhs_bound, rhs_bound, span);
+  }
+
+  PrimExpr VisitExpr_(const GTNode *node) final {
+    PrimExpr lhs = StmtExprMutator::VisitExpr(node->a);
+    PrimExpr rhs = StmtExprMutator::VisitExpr(node->b);
+    auto span = node->span;
+    Map<Var, PrimExpr> vmap_lhs, vmap_rhs;
+    vmap_lhs.Set(inner_var_, 0);
+    PrimExpr lhs_bound = Substitute(lhs, vmap_lhs);
+    vmap_rhs.Set(inner_var_, vector_size_ - 1);
+    PrimExpr rhs_bound = Substitute(rhs, vmap_rhs);
+    return GT(lhs_bound, rhs_bound, span);
+  }
+
+  PrimExpr VisitExpr_(const LENode *node) final {
+    PrimExpr lhs = StmtExprMutator::VisitExpr(node->a);
+    PrimExpr rhs = StmtExprMutator::VisitExpr(node->b);
+    auto span = node->span;
+    Map<Var, PrimExpr> vmap_lhs, vmap_rhs;
+    vmap_lhs.Set(inner_var_, vector_size_ - 1);
+    PrimExpr lhs_bound = Substitute(lhs, vmap_lhs);
+    vmap_rhs.Set(inner_var_, 0);
+    PrimExpr rhs_bound = Substitute(rhs, vmap_rhs);
+    return LE(lhs_bound, rhs_bound, span);
+  }
+
+  PrimExpr VisitExpr_(const LTNode *node) final {
+    PrimExpr lhs = StmtExprMutator::VisitExpr(node->a);
+    PrimExpr rhs = StmtExprMutator::VisitExpr(node->b);
+    auto span = node->span;
+    Map<Var, PrimExpr> vmap_lhs, vmap_rhs;
+    vmap_lhs.Set(inner_var_, vector_size_ - 1);
+    PrimExpr lhs_bound = Substitute(lhs, vmap_lhs);
+    vmap_rhs.Set(inner_var_, 0);
+    PrimExpr rhs_bound = Substitute(rhs, vmap_rhs);
+    return LT(lhs_bound, rhs_bound, span);
+  }
+
+  Var inner_var_;
+  int vector_size_;
+};
+
 class VectorizeRewriterDynamic : public StmtExprMutator {
 public:
   VectorizeRewriterDynamic(VectorizePlanResult plan)
@@ -300,22 +360,19 @@ private:
     VectorizedConditionExtracter extracter;
     std::vector<PrimExpr> conditions = extracter.GetConditions(body);
 
-    // Set vectorize variable to the max value of the extent (i.e.
-    // vector_size_ - 1)
-    PrimExpr condition = conditions[0];
-    for (int i = 1; i < conditions.size(); ++i) {
-      condition = condition && conditions[i];
-    }
+    VectorizedConditionMutator condition_mutator(inner_var, vector_size_);
 
-    // add condition ifthenelse here
-    Map<Var, PrimExpr> vmap_condition;
-    vmap_condition.Set(inner_var, vector_size_ - 1);
-    PrimExpr condition_bound = Substitute(condition, vmap_condition);
+    // Adaptively set vectorized variable to the min/max value of the extent
+    PrimExpr condition_bound = condition_mutator(conditions[0]);
+    for (int i = 1; i < conditions.size(); ++i) {
+      condition_bound = condition_bound && condition_mutator(conditions[i]);
+    }
 
     // modify body in the vectorized loop
     VectorizedBodyMutator mutator(inner_var, vector_size_, conditions);
     Stmt vectorize_body = mutator(body);
 
+    // add condition ifthenelse here
     For vectorize_for =
         For(inner_var, 0, vector_size_, ForKind::kVectorized, vectorize_body);
     For serial_for = For(inner_var, 0, vector_size_, ForKind::kSerial, body);

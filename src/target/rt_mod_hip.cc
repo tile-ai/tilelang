@@ -76,7 +76,7 @@ runtime::Module BuildTileLangHIP(IRModule mod, Target target) {
   return ROCMModuleCreate(ptx, fmt, ExtractFuncInfo(mod), code, std::string());
 }
 
-String BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
+runtime::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
   using tvm::runtime::Registry;
   bool output_ssa = false;
   CodeGenTileLangHIP cg;
@@ -95,7 +95,8 @@ String BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
   if (const auto *f = Registry::Get("tilelang_callback_hip_postproc")) {
     code = (*f)(code, target).operator std::string();
   }
-  return String(code);
+  return ROCMModuleCreate("ptx", "fmt", ExtractFuncInfo(mod), code,
+                          std::string());
 }
 TVM_REGISTER_GLOBAL("target.build.tilelang_hip")
     .set_body_typed(BuildTileLangHIP);
