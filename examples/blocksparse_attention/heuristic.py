@@ -21,7 +21,6 @@ def num_splits_heuristic(total_mblocks, num_SMs, num_n_blocks, num_m_blocks, siz
     # If we have enough m_blocks to almost fill the SMs, prefer 1 split unless memory constraints apply.
     if total_mblocks >= 0.8 * num_SMs:
         size_l2 = 50 * 1024 * 1024  # L2 cache size assumption (50MB)
-
         # Only split if each KV head is too large for L2 and there are enough m_blocks
         if size_one_kv_head > size_l2 and num_m_blocks >= num_SMs * 2 and not is_causal_or_local:
             return min((size_one_kv_head + size_l2 - 1) // size_l2, max_splits)
@@ -42,7 +41,6 @@ def num_splits_heuristic(total_mblocks, num_SMs, num_n_blocks, num_m_blocks, siz
     for num_splits in range(1, max_splits + 1):
         n_waves = (total_mblocks * num_splits) / num_SMs
         eff = n_waves / math.ceil(n_waves)
-
         # Track max efficiency
         if eff > max_efficiency:
             max_efficiency = eff
