@@ -42,9 +42,9 @@ static std::string GetFP8Type(DataType type) {
     LOG(FATAL) << "Only support scalar and vector types of width (2, 4, 8, 16) "
                   "for FP8";
   }
-  if (type.code() == DataType::kE4M3Float) {
+  if (type.code() == DataType::kFloat8_e4m3fn) {
     stream << "fp8_e4" << vec << "_t";
-  } else if (type.code() == DataType::kE5M2Float) {
+  } else if (type.code() == DataType::kFloat8_e5m2) {
     stream << "fp8_e5" << vec << "_t";
   } else {
     LOG(FATAL) << "Unsupported FP8 type in CUDA codegen";
@@ -1478,6 +1478,12 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     os << '(' << std::scientific << op->value << 'f' << ')';
     return;
   }
+  // Type code is kFloat8_e5m2 or kE4M4Float
+  if (op->dtype.is_float8() || op->dtype.is_float4()) {
+    p->PrintType(op->dtype, os);
+    os << '(' << std::scientific << op->value << 'f' << ')';
+    return;
+  }
   // Type code is kFloat
   switch (op->dtype.bits()) {
   case 64:
@@ -1488,8 +1494,10 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
         temp << "-";
       }
       temp << ((op->dtype.bits() == 32) ? "CUDART_INF_F" : "CUDART_INF");
+      p->need_math_constants_h_ = true;
     } else if (std::isnan(op->value)) {
       temp << ((op->dtype.bits() == 32) ? "CUDART_NAN_F" : "CUDART_NAN");
+      p->need_math_constants_h_ = true;
     } else {
       temp << std::scientific << op->value;
       if (op->dtype.bits() == 32)

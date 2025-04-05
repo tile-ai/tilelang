@@ -261,6 +261,8 @@ class AutoTuner:
                 if name not in keys:
                     new_args.append(value)
                 else:
+                    if name not in config:
+                        raise ValueError(f"Configuration {config} does not contain key {name}")
                     new_args.append(config[name])
             new_args = tuple(new_args)
             config_args.append(new_args)

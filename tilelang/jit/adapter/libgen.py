@@ -10,7 +10,8 @@ import os
 import tempfile
 import subprocess
 import logging
-from tilelang.env import TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR
+from tilelang.env import TILELANG_TEMPLATE_PATH
+from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +33,10 @@ class LibraryGenerator(object):
             lib_path = self.libpath
         return ctypes.CDLL(lib_path)
 
-    def compile_lib(self, timeout: float = None, with_tl: bool = True):
+    def compile_lib(self, timeout: float = None):
         target = self.target
         if is_cuda_target(target):
+            from tilelang.env import CUTLASS_INCLUDE_DIR
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
             compute_version = "".join(get_target_compute_version(target).split("."))
             if compute_version == "90":
@@ -56,17 +58,26 @@ class LibraryGenerator(object):
                 "-gencode",
                 f"arch=compute_{compute_version},code=sm_{compute_version}",
             ]
+            command += [
+                "-I" + CUTLASS_INCLUDE_DIR,
+            ]
 
         elif is_hip_target(target):
+            from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)
             libpath = src.name.replace(".cpp", ".so")
-
+            rocm_path = find_rocm_path()
+            arch = get_rocm_arch(rocm_path)
             command = [
                 "hipcc",
                 "-std=c++17",
                 "-fPIC",
+                f"--offload-arch={arch}",
                 "--shared",
                 src.name,
+            ]
+            command += [
+                "-I" + COMPOSABLE_KERNEL_INCLUDE_DIR,
             ]
         elif is_cpu_target(target):
             from tilelang.contrib.cc import get_cplus_compiler
@@ -74,19 +85,15 @@ class LibraryGenerator(object):
             libpath = src.name.replace(".cpp", ".so")
 
             command = [get_cplus_compiler(), "-std=c++17", "-fPIC", "-shared", src.name]
-            with_tl = False
             command += [
                 "-I" + TILELANG_TEMPLATE_PATH,
             ]
         else:
             raise ValueError(f"Unsupported target: {target}")
 
-        if with_tl:
-            command += [
-                "-I" + TILELANG_TEMPLATE_PATH,
-                "-I" + CUTLASS_INCLUDE_DIR,
-            ]
-            command += ["-diag-suppress=20013"]
+        command += [
+            "-I" + TILELANG_TEMPLATE_PATH,
+        ]
         command += ["-o", libpath]
 
         src.write(self.lib_code)

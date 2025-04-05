@@ -44,7 +44,6 @@ def test_gemm_fp8(M, N, K, dtype):
     func = matmul(M, N, K, 128, 128, 64, dtype)
 
     kernel = tilelang.compile(func, out_idx=-1)
-
     a = torch.randn(M, K, dtype=torch.float16, device='cuda').to(dtype=torch_dtype)
     b = torch.randn(N, K, dtype=torch.float16, device='cuda').to(dtype=torch_dtype)
 

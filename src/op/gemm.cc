@@ -256,8 +256,6 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       ICHECK(0) << "WGMMA only support B in shared.";
     }
   } else if (TargetIsCDNA(T.target)) {
-    ICHECK(trans_B == true) << "Currently only support Transpose B for CDNA";
-
     const int warp_size = 64;
     auto [warp_m, warp_n] =
         ComputeWarpPartition(T.block_size / warp_size, T.target);

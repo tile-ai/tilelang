@@ -112,6 +112,7 @@ std::string CodeGenTileLangHIP::Finish() {
   decl_stream << "#include <tl_templates/hip/reduce.h>\n";
   decl_stream << "#include <tl_templates/hip/ldsm.h>\n";
   decl_stream << "#include <tl_templates/hip/threadblock_swizzle.h>\n";
+  decl_stream << "#include <tl_templates/hip/debug.h>\n";
   decl_stream << "\n";
   return CodeGenC::Finish();
 }
@@ -505,11 +506,11 @@ void CodeGenTileLangHIP::PrintVecElemStore(const std::string &vec, DataType t,
       stream << "(" << value << " << " << i % 4 * 8 << ");\n";
     }
   } else if (t.is_float16()) {
-    stream << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
-           << access[i % 2] << " = " << value << ";\n";
+    stream << "*((half_t*)(&(((half2*)(&(" << vec << "." << access[i / 2]
+           << ")))->" << access[i % 2] << "))) = " << value << ";\n";
   } else if (t.is_bfloat16()) {
-    stream << "((nv_bfloat162*)(&(" << vec << "." << access[i / 2] << ")))->"
-           << access[i % 2] << " = " << value << ";\n";
+    stream << "*((bfloat16_t*)(&((half2*)(&(" << vec << "." << access[i / 2]
+           << ")))->" << access[i % 2] << "))) = " << value << ";\n";
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
