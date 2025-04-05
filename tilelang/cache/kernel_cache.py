@@ -144,7 +144,8 @@ class KernelCache:
         sorted_pairs = sorted(pairs, key=lambda pair: pair[0])
 
         # Rebuild sorted layout_map string and re-index
-        sorted_layout_map_content = ', '.join([f"{key}: metadata[\"tl.Layout\"][{i}]" for i, (key, value) in enumerate(sorted_pairs)])
+        sorted_layout_map_content = ', '.join(
+            [f"{key}: metadata[\"tl.Layout\"][{i}]" for i, (key, value) in enumerate(sorted_pairs)])
         if sorted_pairs:
             sorted_layout_map_str = '{' + sorted_layout_map_content + '}'
         else:
@@ -158,7 +159,7 @@ class KernelCache:
 
         layout_map_line_index = -1
         for line_index, line_content in enumerate(lines):
-            if start_marker.strip() in line_content.strip(): # find line index of layout_map_start
+            if start_marker.strip() in line_content.strip():  # find line index of layout_map_start
                 layout_map_line_index = line_index
                 break
 
@@ -166,31 +167,40 @@ class KernelCache:
             for line_index in range(layout_map_line_index - 1, -1, -1):
                 line = lines[line_index]
                 if re.match(r'\s*(\w+)\s*=\s*T\.handle\("float16",\s*"shared\.dyn"\)\s*', line):
-                    handle_lines.insert(0, line) # Find handle lines in reverse order, insert at the beginning to keep relative order
+                    handle_lines.insert(
+                        0, line
+                    )  # Find handle lines in reverse order, insert at the beginning to keep relative order
                     handle_start_index = line_index
                     if handle_end_index == -1:
-                        handle_end_index = line_index + 1 # Record the end line index (exclusive) of the handle block
+                        handle_end_index = line_index + 1  # Record the end line index (exclusive) of the handle block
                 else:
-                    if handle_start_index != -1: # stop if already found handle lines and current line is not handle
+                    if handle_start_index != -1:  # stop if already found handle lines and current line is not handle
                         break
-                    elif not line.strip(): # skip empty lines before handle block
+                    elif not line.strip() or line.strip().startswith(
+                            '#'):  # skip comment lines before handle block
                         continue
-                    elif line.strip().startswith('#'): # skip comment lines before handle block
-                        continue
-                    else: # stop if non-handle line found before handle block starts
+                    else:  # stop if non-handle line found before handle block starts
                         break
 
-
-        sorted_handle_lines = sorted(handle_lines, key=lambda line: re.match(r'\s*(\w+)\s*=', line).group(1).strip()) if handle_lines else []
-        sorted_handle_block = "".join(sorted_handle_lines)
-
+        sorted_handle_lines = sorted(
+            handle_lines, key=lambda line: re.match(r'\s*(\w+)\s*=', line).group(1).strip()
+        ) if handle_lines else []
 
         # Construct new function string
-        prefix_lines = lines[:handle_start_index] if handle_start_index != -1 else lines[:layout_map_line_index] # up to handle block or layout_map if no handle
-        handle_separator_lines = lines[handle_end_index:layout_map_line_index] if handle_start_index != -1 and handle_end_index != -1 else [] # lines between handle and layout_map, from handle_end_index
-        suffix_lines = lines[layout_map_line_index+1:] # lines after layout_map block line
+        prefix_lines = lines[:
+                             handle_start_index] if handle_start_index != -1 else lines[:
+                                                                                        layout_map_line_index]  # up to handle block or layout_map if no handle
+        handle_separator_lines = lines[
+            handle_end_index:
+            layout_map_line_index] if handle_start_index != -1 and handle_end_index != -1 else [
+            ]  # lines between handle and layout_map, from handle_end_index
+        suffix_lines = lines[layout_map_line_index + 1:]  # lines after layout_map block line
 
-        new_lines = prefix_lines + [line for line in sorted_handle_lines] + handle_separator_lines + [lines[layout_map_line_index].replace(layout_map_content, sorted_layout_map_str)] + suffix_lines
+        new_lines = prefix_lines + [line for line in sorted_handle_lines
+                                   ] + handle_separator_lines + [
+                                       lines[layout_map_line_index].replace(
+                                           layout_map_content, sorted_layout_map_str)
+                                   ] + suffix_lines
         new_func_string = "".join(new_lines)
 
         return new_func_string
