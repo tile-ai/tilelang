@@ -286,6 +286,7 @@ def LoopVectorizeDynamic():
     """
     return _ffi_api.LoopVectorizeDynamic()  # type: ignore
 
+
 def ExpandIndexDataType():
     """Expand index datatype.
 
