@@ -411,7 +411,6 @@ def jit(out_idx: Optional[List[int]] = None,
         def decorator(*args, **kwargs) -> float:
 
             kernel = tilelang.compile(fn(*args, **kwargs), out_idx=out_idx, target=target)
-            profiler = kernel.get_profiler(tensor_supply_type=supply_type)
 
             return JITContext(
                 out_idx=out_idx,
@@ -422,7 +421,8 @@ def jit(out_idx: Optional[List[int]] = None,
                 max_mismatched_ratio=max_mismatched_ratio,
                 skip_check=skip_check,
                 cache_input_tensors=cache_input_tensors,
-                profiler=profiler,
+                kernel=kernel,
+                supply_type=supply_type,
                 target=target)
 
         return decorator
