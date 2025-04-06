@@ -78,9 +78,11 @@ tvm::transform::Pass ConfigIndexBitwidth() {
     tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
     Optional<Integer> opt_config_index_bitwidth =
         ctxt->GetConfig(kConfigIndexBitwidth, Optional<Integer>());
-    int config_index_bitwidth = opt_config_index_bitwidth.value_or(32)->value;
-    n->body =
-        ConfigIndexBitwidthRewriter(config_index_bitwidth)(std::move(n->body));
+    if (opt_config_index_bitwidth.defined()) {
+      int config_index_bitwidth = opt_config_index_bitwidth.value()->value;
+      n->body =
+          ConfigIndexBitwidthRewriter(config_index_bitwidth)(std::move(n->body));
+    }
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ConfigIndexBitwidth", {});

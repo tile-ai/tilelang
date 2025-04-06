@@ -139,7 +139,7 @@ def compile(
         Available options:
             "tir.disable_vectorize": bool, default: False
             "tl.disable_tma_lower": bool, default: False
-            "tl.config_index_bitwidth": int, default: 32
+            "tl.config_index_bitwidth": int, default: None
     """
     return cached(
         func=func,
