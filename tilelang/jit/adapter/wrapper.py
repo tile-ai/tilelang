@@ -67,22 +67,22 @@ TMA_DESC_INIT_FUNC = """
     &{0}, {0}_type, {0}_tensorRank, {0}_globalAddress, {0}_globalDim, {0}_globalStride + 1, {0}_boxDim, {0}_elementStrides, {0}_interleave, {0}_swizzle, {0}_l2Promotion, {0}_oobFill);
 
 \tif ({0}_result != CUDA_SUCCESS) {{
-    std::stringstream ss;
-    ss << "TMA Desc Addr:   " << &{0}
-       << "\\nformat         " << {0}_type
-       << "\\ndim            " << {0}_tensorRank
-       << "\\ngmem_address   " << {0}_globalAddress
-       << "\\nglobalDim      " << {0}_globalDim
-       << "\\nglobalStrides  " << {0}_globalStride + 1
-       << "\\nboxDim         " << {0}_boxDim
-       << "\\nelementStrides " << {0}_elementStrides
-       << "\\ninterleave     " << {0}_interleave
-       << "\\nswizzle        " << {0}_swizzle
-       << "\\nl2Promotion    " << {0}_l2Promotion
-       << "\\noobFill        " << {0}_oobFill
-       << "\\nError: Failed to initialize the TMA descriptor {0}";
-    snprintf(error_buf, ERROR_BUF_SIZE, "%s", ss.str().c_str());
-    return -1;
+\t\tstd::stringstream ss;
+\t\tss << "TMA Desc Addr:   " << &{0}
+\t\t\t<< "\\nformat         " << {0}_type
+\t\t\t<< "\\ndim            " << {0}_tensorRank
+\t\t\t<< "\\ngmem_address   " << {0}_globalAddress
+\t\t\t<< "\\nglobalDim      " << {0}_globalDim
+\t\t\t<< "\\nglobalStrides  " << {0}_globalStride + 1
+\t\t\t<< "\\nboxDim         " << {0}_boxDim
+\t\t\t<< "\\nelementStrides " << {0}_elementStrides
+\t\t\t<< "\\ninterleave     " << {0}_interleave
+\t\t\t<< "\\nswizzle        " << {0}_swizzle
+\t\t\t<< "\\nl2Promotion    " << {0}_l2Promotion
+\t\t\t<< "\\noobFill        " << {0}_oobFill
+\t\t\t<< "\\nError: Failed to initialize the TMA descriptor {0}";
+\t\tsnprintf(error_buf, ERROR_BUF_SIZE, "%s", ss.str().c_str());
+\t\treturn -1;
 }}
 """
 

@@ -48,7 +48,7 @@ Array<IterVar> Copy::MakeIterVars() const {
   for (size_t i = 0; i < src_range.size(); i++) {
     if (is_one(src_range[i]->extent))
       continue;
-    Var var = Var(std::string{char('i' + idx)});
+    Var var = Var(std::string{char('i' + idx)}, src_range[i]->extent->dtype);
     idx++;
     loop_vars.push_back(
         {Range(0, src_range[i]->extent), var, IterVarType::kDataPar});
@@ -408,7 +408,7 @@ For Fill::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars;
   Array<PrimExpr> dst_indices;
   for (int i = 0; i < ndim; i++) {
-    Var var = Var(std::string{char('i' + i)});
+    Var var = Var(std::string{char('i' + i)}, region[i]->extent->dtype);
     loop_vars.push_back({region[i], var, IterVarType::kDataPar});
     dst_indices.push_back(var);
   }

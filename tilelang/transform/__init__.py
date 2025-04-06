@@ -285,3 +285,14 @@ def LoopVectorizeDynamic():
     ----
     """
     return _ffi_api.LoopVectorizeDynamic()  # type: ignore
+
+def ExpandIndexDataType():
+    """Expand index datatype.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    ----
+    """
+    return _ffi_api.ExpandIndexDataType()  # type: ignore

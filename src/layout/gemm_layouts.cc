@@ -17,7 +17,7 @@ namespace tvm {
 namespace tl {
 
 static IterVar make_itervar(std::string name, PrimExpr dom) {
-  Var var = Var(name);
+  Var var = Var(name, dom->dtype);
   return IterVar(Range(0, dom), var, IterVarType::kDataPar);
 }
 

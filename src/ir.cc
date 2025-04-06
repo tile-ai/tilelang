@@ -35,7 +35,7 @@ static Var CreateEnvThread(String name, String thread_tag, DataType dtype) {
 
 static ForFrame MakeIterVarFrame(std::string name, PrimExpr dom) {
   using namespace tvm::tir;
-  Var var = Var(name);
+  Var var = Var(name, dom->dtype);
   // Create a frame that represents a loop over the given domain.
   ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
   n->vars.push_back(var);
