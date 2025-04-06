@@ -1,57 +1,12 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 import math
-import torch
 
 import tilelang
 import tilelang.language as T
-tilelang.disable_cache()
-import torch.nn.functional as F
 
-def get_sta_mask(x, canvas_size=(32, 48, 80), tile_size=(4, 8, 8), kernel_size=(1, 1, 1), has_text=False):
-    bsz, num_head, downsample_len, _ = x.shape
-    device = x.device
-    CT, CH, CW = canvas_size
-    TT, TH, TW = tile_size
-    NT, NH, NW = CT // TT, CH // TH, CW // TW
-    KT, KH, KW = kernel_size
-    DT, DH, DW = KT // 2, KH // 2, KW // 2
-    
-    dense_mask = torch.full([bsz, num_head, downsample_len, downsample_len],
-                           False,
-                           dtype=torch.bool,
-                           device=device)
-    indices = torch.arange(downsample_len, device=device)
-    q_t = (indices // (NT * NH * NW)).unsqueeze(-1)
-    q_h = ((indices // (NW)) % NH).unsqueeze(-1)
-    q_w = ((indices // 1) % NW).unsqueeze(-1)
-    
-    q_t = torch.clamp(q_t, DT, NT-DT-1)
-    q_h = torch.clamp(q_h, DH, NH-DH-1)
-    q_w = torch.clamp(q_w, DW, NW-DW-1)
-    
-    k_indices = torch.arange(downsample_len, device=device)
-    k_t = (k_indices // (NT * NH * NW)).unsqueeze(0)
-    k_h = ((k_indices // (NW)) % NH).unsqueeze(0)
-    k_w = ((k_indices // 1) % NW).unsqueeze(0)
-    
-    t_dist = torch.abs(q_t - k_t)
-    h_dist = torch.abs(q_h - k_h)
-    w_dist = torch.abs(q_w - k_w)
-    mask = (t_dist <= DT) & (h_dist <= DH) & (w_dist <= DW)
-    
-    for b in range(bsz):
-        for h in range(num_head):
-            dense_mask[b, h] = mask
-    
-    # for text mask
-    if has_text:
-        text_start = downsample_len - 3
-        dense_mask[:, :, text_start:, :text_start] = True
-        dense_mask[:, :, text_start:, text_start:] = torch.tril(
-            torch.ones(3, 3, device=device, dtype=torch.bool)
-        )
-    return dense_mask
+tilelang.disable_cache()
+
 
 def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal):
     block_M = 64
@@ -59,7 +14,7 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
     num_stages = 0
     threads = 128
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
-    
+
     batch = T.int32(batch)
     heads = T.int32(heads)
     seq_len = T.int32(seq_len)
@@ -202,21 +157,15 @@ def test_sta_attention():
     BATCH, N_HEADS, SEQ_LEN, D_HEAD = 1, 24, 82944, 128
 
     # Create sparse mask (downsampled to block level)
-    canvas_size = (32, 48, 80)
     tile_size = (4, 8, 8)
-    kernel_size = (2, 2, 2)
     BLOCK = tile_size[0] * tile_size[1] * tile_size[2]
     downsample_factor = BLOCK
     downsample_len = math.ceil(SEQ_LEN / downsample_factor)
-    x_ds = torch.randn([BATCH, N_HEADS, downsample_len, downsample_len],
-                       device='cuda',
-                       dtype=torch.bfloat16)
-    block_mask = get_sta_mask(x_ds, canvas_size, tile_size, kernel_size, has_text=True)
     program = blocksparse_flashattn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
     kernel = tilelang.compile(program, out_idx=[4], pass_configs={"tl.config_index_bitwidth": 64})
 
     cuda_source = kernel.get_kernel_source()
-    
+
     assert "int64_t" in cuda_source
 
 

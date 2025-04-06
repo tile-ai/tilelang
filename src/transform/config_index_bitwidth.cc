@@ -79,7 +79,8 @@ tvm::transform::Pass ConfigIndexBitwidth() {
     Optional<Integer> opt_config_index_bitwidth =
         ctxt->GetConfig(kConfigIndexBitwidth, Optional<Integer>());
     int config_index_bitwidth = opt_config_index_bitwidth.value_or(32)->value;
-    n->body = ConfigIndexBitwidthRewriter(config_index_bitwidth)(std::move(n->body));
+    n->body =
+        ConfigIndexBitwidthRewriter(config_index_bitwidth)(std::move(n->body));
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ConfigIndexBitwidth", {});
