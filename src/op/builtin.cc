@@ -20,6 +20,7 @@ namespace tvm {
 namespace tl {
 
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableTMALower, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kConfigIndexBitwidth, Integer);
 
 #define TIR_DEFINE_TL_BUILTIN(OpName)                                          \
   const Op &OpName() {                                                         \

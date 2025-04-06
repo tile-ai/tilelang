@@ -1,6 +1,7 @@
 // Copyright (c) Tile-AI Corporation.
 // Licensed under the MIT License.
 
+#include "../op/builtin.h"
 #include <tvm/runtime/registry.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/data_type_rewriter.h>
@@ -11,10 +12,11 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
-class ExpandDataTypeRewriter : public IndexDataTypeRewriter {
+class ConfigIndexBitwidthRewriter : public IndexDataTypeRewriter {
 public:
   using Parent = IndexDataTypeRewriter;
-  ExpandDataTypeRewriter() = default;
+  ConfigIndexBitwidthRewriter(int index_bitwidth)
+      : _index_bitwidth_(index_bitwidth) {}
 
   Stmt operator()(Stmt s) { return VisitStmt(s); }
 
@@ -34,7 +36,7 @@ protected:
 
   PrimExpr VisitExpr_(const IntImmNode *op) final {
     if (is_enabled_ && op->dtype.is_int() && op->dtype.bits() < 64) {
-      return IntImm(DataType::Int(64), op->value);
+      return IntImm(DataType::Int(_index_bitwidth_), op->value);
     }
     return GetRef<PrimExpr>(op);
   }
@@ -42,7 +44,7 @@ protected:
   PrimExpr VisitExpr_(const CastNode *op) final {
     if (is_enabled_ && op->dtype.is_int() && op->dtype.bits() < 64) {
       PrimExpr value = VisitExpr(op->value);
-      return Cast(DataType::Int(64), value);
+      return Cast(DataType::Int(_index_bitwidth_), value);
     }
     return Parent::VisitExpr_(op);
   }
@@ -64,20 +66,27 @@ protected:
     is_enabled_ = is_enabled;
     return std::move(node);
   }
+
+  int _index_bitwidth_;
 };
 
-tvm::transform::Pass ExpandIndexDataType() {
+tvm::transform::Pass ConfigIndexBitwidth() {
   using namespace tir::transform;
   auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) {
     auto *n = f.CopyOnWrite();
-    n->body = ExpandDataTypeRewriter()(std::move(n->body));
+    // Get pass config `tl.config_index_bitwidth`
+    tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
+    Optional<Integer> opt_config_index_bitwidth =
+        ctxt->GetConfig(kConfigIndexBitwidth, Optional<Integer>());
+    int config_index_bitwidth = opt_config_index_bitwidth.value_or(32)->value;
+    n->body = ConfigIndexBitwidthRewriter(config_index_bitwidth)(std::move(n->body));
     return f;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.ExpandIndexDataType", {});
+  return CreatePrimFuncPass(pass_func, 0, "tl.ConfigIndexBitwidth", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.ExpandIndexDataType")
-    .set_body_typed(ExpandIndexDataType);
+TVM_REGISTER_GLOBAL("tl.transform.ConfigIndexBitwidth")
+    .set_body_typed(ConfigIndexBitwidth);
 
 } // namespace tl
 } // namespace tvm

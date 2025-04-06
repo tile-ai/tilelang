@@ -78,8 +78,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.InferFragment()(mod)
     mod = tir.transform.LowerThreadAllreduce()(mod)
     mod = tilelang.transform.LowerHopperIntrin()(mod)
-    # Expand index datatype
-    mod = tilelang.transform.ExpandIndexDataType()(mod)
+    mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     mod = tilelang.transform.InjectPTXAsyncCopy()(mod)
