@@ -80,8 +80,8 @@ tvm::transform::Pass ConfigIndexBitwidth() {
         ctxt->GetConfig(kConfigIndexBitwidth, Optional<Integer>());
     if (opt_config_index_bitwidth.defined()) {
       int config_index_bitwidth = opt_config_index_bitwidth.value()->value;
-      n->body =
-          ConfigIndexBitwidthRewriter(config_index_bitwidth)(std::move(n->body));
+      n->body = ConfigIndexBitwidthRewriter(config_index_bitwidth)(
+          std::move(n->body));
     }
     return f;
   };
