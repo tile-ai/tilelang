@@ -1,7 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
-
 import torch
 import triton
 import triton.language as tl
@@ -34,12 +33,27 @@ def _split_kernel(
     sm_scale,
     num_splits,
     gqa_group_size,
-    stride_q_b, stride_q_h, stride_q_d,
-    stride_k_b, stride_k_s, stride_k_h, stride_k_d,
-    stride_v_b, stride_v_s, stride_v_h, stride_v_d,
-    stride_o_b, stride_o_h, stride_o_split, stride_o_d,
-    stride_lse_b, stride_lse_h, stride_lse_split,
-    stride_mask_b, stride_mask_h, stride_mask_s,
+    stride_q_b,
+    stride_q_h,
+    stride_q_d,
+    stride_k_b,
+    stride_k_s,
+    stride_k_h,
+    stride_k_d,
+    stride_v_b,
+    stride_v_s,
+    stride_v_h,
+    stride_v_d,
+    stride_o_b,
+    stride_o_h,
+    stride_o_split,
+    stride_o_d,
+    stride_lse_b,
+    stride_lse_h,
+    stride_lse_split,
+    stride_mask_b,
+    stride_mask_h,
+    stride_mask_s,
     BLOCK_H: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -47,7 +61,6 @@ def _split_kernel(
     batch_idx = tl.program_id(0)
     head_idx_kv = tl.program_id(1)
     split_idx = tl.program_id(2)
-
 
     head_idx_q = head_idx_kv * gqa_group_size
     offs_h = tl.arange(0, BLOCK_H)
@@ -67,22 +80,26 @@ def _split_kernel(
         loop_range = blocks_per_split
 
     q_ptr += batch_idx * stride_q_b + head_idx_q * stride_q_h
-    k_cache_ptr += batch_idx * stride_k_b + head_idx_kv * stride_k_h + offs_n[None, :] * stride_k_s + offs_d[:, None] * stride_k_d
-    v_cache_ptr += batch_idx * stride_v_b + head_idx_kv * stride_v_h + offs_n[:, None] * stride_v_s + offs_d[None, :] * stride_v_d
+    k_cache_ptr += batch_idx * stride_k_b + head_idx_kv * stride_k_h + offs_n[
+        None, :] * stride_k_s + offs_d[:, None] * stride_k_d
+    v_cache_ptr += batch_idx * stride_v_b + head_idx_kv * stride_v_h + offs_n[:,
+                                                                              None] * stride_v_s + offs_d[
+                                                                                  None, :] * stride_v_d
     mask_ptr += batch_idx * stride_mask_b + head_idx_kv * stride_mask_h
 
-
-    q = tl.load(q_ptr + offs_h[:, None] * stride_q_h + offs_d[None, :] * stride_q_d, mask=offs_h[:, None] < gqa_group_size)
+    q = tl.load(
+        q_ptr + offs_h[:, None] * stride_q_h + offs_d[None, :] * stride_q_d,
+        mask=offs_h[:, None] < gqa_group_size)
     start = blocks_per_split * split_idx + tl.minimum(split_idx, remaining_blocks)
     for block_idx in range(loop_range):
         start_n = (start + block_idx) * BLOCK_N
         mask_val = tl.load(mask_ptr + (start + block_idx) * stride_mask_s)
         if mask_val == 1:
-            k_ptr = k_cache_ptr + start_n * stride_k_s 
+            k_ptr = k_cache_ptr + start_n * stride_k_s
             v_ptr = v_cache_ptr + start_n * stride_v_s
 
-            k = tl.load(k_ptr, mask= start_n + offs_n[None, :] < cache_seqlens, other=0.0)
-            v = tl.load(v_ptr, mask= start_n + offs_n[:, None] < cache_seqlens, other=0.0)
+            k = tl.load(k_ptr, mask=start_n + offs_n[None, :] < cache_seqlens, other=0.0)
+            v = tl.load(v_ptr, mask=start_n + offs_n[:, None] < cache_seqlens, other=0.0)
 
             qk = tl.dot(q, k)
             qk = qk * sm_scale
@@ -101,12 +118,15 @@ def _split_kernel(
     m_i += tl.math.log(l_i)
     l_recip = 1 / l_i[:, None]
     acc = acc * l_recip
-    acc = acc.to(o_partial_ptr.dtype.element_ty) 
+    acc = acc.to(o_partial_ptr.dtype.element_ty)
 
-    lse_partial_ptr += batch_idx * stride_lse_b + (head_idx_q + offs_h) * stride_lse_h + split_idx * stride_lse_split
+    lse_partial_ptr += batch_idx * stride_lse_b + (
+        head_idx_q + offs_h) * stride_lse_h + split_idx * stride_lse_split
     tl.store(lse_partial_ptr, m_i, mask=offs_h < gqa_group_size)
 
-    o_partial_ptr += batch_idx * stride_o_b + (head_idx_q + offs_h[:, None]) * stride_o_h + split_idx * stride_o_split + offs_d[None, :] * stride_o_d
+    o_partial_ptr += batch_idx * stride_o_b + (
+        head_idx_q +
+        offs_h[:, None]) * stride_o_h + split_idx * stride_o_split + offs_d[None, :] * stride_o_d
     tl.store(o_partial_ptr, acc, mask=offs_h[:, None] < gqa_group_size)
 
 
@@ -123,9 +143,16 @@ def _merge_kernel(
     o_partial_ptr,
     lse_partial_ptr,
     o_ptr,
-    lse_partial_stride_b, lse_partial_stride_h, lse_partial_stride_split,
-    o_partial_stride_b, o_partial_stride_h, o_partial_stride_split, o_partial_stride_d,
-    o_stride_b, o_stride_h, o_stride_d,
+    lse_partial_stride_b,
+    lse_partial_stride_h,
+    lse_partial_stride_split,
+    o_partial_stride_b,
+    o_partial_stride_h,
+    o_partial_stride_split,
+    o_partial_stride_d,
+    o_stride_b,
+    o_stride_h,
+    o_stride_d,
     BLOCK_D: tl.constexpr,
     num_splits: tl.constexpr,
     num_splits_pow2: tl.constexpr,
@@ -137,12 +164,18 @@ def _merge_kernel(
     offs_d = tl.arange(0, BLOCK_D)
 
     lse_offsets = lse_partial_ptr + batch_idx * lse_partial_stride_b + head_idx * lse_partial_stride_h
-    lse = tl.load(lse_offsets + offs_splits * lse_partial_stride_split, mask=offs_splits < num_splits, other=float("-inf"))
+    lse = tl.load(
+        lse_offsets + offs_splits * lse_partial_stride_split,
+        mask=offs_splits < num_splits,
+        other=float("-inf"))
 
     lse_max = tl.max(lse)
 
     o_offsets = o_partial_ptr + batch_idx * o_partial_stride_b + head_idx * o_partial_stride_h
-    o_partial = tl.load(o_offsets + offs_splits[:, None] * o_partial_stride_split + offs_d[None, :] * o_partial_stride_d, mask=offs_splits[:, None] < num_splits)
+    o_partial = tl.load(
+        o_offsets + offs_splits[:, None] * o_partial_stride_split +
+        offs_d[None, :] * o_partial_stride_d,
+        mask=offs_splits[:, None] < num_splits)
     sumexp_normalized_splitk = tl.exp(lse - lse_max)
     sumexp_normalized = tl.sum(sumexp_normalized_splitk, axis=0)
     numerator_normalized = tl.sum(o_partial * sumexp_normalized_splitk[:, None], axis=0)
@@ -212,12 +245,27 @@ def block_sparse_flash_decode_gqa_mask_triton(
         sm_scale,
         num_splits,
         group_size,
-        q.stride(0), q.stride(1), q.stride(2),
-        k_cache.stride(0), k_cache.stride(1), k_cache.stride(2), k_cache.stride(3),
-        v_cache.stride(0), v_cache.stride(1), v_cache.stride(2), v_cache.stride(3),
-        o_partial.stride(0), o_partial.stride(1), o_partial.stride(2), o_partial.stride(3),
-        lse_partial.stride(0), lse_partial.stride(1), lse_partial.stride(2),
-        block_mask.stride(0), block_mask.stride(1), block_mask.stride(2),
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k_cache.stride(0),
+        k_cache.stride(1),
+        k_cache.stride(2),
+        k_cache.stride(3),
+        v_cache.stride(0),
+        v_cache.stride(1),
+        v_cache.stride(2),
+        v_cache.stride(3),
+        o_partial.stride(0),
+        o_partial.stride(1),
+        o_partial.stride(2),
+        o_partial.stride(3),
+        lse_partial.stride(0),
+        lse_partial.stride(1),
+        lse_partial.stride(2),
+        block_mask.stride(0),
+        block_mask.stride(1),
+        block_mask.stride(2),
         BLOCK_H=BLOCK_H,
         BLOCK_N=block_size,
         BLOCK_D=BLOCK_D,
@@ -229,15 +277,23 @@ def block_sparse_flash_decode_gqa_mask_triton(
         o_partial,
         lse_partial,
         output,
-        lse_partial.stride(0), lse_partial.stride(1), lse_partial.stride(2),
-        o_partial.stride(0), o_partial.stride(1), o_partial.stride(2), o_partial.stride(3),
-        output.stride(0), output.stride(1), output.stride(2),
+        lse_partial.stride(0),
+        lse_partial.stride(1),
+        lse_partial.stride(2),
+        o_partial.stride(0),
+        o_partial.stride(1),
+        o_partial.stride(2),
+        o_partial.stride(3),
+        output.stride(0),
+        output.stride(1),
+        output.stride(2),
         BLOCK_D=dim_v,
         num_splits=num_splits,
         num_splits_pow2=num_splits_pow2,
     )
 
     return output
+
 
 def ref_program_torch(query, key, value, block_mask, cache_seqlens, max_cache_seqlen, num_blocks,
                       block_size):
@@ -281,6 +337,7 @@ def ref_program_torch(query, key, value, block_mask, cache_seqlens, max_cache_se
     out = rearrange(out, 'b g h d -> b (h g) d')  # [batch_size, heads, dim]
     return out
 
+
 def ref_program_fa(query, key, value, cache_seqlens):
     # latency reference
     # from flash_attn_interface import flash_attn_with_kvcache # fa3
@@ -323,7 +380,6 @@ if __name__ == "__main__":
     cache_seqlens[
         random_index] = max_cache_seqlen  # Assign cache_seqlen to ensure at least one occurrence
 
-
     num_blocks = (max_cache_seqlen + block_size - 1) // block_size
 
     valid_num_blocks = torch.ceil(cache_seqlens * (1 - sparse_ratio) / block_size).int()
@@ -356,9 +412,9 @@ if __name__ == "__main__":
     )
 
     # print("max difference: ", torch.max(torch.abs(ref - triton_out)))
-    assert torch.allclose(ref, triton_out, atol=1e-2), "Output mismatch between Triton and reference implementation"
+    assert torch.allclose(
+        ref, triton_out, atol=1e-2), "Output mismatch between Triton and reference implementation"
     print("Passed the ref test!")
-
 
     # Measure performance
     torch.cuda.synchronize()
@@ -379,8 +435,6 @@ if __name__ == "__main__":
     avg_time = elapsed_time / 1000
     avg_flops = total_flops / avg_time
     print(f"Average time: {avg_time:.6f} seconds")
-
-
 
     # Measure performance of reference implementation
     start = time.time()
