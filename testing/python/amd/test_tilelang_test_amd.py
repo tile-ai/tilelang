@@ -215,5 +215,4 @@ def test_gemm_rs_f16f32f32_nt():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_gemm_rs_f16f32f32_nt()
+    tilelang.testing.main()
