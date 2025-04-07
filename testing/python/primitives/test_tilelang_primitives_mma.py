@@ -363,4 +363,3 @@ def run_matmul_rrr(
 
 if __name__ == "__main__":
     tilelang.testing.main()
-
