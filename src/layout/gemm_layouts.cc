@@ -17,7 +17,7 @@ namespace tvm {
 namespace tl {
 
 static IterVar make_itervar(std::string name, PrimExpr dom) {
-  Var var = Var(name);
+  Var var = Var(name, dom->dtype);
   return IterVar(Range(0, dom), var, IterVarType::kDataPar);
 }
 
@@ -182,8 +182,8 @@ Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
     auto base_layout =
         makeGemmFragmentAB16x16CDNATransposed()->Repeat({1, 1}, false, false);
     auto warp_layout =
-        base_layout->Repeat({warp_m / 16, block_k / 16}, false, false);
-    auto block_layout = warp_layout->Repeat({block_m / warp_m, 1}, true, true)
+        base_layout->Repeat({block_k / 16, warp_m / 16}, false, true);
+    auto block_layout = warp_layout->Repeat({1, block_m / warp_m}, true, true)
                             ->Replicate(block_n / warp_n);
     return block_layout;
   } else {

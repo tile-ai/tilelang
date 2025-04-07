@@ -56,7 +56,8 @@ RegionOp::RegionOp(Array<PrimExpr> args, BufferMap vmap) {
   size_t ndim = n - 2;
   auto load = args[0].as<BufferLoadNode>();
   ICHECK(load);
-  ICHECK(load->indices.size() == ndim);
+  ICHECK(load->indices.size() == ndim)
+      << "load->indices.size() = " << load->indices << " ndim = " << ndim;
   buffer_ = load->buffer;
   access_mask_ = static_cast<int>(*as_const_int(args[1]));
   for (size_t i = 0; i < ndim; i++) {

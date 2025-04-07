@@ -5,7 +5,7 @@ import torch
 import torch.backends
 from tilelang import tvm as tvm
 from tvm import DataType
-import tilelang as TL
+import tilelang
 import tilelang.language as T
 from tilelang.intrinsics import get_swizzle_layout
 from tilelang.intrinsics.mma_macro_generator import (
@@ -53,10 +53,10 @@ def tl_matmul(
         micro_size_k = 32
 
     # This is a debug config
-    block_row_warps = 1
-    block_col_warps = 1
-    warp_row_tiles = 16
-    warp_col_tiles = 16
+    block_row_warps = 2
+    block_col_warps = 2
+    warp_row_tiles = 64
+    warp_col_tiles = 64
     # chunk = 32 if in_dtype == "float16" else 64
     chunk = 32
     shared_scope = "shared.dyn"
@@ -162,11 +162,11 @@ def tl_matmul(
     return main
 
 
-M, N, K = 128, 128, 128
-in_dtype, out_dtype, accum_dtype = "float16", "float16", "float16"
+M, N, K = 16384, 16384, 16384
+in_dtype, out_dtype, accum_dtype = "float16", "float16", "float32"
 matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
-mod, params = TL.lower(matmul)
-src_code = mod.imported_modules[0].get_source()
+kernel = tilelang.compile(matmul, out_idx=[2])
+src_code = kernel.get_kernel_source()
 # src_code is the generated cuda source
 assert src_code is not None
 
@@ -177,19 +177,18 @@ else:
     A = torch.rand(M, K, device="cuda", dtype=getattr(torch, in_dtype))
     B = torch.rand(N, K, device="cuda", dtype=getattr(torch, in_dtype))
 
-C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, accum_dtype))
+profiler = kernel.get_profiler()
 
-mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
+latency = profiler.do_bench(profiler.func, warmup=25)
 
-mod(A, B, C)
-
-latency = mod.do_bench(mod.func, warmup=25)
+print(latency)
 
 # Ensure that the latency is not None
 assert latency is not None
 
-# Get Reference Result
-ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(getattr(torch, accum_dtype))
-print(C)
-print(ref_c)
-torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
+
+def ref_program(A, B):
+    return A @ B.T
+
+
+profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)

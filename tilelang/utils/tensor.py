@@ -83,7 +83,7 @@ def get_tensor_supply(supply_type: TensorSupplyType):
             elif is_boolean:
                 return torch.randint(low=0, high=2, size=shape, device=device, dtype=dtype)
             elif dtype in {torch.float16, torch.float32, torch.bfloat16}:
-                return torch.empty(*shape, device=device, dtype=dtype).normal_(-1.0, 1.0)
+                return torch.empty(*shape, device=device, dtype=dtype).uniform_(-1.0, 1.0)
             else:
                 return torch.randint(low=-2, high=3, size=shape, device=device, dtype=dtype)
 

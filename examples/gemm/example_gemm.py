@@ -15,10 +15,9 @@ def ref_program(A, B):
     return A @ B.T
 
 
-def get_configs(M, N, K, with_roller=False):
+def get_configs(M, N, K, with_roller=False, topk=20):
     if with_roller:
         arch = CUDA("cuda")
-        topk = 10
         carve_template = MatmulTemplate(
             M=M,
             N=N,
@@ -43,7 +42,7 @@ def get_configs(M, N, K, with_roller=False):
             config["block_M"] = block_m
             config["block_N"] = block_n
             config["block_K"] = hint.rstep[0]
-            config["num_stages"] = hint.pipeline_stage
+            config["num_stages"] = hint.pipeline_stage if hint.pipeline_stage > 1 else 0
             config["thread_num"] = block_rows * block_cols * 32
             config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
             configs.append(config)
@@ -228,23 +227,21 @@ if __name__ == "__main__":
     a = torch.randn(M, K).cuda().half()
     b = torch.randn(N, K).cuda().half()
     use_autotune = args.use_autotune
+    use_autotune = True
     with_roller = args.with_roller
     if use_autotune:
         result = get_best_config(M, N, K, with_roller)
+        print(result.config)
         kernel = result.kernel
     else:
         config = get_heuristic_config()
         kernel = tl.compile(matmul(M, N, K, **config), out_idx=-1)
 
-    out_c = kernel(a, b)
-    ref_c = ref_program(a, b)
-    torch.testing.assert_close(out_c, ref_c, rtol=1e-2, atol=1e-2)
-
     # benchmark
     profiler = kernel.get_profiler(tensor_supply_type=tl.TensorSupplyType.Auto)
     tilelang_latency = profiler.do_bench()
     ref_latency = profiler.do_bench(ref_program)
-
+    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
     print(f"TileLang latency: {tilelang_latency}")
     print(f"Ref latency: {ref_latency}")
     print(f"TileLang TFlops: {2 * M * N * K / tilelang_latency * 1e-9}")

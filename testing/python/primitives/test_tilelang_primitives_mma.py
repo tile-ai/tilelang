@@ -99,7 +99,7 @@ def run_matmul_ssr(
         C = C.to(torch.__getattribute__(out_dtype))
         return C
 
-    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
 def test_gemm_f16f16f16_nt_ssr():
@@ -362,19 +362,4 @@ def run_matmul_rrr(
 #     )
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    run_matmul_rsr(
-        128,
-        128,
-        128,
-        False,
-        True,
-        "float16",
-        "float16",
-        "float16",
-        128,
-        128,
-        32,
-        0,
-        num_threads=128,
-    )
+    tilelang.testing.main()

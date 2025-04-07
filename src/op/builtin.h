@@ -18,6 +18,8 @@ namespace tl {
 
 static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
 
+static constexpr const char *kConfigIndexBitwidth = "tl.config_index_bitwidth";
+
 /*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load
  *
