@@ -58,9 +58,11 @@ class FrameStack:
         """
         return bool(self._stack)
 
+
 # Use thread local to store the stack
 # This is to avoid the cross-thread interference
 _local = threading.local()
+
 
 def _get_current_stack() -> FrameStack:
     if not hasattr(_local, "kernel_launch_frame_stack"):
