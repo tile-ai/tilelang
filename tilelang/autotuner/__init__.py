@@ -50,7 +50,8 @@ class JITContext:
         max_mismatched_ratio: Maximum allowed ratio of mismatched elements.
         skip_check: Whether to skip validation checks.
         cache_input_tensors: Whether to cache input tensors for each compilation.
-        profiler: Profiler instance for performance measurement.
+        kernel: JITKernel instance for performance measurement.
+        supply_type: Type of tensor supply mechanism.
         target: Target platform ('cuda' or 'hip').
     """
     out_idx: List[int]
@@ -61,7 +62,8 @@ class JITContext:
     max_mismatched_ratio: float
     skip_check: bool
     cache_input_tensors: bool
-    profiler: tilelang.Profiler
+    kernel: tilelang.JITKernel
+    supply_type: tilelang.TensorSupplyType
     target: Literal['cuda', 'hip']
 
 
@@ -153,7 +155,6 @@ class AutoTuner:
 
         def _compile(*config_arg):
             kernel = tilelang.compile(self.fn(*config_arg), out_idx=out_idx, target=target)
-            profiler = kernel.get_profiler(tensor_supply_type=supply_type)
             jit_context = JITContext(
                 out_idx=out_idx,
                 ref_prog=ref_prog,
@@ -163,7 +164,8 @@ class AutoTuner:
                 max_mismatched_ratio=max_mismatched_ratio,
                 skip_check=skip_check,
                 cache_input_tensors=cache_input_tensors,
-                profiler=profiler,
+                kernel=kernel,
+                supply_type=supply_type,
                 target=target)
             return jit_context
 
@@ -191,7 +193,8 @@ class AutoTuner:
 
         def target_fn(jit_context: JITContext):
             # Unpack the context
-            profiler = jit_context.profiler
+            kernel = jit_context.kernel
+            supply_type = jit_context.supply_type
             skip_check = jit_context.skip_check
             cache_input_tensors = jit_context.cache_input_tensors
             ref_prog = jit_context.ref_prog
@@ -199,6 +202,8 @@ class AutoTuner:
             rtol = jit_context.rtol
             atol = jit_context.atol
             max_mismatched_ratio = jit_context.max_mismatched_ratio
+
+            profiler = kernel.get_profiler(tensor_supply_type=supply_type)
 
             # Factory functions for generating input tensors.
             # This encapsulates the logic of using either a custom supply program (`supply_prog`)
@@ -329,9 +334,9 @@ class AutoTuner:
             latency=best_latency,
             config=best_config,
             ref_latency=ref_latency,
-            libcode=best_jit_context.profiler.func.lib_code,
+            libcode=best_jit_context.kernel.get_kernel_source(),
             func=self.fn(*best_config),
-            kernel=best_jit_context.profiler.func)
+            kernel=best_jit_context.kernel)
 
     def __call__(self) -> Any:
         """Make the AutoTuner callable, running the auto-tuning process.
@@ -404,7 +409,6 @@ def jit(out_idx: Optional[List[int]] = None,
         def decorator(*args, **kwargs) -> float:
 
             kernel = tilelang.compile(fn(*args, **kwargs), out_idx=out_idx, target=target)
-            profiler = kernel.get_profiler(tensor_supply_type=supply_type)
 
             return JITContext(
                 out_idx=out_idx,
@@ -415,7 +419,8 @@ def jit(out_idx: Optional[List[int]] = None,
                 max_mismatched_ratio=max_mismatched_ratio,
                 skip_check=skip_check,
                 cache_input_tensors=cache_input_tensors,
-                profiler=profiler,
+                kernel=kernel,
+                supply_type=supply_type,
                 target=target)
 
         return decorator
