@@ -121,6 +121,7 @@ std::string CodeGenTileLangCUDA::Finish() {
   }
 
   decl_stream << "#include <tl_templates/cuda/gemm.h>\n";
+  decl_stream << "#include <tl_templates/cuda/gemm_sp.h>\n";
   decl_stream << "#include <tl_templates/cuda/copy.h>\n";
   decl_stream << "#include <tl_templates/cuda/reduce.h>\n";
   decl_stream << "#include <tl_templates/cuda/ldsm.h>\n";
