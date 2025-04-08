@@ -9,7 +9,6 @@ import torch
 import triton
 import triton.language as tl
 
-
 import tilelang
 from tilelang.profiler import do_bench
 from example_mla_decode_paged import mla_decode_tilelang
