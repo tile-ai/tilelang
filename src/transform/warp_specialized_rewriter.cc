@@ -556,7 +556,8 @@ class WSCodeEmitter : public StmtMutator {
 public:
   WSCodeEmitter(bool is_emitting_producer, IterVar thread_iv,
                 Map<Var, Buffer> buffer_data_to_buffer,
-                const WarpSpecializedRoleMarker &marker, bool mbarrier_only = false)
+                const WarpSpecializedRoleMarker &marker,
+                bool mbarrier_only = false)
       : is_emitting_producer_(is_emitting_producer),
         buffer_data_to_buffer_(buffer_data_to_buffer), marker_(marker),
         thread_var_(thread_iv->var), mbarrier_only_(mbarrier_only) {}
@@ -564,11 +565,11 @@ public:
 private:
   template <typename NodeType> Stmt FilterByRole(const NodeType *op) {
     Role role = marker_.GetRole(op);
-    if (mbarrier_only_){
+    if (mbarrier_only_) {
       if (role != Role::kProducer)
         return StmtMutator::VisitStmt_(op);
     }
-    if (role == Role::kBoth){
+    if (role == Role::kBoth) {
       return StmtMutator::VisitStmt_(op);
     } else if ((role == Role::kProducer) == is_emitting_producer_) {
       return GetRef<Stmt>(op);
@@ -618,19 +619,19 @@ private:
       ProducerTraitsCollector collector;
       for (int i = 0; i < static_cast<int>(op->seq.size()); i++) {
         Array<Stmt> block_stmt = {};
-        if (!mbarrier_only_){
+        if (!mbarrier_only_) {
           if (marker_.GetRole(op->seq[i]) == Role::kConsumer)
             continue;
           if (marker_.GetRole(op->seq[i]) == Role::kBoth) {
             block_stmt.push_back(seq_transformed[i]);
             new_body.push_back(MakeGroupBlock(
                 block_stmt.size() == 1 ? block_stmt[0]
-                                      : SeqStmt(std::move(block_stmt)),
+                                       : SeqStmt(std::move(block_stmt)),
                 annotations));
             continue;
           }
         }
-  
+
         if (map.acquire[i] != -1) {
           PrimExpr acquire_barrier_id =
               stage_ + num_barriers_ + num_stages_ * map.acquire[i];
@@ -1169,7 +1170,8 @@ private:
     }
 
     if (disable_warp_specialized_) {
-      WSCodeEmitter mbarrier_emitter(true, thread_iv_, buffer_data_to_buffer_, marker, true);
+      WSCodeEmitter mbarrier_emitter(true, thread_iv_, buffer_data_to_buffer_,
+                                     marker, true);
       auto code = mbarrier_emitter(block->body);
       int num_barriers = mbarrier_emitter.num_barriers_;
       Array<PrimExpr> barrier_num_threads;
@@ -1258,7 +1260,8 @@ using namespace tir::transform;
 
 tvm::transform::Pass WarpSpecialized() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    bool disable_warp_specialized = ctx->GetConfig<Bool>(kDisableWarpSpecialized, Bool(false)).value();
+    bool disable_warp_specialized =
+        ctx->GetConfig<Bool>(kDisableWarpSpecialized, Bool(false)).value();
     return WarpSpecializedRewriter::Substitute(f, disable_warp_specialized);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.WarpSpecialized", {});
