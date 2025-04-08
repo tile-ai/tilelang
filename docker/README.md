@@ -5,7 +5,8 @@ git clone --recursive https://github.com/tile-ai/tilelang TileLang
 cd TileLang/docker
 # build the image, this may take a while (around 10+ minutes on our test machine)
 # replace the version number cu124 with the one you want to use
-docker build -t tilelang_cuda -f Dockerfile.cu124 .
+# replace .cu** with .rocm for AMD GPU
+docker build -t tilelang_workspace -f Dockerfile.cu124 .
 # run the container
-docker run -it --cap-add=SYS_ADMIN --network=host --gpus all --cap-add=SYS_PTRACE --shm-size=4G --security-opt seccomp=unconfined --security-opt apparmor=unconfined --name tilelang_test tilelang_cuda bash
+docker run -it --cap-add=SYS_ADMIN --network=host --gpus all --cap-add=SYS_PTRACE --shm-size=4G --security-opt seccomp=unconfined --security-opt apparmor=unconfined --name tilelang_test tilelang_workspace bash
 ```
