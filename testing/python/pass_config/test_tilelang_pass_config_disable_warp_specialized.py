@@ -85,7 +85,10 @@ def run_gemm(
         num_threads,
     )
 
-    kernel = tilelang.compile(program, out_idx=[2], pass_configs={"tl.disable_warp_specialized": disable_warp_specialized})
+    kernel = tilelang.compile(
+        program,
+        out_idx=[2],
+        pass_configs={"tl.disable_warp_specialized": disable_warp_specialized})
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -133,6 +136,7 @@ def test_gemm_f16f16f16_nn():
         32,
         disable_warp_specialized=True,
     )
+
 
 if __name__ == "__main__":
     tilelang.testing.main()
