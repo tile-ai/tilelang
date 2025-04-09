@@ -172,7 +172,7 @@ class AutoTuner:
         self.jit_compile = _compile
         return self
 
-    def run(self, warmup: int = 25, rep: int = 100, timeout: int = 100):
+    def run(self, warmup: int = 25, rep: int = 100, timeout: int = 30):
         """Run the auto-tuning process.
 
         Args:
@@ -218,7 +218,7 @@ class AutoTuner:
 
                 return func
 
-            jit_input_tensors_supply = get_input_tensors_supply(with_output=(profiler == "tvm"))
+            jit_input_tensors_supply = get_input_tensors_supply(with_output=False)
             ref_input_tensors_supply = get_input_tensors_supply(with_output=False)
 
             if cache_input_tensors:
@@ -247,9 +247,8 @@ class AutoTuner:
                     rtol=rtol,
                     atol=atol,
                     max_mismatched_ratio=max_mismatched_ratio)
-
             latency = profiler.do_bench(
-                profiler.func, n_warmup=warmup, n_repeat=rep, input_tensors=self.jit_input_tensors)
+                warmup=warmup, rep=rep, input_tensors=self.jit_input_tensors)
             if self.ref_latency_cache is None and ref_prog is not None:
                 self.ref_input_tensors = ref_input_tensors_supply()
                 self.ref_latency_cache = profiler.do_bench(
@@ -304,7 +303,15 @@ class AutoTuner:
             try:
                 # Cannot ThreadPoolExecutor to enforce timeout on target_fn execution
                 # Because tma init may behave strangely with one thread
-                latency, ref_latency = target_fn(jit_context)
+                # latency, ref_latency = target_fn(jit_context)
+                benchmark_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                future = benchmark_executor.submit(target_fn, jit_context)
+                latency, ref_latency = future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                logger.info(
+                    f"A timeout occurred while testing config {config}, checkout autotuner.log for more details"
+                )
+                continue
             except Exception as e:
                 logger.info(
                     f"An error occurred while testing config {config}, checkout autotuner.log for more details"

@@ -170,7 +170,8 @@ Fragment makeGemmFragmentA(const int block_m, const int block_n,
 
 Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
                                const int block_k, const int warp_m,
-                               const int warp_n, bool transposed) {
+                               const int warp_n, const int element_size,
+                               bool transposed) {
   // assume not transposed
   ICHECK(block_m % warp_m == 0);
   ICHECK(block_n % warp_n == 0);
