@@ -11,7 +11,17 @@ import argparse
 
 tilelang.disable_cache()
 
-def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split, threads=128):
+
+def flashattn(batch,
+              heads,
+              kv_head_num,
+              seqlen_kv,
+              dim,
+              pe_dim,
+              block_N,
+              block_H,
+              num_split,
+              threads=128):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     dtype = "float16"
     accum_dtype = "float"
@@ -92,7 +102,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
     ):
         with T.Kernel(
-                batch, heads // min(block_H, kv_group_num), num_split, threads=threads) as (bx, by, bz):
+                batch, heads // min(block_H, kv_group_num), num_split,
+                threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_fragment([block_H, dim], dtype)
             Q_pe_shared = T.alloc_fragment([block_H, pe_dim], dtype)
             KV_shared = T.alloc_shared([block_N, dim], dtype)
