@@ -20,11 +20,11 @@ PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY = """
 """
 
 PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY_HIP = """
-    hipError_t result_{0} = hipFuncSetAttribute((const void *){0}, hipFuncAttributeMaxDynamicSharedMemorySize, {1});
-    if (result_{0} != HIP_SUCCESS) {{
-        snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed dynamic shared memory size to %d with error: %s", {1}, hipGetErrorString(result_{0}));
+    if ({1} > 65536) {{
+        snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed dynamic shared memory size for {0} to %d", {1});
         return -1;
     }}
+    return 0;
 """
 
 PREDEF_INIT_FUNC = """
