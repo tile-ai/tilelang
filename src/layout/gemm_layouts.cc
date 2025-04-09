@@ -146,7 +146,8 @@ Fragment makeGemmFragmentA(const int block_m, const int block_n,
   ICHECK(warp_m % 16 == 0);
   ICHECK(block_k % 16 == 0);
   // Only support 8-bit and 16-bit
-  ICHECK(element_size == 8 || element_size == 16);
+  ICHECK(element_size == 8 || element_size == 16)
+      << "element bitwidth=" << element_size;
   if (element_size == 8) {
     auto base_layout = makeGemmFragment8x16()->Repeat({2, 2}, false, false);
     auto warp_layout = base_layout->Repeat({block_m / warp_m, 1}, true)
@@ -175,6 +176,8 @@ Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
   ICHECK(block_n % warp_n == 0);
   ICHECK(warp_m % 16 == 0);
   ICHECK(block_k % 16 == 0);
+  ICHECK(element_size == 8 || element_size == 16)
+      << "element bitwidth=" << element_size;
   if (transposed) {
     auto base_layout =
         makeGemmFragmentAB16x16CDNATransposed()->Repeat({1, 1}, false, false);
