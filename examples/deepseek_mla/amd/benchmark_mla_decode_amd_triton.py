@@ -197,7 +197,7 @@ def _mla_attn(
         PAGE_SIZE=page_size,
         HEAD_DIM_CKV=head_dim_ckv,
         HEAD_DIM_KPE=head_dim_kpe,
-        num_stages=1, # 2 will oom in amd
+        num_stages=1,  # 2 will oom in amd
     )
 
 
