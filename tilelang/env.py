@@ -35,7 +35,25 @@ def _find_cuda_home() -> str:
     return cuda_home if cuda_home is not None else ""
 
 
+def _find_hip_home() -> str:
+    """Find the HIP/ROCm install path."""
+    # First check explicit environment variables
+    hip_home = os.environ.get('HIP_HOME') or os.environ.get('ROCM_PATH')
+    if hip_home is None:
+        # Try to find hipcc in PATH
+        hipcc_path = shutil.which("hipcc")
+        if hipcc_path is not None:
+            hip_home = os.path.dirname(os.path.dirname(hipcc_path))
+        else:
+            # Default ROCm location on most systems
+            hip_home = '/opt/rocm'
+            if not os.path.exists(hip_home):
+                hip_home = None
+    return hip_home if hip_home is not None else ""
+
+
 CUDA_HOME = _find_cuda_home()
+HIP_HOME = _find_hip_home()
 
 CUTLASS_INCLUDE_DIR: str = os.environ.get("TL_CUTLASS_PATH", None)
 COMPOSABLE_KERNEL_INCLUDE_DIR: str = os.environ.get("TL_COMPOSABLE_KERNEL_PATH", None)
@@ -177,6 +195,7 @@ __all__ = [
     "TVM_LIBRARY_PATH",
     "TILELANG_TEMPLATE_PATH",
     "CUDA_HOME",
+    "HIP_HOME",
     "TILELANG_CACHE_DIR",
     "enable_cache",
     "disable_cache",

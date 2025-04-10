@@ -150,7 +150,7 @@ source ~/.bashrc
 echo "Installation script completed successfully."
 
 echo "Installing TileLang package with HIP support..."
-pip install -e . -v USE_HIP=True
+USE_HIP=True pip install -e . -v
 
 echo "HIP installation script completed successfully."
 echo "TileLang is now configured to use HIP for AMD GPU support."
