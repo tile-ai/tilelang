@@ -32,7 +32,7 @@ def match_global_kernel(source: str, annotation: str = "__global__") -> int:
 
 
 def match_declare_kernel(source: str, annotation: str = "__global__") -> int:
-    pattern = r"__global__\s+void\s+\w+"
+    pattern = r"__global__\s+void\s+(?:__launch_bounds__\(\d+\)\s+)?\w+"
     for line in source.split("\n"):
         if annotation in line:
             matched = re.findall(pattern, line)
