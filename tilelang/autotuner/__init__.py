@@ -271,7 +271,7 @@ class AutoTuner:
             new_args = tuple(new_args)
             config_args.append(new_args)
 
-        num_workers = max(1, int(os.cpu_count() * 0.9))
+        num_workers = max(1, int(get_available_cpu_count() * 0.9))
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
         futures = []
         future_to_index = {}
@@ -455,3 +455,14 @@ def check_tensor_list_compatibility(
         return False
 
     return all(tensor1.shape == tensor2.shape for tensor1, tensor2 in zip(list1, list2))
+
+
+def get_available_cpu_count():
+    """Gets the number of CPU cores available to the current process.
+    """
+    try:
+        cpu_count = len(os.sched_getaffinity(0))
+    except AttributeError:
+        cpu_count = os.cpu_count()
+
+    return cpu_count

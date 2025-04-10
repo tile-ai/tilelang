@@ -7,7 +7,7 @@ import tilelang
 import tilelang.language as T
 from tilelang.autotuner import AutoTuner
 from tilelang.engine.param import KernelParam
-from tilelang.utils.tensor import get_tensor_supply
+from tilelang.utils.tensor import get_tensor_supply, TensorSupplyType
 import torch
 from typing import List
 
@@ -30,7 +30,7 @@ args = parser.parse_args()
 M, N, K = args.m, args.n, args.k
 sparsity = args.sparsity
 use_autotune = args.use_autotune
-default_tensor_supply = get_tensor_supply()
+default_tensor_supply = get_tensor_supply(TensorSupplyType.Auto)
 
 print(f"Running BlockSparse MatMul Benchmark for M={M}, N={N}, K={K}")
 print(f"Target Block Sparsity: {sparsity}")
