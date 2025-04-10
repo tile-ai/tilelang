@@ -10,7 +10,7 @@ import tilelang
 from tilelang import tvm as tvm
 import inspect
 from functools import wraps, partial
-from typing import Callable, List, Literal, Any, Optional
+from typing import Callable, List, Literal, Any, Optional, Union
 from tqdm import tqdm
 import logging
 from dataclasses import dataclass
@@ -121,7 +121,7 @@ class AutoTuner:
         return cls(kernel, configs)
 
     def set_compile_args(self,
-                         out_idx: List[int],
+                         out_idx: Union[List[int], int] = -1,
                          supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto,
                          ref_prog: Callable = None,
                          supply_prog: Callable = None,

@@ -12,7 +12,7 @@ import argparse
 tilelang.disable_cache()
 
 
-def flashattn(batch,
+def flashmla_decode(batch,
               heads,
               kv_head_num,
               seqlen_kv,
@@ -133,13 +133,13 @@ def flashattn(batch,
                 T.copy(K_pe[bx, kv_start:kv_end, cur_kv_head, :], K_pe_shared)
                 T.clear(acc_s)
                 T.gemm(
-                    Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
+                    Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.gemm(
                     Q_pe_shared,
                     K_pe_shared,
                     acc_s,
                     transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullCol)
+                    policy=T.GemmWarpPolicy.FullRow)
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -153,7 +153,7 @@ def flashattn(batch,
                     logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
                 for i, j in T.Parallel(block_H, dim):
                     acc_o[i, j] *= scores_scale[i]
-                T.gemm(acc_s_cast, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullCol)
+                T.gemm(acc_s_cast, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
             for i, j in T.Parallel(block_H, dim):
                 acc_o[i, j] /= logsum[i]
             for i in T.Parallel(block_H):
@@ -278,27 +278,68 @@ if __name__ == "__main__":
     parser.add_argument('--heads', type=int, default=128, help='q heads number')
     parser.add_argument('--kv_heads', type=int, default=1, help='kv heads number')
     parser.add_argument('--kv_ctx', type=int, default=1024, help='kv context length')
-    parser.add_argument('--dim', type=int, default=256, help='head dim')
+    parser.add_argument('--dim', type=int, default=512, help='head dim')
     parser.add_argument('--pe_dim', type=int, default=64, help='pe head dim')
+    parser.add_argument('--auto_tune', action='store_true', help='auto tune')
     args = parser.parse_args()
     batch, heads, kv_heads, kv_ctx, dim, pe_dim = args.batch, args.heads, args.kv_heads, args.kv_ctx, args.dim, args.pe_dim
+    enable_autotune = args.auto_tune
+    
     qk_flops = 2 * batch * heads * kv_ctx * (dim + pe_dim)
     pv_flops = 2 * batch * heads * kv_ctx * dim
     total_flops = qk_flops + pv_flops
     BLOCK_N = 32
     BLOCK_H = 64
-    num_split = 1
+    num_split = 4
 
-    program = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split)
+    program = flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split)
     kernel = tilelang.compile(program, out_idx=[6])
-    print(kernel.get_kernel_source())
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     input_tensors = profiler._get_inputs()
     tilelang_output = kernel(*input_tensors)
     ref_output = ref_program(*input_tensors)
     print(f"Tilelang output: {tilelang_output}")
     print(f"Ref output: {ref_output}")
-    torch.testing.assert_allclose(tilelang_output, ref_output, rtol=0.01, atol=0.01)
+    torch.testing.assert_close(tilelang_output, ref_output, rtol=0.01, atol=0.01)
     latency = profiler.do_bench(warmup=500)
     print(f"Latency: {latency} ms")
     print(f"TFlops: {total_flops / latency * 1e-9} TFlops")
+    
+    # Enable Auto Tuning
+
+    def get_configs():
+        import itertools
+        BLOCK_N = [16, 32, 64, 128]
+        BLOCK_H = [16, 32, 64, 128]
+        num_split = [1, 2, 4, 8, 16, 32]
+        thread_num = [128, 256]
+
+        _configs = list(
+            itertools.product(BLOCK_N, BLOCK_H, num_split, thread_num))
+
+        return [{
+            "block_N": c[0],
+            "block_H": c[1],
+            "num_split": c[2],
+            "thread_num": c[3],
+        } for c in _configs]
+
+
+    def wrapped_kernel(block_N=None,
+            block_H=None,
+            num_split=None,
+            thread_num=None):
+        return flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim, block_N, block_H, num_split, thread_num)
+
+    if enable_autotune:
+        autotuner = AutoTuner.from_kernel(
+            kernel=wrapped_kernel, configs=get_configs()).set_compile_args(
+                supply_type=tilelang.TensorSupplyType.Integer,
+                target="auto",
+            )
+        tune_result = autotuner.run(warmup=3, rep=20)
+        best_latency = tune_result.latency
+        best_config = tune_result.config
+        print(f"Best latency: {best_latency} ms")
+        print(f"Best TFlops: {total_flops / best_latency * 1e-9} TFlops")
+        print(f"Best config: {best_config}")
