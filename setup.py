@@ -29,6 +29,8 @@ ROOT_DIR = os.path.dirname(__file__)
 
 # Add LLVM control environment variable
 USE_LLVM = os.environ.get("USE_LLVM", "False").lower() == "true"
+# Add HIP control environment variable
+USE_HIP = os.environ.get("USE_HIP", "False").lower() == "true"
 
 
 def load_module_from_path(module_name, path):
@@ -40,9 +42,20 @@ def load_module_from_path(module_name, path):
 
 
 envs = load_module_from_path('env', os.path.join(ROOT_DIR, PACKAGE_NAME, 'env.py'))
-CUDA_HOME = envs.CUDA_HOME
 
-assert CUDA_HOME, "Failed to automatically detect CUDA installation. Please set the CUDA_HOME environment variable manually (e.g., export CUDA_HOME=/usr/local/cuda)."
+CUDA_HOME = envs.CUDA_HOME
+HIP_HOME = envs.HIP_HOME
+
+# Check if both CUDA and HIP are enabled
+if USE_HIP and not HIP_HOME:
+    raise ValueError("HIP support is enabled (USE_HIP=True) but HIP_HOME is not set or detected.")
+    
+if not USE_HIP and not CUDA_HOME:
+    raise ValueError("CUDA support is enabled by default (USE_HIP=False) but CUDA_HOME is not set or detected.")
+
+# Ensure one of CUDA or HIP is available
+if not (CUDA_HOME or HIP_HOME):
+    raise ValueError("Failed to automatically detect CUDA or HIP installation. Please set the CUDA_HOME or HIP_HOME environment variable manually (e.g., export CUDA_HOME=/usr/local/cuda or export HIP_HOME=/opt/rocm).")
 
 # TileLang only supports Linux platform
 assert sys.platform.startswith("linux"), "TileLang only supports Linux platform (including WSL)."
@@ -85,15 +98,51 @@ def get_nvcc_cuda_version():
     return nvcc_cuda_version
 
 
+def get_hip_version():
+    """Get the HIP version from hipcc."""
+    try:
+        hipcc_output = subprocess.check_output(["hipcc", "--version"], universal_newlines=True)
+        # Parse HIP version from output
+        # Example output: HIP version: x.y.z-...
+        match = re.search(r'HIP version: (\d+\.\d+\.\d+)', hipcc_output)
+        if match:
+            return LooseVersion(match.group(1))
+        else:
+            # Fallback to extracting from lib version if hipcc doesn't provide it
+            rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
+            hip_version_file = os.path.join(rocm_path, "lib", "cmake", "hip", "hip-config-version.cmake")
+            if os.path.exists(hip_version_file):
+                with open(hip_version_file, "r") as f:
+                    content = f.read()
+                    match = re.search(r'set\(PACKAGE_VERSION "(\d+\.\d+\.\d+)"', content)
+                    if match:
+                        return LooseVersion(match.group(1))
+        # If we can't determine the version, return a default
+        return LooseVersion("5.0.0")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # If hipcc is not found, return a default version
+        return LooseVersion("5.0.0")
+
+
 def get_tilelang_version(with_cuda=True, with_system_info=True) -> str:
     version = find_version(get_path(".", "VERSION"))
     local_version_parts = []
     if with_system_info:
         local_version_parts.append(get_system_info().replace("-", "."))
+    
+    # Add CUDA or HIP version to the local version parts
     if with_cuda:
-        cuda_version = str(get_nvcc_cuda_version())
-        cuda_version_str = cuda_version.replace(".", "")[:3]
-        local_version_parts.append(f"cu{cuda_version_str}")
+        if USE_HIP:
+            if HIP_HOME:
+                hip_version = str(get_hip_version())
+                hip_version_str = hip_version.replace(".", "")[:3]
+                local_version_parts.append(f"hip{hip_version_str}")
+        else:
+            if CUDA_HOME:
+                cuda_version = str(get_nvcc_cuda_version())
+                cuda_version_str = cuda_version.replace(".", "")[:3]
+                local_version_parts.append(f"cu{cuda_version_str}")
+    
     if local_version_parts:
         version += f"+{'.'.join(local_version_parts)}"
     return version
@@ -208,10 +257,15 @@ def build_csrc(llvm_config_path):
     # Copy the config.cmake as a baseline
     if not os.path.exists("config.cmake"):
         shutil.copy("../3rdparty/tvm/cmake/config.cmake", "config.cmake")
-    # Set LLVM path and enable CUDA in config.cmake
+    # Set LLVM path and enable CUDA or HIP in config.cmake
     with open("config.cmake", "a") as config_file:
         config_file.write(f"set(USE_LLVM {llvm_config_path})\n")
-        config_file.write(f"set(USE_CUDA {CUDA_HOME})\n")
+        if USE_HIP:
+            config_file.write(f"set(USE_ROCM {HIP_HOME})\n")
+            config_file.write("set(USE_CUDA OFF)\n")
+        else:
+            config_file.write(f"set(USE_CUDA {CUDA_HOME})\n")
+            config_file.write("set(USE_ROCM OFF)\n")
     # Run CMake and make
     try:
         subprocess.check_call(["cmake", ".."])
@@ -563,7 +617,12 @@ class CMakeBuild(build_ext):
         # Append some configuration variables to 'config.cmake'
         with open(dst_config_cmake, "a") as config_file:
             config_file.write(f"set(USE_LLVM {llvm_config_path})\n")
-            config_file.write(f"set(USE_CUDA {CUDA_HOME})\n")
+            if USE_HIP:
+                config_file.write(f"set(USE_ROCM {HIP_HOME})\n")
+                config_file.write("set(USE_CUDA OFF)\n")
+            else:
+                config_file.write(f"set(USE_CUDA {CUDA_HOME})\n")
+                config_file.write("set(USE_ROCM OFF)\n")
 
         # Run CMake to configure the project with the given arguments.
         subprocess.check_call(["cmake", ext.sourcedir] + cmake_args, cwd=build_temp)
@@ -584,7 +643,7 @@ setup(
     long_description=read_readme(),
     long_description_content_type="text/markdown",
     platforms=[
-        "Environment :: GPU :: NVIDIA CUDA",
+        "Environment :: GPU :: NVIDIA CUDA" if not USE_HIP else "Environment :: GPU :: AMD ROCm",
         "Operating System :: POSIX :: Linux",
     ],
     license="MIT",
