@@ -91,17 +91,18 @@ private:
     pinfo.original_order = idx;
 
     // copy stage should only have one reads and one writes
-    bool write_to_shared = false;
+    bool write_to_shared_or_local = false;
     bool read_from_global = false;
     for (auto region : pinfo.reads)
       if (region->buffer.scope() == "global")
         read_from_global = true;
     for (auto region : pinfo.writes)
       if (region->buffer.scope() == "shared" ||
-          region->buffer.scope() == "shared.dyn")
-        write_to_shared = true;
+          region->buffer.scope() == "shared.dyn" ||
+          region->buffer.scope() == "local")
+        write_to_shared_or_local = true;
 
-    pinfo.copy_stage = write_to_shared && read_from_global;
+    pinfo.copy_stage = write_to_shared_or_local && read_from_global;
 
     return std::move(pinfo);
   }

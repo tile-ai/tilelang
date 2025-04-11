@@ -46,7 +46,7 @@ def adapt_torch2tvm(arg):
     return arg
 
 
-def get_tensor_supply(supply_type: TensorSupplyType):
+def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
 
     from tilelang.engine.param import KernelParam
 

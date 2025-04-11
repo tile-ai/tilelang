@@ -121,6 +121,16 @@ struct GlobalMemChecker : public StmtExprVisitor {
       PrimExpr index = indices[i];
       PrimExpr shape_dim = buffer->shape[i];
 
+      bool has_variable = false;
+      PostOrderVisit(index, [&](const ObjectRef &obj) {
+        if (const VarNode *v = obj.as<VarNode>()) {
+          has_variable = true;
+        }
+      });
+      if (!has_variable) {
+        continue;
+      }
+
       // We want to check if index < shape_dim can be proven.
       // If analyzer->CanProve(index < shape_dim) returns false,
       // it means we cannot prove the access is within bounds.
@@ -160,12 +170,18 @@ private:
     if (IsGlobalBuffer(store->buffer)) {
       Stmt store_with_conditions = store;
       for (auto cond : conditions) {
+        LOG(INFO) << "condition: " << cond;
+        LOG(INFO) << "store: " << store;
         store_with_conditions = IfThenElse(cond, store_with_conditions);
       }
       return store_with_conditions;
     } else if (isSharedBuffer(store->buffer)) {
       PrimExpr value = store->value;
+      LOG(INFO) << "value: " << value;
+      LOG(INFO) << "conditions: " << conditions;
       for (auto cond : conditions) {
+        ICHECK(cond.dtype() == DataType::Bool(1))
+            << "condition is not a boolean: " << cond;
         value = if_then_else(cond, value, make_zero(value->dtype));
       }
       store.CopyOnWrite()->value = value;
