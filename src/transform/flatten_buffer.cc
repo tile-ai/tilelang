@@ -35,11 +35,11 @@ namespace tl {
 using namespace tir;
 
 /*!
- * \brief Transform multi-dimension BufferLoad/BufferStore into device-supported dimension
- *        for the TIR not contains opaque block.
+ * \brief Transform multi-dimension BufferLoad/BufferStore into device-supported
+ * dimension for the TIR not contains opaque block.
  */
 class BufferFlattener : public arith::IRMutatorWithAnalyzer {
- public:
+public:
   static PrimFunc Flatten(PrimFunc func) {
     arith::Analyzer ana;
     auto pass = BufferFlattener(&ana);
@@ -53,35 +53,40 @@ class BufferFlattener : public arith::IRMutatorWithAnalyzer {
     return func;
   }
 
- private:
+private:
   using IRMutatorWithAnalyzer::VisitExpr;
   using IRMutatorWithAnalyzer::VisitExpr_;
   using IRMutatorWithAnalyzer::VisitStmt;
   using IRMutatorWithAnalyzer::VisitStmt_;
 
-  explicit BufferFlattener(arith::Analyzer* ana) : IRMutatorWithAnalyzer(ana) {}
+  explicit BufferFlattener(arith::Analyzer *ana) : IRMutatorWithAnalyzer(ana) {}
 
-  Stmt VisitStmt_(const BlockNode* op) final {
+  Stmt VisitStmt_(const BlockNode *op) final {
     ICHECK_EQ(op->match_buffers.size(), 0)
-        << "Unexpected MatchBufferRegion found during tir.transform.FlattenBuffer.  "
-        << "All MatchBufferRegion should be removed in tir.transform.LowerMatchBuffer.";
+        << "Unexpected MatchBufferRegion found during "
+           "tir.transform.FlattenBuffer.  "
+        << "All MatchBufferRegion should be removed in "
+           "tir.transform.LowerMatchBuffer.";
 
     Block block = GetRef<Block>(op);
 
     Array<Buffer> alloc_buffers = op->alloc_buffers;
-    alloc_buffers.MutateByApply([this](Buffer buf) { return GetFlattenedBuffer(buf); });
+    alloc_buffers.MutateByApply(
+        [this](Buffer buf) { return GetFlattenedBuffer(buf); });
     if (!alloc_buffers.same_as(op->alloc_buffers)) {
       block.CopyOnWrite()->alloc_buffers = alloc_buffers;
     }
 
     Array<BufferRegion> reads = op->reads;
-    reads.MutateByApply([this](BufferRegion region) { return MutateBufferRegion(region); });
+    reads.MutateByApply(
+        [this](BufferRegion region) { return MutateBufferRegion(region); });
     if (!reads.same_as(op->reads)) {
       block.CopyOnWrite()->reads = reads;
     }
 
     Array<BufferRegion> writes = op->writes;
-    writes.MutateByApply([this](BufferRegion region) { return MutateBufferRegion(region); });
+    writes.MutateByApply(
+        [this](BufferRegion region) { return MutateBufferRegion(region); });
     if (!writes.same_as(op->writes)) {
       block.CopyOnWrite()->writes = writes;
     }
@@ -89,7 +94,7 @@ class BufferFlattener : public arith::IRMutatorWithAnalyzer {
     return StmtExprMutator::VisitStmt_(block.get());
   }
 
-  Stmt VisitStmt_(const AllocateNode* op) final {
+  Stmt VisitStmt_(const AllocateNode *op) final {
     // Determine the flattened extents first, before stripping of
     // DeclBuffer.
     auto new_extents = [&]() -> Array<PrimExpr> {
@@ -98,10 +103,10 @@ class BufferFlattener : public arith::IRMutatorWithAnalyzer {
         return op->extents;
       }
 
-      if (auto* decl_buffer = op->body.as<DeclBufferNode>()) {
+      if (auto *decl_buffer = op->body.as<DeclBufferNode>()) {
         // N-d buffer, use the DeclBuffer inside to determine how it
         // should be flattened.
-        auto& buffer = decl_buffer->buffer;
+        auto &buffer = decl_buffer->buffer;
         bool matching_buffer = [&]() {
           if (!decl_buffer->buffer->data.same_as(op->buffer_var)) {
             return false;
@@ -126,14 +131,15 @@ class BufferFlattener : public arith::IRMutatorWithAnalyzer {
           return flattened->shape;
         } else {
           ICHECK(decl_buffer->buffer->axis_separators.empty())
-              << "DeclBuffer node doesn't match Allocate extents, but also shouldn't be "
+              << "DeclBuffer node doesn't match Allocate extents, but also "
+                 "shouldn't be "
                  "flattened to 1-d physical memory";
         }
       }
 
       // Fallback, this is an allocation without a matching DeclBuffer
       PrimExpr flat_extent = 1;
-      for (const auto& dim : op->extents) {
+      for (const auto &dim : op->extents) {
         flat_extent *= dim;
       }
       return {flat_extent};
@@ -154,7 +160,7 @@ class BufferFlattener : public arith::IRMutatorWithAnalyzer {
     return std::move(alloc);
   }
 
-  Stmt VisitStmt_(const DeclBufferNode* op) final {
+  Stmt VisitStmt_(const DeclBufferNode *op) final {
     // TODO(rfc-70): Update the DeclBuffer node instead of
     // stripping it out.  Stripping it out in the current
     // implementation as not all lowering passes support
@@ -184,7 +190,7 @@ class BufferFlattener : public arith::IRMutatorWithAnalyzer {
     return flattened;
   }
 
-  Stmt VisitStmt_(const BufferStoreNode* op) final {
+  Stmt VisitStmt_(const BufferStoreNode *op) final {
     BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
     bool store_returns_bool = (op->value.dtype() == DataType::Bool());
     store = VisitBufferAccess(store);
@@ -203,20 +209,21 @@ class BufferFlattener : public arith::IRMutatorWithAnalyzer {
     return std::move(store);
   }
 
-  PrimExpr VisitExpr_(const BufferLoadNode* op) final {
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
     return VisitBufferAccess(load);
   }
-  
-  Array<PrimExpr> GetSimplifiedElemOffset(const Buffer& buffer, const Array<PrimExpr>& indices) {
+
+  Array<PrimExpr> GetSimplifiedElemOffset(const Buffer &buffer,
+                                          const Array<PrimExpr> &indices) {
     auto flattened_indices = buffer->ElemOffset(indices);
     return this->IterMapSimplifyWithContext(flattened_indices, false);
   }
 
-  template <typename Node>
-  Node VisitBufferAccess(Node node) {
+  template <typename Node> Node VisitBufferAccess(Node node) {
     ICHECK(node->buffer.defined());
-    auto flattened_indices = GetSimplifiedElemOffset(node->buffer, node->indices);
+    auto flattened_indices =
+        GetSimplifiedElemOffset(node->buffer, node->indices);
     Buffer flattened_buffer = GetFlattenedBuffer(node->buffer);
 
     auto writer = node.CopyOnWrite();
@@ -234,13 +241,15 @@ class BufferFlattener : public arith::IRMutatorWithAnalyzer {
 
     Array<PrimExpr> min_values;
     Array<PrimExpr> max_values;
-    for (const auto& range : region->region) {
+    for (const auto &range : region->region) {
       min_values.push_back(range->min);
       max_values.push_back(range->min + range->extent - 1);
     }
 
-    Array<PrimExpr> flattened_min = GetSimplifiedElemOffset(orig_buf, min_values);
-    Array<PrimExpr> flattened_max = GetSimplifiedElemOffset(orig_buf, max_values);
+    Array<PrimExpr> flattened_min =
+        GetSimplifiedElemOffset(orig_buf, min_values);
+    Array<PrimExpr> flattened_max =
+        GetSimplifiedElemOffset(orig_buf, max_values);
 
     Array<Range> flattened_ranges;
     ICHECK_EQ(flattened_min.size(), flattened_max.size());
@@ -252,7 +261,8 @@ class BufferFlattener : public arith::IRMutatorWithAnalyzer {
   }
 
   /*! \brief Map of buffers being remapped. */
-  std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_remap_;
+  std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
+      buffer_remap_;
 
   /*! \brief The updated external buffer map. */
   Map<Var, Buffer> updated_extern_buffer_map_;
@@ -277,5 +287,5 @@ tvm::transform::Pass FlattenBuffer() {
 
 TVM_REGISTER_GLOBAL("tl.transform.FlattenBuffer").set_body_typed(FlattenBuffer);
 
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl
+} // namespace tvm

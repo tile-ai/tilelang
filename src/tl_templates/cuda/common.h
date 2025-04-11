@@ -172,8 +172,7 @@ TL_DEVICE void DP4A(InDatatype *a, InDatatype *b, OutDatatype *c) {
 
 namespace tl {
 // Any
-template <typename T>
-TL_DEVICE bool Any(T *a, int size) {
+template <typename T> TL_DEVICE bool Any(T *a, int size) {
   for (int i = 0; i < size; i++) {
     if (a[i]) {
       return true;
@@ -183,8 +182,7 @@ TL_DEVICE bool Any(T *a, int size) {
 }
 
 // All
-template <typename T>
-TL_DEVICE bool All(T *a, int size) {
+template <typename T> TL_DEVICE bool All(T *a, int size) {
   for (int i = 0; i < size; i++) {
     if (!a[i]) {
       return false;
@@ -192,4 +190,4 @@ TL_DEVICE bool All(T *a, int size) {
   }
   return true;
 }
-}  // namespace tl
+} // namespace tl

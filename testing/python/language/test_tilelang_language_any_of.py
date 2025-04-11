@@ -1,14 +1,10 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
-import argparse
-import itertools
 import tilelang
 import tilelang.testing
 import tilelang.language as T
-from tilelang.engine.param import KernelParam
 import torch
-from typing import List
 
 
 def ref_program(A, B, BlockMask, block_M, block_N, block_K):
@@ -20,38 +16,12 @@ def ref_program(A, B, BlockMask, block_M, block_N, block_K):
             accu = torch.zeros((block_M, block_N), dtype=torch.float32, device=A.device)
             for k in range(K // block_K):
                 if torch.any(BlockMask[i, j, k]):
-                    accu += A[
-                        i * block_M : (i + 1) * block_M, k * block_K : (k + 1) * block_K
-                    ].to(torch.float32) @ B[
-                        k * block_K : (k + 1) * block_K, j * block_N : (j + 1) * block_N
-                    ].to(
-                        torch.float32
-                    )
-            ref_c[i * block_M : (i + 1) * block_M, j * block_N : (j + 1) * block_N] = (
-                accu.to(torch.float16)
-            )
+                    accu += A[i * block_M:(i + 1) * block_M, k * block_K:(k + 1) * block_K].to(
+                        torch.float32) @ B[k * block_K:(k + 1) * block_K,
+                                           j * block_N:(j + 1) * block_N].to(torch.float32)
+            ref_c[i * block_M:(i + 1) * block_M, j * block_N:(j + 1) * block_N] = (
+                accu.to(torch.float16))
     return ref_c
-
-
-def supply_program(params: List[KernelParam]):
-    input_tensors = []
-
-    for p in params:
-        # Check if the kernel parameter is BlockMask tensor.
-        # Here, BlockMask is uniquely identified by having 3 dimensions.
-        if len(p.shape) != 3:
-            # For non-BlockMask tensors, use the default tensor generation logic.
-            input_tensors.append(default_tensor_supply(p))
-        else:
-            # For BlockMask tensor, randomly set elements to True based on desired
-            # sparsity level.
-            block_mask = torch.zeros(
-                p.shape, dtype=torch.bool, device=torch.cuda.current_device()
-            )
-            block_mask[:, :, :] = torch.rand(p.shape) > sparsity
-            input_tensors.append(block_mask)
-
-    return input_tensors
 
 
 def blocksparse_matmul_global(
@@ -73,14 +43,12 @@ def blocksparse_matmul_global(
 
     @T.prim_func
     def main(
-        A: T.Tensor((M, K), dtype),
-        B: T.Tensor((K, N), dtype),
-        BlockMask: T.Tensor(block_mask_shape, "bool"),
-        C: T.Tensor((M, N), dtype),
+            A: T.Tensor((M, K), dtype),
+            B: T.Tensor((K, N), dtype),
+            BlockMask: T.Tensor(block_mask_shape, "bool"),
+            C: T.Tensor((M, N), dtype),
     ):
-        with T.Kernel(
-            T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num
-        ) as (bx, by):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -120,14 +88,12 @@ def blocksparse_matmul_shared(
 
     @T.prim_func
     def main(
-        A: T.Tensor((M, K), dtype),
-        B: T.Tensor((K, N), dtype),
-        BlockMask: T.Tensor(block_mask_shape, "bool"),
-        C: T.Tensor((M, N), dtype),
+            A: T.Tensor((M, K), dtype),
+            B: T.Tensor((K, N), dtype),
+            BlockMask: T.Tensor(block_mask_shape, "bool"),
+            C: T.Tensor((M, N), dtype),
     ):
-        with T.Kernel(
-            T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num
-        ) as (bx, by):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -172,14 +138,12 @@ def blocksparse_matmul_local(
 
     @T.prim_func
     def main(
-        A: T.Tensor((M, K), dtype),
-        B: T.Tensor((K, N), dtype),
-        BlockMask: T.Tensor(block_mask_shape, "bool"),
-        C: T.Tensor((M, N), dtype),
+            A: T.Tensor((M, K), dtype),
+            B: T.Tensor((K, N), dtype),
+            BlockMask: T.Tensor(block_mask_shape, "bool"),
+            C: T.Tensor((M, N), dtype),
     ):
-        with T.Kernel(
-            T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num
-        ) as (bx, by):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -205,9 +169,7 @@ def blocksparse_matmul_local(
     return main
 
 
-def run_block_sparse_matmul_global(
-    M=1024, N=1024, K=1024, sparsity=0.5, condition_dim=2
-):
+def run_block_sparse_matmul_global(M=1024, N=1024, K=1024, sparsity=0.5, condition_dim=2):
     block_M = 128
     block_N = 128
     block_K = 32
@@ -248,9 +210,7 @@ def run_block_sparse_matmul_global(
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
 
 
-def run_block_sparse_matmul_shared(
-    M=1024, N=1024, K=1024, sparsity=0.5, condition_dim=2
-):
+def run_block_sparse_matmul_shared(M=1024, N=1024, K=1024, sparsity=0.5, condition_dim=2):
     block_M = 128
     block_N = 128
     block_K = 32
@@ -291,9 +251,7 @@ def run_block_sparse_matmul_shared(
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
 
 
-def run_block_sparse_matmul_local(
-    M=1024, N=1024, K=1024, sparsity=0.5, condition_dim=2
-):
+def run_block_sparse_matmul_local(M=1024, N=1024, K=1024, sparsity=0.5, condition_dim=2):
     block_M = 128
     block_N = 128
     block_K = 32
@@ -335,15 +293,11 @@ def run_block_sparse_matmul_local(
 
 
 def test_block_sparse_matmul_global():
-    run_block_sparse_matmul_global(
-        M=1024, N=1024, K=1024, sparsity=0.5, condition_dim=2
-    )
+    run_block_sparse_matmul_global(M=1024, N=1024, K=1024, sparsity=0.5, condition_dim=2)
 
 
 def test_block_sparse_matmul_shared():
-    run_block_sparse_matmul_shared(
-        M=1024, N=1024, K=1024, sparsity=0.5, condition_dim=2
-    )
+    run_block_sparse_matmul_shared(M=1024, N=1024, K=1024, sparsity=0.5, condition_dim=2)
 
 
 def test_block_sparse_matmul_local():

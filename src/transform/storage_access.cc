@@ -203,12 +203,12 @@ void TileLangStorageAccessVisitor::VisitStmt_(const IfThenElseNode *op) {
   if (!is_thread_invariant) {
     ++condition_counter_;
   }
-  
+
   allow_append_ = true;
-  this->VisitExpr(op->condition);  
+  this->VisitExpr(op->condition);
   curr_stmt_.access.clear();
   allow_append_ = false;
-  
+
   scope_.push_back(std::vector<StmtEntry>());
   this->VisitStmt(op->then_case);
   StmtEntry s;
@@ -266,11 +266,11 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
         e.type = kRead;
         e.scope = scope;
         curr_stmt_.access.emplace_back(e);
-        }
-        StmtExprVisitor::VisitExpr_(load);
-      } else {
-        StmtExprVisitor::VisitExpr_(op);
       }
+      StmtExprVisitor::VisitExpr_(load);
+    } else {
+      StmtExprVisitor::VisitExpr_(op);
+    }
   } else if (op->op.same_as(builtin::tvm_access_ptr())) {
     ICHECK_EQ(op->args.size(), 5U);
     DataType dtype = op->args[0].dtype();

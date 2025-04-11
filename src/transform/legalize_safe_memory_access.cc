@@ -120,7 +120,7 @@ struct GlobalMemChecker : public StmtExprVisitor {
     for (size_t i = 0; i < indices.size(); i++) {
       PrimExpr index = indices[i];
       PrimExpr shape_dim = buffer->shape[i];
-      
+
       bool has_variable = false;
       PostOrderVisit(index, [&](const ObjectRef &obj) {
         if (const VarNode *v = obj.as<VarNode>()) {

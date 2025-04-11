@@ -298,6 +298,7 @@ def ConfigIndexBitwidth():
     """
     return _ffi_api.ConfigIndexBitwidth()  # type: ignore
 
+
 def FlattenBuffer():
     """FlattenBuffer
 

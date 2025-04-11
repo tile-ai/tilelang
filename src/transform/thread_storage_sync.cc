@@ -446,12 +446,12 @@ public:
 
       if (auto load = op->args[0].as<BufferLoadNode>()) {
         Var buffer_var(Downcast<Var>(load->buffer->data));
-      if (sync_scope_.rank == StorageRank::kGlobal &&
-          GetScope(buffer_var).rank == StorageRank::kGlobal) {
-        ++rw_stats_[buffer_var].read_count;
-      }
-      if (sync_scope_.rank == StorageRank::kGlobal &&
-          GetScope(buffer_var).rank == StorageRank::kGlobal) {
+        if (sync_scope_.rank == StorageRank::kGlobal &&
+            GetScope(buffer_var).rank == StorageRank::kGlobal) {
+          ++rw_stats_[buffer_var].read_count;
+        }
+        if (sync_scope_.rank == StorageRank::kGlobal &&
+            GetScope(buffer_var).rank == StorageRank::kGlobal) {
           ++rw_stats_[buffer_var].write_count;
         }
         return expr;
