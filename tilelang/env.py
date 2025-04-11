@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 def _find_cuda_home() -> str:
     """Find the CUDA install path.
-    
+
     Adapted from https://github.com/pytorch/pytorch/blob/main/torch/utils/cpp_extension.py
     """
     # Guess #1
@@ -35,25 +35,22 @@ def _find_cuda_home() -> str:
     return cuda_home if cuda_home is not None else ""
 
 
-def _find_hip_home() -> str:
-    """Find the HIP/ROCm install path."""
-    # First check explicit environment variables
-    hip_home = os.environ.get('HIP_HOME') or os.environ.get('ROCM_PATH')
-    if hip_home is None:
-        # Try to find hipcc in PATH
-        hipcc_path = shutil.which("hipcc")
-        if hipcc_path is not None:
-            hip_home = os.path.dirname(os.path.dirname(hipcc_path))
+def _find_rocm_home() -> str:
+    """Find the ROCM install path."""
+    rocm_home = os.environ.get('ROCM_PATH') or os.environ.get('ROCM_HOME')
+    if rocm_home is None:
+        rocmcc_path = shutil.which("hipcc")
+        if rocmcc_path is not None:
+            rocm_home = os.path.dirname(os.path.dirname(rocmcc_path))
         else:
-            # Default ROCm location on most systems
-            hip_home = '/opt/rocm'
-            if not os.path.exists(hip_home):
-                hip_home = None
-    return hip_home if hip_home is not None else ""
+            rocm_home = '/opt/rocm'
+            if not os.path.exists(rocm_home):
+                rocm_home = None
+    return rocm_home if rocm_home is not None else ""
 
 
 CUDA_HOME = _find_cuda_home()
-HIP_HOME = _find_hip_home()
+ROCM_HOME = _find_rocm_home()
 
 CUTLASS_INCLUDE_DIR: str = os.environ.get("TL_CUTLASS_PATH", None)
 COMPOSABLE_KERNEL_INCLUDE_DIR: str = os.environ.get("TL_COMPOSABLE_KERNEL_PATH", None)
@@ -195,7 +192,7 @@ __all__ = [
     "TVM_LIBRARY_PATH",
     "TILELANG_TEMPLATE_PATH",
     "CUDA_HOME",
-    "HIP_HOME",
+    "ROCM_HOME",
     "TILELANG_CACHE_DIR",
     "enable_cache",
     "disable_cache",
