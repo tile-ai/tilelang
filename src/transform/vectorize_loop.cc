@@ -123,9 +123,9 @@ inline PrimExpr BroadcastTo(PrimExpr e, int lanes, bool is_scalable) {
 // The same principle applies when using one thread to simulate multiple
 // context.
 //
-class VecAllocAccess : public StmtExprMutator {
+class TLVecAllocAccess : public StmtExprMutator {
 public:
-  VecAllocAccess(const VarNode *buf, Var var, PrimExpr var_lanes)
+  TLVecAllocAccess(const VarNode *buf, Var var, PrimExpr var_lanes)
       : buf_(buf), var_(var), var_lanes_(var_lanes) {}
 
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
@@ -182,16 +182,6 @@ private:
       buffer_map_[buf.get()] = buf;
     }
 
-    // Extend the last index by the number of lanes in the vectorized
-    // variable.
-    Array<PrimExpr> indices = node->indices;
-    indices.Set(
-        indices.size() - 1,
-        analyzer_.Simplify(indices[indices.size() - 1] * var_lanes_ + var_));
-
-    auto writer = node.CopyOnWrite();
-    writer->buffer = buf;
-    writer->indices = indices;
     return node;
   }
 
@@ -688,6 +678,8 @@ public:
       return Scalarize(GetRef<Stmt>(op));
     }
 
+    // Mutate the extents
+    Array<PrimExpr> extents;
     for (const auto &extent : op->extents) {
       PrimExpr new_ext = this->VisitExpr(extent);
       if (new_ext.dtype().is_scalable_or_fixed_length_vector()) {
@@ -695,8 +687,23 @@ public:
                      << op->buffer_var->name_hint;
         return Scalarize(GetRef<Stmt>(op));
       }
+      extents.push_back(new_ext);
     }
-    return GetRef<Stmt>(op);
+
+    // TODO(Lunderberg): Move this pass to be prior to
+    // StorageFlatten/FlattenBuffer.  That will allow this pass to be
+    // implemented as adding a new buffer dimension, which is later
+    // flattened.
+
+    // Extend the least significant dimension by a factor of
+    // var_lanes_.  Typically, this will be a 1-d index into a flat
+    // memory space.
+    extents.Set(extents.size() - 1, extents[extents.size() - 1] * var_lanes_);
+    // Rewrite access to the buffer in the body.
+    Stmt body =
+        TLVecAllocAccess(op->buffer_var.get(), var_, var_lanes_)(op->body);
+    body = this->VisitStmt(body);
+    return Allocate(op->buffer_var, op->dtype, extents, condition, body);
   }
 
   // scalarize the statment
