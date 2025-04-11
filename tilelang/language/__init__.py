@@ -60,6 +60,7 @@ from .customize import (
     reshape,  # noqa: F401
     view,  # noqa: F401
 )
+from .logical import any_of, all_of  # noqa: F401
 from .builtin import *  # noqa: F401
 
 from .memscope import *  # noqa: F401

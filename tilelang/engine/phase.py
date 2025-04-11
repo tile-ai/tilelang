@@ -54,7 +54,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # TODO(lei): may need a pass to fuse the if-then-else in the
     # pipeline loop when we meet dynamic branch.
     mod = tir.transform.LowerOpaqueBlock()(mod)
-    mod = tir.transform.FlattenBuffer()(mod)
+    mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tir.transform.Simplify()(mod)
     mod = tilelang.transform.VectorizeLoop()(mod)

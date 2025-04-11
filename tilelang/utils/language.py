@@ -79,6 +79,11 @@ def is_fragment(buffer: Buffer) -> bool:
     """
     return buffer.scope().startswith("local.fragment")
 
+def get_buffer_elems(buffer: Buffer) -> int:
+    """
+    Get the number of elements in the buffer.
+    """
+    return reduce(lambda x, y: x * y, buffer.shape)
 
 def array_reduce(array: List[int]) -> int:
     """

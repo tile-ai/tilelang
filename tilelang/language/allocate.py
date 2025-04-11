@@ -30,6 +30,10 @@ def alloc_shared(shape, dtype, scope="shared.dyn"):
     Returns:
         T.Buffer: A TVM buffer object allocated in shared memory
     """
+    if dtype == "bool":
+        # lei: This is a hack to handle bool type.
+        # Because tilelang's merge smem pass cannot merge bool type currently.
+        scope = "shared"
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
