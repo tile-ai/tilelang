@@ -3,15 +3,8 @@
 import numpy as np
 from dataclasses import dataclass
 from tilelang import tvm
+from tilelang.carver.arch.driver import get_cuda_device_properties
 from tvm.tir.stmt_functor import ir_transform
-import logging
-from typing import Optional
-# Configuration for different hardware architectures.
-# Each entry contains: (cores per SM, default clock (GHz), FLOPs per cycle, max SM count)
-ARCH_CONFIGS = {"80": (128, 1.41, 2, 108), "86": (128, 1.70, 2, 84), "89": (128, 2.52, 2, 128)}
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -28,8 +21,8 @@ class AnalysisResult:
     total_flops: int
     total_global_bytes: int
     estimated_time: float
-    expected_tflops: float
-    expected_bandwidth_GBps: float
+    tflops: float
+    bandwidth_GBps: float
 
 
 class Analyzer:
@@ -170,7 +163,7 @@ class Analyzer:
             AnalysisResult: The calculated performance metrics.
         """
 
-        def get_peak_tflops(device) -> Optional[float]:
+        def get_peak_tflops(device) -> float:
             """
             Get the peak TFLOPS for the target device.
             Args:
@@ -178,16 +171,17 @@ class Analyzer:
             Returns:
                 float: The peak TFLOPS.
             """
-            arch_key = device.compute_capability[:2]
-            if arch_key not in ARCH_CONFIGS:
-                logger.info(
-                    f"Unsupported compute capability: {device.compute_capability}, theoretical peak tflops will be None"
-                )
-                return None
-
-            cores_per_sm, default_clock, flops_per_cycle, compute_max_core = ARCH_CONFIGS[arch_key]
-            total_cores = compute_max_core * cores_per_sm
-            tflops = (total_cores * default_clock * flops_per_cycle) / 1e3
+            if not (hasattr(device, "tensor_core_flops") and
+                    hasattr(device, "tensor_cores_per_sm")):
+                raise ValueError(
+                    "Device does not have tensor_core_flops or tensor_cores_per_sm attributes")
+            tensor_core_flops = device.tensor_core_flops
+            tensor_cores_per_sm = device.tensor_cores_per_sm
+            prop = get_cuda_device_properties()
+            clock_rate = prop.clockRate
+            multiProcessorCount = prop.multiProcessorCount
+            total_cores = multiProcessorCount * tensor_cores_per_sm
+            tflops = (total_cores * clock_rate * tensor_core_flops) / 1e3
             return round(tflops, 1)
 
         # Calculate memory bandwidth and peak TFLOPS
@@ -196,16 +190,16 @@ class Analyzer:
 
         # Estimate memory and compute times
         mem_time = self.total_global_bytes / (bandwidth_GBps * 1e9)
-        compute_time = self.total_flops / (peak_tflops * 1e12) if peak_tflops else None
-        estimated_time = max(mem_time, compute_time) if peak_tflops else mem_time
+        compute_time = self.total_flops / (peak_tflops * 1e12)
+        estimated_time = max(mem_time, compute_time)  # Use the larger of the two times
 
         # Return the analysis results
         return AnalysisResult(
             total_flops=self.total_flops,
             total_global_bytes=self.total_global_bytes,
-            estimated_time=estimated_time,
-            expected_tflops=peak_tflops,
-            expected_bandwidth_GBps=bandwidth_GBps)
+            estimated_time=float(estimated_time),
+            tflops=float(self.total_flops / estimated_time / 1e12),
+            bandwidth_GBps=bandwidth_GBps)
 
     @classmethod
     def analysis(cls, fn, device):
