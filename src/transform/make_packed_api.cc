@@ -440,11 +440,12 @@ PrimFunc MakePackedAPI(PrimFunc func) {
       }();
       shape_checks.emplace_back(AssertStmt(
           shape_vectorize_expr == 0,
-          tvm::tir::StringImm(kv.second->name +
-                              ": Vectorize dimension in buffer must be divisible by " +
-                              std::to_string(dynamic_vectorize_size_bits /
-                                              kv.second->dtype.bits())),
-            nop));
+          tvm::tir::StringImm(
+              kv.second->name +
+              ": Vectorize dimension in buffer must be divisible by " +
+              std::to_string(dynamic_vectorize_size_bits /
+                             kv.second->dtype.bits())),
+          nop));
     }
   }
 

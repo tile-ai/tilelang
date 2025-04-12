@@ -32,9 +32,10 @@ static constexpr const char *kDisableDynamicTailSplit =
 
 /*!
  * \brief The size of the vectorized dimension in buffer, designed by user
- * 
- * For example, if the vectorized dimension is 128 bits and the dtype of buffer A[m, k] is float16,
- * the size of the vectorized dimension (i.e. k) in buffer A should be divisible by 8 (8 = 128 / 16).
+ *
+ * For example, if the vectorized dimension is 128 bits and the dtype of buffer
+ * A[m, k] is float16, the size of the vectorized dimension (i.e. k) in buffer A
+ * should be divisible by 8 (8 = 128 / 16).
  *
  * kDynamicVectorizeSizeBits = "tl.dynamic_vectorize_size_bits"
  *
