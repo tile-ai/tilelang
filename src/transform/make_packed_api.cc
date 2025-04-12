@@ -36,6 +36,7 @@
 
 #include "tir/transforms/arg_binder.h"
 #include "tir/transforms/ir_utils.h"
+#include "../op/builtin.h"
 
 namespace tvm {
 namespace tl {
@@ -273,6 +274,9 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   std::vector<Stmt> seq_init, seq_check, arg_buffer_declarations;
   std::unordered_map<const VarNode *, PrimExpr> vmap;
   ArgBinder binder(&vmap);
+  std::vector<Stmt> shape_checks;
+  tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
+  bool disable_dynamic_tail_split = ctxt->GetConfig<Bool>(kDisableDynamicTailSplit, Bool(false)).value();
 
   // ---------------------------
   // local function definitions
@@ -415,13 +419,44 @@ PrimFunc MakePackedAPI(PrimFunc func) {
       body = SeqStmt({set_device, body});
     }
   }
+  
+  // (zhengju) For dynamic constraint, we need to check the buffer shape and dtype
+  // to make sure the buffer can be vectorized.
+  for (const auto &kv : buffer_def) {
+    if (disable_dynamic_tail_split) {
+      Optional<Integer> opt_dynamic_vectorize_size_bits =
+          ctxt->GetConfig(kDynamicVectorizeSizeBits, Optional<Integer>());
+      int dynamic_vectorize_size_bits = opt_dynamic_vectorize_size_bits.value_or(Integer(128))->value;
+      for (const auto &dim : kv.second->shape) {
+        auto shape_vectorize_expr = [&]() -> PrimExpr {
+          PrimExpr result = IntImm(kv.second->DefaultIndexType(), 1);
+          result = result * dim;
+          result = result * kv.second->dtype.bits();
+          result = FloorMod(result, dynamic_vectorize_size_bits);
+          return result;
+        }();
+        shape_checks.emplace_back(
+          AssertStmt(shape_vectorize_expr == 0,
+                     tvm::tir::StringImm(kv.second->name + ": Buffer shape must be divisible by " + std::to_string(dynamic_vectorize_size_bits / kv.second->dtype.bits())),
+                     nop)
+        );
+      }
+    }
+  }
 
   // Return error code of zero on success
   body = SeqStmt({body, Evaluate(ret(Integer(0)))});
 
-  body = MergeNest({seq_init, binder.init_nest(), seq_check, binder.asserts(),
-                    arg_buffer_declarations},
-                   body);
+  if (!disable_dynamic_tail_split) {
+    body = MergeNest({seq_init, binder.init_nest(), seq_check, binder.asserts(),
+                      arg_buffer_declarations},
+                     body);
+  } else {
+    body = MergeNest({seq_init, binder.init_nest(), seq_check, binder.asserts(),
+                      arg_buffer_declarations, shape_checks},
+                     body);
+  }
+
   func_ptr->body = body;
   func_ptr->params = args;
 

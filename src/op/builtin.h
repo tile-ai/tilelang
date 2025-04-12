@@ -20,6 +20,9 @@ static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
 static constexpr const char *kDisableWarpSpecialized =
     "tl.disable_warp_specialized";
 static constexpr const char *kConfigIndexBitwidth = "tl.config_index_bitwidth";
+static constexpr const char *kDisableDynamicTailSplit =
+    "tl.disable_dynamic_tail_split";
+static constexpr const char *kDynamicVectorizeSizeBits= "tl.dynamic_vectorize_size_bits";
 
 /*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load
