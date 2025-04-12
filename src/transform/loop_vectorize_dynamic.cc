@@ -398,7 +398,6 @@ private:
     } else {
       // If dynamic_tail_split is false, we will directly vectorize the loop
       // without dynamic tail split and if_then_else, which may lead to error
-      // TODO add the assert statement to ensure correctness
       VectorizedBodyMutator mutator(inner_var, vector_size_, conditions);
       Stmt vectorize_body = mutator(body);
 

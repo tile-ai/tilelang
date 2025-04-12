@@ -429,22 +429,22 @@ PrimFunc MakePackedAPI(PrimFunc func) {
           ctxt->GetConfig(kDynamicVectorizeSizeBits, Optional<Integer>());
       int dynamic_vectorize_size_bits =
           opt_dynamic_vectorize_size_bits.value_or(Integer(128))->value;
-      for (const auto &dim : kv.second->shape) {
-        auto shape_vectorize_expr = [&]() -> PrimExpr {
-          PrimExpr result = IntImm(kv.second->DefaultIndexType(), 1);
-          result = result * dim;
-          result = result * kv.second->dtype.bits();
-          result = FloorMod(result, dynamic_vectorize_size_bits);
-          return result;
-        }();
-        shape_checks.emplace_back(AssertStmt(
-            shape_vectorize_expr == 0,
-            tvm::tir::StringImm(kv.second->name +
-                                ": Buffer shape must be divisible by " +
-                                std::to_string(dynamic_vectorize_size_bits /
-                                               kv.second->dtype.bits())),
+      // The vectorize dimension will be the last dimension of the buffer
+      auto vectorize_dim = kv.second->shape[kv.second->shape.size() - 1];
+      auto shape_vectorize_expr = [&]() -> PrimExpr {
+        PrimExpr result = IntImm(kv.second->DefaultIndexType(), 1);
+        result = result * vectorize_dim;
+        result = result * kv.second->dtype.bits();
+        result = FloorMod(result, dynamic_vectorize_size_bits);
+        return result;
+      }();
+      shape_checks.emplace_back(AssertStmt(
+          shape_vectorize_expr == 0,
+          tvm::tir::StringImm(kv.second->name +
+                              ": Vectorize dimension in buffer must be divisible by " +
+                              std::to_string(dynamic_vectorize_size_bits /
+                                              kv.second->dtype.bits())),
             nop));
-      }
     }
   }
 
