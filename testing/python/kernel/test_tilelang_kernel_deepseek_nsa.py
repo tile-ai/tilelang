@@ -1,6 +1,6 @@
 # Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
-
+# ruff: noqa
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
@@ -12,17 +12,17 @@ tilelang.testing.set_random_seed(42)
 
 
 def naive_nsa_ref(q: torch.Tensor,
-              k: torch.Tensor,
-              v: torch.Tensor,
-              g_slc: torch.Tensor,
-              g_swa: torch.Tensor,
-              block_indices: torch.LongTensor,
-              block_counts: Optional[Union[torch.LongTensor, int]] = None,
-              block_size: int = 64,
-              window_size: int = 0,
-              scale: Optional[float] = None,
-              cu_seqlens: Optional[torch.LongTensor] = None,
-              head_first: bool = False) -> torch.Tensor:
+                  k: torch.Tensor,
+                  v: torch.Tensor,
+                  g_slc: torch.Tensor,
+                  g_swa: torch.Tensor,
+                  block_indices: torch.LongTensor,
+                  block_counts: Optional[Union[torch.LongTensor, int]] = None,
+                  block_size: int = 64,
+                  window_size: int = 0,
+                  scale: Optional[float] = None,
+                  cu_seqlens: Optional[torch.LongTensor] = None,
+                  head_first: bool = False) -> torch.Tensor:
 
     if scale is None:
         scale = k.shape[-1]**-0.5
@@ -242,20 +242,22 @@ def native_sparse_attention(batch,
 
     return native_sparse_attention
 
+
 def run_native_sparse_attention(batch,
-                               heads,
-                               seq_len,
-                               dim,
-                               is_causal,
-                               scale=None,
-                               block_size=64,
-                               groups=16,
-                               selected_blocks=16,
-                               num_stages=0,
-                               threads=32):
+                                heads,
+                                seq_len,
+                                dim,
+                                is_causal,
+                                scale=None,
+                                block_size=64,
+                                groups=16,
+                                selected_blocks=16,
+                                num_stages=0,
+                                threads=32):
     dtype = torch.float16
     head_kv = heads // groups
-    program = native_sparse_attention(batch, heads, seq_len, dim, is_causal, scale, block_size, groups, selected_blocks, num_stages, threads)
+    program = native_sparse_attention(batch, heads, seq_len, dim, is_causal, scale, block_size,
+                                      groups, selected_blocks, num_stages, threads)
     kernel = tilelang.compile(program, out_idx=-1)
     Q = torch.randn((batch, seq_len, heads, dim), dtype=dtype).cuda()
     K = torch.randn((batch, seq_len, head_kv, dim), dtype=dtype).cuda()
@@ -263,7 +265,10 @@ def run_native_sparse_attention(batch,
     g_slc = torch.ones((batch, seq_len, heads), dtype=dtype).cuda()
     g_swa = torch.ones((batch, seq_len, heads), dtype=dtype).cuda()
 
-    block_indices = torch.full((batch, seq_len, head_kv, selected_blocks), seq_len, dtype=torch.long, device='cuda')
+    block_indices = torch.full((batch, seq_len, head_kv, selected_blocks),
+                               seq_len,
+                               dtype=torch.long,
+                               device='cuda')
     for b in range(batch):
         for t in range(seq_len):
             for h in range(head_kv):
@@ -287,11 +292,34 @@ def run_native_sparse_attention(batch,
     )
     torch.testing.assert_close(ref, out, atol=1e-2, rtol=1e-2)
 
+
 def test_tilelang_kernel_deepseek_nsa():
     # disable pipeline
-    run_native_sparse_attention(batch=2, heads=64, seq_len=1, dim=16, is_causal=True, scale=None, block_size=32, groups=16, selected_blocks=16, num_stages=0, threads=32)
+    run_native_sparse_attention(
+        batch=2,
+        heads=64,
+        seq_len=1,
+        dim=16,
+        is_causal=True,
+        scale=None,
+        block_size=32,
+        groups=16,
+        selected_blocks=16,
+        num_stages=0,
+        threads=32)
     # enable pipeline
-    run_native_sparse_attention(batch=2, heads=64, seq_len=1, dim=16, is_causal=True, scale=None, block_size=32, groups=16, selected_blocks=16, num_stages=2, threads=32)
+    run_native_sparse_attention(
+        batch=2,
+        heads=64,
+        seq_len=1,
+        dim=16,
+        is_causal=True,
+        scale=None,
+        block_size=32,
+        groups=16,
+        selected_blocks=16,
+        num_stages=2,
+        threads=32)
 
 
 if __name__ == "__main__":

@@ -24,9 +24,9 @@
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/tir/analysis.h>
+#include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
-#include <tvm/tir/builtin.h>
 
 #include "../target/utils.h"
 
@@ -70,14 +70,13 @@ public:
   }
 
 private:
-
   void VisitStmt_(const BufferStoreNode *op) final {
     Buffer store_buffer = op->buffer;
     is_global_read_ = false;
     this->VisitExpr(op->value);
     if (is_global_read_ && (store_buffer.scope() == "shared" ||
-                           store_buffer.scope() == "shared.dyn" ||
-                           store_buffer.scope() == "local")) {
+                            store_buffer.scope() == "shared.dyn" ||
+                            store_buffer.scope() == "local")) {
       is_global_copy_pattern_ = true;
     }
     is_global_read_ = false;
@@ -93,11 +92,12 @@ private:
     auto args = op->args;
     if (op->op.same_as(tir::builtin::if_then_else())) {
       // Simplify nested if_then_else
-      // if (cond) { if (inner_cond) { inner_then_expr } else { inner_else_expr } } else { else_expr }
+      // if (cond) { if (inner_cond) { inner_then_expr } else { inner_else_expr
+      // } } else { else_expr }
       // => if (cond && inner_cond) { inner_then_expr } else { else_expr }
-      const PrimExpr& cond = op->args[0];
-      const PrimExpr& then_expr = op->args[1];
-      const PrimExpr& else_expr = op->args[2];
+      const PrimExpr &cond = op->args[0];
+      const PrimExpr &then_expr = op->args[1];
+      const PrimExpr &else_expr = op->args[2];
       this->VisitExpr(then_expr);
       this->VisitExpr(else_expr);
     }
