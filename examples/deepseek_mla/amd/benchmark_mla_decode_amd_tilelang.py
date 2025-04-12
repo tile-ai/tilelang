@@ -38,8 +38,8 @@ def flashmla_decode(batch,
             Output: T.Tensor([batch, heads, dim], dtype),
     ):
         with T.Kernel(batch, heads // min(block_H, kv_group_num), threads=threads) as (bx, by):
-            Q_shared = T.alloc_fragment([block_H, dim], dtype)
-            Q_pe_shared = T.alloc_fragment([block_H, pe_dim], dtype)
+            Q_local = T.alloc_fragment([block_H, dim], dtype)
+            Q_pe_local = T.alloc_fragment([block_H, pe_dim], dtype)
             KV_shared = T.alloc_shared([block_N, dim], dtype)
             K_pe_shared = T.alloc_shared([block_N, pe_dim], dtype)
             acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
@@ -54,8 +54,8 @@ def flashmla_decode(batch,
             cur_kv_head = by // (kv_group_num // block_H)
             T.use_swizzle(10)
 
-            T.copy(Q[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_shared)
-            T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_shared)
+            T.copy(Q[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_local)
+            T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_local)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -66,9 +66,9 @@ def flashmla_decode(batch,
                 T.copy(K_pe[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_pe_shared)
                 T.clear(acc_s)
                 T.gemm(
-                    Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                    Q_local, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.gemm(
-                    Q_pe_shared,
+                    Q_pe_local,
                     K_pe_shared,
                     acc_s,
                     transpose_B=True,
@@ -104,8 +104,8 @@ def flashmla_decode(batch,
         with T.Kernel(
                 batch, heads // min(block_H, kv_group_num), num_split,
                 threads=threads) as (bx, by, bz):
-            Q_shared = T.alloc_fragment([block_H, dim], dtype)
-            Q_pe_shared = T.alloc_fragment([block_H, pe_dim], dtype)
+            Q_local = T.alloc_fragment([block_H, dim], dtype)
+            Q_pe_local = T.alloc_fragment([block_H, pe_dim], dtype)
             KV_shared = T.alloc_shared([block_N, dim], dtype)
             K_pe_shared = T.alloc_shared([block_N, pe_dim], dtype)
             acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
@@ -119,8 +119,8 @@ def flashmla_decode(batch,
 
             cur_kv_head = by // (kv_group_num // block_H)
             T.use_swizzle(10)
-            T.copy(Q[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_shared)
-            T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_shared)
+            T.copy(Q[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_local)
+            T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_local)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -133,9 +133,9 @@ def flashmla_decode(batch,
                 T.copy(K_pe[bx, kv_start:kv_end, cur_kv_head, :], K_pe_shared)
                 T.clear(acc_s)
                 T.gemm(
-                    Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                    Q_local, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.gemm(
-                    Q_pe_shared,
+                    Q_pe_local,
                     K_pe_shared,
                     acc_s,
                     transpose_B=True,
