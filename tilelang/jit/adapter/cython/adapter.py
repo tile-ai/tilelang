@@ -72,7 +72,7 @@ def get_cached_lib(source_code: str) -> Tuple[Optional[ctypes.CDLL], Path]:
                     if cache_path.stat().st_size > 1024:
                         return ctypes.CDLL(str(cache_path)), cache_path
                     else:
-                        cache_path.unlink() # delete the incomplete file
+                        cache_path.unlink()  # remove the incomplete file
                 except Exception as e:
                     logger.error(f"Failed to load cached library: {e}")
                     return None, cache_path
@@ -112,7 +112,7 @@ with open(cython_wrapper_path, "r") as f:
         try:
             with open(md5_path, "w") as f:
                 f.write(code_hash)
-
+            
             # compile the cython_wrapper.pyx file into .cpp
             cython = get_cython_compiler()
             if cython is None:
