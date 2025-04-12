@@ -112,7 +112,7 @@ with open(cython_wrapper_path, "r") as f:
         try:
             with open(md5_path, "w") as f:
                 f.write(code_hash)
-            
+
             # compile the cython_wrapper.pyx file into .cpp
             cython = get_cython_compiler()
             if cython is None:
@@ -122,7 +122,7 @@ with open(cython_wrapper_path, "r") as f:
             cc = get_cplus_compiler()
             command = f"{cc} -shared -pthread -fPIC -fwrapv -O2 -Wall -fno-strict-aliasing -I{python_include_path} {source_path} -o {temp_path}"
             os.system(command)
-            
+
             # rename the temp file to the library file
             temp_path.rename(library_path)
         except Exception as e:
