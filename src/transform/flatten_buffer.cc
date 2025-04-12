@@ -210,8 +210,30 @@ private:
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+    bool load_returns_bool = (op->dtype == DataType::Bool());
     BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    return VisitBufferAccess(load);
+    load = VisitBufferAccess(load);
+    // Handle casts from dtype of the backing array to value's dtype.
+    // TODO(Lunderberg): Move the handling of boolean into a
+    // dedicated pass.
+    if (load_returns_bool && !under_address_of) {
+      ICHECK_EQ(load->buffer->dtype, DataType::Int(8))
+          << "Expected int8 backing array for boolean tensor";
+      load.CopyOnWrite()->dtype = DataType::Int(8);
+      return tvm::cast(DataType::Bool(), load);
+    } else {
+      return std::move(load);
+    }
+  }
+
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(builtin::address_of())) {
+      under_address_of = true;
+      auto result = StmtExprMutator::VisitExpr_(op);
+      under_address_of = false;
+      return result;
+    }
+    return StmtExprMutator::VisitExpr_(op);
   }
 
   Array<PrimExpr> GetSimplifiedElemOffset(const Buffer &buffer,
@@ -260,6 +282,8 @@ private:
     return BufferRegion(flattened_buf, flattened_ranges);
   }
 
+  /*! \brief Whether the current buffer is under address_of */
+  bool under_address_of = false;
   /*! \brief Map of buffers being remapped. */
   std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
       buffer_remap_;
