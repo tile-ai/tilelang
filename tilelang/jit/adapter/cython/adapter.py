@@ -70,7 +70,7 @@ def get_cached_lib(source_code: str) -> Tuple[Optional[ctypes.CDLL], Path]:
                     if cache_path.stat().st_size > 1024:
                         return ctypes.CDLL(str(cache_path)), cache_path
                     else:
-                        cache_path.unlink()  # 删除不完整文件
+                        cache_path.unlink()  # remove the incomplete file
                 except Exception as e:
                     logger.error(f"Failed to load cached library: {e}")
                     return None, cache_path
@@ -111,7 +111,7 @@ with open(cython_wrapper_path, "r") as f:
             with open(md5_path, "w") as f:
                 f.write(code_hash)
             
-            # 使用临时文件进行编译
+            # compile the cython_wrapper.pyx file into .cpp
             cython = get_cython_compiler()
             if cython is None:
                 raise Exception("Cython is not installed, please install it first.")
@@ -121,7 +121,7 @@ with open(cython_wrapper_path, "r") as f:
             command = f"{cc} -shared -pthread -fPIC -fwrapv -O2 -Wall -fno-strict-aliasing -I{python_include_path} {source_path} -o {temp_path}"
             os.system(command)
             
-            # 原子替换操作
+            # rename the temp file to the library file
             temp_path.rename(library_path)
         except Exception as e:
             if temp_path.exists():
