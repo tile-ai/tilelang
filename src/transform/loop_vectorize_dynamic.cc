@@ -65,7 +65,7 @@ bool IndiceCanVectorizeDynamic(PrimExpr expr, Var var, PrimExpr iter_var_size,
 
 class VectorizePlannerDynamic : public arith::IRVisitorWithAnalyzer {
 public:
-  VectorizePlannerDynamic(int dynamic_vectorize_size_bits) 
+  VectorizePlannerDynamic(int dynamic_vectorize_size_bits)
       : vector_load_bits_max_(dynamic_vectorize_size_bits), inner_for_(nullptr),
         vector_size_(dynamic_vectorize_size_bits) {}
 
@@ -343,7 +343,8 @@ private:
     tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
     Optional<Bool> opt_disable_dynamic_tail_split =
         ctxt->GetConfig(kDisableDynamicTailSplit, Optional<Bool>());
-    bool disable_dynamic_tail_split = opt_disable_dynamic_tail_split.value_or(Bool(false));
+    bool disable_dynamic_tail_split =
+        opt_disable_dynamic_tail_split.value_or(Bool(false));
 
     inner_for_ = node;
     auto ret = StmtExprMutator::VisitStmt_(node);
@@ -381,8 +382,8 @@ private:
     }
 
     if (!disable_dynamic_tail_split) {
-      // If dynamic_tail_split is true, we will vectorize the loop with if-then-else conditions
-      // modify body in the vectorized loop
+      // If dynamic_tail_split is true, we will vectorize the loop with
+      // if-then-else conditions modify body in the vectorized loop
       VectorizedBodyMutator mutator(inner_var, vector_size_, conditions);
       Stmt vectorize_body = mutator(body);
 
@@ -392,7 +393,7 @@ private:
       For serial_for = For(inner_var, 0, vector_size_, ForKind::kSerial, body);
       body = IfThenElse(condition_bound, vectorize_for, serial_for);
       body = For(outer_var, 0, extent / vector_size_, fnode->kind, body,
-                fnode->thread_binding, fnode->annotations, fnode->span);
+                 fnode->thread_binding, fnode->annotations, fnode->span);
       return body;
     } else {
       // If dynamic_tail_split is false, we will directly vectorize the loop
@@ -401,9 +402,11 @@ private:
       VectorizedBodyMutator mutator(inner_var, vector_size_, conditions);
       Stmt vectorize_body = mutator(body);
 
-      For vectorize_for = For(inner_var, 0, vector_size_, ForKind::kVectorized, vectorize_body);
-      body = For(outer_var, 0, extent / vector_size_, fnode->kind, vectorize_for,
-                 fnode->thread_binding, fnode->annotations, fnode->span);
+      For vectorize_for =
+          For(inner_var, 0, vector_size_, ForKind::kVectorized, vectorize_body);
+      body =
+          For(outer_var, 0, extent / vector_size_, fnode->kind, vectorize_for,
+              fnode->thread_binding, fnode->annotations, fnode->span);
       return body;
     }
   }
@@ -415,7 +418,9 @@ private:
   const bool dynamic_tail_split_;
 };
 
-VectorizePlanResult GetVectorizePlanResultDynamic(const For &loop, int64_t dynamic_vectorize_size_bits) {
+VectorizePlanResult
+GetVectorizePlanResultDynamic(const For &loop,
+                              int64_t dynamic_vectorize_size_bits) {
   VectorizePlannerDynamic planner(dynamic_vectorize_size_bits);
   int vector_size = planner.Plan(loop);
   bool dynamic = planner.GetDynamic();
@@ -425,16 +430,21 @@ VectorizePlanResult GetVectorizePlanResultDynamic(const For &loop, int64_t dynam
 
 class LoopVectorizerDynamic : public IRMutatorWithAnalyzer {
 public:
-  static Stmt Substitute(Stmt stmt, bool dynamic_tail_split, int64_t dynamic_vectorize_size_bits) {
+  static Stmt Substitute(Stmt stmt, bool dynamic_tail_split,
+                         int64_t dynamic_vectorize_size_bits) {
     arith::Analyzer analyzer;
-    LoopVectorizerDynamic substituter(&analyzer, dynamic_tail_split, dynamic_vectorize_size_bits);
+    LoopVectorizerDynamic substituter(&analyzer, dynamic_tail_split,
+                                      dynamic_vectorize_size_bits);
     stmt = substituter.VisitStmt(stmt);
     return stmt;
   }
 
 private:
-  LoopVectorizerDynamic(arith::Analyzer *analyzer, bool dynamic_tail_split, int dynamic_vectorize_size_bits)
-      : arith::IRMutatorWithAnalyzer(analyzer), dynamic_tail_split_(dynamic_tail_split), dynamic_vectorize_size_bits_(dynamic_vectorize_size_bits) {}
+  LoopVectorizerDynamic(arith::Analyzer *analyzer, bool dynamic_tail_split,
+                        int dynamic_vectorize_size_bits)
+      : arith::IRMutatorWithAnalyzer(analyzer),
+        dynamic_tail_split_(dynamic_tail_split),
+        dynamic_vectorize_size_bits_(dynamic_vectorize_size_bits) {}
 
   Stmt VisitStmt_(const ForNode *op) final {
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
@@ -471,14 +481,22 @@ public:
 tvm::transform::Pass LoopVectorizeDynamic() {
   using namespace tir::transform;
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    bool disable_dynamic_tail_split = ctx->GetConfig<Bool>(kDisableDynamicTailSplit, Bool(false)).value();
-    int dynamic_vectorize_size_bits = (int)(ctx->GetConfig<Integer>(kDynamicVectorizeSizeBits, Integer(128)).value_or(Integer(128))->value);
+    bool disable_dynamic_tail_split =
+        ctx->GetConfig<Bool>(kDisableDynamicTailSplit, Bool(false)).value();
+    int dynamic_vectorize_size_bits =
+        (int)(ctx->GetConfig<Integer>(kDynamicVectorizeSizeBits, Integer(128))
+                  .value_or(Integer(128))
+                  ->value);
     // Ensure dynamic_vectorize_size_bits is a power of 2
-    if ((dynamic_vectorize_size_bits & (dynamic_vectorize_size_bits - 1)) != 0) {
-      LOG(FATAL) << "dynamic_vectorize_size_bits must be a power of 2, but got " << dynamic_vectorize_size_bits;
+    if ((dynamic_vectorize_size_bits & (dynamic_vectorize_size_bits - 1)) !=
+        0) {
+      LOG(FATAL) << "dynamic_vectorize_size_bits must be a power of 2, but got "
+                 << dynamic_vectorize_size_bits;
     }
     auto *n = f.CopyOnWrite();
-    n->body = LoopVectorizerDynamic::Substitute(std::move(n->body), disable_dynamic_tail_split, dynamic_vectorize_size_bits);
+    n->body = LoopVectorizerDynamic::Substitute(std::move(n->body),
+                                                disable_dynamic_tail_split,
+                                                dynamic_vectorize_size_bits);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LoopVectorizeDynamic", {});

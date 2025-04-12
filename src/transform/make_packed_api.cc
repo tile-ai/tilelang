@@ -34,9 +34,9 @@
 #include <utility>
 #include <vector>
 
+#include "../op/builtin.h"
 #include "tir/transforms/arg_binder.h"
 #include "tir/transforms/ir_utils.h"
-#include "../op/builtin.h"
 
 namespace tvm {
 namespace tl {
@@ -276,7 +276,8 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   ArgBinder binder(&vmap);
   std::vector<Stmt> shape_checks;
   tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
-  bool disable_dynamic_tail_split = ctxt->GetConfig<Bool>(kDisableDynamicTailSplit, Bool(false)).value();
+  bool disable_dynamic_tail_split =
+      ctxt->GetConfig<Bool>(kDisableDynamicTailSplit, Bool(false)).value();
 
   // ---------------------------
   // local function definitions
@@ -419,14 +420,15 @@ PrimFunc MakePackedAPI(PrimFunc func) {
       body = SeqStmt({set_device, body});
     }
   }
-  
-  // (zhengju) For dynamic constraint, we need to check the buffer shape and dtype
-  // to make sure the buffer can be vectorized.
+
+  // (zhengju) For dynamic constraint, we need to check the buffer shape and
+  // dtype to make sure the buffer can be vectorized.
   for (const auto &kv : buffer_def) {
     if (disable_dynamic_tail_split) {
       Optional<Integer> opt_dynamic_vectorize_size_bits =
           ctxt->GetConfig(kDynamicVectorizeSizeBits, Optional<Integer>());
-      int dynamic_vectorize_size_bits = opt_dynamic_vectorize_size_bits.value_or(Integer(128))->value;
+      int dynamic_vectorize_size_bits =
+          opt_dynamic_vectorize_size_bits.value_or(Integer(128))->value;
       for (const auto &dim : kv.second->shape) {
         auto shape_vectorize_expr = [&]() -> PrimExpr {
           PrimExpr result = IntImm(kv.second->DefaultIndexType(), 1);
@@ -435,11 +437,13 @@ PrimFunc MakePackedAPI(PrimFunc func) {
           result = FloorMod(result, dynamic_vectorize_size_bits);
           return result;
         }();
-        shape_checks.emplace_back(
-          AssertStmt(shape_vectorize_expr == 0,
-                     tvm::tir::StringImm(kv.second->name + ": Buffer shape must be divisible by " + std::to_string(dynamic_vectorize_size_bits / kv.second->dtype.bits())),
-                     nop)
-        );
+        shape_checks.emplace_back(AssertStmt(
+            shape_vectorize_expr == 0,
+            tvm::tir::StringImm(kv.second->name +
+                                ": Buffer shape must be divisible by " +
+                                std::to_string(dynamic_vectorize_size_bits /
+                                               kv.second->dtype.bits())),
+            nop));
       }
     }
   }

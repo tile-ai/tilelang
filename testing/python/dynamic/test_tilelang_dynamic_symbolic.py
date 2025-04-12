@@ -419,7 +419,12 @@ def assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
         num_threads,
     )
 
-    kernel = tilelang.compile(program, pass_configs={"tl.disable_dynamic_tail_split": True, "tl.dynamic_vectorize_size_bits": dynamic_vectorize_size_bits})
+    kernel = tilelang.compile(
+        program,
+        pass_configs={
+            "tl.disable_dynamic_tail_split": True,
+            "tl.dynamic_vectorize_size_bits": dynamic_vectorize_size_bits
+        })
 
     if trans_A:
         A = torch.rand(K, M, device="cuda", dtype=getattr(torch, in_dtype))
@@ -473,16 +478,47 @@ def test_assert_tl_matmul_block_all_dynamic():
     assert_tl_matmul_block_all_dynamic_correctness(36, 128, 128, False, False, "float16", "float16",
                                                    "float16", 64, 64, 32)
 
+
 def test_assert_tl_matmul_block_all_dynamic_with_pass_config():
-    assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(128, 128, 128, False, False, "float16",
-                                                                   "float16", "float16", 64, 64, 32,
-                                                                   dynamic_vectorize_size_bits=128)
-    assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(64, 128, 128, False, False, "float16",
-                                                                   "float16", "float16", 64, 64, 32,
-                                                                   dynamic_vectorize_size_bits=128)
-    assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(64, 128, 60, False, False, "float16",
-                                                                   "float16", "float16", 64, 64, 32,
-                                                                   dynamic_vectorize_size_bits=64)
+    assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
+        128,
+        128,
+        128,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float16",
+        64,
+        64,
+        32,
+        dynamic_vectorize_size_bits=128)
+    assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
+        64,
+        128,
+        128,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float16",
+        64,
+        64,
+        32,
+        dynamic_vectorize_size_bits=128)
+    assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
+        64,
+        128,
+        60,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float16",
+        64,
+        64,
+        32,
+        dynamic_vectorize_size_bits=64)
 
 
 if __name__ == "__main__":
