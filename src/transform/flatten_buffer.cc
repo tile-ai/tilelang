@@ -209,7 +209,7 @@ private:
     return std::move(store);
   }
 
-  PrimExpr VisitExpr_(const BufferLoadNode* op) final {
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     bool load_returns_bool = (op->dtype == DataType::Bool());
     BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
     load = VisitBufferAccess(load);
@@ -226,7 +226,7 @@ private:
     }
   }
 
-  PrimExpr VisitExpr_(const CallNode* op) final {
+  PrimExpr VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(builtin::address_of())) {
       under_address_of = true;
       auto result = StmtExprMutator::VisitExpr_(op);
