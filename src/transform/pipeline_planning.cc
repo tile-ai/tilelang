@@ -152,20 +152,7 @@ private:
     pinfo.reads = std::move(access[0]);
     pinfo.writes = std::move(access[1]);
     pinfo.original_order = idx;
-
-    // copy stage should only have one reads and one writes
-    bool write_to_shared_or_local = false;
-    bool read_from_global = false;
-    for (auto region : pinfo.reads)
-      if (region->buffer.scope() == "global")
-        read_from_global = true;
-    for (auto region : pinfo.writes)
-      if (region->buffer.scope() == "shared" ||
-          region->buffer.scope() == "shared.dyn" ||
-          region->buffer.scope() == "local")
-        write_to_shared_or_local = true;
-    bool is_copy_stage = GlobalCopyPatternDetector::Detect(stmt);
-    pinfo.copy_stage = is_copy_stage;
+    pinfo.copy_stage = GlobalCopyPatternDetector::Detect(stmt);
 
     return std::move(pinfo);
   }
