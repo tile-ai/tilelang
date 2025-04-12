@@ -89,7 +89,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
     mod = tir.transform.MergeSharedMemoryAllocations()(mod)
-    print(mod)
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tir.transform.LowerDeviceKernelLaunch()(mod)
 
