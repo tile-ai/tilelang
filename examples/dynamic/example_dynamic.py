@@ -82,8 +82,6 @@ def test_matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in
 
     kernel(A, B, C)
 
-    print(kernel.kernel_source)
-
     def ref_program(A, B):
         import torch
 
@@ -101,12 +99,10 @@ def test_matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
     print("Kernel output matches PyTorch reference.")
 
-    # profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
-    # latency = profiler.do_bench()
-    # print(f"Latency: {latency} ms")
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+    latency = profiler.do_bench(input_tensors=[A, B, C])
+    print(f"Latency: {latency} ms")
 
 
 if __name__ == "__main__":
-    # test_matmul_dynamic(128, 128, 128, 64, 64, 32, False, False, "float16", "float16", "float16", 3, 128)
-    # test_matmul_dynamic(1024, 1024, 1024, 64, 64, 32, False, False, "float16", "float16", "float16", 3, 128)
-    test_matmul_dynamic(4096, 4096, 4096, 128, 128, 32, False, False, "float16", "float16", "float16", 3, 128)
+    test_matmul_dynamic(16384, 16384, 16384, 128, 128, 32, False, False, "float16", "float16", "float32", 3, 128)
