@@ -422,7 +422,7 @@ def assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
     kernel = tilelang.compile(
         program,
         pass_configs={
-            "tl.disable_dynamic_tail_split": True if dynamic_alignment != 0 else False,
+            "tl.disable_dynamic_tail_split": dynamic_alignment != 0,
             "tl.dynamic_alignment": dynamic_alignment
         })
 
