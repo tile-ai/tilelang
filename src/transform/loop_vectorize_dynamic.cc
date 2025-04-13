@@ -34,6 +34,7 @@ struct VectorizePlanResult {
   PrimExpr condition;
 };
 
+
 bool IndiceCanVectorizeDynamic(PrimExpr expr, Var var, PrimExpr iter_var_size,
                                int target_vectorized_size,
                                arith::Analyzer *analyzer) {
