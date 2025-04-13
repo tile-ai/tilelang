@@ -430,7 +430,6 @@ def assert_tl_matmul_block_dynamic_mnk(
 
     kernel(A, B, C)
 
-
     def ref_program(A, B):
         import torch
 
