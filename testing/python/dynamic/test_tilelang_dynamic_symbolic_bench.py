@@ -99,6 +99,7 @@ def assert_tl_matmul_block_static(
     C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, out_dtype))
 
     kernel(A, B, C)
+
     # print(kernel.get_kernel_source())
 
     def ref_program(A, B):
@@ -428,7 +429,7 @@ def assert_tl_matmul_block_dynamic_mnk(
     C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, out_dtype))
 
     kernel(A, B, C)
-    # print(kernel.get_kernel_source())
+
 
     def ref_program(A, B):
         import torch
@@ -457,12 +458,22 @@ def test_assert_tl_matmul_block_static(M, N, K, block_M, block_N, block_K):
 
 
 def test_assert_tl_matmul_block_dynamic_m(M, N, K, block_M, block_N, block_K):
-    assert_tl_matmul_block_dynamic_m(M, N, K, block_M, block_N, block_K, False, False, "float16",
-                                     "float16", "float32",
-                                     pass_configs={
-                                        "tl.disable_dynamic_tail_split": True,
-                                        "tl.dynamic_alignment": 8
-                                    })
+    assert_tl_matmul_block_dynamic_m(
+        M,
+        N,
+        K,
+        block_M,
+        block_N,
+        block_K,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        pass_configs={
+            "tl.disable_dynamic_tail_split": True,
+            "tl.dynamic_alignment": 8
+        })
     assert_tl_matmul_block_dynamic_m(
         M,
         N,
@@ -479,12 +490,22 @@ def test_assert_tl_matmul_block_dynamic_m(M, N, K, block_M, block_N, block_K):
 
 
 def test_assert_tl_matmul_block_dynamic_mn(M, N, K, block_M, block_N, block_K):
-    assert_tl_matmul_block_dynamic_mn(M, N, K, block_M, block_N, block_K, False, False, "float16",
-                                     "float16", "float32",
-                                     pass_configs={
-                                        "tl.disable_dynamic_tail_split": True,
-                                        "tl.dynamic_alignment": 8
-                                    })
+    assert_tl_matmul_block_dynamic_mn(
+        M,
+        N,
+        K,
+        block_M,
+        block_N,
+        block_K,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        pass_configs={
+            "tl.disable_dynamic_tail_split": True,
+            "tl.dynamic_alignment": 8
+        })
     assert_tl_matmul_block_dynamic_mn(
         M,
         N,
@@ -501,12 +522,22 @@ def test_assert_tl_matmul_block_dynamic_mn(M, N, K, block_M, block_N, block_K):
 
 
 def test_assert_tl_matmul_block_dynamic_mnk(M, N, K, block_M, block_N, block_K):
-    assert_tl_matmul_block_dynamic_mnk(M, N, K, block_M, block_N, block_K, False, False, "float16",
-                                     "float16", "float32",
-                                     pass_configs={
-                                        "tl.disable_dynamic_tail_split": True,
-                                        "tl.dynamic_alignment": 8
-                                    })
+    assert_tl_matmul_block_dynamic_mnk(
+        M,
+        N,
+        K,
+        block_M,
+        block_N,
+        block_K,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float32",
+        pass_configs={
+            "tl.disable_dynamic_tail_split": True,
+            "tl.dynamic_alignment": 8
+        })
     assert_tl_matmul_block_dynamic_mnk(
         M,
         N,
@@ -523,10 +554,10 @@ def test_assert_tl_matmul_block_dynamic_mnk(M, N, K, block_M, block_N, block_K):
 
 
 def assert_all():
-    test_assert_tl_matmul_block_static(4096, 4096, 4096, 128, 128, 32)
-    # test_assert_tl_matmul_block_dynamic_m(32768, 32768, 16384, 128, 128, 32)
-    # test_assert_tl_matmul_block_dynamic_mn(32768, 32768, 16384, 128, 128, 32)
-    test_assert_tl_matmul_block_dynamic_mnk(4096, 4096, 4096, 128, 128, 32)
+    test_assert_tl_matmul_block_static(16384, 16384, 16384, 128, 128, 32)
+    test_assert_tl_matmul_block_dynamic_m(16384, 16384, 16384, 128, 128, 32)
+    test_assert_tl_matmul_block_dynamic_mn(16384, 16384, 16384, 128, 128, 32)
+    test_assert_tl_matmul_block_dynamic_mnk(16384, 16384, 16384, 128, 128, 32)
 
 
 if __name__ == "__main__":
