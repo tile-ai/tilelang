@@ -6,6 +6,7 @@ import torch.backends
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
+import pytest
 
 tilelang.testing.set_random_seed(0)
 tilelang.disable_cache()
@@ -451,11 +452,13 @@ def assert_tl_matmul_block_dynamic_mnk(
     print(f"Dynamic MNK Latency with pass_configs: {pass_configs} is {latency} ms")
 
 
+@pytest.mark.skip("Skip static test")
 def test_assert_tl_matmul_block_static(M, N, K, block_M, block_N, block_K):
     assert_tl_matmul_block_static(M, N, K, block_M, block_N, block_K, False, False, "float16",
                                   "float16", "float32")
 
 
+@pytest.mark.skip("Skip dynamic m test")
 def test_assert_tl_matmul_block_dynamic_m(M, N, K, block_M, block_N, block_K):
     assert_tl_matmul_block_dynamic_m(
         M,
@@ -488,6 +491,7 @@ def test_assert_tl_matmul_block_dynamic_m(M, N, K, block_M, block_N, block_K):
         pass_configs={"tl.disable_dynamic_tail_split": False})
 
 
+@pytest.mark.skip("Skip dynamic mn test")
 def test_assert_tl_matmul_block_dynamic_mn(M, N, K, block_M, block_N, block_K):
     assert_tl_matmul_block_dynamic_mn(
         M,
@@ -520,6 +524,7 @@ def test_assert_tl_matmul_block_dynamic_mn(M, N, K, block_M, block_N, block_K):
         pass_configs={"tl.disable_dynamic_tail_split": False})
 
 
+@pytest.mark.skip("Skip dynamic mnk test")
 def test_assert_tl_matmul_block_dynamic_mnk(M, N, K, block_M, block_N, block_K):
     assert_tl_matmul_block_dynamic_mnk(
         M,
@@ -552,7 +557,7 @@ def test_assert_tl_matmul_block_dynamic_mnk(M, N, K, block_M, block_N, block_K):
         pass_configs={"tl.disable_dynamic_tail_split": False})
 
 
-def assert_all():
+def test_all():
     test_assert_tl_matmul_block_static(16384, 16384, 16384, 128, 128, 32)
     test_assert_tl_matmul_block_dynamic_m(16384, 16384, 16384, 128, 128, 32)
     test_assert_tl_matmul_block_dynamic_mn(16384, 16384, 16384, 128, 128, 32)
@@ -560,4 +565,4 @@ def assert_all():
 
 
 if __name__ == "__main__":
-    assert_all()
+    tilelang.testing.main()
