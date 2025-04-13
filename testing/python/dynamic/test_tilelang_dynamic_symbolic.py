@@ -507,32 +507,10 @@ def test_assert_tl_matmul_block_all_dynamic_with_pass_config():
         32,
         dynamic_alignment=8)
     assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
-        64,
-        128,
-        60,
-        False,
-        False,
-        "float16",
-        "float16",
-        "float16",
-        64,
-        64,
-        32,
-        dynamic_alignment=4)
+        64, 128, 60, False, False, "float16", "float16", "float16", 64, 64, 32, dynamic_alignment=4)
     # Tail split is enabled with dynamic alignment 0
     assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
-        64,
-        128,
-        64,
-        False,
-        False,
-        "float16",
-        "float16",
-        "float16",
-        64,
-        64,
-        32,
-        dynamic_alignment=0)
+        64, 128, 64, False, False, "float16", "float16", "float16", 64, 64, 32, dynamic_alignment=0)
 
 
 if __name__ == "__main__":

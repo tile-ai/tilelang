@@ -28,15 +28,15 @@ def matmul_dynamic_mnk(
 
     A_shape = (K, M) if trans_A else (M, K)
     B_shape = (N, K) if trans_B else (K, N)
-    
+
     A_shared_shape = (block_K, block_M) if trans_A else (block_M, block_K)
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
 
     @T.prim_func
     def main(
-        A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, in_dtype),
-        C: T.Tensor((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -58,17 +58,20 @@ def matmul_dynamic_mnk(
     return main
 
 
-def test_matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, accum_dtype, num_stages, threads):
-    print(f"M: {M}, N: {N}, K: {K}, block_M: {block_M}, block_N: {block_N}, block_K: {block_K}, trans_A: {trans_A}, trans_B: {trans_B}, in_dtype: {in_dtype}, out_dtype: {out_dtype}, accum_dtype: {accum_dtype}, num_stages: {num_stages}, threads: {threads}")
-    program = matmul_dynamic_mnk(block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype, accum_dtype, num_stages, threads)
+def test_matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype,
+                        accum_dtype, num_stages, threads):
+    print(
+        f"M: {M}, N: {N}, K: {K}, block_M: {block_M}, block_N: {block_N}, block_K: {block_K}, trans_A: {trans_A}, trans_B: {trans_B}, in_dtype: {in_dtype}, out_dtype: {out_dtype}, accum_dtype: {accum_dtype}, num_stages: {num_stages}, threads: {threads}"
+    )
+    program = matmul_dynamic_mnk(block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype,
+                                 accum_dtype, num_stages, threads)
 
     kernel = tilelang.compile(
-        program,
-        pass_configs={
+        program, pass_configs={
             "tl.disable_dynamic_tail_split": True,
             "tl.dynamic_alignment": 8
         })
-    
+
     import torch
     if trans_A:
         A = torch.rand(K, M, device="cuda", dtype=getattr(torch, in_dtype))
@@ -105,4 +108,5 @@ def test_matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in
 
 
 if __name__ == "__main__":
-    test_matmul_dynamic(16384, 16384, 16384, 128, 128, 32, False, False, "float16", "float16", "float32", 3, 128)
+    test_matmul_dynamic(16384, 16384, 16384, 128, 128, 32, False, False, "float16", "float16",
+                        "float32", 3, 128)
