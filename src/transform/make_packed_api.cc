@@ -421,6 +421,8 @@ PrimFunc MakePackedAPI(PrimFunc func) {
     }
   }
 
+
+
   // (zhengju) For dynamic constraint, we need to check the buffer shape and
   // dtype to make sure the buffer can be vectorized.
   for (const auto &kv : buffer_def) {
