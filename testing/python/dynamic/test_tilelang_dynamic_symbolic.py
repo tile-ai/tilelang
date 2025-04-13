@@ -404,7 +404,7 @@ def assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
     block_K,
     num_stages=3,
     num_threads=128,
-    dynamic_vectorize_size_bits=128,
+    dynamic_alignment=8,
 ):
     program = tl_matmul_block_all_dynamic(
         block_M,
@@ -422,8 +422,8 @@ def assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
     kernel = tilelang.compile(
         program,
         pass_configs={
-            "tl.disable_dynamic_tail_split": True,
-            "tl.dynamic_vectorize_size_bits": dynamic_vectorize_size_bits
+            "tl.disable_dynamic_tail_split": True if dynamic_alignment != 0 else False,
+            "tl.dynamic_alignment": dynamic_alignment
         })
 
     if trans_A:
@@ -492,7 +492,7 @@ def test_assert_tl_matmul_block_all_dynamic_with_pass_config():
         64,
         64,
         32,
-        dynamic_vectorize_size_bits=128)
+        dynamic_alignment=8)
     assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
         64,
         128,
@@ -505,7 +505,7 @@ def test_assert_tl_matmul_block_all_dynamic_with_pass_config():
         64,
         64,
         32,
-        dynamic_vectorize_size_bits=128)
+        dynamic_alignment=8)
     assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
         64,
         128,
@@ -518,7 +518,21 @@ def test_assert_tl_matmul_block_all_dynamic_with_pass_config():
         64,
         64,
         32,
-        dynamic_vectorize_size_bits=64)
+        dynamic_alignment=4)
+    # Tail split is enabled with dynamic alignment 0
+    assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
+        64,
+        128,
+        64,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float16",
+        64,
+        64,
+        32,
+        dynamic_alignment=0)
 
 
 if __name__ == "__main__":
