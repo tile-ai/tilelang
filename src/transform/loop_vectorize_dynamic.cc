@@ -504,10 +504,10 @@ tvm::transform::Pass LoopVectorizeDynamic() {
         (int)(ctx->GetConfig<Integer>(kDynamicAlignment, Integer(8))
                   .value_or(Integer(8))
                   ->value);
-    // Ensure dynamic_vectorize_size_bits is a power of 2
+    // Ensure tl.dynamic_alignment is a power of 2
     if (disable_dynamic_tail_split &&
         ((dynamic_alignment & (dynamic_alignment - 1)) != 0)) {
-      LOG(FATAL) << "dynamic_alignment must be a power of 2, but got "
+      LOG(FATAL) << "tl.dynamic_alignment must be a power of 2, but got "
                  << dynamic_alignment;
     }
     auto *n = f.CopyOnWrite();
