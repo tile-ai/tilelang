@@ -421,16 +421,13 @@ PrimFunc MakePackedAPI(PrimFunc func) {
     }
   }
 
-
-
   // (zhengju) For dynamic constraint, we need to check the buffer shape and
   // dtype to make sure the buffer can be vectorized.
   for (const auto &kv : buffer_def) {
     if (disable_dynamic_tail_split) {
       Optional<Integer> opt_dynamic_alignment =
           ctxt->GetConfig(kDynamicAlignment, Optional<Integer>());
-      int dynamic_alignment =
-          opt_dynamic_alignment.value_or(Integer(8))->value;
+      int dynamic_alignment = opt_dynamic_alignment.value_or(Integer(8))->value;
       // The vectorize dimension will be the last dimension of the buffer
       auto vectorize_dim = kv.second->shape[kv.second->shape.size() - 1];
       auto shape_vectorize_expr = [&]() -> PrimExpr {
