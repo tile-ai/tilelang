@@ -277,7 +277,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   std::vector<Stmt> shape_checks;
   tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
   bool disable_dynamic_tail_split =
-      ctxt->GetConfig<Bool>(kDisableDynamicTailSplit, Bool(false)).value();
+      ctxt->GetConfig<Bool>(kDisableDynamicTailSplit, Bool(true)).value();
 
   // ---------------------------
   // local function definitions
@@ -425,17 +425,16 @@ PrimFunc MakePackedAPI(PrimFunc func) {
   // dtype to make sure the buffer can be vectorized.
   for (const auto &kv : buffer_def) {
     if (disable_dynamic_tail_split) {
-      Optional<Integer> opt_dynamic_vectorize_size_bits =
-          ctxt->GetConfig(kDynamicVectorizeSizeBits, Optional<Integer>());
-      int dynamic_vectorize_size_bits =
-          opt_dynamic_vectorize_size_bits.value_or(Integer(128))->value;
+      Optional<Integer> opt_dynamic_alignment =
+          ctxt->GetConfig(kDynamicAlignment, Optional<Integer>());
+      int dynamic_alignment =
+          opt_dynamic_alignment.value_or(Integer(8))->value;
       // The vectorize dimension will be the last dimension of the buffer
       auto vectorize_dim = kv.second->shape[kv.second->shape.size() - 1];
       auto shape_vectorize_expr = [&]() -> PrimExpr {
         PrimExpr result = IntImm(kv.second->DefaultIndexType(), 1);
         result = result * vectorize_dim;
-        result = result * kv.second->dtype.bits();
-        result = FloorMod(result, dynamic_vectorize_size_bits);
+        result = FloorMod(result, dynamic_alignment);
         return result;
       }();
       shape_checks.emplace_back(AssertStmt(
@@ -443,8 +442,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
           tvm::tir::StringImm(
               kv.second->name +
               ": Vectorize dimension in buffer must be divisible by " +
-              std::to_string(dynamic_vectorize_size_bits /
-                             kv.second->dtype.bits())),
+              std::to_string(dynamic_alignment)),
           nop));
     }
   }

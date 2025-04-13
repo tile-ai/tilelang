@@ -65,9 +65,15 @@ bool IndiceCanVectorizeDynamic(PrimExpr expr, Var var, PrimExpr iter_var_size,
 
 class VectorizePlannerDynamic : public arith::IRVisitorWithAnalyzer {
 public:
-  VectorizePlannerDynamic(int dynamic_vectorize_size_bits)
-      : vector_load_bits_max_(dynamic_vectorize_size_bits), inner_for_(nullptr),
-        vector_size_(dynamic_vectorize_size_bits) {}
+  VectorizePlannerDynamic(int dynamic_alignment, bool disable_dynamic_tail_split)
+      : dynamic_alignment_(dynamic_alignment), disable_dynamic_tail_split_(disable_dynamic_tail_split),
+        vector_load_bits_max_(128) {
+          if (disable_dynamic_tail_split_) {
+            vector_size_ = dynamic_alignment_;
+          } else {
+            vector_size_ = vector_load_bits_max_;
+          }
+        }
 
   int Plan(const For &node) {
     this->operator()(node);
@@ -174,18 +180,23 @@ private:
                                         &analyzer_)) {
         vector_size_ /= 2;
       }
-    } else if (vector_size_ <= vector_load_bits_max_ / buffer->dtype.bits()) {
+    } else {
       // dynamic shape load: get the vectorization condition
       dynamic_ = true;
+      if (!disable_dynamic_tail_split_ && vector_size_ >= vector_load_bits_max_ / buffer->dtype.bits()) {
+        vector_size_ = vector_load_bits_max_ / buffer->dtype.bits();
+      }
       PrimExpr offset = buffer.OffsetOf(indices).back();
       // condition for alignment, maybe useless
       condition_ = (FloorMod(offset, vector_size_) == 0);
     }
   }
 
-  // const int vector_load_bits_max_ = 128;
-  // Use dynamic vectorize size bits from pass config
+  // Use dynamic alignment from pass config
   int vector_load_bits_max_;
+  int dynamic_alignment_;
+  bool disable_dynamic_tail_split_;
+
   int vector_size_;
 
   const ForNode *inner_for_;
@@ -333,9 +344,9 @@ private:
 
 class VectorizeRewriterDynamic : public StmtExprMutator {
 public:
-  VectorizeRewriterDynamic(VectorizePlanResult plan, bool dynamic_tail_split)
+  VectorizeRewriterDynamic(VectorizePlanResult plan, bool disable_dynamic_tail_split)
       : vector_size_(plan.vector_size), condition_(plan.condition),
-        dynamic_(plan.dynamic), dynamic_tail_split_(dynamic_tail_split) {}
+        dynamic_(plan.dynamic), disable_dynamic_tail_split_(disable_dynamic_tail_split) {}
 
 private:
   Stmt VisitStmt_(const ForNode *node) final {
@@ -414,13 +425,12 @@ private:
   const int vector_size_;
   const PrimExpr condition_;
   const bool dynamic_;
-  const bool dynamic_tail_split_;
+  const bool disable_dynamic_tail_split_;
 };
 
 VectorizePlanResult
-GetVectorizePlanResultDynamic(const For &loop,
-                              int64_t dynamic_vectorize_size_bits) {
-  VectorizePlannerDynamic planner(dynamic_vectorize_size_bits);
+GetVectorizePlanResultDynamic(const For &loop, int dynamic_alignment, bool disable_dynamic_tail_split) {
+  VectorizePlannerDynamic planner(dynamic_alignment, disable_dynamic_tail_split);
   int vector_size = planner.Plan(loop);
   bool dynamic = planner.GetDynamic();
   PrimExpr condition = planner.GetCondition();
@@ -429,39 +439,39 @@ GetVectorizePlanResultDynamic(const For &loop,
 
 class LoopVectorizerDynamic : public IRMutatorWithAnalyzer {
 public:
-  static Stmt Substitute(Stmt stmt, bool dynamic_tail_split,
-                         int64_t dynamic_vectorize_size_bits) {
+  static Stmt Substitute(Stmt stmt, bool disable_dynamic_tail_split,
+                         int dynamic_alignment) {
     arith::Analyzer analyzer;
-    LoopVectorizerDynamic substituter(&analyzer, dynamic_tail_split,
-                                      dynamic_vectorize_size_bits);
+    LoopVectorizerDynamic substituter(&analyzer, disable_dynamic_tail_split,
+                                      dynamic_alignment);
     stmt = substituter.VisitStmt(stmt);
     return stmt;
   }
 
 private:
-  LoopVectorizerDynamic(arith::Analyzer *analyzer, bool dynamic_tail_split,
-                        int dynamic_vectorize_size_bits)
+  LoopVectorizerDynamic(arith::Analyzer *analyzer, bool disable_dynamic_tail_split,
+                        int dynamic_alignment)
       : arith::IRMutatorWithAnalyzer(analyzer),
-        dynamic_tail_split_(dynamic_tail_split),
-        dynamic_vectorize_size_bits_(dynamic_vectorize_size_bits) {}
+        disable_dynamic_tail_split_(disable_dynamic_tail_split),
+        dynamic_alignment_(dynamic_alignment) {}
 
   Stmt VisitStmt_(const ForNode *op) final {
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
     VectorizePlanResult res{vector_load_bits_max_, false, 0};
-    res = GetVectorizePlanResultDynamic(for_node, dynamic_vectorize_size_bits_);
+    res = GetVectorizePlanResultDynamic(for_node, dynamic_alignment_, disable_dynamic_tail_split_);
     NestedLoopChecker checker;
     int nest_num = checker.GetNestLoopNum(for_node);
     if (nest_num > 1) { // only rewrite the innermost loop
       return for_node;
     }
     int vectorize_hint = res.vector_size;
-    auto rewriter = VectorizeRewriterDynamic(res, dynamic_tail_split_);
+    auto rewriter = VectorizeRewriterDynamic(res, disable_dynamic_tail_split_);
     return Downcast<For>(rewriter(for_node));
   }
 
   const int vector_load_bits_max_ = 128;
-  int64_t dynamic_vectorize_size_bits_;
-  bool dynamic_tail_split_;
+  int dynamic_alignment_;
+  bool disable_dynamic_tail_split_;
 };
 
 class VectorizeSkipperDynamic : public StmtMutator {
@@ -481,21 +491,20 @@ tvm::transform::Pass LoopVectorizeDynamic() {
   using namespace tir::transform;
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
     bool disable_dynamic_tail_split =
-        ctx->GetConfig<Bool>(kDisableDynamicTailSplit, Bool(false)).value();
-    int dynamic_vectorize_size_bits =
-        (int)(ctx->GetConfig<Integer>(kDynamicVectorizeSizeBits, Integer(128))
-                  .value_or(Integer(128))
+        ctx->GetConfig<Bool>(kDisableDynamicTailSplit, Bool(true)).value();
+    int dynamic_alignment =
+        (int)(ctx->GetConfig<Integer>(kDynamicAlignment, Integer(8))
+                  .value_or(Integer(8))
                   ->value);
     // Ensure dynamic_vectorize_size_bits is a power of 2
-    if ((dynamic_vectorize_size_bits & (dynamic_vectorize_size_bits - 1)) !=
-        0) {
-      LOG(FATAL) << "dynamic_vectorize_size_bits must be a power of 2, but got "
-                 << dynamic_vectorize_size_bits;
+    if (disable_dynamic_tail_split && ((dynamic_alignment & (dynamic_alignment - 1)) != 0)) {
+      LOG(FATAL) << "dynamic_alignment must be a power of 2, but got "
+                 << dynamic_alignment;
     }
     auto *n = f.CopyOnWrite();
     n->body = LoopVectorizerDynamic::Substitute(std::move(n->body),
                                                 disable_dynamic_tail_split,
-                                                dynamic_vectorize_size_bits);
+                                                dynamic_alignment);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LoopVectorizeDynamic", {});

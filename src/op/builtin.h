@@ -37,11 +37,10 @@ static constexpr const char *kDisableDynamicTailSplit =
  * A[m, k] is float16, the size of the vectorized dimension (i.e. k) in buffer A
  * should be divisible by 8 (8 = 128 / 16).
  *
- * kDynamicVectorizeSizeBits = "tl.dynamic_vectorize_size_bits"
+ * kDynamicAlignment = "tl.dynamic_alignment"
  *
  */
-static constexpr const char *kDynamicVectorizeSizeBits =
-    "tl.dynamic_vectorize_size_bits";
+static constexpr const char *kDynamicAlignment = "tl.dynamic_alignment";
 
 /*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load
