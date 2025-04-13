@@ -24,6 +24,7 @@
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/tir/analysis.h>
+#include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
@@ -53,6 +54,68 @@ bool MayConflict(Region region1, Region region2) {
   }
   return true;
 }
+
+/*!
+ * \brief Detect if a statement follows the global memory copy pattern:
+ *        1. Contains exactly one buffer store operation
+ *        2. Source buffer must be in global memory scope
+ *        3. Destination buffer must be in local or shared memory scope
+ */
+class GlobalCopyPatternDetector : public StmtExprVisitor {
+public:
+  static bool Detect(const Stmt &stmt) {
+    GlobalCopyPatternDetector detector;
+    detector.VisitStmt(stmt);
+    return detector.is_global_copy_pattern_;
+  }
+
+private:
+  void VisitStmt_(const BufferStoreNode *op) final {
+    Buffer store_buffer = op->buffer;
+    is_global_read_ = false;
+    this->VisitExpr(op->value);
+    if (is_global_read_ && (store_buffer.scope() == "shared" ||
+                            store_buffer.scope() == "shared.dyn" ||
+                            store_buffer.scope() == "local")) {
+      is_global_copy_pattern_ = true;
+    }
+    is_global_read_ = false;
+  }
+
+  void VisitExpr_(const BufferLoadNode *op) final {
+    if (op->buffer.scope() == "global") {
+      is_global_read_ = true;
+    }
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    auto args = op->args;
+    if (op->op.same_as(tir::builtin::if_then_else())) {
+      // Simplify nested if_then_else
+      // if (cond) { if (inner_cond) { inner_then_expr } else { inner_else_expr
+      // } } else { else_expr }
+      // => if (cond && inner_cond) { inner_then_expr } else { else_expr }
+      const PrimExpr &cond = op->args[0];
+      const PrimExpr &then_expr = op->args[1];
+      const PrimExpr &else_expr = op->args[2];
+      this->VisitExpr(then_expr);
+      this->VisitExpr(else_expr);
+    }
+  }
+
+  void VisitStmt_(const IfThenElseNode *op) final {
+    // Skip condition
+    this->VisitStmt(op->then_case);
+    if (op->else_case.defined()) {
+      this->VisitStmt(op->else_case.value());
+    }
+  }
+
+private:
+  bool is_global_read_ = false;
+  bool under_buffer_store_ = false;
+  bool is_global_copy_pattern_ = false;
+};
 
 class PipelinePlanner : public StmtExprMutator {
 public:
@@ -89,20 +152,7 @@ private:
     pinfo.reads = std::move(access[0]);
     pinfo.writes = std::move(access[1]);
     pinfo.original_order = idx;
-
-    // copy stage should only have one reads and one writes
-    bool write_to_shared_or_local = false;
-    bool read_from_global = false;
-    for (auto region : pinfo.reads)
-      if (region->buffer.scope() == "global")
-        read_from_global = true;
-    for (auto region : pinfo.writes)
-      if (region->buffer.scope() == "shared" ||
-          region->buffer.scope() == "shared.dyn" ||
-          region->buffer.scope() == "local")
-        write_to_shared_or_local = true;
-
-    pinfo.copy_stage = write_to_shared_or_local && read_from_global;
+    pinfo.copy_stage = GlobalCopyPatternDetector::Detect(stmt);
 
     return std::move(pinfo);
   }

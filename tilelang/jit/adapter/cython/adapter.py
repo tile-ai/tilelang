@@ -62,13 +62,23 @@ def get_cached_lib(source_code: str) -> Tuple[Optional[ctypes.CDLL], Path]:
     """Try to load cached library or return None if not found."""
     code_hash = hashlib.sha256(source_code.encode()).hexdigest()
     cache_path = get_cache_dir() / f"{code_hash}.so"
-    if cache_path.exists():
+    lock_file = cache_path.with_suffix('.lock')
+    import fcntl
+    with open(lock_file, 'w') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
-            return ctypes.CDLL(str(cache_path)), cache_path
-        except Exception as e:
-            logger.error(f"Failed to load cached library: {e}")
+            if cache_path.exists():
+                try:
+                    if cache_path.stat().st_size > 1024:
+                        return ctypes.CDLL(str(cache_path)), cache_path
+                    else:
+                        cache_path.unlink()  # remove the incomplete file
+                except Exception as e:
+                    logger.error(f"Failed to load cached library: {e}")
+                    return None, cache_path
             return None, cache_path
-    return None, cache_path
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 # read the cython_wrapper.pyx file
@@ -82,6 +92,7 @@ with open(cython_wrapper_path, "r") as f:
     library_path = cache_dir / "cython_wrapper.so"
     md5_path = cache_dir / "md5.txt"
     code_hash = hashlib.sha256(cython_wrapper_code.encode()).hexdigest()
+    cache_path = cache_dir / f"{code_hash}.so"
 
     # Check if cached version exists and is valid
     need_compile = True
@@ -98,21 +109,31 @@ with open(cython_wrapper_path, "r") as f:
 
     if need_compile:
         logger.info("Compiling cython jit adapter...")
-        with open(md5_path, "w") as f:
-            f.write(code_hash)
-        # compile the cython_wrapper.pyx file into .cpp
-        cython = get_cython_compiler()
-        if cython is None:
-            raise Exception("Cython is not installed, please install it first.")
-        os.system(f"{cython} {cython_wrapper_path} --cplus -o {source_path}")
-        # compile the .cpp file into .so
-        python_include_path = sysconfig.get_path("include")
-        cc = get_cplus_compiler()
-        command = f"{cc} -shared -pthread -fPIC -fwrapv -O2 -Wall -fno-strict-aliasing -I{python_include_path} {source_path} -o {library_path}"
+        temp_path = cache_dir / f"temp_{code_hash}.so"
         try:
+            with open(md5_path, "w") as f:
+                f.write(code_hash)
+
+            # compile the cython_wrapper.pyx file into .cpp
+            cython = get_cython_compiler()
+            if cython is None:
+                raise Exception("Cython is not installed, please install it first.")
+            os.system(f"{cython} {cython_wrapper_path} --cplus -o {source_path}")
+            python_include_path = sysconfig.get_path("include")
+            cc = get_cplus_compiler()
+            command = f"{cc} -shared -pthread -fPIC -fwrapv -O2 -Wall -fno-strict-aliasing -I{python_include_path} {source_path} -o {temp_path}"
             os.system(command)
+
+            # rename the temp file to the library file
+            temp_path.rename(library_path)
         except Exception as e:
+            if temp_path.exists():
+                temp_path.unlink()
             raise Exception(f"Failed to compile cython jit adapter: {e}") from e
+        finally:
+            lock_file = cache_path.with_suffix('.lock')
+            if lock_file.exists():
+                lock_file.unlink()
 
     # add the .so file to the sys.path
     cache_dir_str = str(cache_dir)

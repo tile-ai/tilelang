@@ -13,15 +13,15 @@ tilelang.disable_cache()
 
 
 def flashmla_decode(batch,
-              heads,
-              kv_head_num,
-              seqlen_kv,
-              dim,
-              pe_dim,
-              block_N,
-              block_H,
-              num_split,
-              threads=128):
+                    heads,
+                    kv_head_num,
+                    seqlen_kv,
+                    dim,
+                    pe_dim,
+                    block_N,
+                    block_H,
+                    num_split,
+                    threads=128):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     dtype = "float16"
     accum_dtype = "float"
@@ -38,8 +38,8 @@ def flashmla_decode(batch,
             Output: T.Tensor([batch, heads, dim], dtype),
     ):
         with T.Kernel(batch, heads // min(block_H, kv_group_num), threads=threads) as (bx, by):
-            Q_shared = T.alloc_fragment([block_H, dim], dtype)
-            Q_pe_shared = T.alloc_fragment([block_H, pe_dim], dtype)
+            Q_local = T.alloc_fragment([block_H, dim], dtype)
+            Q_pe_local = T.alloc_fragment([block_H, pe_dim], dtype)
             KV_shared = T.alloc_shared([block_N, dim], dtype)
             K_pe_shared = T.alloc_shared([block_N, pe_dim], dtype)
             acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
@@ -54,8 +54,8 @@ def flashmla_decode(batch,
             cur_kv_head = by // (kv_group_num // block_H)
             T.use_swizzle(10)
 
-            T.copy(Q[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_shared)
-            T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_shared)
+            T.copy(Q[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_local)
+            T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_local)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -65,10 +65,9 @@ def flashmla_decode(batch,
                 T.copy(KV[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], KV_shared)
                 T.copy(K_pe[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_pe_shared)
                 T.clear(acc_s)
+                T.gemm(Q_local, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.gemm(
-                    Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-                T.gemm(
-                    Q_pe_shared,
+                    Q_pe_local,
                     K_pe_shared,
                     acc_s,
                     transpose_B=True,
@@ -104,8 +103,8 @@ def flashmla_decode(batch,
         with T.Kernel(
                 batch, heads // min(block_H, kv_group_num), num_split,
                 threads=threads) as (bx, by, bz):
-            Q_shared = T.alloc_fragment([block_H, dim], dtype)
-            Q_pe_shared = T.alloc_fragment([block_H, pe_dim], dtype)
+            Q_local = T.alloc_fragment([block_H, dim], dtype)
+            Q_pe_local = T.alloc_fragment([block_H, pe_dim], dtype)
             KV_shared = T.alloc_shared([block_N, dim], dtype)
             K_pe_shared = T.alloc_shared([block_N, pe_dim], dtype)
             acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
@@ -119,8 +118,8 @@ def flashmla_decode(batch,
 
             cur_kv_head = by // (kv_group_num // block_H)
             T.use_swizzle(10)
-            T.copy(Q[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_shared)
-            T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_shared)
+            T.copy(Q[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_local)
+            T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_local)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -132,10 +131,9 @@ def flashmla_decode(batch,
                 T.copy(KV[bx, kv_start:kv_end, cur_kv_head, :], KV_shared)
                 T.copy(K_pe[bx, kv_start:kv_end, cur_kv_head, :], K_pe_shared)
                 T.clear(acc_s)
+                T.gemm(Q_local, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.gemm(
-                    Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-                T.gemm(
-                    Q_pe_shared,
+                    Q_pe_local,
                     K_pe_shared,
                     acc_s,
                     transpose_B=True,
@@ -284,7 +282,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     batch, heads, kv_heads, kv_ctx, dim, pe_dim = args.batch, args.heads, args.kv_heads, args.kv_ctx, args.dim, args.pe_dim
     enable_autotune = args.auto_tune
-    
+
     qk_flops = 2 * batch * heads * kv_ctx * (dim + pe_dim)
     pv_flops = 2 * batch * heads * kv_ctx * dim
     total_flops = qk_flops + pv_flops
@@ -292,7 +290,8 @@ if __name__ == "__main__":
     BLOCK_H = 64
     num_split = 4
 
-    program = flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split)
+    program = flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H,
+                              num_split)
     kernel = tilelang.compile(program, out_idx=[6])
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     input_tensors = profiler._get_inputs()
@@ -304,8 +303,9 @@ if __name__ == "__main__":
     latency = profiler.do_bench(warmup=500)
     print(f"Latency: {latency} ms")
     print(f"TFlops: {total_flops / latency * 1e-9} TFlops")
-    
+
     # Enable Auto Tuning
+
 
     def get_configs():
         import itertools
@@ -314,8 +314,7 @@ if __name__ == "__main__":
         num_split = [1, 2, 4, 8, 16, 32]
         thread_num = [128, 256]
 
-        _configs = list(
-            itertools.product(BLOCK_N, BLOCK_H, num_split, thread_num))
+        _configs = list(itertools.product(BLOCK_N, BLOCK_H, num_split, thread_num))
 
         return [{
             "block_N": c[0],
@@ -324,12 +323,9 @@ if __name__ == "__main__":
             "thread_num": c[3],
         } for c in _configs]
 
-
-    def wrapped_kernel(block_N=None,
-            block_H=None,
-            num_split=None,
-            thread_num=None):
-        return flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim, block_N, block_H, num_split, thread_num)
+    def wrapped_kernel(block_N=None, block_H=None, num_split=None, thread_num=None):
+        return flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim, block_N, block_H,
+                               num_split, thread_num)
 
     if enable_autotune:
         autotuner = AutoTuner.from_kernel(

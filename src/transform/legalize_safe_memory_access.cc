@@ -170,15 +170,11 @@ private:
     if (IsGlobalBuffer(store->buffer)) {
       Stmt store_with_conditions = store;
       for (auto cond : conditions) {
-        LOG(INFO) << "condition: " << cond;
-        LOG(INFO) << "store: " << store;
         store_with_conditions = IfThenElse(cond, store_with_conditions);
       }
       return store_with_conditions;
     } else if (isSharedBuffer(store->buffer)) {
       PrimExpr value = store->value;
-      LOG(INFO) << "value: " << value;
-      LOG(INFO) << "conditions: " << conditions;
       for (auto cond : conditions) {
         ICHECK(cond.dtype() == DataType::Bool(1))
             << "condition is not a boolean: " << cond;
