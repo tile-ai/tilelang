@@ -262,8 +262,59 @@ private:
       return false;
     }
 
-    // If nothing else allows sharing the same buffer, then they are
-    // in conflict.
+    // Check if the accessed regions of the buffer actually overlap
+    // If there's no overlap, there's no conflict
+    bool has_region_overlap = false;
+    bool has_region_check = true;
+    
+    // We need to check all dimensions for overlap
+    for (size_t i = 0; i < prev.touched.size(); i++) {
+      // If we can't determine the region (e.g., it's not a concrete range or point),
+      // we conservatively assume there could be an overlap
+      if (!prev.touched[i].IsSinglePoint() && !curr.touched[i].IsSinglePoint()) {
+        // If both are not single points, check if the regions intersect
+        if (arith::Intersect({prev.touched[i], curr.touched[i]}).IsNothing()) {
+          // No intersection in this dimension means no overall conflict
+          return false;
+        }
+      } else if (prev.touched[i].IsSinglePoint() && curr.touched[i].IsSinglePoint()) {
+        // If both are points, we already checked this case above
+        has_region_check = false;
+        break;
+      } else {
+        // One is a point, one is a range - we need to check if the point is in the range
+        arith::IntSet point_set;
+        arith::IntSet range_set;
+        if (prev.touched[i].IsSinglePoint()) {
+          point_set = prev.touched[i];
+          range_set = curr.touched[i];
+        } else {
+          point_set = curr.touched[i];
+          range_set = prev.touched[i];
+        }
+        if (arith::Intersect({point_set, range_set}).IsNothing()) {
+          // No intersection in this dimension means no overall conflict
+          return false;
+        }
+      }
+    }
+
+    // If we successfully checked all regions and found no non-overlapping dimensions,
+    // and if the types of access would create a conflict (read after write, write after read, etc.),
+    // then there's a conflict
+    bool access_type_conflict = false;
+    if ((prev.type == kWrite && curr.type == kRead) ||
+        (prev.type == kRead && curr.type == kWrite) ||
+        (prev.type == kWrite && curr.type == kWrite)) {
+      access_type_conflict = true;
+    }
+
+    if (has_region_check && access_type_conflict) {
+      return true;
+    }
+    
+    // If we couldn't determine region overlap or there's no access type conflict,
+    // fall back to original behavior
     return true;
   }
 
