@@ -1,4 +1,4 @@
-// Copyright (c)// Copyright (c) Tile-AI Corporation.
+// Copyright (c) Tile-AI Corporation.
 // Licensed under the MIT License.
 #pragma once
 
@@ -28,10 +28,7 @@ struct MfmaTraits<__hip_bfloat16> {
     template <typename AccType>
     static TL_DEVICE void mfma_op(
         const __hip_bfloat16* b, const __hip_bfloat16* a, AccType* c) {
-        // Creating a data structure for the MFMA intrinsic
-        // This depends on how your intrinsic expects the BF16 data
-        typedef __attribute__((__vector_size__(4 * sizeof(short)))) short bf16_vec;
-        bf16_vec b_vec, a_vec;
+        bfloat16x4_vec b_vec, a_vec;
         
         // Reinterpret the pointers
         short* b_short = reinterpret_cast<short*>(const_cast<__hip_bfloat16*>(b));
