@@ -490,51 +490,51 @@ void CodeGenTileLangHIP::PrintVecElemStore(const std::string &vec, DataType t,
   this->PrintIndent();
   static const char access[] = {'x', 'y', 'z', 'w'};
   ICHECK(i >= 0 && i < (t.bits() == 8                        ? 16
-  : (t.bits() == 16 || t.bits() == 32) ? 8
-                                       : 4));
-        if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
-        if (t.lanes() == 2 || t.lanes() == 3) {
-        stream << vec << '.' << access[i % t.lanes()] << "="
-        << "(" << value << ");\n";
-        } else {
-        std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
-        stream << ac << "=";
-        if (i != 0) {
+                        : (t.bits() == 16 || t.bits() == 32) ? 8
+                                                             : 4));
+  if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
+    if (t.lanes() == 2 || t.lanes() == 3) {
+      stream << vec << '.' << access[i % t.lanes()] << "="
+             << "(" << value << ");\n";
+    } else {
+      std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
+      stream << ac << "=";
+      // Do not read the first undef lane.
+      if (i != 0) {
         stream << ac << " & ~(0x000000ff << " << i % 4 * 8 << ") |";
-        }
-        stream << "(" << value << " << " << i % 4 * 8 << ");\n";
-        }
-        } else if (t.is_float16()) {
-          stream << "*((half_t*)(&(((half2*)(&(" << vec << "." << access[i / 2]
-          << ")))->" << access[i % 2] << "))) = " << value << ";\n";
-        } else if (t.is_bfloat16()) {
-          stream << "((bfloat16_t*)(&(" << vec << "." << access[i / 2]
-          << ")))[" << (i % 2) << "] = " << value << ";\n";
-        } else if (t.lanes() > 4 && t.lanes() <= 8) {
-        std::string type_name;
-        if (t.bits() == 16) {
-        if (t.is_int()) {
+      }
+      stream << "(" << value << " << " << i % 4 * 8 << ");\n";
+    }
+  } else if (t.is_float16()) {
+    stream << "*((half_t*)(&(((half2*)(&(" << vec << "." << access[i / 2]
+           << ")))->" << access[i % 2] << "))) = " << value << ";\n";
+  } else if (t.is_bfloat16()) {
+    stream << "((bfloat16_t*)(&(" << vec << "." << access[i / 2]
+           << ")))[" << (i % 2) << "] = " << value << ";\n";
+  } else if (t.lanes() > 4 && t.lanes() <= 8) {
+    std::string type_name;
+    if (t.bits() == 16) {
+      if (t.is_int()) {
         type_name = "short";
-        } else if (t.is_uint()) {
+      } else if (t.is_uint()) {
         type_name = "ushort";
-        }
-        } else if (t.bits() == 32) {
-        if (t.is_int()) {
+      }
+    } else if (t.bits() == 32) {
+      if (t.is_int()) {
         type_name = "int";
-        } else if (t.is_uint()) {
+      } else if (t.is_uint()) {
         type_name = "uint";
-              } else if (t.is_float()) {
-                              type_name = "float";
-                                    }
-        }
-        ICHECK(!type_name.empty());
-        stream << "((" << type_name << "2*)(&(" << vec << "." << access[i / 2]
-        << ")))->" << access[i % 2] << " = " << value << ";\n";
-        } else {
-        stream << vec << "." << access[i] << " = " << value << ";\n";
-        }
+      } else if (t.is_float()) {
+        type_name = "float";
+      }
+    }
+    ICHECK(!type_name.empty());
+    stream << "((" << type_name << "2*)(&(" << vec << "." << access[i / 2]
+           << ")))->" << access[i % 2] << " = " << value << ";\n";
+  } else {
+    stream << vec << "." << access[i] << " = " << value << ";\n";
+  }
 }
- 
 
 void CodeGenTileLangHIP::PrintStorageSync(const CallNode *op) {
   const std::string &sync = op->args[0].as<StringImmNode>()->value;
