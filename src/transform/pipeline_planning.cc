@@ -138,11 +138,13 @@ private:
    *
    * \param reads Array of buffer regions read by this stage
    * \param writes Array of buffer regions written by this stage
-   * \param original_order Original position of this stage in the pipeline before reordering
-   * \param order Current position of this stage in the pipeline after reordering (-1 if not yet assigned)
-   * \param stage Pipeline stage number this operation belongs to (-1 if not yet assigned)
-   * \param copy_stage Whether this stage is a memory copy operation
-   * \param last_use_stage Last pipeline stage that uses the results of this stage (-1 if not yet determined)
+   * \param original_order Original position of this stage in the pipeline
+   * before reordering \param order Current position of this stage in the
+   * pipeline after reordering (-1 if not yet assigned) \param stage Pipeline
+   * stage number this operation belongs to (-1 if not yet assigned) \param
+   * copy_stage Whether this stage is a memory copy operation \param
+   * last_use_stage Last pipeline stage that uses the results of this stage (-1
+   * if not yet determined)
    */
   struct PipelineStageInfo {
     Array<BufferRegion> reads, writes;
@@ -270,16 +272,16 @@ private:
     for (auto &pinfo : pipeline_stage_infos) {
       if (pinfo.copy_stage && pinfo.last_use_stage != -1)
         continue;
-        
+
       pinfo.order = order_idx++;
       pinfo.stage = num_stages;
-      
+
       bool used_by_copy = false;
       for (const auto &write : pinfo.writes) {
         for (const auto &other : pipeline_stage_infos) {
           if (other.copy_stage) {
             for (const auto &read : other.reads) {
-              if (write->buffer == read->buffer && 
+              if (write->buffer == read->buffer &&
                   MayConflict(write->region, read->region)) {
                 used_by_copy = true;
                 break;
@@ -289,9 +291,9 @@ private:
         }
       }
       if (used_by_copy) {
-        pinfo.stage = 0; 
+        pinfo.stage = 0;
       }
-      
+
       for (auto &pinfo_1 : pipeline_stage_infos) {
         if (pinfo_1.copy_stage &&
             pinfo_1.last_use_stage == pinfo.original_order) {
@@ -301,8 +303,8 @@ private:
       }
     }
     // process the tail copy stage
-    auto& head_pinfo = pipeline_stage_infos.at(0);
-    if(head_pinfo.order == -1){
+    auto &head_pinfo = pipeline_stage_infos.at(0);
+    if (head_pinfo.order == -1) {
       for (auto &pinfo : pipeline_stage_infos) {
         pinfo.order++;
       }
