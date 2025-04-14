@@ -36,7 +36,7 @@ We conducted comparative performance analysis across multiple frameworks using f
   <figcaption style="text-align: center;">Figure 1: Computational throughput comparison across frameworks (Batch sizes 64 and 128)</figcaption>
 </figure>
 
-Notably, TileLang achieves performance parity with hand-optimized assembly kernels (aiter-asm) (up to 1.21x) in most test cases, while significantly outperforming Triton (up to 6.5x faster)implementations. This performance is achieved through a concise 70-line Python implementation!
+Notably, TileLang achieves performance parity with hand-optimized assembly kernels (aiter-asm) (from 0.73x to 1.21x) in most test cases, while significantly outperforming Triton (up to 6.5x faster)implementations. This performance is achieved through a concise 70-line Python implementation!
 
 ## Future Optimization Opportunities
 
