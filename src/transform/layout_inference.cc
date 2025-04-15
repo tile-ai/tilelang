@@ -537,18 +537,19 @@ private:
       // For example:
       //   for i in T.Parallel(1024):
       //     A_local[i] = A_global[i]
-      // Here, A_local is a register-local buffer held independently by each thread,
-      // so explicit thread binding is not required.
+      // Here, A_local is a register-local buffer held independently by each
+      // thread, so explicit thread binding is not required.
       //
-      // We use PostOrderVisit to detect whether the buffer store targets a "local" buffer,
-      // which indicates register usage and justifies skipping thread binding.
+      // We use PostOrderVisit to detect whether the buffer store targets a
+      // "local" buffer, which indicates register usage and justifies skipping
+      // thread binding.
       bool is_register_store = false;
       PostOrderVisit(root, [&](const ObjectRef &obj) {
-          if (const auto *store = obj.as<BufferStoreNode>()) {
-            if (store->buffer.scope() == "local") {
-              is_register_store = true;
-            }
+        if (const auto *store = obj.as<BufferStoreNode>()) {
+          if (store->buffer.scope() == "local") {
+            is_register_store = true;
           }
+        }
       });
 
       bool parallel_loop = !is_register_store && !skip_thread_partition_;

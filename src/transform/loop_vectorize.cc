@@ -238,11 +238,13 @@ bool IndiceCanVectorize(PrimExpr expr, Var var, PrimExpr iter_var_size,
     return false;
   Var v0("v0"), v1("v1");
   analyzer->Bind(v0, Range(0, target_vectorized_size));
-  analyzer->Bind(v1, Range(0, analyzer->Simplify(FloorDiv(iter_var_size, target_vectorized_size))));
+  analyzer->Bind(v1, Range(0, analyzer->Simplify(FloorDiv(
+                                  iter_var_size, target_vectorized_size))));
   PrimExpr expr_transformed = analyzer->Simplify(
       Substitute(expr, {{var, v0 + v1 * target_vectorized_size}}));
   Vectorizer vectorizer(v0, IntImm(v0->dtype, target_vectorized_size));
-  PrimExpr expr_vectorized = analyzer->Simplify(vectorizer.VisitExpr(expr_transformed));
+  PrimExpr expr_vectorized =
+      analyzer->Simplify(vectorizer.VisitExpr(expr_transformed));
   auto ramp_node = expr_vectorized.as<RampNode>();
   if (!ramp_node) {
     // Broadcast value

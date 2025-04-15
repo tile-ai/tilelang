@@ -77,9 +77,7 @@ class KernelParam:
         dtype_str = str(self.dtype)
         if dtype_str.startswith("torch."):
             dtype_str = dtype_str[6:]
-        if dtype_str.startswith("uint"):
-            return True
-        return False
+        return dtype_str.startswith("uint")
 
     def is_float8(self) -> bool:
         """
@@ -91,9 +89,7 @@ class KernelParam:
         dtype_str = str(self.dtype)
         if dtype_str.startswith("torch."):
             dtype_str = dtype_str[6:]
-        if dtype_str.startswith("float8"):
-            return True
-        return False
+        return dtype_str.startswith("float8")
 
     def is_boolean(self) -> bool:
         """
