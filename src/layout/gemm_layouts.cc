@@ -84,7 +84,7 @@ Fragment makeGemmFragmentC_F64(const int block_m, const int block_n,
   ICHECK(block_m % warp_m == 0);
   ICHECK(block_n % warp_n == 0);
   ICHECK(warp_m % 16 == 0);
-  ICHECK(warp_n % 16 == 0);
+  ICHECK(warp_n % 8 == 0);
   auto base_layout = makeGemmFragment8x8();
   auto warp_layout =
       base_layout->Repeat({block_m / warp_m, block_n / warp_n}, true, false);
@@ -101,7 +101,7 @@ Fragment makeGemmFragmentC(const int block_m, const int block_n,
   ICHECK(block_m % warp_m == 0);
   ICHECK(block_n % warp_n == 0);
   ICHECK(warp_m % 16 == 0) << "warp_m=" << warp_m;
-  ICHECK(warp_n % 16 == 0) << "warp_n=" << warp_n;
+  ICHECK(warp_n % 8 == 0) << "warp_n=" << warp_n;
   auto base_layout = makeGemmFragment8x8()->Repeat({2, 1}, false);
   auto warp_layout =
       base_layout->Repeat({block_m / warp_m, block_n / warp_n}, true, false);
