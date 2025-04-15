@@ -93,7 +93,7 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
         // put N dimension first
         // because usually n in mma
         // is more smaller than m
-        if (this->N / n_warp >=this->M / m_warp)
+        if (this->N / n_warp >= this->M / m_warp)
           n_warp *= factor;
         else
           m_warp *= factor;

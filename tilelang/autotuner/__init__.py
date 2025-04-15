@@ -121,6 +121,7 @@ class CompileArgs:
     cache_input_tensors: bool = True
     target: Literal['auto', 'cuda', 'hip'] = 'auto'
 
+
 class AutoTuner:
     """Auto-tuner for tilelang programs.
 
@@ -191,9 +192,8 @@ class AutoTuner:
             max_mismatched_ratio=max_mismatched_ratio,
             skip_check=skip_check,
             cache_input_tensors=cache_input_tensors,
-            target=target
-        )
-        
+            target=target)
+
         # If a custom `supply_prog`` is provided, the profiler's `supply_type` setting
         # becomes ineffective. The custom supply program will be used instead.
         if ref_prog is not None and supply_type != tilelang.TensorSupplyType.Auto:
@@ -223,7 +223,8 @@ class AutoTuner:
 
         def _compile(*config_arg):
             compile_args = self.compile_args
-            kernel = tilelang.compile(self.fn(*config_arg), out_idx=compile_args.out_idx, target=compile_args.target)
+            kernel = tilelang.compile(
+                self.fn(*config_arg), out_idx=compile_args.out_idx, target=compile_args.target)
             jit_context = JITContext(
                 out_idx=compile_args.out_idx,
                 ref_prog=compile_args.ref_prog,
