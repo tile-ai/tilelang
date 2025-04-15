@@ -48,14 +48,18 @@ ROCM_HOME = envs.ROCM_HOME
 
 # Check if both CUDA and ROCM are enabled
 if USE_ROCM and not ROCM_HOME:
-    raise ValueError("ROCM support is enabled (USE_ROCM=True) but ROCM_HOME is not set or detected.")
+    raise ValueError(
+        "ROCM support is enabled (USE_ROCM=True) but ROCM_HOME is not set or detected.")
 
 if not USE_ROCM and not CUDA_HOME:
-    raise ValueError("CUDA support is enabled by default (USE_ROCM=False) but CUDA_HOME is not set or detected.")
+    raise ValueError(
+        "CUDA support is enabled by default (USE_ROCM=False) but CUDA_HOME is not set or detected.")
 
 # Ensure one of CUDA or ROCM is available
 if not (CUDA_HOME or ROCM_HOME):
-    raise ValueError("Failed to automatically detect CUDA or ROCM installation. Please set the CUDA_HOME or ROCM_HOME environment variable manually (e.g., export CUDA_HOME=/usr/local/cuda or export ROCM_HOME=/opt/rocm).")
+    raise ValueError(
+        "Failed to automatically detect CUDA or ROCM installation. Please set the CUDA_HOME or ROCM_HOME environment variable manually (e.g., export CUDA_HOME=/usr/local/cuda or export ROCM_HOME=/opt/rocm)."
+    )
 
 # TileLang only supports Linux platform
 assert sys.platform.startswith("linux"), "TileLang only supports Linux platform (including WSL)."
@@ -108,7 +112,8 @@ def get_rocm_version():
         return LooseVersion(match.group(1))
     else:
         rocm_path = os.environ.get("ROCM_PATH", "/opt/rocm")
-        rocm_version_file = os.path.join(rocm_path, "lib", "cmake", "rocm", "rocm-config-version.cmake")
+        rocm_version_file = os.path.join(rocm_path, "lib", "cmake", "rocm",
+                                         "rocm-config-version.cmake")
         if os.path.exists(rocm_version_file):
             with open(rocm_version_file, "r") as f:
                 content = f.read()
