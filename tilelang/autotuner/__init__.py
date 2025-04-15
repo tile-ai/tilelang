@@ -139,6 +139,7 @@ class AutoTuner:
         self.ref_latency_cache = None
         self.jit_input_tensors = None
         self.ref_input_tensors = None
+        self.jit_compile = None
         self.compile_args = CompileArgs()
 
     @classmethod
@@ -239,7 +240,8 @@ class AutoTuner:
                 target=compile_args.target)
             return jit_context
 
-        self.jit_compile = _compile
+        if self.jit_compile is None:
+            self.jit_compile = _compile
 
         def target_fn(jit_context: JITContext):
             # Unpack the context
