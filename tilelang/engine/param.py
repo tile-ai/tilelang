@@ -72,7 +72,10 @@ class KernelParam:
         Returns:
             bool: True if parameter is an unsigned integer type, False otherwise
         """
-        return str(self.dtype).removeprefix("torch.").startswith("uint")
+        dtype_str = str(self.dtype)
+        if dtype_str.startswith("torch."):
+            dtype_str = dtype_str[6:]
+        return dtype_str.startswith("uint")
 
     def is_float8(self) -> bool:
         """
@@ -81,7 +84,10 @@ class KernelParam:
         Returns:
             bool: True if parameter is a float8 type, False otherwise
         """
-        return str(self.dtype).removeprefix("torch.").startswith("float8")
+        dtype_str = str(self.dtype)
+        if dtype_str.startswith("torch."):
+            dtype_str = dtype_str[6:]
+        return dtype_str.startswith("float8")
 
     def is_boolean(self) -> bool:
         """
@@ -90,7 +96,8 @@ class KernelParam:
         Returns:
             bool: True if parameter is a boolean type, False otherwise
         """
-        return str(self.dtype).removeprefix("torch.").startswith("bool")
+        dtype_str = str(self.dtype)
+        return dtype_str[6:] if dtype_str.startswith("torch.") else dtype_str.startswith("bool")
 
 
 @dataclass
