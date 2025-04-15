@@ -248,9 +248,8 @@ private:
 
     // Check if the accessed regions of the buffer actually overlap
     // If there's no overlap, there's no conflict
-    bool has_region_overlap = false;
     bool has_region_check = true;
-    
+
     // We need to check all dimensions for overlap
     for (size_t i = 0; i < prev.touched.size(); i++) {
       // If we can't determine the region (e.g., it's not a concrete range or point),
@@ -296,7 +295,7 @@ private:
     if (has_region_check && access_type_conflict) {
       return true;
     }
-    
+
     // If we couldn't determine region overlap or there's no access type conflict,
     // fall back to original behavior
     return true;

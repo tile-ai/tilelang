@@ -264,7 +264,6 @@ private:
 
     // Check if the accessed regions of the buffer actually overlap
     // If there's no overlap, there's no conflict
-    bool has_region_overlap = false;
     bool has_region_check = true;
     
     // We need to check all dimensions for overlap
