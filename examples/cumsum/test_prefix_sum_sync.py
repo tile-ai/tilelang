@@ -15,10 +15,10 @@ def prefix_sum(M, N, blk_m):
             tid = T.get_thread_binding()
 
             T.copy(A[bx * blk_m:(bx + 1) * blk_m, :], A_shared)
-            
+
             steps = T.alloc_var("int32")
             steps = T.log2(T.Cast("float32", N)).astype("int32")
-            
+
             # Up-sweep phase
             for i in T.serial(steps):
                 offset = 1 << i
@@ -65,21 +65,24 @@ def print_sync_barrier_locations(kernel_source):
 
 if __name__ == "__main__":
     M, N, blk_m = 2, 8, 1
-    
+
     print("测试前缀和内核中的线程同步...")
     program = prefix_sum(M, N, blk_m)
+
+    print(program)
     kernel = tilelang.compile(program, out_idx=-1, target="cuda", execution_backend="cython")
-    
+    print(kernel.get_kernel_source())
+
     # 检查生成的CUDA代码中的同步屏障
     cuda_source = kernel.get_kernel_source()
     print_sync_barrier_locations(cuda_source)
-    
+
     # 运行内核并验证结果
     a = torch.rand((M, N), device="cuda").float()
     b = torch.zeros_like(a)
     kernel(a, b)
-    
+
     # 与参考实现比较
     ref = reference_program(a)
     torch.testing.assert_close(b, ref, rtol=1e-4, atol=1e-4)
-    print("内核输出与PyTorch参考结果匹配。") 
+    print("内核输出与PyTorch参考结果匹配。")
