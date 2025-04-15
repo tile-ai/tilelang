@@ -134,6 +134,18 @@ public:
 private:
   PipelinePlanner() = default;
 
+  /*! \brief Information about a pipeline stage
+   *
+   * \param reads Array of buffer regions read by this stage
+   * \param writes Array of buffer regions written by this stage
+   * \param original_order Original position of this stage in the pipeline
+   * before reordering \param order Current position of this stage in the
+   * pipeline after reordering (-1 if not yet assigned) \param stage Pipeline
+   * stage number this operation belongs to (-1 if not yet assigned) \param
+   * copy_stage Whether this stage is a memory copy operation \param
+   * last_use_stage Last pipeline stage that uses the results of this stage (-1
+   * if not yet determined)
+   */
   struct PipelineStageInfo {
     Array<BufferRegion> reads, writes;
     int original_order;
@@ -158,7 +170,32 @@ private:
   }
 
   Stmt VisitStmt_(const ForNode *loop) final {
+    auto order_anno = loop->annotations.Get("tl_pipeline_order");
+    auto stage_anno = loop->annotations.Get("tl_pipeline_stage");
     auto num_stages_anno = loop->annotations.Get("num_stages");
+    if (order_anno.defined() && stage_anno.defined()) {
+      Map<String, ObjectRef> annotations;
+      for (const auto &[key, value] : loop->annotations) {
+        if (key != "tl_pipeline_order") {
+          annotations.Set(key, value);
+        }
+      }
+      annotations.Set(tir::attr::software_pipeline_order, order_anno);
+
+      for (const auto &[key, value] : loop->annotations) {
+        if (key != "tl_pipeline_stage") {
+          annotations.Set(key, value);
+        }
+      }
+      annotations.Set(tir::attr::software_pipeline_stage, stage_anno);
+      if (TargetHasAsyncCopy(target_))
+        annotations.Set(tir::attr::software_pipeline_async_stages,
+                        Array<Integer>{0});
+      auto for_node = GetRef<For>(loop);
+      for_node.CopyOnWrite()->annotations = annotations;
+      return for_node;
+    }
+
     if (!num_stages_anno.defined())
       return StmtExprMutator::VisitStmt_(loop);
     int num_stages = num_stages_anno.as<IntImmNode>()->value;
@@ -235,8 +272,28 @@ private:
     for (auto &pinfo : pipeline_stage_infos) {
       if (pinfo.copy_stage && pinfo.last_use_stage != -1)
         continue;
+
       pinfo.order = order_idx++;
       pinfo.stage = num_stages;
+
+      bool used_by_copy = false;
+      for (const auto &write : pinfo.writes) {
+        for (const auto &other : pipeline_stage_infos) {
+          if (other.copy_stage) {
+            for (const auto &read : other.reads) {
+              if (write->buffer == read->buffer &&
+                  MayConflict(write->region, read->region)) {
+                used_by_copy = true;
+                break;
+              }
+            }
+          }
+        }
+      }
+      if (used_by_copy) {
+        pinfo.stage = 0;
+      }
+
       for (auto &pinfo_1 : pipeline_stage_infos) {
         if (pinfo_1.copy_stage &&
             pinfo_1.last_use_stage == pinfo.original_order) {
@@ -245,6 +302,16 @@ private:
         }
       }
     }
+    // process the tail copy stage
+    auto &head_pinfo = pipeline_stage_infos.at(0);
+    if (head_pinfo.order == -1) {
+      for (auto &pinfo : pipeline_stage_infos) {
+        pinfo.order++;
+      }
+      head_pinfo.stage = 0;
+      order_idx++;
+    }
+
     ICHECK(size_t(order_idx) == pipeline_stage_infos.size())
         << "The number of stages should be equal to the number of pipeline "
            "stages. "

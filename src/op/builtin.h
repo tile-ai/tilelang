@@ -22,6 +22,27 @@ static constexpr const char *kDisableWarpSpecialized =
 static constexpr const char *kConfigIndexBitwidth = "tl.config_index_bitwidth";
 
 /*!
+ * \brief Whether to disable dynamic tail split
+ *
+ * kDisableDynamicTailSplit = "tl.disable_dynamic_tail_split"
+ *
+ */
+static constexpr const char *kDisableDynamicTailSplit =
+    "tl.disable_dynamic_tail_split";
+
+/*!
+ * \brief The size of the vectorized dimension in buffer, designed by user
+ *
+ * For example, if the vectorized dimension is 128 bits and the dtype of buffer
+ * A[m, k] is float16, the size of the vectorized dimension (i.e. k) in buffer A
+ * should be divisible by 8 (8 = 128 / 16).
+ *
+ * kDynamicAlignment = "tl.dynamic_alignment"
+ *
+ */
+static constexpr const char *kDynamicAlignment = "tl.dynamic_alignment";
+
+/*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load
  *
  * CuTensorMap* CreateTMADescriptorOp(data_type, rank, global_addr,
