@@ -22,6 +22,8 @@ namespace tl {
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableTMALower, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableWarpSpecialized, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kConfigIndexBitwidth, Integer);
+TVM_REGISTER_PASS_CONFIG_OPTION(kDisableDynamicTailSplit, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kDynamicAlignment, Integer);
 
 #define TIR_DEFINE_TL_BUILTIN(OpName)                                          \
   const Op &OpName() {                                                         \
