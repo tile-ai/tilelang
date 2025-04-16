@@ -118,13 +118,14 @@ with open(cython_wrapper_path, "r") as f:
                     with open(md5_path, "r") as f:
                         cached_hash = f.read().strip()
                         if cached_hash == code_hash:
-                            logger.info("Another process has already compiled the file, using it...")
+                            logger.info(
+                                "Another process has already compiled the file, using it...")
                             need_compile = False
 
                 if need_compile:
                     logger.info("Compiling cython jit adapter...")
                     temp_path = cache_dir / f"temp_{code_hash}.so"
-                    
+
                     with open(md5_path, "w") as f:
                         f.write(code_hash)
 
