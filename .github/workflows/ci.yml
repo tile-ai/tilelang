@@ -68,4 +68,4 @@ jobs:
         source tilelang_ci/bin/activate
         cd testing/python
         export TILELANG_CLEAR_CACHE=1
-        python -m pytest -n auto
+        python -m pytest -n 4
