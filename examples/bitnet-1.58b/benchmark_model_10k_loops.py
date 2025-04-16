@@ -18,6 +18,7 @@ args = parser.parse_args()
 seq_len = args.seq_len
 batch_size = args.batch_size
 
+
 def profile(model, input_data):
     import time
 

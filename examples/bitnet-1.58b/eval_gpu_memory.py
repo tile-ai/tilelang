@@ -11,6 +11,7 @@ torch.set_grad_enabled(False)
 parser = argparse.ArgumentParser()
 parser.add_argument('--hf_path', default='1bitLLM/bitnet_b1_58-3B', type=str)
 
+
 def profile(model, input_data):
     import time
 
@@ -34,22 +35,20 @@ def profile(model, input_data):
         times = get_runtime(num_repeats)
     return np.mean(times)
 
+
 def main():
     model = BitnetForCausalLM.from_pretrained(
         '1bitLLM/bitnet_b1_58-3B',
         device_map='auto',
-        low_cpu_mem_usage=True, 
+        low_cpu_mem_usage=True,
         use_flash_attention_2=True,
         torch_dtype=torch.float16,
     ).half()
-    print(
-        f"gpu memory: {torch.cuda.memory_allocated() / 1024 ** 3} GB"
-    )
+    print(f"gpu memory: {torch.cuda.memory_allocated() / 1024 ** 3} GB")
     with torch.no_grad():
         model._post_process_weights()
-    print(
-        f"gpu memory BitBLAS: {torch.cuda.memory_allocated() / 1024 ** 3} GB"
-    )
+    print(f"gpu memory BitBLAS: {torch.cuda.memory_allocated() / 1024 ** 3} GB")
+
 
 if __name__ == '__main__':
     main()

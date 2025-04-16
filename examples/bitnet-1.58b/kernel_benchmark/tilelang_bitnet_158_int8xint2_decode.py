@@ -7,15 +7,8 @@ import tilelang
 import tilelang.language as T
 from tilelang import tvm as tvm
 from tvm import DataType
-from tilelang.intrinsics.mma_layout import (
-    make_mma_swizzle_layout as make_swizzle_layout,
-)
-from tilelang.intrinsics.utils import index_to_coordinates
 import numpy as np
 
-from tilelang.intrinsics.mma_macro_generator import (
-    INT4TensorCoreIntrinEmitter,
-)
 from tilelang.transform import simplify_prim_func
 
 torch.manual_seed(42)
@@ -106,6 +99,7 @@ def bitnet_158_int8xint2_decode(
 
     use_dp4a = True
     dp4a_size = 4
+
     @T.prim_func
     def kernel(
             A: T.Buffer(A_shape, in_dtype),
@@ -142,7 +136,7 @@ def bitnet_158_int8xint2_decode(
                         ko * (reduce_thread * micro_size_k_compressed) +
                         kr * micro_size_k_compressed + v,
                     ]
-                
+
                 T.call_extern(
                     "handle",
                     "decode_i2u_to_i8s",
@@ -178,7 +172,6 @@ def bitnet_158_int8xint2_decode(
             if kr == 0:
                 C[by, bx * n_partition + ni] = reduced_accum_res[0]
 
-
     return kernel
 
 
@@ -195,9 +188,7 @@ def general_compress(lowprecision_weight, source_bits=4, storage_dtype=np.int8):
     )
     for j in range(lowprecision_weight.shape[-1] // elems_per_byte):
         for k in range(elems_per_byte):
-            int8_weight[:, j] |= lowprecision_weight[:, j * elems_per_byte + k] << (
-                source_bits * k
-            )
+            int8_weight[:, j] |= lowprecision_weight[:, j * elems_per_byte + k] << (source_bits * k)
 
     return int8_weight.view(storage_dtype)
 
@@ -243,12 +234,14 @@ def interleave_weight(qweight, nbits=4, target_dtype="float16"):
     return new_qweight.view(np.int8)
 
 
-def assert_bitnet_158_int8xint2_decode_correctness(
-    M, N, K, in_dtype, out_dtype, accum_dtype, fast_decoding=True
-):
-    program = bitnet_158_int8xint2_decode(
-        M, N, K, in_dtype, out_dtype, accum_dtype, fast_decoding
-    )
+def assert_bitnet_158_int8xint2_decode_correctness(M,
+                                                   N,
+                                                   K,
+                                                   in_dtype,
+                                                   out_dtype,
+                                                   accum_dtype,
+                                                   fast_decoding=True):
+    program = bitnet_158_int8xint2_decode(M, N, K, in_dtype, out_dtype, accum_dtype, fast_decoding)
     print(program)
     kernel = tilelang.compile(program)
     src_code = kernel.get_kernel_source()
@@ -265,15 +258,11 @@ def assert_bitnet_158_int8xint2_decode_correctness(
 
     kernel(A, qw, C)
     # Get Reference Result
-    ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(
-        getattr(torch, accum_dtype)
-    )
+    ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(getattr(torch, accum_dtype))
 
     print(ref_c)
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
 
 if __name__ == "__main__":
-    assert_bitnet_158_int8xint2_decode_correctness(
-        1, 256, 256, "int8", "int32", "int32"
-    )
+    assert_bitnet_158_int8xint2_decode_correctness(1, 256, 256, "int8", "int32", "int32")

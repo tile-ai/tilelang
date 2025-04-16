@@ -8,14 +8,12 @@ import tilelang.language as T
 from tilelang import tvm as tvm
 from tvm import DataType
 from tilelang.intrinsics.mma_layout import (
-    make_mma_swizzle_layout as make_swizzle_layout,
-)
+    make_mma_swizzle_layout as make_swizzle_layout,)
 from tilelang.intrinsics.utils import index_to_coordinates
 import numpy as np
 
 from tilelang.intrinsics.mma_macro_generator import (
-    INT4TensorCoreIntrinEmitter,
-)
+    INT4TensorCoreIntrinEmitter,)
 from tilelang.transform import simplify_prim_func
 
 torch.manual_seed(42)
@@ -151,40 +149,35 @@ def bitnet_158_int8xint2_prefill(
 
     @T.prim_func
     def main(
-        A: T.Buffer(A_shape, in_dtype),
-        B: T.Buffer(B_shape, storage_dtype),
-        C: T.Buffer((M, N), out_dtype),
+            A: T.Buffer(A_shape, in_dtype),
+            B: T.Buffer(B_shape, storage_dtype),
+            C: T.Buffer((M, N), out_dtype),
     ):
         with T.Kernel(
-            T.ceildiv(N, block_N),
-            T.ceildiv(M, block_M),
-            threads=threads,
-            prelude=decode_i2s_to_i8s,
+                T.ceildiv(N, block_N),
+                T.ceildiv(M, block_M),
+                threads=threads,
+                prelude=decode_i2s_to_i8s,
         ) as (bx, by):
 
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
             B_shared = T.alloc_shared(B_shared_shape, storage_dtype, scope=shared_scope)
             B_dequantize_shared = T.alloc_shared(
-                B_dequantize_shared_shape, in_dtype, scope=shared_scope
-            )
+                B_dequantize_shared_shape, in_dtype, scope=shared_scope)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
             A_frag = T.alloc_local((warp_rows * fragement_size_a), in_dtype)
             B_frag = T.alloc_local((warp_cols * fragement_size_b), in_dtype)
-            C_frag = T.alloc_local(
-                (warp_rows * warp_cols * fragement_size_c), accum_dtype
-            )
+            C_frag = T.alloc_local((warp_rows * warp_cols * fragement_size_c), accum_dtype)
 
             B_local = T.alloc_local([local_size_compressed], storage_dtype)
             B_dequantize_local = T.alloc_local([local_size], in_dtype)
 
             thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
 
-            T.annotate_layout(
-                {
-                    A_shared: make_swizzle_layout(A_shared),
-                    B_dequantize_shared: make_swizzle_layout(B_dequantize_shared),
-                }
-            )
+            T.annotate_layout({
+                A_shared: make_swizzle_layout(A_shared),
+                B_dequantize_shared: make_swizzle_layout(B_dequantize_shared),
+            })
 
             # Improve L2 Cache
             T.use_swizzle(panel_size=10)
@@ -199,22 +192,14 @@ def bitnet_158_int8xint2_prefill(
 
                 # Load B into shared memory
                 for j, k in T.Parallel(block_N, block_K // num_elems_per_byte):
-                    B_shared[j, k] = B[
-                        bx * block_N + j, ko * (block_K // num_elems_per_byte) + k
-                    ]
+                    B_shared[j, k] = B[bx * block_N + j, ko * (block_K // num_elems_per_byte) + k]
 
-                for i in T.serial(
-                    block_N
-                    * block_K
-                    // num_elems_per_byte
-                    // (threads * local_size_compressed)
-                ):
+                for i in T.serial(block_N * block_K // num_elems_per_byte //
+                                  (threads * local_size_compressed)):
                     for v in T.vectorized(0, local_size_compressed):
                         index = (
-                            i * threads * local_size_compressed
-                            + thread_bindings * local_size_compressed
-                            + v
-                        )
+                            i * threads * local_size_compressed +
+                            thread_bindings * local_size_compressed + v)
                         vi, vj = index_to_coordinates(index, B_shared_shape)
                         B_local[v] = B_shared[vi, vj]
 
@@ -226,9 +211,7 @@ def bitnet_158_int8xint2_prefill(
                     )
 
                     for v in T.vectorized(0, local_size):
-                        index = (
-                            i * threads * local_size + thread_bindings * local_size + v
-                        )
+                        index = (i * threads * local_size + thread_bindings * local_size + v)
                         vi, vj = index_to_coordinates(index, B_dequantize_shared_shape)
                         B_dequantize_shared[vi, vj] = B_dequantize_local[v]
 
@@ -282,9 +265,7 @@ def general_compress(lowprecision_weight, source_bits=4, storage_dtype=np.int8):
     )
     for j in range(lowprecision_weight.shape[-1] // elems_per_byte):
         for k in range(elems_per_byte):
-            int8_weight[:, j] |= lowprecision_weight[:, j * elems_per_byte + k] << (
-                source_bits * k
-            )
+            int8_weight[:, j] |= lowprecision_weight[:, j * elems_per_byte + k] << (source_bits * k)
 
     return int8_weight.view(storage_dtype)
 
@@ -330,12 +311,14 @@ def interleave_weight(qweight, nbits=4, target_dtype="float16"):
     return new_qweight.view(np.int8)
 
 
-def assert_bitnet_158_int8xint2_prefill_correctness(
-    M, N, K, in_dtype, out_dtype, accum_dtype, fast_decoding=True
-):
-    program = bitnet_158_int8xint2_prefill(
-        M, N, K, in_dtype, out_dtype, accum_dtype, fast_decoding
-    )
+def assert_bitnet_158_int8xint2_prefill_correctness(M,
+                                                    N,
+                                                    K,
+                                                    in_dtype,
+                                                    out_dtype,
+                                                    accum_dtype,
+                                                    fast_decoding=True):
+    program = bitnet_158_int8xint2_prefill(M, N, K, in_dtype, out_dtype, accum_dtype, fast_decoding)
     print(program)
     kernel = tilelang.compile(program)
     src_code = kernel.get_kernel_source()
@@ -352,15 +335,11 @@ def assert_bitnet_158_int8xint2_prefill_correctness(
 
     kernel(A, qw, C)
     # Get Reference Result
-    ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(
-        getattr(torch, accum_dtype)
-    )
+    ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(getattr(torch, accum_dtype))
 
     print(ref_c)
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
 
 if __name__ == "__main__":
-    assert_bitnet_158_int8xint2_prefill_correctness(
-        256, 256, 256, "int8", "int32", "int32"
-    )
+    assert_bitnet_158_int8xint2_prefill_correctness(256, 256, 256, "int8", "int32", "int32")
