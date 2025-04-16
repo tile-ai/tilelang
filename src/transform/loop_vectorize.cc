@@ -248,8 +248,8 @@ bool IndiceCanVectorize(PrimExpr expr, Var var, PrimExpr iter_var_size,
 
   // Check if the expr_vectorized uses v0
   bool used_vectorize_var = false;
-  auto check_var = [&](const ObjectRef& n) {
-    if (const auto* var_node = n.as<VarNode>()) {
+  auto check_var = [&](const ObjectRef &n) {
+    if (const auto *var_node = n.as<VarNode>()) {
       if (var_node == v0.get()) {
         used_vectorize_var = true;
       }
