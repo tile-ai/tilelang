@@ -1,3 +1,12 @@
+// Copyright (c) Tile-AI Corporation.
+// Licensed under the MIT License.
+
+/*!
+ * \file tl/op/logical.cc
+ * \brief Logical operations.
+ *
+ */
+
 #include <tvm/runtime/registry.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
