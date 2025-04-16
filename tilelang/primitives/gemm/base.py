@@ -107,10 +107,10 @@ class GemmWarpPolicy(IntEnum):
                 # Assign the factor to either m_warp or n_warp based on divisibility and aspect ratio.
                 if M_divisible and N_divisible:
                     # Prefer to assign to rows if M is larger, otherwise to columns.
-                    if M / m_warp >= N / n_warp:
-                        m_warp *= factor
-                    else:
+                    if N / n_warp >= M / m_warp:
                         n_warp *= factor
+                    else:
+                        m_warp *= factor
                 elif M_divisible:
                     m_warp *= factor
                 elif N_divisible:

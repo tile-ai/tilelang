@@ -532,16 +532,37 @@ private:
   Stmt VisitStmt_(const ForNode *op) final {
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
     if (result_.for_map.count(GetRef<For>(op))) {
-      auto loop_layout = result_.for_map[GetRef<For>(op)];
-      if (!skip_thread_partition_) {
-        // If none thread bindings are provided, partition the loop
+      auto root = GetRef<For>(op);
+      // This check is a workaround to support T.Parallel for local buffers.
+      // For example:
+      //   for i in T.Parallel(1024):
+      //     A_local[i] = A_global[i]
+      // Here, A_local is a register-local buffer held independently by each
+      // thread, so explicit thread binding is not required.
+      //
+      // We use PostOrderVisit to detect whether the buffer store targets a
+      // "local" buffer, which indicates register usage and justifies skipping
+      // thread binding.
+      bool is_register_store = false;
+      PostOrderVisit(root, [&](const ObjectRef &obj) {
+        if (const auto *store = obj.as<BufferStoreNode>()) {
+          if (store->buffer.scope() == "local") {
+            is_register_store = true;
+          }
+        }
+      });
+
+      bool parallel_loop = !is_register_store && !skip_thread_partition_;
+      if (parallel_loop) {
+        auto loop_layout = result_.for_map[root];
         for_node =
             PartitionLoop(for_node, thread_var_->var, analyzer_, loop_layout);
       }
+      // If none thread bindings are provided, partition the loop
       for_node = VectorizeLoop(for_node);
 
-      if (result_.predicate_map.count(GetRef<For>(op))) {
-        return IfThenElse(result_.predicate_map[GetRef<For>(op)], for_node);
+      if (result_.predicate_map.count(root) && parallel_loop) {
+        return IfThenElse(result_.predicate_map[root], for_node);
       } else {
         return for_node;
       }
