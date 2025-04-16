@@ -8,41 +8,37 @@
 namespace tl {
 
 // Trait to determine the MFMA instruction to use based on data type
-template <typename T>
-struct MfmaTraits;
+template <typename T> struct MfmaTraits;
 
 // Specialization for half/float16
-template <>
-struct MfmaTraits<half> {
-    template <typename AccType>
-    static TL_DEVICE void mfma_op(
-        const half* b, const half* a, AccType* c) {
-        *c = __builtin_amdgcn_mfma_f32_16x16x16f16(
-            *((float16x4*)b), *((float16x4*)a), *c, 0, 0, 0);
-    }
+template <> struct MfmaTraits<half> {
+  template <typename AccType>
+  static TL_DEVICE void mfma_op(const half *b, const half *a, AccType *c) {
+    *c = __builtin_amdgcn_mfma_f32_16x16x16f16(*((float16x4 *)b),
+                                               *((float16x4 *)a), *c, 0, 0, 0);
+  }
 };
 
 // Specialization for __hip_bfloat16
-template <>
-struct MfmaTraits<__hip_bfloat16> {
-    template <typename AccType>
-    static TL_DEVICE void mfma_op(
-        const __hip_bfloat16* b, const __hip_bfloat16* a, AccType* c) {
-        bfloat16x4_vec b_vec, a_vec;
-        
-        // Reinterpret the pointers
-        short* b_short = reinterpret_cast<short*>(const_cast<__hip_bfloat16*>(b));
-        short* a_short = reinterpret_cast<short*>(const_cast<__hip_bfloat16*>(a));
-        
-        // Copy the data
-        for (int i = 0; i < 4; ++i) {
-            b_vec[i] = b_short[i];
-            a_vec[i] = a_short[i];
-        }
-        
-        // Call the intrinsic and store the result directly to c
-        *c = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(b_vec, a_vec, *c, 0, 0, 0);
+template <> struct MfmaTraits<__hip_bfloat16> {
+  template <typename AccType>
+  static TL_DEVICE void mfma_op(const __hip_bfloat16 *b,
+                                const __hip_bfloat16 *a, AccType *c) {
+    bfloat16x4_vec b_vec, a_vec;
+
+    // Reinterpret the pointers
+    short *b_short = reinterpret_cast<short *>(const_cast<__hip_bfloat16 *>(b));
+    short *a_short = reinterpret_cast<short *>(const_cast<__hip_bfloat16 *>(a));
+
+    // Copy the data
+    for (int i = 0; i < 4; ++i) {
+      b_vec[i] = b_short[i];
+      a_vec[i] = a_short[i];
     }
+
+    // Call the intrinsic and store the result directly to c
+    *c = __builtin_amdgcn_mfma_f32_16x16x16bf16_1k(b_vec, a_vec, *c, 0, 0, 0);
+  }
 };
 
 // ref to bitblas/tl/mfma_macro_generator.py::kPack
@@ -209,8 +205,9 @@ public:
             auto acc_ptr = ((float32x4 *)C_local) + ((i * warp_cols) + j);
             auto b_ptr = ((B_type *)B_local) + (j * kPack + kp) * 4;
             auto a_ptr = ((A_type *)A_local) + (i * kPack + kp) * 4;
-            
-            // Use the trait to select the correct MFMA instruction, either fp16 or bf16 currently
+
+            // Use the trait to select the correct MFMA instruction, either fp16
+            // or bf16 currently
             MfmaTraits<A_type>::mfma_op(b_ptr, a_ptr, acc_ptr);
           }
         }
@@ -265,9 +262,11 @@ public:
           for (int j = 0; j < warp_cols; ++j) {
             auto acc_ptr = ((float32x4 *)C_local) + ((i * warp_cols) + j);
             auto b_ptr = ((B_type *)B_local) + (j * kPack + kp) * 4;
-            auto a_ptr = ((A_type *)A_local) + (ki * warp_rows * kPack + i * kPack + kp) * 4;
-            
-            // Use the trait to select the correct MFMA instruction, either fp16 or bf16 currently
+            auto a_ptr = ((A_type *)A_local) +
+                         (ki * warp_rows * kPack + i * kPack + kp) * 4;
+
+            // Use the trait to select the correct MFMA instruction, either fp16
+            // or bf16 currently
             MfmaTraits<A_type>::mfma_op(b_ptr, a_ptr, acc_ptr);
           }
         }
