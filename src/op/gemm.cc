@@ -90,14 +90,17 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
       bool M_divisible = (this->M % (factor * m_warp)) == 0;
       bool N_divisible = (this->N % (factor * n_warp)) == 0;
       if (M_divisible && N_divisible) {
-        if (this->M / m_warp >= this->N / n_warp)
-          m_warp *= factor;
-        else
+        // put N dimension first
+        // because usually n in mma
+        // is more smaller than m
+        if (this->N / n_warp >= this->M / m_warp)
           n_warp *= factor;
-      } else if (M_divisible) {
-        m_warp *= factor;
+        else
+          m_warp *= factor;
       } else if (N_divisible) {
         n_warp *= factor;
+      } else if (M_divisible) {
+        m_warp *= factor;
       } else {
         ICHECK(0) << "Cannot compute warp partition for shape" << M << " " << N
                   << " with num_warps " << num_warps;
@@ -106,7 +109,6 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
   } else {
     ICHECK(0) << "Unknown GemmWarpPolicy";
   }
-  // TODO: perform more checks here
   return {m_warp, n_warp};
 }
 

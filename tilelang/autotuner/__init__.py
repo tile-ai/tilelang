@@ -89,6 +89,39 @@ class AutotuneResult:
     kernel: Callable
 
 
+@dataclass(frozen=True)
+class CompileArgs:
+    """Compile arguments for the auto-tuner.
+
+    Attributes:
+        out_idx: List of output tensor indices.
+        supply_type: Type of tensor supply mechanism.
+        ref_prog: Reference program for correctness validation.
+        supply_prog: Supply program for input tensors.
+        out_idx: Union[List[int], int] = -1
+        supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto
+        ref_prog: Callable = None
+        supply_prog: Callable = None
+        rtol: float = 1e-2
+        atol: float = 1e-2
+        max_mismatched_ratio: float = 0.01
+        skip_check: bool = False
+        cache_input_tensors: bool = True
+        target: Literal['auto', 'cuda', 'hip'] = 'auto'
+    """
+
+    out_idx: Union[List[int], int] = -1
+    supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto
+    ref_prog: Callable = None
+    supply_prog: Callable = None
+    rtol: float = 1e-2
+    atol: float = 1e-2
+    max_mismatched_ratio: float = 0.01
+    skip_check: bool = False
+    cache_input_tensors: bool = True
+    target: Literal['auto', 'cuda', 'hip'] = 'auto'
+
+
 class AutoTuner:
     """Auto-tuner for tilelang programs.
 
@@ -106,6 +139,8 @@ class AutoTuner:
         self.ref_latency_cache = None
         self.jit_input_tensors = None
         self.ref_input_tensors = None
+        self.jit_compile = None
+        self.compile_args = CompileArgs()
 
     @classmethod
     def from_kernel(cls, kernel: Callable, configs):
@@ -148,6 +183,17 @@ class AutoTuner:
         Returns:
             AutoTuner: Self for method chaining.
         """
+        self.compile_args = CompileArgs(
+            out_idx=out_idx,
+            supply_type=supply_type,
+            ref_prog=ref_prog,
+            supply_prog=supply_prog,
+            rtol=rtol,
+            atol=atol,
+            max_mismatched_ratio=max_mismatched_ratio,
+            skip_check=skip_check,
+            cache_input_tensors=cache_input_tensors,
+            target=target)
 
         # If a custom `supply_prog`` is provided, the profiler's `supply_type` setting
         # becomes ineffective. The custom supply program will be used instead.
@@ -155,23 +201,6 @@ class AutoTuner:
             logger.warning("Ignoring `supply_type` passed to `set_compile_args` because "
                            "`ref_prog` is not None.")
 
-        def _compile(*config_arg):
-            kernel = tilelang.compile(self.fn(*config_arg), out_idx=out_idx, target=target)
-            jit_context = JITContext(
-                out_idx=out_idx,
-                ref_prog=ref_prog,
-                supply_prog=supply_prog,
-                rtol=rtol,
-                atol=atol,
-                max_mismatched_ratio=max_mismatched_ratio,
-                skip_check=skip_check,
-                cache_input_tensors=cache_input_tensors,
-                kernel=kernel,
-                supply_type=supply_type,
-                target=target)
-            return jit_context
-
-        self.jit_compile = _compile
         return self
 
     def run(self, warmup: int = 25, rep: int = 100, timeout: int = 30):
@@ -192,6 +221,27 @@ class AutoTuner:
         best_latency = 1e8
         best_config = None
         best_jit_context = None
+
+        def _compile(*config_arg):
+            compile_args = self.compile_args
+            kernel = tilelang.compile(
+                self.fn(*config_arg), out_idx=compile_args.out_idx, target=compile_args.target)
+            jit_context = JITContext(
+                out_idx=compile_args.out_idx,
+                ref_prog=compile_args.ref_prog,
+                supply_prog=compile_args.supply_prog,
+                rtol=compile_args.rtol,
+                atol=compile_args.atol,
+                max_mismatched_ratio=compile_args.max_mismatched_ratio,
+                skip_check=compile_args.skip_check,
+                cache_input_tensors=compile_args.cache_input_tensors,
+                kernel=kernel,
+                supply_type=compile_args.supply_type,
+                target=compile_args.target)
+            return jit_context
+
+        if self.jit_compile is None:
+            self.jit_compile = _compile
 
         def target_fn(jit_context: JITContext):
             # Unpack the context
