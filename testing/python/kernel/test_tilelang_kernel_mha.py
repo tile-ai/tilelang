@@ -153,7 +153,6 @@ def run_mha(batch, heads, seq_len, dim, is_causal, block_M, block_N, num_stages=
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
-@pytest.mark.serial
 def test_mha_causal_dim64():
     run_mha(
         batch=4,
@@ -167,7 +166,6 @@ def test_mha_causal_dim64():
         threads=128)
 
 
-@pytest.mark.serial
 def test_mha_no_causal_dim64():
     run_mha(
         batch=4,
@@ -206,7 +204,6 @@ def test_mha_no_causal_dim64():
 #         threads=128)
 
 
-@pytest.mark.serial
 def test_mha_causal_dim256():
     run_mha(
         batch=4,
@@ -220,7 +217,6 @@ def test_mha_causal_dim256():
         threads=128)
 
 
-@pytest.mark.serial
 def test_mha_no_causal_dim256():
     run_mha(
         batch=4,
