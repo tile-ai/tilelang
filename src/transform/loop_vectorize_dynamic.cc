@@ -468,6 +468,7 @@ private:
         disable_dynamic_tail_split_(disable_dynamic_tail_split),
         dynamic_alignment_(dynamic_alignment) {}
 
+
   Stmt VisitStmt_(const ForNode *op) final {
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
     VectorizePlanResult res{vector_load_bits_max_, false, 0};

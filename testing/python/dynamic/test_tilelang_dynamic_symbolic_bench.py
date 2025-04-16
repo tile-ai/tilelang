@@ -561,5 +561,4 @@ def test_all():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    run_assert_tl_matmul_block_dynamic_mnk(16384, 16384, 16380, 128, 128, 32)
+    tilelang.testing.main()
