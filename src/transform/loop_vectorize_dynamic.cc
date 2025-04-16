@@ -379,7 +379,8 @@ private:
     }
 
     if (!disable_dynamic_tail_split) {
-      // To handle the fact that cp.async only support address aligned with access size
+      // To handle the fact that cp.async only support address aligned with
+      // access size
       vector_size_ = 1;
     }
 
@@ -468,7 +469,6 @@ private:
         disable_dynamic_tail_split_(disable_dynamic_tail_split),
         dynamic_alignment_(dynamic_alignment) {}
 
-
   Stmt VisitStmt_(const ForNode *op) final {
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
     VectorizePlanResult res{vector_load_bits_max_, false, 0};
@@ -476,7 +476,9 @@ private:
                                         disable_dynamic_tail_split_);
     NestedLoopChecker checker;
     int nest_num = checker.GetNestLoopNum(for_node);
-    if (nest_num > 1 || for_node->kind == ForKind::kVectorized) { // only rewrite the innermost non-vectorized loop
+    if (nest_num > 1 ||
+        for_node->kind == ForKind::kVectorized) { // only rewrite the innermost
+                                                  // non-vectorized loop
       return for_node;
     }
     int vectorize_hint = res.vector_size;
