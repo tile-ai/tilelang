@@ -374,6 +374,13 @@ private:
     if (!dynamic_) {
       return fnode;
     }
+
+    if (!disable_dynamic_tail_split) {
+      // To handle the fact that cp.async only support address aligned with
+      // access size
+      vector_size_ = 1;
+    }
+
     ICHECK(extent % vector_size_ == 0)
         << "extent: " << extent << " vector_size_: " << vector_size_;
     ICHECK(is_zero(fnode->min));
@@ -424,7 +431,7 @@ private:
   }
 
   const ForNode *inner_for_;
-  const int vector_size_;
+  int vector_size_;
   const PrimExpr condition_;
   const bool dynamic_;
   const bool disable_dynamic_tail_split_;
@@ -466,7 +473,9 @@ private:
                                         disable_dynamic_tail_split_);
     NestedLoopChecker checker;
     int nest_num = checker.GetNestLoopNum(for_node);
-    if (nest_num > 1) { // only rewrite the innermost loop
+    if (nest_num > 1 ||
+        for_node->kind == ForKind::kVectorized) { // only rewrite the innermost
+                                                  // non-vectorized loop
       return for_node;
     }
     int vectorize_hint = res.vector_size;
