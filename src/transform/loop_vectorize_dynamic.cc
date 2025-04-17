@@ -377,6 +377,13 @@ private:
     if (!dynamic_) {
       return fnode;
     }
+
+    if (!disable_dynamic_tail_split) {
+      // To handle the fact that cp.async only support address aligned with
+      // access size
+      vector_size_ = 1;
+    }
+
     ICHECK(extent % vector_size_ == 0)
         << "extent: " << extent << " vector_size_: " << vector_size_;
     ICHECK(is_zero(fnode->min));
@@ -392,9 +399,12 @@ private:
     VectorizedConditionMutator condition_mutator(inner_var, vector_size_);
 
     // Adaptively set vectorized variable to the min/max value of the extent
-    PrimExpr condition_bound = condition_mutator(conditions[0]);
-    for (int i = 1; i < conditions.size(); ++i) {
-      condition_bound = condition_bound && condition_mutator(conditions[i]);
+    PrimExpr condition_bound;
+    if (conditions.size() > 0) {
+      condition_bound = condition_mutator(conditions[0]);
+      for (int i = 1; i < conditions.size(); ++i) {
+        condition_bound = condition_bound && condition_mutator(conditions[i]);
+      }
     }
 
     if (!disable_dynamic_tail_split) {
@@ -407,7 +417,11 @@ private:
       For vectorize_for =
           For(inner_var, 0, vector_size_, ForKind::kVectorized, vectorize_body);
       For serial_for = For(inner_var, 0, vector_size_, ForKind::kSerial, body);
-      body = IfThenElse(condition_bound, vectorize_for, serial_for);
+      if (conditions.size() > 0) {
+        body = IfThenElse(condition_bound, vectorize_for, serial_for);
+      } else {
+        body = vectorize_for;
+      }
       body = For(outer_var, 0, extent / vector_size_, fnode->kind, body,
                  fnode->thread_binding, fnode->annotations, fnode->span);
       return body;
@@ -427,7 +441,7 @@ private:
   }
 
   const ForNode *inner_for_;
-  const int vector_size_;
+  int vector_size_;
   const PrimExpr condition_;
   const bool dynamic_;
   const bool disable_dynamic_tail_split_;
@@ -469,7 +483,9 @@ private:
                                         disable_dynamic_tail_split_);
     NestedLoopChecker checker;
     int nest_num = checker.GetNestLoopNum(for_node);
-    if (nest_num > 1) { // only rewrite the innermost loop
+    if (nest_num > 1 ||
+        for_node->kind == ForKind::kVectorized) { // only rewrite the innermost
+                                                  // non-vectorized loop
       return for_node;
     }
     int vectorize_hint = res.vector_size;

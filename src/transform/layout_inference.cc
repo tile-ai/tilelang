@@ -559,7 +559,24 @@ private:
             PartitionLoop(for_node, thread_var_->var, analyzer_, loop_layout);
       }
       // If none thread bindings are provided, partition the loop
-      for_node = VectorizeLoop(for_node);
+      bool has_non_local = false;
+      PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
+        if (const auto *load = obj.as<BufferLoadNode>()) {
+          String scope = load->buffer.scope();
+          if (scope != "local" && scope != "local.fragment") {
+            has_non_local = true;
+          }
+        } else if (const auto *store = obj.as<BufferStoreNode>()) {
+          String scope = store->buffer.scope();
+          if (scope != "local" && scope != "local.fragment") {
+            has_non_local = true;
+          }
+        }
+      });
+
+      if (has_non_local) {
+        for_node = VectorizeLoop(for_node);
+      }
 
       if (result_.predicate_map.count(root) && parallel_loop) {
         return IfThenElse(result_.predicate_map[root], for_node);
