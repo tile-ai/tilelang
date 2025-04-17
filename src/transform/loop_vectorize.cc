@@ -80,6 +80,7 @@ private:
       }
     }
     UpdateVectorSize(node->indices, node->buffer);
+    return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
   }
 
   void VisitStmt_(const BufferStoreNode *node) final {
@@ -87,7 +88,7 @@ private:
         node->buffer.scope() == "shared.dyn")
       has_nonlocal_memory_access_ = true;
     UpdateVectorSize(node->indices, node->buffer);
-    return arith::IRVisitorWithAnalyzer::VisitExpr(node->value);
+    return arith::IRVisitorWithAnalyzer::VisitStmt_(node);
   }
 
   void VisitStmt_(const IfThenElseNode *node) final {
