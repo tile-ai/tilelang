@@ -560,13 +560,13 @@ private:
       }
       // If none thread bindings are provided, partition the loop
       bool has_non_local = false;
-      PostOrderVisit(for_node->body, [&](const ObjectRef& obj) {
-        if (const auto* load = obj.as<BufferLoadNode>()) {
+      PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
+        if (const auto *load = obj.as<BufferLoadNode>()) {
           String scope = load->buffer.scope();
           if (scope != "local" && scope != "local.fragment") {
             has_non_local = true;
           }
-        } else if (const auto* store = obj.as<BufferStoreNode>()) {
+        } else if (const auto *store = obj.as<BufferStoreNode>()) {
           String scope = store->buffer.scope();
           if (scope != "local" && scope != "local.fragment") {
             has_non_local = true;
