@@ -247,20 +247,6 @@ bool IndiceCanVectorize(PrimExpr expr, Var var, PrimExpr iter_var_size,
   Vectorizer vectorizer(v0, IntImm(v0->dtype, target_vectorized_size));
   PrimExpr expr_vectorized = vectorizer.VisitExpr(expr_transformed);
 
-  // Check if the expr_vectorized uses v0
-  bool used_vectorize_var = false;
-  auto check_var = [&](const ObjectRef &n) {
-    if (const auto *var_node = n.as<VarNode>()) {
-      if (var_node == v0.get()) {
-        used_vectorize_var = true;
-      }
-    }
-  };
-  PostOrderVisit(expr_vectorized, check_var);
-  if (!used_vectorize_var) {
-    return true;
-  }
-
   auto ramp_node = expr_vectorized.as<RampNode>();
   if (!ramp_node) {
     expr_vectorized = analyzer->Simplify(expr_vectorized);
