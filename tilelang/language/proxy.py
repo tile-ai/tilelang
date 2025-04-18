@@ -178,7 +178,7 @@ if TYPE_CHECKING:
         def __class_getitem__(cls, key):
             return cls
         def __getitem__(self, key) -> Any: ...
-        def __setitem__(self, key, value) ->: ...
+        def __setitem__(self, key, value) -> None: ...
         def __init__(
             self,
             shape: Sequence[SupportsIndex],
@@ -204,7 +204,7 @@ if TYPE_CHECKING:
     class SharedBuffer(BaseTensor): ...
     class LocalBuffer(BaseTensor): ...
 else:
-    Tensor = TensorProxy() # pylint: disable=invalid-name>
+    Tensor = TensorProxy() # pylint: disable=invalid-name
     FragmentBuffer = FragmentBufferProxy()  # pylint: disable=invalid-name
     SharedBuffer = SharedBufferProxy()  # pylint: disable=invalid-name
     LocalBuffer = LocalBufferProxy()  # pylint: disable=invalid-name
