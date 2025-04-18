@@ -4,6 +4,11 @@ from .arch_base import TileDevice
 from .cuda import CUDA
 from .cpu import CPU
 from .cdna import CDNA
+from .rtx3090 import *
+from .rtx4090 import *
+from .a100 import *
+from .h100 import *
+from .v100 import *
 from typing import Union
 from tvm.target import Target
 
