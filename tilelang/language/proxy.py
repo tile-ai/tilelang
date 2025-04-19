@@ -3,7 +3,8 @@
 """The language interface for tl programs."""
 
 from __future__ import annotations
-from typing import Any, Optional, Self, Sequence, SupportsIndex, TYPE_CHECKING
+from typing import Any, Optional, Sequence, SupportsIndex, TYPE_CHECKING
+from typing_extensions import Self
 
 from tvm import tir
 from tvm.tir import Var, PrimExpr
