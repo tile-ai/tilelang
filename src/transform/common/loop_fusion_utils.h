@@ -112,7 +112,6 @@ private:
     if (detector.HasFragmentAccess()) {
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     }
-
     while (true) {
       if (current->kind != ForKind::kParallel)
         break;
@@ -130,6 +129,21 @@ private:
     // If only one loop found or loop chain size is 1, no fusion needed.
     if (loop_chain.size() <= 1) {
       return IRMutatorWithAnalyzer::VisitStmt_(op);
+    }
+
+    // If one of the loop has extent which is not 2^n, we do not fuse
+    for (auto l : loop_chain) {
+      PrimExpr extent = l->extent;
+      // If extent is not a constant integer, we cannot determine if it's power
+      // of 2
+      if (!extent.as<IntImmNode>()) {
+        return IRMutatorWithAnalyzer::VisitStmt_(op);
+      }
+      int64_t value = extent.as<IntImmNode>()->value;
+      // Check if value is power of 2: value > 0 and only has one bit set
+      if (value <= 0 || (value & (value - 1)) != 0) {
+        return IRMutatorWithAnalyzer::VisitStmt_(op);
+      }
     }
 
     // At this point we have multiple nested parallel loops starting at zero

@@ -244,11 +244,11 @@ bool IndiceCanVectorize(PrimExpr expr, Var var, PrimExpr iter_var_size,
   PrimExpr expr_simplified = analyzer->Simplify(expr_transformed);
 
   Vectorizer vectorizer(v0, IntImm(v0->dtype, target_vectorized_size));
-  PrimExpr expr_vectorized = vectorizer.VisitExpr(expr_transformed);
+  PrimExpr expr_vectorized =
+      analyzer->Simplify(vectorizer.VisitExpr(expr_transformed));
 
   auto ramp_node = expr_vectorized.as<RampNode>();
   if (!ramp_node) {
-    expr_vectorized = analyzer->Simplify(expr_vectorized);
     // Broadcast value
     if (expr_vectorized.dtype().lanes() == 1)
       return true;
