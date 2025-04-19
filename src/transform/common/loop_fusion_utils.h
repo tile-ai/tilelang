@@ -136,7 +136,8 @@ private:
     // If one of the loop has extent which is not 2^n, we do not fuse
     for (auto l : loop_chain) {
       PrimExpr extent = l->extent;
-      // If extent is not a constant integer, we cannot determine if it's power of 2
+      // If extent is not a constant integer, we cannot determine if it's power
+      // of 2
       if (!extent.as<IntImmNode>()) {
         return IRMutatorWithAnalyzer::VisitStmt_(op);
       }
