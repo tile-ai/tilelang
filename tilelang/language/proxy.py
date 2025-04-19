@@ -174,11 +174,18 @@ Buffer = BufferProxy()  # pylint: disable=invalid-name
 # Because when user do jit compile, the input and output will
 # be mapped with torch.Tensor.
 if TYPE_CHECKING:
+
     class BaseTensor:
+
         def __class_getitem__(cls, key):
             return cls
-        def __getitem__(self, key) -> Any: ...
-        def __setitem__(self, key, value) -> None: ...
+
+        def __getitem__(self, key) -> Any:
+            ...
+
+        def __setitem__(self, key, value) -> None:
+            ...
+
         def __init__(
             self,
             shape: Sequence[SupportsIndex],
@@ -191,24 +198,32 @@ if TYPE_CHECKING:
             offset_factor=None,
             buffer_type="",
             axis_separators=None,
-        ): ...
+        ):
+            ...
+
         @classmethod
-        def from_ptr(
-            cls,
-            pointer_var: Var,
-            shape: Sequence[PrimExpr, ...],
-            dtype: str = "float32"
-        ) -> Self: ...
-    class Tensor(BaseTensor): ...
-    class FragmentBuffer(BaseTensor): ...
-    class SharedBuffer(BaseTensor): ...
-    class LocalBuffer(BaseTensor): ...
+        def from_ptr(cls,
+                     pointer_var: Var,
+                     shape: Sequence[PrimExpr, ...],
+                     dtype: str = "float32") -> Self:
+            ...
+
+    class Tensor(BaseTensor):
+        ...
+
+    class FragmentBuffer(BaseTensor):
+        ...
+
+    class SharedBuffer(BaseTensor):
+        ...
+
+    class LocalBuffer(BaseTensor):
+        ...
 else:
-    Tensor = TensorProxy() # pylint: disable=invalid-name
+    Tensor = TensorProxy()  # pylint: disable=invalid-name
     FragmentBuffer = FragmentBufferProxy()  # pylint: disable=invalid-name
     SharedBuffer = SharedBufferProxy()  # pylint: disable=invalid-name
     LocalBuffer = LocalBufferProxy()  # pylint: disable=invalid-name
-
 
 
 def ptr(dtype: Optional[str] = None,
