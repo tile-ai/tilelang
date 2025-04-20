@@ -66,6 +66,8 @@ struct bfloat16x16 {
 typedef
     __attribute__((__vector_size__(4 * sizeof(short)))) short bfloat16x4_vec;
 
+// TODO: add fp8 and 4xfp8 packing
+
 using int32x4 = __attribute__((__vector_size__(4 * sizeof(int)))) int;
 using float32x4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
 using float32x16 = __attribute__((__vector_size__(16 * sizeof(float)))) float;

@@ -81,6 +81,7 @@ def tl_matmul(
         warp_row_tiles=warp_row_tiles,
         warp_col_tiles=warp_col_tiles,
         chunk=chunk,
+        kPack=1,  # for fp8, try 2
     )
 
     @T.prim_func

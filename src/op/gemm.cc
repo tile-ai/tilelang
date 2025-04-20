@@ -48,6 +48,7 @@ Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
   policy = static_cast<GemmWarpPolicy>(args[8].as<IntImm>().value()->value);
   clear_accum = args[9].as<Bool>().value();
   if (args.size() > 10) {
+    // kPack can be controlled from here
     kPack = args[10].as<IntImm>().value()->value;
     if (kPack != 1 && kPack != 2) {
       ICHECK(false) << "kPack must be 1 or 2";

@@ -52,6 +52,8 @@ Fragment makeGemmFragmentAB16x16CDNATransposed() {
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
+// TODO: add CDNA 32x32 fragment for fp8? (fp8 can also use 16x16)
+
 Fragment makeGemmFragmentC16x16CDNA() {
   IterVar i = make_itervar("i", 16);
   IterVar j = make_itervar("j", 16);
@@ -115,6 +117,7 @@ Fragment makeGemmFragmentCCDNA(const int block_m, const int block_n,
                                const int element_size) {
   if (element_size == 64)
     LOG(FATAL) << "Not supported";
+  // TODO: add 32x32 support? Might improve arithmetic intensity
   ICHECK(block_m % warp_m == 0);
   ICHECK(block_n % warp_n == 0);
   ICHECK(warp_m % 16 == 0) << "warp_m=" << warp_m;
@@ -340,6 +343,7 @@ Layout makeMatrixCoreSwizzleLayout(int stride, int continuous, int element_size,
   const int bankBitWidth = 32;
   const int SIMDWidth = 16;
   const int vecSize = 4 * kPack;
+  // kPack shows up everywhere, seems like for fp8 we might have to adjust it
   const int innerDimLength = continuous;
   const int typeWidthInBit = element_size;
 

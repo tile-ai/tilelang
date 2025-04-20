@@ -229,6 +229,7 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     if (!fail)
       return;
   } else if (t.is_float8()) {
+    // TODO add fp8x8, or can have in tl:gemm
     if (t.is_scalar()) {
       os << "unsigned char"; // __nv_fp8_storage_t is an alias of unsigned char
     } else if (lanes == 2) {
@@ -337,7 +338,7 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
         // s4.w is emitted as *(short2*)(&(i2.y)).y
         //
         ICHECK_EQ(t.lanes() % 2, 0)
-            << "only support even lane for shorT type with lanes > 4";
+            << "only support even lane for short type with lanes > 4";
         os << "int" << t.lanes() / 2;
       } else {
         fail = true;
@@ -460,6 +461,7 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
   } else if (t.is_bfloat16()) {
     os << "((nv_bfloat162*)(&(" << vec << "." << access[i / 2] << ")))->"
        << access[i % 2];
+    // TODO: add fp8
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
@@ -511,6 +513,7 @@ void CodeGenTileLangHIP::PrintVecElemStore(const std::string &vec, DataType t,
   } else if (t.is_bfloat16()) {
     stream << "((bfloat16_t*)(&(" << vec << "." << access[i / 2] << ")))["
            << (i % 2) << "] = " << value << ";\n";
+  // TODO: add fp8
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
@@ -909,9 +912,11 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string b_bias = this->PrintExpr(op->args[9]);
     std::string c_ref = this->PrintExpr(op->args[10]);
     std::string c_bias = this->PrintExpr(op->args[11]);
+    // TODO check for fp8 problem, may have to transpose B
     ICHECK(A_layout == "row" || B_layout == "row")
         << "Matrix core only support row major";
     // map for dtype -> float32x4 -> float4
+    // // TODO: add fp8
     std::unordered_map<std::string, std::string> dtype_map = {
         {"int8", "char"},
         {"int32", "int"},
@@ -1069,6 +1074,8 @@ void CodeGenTileLangHIP::VisitExpr_(const BroadcastNode *op,
     return;
   }
 
+  // TODO: add fp8, e.g. fp8x4, even fp8x8?
+
   if (op->dtype.is_float() && op->dtype.bits() == 32 &&
       op->dtype.lanes() == 8) {
     std::string v = PrintExpr(op->value);
@@ -1148,6 +1155,8 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     os << '(' << std::scientific << op->value << 'f' << ')';
     return;
   }
+  // TODO: add fp8
+
   // Type code is kFloat
   switch (op->dtype.bits()) {
   case 64:
@@ -1200,6 +1209,7 @@ void CodeGenTileLangHIP::HandleVolatileLoads(const std::string &value,
   } else {
     os << value;
   }
+  // TODO: do we need to add fp8 here?
 }
 
 void CodeGenTileLangHIP::PrintVecElemLoadExpr(DataType t, int i,
@@ -1254,6 +1264,7 @@ void CodeGenTileLangHIP::PrintVecElemLoadExpr(DataType t, int i,
     }
     return;
   }
+  // TODO: add fp8, create packing function for x4
 
   if (i == 0) {
     os << "make_";

@@ -53,7 +53,7 @@ class MatrixCoreIntrinEmitter(object):
         chunk: int = 16,
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
-        k_pack: Optional[int] = None,
+        k_pack: Optional[int] = None,  # Perfect, kPack can be adjusted from here
         is_m_first: Optional[bool] = False,
     ):
         self.a_dtype = a_dtype
