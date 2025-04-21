@@ -202,8 +202,8 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (instruction_dim > 256) {
     // smem_box dim must be in [0, 256]
     // if is 512, we need to split the copy into two parts
-    ICHECK((*inner_box_dim) % 256 == 0) << "inner_box_dim: " << *inner_box_dim
-                                           << " is not divisible by 256";
+    ICHECK((*inner_box_dim) % 256 == 0)
+        << "inner_box_dim: " << *inner_box_dim << " is not divisible by 256";
     instruction_dim = 256;
   }
   ICHECK((*inner_box_dim) % instruction_dim == 0);

@@ -57,7 +57,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             loop_range = T.ceildiv(seqlen_kv, block_N)
             for k in T.Pipelined(loop_range, num_stages=2):
                 T.copy(KV[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], qKV_shared)
-                T.copy(K_pe[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_pe_shared)                
+                T.copy(K_pe[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_pe_shared)
                 T.copy(qKV_shared, KV_shared)
 
                 T.clear(acc_s)
