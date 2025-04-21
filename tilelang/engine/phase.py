@@ -50,9 +50,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
-
-    # TODO(lei): may need a pass to fuse the if-then-else in the
-    # pipeline loop when we meet dynamic branch.
     mod = tir.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
