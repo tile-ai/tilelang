@@ -208,6 +208,7 @@ def lower(
     '''
 
     mod = func_or_mod
+    params = None
     if isinstance(func_or_mod, tir.PrimFunc):
         func = func_or_mod
         params = extrac_params(func) if not runtime_only else None
