@@ -241,12 +241,6 @@ public:
 
       // Check that each thread_var_vec_ entry is defined
       if (!thread_var_vec_[i].defined() && skip_thread_partition_) {
-        if (!thread_var_.defined()) {
-          // TODO(lei): This is a workaround for cpu backend
-          // Fake thread var to inference predicate for the buffer
-          thread_var_ = IterVar(Range::FromMinExtent(PrimExpr(0), PrimExpr(1)),
-                                Var(""), IterVarType::kDataPar);
-        }
         thread_var_vec_[i] = thread_var_;
       }
       q.push(i);
@@ -425,11 +419,16 @@ private:
       }
       infer_list_.push_back(std::move(p));
       thread_var_vec_.push_back(thread_var_);
-      auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-      auto dtype = thread_var_->var.dtype();
-      thread_bounds_vec_.push_back(
-          Range::FromMinExtent(IntImm(dtype, const_int_bound->min_value),
-                               IntImm(dtype, const_int_bound->max_value + 1)));
+      if (thread_var_.defined()) {
+        auto const_int_bound = analyzer_.const_int_bound(thread_var_);
+        ICHECK(const_int_bound->min_value >= 0) << "thread_var_ has no bound";
+        auto dtype = thread_var_->var.dtype();
+        thread_bounds_vec_.push_back(Range::FromMinExtent(
+            IntImm(dtype, const_int_bound->min_value),
+            IntImm(dtype, const_int_bound->max_value + 1)));
+      } else {
+        thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
+      }
     }
   }
 
@@ -458,11 +457,15 @@ private:
       }
       infer_list_.push_back(std::move(infer));
       thread_var_vec_.push_back(thread_var_);
-      auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-      auto dtype = thread_var_->var.dtype();
-      thread_bounds_vec_.push_back(
-          Range::FromMinExtent(IntImm(dtype, const_int_bound->min_value),
-                               IntImm(dtype, const_int_bound->max_value + 1)));
+      if (thread_var_.defined()) {
+        auto const_int_bound = analyzer_.const_int_bound(thread_var_);
+        auto dtype = thread_var_->var.dtype();
+        thread_bounds_vec_.push_back(Range::FromMinExtent(
+            IntImm(dtype, const_int_bound->min_value),
+            IntImm(dtype, const_int_bound->max_value + 1)));
+      } else {
+        thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
+      }
     } else {
       IRVisitorWithAnalyzer::VisitStmt(op->body);
     }
@@ -499,7 +502,10 @@ private:
   std::vector<std::unique_ptr<Operator>> infer_list_;
   std::unordered_map<Buffer, std::vector<int>, ObjectPtrHash, ObjectPtrEqual>
       use_list_;
-  IterVar thread_var_;
+  // This is a workaround for cpu backend,
+  // we need to define a thread_var for the serial loop.
+  IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
+                                IterVarType::kDataPar);
   std::vector<IterVar> thread_var_vec_;
   std::vector<Range> thread_bounds_vec_;
   Target target_;
