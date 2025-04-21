@@ -4,15 +4,15 @@ from tvm import tir, IRModule
 from tvm.target import Target
 import tilelang
 
+
 def allow_tma_and_warp_specialized(target: Target) -> bool:
     if target.arch not in {"sm_90"}:
         return False
     cur_pass_ctx = tilelang.transform.get_pass_context()
     disable_tma_lower = cur_pass_ctx.config.get("tl.disable_tma_lower", False)
     disable_warp_specialized = cur_pass_ctx.config.get("tl.disable_warp_specialized", False)
-    if disable_tma_lower and disable_warp_specialized:
-        return False
-    return True
+    return not (disable_tma_lower and disable_warp_specialized)
+
 
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module

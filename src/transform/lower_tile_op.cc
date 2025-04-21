@@ -293,11 +293,13 @@ private:
         ctxt->GetConfig(kDisableTMALower, Optional<Bool>());
     bool disable_tma_lower = opt_disable_tma_lower.value_or(Bool(false));
     auto const_int_bound = analyzer_->const_int_bound(thread_var_);
-    Range thread_bounds = Range::FromMinExtent(IntImm(thread_var_.dtype(), const_int_bound->min_value), IntImm(thread_var_.dtype(), const_int_bound->max_value + 1));
-    auto lowered = tile_op->Lower(LowerArgs{target_, thread_bounds, thread_var_,
-                                            callback, layout_map_, buffer_remap_,
-                                            disable_tma_lower},
-                                  analyzer_);
+    Range thread_bounds = Range::FromMinExtent(
+        IntImm(thread_var_.dtype(), const_int_bound->min_value),
+        IntImm(thread_var_.dtype(), const_int_bound->max_value + 1));
+    auto lowered =
+        tile_op->Lower(LowerArgs{target_, thread_bounds, thread_var_, callback,
+                                 layout_map_, buffer_remap_, disable_tma_lower},
+                       analyzer_);
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
 

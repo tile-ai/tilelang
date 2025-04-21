@@ -6,6 +6,7 @@
 from . import _ffi_api
 from .simplify import Simplify, simplify_prim_func  # noqa: F401
 
+
 def get_pass_context():
     """Get the current pass context"""
     from tilelang import tvm as tvm

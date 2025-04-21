@@ -78,8 +78,7 @@ public:
 
     // If there are inner loops, bind their ranges as well
     while (const ForNode *inner = body.as<ForNode>()) {
-      analyzer_->Bind(inner->loop_var,
-                      Range::FromMinExtent(0, inner->extent));
+      analyzer_->Bind(inner->loop_var, Range::FromMinExtent(0, inner->extent));
       loop_vars.push_back(inner->loop_var);
       loop_extents.push_back(inner->extent);
       body = inner->body;
@@ -135,8 +134,7 @@ public:
           int64_t upper_bound = bound->max_value + 1;
           int64_t shape = Downcast<IntImm>(buffer->shape[i])->value;
           if (upper_bound < shape) {
-            PrimExpr predicate =
-                LT(index, IntImm(index.dtype(), upper_bound));
+            PrimExpr predicate = LT(index, IntImm(index.dtype(), upper_bound));
             condition =
                 condition.defined() ? And(condition, predicate) : predicate;
 
@@ -148,9 +146,9 @@ public:
                 analyzer_);
 
             loop_extents.Set(i, IntImm(index.dtype(), shape));
-            body = tir::Substitute(
-                body, {{loop_var, inverse_index_map->MapIndices(
-                                      {loop_var}, analyzer_)[0]}});
+            body = tir::Substitute(body,
+                                   {{loop_var, inverse_index_map->MapIndices(
+                                                   {loop_var}, analyzer_)[0]}});
           }
         }
       }
@@ -289,9 +287,7 @@ public:
 
       // Run InferLayout
       auto updates = next->InferLayout(
-          LayoutInferArgs{target_, thread_bounds,
-                          layout_map},
-          level);
+          LayoutInferArgs{target_, thread_bounds, layout_map}, level);
       // Process the returned updates
       for (const auto &[buffer, layout] : updates) {
         // Basic validity checks
@@ -432,8 +428,8 @@ private:
       auto const_int_bound = analyzer_.const_int_bound(thread_var_);
       auto dtype = thread_var_->var.dtype();
       thread_bounds_vec_.push_back(
-        Range::FromMinExtent(IntImm(dtype, const_int_bound->min_value), 
-        IntImm(dtype, const_int_bound->max_value + 1)));
+          Range::FromMinExtent(IntImm(dtype, const_int_bound->min_value),
+                               IntImm(dtype, const_int_bound->max_value + 1)));
     }
   }
 
@@ -465,8 +461,8 @@ private:
       auto const_int_bound = analyzer_.const_int_bound(thread_var_);
       auto dtype = thread_var_->var.dtype();
       thread_bounds_vec_.push_back(
-        Range::FromMinExtent(IntImm(dtype, const_int_bound->min_value), 
-        IntImm(dtype, const_int_bound->max_value + 1)));
+          Range::FromMinExtent(IntImm(dtype, const_int_bound->min_value),
+                               IntImm(dtype, const_int_bound->max_value + 1)));
     } else {
       IRVisitorWithAnalyzer::VisitStmt(op->body);
     }

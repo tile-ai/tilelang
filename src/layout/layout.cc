@@ -214,7 +214,8 @@ Layout LayoutNode::Inverse() const {
   arith::IterMapResult res =
       arith::DetectIterMap(forward_index_, getVarMap(), 1,
                            arith::IterMapLevel::Bijective, &analyzer);
-  ICHECK(res->errors.empty()) << "Layout " << DebugOutput() << " has errors: " << res->errors;
+  ICHECK(res->errors.empty())
+      << "Layout " << DebugOutput() << " has errors: " << res->errors;
 
   auto outputs_shape = OutputShape();
   Array<PrimExpr> outputs;
