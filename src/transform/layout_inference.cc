@@ -419,13 +419,13 @@ private:
       }
       infer_list_.push_back(std::move(p));
       thread_var_vec_.push_back(thread_var_);
-      if (thread_var_.defined()) {
+      if (analyzer_.const_int_bound.IsBound(thread_var_->var)) {
         auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-        ICHECK(const_int_bound->min_value >= 0) << "thread_var_ has no bound";
+        auto min_value = const_int_bound->min_value;
+        auto max_value = const_int_bound->max_value;
         auto dtype = thread_var_->var.dtype();
         thread_bounds_vec_.push_back(Range::FromMinExtent(
-            IntImm(dtype, const_int_bound->min_value),
-            IntImm(dtype, const_int_bound->max_value + 1)));
+            IntImm(dtype, min_value), IntImm(dtype, max_value + 1)));
       } else {
         thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
       }
@@ -457,7 +457,8 @@ private:
       }
       infer_list_.push_back(std::move(infer));
       thread_var_vec_.push_back(thread_var_);
-      if (thread_var_.defined()) {
+      if (thread_var_.defined() &&
+          analyzer_.const_int_bound.IsBound(thread_var_->var)) {
         auto const_int_bound = analyzer_.const_int_bound(thread_var_);
         auto dtype = thread_var_->var.dtype();
         thread_bounds_vec_.push_back(Range::FromMinExtent(
@@ -618,7 +619,8 @@ private:
 
 private:
   const LayoutInferenceResult result_;
-  IterVar thread_var_;
+  IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
+                                IterVarType::kDataPar);
   bool skip_thread_partition_{false};
 };
 

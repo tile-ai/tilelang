@@ -294,10 +294,10 @@ private:
     bool disable_tma_lower = opt_disable_tma_lower.value_or(Bool(false));
     Range thread_bounds;
 
-    auto const_int_bound = analyzer_->const_int_bound(thread_var_);
-    auto min_value = const_int_bound->min_value;
-    auto max_value = const_int_bound->max_value;
-    if (min_value >= 0) {
+    if (analyzer_->const_int_bound.IsBound(thread_var_->var)) {
+      auto const_int_bound = analyzer_->const_int_bound(thread_var_);
+      auto min_value = const_int_bound->min_value;
+      auto max_value = const_int_bound->max_value;
       thread_bounds =
           Range::FromMinExtent(IntImm(thread_var_->var.dtype(), min_value),
                                IntImm(thread_var_->var.dtype(), max_value + 1));
