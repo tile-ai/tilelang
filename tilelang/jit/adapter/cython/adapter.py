@@ -40,17 +40,17 @@ def get_cython_compiler() -> Optional[str]:
     """
 
     cython_names = ["cython", "cython3"]
-    
+
     # Check system PATH
     dirs_in_path = list(os.get_exec_path())
-    
+
     # Add user site-packages bin directory
     user_base = site.getuserbase()
     if user_base:
         user_bin = os.path.join(user_base, "bin")
         if os.path.exists(user_bin):
             dirs_in_path = [user_bin] + dirs_in_path
-    
+
     # If in a virtual environment, add its bin directory
     if sys.prefix != sys.base_prefix:
         venv_bin = os.path.join(sys.prefix, "bin")
