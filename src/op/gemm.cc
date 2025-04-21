@@ -117,12 +117,12 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (TargetIsCDNA(T.target)) {
     warp_size = 64;
   }
-
+  auto block_size = *as_const_int(T.thread_bounds->extent);
   bool maybe_wgmma = TargetIsHopper(T.target) && (this->M >= 64) &&
-                     (T.block_size / warp_size % 4 == 0);
+                     (block_size / warp_size % 4 == 0);
 
   auto [warp_m, warp_n] =
-      ComputeWarpPartition(T.block_size / warp_size, T.target, maybe_wgmma);
+      ComputeWarpPartition(block_size / warp_size, T.target, maybe_wgmma);
 
   std::stringstream ss;
   std::string op_name = "tl::gemm_ss";
@@ -164,11 +164,11 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     return {};
   LayoutMap results;
   ICHECK(C.scope() == "local.fragment");
-
+  auto block_size = *as_const_int(T.thread_bounds->extent);
   if (TargetIsVolta(T.target)) {
     const int warp_size = 32;
     auto [warp_m, warp_n] =
-        ComputeWarpPartition(T.block_size / warp_size, T.target);
+        ComputeWarpPartition(block_size / warp_size, T.target);
     auto fragment =
         makeGemmVoltaFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
     results.Set(C, fragment);
@@ -190,7 +190,7 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   } else if (TargetIsAmpere(T.target) || TargetIsTuring(T.target)) {
     const int warp_size = 32;
     auto [warp_m, warp_n] =
-        ComputeWarpPartition(T.block_size / warp_size, T.target);
+        ComputeWarpPartition(block_size / warp_size, T.target);
     auto fragment =
         makeGemmFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
     results.Set(C, fragment);
@@ -222,13 +222,13 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     }
   } else if (TargetIsHopper(T.target)) {
     const int warp_size = 32;
-    bool maybe_wgmma = (this->M >= 64) && (T.block_size / warp_size % 4 == 0);
+    bool maybe_wgmma = (this->M >= 64) && (block_size / warp_size % 4 == 0);
     if (!maybe_wgmma) {
       LOG(WARNING)
           << "WGMMA is not enabled because M < 64 or block_size % 128 != 0";
     }
     auto [warp_m, warp_n] =
-        ComputeWarpPartition(T.block_size / warp_size, T.target, maybe_wgmma);
+        ComputeWarpPartition(block_size / warp_size, T.target, maybe_wgmma);
     auto fragment =
         maybe_wgmma
             ? makeGemmFragmentCHopper(M, N, M / warp_m, N / warp_n,
@@ -260,7 +260,7 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   } else if (TargetIsCDNA(T.target)) {
     const int warp_size = 64;
     auto [warp_m, warp_n] =
-        ComputeWarpPartition(T.block_size / warp_size, T.target);
+        ComputeWarpPartition(block_size / warp_size, T.target);
 
     auto fragment =
         makeGemmFragmentCCDNA(M, N, M / warp_m, N / warp_n, C->dtype.bits());
