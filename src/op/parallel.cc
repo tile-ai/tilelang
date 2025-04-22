@@ -128,6 +128,7 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   if (level == InferLevel::kStrict)
     return {};
 
+  auto block_size = T.thread_bounds->extent - T.thread_bounds->min;
   // Step 1: try to infer loop's partition from a source fragment
   Buffer source_buffer, read_source_buffer;
   for (const auto &[buffer, _] : indice_map_) {
@@ -192,12 +193,10 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
           LOG(FATAL) << "coalesced_width should be an IntImmNode.";
         }
       }
-
-      loop_layout_ = PlanLoopPartition(root_, T.block_size, vector_size);
+      loop_layout_ = PlanLoopPartition(root_, vector_size, T.thread_bounds);
     }
     PrimExpr loop_thread_extent = loop_layout_->ThreadExtent();
-    if (!analyzer_.CanProveEqual(loop_thread_extent,
-                                 static_cast<int>(T.block_size)))
+    if (!analyzer_.CanProveEqual(loop_thread_extent, block_size))
       AddPredicate(LT(InputPlaceholder(0), loop_thread_extent));
   } else {
     return {};

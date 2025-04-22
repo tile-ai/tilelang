@@ -39,6 +39,8 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
 
 Fragment PlanLoopPartition(For op, size_t num_thread, int vectorize_size);
 
+Fragment PlanLoopPartition(For op, int vectorize_size, Range thread_range);
+
 For LoopPragmaUnroll(For stmt);
 
 } // namespace tl

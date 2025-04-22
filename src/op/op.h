@@ -44,7 +44,7 @@ enum class InferLevel {
 
 struct LowerArgs {
   Target target;
-  size_t block_size;
+  Range thread_bounds;
   Var thread_var;
   AddWorkspaceCallback AddWorkspace;
   LayoutMap layout_map;
@@ -54,7 +54,7 @@ struct LowerArgs {
 
 struct LayoutInferArgs {
   Target target;
-  size_t block_size;
+  Range thread_bounds;
   LayoutMap layout_map;
   Map<Buffer, Buffer> buffer_remap;
 };
