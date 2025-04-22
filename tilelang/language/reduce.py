@@ -1,6 +1,8 @@
 """The language interface for tl programs."""
 
 from tvm import tir
+from typing import Optional
+from tilelang.language import copy, macro, alloc_shared
 
 
 def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clear: bool):
@@ -104,3 +106,33 @@ def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int):
         tir.Call: Handle to the reduction operation
     """
     return reduce(buffer, out, "absmax", dim, True)
+
+
+@macro
+def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -> tir.PrimExpr:
+    cumsum_smem = alloc_shared(src.shape, src.dtype, "shared.dyn")
+    copy(src, cumsum_smem)
+    tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.cumsum"),
+        cumsum_smem.access_ptr("r"),
+        cumsum_smem.access_ptr("w"),
+        dim,
+        reverse,
+    )
+    copy(cumsum_smem, dst)
+
+
+def cumsum(src: tir.Buffer, dst: Optional[tir.Buffer] = None, dim: int = 0, reverse: bool = False):
+    if dst is None:
+        dst = src
+    if src.scope() == "local.fragment":
+        return cumsum_fragment(src, dst, dim, reverse)
+    return tir.call_intrin(
+        "handle",
+        tir.op.Op.get("tl.cumsum"),
+        src.access_ptr("r"),
+        dst.access_ptr("w"),
+        dim,
+        reverse,
+    )
