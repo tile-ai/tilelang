@@ -259,19 +259,24 @@ CumSumOp::CumSumOp(Array<PrimExpr> args, BufferMap vmap) {
 Stmt CumSumOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (this->src.scope() == "local.fragment" &&
       this->dst.scope() == "local.fragment") {
-    LOG(FATAL) << "CumSum for fragment not implemented, please raise an issue if you need this feature.";
-  } else if (this->src.scope() == "shared.dyn" || this->src.scope() == "shared") {
+    LOG(FATAL) << "CumSum for fragment not implemented, please raise an issue "
+                  "if you need this feature.";
+  } else if (this->src.scope() == "shared.dyn" ||
+             this->src.scope() == "shared") {
     ICHECK(this->dst.scope() == "shared.dyn" || this->dst.scope() == "shared");
     std::stringstream ss;
     auto threads = T.thread_bounds->extent - T.thread_bounds->min;
-    ss << "tl::CumSum2D<" << threads << ", " << dim << ", " << (reverse ? "true" : "false") << ">::run";
-    Array<PrimExpr> args = {StringImm(ss.str()), src.access_ptr(1), dst.access_ptr(3)};
+    ss << "tl::CumSum2D<" << threads << ", " << dim << ", "
+       << (reverse ? "true" : "false") << ">::run";
+    Array<PrimExpr> args = {StringImm(ss.str()), src.access_ptr(1),
+                            dst.access_ptr(3)};
     for (int i = 0; i < src->shape.size(); i++) {
       args.push_back(src->shape[i]);
     }
     return Evaluate(Call(dst->dtype, builtin::call_extern(), args));
   } else {
-    ICHECK(false) << "Cannot lower cumsum for " << this->src.scope() << " and " << this->dst.scope();
+    ICHECK(false) << "Cannot lower cumsum for " << this->src.scope() << " and "
+                  << this->dst.scope();
   }
 
   return Stmt();
@@ -280,7 +285,6 @@ Stmt CumSumOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 LayoutMap CumSumOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   return {};
 }
-
 
 TIR_REGISTER_TL_OP(CumSumOp, cumsum)
     .set_num_inputs(4)

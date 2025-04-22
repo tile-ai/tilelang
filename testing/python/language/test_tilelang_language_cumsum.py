@@ -6,7 +6,8 @@ import tilelang.testing
 import tilelang as tl
 import torch
 
-def cumsum_smem_test(M, N, block_M, block_N, dim = 0, reverse = False, dtype="float16"):
+
+def cumsum_smem_test(M, N, block_M, block_N, dim=0, reverse=False, dtype="float16"):
     import tilelang.language as T
 
     @T.prim_func
@@ -24,7 +25,8 @@ def cumsum_smem_test(M, N, block_M, block_N, dim = 0, reverse = False, dtype="fl
 
     return cumsum
 
-def cumsum_fragment_test(M, N, block_M, block_N, dim = 0, reverse = False, dtype="float16"):
+
+def cumsum_fragment_test(M, N, block_M, block_N, dim=0, reverse=False, dtype="float16"):
     import tilelang.language as T
 
     @T.prim_func
@@ -44,7 +46,8 @@ def cumsum_fragment_test(M, N, block_M, block_N, dim = 0, reverse = False, dtype
 
     return cumsum
 
-def run_cumsum(M, N, block_M, block_N, dim = 0, reverse = False, dtype="float16", scope="smem"):
+
+def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype="float16", scope="smem"):
     if scope == "smem":
         program = cumsum_smem_test(M, N, block_M, block_N, dim, reverse, dtype)
     elif scope == "fragment":
@@ -56,12 +59,16 @@ def run_cumsum(M, N, block_M, block_N, dim = 0, reverse = False, dtype="float16"
         ref_b = torch.empty_like(A)
         for i in range(M // block_M):
             for j in range(N // block_N):
-                ref_b[i * block_M:(i + 1) * block_M, j * block_N:(j + 1) * block_N] = A[i * block_M:(i + 1) * block_M, j * block_N:(j + 1) * block_N].cumsum(dim=dim)
+                ref_b[i * block_M:(i + 1) * block_M,
+                      j * block_N:(j + 1) * block_N] = A[i * block_M:(i + 1) * block_M, j *
+                                                         block_N:(j + 1) * block_N].cumsum(dim=dim)
                 if reverse:
-                    ref_b[i * block_M:(i + 1) * block_M, j * block_N:(j + 1) * block_N] = ref_b[i * block_M:(i + 1) * block_M, j * block_N:(j + 1) * block_N].flip(dims=[dim])
+                    ref_b[i * block_M:(i + 1) * block_M, j * block_N:(j + 1) *
+                          block_N] = ref_b[i * block_M:(i + 1) * block_M,
+                                           j * block_N:(j + 1) * block_N].flip(dims=[dim])
         return ref_b
 
-    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+    profiler.assert_allclose(ref_program)
 
 
 def test_cumsum_smem():
@@ -74,6 +81,7 @@ def test_cumsum_smem():
     run_cumsum(256, 256, 128, 128, dtype="float32")
     run_cumsum(256, 256, 128, 128, dtype="float16")
 
+
 def test_cumsum_fragment():
     run_cumsum(1024, 1024, 128, 128, scope="fragment")
     run_cumsum(1024, 1024, 128, 128, dim=1, scope="fragment")
@@ -82,6 +90,7 @@ def test_cumsum_fragment():
     # Test different dtypes
     run_cumsum(256, 256, 128, 128, dtype="float32", scope="fragment")
     run_cumsum(256, 256, 128, 128, dtype="float16", scope="fragment")
+
 
 if __name__ == "__main__":
     tilelang.testing.main()

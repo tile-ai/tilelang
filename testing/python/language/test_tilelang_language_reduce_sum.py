@@ -4,7 +4,9 @@
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang as tl
+
 tilelang.disable_cache()
+
 
 def reduce_sum_test(M, N, dtype="float16"):
     import tilelang.language as T
