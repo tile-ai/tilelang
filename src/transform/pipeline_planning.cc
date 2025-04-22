@@ -225,6 +225,30 @@ private:
     auto stage_anno = loop->annotations.Get("tl_pipeline_stage");
     auto num_stages_anno = loop->annotations.Get("num_stages");
     if (order_anno.defined() && stage_anno.defined()) {
+      // Check if order_anno or stage_anno contains -1, which means TMA+WS is
+      // enabled
+      bool ws_tma_enabled = false;
+      auto order_array = Downcast<Array<Integer>>(order_anno);
+      auto stage_array = Downcast<Array<Integer>>(stage_anno);
+      for (const auto &val : order_array) {
+        if (val->value == -1) {
+          ws_tma_enabled = true;
+          break;
+        }
+      }
+      if (!ws_tma_enabled) {
+        for (const auto &val : stage_array) {
+          if (val->value == -1) {
+            ws_tma_enabled = true;
+            break;
+          }
+        }
+      }
+
+      if (ws_tma_enabled) {
+        return StmtExprMutator::VisitStmt_(loop);
+      }
+
       Map<String, ObjectRef> annotations;
       for (const auto &[key, value] : loop->annotations) {
         if (key != "tl_pipeline_order") {
