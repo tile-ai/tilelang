@@ -163,11 +163,11 @@ Stmt Copy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (is_cpu_target) {
     vectorized_thread_loop = VectorizeLoop(fused_loop);
   } else {
-    std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict, InferLevel::kFree};
+    std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
+                                      InferLevel::kFree};
     for (auto level : levels) {
       par_op->InferLayout(
-          {T.target, T.thread_bounds, T.layout_map, T.buffer_remap},
-          level);
+          {T.target, T.thread_bounds, T.layout_map, T.buffer_remap}, level);
     }
 
     auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
