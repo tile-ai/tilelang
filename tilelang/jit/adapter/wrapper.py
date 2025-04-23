@@ -38,6 +38,7 @@ extern "C" const char* get_last_error() {{
 extern "C" int init() {{
     error_buf[0] = '\\0';
     {0}
+    return 0;
 }}
 """
 
