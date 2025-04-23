@@ -122,6 +122,24 @@ bool ParallelOp::IsCommonAccessIndice(const Buffer &buffer) const {
   return StructuralEqual()(indice_map_[buffer], common_indice);
 }
 
+/*! \brief Infer the layout for parallel operations based on different inference
+ * levels
+ *
+ * The inference level controls how aggressively we try to infer and optimize
+ * layouts:
+ * - kStrict (2): Most conservative level. Only allows explicitly defined
+ * layouts. Returns empty layout map if loop_layout_ is not already defined.
+ *                Used when exact layout control is required.
+ *
+ * - kCommon (1): Intermediate level between strict and free.
+ *                Allows common layout patterns while maintaining some
+ * constraints.
+ *
+ * - kFree (0):   Most permissive level. Allows maximum optimization freedom.
+ *                Will attempt layout inference even without source buffers.
+ *                Can generate new layouts based on vectorization and thread
+ * bounds. Used when maximum performance optimization is desired.
+ */
 LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   if (loop_layout_.defined())
     return {};
@@ -163,6 +181,8 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   };
   if (source_buffer.defined()) {
     loop_layout_ = compute_loop_layout_from_buffer(source_buffer);
+  } else if (read_source_buffer.defined()) {
+    loop_layout_ = compute_loop_layout_from_buffer(read_source_buffer);
   } else if (level == InferLevel::kFree) {
     if (read_source_buffer.defined()) {
       loop_layout_ = compute_loop_layout_from_buffer(read_source_buffer);
