@@ -219,7 +219,7 @@ private:
 
     // Create the fused loop
     For fused_for = For(fused_var, 0, fused_extent, ForKind::kParallel, body);
-
+    fused_for.CopyOnWrite()->annotations = op->annotations;
     return fused_for;
   }
 };
