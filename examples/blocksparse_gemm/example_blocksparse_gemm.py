@@ -7,7 +7,7 @@ import tilelang
 import tilelang.language as T
 from tilelang.autotuner import AutoTuner
 from tilelang.engine.param import KernelParam
-from tilelang.utils.tensor import get_tensor_supply, TensorSupplyType
+from tilelang.utils.tensor import get_tensor_supply, TensorDistribution
 import torch
 from typing import List
 
@@ -30,7 +30,7 @@ args = parser.parse_args()
 M, N, K = args.m, args.n, args.k
 sparsity = args.sparsity
 use_autotune = args.use_autotune
-default_tensor_supply = get_tensor_supply(TensorSupplyType.Auto)
+default_tensor_supply = get_tensor_supply(TensorDistribution.Auto)
 
 print(f"Running BlockSparse MatMul Benchmark for M={M}, N={N}, K={K}")
 print(f"Target Block Sparsity: {sparsity}")
@@ -111,8 +111,8 @@ def get_best_config(M, N, K):
     ).set_compile_args(
         out_idx=[-1],  # Index of the output tensor
 
-        # supply_type should not set here because we provide a custom supply
-        # function `supply_prog` and `supply_type` will be ignored.
+        # distribution should not set here because we provide a custom supply
+        # function `supply_prog` and `distribution` will be ignored.
 
         # supply_prog: Provide the custom function to generate input tensors
         # (A, B, BlockMask) for the kernel, allowing controlling sparsity via

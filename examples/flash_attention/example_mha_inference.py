@@ -306,7 +306,7 @@ if __name__ == "__main__":
     program = flashattn(BATCH, H, Q_CTX, KV_CTX, D_HEAD, causal, BLOCK_M, BLOCK_N)
     ref_program = partial(ref_program, causal=causal)
     kernel = tilelang.compile(program, out_idx=[5])
-    profiler = kernel.get_profiler(tilelang.TensorSupplyType.Normal)
+    profiler = kernel.get_profiler(tilelang.TensorDistribution.Normal)
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
     print("All checks passed!")
 

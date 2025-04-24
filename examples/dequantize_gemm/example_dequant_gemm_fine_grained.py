@@ -115,7 +115,7 @@ def run_gemm(
     )
 
     kernel = tilelang.compile(program, out_idx=[2])
-    profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
+    profiler = kernel.get_profiler(tilelang.TensorDistribution.Integer)
 
     out = profiler.run_once()
     assert out is not None
@@ -364,7 +364,7 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
 
     kernel = tilelang.compile(matmul, out_idx=[2])
     src_code = kernel.get_kernel_source()
-    profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
+    profiler = kernel.get_profiler(tilelang.TensorDistribution.Integer)
 
     # src_code is the generated cuda source
     assert src_code is not None

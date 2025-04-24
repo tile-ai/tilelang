@@ -14,7 +14,7 @@ from tilelang.jit.adapter import (
     CythonKernelAdapter,
 )
 from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
-from tilelang.profiler import Profiler, TensorSupplyType
+from tilelang.profiler import Profiler, TensorDistribution
 from tilelang.engine.param import KernelParam, CompiledArtifact
 
 
@@ -301,14 +301,14 @@ class JITKernel(object):
         return cls(func=tilelang_func, **kwargs)
 
     def get_profiler(self,
-                     tensor_supply_type: TensorSupplyType = TensorSupplyType.Auto) -> Profiler:
+                     tensor_distribution: TensorDistribution = TensorDistribution.Auto) -> Profiler:
         """
         Creates a profiler to benchmark the compiled runtime module.
 
         Parameters
         ----------
-        tensor_supply_type : TensorSupplyType, optional
-            The type of input tensors to supply for profiling (default: TensorSupplyType.Auto).
+        tensor_distribution : TensorDistribution, optional
+            The type of input tensors to supply for profiling (default: TensorDistribution.Auto).
 
         Returns
         -------
@@ -316,7 +316,7 @@ class JITKernel(object):
             A Profiler instance for benchmarking the runtime module.
         """
         return Profiler(self.params, self.out_idx,
-                        tensor_supply_type).with_default_adapter(self.adapter)
+                        tensor_distribution).with_default_adapter(self.adapter)
 
     def get_kernel_source(self) -> str:
         """

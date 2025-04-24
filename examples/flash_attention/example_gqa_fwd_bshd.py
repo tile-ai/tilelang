@@ -192,7 +192,7 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False, groups=1):
             keys=["block_M", "block_N", "num_stages", "threads"],
             warmup=10,
             rep=10)
-        @jit(out_idx=[3], supply_type=tilelang.TensorSupplyType.Integer, ref_prog=None)
+        @jit(out_idx=[3], distribution=tilelang.TensorDistribution.Integer, ref_prog=None)
         def kernel(block_M=None, block_N=None, num_stages=None, threads=None):
             return kernel_func(block_M, block_N, num_stages, threads)
 
@@ -252,7 +252,7 @@ if __name__ == "__main__":
                 block_M=128, block_N=128, num_stages=2, threads=128)
         ref_program = partial(ref_program, is_causal=is_causal, groups=groups)
         kernel = tilelang.compile(program, out_idx=[3])
-        profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+        profiler = kernel.get_profiler(tensor_distribution=tilelang.TensorDistribution.Normal)
         profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")
         latency = profiler.do_bench(ref_program, warmup=500)

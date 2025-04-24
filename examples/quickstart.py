@@ -97,7 +97,7 @@ print("Kernel output matches PyTorch reference.")
 # print("Generated CUDA kernel:\n", cuda_source)
 
 # 5.Profile latency with kernel
-profiler = jit_kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+profiler = jit_kernel.get_profiler(tensor_distribution=tilelang.TensorDistribution.Normal)
 
 latency = profiler.do_bench()
 

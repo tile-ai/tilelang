@@ -195,7 +195,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
     C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, accum_dtype))
 
-    mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
+    mod = TL.Profiler(mod, params, [], TL.TensorDistribution.Integer)
 
     mod(A, B, C)
 

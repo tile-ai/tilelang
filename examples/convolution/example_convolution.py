@@ -155,7 +155,7 @@ def get_best_config(N, C, H, W, F, K, S, D, P, with_roller):
         kernel=kernel, configs=get_configs(N, C, H, W, F, K, S, D, P,
                                            with_roller)).set_compile_args(
                                                out_idx=[2],
-                                               supply_type=tilelang.TensorSupplyType.Integer,
+                                               distribution=tilelang.TensorDistribution.Integer,
                                                ref_prog=ref_program(S, P, D),
                                                skip_check=False,
                                                target="auto",

@@ -243,7 +243,7 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
             keys=["block_M", "block_N", "block_K", "num_stages", "threads", "split"],
             warmup=10,
             rep=10)
-        @jit(out_idx=[2], supply_type=tilelang.TensorSupplyType.Integer, ref_prog=None)
+        @jit(out_idx=[2], distribution=tilelang.TensorDistribution.Integer, ref_prog=None)
         def kernel(block_M=None,
                    block_N=None,
                    block_K=None,
@@ -284,7 +284,7 @@ if __name__ == "__main__":
             M, N, K, "float16", "float16", "float32", num_bits=4, tune=args.tune)(
                 block_M=128, block_N=128, block_K=128, num_stages=2, threads=256, split=1)
         kernel = tilelang.compile(program, out_idx=[2])
-        profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
+        profiler = kernel.get_profiler(tilelang.TensorDistribution.Integer)
         profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")
         latency = profiler.do_bench(ref_program, warmup=500)

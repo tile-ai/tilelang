@@ -278,7 +278,7 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
             rep=10)
         @jit(
             out_idx=[6],
-            supply_type=tilelang.TensorSupplyType.Auto,
+            distribution=tilelang.TensorDistribution.Auto,
             ref_prog=ref_program,
             max_mismatched_ratio=0.05)
         def kernel(block_N=None, block_H=None, num_split=None, num_stages=None, threads=None):
@@ -459,7 +459,7 @@ if __name__ == "__main__":
         config = get_heuristic_config()
         program = flashattn(batch, heads, groups, kv_seqlen, dim, tune=args.tune)(**config)
         kernel = tilelang.compile(program, out_idx=[6])
-        profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
+        profiler = kernel.get_profiler(tensor_distribution=tilelang.TensorDistribution.Auto)
         profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")
         latency = profiler.do_bench(ref_program, warmup=500)

@@ -187,7 +187,7 @@ if __name__ == "__main__":
         execution_backend="cython",
         pass_configs={"tl.disable_tma_lower": True})
     print(kernel.get_kernel_source())
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+    profiler = kernel.get_profiler(tensor_distribution=tilelang.TensorDistribution.Randn)
 
     x_fp8, x_amax = kernel(x, batch_sizes)
     x_fp8_ref, x_amax_ref = ref_program(x, batch_sizes)

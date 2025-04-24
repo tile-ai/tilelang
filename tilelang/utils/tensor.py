@@ -11,7 +11,7 @@ from torch.utils.dlpack import to_dlpack
 import numpy as np
 
 
-class TensorSupplyType(Enum):
+class TensorDistribution(Enum):
     Integer = 1
     Uniform = 2
     Normal = 3
@@ -49,7 +49,7 @@ def adapt_torch2tvm(arg):
     return arg
 
 
-def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
+def get_tensor_supply(distribution: TensorDistribution = TensorDistribution.Integer):
 
     from tilelang.engine.param import KernelParam
 
@@ -71,7 +71,7 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
                 )
 
         shape = list(map(int, param.shape))
-        if supply_type == TensorSupplyType.Auto:
+        if distribution == TensorDistribution.Auto:
             is_unsigned = param.is_unsigned()
             is_float8 = param.is_float8()
             is_boolean = param.is_boolean()
@@ -87,13 +87,13 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
             else:
                 return torch.randint(low=-2, high=3, size=shape, device=device, dtype=dtype)
 
-        if dtype == torch.int8 and supply_type in [
-                TensorSupplyType.Uniform,
-                TensorSupplyType.Normal,
+        if dtype == torch.int8 and distribution in [
+                TensorDistribution.Uniform,
+                TensorDistribution.Normal,
         ]:
             return torch.ones(*shape, device=device, dtype=dtype)
 
-        if supply_type == TensorSupplyType.Integer:
+        if distribution == TensorDistribution.Integer:
             is_unsigned = param.is_unsigned()
             is_float8 = param.is_float8()
             is_boolean = param.is_boolean()
@@ -106,18 +106,18 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
                 return torch.randint(low=0, high=2, size=shape, device=device, dtype=dtype)
             else:
                 return torch.randint(low=-2, high=3, size=shape, device=device, dtype=dtype)
-        elif supply_type == TensorSupplyType.Uniform:
+        elif distribution == TensorDistribution.Uniform:
             return torch.empty(*shape, device=device, dtype=dtype).uniform_(-1.0, 1.0)
-        elif supply_type == TensorSupplyType.Normal:
+        elif distribution == TensorDistribution.Normal:
             return torch.empty(*shape, device=device, dtype=dtype).normal_(-1.0, 1.0)
-        elif supply_type == TensorSupplyType.Randn:
+        elif distribution == TensorDistribution.Randn:
             return torch.randn(*shape, device=device).to(dtype)
-        elif supply_type == TensorSupplyType.Zero:
+        elif distribution == TensorDistribution.Zero:
             return torch.zeros(*shape, device=device, dtype=dtype)
-        elif supply_type == TensorSupplyType.One:
+        elif distribution == TensorDistribution.One:
             return torch.ones(*shape, device=device, dtype=dtype)
         else:
-            raise NotImplementedError(supply_type)
+            raise NotImplementedError(distribution)
 
     return get_tensor
 

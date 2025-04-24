@@ -307,7 +307,7 @@ if __name__ == "__main__":
     ref_program = partial(ref_program, causal=causal)
     kernel = tilelang.compile(program, out_idx=[5], target="cuda", execution_backend="dlpack")
     print(kernel.get_kernel_source())
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+    profiler = kernel.get_profiler(tensor_distribution=tilelang.TensorDistribution.Normal)
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
     print("All checks passed!")
 

@@ -326,7 +326,7 @@ def run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s
     program = mla_decode_tilelang(b, h_q, h_kv, max_seqlen_pad, dv, dpe, BLOCK_N, BLOCK_H,
                                   num_kv_splits, block_size)
     kernel = tilelang.compile(program, out_idx=[8])
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+    profiler = kernel.get_profiler(tensor_distribution=tilelang.TensorDistribution.Randn)
 
     def flash_mla_tilelang():
         out = profiler.func(

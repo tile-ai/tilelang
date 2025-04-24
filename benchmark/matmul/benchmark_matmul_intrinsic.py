@@ -269,7 +269,7 @@ def matmul(M,
     )
     @jit(
         out_idx=[2],
-        supply_type=tl.TensorSupplyType.Integer,
+        distribution=tl.TensorDistribution.Integer,
         ref_prog=ref_program,
         skip_check=True,
         target="auto",

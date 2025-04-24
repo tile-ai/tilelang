@@ -122,7 +122,7 @@ def get_best_config(M, N, K, with_roller=False):
     autotuner = AutoTuner.from_kernel(
         kernel=kernel, configs=get_configs(M, N, K, with_roller)).set_compile_args(
             out_idx=[-1],
-            supply_type=tl.TensorSupplyType.Integer,
+            distribution=tl.TensorDistribution.Integer,
             ref_prog=ref_program,
             skip_check=False,
             target="auto",
@@ -238,7 +238,7 @@ if __name__ == "__main__":
         kernel = tl.compile(matmul(M, N, K, **config), out_idx=-1)
 
     # benchmark
-    profiler = kernel.get_profiler(tensor_supply_type=tl.TensorSupplyType.Auto)
+    profiler = kernel.get_profiler(tensor_distribution=tl.TensorDistribution.Auto)
     tilelang_latency = profiler.do_bench()
     ref_latency = profiler.do_bench(ref_program)
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)

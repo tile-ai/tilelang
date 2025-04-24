@@ -102,7 +102,7 @@ Configure JIT compilation and benchmarking settings:
 autotuner = AutoTuner.from_kernel(
     kernel=kernel, configs=get_configs(M, N, K, with_roller)).set_compile_args(
         out_idx=[-1],
-        supply_type=tl.TensorSupplyType.Integer,
+        distribution=tl.TensorDistribution.Integer,
         ref_prog=ref_program,
         skip_check=False,
         target="auto",

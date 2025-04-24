@@ -118,7 +118,7 @@ def assert_tl_matmul_block_static(
 
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+    profiler = kernel.get_profiler(tensor_distribution=tilelang.TensorDistribution.Normal)
     latency = profiler.do_bench()
     print(f"Static Latency: {latency} ms")
 
@@ -228,7 +228,7 @@ def assert_tl_matmul_block_dynamic_m(
 
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+    profiler = kernel.get_profiler(tensor_distribution=tilelang.TensorDistribution.Normal)
     latency = profiler.do_bench(input_tensors=[A, B, C])
     print(f"Dynamic M Latency with pass_configs: {pass_configs} is {latency} ms")
 
@@ -337,7 +337,7 @@ def assert_tl_matmul_block_dynamic_mn(
 
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+    profiler = kernel.get_profiler(tensor_distribution=tilelang.TensorDistribution.Normal)
     latency = profiler.do_bench(input_tensors=[A, B, C])
     print(f"Dynamic MN Latency with pass_configs: {pass_configs} is {latency} ms")
 
@@ -446,7 +446,7 @@ def assert_tl_matmul_block_dynamic_mnk(
 
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+    profiler = kernel.get_profiler(tensor_distribution=tilelang.TensorDistribution.Normal)
     latency = profiler.do_bench(input_tensors=[A, B, C])
     print(f"Dynamic MNK Latency with pass_configs: {pass_configs} is {latency} ms")
 

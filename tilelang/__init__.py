@@ -86,7 +86,7 @@ from .profiler import Profiler  # noqa: F401
 from .cache import cached  # noqa: F401
 
 from .utils import (
-    TensorSupplyType,  # noqa: F401
+    TensorDistribution,  # noqa: F401
     deprecated,  # noqa: F401
 )
 from .layout import (

@@ -91,7 +91,7 @@ if __name__ == "__main__":
         execution_backend="cython",
         pass_configs={"tl.disable_tma_lower": True})
     print(kernel.get_kernel_source())
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+    profiler = kernel.get_profiler(tensor_distribution=tilelang.TensorDistribution.Randn)
 
     x = torch.randn(M, N, device="cuda", dtype=torch.float32)
 

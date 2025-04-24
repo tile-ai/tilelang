@@ -181,7 +181,7 @@ if __name__ == "__main__":
     BLOCK_N = 64
     program = retnet(BATCH, H, N_CTX, dim_qk, dim_v, BLOCK_M, BLOCK_N)
     kernel = tilelang.compile(program, out_idx=[4])
-    profiler = kernel.get_profiler(tilelang.TensorSupplyType.Normal)
+    profiler = kernel.get_profiler(tilelang.TensorDistribution.Normal)
 
     ins = []
     for i in range(len(kernel.params)):

@@ -102,7 +102,7 @@ def test_matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
     print("Kernel output matches PyTorch reference.")
 
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
+    profiler = kernel.get_profiler(tensor_distribution=tilelang.TensorDistribution.Normal)
     latency = profiler.do_bench(input_tensors=[A, B, C])
     print(f"Latency: {latency} ms")
 

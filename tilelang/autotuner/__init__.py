@@ -53,7 +53,7 @@ class JITContext:
         skip_check: Whether to skip validation checks.
         cache_input_tensors: Whether to cache input tensors for each compilation.
         kernel: JITKernel instance for performance measurement.
-        supply_type: Type of tensor supply mechanism.
+        distribution: Type of tensor supply mechanism.
         target: Target platform ('cuda' or 'hip').
     """
     out_idx: List[int]
@@ -65,7 +65,7 @@ class JITContext:
     skip_check: bool
     cache_input_tensors: bool
     kernel: tilelang.JITKernel
-    supply_type: tilelang.TensorSupplyType
+    distribution: tilelang.TensorDistribution
     target: Literal['cuda', 'hip']
 
 
@@ -95,11 +95,11 @@ class CompileArgs:
 
     Attributes:
         out_idx: List of output tensor indices.
-        supply_type: Type of tensor supply mechanism.
+        distribution: Type of tensor supply mechanism.
         ref_prog: Reference program for correctness validation.
         supply_prog: Supply program for input tensors.
         out_idx: Union[List[int], int] = -1
-        supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto
+        distribution: tilelang.TensorDistribution = tilelang.TensorDistribution.Auto
         ref_prog: Callable = None
         supply_prog: Callable = None
         rtol: float = 1e-2
@@ -111,7 +111,7 @@ class CompileArgs:
     """
 
     out_idx: Union[List[int], int] = -1
-    supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto
+    distribution: tilelang.TensorDistribution = tilelang.TensorDistribution.Auto
     ref_prog: Callable = None
     supply_prog: Callable = None
     rtol: float = 1e-2
@@ -157,7 +157,7 @@ class AutoTuner:
 
     def set_compile_args(self,
                          out_idx: Union[List[int], int] = -1,
-                         supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto,
+                         distribution: tilelang.TensorDistribution = tilelang.TensorDistribution.Auto,
                          ref_prog: Callable = None,
                          supply_prog: Callable = None,
                          rtol: float = 1e-2,
@@ -170,7 +170,7 @@ class AutoTuner:
 
         Args:
             out_idx: List of output tensor indices.
-            supply_type: Type of tensor supply mechanism. Ignored if `supply_prog` is provided.
+            distribution: Type of tensor supply mechanism. Ignored if `supply_prog` is provided.
             ref_prog: Reference program for validation.
             supply_prog: Supply program for input tensors.
             rtol: Relative tolerance for validation.
@@ -185,7 +185,7 @@ class AutoTuner:
         """
         self.compile_args = CompileArgs(
             out_idx=out_idx,
-            supply_type=supply_type,
+            distribution=distribution,
             ref_prog=ref_prog,
             supply_prog=supply_prog,
             rtol=rtol,
@@ -195,10 +195,10 @@ class AutoTuner:
             cache_input_tensors=cache_input_tensors,
             target=target)
 
-        # If a custom `supply_prog`` is provided, the profiler's `supply_type` setting
+        # If a custom `supply_prog`` is provided, the profiler's `distribution` setting
         # becomes ineffective. The custom supply program will be used instead.
-        if ref_prog is not None and supply_type != tilelang.TensorSupplyType.Auto:
-            logger.warning("Ignoring `supply_type` passed to `set_compile_args` because "
+        if ref_prog is not None and distribution != tilelang.TensorDistribution.Auto:
+            logger.warning("Ignoring `distribution` passed to `set_compile_args` because "
                            "`ref_prog` is not None.")
 
         return self
@@ -236,7 +236,7 @@ class AutoTuner:
                 skip_check=compile_args.skip_check,
                 cache_input_tensors=compile_args.cache_input_tensors,
                 kernel=kernel,
-                supply_type=compile_args.supply_type,
+                distribution=compile_args.distribution,
                 target=compile_args.target)
             return jit_context
 
@@ -246,7 +246,7 @@ class AutoTuner:
         def target_fn(jit_context: JITContext):
             # Unpack the context
             kernel = jit_context.kernel
-            supply_type = jit_context.supply_type
+            distribution = jit_context.distribution
             skip_check = jit_context.skip_check
             cache_input_tensors = jit_context.cache_input_tensors
             ref_prog = jit_context.ref_prog
@@ -255,7 +255,7 @@ class AutoTuner:
             atol = jit_context.atol
             max_mismatched_ratio = jit_context.max_mismatched_ratio
 
-            profiler = kernel.get_profiler(tensor_supply_type=supply_type)
+            profiler = kernel.get_profiler(tensor_distribution=distribution)
 
             # Factory functions for generating input tensors.
             # This encapsulates the logic of using either a custom supply program (`supply_prog`)
@@ -429,7 +429,7 @@ def autotune(configs: Any, warmup: int = 25, rep: int = 100, timeout: int = 100)
 
 
 def jit(out_idx: Optional[List[int]] = None,
-        supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto,
+        distribution: tilelang.TensorDistribution = tilelang.TensorDistribution.Auto,
         ref_prog: Callable = None,
         supply_prog: Callable = None,
         rtol: float = 1e-2,
@@ -442,7 +442,7 @@ def jit(out_idx: Optional[List[int]] = None,
 
     Args:
         out_idx: List of output tensor indices.
-        supply_type: Type of tensor supply mechanism. Ignored if `supply_prog` is provided.
+        distribution: Type of tensor supply mechanism. Ignored if `supply_prog` is provided.
         ref_prog: Reference program for correctness validation.
         supply_prog: Supply program for input tensors.
         rtol: Relative tolerance for output validation.
@@ -456,10 +456,10 @@ def jit(out_idx: Optional[List[int]] = None,
         Callable: Decorated function that performs JIT compilation.
     """
 
-    # If a custom `supply_prog`` is provided, the profiler's `supply_type` setting
+    # If a custom `supply_prog`` is provided, the profiler's `distribution` setting
     # becomes ineffective. The custom supply program will be used instead.
-    if supply_prog is not None and supply_type != tilelang.TensorSupplyType.Auto:
-        logger.warning("Ignoring `supply_type` passed to `autotune.jit` because "
+    if supply_prog is not None and distribution != tilelang.TensorDistribution.Auto:
+        logger.warning("Ignoring `distribution` passed to `autotune.jit` because "
                        "`supply_prog` is not None.")
 
     def wrapper(fn: Callable):
@@ -479,7 +479,7 @@ def jit(out_idx: Optional[List[int]] = None,
                 skip_check=skip_check,
                 cache_input_tensors=cache_input_tensors,
                 kernel=kernel,
-                supply_type=supply_type,
+                distribution=distribution,
                 target=target)
 
         return decorator

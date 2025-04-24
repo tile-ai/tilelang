@@ -293,7 +293,7 @@ if __name__ == "__main__":
     program = flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H,
                               num_split)
     kernel = tilelang.compile(program, out_idx=[6])
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+    profiler = kernel.get_profiler(tensor_distribution=tilelang.TensorDistribution.Randn)
     input_tensors = profiler._get_inputs()
     tilelang_output = kernel(*input_tensors)
     ref_output = ref_program(*input_tensors)
@@ -330,7 +330,7 @@ if __name__ == "__main__":
     if enable_autotune:
         autotuner = AutoTuner.from_kernel(
             kernel=wrapped_kernel, configs=get_configs()).set_compile_args(
-                supply_type=tilelang.TensorSupplyType.Integer,
+                distribution=tilelang.TensorDistribution.Integer,
                 target="auto",
             )
         tune_result = autotuner.run(warmup=3, rep=20)

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import tvm
 from tilelang.utils.tensor import (
     get_tensor_supply,
-    TensorSupplyType,
+    TensorDistribution,
     torch_assert_close,
     adapt_torch2tvm,
 )
@@ -26,19 +26,19 @@ class Profiler:
     Attributes:
         params: List of kernel parameters defining the input/output specifications
         result_idx: Indices indicating which parameters are output tensors
-        supply_type: Type of tensor supply to use (e.g., random, zeros, etc.)
+        distribution: Type of tensor supply to use (e.g., random, zeros, etc.)
         adapter: Optional kernel adapter for interfacing with different backends
     """
 
     params: List[KernelParam]
     result_idx: List[int]
-    supply_type: TensorSupplyType
+    distribution: TensorDistribution
     adapter: Optional[BaseKernelAdapter] = None
 
     def __post_init__(self):
         """Initialize tensor supply after dataclass initialization"""
         self.result_idx = self._legalize_result_idx(self.result_idx)
-        self.supply = get_tensor_supply(self.supply_type)
+        self.supply = get_tensor_supply(self.distribution)
 
     def _legalize_result_idx(self, result_idx: Optional[List[int]] = None) -> List[int]:
         params = self.params

@@ -202,7 +202,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
     C = torch.zeros(M, N, device="cuda", dtype=accum_dtype)
 
-    profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
+    profiler = kernel.get_profiler(tilelang.TensorDistribution.Integer)
 
     profiler(A, B, C)
 

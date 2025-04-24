@@ -151,7 +151,7 @@ if __name__ == "__main__":
     program = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H)
     print(program)
     kernel = tilelang.compile(program, out_idx=-1)
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+    profiler = kernel.get_profiler(tensor_distribution=tilelang.TensorDistribution.Randn)
     latency = profiler.do_bench(warmup=500)
     print(f"Latency: {latency} ms")
     print(f"TFlops: {total_flops / latency * 1e-9} TFlops")
