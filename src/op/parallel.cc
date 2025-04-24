@@ -184,19 +184,19 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   } else if (level == InferLevel::kFree) {
     if (read_source_buffer.defined()) {
       loop_layout_ = compute_loop_layout_from_buffer(read_source_buffer);
-      // Loop don't need to be replicated.
-      if (!is_one(loop_layout_->ReplicateExtent()))
-        loop_layout_ = loop_layout_->DeReplicate();
-      // if still has replication, add a condition
-      if (!is_one(loop_layout_->ReplicateExtent())) {
-        auto inv = loop_layout_->Inverse();
-        Array<PrimExpr> fwd;
-        for (size_t i = 0; i < loop_layout_->OutputDim(); i++)
-          fwd.push_back(0);
-        fwd.push_back(InputPlaceholder(0));
-        auto rep = inv->Forward(fwd).back();
-        AddPredicate(EQ(rep, 0));
-      }
+      // // Loop don't need to be replicated.
+      // if (!is_one(loop_layout_->ReplicateExtent()))
+      //   loop_layout_ = loop_layout_->DeReplicate();
+      // // if still has replication, add a condition
+      // if (!is_one(loop_layout_->ReplicateExtent())) {
+      //   auto inv = loop_layout_->Inverse();
+      //   Array<PrimExpr> fwd;
+      //   for (size_t i = 0; i < loop_layout_->OutputDim(); i++)
+      //     fwd.push_back(0);
+      //   fwd.push_back(InputPlaceholder(0));
+      //   auto rep = inv->Forward(fwd).back();
+      //   AddPredicate(EQ(rep, 0));
+      // }
     } else {
       // Vectorize Size must be aware of the buffer_remap
       // As the pass will do post processing to the layout
@@ -227,6 +227,7 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   } else {
     return {};
   }
+
   // Step 2: Check that the loop's partition can correctly align with all source
   // fragment
   for (const auto &[buffer, _] : indice_map_) {
@@ -270,8 +271,8 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
               << "Layout may conflict with ParallelOp for buffer " << buffer
               << "\nError body begin:\n"
               << GetRoot()->body << "\nError body end"
-              << "\nbuffer layout = " << src_layout->DebugOutput()
-              << "\nloop layout = " << dst_layout->DebugOutput()
+              << "\nLHS = " << src_layout->DebugOutput()
+              << "\nRHS = " << dst_layout->DebugOutput()
               << "\nYou may need to use a shared memory to transform the "
                  "layout";
         }

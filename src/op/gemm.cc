@@ -223,10 +223,6 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   } else if (TargetIsHopper(T.target)) {
     const int warp_size = 32;
     bool maybe_wgmma = (this->M >= 64) && (block_size / warp_size % 4 == 0);
-    if (!maybe_wgmma) {
-      LOG(WARNING)
-          << "WGMMA is not enabled because M < 64 or block_size % 128 != 0";
-    }
     auto [warp_m, warp_n] =
         ComputeWarpPartition(block_size / warp_size, T.target, maybe_wgmma);
     auto fragment =
