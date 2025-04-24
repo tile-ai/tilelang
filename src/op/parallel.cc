@@ -181,8 +181,6 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   };
   if (source_buffer.defined()) {
     loop_layout_ = compute_loop_layout_from_buffer(source_buffer);
-  } else if (read_source_buffer.defined()) {
-    loop_layout_ = compute_loop_layout_from_buffer(read_source_buffer);
   } else if (level == InferLevel::kFree) {
     if (read_source_buffer.defined()) {
       loop_layout_ = compute_loop_layout_from_buffer(read_source_buffer);
@@ -272,8 +270,8 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
               << "Layout may conflict with ParallelOp for buffer " << buffer
               << "\nError body begin:\n"
               << GetRoot()->body << "\nError body end"
-              << "\nLHS = " << src_layout->DebugOutput()
-              << "\nRHS = " << dst_layout->DebugOutput()
+              << "\nbuffer layout = " << src_layout->DebugOutput()
+              << "\nloop layout = " << dst_layout->DebugOutput()
               << "\nYou may need to use a shared memory to transform the "
                  "layout";
         }
