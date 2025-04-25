@@ -126,6 +126,24 @@ def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -
 
 
 def cumsum(src: tir.Buffer, dst: Optional[tir.Buffer] = None, dim: int = 0, reverse: bool = False):
+    """Perform cumulative sum on input buffer, store the result to output buffer.
+
+    Args:
+        src (tir.Buffer): The input buffer
+        dst (tir.Buffer, optional): The output buffer. Defaults to None.
+        dim (int, optional): The dimension to perform cumulative sum on. Defaults to 0.
+        reverse (bool, optional): Whether to perform reverse cumulative sum. Defaults to False.
+
+    Returns:
+        tir.Call: Handle to the cumulative sum operation
+    """
+
+    shape = src.shape
+    if dim >= len(shape) or dim <= -len(shape):
+        raise ValueError(f"Dimension {dim} is out of bounds for buffer with shape {shape}")
+    if dim < 0:
+        dim = len(shape) + dim
+
     if dst is None:
         dst = src
     if src.scope() == "local.fragment":

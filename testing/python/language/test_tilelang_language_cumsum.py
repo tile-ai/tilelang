@@ -53,7 +53,7 @@ def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype="float16", sc
     elif scope == "fragment":
         program = cumsum_fragment_test(M, N, block_M, block_N, dim, reverse, dtype)
     jit_kernel = tl.compile(program, out_idx=-1)
-    profiler = jit_kernel.get_profiler(tensor_supply_type=tl.TensorDistributionType.Randn)
+    profiler = jit_kernel.get_profiler(tensor_supply_type=tl.TensorSupplyType.Randn)
 
     def ref_program(A):
         ref_b = torch.empty_like(A)
