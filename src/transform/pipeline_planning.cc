@@ -89,8 +89,7 @@ private:
     is_global_read_ = false;
     this->VisitExpr(op->value);
     if (is_global_read_ && (store_buffer.scope() == "shared" ||
-                            store_buffer.scope() == "shared.dyn" ||
-                            store_buffer.scope() == "local")) {
+                            store_buffer.scope() == "shared.dyn")) {
       is_global_copy_pattern_ = true;
     }
     is_global_read_ = false;
