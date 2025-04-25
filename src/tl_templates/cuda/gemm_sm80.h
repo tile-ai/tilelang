@@ -58,7 +58,7 @@ struct DispatchInstruction<half_t, half_t, float, num_warp_m, num_warp_n> {
 };
 #endif
 
-template <int Bits, int N, int K, bool K_inner, typename Enable = void>
+template <int Bits, int N, int K, bool K_inner, int num_warp_n, typename Enable = void>
 struct OperandTraits {
   // Primary template, use padded layout and default copy
   static constexpr int stride = K_inner ? K : N;
@@ -70,26 +70,26 @@ struct OperandTraits {
   using Copy = DefaultCopy;
 };
 
-template <int N, int K>
-struct OperandTraits<16, N, K, true,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<16, N, K, true, num_warp_n,
                      typename std::enable_if<K % 64 == 32>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 3, 3>{}, Layout<Shape<_8, _32>, Stride<_32, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = SM75_U32x4_LDSM_N;
+  using Copy = typename std::conditional<N == 8 * num_warp_n, SM75_U32x2_LDSM_N, SM75_U32x4_LDSM_N>::type;
 };
 
-template <int N, int K>
-struct OperandTraits<16, N, K, true,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<16, N, K, true, num_warp_n,
                      typename std::enable_if<K % 64 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<3, 3, 3>{}, Layout<Shape<_8, _64>, Stride<_64, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = SM75_U32x4_LDSM_N;
+  using Copy = typename std::conditional<N == 8 * num_warp_n, SM75_U32x2_LDSM_N, SM75_U32x4_LDSM_N>::type;
 };
 
-template <int N, int K>
-struct OperandTraits<16, N, K, false,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<16, N, K, false, num_warp_n,
                      typename std::enable_if<N % 64 == 32>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 3, 3>{}, Layout<Shape<_32, _8>, Stride<_1, _32>>{}));
@@ -98,8 +98,8 @@ struct OperandTraits<16, N, K, false,
   using Copy = SM75_U16x8_LDSM_T;
 };
 
-template <int N, int K>
-struct OperandTraits<16, N, K, false,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<16, N, K, false, num_warp_n,
                      typename std::enable_if<N % 64 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<3, 3, 3>{}, Layout<Shape<_64, _8>, Stride<_1, _64>>{}));
@@ -108,26 +108,26 @@ struct OperandTraits<16, N, K, false,
   using Copy = SM75_U16x8_LDSM_T;
 };
 
-template <int N, int K>
-struct OperandTraits<32, N, K, true,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<32, N, K, true, num_warp_n,
                      typename std::enable_if<K % 32 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<3, 2, 3>{}, Layout<Shape<_8, _32>, Stride<_32, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = SM75_U32x4_LDSM_N;
+  using Copy = typename std::conditional<N == 8 * num_warp_n, SM75_U32x2_LDSM_N, SM75_U32x4_LDSM_N>::type;
 };
 
-template <int N, int K>
-struct OperandTraits<32, N, K, true,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<32, N, K, true, num_warp_n,
                      typename std::enable_if<K % 32 == 16>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 2, 3>{}, Layout<Shape<_8, _16>, Stride<_16, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = SM75_U32x4_LDSM_N;
+  using Copy = typename std::conditional<N == 8 * num_warp_n, SM75_U32x2_LDSM_N, SM75_U32x4_LDSM_N>::type;
 };
 
-template <int N, int K>
-struct OperandTraits<32, N, K, false,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<32, N, K, false, num_warp_n,
                      typename std::enable_if<N % 32 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<3, 2, 3>{}, Layout<Shape<_32, _8>, Stride<_1, _32>>{}));
@@ -136,8 +136,8 @@ struct OperandTraits<32, N, K, false,
   using Copy = UniversalCopy<tfloat32_t>;
 };
 
-template <int N, int K>
-struct OperandTraits<32, N, K, false,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<32, N, K, false, num_warp_n,
                      typename std::enable_if<N % 32 == 16>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 2, 3>{}, Layout<Shape<_16, _8>, Stride<_1, _16>>{}));
@@ -146,8 +146,8 @@ struct OperandTraits<32, N, K, false,
   using Copy = UniversalCopy<tfloat32_t>;
 };
 
-template <int N, int K>
-struct OperandTraits<8, N, K, true,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<8, N, K, true, num_warp_n,
                      typename std::enable_if<K % 128 == 64>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 4, 3>{}, Layout<Shape<_8, _64>, Stride<_64, _1>>{}));
@@ -155,17 +155,17 @@ struct OperandTraits<8, N, K, true,
   using Copy = SM75_U32x4_LDSM_N;
 };
 
-template <int N, int K>
-struct OperandTraits<8, N, K, true,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<8, N, K, true, num_warp_n,
                      typename std::enable_if<K % 128 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<3, 4, 3>{}, Layout<Shape<_8, _128>, Stride<_128, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = SM75_U32x4_LDSM_N;
+  using Copy = typename std::conditional<N == 8 * num_warp_n, SM75_U32x2_LDSM_N, SM75_U32x4_LDSM_N>::type;
 };
 
-template <int N, int K>
-struct OperandTraits<64, N, K, true,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<64, N, K, true, num_warp_n,
                      typename std::enable_if<K % 16 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 0, 4>{}, Layout<Shape<_4, _16>, Stride<_16, _1>>{}));
@@ -173,8 +173,8 @@ struct OperandTraits<64, N, K, true,
   using Copy = DefaultCopy;
 };
 
-template <int N, int K>
-struct OperandTraits<64, N, K, false,
+template <int N, int K, int num_warp_n>
+struct OperandTraits<64, N, K, false, num_warp_n,
                      typename std::enable_if<N % 16 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 2, 2>{}, Layout<Shape<_16, _4>, Stride<_1, _16>>{}));
