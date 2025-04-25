@@ -49,6 +49,7 @@ def test_reduce_max():
     run_reduce_max(256, 256, "float32")
     run_reduce_max(256, 256, "float16")
 
+
 def reduce_max_test_clear(M, N, dtype="float16"):
     import tilelang.language as T
 
@@ -60,7 +61,7 @@ def reduce_max_test_clear(M, N, dtype="float16"):
         with T.Kernel(1, threads=32) as _:
             A_local = T.alloc_fragment((M, N), dtype)
             B_local = T.alloc_fragment((M,), dtype)
-            
+
             T.copy(A, A_local)
             T.fill(B_local, -T.infinity(dtype))
             T.reduce_max(A_local, B_local, dim=1, clear=False)
@@ -73,6 +74,7 @@ def run_reduce_max_clear(M, N, dtype="float16"):
     program = reduce_max_test_clear(M, N, dtype)
     jit_kernel = tl.compile(program, out_idx=-1)
     print(jit_kernel.get_kernel_source())
+
     def ref_program(A):
         return A.max(dim=1).values
 
@@ -84,8 +86,10 @@ def run_reduce_max_clear(M, N, dtype="float16"):
     print(ref_out)
     torch.testing.assert_close(tl_out, ref_out, atol=1e-2, rtol=1e-2)
 
+
 def test_reduce_max_clear():
     run_reduce_max_clear(256, 256, "float16")
+
 
 if __name__ == "__main__":
     tilelang.testing.main()
