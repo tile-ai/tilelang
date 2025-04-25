@@ -68,18 +68,28 @@ def reduce_min(buffer: tir.Buffer, out: tir.Buffer, dim: int, clear: bool = True
     return reduce(buffer, out, "min", dim, clear)
 
 
-def reduce_sum(buffer: tir.Buffer, out: tir.Buffer, dim: int):
+def reduce_sum(buffer: tir.Buffer, out: tir.Buffer, dim: int, clear: bool = True):
     """Perform reduce sum on input buffer, store the result to output buffer.
 
     Args:
         buffer (tir.Buffer): The input buffer
         out (tir.Buffer): The output buffer
         dim (int): The dimension to perform reduce on
+        clear (bool, optional): If True, output buffer will be cleared before reduction.
+                              If False, results will be accumulated on existing values.
+                              Defaults to True.
+    Note: When clear=True, reduce_sum will not compute directly on the output buffer. This is because 
+          during warp reduction, the same value would be accumulated multiple times (number of threads 
+          in the warp). Therefore, the implementation with clear=True follows these steps:
+        1. create a temp buffer with same shape and dtype as out
+        2. copy out to temp buffer
+        3. call reduce_sum with temp buffer and out
+        4. Add temp buffer to out
 
     Returns:
         tir.Call: Handle to the reduction operation
     """
-    return reduce(buffer, out, "sum", dim, True)
+    return reduce(buffer, out, "sum", dim, clear)
 
 
 def reduce_abssum(buffer: tir.Buffer, out: tir.Buffer, dim: int):
@@ -96,7 +106,7 @@ def reduce_abssum(buffer: tir.Buffer, out: tir.Buffer, dim: int):
     return reduce(buffer, out, "abssum", dim, True)
 
 
-def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int):
+def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int, clear: bool = True):
     """Perform reduce absolute max on input buffer, store the result to output buffer.
 
     Args:
@@ -107,7 +117,7 @@ def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int):
     Returns:
         tir.Call: Handle to the reduction operation
     """
-    return reduce(buffer, out, "absmax", dim, True)
+    return reduce(buffer, out, "absmax", dim, clear)
 
 
 @macro
