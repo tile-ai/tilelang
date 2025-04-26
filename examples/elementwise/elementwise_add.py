@@ -11,10 +11,10 @@ def ref_program(x, y):
 
 
 def elementwise_add(M, N, block_M, block_N, in_dtype, out_dtype, threads):
+
     @T.prim_func
-    def main(A: T.Tensor((M, N), in_dtype),
-             B: T.Tensor((M, N), in_dtype),
-             C: T.Tensor((M, N), out_dtype)):
+    def main(A: T.Tensor((M, N), in_dtype), B: T.Tensor((M, N), in_dtype), C: T.Tensor((M, N),
+                                                                                       out_dtype)):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             start_x = bx * block_N
             start_y = by * block_M
@@ -22,6 +22,7 @@ def elementwise_add(M, N, block_M, block_N, in_dtype, out_dtype, threads):
                 y = start_y + local_y
                 x = start_x + local_x
                 C[y, x] = A[y, x] + B[y, x]
+
     return main
 
 
@@ -30,23 +31,22 @@ def get_configs(M, N):
     block_N = [64, 128, 256]
     threads = [64, 128, 256]
     configs = list(itertools.product(block_M, block_N, threads))
-    return [
-        {"block_M": bm, "block_N": bn, "threads": th}
-        for bm, bn, th in configs
-    ]
+    return [{"block_M": bm, "block_N": bn, "threads": th} for bm, bn, th in configs]
 
 
 def get_best_config(M, N):
+
     def kernel(block_M=None, block_N=None, threads=None):
         return elementwise_add(M, N, block_M, block_N, "float32", "float32", threads)
 
-    autotuner = AutoTuner.from_kernel(kernel=kernel, configs=get_configs(M, N)).set_compile_args(
-        out_idx=[-1],
-        supply_type=tilelang.TensorSupplyType.Auto,
-        ref_prog=ref_program,
-        skip_check=False,
-        target="cuda",
-    )
+    autotuner = AutoTuner.from_kernel(
+        kernel=kernel, configs=get_configs(M, N)).set_compile_args(
+            out_idx=[-1],
+            supply_type=tilelang.TensorSupplyType.Auto,
+            ref_prog=ref_program,
+            skip_check=False,
+            target="cuda",
+        )
     return autotuner.run(warmup=3, rep=20)
 
 
@@ -68,9 +68,7 @@ if __name__ == "__main__":
         # Default config
         config = {"block_M": 128, "block_N": 256, "threads": 128}
         kernel = tilelang.compile(
-            elementwise_add(M, N, **config, in_dtype="float32", out_dtype="float32"),
-            out_idx=-1
-        )
+            elementwise_add(M, N, **config, in_dtype="float32", out_dtype="float32"), out_idx=-1)
 
     out = kernel(a, b)
     torch.testing.assert_close(out, ref_program(a, b), rtol=1e-2, atol=1e-2)

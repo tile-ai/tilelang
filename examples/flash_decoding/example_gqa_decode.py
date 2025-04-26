@@ -271,10 +271,7 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
 
     if tune:
 
-        @autotune(
-            configs=get_configs(),
-            warmup=10,
-            rep=10)
+        @autotune(configs=get_configs(), warmup=10, rep=10)
         @jit(
             out_idx=[6],
             supply_type=tilelang.TensorSupplyType.Auto,
