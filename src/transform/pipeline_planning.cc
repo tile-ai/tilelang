@@ -389,7 +389,6 @@ private:
     // Handle trailing unassigned copy stages:
     // These are typically final copy operations needing post-main-stage
     // insertion
-
     auto &head_pinfo = pipeline_stage_infos.at(0);
     int unassigned_order_elem = -1;
 
@@ -422,7 +421,7 @@ private:
       int copy_order_min = pipeline_stage_infos.size();
       int non_copy_order_max = 0;
       for (auto &pinfo : pipeline_stage_infos) {
-        if (pinfo.copy_stage) {
+        if (pinfo.copy_stage || pinfo.prepare_for_condition) {
           copy_stage_cnt++;
           copy_order_min = std::min(copy_order_min, pinfo.order);
         } else {
@@ -437,7 +436,7 @@ private:
       for (auto &pinfo : pipeline_stage_infos) { // move copy to the beginning
         pinfo.order =
             (pinfo.order + copy_stage_at_end) % pipeline_stage_infos.size();
-        if (!pinfo.copy_stage)
+        if (!pinfo.copy_stage && !pinfo.prepare_for_condition)
           pinfo.stage--;
       }
     }

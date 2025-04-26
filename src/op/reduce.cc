@@ -12,6 +12,7 @@
 
 #include "../layout/utils.h"
 #include "../transform/loop_partition.h"
+#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -121,10 +122,33 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   Array<Stmt> stmts;
 
+  bool require_init = this->clear;
+  // sum op must be cleared
+  if (this->type == ReduceType::kSum) {
+    require_init = true;
+  } else if (this->type == ReduceType::kAbsSum) {
+    require_init = true;
+  }
+
+  Buffer clear_buffer = dst_buffer;
+  bool need_duplicate = false;
+  if (this->type == ReduceType::kSum && !this->clear) {
+    need_duplicate = true;
+  } else if (this->type == ReduceType::kAbsSum && !this->clear) {
+    need_duplicate = true;
+  }
+
+  if (need_duplicate) {
+    // Create a new buffer with same shape and dtype as dst_buffer
+    clear_buffer = decl_buffer(dst_buffer->shape, dst_buffer->dtype,
+                               dst_buffer->name + "_clear",
+                               GetPtrStorageScope(dst_buffer->data));
+  }
+
   // make reduce-init stmt
-  if (this->clear)
+  if (require_init)
     stmts.push_back(
-        BufferStore(dst_buffer, this->MakeInitValue(), dst_indices));
+        BufferStore(clear_buffer, this->MakeInitValue(), dst_indices));
 
   // make thread-local reduce
   Array<PrimExpr> src_indice_compressed;
@@ -138,8 +162,8 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     src_var_compressed.push_back(var);
   }
   Stmt reduce_local = BufferStore(
-      dst_buffer,
-      this->MakeReduce(BufferLoad(dst_buffer, dst_indices),
+      clear_buffer,
+      this->MakeReduce(BufferLoad(clear_buffer, dst_indices),
                        BufferLoad(src_buffer, src_indice_compressed)),
       dst_indices);
   for (int i = src_layout->OutputDim() - 1; i >= 0; i--) {
@@ -176,20 +200,37 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
            << reducing_threads << ", " << (*scale) << ">::run";
       }
       Array<PrimExpr> thread_reduce_args = {
-          StringImm(ss.str()), BufferLoad(dst_buffer, dst_indices)};
+          StringImm(ss.str()), BufferLoad(clear_buffer, dst_indices)};
       if (reducing_threads >= 32) {
         PrimExpr workspace = T.AddWorkspace(
-            *as_const_int(T.thread_bounds->extent), dst_buffer->dtype);
+            *as_const_int(T.thread_bounds->extent), clear_buffer->dtype);
         thread_reduce_args.push_back(workspace);
       }
       auto call =
-          Call(dst_buffer->dtype, builtin::call_extern(), thread_reduce_args);
-      stmts.push_back(BufferStore(dst_buffer, call, dst_indices));
+          Call(clear_buffer->dtype, builtin::call_extern(), thread_reduce_args);
+      stmts.push_back(BufferStore(clear_buffer, call, dst_indices));
     }
   }
-  Stmt reduce_interthread =
-      BufferStore(dst_buffer, BufferLoad(dst_buffer, dst_indices), dst_indices);
+  Stmt reduce_interthread = BufferStore(
+      clear_buffer, BufferLoad(clear_buffer, dst_indices), dst_indices);
 
+  // copy clear_buffer to dst_buffer
+  if (need_duplicate) {
+    // if is reduce sum, we should add a copy from clear_buffer to dst_buffer
+    if (this->type == ReduceType::kSum) {
+      stmts.push_back(BufferStore(dst_buffer,
+                                  Add(BufferLoad(dst_buffer, dst_indices),
+                                      BufferLoad(clear_buffer, dst_indices)),
+                                  dst_indices));
+    } else if (this->type == ReduceType::kAbsSum) {
+      stmts.push_back(BufferStore(dst_buffer,
+                                  Add(BufferLoad(dst_buffer, dst_indices),
+                                      BufferLoad(clear_buffer, dst_indices)),
+                                  dst_indices));
+    } else {
+      ICHECK(false) << "Unsupported reduce type: " << (int)this->type;
+    }
+  }
   // make the outer spatial loop
   Stmt body = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
   for (int i = dst_layout->InputDim() - 1; i >= 0; i--) {
@@ -198,6 +239,10 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 
   body = PartitionLoop(Downcast<For>(body), T.thread_var, analyzer, dst_layout);
+  if (need_duplicate) {
+    body = Allocate(clear_buffer->data, clear_buffer->dtype,
+                    clear_buffer->shape, const_true(), body);
+  }
   return body;
 }
 
