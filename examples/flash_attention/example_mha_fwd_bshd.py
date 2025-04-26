@@ -12,10 +12,10 @@ from functools import partial
 
 
 def get_configs():
-    block_M = [128]
-    block_N = [128]
-    num_stages = [2]
-    threads = [256]
+    block_M = [64]
+    block_N = [64]
+    num_stages = [1]
+    threads = [128]
     _configs = list(itertools.product(block_M, block_N, num_stages, threads))
 
     configs = [{
