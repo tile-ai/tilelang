@@ -18,7 +18,7 @@ import logging
 from tilelang.env import TILELANG_CACHE_DIR, is_cache_enabled
 
 KERNEL_PATH = "kernel.cu"
-WRAPPED_KERNEL_PATH = "warpped_kernel.cu"
+WRAPPED_KERNEL_PATH = "wrapped_kernel.cu"
 KERNEL_LIB_PATH = "kernel_lib.so"
 PARAMS_PATH = "params.pkl"
 
@@ -28,7 +28,7 @@ class KernelCache:
     Caches compiled kernels using a class and database persistence to avoid redundant compilation.
     Cache files:
         kernel.cu: The compiled kernel source code
-        warpped_kernel.cu: The compiled wrapped kernel source code
+        wrapped_kernel.cu: The compiled wrapped kernel source code
         kernel_lib.so: The compiled kernel library
         params.pkl: The compiled kernel parameters
     """
