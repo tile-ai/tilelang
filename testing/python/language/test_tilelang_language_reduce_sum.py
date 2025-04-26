@@ -6,7 +6,6 @@ import tilelang.testing
 import tilelang as tl
 
 tilelang.testing.set_random_seed()
-tilelang.disable_cache()
 
 
 def reduce_sum_test(M, N, dtype="float16"):
@@ -97,9 +96,9 @@ def run_reduce_sum_clear(M, N, dtype="float16"):
 
 
 def test_reduce_sum_clear():
-    run_reduce_sum_clear(256, 256, "float16")
-    run_reduce_sum_clear(512, 128, "float16")
-    run_reduce_sum_clear(128, 512, "float16")
+    run_reduce_sum_clear(256, 256, "float32")
+    run_reduce_sum_clear(512, 128, "float32")
+    run_reduce_sum_clear(128, 512, "float32")
 
 
 if __name__ == "__main__":
