@@ -46,8 +46,6 @@ def get_configs(M, N, K, with_roller=False, topk=20):
             config["thread_num"] = block_rows * block_cols * 32
             config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
             configs.append(config)
-        for config in configs:
-            print(config)
     else:
         block_M = [64, 128, 256]
         block_N = [64, 128, 256]
