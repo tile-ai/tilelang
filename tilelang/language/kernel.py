@@ -9,6 +9,7 @@ from tvm.tir import Var
 from tvm.script.ir_builder.tir.frame import TIRFrame, BlockFrame
 from tvm._ffi import register_object
 from tilelang import _ffi_api
+import threading
 
 
 class FrameStack:
@@ -42,6 +43,10 @@ class FrameStack:
             return self._stack[-1]
         raise IndexError(f"{self.__class__.__name__} is empty")
 
+    def size(self):
+        """Returns the number of items in the stack."""
+        return len(self._stack)
+
     def __len__(self):
         """Returns the number of items in the stack."""
         return len(self._stack)
@@ -54,8 +59,15 @@ class FrameStack:
         return bool(self._stack)
 
 
-# Use our new FrameStack instead of a plain list or deque
-_kernel_launch_frame_stack = FrameStack()
+# Use thread local to store the stack
+# This is to avoid the cross-thread interference
+_local = threading.local()
+
+
+def _get_current_stack() -> FrameStack:
+    if not hasattr(_local, "kernel_launch_frame_stack"):
+        _local.kernel_launch_frame_stack = FrameStack()
+    return _local.kernel_launch_frame_stack
 
 
 @register_object("tl.KernelLaunchFrame")
@@ -72,7 +84,7 @@ class KernelLaunchFrame(TIRFrame):
         block dimension), or a list of Vars otherwise.
         """
         super().__enter__()
-        _kernel_launch_frame_stack.push(self)
+        _get_current_stack().push(self)
         # If we have exactly 5 frames, return the single iter_var.var.
         if len(self.frames) == 5:
             return self.frames[0].iter_var.var
@@ -96,9 +108,9 @@ class KernelLaunchFrame(TIRFrame):
         Exits the KernelLaunchFrame scope and pops this frame from the stack,
         but only if it's indeed the topmost frame.
         """
-        # Check if this frame is the current top before popping.
-        if _kernel_launch_frame_stack.top() is self:
-            _kernel_launch_frame_stack.pop()
+        stack = _get_current_stack()
+        if stack.top() is self:
+            stack.pop()
         super().__exit__(ptype, value, trace)
 
     @classmethod
@@ -107,7 +119,8 @@ class KernelLaunchFrame(TIRFrame):
         Returns the topmost (current) KernelLaunchFrame from the stack if it exists,
         or None if the stack is empty.
         """
-        return _kernel_launch_frame_stack.top()
+        stack = _get_current_stack()
+        return stack.top() if stack else None
 
     def get_block_extent(self, dim: int) -> int:
         """

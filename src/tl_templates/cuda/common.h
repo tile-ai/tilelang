@@ -160,6 +160,7 @@ TL_DEVICE void AtomicAddx2(bfloat16_t *address, bfloat16_t *val) {
       static_cast<__nv_bfloat162>(*reinterpret_cast<__nv_bfloat162 *>(val)));
 }
 #endif
+
 // DP4A
 template <typename InDatatype, typename OutDatatype>
 TL_DEVICE void DP4A(InDatatype *a, InDatatype *b, OutDatatype *c) {
@@ -168,3 +169,25 @@ TL_DEVICE void DP4A(InDatatype *a, InDatatype *b, OutDatatype *c) {
   const int c_int = *((int *)c);
   *c = __dp4a(a_int, b_int, c_int);
 }
+
+namespace tl {
+// Any
+template <typename T> TL_DEVICE bool Any(T *a, int size) {
+  for (int i = 0; i < size; i++) {
+    if (a[i]) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// All
+template <typename T> TL_DEVICE bool All(T *a, int size) {
+  for (int i = 0; i < size; i++) {
+    if (!a[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+} // namespace tl

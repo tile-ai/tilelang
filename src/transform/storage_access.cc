@@ -39,7 +39,7 @@ void TileLangStorageAccessVisitor::VisitExpr_(const BufferLoadNode *op) {
   Var buf = op->buffer->data;
   StorageScope scope = GetScope(buf);
   if (Enabled(buf.get(), scope)) {
-    ICHECK(allow_append_) << op << " " << scope.to_string();
+    ICHECK(allow_append_) << GetRef<BufferLoad>(op) << " " << scope.to_string();
     AccessEntry e;
     e.threads = env_threads();
     e.buffer = buf;
@@ -203,7 +203,12 @@ void TileLangStorageAccessVisitor::VisitStmt_(const IfThenElseNode *op) {
   if (!is_thread_invariant) {
     ++condition_counter_;
   }
+
+  allow_append_ = true;
   this->VisitExpr(op->condition);
+  curr_stmt_.access.clear();
+  allow_append_ = false;
+
   scope_.push_back(std::vector<StmtEntry>());
   this->VisitStmt(op->then_case);
   StmtEntry s;
@@ -244,25 +249,28 @@ void TileLangStorageAccessVisitor::VisitStmt_(const WhileNode *op) {
 void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
   if (op->op.same_as(builtin::address_of())) {
     ICHECK_EQ(op->args.size(), 1U);
-    const BufferLoadNode *load = op->args[0].as<BufferLoadNode>();
-    Buffer buffer = load->buffer;
-    DataType dtype = buffer->dtype;
-    const VarNode *buffer_var = buffer->data.as<VarNode>();
-    StorageScope scope = GetScope(GetRef<Var>(buffer_var));
-    if (Enabled(buffer_var, scope)) {
-      ICHECK(allow_append_);
-      AccessEntry e;
-      e.threads = env_threads();
-      e.dtype = dtype;
-      e.buffer = Downcast<Var>(buffer->data);
-      for (const auto &index : load->indices) {
-        e.touched.push_back(arith::IntSet::Vector(index));
+    if (auto load = op->args[0].as<BufferLoadNode>()) {
+      Buffer buffer = load->buffer;
+      DataType dtype = buffer->dtype;
+      const VarNode *buffer_var = buffer->data.as<VarNode>();
+      StorageScope scope = GetScope(GetRef<Var>(buffer_var));
+      if (Enabled(buffer_var, scope)) {
+        ICHECK(allow_append_);
+        AccessEntry e;
+        e.threads = env_threads();
+        e.dtype = dtype;
+        e.buffer = Downcast<Var>(buffer->data);
+        for (const auto &index : load->indices) {
+          e.touched.push_back(arith::IntSet::Vector(index));
+        }
+        e.type = kRead;
+        e.scope = scope;
+        curr_stmt_.access.emplace_back(e);
       }
-      e.type = kRead;
-      e.scope = scope;
-      curr_stmt_.access.emplace_back(e);
+      StmtExprVisitor::VisitExpr_(load);
+    } else {
+      StmtExprVisitor::VisitExpr_(op);
     }
-    StmtExprVisitor::VisitExpr_(load);
   } else if (op->op.same_as(builtin::tvm_access_ptr())) {
     ICHECK_EQ(op->args.size(), 5U);
     DataType dtype = op->args[0].dtype();

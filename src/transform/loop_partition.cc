@@ -38,7 +38,7 @@ public:
 private:
   PrimExpr VisitExpr_(const BufferLoadNode *node) final {
     auto visited = StmtExprMutator::VisitExpr_(node);
-    auto n = visited.as<BufferLoad>().value();
+    auto n = Downcast<BufferLoad>(visited);
     auto nptr = n.CopyOnWrite();
     nptr->indices = nptr->indices.Map(
         [&](const auto &e) { return analyzer_->Simplify(e); });
@@ -46,7 +46,7 @@ private:
   }
   Stmt VisitStmt_(const BufferStoreNode *node) final {
     auto visited = StmtExprMutator::VisitStmt_(node);
-    auto n = visited.as<BufferStore>().value();
+    auto n = Downcast<BufferStore>(visited);
     auto nptr = n.CopyOnWrite();
     nptr->indices = nptr->indices.Map(
         [&](const auto &e) { return analyzer_->Simplify(e); });
@@ -74,11 +74,10 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   Map<Var, PrimExpr> vmap;
   Stmt body = op;
   auto inv_loop = loop_layout->Inverse();
-  auto indices =
-      inv_loop->Forward(vars.Map([](const Var &v) { return PrimExpr(v); }));
+  auto indices = inv_loop->Forward(Array<PrimExpr>(vars.begin(), vars.end()));
   for (int i = 0; i < old_loop_depth; i++) {
-    ICHECK(body.as<For>().defined());
-    For loop = body.as<For>().value();
+    const ForNode *loop = body.as<ForNode>();
+    ICHECK(loop != nullptr);
     vmap.Set(loop->loop_var, indices[i]);
     body = loop->body;
   }
@@ -94,7 +93,12 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   body = BufferIndiceSimplify(analyzer)(body);
 
   auto for_node = LoopPragmaUnroll(Downcast<For>(body));
-
+  if (loop_layout->ThreadRange().defined()) {
+    auto range = loop_layout->ThreadRange();
+    auto thread_var_with_offset = thread_var - range->min;
+    for_node.CopyOnWrite()->body =
+        Substitute(for_node->body, {{thread_var, thread_var_with_offset}});
+  }
   return for_node;
 }
 
@@ -159,6 +163,16 @@ private:
 Fragment PlanLoopPartition(For op, size_t num_thread, int vectorize_size) {
   LoopPartitioner partitioner;
   return partitioner.Partition(op, num_thread, vectorize_size);
+}
+
+Fragment PlanLoopPartition(For op, int vectorize_size, Range thread_range) {
+  size_t num_thread =
+      *as_const_int(thread_range->extent) - *as_const_int(thread_range->min);
+  LoopPartitioner partitioner;
+  Fragment fragment = partitioner.Partition(op, num_thread, vectorize_size);
+  auto node = make_object<FragmentNode>(*fragment.get());
+  node->SetThreadRange(thread_range);
+  return Fragment(node);
 }
 
 For LoopPragmaUnroll(For stmt) {

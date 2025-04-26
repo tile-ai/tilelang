@@ -49,7 +49,7 @@ def adapt_torch2tvm(arg):
     return arg
 
 
-def get_tensor_supply(supply_type: TensorSupplyType):
+def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
 
     from tilelang.engine.param import KernelParam
 
@@ -83,7 +83,7 @@ def get_tensor_supply(supply_type: TensorSupplyType):
             elif is_boolean:
                 return torch.randint(low=0, high=2, size=shape, device=device, dtype=dtype)
             elif dtype in {torch.float16, torch.float32, torch.bfloat16}:
-                return torch.empty(*shape, device=device, dtype=dtype).normal_(-1.0, 1.0)
+                return torch.empty(*shape, device=device, dtype=dtype).uniform_(-1.0, 1.0)
             else:
                 return torch.randint(low=-2, high=3, size=shape, device=device, dtype=dtype)
 
@@ -295,6 +295,8 @@ def torch_assert_close(
             f"({max_mismatched_ratio * 100:.2f}% allowed, but get {num_mismatched / total_elements * 100:.2f}%)."
             f"{mismatch_info}"
             f"\nGreatest absolute difference: {diff.max().item()}, "
-            f"Greatest relative difference: {(diff / (torch.abs(tensor_b) + 1e-12)).max().item()}.")
+            f"Greatest relative difference: {(diff / (torch.abs(tensor_b) + 1e-12)).max().item()}"
+            f"\nLHS: {tensor_a}"
+            f"\nRHS: {tensor_b}")
     else:
         return True

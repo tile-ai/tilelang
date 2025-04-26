@@ -5,14 +5,9 @@
 import argparse
 import math
 import random
-
-import flashinfer
 import torch
 import triton
 import triton.language as tl
-
-# pip install flashinfer-python
-from flash_mla import flash_mla_with_kvcache, get_mla_metadata
 
 import tilelang
 from tilelang.profiler import do_bench
@@ -70,6 +65,8 @@ def run_torch_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q,
 @torch.inference_mode()
 def run_flash_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens, h_q,
                   h_kv, d, dv, causal, dtype):
+    from flash_mla import flash_mla_with_kvcache, get_mla_metadata
+
     blocked_v = blocked_k[..., :dv]
 
     tile_scheduler_metadata, num_splits = get_mla_metadata(cache_seqlens, s_q * h_q // h_kv, h_kv)
@@ -94,7 +91,8 @@ def run_flash_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q,
 @torch.inference_mode()
 def run_flash_infer(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens,
                     h_q, h_kv, d, dv, causal, dtype):
-
+    # pip install flashinfer-python
+    import flashinfer
     assert d > dv, "mla with rope dim should be larger than no rope dim"
     q_nope, q_pe = q[..., :dv].contiguous(), q[..., dv:].contiguous()
     blocked_k_nope, blocked_k_pe = blocked_k[..., :dv].contiguous(), blocked_k[...,
@@ -443,7 +441,7 @@ def run_flash_mla_tilelang(q, block_table, blocked_k, max_seqlen_pad, block_size
     kernel = tilelang.compile(program, out_idx=[8])
 
     def flash_mla_tilelang():
-        out = kernel.func(
+        out = kernel(
             q_nope.view(-1, h_q, dv),
             q_pe.view(-1, h_q, dpe),
             blocked_k_nope.view(-1, h_kv, dv),

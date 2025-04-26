@@ -509,8 +509,8 @@ void CodeGenTileLangHIP::PrintVecElemStore(const std::string &vec, DataType t,
     stream << "*((half_t*)(&(((half2*)(&(" << vec << "." << access[i / 2]
            << ")))->" << access[i % 2] << "))) = " << value << ";\n";
   } else if (t.is_bfloat16()) {
-    stream << "*((bfloat16_t*)(&((half2*)(&(" << vec << "." << access[i / 2]
-           << ")))->" << access[i % 2] << "))) = " << value << ";\n";
+    stream << "((bfloat16_t*)(&(" << vec << "." << access[i / 2] << ")))["
+           << (i % 2) << "] = " << value << ";\n";
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {

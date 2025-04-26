@@ -9,6 +9,7 @@ from tvm import DataType
 from tvm.script.ir_builder.tir.frame import TIRFrame
 from collections import deque
 from typing import Optional
+import threading
 
 
 class FrameStack:
@@ -97,8 +98,15 @@ class FrameStack:
         return bool(self._stack)
 
 
-# Global stack for LetFrame instances
-_let_frame_stack = FrameStack()
+# Use thread local to store the stack
+# This is to avoid the cross-thread interference
+_local_let = threading.local()
+
+
+def _get_let_stack() -> FrameStack:
+    if not hasattr(_local_let, "let_frame_stack"):
+        _local_let.let_frame_stack = FrameStack()
+    return _local_let.let_frame_stack
 
 
 @_register_object("script.ir_builder.tir.LetFrame")
@@ -127,7 +135,7 @@ class LetFrame(TIRFrame):
                 self.value = BufferRegion(self.value.buffer,
                                           [Range(x.base, x.lanes) for x in indices])
 
-        _let_frame_stack.push(self)
+        _get_let_stack().push(self)
         return self.var
 
     def __exit__(self, ptype, value, trace):
@@ -138,8 +146,9 @@ class LetFrame(TIRFrame):
             value: Exception value if an exception occurred
             trace: Exception traceback if an exception occurred
         """
-        if _let_frame_stack.top() is self:
-            _let_frame_stack.pop()
+        stack = _get_let_stack()
+        if stack.top() is self:
+            stack.pop()
         super().__exit__(ptype, value, trace)
 
     @classmethod
@@ -152,7 +161,7 @@ class LetFrame(TIRFrame):
         Raises:
             IndexError: If there are no active let frames
         """
-        return _let_frame_stack.top()
+        return _get_let_stack().top()
 
     @staticmethod
     def get_value(var: Var):
@@ -164,7 +173,7 @@ class LetFrame(TIRFrame):
         Returns:
             The value bound to the variable, or None if not found
         """
-        return _let_frame_stack.get_value(var)
+        return _get_let_stack().get_value(var)
 
     @staticmethod
     def has_value(var: Var) -> bool:
@@ -176,7 +185,7 @@ class LetFrame(TIRFrame):
         Returns:
             bool: True if the variable has a binding, False otherwise
         """
-        return _let_frame_stack.has_value(var)
+        return _get_let_stack().has_value(var)
 
 
 def has_let_value(var: Var) -> bool:
@@ -188,7 +197,7 @@ def has_let_value(var: Var) -> bool:
     Returns:
         bool: True if the variable has a binding, False otherwise
     """
-    return _let_frame_stack.has_value(var)
+    return _get_let_stack().has_value(var)
 
 
 def get_let_value(var: Var) -> Optional[PrimExpr]:
@@ -200,4 +209,4 @@ def get_let_value(var: Var) -> Optional[PrimExpr]:
     Returns:
         Optional[PrimExpr]: The bound value if found, None otherwise
     """
-    return _let_frame_stack.get_value(var)
+    return _get_let_stack().get_value(var)

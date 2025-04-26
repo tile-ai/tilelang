@@ -7,6 +7,12 @@ from . import _ffi_api
 from .simplify import Simplify, simplify_prim_func  # noqa: F401
 
 
+def get_pass_context():
+    """Get the current pass context"""
+    from tilelang import tvm as tvm
+    return tvm.transform.PassContext.current()
+
+
 def ClusterPlanning():
     """ClusterPlanning
 
@@ -297,3 +303,14 @@ def ConfigIndexBitwidth():
     ----
     """
     return _ffi_api.ConfigIndexBitwidth()  # type: ignore
+
+
+def FlattenBuffer():
+    """FlattenBuffer
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.FlattenBuffer()  # type: ignore

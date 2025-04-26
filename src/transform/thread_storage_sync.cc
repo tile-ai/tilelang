@@ -444,17 +444,20 @@ public:
       ICHECK_EQ(op->args.size(), 1U)
           << "address_of should only have one argument (Buffer)";
 
-      BufferLoad load = Downcast<BufferLoad>(op->args[0]);
-      Var buffer_var(Downcast<Var>(load->buffer->data));
-      if (sync_scope_.rank == StorageRank::kGlobal &&
-          GetScope(buffer_var).rank == StorageRank::kGlobal) {
-        ++rw_stats_[buffer_var].read_count;
+      if (auto load = op->args[0].as<BufferLoadNode>()) {
+        Var buffer_var(Downcast<Var>(load->buffer->data));
+        if (sync_scope_.rank == StorageRank::kGlobal &&
+            GetScope(buffer_var).rank == StorageRank::kGlobal) {
+          ++rw_stats_[buffer_var].read_count;
+        }
+        if (sync_scope_.rank == StorageRank::kGlobal &&
+            GetScope(buffer_var).rank == StorageRank::kGlobal) {
+          ++rw_stats_[buffer_var].write_count;
+        }
+        return expr;
+      } else {
+        return StmtExprMutator::VisitExpr_(op);
       }
-      if (sync_scope_.rank == StorageRank::kGlobal &&
-          GetScope(buffer_var).rank == StorageRank::kGlobal) {
-        ++rw_stats_[buffer_var].write_count;
-      }
-      return expr;
     } else {
       return StmtExprMutator::VisitExpr_(op);
     }

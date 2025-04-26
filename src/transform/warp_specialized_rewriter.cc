@@ -556,24 +556,31 @@ class WSCodeEmitter : public StmtMutator {
 public:
   WSCodeEmitter(bool is_emitting_producer, IterVar thread_iv,
                 Map<Var, Buffer> buffer_data_to_buffer,
-                const WarpSpecializedRoleMarker &marker)
+                const WarpSpecializedRoleMarker &marker,
+                bool mbarrier_only = false)
       : is_emitting_producer_(is_emitting_producer),
         buffer_data_to_buffer_(buffer_data_to_buffer), marker_(marker),
-        thread_var_(thread_iv->var) {}
+        thread_var_(thread_iv->var), mbarrier_only_(mbarrier_only) {}
 
 private:
   template <typename NodeType> Stmt FilterByRole(const NodeType *op) {
     Role role = marker_.GetRole(op);
-    if (role == Role::kBoth)
+    if (mbarrier_only_) {
+      if (role != Role::kProducer)
+        return StmtMutator::VisitStmt_(op);
+    }
+    if (role == Role::kBoth) {
       return StmtMutator::VisitStmt_(op);
-    else if ((role == Role::kProducer) == is_emitting_producer_)
+    } else if ((role == Role::kProducer) == is_emitting_producer_) {
       return GetRef<Stmt>(op);
-    else
+    } else {
       return Evaluate(0);
+    }
   }
 
   // TODO: only need to add block for ops in the loop
   Stmt VisitStmt_(const SeqStmtNode *op) final {
+
     bool has_producer = false;
     for (auto stmt : op->seq) {
       if (marker_.GetRole(stmt) == Role::kProducer) {
@@ -590,18 +597,20 @@ private:
         op->seq.Map([&](Stmt stmt) { return VisitStmt(stmt); });
 
     auto map = ExtractSyncPattern(op->seq);
-    // std::cout << "Print ExtractSyncPattern" << std::endl;
-    // for (int i = 0; i < static_cast<int>(op->seq.size()); i++) {
-    //   std::cout << i << " " << map.acquire[i] << " " << map.release[i] << " "
-    //   << map.release_after[i] << std::endl;
-    // }
-    // std::cout << "Print sync pattern" << std::endl;
-    // for (auto pattern : map.patterns) {
-    //   std::cout << pattern.release_idx << " " << pattern.acquire_idx <<
-    //   std::endl;
-    // }
-    // std::cout << "End of ExtractSyncPattern" << std::endl;
-    // pipeline_info_.PrintPipelineInfo();
+    /*
+      std::cout << "Print ExtractSyncPattern" << std::endl;
+      for (int i = 0; i < static_cast<int>(op->seq.size()); i++) {
+        std::cout << i << " " << map.acquire[i] << " " << map.release[i] << " "
+        << map.release_after[i] << std::endl;
+      }
+      std::cout << "Print sync pattern" << std::endl;
+      for (auto pattern : map.patterns) {
+        std::cout << pattern.release_idx << " " << pattern.acquire_idx <<
+        std::endl;
+      }
+      std::cout << "End of ExtractSyncPattern" << std::endl;
+      pipeline_info_.PrintPipelineInfo();
+    */
     Array<Stmt> new_body;
     Map<String, ObjectRef> annotations;
     annotations.Set(String("stmt_group"), Integer(1));
@@ -610,80 +619,85 @@ private:
       ProducerTraitsCollector collector;
       for (int i = 0; i < static_cast<int>(op->seq.size()); i++) {
         Array<Stmt> block_stmt = {};
-        if (marker_.GetRole(op->seq[i]) == Role::kConsumer)
-          continue;
-        if (marker_.GetRole(op->seq[i]) == Role::kBoth) {
-          block_stmt.push_back(seq_transformed[i]);
-          new_body.push_back(MakeGroupBlock(
-              block_stmt.size() == 1 ? block_stmt[0]
-                                     : SeqStmt(std::move(block_stmt)),
-              annotations));
-          continue;
+        if (!mbarrier_only_) {
+          if (marker_.GetRole(op->seq[i]) == Role::kConsumer)
+            continue;
+          if (marker_.GetRole(op->seq[i]) == Role::kBoth) {
+            block_stmt.push_back(seq_transformed[i]);
+            new_body.push_back(MakeGroupBlock(
+                block_stmt.size() == 1 ? block_stmt[0]
+                                       : SeqStmt(std::move(block_stmt)),
+                annotations));
+            continue;
+          }
         }
-        if (map.acquire[i] != -1) {
+
+        for (int pattern_idx : map.acquire[i]) {
           PrimExpr acquire_barrier_id =
-              stage_ + num_barriers_ + num_stages_ * map.acquire[i];
-          PrimExpr parity = map.is_loop_dependency(map.acquire[i])
+              stage_ + num_barriers_ + num_stages_ * pattern_idx;
+          PrimExpr parity = map.is_loop_dependency(pattern_idx)
                                 ? bitwise_xor(parity_, 1)
                                 : parity_;
           block_stmt.push_back(makeParityWait(acquire_barrier_id, parity));
         }
-        ICHECK(map.release[i] >= 0);
-        PrimExpr release_barrier_id =
-            stage_ + num_barriers_ + num_stages_ * map.release[i];
-        auto stmt =
-            MbarrierRewriter::Rewrite(seq_transformed[i], release_barrier_id);
-        collector.Collect(stmt);
-        if (!is_zero(collector.BulkCopyBytes())) {
-          auto expect_tx = IfThenElse(
-              EQ(thread_var_, 0),
-              makeExpectTX(release_barrier_id, collector.BulkCopyBytes()));
-          block_stmt.push_back(TMAExpectTxRewriter::Rewrite(stmt, expect_tx));
-        } else {
-          block_stmt.push_back(stmt);
-        }
-        if (collector.HasSimtCopy() > 0) {
-          block_stmt.push_back(makeCpAsyncBarrier(release_barrier_id));
-        }
-        if (map.release_after[i]) {
-          block_stmt.push_back(makeArriveBarrier(release_barrier_id));
-          for (int j = 0; j < num_stages_; j++) {
-            released_barrier_.insert(j + num_barriers_ +
-                                     num_stages_ * map.release[i]);
+        ICHECK(map.release[i].size() > 0);
+        for (size_t j = 0; j < map.release[i].size(); j++) {
+          int pattern_idx = map.release[i][j];
+          PrimExpr release_barrier_id =
+              stage_ + num_barriers_ + num_stages_ * pattern_idx;
+          auto stmt =
+              MbarrierRewriter::Rewrite(seq_transformed[i], release_barrier_id);
+          collector.Collect(stmt);
+          if (!is_zero(collector.BulkCopyBytes())) {
+            auto expect_tx = IfThenElse(
+                EQ(thread_var_, 0),
+                makeExpectTX(release_barrier_id, collector.BulkCopyBytes()));
+            block_stmt.push_back(TMAExpectTxRewriter::Rewrite(stmt, expect_tx));
+          } else {
+            block_stmt.push_back(stmt);
           }
+          if (collector.HasSimtCopy() > 0) {
+            block_stmt.push_back(makeCpAsyncBarrier(release_barrier_id));
+          }
+          if (map.release_after[i][j]) {
+            block_stmt.push_back(makeArriveBarrier(release_barrier_id));
+            for (int s = 0; s < num_stages_; s++) {
+              released_barrier_.insert(s + num_barriers_ +
+                                       num_stages_ * pattern_idx);
+            }
+          }
+          collector.Clear();
+          new_body.push_back(MakeGroupBlock(
+              block_stmt.size() == 1 ? block_stmt[0]
+                                     : SeqStmt(std::move(block_stmt)),
+              annotations));
         }
-        collector.Clear();
-        new_body.push_back(MakeGroupBlock(block_stmt.size() == 1
-                                              ? block_stmt[0]
-                                              : SeqStmt(std::move(block_stmt)),
-                                          annotations));
       }
     } else { // consumer case
       for (int i = 0; i < static_cast<int>(op->seq.size()); i++) {
         Array<Stmt> block_stmt = {};
         if (marker_.GetRole(op->seq[i]) == Role::kProducer)
           continue;
-        if (map.acquire[i] != -1) {
+        for (int pattern_idx : map.acquire[i]) {
           PrimExpr acquire_barrier_id =
-              stage_ + num_barriers_ + num_stages_ * map.acquire[i];
-          PrimExpr parity = map.is_loop_dependency(map.acquire[i])
+              stage_ + num_barriers_ + num_stages_ * pattern_idx;
+          PrimExpr parity = map.is_loop_dependency(pattern_idx)
                                 ? bitwise_xor(parity_, 1)
                                 : parity_;
           block_stmt.push_back(makeParityWait(acquire_barrier_id, parity));
         }
         block_stmt.push_back(seq_transformed[i]);
-        // new_body.push_back(MakeGroupBlock(block_stmt.size() == 1 ?
-        // block_stmt[0] : SeqStmt(std::move(block_stmt)), annotations));
-        if (map.release_after[i]) {
-          PrimExpr release_barrier_id =
-              stage_ + num_barriers_ + num_stages_ * map.release[i];
-          block_stmt.push_back(makeArriveBarrier(release_barrier_id));
-          for (int j = 0; j < num_stages_; j++) {
-            released_barrier_.insert(j + num_barriers_ +
-                                     num_stages_ * map.release[i]);
+        for (size_t j = 0; j < map.release[i].size(); j++) {
+          if (map.release_after[i][j]) {
+            int pattern_idx = map.release[i][j];
+            PrimExpr release_barrier_id =
+                stage_ + num_barriers_ + num_stages_ * pattern_idx;
+            block_stmt.push_back(makeArriveBarrier(release_barrier_id));
+            for (int s = 0; s < num_stages_; s++) {
+              released_barrier_.insert(s + num_barriers_ +
+                                       num_stages_ * pattern_idx);
+            }
           }
-          // Update the pipeline info
-          // Todo: handle sync
         }
         new_body.push_back(MakeGroupBlock(block_stmt.size() == 1
                                               ? block_stmt[0]
@@ -816,13 +830,20 @@ private:
   };
 
   struct SyncPatternMap {
-    std::vector<int> acquire;
-    std::vector<int> release;
-    std::vector<bool> release_after;
+    std::vector<std::vector<int>> acquire;
+    std::vector<std::vector<int>> release;
+    std::vector<std::vector<bool>> release_after;
     std::vector<SyncPattern> patterns;
-    bool is_loop_dependency(int i) {
-      // return if the acquire is based on release in the previous iteration
-      return patterns[i].release_idx > patterns[i].acquire_idx;
+
+    void resize(size_t n) {
+      acquire.resize(n);
+      release.resize(n);
+      release_after.resize(n);
+    }
+
+    bool is_loop_dependency(int pattern_idx) {
+      return patterns[pattern_idx].release_idx >
+             patterns[pattern_idx].acquire_idx;
     }
   };
 
@@ -948,29 +969,41 @@ private:
     // }
 
     SyncPatternMap map;
+    map.resize(num_stmts);
     map.patterns = sync_patterns;
-    map.acquire.resize(num_stmts, -1);
-    map.release.resize(num_stmts, -1);
-    map.release_after.resize(num_stmts, false);
+
     for (size_t i = 0; i < sync_patterns.size(); i++) {
-      map.acquire[sync_patterns[i].acquire_idx] = i;
-      map.release[sync_patterns[i].release_idx] = i;
-      map.release_after[sync_patterns[i].release_idx] = true;
+      int acquire_idx = sync_patterns[i].acquire_idx;
+      int release_idx = sync_patterns[i].release_idx;
+
+      map.acquire[acquire_idx].push_back(i);
+      map.release[release_idx].push_back(i);
+      map.release_after[release_idx].push_back(true);
     }
 
-    int cur_consumer_barrier = -1, cur_producer_barrier = -1;
+    std::vector<int> cur_consumer_barrier, cur_producer_barrier;
     for (int i = num_stmts - 1; i >= 0; i--) {
       if (is_producer[i]) {
-        if (map.release[i] == -1) {
-          map.release[i] = cur_producer_barrier;
+        if (map.release[i].size() == 0) {
+          for (auto pattern_idx : cur_producer_barrier) {
+            map.release[i].push_back(pattern_idx);
+            map.release_after[i].push_back(false);
+          }
         } else {
-          cur_producer_barrier = map.release[i];
+          for (auto pattern_idx : map.release[i]) {
+            cur_producer_barrier.push_back(pattern_idx);
+          }
         }
       } else {
-        if (map.release[i] == -1) {
-          map.release[i] = cur_consumer_barrier;
+        if (map.release[i].size() == 0) {
+          for (auto pattern_idx : cur_consumer_barrier) {
+            map.release[i].push_back(pattern_idx);
+            map.release_after[i].push_back(false);
+          }
         } else {
-          cur_consumer_barrier = map.release[i];
+          for (auto pattern_idx : map.release[i]) {
+            cur_consumer_barrier.push_back(pattern_idx);
+          }
         }
       }
     }
@@ -987,6 +1020,7 @@ private:
   PrimExpr stage_ = 0;
   int num_stages_ = 1;
   Var thread_var_;
+  bool mbarrier_only_ = false;
   PipelineInfo pipeline_info_;
   friend class WarpSpecializedRewriter;
 };
@@ -1072,7 +1106,9 @@ private:
 
 class WarpSpecializedRewriter : public StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc f) {
+  WarpSpecializedRewriter(bool disable_warp_specialized)
+      : disable_warp_specialized_(disable_warp_specialized) {}
+  static PrimFunc Substitute(PrimFunc f, bool disable_warp_specialized) {
     // Check if function only uses threadIdx.x before proceeding
     if (!ThreadTagChecker::HasOnlyThreadIdxX(f)) {
       LOG(WARNING) << "WarpSpecialize will be disabled because the program "
@@ -1083,7 +1119,7 @@ public:
       return f;
     }
 
-    auto T = WarpSpecializedRewriter();
+    auto T = WarpSpecializedRewriter(disable_warp_specialized);
     T.nreg_ = SetMaxNRegCollector::Collect(f);
     T.buffer_lca_ = DetectBufferAccessLCA(f);
     for (auto [buffer, _] : T.buffer_lca_)
@@ -1154,11 +1190,27 @@ private:
       return block_realize;
     }
 
+    if (disable_warp_specialized_) {
+      WSCodeEmitter mbarrier_emitter(true, thread_iv_, buffer_data_to_buffer_,
+                                     marker, true);
+      auto code = mbarrier_emitter(block->body);
+      int num_barriers = mbarrier_emitter.num_barriers_;
+      Array<PrimExpr> barrier_num_threads;
+      barrier_num_threads.reserve(num_barriers);
+      PrimExpr arrive_thread_count = thread_iv_->dom->extent;
+      for (int i = 0; i < num_barriers; i++) {
+        barrier_num_threads.push_back(arrive_thread_count);
+      }
+      Stmt init_barrier = Evaluate(Call(
+          DataType::Handle(), CreateListofMBarrierOp(), barrier_num_threads));
+      block.CopyOnWrite()->body = SeqStmt({init_barrier, code});
+      block_realize.CopyOnWrite()->block = block;
+      return block_realize;
+    }
     WSCodeEmitter producer(true, thread_iv_, buffer_data_to_buffer_, marker);
     WSCodeEmitter consumer(false, thread_iv_, buffer_data_to_buffer_, marker);
     Stmt producer_code = producer(block->body);
     Stmt consumer_code = consumer(block->body);
-
     PrimExpr consumer_thread_extent = thread_iv_->dom->extent;
     PrimExpr producer_thread_extent = thread_iv_->dom->extent;
     // Need one warp-group for bulk-copy only case
@@ -1166,7 +1218,6 @@ private:
       producer_thread_extent = 128;
 
     // TODO: estimate the correct reg usage.
-
     int dec_reg = nreg_[0].as<IntImmNode>()->value;
     int inc_reg = nreg_[1].as<IntImmNode>()->value;
 
@@ -1222,6 +1273,7 @@ private:
   IterVar thread_iv_;
   Optional<PrimExpr> updated_thread_extent_;
   bool need_update_thread_extent_ = false;
+  bool disable_warp_specialized_ = false;
   Array<IntImm> nreg_;
 };
 
@@ -1229,7 +1281,9 @@ using namespace tir::transform;
 
 tvm::transform::Pass WarpSpecialized() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    return WarpSpecializedRewriter::Substitute(f);
+    bool disable_warp_specialized =
+        ctx->GetConfig<Bool>(kDisableWarpSpecialized, Bool(false)).value();
+    return WarpSpecializedRewriter::Substitute(f, disable_warp_specialized);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.WarpSpecialized", {});
 }

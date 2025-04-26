@@ -90,14 +90,17 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
       bool M_divisible = (this->M % (factor * m_warp)) == 0;
       bool N_divisible = (this->N % (factor * n_warp)) == 0;
       if (M_divisible && N_divisible) {
-        if (this->M / m_warp >= this->N / n_warp)
-          m_warp *= factor;
-        else
+        // put N dimension first
+        // because usually n in mma
+        // is more smaller than m
+        if (this->N / n_warp >= this->M / m_warp)
           n_warp *= factor;
-      } else if (M_divisible) {
-        m_warp *= factor;
+        else
+          m_warp *= factor;
       } else if (N_divisible) {
         n_warp *= factor;
+      } else if (M_divisible) {
+        m_warp *= factor;
       } else {
         ICHECK(0) << "Cannot compute warp partition for shape" << M << " " << N
                   << " with num_warps " << num_warps;
@@ -106,7 +109,6 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
   } else {
     ICHECK(0) << "Unknown GemmWarpPolicy";
   }
-  // TODO: perform more checks here
   return {m_warp, n_warp};
 }
 
@@ -115,12 +117,12 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (TargetIsCDNA(T.target)) {
     warp_size = 64;
   }
-
+  auto block_size = *as_const_int(T.thread_bounds->extent);
   bool maybe_wgmma = TargetIsHopper(T.target) && (this->M >= 64) &&
-                     (T.block_size / warp_size % 4 == 0);
+                     (block_size / warp_size % 4 == 0);
 
   auto [warp_m, warp_n] =
-      ComputeWarpPartition(T.block_size / warp_size, T.target, maybe_wgmma);
+      ComputeWarpPartition(block_size / warp_size, T.target, maybe_wgmma);
 
   std::stringstream ss;
   std::string op_name = "tl::gemm_ss";
@@ -162,11 +164,12 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     return {};
   LayoutMap results;
   ICHECK(C.scope() == "local.fragment");
-
+  auto block_size = *as_const_int(T.thread_bounds->extent) -
+                    *as_const_int(T.thread_bounds->min);
   if (TargetIsVolta(T.target)) {
     const int warp_size = 32;
     auto [warp_m, warp_n] =
-        ComputeWarpPartition(T.block_size / warp_size, T.target);
+        ComputeWarpPartition(block_size / warp_size, T.target);
     auto fragment =
         makeGemmVoltaFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
     results.Set(C, fragment);
@@ -188,7 +191,7 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   } else if (TargetIsAmpere(T.target) || TargetIsTuring(T.target)) {
     const int warp_size = 32;
     auto [warp_m, warp_n] =
-        ComputeWarpPartition(T.block_size / warp_size, T.target);
+        ComputeWarpPartition(block_size / warp_size, T.target);
     auto fragment =
         makeGemmFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
     results.Set(C, fragment);
@@ -213,20 +216,17 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
                                    B->dtype.bits(), trans_B ? 2 : 1));
     } else if (B.scope() == "local.fragment") {
-      ICHECK(trans_B == false);
+      ICHECK(trans_B == false) << "B is local.fragment, trans_B must be false, "
+                                  "please raise an issue if you see this";
       results.Set(B, makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n));
     } else {
       ICHECK(0);
     }
   } else if (TargetIsHopper(T.target)) {
     const int warp_size = 32;
-    bool maybe_wgmma = (this->M >= 64) && (T.block_size / warp_size % 4 == 0);
-    if (!maybe_wgmma) {
-      LOG(WARNING)
-          << "WGMMA is not enabled because M < 64 or block_size % 128 != 0";
-    }
+    bool maybe_wgmma = (this->M >= 64) && (block_size / warp_size % 4 == 0);
     auto [warp_m, warp_n] =
-        ComputeWarpPartition(T.block_size / warp_size, T.target, maybe_wgmma);
+        ComputeWarpPartition(block_size / warp_size, T.target, maybe_wgmma);
     auto fragment =
         maybe_wgmma
             ? makeGemmFragmentCHopper(M, N, M / warp_m, N / warp_n,
@@ -258,7 +258,7 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   } else if (TargetIsCDNA(T.target)) {
     const int warp_size = 64;
     auto [warp_m, warp_n] =
-        ComputeWarpPartition(T.block_size / warp_size, T.target);
+        ComputeWarpPartition(block_size / warp_size, T.target);
 
     auto fragment =
         makeGemmFragmentCCDNA(M, N, M / warp_m, N / warp_n, C->dtype.bits());
@@ -278,8 +278,8 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
                                                 A->dtype.bits(), kPack);
       results.Set(A, shared_layout);
     } else if (A.scope() == "local.fragment") {
-      results.Set(
-          A, makeGemmFragmentACDNA(M, N, K, M / warp_m, N / warp_n, trans_A));
+      results.Set(A, makeGemmFragmentACDNA(M, N, K, M / warp_m, N / warp_n,
+                                           A->dtype.bits(), trans_A));
     } else {
       ICHECK(0);
     }

@@ -98,15 +98,21 @@ public:
 
   std::string DebugOutput() const final;
 
+  Fragment SetThreadRange(Range thread_range);
+
+  Range ThreadRange() const { return thread_range_; }
+
   bool IsEqual(const FragmentNode *other, bool skip_index = false) const;
 
   void VisitAttrs(tvm::AttrVisitor *v);
+
   bool SEqualReduce(const FragmentNode *other, SEqualReducer equal) const;
   static constexpr const char *_type_key = "tl.Fragment";
   TVM_DECLARE_FINAL_OBJECT_INFO(FragmentNode, LayoutNode);
 
 protected:
   Map<Var, Range> getVarMap() const final;
+  Range thread_range_;
   PrimExpr forward_thread_;
   PrimExpr replicate_size_;
 };
@@ -149,7 +155,8 @@ Fragment makeGemmFragmentB(const int block_m, const int block_n,
 
 Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
                                const int block_k, const int warp_m,
-                               const int warp_n, bool transposed = false);
+                               const int warp_n, const int element_size,
+                               bool transposed = false);
 
 // Default Memory Layout
 Layout makeGemmLayoutLinear(int stride, int continuous);

@@ -108,4 +108,4 @@ def test_multi_version_buffer():
 
 
 if __name__ == "__main__":
-    test_multi_version_buffer()
+    tilelang.testing.main()

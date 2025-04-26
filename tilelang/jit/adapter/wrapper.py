@@ -20,11 +20,11 @@ PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY = """
 """
 
 PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY_HIP = """
-    hipError_t result_{0} = hipFuncSetAttribute((const void *){0}, hipFuncAttributeMaxDynamicSharedMemorySize, {1});
-    if (result_{0} != HIP_SUCCESS) {{
-        snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed dynamic shared memory size to %d with error: %s", {1}, hipGetErrorString(result_{0}));
+    if ({1} > 65536) {{
+        snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed dynamic shared memory size for {0} to %d", {1});
         return -1;
     }}
+    return 0;
 """
 
 PREDEF_INIT_FUNC = """
@@ -68,22 +68,10 @@ TMA_DESC_INIT_FUNC = """
 
 \tif ({0}_result != CUDA_SUCCESS) {{
 \t\tstd::stringstream ss;
-\t\tss << "TMA Desc Addr:   " << &{0}
-\t\t\t<< "\\nformat         " << {0}_type
-\t\t\t<< "\\ndim            " << {0}_tensorRank
-\t\t\t<< "\\ngmem_address   " << {0}_globalAddress
-\t\t\t<< "\\nglobalDim      " << {0}_globalDim
-\t\t\t<< "\\nglobalStrides  " << {0}_globalStride + 1
-\t\t\t<< "\\nboxDim         " << {0}_boxDim
-\t\t\t<< "\\nelementStrides " << {0}_elementStrides
-\t\t\t<< "\\ninterleave     " << {0}_interleave
-\t\t\t<< "\\nswizzle        " << {0}_swizzle
-\t\t\t<< "\\nl2Promotion    " << {0}_l2Promotion
-\t\t\t<< "\\noobFill        " << {0}_oobFill
-\t\t\t<< "\\nError: Failed to initialize the TMA descriptor {0}";
+\t\tss << "Error: Failed to initialize the TMA descriptor {0}";
 \t\tsnprintf(error_buf, ERROR_BUF_SIZE, "%s", ss.str().c_str());
 \t\treturn -1;
-}}
+\t}}
 """
 
 

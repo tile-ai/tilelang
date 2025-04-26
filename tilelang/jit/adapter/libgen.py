@@ -3,7 +3,7 @@
 from typing import Optional
 from .utils import is_cuda_target, is_hip_target, is_cpu_target
 from tilelang import tvm as tvm
-from tilelang.contrib.nvcc import get_target_compute_version
+from tilelang.contrib.nvcc import get_target_compute_version, get_nvcc_compiler
 from tvm.target import Target
 import ctypes
 import os
@@ -44,7 +44,7 @@ class LibraryGenerator(object):
             libpath = src.name.replace(".cu", ".so")
 
             command = [
-                "nvcc",
+                get_nvcc_compiler(),
                 "-std=c++17",
                 "-w",  # Disable all warning messages
                 "-Xcudafe",

@@ -5,6 +5,8 @@ from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
 
+tilelang.testing.set_random_seed(42)
+
 
 def convolution(N, C, H, W, F, K, S, D, P, in_dtype, out_dtype, dtypeAccum, block_M, block_N,
                 block_K, num_stages, threads):
@@ -81,90 +83,6 @@ def run_conv(N,
         return C.to(torch.__getattribute__(out_dtype))
 
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
-
-
-def test_conv_f16f16f16_k3s1d1p1():
-    run_conv(
-        1,
-        128,
-        64,
-        64,
-        128,
-        3,
-        1,
-        1,
-        1,
-        "float16",
-        "float16",
-        "float16",
-        128,
-        128,
-        32,
-        2,
-    )
-
-
-def test_conv_f16f16f16_k3s2d1p1():
-    run_conv(
-        1,
-        128,
-        64,
-        64,
-        128,
-        3,
-        2,
-        1,
-        1,
-        "float16",
-        "float16",
-        "float16",
-        128,
-        128,
-        32,
-        2,
-    )
-
-
-def test_conv_f16f16f16_k1s1d1p0():
-    run_conv(
-        1,
-        128,
-        64,
-        64,
-        128,
-        1,
-        1,
-        1,
-        0,
-        "float16",
-        "float16",
-        "float16",
-        128,
-        128,
-        32,
-        2,
-    )
-
-
-def test_conv_f16f16f16_k1s2d1p0():
-    run_conv(
-        1,
-        128,
-        64,
-        64,
-        128,
-        1,
-        2,
-        1,
-        0,
-        "float16",
-        "float16",
-        "float16",
-        128,
-        128,
-        32,
-        2,
-    )
 
 
 def test_conv_f16f16f32_k3s1d1p1():

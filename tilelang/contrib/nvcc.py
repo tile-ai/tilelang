@@ -414,3 +414,8 @@ def have_fp8(compute_version):
     conditions.append(major == 8 and minor >= 9)
     conditions.append(major >= 9)
     return any(conditions)
+
+
+def get_nvcc_compiler() -> str:
+    """Get the path to the nvcc compiler"""
+    return os.path.join(find_cuda_path(), "bin", "nvcc")

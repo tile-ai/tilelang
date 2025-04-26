@@ -108,6 +108,26 @@ def test_gemm_f16f32f32_nt():
     run_gemm(1024, 1024, 1024, False, True, "float16", "float32", "float32", 128, 128, 32, k_pack=2)
 
 
+@tilelang.testing.requires_rocm
+def test_gemm_bf16f32f32_nt():
+    run_gemm(1024, 1024, 1024, False, False, "bfloat16", "float32", "float32", 128, 128, 32)
+    run_gemm(1024, 1024, 1024, False, True, "bfloat16", "float32", "float32", 128, 128, 32)
+    run_gemm(1024, 1024, 1024, True, True, "bfloat16", "float32", "float32", 128, 128, 32)
+    run_gemm(1024, 1024, 1024, True, False, "bfloat16", "float32", "float32", 128, 128, 32)
+    run_gemm(
+        1024, 1024, 1024, False, True, "bfloat16", "float32", "float32", 128, 128, 32, k_pack=2)
+
+
+@tilelang.testing.requires_rocm
+def test_gemm_bf16bf16f32():
+    run_gemm(1024, 1024, 1024, False, False, "bfloat16", "bfloat16", "float32", 128, 128, 32)
+    run_gemm(1024, 1024, 1024, False, True, "bfloat16", "bfloat16", "float32", 128, 128, 32)
+    run_gemm(1024, 1024, 1024, True, True, "bfloat16", "bfloat16", "float32", 128, 128, 32)
+    run_gemm(1024, 1024, 1024, True, False, "bfloat16", "bfloat16", "float32", 128, 128, 32)
+    run_gemm(
+        1024, 1024, 1024, False, True, "bfloat16", "bfloat16", "float32", 128, 128, 32, k_pack=2)
+
+
 def matmul_rs(
     M,
     N,
@@ -131,8 +151,11 @@ def matmul_rs(
     vec_size = 4 * k_pack
 
     @T.prim_func
-    def main(A: T.Tensor(A_shape, in_dtype), B: T.Tensor(B_shape, in_dtype), C: T.Tensor(
-        (M, N), out_dtype)):
+    def main(
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
+    ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             A_local = T.alloc_fragment(A_shared_shape, in_dtype)
@@ -145,6 +168,7 @@ def matmul_rs(
                     T.copy(A_shared, A_local)
                 else:
                     T.copy(A[by * block_M, k * block_K], A_shared, coalesced_width=vec_size)
+                    T.copy(A_shared, A_local)
                 if trans_B:
                     T.copy(B[bx * block_N, k * block_K], B_shared, coalesced_width=vec_size)
                 else:
@@ -171,7 +195,7 @@ def run_gemm_rs(
     num_threads=128,
     k_pack=1,
 ):
-    program = matmul(
+    program = matmul_rs(
         M,
         N,
         K,
@@ -208,6 +232,22 @@ def test_gemm_rs_f16f32f32_nt():
     run_gemm_rs(1024, 1024, 1024, False, True, "float16", "float32", "float32", 128, 128, 32)
     run_gemm_rs(1024, 1024, 1024, True, True, "float16", "float32", "float32", 128, 128, 32)
     run_gemm_rs(1024, 1024, 1024, True, False, "float16", "float32", "float32", 128, 128, 32)
+
+
+@tilelang.testing.requires_rocm
+def test_gemm_rs_bf16f32f32_nt():
+    run_gemm_rs(1024, 1024, 1024, False, False, "bfloat16", "float32", "float32", 128, 128, 32)
+    run_gemm_rs(1024, 1024, 1024, False, True, "bfloat16", "float32", "float32", 128, 128, 32)
+    run_gemm_rs(1024, 1024, 1024, True, True, "bfloat16", "float32", "float32", 128, 128, 32)
+    run_gemm_rs(1024, 1024, 1024, True, False, "bfloat16", "float32", "float32", 128, 128, 32)
+
+
+@tilelang.testing.requires_rocm
+def test_gemm_rs_bf16bf16f32_nt():
+    run_gemm_rs(1024, 1024, 1024, False, False, "bfloat16", "bfloat16", "float32", 128, 128, 32)
+    run_gemm_rs(1024, 1024, 1024, False, True, "bfloat16", "bfloat16", "float32", 128, 128, 32)
+    run_gemm_rs(1024, 1024, 1024, True, True, "bfloat16", "bfloat16", "float32", 128, 128, 32)
+    run_gemm_rs(1024, 1024, 1024, True, False, "bfloat16", "bfloat16", "float32", 128, 128, 32)
 
 
 if __name__ == "__main__":

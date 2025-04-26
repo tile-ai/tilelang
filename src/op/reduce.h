@@ -41,6 +41,19 @@ private:
   std::string MakeCodegenReducer() const;
 };
 
+class CumSumOp : public Operator {
+public:
+  CumSumOp(Array<PrimExpr> args, BufferMap vmap);
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
+  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) final;
+  static const Op &Get();
+
+private:
+  tir::Buffer src, dst;
+  int dim;
+  bool reverse;
+};
+
 } // namespace tl
 } // namespace tvm
 
