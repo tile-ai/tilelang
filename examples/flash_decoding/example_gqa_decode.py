@@ -272,7 +272,6 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
 
         @autotune(
             configs=get_configs(),
-            keys=["block_N", "block_H", "num_split", "num_stages", "threads"],
             warmup=10,
             rep=10)
         @jit(

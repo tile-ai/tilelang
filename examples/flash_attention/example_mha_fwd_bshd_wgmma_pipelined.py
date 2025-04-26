@@ -159,7 +159,6 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False):
 
         @autotune(
             configs=get_configs(),
-            keys=["block_M", "block_N", "num_stages", "threads"],
             warmup=10,
             rep=10)
         @jit(out_idx=[3], supply_type=tilelang.TensorSupplyType.Integer, ref_prog=None)

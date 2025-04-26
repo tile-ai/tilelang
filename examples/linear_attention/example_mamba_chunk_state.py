@@ -142,7 +142,6 @@ def chunk_state_fwd(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate,
 
         @autotune(
             configs=get_configs(),
-            keys=["block_M", "block_N", "block_K", "num_stages", "threads"],
             warmup=10,
             rep=10)
         @jit(out_idx=[4], supply_type=tilelang.TensorSupplyType.Normal, ref_prog=None)
