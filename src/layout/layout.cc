@@ -204,12 +204,18 @@ Fragment FragmentNode::DeReplicate() const {
                   int(*rep_size) / factor, NullOpt);
 }
 
+Fragment FragmentNode::SetThreadRange(Range thread_range) {
+  thread_range_ = thread_range;
+  return GetRef<Fragment>(this);
+}
+
 Layout LayoutNode::Inverse() const {
   arith::Analyzer analyzer;
   arith::IterMapResult res =
       arith::DetectIterMap(forward_index_, getVarMap(), 1,
                            arith::IterMapLevel::Bijective, &analyzer);
-  ICHECK(res->errors.empty()) << res->errors;
+  ICHECK(res->errors.empty())
+      << "Layout " << DebugOutput() << " has errors: " << res->errors;
 
   auto outputs_shape = OutputShape();
   Array<PrimExpr> outputs;

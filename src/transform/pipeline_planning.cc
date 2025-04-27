@@ -61,28 +61,51 @@ bool MayConflict(Region region1, Region region2) {
  *        2. Source buffer must be in global memory scope
  *        3. Destination buffer must be in local or shared memory scope
  */
-class GlobalCopyPatternDetector : public StmtExprVisitor {
+class BufferRegionCollector : public StmtExprVisitor {
 public:
-  static bool Detect(const Stmt &stmt) {
-    GlobalCopyPatternDetector detector;
-    detector.VisitStmt(stmt);
-    return detector.is_global_copy_pattern_;
-  }
+  BufferRegionCollector(Map<Var, Buffer> buffer_data_to_buffer)
+      : buffer_data_to_buffer_(buffer_data_to_buffer) {}
+
+  Array<BufferRegion> GetReads() const { return reads_; }
+
+  Array<BufferRegion> GetWrites() const { return writes_; }
+
+  bool GetGlobalCopyPattern() const { return is_global_copy_pattern_; }
+
+  PrimExpr GetConditonalExpr() const { return conditonal_expr; }
 
 private:
   void VisitStmt_(const BufferStoreNode *op) final {
     Buffer store_buffer = op->buffer;
+    Array<PrimExpr> indices = op->indices;
+    // convert indices to region
+    Array<Range> region;
+    for (const auto &index : indices) {
+      region.push_back(Range::FromMinExtent(index, 1));
+    }
+    auto store_region = BufferRegion(store_buffer, region);
+    writes_.push_back(store_region);
+
     is_global_read_ = false;
     this->VisitExpr(op->value);
     if (is_global_read_ && (store_buffer.scope() == "shared" ||
-                            store_buffer.scope() == "shared.dyn" ||
-                            store_buffer.scope() == "local")) {
+                            store_buffer.scope() == "shared.dyn")) {
       is_global_copy_pattern_ = true;
     }
     is_global_read_ = false;
   }
 
   void VisitExpr_(const BufferLoadNode *op) final {
+    auto load_buffer = op->buffer;
+    Array<PrimExpr> indices = op->indices;
+    // convert indices to region
+    Array<Range> region;
+    for (const auto &index : indices) {
+      region.push_back(Range::FromMinExtent(index, 1));
+    }
+    auto load_region = BufferRegion(load_buffer, region);
+    reads_.push_back(load_region);
+
     if (op->buffer.scope() == "global") {
       is_global_read_ = true;
     }
@@ -90,7 +113,22 @@ private:
 
   void VisitExpr_(const CallNode *op) final {
     auto args = op->args;
-    if (op->op.same_as(tir::builtin::if_then_else())) {
+    if (op->op.same_as(builtin::address_of())) {
+      const BufferLoad load = Downcast<BufferLoad>(op->args[0]);
+      const BufferRegion buffer_region = BufferRegion::FullRegion(load->buffer);
+      // because we only care about the buffer itself instead of indices
+      reads_.push_back(buffer_region);
+    } else if (op->op.same_as(builtin::tvm_access_ptr())) {
+      const VarNode *buffer_var = op->args[1].as<VarNode>();
+      ICHECK(buffer_var);
+      auto it = buffer_data_to_buffer_.find(GetRef<Var>(buffer_var));
+      if (it != buffer_data_to_buffer_.end()) {
+        const Buffer &buffer = (*it).second;
+        const BufferRegion buffer_region = BufferRegion::FullRegion(buffer);
+        // because we only care about the buffer itself instead of indices
+        reads_.push_back(buffer_region);
+      }
+    } else if (op->op.same_as(tir::builtin::if_then_else())) {
       // Simplify nested if_then_else
       // if (cond) { if (inner_cond) { inner_then_expr } else { inner_else_expr
       // } } else { else_expr }
@@ -98,23 +136,31 @@ private:
       const PrimExpr &cond = op->args[0];
       const PrimExpr &then_expr = op->args[1];
       const PrimExpr &else_expr = op->args[2];
+      conditonal_expr = cond;
       this->VisitExpr(then_expr);
       this->VisitExpr(else_expr);
+    } else {
+      StmtExprVisitor::VisitExpr_(op);
     }
   }
 
   void VisitStmt_(const IfThenElseNode *op) final {
     // Skip condition
     this->VisitStmt(op->then_case);
+    conditonal_expr = op->condition;
     if (op->else_case.defined()) {
       this->VisitStmt(op->else_case.value());
     }
   }
 
 private:
+  Map<Var, Buffer> buffer_data_to_buffer_;
+  Array<BufferRegion> reads_;
+  Array<BufferRegion> writes_;
   bool is_global_read_ = false;
   bool under_buffer_store_ = false;
   bool is_global_copy_pattern_ = false;
+  PrimExpr conditonal_expr;
 };
 
 class PipelinePlanner : public StmtExprMutator {
@@ -151,7 +197,10 @@ private:
     int original_order;
     int order = -1, stage = -1;
     bool copy_stage = false;
+    bool prepare_for_condition = false;
     int last_use_stage = -1;
+    // represent the stage is used in a conditional statement
+    PrimExpr conditonal_expr;
   };
 
   PipelineStageInfo MakePipelineStageInfo(Stmt stmt, int idx) {
@@ -159,13 +208,14 @@ private:
                 /*body*/ stmt);
     Array<Array<BufferRegion>> access =
         GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
-
+    auto collector = BufferRegionCollector(buffer_data_to_buffer_);
+    collector(block);
     PipelineStageInfo pinfo;
-    pinfo.reads = std::move(access[0]);
-    pinfo.writes = std::move(access[1]);
+    pinfo.reads = std::move(collector.GetReads());
+    pinfo.writes = std::move(collector.GetWrites());
     pinfo.original_order = idx;
-    pinfo.copy_stage = GlobalCopyPatternDetector::Detect(stmt);
-
+    pinfo.copy_stage = collector.GetGlobalCopyPattern();
+    pinfo.conditonal_expr = collector.GetConditonalExpr();
     return std::move(pinfo);
   }
 
@@ -174,6 +224,30 @@ private:
     auto stage_anno = loop->annotations.Get("tl_pipeline_stage");
     auto num_stages_anno = loop->annotations.Get("num_stages");
     if (order_anno.defined() && stage_anno.defined()) {
+      // Check if order_anno or stage_anno contains -1, which means TMA+WS is
+      // enabled
+      bool ws_tma_enabled = false;
+      auto order_array = Downcast<Array<Integer>>(order_anno);
+      auto stage_array = Downcast<Array<Integer>>(stage_anno);
+      for (const auto &val : order_array) {
+        if (val->value == -1) {
+          ws_tma_enabled = true;
+          break;
+        }
+      }
+      if (!ws_tma_enabled) {
+        for (const auto &val : stage_array) {
+          if (val->value == -1) {
+            ws_tma_enabled = true;
+            break;
+          }
+        }
+      }
+
+      if (ws_tma_enabled) {
+        return StmtExprMutator::VisitStmt_(loop);
+      }
+
       Map<String, ObjectRef> annotations;
       for (const auto &[key, value] : loop->annotations) {
         if (key != "tl_pipeline_order") {
@@ -235,6 +309,25 @@ private:
       pipeline_stage_infos.push_back(std::move(pinfo));
     }
 
+    // process the conditional stage
+    // assign conditional stage (analysis the copy stage)
+    for (auto &pinfo : pipeline_stage_infos) {
+      for (const auto &write : pinfo.writes) {
+        for (const auto &other : pipeline_stage_infos) {
+          if (other.conditonal_expr.defined()) {
+            auto check_var = [&](const ObjectRef &n) {
+              if (const auto *buffer_load = n.as<BufferLoadNode>()) {
+                if (buffer_load->buffer == write->buffer) {
+                  pinfo.prepare_for_condition = true;
+                }
+              }
+            };
+            PostOrderVisit(other.conditonal_expr, check_var);
+          }
+        }
+      }
+    }
+
     // analysis use-def chain
     for (auto &pinfo : pipeline_stage_infos) {
       for (int i = pinfo.original_order + 1;
@@ -269,47 +362,50 @@ private:
 
     // Making stages and orders
     int order_idx = 0;
+    // Create pipeline stages and assign order
     for (auto &pinfo : pipeline_stage_infos) {
-      if (pinfo.copy_stage && pinfo.last_use_stage != -1)
+      // Skip elements that must be in first stage:
+      // 1. Copy stages (with active last_use_stage)
+      // 2. Condition preparation stages
+      if ((pinfo.copy_stage && pinfo.last_use_stage != -1) ||
+          pinfo.prepare_for_condition)
         continue;
 
+      // Main logic stage assignment:
+      // - Increment order index
+      // - Assign to new stage (current num_stages)
       pinfo.order = order_idx++;
       pinfo.stage = num_stages;
 
-      bool used_by_copy = false;
-      for (const auto &write : pinfo.writes) {
-        for (const auto &other : pipeline_stage_infos) {
-          if (other.copy_stage) {
-            for (const auto &read : other.reads) {
-              if (write->buffer == read->buffer &&
-                  MayConflict(write->region, read->region)) {
-                used_by_copy = true;
-                break;
-              }
-            }
-          }
-        }
-      }
-      if (used_by_copy) {
-        pinfo.stage = 0;
-      }
-
       for (auto &pinfo_1 : pipeline_stage_infos) {
-        if (pinfo_1.copy_stage &&
-            pinfo_1.last_use_stage == pinfo.original_order) {
+        if ((pinfo_1.copy_stage &&
+             pinfo_1.last_use_stage == pinfo.original_order)) {
           pinfo_1.order = order_idx++;
           pinfo_1.stage = 0;
         }
       }
     }
-    // process the tail copy stage
+
+    // Handle trailing unassigned copy stages:
+    // These are typically final copy operations needing post-main-stage
+    // insertion
     auto &head_pinfo = pipeline_stage_infos.at(0);
-    if (head_pinfo.order == -1) {
-      for (auto &pinfo : pipeline_stage_infos) {
-        pinfo.order++;
+    int unassigned_order_elem = -1;
+
+    // Process dependent copy stages:
+    // Insert copy stages after current stage but assign to stage 0
+    // and adjust the order index
+    for (auto &pinfo : pipeline_stage_infos) {
+      if (pinfo.order == unassigned_order_elem) {
+        pinfo.order = unassigned_order_elem++;
+        // traverse the from the next info
+        for (auto it = pipeline_stage_infos.begin() + unassigned_order_elem;
+             it != pipeline_stage_infos.end(); it++) {
+          it->order += 1;
+        }
+        pinfo.stage = 0;
+        order_idx++;
       }
-      head_pinfo.stage = 0;
-      order_idx++;
     }
 
     ICHECK(size_t(order_idx) == pipeline_stage_infos.size())
@@ -325,7 +421,7 @@ private:
       int copy_order_min = pipeline_stage_infos.size();
       int non_copy_order_max = 0;
       for (auto &pinfo : pipeline_stage_infos) {
-        if (pinfo.copy_stage) {
+        if (pinfo.copy_stage || pinfo.prepare_for_condition) {
           copy_stage_cnt++;
           copy_order_min = std::min(copy_order_min, pinfo.order);
         } else {
@@ -340,7 +436,7 @@ private:
       for (auto &pinfo : pipeline_stage_infos) { // move copy to the beginning
         pinfo.order =
             (pinfo.order + copy_stage_at_end) % pipeline_stage_infos.size();
-        if (!pinfo.copy_stage)
+        if (!pinfo.copy_stage && !pinfo.prepare_for_condition)
           pinfo.stage--;
       }
     }

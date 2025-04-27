@@ -5,6 +5,15 @@ from tvm.target import Target
 import tilelang
 
 
+def allow_tma_and_warp_specialized(target: Target) -> bool:
+    if target.arch not in {"sm_90"}:
+        return False
+    cur_pass_ctx = tilelang.transform.get_pass_context()
+    disable_tma_lower = cur_pass_ctx.config.get("tl.disable_tma_lower", False)
+    disable_warp_specialized = cur_pass_ctx.config.get("tl.disable_warp_specialized", False)
+    return not (disable_tma_lower and disable_warp_specialized)
+
+
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
     mod = tir.transform.BindTarget(target)(mod)
@@ -32,7 +41,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # which may be introduced by the LegalizeSafeMemoryAccess
-    if target.arch == "sm_90":
+    if allow_tma_and_warp_specialized(target):
         mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tilelang.transform.MultiVersionBuffer()(mod)
         mod = tilelang.transform.WarpSpecialized()(mod)
@@ -50,9 +59,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
-
-    # TODO(lei): may need a pass to fuse the if-then-else in the
-    # pipeline loop when we meet dynamic branch.
     mod = tir.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)

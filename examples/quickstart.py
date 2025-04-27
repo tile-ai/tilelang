@@ -57,8 +57,15 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
     return main
 
 
+M = 1024  # M = T.symbolic("m") if you want to use dynamic shape
+N = 1024
+K = 1024
+block_M = 128
+block_N = 128
+block_K = 32
+
 # 1. Define the kernel (matmul) and compile/lower it into an executable module
-func = matmul(1024, 1024, 1024, 128, 128, 32)
+func = matmul(M, N, K, block_M, block_N, block_K)
 
 # 2. Compile the kernel into a torch function
 # out_idx specifies the index of the output buffer in the argument list
@@ -71,8 +78,8 @@ jit_kernel = tilelang.compile(func, out_idx=[2], target="cuda", execution_backen
 import torch
 
 # Create random input tensors on the GPU
-a = torch.randn(1024, 1024, device="cuda", dtype=torch.float16)
-b = torch.randn(1024, 1024, device="cuda", dtype=torch.float16)
+a = torch.randn(M, K, device="cuda", dtype=torch.float16)
+b = torch.randn(K, N, device="cuda", dtype=torch.float16)
 
 # Run the kernel through the Profiler
 c = jit_kernel(a, b)

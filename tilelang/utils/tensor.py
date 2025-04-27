@@ -295,6 +295,8 @@ def torch_assert_close(
             f"({max_mismatched_ratio * 100:.2f}% allowed, but get {num_mismatched / total_elements * 100:.2f}%)."
             f"{mismatch_info}"
             f"\nGreatest absolute difference: {diff.max().item()}, "
-            f"Greatest relative difference: {(diff / (torch.abs(tensor_b) + 1e-12)).max().item()}.")
+            f"Greatest relative difference: {(diff / (torch.abs(tensor_b) + 1e-12)).max().item()}"
+            f"\nLHS: {tensor_a}"
+            f"\nRHS: {tensor_b}")
     else:
         return True

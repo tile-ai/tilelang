@@ -162,6 +162,7 @@ KernelLaunchFrame KernelLaunch(Array<PrimExpr> grid_size,
       attrs.defined() && attrs.count(tilelang_is_cpu_kernel_frame);
 
   if (is_cpu_kernel_frame) {
+    // Launch CPU Kernel
     ICHECK(grid_size.size() >= 0);
     ICHECK(block_size.size() == 0) << "CPU kernel cannot have block size";
     ICHECK(attrs.defined());
@@ -170,7 +171,6 @@ KernelLaunchFrame KernelLaunch(Array<PrimExpr> grid_size,
       n->frames.push_back(
           MakeIterVarFrame("block_var_" + std::to_string(i), grid_size[i]));
     }
-    // Launch CPU Kernel
   } else {
     // Launch GPU Kernel
     ICHECK(grid_size.size() <= 3);
@@ -203,17 +203,15 @@ KernelLaunchFrame KernelLaunch(Array<PrimExpr> grid_size,
             CreateEnvThread("tz", "threadIdx.z", block_size[2].dtype()),
             block_size[2]));
       }
-    } else {
-      n->frames.push_back(Block(""));
     }
   }
 
   if (attrs.defined()) {
-    auto empty_block = Block("");
+    auto empty_block = Block("root");
     empty_block->annotations = attrs;
     n->frames.push_back(empty_block);
   } else {
-    n->frames.push_back(Block(""));
+    n->frames.push_back(Block("root"));
   }
 
   return KernelLaunchFrame(n);

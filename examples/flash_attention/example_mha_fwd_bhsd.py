@@ -155,11 +155,7 @@ def flashattn(batch, heads, seq_q, seq_kv, dim, is_causal, tune=False):
 
     if tune:
 
-        @autotune(
-            configs=get_configs(),
-            keys=["block_M", "block_N", "num_stages", "threads"],
-            warmup=10,
-            rep=10)
+        @autotune(configs=get_configs(), warmup=10, rep=10)
         @jit(out_idx=[3], supply_type=tilelang.TensorSupplyType.Integer, ref_prog=None)
         def kernel(block_M=None, block_N=None, num_stages=None, threads=None):
             return kernel_func(block_M, block_N, num_stages, threads)

@@ -15,6 +15,7 @@
 
 #include "../layout/utils.h"
 #include "../transform/loop_partition.h"
+#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -124,10 +125,33 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   Array<Stmt> stmts;
 
+  bool require_init = this->clear;
+  // sum op must be cleared
+  if (this->type == ReduceType::kSum) {
+    require_init = true;
+  } else if (this->type == ReduceType::kAbsSum) {
+    require_init = true;
+  }
+
+  Buffer clear_buffer = dst_buffer;
+  bool need_duplicate = false;
+  if (this->type == ReduceType::kSum && !this->clear) {
+    need_duplicate = true;
+  } else if (this->type == ReduceType::kAbsSum && !this->clear) {
+    need_duplicate = true;
+  }
+
+  if (need_duplicate) {
+    // Create a new buffer with same shape and dtype as dst_buffer
+    clear_buffer = decl_buffer(dst_buffer->shape, dst_buffer->dtype,
+                               dst_buffer->name + "_clear",
+                               GetPtrStorageScope(dst_buffer->data));
+  }
+
   // make reduce-init stmt
-  if (this->clear)
+  if (require_init)
     stmts.push_back(
-        BufferStore(dst_buffer, this->MakeInitValue(), dst_indices));
+        BufferStore(clear_buffer, this->MakeInitValue(), dst_indices));
 
   // make thread-local reduce
   Array<PrimExpr> src_indice_compressed;
@@ -141,8 +165,8 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     src_var_compressed.push_back(var);
   }
   Stmt reduce_local = BufferStore(
-      dst_buffer,
-      this->MakeReduce(BufferLoad(dst_buffer, dst_indices),
+      clear_buffer,
+      this->MakeReduce(BufferLoad(clear_buffer, dst_indices),
                        BufferLoad(src_buffer, src_indice_compressed)),
       dst_indices);
   for (int i = src_layout->OutputDim() - 1; i >= 0; i--) {
@@ -179,19 +203,37 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
            << reducing_threads << ", " << (*scale) << ">::run";
       }
       Array<PrimExpr> thread_reduce_args = {
-          StringImm(ss.str()), BufferLoad(dst_buffer, dst_indices)};
+          StringImm(ss.str()), BufferLoad(clear_buffer, dst_indices)};
       if (reducing_threads >= 32) {
-        PrimExpr workspace = T.AddWorkspace(T.block_size, dst_buffer->dtype);
+        PrimExpr workspace = T.AddWorkspace(
+            *as_const_int(T.thread_bounds->extent), clear_buffer->dtype);
         thread_reduce_args.push_back(workspace);
       }
       auto call =
-          Call(dst_buffer->dtype, builtin::call_extern(), thread_reduce_args);
-      stmts.push_back(BufferStore(dst_buffer, call, dst_indices));
+          Call(clear_buffer->dtype, builtin::call_extern(), thread_reduce_args);
+      stmts.push_back(BufferStore(clear_buffer, call, dst_indices));
     }
   }
-  Stmt reduce_interthread =
-      BufferStore(dst_buffer, BufferLoad(dst_buffer, dst_indices), dst_indices);
+  Stmt reduce_interthread = BufferStore(
+      clear_buffer, BufferLoad(clear_buffer, dst_indices), dst_indices);
 
+  // copy clear_buffer to dst_buffer
+  if (need_duplicate) {
+    // if is reduce sum, we should add a copy from clear_buffer to dst_buffer
+    if (this->type == ReduceType::kSum) {
+      stmts.push_back(BufferStore(dst_buffer,
+                                  Add(BufferLoad(dst_buffer, dst_indices),
+                                      BufferLoad(clear_buffer, dst_indices)),
+                                  dst_indices));
+    } else if (this->type == ReduceType::kAbsSum) {
+      stmts.push_back(BufferStore(dst_buffer,
+                                  Add(BufferLoad(dst_buffer, dst_indices),
+                                      BufferLoad(clear_buffer, dst_indices)),
+                                  dst_indices));
+    } else {
+      ICHECK(false) << "Unsupported reduce type: " << (int)this->type;
+    }
+  }
   // make the outer spatial loop
   Stmt body = stmts.size() > 1 ? SeqStmt(stmts) : stmts[0];
   for (int i = dst_layout->InputDim() - 1; i >= 0; i--) {
@@ -200,6 +242,10 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 
   body = PartitionLoop(Downcast<For>(body), T.thread_var, analyzer, dst_layout);
+  if (need_duplicate) {
+    body = Allocate(clear_buffer->data, clear_buffer->dtype,
+                    clear_buffer->shape, const_true(), body);
+  }
   return body;
 }
 
@@ -239,5 +285,55 @@ TIR_REGISTER_TL_OP(ReduceOp, reduce)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+CumSumOp::CumSumOp(Array<PrimExpr> args, BufferMap vmap) {
+  /*
+    CumSum arguments:
+      src: input buffer
+      dst: output buffer
+      dim: dimension to cumsum
+      reverse: whether to cumsum in reverse order
+   */
+  CHECK_EQ(args.size(), 4);
+  src = vmap[GetVarFromAccessPtr(args[0])];
+  dst = vmap[GetVarFromAccessPtr(args[1])];
+  dim = args[2].as<IntImm>().value()->value;
+  reverse = args[3].as<Bool>().value();
+  CHECK_LT(dim, static_cast<int>(src->shape.size()));
+}
+
+Stmt CumSumOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+  if (this->src.scope() == "local.fragment" &&
+      this->dst.scope() == "local.fragment") {
+    LOG(FATAL) << "CumSum for fragment not implemented, please raise an issue "
+                  "if you need this feature.";
+  } else if (this->src.scope() == "shared.dyn" ||
+             this->src.scope() == "shared") {
+    ICHECK(this->dst.scope() == "shared.dyn" || this->dst.scope() == "shared");
+    std::stringstream ss;
+    auto threads = T.thread_bounds->extent - T.thread_bounds->min;
+    ss << "tl::CumSum2D<" << threads << ", " << dim << ", "
+       << (reverse ? "true" : "false") << ">::run";
+    Array<PrimExpr> args = {StringImm(ss.str()), src.access_ptr(1),
+                            dst.access_ptr(3)};
+    for (int i = 0; i < src->shape.size(); i++) {
+      args.push_back(src->shape[i]);
+    }
+    return Evaluate(Call(dst->dtype, builtin::call_extern(), args));
+  } else {
+    ICHECK(false) << "Cannot lower cumsum for " << this->src.scope() << " and "
+                  << this->dst.scope();
+  }
+
+  return Stmt();
+}
+
+LayoutMap CumSumOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
+  return {};
+}
+
+TIR_REGISTER_TL_OP(CumSumOp, cumsum)
+    .set_num_inputs(4)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
 } // namespace tl
 } // namespace tvm

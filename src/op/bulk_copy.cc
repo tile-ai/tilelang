@@ -199,6 +199,13 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   } else if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B)) {
     instruction_dim = 128 / src->dtype.bytes();
   }
+  if (instruction_dim > 256) {
+    // smem_box dim must be in [0, 256]
+    // if is 512, we need to split the copy into two parts
+    ICHECK((*inner_box_dim) % 256 == 0)
+        << "inner_box_dim: " << *inner_box_dim << " is not divisible by 256";
+    instruction_dim = 256;
+  }
   ICHECK((*inner_box_dim) % instruction_dim == 0);
   desc.smem_box.Set(0, PrimExpr(instruction_dim));
 

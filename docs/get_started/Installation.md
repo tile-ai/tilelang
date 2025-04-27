@@ -49,15 +49,15 @@ docker run --gpus all -it --rm --ipc=host nvcr.io/nvidia/pytorch:23.01-py3
 To build and install **tile-lang** directly from source, follow these steps. This process requires certain pre-requisites from Apache TVM, which can be installed on Ubuntu/Debian-based systems using the following commands:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y python3 python3-dev python3-setuptools gcc libtinfo-dev zlib1g-dev build-essential cmake libedit-dev libxml2-dev
+apt-get update
+apt-get install -y python3 python3-dev python3-setuptools gcc zlib1g-dev build-essential cmake libedit-dev
 ```
 
 After installing the prerequisites, you can clone the **tile-lang** repository and install it using pip:
 
 ```bash
 git clone --recursive https://github.com/tile-ai/tilelang.git
-cd tileLang
+cd tilelang
 pip install .  # Please be patient, this may take some time.
 ```
 

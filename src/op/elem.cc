@@ -163,8 +163,13 @@ Stmt Copy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (is_cpu_target) {
     vectorized_thread_loop = VectorizeLoop(fused_loop);
   } else {
-    par_op->InferLayout({T.target, T.block_size, T.layout_map, T.buffer_remap},
-                        InferLevel::kFree);
+    std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
+                                      InferLevel::kFree};
+    for (auto level : levels) {
+      par_op->InferLayout(
+          {T.target, T.thread_bounds, T.layout_map, T.buffer_remap}, level);
+    }
+
     auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
                                      par_op->GetLoopLayout());
     vectorized_thread_loop = VectorizeLoop(thread_loop);
@@ -424,9 +429,9 @@ Stmt Fill::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   if (dst.scope() == "local.fragment") {
     auto par_op = std::make_unique<ParallelOp>(MakeSIMTLoop(analyzer));
-    par_op->InferLayout({T.target, T.block_size, T.layout_map},
+    par_op->InferLayout({T.target, T.thread_bounds, T.layout_map},
                         InferLevel::kFree);
-    par_op->InferLayout({T.target, T.block_size, T.layout_map},
+    par_op->InferLayout({T.target, T.thread_bounds, T.layout_map},
                         InferLevel::kFree);
     auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
                                      par_op->GetLoopLayout());
@@ -442,7 +447,7 @@ Stmt Fill::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     return vectorized_thread_loop;
   } else if (dst.scope() == "shared.dyn" || dst.scope() == "shared") {
     auto par_op = std::make_unique<ParallelOp>(MakeSIMTLoop(analyzer));
-    par_op->InferLayout({T.target, T.block_size, T.layout_map},
+    par_op->InferLayout({T.target, T.thread_bounds, T.layout_map},
                         InferLevel::kFree);
     auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
                                      par_op->GetLoopLayout());
