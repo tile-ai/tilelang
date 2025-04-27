@@ -132,7 +132,9 @@ cdef class CythonKernelWrapper:
                 raise ValueError(f"Unsupported tensor type: {type(tensor_list[i])}")
 
         # Check buffer device
-        cdef str tensor_list_device_type = tensor_list[0].device.type
+        # cdef str tensor_list_device_type = tensor_list[0].device.type
+        if isinstance(tensor_list[0], torch.Tensor):
+            tensor_list_device_type = tensor_list[0].device.type
         for param, (buffer_idx, device) in self.buffer_device_map.items():
             if isinstance(tensor_list[buffer_idx], torch.Tensor):
                 tensor_device = tensor_list[buffer_idx].device
