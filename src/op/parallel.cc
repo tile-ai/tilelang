@@ -163,6 +163,11 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
                 indice_map_[read_source_buffer].size()) {
           read_source_buffer = buffer;
         }
+        // If the buffer is not replicated, use it as source_buffer
+        // because the layout inference is more accurate
+        if (is_one(frag->ReplicateExtent())) {
+          source_buffer = buffer;
+        }
       }
     }
   }
