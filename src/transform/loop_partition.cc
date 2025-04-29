@@ -193,7 +193,6 @@ Fragment PlanLoopPartition(For op, int vectorize_size, Range thread_range) {
   LoopPartitioner partitioner;
   Fragment fragment = partitioner.Partition(op, num_thread, vectorize_size);
   auto node = make_object<FragmentNode>(*fragment.get());
-  LOG(INFO) << "PlanLoopPartition thread_range = " << thread_range;
   node->SetThreadRange(thread_range);
   return Fragment(node);
 }
