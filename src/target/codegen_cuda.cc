@@ -810,7 +810,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string barrier_name = "_mbarrier";
     this->stream << "__shared__ uint64_t " << barrier_name << "["
                  << barrier_count << "];\n";
-  } else if (op->op.same_as(tl::GetMBarrierOp())) {
+  } else if (op->op.same_as(tl::get_mbarrier())) {
     std::string barrier_name = "_mbarrier";
     std::string barrier_id = this->PrintExpr(op->args[0]);
     os << barrier_name + "[" + barrier_id + "]";
@@ -822,50 +822,50 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::mbarrier_arrive_expect_tx");
   } else if (op->op.same_as(builtin::ptx_cp_async_barrier())) {
     print_extern_call_stmt("tl::mbarrier_cp_async_arrive");
-  } else if (op->op.same_as(tl::MBarrierExpectTX())) {
+  } else if (op->op.same_as(tl::mbarrier_expect_tx())) {
     print_extern_call_stmt("tl::mbarrier_expect_tx");
-  } else if (op->op.same_as(tl::MBarrierWaitParity())) {
+  } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
     print_extern_call_stmt("tl::mbarrier_wait");
-  } else if (op->op.same_as(tl::SyncThreadsPartialOp())) {
+  } else if (op->op.same_as(tl::sync_thread_partial())) {
     print_extern_call_stmt("tl::syncthreads_partial");
-  } else if (op->op.same_as(tl::TMALoadOp())) {
+  } else if (op->op.same_as(tl::tma_load())) {
     print_extern_call_stmt("tl::tma_load");
-  } else if (op->op.same_as(tl::TMALoadIm2ColOp())) {
+  } else if (op->op.same_as(tl::tma_load_im2col())) {
     print_extern_call_stmt("tl::tma_load_im2col");
-  } else if (op->op.same_as(tl::TMAStoreOp())) {
+  } else if (op->op.same_as(tl::tma_store())) {
     print_extern_call_stmt("tl::tma_store");
-  } else if (op->op.same_as(tl::LDMatrixOp())) {
+  } else if (op->op.same_as(tl::ptx_ldmatirx())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
     std::string func_name = "tl::ptx_ldmatrix_x" + std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
     print_extern_call_stmt(func_name, 2);
-  } else if (op->op.same_as(tl::STMatrixOp())) {
+  } else if (op->op.same_as(tl::ptx_stmatirx())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
     std::string func_name = "tl::ptx_stmatrix_x" + std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
     print_extern_call_stmt(func_name, 2);
-  } else if (op->op.same_as(tl::FenceProxyAsyncOp())) {
+  } else if (op->op.same_as(tl::fence_proxy_async())) {
     print_extern_call_stmt("tl::fence_proxy_async");
-  } else if (op->op.same_as(tl::TMAStoreArrive())) {
+  } else if (op->op.same_as(tl::tma_store_arrive())) {
     print_extern_call_stmt("tl::tma_store_arrive");
-  } else if (op->op.same_as(tl::TMAStoreWait())) {
+  } else if (op->op.same_as(tl::tma_store_wait())) {
     print_extern_call_stmt("tl::tma_store_wait<0>");
-  } else if (op->op.same_as(tl::SetMaxNReg())) {
+  } else if (op->op.same_as(tl::set_max_nreg())) {
     this->PrintIndent();
     int nreg = Downcast<IntImm>(op->args[0])->value;
     int is_inc = Downcast<IntImm>(op->args[1])->value;
     std::string func_name =
         is_inc ? "tl::warpgroup_reg_alloc" : "tl::warpgroup_reg_dealloc";
     this->stream << func_name << "<" << std::to_string(nreg) << ">();\n";
-  } else if (op->op.same_as(tl::WaitWgmma())) {
+  } else if (op->op.same_as(tl::wait_wgmma())) {
     this->PrintIndent();
     int num_mma = Downcast<IntImm>(op->args[0])->value;
     this->stream << "tl::wait_wgmma<" << std::to_string(num_mma) << ">();\n";
-  } else if (op->op.same_as(tl::PackB16Op())) {
+  } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(op->args[0]) << ", "
        << this->PrintExpr(op->args[1]) << ")";
   } else if (op->op.same_as(builtin::tvm_fill_fragment())) {
