@@ -27,6 +27,16 @@ using int4_t = int4;
 #define TL_DEVICE_NOINLINE __noinline__ __device__
 #define TL_PATCH
 
+#define TILELANG_CHECK(stmt)                                                   \
+  do {                                                                         \
+    cudaError_t __err = (stmt);                                                \
+    if (__err != cudaSuccess) {                                                \
+      snprintf(error_buf, ERROR_BUF_SIZE, "%s:%d: %s - %s", __FILE__,          \
+               __LINE__, cudaGetErrorName(__err), cudaGetErrorString(__err));  \
+      return -1;                                                               \
+    }                                                                          \
+  } while (0)
+
 // abs function for bfloat_t and half_t since there is no implicit convertion
 // method
 TL_PATCH TL_DEVICE half_t __habs(const half_t x) {

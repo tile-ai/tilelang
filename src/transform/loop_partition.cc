@@ -141,10 +141,31 @@ public:
     PrimExpr thd = FloorMod(access_idx, num_thread);
     PrimExpr idx = FloorDiv(access_idx, num_thread) * vectorize_size +
                    FloorMod(flattened, vectorize_size);
-    return Fragment(loop_vars_, {idx}, {thd}, {});
+    auto fragment = Fragment(loop_vars_, {idx}, {thd}, {});
+    if (has_fragment_) {
+      // for fragment buffer, we don't need to replicate the loop layout
+      auto thread_extent = *as_const_int(fragment->ThreadExtent());
+      auto num_thread_fragment = num_thread / thread_extent;
+      fragment = fragment->Replicate(num_thread_fragment);
+    }
+    return fragment;
   }
 
 private:
+  void VisitExpr_(const BufferLoadNode *op) final {
+    if (op->buffer.scope() == "local.fragment") {
+      has_fragment_ = true;
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const BufferStoreNode *op) final {
+    if (op->buffer.scope() == "local.fragment") {
+      has_fragment_ = true;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
   void VisitStmt_(const ForNode *node) final {
     if (node->kind == ForKind::kParallel) {
       body_ = node->body;
@@ -157,6 +178,7 @@ private:
 
   Stmt body_;
   PrimExpr flattened = 0;
+  bool has_fragment_ = false;
   Array<IterVar> loop_vars_;
 };
 

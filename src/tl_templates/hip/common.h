@@ -26,6 +26,17 @@
 #define ushort unsigned short
 
 #define TL_DEVICE __forceinline__ __device__
+#define TL_DEVICE_NOINLINE __noinline__ __device__
+
+#define TILELANG_CHECK(stmt)                                                   \
+  do {                                                                         \
+    hipError_t __err = (stmt);                                                 \
+    if (__err != hipSuccess) {                                                 \
+      snprintf(error_buf, ERROR_BUF_SIZE, "%s:%d: %s - %s", __FILE__,          \
+               __LINE__, hipGetErrorName(__err), hipGetErrorString(__err));    \
+      return -1;                                                               \
+    }                                                                          \
+  } while (0)
 
 #define half _Float16
 #define __float2half_rn(x) half(x)

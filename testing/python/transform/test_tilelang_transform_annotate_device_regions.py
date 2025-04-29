@@ -3,7 +3,7 @@
 
 import tilelang
 import tilelang.testing
-from tilelang import language as T
+from tvm.script import tir as T
 
 
 class BaseCompare(tilelang.testing.CompareBeforeAfter):
@@ -13,12 +13,12 @@ class BaseCompare(tilelang.testing.CompareBeforeAfter):
 class TestAnnotateThreadExtent(BaseCompare):
     """Annotation inserted at the "thread_extent" attribute"""
 
-    def before(A: T.Tensor(16, "float32")):
+    def before(A: T.Buffer(16, "float32")):
         T.func_attr({"target": T.target("cuda", host="llvm")})
         i = T.launch_thread("threadIdx.x", 16)
         A[i] = 0.0
 
-    def expected(A: T.Tensor(16, "float32")):
+    def expected(A: T.Buffer(16, "float32")):
         T.func_attr({"target": T.target("cuda", host="llvm")})
         T.attr(T.target("cuda"), "target", 0)
         i = T.launch_thread("threadIdx.x", 16)
@@ -28,12 +28,12 @@ class TestAnnotateThreadExtent(BaseCompare):
 class TestAnnotateDeviceScope(BaseCompare):
     """Annotation inserted at the "device_scope" attribute"""
 
-    def before(A: T.Tensor(1, "float32")):
+    def before(A: T.Buffer(1, "float32")):
         T.func_attr({"target": T.target("cuda", host="llvm")})
         T.attr(0, "device_scope", 0)
         A[0] = 0.0
 
-    def expected(A: T.Tensor(1, "float32")):
+    def expected(A: T.Buffer(1, "float32")):
         T.func_attr({"target": T.target("cuda", host="llvm")})
         T.attr(T.target("cuda"), "target", 0)
         T.attr(0, "device_scope", 0)
