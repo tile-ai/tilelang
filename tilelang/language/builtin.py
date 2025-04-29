@@ -5,7 +5,7 @@
 from tvm import tir
 
 
-def CreateListofMBarrierOp(*args):
+def create_list_of_mbarrier(*args):
     """Create a list of memory barrier operations.
 
     Args:
@@ -14,10 +14,10 @@ def CreateListofMBarrierOp(*args):
     Returns:
         tir.Call: A handle to the created list of memory barriers
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.CreateListofMBarrierOp"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.create_list_of_mbarrier"), *args)
 
 
-def GetMBarrierOp(*args):
+def get_mbarrier(*args):
     """Retrieve a memory barrier operation.
 
     Args:
@@ -26,10 +26,10 @@ def GetMBarrierOp(*args):
     Returns:
         tir.Call: A handle to the requested memory barrier
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.GetMBarrierOp"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.get_mbarrier"), *args)
 
 
-def CreateTMADescriptorOp(*args):
+def create_tma_descriptor(*args):
     """Create a Tensor Memory Access (TMA) descriptor.
 
     Args:
@@ -38,10 +38,10 @@ def CreateTMADescriptorOp(*args):
     Returns:
         tir.Call: A handle to the created TMA descriptor
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.CreateTMADescriptorOp"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.create_tma_descriptor"), *args)
 
 
-def TMALoadOp(*args):
+def tma_load(*args):
     """Perform a Tensor Memory Access (TMA) load operation.
 
     Args:
@@ -50,10 +50,10 @@ def TMALoadOp(*args):
     Returns:
         tir.Call: A handle to the TMA load operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.TMALoadOp"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_load"), *args)
 
 
-def FenceProxyAsyncOp(*args):
+def fence_proxy_async(*args):
     """Create a fence for asynchronous proxy operations.
 
     Args:
@@ -62,10 +62,10 @@ def FenceProxyAsyncOp(*args):
     Returns:
         tir.Call: A handle to the fence operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.FenceProxyAsyncOp"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.fence_proxy_async"), *args)
 
 
-def TMAStoreArrive(*args):
+def tma_store_arrive(*args):
     """Signal the arrival of a TMA store operation.
 
     Args:
@@ -74,10 +74,10 @@ def TMAStoreArrive(*args):
     Returns:
         tir.Call: A handle to the store arrive operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.TMAStoreArrive"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_store_arrive"), *args)
 
 
-def TMAStoreWait(*args):
+def tma_store_wait(*args):
     """Wait for completion of TMA store operations.
 
     Args:
@@ -86,10 +86,10 @@ def TMAStoreWait(*args):
     Returns:
         tir.Call: A handle to the store wait operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.TMAStoreWait"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.tma_store_wait"), *args)
 
 
-def SetMaxNReg(*args):
+def set_max_nreg(*args):
     """Set the maximum number of registers to use.
 
     Args:
@@ -98,10 +98,10 @@ def SetMaxNReg(*args):
     Returns:
         tir.Call: A handle to the register setting operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.SetMaxNReg"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.set_max_nreg"), *args)
 
 
-def NoSetMaxNReg(*args):
+def no_set_max_nreg(*args):
     """Disable the maximum register limit setting.
 
     Args:
@@ -110,10 +110,10 @@ def NoSetMaxNReg(*args):
     Returns:
         tir.Call: A handle to the register limit disable operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.NoSetMaxNReg"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.no_set_max_nreg"), *args)
 
 
-def MBarrierWaitParity(*args):
+def mbarrier_wait_parity(*args):
     """Wait for memory barrier parity condition.
 
     Args:
@@ -122,10 +122,10 @@ def MBarrierWaitParity(*args):
     Returns:
         tir.Call: A handle to the barrier wait operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.MBarrierWaitParity"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), *args)
 
 
-def MBarrierExpectTX(*args):
+def mbarrier_expect_tx(*args):
     """Set expected transaction count for memory barrier.
 
     Args:
@@ -134,10 +134,10 @@ def MBarrierExpectTX(*args):
     Returns:
         tir.Call: A handle to the barrier expectation operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.MBarrierExpectTX"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_expect_tx"), *args)
 
 
-def WaitWgmma(*args):
+def wait_wgmma(*args):
     """Wait for WGMMA (Warp Group Matrix Multiply-Accumulate) operations to complete.
 
     Args:
@@ -146,4 +146,4 @@ def WaitWgmma(*args):
     Returns:
         tir.Call: A handle to the WGMMA wait operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.WaitWgmma"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait_wgmma"), *args)

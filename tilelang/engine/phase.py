@@ -11,13 +11,15 @@ def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
                                    target: Optional[Target] = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    if target.arch not in {"sm_90"}:
+    if target.arch not in {"sm_90", "sm_90a"}:
         return False
     disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
     disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
     disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
     return not (disable_tma_lower and disable_warp_specialized)
 
+def allow_fence_proxy(target: Optional[Target] = None) -> bool:
+    return target.arch in {"sm_90", "sm_90a"}
 
 def allow_vectorize(pass_ctx: Optional[PassContext] = None) -> bool:
     if pass_ctx is None:
@@ -35,6 +37,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Simplify the IR expressions
     mod = tir.transform.Simplify()(mod)
     # Infer memory layouts for fragments and shared memory
+    print(mod)
     mod = tilelang.transform.LayoutInference()(mod)
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
@@ -62,6 +65,8 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         # to get better performance with async copy
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+        # warp_specialized pass will pack the if stmt into the block
+        # so we need to lower the opaque block first
         mod = tir.transform.LowerOpaqueBlock()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
         mod = tilelang.transform.RewriteWgmmaSync()(mod)
@@ -72,13 +77,20 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
+    
+    if allow_fence_proxy(target=target):
+        # in hopper device, wgmma is an async proxy
+        # so we need to inject a fence proxy before it
+        mod = tilelang.transform.InjectFenceProxy()(mod)
 
     mod = tir.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tir.transform.Simplify()(mod)
 
-    mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
+    mod = tilelang.transform.VectorizeLoop(
+        enable_vectorize=allow_vectorize(pass_ctx=pass_ctx)
+    )(mod)
 
     mod = tir.transform.StorageRewrite()(mod)
     mod = tir.transform.UnrollLoop()(mod)
