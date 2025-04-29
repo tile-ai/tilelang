@@ -152,14 +152,14 @@ public:
   }
 
 private:
-  void VisitExpr_(const BufferLoadNode* op) final {
+  void VisitExpr_(const BufferLoadNode *op) final {
     if (op->buffer.scope() == "local.fragment") {
       has_fragment_ = true;
     }
     StmtExprVisitor::VisitExpr_(op);
   }
 
-  void VisitStmt_(const BufferStoreNode* op) final {
+  void VisitStmt_(const BufferStoreNode *op) final {
     if (op->buffer.scope() == "local.fragment") {
       has_fragment_ = true;
     }

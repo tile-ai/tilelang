@@ -221,9 +221,8 @@ class TLCUDASourceWrapper(object):
             grid_str = "dim3({}, {}, {})".format(
                 legalize_c(grid_info[0]), legalize_c(grid_info[1]), legalize_c(grid_info[2]))
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
-            kernel_launch_code += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(function_name, grid_str,
-                                                                      block_str, smem_str,
-                                                                      call_args)
+            kernel_launch_code += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(
+                function_name, grid_str, block_str, smem_str, call_args)
             kernel_launch_code += "\tcudaError_t err = cudaGetLastError();\n"
             kernel_launch_code += "\tif (err != cudaSuccess) {{\n"
             kernel_launch_code += f"\t\tsnprintf(error_buf, ERROR_BUF_SIZE, \"{function_name}: %s - %s\", cudaGetErrorName(err), cudaGetErrorString(err));\n"

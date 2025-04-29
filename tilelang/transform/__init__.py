@@ -9,6 +9,7 @@ from .pass_config import PassConfigKey  # noqa: F401
 from tilelang import tvm as tvm  # noqa: F401
 from tvm.ir.transform import PassContext  # noqa: F401
 
+
 def get_pass_context():
     """Get the current pass context"""
     return PassContext.current()

@@ -6,7 +6,9 @@ import tilelang
 from tilelang.transform import PassContext
 from typing import Optional
 
-def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None, target: Optional[Target] = None) -> bool:
+
+def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
+                                   target: Optional[Target] = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     if target.arch not in {"sm_90"}:
@@ -16,11 +18,13 @@ def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None, targe
     disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
     return not (disable_tma_lower and disable_warp_specialized)
 
+
 def allow_vectorize(pass_ctx: Optional[PassContext] = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
     disable_vectorize = pass_ctx.config.get("tir.disable_vectorize", False)
     return not disable_vectorize
+
 
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
@@ -74,9 +78,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tir.transform.Simplify()(mod)
 
-    mod = tilelang.transform.VectorizeLoop(
-        enable_vectorize=allow_vectorize(pass_ctx=pass_ctx)
-    )(mod)
+    mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
 
     mod = tir.transform.StorageRewrite()(mod)
     mod = tir.transform.UnrollLoop()(mod)
