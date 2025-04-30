@@ -283,20 +283,24 @@ def get_block_bindings() -> List[Var]:
     """
     return KernelLaunchFrame.Current().get_block_bindings()
 
+
 def get_thread_extent(dim: int = 0) -> int:
     """Returns the thread extent for the given dimension.
     """
     return KernelLaunchFrame.Current().get_thread_extent(dim)
+
 
 def get_thread_extents() -> List[int]:
     """Returns all three thread extents.
     """
     return KernelLaunchFrame.Current().get_thread_extents()
 
+
 def get_block_extent(dim: int = 0) -> int:
     """Returns the block extent for the given dimension.
     """
     return KernelLaunchFrame.Current().get_block_extent(dim)
+
 
 def get_block_extents() -> List[int]:
     """Returns all three block extents.

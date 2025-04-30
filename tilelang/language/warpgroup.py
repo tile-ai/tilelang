@@ -16,9 +16,7 @@ class WarpSpecializeFrame(TIRFrame):
     """
 
 
-def WarpSpecialize(
-    warp_group_idx: int,
-):
+def WarpSpecialize(warp_group_idx: int,):
     """Tools to construct a warp group frame.
 
     Parameters
@@ -37,11 +35,11 @@ def WarpSpecialize(
     id_x, id_y, id_z = get_thread_bindings()
     ex_x, ex_y, ex_z = get_thread_extents()
     tid = id_z * (ex_y * ex_x) + id_y * ex_x + id_x
-    # only suport nvidia target.
+    # only available for nvidia gpus.
     warp_group_size = 128
 
-
     return _ffi_api.WarpSpecialize(warp_group_idx, tid, warp_group_size)
+
 
 # Alias for WarpSpecialize for more concise usage
 ws = WarpSpecialize

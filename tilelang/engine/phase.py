@@ -18,8 +18,10 @@ def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
     disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
     return not (disable_tma_lower and disable_warp_specialized)
 
+
 def allow_fence_proxy(target: Optional[Target] = None) -> bool:
     return target.arch in {"sm_90", "sm_90a"}
+
 
 def allow_vectorize(pass_ctx: Optional[PassContext] = None) -> bool:
     if pass_ctx is None:
@@ -76,7 +78,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
-    
+
     if allow_fence_proxy(target=target):
         # in hopper device, wgmma is an async proxy
         # so we need to inject a fence proxy before it
@@ -87,9 +89,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tir.transform.Simplify()(mod)
 
-    mod = tilelang.transform.VectorizeLoop(
-        enable_vectorize=allow_vectorize(pass_ctx=pass_ctx)
-    )(mod)
+    mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
 
     mod = tir.transform.StorageRewrite()(mod)
     mod = tir.transform.UnrollLoop()(mod)
