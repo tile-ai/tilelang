@@ -18,7 +18,6 @@
 #include "../transform/loop_partition.h"
 #include "tir/transforms/ir_utils.h"
 
-
 namespace tvm {
 namespace tl {
 

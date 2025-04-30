@@ -228,7 +228,8 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     }
     PrimExpr loop_thread_extent = loop_layout_->ThreadExtent();
     if (!analyzer_.CanProveEqual(loop_thread_extent, block_size))
-      AddPredicate(LT(InputPlaceholder(0) - T.thread_bounds->min, loop_thread_extent));
+      AddPredicate(
+          LT(InputPlaceholder(0) - T.thread_bounds->min, loop_thread_extent));
   } else {
     return {};
   }

@@ -55,8 +55,6 @@ jit_kernel = tilelang.compile(
         "tl.disable_tma_lower": True,
     })
 print(jit_kernel.get_kernel_source())
-# jit_kernel = tilelang.compile(func, out_idx=[2], target="cuda", execution_backend="dlpack")
-print(jit_kernel.get_kernel_source(), file=open("gemm_ws.cu", "w"))
 # 3. Test the kernel in Python with PyTorch data
 import torch
 

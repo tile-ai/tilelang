@@ -116,8 +116,7 @@ public:
   void VisitStmt_(const EvaluateNode *op) final {
     Role role = Role::kConsumer;
     if (auto call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tma_load()) ||
-          call->op.same_as(tma_load_im2col())) {
+      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
         role = Role::kProducer;
         has_bulk_copy_ = true;
       }
@@ -273,8 +272,7 @@ private:
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tma_load()) ||
-          call->op.same_as(tma_load_im2col())) {
+      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
         contain_tma_load_ = true;
         if (insert_in_evaluate_) {
           Array<Stmt> new_seq = {expect_tx_, GetRef<Evaluate>(op)};
@@ -1149,7 +1147,8 @@ private:
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(set_max_nreg()) || call->op.same_as(no_set_max_nreg())) {
+      if (call->op.same_as(set_max_nreg()) ||
+          call->op.same_as(no_set_max_nreg())) {
         return Evaluate(0);
       }
     }

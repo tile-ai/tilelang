@@ -252,13 +252,16 @@ public:
 
 class WarpSpecializeFrame : public TIRFrame {
 public:
-  TVM_DEFINE_MUTABLE_NOTNULLABLE_OBJECT_REF_METHODS(WarpSpecializeFrame, TIRFrame,
+  TVM_DEFINE_MUTABLE_NOTNULLABLE_OBJECT_REF_METHODS(WarpSpecializeFrame,
+                                                    TIRFrame,
                                                     WarpSpecializeFrameNode);
 };
 
-WarpSpecializeFrame WarpSpecialize(int warp_group_idx, PrimExpr thread_idx, int warp_group_size = 128) {
+WarpSpecializeFrame WarpSpecialize(int warp_group_idx, PrimExpr thread_idx,
+                                   int warp_group_size = 128) {
   ObjectPtr<WarpSpecializeFrameNode> n = make_object<WarpSpecializeFrameNode>();
-  PrimExpr min_bound = max(0, IntImm(thread_idx.dtype(), warp_group_idx) * warp_group_size);
+  PrimExpr min_bound =
+      max(0, IntImm(thread_idx.dtype(), warp_group_idx) * warp_group_size);
   PrimExpr max_bound = min_bound + warp_group_size;
   PrimExpr condition = thread_idx >= min_bound && thread_idx < max_bound;
   IfFrame if_frame = If(condition);

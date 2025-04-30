@@ -31,7 +31,6 @@ def WarpSpecialize(warp_group_idx: int,):
     res : Tuple[frame.LaunchThreadFrame]
         The result LaunchThreadFrame.
     """
-    attrs: dict = {}
     id_x, id_y, id_z = get_thread_bindings()
     ex_x, ex_y, ex_z = get_thread_extents()
     tid = id_z * (ex_y * ex_x) + id_y * ex_x + id_x

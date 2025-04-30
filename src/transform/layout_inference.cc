@@ -461,10 +461,10 @@ private:
           analyzer_.const_int_bound.IsBound(thread_var_->var)) {
         auto const_int_bound = analyzer_.const_int_bound(thread_var_);
         auto dtype = thread_var_->var.dtype();
-        auto extent = const_int_bound->max_value - const_int_bound->min_value + 1;
+        auto extent =
+            const_int_bound->max_value - const_int_bound->min_value + 1;
         thread_bounds_vec_.push_back(Range::FromMinExtent(
-            IntImm(dtype, const_int_bound->min_value),
-            IntImm(dtype, extent)));
+            IntImm(dtype, const_int_bound->min_value), IntImm(dtype, extent)));
       } else {
         thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
       }
@@ -571,7 +571,7 @@ private:
           }
         }
       });
-      
+
       auto loop_layout = result_.for_map[root];
       bool parallel_loop = !is_register_store && !skip_thread_partition_;
       if (parallel_loop) {

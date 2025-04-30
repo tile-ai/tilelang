@@ -171,8 +171,8 @@ Stmt Copy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     }
     auto loop_layout = par_op->GetLoopLayout();
     auto thread_var = T.thread_var;
-    auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
-                                     loop_layout);
+    auto thread_loop =
+        PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer, loop_layout);
     vectorized_thread_loop = VectorizeLoop(thread_loop);
   }
 
