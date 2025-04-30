@@ -37,7 +37,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Simplify the IR expressions
     mod = tir.transform.Simplify()(mod)
     # Infer memory layouts for fragments and shared memory
-    print(mod)
     mod = tilelang.transform.LayoutInference()(mod)
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
@@ -118,6 +117,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    mod = tilelang.transform.EliminateStorageSyncForMBarrier()(mod)
     mod = tilelang.transform.InjectPTXAsyncCopy()(mod)
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
