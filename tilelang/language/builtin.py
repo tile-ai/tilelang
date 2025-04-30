@@ -160,6 +160,7 @@ def mbarrier_wait_parity(mbarrier: Union[int, PrimExpr], parity: Union[int, Var]
         mbarrier = get_mbarrier(mbarrier)
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
 
+
 def mbarrier_arrive(mbarrier: Union[int, PrimExpr]):
     """Arrive at memory barrier.
 
@@ -170,6 +171,7 @@ def mbarrier_arrive(mbarrier: Union[int, PrimExpr]):
     if isinstance(mbarrier, int):
         mbarrier = get_mbarrier(mbarrier)
     return ptx_arrive_barrier(mbarrier)
+
 
 def mbarrier_expect_tx(*args):
     """Set expected transaction count for memory barrier.
