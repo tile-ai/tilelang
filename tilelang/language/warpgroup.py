@@ -32,7 +32,7 @@ def WarpSpecialize(warp_group_idx: int,):
         The result LaunchThreadFrame.
     """
     id_x, id_y, id_z = get_thread_bindings()
-    ex_x, ex_y, ex_z = get_thread_extents()
+    ex_x, ex_y, _ = get_thread_extents()
     tid = id_z * (ex_y * ex_x) + id_y * ex_x + id_x
     # only available for nvidia gpus.
     warp_group_size = 128

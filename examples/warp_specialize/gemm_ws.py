@@ -23,16 +23,16 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
             with T.ws(1):
                 for ko in range(T.ceildiv(K, block_K)):
-                    T.mbarrier_wait_parity(T.get_mbarrier(1), ko ^ 1)
+                    T.mbarrier_wait_parity(1, ko ^ 1)
                     T.copy(A[by * block_M, ko * block_K], A_shared)
                     T.copy(B[ko * block_K, bx * block_N], B_shared)
-                    T.ptx_arrive_barrier(T.get_mbarrier(0))
+                    T.mbarrier_arrive(0)
             with T.ws(0):
                 T.clear(C_local)
                 for ko in range(T.ceildiv(K, block_K)):
-                    T.mbarrier_wait_parity(T.get_mbarrier(0), ko)
+                    T.mbarrier_wait_parity(0, ko)
                     T.gemm(A_shared, B_shared, C_local)
-                    T.ptx_arrive_barrier(T.get_mbarrier(1))
+                    T.mbarrier_arrive(1)
                 T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
