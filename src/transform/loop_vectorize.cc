@@ -64,6 +64,7 @@ private:
   void VisitStmt_(const ForNode *node) final {
     inner_for_ = node;
     iter_map_.Set(node->loop_var, Range(node->min, node->extent));
+
     arith::IRVisitorWithAnalyzer::VisitStmt_(node);
   }
 
@@ -138,7 +139,6 @@ private:
         max_vector_size = gcd_base;
       }
       vector_size_ = arith::ZeroAwareGCD(max_vector_size, vector_size_);
-
       PrimExpr elem_offset = 0;
       PrimExpr stride = 1;
       for (int i = indices.size() - 1; i >= 0; --i) {
@@ -232,6 +232,7 @@ bool IndiceCanVectorize(PrimExpr expr, Var var, PrimExpr iter_var_size,
   ICHECK(target_vectorized_size >= 1);
   if (target_vectorized_size == 1)
     return true;
+  // bind thread range
   if (!analyzer->CanProveEqual(FloorMod(iter_var_size, target_vectorized_size),
                                0))
     return false;
@@ -241,10 +242,11 @@ bool IndiceCanVectorize(PrimExpr expr, Var var, PrimExpr iter_var_size,
                                   iter_var_size, target_vectorized_size))));
   PrimExpr expr_transformed = analyzer->Simplify(
       Substitute(expr, {{var, v0 + v1 * target_vectorized_size}}));
-  PrimExpr expr_simplified = analyzer->Simplify(expr_transformed);
-
   Vectorizer vectorizer(v0, IntImm(v0->dtype, target_vectorized_size));
   PrimExpr expr_vectorized = vectorizer.VisitExpr(expr_transformed);
+  // This simplify is necessary for thread region specifiled
+  // optimizations.
+  expr_vectorized = analyzer->Simplify(expr_vectorized);
   auto ramp_node = expr_vectorized.as<RampNode>();
   if (!ramp_node) {
     // Broadcast value

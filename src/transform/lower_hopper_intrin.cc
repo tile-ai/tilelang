@@ -49,9 +49,9 @@ public:
       Call alloc_desc = Call(DataType::Handle(), builtin::tvm_stack_alloca(),
                              {StringImm("arg_value"), 16});
       Array<PrimExpr> init_desc_args;
-      if (call->op.same_as(CreateTMADescriptorOp())) {
+      if (call->op.same_as(create_tma_descriptor())) {
         init_desc_args.push_back(StringImm(tvm_tensormap_create_tiled));
-      } else if (call->op.same_as(CreateTMAIm2ColDescriptorOp())) {
+      } else if (call->op.same_as(create_tma_im2col_descriptor())) {
         init_desc_args.push_back(StringImm(tvm_tensormap_create_im2col));
       } else {
         CHECK(0) << call->op;
@@ -112,8 +112,8 @@ public:
   }
 
   PrimExpr VisitExpr_(const CallNode *call) final {
-    if (call->op.same_as(CreateTMADescriptorOp()) ||
-        call->op.same_as(CreateTMAIm2ColDescriptorOp())) {
+    if (call->op.same_as(create_tma_descriptor()) ||
+        call->op.same_as(create_tma_im2col_descriptor())) {
       Var var;
       auto iter = desc_map_.find(GetRef<Call>(call));
       if (iter != desc_map_.end()) {
@@ -128,24 +128,24 @@ public:
                           {StringImm("tl::prefetch_tma_descriptor"), var})));
       }
       return var;
-    } else if (call->op.same_as(CreateListofMBarrierOp())) {
+    } else if (call->op.same_as(create_list_of_mbarrier())) {
       ICHECK(init_mbarrier_calls_.size() == 0);
       int num_barriers = static_cast<int>(call->args.size());
       for (int i = 0; i < num_barriers; i++) {
-        PrimExpr mbarrier = Call(DataType::Handle(), GetMBarrierOp(), {i});
+        PrimExpr mbarrier = Call(DataType::Handle(), get_mbarrier(), {i});
         init_mbarrier_calls_.push_back(Evaluate(
             Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
                  {mbarrier, call->args[i]})));
       }
       return 0;
-    } else if (call->op.same_as(SyncThreadsPartialOp())) {
+    } else if (call->op.same_as(sync_thread_partial())) {
       int barrier_id = init_mbarrier_calls_.size();
       PrimExpr mbarrier =
-          Call(DataType::Handle(), GetMBarrierOp(), {barrier_id});
+          Call(DataType::Handle(), get_mbarrier(), {barrier_id});
       init_mbarrier_calls_.push_back(Evaluate(
           Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
                {mbarrier, call->args[0]})));
-      return Call(DataType::Handle(), SyncThreadsPartialOp(), {mbarrier});
+      return Call(DataType::Handle(), sync_thread_partial(), {mbarrier});
     } else {
       return StmtExprMutator::VisitExpr_(call);
     }

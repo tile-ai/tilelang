@@ -188,8 +188,7 @@ Fragment PlanLoopPartition(For op, size_t num_thread, int vectorize_size) {
 }
 
 Fragment PlanLoopPartition(For op, int vectorize_size, Range thread_range) {
-  size_t num_thread =
-      *as_const_int(thread_range->extent) - *as_const_int(thread_range->min);
+  size_t num_thread = *as_const_int(thread_range->extent);
   LoopPartitioner partitioner;
   Fragment fragment = partitioner.Partition(op, num_thread, vectorize_size);
   auto node = make_object<FragmentNode>(*fragment.get());

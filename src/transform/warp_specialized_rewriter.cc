@@ -43,7 +43,7 @@ public:
   void clear() { has_tma_load_ = false; }
 
   void VisitExpr_(const CallNode *call) final {
-    if (call->op.same_as(TMALoadOp()) || call->op.same_as(TMALoadIm2ColOp())) {
+    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
       has_tma_load_ = true;
     }
   }
@@ -116,8 +116,7 @@ public:
   void VisitStmt_(const EvaluateNode *op) final {
     Role role = Role::kConsumer;
     if (auto call = op->value.as<CallNode>()) {
-      if (call->op.same_as(TMALoadOp()) ||
-          call->op.same_as(TMALoadIm2ColOp())) {
+      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
         role = Role::kProducer;
         has_bulk_copy_ = true;
       }
@@ -207,11 +206,11 @@ private:
 };
 
 static PrimExpr makeGetBarrier(PrimExpr barrier_id) {
-  return Call(DataType::Handle(), GetMBarrierOp(), {barrier_id});
+  return Call(DataType::Handle(), get_mbarrier(), {barrier_id});
 }
 
 static Stmt makeExpectTX(PrimExpr barrier_id, PrimExpr bytes) {
-  auto call = Call(DataType::Handle(), MBarrierExpectTX(),
+  auto call = Call(DataType::Handle(), mbarrier_expect_tx(),
                    {makeGetBarrier(barrier_id), bytes});
   return Evaluate(call);
 }
@@ -229,7 +228,7 @@ static Stmt makeCpAsyncBarrier(PrimExpr barrier_id) {
 }
 
 static Stmt makeParityWait(PrimExpr barrier_id, PrimExpr parity) {
-  auto call = Call(DataType::Handle(), MBarrierWaitParity(),
+  auto call = Call(DataType::Handle(), mbarrier_wait_parity(),
                    {makeGetBarrier(barrier_id), parity});
   return Evaluate(call);
 }
@@ -273,8 +272,7 @@ private:
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(TMALoadOp()) ||
-          call->op.same_as(TMALoadIm2ColOp())) {
+      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
         contain_tma_load_ = true;
         if (insert_in_evaluate_) {
           Array<Stmt> new_seq = {expect_tx_, GetRef<Evaluate>(op)};
@@ -308,7 +306,7 @@ public:
 
 private:
   void VisitExpr_(const CallNode *call) final {
-    if (call->op.same_as(TMALoadOp()) || call->op.same_as(TMALoadIm2ColOp())) {
+    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
       Call access_ptr = Downcast<Call>(call->args[2]);
       ICHECK(access_ptr->op.same_as(builtin::tvm_access_ptr()));
       int type_bytes = access_ptr->args[0]->dtype.bytes();
@@ -361,7 +359,7 @@ public:
 private:
   PrimExpr VisitExpr_(const CallNode *op) final {
     auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
-    if (call->op.same_as(TMALoadOp()) || call->op.same_as(TMALoadIm2ColOp())) {
+    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
       Call access_ptr = Downcast<Call>(call->args[2]);
       ICHECK(access_ptr->op.same_as(builtin::tvm_access_ptr()));
       call.CopyOnWrite()->args.Set(1, makeGetBarrier(producer_barrier_idx_));
@@ -1082,7 +1080,7 @@ public:
 private:
   void VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(SetMaxNReg())) {
+      if (call->op.same_as(set_max_nreg())) {
         int reg_hint = call->args[0].as<IntImmNode>()->value;
         int is_inc = call->args[1].as<IntImmNode>()->value;
         ICHECK(reg_hint <= 240 && reg_hint >= 24)
@@ -1092,7 +1090,7 @@ private:
         // producer should decrease register hint while consumer should increase
         // register hint
         nreg_.Set(is_inc, IntImm(DataType::Int(32), reg_hint));
-      } else if (call->op.same_as(NoSetMaxNReg())) {
+      } else if (call->op.same_as(no_set_max_nreg())) {
         has_no_set_max_nreg_ = true;
       }
     }
@@ -1149,7 +1147,8 @@ private:
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(SetMaxNReg()) || call->op.same_as(NoSetMaxNReg())) {
+      if (call->op.same_as(set_max_nreg()) ||
+          call->op.same_as(no_set_max_nreg())) {
         return Evaluate(0);
       }
     }
@@ -1202,7 +1201,7 @@ private:
         barrier_num_threads.push_back(arrive_thread_count);
       }
       Stmt init_barrier = Evaluate(Call(
-          DataType::Handle(), CreateListofMBarrierOp(), barrier_num_threads));
+          DataType::Handle(), create_list_of_mbarrier(), barrier_num_threads));
       block.CopyOnWrite()->body = SeqStmt({init_barrier, code});
       block_realize.CopyOnWrite()->block = block;
       return block_realize;
@@ -1224,9 +1223,9 @@ private:
     auto inc_reg_stmt = Evaluate(0);
     auto dec_reg_stmt = Evaluate(0);
     if (dec_reg >= 0 && inc_reg >= 0) {
-      inc_reg_stmt = Evaluate(Call(DataType::Handle(), SetMaxNReg(),
+      inc_reg_stmt = Evaluate(Call(DataType::Handle(), set_max_nreg(),
                                    {inc_reg == 0 ? 240 : inc_reg, 1}));
-      dec_reg_stmt = Evaluate(Call(DataType::Handle(), SetMaxNReg(),
+      dec_reg_stmt = Evaluate(Call(DataType::Handle(), set_max_nreg(),
                                    {dec_reg == 0 ? 24 : dec_reg, 0}));
     }
 
@@ -1252,7 +1251,7 @@ private:
     }
 
     Stmt init_barrier = Evaluate(Call(
-        DataType::Handle(), CreateListofMBarrierOp(), barrier_num_threads));
+        DataType::Handle(), create_list_of_mbarrier(), barrier_num_threads));
     Stmt body = IfThenElse(GE(thread_iv_->var, consumer_thread_extent),
                            producer_code, consumer_code);
     // Add an attr here to handle the partial thread count in ThreadSync pass.
