@@ -316,3 +316,9 @@ def FlattenBuffer():
         The result pass
     """
     return _ffi_api.FlattenBuffer()  # type: ignore
+
+
+def EliminateStorageSyncForMBarrier():
+    """EliminateStorageSyncForMBarrier
+    """
+    return _ffi_api.EliminateStorageSyncForMBarrier()  # type: ignore

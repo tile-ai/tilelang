@@ -261,6 +261,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         result = self.lib.init()
         if result != 0:
             error_msg = self.lib.get_last_error().decode('utf-8')
+            error_msg += f"\n{self.lib_code}"
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
         self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib)

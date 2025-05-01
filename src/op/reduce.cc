@@ -12,6 +12,7 @@
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
+#include <tvm/tir/stmt_functor.h>
 
 #include "../layout/utils.h"
 #include "../transform/loop_partition.h"
@@ -310,7 +311,7 @@ Stmt CumSumOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
              this->src.scope() == "shared") {
     ICHECK(this->dst.scope() == "shared.dyn" || this->dst.scope() == "shared");
     std::stringstream ss;
-    auto threads = T.thread_bounds->extent - T.thread_bounds->min;
+    auto threads = T.thread_bounds->extent;
     ss << "tl::CumSum2D<" << threads << ", " << dim << ", "
        << (reverse ? "true" : "false") << ">::run";
     Array<PrimExpr> args = {StringImm(ss.str()), src.access_ptr(1),

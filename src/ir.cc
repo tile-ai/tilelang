@@ -223,5 +223,55 @@ TVM_REGISTER_GLOBAL("tl.Parallel").set_body_typed(ParallelFor);
 TVM_REGISTER_GLOBAL("tl.Pipelined").set_body_typed(PipelinedFor);
 TVM_REGISTER_GLOBAL("tl.KernelLaunch").set_body_typed(KernelLaunch);
 
+class WarpSpecializeFrameNode : public TIRFrameNode {
+public:
+  Array<TIRFrame> frames;
+
+  void VisitAttrs(tvm::AttrVisitor *v) {
+    TIRFrameNode::VisitAttrs(v);
+    v->Visit("frames", &frames);
+  }
+
+  static constexpr const char *_type_key = "tl.WarpSpecializeFrame";
+  TVM_DECLARE_FINAL_OBJECT_INFO(WarpSpecializeFrameNode, TIRFrameNode);
+
+public:
+  TVM_DLL void EnterWithScope() final {
+    for (auto frame = frames.begin(); frame != frames.end(); ++frame)
+      (*frame)->EnterWithScope();
+  }
+  /*!
+   * \brief The method called when exiting RAII scope.
+   * \sa tvm::support::With
+   */
+  TVM_DLL void ExitWithScope() final {
+    for (auto frame = frames.rbegin(); frame != frames.rend(); ++frame)
+      (*frame)->ExitWithScope();
+  }
+};
+
+class WarpSpecializeFrame : public TIRFrame {
+public:
+  TVM_DEFINE_MUTABLE_NOTNULLABLE_OBJECT_REF_METHODS(WarpSpecializeFrame,
+                                                    TIRFrame,
+                                                    WarpSpecializeFrameNode);
+};
+
+WarpSpecializeFrame WarpSpecialize(int warp_group_idx, PrimExpr thread_idx,
+                                   int warp_group_size = 128) {
+  ObjectPtr<WarpSpecializeFrameNode> n = make_object<WarpSpecializeFrameNode>();
+  PrimExpr min_bound =
+      max(0, IntImm(thread_idx.dtype(), warp_group_idx) * warp_group_size);
+  PrimExpr max_bound = min_bound + warp_group_size;
+  PrimExpr condition = thread_idx >= min_bound && thread_idx < max_bound;
+  IfFrame if_frame = If(condition);
+  n->frames.push_back(if_frame);
+  n->frames.push_back(Then());
+  return WarpSpecializeFrame(n);
+}
+
+TVM_REGISTER_NODE_TYPE(WarpSpecializeFrameNode);
+TVM_REGISTER_GLOBAL("tl.WarpSpecialize").set_body_typed(WarpSpecialize);
+
 } // namespace tl
 } // namespace tvm

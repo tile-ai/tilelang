@@ -210,14 +210,14 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   desc.smem_box.Set(0, PrimExpr(instruction_dim));
 
   Call create_descriptor =
-      Call(DataType::Handle(), CreateTMADescriptorOp(), desc.EncodeCallArgs());
+      Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
 
   Array<PrimExpr> args;
   args.reserve(desc.rank + 3);
   args.push_back(create_descriptor);
   if (is_load)
     args.push_back(0); // mbarrier id placeholder
-  auto op = is_load ? TMALoadOp() : TMAStoreOp();
+  auto op = is_load ? tma_load() : tma_store();
 
   Stmt tma_copy;
 
@@ -346,7 +346,7 @@ Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
     }
   }
 
-  Call create_desc = Call(DataType::Handle(), CreateTMAIm2ColDescriptorOp(),
+  Call create_desc = Call(DataType::Handle(), create_tma_im2col_descriptor(),
                           desc.EncodeCallArgs());
 
   Array<PrimExpr> global_coords; // c, w, h, n
@@ -397,7 +397,7 @@ Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
 
   Stmt tma_copy =
       IfThenElse(EQ(T.thread_var, 0),
-                 Evaluate(Call(DataType::Handle(), TMALoadIm2ColOp(), args)));
+                 Evaluate(Call(DataType::Handle(), tma_load_im2col(), args)));
   return tma_copy;
 }
 

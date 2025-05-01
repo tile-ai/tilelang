@@ -298,9 +298,10 @@ private:
       auto const_int_bound = analyzer_->const_int_bound(thread_var_);
       auto min_value = const_int_bound->min_value;
       auto max_value = const_int_bound->max_value;
+      auto extent = max_value + 1 - min_value;
       thread_bounds =
           Range::FromMinExtent(IntImm(thread_var_->var.dtype(), min_value),
-                               IntImm(thread_var_->var.dtype(), max_value + 1));
+                               IntImm(thread_var_->var.dtype(), extent));
     } else {
       thread_bounds = Range::FromMinExtent(0, 1);
     }

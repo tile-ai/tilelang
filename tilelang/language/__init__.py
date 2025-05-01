@@ -34,6 +34,7 @@ from .kernel import (
     get_block_binding,  # noqa: F401
     get_block_bindings,  # noqa: F401
 )
+from .warpgroup import ws  # noqa: F401
 from .allocate import (
     alloc_local,  # noqa: F401
     alloc_shared,  # noqa: F401

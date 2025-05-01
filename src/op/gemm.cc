@@ -164,8 +164,7 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     return {};
   LayoutMap results;
   ICHECK(C.scope() == "local.fragment");
-  auto block_size = *as_const_int(T.thread_bounds->extent) -
-                    *as_const_int(T.thread_bounds->min);
+  auto block_size = *as_const_int(T.thread_bounds->extent);
   if (TargetIsVolta(T.target)) {
     const int warp_size = 32;
     auto [warp_m, warp_n] =

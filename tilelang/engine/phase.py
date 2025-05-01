@@ -11,12 +11,16 @@ def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
                                    target: Optional[Target] = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    if target.arch not in {"sm_90"}:
+    if target.arch not in {"sm_90", "sm_90a"}:
         return False
     disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
     disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
     disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
     return not (disable_tma_lower and disable_warp_specialized)
+
+
+def allow_fence_proxy(target: Optional[Target] = None) -> bool:
+    return target.arch in {"sm_90", "sm_90a"}
 
 
 def allow_vectorize(pass_ctx: Optional[PassContext] = None) -> bool:
@@ -62,6 +66,8 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         # to get better performance with async copy
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+        # warp_specialized pass will pack the if stmt into the block
+        # so we need to lower the opaque block first
         mod = tir.transform.LowerOpaqueBlock()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
         mod = tilelang.transform.RewriteWgmmaSync()(mod)
@@ -72,6 +78,11 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
+
+    if allow_fence_proxy(target=target):
+        # in hopper device, wgmma is an async proxy
+        # so we need to inject a fence proxy before it
+        mod = tilelang.transform.InjectFenceProxy()(mod)
 
     mod = tir.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
@@ -106,6 +117,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    mod = tilelang.transform.EliminateStorageSyncForMBarrier()(mod)
     mod = tilelang.transform.InjectPTXAsyncCopy()(mod)
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)

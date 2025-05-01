@@ -33,92 +33,92 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kDynamicAlignment, Integer);
   TVM_REGISTER_OP("tl." #OpName)                                               \
       .set_attr<TScriptPrinterName>("TScriptPrinterName", #OpName)
 
-TIR_DEFINE_TL_BUILTIN(CreateListofMBarrierOp)
+TIR_DEFINE_TL_BUILTIN(create_list_of_mbarrier)
     .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(CreateTMADescriptorOp)
+TIR_DEFINE_TL_BUILTIN(create_tma_descriptor)
     .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 
-TIR_DEFINE_TL_BUILTIN(CreateTMAIm2ColDescriptorOp)
+TIR_DEFINE_TL_BUILTIN(create_tma_im2col_descriptor)
     .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 
-TIR_DEFINE_TL_BUILTIN(GetMBarrierOp)
+TIR_DEFINE_TL_BUILTIN(get_mbarrier)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 
-TIR_DEFINE_TL_BUILTIN(TMALoadOp).set_num_inputs(-1).set_attr<TCallEffectKind>(
+TIR_DEFINE_TL_BUILTIN(tma_load).set_num_inputs(-1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(TMALoadIm2ColOp)
+TIR_DEFINE_TL_BUILTIN(tma_load_im2col)
     .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(TMAStoreOp)
-    .set_num_inputs(-1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_DEFINE_TL_BUILTIN(tma_store).set_num_inputs(-1).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(MBarrierWaitParity)
+TIR_DEFINE_TL_BUILTIN(mbarrier_wait_parity)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(MBarrierExpectTX)
+TIR_DEFINE_TL_BUILTIN(mbarrier_expect_tx)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(LDMatrixOp)
+TIR_DEFINE_TL_BUILTIN(ptx_ldmatirx)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(STMatrixOp)
+TIR_DEFINE_TL_BUILTIN(ptx_stmatirx)
     .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(SyncThreadsPartialOp)
+TIR_DEFINE_TL_BUILTIN(sync_thread_partial)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(FenceProxyAsyncOp)
+TIR_DEFINE_TL_BUILTIN(fence_proxy_async)
     .set_num_inputs(0)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(TMAStoreArrive)
+TIR_DEFINE_TL_BUILTIN(tma_store_arrive)
     .set_num_inputs(0)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(TMAStoreWait)
+TIR_DEFINE_TL_BUILTIN(tma_store_wait)
     .set_num_inputs(0)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
-TIR_DEFINE_TL_BUILTIN(SetMaxNReg)
+TIR_DEFINE_TL_BUILTIN(set_max_nreg)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(NoSetMaxNReg)
+TIR_DEFINE_TL_BUILTIN(no_set_max_nreg)
     .set_num_inputs(0)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(WaitWgmma).set_num_inputs(1).set_attr<TCallEffectKind>(
-    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+TIR_DEFINE_TL_BUILTIN(wait_wgmma)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(PackB16Op).set_num_inputs(2).set_attr<TCallEffectKind>(
+TIR_DEFINE_TL_BUILTIN(pack_b16).set_num_inputs(2).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kPure));
 } // namespace tl
 } // namespace tvm
