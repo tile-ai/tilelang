@@ -22,13 +22,13 @@
  * \brief Warp specialized Pipeline for cuda GPU (sm90+)
  */
 
+#include "arith/ir_visitor_with_analyzer.h"
 #include "tir/analysis/var_use_def_analysis.h"
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
-#include "arith/ir_visitor_with_analyzer.h"
 
 #include "../op/builtin.h"
 
@@ -1185,7 +1185,6 @@ private:
   Array<IntImm> nreg_;
 };
 
-
 class WarpSpecializedDetector : public IRVisitorWithAnalyzer {
 public:
   static bool Detect(Stmt stmt, bool skip_thread_partition = false) {
@@ -1200,9 +1199,9 @@ public:
   }
 
 private:
-  void VisitStmt_(const EvaluateNode* op) final {
-    if (const CallNode* call = op->value.as<CallNode>()) {
-      if (call->op.same_as(create_list_of_mbarrier()) || 
+  void VisitStmt_(const EvaluateNode *op) final {
+    if (const CallNode *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(create_list_of_mbarrier()) ||
           call->op.same_as(mbarrier_wait_parity()) ||
           call->op.same_as(builtin::ptx_arrive_barrier()) ||
           call->op.same_as(builtin::ptx_cp_async_barrier())) {
@@ -1212,9 +1211,8 @@ private:
     IRVisitorWithAnalyzer::VisitStmt_(op);
   }
 
-  void VisitExpr_(const CallNode* op) final {
-    if (op->op.same_as(tma_load()) || 
-        op->op.same_as(tma_load_im2col()) ||
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col()) ||
         op->op.same_as(set_max_nreg())) {
       has_tma_op_ = true;
     }
