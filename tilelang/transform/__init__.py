@@ -189,6 +189,17 @@ def WarpSpecialized():
     return _ffi_api.WarpSpecialized()  # type: ignore
 
 
+def InjectTmaBarrier():
+    """InjectTmaBarrier
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.InjectTmaBarrier()  # type: ignore
+
+
 def InjectFenceProxy():
     """InjectFenceProxy
 

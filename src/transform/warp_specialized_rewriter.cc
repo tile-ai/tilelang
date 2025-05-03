@@ -22,6 +22,7 @@
  * \brief Warp specialized Pipeline for cuda GPU (sm90+)
  */
 
+#include "arith/ir_visitor_with_analyzer.h"
 #include "tir/analysis/var_use_def_analysis.h"
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
@@ -35,6 +36,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+using arith::IRVisitorWithAnalyzer;
 
 enum class Role { kConsumer, kProducer, kBoth };
 
@@ -209,12 +211,6 @@ static PrimExpr makeGetBarrier(PrimExpr barrier_id) {
   return Call(DataType::Handle(), get_mbarrier(), {barrier_id});
 }
 
-static Stmt makeExpectTX(PrimExpr barrier_id, PrimExpr bytes) {
-  auto call = Call(DataType::Handle(), mbarrier_expect_tx(),
-                   {makeGetBarrier(barrier_id), bytes});
-  return Evaluate(call);
-}
-
 static Stmt makeArriveBarrier(PrimExpr barrier_id) {
   auto call = Call(DataType::Handle(), builtin::ptx_arrive_barrier(),
                    {makeGetBarrier(barrier_id)});
@@ -233,95 +229,17 @@ static Stmt makeParityWait(PrimExpr barrier_id, PrimExpr parity) {
   return Evaluate(call);
 }
 
-// static bool isGemm(Stmt stmt) {
-//   bool is_gemm = false;
-//   if (stmt.as<EvaluateNode>()) {
-//     auto call = Downcast<Evaluate>(stmt)->value.as<CallNode>();
-//     if (call && call->op.same_as(Op::Get("tir.call_extern"))) {
-//       if (call->args[0].as<StringImmNode>()) {
-//         std::string name = Downcast<StringImm>(call->args[0])->value;
-//         if (name.find("gemm") != std::string::npos) {
-//           is_gemm = true;
-//         }
-//       }
-//     }
-//   }
-//   return is_gemm;
-// }
-
-class TMAExpectTxRewriter : public StmtExprMutator {
-public:
-  TMAExpectTxRewriter(Stmt expect_tx) : expect_tx_(expect_tx) {}
-  static Stmt Rewrite(Stmt stmt, Stmt expect_tx) {
-    TMAExpectTxRewriter rewriter(expect_tx);
-    return rewriter(stmt);
-  }
-
-private:
-  Stmt VisitStmt_(const ForNode *op) final {
-    insert_in_evaluate_ = false;
-    StmtExprMutator::VisitStmt_(op);
-    insert_in_evaluate_ = true;
-    if (contain_tma_load_) {
-      Array<Stmt> new_seq = {expect_tx_, GetRef<For>(op)};
-      contain_tma_load_ = false;
-      return SeqStmt(std::move(new_seq));
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
-        contain_tma_load_ = true;
-        if (insert_in_evaluate_) {
-          Array<Stmt> new_seq = {expect_tx_, GetRef<Evaluate>(op)};
-          return SeqStmt(std::move(new_seq));
-        }
-      }
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  Stmt expect_tx_;
-  bool contain_tma_load_;
-  bool insert_in_evaluate_ = true;
-};
-
 class ProducerTraitsCollector : public StmtExprVisitor {
 public:
   ProducerTraitsCollector() { Clear(); }
 
-  void Clear() {
-    bulk_copy_bytes = 0;
-    loop_extents = 1;
-    has_simt_copy = false;
-  }
+  void Clear() { has_simt_copy = false; }
 
   void Collect(Stmt stmt) { VisitStmt(stmt); }
 
   bool HasSimtCopy() { return has_simt_copy; }
 
-  PrimExpr BulkCopyBytes() { return bulk_copy_bytes; }
-
 private:
-  void VisitExpr_(const CallNode *call) final {
-    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
-      Call access_ptr = Downcast<Call>(call->args[2]);
-      ICHECK(access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      int type_bytes = access_ptr->args[0]->dtype.bytes();
-      bulk_copy_bytes += access_ptr->args[3] * loop_extents * type_bytes;
-    }
-    StmtExprVisitor::VisitExpr_(call);
-  }
-
-  void VisitStmt_(const ForNode *op) final {
-    PrimExpr old_loop_evtents = loop_extents;
-    loop_extents *= op->extent;
-    StmtExprVisitor::VisitStmt_(op);
-    loop_extents = old_loop_evtents;
-  }
-
   void VisitStmt_(const IfThenElseNode *op) final {
     bool old_in_if_cond = in_if_cond_;
     in_if_cond_ = true;
@@ -342,8 +260,6 @@ private:
   }
 
   bool has_simt_copy;
-  PrimExpr bulk_copy_bytes;
-  PrimExpr loop_extents;
   bool in_if_cond_ = false;
 };
 
@@ -646,14 +562,7 @@ private:
           auto stmt =
               MbarrierRewriter::Rewrite(seq_transformed[i], release_barrier_id);
           collector.Collect(stmt);
-          if (!is_zero(collector.BulkCopyBytes())) {
-            auto expect_tx = IfThenElse(
-                EQ(thread_var_, 0),
-                makeExpectTX(release_barrier_id, collector.BulkCopyBytes()));
-            block_stmt.push_back(TMAExpectTxRewriter::Rewrite(stmt, expect_tx));
-          } else {
-            block_stmt.push_back(stmt);
-          }
+          block_stmt.push_back(stmt);
           if (collector.HasSimtCopy() > 0) {
             block_stmt.push_back(makeCpAsyncBarrier(release_barrier_id));
           }
@@ -1276,13 +1185,56 @@ private:
   Array<IntImm> nreg_;
 };
 
+class WarpSpecializedDetector : public IRVisitorWithAnalyzer {
+public:
+  static bool Detect(Stmt stmt, bool skip_thread_partition = false) {
+    WarpSpecializedDetector detector;
+    detector.VisitStmt(stmt);
+    return detector.has_tma_op_ && detector.has_mbarrier_op_;
+  }
+
+  WarpSpecializedDetector() {
+    has_tma_op_ = false;
+    has_mbarrier_op_ = false;
+  }
+
+private:
+  void VisitStmt_(const EvaluateNode *op) final {
+    if (const CallNode *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(create_list_of_mbarrier()) ||
+          call->op.same_as(mbarrier_wait_parity()) ||
+          call->op.same_as(builtin::ptx_arrive_barrier()) ||
+          call->op.same_as(builtin::ptx_cp_async_barrier())) {
+        has_mbarrier_op_ = true;
+      }
+    }
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col()) ||
+        op->op.same_as(set_max_nreg())) {
+      has_tma_op_ = true;
+    }
+    IRVisitorWithAnalyzer::VisitExpr_(op);
+  }
+
+  bool has_tma_op_{false};
+  bool has_mbarrier_op_{false};
+};
+
 using namespace tir::transform;
 
 tvm::transform::Pass WarpSpecialized() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
     bool disable_warp_specialized =
         ctx->GetConfig<Bool>(kDisableWarpSpecialized, Bool(false)).value();
-    return WarpSpecializedRewriter::Substitute(f, disable_warp_specialized);
+    bool warp_specialized = WarpSpecializedDetector::Detect(f->body);
+
+    if (!warp_specialized) {
+      return WarpSpecializedRewriter::Substitute(f, disable_warp_specialized);
+    }
+    return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.WarpSpecialized", {});
 }

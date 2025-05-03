@@ -3,20 +3,40 @@
 from tilelang import tvm as tvm
 from tilelang.language import ptx_arrive_barrier
 from tvm import tir
-from typing import Union
-from tvm.tir import PrimExpr, Var
+from typing import Union, Any
+from tvm.tir import PrimExpr, Var, Call
 
 
-def create_list_of_mbarrier(*args):
-    """Create a list of memory barrier operations.
-
-    Args:
-        *args: Variable arguments passed to the memory barrier creation operation
-
-    Returns:
-        tir.Call: A handle to the created list of memory barriers
+def create_list_of_mbarrier(*args: Any) -> Call:
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.create_list_of_mbarrier"), *args)
+    Create a list of memory barrier handles.
+
+    Parameters
+    ----------
+    *args : list or Any
+        Either a single list of arguments, or multiple arguments directly.
+
+    Returns
+    -------
+    tvm.tir.Call
+        Handle to the created list of memory barriers.
+
+    Raises
+    ------
+    TypeError
+        If the input is not a list or variadic arguments.
+    
+    Examples
+    --------
+    >>> create_list_of_mbarrier([128, 128])
+    >>> create_list_of_mbarrier(128, 128)
+    """
+    if len(args) == 1 and isinstance(args[0], list):
+        return tir.call_intrin("handle", tir.op.Op.get("tl.create_list_of_mbarrier"), *args[0])
+    elif len(args) >= 1:
+        return tir.call_intrin("handle", tir.op.Op.get("tl.create_list_of_mbarrier"), *args)
+    else:
+        raise TypeError("create_list_of_mbarrier expects a list or one or more arguments.")
 
 
 def get_mbarrier(*args):
@@ -115,7 +135,7 @@ def no_set_max_nreg(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.no_set_max_nreg"), *args)
 
 
-def mbarrier_wait_parity(mbarrier: Union[int, PrimExpr], parity: Union[int, Var]):
+def mbarrier_wait_parity(mbarrier: Union[int, PrimExpr, tir.Call], parity: Union[int, Var]):
     """Wait for memory barrier parity condition.
 
     Args:
@@ -154,20 +174,28 @@ def mbarrier_wait_parity(mbarrier: Union[int, PrimExpr], parity: Union[int, Var]
     Returns:
         tir.Call: A handle to the barrier wait operation
     """
-    if isinstance(mbarrier, int):
+    if isinstance(mbarrier, tir.Call):
+        mbarrier = mbarrier
+    elif isinstance(mbarrier, (tir.PrimExpr, int)):
         mbarrier = get_mbarrier(mbarrier)
+    else:
+        raise TypeError("mbarrier must be an integer or a tir.Call")
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
 
 
-def mbarrier_arrive(mbarrier: Union[int, PrimExpr]):
+def mbarrier_arrive(mbarrier: Union[int, PrimExpr, tir.Call]):
     """Arrive at memory barrier.
 
     Args:
         mbarrier: Optional[int, PrimExpr]
             The memory barrier to arrive at
     """
-    if isinstance(mbarrier, int):
+    if isinstance(mbarrier, tir.Call):
+        mbarrier = mbarrier
+    elif isinstance(mbarrier, (tir.PrimExpr, int)):
         mbarrier = get_mbarrier(mbarrier)
+    else:
+        raise TypeError("mbarrier must be an integer or a tir.Call")
     return ptx_arrive_barrier(mbarrier)
 
 
