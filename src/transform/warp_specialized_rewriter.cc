@@ -28,6 +28,7 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include "arith/ir_visitor_with_analyzer.h"
 
 #include "../op/builtin.h"
 
@@ -35,6 +36,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+using arith::IRVisitorWithAnalyzer;
 
 enum class Role { kConsumer, kProducer, kBoth };
 
@@ -1183,13 +1185,58 @@ private:
   Array<IntImm> nreg_;
 };
 
+
+class WarpSpecializedDetector : public IRVisitorWithAnalyzer {
+public:
+  static bool Detect(Stmt stmt, bool skip_thread_partition = false) {
+    WarpSpecializedDetector detector;
+    detector.VisitStmt(stmt);
+    return detector.has_tma_op_ && detector.has_mbarrier_op_;
+  }
+
+  WarpSpecializedDetector() {
+    has_tma_op_ = false;
+    has_mbarrier_op_ = false;
+  }
+
+private:
+  void VisitStmt_(const EvaluateNode* op) final {
+    if (const CallNode* call = op->value.as<CallNode>()) {
+      if (call->op.same_as(create_list_of_mbarrier()) || 
+          call->op.same_as(mbarrier_wait_parity()) ||
+          call->op.same_as(builtin::ptx_arrive_barrier()) ||
+          call->op.same_as(builtin::ptx_cp_async_barrier())) {
+        has_mbarrier_op_ = true;
+      }
+    }
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const CallNode* op) final {
+    if (op->op.same_as(tma_load()) || 
+        op->op.same_as(tma_load_im2col()) ||
+        op->op.same_as(set_max_nreg())) {
+      has_tma_op_ = true;
+    }
+    IRVisitorWithAnalyzer::VisitExpr_(op);
+  }
+
+  bool has_tma_op_{false};
+  bool has_mbarrier_op_{false};
+};
+
 using namespace tir::transform;
 
 tvm::transform::Pass WarpSpecialized() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
     bool disable_warp_specialized =
         ctx->GetConfig<Bool>(kDisableWarpSpecialized, Bool(false)).value();
-    return WarpSpecializedRewriter::Substitute(f, disable_warp_specialized);
+    bool warp_specialized = WarpSpecializedDetector::Detect(f->body);
+
+    if (!warp_specialized) {
+      return WarpSpecializedRewriter::Substitute(f, disable_warp_specialized);
+    }
+    return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.WarpSpecialized", {});
 }
