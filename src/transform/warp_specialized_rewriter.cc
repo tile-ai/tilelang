@@ -209,7 +209,6 @@ static PrimExpr makeGetBarrier(PrimExpr barrier_id) {
   return Call(DataType::Handle(), get_mbarrier(), {barrier_id});
 }
 
-
 static Stmt makeArriveBarrier(PrimExpr barrier_id) {
   auto call = Call(DataType::Handle(), builtin::ptx_arrive_barrier(),
                    {makeGetBarrier(barrier_id)});
@@ -232,16 +231,13 @@ class ProducerTraitsCollector : public StmtExprVisitor {
 public:
   ProducerTraitsCollector() { Clear(); }
 
-  void Clear() {
-    has_simt_copy = false;
-  }
+  void Clear() { has_simt_copy = false; }
 
   void Collect(Stmt stmt) { VisitStmt(stmt); }
 
   bool HasSimtCopy() { return has_simt_copy; }
 
 private:
-
   void VisitStmt_(const IfThenElseNode *op) final {
     bool old_in_if_cond = in_if_cond_;
     in_if_cond_ = true;

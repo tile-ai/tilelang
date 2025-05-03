@@ -43,7 +43,8 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout) {
   Array<PrimExpr> layout_shape = layout->OutputShape();
   Array<PrimExpr> output_shape = layout_shape;
 
-  if (ptr_type->storage_scope == "shared" || ptr_type->storage_scope == "shared.dyn") {
+  if (ptr_type->storage_scope == "shared" ||
+      ptr_type->storage_scope == "shared.dyn") {
     int replicate_extent = 1;
     Array<PrimExpr> buffer_shape = buffer->shape;
     int buffer_extent = 1;
@@ -62,9 +63,9 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout) {
     }
   }
 
-  return Buffer(new_var, buffer->dtype, output_shape, {},
-                buffer->elem_offset, buffer->name, buffer->data_alignment,
-                buffer->offset_factor, buffer->buffer_type);
+  return Buffer(new_var, buffer->dtype, output_shape, {}, buffer->elem_offset,
+                buffer->name, buffer->data_alignment, buffer->offset_factor,
+                buffer->buffer_type);
 }
 
 class LowerTileOpPass : arith::IRMutatorWithAnalyzer {

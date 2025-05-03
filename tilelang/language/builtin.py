@@ -5,7 +5,7 @@
 from tilelang import tvm as tvm
 from tilelang.language import ptx_arrive_barrier
 from tvm import tir
-from typing import Union, Any, List
+from typing import Union, Any
 from tvm.tir import PrimExpr, Var, Call
 
 

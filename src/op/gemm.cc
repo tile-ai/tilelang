@@ -177,9 +177,9 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     results.Set(C, fragment);
     if (A.scope() == "shared" || A.scope() == "shared.dyn") {
       int dim_A = A->shape.size();
-      results.Set(A, makeGemmVoltaABLayout(*as_const_int(A->shape[dim_A-2]),
-                                           *as_const_int(A->shape[dim_A-1]), true,
-                                           trans_A ? 1 : 2));
+      results.Set(A, makeGemmVoltaABLayout(*as_const_int(A->shape[dim_A - 2]),
+                                           *as_const_int(A->shape[dim_A - 1]),
+                                           true, trans_A ? 1 : 2));
     } else if (A.scope() == "local.fragment") {
       ICHECK(trans_A == false);
       results.Set(A, makeGemmVoltaFragmentA(M, N, K, M / warp_m, N / warp_n));
@@ -189,9 +189,9 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
 
     ICHECK(B.scope() == "shared" || B.scope() == "shared.dyn");
     int dim_B = B->shape.size();
-    results.Set(B, makeGemmVoltaABLayout(*as_const_int(B->shape[dim_B-2]),
-                                         *as_const_int(B->shape[dim_B-1]), false,
-                                         trans_B ? 2 : 1));
+    results.Set(B, makeGemmVoltaABLayout(*as_const_int(B->shape[dim_B - 2]),
+                                         *as_const_int(B->shape[dim_B - 1]),
+                                         false, trans_B ? 2 : 1));
   } else if (TargetIsAmpere(T.target) || TargetIsTuring(T.target)) {
     const int warp_size = 32;
     auto [warp_m, warp_n] =
@@ -202,8 +202,8 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
 
     if (A.scope() == "shared" || A.scope() == "shared.dyn") {
       int dim_A = A->shape.size();
-      const int64_t mat_stride = *as_const_int(A->shape[dim_A-2]);
-      const int64_t mat_continuous = *as_const_int(A->shape[dim_A-1]);
+      const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
+      const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
       results.Set(A,
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
                                    A->dtype.bits(), trans_A ? 1 : 2));
@@ -216,8 +216,8 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     }
     if (B.scope() == "shared" || B.scope() == "shared.dyn") {
       int dim_B = B->shape.size();
-      const int64_t mat_stride = *as_const_int(B->shape[dim_B-2]);
-      const int64_t mat_continuous = *as_const_int(B->shape[dim_B-1]);
+      const int64_t mat_stride = *as_const_int(B->shape[dim_B - 2]);
+      const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
       results.Set(B,
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
                                    B->dtype.bits(), trans_B ? 2 : 1));
@@ -241,8 +241,8 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     results.Set(C, fragment);
     if (A.scope() == "shared" || A.scope() == "shared.dyn") {
       int dim_A = A->shape.size();
-      const int64_t mat_stride = *as_const_int(A->shape[dim_A-2]);
-      const int64_t mat_continuous = *as_const_int(A->shape[dim_A-1]);
+      const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
+      const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
       const int64_t continuity =
           trans_A ? mat_continuous / (warp_m / 4) : mat_continuous;
       results.Set(A, makeGemmABLayout(mat_stride, mat_continuous, continuity,
@@ -254,8 +254,8 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     }
     if (B.scope() == "shared" || B.scope() == "shared.dyn") {
       int dim_B = B->shape.size();
-      const int64_t mat_stride = *as_const_int(B->shape[dim_B-2]);
-      const int64_t mat_continuous = *as_const_int(B->shape[dim_B-1]);
+      const int64_t mat_stride = *as_const_int(B->shape[dim_B - 2]);
+      const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
       const int64_t continuity =
           trans_B ? mat_continuous : mat_continuous / warp_n;
       results.Set(B, makeGemmABLayout(mat_stride, mat_continuous, continuity,
@@ -275,9 +275,9 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
 
     if (A.scope() == "shared" || A.scope() == "shared.dyn") {
       int dim_A = A->shape.size();
-      auto shared_layout = makeGemmABLayoutCDNA(*as_const_int(A->shape[dim_A-2]),
-                                                *as_const_int(A->shape[dim_A-1]),
-                                                A->dtype.bits(), kPack);
+      auto shared_layout = makeGemmABLayoutCDNA(
+          *as_const_int(A->shape[dim_A - 2]),
+          *as_const_int(A->shape[dim_A - 1]), A->dtype.bits(), kPack);
       results.Set(A, shared_layout);
     } else if (A.scope() == "local.fragment") {
       results.Set(A, makeGemmFragmentACDNA(M, N, K, M / warp_m, N / warp_n,
@@ -287,9 +287,9 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     }
     if (B.scope() == "shared" || B.scope() == "shared.dyn") {
       int dim_B = B->shape.size();
-      auto shared_layout = makeGemmABLayoutCDNA(*as_const_int(B->shape[dim_B-2]),
-                                                *as_const_int(B->shape[dim_B-1]),
-                                                B->dtype.bits(), kPack);
+      auto shared_layout = makeGemmABLayoutCDNA(
+          *as_const_int(B->shape[dim_B - 2]),
+          *as_const_int(B->shape[dim_B - 1]), B->dtype.bits(), kPack);
 
       results.Set(B, shared_layout);
     } else if (B.scope() == "local.fragment") {

@@ -91,8 +91,9 @@ def gemm(
     K = A_shape[-2] if transpose_A else A_shape[-1]
     K_B = B_shape[-1] if transpose_B else B_shape[-2]
     assert K == K_B, f"T.gemm K shape check failed: K_A = {K}, K_B = {K_B}"
-    
-    def retrieve_ptr(object: Union[tir.Buffer, tir.BufferRegion], access_type: str = "r") -> tir.PrimExpr:
+
+    def retrieve_ptr(object: Union[tir.Buffer, tir.BufferRegion],
+                     access_type: str = "r") -> tir.PrimExpr:
         if isinstance(object, tir.Buffer):
             return object.access_ptr(access_type)
         elif isinstance(object, tir.BufferRegion):
@@ -111,6 +112,7 @@ def gemm(
             return buffer.access_ptr(access_mask=access_type, offset=offset)
         else:
             raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
+
     Aptr = retrieve_ptr(A, "r")
     Bptr = retrieve_ptr(B, "r")
     Cptr = retrieve_ptr(C, "rw")

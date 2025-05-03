@@ -2,7 +2,9 @@
 # Licensed under the MIT License.
 import tilelang
 import tilelang.language as T
+
 tilelang.disable_cache()
+
 
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
     # add decorator @tilelang.jit if you want to return a torch function
@@ -34,10 +36,10 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             #         T.gemm(A_shared, B_shared, C_local)
             #         T.mbarrier_arrive(1)
             #     T.copy(C_local, C[by * block_M, bx * block_N])
-            
+
             with T.ws(0):
                 T.clear(C_local)
-            
+
             for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=2):
                 with T.ws(1):
                     T.mbarrier_wait_parity(1, (ko & 1) ^ 1)
@@ -48,11 +50,12 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
                     T.mbarrier_wait_parity(0, ko & 1)
                     T.gemm(A_shared, B_shared, C_local)
                     T.mbarrier_arrive(1)
-    
+
             with T.ws(0):
                 T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
+
 
 K = 64
 # 1. Define the kernel (matmul) and compile/lower it into an executable module

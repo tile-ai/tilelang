@@ -77,11 +77,9 @@ private:
   PrimExpr loop_extents = 1;
 };
 
-
 class TmaExpectTxRewriter : public IRMutatorWithAnalyzer {
 public:
-
-  static PrimFunc Rewrite(PrimFunc f, arith::Analyzer* analyzer) {
+  static PrimFunc Rewrite(PrimFunc f, arith::Analyzer *analyzer) {
     TmaExpectTxRewriter rewriter(analyzer);
     f.CopyOnWrite()->body = rewriter(f->body);
     return f;
@@ -92,16 +90,16 @@ private:
   bool visited_tma_load_{false};
   IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
                                 IterVarType::kDataPar);
-  
-  PrimExpr GetBarrierId(const PrimExpr& ko) {
+
+  PrimExpr GetBarrierId(const PrimExpr &ko) {
     // FloorMod(ko, 1)
     return FloorMod(ko, IntImm(DataType::Int(32), 1));
   }
 
-  PrimExpr GetBarrierParity(const PrimExpr& ko) {
+  PrimExpr GetBarrierParity(const PrimExpr &ko) {
     // FloorDiv(ko, 1) % 2
-    return FloorMod(FloorDiv(ko, IntImm(DataType::Int(32), 1)), 
-                   IntImm(DataType::Int(32), 2));
+    return FloorMod(FloorDiv(ko, IntImm(DataType::Int(32), 1)),
+                    IntImm(DataType::Int(32), 2));
   }
 
   PrimExpr makeGetBarrier(PrimExpr barrier_id) {
@@ -110,13 +108,12 @@ private:
 
   Stmt makeExpectTX(PrimExpr barrier_id, PrimExpr bytes) {
     auto call = Call(DataType::Handle(), mbarrier_expect_tx(),
-                    {makeGetBarrier(barrier_id), bytes});
+                     {makeGetBarrier(barrier_id), bytes});
     return Evaluate(call);
   }
 
   TmaExpectTxRewriter(arith::Analyzer *analyzer)
       : IRMutatorWithAnalyzer(analyzer) {}
-
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tir::attr::thread_extent) {
@@ -129,13 +126,13 @@ private:
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
-  Stmt VisitStmt_(const IfThenElseNode* op) {
+  Stmt VisitStmt_(const IfThenElseNode *op) {
     // Check if this is the TMA block
-    const EQNode* eq = op->condition.as<EQNode>();
+    const EQNode *eq = op->condition.as<EQNode>();
     if (eq != nullptr) {
       Stmt ret = IRMutatorWithAnalyzer::VisitStmt_(op);
 
-      if(visited_tma_load_) {
+      if (visited_tma_load_) {
         auto then_case = op->then_case;
         TmaTraitsCollector collector;
         collector.Collect(then_case);
@@ -159,11 +156,12 @@ private:
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
-  PrimExpr VisitExpr_(const CallNode* op) {
+  PrimExpr VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tma_load())) {
       visited_tma_load_ = true;
       Array<PrimExpr> new_args = op->args;
-      new_args.Set(1, Call(DataType::Handle(), get_mbarrier(), {IntImm(DataType::Int(32), 0)}));
+      new_args.Set(1, Call(DataType::Handle(), get_mbarrier(),
+                           {IntImm(DataType::Int(32), 0)}));
       return Call(op->dtype, op->op, new_args);
     }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
@@ -172,10 +170,13 @@ private:
 
 class TmaBarrierCollector : public StmtExprVisitor {
 public:
-  Map<ObjectRef, PrimExpr> tma_op_to_barrier_id() { return tma_op_to_barrier_id_; }
+  Map<ObjectRef, PrimExpr> tma_op_to_barrier_id() {
+    return tma_op_to_barrier_id_;
+  }
+
 private:
-  void VisitStmt_(const EvaluateNode* op) final {
-    if (const auto* call = op->value.as<CallNode>()) {
+  void VisitStmt_(const EvaluateNode *op) final {
+    if (const auto *call = op->value.as<CallNode>()) {
       if (call->op.same_as(tma_load())) {
         pending_tma_ops_.push_back(GetRef<Call>(call));
       } else if (call->op.same_as(mbarrier_expect_tx())) {
@@ -193,14 +194,16 @@ private:
 
   std::vector<Call> pending_tma_ops_;
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
-
 };
 // we trust mbarrier_wait_parity to be correct
 class TmaBarrierRewriter : public IRMutatorWithAnalyzer {
 public:
-  TmaBarrierRewriter(arith::Analyzer* analyzer, Map<ObjectRef, PrimExpr> tma_op_to_barrier_id) : IRMutatorWithAnalyzer(analyzer), tma_op_to_barrier_id_(tma_op_to_barrier_id) {}
+  TmaBarrierRewriter(arith::Analyzer *analyzer,
+                     Map<ObjectRef, PrimExpr> tma_op_to_barrier_id)
+      : IRMutatorWithAnalyzer(analyzer),
+        tma_op_to_barrier_id_(tma_op_to_barrier_id) {}
 
-  static PrimFunc Rewrite(PrimFunc f, arith::Analyzer* analyzer) {
+  static PrimFunc Rewrite(PrimFunc f, arith::Analyzer *analyzer) {
     f = TmaExpectTxRewriter::Rewrite(f, analyzer);
     TmaBarrierCollector collector;
     collector(f->body);
@@ -210,16 +213,18 @@ public:
   }
 
 private:
-  PrimExpr VisitExpr_(const CallNode* op) {
+  PrimExpr VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tma_load())) {
       // check this must be in the tma_op_to_barrier_id_
-      ICHECK(tma_op_to_barrier_id_.count(GetRef<Call>(op))) << "tma_load must be in the tma_op_to_barrier_id_";
+      ICHECK(tma_op_to_barrier_id_.count(GetRef<Call>(op)))
+          << "tma_load must be in the tma_op_to_barrier_id_";
       auto barrier_id = tma_op_to_barrier_id_[GetRef<Call>(op)];
       auto new_args = op->args;
       new_args.Set(1, barrier_id);
       return Call(op->dtype, op->op, new_args);
     } else if (op->op.same_as(mbarrier_expect_tx())) {
-      ICHECK(tma_op_to_barrier_id_.count(GetRef<Call>(op))) << "mbarrier_expect_tx must be in the tma_op_to_barrier_id_";
+      ICHECK(tma_op_to_barrier_id_.count(GetRef<Call>(op)))
+          << "mbarrier_expect_tx must be in the tma_op_to_barrier_id_";
       auto barrier_id = tma_op_to_barrier_id_[GetRef<Call>(op)];
       auto new_args = op->args;
       new_args.Set(0, barrier_id);

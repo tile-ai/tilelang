@@ -2,10 +2,12 @@
 # Licensed under the MIT License.
 import tilelang
 import tilelang.language as T
+
 tilelang.disable_cache()
 
+
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
-    
+
     num_stages = 2
     mbarrier_list = [128, 128] * num_stages
     # add decorator @tilelang.jit if you want to return a torch function
@@ -26,19 +28,24 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
             with T.ws(1):
                 for ko in range(T.ceildiv(K, block_K)):
-                    T.mbarrier_wait_parity(ko % num_stages + num_stages, ((ko // num_stages) % num_stages) ^ 1)
-                    T.copy(A[by * block_M:(by + 1) * block_M, ko * block_K:(ko + 1) * block_K], A_shared[ko % num_stages, :, :])
-                    T.copy(B[ko * block_K:(ko + 1) * block_K, bx * block_N:(bx + 1) * block_N], B_shared[ko % num_stages, :, :])
+                    T.mbarrier_wait_parity(ko % num_stages + num_stages,
+                                           ((ko // num_stages) % num_stages) ^ 1)
+                    T.copy(A[by * block_M:(by + 1) * block_M, ko * block_K:(ko + 1) * block_K],
+                           A_shared[ko % num_stages, :, :])
+                    T.copy(B[ko * block_K:(ko + 1) * block_K, bx * block_N:(bx + 1) * block_N],
+                           B_shared[ko % num_stages, :, :])
                     T.mbarrier_arrive(ko % num_stages)
             with T.ws(0):
                 T.clear(C_local)
                 for ko in range(T.ceildiv(K, block_K)):
                     T.mbarrier_wait_parity(ko % num_stages, (ko // num_stages) % num_stages)
-                    T.gemm(A_shared[ko % num_stages, :, :], B_shared[ko % num_stages, :, :], C_local)
+                    T.gemm(A_shared[ko % num_stages, :, :], B_shared[ko % num_stages, :, :],
+                           C_local)
                     T.mbarrier_arrive(ko % num_stages + num_stages)
                 T.copy(C_local, C[by * block_M, bx * block_N])
-      
+
     return main
+
 
 K = 64
 # 1. Define the kernel (matmul) and compile/lower it into an executable module

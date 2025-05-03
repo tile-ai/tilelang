@@ -190,6 +190,7 @@ def WarpSpecialized():
     """
     return _ffi_api.WarpSpecialized()  # type: ignore
 
+
 def InjectTmaBarrier():
     """InjectTmaBarrier
 

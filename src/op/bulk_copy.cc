@@ -122,7 +122,9 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
     stride *= s;
   }
 
-  ICHECK(strides.size() == indices.size()) << "strides.size() != indices.size()" << strides.size() << " " << indices.size();
+  ICHECK(strides.size() == indices.size())
+      << "strides.size() != indices.size()" << strides.size() << " "
+      << indices.size();
   PrimExpr offset = 0;
   for (size_t i = 0; i < indices.size(); i++) {
     offset += indices[i] * strides[i];
@@ -247,9 +249,9 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
     Var loop_var("i");
     int loop_extent = (*inner_box_dim) / instruction_dim;
 
-    PrimExpr shared_addr =
-        shared_tensor.access_ptr(is_load ? 2 : 1, DataType::Handle(), 1,
-                                 offset + total_elements * loop_var, total_elements);
+    PrimExpr shared_addr = shared_tensor.access_ptr(
+        is_load ? 2 : 1, DataType::Handle(), 1,
+        offset + total_elements * loop_var, total_elements);
     args.push_back(shared_addr);
     global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
     for (auto coord : global_coords)
@@ -257,7 +259,8 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
     tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
                    Evaluate(Call(DataType::Handle(), op, args)));
   } else {
-    PrimExpr shared_addr = shared_tensor.access_ptr(is_load ? 2 : 1, DataType::Handle(), 1, offset, total_elements);
+    PrimExpr shared_addr = shared_tensor.access_ptr(
+        is_load ? 2 : 1, DataType::Handle(), 1, offset, total_elements);
     args.push_back(shared_addr);
     for (auto coord : global_coords)
       args.push_back(coord);
