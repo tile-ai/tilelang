@@ -64,6 +64,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.WarpSpecialized()(mod)
         # if tma is not enabled, we can also do pipeline planning
         # to get better performance with async copy
+        mod = tilelang.transform.InjectTmaBarrier()(mod)
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         # warp_specialized pass will pack the if stmt into the block

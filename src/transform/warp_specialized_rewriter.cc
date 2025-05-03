@@ -209,11 +209,6 @@ static PrimExpr makeGetBarrier(PrimExpr barrier_id) {
   return Call(DataType::Handle(), get_mbarrier(), {barrier_id});
 }
 
-static Stmt makeExpectTX(PrimExpr barrier_id, PrimExpr bytes) {
-  auto call = Call(DataType::Handle(), mbarrier_expect_tx(),
-                   {makeGetBarrier(barrier_id), bytes});
-  return Evaluate(call);
-}
 
 static Stmt makeArriveBarrier(PrimExpr barrier_id) {
   auto call = Call(DataType::Handle(), builtin::ptx_arrive_barrier(),
@@ -233,68 +228,11 @@ static Stmt makeParityWait(PrimExpr barrier_id, PrimExpr parity) {
   return Evaluate(call);
 }
 
-// static bool isGemm(Stmt stmt) {
-//   bool is_gemm = false;
-//   if (stmt.as<EvaluateNode>()) {
-//     auto call = Downcast<Evaluate>(stmt)->value.as<CallNode>();
-//     if (call && call->op.same_as(Op::Get("tir.call_extern"))) {
-//       if (call->args[0].as<StringImmNode>()) {
-//         std::string name = Downcast<StringImm>(call->args[0])->value;
-//         if (name.find("gemm") != std::string::npos) {
-//           is_gemm = true;
-//         }
-//       }
-//     }
-//   }
-//   return is_gemm;
-// }
-
-class TMAExpectTxRewriter : public StmtExprMutator {
-public:
-  TMAExpectTxRewriter(Stmt expect_tx) : expect_tx_(expect_tx) {}
-  static Stmt Rewrite(Stmt stmt, Stmt expect_tx) {
-    TMAExpectTxRewriter rewriter(expect_tx);
-    return rewriter(stmt);
-  }
-
-private:
-  Stmt VisitStmt_(const ForNode *op) final {
-    insert_in_evaluate_ = false;
-    StmtExprMutator::VisitStmt_(op);
-    insert_in_evaluate_ = true;
-    if (contain_tma_load_) {
-      Array<Stmt> new_seq = {expect_tx_, GetRef<For>(op)};
-      contain_tma_load_ = false;
-      return SeqStmt(std::move(new_seq));
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
-        contain_tma_load_ = true;
-        if (insert_in_evaluate_) {
-          Array<Stmt> new_seq = {expect_tx_, GetRef<Evaluate>(op)};
-          return SeqStmt(std::move(new_seq));
-        }
-      }
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  Stmt expect_tx_;
-  bool contain_tma_load_;
-  bool insert_in_evaluate_ = true;
-};
-
 class ProducerTraitsCollector : public StmtExprVisitor {
 public:
   ProducerTraitsCollector() { Clear(); }
 
   void Clear() {
-    bulk_copy_bytes = 0;
-    loop_extents = 1;
     has_simt_copy = false;
   }
 
@@ -302,25 +240,7 @@ public:
 
   bool HasSimtCopy() { return has_simt_copy; }
 
-  PrimExpr BulkCopyBytes() { return bulk_copy_bytes; }
-
 private:
-  void VisitExpr_(const CallNode *call) final {
-    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
-      Call access_ptr = Downcast<Call>(call->args[2]);
-      ICHECK(access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      int type_bytes = access_ptr->args[0]->dtype.bytes();
-      bulk_copy_bytes += access_ptr->args[3] * loop_extents * type_bytes;
-    }
-    StmtExprVisitor::VisitExpr_(call);
-  }
-
-  void VisitStmt_(const ForNode *op) final {
-    PrimExpr old_loop_evtents = loop_extents;
-    loop_extents *= op->extent;
-    StmtExprVisitor::VisitStmt_(op);
-    loop_extents = old_loop_evtents;
-  }
 
   void VisitStmt_(const IfThenElseNode *op) final {
     bool old_in_if_cond = in_if_cond_;
@@ -342,8 +262,6 @@ private:
   }
 
   bool has_simt_copy;
-  PrimExpr bulk_copy_bytes;
-  PrimExpr loop_extents;
   bool in_if_cond_ = false;
 };
 
@@ -646,14 +564,7 @@ private:
           auto stmt =
               MbarrierRewriter::Rewrite(seq_transformed[i], release_barrier_id);
           collector.Collect(stmt);
-          if (!is_zero(collector.BulkCopyBytes())) {
-            auto expect_tx = IfThenElse(
-                EQ(thread_var_, 0),
-                makeExpectTX(release_barrier_id, collector.BulkCopyBytes()));
-            block_stmt.push_back(TMAExpectTxRewriter::Rewrite(stmt, expect_tx));
-          } else {
-            block_stmt.push_back(stmt);
-          }
+          block_stmt.push_back(stmt);
           if (collector.HasSimtCopy() > 0) {
             block_stmt.push_back(makeCpAsyncBarrier(release_barrier_id));
           }

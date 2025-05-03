@@ -829,7 +829,22 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::sync_thread_partial())) {
     print_extern_call_stmt("tl::syncthreads_partial");
   } else if (op->op.same_as(tl::tma_load())) {
-    print_extern_call_stmt("tl::tma_load");
+    this->PrintIndent();
+    ICHECK_GE(op->args.size(), 2);
+    this->stream << "tl::tma_load(";
+    auto desc = op->args[0];
+    this->stream << this->PrintExpr(desc) << ", ";
+    if (const IntImmNode *imm = op->args[1].as<IntImmNode>()) {
+      this->stream << "_mbarrier[" << imm->value << "], ";
+    } else {
+      this->stream << this->PrintExpr(op->args[1]) << ", ";
+    }
+    for (size_t i = 2; i < op->args.size(); i++) {
+      if (i > 2)
+        this->stream << ", ";
+      this->stream << this->PrintExpr(op->args[i]);
+    }
+    this->stream << ");\n";
   } else if (op->op.same_as(tl::tma_load_im2col())) {
     print_extern_call_stmt("tl::tma_load_im2col");
   } else if (op->op.same_as(tl::tma_store())) {

@@ -786,19 +786,6 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::mbarrier_wait");
   } else if (op->op.same_as(tl::sync_thread_partial())) {
     print_extern_call_stmt("tl::syncthreads_partial");
-  } else if (op->op.same_as(tl::tma_load())) {
-    print_extern_call_stmt("tl::tma_load");
-  } else if (op->op.same_as(tl::tma_load_im2col())) {
-    print_extern_call_stmt("tl::tma_load_im2col");
-  } else if (op->op.same_as(tl::tma_store())) {
-    print_extern_call_stmt("tl::tma_store");
-  } else if (op->op.same_as(tl::ptx_ldmatirx())) {
-    int trans = Downcast<IntImm>(op->args[0])->value;
-    int num = Downcast<IntImm>(op->args[1])->value;
-    std::string func_name = "tl::ptx_ldmatrix_x" + std::to_string(num);
-    if (trans == 1)
-      func_name += "_trans";
-    print_extern_call_stmt(func_name, 2);
   } else if (op->op.same_as(tl::ptx_stmatirx())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
@@ -806,15 +793,6 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     if (trans == 1)
       func_name += "_trans";
     print_extern_call_stmt(func_name, 2);
-  } else if (op->op.same_as(tl::fence_proxy_async())) {
-    print_extern_call_stmt("tl::fence_proxy_async");
-  } else if (op->op.same_as(tl::set_max_nreg())) {
-    this->PrintIndent();
-    int nreg = Downcast<IntImm>(op->args[0])->value;
-    int is_inc = Downcast<IntImm>(op->args[1])->value;
-    std::string func_name =
-        is_inc ? "tl::warpgroup_reg_alloc" : "tl::warpgroup_reg_dealloc";
-    this->stream << func_name << "<" << std::to_string(nreg) << ">();\n";
   } else if (op->op.same_as(tl::wait_wgmma())) {
     this->PrintIndent();
     int num_mma = Downcast<IntImm>(op->args[0])->value;
