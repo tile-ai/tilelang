@@ -3,13 +3,14 @@
 import tilelang
 import tilelang.language as T
 
+
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
     # add decorator @tilelang.jit if you want to return a torch function
     @T.prim_func
     def main(
-            A: T.Tensor[(M, K), dtype],
-            B: T.Tensor[(K, N), dtype],
-            C: T.Tensor[(M, N), dtype],
+        A: T.Tensor[(M, K), dtype],
+        B: T.Tensor[(K, N), dtype],
+        C: T.Tensor[(M, N), dtype],
     ):
         # Initialize Kernel Context
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=256) as (bx, by):
@@ -39,6 +40,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
     return main
 
+
 def main():
     M = 16384
     N = 16384
@@ -54,10 +56,7 @@ def main():
     # if out_idx is specified, the tensor will be created during runtime
     # target currently can be "cuda" or "hip" or "cpu".
     tilelang.disable_cache()
-    jit_kernel = tilelang.compile(
-        func,
-        out_idx=[2]
-    )
+    jit_kernel = tilelang.compile(func, out_idx=[2])
 
     # 3. Test the kernel in Python with PyTorch data
     import torch
@@ -86,6 +85,7 @@ def main():
     latency = profiler.do_bench()
 
     print(f"Latency: {latency} ms")
+
 
 if __name__ == "__main__":
     main()

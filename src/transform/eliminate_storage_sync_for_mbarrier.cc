@@ -3,6 +3,7 @@
 /*!
  * \file eliminate_storage_sync_for_mbarrier.cc
  */
+#include "../op/builtin.h"
 #include "./storage_access.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
@@ -12,7 +13,6 @@
 #include <tvm/tir/expr.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
-#include "../op/builtin.h"
 
 namespace tvm {
 namespace tl {
@@ -31,7 +31,7 @@ public:
 
   Eliminator(arith::Analyzer *analyzer) : IRMutatorWithAnalyzer(analyzer) {
     im_mbarrier_for_ = false;
-    in_mbarrier_region_ = false;    
+    in_mbarrier_region_ = false;
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
@@ -86,9 +86,9 @@ public:
     PostOrderVisit(GetRef<For>(op), [&](const ObjectRef &node) {
       if (const auto *call = node.as<CallNode>()) {
         if (call->op.same_as(create_list_of_mbarrier()) ||
-          call->op.same_as(mbarrier_wait_parity()) ||
-          call->op.same_as(builtin::ptx_arrive_barrier()) ||
-          call->op.same_as(builtin::ptx_cp_async_barrier())) {
+            call->op.same_as(mbarrier_wait_parity()) ||
+            call->op.same_as(builtin::ptx_arrive_barrier()) ||
+            call->op.same_as(builtin::ptx_cp_async_barrier())) {
           im_mbarrier_for_ = true;
         }
       }
@@ -98,6 +98,7 @@ public:
     });
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
+
 private:
   bool im_mbarrier_for_;
   bool in_mbarrier_region_;

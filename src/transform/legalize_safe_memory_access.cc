@@ -14,8 +14,8 @@
 
 #include <queue>
 
-#include "../op/parallel.h"
 #include "../op/builtin.h"
+#include "../op/parallel.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "loop_partition.h"
 #include "loop_vectorize.h"

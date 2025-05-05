@@ -8,6 +8,7 @@ from tilelang import _ffi_api
 from .kernel import get_thread_bindings, get_thread_extents
 from typing import List
 
+
 @register_object("tl.WarpSpecializeFrame")
 class WarpSpecializeFrame(TIRFrame):
     """

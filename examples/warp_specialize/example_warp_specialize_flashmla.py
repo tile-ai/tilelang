@@ -9,6 +9,7 @@ import tilelang.language as T
 from einops import rearrange, einsum
 import argparse
 
+
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     dtype = "float16"
@@ -45,7 +46,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             T.annotate_layout({
                 O_shared: tilelang.layout.make_swizzled_layout(O_shared),
             })
-            
+
             T.create_list_of_mbarrier(128, 128, 256, 128)
 
             loop_range = T.ceildiv(seqlen_kv, block_N)
@@ -55,7 +56,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_shared)
                 T.mbarrier_arrive(T.get_mbarrier(3))
                 for k in T.serial(loop_range):
-                    T.mbarrier_wait_parity(T.FloorMod(k, 1) + 2, T.bitwise_xor(T.FloorDiv(k, 1) % 2, 1))
+                    T.mbarrier_wait_parity(
+                        T.FloorMod(k, 1) + 2, T.bitwise_xor(T.FloorDiv(k, 1) % 2, 1))
                     T.copy(KV[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], KV_shared)
                     T.mbarrier_arrive(T.FloorMod(k, 1))
                     T.copy(K_pe[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_pe_shared)
@@ -70,8 +72,14 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     T.clear(acc_s)
                     T.mbarrier_wait_parity(T.get_mbarrier(T.FloorMod(k, 1)), T.FloorDiv(k, 1) % 2)
                     T.gemm(
-                        Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
-                    T.mbarrier_wait_parity(T.get_mbarrier(T.FloorMod(k, 1) + 1), T.FloorDiv(k, 1) % 2)
+                        Q_shared,
+                        KV_shared,
+                        acc_s,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullCol)
+                    T.mbarrier_wait_parity(
+                        T.get_mbarrier(T.FloorMod(k, 1) + 1),
+                        T.FloorDiv(k, 1) % 2)
                     T.gemm(
                         Q_pe_shared,
                         K_pe_shared,
@@ -155,6 +163,7 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     out = rearrange(out, 'b g h d -> b (h g) d')  # [batch_size, heads, dim]
     return out
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=128, help='batch size')
@@ -180,6 +189,7 @@ def main():
     latency = profiler.do_bench(warmup=500)
     print(f"Latency: {latency} ms")
     print(f"TFlops: {total_flops / latency * 1e-9} TFlops")
+
 
 if __name__ == "__main__":
     main()

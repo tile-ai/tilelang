@@ -32,16 +32,16 @@
 #include <unordered_map>
 #include <vector>
 
-#include "runtime/thread_storage_scope.h"
 #include "arith/ir_visitor_with_analyzer.h"
+#include "runtime/thread_storage_scope.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+using arith::IRVisitorWithAnalyzer;
 using runtime::StorageRank;
 using runtime::StorageScope;
-using arith::IRVisitorWithAnalyzer;
 
 /*!
  * \brief Base class of storage access analysis

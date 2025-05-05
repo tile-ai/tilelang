@@ -130,15 +130,18 @@ def set_max_nreg(reg_count: int, is_inc: int):
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.set_max_nreg"), reg_count, is_inc)
 
+
 def inc_max_nreg(reg_count: int):
     """Increment the maximum number of registers to use.
     """
     return set_max_nreg(reg_count, 1)
 
+
 def dec_max_nreg(reg_count: int):
     """Decrement the maximum number of registers to use.
     """
     return set_max_nreg(reg_count, 0)
+
 
 def no_set_max_nreg():
     """Disable the maximum register limit setting.

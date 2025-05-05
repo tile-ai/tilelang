@@ -3,6 +3,7 @@
 import tilelang
 import tilelang.language as T
 
+
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
 
     num_stages = 2
@@ -10,9 +11,9 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
     # add decorator @tilelang.jit if you want to return a torch function
     @T.prim_func
     def main(
-            A: T.Tensor[(M, K), dtype],
-            B: T.Tensor[(K, N), dtype],
-            C: T.Tensor[(M, N), dtype],
+        A: T.Tensor[(M, K), dtype],
+        B: T.Tensor[(K, N), dtype],
+        C: T.Tensor[(M, N), dtype],
     ):
         # Initialize Kernel Context
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=256) as (bx, by):
@@ -26,26 +27,28 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             with T.ws(0):
                 T.clear(C_local)
 
-            for ko in range(T.ceildiv(K, block_K)):            
+            for ko in range(T.ceildiv(K, block_K)):
                 with T.ws(1):
-                    T.mbarrier_wait_parity(mbarrier=ko % num_stages + num_stages,
-                                            parity=((ko // num_stages) % num_stages) ^ 1)
+                    T.mbarrier_wait_parity(
+                        mbarrier=ko % num_stages + num_stages,
+                        parity=((ko // num_stages) % num_stages) ^ 1)
                     T.copy(A[by * block_M:(by + 1) * block_M, ko * block_K:(ko + 1) * block_K],
-                            A_shared[ko % num_stages, :, :])
+                           A_shared[ko % num_stages, :, :])
                     T.copy(B[ko * block_K:(ko + 1) * block_K, bx * block_N:(bx + 1) * block_N],
-                            B_shared[ko % num_stages, :, :])
+                           B_shared[ko % num_stages, :, :])
                     T.mbarrier_arrive(mbarrier=ko % num_stages)
                 with T.ws(0):
-                    T.mbarrier_wait_parity(mbarrier=ko % num_stages,
-                                            parity=(ko // num_stages) % num_stages)
+                    T.mbarrier_wait_parity(
+                        mbarrier=ko % num_stages, parity=(ko // num_stages) % num_stages)
                     T.gemm(A_shared[ko % num_stages, :, :], B_shared[ko % num_stages, :, :],
-                        C_local)
+                           C_local)
                     T.mbarrier_arrive(mbarrier=ko % num_stages + num_stages)
 
             with T.ws(0):
                 T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
+
 
 def main():
     M = 16384
@@ -90,6 +93,7 @@ def main():
     latency = profiler.do_bench()
 
     print(f"Latency: {latency} ms")
+
 
 if __name__ == "__main__":
     main()

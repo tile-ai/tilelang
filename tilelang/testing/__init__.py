@@ -26,6 +26,7 @@ def set_random_seed(seed: int = 42) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+
 def requires_cuda_compute_version(major_version, minor_version=0, mode="ge"):
     """Mark a test as requiring at least a compute architecture
 
@@ -92,11 +93,14 @@ def requires_cuda_compute_version(major_version, minor_version=0, mode="ge"):
 
     return inner
 
+
 def requires_cuda_compute_version_ge(major_version, minor_version=0):
     return requires_cuda_compute_version(major_version, minor_version, mode="ge")
 
+
 def requires_cuda_compute_version_gt(major_version, minor_version=0):
     return requires_cuda_compute_version(major_version, minor_version, mode="gt")
+
 
 def requires_cuda_compute_version_eq(major_version, minor_version=0):
     return requires_cuda_compute_version(major_version, minor_version, mode="eq")
