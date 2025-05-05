@@ -92,11 +92,10 @@ public:
           im_mbarrier_for_ = true;
         }
       }
-      auto stmt = IRMutatorWithAnalyzer::VisitStmt_(op);
-      im_mbarrier_for_ = false;
-      return stmt;
     });
-    return IRMutatorWithAnalyzer::VisitStmt_(op);
+    auto stmt = IRMutatorWithAnalyzer::VisitStmt_(op);
+    im_mbarrier_for_ = false;
+    return stmt;
   }
 
 private:
