@@ -12,6 +12,7 @@
 #include <tvm/tir/expr.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include "../op/builtin.h"
 
 namespace tvm {
 namespace tl {
@@ -29,7 +30,8 @@ public:
   }
 
   Eliminator(arith::Analyzer *analyzer) : IRMutatorWithAnalyzer(analyzer) {
-    in_mbarrier_region_ = false;
+    im_mbarrier_for_ = false;
+    in_mbarrier_region_ = false;    
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
@@ -51,7 +53,8 @@ public:
       call = static_cast<const CallNode *>(op->value.get());
       if (call->op.same_as(builtin::tvm_storage_sync())) {
         // Skip storage sync if we're in a region with mbarrier operations
-        if (in_mbarrier_region_) {
+        // and we're not in a for loop with mbarrier operations
+        if (in_mbarrier_region_ || im_mbarrier_for_) {
           return Stmt();
         }
       } else if (call->op.same_as(builtin::ptx_arrive_barrier()) ||
@@ -79,7 +82,24 @@ public:
     return ret;
   }
 
+  Stmt VisitStmt_(const ForNode *op) final {
+    PostOrderVisit(GetRef<For>(op), [&](const ObjectRef &node) {
+      if (const auto *call = node.as<CallNode>()) {
+        if (call->op.same_as(create_list_of_mbarrier()) ||
+          call->op.same_as(mbarrier_wait_parity()) ||
+          call->op.same_as(builtin::ptx_arrive_barrier()) ||
+          call->op.same_as(builtin::ptx_cp_async_barrier())) {
+          im_mbarrier_for_ = true;
+        }
+      }
+      auto stmt = IRMutatorWithAnalyzer::VisitStmt_(op);
+      im_mbarrier_for_ = false;
+      return stmt;
+    });
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
 private:
+  bool im_mbarrier_for_;
   bool in_mbarrier_region_;
   const AttrStmtNode *thread_extent_{nullptr};
 };

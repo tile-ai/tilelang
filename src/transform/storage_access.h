@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "runtime/thread_storage_scope.h"
+#include "arith/ir_visitor_with_analyzer.h"
 
 namespace tvm {
 namespace tl {
@@ -40,11 +41,12 @@ namespace tl {
 using namespace tir;
 using runtime::StorageRank;
 using runtime::StorageScope;
+using arith::IRVisitorWithAnalyzer;
 
 /*!
  * \brief Base class of storage access analysis
  */
-class TileLangStorageAccessVisitor : public StmtExprVisitor {
+class TileLangStorageAccessVisitor : public IRVisitorWithAnalyzer {
 public:
   /*! \brief Storage access type */
   enum AccessType {

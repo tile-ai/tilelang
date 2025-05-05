@@ -143,6 +143,7 @@ def compile(
             "tl.config_index_bitwidth": int, default: None
             "tl.disable_dynamic_tail_split": bool, default: False
             "tl.dynamic_vectorize_size_bits": int, default: 128
+            "tl.disable_safe_memory_legalize": bool, default: False
     """
     return cached(
         func=func,

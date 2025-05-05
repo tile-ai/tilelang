@@ -17,6 +17,8 @@ namespace tvm {
 namespace tl {
 
 static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
+static constexpr const char *kDisableSafeMemoryLegalize =
+    "tl.disable_safe_memory_legalize";
 static constexpr const char *kDisableWarpSpecialized =
     "tl.disable_warp_specialized";
 static constexpr const char *kConfigIndexBitwidth = "tl.config_index_bitwidth";
