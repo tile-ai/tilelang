@@ -183,32 +183,10 @@ if __name__ == "__main__":
     kernel = tilelang.compile(program, out_idx=[4])
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Normal)
 
-    ins = []
-    for i in range(len(kernel.params)):
-        if i not in kernel.result_idx:
-            shape = [int(x) for x in kernel.params[i].shape]
-            ins.append(torch.empty(shape, device="cuda", dtype=torch.float16).normal_(-0.1, 0.1))
+    ins = profiler._get_inputs()
 
     ref_outs = ref_program(*ins)
-    torch.cuda.synchronize()
     lib_outs = kernel(*ins)
-    torch.cuda.synchronize()
-
-    if isinstance(lib_outs, torch.Tensor):
-        lib_outs = [lib_outs]
-    if isinstance(ref_outs, torch.Tensor):
-        ref_outs = [ref_outs]
-    assert len(lib_outs) == len(ref_outs)
-
-    from tilelang.utils.tensor import torch_assert_close
-    for lhs, rhs in zip(lib_outs, ref_outs):
-        torch_assert_close(
-            lhs,
-            rhs,
-            rtol=0.01,
-            atol=0.01,
-            max_mismatched_ratio=0.01,
-        )
 
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
     latency = profiler.do_bench(n_warmup=10, n_repeat=10, profiler="torch")

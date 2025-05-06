@@ -117,6 +117,8 @@ class Profiler:
                 rtol=rtol,
                 atol=atol,
                 max_mismatched_ratio=max_mismatched_ratio,
+                base_name="tilelang",
+                ref_name="ref",
             )
 
     def assert_consistent(self, repeat=10):
