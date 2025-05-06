@@ -6,4 +6,4 @@ typing_extensions>=4.10.0
 cloudpickle
 ml_dtypes
 psutil
-torch>=2.2.0
+torch
