@@ -68,6 +68,7 @@ class KernelCache:
         args=None,
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
+        pass_configs: dict = None,
     ) -> str:
         """
         Generates a unique hash key for caching compiled kernels.
@@ -93,6 +94,7 @@ class KernelCache:
             "target": str(target),
             "target_host": str(target_host) if target_host else None,
             "execution_backend": execution_backend,
+            "pass_configs": pass_configs,
         }
         key_string = json.dumps(key_data, sort_keys=True)  # Sort keys to ensure consistency
         return sha256(key_string.encode()).hexdigest()  # Use SHA256 to generate hash key
@@ -138,7 +140,9 @@ class KernelCache:
             execution_backend=execution_backend,
             args=args,
             target=target,
-            target_host=target_host)
+            target_host=target_host,
+            pass_configs=pass_configs,
+        )
         with self._lock:
             # First check in-memory cache
             if key in self._memory_cache:
