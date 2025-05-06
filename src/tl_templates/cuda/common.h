@@ -41,7 +41,7 @@ using int4_t = int4;
   do {                                                                         \
     cudaError_t __err = cudaGetLastError();                                    \
     if (__err != cudaSuccess) {                                                \
-      snprintf(error_buf, ERROR_BUF_SIZE, "kernel_name: %s - %s",   \
+      snprintf(error_buf, ERROR_BUF_SIZE, "kernel_name: %s - %s",              \
                cudaGetErrorName(__err), cudaGetErrorString(__err));            \
       return -1;                                                               \
     }                                                                          \
