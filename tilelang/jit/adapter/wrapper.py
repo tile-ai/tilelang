@@ -223,11 +223,7 @@ class TLCUDASourceWrapper(object):
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             kernel_launch_code += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(
                 function_name, grid_str, block_str, smem_str, call_args)
-            kernel_launch_code += "\tcudaError_t err = cudaGetLastError();\n"
-            kernel_launch_code += "\tif (err != cudaSuccess) {{\n"
-            kernel_launch_code += f"\t\tsnprintf(error_buf, ERROR_BUF_SIZE, \"{function_name}: %s - %s\", cudaGetErrorName(err), cudaGetErrorString(err));\n"
-            kernel_launch_code += "\t\treturn -1;\n"
-            kernel_launch_code += "\t}}\n"
+            kernel_launch_code += "TILELANG_CHECK_LAST_ERROR(\"{}\");\n".format(function_name)
 
         kernel_launch_code = self.generate_tma_descriptor_args(desc_name_map) + kernel_launch_code
 
