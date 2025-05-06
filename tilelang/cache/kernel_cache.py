@@ -5,6 +5,7 @@
 import os
 import json
 import shutil
+from pathlib import Path
 from hashlib import sha256
 from typing import Callable, List, Literal, Union, Optional
 from tvm.target import Target
@@ -37,6 +38,8 @@ class KernelCache:
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
 
+    cache_dir: Path = Path(TILELANG_CACHE_DIR)
+
     def __new__(cls, cache_dir=TILELANG_CACHE_DIR):
         """
         Implements singleton pattern for KernelCache class.
@@ -51,7 +54,7 @@ class KernelCache:
             with cls._lock:
                 if cls._instance is None:  # Double-checked locking
                     instance = super().__new__(cls)
-                    instance.cache_dir = cache_dir
+                    instance.cache_dir = Path(cache_dir)
                     os.makedirs(instance.cache_dir, exist_ok=True)
 
                     instance.logger = logging.getLogger(__name__)
@@ -181,6 +184,18 @@ class KernelCache:
         # Store in memory cache after compilation
         self._memory_cache[key] = kernel
         return kernel
+
+    def set_cache_dir(self, cache_dir: str):
+        """
+        Sets the cache directory for the kernel cache.
+        """
+        self.cache_dir = Path(cache_dir)
+
+    def get_cache_dir(self) -> Path:
+        """
+        Gets the cache directory for the kernel cache.
+        """
+        return self.cache_dir
 
     def clear_cache(self):
         """
