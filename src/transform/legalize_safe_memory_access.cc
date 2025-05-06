@@ -14,6 +14,7 @@
 
 #include <queue>
 
+#include "../op/builtin.h"
 #include "../op/parallel.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "loop_partition.h"
@@ -288,6 +289,11 @@ tvm::transform::Pass LegalizeSafeMemoryAccess() {
   using namespace tir::transform;
   // Define the transformation function to be applied
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+    bool disable_safe_memory_legalize =
+        ctx->GetConfig<Bool>(kDisableSafeMemoryLegalize, Bool(false)).value();
+    if (disable_safe_memory_legalize) {
+      return f;
+    }
     return SafeMemoryLegalizer::Substitute(std::move(f));
   };
   // Create and return a PrimFunc pass with the transformation function

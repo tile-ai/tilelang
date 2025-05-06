@@ -6,6 +6,7 @@ from tvm.script.ir_builder.tir.frame import TIRFrame
 from tvm._ffi import register_object
 from tilelang import _ffi_api
 from .kernel import get_thread_bindings, get_thread_extents
+from typing import List
 
 
 @register_object("tl.WarpSpecializeFrame")
@@ -16,7 +17,7 @@ class WarpSpecializeFrame(TIRFrame):
     """
 
 
-def WarpSpecialize(warp_group_idx: int,):
+def WarpSpecialize(*warp_group_idx):
     """Tools to construct a warp group frame.
 
     Parameters
@@ -30,6 +31,10 @@ def WarpSpecialize(warp_group_idx: int,):
     -------
     res : Tuple[frame.LaunchThreadFrame]
         The result LaunchThreadFrame.
+    Examples:
+        >>> T.ws(0) -> if tx < 128
+        >>> T.ws(1) -> if tx >= 128 and tx < 256
+        >>> T.ws(0, 1) -> if tx < 128 or (tx >= 128 and tx < 256)
     """
     id_x, id_y, id_z = get_thread_bindings()
     ex_x, ex_y, _ = get_thread_extents()
@@ -37,7 +42,13 @@ def WarpSpecialize(warp_group_idx: int,):
     # only available for nvidia gpus.
     warp_group_size = 128
 
-    return _ffi_api.WarpSpecialize(warp_group_idx, tid, warp_group_size)
+    warp_group_ids: List[int] = []
+    for warp_group_id in warp_group_idx:
+        warp_group_ids.append(warp_group_id)
+
+    assert len(warp_group_ids) > 0, "warp_group_idx must be non-empty"
+
+    return _ffi_api.WarpSpecialize(warp_group_ids, tid, warp_group_size)
 
 
 # Alias for WarpSpecialize for more concise usage

@@ -62,9 +62,9 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tilelang.transform.MultiVersionBuffer()(mod)
         mod = tilelang.transform.WarpSpecialized()(mod)
+        mod = tilelang.transform.InjectTmaBarrier()(mod)
         # if tma is not enabled, we can also do pipeline planning
         # to get better performance with async copy
-        mod = tilelang.transform.InjectTmaBarrier()(mod)
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         # warp_specialized pass will pack the if stmt into the block
@@ -80,10 +80,10 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
 
-    if allow_fence_proxy(target=target):
-        # in hopper device, wgmma is an async proxy
-        # so we need to inject a fence proxy before it
-        mod = tilelang.transform.InjectFenceProxy()(mod)
+        if allow_fence_proxy(target=target):
+            # in hopper device, wgmma is an async proxy
+            # so we need to inject a fence proxy before it
+            mod = tilelang.transform.InjectFenceProxy()(mod)
 
     mod = tir.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)

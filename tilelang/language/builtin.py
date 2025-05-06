@@ -113,28 +113,40 @@ def tma_store_wait(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.tma_store_wait"), *args)
 
 
-def set_max_nreg(*args):
+def set_max_nreg(reg_count: int, is_inc: int):
     """Set the maximum number of registers to use.
+    Detailed Documentation:
+    https://docs.nvidia.com/cuda/parallel-thread-execution/#miscellaneous-instructions-setmaxnreg
 
     Args:
-        *args: Variable arguments specifying register allocation limits
+        reg_count: int
+            The number of registers to allocate
+        is_inc: int
+            Whether to increment or decrement the register count
+            0 if decrement, 1 if increment
 
     Returns:
         tir.Call: A handle to the register setting operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.set_max_nreg"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.set_max_nreg"), reg_count, is_inc)
 
 
-def no_set_max_nreg(*args):
-    """Disable the maximum register limit setting.
-
-    Args:
-        *args: Variable arguments for the operation
-
-    Returns:
-        tir.Call: A handle to the register limit disable operation
+def inc_max_nreg(reg_count: int):
+    """Increment the maximum number of registers to use.
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.no_set_max_nreg"), *args)
+    return set_max_nreg(reg_count, 1)
+
+
+def dec_max_nreg(reg_count: int):
+    """Decrement the maximum number of registers to use.
+    """
+    return set_max_nreg(reg_count, 0)
+
+
+def no_set_max_nreg():
+    """Disable the maximum register limit setting.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.no_set_max_nreg"))
 
 
 def mbarrier_wait_parity(mbarrier: Union[int, PrimExpr, tir.Call], parity: Union[int, Var]):

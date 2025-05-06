@@ -1,12 +1,13 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
+# use default stage 1 template, not the optimal
+# schedule, please checkout examples/deepseek_mla
 import torch
 import torch.nn.functional as F
 import tilelang
 import tilelang.language as T
 from einops import rearrange, einsum
 import argparse
-tilelang.disable_cache()
 
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
@@ -44,7 +45,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             T.annotate_layout({
                 O_shared: tilelang.layout.make_swizzled_layout(O_shared),
             })
-            
             T.create_list_of_mbarrier(128, 128, 256, 128)
 
             loop_range = T.ceildiv(seqlen_kv, block_N)
@@ -54,7 +54,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_shared)
                 T.mbarrier_arrive(T.get_mbarrier(3))
                 for k in T.serial(loop_range):
-                    T.mbarrier_wait_parity(T.FloorMod(k, 1) + 2, T.bitwise_xor(T.FloorDiv(k, 1) % 2, 1))
+                    T.mbarrier_wait_parity(
+                        T.FloorMod(k, 1) + 2, T.bitwise_xor(T.FloorDiv(k, 1) % 2, 1))
                     T.copy(KV[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], KV_shared)
                     T.mbarrier_arrive(T.FloorMod(k, 1))
                     T.copy(K_pe[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_pe_shared)
@@ -69,8 +70,14 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     T.clear(acc_s)
                     T.mbarrier_wait_parity(T.get_mbarrier(T.FloorMod(k, 1)), T.FloorDiv(k, 1) % 2)
                     T.gemm(
-                        Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
-                    T.mbarrier_wait_parity(T.get_mbarrier(T.FloorMod(k, 1) + 1), T.FloorDiv(k, 1) % 2)
+                        Q_shared,
+                        KV_shared,
+                        acc_s,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullCol)
+                    T.mbarrier_wait_parity(
+                        T.get_mbarrier(T.FloorMod(k, 1) + 1),
+                        T.FloorDiv(k, 1) % 2)
                     T.gemm(
                         Q_pe_shared,
                         K_pe_shared,
@@ -172,9 +179,7 @@ def main():
     num_split = 1
 
     program = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split)
-    print(program)
     kernel = tilelang.compile(program, out_idx=[6])
-    print(kernel.get_kernel_source())
 
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)

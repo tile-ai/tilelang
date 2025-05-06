@@ -257,13 +257,38 @@ public:
                                                     WarpSpecializeFrameNode);
 };
 
-WarpSpecializeFrame WarpSpecialize(int warp_group_idx, PrimExpr thread_idx,
+WarpSpecializeFrame WarpSpecialize(Array<IntImm> warp_group_ids,
+                                   PrimExpr thread_idx,
                                    int warp_group_size = 128) {
   ObjectPtr<WarpSpecializeFrameNode> n = make_object<WarpSpecializeFrameNode>();
-  PrimExpr min_bound =
-      max(0, IntImm(thread_idx.dtype(), warp_group_idx) * warp_group_size);
-  PrimExpr max_bound = min_bound + warp_group_size;
-  PrimExpr condition = thread_idx >= min_bound && thread_idx < max_bound;
+  PrimExpr condition;
+  std::vector<int> warp_groups;
+  for (int i = 0; i < warp_group_ids.size(); i++) {
+    warp_groups.push_back(Downcast<IntImm>(warp_group_ids[i])->value);
+  }
+  std::sort(warp_groups.begin(), warp_groups.end());
+
+  // Merge consecutive groups
+  std::vector<std::pair<int, int>> merged;
+  for (int group : warp_groups) {
+    if (merged.empty() || group != merged.back().second) {
+      merged.emplace_back(group, group + 1);
+    } else {
+      merged.back().second = group + 1;
+    }
+  }
+
+  for (const auto &[start, end] : merged) {
+    PrimExpr min_bound = IntImm(thread_idx.dtype(), start) * warp_group_size;
+    PrimExpr max_bound = IntImm(thread_idx.dtype(), end) * warp_group_size;
+    PrimExpr range_cond = (thread_idx >= min_bound) && (thread_idx < max_bound);
+
+    if (condition.defined()) {
+      condition = tir::Or(condition, range_cond);
+    } else {
+      condition = range_cond;
+    }
+  }
   IfFrame if_frame = If(condition);
   n->frames.push_back(if_frame);
   n->frames.push_back(Then());

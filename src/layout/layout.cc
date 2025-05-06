@@ -384,6 +384,7 @@ std::string FragmentNode::DebugOutput() const {
   ss << " -> thread: " << ThreadExtent();
   ss << " -> forward_thread: " << forward_thread_;
   ss << " -> forward_index: " << GetForwardIndex();
+  ss << " -> thread_range: " << thread_range_;
   return ss.str();
 }
 
