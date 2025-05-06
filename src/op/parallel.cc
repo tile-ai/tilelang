@@ -181,7 +181,8 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
                               IterVarType::kDataPar);
       PrimExpr loop_var_to_thread =
           src_layout->ForwardThread(indice_map_[buffer], rep);
-      return Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter);
+      return Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter)
+          .SetThreadRange(T.thread_bounds);
     }
   };
   if (source_buffer.defined()) {
@@ -258,7 +259,8 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   LayoutMap results;
   for (const auto &[buffer, _] : indice_map_) {
     if (!T.layout_map.count(buffer)) {
-      results.Set(buffer, CompleteBufferFragment(buffer));
+      results.Set(buffer, CompleteBufferFragment(buffer).SetThreadRange(
+                              T.thread_bounds));
     }
     // Though they may exist some conflicts, but it's fine.
 
@@ -269,7 +271,8 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       if (T.layout_map.count(buffer)) {
         const FragmentNode *src_layout =
             T.layout_map[buffer].as<Fragment>().get();
-        Fragment dst_layout_fragment = CompleteBufferFragment(buffer);
+        Fragment dst_layout_fragment =
+            CompleteBufferFragment(buffer).SetThreadRange(T.thread_bounds);
         const FragmentNode *dst_layout =
             dst_layout_fragment.as<Fragment>().get();
         if (src_layout && dst_layout) {
