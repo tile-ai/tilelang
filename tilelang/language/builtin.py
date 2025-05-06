@@ -236,6 +236,7 @@ def wait_wgmma(*args):
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait_wgmma"), *args)
 
+
 def barrier_wait(barrier_id: Union[int, PrimExpr, tir.Call], parity: Union[int, Var, None] = None):
     """Wait for a memory barrier to complete.
 

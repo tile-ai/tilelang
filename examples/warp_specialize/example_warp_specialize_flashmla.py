@@ -9,6 +9,7 @@ import tilelang.language as T
 from einops import rearrange, einsum
 import argparse
 
+
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     dtype = "float16"
@@ -161,6 +162,7 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     out = rearrange(out, 'b g h d -> b (h g) d')  # [batch_size, heads, dim]
     return out
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=128, help='batch size')
@@ -186,6 +188,7 @@ def main():
     latency = profiler.do_bench(warmup=500)
     print(f"Latency: {latency} ms")
     print(f"TFlops: {total_flops / latency * 1e-9} TFlops")
+
 
 if __name__ == "__main__":
     main()
