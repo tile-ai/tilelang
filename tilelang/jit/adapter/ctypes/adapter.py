@@ -119,6 +119,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
         adapter.kernel_global_source = kernel_global_source
         adapter.wrapped_source = kernel_global_source
+        adapter.pass_configs = pass_configs
 
         if isinstance(func_or_mod, tir.PrimFunc):
             adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
