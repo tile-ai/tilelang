@@ -83,7 +83,7 @@ if SKIP_LOADING_TILELANG_SO == "0":
 
 from .jit import jit, JITKernel, compile  # noqa: F401
 from .profiler import Profiler  # noqa: F401
-from .cache import cached  # noqa: F401
+from .cache import cached, set_cache_dir, get_cache_dir  # noqa: F401
 
 from .utils import (
     TensorSupplyType,  # noqa: F401
