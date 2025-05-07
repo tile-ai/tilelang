@@ -92,37 +92,37 @@ def shared_32x16_to_mma_32x16_smoothlayout(i, j):
     return (i * 2 + j // 16, j % 16)
 
 
-def get_swizzle_layout(row_idx, col_idx, row_size, dtype: Union[DataType, str], swizzle_bytes = None):
+def get_swizzle_layout(row_idx, col_idx, row_size, dtype: Union[DataType, str], swizzle_bytes=None):
     ana = arith.Analyzer()
     if isinstance(dtype, str):
         dtype = DataType(dtype)
     row_bytes = dtype.bits * row_size // 8
-    assert row_bytes % 32 == 0, f"Row size must be multiple of 32B."
+    assert row_bytes % 32 == 0, "Row size must be multiple of 32B."
     if swizzle_bytes is None:
         swizzle_bytes = min(128, row_bytes)
     # 128B swizzle
-        #   Use 8 * 8 permuted layout
-        #   Every number below corresponds to 16B
-        #   0  1  2  3  4  5  6  7    ==>    0  1  2  3  4  5  6  7
-        #   0  1  2  3  4  5  6  7    ==>    1  0  3  2  5  4  7  6
-        #   0  1  2  3  4  5  6  7    ==>    2  3  0  1  6  7  4  5
-        #   0  1  2  3  4  5  6  7    ==>    3  2  1  0  7  6  5  4
-        #   0  1  2  3  4  5  6  7    ==>    4  5  6  7  0  1  2  3
-        #   0  1  2  3  4  5  6  7    ==>    5  4  7  6  1  0  3  2
-        #   0  1  2  3  4  5  6  7    ==>    6  7  4  5  2  3  0  1
-        #   0  1  2  3  4  5  6  7    ==>    7  6  5  4  3  2  1  0
+    #   Use 8 * 8 permuted layout
+    #   Every number below corresponds to 16B
+    #   0  1  2  3  4  5  6  7    ==>    0  1  2  3  4  5  6  7
+    #   0  1  2  3  4  5  6  7    ==>    1  0  3  2  5  4  7  6
+    #   0  1  2  3  4  5  6  7    ==>    2  3  0  1  6  7  4  5
+    #   0  1  2  3  4  5  6  7    ==>    3  2  1  0  7  6  5  4
+    #   0  1  2  3  4  5  6  7    ==>    4  5  6  7  0  1  2  3
+    #   0  1  2  3  4  5  6  7    ==>    5  4  7  6  1  0  3  2
+    #   0  1  2  3  4  5  6  7    ==>    6  7  4  5  2  3  0  1
+    #   0  1  2  3  4  5  6  7    ==>    7  6  5  4  3  2  1  0
     # 64B swizzle
-        #  Use 8 * 4 permuted layout
-        #  Every number below corresponds to 16B
-        #  0  1  2  3  4  0  1  2  3    ==>    0  1  2  3  0  1  2  3
-        #  0  1  2  3  4  0  1  2  3    ==>    1  0  3  2  1  0  3  2
-        #  0  1  2  3  4  0  1  2  3    ==>    2  3  0  1  2  3  0  1
-        #  0  1  2  3  4  0  1  2  3    ==>    3  2  1  0  3  2  1  0
+    #  Use 8 * 4 permuted layout
+    #  Every number below corresponds to 16B
+    #  0  1  2  3  4  0  1  2  3    ==>    0  1  2  3  0  1  2  3
+    #  0  1  2  3  4  0  1  2  3    ==>    1  0  3  2  1  0  3  2
+    #  0  1  2  3  4  0  1  2  3    ==>    2  3  0  1  2  3  0  1
+    #  0  1  2  3  4  0  1  2  3    ==>    3  2  1  0  3  2  1  0
     # 32B swizzle
-        #  Use 8 * 2 permuted layout
-        #  Every number below corresponds to 16B
-        #  0  1  2  3  4  5  6  7    ==>    0  1  2  3  4  5  6  7
-        #  0  1  2  3  4  5  6  7    ==>    1  0  3  2  5  4  7  6
+    #  Use 8 * 2 permuted layout
+    #  Every number below corresponds to 16B
+    #  0  1  2  3  4  5  6  7    ==>    0  1  2  3  4  5  6  7
+    #  0  1  2  3  4  5  6  7    ==>    1  0  3  2  5  4  7  6
     elem_per_16B = 128 // dtype.bits
     col_idx_16B = col_idx // elem_per_16B
     col_idx_in_16B = col_idx % elem_per_16B
