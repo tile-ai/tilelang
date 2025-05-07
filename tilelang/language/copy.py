@@ -77,16 +77,30 @@ def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: s
     region_extents = [x.extent for x in buffer_region.region]
     assert len(region_extents) >= len(
         extents), f"region_extents = {region_extents}, extents = {extents}"
-    offset = len(region_extents) - len(extents)
-    for i in range(len(extents)):
-        if region_extents[i + offset] != extents[i]:
-            if region_extents[i + offset] == 1:
-                region_extents[i + offset] = extents[i]
-            else:
-                raise ValueError(
-                    f"buffer {buffer_region.buffer} region_extents[{i + offset}] = {region_extents[i + offset]}, extents[{i}] = {extents[i]}"
-                )
 
+    # If region_extents already contains all elements
+    # of extents (in any order), pass directly
+    tmp_extents = list(extents)
+    for i in range(len(region_extents)):
+        v = region_extents[i]
+        if v in tmp_extents:
+            tmp_extents.remove(v)
+        elif v != 1:
+            raise ValueError(
+                f"buffer {buffer_region.buffer} region_extents[{i}] = {v}, extents[{i}] = {extents[i]}"
+            )
+    if len(tmp_extents) > 0:
+        # Otherwise, align extents from the last dimension, region_extents
+        # can only replace 1 with extents value, otherwise raise error
+        for i in range(len(extents)):
+            idx = len(region_extents) - len(extents) + i
+            if region_extents[idx] != extents[i]:
+                if region_extents[idx] == 1:
+                    region_extents[idx] = extents[i]
+                else:
+                    raise ValueError(
+                        f"buffer {buffer_region.buffer} region_extents[{idx}] = {region_extents[idx]}, extents[{i}] = {extents[i]}"
+                    )
     return region(T.BufferLoad(buffer_region.buffer, mins), access_type, *region_extents)
 
 
