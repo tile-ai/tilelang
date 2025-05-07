@@ -233,17 +233,19 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   PrimExpr loop_thread_extent = loop_layout_->ThreadExtent();
 
   auto block_size = T.thread_bounds->extent;
-  if (loop_layout_.defined()){
-    if (loop_layout_->ThreadRange().defined()){
+  if (loop_layout_.defined()) {
+    if (loop_layout_->ThreadRange().defined()) {
       auto thread_range = loop_layout_->ThreadRange();
       block_size = thread_range->extent;
       AddPredicate(GE(InputPlaceholder(0), thread_range->min));
-      AddPredicate(LT(InputPlaceholder(0), thread_range->min + thread_range->extent));
+      AddPredicate(
+          LT(InputPlaceholder(0), thread_range->min + thread_range->extent));
     }
   }
 
-  if (!analyzer_.CanProveEqual(loop_thread_extent, block_size)){
-    AddPredicate(LT(InputPlaceholder(0), loop_thread_extent + T.thread_bounds->min));
+  if (!analyzer_.CanProveEqual(loop_thread_extent, block_size)) {
+    AddPredicate(
+        LT(InputPlaceholder(0), loop_thread_extent + T.thread_bounds->min));
   }
 
   // Step 2: Check that the loop's partition can correctly align with all source

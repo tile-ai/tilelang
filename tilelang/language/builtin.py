@@ -261,6 +261,7 @@ def barrier_arrive(barrier_id: Union[int, PrimExpr, tir.Call]):
     """
     return mbarrier_arrive(barrier_id)
 
+
 def shfl_xor(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
     """Perform a shuffle operation with XOR offset.
 
@@ -274,6 +275,7 @@ def shfl_xor(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr,
     """
     return tir.call_extern(value.dtype, "__shfl_xor_sync", 0xffffffff, value, offset)
 
+
 def shfl_down(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
     """Perform a shuffle operation with down offset.
 
@@ -282,6 +284,7 @@ def shfl_down(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr
             The value to shuffle
     """
     return tir.call_extern(value.dtype, "__shfl_down_sync", 0xffffffff, value, offset)
+
 
 def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
     """Perform a shuffle operation with up offset.

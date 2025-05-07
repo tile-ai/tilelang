@@ -2,7 +2,9 @@
 # Licensed under the MIT License.
 import tilelang
 import tilelang.language as T
+
 tilelang.disable_cache()
+
 
 def matmul_warp_specialize_copy_1_gemm_0(M,
                                          N,
@@ -42,7 +44,7 @@ def matmul_warp_specialize_copy_1_gemm_0(M,
                 with T.ws(0):
                     T.copy(B[ko * block_K, bx * block_N + block_N // warp_group_num], B_shared_g0)
                     T.gemm(A_shared, B_shared_g0, C_local_g0)
-            
+
             T.copy(C_local_g1, C[by * block_M, bx * block_N])
             T.copy(C_local_g0, C[by * block_M, bx * block_N + block_N // warp_group_num])
 
@@ -71,8 +73,7 @@ def main():
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             # tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        }
-    )
+        })
     print(jit_kernel.get_kernel_source())
     # 3. Test the kernel in Python with PyTorch data
     import torch

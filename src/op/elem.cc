@@ -120,14 +120,12 @@ For Copy::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 
   ICHECK(loop_vars.size() == src_range.size())
       << "loop_vars.size() = " << loop_vars.size()
-      << ", src_range.size() = " << src_range.size()
-      << ", src = " << src->name
+      << ", src_range.size() = " << src_range.size() << ", src = " << src->name
       << ", dst = " << dst->name;
 
   ICHECK(loop_vars.size() == dst_range.size())
       << "loop_vars.size() = " << loop_vars.size()
-      << ", dst_range.size() = " << dst_range.size()
-      << ", src = " << src->name
+      << ", dst_range.size() = " << dst_range.size() << ", src = " << src->name
       << ", dst = " << dst->name;
 
   Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
@@ -190,7 +188,7 @@ Stmt Copy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   if (par_op->GetPredicate(T.thread_var).defined()) {
     return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
-                      vectorized_thread_loop);  
+                      vectorized_thread_loop);
   }
 
   return vectorized_thread_loop;

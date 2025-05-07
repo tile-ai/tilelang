@@ -55,8 +55,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_shared)
                 T.barrier_arrive(barrier_id=3)
                 for k in T.serial(loop_range):
-                    T.barrier_wait(
-                        barrier_id=(k % 1) + 2, parity=(k % 2) ^ 1)
+                    T.barrier_wait(barrier_id=(k % 1) + 2, parity=(k % 2) ^ 1)
                     T.copy(KV[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], KV_shared)
                     T.barrier_arrive(k % 1)
                     T.copy(K_pe[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_pe_shared)
@@ -76,9 +75,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         acc_s,
                         transpose_B=True,
                         policy=T.GemmWarpPolicy.FullCol)
-                    T.barrier_wait(
-                        barrier_id=k % 1 + 1,
-                        parity=(k // 1) % 2)
+                    T.barrier_wait(barrier_id=k % 1 + 1, parity=(k // 1) % 2)
                     T.gemm(
                         Q_pe_shared,
                         K_pe_shared,

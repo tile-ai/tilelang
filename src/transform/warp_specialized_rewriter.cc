@@ -1190,7 +1190,8 @@ public:
   static bool Detect(Stmt stmt, bool skip_thread_partition = false) {
     WarpSpecializedDetector detector;
     detector.VisitStmt(stmt);
-    return detector.has_warp_specialization_ || (detector.has_tma_op_ && detector.has_mbarrier_op_);
+    return detector.has_warp_specialization_ ||
+           (detector.has_tma_op_ && detector.has_mbarrier_op_);
   }
 
   WarpSpecializedDetector() {
@@ -1225,15 +1226,15 @@ private:
     // because we only care about the condition
     auto cond = op->condition;
     // assert cond is a binary expression
-    PostOrderVisit(cond, [this](const ObjectRef& node) {
+    PostOrderVisit(cond, [this](const ObjectRef &node) {
       bool is_cmp_op = false;
-      if (const auto* lt = node.as<LTNode>()) {
+      if (const auto *lt = node.as<LTNode>()) {
         is_cmp_op = true;
-      } else if (const auto* le = node.as<LENode>()) {
+      } else if (const auto *le = node.as<LENode>()) {
         is_cmp_op = true;
-      } else if (const auto* gt = node.as<GTNode>()) {
+      } else if (const auto *gt = node.as<GTNode>()) {
         is_cmp_op = true;
-      } else if (const auto* ge = node.as<GENode>()) {
+      } else if (const auto *ge = node.as<GENode>()) {
         is_cmp_op = true;
       }
 
@@ -1241,10 +1242,11 @@ private:
         bool has_thread_var = false;
         bool has_warp_group_size = false;
         // check if has thread_var_ in lt->a or lt->b
-        PostOrderVisit(node, [this, &has_thread_var, &has_warp_group_size](const ObjectRef& node_) {
+        PostOrderVisit(node, [this, &has_thread_var,
+                              &has_warp_group_size](const ObjectRef &node_) {
           if (node_.as<VarNode>() == thread_var_->var.get()) {
             has_thread_var = true;
-          } else if (const auto* imm = node_.as<IntImmNode>()) {
+          } else if (const auto *imm = node_.as<IntImmNode>()) {
             // 128 is the warp group size of nvidia gpus
             has_warp_group_size = imm->value % 128 == 0;
           }
@@ -1254,7 +1256,6 @@ private:
         }
       }
     });
-
   }
 
   void VisitStmt_(const AttrStmtNode *op) final {

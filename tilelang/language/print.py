@@ -43,6 +43,7 @@ def print_var_with_condition(condition: tir.PrimExpr,
     if condition:
         tir.call_extern("handle", "debug_print_var", msg, var)
 
+
 @macro
 def print_global_buffer_with_condition(condition: tir.PrimExpr,
                                        buffer: tir.Buffer,
@@ -58,8 +59,7 @@ def print_global_buffer_with_condition(condition: tir.PrimExpr,
             tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i,
                             buffer[coords])
     else:
-        tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i,
-                        buffer[coords])
+        tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
 @macro
