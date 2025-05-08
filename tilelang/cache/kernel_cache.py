@@ -67,7 +67,7 @@ class KernelCache:
         self,
         func: Callable,
         out_idx: List[int],
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         args=None,
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
@@ -109,7 +109,7 @@ class KernelCache:
         *args,
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         verbose: bool = False,
         pass_configs: dict = None,
     ) -> JITKernel:
@@ -278,7 +278,7 @@ class KernelCache:
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
         out_idx: List[int] = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         pass_configs: dict = None,
         func: Callable = None,
     ) -> JITKernel:

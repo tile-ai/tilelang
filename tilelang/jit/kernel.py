@@ -12,6 +12,7 @@ from tilelang.jit.adapter import (
     BaseKernelAdapter,
     CtypesKernelAdapter,
     CythonKernelAdapter,
+    NVRTCKernelAdapter,
 )
 from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
 from tilelang.profiler import Profiler, TensorSupplyType
@@ -40,7 +41,7 @@ class JITKernel(object):
         self,
         func: PrimFunc = None,
         out_idx: Union[List[int], int] = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
         verbose: bool = False,
@@ -56,8 +57,8 @@ class JITKernel(object):
             The TileLang TIR function to compile and wrap.
         out_idx : Union[List[int], int], optional
             Index(es) of the output tensors to return (default: None).
-        execution_backend : Literal["dlpack", "ctypes"], optional
-            Execution backend to use for kernel execution (default: "dlpack").
+        execution_backend : Literal["dlpack", "ctypes", "cython", "nvrtc"], optional
+            Execution backend to use for kernel execution (default: "cython").
         target : Union[str, Target], optional
             Compilation target, either as a string or a TVM Target object (default: "auto").
         target_host : Union[str, Target], optional
@@ -96,6 +97,7 @@ class JITKernel(object):
             "dlpack",
             "ctypes",
             "cython",
+            "nvrtc",
         ], f"Invalid execution backend. {execution_backend}"
         if execution_backend == "cython":
             from tilelang.contrib.cc import get_cplus_compiler
@@ -124,7 +126,7 @@ class JITKernel(object):
         target: Union[str, Target],
         target_host: Union[str, Target],
         out_idx: Union[List[int], int],
-        execution_backend: Literal["dlpack", "ctypes", "cython"],
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"],
         pass_configs: Optional[Dict[str, Any]] = None,
     ):
         """
@@ -227,6 +229,18 @@ class JITKernel(object):
             )
         elif execution_backend == "cython":
             adapter = CythonKernelAdapter(
+                params=artifact.params,
+                result_idx=out_idx,
+                target=target,
+                func_or_mod=tilelang_func,
+                host_mod=artifact.host_mod,
+                device_mod=artifact.device_mod,
+                kernel_global_source=artifact.kernel_source,
+                verbose=verbose,
+                pass_configs=pass_configs,
+            )
+        elif execution_backend == "nvrtc":
+            adapter = NVRTCKernelAdapter(
                 params=artifact.params,
                 result_idx=out_idx,
                 target=target,

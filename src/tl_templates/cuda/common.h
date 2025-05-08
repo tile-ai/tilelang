@@ -2,7 +2,10 @@
 // Licensed under the MIT License.
 #pragma once
 
+#ifndef __CUDACC_RTC__
 #include <cuda_runtime.h>
+#endif
+
 #include <cutlass/fast_math.h>
 #include <cutlass/numeric_types.h>
 #include <math_constants.h>

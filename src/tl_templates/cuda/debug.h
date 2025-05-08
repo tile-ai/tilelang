@@ -1,7 +1,10 @@
 #pragma once
 
 #include "common.h"
-#include <stdio.h>
+
+#ifndef __CUDACC_RTC__
+#include <cstdio>
+#endif
 
 // Template declaration for device-side debug printing (variable only)
 template <typename T> __device__ void debug_print_var(const char *msg, T var);
@@ -77,11 +80,6 @@ __device__ void debug_print_var<double>(const char *msg, double var) {
          msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
          threadIdx.z, var);
 }
-
-#pragma once
-
-#include "common.h"
-#include <stdio.h>
 
 // Template declaration for device-side debug printing (buffer only)
 template <typename T>
