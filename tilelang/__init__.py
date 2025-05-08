@@ -83,7 +83,7 @@ if SKIP_LOADING_TILELANG_SO == "0":
 
 from .jit import jit, JITKernel, compile  # noqa: F401
 from .profiler import Profiler  # noqa: F401
-from .cache import cached  # noqa: F401
+from .cache import cached, set_cache_dir, get_cache_dir  # noqa: F401
 
 from .utils import (
     TensorSupplyType,  # noqa: F401
@@ -99,6 +99,7 @@ from . import (
     language,  # noqa: F401
     engine,  # noqa: F401
 )
+from .transform import PassConfigKey  # noqa: F401
 
 from .engine import lower, register_cuda_postproc, register_hip_postproc  # noqa: F401
 

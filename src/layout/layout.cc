@@ -384,6 +384,7 @@ std::string FragmentNode::DebugOutput() const {
   ss << " -> thread: " << ThreadExtent();
   ss << " -> forward_thread: " << forward_thread_;
   ss << " -> forward_index: " << GetForwardIndex();
+  ss << " -> thread_range: " << thread_range_;
   return ss.str();
 }
 
@@ -417,6 +418,7 @@ bool FragmentNode::IsEqual(const FragmentNode *other, bool skip_index) const {
   // a[i, j] = b[j, i] in register level.
 
   bool ret = StructuralEqual()(this->InputShape(), other->InputShape());
+  ret &= StructuralEqual()(this->ThreadRange(), other->ThreadRange());
   if (!ret) {
     // may be broadcast case
     return true;

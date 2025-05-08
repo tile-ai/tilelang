@@ -1,22 +1,5 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership. The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
-
+// Copyright (c) Tile-AI Corporation.
+// Licensed under the MIT License.
 /*!
  * \file lower hopper intrin.cc
  * \brief Lower Hopper intrinsics cuda GPU(sm90+)
@@ -49,9 +32,9 @@ public:
       Call alloc_desc = Call(DataType::Handle(), builtin::tvm_stack_alloca(),
                              {StringImm("arg_value"), 16});
       Array<PrimExpr> init_desc_args;
-      if (call->op.same_as(CreateTMADescriptorOp())) {
+      if (call->op.same_as(create_tma_descriptor())) {
         init_desc_args.push_back(StringImm(tvm_tensormap_create_tiled));
-      } else if (call->op.same_as(CreateTMAIm2ColDescriptorOp())) {
+      } else if (call->op.same_as(create_tma_im2col_descriptor())) {
         init_desc_args.push_back(StringImm(tvm_tensormap_create_im2col));
       } else {
         CHECK(0) << call->op;
@@ -112,8 +95,8 @@ public:
   }
 
   PrimExpr VisitExpr_(const CallNode *call) final {
-    if (call->op.same_as(CreateTMADescriptorOp()) ||
-        call->op.same_as(CreateTMAIm2ColDescriptorOp())) {
+    if (call->op.same_as(create_tma_descriptor()) ||
+        call->op.same_as(create_tma_im2col_descriptor())) {
       Var var;
       auto iter = desc_map_.find(GetRef<Call>(call));
       if (iter != desc_map_.end()) {
@@ -128,24 +111,24 @@ public:
                           {StringImm("tl::prefetch_tma_descriptor"), var})));
       }
       return var;
-    } else if (call->op.same_as(CreateListofMBarrierOp())) {
+    } else if (call->op.same_as(create_list_of_mbarrier())) {
       ICHECK(init_mbarrier_calls_.size() == 0);
       int num_barriers = static_cast<int>(call->args.size());
       for (int i = 0; i < num_barriers; i++) {
-        PrimExpr mbarrier = Call(DataType::Handle(), GetMBarrierOp(), {i});
+        PrimExpr mbarrier = Call(DataType::Handle(), get_mbarrier(), {i});
         init_mbarrier_calls_.push_back(Evaluate(
             Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
                  {mbarrier, call->args[i]})));
       }
       return 0;
-    } else if (call->op.same_as(SyncThreadsPartialOp())) {
+    } else if (call->op.same_as(sync_thread_partial())) {
       int barrier_id = init_mbarrier_calls_.size();
       PrimExpr mbarrier =
-          Call(DataType::Handle(), GetMBarrierOp(), {barrier_id});
+          Call(DataType::Handle(), get_mbarrier(), {barrier_id});
       init_mbarrier_calls_.push_back(Evaluate(
           Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
                {mbarrier, call->args[0]})));
-      return Call(DataType::Handle(), SyncThreadsPartialOp(), {mbarrier});
+      return Call(DataType::Handle(), sync_thread_partial(), {mbarrier});
     } else {
       return StmtExprMutator::VisitExpr_(call);
     }

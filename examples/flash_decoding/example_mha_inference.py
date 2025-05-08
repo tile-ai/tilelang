@@ -191,7 +191,6 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
                 T.copy(po_shared, po_local)
                 for i in T.Parallel(block_M):
                     lse_local_split[i] = lse_local[k, i]
-                # T.copy(lse_local[k, :], lse_local_split)
                 for i in T.Parallel(block_M):
                     scale_local[i] = T.exp2(lse_local_split[i] - lse_logsum_local[i])
                 for i, j in T.Parallel(block_M, dim):
@@ -305,7 +304,8 @@ if __name__ == "__main__":
     BLOCK_N = 64  # if D_HEAD <= 128 else 32
     program = flashattn(BATCH, H, Q_CTX, KV_CTX, D_HEAD, causal, BLOCK_M, BLOCK_N)
     ref_program = partial(ref_program, causal=causal)
-    kernel = tilelang.compile(program, out_idx=[5], target="cuda", execution_backend="dlpack")
+    kernel = tilelang.compile(
+        program, out_idx=[5], pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True})
     print(kernel.get_kernel_source())
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)

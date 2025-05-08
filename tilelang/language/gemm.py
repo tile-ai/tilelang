@@ -5,7 +5,7 @@
 from tilelang.primitives.gemm.base import GemmWarpPolicy
 import tilelang.language as T
 from tvm import tir
-from typing import Union
+from typing import Union, List
 
 
 def gemm(
@@ -58,14 +58,64 @@ def gemm(
     A = legalize_arguments(A)
     B = legalize_arguments(B)
     C = legalize_arguments(C)
-    M = C.shape[0]
-    N = C.shape[1]
-    K = A.shape[0] if transpose_A else A.shape[1]
-    K_B = B.shape[1] if transpose_B else B.shape[0]
-    assert K == K_B, "gemm K shape check failed"
-    Aptr = A.access_ptr("r")
-    Bptr = B.access_ptr("r")
-    Cptr = C.access_ptr("rw")
+
+    def retrieve_shape(object: Union[tir.Buffer, tir.BufferRegion]) -> List[int]:
+        if isinstance(object, tir.Buffer):
+            return object.shape
+        elif isinstance(object, tir.BufferRegion):
+            region = object.region
+            shape = []
+            for r in region:
+                shape.append(r.extent)
+            return shape
+        else:
+            raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
+
+    A_shape = retrieve_shape(A)
+    B_shape = retrieve_shape(B)
+    C_shape = retrieve_shape(C)
+
+    assert len(C_shape) == 2, "current only support C as a 2D tensor"
+    assert len(A_shape) >= 2, "current only support A as a 2D or higher-order tensor"
+    assert len(B_shape) >= 2, "current only support B as a 2D or higher-order tensor"
+    if len(A_shape) > 2:
+        for i in range(len(A_shape) - 2):
+            assert A_shape[i] == 1, \
+                "current only support A as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
+    if len(B_shape) > 2:
+        for i in range(len(B_shape) - 2):
+            assert B_shape[i] == 1, \
+                "current only support B as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
+
+    M, N = C_shape
+    K = A_shape[-2] if transpose_A else A_shape[-1]
+    K_B = B_shape[-1] if transpose_B else B_shape[-2]
+    assert K == K_B, f"T.gemm K shape check failed: K_A = {K}, K_B = {K_B}"
+
+    def retrieve_ptr(object: Union[tir.Buffer, tir.BufferRegion],
+                     access_type: str = "r") -> tir.PrimExpr:
+        if isinstance(object, tir.Buffer):
+            return object.access_ptr(access_type)
+        elif isinstance(object, tir.BufferRegion):
+            buffer, region = object.buffer, object.region
+            indices = []
+            for r in region:
+                indices.append(r.min)
+            strides = []
+            stride = 1
+            for s in reversed(buffer.shape):
+                strides.insert(0, stride)
+                stride *= s
+            offset = 0
+            for i in range(len(indices)):
+                offset += indices[i] * strides[i]
+            return buffer.access_ptr(access_mask=access_type, offset=offset)
+        else:
+            raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
+
+    Aptr = retrieve_ptr(A, "r")
+    Bptr = retrieve_ptr(B, "r")
+    Cptr = retrieve_ptr(C, "rw")
     return tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.gemm"),

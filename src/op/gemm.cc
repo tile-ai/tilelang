@@ -37,9 +37,12 @@ static std::vector<int> toPrimeFactors(int x) {
 }
 
 Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
-  A = vmap[GetVarFromAccessPtr(args[0])];
-  B = vmap[GetVarFromAccessPtr(args[1])];
-  C = vmap[GetVarFromAccessPtr(args[2])];
+  Aptr = args[0];
+  Bptr = args[1];
+  Cptr = args[2];
+  A = vmap[GetVarFromAccessPtr(Aptr)];
+  B = vmap[GetVarFromAccessPtr(Bptr)];
+  C = vmap[GetVarFromAccessPtr(Cptr)];
   trans_A = args[3].as<Bool>().value();
   trans_B = args[4].as<Bool>().value();
   M = args[5].as<IntImm>().value()->value;
@@ -68,11 +71,11 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
     if (this->policy == GemmWarpPolicy::kFullRow ||
         this->policy == GemmWarpPolicy::kSquare) {
       m_warp = num_warps;
-      ICHECK(this->M % num_warps == 0);
+      ICHECK(this->M % num_warps == 0) << this->M << " % " << num_warps;
     } else if (this->policy == GemmWarpPolicy::kFullCol) {
       m_warp = 4;
       n_warp = num_warps / 4;
-      ICHECK(this->N % n_warp == 0);
+      ICHECK(this->N % n_warp == 0) << this->N << " % " << n_warp;
     } else {
       ICHECK(0) << "Unknown GemmWarpPolicy";
     }
@@ -80,10 +83,10 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
   }
   if (this->policy == GemmWarpPolicy::kFullRow) {
     m_warp = num_warps;
-    ICHECK(this->M % num_warps == 0);
+    ICHECK(this->M % num_warps == 0) << this->M << " % " << num_warps;
   } else if (this->policy == GemmWarpPolicy::kFullCol) {
     n_warp = num_warps;
-    ICHECK(this->N % num_warps == 0);
+    ICHECK(this->N % num_warps == 0) << this->N << " % " << num_warps;
   } else if (this->policy == GemmWarpPolicy::kSquare) {
     auto factors = toPrimeFactors(num_warps);
     for (int factor : factors) {
@@ -152,9 +155,9 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   Array<PrimExpr> new_args;
   new_args.push_back(StringImm(ss.str()));
-  new_args.push_back(A_buffer.access_ptr(1));
-  new_args.push_back(B_buffer.access_ptr(1));
-  new_args.push_back(C_buffer.access_ptr(3));
+  new_args.push_back(Aptr);
+  new_args.push_back(Bptr);
+  new_args.push_back(Cptr);
   auto new_call = Call(DataType::Handle(), builtin::call_extern(), new_args);
   return Evaluate(new_call);
 }
@@ -164,61 +167,68 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     return {};
   LayoutMap results;
   ICHECK(C.scope() == "local.fragment");
-  auto block_size = *as_const_int(T.thread_bounds->extent) -
-                    *as_const_int(T.thread_bounds->min);
+  auto thread_range = T.thread_bounds;
+  auto block_size = *as_const_int(thread_range->extent);
   if (TargetIsVolta(T.target)) {
     const int warp_size = 32;
     auto [warp_m, warp_n] =
         ComputeWarpPartition(block_size / warp_size, T.target);
     auto fragment =
         makeGemmVoltaFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
-    results.Set(C, fragment);
+    results.Set(C, fragment.SetThreadRange(thread_range));
     if (A.scope() == "shared" || A.scope() == "shared.dyn") {
-      results.Set(A, makeGemmVoltaABLayout(*as_const_int(A->shape[0]),
-                                           *as_const_int(A->shape[1]), true,
-                                           trans_A ? 1 : 2));
+      int dim_A = A->shape.size();
+      results.Set(A, makeGemmVoltaABLayout(*as_const_int(A->shape[dim_A - 2]),
+                                           *as_const_int(A->shape[dim_A - 1]),
+                                           true, trans_A ? 1 : 2));
     } else if (A.scope() == "local.fragment") {
       ICHECK(trans_A == false);
-      results.Set(A, makeGemmVoltaFragmentA(M, N, K, M / warp_m, N / warp_n));
+      auto fragment = makeGemmVoltaFragmentA(M, N, K, M / warp_m, N / warp_n);
+      results.Set(A, fragment.SetThreadRange(thread_range));
     } else {
       ICHECK(0);
     }
 
     ICHECK(B.scope() == "shared" || B.scope() == "shared.dyn");
-    results.Set(B, makeGemmVoltaABLayout(*as_const_int(B->shape[0]),
-                                         *as_const_int(B->shape[1]), false,
-                                         trans_B ? 2 : 1));
+    int dim_B = B->shape.size();
+    results.Set(B, makeGemmVoltaABLayout(*as_const_int(B->shape[dim_B - 2]),
+                                         *as_const_int(B->shape[dim_B - 1]),
+                                         false, trans_B ? 2 : 1));
   } else if (TargetIsAmpere(T.target) || TargetIsTuring(T.target)) {
     const int warp_size = 32;
     auto [warp_m, warp_n] =
         ComputeWarpPartition(block_size / warp_size, T.target);
     auto fragment =
         makeGemmFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
-    results.Set(C, fragment);
+    results.Set(C, fragment.SetThreadRange(thread_range));
 
     if (A.scope() == "shared" || A.scope() == "shared.dyn") {
-      const int64_t mat_stride = *as_const_int(A->shape[0]);
-      const int64_t mat_continuous = *as_const_int(A->shape[1]);
+      int dim_A = A->shape.size();
+      const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
+      const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
       results.Set(A,
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
                                    A->dtype.bits(), trans_A ? 1 : 2));
     } else if (A.scope() == "local.fragment") {
       ICHECK(trans_A == false);
-      results.Set(A, makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
-                                       A->dtype.bits()));
+      auto fragment =
+          makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n, A->dtype.bits());
+      results.Set(A, fragment.SetThreadRange(thread_range));
     } else {
       ICHECK(0);
     }
     if (B.scope() == "shared" || B.scope() == "shared.dyn") {
-      const int64_t mat_stride = *as_const_int(B->shape[0]);
-      const int64_t mat_continuous = *as_const_int(B->shape[1]);
+      int dim_B = B->shape.size();
+      const int64_t mat_stride = *as_const_int(B->shape[dim_B - 2]);
+      const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
       results.Set(B,
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
                                    B->dtype.bits(), trans_B ? 2 : 1));
     } else if (B.scope() == "local.fragment") {
       ICHECK(trans_B == false) << "B is local.fragment, trans_B must be false, "
                                   "please raise an issue if you see this";
-      results.Set(B, makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n));
+      auto fragment = makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n);
+      results.Set(B, fragment.SetThreadRange(thread_range));
     } else {
       ICHECK(0);
     }
@@ -232,22 +242,25 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
             ? makeGemmFragmentCHopper(M, N, M / warp_m, N / warp_n,
                                       C->dtype.bits())
             : makeGemmFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
-    results.Set(C, fragment);
+    results.Set(C, fragment.SetThreadRange(thread_range));
     if (A.scope() == "shared" || A.scope() == "shared.dyn") {
-      const int64_t mat_stride = *as_const_int(A->shape[0]);
-      const int64_t mat_continuous = *as_const_int(A->shape[1]);
+      int dim_A = A->shape.size();
+      const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
+      const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
       const int64_t continuity =
           trans_A ? mat_continuous / (warp_m / 4) : mat_continuous;
       results.Set(A, makeGemmABLayout(mat_stride, mat_continuous, continuity,
                                       A->dtype.bits(), trans_A ? 1 : 2));
     } else {
       ICHECK(trans_A == false);
-      results.Set(A, makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
-                                       A->dtype.bits()));
+      auto fragment =
+          makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n, A->dtype.bits());
+      results.Set(A, fragment.SetThreadRange(thread_range));
     }
     if (B.scope() == "shared" || B.scope() == "shared.dyn") {
-      const int64_t mat_stride = *as_const_int(B->shape[0]);
-      const int64_t mat_continuous = *as_const_int(B->shape[1]);
+      int dim_B = B->shape.size();
+      const int64_t mat_stride = *as_const_int(B->shape[dim_B - 2]);
+      const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
       const int64_t continuity =
           trans_B ? mat_continuous : mat_continuous / warp_n;
       results.Set(B, makeGemmABLayout(mat_stride, mat_continuous, continuity,
@@ -262,41 +275,31 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
 
     auto fragment =
         makeGemmFragmentCCDNA(M, N, M / warp_m, N / warp_n, C->dtype.bits());
-
-    results.Set(C, fragment);
+    results.Set(C, fragment.SetThreadRange(thread_range));
 
     if (A.scope() == "shared" || A.scope() == "shared.dyn") {
-
-      // Make Linear Memory Access Layout
-      // auto shared_layout =
-      //     makeGemmLayoutLinear(*as_const_int(A->shape[0]),
-      //     *as_const_int(A->shape[1]));
-
-      // Make Swizzle or Pad Layout
-      auto shared_layout = makeGemmABLayoutCDNA(*as_const_int(A->shape[0]),
-                                                *as_const_int(A->shape[1]),
-                                                A->dtype.bits(), kPack);
+      int dim_A = A->shape.size();
+      auto shared_layout = makeGemmABLayoutCDNA(
+          *as_const_int(A->shape[dim_A - 2]),
+          *as_const_int(A->shape[dim_A - 1]), A->dtype.bits(), kPack);
       results.Set(A, shared_layout);
     } else if (A.scope() == "local.fragment") {
-      results.Set(A, makeGemmFragmentACDNA(M, N, K, M / warp_m, N / warp_n,
-                                           A->dtype.bits(), trans_A));
+      auto fragment = makeGemmFragmentACDNA(M, N, K, M / warp_m, N / warp_n,
+                                            A->dtype.bits(), trans_A);
+      results.Set(A, fragment.SetThreadRange(thread_range));
     } else {
       ICHECK(0);
     }
     if (B.scope() == "shared" || B.scope() == "shared.dyn") {
-      // Make Linear Memory Access Layout
-      // auto shared_layout =
-      //     makeGemmLayoutLinear(*as_const_int(B->shape[0]),
-      //     *as_const_int(B->shape[1]));
-
-      // Make Swizzle or Pad Layout
-      auto shared_layout = makeGemmABLayoutCDNA(*as_const_int(B->shape[0]),
-                                                *as_const_int(B->shape[1]),
-                                                B->dtype.bits(), kPack);
+      int dim_B = B->shape.size();
+      auto shared_layout = makeGemmABLayoutCDNA(
+          *as_const_int(B->shape[dim_B - 2]),
+          *as_const_int(B->shape[dim_B - 1]), B->dtype.bits(), kPack);
 
       results.Set(B, shared_layout);
     } else if (B.scope() == "local.fragment") {
-      results.Set(B, makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n));
+      auto fragment = makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n);
+      results.Set(B, fragment.SetThreadRange(thread_range));
     } else {
       ICHECK(0);
     }

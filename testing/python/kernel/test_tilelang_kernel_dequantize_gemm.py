@@ -338,6 +338,7 @@ def run_gemm(
 
 
 @tvm.testing.requires_package("bitblas")
+@tilelang.testing.requires_llvm
 def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
     M,
     N,
@@ -632,6 +633,7 @@ def test_run_dequantize_gemm():
 
 
 @tilelang.testing.requires_package("bitblas")
+@tilelang.testing.requires_llvm
 def test_assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4():
     assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correctness(
         256, 1024, 512, "float16", "float16", "float16", 3)

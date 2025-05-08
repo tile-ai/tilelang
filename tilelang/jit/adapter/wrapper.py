@@ -45,7 +45,7 @@ extern "C" int init() {{
 PREDEF_HOST_FUNC = """
 extern "C" int call({}) {{
 {}
-    return 0;
+\treturn 0;
 }}
 """
 
@@ -196,7 +196,7 @@ class TLCUDASourceWrapper(object):
                 p = int(p)
             return str(p).replace("//", "/")
 
-        _call_str = """"""
+        kernel_launch_code = """"""
         desc_name_map: Dict[str, str] = {}
         for function_name, function_info in function_informations.items():
             block_info = function_info["block_info"]
@@ -221,14 +221,14 @@ class TLCUDASourceWrapper(object):
             grid_str = "dim3({}, {}, {})".format(
                 legalize_c(grid_info[0]), legalize_c(grid_info[1]), legalize_c(grid_info[2]))
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
-            _call_str += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(function_name, grid_str,
-                                                                      block_str, smem_str,
-                                                                      call_args)
+            kernel_launch_code += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(
+                function_name, grid_str, block_str, smem_str, call_args)
+            kernel_launch_code += "\tTILELANG_CHECK_LAST_ERROR(\"{}\");\n".format(function_name)
 
-        _call_str = self.generate_tma_descriptor_args(desc_name_map) + _call_str
+        kernel_launch_code = self.generate_tma_descriptor_args(desc_name_map) + kernel_launch_code
 
         # Wrap the kernel dispatch logic in an external C function
-        host_func = PREDEF_HOST_FUNC.format(def_args, _call_str)
+        host_func = PREDEF_HOST_FUNC.format(def_args, kernel_launch_code)
         return host_func
 
     def generate_tma_descriptor_args(self, desc_name_map: Dict[str, str]) -> str:

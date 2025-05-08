@@ -36,6 +36,8 @@ private:
 
   Array<PrimExpr> call_args;
   tir::Buffer A, B, C;
+  // pointer to the A, B, C
+  PrimExpr Aptr, Bptr, Cptr;
   bool trans_A, trans_B;
   int M, N, K;
   bool clear_accum = false;

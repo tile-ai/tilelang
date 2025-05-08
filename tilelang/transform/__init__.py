@@ -5,12 +5,14 @@
 
 from . import _ffi_api
 from .simplify import Simplify, simplify_prim_func  # noqa: F401
+from .pass_config import PassConfigKey  # noqa: F401
+from tilelang import tvm as tvm  # noqa: F401
+from tvm.ir.transform import PassContext  # noqa: F401
 
 
 def get_pass_context():
     """Get the current pass context"""
-    from tilelang import tvm as tvm
-    return tvm.transform.PassContext.current()
+    return PassContext.current()
 
 
 def ClusterPlanning():
@@ -189,6 +191,17 @@ def WarpSpecialized():
     return _ffi_api.WarpSpecialized()  # type: ignore
 
 
+def InjectTmaBarrier():
+    """InjectTmaBarrier
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.InjectTmaBarrier()  # type: ignore
+
+
 def InjectFenceProxy():
     """InjectFenceProxy
 
@@ -314,3 +327,9 @@ def FlattenBuffer():
         The result pass
     """
     return _ffi_api.FlattenBuffer()  # type: ignore
+
+
+def EliminateStorageSyncForMBarrier():
+    """EliminateStorageSyncForMBarrier
+    """
+    return _ffi_api.EliminateStorageSyncForMBarrier()  # type: ignore

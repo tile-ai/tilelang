@@ -5,8 +5,10 @@ from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang as tl
 
+tilelang.testing.set_random_seed()
 
-def reduce_max_test(M, N, dtype="float16"):
+
+def reduce_sum_test(M, N, dtype="float16"):
     import tilelang.language as T
 
     @T.prim_func
@@ -20,37 +22,37 @@ def reduce_max_test(M, N, dtype="float16"):
 
             # Copy input to local
             T.copy(A, A_local)
-            # Perform reduce_max operation
-            T.reduce_max(A_local, B_local, dim=1)
+            # Perform reduce_sum operation
+            T.reduce_sum(A_local, B_local, dim=1)
             # Copy result back
             T.copy(B_local, B)
 
     return main
 
 
-def run_reduce_max(M, N, dtype="float16"):
-    program = reduce_max_test(M, N, dtype)
+def run_reduce_sum(M, N, dtype="float16"):
+    program = reduce_sum_test(M, N, dtype)
     jit_kernel = tl.compile(program, out_idx=-1)
     profiler = jit_kernel.get_profiler()
 
     def ref_program(A):
-        return A.max(dim=1).values
+        return A.sum(dim=1)
 
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
-def test_reduce_max():
+def test_reduce_sum():
     # Test different sizes
-    run_reduce_max(256, 256)
-    run_reduce_max(512, 128)
-    run_reduce_max(128, 512)
+    run_reduce_sum(256, 256)
+    run_reduce_sum(512, 128)
+    run_reduce_sum(128, 512)
 
     # Test different dtypes
-    run_reduce_max(256, 256, "float32")
-    run_reduce_max(256, 256, "float16")
+    run_reduce_sum(256, 256, "float32")
+    run_reduce_sum(256, 256, "float16")
 
 
-def reduce_max_test_clear(M, N, dtype="float16"):
+def reduce_sum_test_clear(M, N, dtype="float16"):
     import tilelang.language as T
 
     @T.prim_func
@@ -63,20 +65,26 @@ def reduce_max_test_clear(M, N, dtype="float16"):
             B_local = T.alloc_fragment((M,), dtype)
 
             T.copy(A, A_local)
-            T.fill(B_local, -T.infinity(dtype))
-            T.reduce_max(A_local, B_local, dim=1, clear=False)
+            T.fill(B_local, 1)
+            T.reduce_sum(A_local, B_local, dim=1, clear=False)
             T.copy(B_local, B)
 
     return main
 
 
-def run_reduce_max_clear(M, N, dtype="float16"):
-    program = reduce_max_test_clear(M, N, dtype)
-    jit_kernel = tl.compile(program, out_idx=-1)
+def run_reduce_sum_clear(M, N, dtype="float16"):
+    program = reduce_sum_test_clear(M, N, dtype)
+    jit_kernel = tl.compile(
+        program,
+        out_idx=-1,
+        pass_configs={
+            "tl.disable_tma_lower": True,
+            "tl.disable_warp_specialized": True,
+        })
     print(jit_kernel.get_kernel_source())
 
     def ref_program(A):
-        return A.max(dim=1).values
+        return A.sum(dim=1) + 1
 
     import torch
     dummp_A = torch.randn((M, N), dtype=getattr(torch, dtype)).cuda()
@@ -87,8 +95,10 @@ def run_reduce_max_clear(M, N, dtype="float16"):
     torch.testing.assert_close(tl_out, ref_out, atol=1e-2, rtol=1e-2)
 
 
-def test_reduce_max_clear():
-    run_reduce_max_clear(256, 256, "float16")
+def test_reduce_sum_clear():
+    run_reduce_sum_clear(256, 256, "float32")
+    run_reduce_sum_clear(512, 128, "float32")
+    run_reduce_sum_clear(128, 512, "float32")
 
 
 if __name__ == "__main__":

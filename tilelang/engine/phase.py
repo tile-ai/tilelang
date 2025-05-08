@@ -3,15 +3,31 @@
 from tvm import tir, IRModule
 from tvm.target import Target
 import tilelang
+from tilelang.transform import PassContext
+from typing import Optional
 
 
-def allow_tma_and_warp_specialized(target: Target) -> bool:
-    if target.arch not in {"sm_90"}:
+def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
+                                   target: Optional[Target] = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    if target.arch not in {"sm_90", "sm_90a"}:
         return False
-    cur_pass_ctx = tilelang.transform.get_pass_context()
-    disable_tma_lower = cur_pass_ctx.config.get("tl.disable_tma_lower", False)
-    disable_warp_specialized = cur_pass_ctx.config.get("tl.disable_warp_specialized", False)
+    disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
+    disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
+    disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
     return not (disable_tma_lower and disable_warp_specialized)
+
+
+def allow_fence_proxy(target: Optional[Target] = None) -> bool:
+    return target.arch in {"sm_90", "sm_90a"}
+
+
+def allow_vectorize(pass_ctx: Optional[PassContext] = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    disable_vectorize = pass_ctx.config.get("tir.disable_vectorize", False)
+    return not disable_vectorize
 
 
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
@@ -40,15 +56,19 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
 
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
+    pass_ctx = tilelang.transform.get_pass_context()
     # which may be introduced by the LegalizeSafeMemoryAccess
-    if allow_tma_and_warp_specialized(target):
+    if allow_tma_and_warp_specialized(pass_ctx=pass_ctx, target=target):
         mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tilelang.transform.MultiVersionBuffer()(mod)
         mod = tilelang.transform.WarpSpecialized()(mod)
+        mod = tilelang.transform.InjectTmaBarrier()(mod)
         # if tma is not enabled, we can also do pipeline planning
         # to get better performance with async copy
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+        # warp_specialized pass will pack the if stmt into the block
+        # so we need to lower the opaque block first
         mod = tir.transform.LowerOpaqueBlock()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
         mod = tilelang.transform.RewriteWgmmaSync()(mod)
@@ -59,11 +79,19 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
+
+        if allow_fence_proxy(target=target):
+            # in hopper device, wgmma is an async proxy
+            # so we need to inject a fence proxy before it
+            mod = tilelang.transform.InjectFenceProxy()(mod)
+
     mod = tir.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tir.transform.Simplify()(mod)
-    mod = tilelang.transform.VectorizeLoop()(mod)
+
+    mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
+
     mod = tir.transform.StorageRewrite()(mod)
     mod = tir.transform.UnrollLoop()(mod)
     mod = tir.transform.RenormalizeSplitPattern()(mod)
@@ -90,6 +118,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    mod = tilelang.transform.EliminateStorageSyncForMBarrier()(mod)
     mod = tilelang.transform.InjectPTXAsyncCopy()(mod)
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)

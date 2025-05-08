@@ -320,8 +320,9 @@ Layout makeFullBankSwizzleLayout(int stride, int continuous, int element_size) {
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
   int vector_size = 128 / element_size;
-  ICHECK(stride % 8 == 0);
-  ICHECK(continuous % (vector_size * 8) == 0);
+  ICHECK(stride % 8 == 0) << "stride=" << stride;
+  ICHECK(continuous % (vector_size * 8) == 0)
+      << "continuous=" << continuous << ", vector_size=" << vector_size;
   PrimExpr ts = FloorDiv(i, 8);
   PrimExpr s = FloorMod(i, 8);
   PrimExpr tc = FloorDiv(FloorDiv(j, vector_size), 8);
