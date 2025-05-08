@@ -6,7 +6,6 @@ import example_elementwise_add
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_example_elementwise_add():
     example_elementwise_add.main()
 
