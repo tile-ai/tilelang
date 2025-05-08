@@ -5,7 +5,6 @@ import tilelang.testing
 import example_gemv
 
 
-@tilelang.testing.requires_cuda
 def test_example_gemv():
     example_gemv.main()
 
