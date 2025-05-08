@@ -56,7 +56,7 @@ def main():
     parser.add_argument("--m", type=int, default=512)
     parser.add_argument("--n", type=int, default=1024)
     parser.add_argument("--use_autotune", action="store_true", default=False)
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
     M, N = args.m, args.n
 
     a = torch.randn(M, N, dtype=torch.float32, device="cuda")
