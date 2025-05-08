@@ -6,6 +6,7 @@ import pynvshmem
 import datetime
 import os
 
+
 def init_distributed():
     WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
     RANK = int(os.environ.get("RANK", 0))

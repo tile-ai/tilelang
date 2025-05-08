@@ -79,6 +79,7 @@ CPENGINE_DESC_INIT_FUNC = """
 \t// CUresult {0}_result = CUTLASS_CUDA_DRIVER_WRAPPER_CALL(cuMemcpyDtoDAsync)();
 """
 
+
 class BaseWrapper(ABC):
 
     @abstractmethod
@@ -236,8 +237,9 @@ class TLCUDASourceWrapper(object):
             grid_str = "dim3({}, {}, {})".format(
                 legalize_c(grid_info[0]), legalize_c(grid_info[1]), legalize_c(grid_info[2]))
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
-            _call_str += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(
-                function_name, grid_str, block_str, smem_str, call_args)
+            _call_str += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(function_name, grid_str,
+                                                                      block_str, smem_str,
+                                                                      call_args)
             # if self.use_nvshmem:
             #     _call_str += "\tnvshmemx_barrier_all_on_stream(stream);\n"
 

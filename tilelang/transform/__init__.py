@@ -100,7 +100,7 @@ def LowerCpengineIntrin():
         The result pass
     """
     return _ffi_api.LowerCpengineIntrin()  # type: ignore
-    
+
 
 def WarpSpecializedPipeline():
     """WarpSpecializedPipeline
