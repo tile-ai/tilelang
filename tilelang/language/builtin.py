@@ -235,3 +235,62 @@ def wait_wgmma(*args):
         tir.Call: A handle to the WGMMA wait operation
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait_wgmma"), *args)
+
+
+def barrier_wait(barrier_id: Union[int, PrimExpr, tir.Call], parity: Union[int, Var, None] = None):
+    """Wait for a memory barrier to complete.
+
+    Args:
+        barrier_id: Optional[int, PrimExpr]
+            The memory barrier to wait on
+        parity: Optional[int, Var]
+            The parity value to wait for
+    Returns:
+        tir.Call: A handle to the barrier wait operation
+    Current implementation is a sugar syntax for mbarrier_wait_parity, as we only support parity 0 and 1.
+    """
+    return mbarrier_wait_parity(barrier_id, parity)
+
+
+def barrier_arrive(barrier_id: Union[int, PrimExpr, tir.Call]):
+    """Arrive at a memory barrier.
+
+    Args:
+        barrier_id: Optional[int, PrimExpr]
+            The memory barrier to arrive at
+    """
+    return mbarrier_arrive(barrier_id)
+
+
+def shfl_xor(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
+    """Perform a shuffle operation with XOR offset.
+
+    Args:
+        value: Optional[int, PrimExpr]
+            The value to shuffle
+        offset: Optional[int, PrimExpr]
+            The offset for the shuffle operation
+    Returns:
+        tir.Call: A handle to the shuffle operation
+    """
+    return tir.call_extern(value.dtype, "__shfl_xor_sync", 0xffffffff, value, offset)
+
+
+def shfl_down(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
+    """Perform a shuffle operation with down offset.
+
+    Args:
+        value: Optional[int, PrimExpr]
+            The value to shuffle
+    """
+    return tir.call_extern(value.dtype, "__shfl_down_sync", 0xffffffff, value, offset)
+
+
+def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
+    """Perform a shuffle operation with up offset.
+
+    Args:
+        value: Optional[int, PrimExpr]
+            The value to shuffle
+    """
+    return tir.call_extern(value.dtype, "__shfl_up_sync", 0xffffffff, value, offset)

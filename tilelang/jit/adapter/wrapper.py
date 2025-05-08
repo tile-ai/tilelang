@@ -223,7 +223,7 @@ class TLCUDASourceWrapper(object):
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             kernel_launch_code += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(
                 function_name, grid_str, block_str, smem_str, call_args)
-            kernel_launch_code += "TILELANG_CHECK_LAST_ERROR(\"{}\");\n".format(function_name)
+            kernel_launch_code += "\tTILELANG_CHECK_LAST_ERROR(\"{}\");\n".format(function_name)
 
         kernel_launch_code = self.generate_tma_descriptor_args(desc_name_map) + kernel_launch_code
 

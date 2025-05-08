@@ -37,8 +37,13 @@ def WarpSpecialize(*warp_group_idx):
         >>> T.ws(0, 1) -> if tx < 128 or (tx >= 128 and tx < 256)
     """
     id_x, id_y, id_z = get_thread_bindings()
-    ex_x, ex_y, _ = get_thread_extents()
-    tid = id_z * (ex_y * ex_x) + id_y * ex_x + id_x
+    ex_x, ex_y, ex_z = get_thread_extents()
+    tid = id_x
+    if ex_y > 1:
+        tid = id_y * ex_x + tid
+    if ex_z > 1:
+        tid = id_z * (ex_y * ex_x) + tid
+
     # only available for nvidia gpus.
     warp_group_size = 128
 

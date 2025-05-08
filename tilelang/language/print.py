@@ -45,6 +45,24 @@ def print_var_with_condition(condition: tir.PrimExpr,
 
 
 @macro
+def print_global_buffer_with_condition(condition: tir.PrimExpr,
+                                       buffer: tir.Buffer,
+                                       elems: int,
+                                       msg: str = "") -> tir.PrimExpr:
+    """
+    Conditionally prints the values of a flattened TIR buffer if the condition is True.
+    """
+    if condition:
+        # Iterate through the buffer elements and print each one.
+        for i in serial(elems):
+            coords = index_to_coordinates(i, buffer.shape)
+            tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i,
+                            buffer[coords])
+    else:
+        tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
+
+
+@macro
 def print_shared_buffer_with_condition(condition: tir.PrimExpr,
                                        buffer: tir.Buffer,
                                        elems: int,
@@ -172,6 +190,15 @@ def print(obj: Any, msg: str = "") -> tir.PrimExpr:
             if not msg:
                 msg = f"buffer<{buffer.name}, {buffer.dtype}>"
             return print_shared_buffer_with_condition(condition, buffer, elems, msg)
+        elif buffer.scope() == "global":
+            # Get the number of elements in the buffer.
+            elems = 1
+            for dim in buffer.shape:
+                elems *= dim
+            condition = True
+            return print_global_buffer_with_condition(condition, buffer, elems, msg)
+        else:
+            raise ValueError(f"Unsupported buffer scope: {buffer.scope()}")
 
     elif isinstance(obj, tir.PrimExpr):
         if not msg:
