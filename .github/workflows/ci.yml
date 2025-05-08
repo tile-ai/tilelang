@@ -63,6 +63,12 @@ jobs:
         source tilelang_ci/bin/activate
         python -m pip install .
 
+    - name: Run examples
+      run: |
+        source tilelang_ci/bin/activate
+        cd examples
+        python -m pytest **/test*.py
+
     - name: Run tests
       run: |
         source tilelang_ci/bin/activate
