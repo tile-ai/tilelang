@@ -39,6 +39,7 @@ python -c "import tilelang; print(tilelang.__version__)"
 - **Operating System**: Linux
 - **Python Version**: >= 3.7
 - **CUDA Version**: >= 10.0
+- **LLVM**: < 20 if you are using the bundled TVM submodule
 
 We recommend using a Docker container with the necessary dependencies to build **tile-lang** from source. You can use the following command to run a Docker container with the required dependencies:
 
