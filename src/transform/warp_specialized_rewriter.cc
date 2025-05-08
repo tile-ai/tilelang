@@ -1019,7 +1019,7 @@ public:
     // Check if function only uses threadIdx.x before proceeding
     if (!ThreadTagChecker::HasOnlyThreadIdxX(f)) {
       LOG(WARNING) << "WarpSpecialize will be disabled because the program "
-                      "uses thread tags other than threadIdx.x\n"
+                      "uses thread tags other than threadIdx.x."
                    << "If you want to use warp specialization, please refactor "
                       "your program to use threadIdx.x only";
       // Return original function unchanged if other thread tags are found
@@ -1190,12 +1190,14 @@ public:
   static bool Detect(Stmt stmt, bool skip_thread_partition = false) {
     WarpSpecializedDetector detector;
     detector.VisitStmt(stmt);
-    return detector.has_tma_op_ && detector.has_mbarrier_op_;
+    return detector.has_warp_specialization_ ||
+           (detector.has_tma_op_ && detector.has_mbarrier_op_);
   }
 
   WarpSpecializedDetector() {
     has_tma_op_ = false;
     has_mbarrier_op_ = false;
+    has_warp_specialization_ = false;
   }
 
 private:
@@ -1219,8 +1221,58 @@ private:
     IRVisitorWithAnalyzer::VisitExpr_(op);
   }
 
+  void VisitStmt_(const IfThenElseNode *op) final {
+    // do not visit the body of the if-then-else statement
+    // because we only care about the condition
+    auto cond = op->condition;
+    // assert cond is a binary expression
+    PostOrderVisit(cond, [this](const ObjectRef &node) {
+      bool is_cmp_op = false;
+      if (const auto *lt = node.as<LTNode>()) {
+        is_cmp_op = true;
+      } else if (const auto *le = node.as<LENode>()) {
+        is_cmp_op = true;
+      } else if (const auto *gt = node.as<GTNode>()) {
+        is_cmp_op = true;
+      } else if (const auto *ge = node.as<GENode>()) {
+        is_cmp_op = true;
+      }
+
+      if (is_cmp_op) {
+        bool has_thread_var = false;
+        bool has_warp_group_size = false;
+        // check if has thread_var_ in lt->a or lt->b
+        PostOrderVisit(node, [this, &has_thread_var,
+                              &has_warp_group_size](const ObjectRef &node_) {
+          if (node_.as<VarNode>() == thread_var_->var.get()) {
+            has_thread_var = true;
+          } else if (const auto *imm = node_.as<IntImmNode>()) {
+            // 128 is the warp group size of nvidia gpus
+            has_warp_group_size = imm->value % 128 == 0;
+          }
+        });
+        if (has_thread_var && has_warp_group_size) {
+          has_warp_specialization_ = true;
+        }
+      }
+    });
+  }
+
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tir::attr::thread_extent) {
+      IterVar iv = Downcast<IterVar>(op->node);
+      if (iv->thread_tag == "threadIdx.x") {
+        ICHECK(iv->dom->extent.as<IntImmNode>());
+        thread_var_ = iv;
+      }
+    }
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
   bool has_tma_op_{false};
+  IterVar thread_var_;
   bool has_mbarrier_op_{false};
+  bool has_warp_specialization_{false};
 };
 
 using namespace tir::transform;
