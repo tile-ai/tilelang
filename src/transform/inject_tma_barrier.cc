@@ -32,10 +32,10 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include "./common/attr.h"
+#include "./common/collector.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
-#include "./common/collector.h"
-#include "./common/attr.h"
 
 namespace tvm {
 namespace tl {
@@ -192,13 +192,15 @@ private:
           tma_op_to_barrier_id_.Set(tma_call, barrier_id);
         }
         auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-        auto extent = const_int_bound->max_value - const_int_bound->min_value + 1;
+        auto extent =
+            const_int_bound->max_value - const_int_bound->min_value + 1;
         UpdateBarrierRange(barrier_id, IntImm(DataType::Int(32), extent));
         pending_tma_ops_.clear();
       } else if (call->op.same_as(builtin::ptx_wait_barrier())) {
         PrimExpr barrier_id = call->args[0];
         auto const_int_bound = analyzer_.const_int_bound(thread_var_);
-        auto extent = const_int_bound->max_value - const_int_bound->min_value + 1;
+        auto extent =
+            const_int_bound->max_value - const_int_bound->min_value + 1;
         UpdateBarrierRange(barrier_id, IntImm(DataType::Int(32), extent));
       }
     }
@@ -237,25 +239,25 @@ public:
     TmaBarrierCollector collector;
     collector(f->body);
     bool has_create_list_of_mbarrier = false;
-    PostOrderVisit(f->body, [&](const ObjectRef& node) {
-      if (const auto* call = node.as<CallNode>()) {
+    PostOrderVisit(f->body, [&](const ObjectRef &node) {
+      if (const auto *call = node.as<CallNode>()) {
         if (call->op.same_as(create_list_of_mbarrier())) {
           has_create_list_of_mbarrier = true;
         }
       }
     });
     TmaBarrierRewriter rewriter(analyzer, collector.tma_op_to_barrier_id(),
-                                collector.barrier_id_to_range(), has_create_list_of_mbarrier);
+                                collector.barrier_id_to_range(),
+                                has_create_list_of_mbarrier);
     f.CopyOnWrite()->body = rewriter(f->body);
     return f;
   }
 
 private:
-
-
-  Stmt VisitStmt_(const BlockNode *op){
+  Stmt VisitStmt_(const BlockNode *op) {
     auto block = GetRef<Block>(op);
-    if (!has_create_list_of_mbarrier_ && op->name_hint == MainBlockName) {
+    if (!has_create_list_of_mbarrier_ && barrier_id_to_range_.size() > 0 &&
+        op->name_hint == MainBlockName) {
       ICHECK(false) << "Please declare create_list_of_mbarrier.";
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
