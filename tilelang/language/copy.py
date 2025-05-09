@@ -95,7 +95,6 @@ def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: s
                 f"buffer {buffer_region.buffer} region_extents[{i}] = {v}, extents[{i}] = {extents[i]}"
             )
 
-
     tmp_len = len(tmp_extents) - variable_extent_count
     if tmp_len > 0:
         # Otherwise, align extents from the last dimension, region_extents
