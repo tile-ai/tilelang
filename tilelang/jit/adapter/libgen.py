@@ -15,7 +15,6 @@ from tvm.target import Target
 
 from tilelang import tvm as tvm
 from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_compute_version
-from tilelang.contrib.nvrtc import compile_cuda
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
 
@@ -25,9 +24,9 @@ logger = logging.getLogger(__name__)
 
 try:
     import cuda.bindings.driver as cuda
+    from tilelang.contrib.nvrtc import compile_cuda
 except ImportError:
-    logger.warning(
-        "Failed to import cuda.bindings.driver as cuda, nvrtc backend will not be available.")
+    logger.warning("nvrtc backend is not available, please install cuda-python")
 
 
 class LibraryGenerator(object):
