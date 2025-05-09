@@ -97,19 +97,26 @@ def xor2x2(i, j):
 
 
 def xor4x4(i, j):
-    i0 = i % 2
-    j0 = j % 2
-    i1 = i // 2
-    j1 = j // 2
+    i0, i1 = i % 2, i // 2
+    j0, j1 = j % 2, j // 2
     return 2 * xor2x2(i1, j1) + xor2x2(i0, j0)
 
 
 def xor8x8(i, j):
-    i0 = i % 2
-    j0 = j % 2
-    i1 = i // 2
-    j1 = j // 2
+    i0, i1 = i % 2, i // 2
+    j0, j1 = j % 2, j // 2
     return 2 * xor4x4(i1, j1) + xor2x2(i0, j0)
+
+
+def xor_swizzle(i, j, swizzle_bytes):
+    if swizzle_bytes == 128:
+        return xor8x8(i, j)
+    elif swizzle_bytes == 64:
+        return xor4x4(i, j)
+    elif swizzle_bytes == 32:
+        return xor2x2(i, j)
+    else:
+        raise ValueError(f"Unsupported swizzle bytes: {swizzle_bytes}")
 
 
 def get_swizzle_layout(row_idx, col_idx, row_size, dtype: Union[DataType, str], swizzle_bytes=None):
@@ -146,7 +153,7 @@ def get_swizzle_layout(row_idx, col_idx, row_size, dtype: Union[DataType, str], 
     elem_per_16B = 128 // dtype.bits
     col_idx_16B = col_idx // elem_per_16B
     col_idx_in_16B = col_idx % elem_per_16B
-    new_col_idx_16B = col_idx_16B ^ (row_idx % (swizzle_bytes // 16))
+    new_col_idx_16B = xor_swizzle(row_idx, col_idx_16B, swizzle_bytes)
     return row_idx, ana.simplify(new_col_idx_16B * elem_per_16B + col_idx_in_16B)
 
 
