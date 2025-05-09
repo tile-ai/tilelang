@@ -17,8 +17,8 @@ def per_token_cast_to_fp8(M, N, blk_m):
     fp8_max = 448.0
 
     @T.prim_func
-    def per_token_cast(X: T.Tensor((M, N), dtype), X_fp8: T.Tensor((M, N), "e4m3_float8"), X_amax: T.Tensor(
-        (M, T.ceildiv(N, group_size)), dtype)):
+    def per_token_cast(X: T.Tensor((M, N), dtype), X_fp8: T.Tensor((M, N), "e4m3_float8"),
+                       X_amax: T.Tensor((M, T.ceildiv(N, group_size)), dtype)):
         with T.Kernel(T.ceildiv(M, blk_m), T.ceildiv(N, group_size), threads=128) as (bx, by):
             row = bx
             row_g_id = by

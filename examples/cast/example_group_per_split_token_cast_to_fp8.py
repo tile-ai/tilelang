@@ -18,9 +18,9 @@ def group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m):
     fp8_max = 448.0
 
     @T.prim_func
-    def group_per_split_token_cast(X: T.Tensor((M, N), dtype), batch_sizes: T.Tensor((BG,), "int32"), X_fp8: T.Tensor(
-        (BG, M_max, N), "e4m3_float8"), X_amax: T.Tensor((BG, M_max, T.ceildiv(N, group_size)),
-                                                         accum_dtype)):
+    def group_per_split_token_cast(X: T.Tensor((M, N), dtype), batch_sizes: T.Tensor(
+        (BG,), "int32"), X_fp8: T.Tensor((BG, M_max, N), "e4m3_float8"), X_amax: T.Tensor(
+            (BG, M_max, T.ceildiv(N, group_size)), accum_dtype)):
         with T.Kernel(
                 T.ceildiv(M_max, blk_m), T.ceildiv(N, group_size), BG, threads=128) as (bx, by, bz):
             row = bx
@@ -187,7 +187,7 @@ def main():
         execution_backend="cython",
         pass_configs={"tl.disable_tma_lower": True})
     print(kernel.get_kernel_source())
-    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
+    # profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
 
     x_fp8, x_amax = kernel(x, batch_sizes)
     x_fp8_ref, x_amax_ref = ref_program(x, batch_sizes)

@@ -59,7 +59,7 @@ def matmul_dynamic_mnk(
 
 
 def matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype,
-                        accum_dtype, num_stages, threads):
+                   accum_dtype, num_stages, threads):
     print(
         f"M: {M}, N: {N}, K: {K}, block_M: {block_M}, block_N: {block_N}, block_K: {block_K}, trans_A: {trans_A}, trans_B: {trans_B}, in_dtype: {in_dtype}, out_dtype: {out_dtype}, accum_dtype: {accum_dtype}, num_stages: {num_stages}, threads: {threads}"
     )
@@ -116,7 +116,8 @@ def main():
     num_stages = 3
     threads = 128
     matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype,
-                        accum_dtype, num_stages, threads)
+                   accum_dtype, num_stages, threads)
+
 
 if __name__ == "__main__":
     main()
