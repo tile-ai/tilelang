@@ -17,7 +17,6 @@
 #include "../op/builtin.h"
 #include "./common/collector.h"
 
-
 namespace tvm {
 namespace tl {
 

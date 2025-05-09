@@ -34,6 +34,8 @@
 #include "../op/builtin.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
+#include "./common/collector.h"
+#include "./common/attr.h"
 
 namespace tvm {
 namespace tl {
@@ -41,6 +43,7 @@ namespace tl {
 using namespace tir;
 using namespace tir::transform;
 using arith::IRMutatorWithAnalyzer;
+using arith::IRVisitorWithAnalyzer;
 
 class TmaTraitsCollector : public StmtExprVisitor {
 public:
@@ -91,17 +94,6 @@ private:
   IterVar thread_var_ = IterVar(Range::FromMinExtent(0, 1), Var("v_thread"),
                                 IterVarType::kDataPar);
 
-  PrimExpr GetBarrierId(const PrimExpr &ko) {
-    // FloorMod(ko, 1)
-    return FloorMod(ko, IntImm(DataType::Int(32), 1));
-  }
-
-  PrimExpr GetBarrierParity(const PrimExpr &ko) {
-    // FloorDiv(ko, 1) % 2
-    return FloorMod(FloorDiv(ko, IntImm(DataType::Int(32), 1)),
-                    IntImm(DataType::Int(32), 2));
-  }
-
   PrimExpr makeGetBarrier(PrimExpr barrier_id) {
     return Call(DataType::Handle(), get_mbarrier(), {barrier_id});
   }
@@ -116,6 +108,7 @@ private:
       : IRMutatorWithAnalyzer(analyzer) {}
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
+
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
@@ -168,13 +161,25 @@ private:
   }
 };
 
-class TmaBarrierCollector : public StmtExprVisitor {
+class TmaBarrierCollector : public IRVisitorWithAnalyzer {
 public:
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id() {
     return tma_op_to_barrier_id_;
   }
+  Map<PrimExpr, IntImm> barrier_id_to_range() { return barrier_id_to_range_; }
 
 private:
+  void UpdateBarrierRange(PrimExpr barrier_id, IntImm extent) {
+    if (barrier_id_to_range_.count(barrier_id)) {
+      auto old_extent = barrier_id_to_range_[barrier_id];
+      ICHECK_EQ(old_extent->value, extent->value)
+          << "barrier_id: " << barrier_id << " has different extent";
+      barrier_id_to_range_.Set(barrier_id, extent);
+    } else {
+      barrier_id_to_range_.Set(barrier_id, extent);
+    }
+  }
+
   void VisitStmt_(const EvaluateNode *op) final {
     if (const auto *call = op->value.as<CallNode>()) {
       if (call->op.same_as(tma_load())) {
@@ -186,33 +191,76 @@ private:
         for (auto tma_call : pending_tma_ops_) {
           tma_op_to_barrier_id_.Set(tma_call, barrier_id);
         }
+        auto const_int_bound = analyzer_.const_int_bound(thread_var_);
+        auto extent = const_int_bound->max_value - const_int_bound->min_value + 1;
+        UpdateBarrierRange(barrier_id, IntImm(DataType::Int(32), extent));
         pending_tma_ops_.clear();
+      } else if (call->op.same_as(builtin::ptx_wait_barrier())) {
+        PrimExpr barrier_id = call->args[0];
+        auto const_int_bound = analyzer_.const_int_bound(thread_var_);
+        auto extent = const_int_bound->max_value - const_int_bound->min_value + 1;
+        UpdateBarrierRange(barrier_id, IntImm(DataType::Int(32), extent));
       }
     }
     StmtExprVisitor::VisitStmt_(op);
   }
 
+  void VisitStmt_(const AttrStmtNode *op) {
+    if (op->attr_key == tir::attr::thread_extent) {
+      IterVar iv = Downcast<IterVar>(op->node);
+      if (iv->thread_tag == "threadIdx.x") {
+        thread_var_ = iv;
+      }
+    }
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
+  IterVar thread_var_;
   std::vector<Call> pending_tma_ops_;
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
+  Map<PrimExpr, IntImm> barrier_id_to_range_;
 };
 // we trust mbarrier_wait_parity to be correct
 class TmaBarrierRewriter : public IRMutatorWithAnalyzer {
 public:
   TmaBarrierRewriter(arith::Analyzer *analyzer,
-                     Map<ObjectRef, PrimExpr> tma_op_to_barrier_id)
+                     Map<ObjectRef, PrimExpr> tma_op_to_barrier_id,
+                     Map<PrimExpr, IntImm> barrier_id_to_range,
+                     bool has_create_list_of_mbarrier)
       : IRMutatorWithAnalyzer(analyzer),
-        tma_op_to_barrier_id_(tma_op_to_barrier_id) {}
+        tma_op_to_barrier_id_(tma_op_to_barrier_id),
+        barrier_id_to_range_(barrier_id_to_range),
+        has_create_list_of_mbarrier_(has_create_list_of_mbarrier) {}
 
   static PrimFunc Rewrite(PrimFunc f, arith::Analyzer *analyzer) {
     f = TmaExpectTxRewriter::Rewrite(f, analyzer);
     TmaBarrierCollector collector;
     collector(f->body);
-    TmaBarrierRewriter rewriter(analyzer, collector.tma_op_to_barrier_id());
+    bool has_create_list_of_mbarrier = false;
+    PostOrderVisit(f->body, [&](const ObjectRef& node) {
+      if (const auto* call = node.as<CallNode>()) {
+        if (call->op.same_as(create_list_of_mbarrier())) {
+          has_create_list_of_mbarrier = true;
+        }
+      }
+    });
+    TmaBarrierRewriter rewriter(analyzer, collector.tma_op_to_barrier_id(),
+                                collector.barrier_id_to_range(), has_create_list_of_mbarrier);
     f.CopyOnWrite()->body = rewriter(f->body);
     return f;
   }
 
 private:
+
+
+  Stmt VisitStmt_(const BlockNode *op){
+    auto block = GetRef<Block>(op);
+    if (!has_create_list_of_mbarrier_ && op->name_hint == MainBlockName) {
+      ICHECK(false) << "Please declare create_list_of_mbarrier.";
+    }
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
   PrimExpr VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tma_load())) {
       // check this must be in the tma_op_to_barrier_id_
@@ -233,10 +281,21 @@ private:
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
+  Map<PrimExpr, IntImm> barrier_id_to_range_;
+  bool has_create_list_of_mbarrier_;
 };
 
 tvm::transform::Pass InjectTmaBarrier() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+    // Check if function only uses threadIdx.x before proceeding
+    if (!ThreadTagChecker::HasOnlyThreadIdxX(f)) {
+      LOG(WARNING) << "InjectTmaBarrier will be disabled because the program "
+                      "uses thread tags other than threadIdx.x\n"
+                   << "If you want to use TMA barrier, please refactor "
+                      "your program to use threadIdx.x only";
+      // Return original function unchanged if other thread tags are found
+      return f;
+    }
     arith::Analyzer analyzer;
     return TmaBarrierRewriter::Rewrite(f, &analyzer);
   };
