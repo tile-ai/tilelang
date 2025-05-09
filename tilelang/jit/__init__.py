@@ -26,7 +26,7 @@ def jit(
     execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
     target: Union[str, Target] = "auto",
     verbose: bool = False,
-    **pass_config_kwargs: Optional[Dict[str, Any]],
+    pass_configs: Optional[Dict[str, Any]] = None,
 ) -> BaseKernelAdapter:
     """
     A decorator (or decorator factory) that JIT-compiles a given TileLang PrimFunc 
@@ -93,7 +93,7 @@ def jit(
             verbose=verbose,
             execution_backend=execution_backend,
             out_idx=out_idx,
-            **pass_config_kwargs,
+            pass_configs=pass_configs,
         ).adapter
 
     # If `func` was given, compile it immediately and return the adapter.
