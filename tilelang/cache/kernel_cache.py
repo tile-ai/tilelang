@@ -23,6 +23,7 @@ KERNEL_PATH = "kernel.cu"
 WRAPPED_KERNEL_PATH = "wrapped_kernel.cu"
 KERNEL_LIB_PATH = "kernel_lib.so"
 KERNEL_CUBIN_PATH = "kernel.cubin"
+KERNEL_PY_PATH = "kernel.py"
 PARAMS_PATH = "params.pkl"
 
 
@@ -272,10 +273,8 @@ class KernelCache:
             src_lib_path = kernel.adapter.libpath
             shutil.copy(src_lib_path, kernel_lib_path)
             if self.execution_backend == "nvrtc":
-                kernel_pymodule_name = kernel.adapter.pymodule_name
-                shutil.copytree(
-                    os.path.join(os.path.dirname(src_lib_path), kernel_pymodule_name),
-                    os.path.join(cache_path, kernel_pymodule_name))
+                shutil.copy(
+                    src_lib_path.replace(".cubin", ".py"), os.path.join(cache_path, KERNEL_PY_PATH))
         except Exception as e:
             self.logger.error(f"Error saving kernel library to disk: {e}")
 

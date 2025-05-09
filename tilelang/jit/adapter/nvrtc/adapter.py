@@ -82,7 +82,6 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         self.lib_generator.load_lib()
         self.libpath = self.lib_generator.libpath
         self.pymodule = self.lib_generator.pymodule
-        self.pymodule_name = self.lib_generator.pymodule_name
         culib = self.lib_generator.culib
         for name in self.function_names:
             result, self.kernels[name] = cuda.cuLibraryGetKernel(culib, bytes(name, "utf-8"))
@@ -132,7 +131,6 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         adapter.lib_generator = PyLibraryGenerator(adapter.target)
         adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
         adapter.pymodule = adapter.lib_generator.pymodule
-        adapter.pymodule_name = adapter.lib_generator.pymodule_name
         adapter.function_names = adapter.pymodule._function_names
 
         culib = adapter.lib_generator.culib

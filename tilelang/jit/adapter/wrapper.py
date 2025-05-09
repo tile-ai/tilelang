@@ -50,7 +50,6 @@ extern "C" int call({}) {{
 """
 
 PREDEF_HOST_FUNC_PY = """
-import torch
 import cuda.bindings.driver
 import ctypes
 
@@ -688,7 +687,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         return self.lib_code
 
     def get_stream_type(self) -> Dict[str, str]:
-        return {"name": "stream=torch.cuda.current_stream().cuda_stream", "type": "int"}
+        return {"name": "stream=0", "type": "int"}
 
 
 class TLHIPSourceWrapper(TLCUDASourceWrapper):

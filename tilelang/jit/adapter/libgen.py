@@ -6,9 +6,7 @@ import logging
 import os
 import os.path as osp
 import subprocess
-import sys
 import tempfile
-import uuid
 from typing import Optional
 
 from tvm.target import Target
@@ -142,12 +140,18 @@ class LibraryGenerator(object):
 
 class PyLibraryGenerator(LibraryGenerator):
     host_func: Optional[str] = None
-    pymodule_name: Optional[str] = None
     culib = None
     pymodule = None
 
     def __init__(self, target: Target):
         super().__init__(target)
+
+    @staticmethod
+    def import_from_file(module_name, file_path):
+        spec = importlib.util.spec_from_file_location(module_name, file_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
 
     def update_host_func(self, host_func: str):
         self.host_func = host_func
@@ -156,17 +160,8 @@ class PyLibraryGenerator(LibraryGenerator):
         if lib_path is None:
             lib_path = self.libpath
 
-        lib_dir = osp.dirname(lib_path)
-        if lib_dir not in sys.path:
-            sys.path.append(lib_dir)
-
-        if self.pymodule_name is None:
-            for name in os.listdir(lib_dir):
-                if name.startswith("tilelang_lib_"):
-                    self.pymodule_name = name
-                    break
-
-        self.pymodule = importlib.import_module(self.pymodule_name)
+        pypath = lib_path.replace(".cubin", ".py")
+        self.pymodule = self.import_from_file("kernel", pypath)
         result, self.culib = cuda.cuLibraryLoadFromFile(
             bytes(lib_path, "utf-8"), [], [], 0, [], [], 0)
         assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to load library: {lib_path}"
@@ -205,10 +200,8 @@ class PyLibraryGenerator(LibraryGenerator):
             self.srcpath = src.name
             self.libpath = libpath
 
-            self.pymodule_name = "tilelang_lib_" + str(uuid.uuid4())
-            pymodule_path = osp.join(osp.dirname(src.name), self.pymodule_name)
-            os.makedirs(pymodule_path, exist_ok=True)
-            with open(osp.join(pymodule_path, "__init__.py"), "w") as f:
+            pypath = src.name.replace(".cu", ".py")
+            with open(pypath, "w") as f:
                 f.write(self.host_func)
         else:
             raise ValueError(f"Unsupported target: {target}")
