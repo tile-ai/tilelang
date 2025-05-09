@@ -295,6 +295,7 @@ def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, 
     """
     return tir.call_extern(value.dtype, "__shfl_up_sync", 0xffffffff, value, offset)
 
+
 def sync_threads():
     """Synchronize all threads in a warp.
     """
