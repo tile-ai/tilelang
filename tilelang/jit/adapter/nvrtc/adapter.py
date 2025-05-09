@@ -1,23 +1,29 @@
 # Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
 
-from ..base import BaseKernelAdapter
-from typing import List, Union, Callable, Optional, Dict, Any
-from tilelang import tvm as tvm
-from tvm.target import Target
-from tvm import tir
-from tilelang.engine.param import KernelParam
-from tilelang.jit.adapter.wrapper import TLPyWrapper
-from tilelang.utils.target import determine_target
+import importlib
 import logging
-from tilelang.contrib.nvrtc import compile_cuda
 import os
 import os.path as osp
-import tempfile
 import sys
+import tempfile
 import uuid
-import importlib
+from typing import Any, Callable, Dict, List, Optional, Union
+
 import cuda.bindings.driver as cuda
+import torch
+from tvm import tir
+from tvm.target import Target
+
+from tilelang import tvm as tvm
+from tilelang.contrib.nvrtc import compile_cuda
+from tilelang.engine.param import KernelParam
+from tilelang.jit.adapter.wrapper import TLPyWrapper
+from tilelang.utils.language import retrieve_func_from_module
+from tilelang.utils.target import determine_target
+
+from ..base import BaseKernelAdapter
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,19 +40,40 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
             verbose: bool = False,
             pass_configs: Optional[Dict[str, Any]] = None):
         
+        self.params = params
+        self.result_idx = self._legalize_result_idx(result_idx)
+        self.kernel_global_source = kernel_global_source
+        
         if isinstance(func_or_mod, tir.PrimFunc):
             self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
         else:
             self.ir_module = func_or_mod
+            
+        # Cache parameter information during initialization
+        self.param_dtypes = [param.dtype for param in params]
+        self.param_shapes = []
+        for param in params:
+            native_shape = []
+            for dim in param.shape:
+                if isinstance(dim, tir.IntImm):
+                    native_shape.append(int(dim))
+                elif isinstance(dim, tir.Var):
+                    # Keep tir.Var for dynamic dimensions
+                    native_shape.append(dim)
+                else:
+                    native_shape.append(dim)
+            self.param_shapes.append(native_shape)
         
-        self.result_idx = result_idx
+        self.dynamic_symbolic_map = self._process_dynamic_symbolic()
+        
         self.target = Target.canon_target(determine_target(target))
+        self.verbose = verbose
         self.wrapper = TLPyWrapper(self.target)
         self.wrapper.assign_optimized_module(self.ir_module)
         self.wrapper.assign_pass_configs(pass_configs)
         self.wrapper.assign_host_module(host_mod)
         self.wrapper.assign_device_module(device_mod)
-        self.wrapper_source, self.host_func, self.function_names = self.wrapper.wrap(kernel_global_source)
+        self.host_func, self.function_names = self.wrapper.wrap(kernel_global_source)
         
         project_root = osp.join(osp.dirname(__file__), "../../..")
         if "TL_TEMPLATE_PATH" in os.environ:
@@ -65,7 +92,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         else:
             cuda_home = "/usr/local/cuda"
 
-        cubin_bytes = compile_cuda(self.wrapper_source, 
+        cubin_bytes = compile_cuda(self.kernel_global_source, 
                                    target_format="cubin", 
                                    options=[f"-I{tl_template_path}", f"-I{cutlass_path}", f"-I{cuda_home}/include"],
                                    verbose=True)
@@ -88,17 +115,107 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         for name in self.function_names:
             result, self.kernels[name] = cuda.cuLibraryGetKernel(self.culib, bytes(name, "utf-8"))
             assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to get kernel: {name}"
-        self.func = self._convert_torch_func()
+        
+        self._post_init()
+    
+    def _process_dynamic_symbolic(self):
+        """Extract information about dynamic shapes from the TIR function.
+        
+        Maps symbolic variables to their corresponding (buffer_index, shape_dimension)
+        for runtime shape resolution.
+        """
+        func = self.prim_func
+        params = func.params
+        buffer_map = func.buffer_map
+        dynamic_symbolic_map = {}
+        for i, param in enumerate(params):
+            buffer = buffer_map[param]
+            for j, shape in enumerate(buffer.shape):
+                if isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map):
+                    dynamic_symbolic_map[shape] = (i, j)
+        return dynamic_symbolic_map
+
         
     def get_kernel_source(self):
-        return self.wrapper_source
+        return self.kernel_global_source
+    
+    def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):
+        """Low-level function to call the compiled CUDA kernel.
+        """
+        return self.lib.call(self.kernels, *args, stream=stream)
+    
+    def _wrap_forward_from_prebuild_lib(self,
+                                        *ins: List[torch.Tensor],
+                                        stream: Optional[int] = None):
+        """High-level wrapper for kernel execution.
+        
+        Handles:
+        1. Input validation
+        2. Output tensor allocation
+        3. Dynamic shape resolution
+        4. CUDA stream management
+        
+        Args:
+            ins: Input PyTorch tensors
+            stream: Optional CUDA stream for asynchronous execution
+        
+        Returns:
+            Single tensor or list of tensors containing the kernel results
+        """
+        if len(ins) + len(self.result_idx) != len(self.params):
+            raise ValueError(
+                f"Expected {len(self.params)} inputs, got {len(ins) + len(self.result_idx)} with {len(ins)} inputs and {len(self.result_idx)} outputs"
+            )
+        ins_idx = 0
+        args = []
+
+        # tensor pointers
+        for i in range(len(self.params)):
+            if i in self.result_idx:
+                dtype = self.param_dtypes[i]
+                shape = []
+                # Now working with native Python list, no FFI calls needed
+                for s in self.param_shapes[i]:
+                    if isinstance(s, tir.Var):
+                        ref_tensor_idx, ref_shape_idx = self.dynamic_symbolic_map[s]
+                        shape.append(ins[ref_tensor_idx].shape[ref_shape_idx])
+                    else:  # Already converted to Python int during initialization
+                        shape.append(s)
+                device = ins[0].device if len(
+                    ins) > 0 else torch.cuda.current_device()
+                tensor = torch.empty(*shape, dtype=dtype, device=device)
+            else:
+                tensor = ins[ins_idx]
+                ins_idx += 1
+            args.append(tensor)
+
+        # dynamic symbolics
+        for _, (buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():
+            args.append(ins[buffer_idx].shape[shape_idx])
+
+        # if stream is not None, we need to pass the stream to the library
+        if stream is None:
+            if str(self.target).startswith("cuda") and torch.cuda.is_available():
+                stream = torch.cuda.current_stream().cuda_stream
+            else:
+                stream = 0
+
+        self._forward_from_prebuild_lib(*args, stream=stream)
+
+        if len(self.result_idx) == 1:
+            return args[self.result_idx[0]]
+        else:
+            return [args[i] for i in self.result_idx]
 
     def _convert_torch_func(self) -> Callable:
-        """Returns a PyTorch-compatible function wrapper for the kernel."""
-        def lambda_forward(*args, stream: int = -1):
-            if stream == -1:
-                return self.lib.call(self.kernels, *args)
-            else:
-                return self.lib.call(self.kernels, *args, stream=stream)
+        return self._wrap_forward_from_prebuild_lib
+    
+    @property
+    def prim_func(self) -> tir.PrimFunc:
+        """Returns the primary TIR function from the IR module."""
+        return retrieve_func_from_module(self.ir_module)
 
-        return lambda_forward
+    def __del__(self):
+        result = cuda.cuLibraryUnload(self.culib)[0]
+        if result != cuda.CUresult.CUDA_SUCCESS:
+            logger.warning(f"Failed to unload library: {self.libpath}")

@@ -132,7 +132,6 @@ KERNAL_LAUNCH_FUNC_PY = """
 \tconfig.blockDimY = {5}
 \tconfig.blockDimZ = {6}
 \tconfig.sharedMemBytes = {7}
-\tprint(stream)
 \tconfig.hStream = stream
 
 \targ_values = {8}
@@ -673,12 +672,10 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
     def update_lib_code(self, code: str):
         # Update the library code with the given code string
         self.lib_code = code
-        # Get the function names
-        function_names = self.function_names
 
         # Organize function information for code generation
         function_informations = {}
-        for function_name in function_names:
+        for function_name in self.function_names:
             # Do not update function with dispatch host function
             if (function_name not in self.block_info) or (function_name not in self.grid_info):
                 continue
@@ -972,4 +969,4 @@ class TLPyWrapper(TLWrapper):
             device_mod=self.device_mod,
             host_mod=self.host_mod,
             pass_configs=self.pass_configs)
-        return wrapper.lib_code, wrapper.host_func, wrapper.function_names
+        return wrapper.host_func, wrapper.function_names
