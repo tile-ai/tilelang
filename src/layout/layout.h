@@ -181,8 +181,9 @@ Fragment makeGemmVoltaFragmentA(const int block_m, const int block_n,
 Layout makeGemmVoltaABLayout(int stride, int continuous, bool is_a,
                              int kfactor);
 
-Layout makeFullBankSwizzleLayout(int stride, int continuous, int element_size);
-Layout makeHalfBankSwizzleLayout(int stride, int continuous, int element_size);
+Layout makeSwizzle32BLayout(int stride, int continuous, int element_size);
+Layout makeSwizzle64BLayout(int stride, int continuous, int element_size);
+Layout makeSwizzle128BLayout(int stride, int continuous, int element_size);
 
 namespace attr {
 // BlockAttr, Containing the layout for all the buffers in the block

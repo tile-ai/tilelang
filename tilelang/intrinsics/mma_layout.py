@@ -91,6 +91,22 @@ def shared_16x32_to_mma_32x16_smoothlayout(i, j):
 def shared_32x16_to_mma_32x16_smoothlayout(i, j):
     return (i * 2 + j // 16, j % 16)
 
+def xor2x2(i,j):
+    return (i+j)%2
+
+def xor4x4(i,j):
+    i0 = i%2
+    j0 = j%2
+    i1 = i//2
+    j1 = j//2
+    return 2*xor2x2(i1,j1)+xor2x2(i0,j0)
+    
+def xor8x8(i,j):
+    i0 = i%2
+    j0 = j%2
+    i1 = i//2
+    j1 = j//2
+    return 2*xor4x4(i1,j1)+xor2x2(i0,j0)
 
 def get_swizzle_layout(row_idx, col_idx, row_size, dtype: Union[DataType, str], swizzle_bytes=None):
     ana = arith.Analyzer()
