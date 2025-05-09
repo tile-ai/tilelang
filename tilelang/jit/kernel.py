@@ -269,7 +269,7 @@ class JITKernel(object):
     ) -> BaseKernelAdapter:
         target = self.target
         execution_backend = self.execution_backend
-
+        
         # Create an adapter based on the specified execution backend.
         if execution_backend == "dlpack":
             raise ValueError("DLPack backend is not supported for TileLang JIT.")
@@ -285,6 +285,16 @@ class JITKernel(object):
             )
         elif execution_backend == "cython":
             adapter = CythonKernelAdapter.from_database(
+                params=params,
+                result_idx=result_idx,
+                target=target,
+                func_or_mod=func_or_mod,
+                kernel_global_source=kernel_global_source,
+                kernel_lib_path=kernel_lib_path,
+                pass_configs=pass_configs,
+            )
+        elif execution_backend == "nvrtc":
+            adapter = NVRTCKernelAdapter.from_database(
                 params=params,
                 result_idx=result_idx,
                 target=target,

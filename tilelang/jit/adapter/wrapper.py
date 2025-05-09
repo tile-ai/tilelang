@@ -54,6 +54,8 @@ import torch
 import cuda.bindings.driver
 import ctypes
 
+_function_names = {}
+
 def call({}):
     {}
 """
@@ -606,7 +608,8 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             )
 
         # Wrap the kernel dispatch logic in an external C function
-        host_func = PREDEF_HOST_FUNC_PY.format(def_args, kernel_launch_code)
+        host_func = PREDEF_HOST_FUNC_PY.format(
+            repr(list(function_informations.keys())), def_args, kernel_launch_code)
         return host_func
         
     def generate_tma_descriptor_args(self, desc_name_map: Dict[str, str]) -> str:

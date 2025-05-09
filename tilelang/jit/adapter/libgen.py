@@ -139,8 +139,9 @@ class LibraryGenerator(object):
 class PyLibraryGenerator(LibraryGenerator):
     culib: Optional[cuda.CUlibrary] = None
     host_func: Optional[str] = None
+    pymodule_name: Optional[str] = None
     pymodule = None
-    
+
     def __init__(self, target: Target):
         super().__init__(target)
         
@@ -150,13 +151,21 @@ class PyLibraryGenerator(LibraryGenerator):
     def load_lib(self, lib_path: Optional[str] = None):
         if lib_path is None:
             lib_path = self.libpath
+            
         lib_dir = osp.dirname(lib_path)
         if lib_dir not in sys.path:
             sys.path.append(lib_dir)
+            
+        if self.pymodule_name is None:
+            for name in os.listdir(lib_dir):
+                if name.startswith("tilelang_lib_"):
+                    self.pymodule_name = name
+                    break
+
         self.pymodule = importlib.import_module(self.pymodule_name)
         result, self.culib = cuda.cuLibraryLoadFromFile(
-            bytes(self.libpath, "utf-8"), [], [], 0, [], [], 0)
-        assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to load library: {self.libpath}"
+            bytes(lib_path, "utf-8"), [], [], 0, [], [], 0)
+        assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to load library: {lib_path}"
 
     def compile_lib(self, timeout: float = None):
         target = self.target
@@ -197,7 +206,7 @@ class PyLibraryGenerator(LibraryGenerator):
             self.srcpath = src.name
             self.libpath = libpath
             
-            self.pymodule_name = str(uuid.uuid4())
+            self.pymodule_name = "tilelang_lib_" + str(uuid.uuid4())
             pymodule_path = osp.join(osp.dirname(src.name), self.pymodule_name)
             os.makedirs(pymodule_path, exist_ok=True)
             with open(osp.join(pymodule_path, "__init__.py"), "w") as f:

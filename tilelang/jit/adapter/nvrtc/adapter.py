@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 
 
 class NVRTCKernelAdapter(BaseKernelAdapter):
+    pymodule = None
+    kernels = {}
+    
     def __init__(
             self,
             params: List[KernelParam],
@@ -81,12 +84,10 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         self.lib_generator.update_host_func(self.host_func)
         self.lib_generator.compile_lib()
         self.lib_generator.load_lib()
-        self.libpath = self.lib_generator.libpath
-       
+        self.libpath = self.lib_generator.libpath       
+        self.pymodule = self.lib_generator.pymodule
+        self.pymodule_name = self.lib_generator.pymodule_name
         culib = self.lib_generator.culib
-        self.lib = self.lib_generator.pymodule
-
-        self.kernels = {}
         for name in self.function_names:
             result, self.kernels[name] = cuda.cuLibraryGetKernel(culib, bytes(name, "utf-8"))
             assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to get kernel: {name}"
@@ -133,9 +134,16 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
 
         adapter.target = Target.canon_target(determine_target(target))
         adapter.verbose = verbose
-        # adapter.lib_generator = LibraryGenerator(adapter.target)
-        # adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
-        # adapter.lib.init()
+        adapter.lib_generator = PyLibraryGenerator(adapter.target)
+        adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
+        adapter.pymodule = adapter.lib_generator.pymodule
+        adapter.pymodule_name = adapter.lib_generator.pymodule_name
+        adapter.function_names = adapter.pymodule._function_names
+
+        culib = adapter.lib_generator.culib
+        for name in adapter.function_names:
+            result, adapter.kernels[name] = cuda.cuLibraryGetKernel(culib, bytes(name, "utf-8"))
+            assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to get kernel: {name}"
 
         adapter._post_init()
         return adapter
@@ -165,7 +173,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
     def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):
         """Low-level function to call the compiled CUDA kernel.
         """
-        return self.lib.call(self.kernels, *args, stream=stream)
+        return self.pymodule.call(self.kernels, *args, stream=stream)
     
     def _wrap_forward_from_prebuild_lib(self,
                                         *ins: List[torch.Tensor],
