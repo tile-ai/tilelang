@@ -2600,6 +2600,21 @@ def isinf(x, span=None):
     return _tvm_op.isinf(x, span)
 
 
+def pow_of_int(x: PrimExpr, y: int) -> PrimExpr:
+    """Fast power operation than pow(float, float).
+    
+    Args:
+        x (PrimExpr): Base value
+        y (int): Exponent value
+    """
+    return call_intrin(
+        x.dtype,
+        tvm.tir.op.Op.get("tl.power_of_int"),
+        x,
+        y,
+    )
+
+
 def power(x, y, span=None):
     """x power y
 
@@ -2619,6 +2634,8 @@ def power(x, y, span=None):
     z : PrimExpr
         The result.
     """
+    if isinstance(y, (int, IntImm)):
+        return pow_of_int(x, y)
     return _tvm_op.power(x, y, span)
 
 
@@ -2641,6 +2658,8 @@ def pow(x, y, span=None):
     z : PrimExpr
         The result.
     """
+    if isinstance(y, (int, IntImm)):
+        return pow_of_int(x, y)
     return _tvm_op.pow(x, y, span)
 
 
