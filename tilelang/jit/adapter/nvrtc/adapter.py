@@ -19,6 +19,7 @@ from tilelang import tvm as tvm
 from tilelang.contrib.nvrtc import compile_cuda
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.wrapper import TLPyWrapper
+from tilelang.jit.adapter.libgen import PyLibraryGenerator
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.utils.target import determine_target
 
@@ -75,49 +76,71 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         self.wrapper.assign_device_module(device_mod)
         self.host_func, self.function_names = self.wrapper.wrap(kernel_global_source)
         
-        project_root = osp.join(osp.dirname(__file__), "../../..")
-        if "TL_TEMPLATE_PATH" in os.environ:
-            tl_template_path = os.environ["TL_TEMPLATE_PATH"]
-        else:
-            tl_template_path = osp.abspath(osp.join(project_root, "src"))
-            
-        if "TL_CUTLASS_PATH" in os.environ:
-            cutlass_path = os.environ["TL_CUTLASS_PATH"]
-        else:
-            cutlass_path = osp.abspath(
-                osp.join(project_root, "3rdparty/cutlass/include"))
-            
-        if "CUDA_HOME" in os.environ:
-            cuda_home = os.environ["CUDA_HOME"]
-        else:
-            cuda_home = "/usr/local/cuda"
+        self.lib_generator = PyLibraryGenerator(self.target)
+        self.lib_generator.update_lib_code(self.kernel_global_source)
+        self.lib_generator.update_host_func(self.host_func)
+        self.lib_generator.compile_lib()
+        self.lib_generator.load_lib()
+        self.libpath = self.lib_generator.libpath
+       
+        culib = self.lib_generator.culib
+        self.lib = self.lib_generator.pymodule
 
-        cubin_bytes = compile_cuda(self.kernel_global_source, 
-                                   target_format="cubin", 
-                                   options=[f"-I{tl_template_path}", f"-I{cutlass_path}", f"-I{cuda_home}/include"],
-                                   verbose=True)
-        lib = tempfile.NamedTemporaryFile(mode="wb", suffix=".cubin", delete=False)
-        lib.write(cubin_bytes)
-        lib.close()
-        self.libpath = lib.name
-        
-        host_dir = tempfile.mkdtemp()
-        sys.path.append(host_dir)
-        lib_name = str(uuid.uuid4())
-        os.makedirs(osp.join(host_dir, lib_name), exist_ok=True)
-        with open(osp.join(host_dir, lib_name, "__init__.py"), "w") as f:
-            f.write(self.host_func)
-        self.lib = importlib.import_module(lib_name)
-        
         self.kernels = {}
-        result, self.culib = cuda.cuLibraryLoadFromFile(bytes(self.libpath, "utf-8"), [], [], 0, [], [], 0)
-        assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to load library: {self.libpath}"
         for name in self.function_names:
-            result, self.kernels[name] = cuda.cuLibraryGetKernel(self.culib, bytes(name, "utf-8"))
+            result, self.kernels[name] = cuda.cuLibraryGetKernel(culib, bytes(name, "utf-8"))
             assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to get kernel: {name}"
         
         self._post_init()
-    
+        
+    @classmethod
+    def from_database(cls,
+                      params: List[KernelParam],
+                      result_idx: List[int],
+                      target: str,
+                      func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+                      kernel_global_source: str,
+                      kernel_lib_path: str,
+                      verbose: bool = False,
+                      pass_configs: Optional[Dict[str, Any]] = None):
+        adapter = cls.__new__(cls)
+        adapter.params = params
+        adapter.result_idx = adapter._legalize_result_idx(result_idx)
+        adapter.kernel_global_source = kernel_global_source
+        
+        if isinstance(func_or_mod, tir.PrimFunc):
+            adapter.ir_module = tvm.IRModule(
+                {func_or_mod.attrs["global_symbol"]: func_or_mod})
+        else:
+            adapter.ir_module = func_or_mod
+
+        # Cache parameter information during initialization
+        adapter.param_dtypes = [param.dtype for param in params]
+        adapter.param_shapes = []
+        for param in params:
+            native_shape = []
+            for dim in param.shape:
+                if isinstance(dim, tir.IntImm):
+                    native_shape.append(int(dim))
+                elif isinstance(dim, tir.Var):
+                    # Keep tir.Var for dynamic dimensions
+                    native_shape.append(dim)
+                else:
+                    native_shape.append(dim)
+            adapter.param_shapes.append(native_shape)
+
+        adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
+
+        adapter.target = Target.canon_target(determine_target(target))
+        adapter.verbose = verbose
+        # adapter.lib_generator = LibraryGenerator(adapter.target)
+        # adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
+        # adapter.lib.init()
+
+        adapter._post_init()
+        return adapter
+        
+        
     def _process_dynamic_symbolic(self):
         """Extract information about dynamic shapes from the TIR function.
         
@@ -214,8 +237,3 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
     def prim_func(self) -> tir.PrimFunc:
         """Returns the primary TIR function from the IR module."""
         return retrieve_func_from_module(self.ir_module)
-
-    def __del__(self):
-        result = cuda.cuLibraryUnload(self.culib)[0]
-        if result != cuda.CUresult.CUDA_SUCCESS:
-            logger.warning(f"Failed to unload library: {self.libpath}")
