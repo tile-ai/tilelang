@@ -24,7 +24,7 @@ PrimExpr power_of_int_op(PrimExpr args) {
   PrimExpr base = arg[0];
   PrimExpr exp = arg[1];
   String power_of_int_name =
-      "tl::power_of_int<" + std::to_string(exp.as<IntImmNode>()->value) + ">";
+      "tl::pow_of_int<" + std::to_string(exp.as<IntImmNode>()->value) + ">";
   return tir::Call(base.dtype(), tir::builtin::call_extern(),
                    {StringImm(power_of_int_name), base});
 }
