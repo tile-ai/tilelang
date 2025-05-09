@@ -290,7 +290,7 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
             dst_layout_fragment.as<Fragment>().get();
         if (src_layout && dst_layout) {
           ICHECK(src_layout->IsEqual(dst_layout, true))
-              << "Layout may conflict with ParallelOp for buffer " << buffer
+              << "Layout may conflict with ParallelOp for buffer " << buffer << " vs. " << source_buffer
               << "\nError body begin:\n"
               << GetRoot()->body << "\nError body end"
               << "\nLHS = " << src_layout->DebugOutput()
