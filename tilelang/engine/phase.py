@@ -6,12 +6,14 @@ import tilelang
 from tilelang.transform import PassContext
 from typing import Optional
 
+SUPPORTED_TMA_ARCHS = {"sm_90", "sm_90a"}
+
 
 def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
                                    target: Optional[Target] = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    if target.arch not in {"sm_90", "sm_90a"}:
+    if target.arch not in SUPPORTED_TMA_ARCHS:
         return False
     disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
     disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
@@ -20,7 +22,7 @@ def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
 
 
 def allow_fence_proxy(target: Optional[Target] = None) -> bool:
-    return target.arch in {"sm_90", "sm_90a"}
+    return target.arch in SUPPORTED_TMA_ARCHS
 
 
 def allow_vectorize(pass_ctx: Optional[PassContext] = None) -> bool:

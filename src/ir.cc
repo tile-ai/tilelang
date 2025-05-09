@@ -7,14 +7,12 @@
  *
  */
 
+#include "./transform/common/attr.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/script/ir_builder/tir/ir.h>
 
 namespace tvm {
 namespace tl {
-
-constexpr const char *tilelang_is_cpu_kernel_frame =
-    "tilelang.is_cpu_kernel_frame";
 
 using namespace script::ir_builder::tir;
 
@@ -207,11 +205,11 @@ KernelLaunchFrame KernelLaunch(Array<PrimExpr> grid_size,
   }
 
   if (attrs.defined()) {
-    auto empty_block = Block("root");
+    auto empty_block = Block(MainBlockName);
     empty_block->annotations = attrs;
     n->frames.push_back(empty_block);
   } else {
-    n->frames.push_back(Block("root"));
+    n->frames.push_back(Block(MainBlockName));
   }
 
   return KernelLaunchFrame(n);

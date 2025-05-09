@@ -1,24 +1,8 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership. The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
+// Copyright (c) Tile-AI Corporation.
+// Licensed under the MIT License.
 
 /*!
- * \file warp_specialized_pipeline.cc
+ * \file warp_specialized_rewriter.cc
  * \brief Warp specialized Pipeline for cuda GPU (sm90+)
  */
 
@@ -31,6 +15,7 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include "./common/collector.h"
 
 namespace tvm {
 namespace tl {
@@ -930,49 +915,6 @@ private:
   bool mbarrier_only_ = false;
   PipelineInfo pipeline_info_;
   friend class WarpSpecializedRewriter;
-};
-
-class ThreadTagChecker : public StmtExprVisitor {
-public:
-  static bool HasOnlyThreadIdxX(const PrimFunc &f) {
-    ThreadTagChecker checker;
-    checker(f->body);
-    return checker.is_valid_;
-  }
-
-private:
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
-      IterVar iter_var = Downcast<IterVar>(op->node);
-      String thread_tag = iter_var->thread_tag;
-      bool is_y_or_z =
-          thread_tag == "threadIdx.y" || thread_tag == "threadIdx.z";
-
-      if (!thread_tag.empty() && is_y_or_z && !is_one(iter_var->dom->extent)) {
-        is_valid_ = false;
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const ForNode *op) final {
-    if (op->kind == ForKind::kThreadBinding) {
-      ICHECK(op->thread_binding.defined());
-      String thread_tag = op->thread_binding.value()->thread_tag;
-      bool is_y_or_z =
-          thread_tag == "threadIdx.y" || thread_tag == "threadIdx.z";
-      if (!thread_tag.empty() && is_y_or_z) {
-        auto iter_var = Downcast<IterVar>(op->thread_binding);
-        if (iter_var.defined() && iter_var->dom.defined() &&
-            !is_one(iter_var->dom->extent)) {
-          is_valid_ = false;
-        }
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  bool is_valid_ = true;
 };
 
 class SetMaxNRegCollector : public StmtExprVisitor {

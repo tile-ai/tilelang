@@ -17,8 +17,8 @@ def per_token_cast_to_fp8(M, N, blk_m):
     fp8_max = 448.0
 
     @T.prim_func
-    def main(X: T.Tensor((M, N), dtype), X_fp8: T.Tensor((M, N), "e4m3_float8"), X_amax: T.Tensor(
-        (M, T.ceildiv(N, group_size)), dtype)):
+    def per_token_cast(X: T.Tensor((M, N), dtype), X_fp8: T.Tensor((M, N), "e4m3_float8"),
+                       X_amax: T.Tensor((M, T.ceildiv(N, group_size)), dtype)):
         with T.Kernel(T.ceildiv(M, blk_m), T.ceildiv(N, group_size), threads=128) as (bx, by):
             row = bx
             row_g_id = by
@@ -51,7 +51,7 @@ def per_token_cast_to_fp8(M, N, blk_m):
                 y_q_local_fp8, X_fp8[row * blk_m:(row + 1) * blk_m,
                                      row_g_id * group_size:(row_g_id + 1) * group_size])
 
-    return main
+    return per_token_cast
 
 
 def ceil_div(x: int, y: int) -> int:
@@ -81,7 +81,7 @@ def ref_program(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     return x_fp8, (x_amax / 448.0).view(m, -1)
 
 
-if __name__ == "__main__":
+def main():
     M, N, blk_m = 8192, 8192, 8
     program = per_token_cast_to_fp8(M, N, blk_m)
     kernel = tilelang.compile(
@@ -123,3 +123,7 @@ if __name__ == "__main__":
     x_fp8_triton, x_amax_triton = run_triton()
     latency = do_bench(run_triton)
     print("Triton: {:.2f} ms".format(latency))
+
+
+if __name__ == "__main__":
+    main()
