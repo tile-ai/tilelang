@@ -256,7 +256,8 @@ public:
 private:
   Stmt VisitStmt_(const BlockNode *op) {
     auto block = GetRef<Block>(op);
-    if (!has_create_list_of_mbarrier_ && op->name_hint == MainBlockName) {
+    if (!has_create_list_of_mbarrier_ && barrier_id_to_range_.size() > 0 &&
+        op->name_hint == MainBlockName) {
       ICHECK(false) << "Please declare create_list_of_mbarrier.";
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
