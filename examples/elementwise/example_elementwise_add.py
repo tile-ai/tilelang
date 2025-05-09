@@ -1,3 +1,5 @@
+# Copyright (c) Tile-AI Corporation.
+# Licensed under the MIT License.
 import argparse
 import itertools
 import torch
@@ -13,7 +15,7 @@ def ref_program(x, y):
 def elementwise_add(M, N, block_M, block_N, in_dtype, out_dtype, threads):
 
     @T.prim_func
-    def main(A: T.Tensor((M, N), in_dtype), B: T.Tensor((M, N), in_dtype), C: T.Tensor((M, N),
+    def elem_add(A: T.Tensor((M, N), in_dtype), B: T.Tensor((M, N), in_dtype), C: T.Tensor((M, N),
                                                                                        out_dtype)):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             start_x = bx * block_N
@@ -23,7 +25,7 @@ def elementwise_add(M, N, block_M, block_N, in_dtype, out_dtype, threads):
                 x = start_x + local_x
                 C[y, x] = A[y, x] + B[y, x]
 
-    return main
+    return elem_add
 
 
 def get_configs(M, N):
@@ -49,13 +51,12 @@ def get_best_config(M, N):
         )
     return autotuner.run(warmup=3, rep=20)
 
-
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--m", type=int, default=512)
     parser.add_argument("--n", type=int, default=1024)
     parser.add_argument("--use_autotune", action="store_true", default=False)
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
     M, N = args.m, args.n
 
     a = torch.randn(M, N, dtype=torch.float32, device="cuda")
@@ -72,3 +73,7 @@ if __name__ == "__main__":
 
     out = kernel(a, b)
     torch.testing.assert_close(out, ref_program(a, b), rtol=1e-2, atol=1e-2)
+
+
+if __name__ == "__main__":
+    main()

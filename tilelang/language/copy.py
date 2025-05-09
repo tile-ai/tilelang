@@ -85,7 +85,7 @@ def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: s
         v = region_extents[i]
         if v in tmp_extents:
             tmp_extents.remove(v)
-        elif v != 1:
+        elif isinstance(v, tir.IntImm) and v != 1:
             raise ValueError(
                 f"buffer {buffer_region.buffer} region_extents[{i}] = {v}, extents[{i}] = {extents[i]}"
             )

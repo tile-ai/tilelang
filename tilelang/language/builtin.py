@@ -294,3 +294,22 @@ def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, 
             The value to shuffle
     """
     return tir.call_extern(value.dtype, "__shfl_up_sync", 0xffffffff, value, offset)
+
+
+def sync_threads():
+    """Synchronize all threads in a warp.
+    """
+    return tir.op.tvm_storage_sync("shared")
+
+
+def sync_thread_partial(barrier_id: Union[int, PrimExpr, tir.Call]):
+    """Synchronize threads within a warp.
+
+    Args:
+        barrier_id: Optional[int, PrimExpr]
+            The memory barrier to synchronize
+
+    Returns:
+        tir.Call: A handle to the synchronization operation
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.sync_thread_partial"), barrier_id)
