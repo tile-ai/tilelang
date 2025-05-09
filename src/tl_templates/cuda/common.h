@@ -210,4 +210,14 @@ template <typename T> TL_DEVICE bool All(T *a, int size) {
   }
   return true;
 }
+
+// Pow of int
+template <int y = 1, typename T> TL_DEVICE T pow_of_int(T x) {
+  T result = x;
+  for (int i = 1; i < y; i++) {
+    result *= x;
+  }
+  return result;
+}
+
 } // namespace tl

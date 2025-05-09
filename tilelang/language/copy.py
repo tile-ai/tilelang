@@ -81,15 +81,22 @@ def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: s
     # If region_extents already contains all elements
     # of extents (in any order), pass directly
     tmp_extents = list(extents)
+    variable_extent_count = 0
     for i in range(len(region_extents)):
         v = region_extents[i]
+        if not isinstance(v, tir.IntImm):
+            variable_extent_count += 1
+            continue
+
         if v in tmp_extents:
             tmp_extents.remove(v)
         elif isinstance(v, tir.IntImm) and v != 1:
             raise ValueError(
                 f"buffer {buffer_region.buffer} region_extents[{i}] = {v}, extents[{i}] = {extents[i]}"
             )
-    if len(tmp_extents) > 0:
+
+    tmp_len = len(tmp_extents) - variable_extent_count
+    if tmp_len > 0:
         # Otherwise, align extents from the last dimension, region_extents
         # can only replace 1 with extents value, otherwise raise error
         for i in range(len(extents)):
