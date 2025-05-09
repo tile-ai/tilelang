@@ -2612,7 +2612,7 @@ def pow_of_int(x: PrimExpr, y: int) -> PrimExpr:
     """
     return call_intrin(
         x.dtype,
-        tvm.tir.op.Op.get("tl.power_of_int"),
+        tvm.tir.op.Op.get("tl.pow_of_int"),
         x,
         y,
     )
