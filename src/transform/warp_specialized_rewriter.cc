@@ -1,24 +1,8 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership. The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
+// Copyright (c) Tile-AI Corporation.
+// Licensed under the MIT License.
 
 /*!
- * \file warp_specialized_pipeline.cc
+ * \file warp_specialized_rewriter.cc
  * \brief Warp specialized Pipeline for cuda GPU (sm90+)
  */
 
@@ -31,6 +15,7 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include "./common/collector.h"
 
 namespace tvm {
 namespace tl {
@@ -932,49 +917,6 @@ private:
   friend class WarpSpecializedRewriter;
 };
 
-class ThreadTagChecker : public StmtExprVisitor {
-public:
-  static bool HasOnlyThreadIdxX(const PrimFunc &f) {
-    ThreadTagChecker checker;
-    checker(f->body);
-    return checker.is_valid_;
-  }
-
-private:
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
-      IterVar iter_var = Downcast<IterVar>(op->node);
-      String thread_tag = iter_var->thread_tag;
-      bool is_y_or_z =
-          thread_tag == "threadIdx.y" || thread_tag == "threadIdx.z";
-
-      if (!thread_tag.empty() && is_y_or_z && !is_one(iter_var->dom->extent)) {
-        is_valid_ = false;
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const ForNode *op) final {
-    if (op->kind == ForKind::kThreadBinding) {
-      ICHECK(op->thread_binding.defined());
-      String thread_tag = op->thread_binding.value()->thread_tag;
-      bool is_y_or_z =
-          thread_tag == "threadIdx.y" || thread_tag == "threadIdx.z";
-      if (!thread_tag.empty() && is_y_or_z) {
-        auto iter_var = Downcast<IterVar>(op->thread_binding);
-        if (iter_var.defined() && iter_var->dom.defined() &&
-            !is_one(iter_var->dom->extent)) {
-          is_valid_ = false;
-        }
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  bool is_valid_ = true;
-};
-
 class SetMaxNRegCollector : public StmtExprVisitor {
 public:
   static Array<IntImm> Collect(const PrimFunc &f) {
@@ -1019,7 +961,7 @@ public:
     // Check if function only uses threadIdx.x before proceeding
     if (!ThreadTagChecker::HasOnlyThreadIdxX(f)) {
       LOG(WARNING) << "WarpSpecialize will be disabled because the program "
-                      "uses thread tags other than threadIdx.x\n"
+                      "uses thread tags other than threadIdx.x."
                    << "If you want to use warp specialization, please refactor "
                       "your program to use threadIdx.x only";
       // Return original function unchanged if other thread tags are found
@@ -1190,12 +1132,14 @@ public:
   static bool Detect(Stmt stmt, bool skip_thread_partition = false) {
     WarpSpecializedDetector detector;
     detector.VisitStmt(stmt);
-    return detector.has_tma_op_ && detector.has_mbarrier_op_;
+    return detector.has_warp_specialization_ ||
+           (detector.has_tma_op_ && detector.has_mbarrier_op_);
   }
 
   WarpSpecializedDetector() {
     has_tma_op_ = false;
     has_mbarrier_op_ = false;
+    has_warp_specialization_ = false;
   }
 
 private:
@@ -1219,8 +1163,58 @@ private:
     IRVisitorWithAnalyzer::VisitExpr_(op);
   }
 
+  void VisitStmt_(const IfThenElseNode *op) final {
+    // do not visit the body of the if-then-else statement
+    // because we only care about the condition
+    auto cond = op->condition;
+    // assert cond is a binary expression
+    PostOrderVisit(cond, [this](const ObjectRef &node) {
+      bool is_cmp_op = false;
+      if (const auto *lt = node.as<LTNode>()) {
+        is_cmp_op = true;
+      } else if (const auto *le = node.as<LENode>()) {
+        is_cmp_op = true;
+      } else if (const auto *gt = node.as<GTNode>()) {
+        is_cmp_op = true;
+      } else if (const auto *ge = node.as<GENode>()) {
+        is_cmp_op = true;
+      }
+
+      if (is_cmp_op) {
+        bool has_thread_var = false;
+        bool has_warp_group_size = false;
+        // check if has thread_var_ in lt->a or lt->b
+        PostOrderVisit(node, [this, &has_thread_var,
+                              &has_warp_group_size](const ObjectRef &node_) {
+          if (node_.as<VarNode>() == thread_var_->var.get()) {
+            has_thread_var = true;
+          } else if (const auto *imm = node_.as<IntImmNode>()) {
+            // 128 is the warp group size of nvidia gpus
+            has_warp_group_size = imm->value % 128 == 0;
+          }
+        });
+        if (has_thread_var && has_warp_group_size) {
+          has_warp_specialization_ = true;
+        }
+      }
+    });
+  }
+
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tir::attr::thread_extent) {
+      IterVar iv = Downcast<IterVar>(op->node);
+      if (iv->thread_tag == "threadIdx.x") {
+        ICHECK(iv->dom->extent.as<IntImmNode>());
+        thread_var_ = iv;
+      }
+    }
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
   bool has_tma_op_{false};
+  IterVar thread_var_;
   bool has_mbarrier_op_{false};
+  bool has_warp_specialization_{false};
 };
 
 using namespace tir::transform;

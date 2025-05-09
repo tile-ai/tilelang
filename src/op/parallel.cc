@@ -146,7 +146,6 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   if (level == InferLevel::kStrict)
     return {};
 
-  auto block_size = T.thread_bounds->extent;
   // Step 1: try to infer loop's partition from a source fragment
   Buffer source_buffer, read_source_buffer;
   for (const auto &[buffer, indices] : indice_map_) {
@@ -227,12 +226,26 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       }
       loop_layout_ = PlanLoopPartition(root_, vector_size, T.thread_bounds);
     }
-    PrimExpr loop_thread_extent = loop_layout_->ThreadExtent();
-    if (!analyzer_.CanProveEqual(loop_thread_extent, block_size))
-      AddPredicate(
-          LT(InputPlaceholder(0) - T.thread_bounds->min, loop_thread_extent));
   } else {
     return {};
+  }
+
+  PrimExpr loop_thread_extent = loop_layout_->ThreadExtent();
+
+  auto block_size = T.thread_bounds->extent;
+  if (loop_layout_.defined()) {
+    if (loop_layout_->ThreadRange().defined()) {
+      auto thread_range = loop_layout_->ThreadRange();
+      block_size = thread_range->extent;
+      AddPredicate(GE(InputPlaceholder(0), thread_range->min));
+      AddPredicate(
+          LT(InputPlaceholder(0), thread_range->min + thread_range->extent));
+    }
+  }
+
+  if (!analyzer_.CanProveEqual(loop_thread_extent, block_size)) {
+    AddPredicate(
+        LT(InputPlaceholder(0), loop_thread_extent + T.thread_bounds->min));
   }
 
   // Step 2: Check that the loop's partition can correctly align with all source

@@ -118,6 +118,16 @@ For Copy::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   for (const auto &iv : loop_vars)
     analyzer->Bind(iv->var, iv->dom);
 
+  ICHECK(loop_vars.size() <= src_range.size())
+      << "loop_vars.size() = " << loop_vars.size()
+      << ", src_range.size() = " << src_range.size() << ", src = " << src->name
+      << ", dst = " << dst->name;
+
+  ICHECK(loop_vars.size() <= dst_range.size())
+      << "loop_vars.size() = " << loop_vars.size()
+      << ", dst_range.size() = " << dst_range.size() << ", src = " << src->name
+      << ", dst = " << dst->name;
+
   Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
 
