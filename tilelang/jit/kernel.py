@@ -355,7 +355,7 @@ class JITKernel(object):
         str
             The source code of the compiled kernel function.
         """
-        if self.execution_backend in {"ctypes", "cython"}:
+        if self.execution_backend in {"ctypes", "cython", "nvrtc"}:
             return self.adapter.get_kernel_source()
         return self.artifact.kernel_source
 
