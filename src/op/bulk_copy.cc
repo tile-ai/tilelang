@@ -198,16 +198,20 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
                                              *stride, *continuous,
                                              shared_tensor->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
-    } else if (StructuralEqual()(shared_layout, makeSwizzle32BLayout(
-                                             *stride, *continuous,
-                                             shared_tensor->dtype.bits()))) {
+    } else if (StructuralEqual()(
+                   shared_layout,
+                   makeSwizzle32BLayout(*stride, *continuous,
+                                        shared_tensor->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
-    } else if (StructuralEqual()(shared_layout, makeSwizzle64BLayout(
-                                             *stride, *continuous,
-                                             shared_tensor->dtype.bits()))) {
+    } else if (StructuralEqual()(
+                   shared_layout,
+                   makeSwizzle64BLayout(*stride, *continuous,
+                                        shared_tensor->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
-    } else if (StructuralEqual()(shared_layout, makeSwizzle128BLayout(*stride, *continuous,
-                                             shared_tensor->dtype.bits()))) {
+    } else if (StructuralEqual()(
+                   shared_layout,
+                   makeSwizzle128BLayout(*stride, *continuous,
+                                         shared_tensor->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
     } else {
       ICHECK(0) << "Cannot detect TMA layout.";
@@ -357,17 +361,17 @@ Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
     auto stride = as_const_int(shared_layout->InputShape()[0]);
     auto continuous = as_const_int(shared_layout->InputShape()[1]);
     ICHECK(stride != nullptr && continuous != nullptr);
-    if (StructuralEqual()(shared_layout, makeSwizzle32BLayout(
-                                                    *stride, *continuous,
-                                                    dst->dtype.bits()))) {
+    if (StructuralEqual()(
+            shared_layout,
+            makeSwizzle32BLayout(*stride, *continuous, dst->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
-    } else if (StructuralEqual()(shared_layout, makeSwizzle64BLayout(
-                                                    *stride, *continuous,
-                                                    dst->dtype.bits()))) {
+    } else if (StructuralEqual()(shared_layout,
+                                 makeSwizzle64BLayout(*stride, *continuous,
+                                                      dst->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
-    } else if (StructuralEqual()(shared_layout, makeSwizzle128BLayout(
-                                                    *stride, *continuous,
-                                                    dst->dtype.bits()))) {
+    } else if (StructuralEqual()(shared_layout,
+                                 makeSwizzle128BLayout(*stride, *continuous,
+                                                       dst->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
     } else {
       ICHECK(0) << "Cannot detect TMA layout.";
