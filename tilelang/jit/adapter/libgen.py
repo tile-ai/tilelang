@@ -141,9 +141,9 @@ class LibraryGenerator(object):
 
 
 class PyLibraryGenerator(LibraryGenerator):
-    culib: Optional[cuda.CUlibrary] = None
     host_func: Optional[str] = None
     pymodule_name: Optional[str] = None
+    culib = None
     pymodule = None
 
     def __init__(self, target: Target):
