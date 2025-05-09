@@ -1,13 +1,7 @@
 # Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
 
-import importlib
 import logging
-import os
-import os.path as osp
-import sys
-import tempfile
-import uuid
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import cuda.bindings.driver as cuda
@@ -16,7 +10,6 @@ from tvm import tir
 from tvm.target import Target
 
 from tilelang import tvm as tvm
-from tilelang.contrib.nvrtc import compile_cuda
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.wrapper import TLPyWrapper
 from tilelang.jit.adapter.libgen import PyLibraryGenerator
@@ -31,28 +24,27 @@ logger = logging.getLogger(__name__)
 class NVRTCKernelAdapter(BaseKernelAdapter):
     pymodule = None
     kernels = {}
-    
-    def __init__(
-            self,
-            params: List[KernelParam],
-            result_idx: List[int],
-            target: Union[str, Target],
-            func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-            host_mod: Optional[tvm.IRModule] = None,
-            device_mod: Optional[tvm.IRModule] = None,
-            kernel_global_source: Optional[str] = None,
-            verbose: bool = False,
-            pass_configs: Optional[Dict[str, Any]] = None):
-        
+
+    def __init__(self,
+                 params: List[KernelParam],
+                 result_idx: List[int],
+                 target: Union[str, Target],
+                 func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+                 host_mod: Optional[tvm.IRModule] = None,
+                 device_mod: Optional[tvm.IRModule] = None,
+                 kernel_global_source: Optional[str] = None,
+                 verbose: bool = False,
+                 pass_configs: Optional[Dict[str, Any]] = None):
+
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
         self.kernel_global_source = kernel_global_source
-        
+
         if isinstance(func_or_mod, tir.PrimFunc):
             self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
         else:
             self.ir_module = func_or_mod
-            
+
         # Cache parameter information during initialization
         self.param_dtypes = [param.dtype for param in params]
         self.param_shapes = []
@@ -67,9 +59,9 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                 else:
                     native_shape.append(dim)
             self.param_shapes.append(native_shape)
-        
+
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
-        
+
         self.target = Target.canon_target(determine_target(target))
         self.verbose = verbose
         self.wrapper = TLPyWrapper(self.target)
@@ -78,22 +70,22 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         self.wrapper.assign_host_module(host_mod)
         self.wrapper.assign_device_module(device_mod)
         self.host_func, self.function_names = self.wrapper.wrap(kernel_global_source)
-        
+
         self.lib_generator = PyLibraryGenerator(self.target)
         self.lib_generator.update_lib_code(self.kernel_global_source)
         self.lib_generator.update_host_func(self.host_func)
         self.lib_generator.compile_lib()
         self.lib_generator.load_lib()
-        self.libpath = self.lib_generator.libpath       
+        self.libpath = self.lib_generator.libpath
         self.pymodule = self.lib_generator.pymodule
         self.pymodule_name = self.lib_generator.pymodule_name
         culib = self.lib_generator.culib
         for name in self.function_names:
             result, self.kernels[name] = cuda.cuLibraryGetKernel(culib, bytes(name, "utf-8"))
             assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to get kernel: {name}"
-        
+
         self._post_init()
-        
+
     @classmethod
     def from_database(cls,
                       params: List[KernelParam],
@@ -108,10 +100,9 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
         adapter.kernel_global_source = kernel_global_source
-        
+
         if isinstance(func_or_mod, tir.PrimFunc):
-            adapter.ir_module = tvm.IRModule(
-                {func_or_mod.attrs["global_symbol"]: func_or_mod})
+            adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
         else:
             adapter.ir_module = func_or_mod
 
@@ -147,8 +138,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
 
         adapter._post_init()
         return adapter
-        
-        
+
     def _process_dynamic_symbolic(self):
         """Extract information about dynamic shapes from the TIR function.
         
@@ -166,15 +156,14 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                     dynamic_symbolic_map[shape] = (i, j)
         return dynamic_symbolic_map
 
-        
     def get_kernel_source(self):
         return self.kernel_global_source
-    
+
     def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):
         """Low-level function to call the compiled CUDA kernel.
         """
         return self.pymodule.call(self.kernels, *args, stream=stream)
-    
+
     def _wrap_forward_from_prebuild_lib(self,
                                         *ins: List[torch.Tensor],
                                         stream: Optional[int] = None):
@@ -212,8 +201,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                         shape.append(ins[ref_tensor_idx].shape[ref_shape_idx])
                     else:  # Already converted to Python int during initialization
                         shape.append(s)
-                device = ins[0].device if len(
-                    ins) > 0 else torch.cuda.current_device()
+                device = ins[0].device if len(ins) > 0 else torch.cuda.current_device()
                 tensor = torch.empty(*shape, dtype=dtype, device=device)
             else:
                 tensor = ins[ins_idx]
@@ -240,7 +228,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
 
     def _convert_torch_func(self) -> Callable:
         return self._wrap_forward_from_prebuild_lib
-    
+
     @property
     def prim_func(self) -> tir.PrimFunc:
         """Returns the primary TIR function from the IR module."""

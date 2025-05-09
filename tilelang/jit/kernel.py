@@ -269,7 +269,7 @@ class JITKernel(object):
     ) -> BaseKernelAdapter:
         target = self.target
         execution_backend = self.execution_backend
-        
+
         # Create an adapter based on the specified execution backend.
         if execution_backend == "dlpack":
             raise ValueError("DLPack backend is not supported for TileLang JIT.")

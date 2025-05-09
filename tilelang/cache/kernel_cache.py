@@ -70,8 +70,7 @@ class KernelCache:
         self,
         func: Callable,
         out_idx: List[int],
-        execution_backend: Literal["dlpack",
-                                   "ctypes", "cython", "nvrtc"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         args=None,
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
@@ -117,8 +116,7 @@ class KernelCache:
         *args,
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
-        execution_backend: Literal["dlpack",
-                                   "ctypes", "cython", "nvrtc"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         verbose: bool = False,
         pass_configs: dict = None,
     ) -> JITKernel:
@@ -179,8 +177,7 @@ class KernelCache:
             pass_configs=pass_configs,
         )
         if execution_backend == "dlpack":
-            self.logger.warning(
-                "DLPack backend does not support cache saving to disk.")
+            self.logger.warning("DLPack backend does not support cache saving to disk.")
         else:
             with self._lock:  # enter critical section again to check and update disk cache
                 disk_kernel = self._load_kernel_from_disk(
@@ -264,8 +261,7 @@ class KernelCache:
             with open(wrapped_kernel_path, "w") as f:
                 f.write(kernel.adapter.get_kernel_source())
         except Exception as e:
-            self.logger.error(
-                f"Error saving wrapped kernel source code to disk: {e}")
+            self.logger.error(f"Error saving wrapped kernel source code to disk: {e}")
 
         # Save kernel library
         try:
@@ -277,8 +273,9 @@ class KernelCache:
             shutil.copy(src_lib_path, kernel_lib_path)
             if self.execution_backend == "nvrtc":
                 kernel_pymodule_name = kernel.adapter.pymodule_name
-                shutil.copytree(os.path.join(os.path.dirname(
-                    src_lib_path), kernel_pymodule_name), os.path.join(cache_path, kernel_pymodule_name))
+                shutil.copytree(
+                    os.path.join(os.path.dirname(src_lib_path), kernel_pymodule_name),
+                    os.path.join(cache_path, kernel_pymodule_name))
         except Exception as e:
             self.logger.error(f"Error saving kernel library to disk: {e}")
 
@@ -296,8 +293,7 @@ class KernelCache:
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
         out_idx: List[int] = None,
-        execution_backend: Literal["dlpack",
-                                   "ctypes", "cython", "nvrtc"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         pass_configs: dict = None,
         func: Callable = None,
     ) -> JITKernel:
@@ -328,8 +324,7 @@ class KernelCache:
             with open(wrapped_kernel_path, "r") as f:
                 kernel_global_source = f.read()
         except Exception as e:
-            self.logger.error(
-                f"Error loading wrapped kernel source code from disk: {e}")
+            self.logger.error(f"Error loading wrapped kernel source code from disk: {e}")
 
         if self.execution_backend == "nvrtc":
             kernel_lib_path = os.path.join(cache_path, KERNEL_CUBIN_PATH)
@@ -342,8 +337,7 @@ class KernelCache:
             with open(params_path, "rb") as f:
                 kernel_params = cloudpickle.load(f)
         except Exception as e:
-            self.logger.error(
-                f"Error loading kernel parameters from disk: {e}")
+            self.logger.error(f"Error loading kernel parameters from disk: {e}")
 
         if kernel_global_source and kernel_params:
             return JITKernel.from_database(

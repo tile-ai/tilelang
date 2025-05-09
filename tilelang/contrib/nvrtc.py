@@ -1,10 +1,8 @@
 import cuda.bindings.nvrtc as nvrtc
 from typing import Literal, Union, List, Optional, Tuple
-import os
-import tvm
 from tvm.target import Target
-from tvm.contrib import utils
 from .nvcc import get_target_compute_version
+
 
 def get_nvrtc_version() -> Tuple[int, int]:
     result, major, minor = nvrtc.nvrtcVersion()
@@ -71,15 +69,11 @@ def compile_cuda(code: str,
 
     code = "#include <tl_templates/cuda/nvrtc_std.h>\n" + code
     code_bytes = bytes(code, "utf-8")
-    result, program = nvrtc.nvrtcCreateProgram(
-        code_bytes, bytes(file_name, "utf-8"), 0, [], [])
+    result, program = nvrtc.nvrtcCreateProgram(code_bytes, bytes(file_name, "utf-8"), 0, [], [])
     assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to create program: {result}"
 
-    options_bytes = [
-        bytes(flag, "utf-8") for flag in final_options
-    ]
-    compile_result = nvrtc.nvrtcCompileProgram(
-        program, len(options_bytes), options_bytes)[0]
+    options_bytes = [bytes(flag, "utf-8") for flag in final_options]
+    compile_result = nvrtc.nvrtcCompileProgram(program, len(options_bytes), options_bytes)[0]
 
     if compile_result != nvrtc.nvrtcResult.NVRTC_SUCCESS:
         msg = f"{code}\n" \
@@ -110,7 +104,7 @@ def compile_cuda(code: str,
         assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get PTX: {result}"
 
     # Destroy handler
-    assert nvrtc.nvrtcDestroyProgram(program)[
-        0] == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to destroy program: {result}"
+    assert nvrtc.nvrtcDestroyProgram(
+        program)[0] == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to destroy program: {result}"
 
     return result_bytes

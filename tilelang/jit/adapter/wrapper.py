@@ -205,7 +205,7 @@ class TLCUDASourceWrapper(object):
     def is_tma_descriptor_arg(self, arg_name: str) -> bool:
         return arg_name in self.prim_func.buffer_map
 
-    def create_dispatch_func(self, code, function_informations):        
+    def create_dispatch_func(self, code, function_informations):
         # Extract the set of dynamic symbolic names used in the primary function
         dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
 
@@ -476,12 +476,13 @@ class TLCUDASourceWrapper(object):
                 if "tir.is_global_func" in attr and attr["tir.is_global_func"]:
                     return function
             raise ValueError("Cannot find primary function in the module.")
-        
+
+
 class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
     """
     A wrapper class for the TileLang NVRTC backend.
     """
-    
+
     _TYPE_MAP = {
         "float32": "ctypes.c_float",
         "float16": "ctypes.c_uint16",
@@ -508,13 +509,12 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                  host_mod: Optional[IRModule] = None,
                  pass_configs: Optional[Dict[str, Any]] = None):
         super().__init__(scheduled_ir_module, source, target, device_mod, host_mod, pass_configs)
-        
+
     def create_dispatch_func(self, code, function_informations):
         # Extract the set of dynamic symbolic names used in the primary function
         dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
 
-        function_args = [
-            {"name": "kernels", "type": "Dict[str, cuda.bindings.driver.CUkernel]"}]
+        function_args = [{"name": "kernels", "type": "Dict[str, cuda.bindings.driver.CUkernel]"}]
         # Collect function arguments based on primary function's parameters and buffer mappings
         for param in self.prim_func.params:
             if param in self.prim_func.buffer_map:
@@ -524,8 +524,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                     "type": "ctypes.c_void_p",
                 })
             elif isinstance(param, tvm.tir.Var):
-                function_args.append(
-                    {"name": param.name, "type": self._TYPE_MAP[param.dtype]})
+                function_args.append({"name": param.name, "type": self._TYPE_MAP[param.dtype]})
             else:
                 raise ValueError(
                     f"Parameter {param} is not in the buffer map of the primary function.")
@@ -537,10 +536,9 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         function_args.append(self.get_stream_type())
 
         # Format the function arguments for declaration
-        def_args = ", ".join(
-            [f"{arg['name']}" for arg in function_args])
+        def_args = ", ".join([f"{arg['name']}" for arg in function_args])
 
-        def func_call_args(s, function_args, desc_name_map: Optional[Dict[str, str]] = None):            
+        def func_call_args(s, function_args, desc_name_map: Optional[Dict[str, str]] = None):
             # Extract the function call arguments matching the function definition
             def maybe_desc(name: str, matches: List[str], i: int):
                 match = matches[i]
@@ -561,7 +559,9 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             for i, match in enumerate(matches):
                 for arg in function_args:
                     if arg["name"] == match:
-                        call_args.append((f"{match}.data_ptr()" if arg["type"] == "ctypes.c_void_p" else match, arg["type"]))
+                        call_args.append(
+                            (f"{match}.data_ptr()" if arg["type"] == "ctypes.c_void_p" else match,
+                             arg["type"]))
                     elif maybe_desc(arg["name"], matches, i):
                         call_args.append((match, "None"))
             return call_args
@@ -593,25 +593,22 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             call_args = func_call_args(declaration, function_args, desc_name_map)
             for arg_name, arg_type in call_args:
                 if arg_type == "ctypes.c_void_p":
-                    device_index = f"{arg_name.replace(".data_ptr()", "")}.device.index"
+                    device_index = f"{arg_name.replace('.data_ptr()', '')}.device.index"
                     break
             arg_names = ", ".join([arg[0] for arg in call_args])
             arg_types = ", ".join([arg[1] for arg in call_args])
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             kernel_launch_code += self.generate_tma_descriptor_args(
                 desc_name_map) + KERNAL_LAUNCH_FUNC_PY.format(
-                function_name, legalize(grid_info[0]), legalize(
-                    grid_info[1]), legalize(grid_info[2]),
-                legalize(block_info[0]), legalize(
-                    block_info[1]), legalize(block_info[2]),
-                smem_str, arg_names, arg_types, device_index
-            )
+                    function_name, legalize(grid_info[0]), legalize(grid_info[1]),
+                    legalize(grid_info[2]), legalize(block_info[0]), legalize(block_info[1]),
+                    legalize(block_info[2]), smem_str, arg_names, arg_types, device_index)
 
         # Wrap the kernel dispatch logic in an external C function
         host_func = PREDEF_HOST_FUNC_PY.format(
             repr(list(function_informations.keys())), def_args, kernel_launch_code)
         return host_func
-        
+
     def generate_tma_descriptor_args(self, desc_name_map: Dict[str, str]) -> str:
         tma_descripter_init = ""
         if self.tma_descriptor_args is None:
@@ -630,8 +627,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             tensor_rank = int(tensor_rank)
             # Validate tensor_rank
             if not isinstance(tensor_rank, int) or tensor_rank <= 0:
-                raise ValueError(
-                    f"Invalid tensor_rank: {tensor_rank}. Must be a positive integer")
+                raise ValueError(f"Invalid tensor_rank: {tensor_rank}. Must be a positive integer")
 
             # Calculate required length for remaining_args
             # 4 groups of tensor_rank size + 4 parameters
@@ -660,18 +656,15 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                     "Failed to unpack the final 4 TMA parameters (interleave, swizzle, l2Promotion, oobFill)"
                 ) from e
 
-            tma_descripter_init += TMA_DESC_INIT_FUNC_PY.format(handle_name, dtype, tensor_rank, globalAddress,
-                                                                ", ".join(
-                                                                    map(lambda x: f"cuda.bindings.driver.cuuint64_t({x})", global_dim)),
-                                                                ", ".join(
-                                                                    map(lambda x: f"cuda.bindings.driver.cuuint64_t({x})", global_stride)),
-                                                                ", ".join(
-                                                                    map(lambda x: f"cuda.bindings.driver.cuuint32_t({x})", box_dim)),
-                                                                ", ".join(
-                                                                    map(lambda x: f"cuda.bindings.driver.cuuint32_t({x})", element_strides)),
-                                                                interleave, swizzle, l2Promotion, oobFill)
+            tma_descripter_init += TMA_DESC_INIT_FUNC_PY.format(
+                handle_name, dtype, tensor_rank, globalAddress,
+                ", ".join(map(lambda x: f"cuda.bindings.driver.cuuint64_t({x})", global_dim)),
+                ", ".join(map(lambda x: f"cuda.bindings.driver.cuuint64_t({x})", global_stride)),
+                ", ".join(map(lambda x: f"cuda.bindings.driver.cuuint32_t({x})", box_dim)),
+                ", ".join(map(lambda x: f"cuda.bindings.driver.cuuint32_t({x})",
+                              element_strides)), interleave, swizzle, l2Promotion, oobFill)
         return tma_descripter_init
-    
+
     def update_lib_code(self, code: str):
         # Update the library code with the given code string
         self.lib_code = code
@@ -693,7 +686,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         # Create the host function wrapper for the CUDA kernel
         self.host_func = self.create_dispatch_func(code, function_informations)
         return self.lib_code
-    
+
     def get_stream_type(self) -> Dict[str, str]:
         return {"name": "stream=torch.cuda.current_stream().cuda_stream", "type": "int"}
 
@@ -953,12 +946,13 @@ class TLWrapper(BaseWrapper):
             host_mod=self.host_mod,
             pass_configs=self.pass_configs)
         return wrapper.lib_code
-    
+
 
 class TLPyWrapper(TLWrapper):
+
     def __init__(self, target: Target):
         super().__init__(target)
-    
+
     def wrap(self, c_source: str):
         # assert self.scheduled_ir_module is not None, "Please assign optimized module first."
         if is_cuda_target(self.target):

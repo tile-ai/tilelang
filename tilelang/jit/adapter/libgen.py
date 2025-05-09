@@ -144,18 +144,18 @@ class PyLibraryGenerator(LibraryGenerator):
 
     def __init__(self, target: Target):
         super().__init__(target)
-        
+
     def update_host_func(self, host_func: str):
         self.host_func = host_func
-        
+
     def load_lib(self, lib_path: Optional[str] = None):
         if lib_path is None:
             lib_path = self.libpath
-            
+
         lib_dir = osp.dirname(lib_path)
         if lib_dir not in sys.path:
             sys.path.append(lib_dir)
-            
+
         if self.pymodule_name is None:
             for name in os.listdir(lib_dir):
                 if name.startswith("tilelang_lib_"):
@@ -170,42 +170,37 @@ class PyLibraryGenerator(LibraryGenerator):
     def compile_lib(self, timeout: float = None):
         target = self.target
         if is_cuda_target(target):
-            from tilelang.env import (CUDA_HOME, CUTLASS_INCLUDE_DIR,
-                                      TILELANG_TEMPLATE_PATH)
+            from tilelang.env import (CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH)
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
             libpath = src.name.replace(".cu", ".cubin")
-            
+
             project_root = osp.join(osp.dirname(__file__), "..", "..")
             if CUTLASS_INCLUDE_DIR is None:
-                cutlass_path = osp.abspath(
-                    osp.join(project_root, "3rdparty/cutlass/include"))
+                cutlass_path = osp.abspath(osp.join(project_root, "3rdparty/cutlass/include"))
             else:
                 cutlass_path = CUTLASS_INCLUDE_DIR
-            
+
             if TILELANG_TEMPLATE_PATH is None:
-                tl_template_path = osp.abspath(
-                    osp.join(project_root, "src"))
+                tl_template_path = osp.abspath(osp.join(project_root, "src"))
             else:
                 tl_template_path = TILELANG_TEMPLATE_PATH
-            
-            if CUDA_HOME is None:
-                cuda_home = "/usr/local/cuda"
-            else:
-                cuda_home = CUDA_HOME
-                
-            cubin_bytes = compile_cuda(self.lib_code, 
-                                       target_format="cubin", 
-                                       options=[f"-I{tl_template_path}", f"-I{cutlass_path}", f"-I{cuda_home}/include"],
-                                       verbose=True)
+
+            cuda_home = "/usr/local/cuda" if CUDA_HOME is None else CUDA_HOME
+
+            cubin_bytes = compile_cuda(
+                self.lib_code,
+                target_format="cubin",
+                options=[f"-I{tl_template_path}", f"-I{cutlass_path}", f"-I{cuda_home}/include"],
+                verbose=True)
             with open(libpath, "wb") as f:
                 f.write(cubin_bytes)
-                
+
             src.write(self.lib_code)
             src.flush()
 
             self.srcpath = src.name
             self.libpath = libpath
-            
+
             self.pymodule_name = "tilelang_lib_" + str(uuid.uuid4())
             pymodule_path = osp.join(osp.dirname(src.name), self.pymodule_name)
             os.makedirs(pymodule_path, exist_ok=True)
