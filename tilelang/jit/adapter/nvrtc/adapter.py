@@ -4,7 +4,6 @@
 import logging
 from typing import Any, Callable, Dict, List, Optional, Union
 
-import cuda.bindings.driver as cuda
 import torch
 from tvm import tir
 from tvm.target import Target
@@ -19,6 +18,11 @@ from tilelang.utils.target import determine_target
 from ..base import BaseKernelAdapter
 
 logger = logging.getLogger(__name__)
+
+try:
+    import cuda.bindings.driver as cuda
+except ImportError:
+    logger.warning("cuda-python is not available, nvrtc backend will not work")
 
 
 class NVRTCKernelAdapter(BaseKernelAdapter):

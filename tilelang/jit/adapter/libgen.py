@@ -26,7 +26,7 @@ try:
     import cuda.bindings.driver as cuda
     from tilelang.contrib.nvrtc import compile_cuda
 except ImportError:
-    logger.warning("nvrtc backend is not available, please install cuda-python")
+    logger.warning("cuda-python is not available, nvrtc backend will not work")
 
 
 class LibraryGenerator(object):
