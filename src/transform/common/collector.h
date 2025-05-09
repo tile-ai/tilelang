@@ -16,7 +16,6 @@
 
 #include "../../op/builtin.h"
 
-
 namespace tvm {
 namespace tl {
 
@@ -65,5 +64,5 @@ private:
   bool is_valid_ = true;
 };
 
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl
+} // namespace tvm
