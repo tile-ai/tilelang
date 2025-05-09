@@ -11,7 +11,6 @@ import tempfile
 import uuid
 from typing import Optional
 
-import cuda.bindings.driver as cuda
 from tvm.target import Target
 
 from tilelang import tvm as tvm
@@ -23,6 +22,12 @@ from tilelang.env import TILELANG_TEMPLATE_PATH
 from .utils import is_cpu_target, is_cuda_target, is_hip_target
 
 logger = logging.getLogger(__name__)
+
+try:
+    import cuda.bindings.driver as cuda
+except ImportError:
+    logger.warning(
+        "Failed to import cuda.bindings.driver as cuda, nvrtc backend will not be available.")
 
 
 class LibraryGenerator(object):
