@@ -191,7 +191,7 @@ Fragment PlanLoopPartition(For op, int vectorize_size, Range thread_range) {
   size_t num_thread = *as_const_int(thread_range->extent);
   LoopPartitioner partitioner;
   Fragment fragment = partitioner.Partition(op, num_thread, vectorize_size);
-  return fragment.SetThreadRange(thread_range);
+  return fragment->BindThreadRange(thread_range);
 }
 
 For LoopPragmaUnroll(For stmt) {
