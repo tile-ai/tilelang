@@ -156,7 +156,7 @@ class AutoTuner:
         return cls(kernel, configs)
 
     def set_compile_args(self,
-                         out_idx: Union[List[int], int] = -1,
+                         out_idx: Union[List[int], int, None] = None,
                          supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto,
                          ref_prog: Callable = None,
                          supply_prog: Callable = None,
