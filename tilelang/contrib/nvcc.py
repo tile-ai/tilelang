@@ -424,14 +424,15 @@ def have_fp8(compute_version):
 
 
 @tvm._ffi.register_func("tvm.contrib.nvcc.supports_tma", override=True)
-def have_tma(compute_version):
+def have_tma(target):
     """Whether TMA support is provided in the specified compute capability or not
 
     Parameters
     ----------
-    compute_version : str
-        GPU capability
+    target : tvm.target.Target
+        The compilation target
     """
+    compute_version = get_target_compute_version(target)
     major, minor = parse_compute_version(compute_version)
     # TMA is supported in Ada Lovelace (9.0) or later architectures.
     conditions = [False]

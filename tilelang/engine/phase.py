@@ -4,7 +4,7 @@ from tvm import tir, IRModule
 from tvm.target import Target
 import tilelang
 from tilelang.transform import PassContext
-from tilelang.contrib.nvcc import get_target_compute_version, have_tma
+from tilelang.contrib.nvcc import have_tma
 from typing import Optional
 
 
@@ -12,7 +12,7 @@ def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
                                    target: Optional[Target] = None) -> bool:
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    if not have_tma(get_target_compute_version(target.arch)):
+    if not have_tma(target):
         return False
     disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
     disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
@@ -21,7 +21,7 @@ def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
 
 
 def allow_fence_proxy(target: Optional[Target] = None) -> bool:
-    return have_tma(get_target_compute_version(target.arch))
+    return have_tma(target)
 
 
 def allow_vectorize(pass_ctx: Optional[PassContext] = None) -> bool:
