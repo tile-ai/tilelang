@@ -62,6 +62,9 @@ jobs:
       run: |
         source tilelang_ci/bin/activate
         python -m pip install .
+        if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
+        python -m pip install attrs decorator
+        python -m pip install flash-attn
 
     - name: Run examples
       run: |
