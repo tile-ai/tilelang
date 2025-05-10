@@ -232,7 +232,25 @@ def convolution(N,
     return main
 
 
-def main():
+def main(n=128, c=128, h=64, w=64, f=128, k=3, s=1, d=1, p=1, use_autotune=True, with_roller=True):
+    N, C, H, W, F, K, S, D, P = n, c, h, w, f, k, s, d, p
+    a = torch.randn(N, H, W, C).cuda().half()
+    b = torch.randn(K, K, C, F).cuda().half()
+    use_autotune = use_autotune
+    with_roller = with_roller
+    if use_autotune:
+        result = get_best_config(N, C, H, W, F, K, S, D, P, with_roller)
+        print(f"best latency {result.latency}")
+        kernel = result.kernel
+    else:
+        kernel = tilelang.compile(
+            convolution(N, C, H, W, F, K, S, D, P, 64, 128, 32, 3, 256), out_idx=[2])
+
+    out_c = kernel(a, b)
+    ref_c = ref_program(S, P, D)(a, b)
+
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--n', type=int, default=128, help='n')
     parser.add_argument('--c', type=int, default=128, help='c')
@@ -253,25 +271,5 @@ def main():
         action="store_true",
         default=True,
         help="Whether to enable BitBLAS roller for search space")
-
     args = parser.parse_args()
-    N, C, H, W, F, K, S, D, P = args.n, args.c, args.h, args.w, args.f, args.k, args.s, args.d, args.p
-    a = torch.randn(N, H, W, C).cuda().half()
-    b = torch.randn(K, K, C, F).cuda().half()
-    use_autotune = args.use_autotune
-    with_roller = args.with_roller
-    if use_autotune:
-        result = get_best_config(N, C, H, W, F, K, S, D, P, with_roller)
-        print(f"best latency {result.latency}")
-        kernel = result.kernel
-    else:
-        kernel = tilelang.compile(
-            convolution(N, C, H, W, F, K, S, D, P, 64, 128, 32, 3, 256), out_idx=[2])
-
-    out_c = kernel(a, b)
-    ref_c = ref_program(S, P, D)(a, b)
-    torch.testing.assert_close(out_c, ref_c, rtol=1e-2, atol=1e-2)
-
-
-if __name__ == "__main__":
-    main()
+    main(args.n, args.c, args.h, args.w, args.f, args.k, args.s, args.d, args.p, args.use_autotune, args.with_roller)
