@@ -6,7 +6,6 @@ import example_convolution
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_example_convolution():
     example_convolution.main()
 
