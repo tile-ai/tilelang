@@ -232,7 +232,7 @@ def convolution(N,
     return main
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--n', type=int, default=128, help='n')
     parser.add_argument('--c', type=int, default=128, help='c')
@@ -254,7 +254,7 @@ def main():
         default=True,
         help="Whether to enable BitBLAS roller for search space")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     N, C, H, W, F, K, S, D, P = args.n, args.c, args.h, args.w, args.f, args.k, args.s, args.d, args.p
     a = torch.randn(N, H, W, C).cuda().half()
     b = torch.randn(K, K, C, F).cuda().half()
