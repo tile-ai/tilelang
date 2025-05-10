@@ -270,7 +270,7 @@ def get_target_compute_version(target=None):
     Returns
     -------
     compute_version : str
-        compute capability of a GPU (e.g. "8.6" or "10.0")
+        compute capability of a GPU (e.g. "8.6" or "9.0")
     """
     # 1. input target object
     # 2. Target.current()
