@@ -204,9 +204,8 @@ Fragment FragmentNode::DeReplicate() const {
                   int(*rep_size) / factor, NullOpt);
 }
 
-Fragment FragmentNode::SetThreadRange(Range thread_range) {
-  thread_range_ = thread_range;
-  return GetRef<Fragment>(this);
+Fragment FragmentNode::BindThreadRange(Range thread_range) const {
+  return GetRef<Fragment>(this).BindThreadRange(thread_range);
 }
 
 Layout LayoutNode::Inverse() const {
@@ -422,7 +421,9 @@ bool FragmentNode::IsEqual(const FragmentNode *other, bool skip_index) const {
     // may be broadcast case
     return true;
   }
-  ret &= StructuralEqual()(this->ThreadRange(), other->ThreadRange());
+  if (this->thread_range_.defined() && other->thread_range_.defined()) {
+    ret &= StructuralEqual()(this->thread_range_, other->thread_range_);
+  }
   ret &= StructuralEqual()(this->OutputShape(), other->OutputShape());
   ret &= StructuralEqual()(this->ReplicateExtent(), other->ReplicateExtent());
   ret &= StructuralEqual()(this->ThreadExtent(), other->ThreadExtent());

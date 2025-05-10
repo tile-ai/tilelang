@@ -98,7 +98,7 @@ public:
 
   std::string DebugOutput() const final;
 
-  Fragment SetThreadRange(Range thread_range);
+  Fragment BindThreadRange(Range thread_range) const;
 
   Range ThreadRange() const { return thread_range_; }
 
@@ -131,9 +131,9 @@ public:
 
   TVM_DEFINE_OBJECT_REF_METHODS(Fragment, Layout, FragmentNode);
 
-  Fragment SetThreadRange(Range thread_range) {
+  Fragment BindThreadRange(Range thread_range) {
     auto node = make_object<FragmentNode>(*this->get());
-    node->SetThreadRange(thread_range);
+    node->BindThreadRange(thread_range);
     return Fragment(node);
   }
 };
