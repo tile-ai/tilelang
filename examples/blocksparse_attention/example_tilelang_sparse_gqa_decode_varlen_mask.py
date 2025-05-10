@@ -371,22 +371,17 @@ def debug(name, expect, actual, atol=1e-3, rtol=1e-3):
         print(f"Index: {first_index}, expect: {expect[first_index]}, actual: {actual[first_index]}")
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=8, help='batch size')
-    parser.add_argument('--heads', type=int, default=32, help='heads')
-    parser.add_argument('--heads_kv', type=int, default=8, help='heads_kv')
-    parser.add_argument(
-        '--max_cache_seqlen', type=int, default=8192, help='kvcache sequence length')
-    parser.add_argument('--dim', type=int, default=128, help='dim')
-    parser.add_argument('--dim_v', type=int, default=128, help='dim_v')
-    parser.add_argument('--sparse_ratio', type=float, default=0.8, help='sparse ratio')
-    parser.add_argument('--block_size', type=int, default=32, help='block_size')
-    args = parser.parse_args()
-
-    batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = args.batch, args.heads, args.heads_kv, args.max_cache_seqlen, args.dim, args.dim_v
-    sparse_ratio = args.sparse_ratio
-    block_size = args.block_size
+def main(batch=8,
+         heads=32,
+         heads_kv=8,
+         max_cache_seqlen=8192,
+         dim=128,
+         dim_v=128,
+         sparse_ratio=0.8,
+         block_size=32):
+    batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = batch, heads, heads_kv, max_cache_seqlen, dim, dim_v
+    sparse_ratio = sparse_ratio
+    block_size = block_size
     max_selected_blocks = int(math.ceil(max_cache_seqlen * (1 - sparse_ratio) / block_size))
     print("max_selected_blocks: ", max_selected_blocks)
     dtype = torch.float16
@@ -456,4 +451,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--batch', type=int, default=8, help='batch size')
+    parser.add_argument('--heads', type=int, default=32, help='heads')
+    parser.add_argument('--heads_kv', type=int, default=8, help='heads_kv')
+    parser.add_argument(
+        '--max_cache_seqlen', type=int, default=8192, help='kvcache sequence length')
+    parser.add_argument('--dim', type=int, default=128, help='dim')
+    parser.add_argument('--dim_v', type=int, default=128, help='dim_v')
+    parser.add_argument('--sparse_ratio', type=float, default=0.8, help='sparse ratio')
+    parser.add_argument('--block_size', type=int, default=32, help='block_size')
+    args = parser.parse_args()
+    main(args.batch, args.heads, args.heads_kv, args.max_cache_seqlen, args.dim, args.dim_v,
+         args.sparse_ratio, args.block_size)
