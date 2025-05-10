@@ -232,7 +232,7 @@ def convolution(N,
     return main
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--n', type=int, default=128, help='n')
     parser.add_argument('--c', type=int, default=128, help='c')
@@ -271,3 +271,7 @@ if __name__ == "__main__":
     out_c = kernel(a, b)
     ref_c = ref_program(S, P, D)(a, b)
     torch.testing.assert_close(out_c, ref_c, rtol=1e-2, atol=1e-2)
+
+
+if __name__ == "__main__":
+    main()
