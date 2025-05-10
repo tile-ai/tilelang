@@ -28,3 +28,5 @@ einops
 attrs
 decorator
 flash-attn
+scipy
+tornado
