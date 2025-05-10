@@ -205,7 +205,9 @@ Fragment FragmentNode::DeReplicate() const {
 }
 
 Fragment FragmentNode::BindThreadRange(Range thread_range) const {
-  return GetRef<Fragment>(this).BindThreadRange(thread_range);
+  auto n = make_object<FragmentNode>(*this);
+  n->thread_range_ = thread_range;
+  return Fragment(n);
 }
 
 Layout LayoutNode::Inverse() const {

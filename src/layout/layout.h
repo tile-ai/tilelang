@@ -130,12 +130,6 @@ public:
                    Optional<Var> replicate_var);
 
   TVM_DEFINE_OBJECT_REF_METHODS(Fragment, Layout, FragmentNode);
-
-  Fragment BindThreadRange(Range thread_range) {
-    auto node = make_object<FragmentNode>(*this->get());
-    node->BindThreadRange(thread_range);
-    return Fragment(node);
-  }
 };
 
 Var InputPlaceholder(size_t idx);
