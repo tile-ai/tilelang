@@ -369,7 +369,6 @@ def main():
     total_flops = qk_flops + pv_flops
 
     dtype = torch.float16
-    block_H = 64
 
     Q = torch.randn((batch, heads, dim), dtype=dtype, device='cuda')
     K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device='cuda')
@@ -435,6 +434,7 @@ def main():
     avg_time = elapsed_time / 1000
     avg_flops = total_flops / avg_time
     print(f"Average time: {avg_time:.6f} seconds")
+    print(f"Average flops: {avg_flops:.2f} GFLOPS")
 
     # Measure performance of reference implementation
     start = time.time()
@@ -446,6 +446,7 @@ def main():
     avg_time_ref = elapsed_time_ref / 1000
     avg_flops_ref = total_flops / avg_time_ref
     print(f"Average time of ref: {avg_time_ref:.6f} seconds")
+    print(f"Average flops of ref: {avg_flops_ref:.2f} GFLOPS")
 
     print(f"Speedup: {avg_time_ref / avg_time:.2f}x")
 

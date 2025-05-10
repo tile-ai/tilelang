@@ -414,14 +414,9 @@ def main():
     batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = args.batch, args.heads, args.heads_kv, args.max_cache_seqlen, args.dim, args.dim_v
     sparse_ratio = args.sparse_ratio
     block_size = args.block_size
-    # qk_flops = 2 * batch * heads * max_cache_seqlen * dim
-    # pv_flops = 2 * batch * heads * max_cache_seqlen * dim_v
-    # total_flops = qk_flops + pv_flops
-
     max_selected_blocks = int(math.ceil(max_cache_seqlen * (1 - sparse_ratio) / block_size))
     print("max_selected_blocks: ", max_selected_blocks)
     dtype = torch.float16
-    # block_H = 64
 
     Q = torch.randn((batch, heads, dim), dtype=dtype, device='cuda')
     K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device='cuda')
