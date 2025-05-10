@@ -180,7 +180,8 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
                               IterVarType::kDataPar);
       PrimExpr loop_var_to_thread =
           src_layout->ForwardThread(indice_map_[buffer], rep);
-      return Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter)->BindThreadRange(T.thread_bounds);
+      return Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter)
+          ->BindThreadRange(T.thread_bounds);
     }
   };
   if (source_buffer.defined()) {
