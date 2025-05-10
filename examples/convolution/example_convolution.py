@@ -272,5 +272,6 @@ def main():
     ref_c = ref_program(S, P, D)(a, b)
     torch.testing.assert_close(out_c, ref_c, rtol=1e-2, atol=1e-2)
 
+
 if __name__ == "__main__":
     main()
