@@ -248,6 +248,9 @@ def main(n=128, c=128, h=64, w=64, f=128, k=3, s=1, d=1, p=1, use_autotune=True,
 
     out_c = kernel(a, b)
     ref_c = ref_program(S, P, D)(a, b)
+    print(out_c)
+    print(ref_c)
+    # torch.testing.assert_close(out_c, ref_c, rtol=1e-2, atol=1e-2)
 
 
 if __name__ == "__main__":
@@ -272,4 +275,5 @@ if __name__ == "__main__":
         default=True,
         help="Whether to enable BitBLAS roller for search space")
     args = parser.parse_args()
-    main(args.n, args.c, args.h, args.w, args.f, args.k, args.s, args.d, args.p, args.use_autotune, args.with_roller)
+    main(args.n, args.c, args.h, args.w, args.f, args.k, args.s, args.d, args.p, args.use_autotune,
+         args.with_roller)
