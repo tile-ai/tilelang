@@ -209,6 +209,7 @@ class SparseFlashAttn(torch.nn.Module):
         heads = self.heads
         heads_kv = self.heads_kv
         dim_v = self.dim_v
+        dim = self.dim
         block_size = self.block_size
         block_H = self.block_H
         max_cache_seqlen = key.shape[1]
@@ -370,7 +371,7 @@ def debug(name, expect, actual, atol=1e-3, rtol=1e-3):
         print(f"Index: {first_index}, expect: {expect[first_index]}, actual: {actual[first_index]}")
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=8, help='batch size')
     parser.add_argument('--heads', type=int, default=32, help='heads')
@@ -457,3 +458,7 @@ if __name__ == "__main__":
         out = model(Q, K, V, block_mask, cache_seqlens)
     torch.cuda.synchronize()
     print("sparse time: ", (time.time() - start) / 100 * 1000)
+
+
+if __name__ == "__main__":
+    main()

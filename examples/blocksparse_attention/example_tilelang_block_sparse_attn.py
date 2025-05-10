@@ -118,7 +118,7 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
                 acc_o[i, j] *= scores_scale[i]
 
         @T.prim_func
-        def main(
+        def blocksparse_flashattn(
                 Q: T.Tensor(shape, dtype),
                 K: T.Tensor(shape, dtype),
                 V: T.Tensor(shape, dtype),
@@ -165,7 +165,7 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
                 T.copy(acc_o, O_shared)
                 T.copy(O_shared, Output[bz, by, bx * block_M:(bx + 1) * block_M, :])
 
-        return main
+        return blocksparse_flashattn
 
     return kernel_func(block_M, block_N, num_stages, threads)
 
@@ -219,5 +219,9 @@ def test_topk_sparse_attention():
     print("Pass topk sparse attention test with qlen == klen")
 
 
-if __name__ == "__main__":
+def main():
     test_topk_sparse_attention()
+
+
+if __name__ == "__main__":
+    main()

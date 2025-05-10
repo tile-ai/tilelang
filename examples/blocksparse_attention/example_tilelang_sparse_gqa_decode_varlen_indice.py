@@ -223,6 +223,7 @@ class SparseFlashAttn(torch.nn.Module):
         heads = self.heads
         heads_kv = self.heads_kv
         dim_v = self.dim_v
+        dim = self.dim
         block_size = self.block_size
         max_selected_blocks = block_indices.shape[-1]
 
@@ -397,7 +398,7 @@ def debug(name, expect, actual, atol=1e-3, rtol=1e-3):
         print(f"Index: {first_index}, expect: {expect[first_index]}, actual: {actual[first_index]}")
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=8, help='batch size')
     parser.add_argument('--heads', type=int, default=32, help='heads')
@@ -413,14 +414,14 @@ if __name__ == "__main__":
     batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = args.batch, args.heads, args.heads_kv, args.max_cache_seqlen, args.dim, args.dim_v
     sparse_ratio = args.sparse_ratio
     block_size = args.block_size
-    qk_flops = 2 * batch * heads * max_cache_seqlen * dim
-    pv_flops = 2 * batch * heads * max_cache_seqlen * dim_v
-    total_flops = qk_flops + pv_flops
+    # qk_flops = 2 * batch * heads * max_cache_seqlen * dim
+    # pv_flops = 2 * batch * heads * max_cache_seqlen * dim_v
+    # total_flops = qk_flops + pv_flops
 
     max_selected_blocks = int(math.ceil(max_cache_seqlen * (1 - sparse_ratio) / block_size))
     print("max_selected_blocks: ", max_selected_blocks)
     dtype = torch.float16
-    block_H = 64
+    # block_H = 64
 
     Q = torch.randn((batch, heads, dim), dtype=dtype, device='cuda')
     K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device='cuda')
@@ -494,3 +495,7 @@ if __name__ == "__main__":
         out = sparse_kernel(Q, K, V, block_indices, cache_seqlens)
     torch.cuda.synchronize()
     print("sparse time: ", (time.time() - start) / 100 * 1000)
+
+
+if __name__ == "__main__":
+    main()

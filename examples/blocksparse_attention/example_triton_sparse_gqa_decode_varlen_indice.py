@@ -350,7 +350,7 @@ def ref_program_fa(query, key, value, cache_seqlens):
     return output
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=64, help='batch size')
     parser.add_argument('--heads', type=int, default=32, help='heads')
@@ -466,3 +466,7 @@ if __name__ == "__main__":
     print(f"Average time of ref: {avg_time_ref:.6f} seconds")
 
     print(f"Speedup: {avg_time_ref / avg_time:.2f}x")
+
+
+if __name__ == "__main__":
+    main()
