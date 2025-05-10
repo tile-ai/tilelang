@@ -7,7 +7,7 @@ import example_convolution
 
 @tilelang.testing.requires_cuda
 def test_example_convolution():
-    example_convolution.main()
+    example_convolution.main([])
 
 
 if __name__ == "__main__":
