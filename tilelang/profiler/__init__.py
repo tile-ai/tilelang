@@ -122,6 +122,7 @@ class Profiler:
                 base_name="tilelang",
                 ref_name="ref",
             )
+
     def manual_assert_close(
         self,
         reference_program: Callable,

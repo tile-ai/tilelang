@@ -343,9 +343,11 @@ class AutoTuner:
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
         futures = []
         future_to_index = {}
+
         def device_wrapper(func, device, *config_arg):
             torch.cuda.set_device(device)
-            return func(*config_arg)        
+            return func(*config_arg)
+
         for i, config_arg in enumerate(config_args):
             future = pool.submit(
                 functools.partial(device_wrapper, self.jit_compile, torch.cuda.current_device()),
@@ -378,7 +380,9 @@ class AutoTuner:
                 # Because tma init may behave strangely with one thread
                 # latency, ref_latency = target_fn(jit_context)
                 benchmark_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                future = benchmark_executor.submit(functools.partial(device_wrapper, target_fn, torch.cuda.current_device()), jit_context)
+                future = benchmark_executor.submit(
+                    functools.partial(device_wrapper, target_fn, torch.cuda.current_device()),
+                    jit_context)
                 latency, ref_latency = future.result(timeout=timeout)
             except concurrent.futures.TimeoutError:
                 logger.info(
