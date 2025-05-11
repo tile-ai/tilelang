@@ -302,10 +302,7 @@ class AutoTuner:
                 self.jit_input_tensors = jit_input_tensors_supply()
 
             if (not skip_check) and (ref_prog is not None):
-                print('manual_check_prog', manual_check_prog)
                 if manual_check_prog is not None:
-                    print(f'{getattr(profiler, "assert_allclose", None)=}')
-                    print(f'{getattr(profiler, "manual_assert_close", None)=}')
                     profiler.manual_assert_close(
                         ref_prog,
                         input_tensors=self.jit_input_tensors,
