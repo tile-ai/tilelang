@@ -10,9 +10,12 @@ from typing import Optional
 
 def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
                                    target: Optional[Target] = None) -> bool:
+    # avoid circular import
+    from tilelang.jit.adapter.utils import is_cuda_target
+
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    if not have_tma(target):
+    if not is_cuda_target(target) or not have_tma(target):
         return False
     disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
     disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
@@ -21,7 +24,10 @@ def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
 
 
 def allow_fence_proxy(target: Optional[Target] = None) -> bool:
-    return have_tma(target)
+    # avoid circular import
+    from tilelang.jit.adapter.utils import is_cuda_target
+
+    return is_cuda_target(target) and have_tma(target)
 
 
 def allow_vectorize(pass_ctx: Optional[PassContext] = None) -> bool:
