@@ -468,6 +468,7 @@ def main(batch: int = 1,
         print(f"Best latency: {best_latency}")
         print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
         print(f"Best config: {best_config}")
+        print(f"Ref latency: {ref_latency}")
 
 
 if __name__ == "__main__":
