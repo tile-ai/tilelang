@@ -151,7 +151,7 @@ Fragment makeGemmFragmentA(const int block_m, const int block_n,
                            const int warp_n, const int element_size);
 Fragment makeGemmFragmentB(const int block_m, const int block_n,
                            const int block_k, const int warp_m,
-                           const int warp_n);
+                           const int warp_n, bool transposed);
 
 Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
                                const int block_k, const int warp_m,

@@ -203,17 +203,26 @@ Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
 
 Fragment makeGemmFragmentB(const int block_m, const int block_n,
                            const int block_k, const int warp_m,
-                           const int warp_n) {
+                           const int warp_n, bool transposed) {
   // transposed
   ICHECK(warp_n % 8 == 0);
   ICHECK(block_k % 16 == 0);
-  auto base_layout =
-      makeGemmFragment8x8Transposed()->Repeat({2, 1}, false, false);
-  auto warp_layout = base_layout->Replicate(block_m / warp_m)
-                         ->Repeat({1, block_n / warp_n}, true);
-  auto block_layout =
-      warp_layout->Repeat({block_k / 16, warp_n / 8}, false, true);
-  return block_layout;
+  if (transposed) {
+    auto base_layout = makeGemmFragment8x8()->Repeat({1, 2}, false, false);
+    auto warp_layout = base_layout->Repeat({block_n / warp_n, 1}, true, true)
+                           ->Replicate(block_m / warp_m);
+    auto block_layout =
+        warp_layout->Repeat({warp_n / 8, block_k / 16}, false, false);
+    return block_layout;
+  } else {
+    auto base_layout =
+        makeGemmFragment8x8Transposed()->Repeat({2, 1}, false, false);
+    auto warp_layout = base_layout->Replicate(block_m / warp_m)
+                          ->Repeat({1, block_n / warp_n}, true);
+    auto block_layout =
+        warp_layout->Repeat({block_k / 16, warp_n / 8}, false, true);
+    return block_layout;
+  }
 }
 
 Fragment makeGemmFragment32x32(int element_size) {
