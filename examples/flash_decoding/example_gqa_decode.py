@@ -411,11 +411,11 @@ def reduce_ref(Q, K, V, mask, glse, Output_partial):
 
 
 def main(batch: int = 1,
-    heads: int = 32,
-    groups: int = 8,
-    kv_seqlen: int = 8192,
-    dim: int = 128,
-    tune: bool = False):
+         heads: int = 32,
+         groups: int = 8,
+         kv_seqlen: int = 8192,
+         dim: int = 128,
+         tune: bool = False):
     batch, heads, groups, kv_seqlen, dim = batch, heads, groups, kv_seqlen, dim
     qk_flops = 2 * batch * heads * kv_seqlen * dim
     pv_flops = 2 * batch * heads * kv_seqlen * dim
