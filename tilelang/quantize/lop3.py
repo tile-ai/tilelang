@@ -2,7 +2,6 @@
 # Licensed under the MIT License.
 from typing import Dict, Literal
 
-
 decode_i4_to_f16 = """
 template <typename T1, typename T2, bool isSigned = false>
 __device__ void decode_i4b_to_f16(T1 *_i4s, T2 *B_local_decode, const int N = 8)

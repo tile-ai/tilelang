@@ -40,7 +40,6 @@ def dequantize_gemv(
     MAX_TRANSACTION_SIZE_IN_BITS = 128
     micro_size_k = MAX_TRANSACTION_SIZE_IN_BITS // DataType(in_dtype).bits
     micro_size_k_compressed = micro_size_k // num_elems_per_byte
-    block_N = n_partition
     block_K = reduce_thread * micro_size_k
 
     if group_size == -1:
