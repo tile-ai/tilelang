@@ -23,15 +23,15 @@ def tl_matmul(
     out_dtype,
     accum_dtype,
 ):
-    assert in_dtype in [
-        "float16",
-        "int8",
-    ], "Currently only float16 and int8 are supported"
-    assert out_dtype in [
-        "float16",
-        "float32",
-        "int32",
-    ], "Currently only float16, float32 and int32 are supported"
+    # assert in_dtype in [
+    #     "float16",
+    #     "int8",
+    # ], "Currently only float16 and int8 are supported"
+    # assert out_dtype in [
+    #     "float16",
+    #     "float32",
+    #     "int32",
+    # ], "Currently only float16, float32 and int32 are supported"
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
@@ -197,7 +197,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype="floa
 
 @tilelang.testing.requires_rocm
 def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(128, 128, 128, "float16", "float16")
+    assert_tl_matmul_correctness(128, 128, 128, "e4m3_float8", "float16")
     assert_tl_matmul_correctness(128, 256, 256, "float16", "float32")
 
 

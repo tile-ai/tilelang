@@ -108,14 +108,15 @@ class MatrixCoreIntrinEmitter(object):
             "float16": "f16",
             "float32": "f32",
             "int8": "i8",
-            "int32": "i32"
+            "int32": "i32",
         }[out_dtype]
 
         in_dtype_abbrv = {
             "float16": "f16",
             "float32": "f32",
             "int8": "i8",
-            "int32": "i32"
+            "int32": "i32",
+            "e4m3_float8":"fp8"
         }[in_dtype]
 
         self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}{in_dtype_abbrv}"

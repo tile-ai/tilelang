@@ -6,6 +6,7 @@
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
+#include <hip/amd_detail/amd_hip_fp8.h>
 #include <rocwmma/rocwmma.hpp>
 
 #define HIPRT_INF_F __int_as_float(0x7f800000)
