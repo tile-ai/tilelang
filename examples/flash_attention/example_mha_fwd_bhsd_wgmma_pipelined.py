@@ -140,11 +140,12 @@ def flashattn(batch, heads, seq_q, seq_kv, dim, is_causal, tune=False):
                     T.min(T.ceildiv(seq_kv, block_N), T.ceildiv(
                         (bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(seq_kv, block_N))
 
-                for k in T.Pipelined(loop_range, num_stages=num_stages,
+                for k in T.Pipelined(
+                        loop_range,
+                        num_stages=num_stages,
                         order=[-1, 0, 3, 1, -1, 2],
                         stage=[-1, 0, 0, 1, -1, 1],
-                        group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]]
-                    ):
+                        group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]]):
                     MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
                     Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale,
                             scores_sum, logsum)

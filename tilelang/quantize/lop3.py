@@ -1,15 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-from bitblas import tvm
-from tvm.tir.function import TensorIntrin
-from tvm.script import tir as T
-from typing import Dict, Literal, List
-from bitblas.quantization import (
-    _tir_packed_int_to_int_convert,
-    _tir_packed_to_signed_convert,
-    _tir_packed_to_unsigned_convert,
-    _tir_packed_to_unsigned_convert_with_zeros,
-)
+from typing import Dict, Literal
+
 
 decode_i4_to_f16 = """
 template <typename T1, typename T2, bool isSigned = false>
@@ -1095,6 +1087,7 @@ __device__ void decode_i2u_to_i4s(T1 *_i4u, T2 *B_local_decode, const int N = 16
 }
 """
 
+
 def get_lop3_intrin_group(
     out_dtype: Literal["float16", "int8", "int4"],
     source_format: Literal["int", "uint"] = "uint",
@@ -1146,7 +1139,8 @@ def get_lop3_intrin_group(
     target_dtype = dtype_mapping[out_dtype]
 
     if source_format not in ["int", "uint"]:
-        raise ValueError(f"Invalid source_format. Expected 'int' or 'uint', but got {source_format}.")
+        raise ValueError(
+            f"Invalid source_format. Expected 'int' or 'uint', but got {source_format}.")
     if with_zeros and source_format == "int":
         raise ValueError(f"Zeros are not supported for signed integers, but got {source_format}")
 
