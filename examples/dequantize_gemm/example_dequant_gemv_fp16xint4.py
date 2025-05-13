@@ -176,9 +176,8 @@ def main() -> None:
     program = dequantize_gemv(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits, storage_dtype,
                               source_format, n_partition, reduce_thread, fast_decoding, trans_A,
                               trans_B, group_size, with_scaling)
-    print(program)
+
     kernel = tilelang.compile(program)
-    print(kernel.get_kernel_source())
 
     storage_nbit = int("".join(c for c in storage_dtype if c.isdigit()))
     num_elems_per_byte = storage_nbit // num_bits
@@ -189,8 +188,7 @@ def main() -> None:
 
     if fast_decoding:
         from tilelang.quantize.utils import interleave_weight
-        qB = interleave_weight(qB.cpu().numpy(), num_bits, in_dtype)
-        qB = torch.from_numpy(qB).cuda()
+        qB = interleave_weight(qB, num_bits, in_dtype)
     kernel(A, qB, C)
 
     # int4 reference
