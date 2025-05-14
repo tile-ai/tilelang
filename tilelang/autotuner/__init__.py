@@ -21,11 +21,14 @@ import os
 import sys
 import signal
 
+
 class TimeoutException(Exception):
     pass
 
+
 def timeout_handler(signum, frame):
     raise TimeoutException()
+
 
 def run_with_timeout(func, timeout, *args, **kwargs):
     signal.signal(signal.SIGALRM, timeout_handler)
@@ -35,6 +38,7 @@ def run_with_timeout(func, timeout, *args, **kwargs):
     finally:
         signal.alarm(0)
     return result
+
 
 # Configure logging for the autotuner module
 # TODO: Consider creating a common logger in utils
