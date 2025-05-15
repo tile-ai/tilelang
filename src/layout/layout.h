@@ -148,10 +148,11 @@ Fragment makeGemmFragmentCHopper(const int block_m, const int block_n,
                                  const int element_size);
 Fragment makeGemmFragmentA(const int block_m, const int block_n,
                            const int block_k, const int warp_m,
-                           const int warp_n, const int element_size);
+                           const int warp_n, const int element_size,
+                           bool transposed = false);
 Fragment makeGemmFragmentB(const int block_m, const int block_n,
                            const int block_k, const int warp_m,
-                           const int warp_n);
+                           const int warp_n, bool transposed = false);
 
 Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
                                const int block_k, const int warp_m,
