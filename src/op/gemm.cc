@@ -247,8 +247,9 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
       const int64_t continuity =
           trans_A ? 4 * mat_continuous / warp_m : mat_continuous;
-      results.Set(A, makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                      A->dtype.bits(), trans_A ? 1 : 2));
+      results.Set(A,
+                  makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                   A->dtype.bits(), trans_A ? 1 : 2));
     } else {
       ICHECK(trans_A == false);
       auto fragment =
