@@ -354,7 +354,7 @@ def run_gemm_sr(
     block_M,
     block_N,
     block_K,
-    num_stages=3,
+    num_stages=1,
     num_threads=128,
 ):
     program = matmul_sr(
@@ -470,7 +470,7 @@ def run_gemm_rs(
     block_M,
     block_N,
     block_K,
-    num_stages=3,
+    num_stages=1,
     num_threads=128,
 ):
     program = matmul_rs(
