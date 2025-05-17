@@ -16,25 +16,25 @@ namespace tvm {
 namespace tl {
 using namespace tir;
 
-PrimExpr power_of_int_op(PrimExpr args) {
+PrimExpr pow_of_int_op(PrimExpr args) {
   const CallNode *call = args.as<CallNode>();
   CHECK(call != nullptr);
   const Array<PrimExpr> &arg = call->args;
   ICHECK_EQ(arg.size(), 2);
   PrimExpr base = arg[0];
   PrimExpr exp = arg[1];
-  String power_of_int_name =
-      "tl::power_of_int<" + std::to_string(exp.as<IntImmNode>()->value) + ">";
+  String pow_of_int_name =
+      "tl::pow_of_int<" + std::to_string(exp.as<IntImmNode>()->value) + ">";
   return tir::Call(base.dtype(), tir::builtin::call_extern(),
-                   {StringImm(power_of_int_name), base});
+                   {StringImm(pow_of_int_name), base});
 }
 
-TVM_REGISTER_OP("tl.power_of_int")
+TVM_REGISTER_OP("tl.pow_of_int")
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure))
-    .set_attr<TScriptPrinterName>("TScriptPrinterName", "power_of_int")
-    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", power_of_int_op);
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "pow_of_int")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", pow_of_int_op);
 
 } // namespace tl
 } // namespace tvm

@@ -435,5 +435,10 @@ def test_assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4():
         256, 1024, 512, "float16", "float16", "float16", 3)
 
 
+def main():
+    test_run_dequantize_gemm()
+    test_assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4()
+
+
 if __name__ == "__main__":
-    tilelang.testing.main()
+    main()

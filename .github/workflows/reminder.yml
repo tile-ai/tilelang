@@ -1,0 +1,23 @@
+name: Reminder Bot
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  pr_reminder:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remind
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: '👋 Hi! Thank you for contributing to the **TileLang** project.\n\n' +
+                'Please remember to run `bash format.sh` in the root directory of the project to ensure your changes are properly linted and formatted. This will help ensure your contribution passes the format check.\n\n' +
+                'We appreciate you taking this step! Our team will review your contribution, and we look forward to your awesome work!\n\n' +
+                '🚀'
+            })
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

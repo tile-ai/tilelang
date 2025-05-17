@@ -199,7 +199,7 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
             T.copy(o_shared, Output[bz, bx * block_M:(bx + 1) * block_M, by, :])
 
     @T.prim_func
-    def main(
+    def flashattn_mha_inference(
             Q: T.Tensor(shape_q, dtype),
             K: T.Tensor(shape_kv, dtype),
             V: T.Tensor(shape_kv, dtype),
@@ -210,7 +210,7 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
         flash_attn_split(Q, K, V, glse, Output_partial)
         combine(glse, Output_partial, Output)
 
-    return main
+    return flashattn_mha_inference
 
 
 def ref_program(Q, K, V, glse, Output_partial, causal):
@@ -293,7 +293,7 @@ def flash_split_ref(Q, K, V, causal):
                                              3), gacc_o.to(torch.float16).permute(1, 2, 3, 0, 4)
 
 
-if __name__ == "__main__":
+def main():
     BATCH, H, Q_CTX, KV_CTX, D_HEAD = 1, 32, 128, 8192, 128
     causal = False
     flops_per_matmul = 2.0 * BATCH * H * Q_CTX * KV_CTX * D_HEAD
@@ -303,17 +303,21 @@ if __name__ == "__main__":
     BLOCK_M = 128
     BLOCK_N = 64  # if D_HEAD <= 128 else 32
     program = flashattn(BATCH, H, Q_CTX, KV_CTX, D_HEAD, causal, BLOCK_M, BLOCK_N)
-    ref_program = partial(ref_program, causal=causal)
+    ref_fn = partial(ref_program, causal=causal)
     kernel = tilelang.compile(
         program, out_idx=[5], pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True})
     print(kernel.get_kernel_source())
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
-    profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+    profiler.assert_allclose(ref_fn, rtol=0.01, atol=0.01)
     print("All checks passed!")
 
-    latency = profiler.do_bench(ref_program, warmup=500)
+    latency = profiler.do_bench(ref_fn, warmup=500)
     print("{:.2f} ms".format(latency))
     print("{:.2f} TFlops".format(total_flops / latency * 1e-9))
     latency = profiler.do_bench(n_warmup=10, n_repeat=10)
     print("{:.4f} ms".format(latency))
     print("{:.2f} TFlops".format(total_flops / latency * 1e-9))
+
+
+if __name__ == "__main__":
+    main()

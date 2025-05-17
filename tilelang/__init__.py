@@ -61,6 +61,7 @@ from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
 
 import tvm
 import tvm._ffi.base
+from tvm import DataType  # noqa: F401
 
 from . import libinfo
 

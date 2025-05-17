@@ -291,8 +291,8 @@ public:
           // If already in map, ensure they are structurally equal
           ICHECK(StructuralEqual()(layout, layout_map[buffer]))
               << "Get different layout for " << buffer
-              << " current layout: " << layout->DebugOutput()
-              << " previous layout: " << layout_map[buffer]->DebugOutput();
+              << "\n current layout: " << layout->DebugOutput()
+              << "\n previous layout: " << layout_map[buffer]->DebugOutput();
         } else {
           // Otherwise, update map
           layout_map.Set(buffer, layout);

@@ -4,16 +4,18 @@ from tvm import tir, IRModule
 from tvm.target import Target
 import tilelang
 from tilelang.transform import PassContext
+from tilelang.contrib.nvcc import have_tma
 from typing import Optional
-
-SUPPORTED_TMA_ARCHS = {"sm_90", "sm_90a"}
 
 
 def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
                                    target: Optional[Target] = None) -> bool:
+    # avoid circular import
+    from tilelang.jit.adapter.utils import is_cuda_target
+
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    if target.arch not in SUPPORTED_TMA_ARCHS:
+    if not is_cuda_target(target) or not have_tma(target):
         return False
     disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
     disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
@@ -22,7 +24,10 @@ def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
 
 
 def allow_fence_proxy(target: Optional[Target] = None) -> bool:
-    return target.arch in SUPPORTED_TMA_ARCHS
+    # avoid circular import
+    from tilelang.jit.adapter.utils import is_cuda_target
+
+    return is_cuda_target(target) and have_tma(target)
 
 
 def allow_vectorize(pass_ctx: Optional[PassContext] = None) -> bool:
@@ -125,7 +130,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
-    mod = tir.transform.MergeSharedMemoryAllocations()(mod)
+    mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tir.transform.LowerDeviceKernelLaunch()(mod)
 

@@ -15,7 +15,8 @@
 
 namespace tvm {
 namespace tl {
-
+static constexpr const char *kDebugMergeSharedMemoryAllocations =
+    "tl.debug_merge_shared_memory_allocations";
 static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
 static constexpr const char *kDisableSafeMemoryLegalize =
     "tl.disable_safe_memory_legalize";
