@@ -17,7 +17,7 @@ def make_swizzle_layout(shared_buf):
     dtype = shared_buf.dtype
     shape = shared_buf.shape
 
-    can_swizzle = shape[-1] * DataType(dtype).bits == 512
+    can_swizzle = shape[-1] * DataType(dtype).bits % 256 == 0
     if not can_swizzle:
         return T.Layout(shape, lambda *args: args)
 

@@ -563,11 +563,11 @@ Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
   int vector_size = 128 / element_size;
   if (kfactor == 1 && element_size == 8) // int8 KxN
     return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
-  else if (continuity % (vector_size * 8) == 0)
+  else if (mat_continuous % (vector_size * 8) == 0)
     return makeSwizzle128BLayout(mat_stride, mat_continuous, element_size);
-  else if (continuity % (vector_size * 4) == 0)
+  else if (mat_continuous % (vector_size * 4) == 0)
     return makeSwizzle64BLayout(mat_stride, mat_continuous, element_size);
-  else if (continuity % (vector_size * 2) == 0)
+  else if (mat_continuous % (vector_size * 2) == 0)
     return makeSwizzle32BLayout(mat_stride, mat_continuous, element_size);
   else {
     return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
