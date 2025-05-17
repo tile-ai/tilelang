@@ -36,11 +36,9 @@ public:
       trans_B ? GMMA::Major::K : GMMA::Major::MN;
 
   using SmemLayoutAtomA =
-      decltype(ss_smem_selector<GmmaMajorA, A_type, Int<M / (num_warp_m / 4)>,
-                                Int<K>>());
+      decltype(ss_smem_selector<GmmaMajorA, A_type, Int<M>, Int<K>>());
   using SmemLayoutAtomB =
-      decltype(ss_smem_selector<GmmaMajorB, B_type, Int<N / num_warp_n>,
-                                Int<K>>());
+      decltype(ss_smem_selector<GmmaMajorB, B_type, Int<N>, Int<K>>());
 
   using SmemLayoutA = decltype(tile_to_shape(
       SmemLayoutAtomA{}, Shape<Int<M>, Int<K>>{},
@@ -49,7 +47,8 @@ public:
       SmemLayoutAtomB{}, Shape<Int<N>, Int<K>>{},
       conditional_t<trans_B, Step<_1, _2>, Step<_2, _1>>{}));
 
-  static_assert(num_warp_m % 4 == 0, "num_warp_m must be a multiple of 4");
+  static_assert(num_warp_m % 4 == 0,
+                "num_warp_m must be a multiple of 4 for hopper wgmma");
 
   template <int wg_wait = 0>
   static CUTE_DEVICE void body(A_type_raw *pA, B_type_raw *pB, C_type_raw *pC) {
@@ -61,7 +60,7 @@ public:
     auto tiled_mma = make_tiled_mma(
         GMMA::ss_op_selector<
             A_type, B_type, C_type,
-            Shape<Int<M / (num_warp_m / 4)>, Int<N / num_warp_n>, Int<K>>,
+            Shape<Int<4 * M / num_warp_m>, Int<N / num_warp_n>, Int<K>>,
             GmmaMajorA, GmmaMajorB>(),
         Layout<Shape<Int<num_warp_m / 4>, Int<num_warp_n>, _1>>{});
     auto thr_mma = tiled_mma.get_thread_slice(tid);
@@ -95,14 +94,6 @@ public:
       warpgroup_wait<wg_wait>();
     }
     warpgroup_fence_operand(acc);
-    // warpgroup_fence_operand(acc);
-    // warpgroup_arrive();
-
-    // gemm(tiled_mma, tCrA(_, _, _), tCrB(_, _, _), acc);
-
-    // warpgroup_commit_batch();
-    // if constexpr (wg_wait >= 0) { warpgroup_wait<wg_wait>(); }
-    // warpgroup_fence_operand(acc);
   }
 
   template <int wg_wait = 0>

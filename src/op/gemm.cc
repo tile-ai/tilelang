@@ -251,9 +251,8 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
                                    A->dtype.bits(), trans_A ? 1 : 2));
     } else {
-      ICHECK(trans_A == false);
-      auto fragment =
-          makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n, A->dtype.bits());
+      auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
+                                        A->dtype.bits(), trans_A);
       results.Set(A, fragment->BindThreadRange(thread_range));
     }
     if (B.scope() == "shared" || B.scope() == "shared.dyn") {
