@@ -92,6 +92,33 @@ def shared_32x16_to_mma_32x16_smoothlayout(i, j):
     return (i * 2 + j // 16, j % 16)
 
 
+def xor2x2(i, j):
+    return (i + j) % 2
+
+
+def xor4x4(i, j):
+    i0, i1 = i % 2, i // 2
+    j0, j1 = j % 2, j // 2
+    return 2 * xor2x2(i1, j1) + xor2x2(i0, j0)
+
+
+def xor8x8(i, j):
+    i0, i1 = i % 2, i // 2
+    j0, j1 = j % 2, j // 2
+    return 2 * xor4x4(i1, j1) + xor2x2(i0, j0)
+
+
+def xor_swizzle(i, j, swizzle_bytes):
+    if swizzle_bytes == 128:
+        return xor8x8(i, j)
+    elif swizzle_bytes == 64:
+        return xor4x4(i, j)
+    elif swizzle_bytes == 32:
+        return xor2x2(i, j)
+    else:
+        raise ValueError(f"Unsupported swizzle bytes: {swizzle_bytes}")
+
+
 def get_swizzle_layout(row_idx, col_idx, row_size, dtype: Union[DataType, str], swizzle_bytes=None):
     ana = arith.Analyzer()
     if isinstance(dtype, str):
@@ -126,7 +153,7 @@ def get_swizzle_layout(row_idx, col_idx, row_size, dtype: Union[DataType, str], 
     elem_per_16B = 128 // dtype.bits
     col_idx_16B = col_idx // elem_per_16B
     col_idx_in_16B = col_idx % elem_per_16B
-    new_col_idx_16B = col_idx_16B ^ (row_idx % (swizzle_bytes // 16))
+    new_col_idx_16B = xor_swizzle(row_idx, col_idx_16B, swizzle_bytes)
     return row_idx, ana.simplify(new_col_idx_16B * elem_per_16B + col_idx_in_16B)
 
 
@@ -134,7 +161,7 @@ def make_mma_swizzle_layout(shared_buf, is_smooth: bool = False):
     dtype = shared_buf.dtype
     shape = shared_buf.shape
 
-    can_swizzle = shape[-1] * DataType(dtype).bits % 512 == 0
+    can_swizzle = shape[-1] * DataType(dtype).bits % 256 == 0
     if is_smooth or (not can_swizzle):
         return T.Layout(shape, lambda *args: args)
 
