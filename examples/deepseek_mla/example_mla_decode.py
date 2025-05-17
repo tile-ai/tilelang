@@ -272,7 +272,7 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     return out
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=128, help='batch size')
     parser.add_argument('--heads', type=int, default=128, help='q heads number')
@@ -296,3 +296,7 @@ if __name__ == "__main__":
     latency = profiler.do_bench(warmup=500)
     print(f"Latency: {latency} ms")
     print(f"TFlops: {total_flops / latency * 1e-9} TFlops")
+
+
+if __name__ == "__main__":
+    main()
