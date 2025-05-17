@@ -36,8 +36,7 @@ public:
       trans_B ? GMMA::Major::K : GMMA::Major::MN;
 
   using SmemLayoutAtomA =
-      decltype(ss_smem_selector<GmmaMajorA, A_type, Int<M>,
-                                Int<K>>());
+      decltype(ss_smem_selector<GmmaMajorA, A_type, Int<M>, Int<K>>());
   using SmemLayoutAtomB =
       decltype(ss_smem_selector<GmmaMajorB, B_type, Int<N>, Int<K>>());
 
@@ -48,7 +47,8 @@ public:
       SmemLayoutAtomB{}, Shape<Int<N>, Int<K>>{},
       conditional_t<trans_B, Step<_1, _2>, Step<_2, _1>>{}));
 
-  static_assert(num_warp_m % 4 == 0, "num_warp_m must be a multiple of 4 for hopper wgmma");
+  static_assert(num_warp_m % 4 == 0,
+                "num_warp_m must be a multiple of 4 for hopper wgmma");
 
   template <int wg_wait = 0>
   static CUTE_DEVICE void body(A_type_raw *pA, B_type_raw *pB, C_type_raw *pC) {
