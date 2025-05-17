@@ -98,7 +98,8 @@ struct OperandTraits<16, N, K, false, num_warp_n,
       Swizzle<2, 3, 3>{}, Layout<Shape<_32, _8>, Stride<_1, _32>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{},
                                         Step<_2, _1>{}));
-  using Copy = SM75_U16x8_LDSM_T;
+  using Copy = typename std::conditional<N == 8 * num_warp_n, SM75_U16x4_LDSM_N,
+                                         SM75_U16x8_LDSM_N>::type;
 };
 
 template <int N, int K, int num_warp_n>
@@ -108,7 +109,8 @@ struct OperandTraits<16, N, K, false, num_warp_n,
       Swizzle<3, 3, 3>{}, Layout<Shape<_64, _8>, Stride<_1, _64>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{},
                                         Step<_2, _1>{}));
-  using Copy = SM75_U16x8_LDSM_T;
+  using Copy = typename std::conditional<N == 8 * num_warp_n, SM75_U16x4_LDSM_N,
+                                         SM75_U16x8_LDSM_N>::type;
 };
 
 template <int N, int K, int num_warp_n>
