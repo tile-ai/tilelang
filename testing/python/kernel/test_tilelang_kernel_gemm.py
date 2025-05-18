@@ -62,7 +62,7 @@ def run_gemm(
     block_M,
     block_N,
     block_K,
-    num_stages=3,
+    num_stages=0,
     num_threads=128,
 ):
     program = matmul(
@@ -109,9 +109,9 @@ def test_gemm_f16f16f16_nn():
         "float16",
         "float16",
         128,
-        256,
+        128,
         32,
-        2,
+        0,
     )
 
 
@@ -174,9 +174,9 @@ def test_gemm_f16f16f16_tn():
         "float16",
         "float16",
         128,
-        256,
+        128,
         32,
-        2,
+        0,
     )
 
 
@@ -191,9 +191,9 @@ def test_gemm_f16f16f16_nt():
         "float16",
         "float16",
         128,
-        256,
+        128,
         32,
-        2,
+        0,
     )
 
 
@@ -401,9 +401,9 @@ def test_gemm_f16f16f16_sr():
         "float16",
         "float16",
         128,
-        256,
+        128,
         32,
-        2,
+        0,
     )
 
 

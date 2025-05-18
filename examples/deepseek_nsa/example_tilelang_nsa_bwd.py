@@ -4,7 +4,6 @@ from typing import Optional, Union
 
 import torch
 import triton
-import triton.language as tl
 
 from fla.ops.common.utils import prepare_token_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
@@ -13,6 +12,7 @@ from einops import rearrange
 import tilelang
 
 
+@tilelang.jit
 def tilelang_kernel_fwd(
     batch,
     heads,
@@ -55,7 +55,6 @@ def tilelang_kernel_fwd(
     num_stages = 0
     threads = 32
 
-    @tilelang.jit
     @T.prim_func
     def native_sparse_attention(
             Q: T.Tensor(q_shape, dtype),
@@ -146,6 +145,7 @@ def tilelang_kernel_fwd(
     return native_sparse_attention
 
 
+@tilelang.jit
 def tilelang_kernel_bwd_dkv(
     batch,
     heads,
@@ -193,7 +193,6 @@ def tilelang_kernel_bwd_dkv(
     num_threads = 32
     print("NV", NV, "NS", NS, "B", B, "H", H)
 
-    @tilelang.jit
     @T.prim_func
     def flash_bwd_dkv(
             Q: T.Tensor(q_shape, dtype),
@@ -310,6 +309,7 @@ def make_dq_layout(dQ):
     )
 
 
+@tilelang.jit
 def tilelang_kernel_bwd_dqkv(
     batch,
     heads,
@@ -357,7 +357,6 @@ def tilelang_kernel_bwd_dqkv(
     block_mask_shape = [batch, seq_len, heads_kv, NS]
     num_threads = 32
 
-    @tilelang.jit
     @T.prim_func
     def flash_bwd_dqkv(
             Q: T.Tensor(q_shape, dtype),
@@ -473,6 +472,7 @@ def tilelang_kernel_bwd_dqkv(
     return flash_bwd_dqkv
 
 
+@tilelang.jit(out_idx=[2])
 def tilelang_kernel_preprocess(
     batch,
     heads,
@@ -486,7 +486,6 @@ def tilelang_kernel_preprocess(
 
     shape = [batch, seq_len, heads, dim]
 
-    @tilelang.jit(out_idx=[2], execution_backend="cython")
     @T.prim_func
     def flash_bwd_prep(
             O: T.Tensor(shape, dtype),  # type: ignore
@@ -510,6 +509,7 @@ def tilelang_kernel_preprocess(
     return flash_bwd_prep
 
 
+@tilelang.jit(out_idx=[2])
 def tilelang_kernel_block_mask(
     batch,
     heads,
@@ -529,7 +529,6 @@ def tilelang_kernel_block_mask(
     block_mask_shape = [batch, seq_len, heads, NS]
     USE_BLOCK_COUNTS = block_counts is not None
 
-    @tilelang.jit(out_idx=[2], execution_backend="cython")
     @T.prim_func
     def flash_bwd_block_mask(
             BlockIndices: T.Tensor(block_indices_shape, dtype),  # type: ignore
