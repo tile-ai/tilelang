@@ -127,4 +127,4 @@ def test_gemm_f16f16f16_nn_kernel_jit():
 
 
 if __name__ == "__main__":
-    test_gemm_f16f16f16_nn_kernel_jit()
+    tilelang.testing.main()
