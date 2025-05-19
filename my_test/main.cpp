@@ -62,7 +62,7 @@ int main() {
 
     // --- 3. Populate host matrices A and B with FP8 representation of 2.0f ---
     // Using 0x40 as the unsigned char representation for 2.0f in E4M3 (bias 7)
-    unsigned char fp8_val_2_0 = float_to_fp8_e4m3_approx(2.0f);
+    unsigned char fp8_val_2_0 = float_to__approx(2.0f);
     std::cout << "Using 0x" << std::hex << (int)fp8_val_2_0 << std::dec << " for FP8 representation of 2.0f" << std::endl;
 
     for (int i = 0; i < M * K; ++i) {

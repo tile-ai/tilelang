@@ -30,6 +30,7 @@ class MatrixCoreIntrinEmitter(object):
         "int32": "int32",
         "e4m3_float8": "e4m3",
         "e5m2_float8": "e5m2",
+        "e4m3fnuz_float8": "e4m3fnuz",
     }
 
     # k_pack represents the number of elements in a vectorized instruction
@@ -116,7 +117,8 @@ class MatrixCoreIntrinEmitter(object):
             "float32": "f32",
             "int8": "i8",
             "int32": "i32",
-            "e4m3_float8":"_fp8_fp8"
+            "e4m3_float8":"_fp8_fp8",
+            "e4m3fnuz_float8":"_fp8_fp8",
         }[in_dtype]
 
         if in_dtype == "e4m3_float8":

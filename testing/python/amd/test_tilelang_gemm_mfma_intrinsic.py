@@ -202,13 +202,9 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype="floa
 
 @tilelang.testing.requires_rocm
 def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(128, 128, 128, "e4m3_float8", "float16")
+    assert_tl_matmul_correctness(128, 128, 128, "e4m3fnuz_float8", "float16")
     # assert_tl_matmul_correctness(128, 256, 256, "float16", "float32")
 
 
 if __name__ == "__main__":
-    import os
-    print(f"Python script PID: {os.getpid()}")
-    print("Attach rocgdb now and set breakpoints. Then press Enter here to continue.")
-    input()
     test_assert_tl_matmul()
