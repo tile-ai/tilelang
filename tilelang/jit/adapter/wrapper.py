@@ -90,7 +90,7 @@ class TLCUDASourceWrapper(object):
         "float32": "float",
         "float16": "half_t",
         "bfloat16": "bfloat16_t",
-        "e4m3_float8": "__hip_fp8_e4m3_fnuz",
+        "e4m3_float8": "unsigned char",
         "e5m2_float8": "fp8_e5_t",
         "float64": "double",
         "int64": "int64_t",

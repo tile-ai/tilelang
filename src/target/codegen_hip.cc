@@ -901,6 +901,7 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"float16x4", "float16x4"},
         {"bfloat16x4", "bfloat16x4"},
         {"float32x4", "float32x4"},
+        {"e4m3_float8x4", "__hip_fp8_e4m3_fnuz"},
         {"float32x16", "float32x16"}};
     std::string call_mfma_code = R"({
     *((({C_dytpe}*){c_ref}) + {c_bias}) = {mfma_buildin}(*((({A_dytpe}*){a_ref}) + {a_bias}),
@@ -920,6 +921,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("{c_ref}", c_ref);
     replacer.register_rule("{c_bias}", c_bias);
     os << replacer.rewrite(call_mfma_code);
+    // printf 3 dtypes
+    os << "/*" << A_dtype << " " << B_dtype << " " << C_dtype << "*/";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }

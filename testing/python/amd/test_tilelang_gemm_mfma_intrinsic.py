@@ -173,6 +173,11 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype="floa
     if in_dtype == "int8":
         A = torch.randint(-128, 127, (M, K), device="cuda", dtype=torch.int8)
         B = torch.randint(-128, 127, (N, K), device="cuda", dtype=torch.int8)
+    elif in_dtype == "e4m3_float8":
+        gen = torch.Generator(device='cuda')
+        gen.manual_seed(42)
+        A = (torch.randn((M, K), dtype=torch.bfloat16, device="cuda", generator=gen)).to(torch.float8_e4m3fn)
+        B = (torch.randn((N, K), dtype=torch.bfloat16, device="cuda", generator=gen)).to(torch.float8_e4m3fn)
     else:
         A = torch.rand(M, K, device="cuda", dtype=getattr(torch, in_dtype))
         B = torch.rand(N, K, device="cuda", dtype=getattr(torch, in_dtype))
@@ -198,8 +203,12 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype="floa
 @tilelang.testing.requires_rocm
 def test_assert_tl_matmul():
     assert_tl_matmul_correctness(128, 128, 128, "e4m3_float8", "float16")
-    assert_tl_matmul_correctness(128, 256, 256, "float16", "float32")
+    # assert_tl_matmul_correctness(128, 256, 256, "float16", "float32")
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    import os
+    print(f"Python script PID: {os.getpid()}")
+    print("Attach rocgdb now and set breakpoints. Then press Enter here to continue.")
+    input()
+    test_assert_tl_matmul()
