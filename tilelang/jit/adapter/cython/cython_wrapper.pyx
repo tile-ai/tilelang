@@ -116,7 +116,7 @@ cdef class CythonKernelWrapper:
         # Convert tensor pointers to C void pointers for kernel call
         call_args = []
         for i in range(len(tensor_list)):
-            tensor = tensor_list[i],
+            tensor = tensor_list[i]
             if isinstance(tensor, torch.Tensor):
                 if not tensor.is_contiguous():
                     raise ValueError(f"Input tensor at index {i} must be contiguous")
