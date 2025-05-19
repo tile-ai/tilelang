@@ -110,6 +110,8 @@ cdef class CythonKernelWrapper:
                 tensor = torch.empty(*shape, dtype=dtype, device=device)
             else:
                 tensor = inputs[ins_idx]
+                if not tensor.is_contiguous():
+                    raise ValueError(f"Input tensor at index {ins_idx} must be contiguous")
                 ins_idx += 1
             tensor_list.append(tensor)
         
