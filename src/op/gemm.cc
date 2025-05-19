@@ -246,13 +246,13 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
       const int64_t continuity =
-          trans_A ? mat_continuous / (warp_m / 4) : mat_continuous;
-      results.Set(A, makeGemmABLayout(mat_stride, mat_continuous, continuity,
-                                      A->dtype.bits(), trans_A ? 1 : 2));
+          trans_A ? 4 * mat_continuous / warp_m : mat_continuous;
+      results.Set(A,
+                  makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                   A->dtype.bits(), trans_A ? 1 : 2));
     } else {
-      ICHECK(trans_A == false);
-      auto fragment =
-          makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n, A->dtype.bits());
+      auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
+                                        A->dtype.bits(), trans_A);
       results.Set(A, fragment->BindThreadRange(thread_range));
     }
     if (B.scope() == "shared" || B.scope() == "shared.dyn") {

@@ -240,7 +240,7 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
                     Output[bz, by, i] = o_accum_local[i]
 
         @T.prim_func
-        def main_split(
+        def flashattn_gqa_decode_split(
                 Q: T.Tensor(shape_q, dtype),
                 K: T.Tensor(shape_k, dtype),
                 V: T.Tensor(shape_v, dtype),
@@ -253,7 +253,7 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
             combine(glse, Output_partial, Output)
 
         @T.prim_func
-        def main_no_split(
+        def flashattn_gqa_decode_no_split(
                 Q: T.Tensor(shape_q, dtype),
                 K: T.Tensor(shape_k, dtype),
                 V: T.Tensor(shape_v, dtype),
@@ -265,9 +265,9 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
             flash_attn(Q, K, V, mask, Output)
 
         if num_split > 1:
-            return main_split
+            return flashattn_gqa_decode_split
         else:
-            return main_no_split
+            return flashattn_gqa_decode_no_split
 
     if tune:
 
@@ -410,22 +410,18 @@ def reduce_ref(Q, K, V, mask, glse, Output_partial):
     return o.to(torch.float16)
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=1, help='batch size')
-    parser.add_argument('--heads', type=int, default=32, help='heads')
-    parser.add_argument('--groups', type=int, default=8, help='groups')
-    parser.add_argument('--kv_seqlen', type=int, default=8192, help='kv sequence length')
-    parser.add_argument('--dim', type=int, default=128, help='dim')
-    parser.add_argument('--tune', action='store_true', help='tune configs')
-    args = parser.parse_args()
-
-    batch, heads, groups, kv_seqlen, dim = args.batch, args.heads, args.groups, args.kv_seqlen, args.dim
+def main(batch: int = 1,
+         heads: int = 32,
+         groups: int = 8,
+         kv_seqlen: int = 8192,
+         dim: int = 128,
+         tune: bool = False):
+    batch, heads, groups, kv_seqlen, dim = batch, heads, groups, kv_seqlen, dim
     qk_flops = 2 * batch * heads * kv_seqlen * dim
     pv_flops = 2 * batch * heads * kv_seqlen * dim
     total_flops = qk_flops + pv_flops
 
-    if (not args.tune):
+    if (not tune):
 
         def get_heuristic_config() -> dict:
             # Get CUDA device properties
@@ -453,7 +449,7 @@ if __name__ == "__main__":
                 }
 
         config = get_heuristic_config()
-        program = flashattn(batch, heads, groups, kv_seqlen, dim, tune=args.tune)(**config)
+        program = flashattn(batch, heads, groups, kv_seqlen, dim, tune=tune)(**config)
         kernel = tilelang.compile(program, out_idx=[6])
         profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
         profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
@@ -465,10 +461,23 @@ if __name__ == "__main__":
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:
-        best_result = flashattn(batch, heads, groups, kv_seqlen, dim, tune=args.tune)
+        best_result = flashattn(batch, heads, groups, kv_seqlen, dim, tune=tune)
         best_latency = best_result.latency
         best_config = best_result.config
         ref_latency = best_result.ref_latency
         print(f"Best latency: {best_latency}")
         print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
         print(f"Best config: {best_config}")
+        print(f"Ref latency: {ref_latency}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--batch', type=int, default=1, help='batch size')
+    parser.add_argument('--heads', type=int, default=32, help='heads')
+    parser.add_argument('--groups', type=int, default=8, help='groups')
+    parser.add_argument('--kv_seqlen', type=int, default=8192, help='kv sequence length')
+    parser.add_argument('--dim', type=int, default=128, help='dim')
+    parser.add_argument('--tune', action='store_true', help='tune configs')
+    args = parser.parse_args()
+    main(args.batch, args.heads, args.groups, args.kv_seqlen, args.dim, args.tune)

@@ -6,6 +6,8 @@ import tilelang.language as T
 tilelang.disable_cache()
 
 
+# add decorator @tilelang.jit if you want to return a torch function
+# @tilelang.jit
 def matmul_warp_specialize_copy_1_gemm_0(M,
                                          N,
                                          K,
@@ -17,7 +19,7 @@ def matmul_warp_specialize_copy_1_gemm_0(M,
 
     warp_group_num = 2
     threads = 128 * warp_group_num
-    # add decorator @tilelang.jit if you want to return a torch function
+
     @T.prim_func
     def main(
             A: T.Tensor((M, K), dtype),

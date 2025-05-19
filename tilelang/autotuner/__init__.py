@@ -19,6 +19,26 @@ import concurrent.futures
 import torch
 import os
 import sys
+import signal
+
+
+class TimeoutException(Exception):
+    pass
+
+
+def timeout_handler(signum, frame):
+    raise TimeoutException()
+
+
+def run_with_timeout(func, timeout, *args, **kwargs):
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(timeout)
+    try:
+        result = func(*args, **kwargs)
+    finally:
+        signal.alarm(0)
+    return result
+
 
 # Configure logging for the autotuner module
 # TODO: Consider creating a common logger in utils
@@ -376,12 +396,8 @@ class AutoTuner:
                 # Cannot ThreadPoolExecutor to enforce timeout on target_fn execution
                 # Because tma init may behave strangely with one thread
                 # latency, ref_latency = target_fn(jit_context)
-                benchmark_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                future = benchmark_executor.submit(
-                    functools.partial(device_wrapper, target_fn, torch.cuda.current_device()),
-                    jit_context)
-                latency, ref_latency = future.result(timeout=timeout)
-            except concurrent.futures.TimeoutError:
+                latency, ref_latency = run_with_timeout(target_fn, timeout, jit_context)
+            except TimeoutException:
                 logger.info(
                     f"A timeout occurred while testing config {config}, checkout autotuner.log for more details"
                 )

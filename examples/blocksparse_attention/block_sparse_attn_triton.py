@@ -62,8 +62,6 @@ def _fwd_kernel_inner(
     mask_val = tl.load(block_mask_ptr + k_block_col_idx * stride_bmask_n)
     # print
 
-    if k_block_col_idx == 3:
-        print("mask_val", mask_val)
     if mask_val == True:
         start_n = k_block_col_idx * BLOCK_N
         # -- compute qk ----
