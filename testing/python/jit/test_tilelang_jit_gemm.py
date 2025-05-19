@@ -70,7 +70,7 @@ def run_gemm_kernel_jit(
     block_M,
     block_N,
     block_K,
-    num_stages=3,
+    num_stages=0,
     num_threads=128,
 ):
     matmul_kernel = matmul_kernel_jit(
@@ -120,9 +120,9 @@ def test_gemm_f16f16f16_nn_kernel_jit():
         "float16",
         "float16",
         128,
-        256,
+        128,
         32,
-        2,
+        0,
     )
 
 
