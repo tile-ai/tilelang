@@ -196,17 +196,16 @@ class _JitImplementation:
         self.target_host = target_host
         self.verbose = verbose
         self.pass_configs = pass_configs
-        self.return_program = return_program # Stored from args
+        self.return_program = return_program  # Stored from args
 
         # Corrected debug_root_path handling
         self.debug_root_path = debug_root_path
-        if self.debug_root_path is not None:
-            if not path.isabs(self.debug_root_path):
-                try:
-                    base_path = path.dirname(path.dirname(path.dirname(__file__)))
-                    self.debug_root_path = path.join(base_path, self.debug_root_path)
-                except NameError:
-                    self.debug_root_path = path.abspath(self.debug_root_path)
+        if self.debug_root_path is not None and not path.isabs(self.debug_root_path):
+            try:
+                base_path = path.dirname(path.dirname(path.dirname(__file__)))
+                self.debug_root_path = path.join(base_path, self.debug_root_path)
+            except NameError:
+                self.debug_root_path = path.abspath(self.debug_root_path)
         # If debug_root_path was None initially, it remains None.
 
         # Type hint the caches
@@ -225,7 +224,8 @@ class _JitImplementation:
 
     # Actual implementation of __call__
     def __call__(
-        self, func: Callable[_P, _RProg] # func is Union[Callable[_P, _RProg], PrimFunc] in original
+        self,
+        func: Callable[_P, _RProg]  # func is Union[Callable[_P, _RProg], PrimFunc] in original
     ) -> Callable[_P, Any]:
 
         @functools.wraps(func)
@@ -255,7 +255,7 @@ class _JitImplementation:
                 )
 
                 if self.debug_root_path:
-                    func_name = getattr(func, '__name__', 'jit_kernel') # Use func for name
+                    func_name = getattr(func, '__name__', 'jit_kernel')  # Use func for name
                     kernel_file = f'tilelang_jit_kernel_{func_name}.c'
                     makedirs(self.debug_root_path, exist_ok=True)
                     with open(path.join(self.debug_root_path, kernel_file), 'w') as f:
@@ -271,21 +271,21 @@ class _JitImplementation:
                 return cached_program, cached_kernel
             else:
                 return cached_kernel
+
         return wrapper
 
 
-def jit( # This is the new public interface
-    func: Union[Callable[_P, _RProg], PrimFunc, None] = None,
-    *, # Indicates subsequent arguments are keyword-only
-    out_idx: Any = None,
-    target: Union[str, Target] = "auto",
-    target_host: Union[str, Target] = None,
-    execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
-    verbose: bool = False,
-    pass_configs: Optional[Dict[str, Any]] = None,
-    debug_root_path: Optional[str] = None,
-    return_program: bool = False
-):
+def jit(  # This is the new public interface
+        func: Union[Callable[_P, _RProg], PrimFunc, None] = None,
+        *,  # Indicates subsequent arguments are keyword-only
+        out_idx: Any = None,
+        target: Union[str, Target] = "auto",
+        target_host: Union[str, Target] = None,
+        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        verbose: bool = False,
+        pass_configs: Optional[Dict[str, Any]] = None,
+        debug_root_path: Optional[str] = None,
+        return_program: bool = False):
     """
     Just-In-Time (JIT) compiler decorator for TileLang functions.
 
@@ -327,15 +327,14 @@ def jit( # This is the new public interface
         # Case 1: Used as @jit (func_or_out_idx is the function, others are defaults)
         # Create a default _JitImplementation instance and apply it to the function.
         default_decorator = _JitImplementation(
-            out_idx=out_idx, # Explicitly None for the default case
+            out_idx=out_idx,  # Explicitly None for the default case
             target=target,
             target_host=target_host,
             execution_backend=execution_backend,
             verbose=verbose,
             pass_configs=pass_configs,
             debug_root_path=debug_root_path,
-            return_program=return_program
-        )
+            return_program=return_program)
         return default_decorator(func)
     elif isinstance(func, PrimFunc):
         raise ValueError("Use tilelang.jit to decorate prim_func is not supported yet.")
@@ -344,13 +343,12 @@ def jit( # This is the new public interface
         # Create a _JitImplementation instance with the provided/defaulted arguments.
         # This instance is a decorator that will be applied to the function later.
         configured_decorator = _JitImplementation(
-            out_idx=out_idx, # Pass along; could be an actual out_idx or None
+            out_idx=out_idx,  # Pass along; could be an actual out_idx or None
             target=target,
             target_host=target_host,
             execution_backend=execution_backend,
             verbose=verbose,
             pass_configs=pass_configs,
             debug_root_path=debug_root_path,
-            return_program=return_program
-        )
+            return_program=return_program)
         return configured_decorator
