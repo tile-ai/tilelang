@@ -1442,6 +1442,13 @@ e5m2_float8x16 = func_gen(("E5M2Float8x16"))
 e5m2_float8x32 = func_gen(("E5M2Float8x32"))
 e5m2_float8x64 = func_gen(("E5M2Float8x64"))
 
+e4m3fnuz_float8 = func_gen(("E4M3FNUZFloat8"))
+e4m3fnuz_float8x4 = func_gen(("E4M3FNUZFloat8x4"))
+e4m3fnuz_float8x8 = func_gen(("E4M3FNUZFloat8x8"))
+e4m3fnuz_float8x16 = func_gen(("E4M3FNUZFloat8x16"))
+e4m3fnuz_float8x32 = func_gen(("E4M3FNUZFloat8x32"))
+e4m3fnuz_float8x64 = func_gen(("E4M3FNUZFloat8x64"))
+
 # pylint: enable=invalid-name
 
 
@@ -1965,16 +1972,21 @@ __all__ = [
     "uint32x64",
     "uint64x64",
     "e4m3_float8",
+    "e4m3fnuz_float8",
     "e5m2_float8",
     "float16",
     "float32",
     "float64",
     "e4m3_float8x4",
+    "e4m3fnuz_float8x4",
     "e5m2_float8x4",
     "float16x4",
     "float32x4",
     "float64x4",
     "e4m3_float8x8",
+    "e4m3fnuz_float8x8",
+    "e4m3fnuz_float8x16",
+    "e4m3fnuz_float8x32",
     "e5m2_float8x8",
     "float16x8",
     "float32x8",
