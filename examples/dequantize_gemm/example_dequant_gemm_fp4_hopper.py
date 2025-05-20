@@ -269,19 +269,12 @@ def ref_program(A, qB):
     return C.transpose(0, 1)
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--m', type=int, default=256, help='M')
-    parser.add_argument('--n', type=int, default=256, help='N')
-    parser.add_argument('--k', type=int, default=256, help='K')
-    parser.add_argument('--tune', action='store_true', help='tune configs')
-    args = parser.parse_args()
-    M, N, K = args.m, args.n, args.k
-    total_flops = 2 * M * N * K
+def main(m=256, n=256, k=256, tune=False):
+    total_flops = 2 * m * n * k
 
-    if (not args.tune):
+    if (not tune):
         program = matmul(
-            M, N, K, "float16", "float16", "float32", num_bits=4, tune=args.tune)(
+            m, n, k, "float16", "float16", "float32", num_bits=4, tune=tune)(
                 block_M=128, block_N=128, block_K=128, num_stages=2, threads=256, split=1)
         kernel = tilelang.compile(program, out_idx=[2])
         profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
@@ -294,10 +287,20 @@ if __name__ == "__main__":
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:
-        best_result = matmul(M, N, K, "float16", "float16", "float32", num_bits=4, tune=args.tune)
+        best_result = matmul(m, n, k, "float16", "float16", "float32", num_bits=4, tune=tune)
         best_latency = best_result.latency
         best_config = best_result.config
-        ref_latency = best_result.ref_latency
         print(f"Best latency: {best_latency}")
         print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
         print(f"Best config: {best_config}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--m', type=int, default=256, help='M')
+    parser.add_argument('--n', type=int, default=256, help='N')
+    parser.add_argument('--k', type=int, default=256, help='K')
+    parser.add_argument('--tune', action='store_true', help='tune configs')
+    args = parser.parse_args()
+    M, N, K = args.m, args.n, args.k
+    main(M, N, K, args.tune)

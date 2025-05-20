@@ -275,7 +275,8 @@ LayoutMap ReduceOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
         fwd, FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
     Fragment dst_layout =
         Fragment(dst->shape, {}, thd, dest_buffer_rep_extent, NullOpt)
-            ->CondenseReplicateVar();
+            ->CondenseReplicateVar()
+            ->BindThreadRange(T.thread_bounds);
     return {{dst, dst_layout}};
   }
   return {};

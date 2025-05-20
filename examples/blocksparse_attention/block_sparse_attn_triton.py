@@ -62,8 +62,6 @@ def _fwd_kernel_inner(
     mask_val = tl.load(block_mask_ptr + k_block_col_idx * stride_bmask_n)
     # print
 
-    if k_block_col_idx == 3:
-        print("mask_val", mask_val)
     if mask_val == True:
         start_n = k_block_col_idx * BLOCK_N
         # -- compute qk ----
@@ -379,6 +377,10 @@ def test_topk_sparse_attention_qlt_kl():
     print("Pass topk sparse attention test with qlen < klen")
 
 
-if __name__ == "__main__":
+def main():
     test_topk_sparse_attention()
     test_topk_sparse_attention_qlt_kl()
+
+
+if __name__ == "__main__":
+    main()

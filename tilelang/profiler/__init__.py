@@ -123,6 +123,37 @@ class Profiler:
                 ref_name="ref",
             )
 
+    def manual_assert_close(
+        self,
+        reference_program: Callable,
+        input_tensors: Optional[List[torch.Tensor]] = None,
+        manual_check_prog: Callable = None,
+    ):
+        """Validates kernel output against a reference implementation.
+        
+        Args:
+            reference_program: Reference implementation to compare against
+            input_tensors: Optional pre-generated input tensors
+            atol: Absolute tolerance for comparison
+            rtol: Relative tolerance for comparison
+            max_mismatched_ratio: Maximum allowed ratio of mismatched elements
+        """
+        ins = self._get_inputs() if input_tensors is None else input_tensors
+        ref_outs = reference_program(*ins)
+        torch.cuda.synchronize()
+        lib_outs = self.func(*ins)
+        torch.cuda.synchronize()
+
+        if isinstance(lib_outs, torch.Tensor):
+            lib_outs = [lib_outs]
+        if isinstance(ref_outs, torch.Tensor):
+            ref_outs = [ref_outs]
+        elif ref_outs is None:
+            ref_outs = []
+        assert len(lib_outs) == len(ref_outs), f"{len(lib_outs)=} not equals to {len(ref_outs)=} !"
+        torch.set_printoptions(edgeitems=torch.inf)
+        manual_check_prog(lib_outs, ref_outs)
+
     def assert_consistent(self, repeat=10):
         """Checks for kernel consistency across multiple runs.
         

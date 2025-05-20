@@ -291,8 +291,8 @@ public:
           // If already in map, ensure they are structurally equal
           ICHECK(StructuralEqual()(layout, layout_map[buffer]))
               << "Get different layout for " << buffer
-              << " current layout: " << layout->DebugOutput()
-              << " previous layout: " << layout_map[buffer]->DebugOutput();
+              << "\n current layout: " << layout->DebugOutput()
+              << "\n previous layout: " << layout_map[buffer]->DebugOutput();
         } else {
           // Otherwise, update map
           layout_map.Set(buffer, layout);
@@ -301,9 +301,10 @@ public:
 
           // Check if buffer exists in use_list_
           if (!use_list_.count(buffer)) {
-            LOG(WARNING) << "Buffer " << buffer << " not found in use_list_. "
-                         << "Potential mismatch between inference updates and "
-                         << "use_list_.";
+            LOG(WARNING) << "Layout inference failed for buffer " << buffer
+                         << ". "
+                         << "The buffer cannot be inferred with current layout "
+                            "inference rules.";
             continue;
           }
 

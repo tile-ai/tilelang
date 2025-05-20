@@ -261,6 +261,10 @@ def test_topk_sparse_attention_qlen_lt_klen():
     print("Pass topk sparse attention test with qlen < klen")
 
 
-if __name__ == "__main__":
+def main():
     test_topk_sparse_attention()
     test_topk_sparse_attention_qlen_lt_klen()
+
+
+if __name__ == "__main__":
+    main()

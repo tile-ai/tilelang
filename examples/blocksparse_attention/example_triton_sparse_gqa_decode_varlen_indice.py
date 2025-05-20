@@ -350,22 +350,18 @@ def ref_program_fa(query, key, value, cache_seqlens):
     return output
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=64, help='batch size')
-    parser.add_argument('--heads', type=int, default=32, help='heads')
-    parser.add_argument('--heads_kv', type=int, default=8, help='heads_kv')
-    parser.add_argument(
-        '--max_cache_seqlen', type=int, default=8192, help='kvcache sequence length')
-    parser.add_argument('--dim', type=int, default=128, help='dim')
-    parser.add_argument('--dim_v', type=int, default=128, help='dim_v')
-    parser.add_argument('--sparse_ratio', type=float, default=0.8, help='sparse ratio')
-    parser.add_argument('--block_size', type=int, default=32, help='block_size')
-    args = parser.parse_args()
+def main(batch=64,
+         heads=32,
+         heads_kv=8,
+         max_cache_seqlen=8192,
+         dim=128,
+         dim_v=128,
+         sparse_ratio=0.8,
+         block_size=32):
 
-    batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = args.batch, args.heads, args.heads_kv, args.max_cache_seqlen, args.dim, args.dim_v
-    sparse_ratio = args.sparse_ratio
-    block_size = args.block_size
+    batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = batch, heads, heads_kv, max_cache_seqlen, dim, dim_v
+    sparse_ratio = sparse_ratio
+    block_size = block_size
     qk_flops = 2 * batch * heads * max_cache_seqlen * dim
     pv_flops = 2 * batch * heads * max_cache_seqlen * dim_v
     total_flops = qk_flops + pv_flops
@@ -466,3 +462,19 @@ if __name__ == "__main__":
     print(f"Average time of ref: {avg_time_ref:.6f} seconds")
 
     print(f"Speedup: {avg_time_ref / avg_time:.2f}x")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--batch', type=int, default=64, help='batch size')
+    parser.add_argument('--heads', type=int, default=32, help='heads')
+    parser.add_argument('--heads_kv', type=int, default=8, help='heads_kv')
+    parser.add_argument(
+        '--max_cache_seqlen', type=int, default=8192, help='kvcache sequence length')
+    parser.add_argument('--dim', type=int, default=128, help='dim')
+    parser.add_argument('--dim_v', type=int, default=128, help='dim_v')
+    parser.add_argument('--sparse_ratio', type=float, default=0.8, help='sparse ratio')
+    parser.add_argument('--block_size', type=int, default=32, help='block_size')
+    args = parser.parse_args()
+    main(args.batch, args.heads, args.heads_kv, args.max_cache_seqlen, args.dim, args.dim_v,
+         args.sparse_ratio, args.block_size)
