@@ -12,12 +12,9 @@
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
 
-#include <queue>
-
 #include "../op/builtin.h"
 #include "../op/parallel.h"
 #include "arith/ir_mutator_with_analyzer.h"
-#include "arith/ir_visitor_with_analyzer.h"
 #include "loop_partition.h"
 #include "loop_vectorize.h"
 
@@ -26,7 +23,7 @@ namespace tl {
 
 using namespace tir;
 using arith::IRMutatorWithAnalyzer;
-using arith::IRVisitorWithAnalyzer;
+
 // Helper class to find leaf For nodes in a given IR
 class LeafForFinder : public StmtVisitor {
 public:
@@ -60,8 +57,9 @@ private:
 // 3. For each index, compare against the buffer's shape.
 //    If the index might exceed the shape (upper bound too large),
 //    log a warning or handle accordingly.
-struct GlobalMemChecker : public IRVisitorWithAnalyzer {
+struct GlobalMemChecker : public StmtExprVisitor {
 
+  GlobalMemChecker(arith::Analyzer *analyzer) : analyzer_(analyzer) {}
   void VisitExpr_(const BufferLoadNode *op) final {
     // Check if the buffer is in global scope
     if (IsGlobalBuffer(op->buffer)) {
@@ -118,12 +116,12 @@ struct GlobalMemChecker : public IRVisitorWithAnalyzer {
       // If analyzer->CanProve(index < shape_dim) returns false,
       // it means we cannot prove the access is within bounds.
       PrimExpr upper_bound_cond = index < shape_dim;
-      if (!analyzer_.CanProve(upper_bound_cond)) {
+      if (!analyzer_->CanProve(upper_bound_cond)) {
         _conditions.push_back(upper_bound_cond);
       }
       // Check if index >= 0 can be proven.
       PrimExpr lower_bound_cond = index >= 0;
-      if (!analyzer_.CanProve(lower_bound_cond)) {
+      if (!analyzer_->CanProve(lower_bound_cond)) {
         _conditions.push_back(lower_bound_cond);
       }
     }
@@ -133,6 +131,7 @@ struct GlobalMemChecker : public IRVisitorWithAnalyzer {
 
 private:
   Array<PrimExpr> _conditions;
+  arith::Analyzer *analyzer_;
 };
 
 class SafeMemorysRewriter : public StmtExprMutator {
@@ -146,7 +145,7 @@ private:
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     // Check if the buffer is in global scope
     auto store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-    GlobalMemChecker checker;
+    GlobalMemChecker checker(analyzer_);
     checker(store);
     Array<PrimExpr> conditions = checker.GetConditions();
     if (conditions.size() == 0) {
@@ -195,7 +194,7 @@ private:
     if (const CallNode *call_op = op->value.as<CallNode>()) {
       auto call = Downcast<Call>(evaluate->value);
       if (call->op == builtin::call_extern()) {
-        GlobalMemChecker checker;
+        GlobalMemChecker checker(analyzer_);
         checker(call);
         Array<PrimExpr> conditions = checker.GetConditions();
 
