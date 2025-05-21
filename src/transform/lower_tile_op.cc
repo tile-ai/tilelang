@@ -24,7 +24,8 @@ namespace tl {
 
 using namespace tir;
 
-static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout) {
+static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
+                                   Map<Var, Var> &var_remap) {
   const auto *ptr_type =
       TVM_TYPE_AS(buffer->data->type_annotation, PointerTypeNode);
   Type new_type;
@@ -38,7 +39,12 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout) {
   if (ptr_type->storage_scope == "global") {
     new_var = buffer->data;
   } else {
-    new_var = Var(buffer->data->name_hint, new_type);
+    if (var_remap.count(buffer->data)) {
+      new_var = var_remap[buffer->data];
+    } else {
+      new_var = Var(buffer->data->name_hint, new_type);
+      var_remap.Set(buffer->data, new_var);
+    }
   }
   Array<PrimExpr> layout_shape = layout->OutputShape();
   Array<PrimExpr> output_shape = layout_shape;
@@ -62,7 +68,6 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout) {
       output_shape.insert(output_shape.begin(), replicate_extent);
     }
   }
-
   return Buffer(new_var, buffer->dtype, output_shape, {}, buffer->elem_offset,
                 buffer->name, buffer->data_alignment, buffer->offset_factor,
                 buffer->buffer_type);
@@ -106,7 +111,8 @@ private:
                             .as<Map<Buffer, Layout>>()
                             .value();
       for (auto [buffer, layout] : layout_map) {
-        buffer_remap_.Set(buffer, makeBufferWithLayout(buffer, layout));
+        buffer_remap_.Set(buffer,
+                          makeBufferWithLayout(buffer, layout, var_remap_));
         layout_map_.Set(buffer, layout);
       }
     }
@@ -265,21 +271,34 @@ private:
     if (is_ptx_) {
       return load;
     }
-
-    if (buffer_remap_.count(load->buffer)) {
-      auto new_indices = layout_map_[load->buffer]->Forward(load->indices);
+    auto buffer = load->buffer;
+    if (buffer_remap_.count(buffer)) {
+      auto new_indices = layout_map_[buffer]->Forward(load->indices);
       auto new_buffer = buffer_remap_[load->buffer];
       return BufferLoad(new_buffer, new_indices);
+    } else if (var_remap_.count(buffer->data)) {
+      auto new_buffer = Buffer(
+          var_remap_[buffer->data], buffer->dtype, buffer->shape,
+          buffer->strides, buffer->elem_offset, buffer->name,
+          buffer->data_alignment, buffer->offset_factor, buffer->buffer_type);
+      return BufferLoad(new_buffer, load->indices);
     }
     return load;
   }
 
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     auto store = Downcast<BufferStore>(IRMutatorWithAnalyzer::VisitStmt_(op));
-    if (buffer_remap_.count(store->buffer)) {
-      auto new_indices = layout_map_[store->buffer]->Forward(store->indices);
+    auto buffer = store->buffer;
+    if (buffer_remap_.count(buffer)) {
+      auto new_indices = layout_map_[buffer]->Forward(store->indices);
       auto new_buffer = buffer_remap_[store->buffer];
       return BufferStore(new_buffer, store->value, new_indices);
+    } else if (var_remap_.count(buffer->data)) {
+      auto new_buffer = Buffer(
+          var_remap_[buffer->data], buffer->dtype, buffer->shape,
+          buffer->strides, buffer->elem_offset, buffer->name,
+          buffer->data_alignment, buffer->offset_factor, buffer->buffer_type);
+      return BufferStore(new_buffer, store->value, store->indices);
     }
     return store;
   }
@@ -364,6 +383,7 @@ private:
   bool is_ptx_{false};
   // Mapping from data Var of a Buffer to Buffer, for lookup
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
+  Map<Var, Var> var_remap_;
 };
 
 namespace transform {
