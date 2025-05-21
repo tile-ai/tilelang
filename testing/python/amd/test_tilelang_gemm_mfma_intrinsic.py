@@ -208,7 +208,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype="floa
 
 @tilelang.testing.requires_rocm
 def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(128, 128, 128, "float8_e4m3fnuz", "float16")
+    assert_tl_matmul_correctness(128, 128, 128, "e4m3fnuz_float8", "float16")
 
 
 if __name__ == "__main__":
