@@ -89,12 +89,7 @@ class MatrixCoreIntrinEmitter(object):
         if a_dtype.bits == 32:
             self.k_dim = 4
         elif a_dtype.bits in [16, 8]:
-            if str(a_dtype) in ["float8_e4m3fnuz", "e4m3fnuz_float8", "e4m3_float8"]:
-                print(f"Setting k_dim=32 for float8_e4m3fnuz type")
-                self.k_dim = 32
-                self.k_pack = 4  # Adjust k_pack for float8
-            else:
-                self.k_dim = 16
+            self.k_dim = 16
         else:
             raise ValueError(f"Unsupported a_dtype = {a_dtype}")
 
@@ -129,9 +124,6 @@ class MatrixCoreIntrinEmitter(object):
             "e4m3fnuz_float8":"_fp8_fp8",
             "float8_e4m3fnuz":"_fp8_fp8",
         }[in_dtype]
-
-        if in_dtype in ["e4m3_float8", "e4m3fnuz_float8", "float8_e4m3fnuz"]:
-            k_dim = 32
 
         self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}{in_dtype_abbrv}"
 
@@ -187,7 +179,7 @@ class MatrixCoreIntrinEmitter(object):
                 index_map = shared_16x32_to_local_64x8_layout_A if transposed else shared_16x32_to_local_64x8_layout_B
                 reverse_index_map = thread_id_shared_access_64x8_to_16x32_layout_A if transposed else thread_id_shared_access_64x8_to_16x32_layout_B
         else:
-            raise ValueError("k_dim must be 4 or 16 currently")
+            raise ValueError(f"k_dim must be 4 or 16 currently, but got self.k_dim = {self.k_dim}, self.k_pack = {self.k_pack}")
 
         return index_map, reverse_index_map
 
