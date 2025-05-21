@@ -178,6 +178,12 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype="floa
         gen.manual_seed(42)
         A = (torch.randn((M, K), dtype=torch.bfloat16, device="cuda", generator=gen)).to(torch.float8_e4m3fn)
         B = (torch.randn((N, K), dtype=torch.bfloat16, device="cuda", generator=gen)).to(torch.float8_e4m3fn)
+    elif in_dtype == "float8_e4m3fnuz":
+        gen = torch.Generator(device='cuda')
+        gen.manual_seed(42)
+        # Generate positive values only since fnuz is unsigned
+        A = (torch.abs(torch.randn((M, K), dtype=torch.bfloat16, device="cuda", generator=gen))).to(torch.float8_e4m3fnuz)
+        B = (torch.abs(torch.randn((N, K), dtype=torch.bfloat16, device="cuda", generator=gen))).to(torch.float8_e4m3fnuz)
     else:
         A = torch.rand(M, K, device="cuda", dtype=getattr(torch, in_dtype))
         B = torch.rand(N, K, device="cuda", dtype=getattr(torch, in_dtype))
@@ -202,8 +208,16 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype="floa
 
 @tilelang.testing.requires_rocm
 def test_assert_tl_matmul():
-    assert_tl_matmul_correctness(128, 128, 128, "float8_e4m3fnuz", "float16")
-    # assert_tl_matmul_correctness(128, 256, 256, "float16", "float32")
+    # Test int8
+    assert_tl_matmul_correctness(128, 128, 128, "int8", "int32")
+    # Test float16
+    assert_tl_matmul_correctness(128, 128, 128, "float16", "float16")
+    # Test e4m3_float8
+    assert_tl_matmul_correctness(128, 128, 128, "e4m3_float8", "float16")
+    # Test float8_e4m3fnuz
+    assert_tl_matmul_correctness(128, 128, 128, "float8_e4m3fnuz", "float16", "float32")
+    # Test larger size
+    assert_tl_matmul_correctness(256, 256, 256, "float16", "float16")
 
 
 if __name__ == "__main__":
