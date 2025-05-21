@@ -19,8 +19,9 @@ copyright = "2025-2025, %s" % author
 # Version information.
 
 # TODO: use the version from project metadata
-version = "0.1.0"
-release = "0.1.0"
+with open("../VERSION", "r") as f:
+    version = f.read().strip()
+release = version
 
 extensions = [
     "sphinx_tabs.tabs",

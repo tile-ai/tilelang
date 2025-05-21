@@ -40,9 +40,32 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout) {
   } else {
     new_var = Var(buffer->data->name_hint, new_type);
   }
-  return Buffer(new_var, buffer->dtype, layout->OutputShape(), {},
-                buffer->elem_offset, buffer->name, buffer->data_alignment,
-                buffer->offset_factor, buffer->buffer_type);
+  Array<PrimExpr> layout_shape = layout->OutputShape();
+  Array<PrimExpr> output_shape = layout_shape;
+
+  if (ptr_type->storage_scope == "shared" ||
+      ptr_type->storage_scope == "shared.dyn") {
+    int replicate_extent = 1;
+    Array<PrimExpr> buffer_shape = buffer->shape;
+    int buffer_extent = 1;
+    int layout_extent = 1;
+    for (size_t i = 0; i < buffer_shape.size(); i++) {
+      auto shape = buffer_shape[i].as<IntImmNode>();
+      buffer_extent *= shape->value;
+    }
+    for (size_t i = 0; i < layout_shape.size(); i++) {
+      auto shape = layout_shape[i].as<IntImmNode>();
+      layout_extent *= shape->value;
+    }
+    replicate_extent = buffer_extent / layout_extent;
+    if (replicate_extent > 1) {
+      output_shape.insert(output_shape.begin(), replicate_extent);
+    }
+  }
+
+  return Buffer(new_var, buffer->dtype, output_shape, {}, buffer->elem_offset,
+                buffer->name, buffer->data_alignment, buffer->offset_factor,
+                buffer->buffer_type);
 }
 
 class LowerTileOpPass : arith::IRMutatorWithAnalyzer {
@@ -298,9 +321,10 @@ private:
       auto const_int_bound = analyzer_->const_int_bound(thread_var_);
       auto min_value = const_int_bound->min_value;
       auto max_value = const_int_bound->max_value;
+      auto extent = max_value + 1 - min_value;
       thread_bounds =
           Range::FromMinExtent(IntImm(thread_var_->var.dtype(), min_value),
-                               IntImm(thread_var_->var.dtype(), max_value + 1));
+                               IntImm(thread_var_->var.dtype(), extent));
     } else {
       thread_bounds = Range::FromMinExtent(0, 1);
     }

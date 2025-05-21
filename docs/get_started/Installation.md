@@ -39,6 +39,7 @@ python -c "import tilelang; print(tilelang.__version__)"
 - **Operating System**: Linux
 - **Python Version**: >= 3.7
 - **CUDA Version**: >= 10.0
+- **LLVM**: < 20 if you are using the bundled TVM submodule
 
 We recommend using a Docker container with the necessary dependencies to build **tile-lang** from source. You can use the following command to run a Docker container with the required dependencies:
 
@@ -132,7 +133,7 @@ Copy the configuration file and enable the desired backends (e.g., LLVM and CUDA
 mkdir build
 cp 3rdparty/tvm/cmake/config.cmake build
 cd build
-echo "set(USE_LLVM ON)" >> config.cmake
+# echo "set(USE_LLVM ON)"  # set USE_LLVM to ON if using LLVM
 echo "set(USE_CUDA ON)" >> config.cmake 
 # or echo "set(USE_ROCM ON)" >> config.cmake to enable ROCm runtime
 cmake ..

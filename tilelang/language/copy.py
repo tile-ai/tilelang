@@ -62,7 +62,8 @@ def buffer_load_to_tile_region(load: tir.BufferLoad, access_type: str, extents: 
     return region(load, access_type, *extents)
 
 
-def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: str):
+def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: str,
+                                 extents: List[tir.PrimExpr]):
     """Convert a buffer region to a tile region descriptor.
 
     Args:
@@ -73,8 +74,12 @@ def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: s
         tir.Call: A region descriptor for the specified buffer region
     """
     mins = [x.min for x in buffer_region.region]
-    extents = [x.extent for x in buffer_region.region]
-    return region(T.BufferLoad(buffer_region.buffer, mins), access_type, *extents)
+    region_extents = [x.extent for x in buffer_region.region]
+    assert len(region_extents) >= len(
+        extents
+    ), f"region_extents must be >= extents, region_extents = {region_extents}, extents = {extents}"
+
+    return region(T.BufferLoad(buffer_region.buffer, mins), access_type, *region_extents)
 
 
 def copy(
@@ -110,13 +115,10 @@ def copy(
 
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
-
-    if src_extent:
-        extent = src_extent
-    elif dst_extent:
-        extent = dst_extent
-    else:
-        raise TypeError("Can't deduce copy extents from args")
+    assert src_extent or dst_extent, "Can't deduce copy extents from args"
+    src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
+    dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
+    extent = max(src_extent, dst_extent)
 
     def _to_region(data, access_type):
         if isinstance(data, tir.Var) and T.has_let_value(data):
@@ -124,7 +126,7 @@ def copy(
         if isinstance(data, tir.Buffer):
             return buffer_to_tile_region(data, access_type)
         elif isinstance(data, tir.BufferRegion):
-            return buffer_region_to_tile_region(data, access_type)
+            return buffer_region_to_tile_region(data, access_type, extent)
         else:
             return buffer_load_to_tile_region(data, access_type, extent)
 

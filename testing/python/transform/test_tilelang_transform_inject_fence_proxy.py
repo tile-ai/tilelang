@@ -46,7 +46,7 @@ def test_lower_fence_proxy():
             C_local = T.decl_buffer((32,), scope="local")
             for i in T.unroll(16):
                 C_local[i * 2:i * 2 + 2] = T.Broadcast(T.float32(0), 2)
-            T.FenceProxyAsyncOp()
+            T.fence_proxy_async()
             T.call_extern("handle", "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
                           T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, 0, 2048, 1),
                           T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, 0, 2048, 1),

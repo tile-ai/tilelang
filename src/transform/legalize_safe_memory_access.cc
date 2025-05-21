@@ -1,25 +1,9 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership. The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
+// Copyright (c) Tile-AI Corporation.
+// Licensed under the MIT License.
 
 /*!
- * \file layout_inference.cc
- * \brief infer the fragment/shared memory layout
+ * \file legalize_safe_memory_access.cc
+ * \brief legalize safe memory access
  */
 
 #include <tvm/tir/builtin.h>
@@ -28,8 +12,7 @@
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
 
-#include <queue>
-
+#include "../op/builtin.h"
 #include "../op/parallel.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "loop_partition.h"
@@ -75,10 +58,8 @@ private:
 //    If the index might exceed the shape (upper bound too large),
 //    log a warning or handle accordingly.
 struct GlobalMemChecker : public StmtExprVisitor {
-  arith::Analyzer *analyzer;
 
-  explicit GlobalMemChecker(arith::Analyzer *analyzer) : analyzer(analyzer) {}
-
+  GlobalMemChecker(arith::Analyzer *analyzer) : analyzer_(analyzer) {}
   void VisitExpr_(const BufferLoadNode *op) final {
     // Check if the buffer is in global scope
     if (IsGlobalBuffer(op->buffer)) {
@@ -134,9 +115,14 @@ struct GlobalMemChecker : public StmtExprVisitor {
       // We want to check if index < shape_dim can be proven.
       // If analyzer->CanProve(index < shape_dim) returns false,
       // it means we cannot prove the access is within bounds.
-      PrimExpr cond = index < shape_dim;
-      if (!analyzer->CanProve(cond)) {
-        _conditions.push_back(cond);
+      PrimExpr upper_bound_cond = index < shape_dim;
+      if (!analyzer_->CanProve(upper_bound_cond)) {
+        _conditions.push_back(upper_bound_cond);
+      }
+      // Check if index >= 0 can be proven.
+      PrimExpr lower_bound_cond = index >= 0;
+      if (!analyzer_->CanProve(lower_bound_cond)) {
+        _conditions.push_back(lower_bound_cond);
       }
     }
   }
@@ -145,6 +131,7 @@ struct GlobalMemChecker : public StmtExprVisitor {
 
 private:
   Array<PrimExpr> _conditions;
+  arith::Analyzer *analyzer_;
 };
 
 class SafeMemorysRewriter : public StmtExprMutator {
@@ -161,7 +148,6 @@ private:
     GlobalMemChecker checker(analyzer_);
     checker(store);
     Array<PrimExpr> conditions = checker.GetConditions();
-
     if (conditions.size() == 0) {
       return store;
     }
@@ -182,6 +168,18 @@ private:
       }
       store.CopyOnWrite()->value = value;
       return store;
+    } else if (IsLocalBuffer(store->buffer)) {
+      PrimExpr value = store->value;
+      for (auto cond : conditions) {
+        ICHECK(cond.dtype() == DataType::Bool(1))
+            << "condition is not a boolean: " << cond;
+        value = if_then_else(cond, value, make_zero(value->dtype));
+      }
+      store.CopyOnWrite()->value = value;
+      return store;
+    } else {
+      LOG(FATAL) << "Check store buffer: " << store->buffer
+                 << " is not a global or shared or local buffer";
     }
 
     return store;
@@ -213,6 +211,11 @@ private:
     }
 
     return evaluate;
+  }
+
+  bool IsLocalBuffer(const Buffer &buffer) {
+    String scope = buffer.scope();
+    return scope == "local" || scope == "local.fragment";
   }
 
   bool isSharedBuffer(const Buffer &buffer) {
@@ -288,6 +291,11 @@ tvm::transform::Pass LegalizeSafeMemoryAccess() {
   using namespace tir::transform;
   // Define the transformation function to be applied
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+    bool disable_safe_memory_legalize =
+        ctx->GetConfig<Bool>(kDisableSafeMemoryLegalize, Bool(false)).value();
+    if (disable_safe_memory_legalize) {
+      return f;
+    }
     return SafeMemoryLegalizer::Substitute(std::move(f));
   };
   // Create and return a PrimFunc pass with the transformation function

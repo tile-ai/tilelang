@@ -26,7 +26,7 @@ cdef class CythonKernelWrapper:
         # Add new cache attributes
         list param_dtypes    # Cache for parameter dtypes
         list param_shapes    # Cache for parameter shapes as native Python lists
-
+        object get_current_device
     def __cinit__(self, result_idx, params, lib):
         # Initialize wrapper with kernel configuration
         self.result_idx = result_idx
@@ -36,6 +36,7 @@ cdef class CythonKernelWrapper:
         self.param_dtypes = [param.dtype for param in params]
         # Convert TVM shape arrays to native Python lists
         self.param_shapes = []
+        self.get_current_device = torch.cuda.current_device
         for param in params:
             native_shape = []
             for dim in param.shape:
@@ -83,7 +84,10 @@ cdef class CythonKernelWrapper:
         # Use current CUDA stream if none specified
         if stream == -1: 
             if torch.cuda.is_available():
-                stream = torch.cuda.current_stream().cuda_stream
+                try:
+                    stream = torch._C._cuda_getCurrentRawStream(torch.cuda.current_device())
+                except ImportError:
+                    stream = torch.cuda.current_stream().cuda_stream
             else:
                 stream = 0
 
@@ -120,27 +124,33 @@ cdef class CythonKernelWrapper:
         # Convert tensor pointers to C void pointers for kernel call
         call_args = []
         for i in range(len(tensor_list)):
-            if isinstance(tensor_list[i], torch.Tensor):
-                call_args.append(ctypes.c_void_p(tensor_list[i].data_ptr()))
-            elif isinstance(tensor_list[i], int):
+            tensor = tensor_list[i]
+            if isinstance(tensor, torch.Tensor):
+                if not tensor.is_contiguous():
+                    raise ValueError(f"Input tensor at index {i} must be contiguous")
+                call_args.append(ctypes.c_void_p(tensor.data_ptr()))
+            elif isinstance(tensor, int):
                 # Dynamic symbolics which are passed as integer arguments
                 if i in self.ptr_map:
-                    call_args.append(ctypes.c_void_p(tensor_list[i]))
+                    call_args.append(ctypes.c_void_p(tensor))
                 else:
-                    call_args.append(tensor_list[i])
-            elif isinstance(tensor_list[i], float):
-                call_args.append(ctypes.c_float(tensor_list[i]))
-            elif isinstance(tensor_list[i], bool):
-                call_args.append(ctypes.c_bool(tensor_list[i]))
+                    call_args.append(tensor)
+            elif isinstance(tensor, float):
+                call_args.append(ctypes.c_float(tensor))
+            elif isinstance(tensor, bool):
+                call_args.append(ctypes.c_bool(tensor))
             else:
-                raise ValueError(f"Unsupported tensor type: {type(tensor_list[i])}")
+                raise ValueError(f"Unsupported tensor type: {type(tensor)}")
 
         # Check buffer device
+        # cdef str tensor_list_device_type = tensor_list[0].device.type
+        if isinstance(tensor_list[0], torch.Tensor):
+            tensor_list_device_type = tensor_list[0].device.type
         for param, (buffer_idx, device) in self.buffer_device_map.items():
             if isinstance(tensor_list[buffer_idx], torch.Tensor):
                 tensor_device = tensor_list[buffer_idx].device
                 # Compare device types and indices separately to handle both string and torch.device objects            
-                if (tensor_device.type != device.type or 
+                if (tensor_list_device_type != device.type or 
                     (tensor_device.index is not None and device.index is not None and tensor_device.index != device.index)):
                     raise ValueError(f"Buffer device mismatch for parameter {param}: expected {device}, got {tensor_device}")
 

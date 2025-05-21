@@ -33,7 +33,7 @@ def matmul_dynamic_mnk(
     B_shared_shape = (block_N, block_K) if trans_B else (block_K, block_N)
 
     @T.prim_func
-    def main(
+    def dynamic_matmul(
             A: T.Tensor(A_shape, in_dtype),
             B: T.Tensor(B_shape, in_dtype),
             C: T.Tensor((M, N), out_dtype),
@@ -55,11 +55,11 @@ def matmul_dynamic_mnk(
                 T.gemm(A_shared, B_shared, C_local, trans_A, trans_B)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
-    return main
+    return dynamic_matmul
 
 
-def test_matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype,
-                        accum_dtype, num_stages, threads):
+def matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype,
+                   accum_dtype, num_stages, threads):
     print(
         f"M: {M}, N: {N}, K: {K}, block_M: {block_M}, block_N: {block_N}, block_K: {block_K}, trans_A: {trans_A}, trans_B: {trans_B}, in_dtype: {in_dtype}, out_dtype: {out_dtype}, accum_dtype: {accum_dtype}, num_stages: {num_stages}, threads: {threads}"
     )
@@ -107,6 +107,17 @@ def test_matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in
     print(f"Latency: {latency} ms")
 
 
+def main():
+    M, N, K = 16384, 16384, 16384
+    block_M, block_N, block_K = 128, 128, 32
+    trans_A, trans_B = False, False
+    in_dtype, out_dtype = "float16", "float16"
+    accum_dtype = "float32"
+    num_stages = 3
+    threads = 128
+    matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype,
+                   accum_dtype, num_stages, threads)
+
+
 if __name__ == "__main__":
-    test_matmul_dynamic(16384, 16384, 16384, 128, 128, 32, False, False, "float16", "float16",
-                        "float32", 3, 128)
+    main()

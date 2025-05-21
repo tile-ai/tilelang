@@ -27,6 +27,26 @@ using int4_t = int4;
 #define TL_DEVICE_NOINLINE __noinline__ __device__
 #define TL_PATCH
 
+#define TILELANG_CHECK(stmt)                                                   \
+  do {                                                                         \
+    cudaError_t __err = (stmt);                                                \
+    if (__err != cudaSuccess) {                                                \
+      snprintf(error_buf, ERROR_BUF_SIZE, "%s:%d: %s - %s", __FILE__,          \
+               __LINE__, cudaGetErrorName(__err), cudaGetErrorString(__err));  \
+      return -1;                                                               \
+    }                                                                          \
+  } while (0)
+
+#define TILELANG_CHECK_LAST_ERROR(kernel_name)                                 \
+  do {                                                                         \
+    cudaError_t __err = cudaGetLastError();                                    \
+    if (__err != cudaSuccess) {                                                \
+      snprintf(error_buf, ERROR_BUF_SIZE, "kernel_name: %s - %s",              \
+               cudaGetErrorName(__err), cudaGetErrorString(__err));            \
+      return -1;                                                               \
+    }                                                                          \
+  } while (0)
+
 // abs function for bfloat_t and half_t since there is no implicit convertion
 // method
 TL_PATCH TL_DEVICE half_t __habs(const half_t x) {
@@ -190,4 +210,14 @@ template <typename T> TL_DEVICE bool All(T *a, int size) {
   }
   return true;
 }
+
+// Pow of int
+template <int y = 1, typename T> TL_DEVICE T pow_of_int(T x) {
+  T result = x;
+  for (int i = 1; i < y; i++) {
+    result *= x;
+  }
+  return result;
+}
+
 } // namespace tl

@@ -107,6 +107,29 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
   Buffer global_tensor = is_load ? src : dst;
   Buffer shared_tensor = is_load ? dst : src;
+  Array<Range> global_range = is_load ? src_range : dst_range;
+  Array<Range> shared_range = is_load ? dst_range : src_range;
+
+  Array<PrimExpr> indices;
+  for (auto r : shared_range)
+    indices.push_back(r->min);
+
+  std::vector<PrimExpr> strides;
+  PrimExpr stride = 1;
+  for (size_t i = 0; i < shared_tensor->shape.size(); i++) {
+    auto s = shared_tensor->shape[shared_tensor->shape.size() - i - 1];
+    strides.insert(strides.begin(), stride);
+    stride *= s;
+  }
+
+  ICHECK(strides.size() == indices.size())
+      << "strides.size() != indices.size()" << strides.size() << " "
+      << indices.size();
+  PrimExpr offset = 0;
+  for (size_t i = 0; i < indices.size(); i++) {
+    offset += indices[i] * strides[i];
+  }
+
   Layout shared_layout;
   if (T.layout_map.count(shared_tensor)) {
     shared_layout = T.layout_map[shared_tensor];
@@ -132,7 +155,6 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   desc.data_type = to_CUtensorMapDataType(global_tensor->dtype);
 
   // Global Tensor Shape and Stride
-  auto global_range = is_load ? src_range : dst_range;
   desc.global_addr = global_tensor->data;
   desc.global_shape = ReverseArray(global_tensor->shape);
   Array<PrimExpr> global_coords =
@@ -210,26 +232,26 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   desc.smem_box.Set(0, PrimExpr(instruction_dim));
 
   Call create_descriptor =
-      Call(DataType::Handle(), CreateTMADescriptorOp(), desc.EncodeCallArgs());
+      Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
 
   Array<PrimExpr> args;
   args.reserve(desc.rank + 3);
   args.push_back(create_descriptor);
   if (is_load)
     args.push_back(0); // mbarrier id placeholder
-  auto op = is_load ? TMALoadOp() : TMAStoreOp();
+  auto op = is_load ? tma_load() : tma_store();
 
   Stmt tma_copy;
-
+  PrimExpr total_elements = 1;
+  for (auto e : desc.smem_box)
+    total_elements *= e;
   if ((*inner_box_dim) != instruction_dim) {
     Var loop_var("i");
     int loop_extent = (*inner_box_dim) / instruction_dim;
-    PrimExpr total_elements = 1;
-    for (auto e : desc.smem_box)
-      total_elements *= e;
-    PrimExpr shared_addr =
-        shared_tensor.access_ptr(is_load ? 2 : 1, DataType::Handle(), 1,
-                                 total_elements * loop_var, total_elements);
+
+    PrimExpr shared_addr = shared_tensor.access_ptr(
+        is_load ? 2 : 1, DataType::Handle(), 1,
+        offset + total_elements * loop_var, total_elements);
     args.push_back(shared_addr);
     global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
     for (auto coord : global_coords)
@@ -237,13 +259,14 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
     tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
                    Evaluate(Call(DataType::Handle(), op, args)));
   } else {
-    PrimExpr shared_addr = shared_tensor.access_ptr(is_load ? 2 : 1);
+    PrimExpr shared_addr = shared_tensor.access_ptr(
+        is_load ? 2 : 1, DataType::Handle(), 1, offset, total_elements);
     args.push_back(shared_addr);
     for (auto coord : global_coords)
       args.push_back(coord);
     tma_copy = Evaluate(Call(DataType::Handle(), op, args));
   }
-  tma_copy = IfThenElse(EQ(T.thread_var, 0), tma_copy);
+  tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
 
   return tma_copy;
 }
@@ -346,7 +369,7 @@ Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
     }
   }
 
-  Call create_desc = Call(DataType::Handle(), CreateTMAIm2ColDescriptorOp(),
+  Call create_desc = Call(DataType::Handle(), create_tma_im2col_descriptor(),
                           desc.EncodeCallArgs());
 
   Array<PrimExpr> global_coords; // c, w, h, n
@@ -396,8 +419,8 @@ Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
     args.push_back(offset);
 
   Stmt tma_copy =
-      IfThenElse(EQ(T.thread_var, 0),
-                 Evaluate(Call(DataType::Handle(), TMALoadIm2ColOp(), args)));
+      IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
+                 Evaluate(Call(DataType::Handle(), tma_load_im2col(), args)));
   return tma_copy;
 }
 

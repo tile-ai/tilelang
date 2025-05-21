@@ -21,6 +21,15 @@ import platform
 import multiprocessing
 from setuptools.command.build_ext import build_ext
 import importlib
+import logging
+
+# Configure logging with basic settings
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S')
+
+logger = logging.getLogger(__name__)
 
 # Environment variables False/True
 PYPI_BUILD = os.environ.get("PYPI_BUILD", "False").lower() == "true"
@@ -195,7 +204,7 @@ def download_and_extract_llvm(version, is_aarch64=False, extract_path="3rdparty"
     download_url = f"{base_url}/{file_name}"
 
     # Download the file
-    print(f"Downloading {file_name} from {download_url}")
+    logger.info(f"Downloading {file_name} from {download_url}")
     with urllib.request.urlopen(download_url) as response:
         if response.status != 200:
             raise Exception(f"Download failed with status code {response.status}")
@@ -208,11 +217,11 @@ def download_and_extract_llvm(version, is_aarch64=False, extract_path="3rdparty"
         os.remove(os.path.join(extract_path, file_name))
 
     # Extract the file
-    print(f"Extracting {file_name} to {extract_path}")
+    logger.info(f"Extracting {file_name} to {extract_path}")
     with tarfile.open(fileobj=BytesIO(file_content), mode="r:xz") as tar:
         tar.extractall(path=extract_path)
 
-    print("Download and extraction completed successfully.")
+    logger.info("Download and extraction completed successfully.")
     return os.path.abspath(os.path.join(extract_path, file_name.replace(".tar.xz", "")))
 
 
@@ -238,7 +247,7 @@ def update_submodules():
             return False
 
     if not is_git_repo():
-        print("Info: Not a git repository, skipping submodule update.")
+        logger.info("Info: Not a git repository, skipping submodule update.")
         return
 
     try:
@@ -288,7 +297,15 @@ def patch_libs(libpath):
     and have a hard-coded rpath.
     Set rpath to the directory of libs so auditwheel works well.
     """
-    subprocess.run(['patchelf', '--set-rpath', '$ORIGIN', libpath])
+    # check if patchelf is installed
+    # find patchelf in the system
+    patchelf_path = shutil.which("patchelf")
+    if not patchelf_path:
+        logger.warning(
+            "patchelf is not installed, which is required for auditwheel to work for compatible wheels."
+        )
+        return
+    subprocess.run([patchelf_path, '--set-rpath', '$ORIGIN', libpath])
 
 
 class TileLangBuilPydCommand(build_py):
@@ -302,11 +319,11 @@ class TileLangBuilPydCommand(build_py):
         ext_modules = build_ext_cmd.extensions
         for ext in ext_modules:
             extdir = build_ext_cmd.get_ext_fullpath(ext.name)
-            print(f"Extension {ext.name} output directory: {extdir}")
+            logger.info(f"Extension {ext.name} output directory: {extdir}")
 
         ext_output_dir = os.path.dirname(extdir)
-        print(f"Extension output directory (parent): {ext_output_dir}")
-        print(f"Build temp directory: {build_temp_dir}")
+        logger.info(f"Extension output directory (parent): {ext_output_dir}")
+        logger.info(f"Build temp directory: {build_temp_dir}")
 
         # copy cython files
         CYTHON_SRC = [
@@ -373,12 +390,12 @@ class TileLangBuilPydCommand(build_py):
                 os.makedirs(target_dir_release, exist_ok=True)
                 os.makedirs(target_dir_develop, exist_ok=True)
                 shutil.copy2(source_lib_file, target_dir_release)
-                print(f"Copied {source_lib_file} to {target_dir_release}")
+                logger.info(f"Copied {source_lib_file} to {target_dir_release}")
                 shutil.copy2(source_lib_file, target_dir_develop)
-                print(f"Copied {source_lib_file} to {target_dir_develop}")
+                logger.info(f"Copied {source_lib_file} to {target_dir_develop}")
                 os.remove(source_lib_file)
             else:
-                print(f"WARNING: {item} not found in any expected directories!")
+                logger.info(f"WARNING: {item} not found in any expected directories!")
 
         TVM_CONFIG_ITEMS = [
             f"{build_temp_dir}/config.cmake",
@@ -394,7 +411,7 @@ class TileLangBuilPydCommand(build_py):
             if os.path.exists(source_dir):
                 shutil.copy2(source_dir, target_dir)
             else:
-                print(f"INFO: {source_dir} does not exist.")
+                logger.info(f"INFO: {source_dir} does not exist.")
 
         TVM_PACAKGE_ITEMS = [
             "3rdparty/tvm/src",
@@ -489,7 +506,7 @@ class TileLangDevelopCommand(develop):
     """
 
     def run(self):
-        print("Running TileLangDevelopCommand")
+        logger.info("Running TileLangDevelopCommand")
         # 1. Build the C/C++ extension modules
         self.run_command("build_ext")
 
@@ -497,10 +514,10 @@ class TileLangDevelopCommand(develop):
         ext_modules = build_ext_cmd.extensions
         for ext in ext_modules:
             extdir = build_ext_cmd.get_ext_fullpath(ext.name)
-            print(f"Extension {ext.name} output directory: {extdir}")
+            logger.info(f"Extension {ext.name} output directory: {extdir}")
 
         ext_output_dir = os.path.dirname(extdir)
-        print(f"Extension output directory (parent): {ext_output_dir}")
+        logger.info(f"Extension output directory (parent): {ext_output_dir}")
 
         # Copy the built TVM to the package directory
         TVM_PREBUILD_ITEMS = [
@@ -524,7 +541,7 @@ class TileLangDevelopCommand(develop):
                 # remove the original file
                 os.remove(source_lib_file)
             else:
-                print(f"INFO: {source_lib_file} does not exist.")
+                logger.info(f"INFO: {source_lib_file} does not exist.")
 
 
 class CMakeExtension(Extension):

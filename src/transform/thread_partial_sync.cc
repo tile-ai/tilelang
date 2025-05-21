@@ -331,8 +331,8 @@ public:
       if (partial_syncs_.count(stmt.get())) {
         auto iter = partial_syncs_.find(stmt.get());
         ICHECK(sync_scope_.rank == StorageRank::kShared);
-        barrier = Evaluate(Call(DataType::Int(32), tl::SyncThreadsPartialOp(),
-                                {iter->second}));
+        barrier = Evaluate(
+            Call(DataType::Int(32), tl::sync_thread_partial(), {iter->second}));
       } else {
         return StmtExprMutator::VisitStmt(stmt);
       }

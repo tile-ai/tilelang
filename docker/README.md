@@ -8,5 +8,8 @@ cd TileLang/docker
 # replace .cu** with .rocm for AMD GPU
 docker build -t tilelang_workspace -f Dockerfile.cu124 .
 # run the container
+# if it's nvidia
 docker run -it --cap-add=SYS_ADMIN --network=host --gpus all --cap-add=SYS_PTRACE --shm-size=4G --security-opt seccomp=unconfined --security-opt apparmor=unconfined --name tilelang_test tilelang_workspace bash
+# if it's amd
+docker run -it --cap-add=SYS_ADMIN --network=host --device=/dev/kfd --device=/dev/dri  --cap-add=SYS_PTRACE --shm-size=4G --security-opt seccomp=unconfined --security-opt apparmor=unconfined --name tilelang_test tilelang_workspace bash
 ```

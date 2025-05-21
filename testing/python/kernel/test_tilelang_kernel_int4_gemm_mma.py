@@ -16,7 +16,7 @@ from tilelang.intrinsics.mma_macro_generator import (
 )
 from tilelang.transform import simplify_prim_func
 
-tilelang.testing.set_random_seed(0)
+tilelang.testing.set_random_seed(42)
 
 
 @simplify_prim_func
@@ -397,10 +397,10 @@ def assert_tl_matmul_weight_only_transform_correctness(M, N, K, in_dtype, out_dt
 
 
 @tilelang.testing.requires_package("bitblas")
+@tilelang.testing.requires_llvm
 def test_assert_tl_matmul_weight_only_transform():
     assert_tl_matmul_weight_only_transform_correctness(128, 128, 128, "int8", "int32", "int32")
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_assert_tl_matmul_weight_only_transform()
+    tilelang.testing.main()

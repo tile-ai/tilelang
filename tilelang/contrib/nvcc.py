@@ -270,7 +270,7 @@ def get_target_compute_version(target=None):
     Returns
     -------
     compute_version : str
-        compute capability of a GPU (e.g. "8.6")
+        compute capability of a GPU (e.g. "8.6" or "9.0")
     """
     # 1. input target object
     # 2. Target.current()
@@ -279,10 +279,17 @@ def get_target_compute_version(target=None):
         arch = target.arch.split("_")[1]
         if len(arch) == 2:
             major, minor = arch
+            # Handle old format like sm_89
             return major + "." + minor
         elif len(arch) == 3:
-            # This is for arch like "sm_90a"
-            major, minor, suffix = arch
+            major = int(arch[0])
+            if major < 2:
+                major = arch[0:2]
+                minor = arch[2]
+                return major + "." + minor
+            else:
+                # This is for arch like "sm_90a"
+                major, minor, suffix = arch
             return major + "." + minor + "." + suffix
 
     # 3. GPU compute version
@@ -412,6 +419,23 @@ def have_fp8(compute_version):
     # fp8 is supported in Ada Lovelace (8.9) or later architectures.
     conditions = [False]
     conditions.append(major == 8 and minor >= 9)
+    conditions.append(major >= 9)
+    return any(conditions)
+
+
+@tvm._ffi.register_func("tvm.contrib.nvcc.supports_tma", override=True)
+def have_tma(target):
+    """Whether TMA support is provided in the specified compute capability or not
+
+    Parameters
+    ----------
+    target : tvm.target.Target
+        The compilation target
+    """
+    compute_version = get_target_compute_version(target)
+    major, minor = parse_compute_version(compute_version)
+    # TMA is supported in Ada Lovelace (9.0) or later architectures.
+    conditions = [False]
     conditions.append(major >= 9)
     return any(conditions)
 

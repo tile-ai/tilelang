@@ -40,13 +40,14 @@ extern "C" int init() {{
     nvshmem_init();
     error_buf[0] = '\\0';
     {0}
+    return 0;
 }}
 """
 
 PREDEF_HOST_FUNC = """
 extern "C" int call({}) {{
 {}
-    return 0;
+\treturn 0;
 }}
 """
 
@@ -245,7 +246,7 @@ class TLCUDASourceWrapper(object):
         # _call_str += self.generate_cpengine_calls()
 
         # Wrap the kernel dispatch logic in an external C function
-        host_func = PREDEF_HOST_FUNC.format(def_args, _call_str)
+        host_func = PREDEF_HOST_FUNC.format(def_args, kernel_launch_code)
         return host_func
 
     def generate_cpengine_calls(self) -> str:

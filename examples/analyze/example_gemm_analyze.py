@@ -19,7 +19,7 @@ def kernel(
     accum_dtype = "float"
 
     @T.prim_func
-    def main(
+    def matmul(
             A: T.Tensor((M, K), dtype),
             B: T.Tensor((N, K), dtype),
             C: T.Tensor((M, N), dtype),
@@ -43,13 +43,18 @@ def kernel(
             T.copy(C_local, C_shared)
             T.copy(C_shared, C[by * block_M, bx * block_N])
 
-    return main
+    return matmul
 
 
-my_func = kernel(128, 128, 32, 3, 128, True)
+def main():
+    my_func = kernel(128, 128, 32, 3, 128, True)
 
-cuda_device = CUDA("cuda")
-result = Analyzer.analysis(my_func, cuda_device)
+    cuda_device = CUDA("cuda")
+    result = Analyzer.analysis(my_func, cuda_device)
 
-print(f"Analyzed FLOPs: {result.total_flops}")
-print(f"Expected FLOPs: {2 * M * N * K}")
+    print(f"Analyzed FLOPs: {result.total_flops}")
+    print(f"Expected FLOPs: {2 * M * N * K}")
+
+
+if __name__ == "__main__":
+    main()

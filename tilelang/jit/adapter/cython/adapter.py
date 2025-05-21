@@ -261,6 +261,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         result = self.lib.init()
         if result != 0:
             error_msg = self.lib.get_last_error().decode('utf-8')
+            error_msg += f"\n{self.lib_code}"
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
         self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib)
@@ -286,6 +287,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
         adapter.kernel_global_source = kernel_global_source
         adapter.wrapped_source = kernel_global_source
+        adapter.pass_configs = pass_configs
 
         if isinstance(func_or_mod, tir.PrimFunc):
             adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})

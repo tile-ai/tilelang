@@ -31,7 +31,7 @@ class JITKernel(object):
     torch_function : Callable
         The compiled function that can be invoked as a PyTorch-compatible function.
     """
-
+    prim_func: PrimFunc = None
     artifact: CompiledArtifact = None
     adapter: BaseKernelAdapter = None
     torch_function: Callable = None
@@ -74,6 +74,7 @@ class JITKernel(object):
         from_database : bool, optional
             Whether to create a TorchFunction from a database.
         """
+        self.prim_func = func
         self.execution_backend = execution_backend
         self.target = target
         self.target_host = target_host
@@ -147,6 +148,7 @@ class JITKernel(object):
             target=target,
             kernel_global_source=kernel_global_source,
             kernel_lib_path=kernel_lib_path,
+            pass_configs=pass_configs,
         )
         instance.torch_function = instance.adapter.func
         return instance
@@ -250,6 +252,7 @@ class JITKernel(object):
         func_or_mod: Union[PrimFunc, tvm.runtime.Module],
         kernel_global_source: str,
         kernel_lib_path: str,
+        pass_configs: Optional[Dict[str, Any]] = None,
     ) -> BaseKernelAdapter:
         target = self.target
         execution_backend = self.execution_backend
@@ -265,6 +268,7 @@ class JITKernel(object):
                 func_or_mod=func_or_mod,
                 kernel_global_source=kernel_global_source,
                 kernel_lib_path=kernel_lib_path,
+                pass_configs=pass_configs,
             )
         elif execution_backend == "cython":
             adapter = CythonKernelAdapter.from_database(
@@ -274,6 +278,7 @@ class JITKernel(object):
                 func_or_mod=func_or_mod,
                 kernel_global_source=kernel_global_source,
                 kernel_lib_path=kernel_lib_path,
+                pass_configs=pass_configs,
             )
         else:
             # Handle invalid backend.

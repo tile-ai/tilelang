@@ -6,8 +6,10 @@ import tilelang.language as T
 import torch
 
 
+# add decorator @tilelang.jit if you want to return a torch function
+# @tilelang.jit
 def tilelang_copy_mask_parallel(M, N, block_M, block_N, dtype="float16"):
-    # add decorator @tilelang.jit if you want to return a torch function
+
     @T.prim_func
     def main(
             A: T.Tensor((M, N), dtype),
@@ -47,8 +49,10 @@ def test_tilelang_copy_mask_parallel():
     run_tilelang_copy_mask_parallel(M=1024, N=1024, block_M=128, block_N=128)
 
 
+# add decorator @tilelang.jit if you want to return a torch function
+# @tilelang.jit
 def tilelang_copy_mask_copy(M, N, block_M, block_N, dtype="float16"):
-    # add decorator @tilelang.jit if you want to return a torch function
+
     @T.prim_func
     def main(
             A: T.Tensor((M, N), dtype),
@@ -87,8 +91,10 @@ def test_tilelang_copy_mask_copy():
     run_tilelang_copy_mask_copy(M=1024, N=1024, block_M=128, block_N=128)
 
 
+# add decorator @tilelang.jit if you want to return a torch function
+# @tilelang.jit
 def tilelang_copy_mask_parallel_range(M, N, block_M, block_N, dtype="float16"):
-    # add decorator @tilelang.jit if you want to return a torch function
+
     @T.prim_func
     def main(
             A: T.Tensor((M, N), dtype),
@@ -132,8 +138,10 @@ def test_tilelang_copy_mask_parallel_range():
     run_tilelang_copy_mask_parallel_range(M=1024, N=1024, block_M=128, block_N=128)
 
 
+# add decorator @tilelang.jit if you want to return a torch function
+# @tilelang.jit
 def tilelang_copy_mask_copy_range(M, N, block_M, block_N, dtype="float16"):
-    # add decorator @tilelang.jit if you want to return a torch function
+
     @T.prim_func
     def main(
             A: T.Tensor((M, N), dtype),

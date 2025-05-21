@@ -221,6 +221,8 @@ def torch_assert_close(
     check_dtype: bool = True,
     check_layout: bool = True,
     check_stride: bool = False,
+    base_name: str = "LHS",
+    ref_name: str = "RHS",
 ):
     """
     Custom function to assert that two tensors are "close enough," allowing a specified
@@ -296,7 +298,7 @@ def torch_assert_close(
             f"{mismatch_info}"
             f"\nGreatest absolute difference: {diff.max().item()}, "
             f"Greatest relative difference: {(diff / (torch.abs(tensor_b) + 1e-12)).max().item()}"
-            f"\nLHS: {tensor_a}"
-            f"\nRHS: {tensor_b}")
+            f"\n{base_name}: {tensor_a}"
+            f"\n{ref_name}: {tensor_b}")
     else:
         return True

@@ -50,14 +50,14 @@ def test_multi_version_buffer():
                     C_local[i * 2 + vec] = T.float32(0)
             for k in T.serial(16, annotations={"num_stages": 3}):
                 if v == 0:
-                    T.TMALoadOp(
-                        T.CreateTMADescriptorOp(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2,
+                    T.tma_load(
+                        T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2,
                                                 2, 0), 0,
                         T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, 0, 2048, 2),
                         k * 32, by * 64)
                 if v == 0:
-                    T.TMALoadOp(
-                        T.CreateTMADescriptorOp(6, 2, B.data, 512, 512, 2, 1024, 64, 32, 1, 1, 0, 3,
+                    T.tma_load(
+                        T.create_tma_descriptor(6, 2, B.data, 512, 512, 2, 1024, 64, 32, 1, 1, 0, 3,
                                                 2, 0), 0,
                         T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, 0, 2048, 2),
                         bx * 64, k * 32)
@@ -83,15 +83,15 @@ def test_multi_version_buffer():
                     C_local[i * 2 + vec] = T.float32(0)
             for k in T.serial(16, annotations={"num_stages": 3}):
                 if v == 0:
-                    T.TMALoadOp(
-                        T.CreateTMADescriptorOp(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2,
+                    T.tma_load(
+                        T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2,
                                                 2, 0), 0,
                         T.tvm_access_ptr(
                             T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 2),
                         k * 32, by * 64)
                 if v == 0:
-                    T.TMALoadOp(
-                        T.CreateTMADescriptorOp(6, 2, B.data, 512, 512, 2, 1024, 64, 32, 1, 1, 0, 3,
+                    T.tma_load(
+                        T.create_tma_descriptor(6, 2, B.data, 512, 512, 2, 1024, 64, 32, 1, 1, 0, 3,
                                                 2, 0), 0,
                         T.tvm_access_ptr(
                             T.type_annotation("float16"), B_shared.data, k % 3 * 2048, 2048, 2),

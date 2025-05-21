@@ -130,6 +130,12 @@ class KernelLaunchFrame(TIRFrame):
         iter_var = self.frames[dim].iter_var
         return int(iter_var.dom.extent)
 
+    def get_block_extents(self) -> List[int]:
+        """
+        Returns the block extents for all three dimensions.
+        """
+        return [self.get_block_extent(dim) for dim in range(3)]
+
     def get_thread_extent(self, dim: int) -> int:
         """
         Returns the thread extent for the given dimension.
@@ -137,6 +143,12 @@ class KernelLaunchFrame(TIRFrame):
         """
         iter_var = self.frames[-4 + dim].iter_var
         return int(iter_var.dom.extent)
+
+    def get_thread_extents(self) -> List[int]:
+        """
+        Returns the thread extents for all three dimensions.
+        """
+        return [self.get_thread_extent(dim) for dim in range(3)]
 
     def get_thread_binding(self, dim: int = 0) -> Var:
         """
@@ -270,3 +282,27 @@ def get_block_bindings() -> List[Var]:
     """Returns all three block bindings.
     """
     return KernelLaunchFrame.Current().get_block_bindings()
+
+
+def get_thread_extent(dim: int = 0) -> int:
+    """Returns the thread extent for the given dimension.
+    """
+    return KernelLaunchFrame.Current().get_thread_extent(dim)
+
+
+def get_thread_extents() -> List[int]:
+    """Returns all three thread extents.
+    """
+    return KernelLaunchFrame.Current().get_thread_extents()
+
+
+def get_block_extent(dim: int = 0) -> int:
+    """Returns the block extent for the given dimension.
+    """
+    return KernelLaunchFrame.Current().get_block_extent(dim)
+
+
+def get_block_extents() -> List[int]:
+    """Returns all three block extents.
+    """
+    return KernelLaunchFrame.Current().get_block_extents()

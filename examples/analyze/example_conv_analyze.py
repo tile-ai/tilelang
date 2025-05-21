@@ -49,7 +49,7 @@ def kernel(N,
     is_hopper = check_hopper()
 
     @T.prim_func
-    def main(
+    def conv(
             data: T.Tensor((N, H, W, C), dtype),
             kernel: T.Tensor((KH, KW, C, F), dtype),
             out: T.Tensor((N, OH, OW, F), dtype),
@@ -91,11 +91,16 @@ def kernel(N,
             T.copy(out_local, out_shared)
             T.copy(out_shared, out_flat[by * block_M, bx * block_N])
 
-    return main
+    return conv
 
 
-my_func = kernel(N, C, H, W, F, K, S, D, P, 64, 128, 32, 3, 256)
-cuda_device = CUDA("cuda")
-result = Analyzer.analysis(my_func, cuda_device)
-print(result)
-print(f"Analyzed FLOPs: {result.total_flops}")
+def main():
+    my_func = kernel(N, C, H, W, F, K, S, D, P, 64, 128, 32, 3, 256)
+    cuda_device = CUDA("cuda")
+    result = Analyzer.analysis(my_func, cuda_device)
+    print(result)
+    print(f"Analyzed FLOPs: {result.total_flops}")
+
+
+if __name__ == "__main__":
+    main()

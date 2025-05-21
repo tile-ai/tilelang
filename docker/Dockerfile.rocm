@@ -11,18 +11,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   libgtest-dev libprotobuf-dev protobuf-compiler libgflags-dev libsqlite3-dev llvm-dev \
   && apt-get clean autoclean && rm -rf /var/lib/apt/lists/{cache,log} /tmp/* /var/tmp/*
 
-RUN wget https://repo.anaconda.com/miniconda/Miniconda3-py310_23.5.2-0-Linux-x86_64.sh -O install_miniconda.sh && \
-  bash install_miniconda.sh -b -p /opt/conda && rm install_miniconda.sh
-
 ENV PATH="/opt/conda/bin:${PATH}"
-
 ENV LIBGL_ALWAYS_INDIRECT=1
 
-RUN conda install pip cmake && conda install -c conda-forge libstdcxx-ng=12 && conda clean --all
+
+RUN conda run -n py_3.10 conda install pip cmake -y && \
+    conda run -n py_3.10 conda install -c conda-forge libstdcxx-ng=12 -y && \
+    conda clean --all
 
 RUN apt-get install -y python3 python3-dev python3-setuptools gcc libtinfo-dev zlib1g-dev build-essential cmake libedit-dev libxml2-dev
 
-RUN git clone https://github.com/tile-ai/tilelang.git --recursive -b main tilelang \
-  && cd tilelang && ./install_rocm.sh
+RUN git clone https://github.com/tile-ai/tilelang.git --recursive -b main tilelang && \
+    conda run -n py_3.10 bash -c "cd tilelang && ./install_rocm.sh"
 
-CMD bash
+RUN conda init bash
+
+SHELL ["/bin/bash", "-l", "-c"]
+
+CMD ["bash", "-c", "source ~/.bashrc && conda activate py_3.10 && exec bash"]

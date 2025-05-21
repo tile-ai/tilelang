@@ -1,27 +1,12 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership. The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
+// Copyright (c) Tile-AI Corporation.
+// Licensed under the MIT License.
 
 /*!
- * \file warp_specialized_pipeline.cc
+ * \file warp_specialized_rewriter.cc
  * \brief Warp specialized Pipeline for cuda GPU (sm90+)
  */
 
+#include "arith/ir_visitor_with_analyzer.h"
 #include "tir/analysis/var_use_def_analysis.h"
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
@@ -30,11 +15,13 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include "./common/collector.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+using arith::IRVisitorWithAnalyzer;
 
 enum class Role { kConsumer, kProducer, kBoth };
 
@@ -43,7 +30,7 @@ public:
   void clear() { has_tma_load_ = false; }
 
   void VisitExpr_(const CallNode *call) final {
-    if (call->op.same_as(TMALoadOp()) || call->op.same_as(TMALoadIm2ColOp())) {
+    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
       has_tma_load_ = true;
     }
   }
@@ -116,8 +103,7 @@ public:
   void VisitStmt_(const EvaluateNode *op) final {
     Role role = Role::kConsumer;
     if (auto call = op->value.as<CallNode>()) {
-      if (call->op.same_as(TMALoadOp()) ||
-          call->op.same_as(TMALoadIm2ColOp())) {
+      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
         role = Role::kProducer;
         has_bulk_copy_ = true;
       }
@@ -207,13 +193,7 @@ private:
 };
 
 static PrimExpr makeGetBarrier(PrimExpr barrier_id) {
-  return Call(DataType::Handle(), GetMBarrierOp(), {barrier_id});
-}
-
-static Stmt makeExpectTX(PrimExpr barrier_id, PrimExpr bytes) {
-  auto call = Call(DataType::Handle(), MBarrierExpectTX(),
-                   {makeGetBarrier(barrier_id), bytes});
-  return Evaluate(call);
+  return Call(DataType::Handle(), get_mbarrier(), {barrier_id});
 }
 
 static Stmt makeArriveBarrier(PrimExpr barrier_id) {
@@ -229,101 +209,22 @@ static Stmt makeCpAsyncBarrier(PrimExpr barrier_id) {
 }
 
 static Stmt makeParityWait(PrimExpr barrier_id, PrimExpr parity) {
-  auto call = Call(DataType::Handle(), MBarrierWaitParity(),
+  auto call = Call(DataType::Handle(), mbarrier_wait_parity(),
                    {makeGetBarrier(barrier_id), parity});
   return Evaluate(call);
 }
-
-// static bool isGemm(Stmt stmt) {
-//   bool is_gemm = false;
-//   if (stmt.as<EvaluateNode>()) {
-//     auto call = Downcast<Evaluate>(stmt)->value.as<CallNode>();
-//     if (call && call->op.same_as(Op::Get("tir.call_extern"))) {
-//       if (call->args[0].as<StringImmNode>()) {
-//         std::string name = Downcast<StringImm>(call->args[0])->value;
-//         if (name.find("gemm") != std::string::npos) {
-//           is_gemm = true;
-//         }
-//       }
-//     }
-//   }
-//   return is_gemm;
-// }
-
-class TMAExpectTxRewriter : public StmtExprMutator {
-public:
-  TMAExpectTxRewriter(Stmt expect_tx) : expect_tx_(expect_tx) {}
-  static Stmt Rewrite(Stmt stmt, Stmt expect_tx) {
-    TMAExpectTxRewriter rewriter(expect_tx);
-    return rewriter(stmt);
-  }
-
-private:
-  Stmt VisitStmt_(const ForNode *op) final {
-    insert_in_evaluate_ = false;
-    StmtExprMutator::VisitStmt_(op);
-    insert_in_evaluate_ = true;
-    if (contain_tma_load_) {
-      Array<Stmt> new_seq = {expect_tx_, GetRef<For>(op)};
-      contain_tma_load_ = false;
-      return SeqStmt(std::move(new_seq));
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(TMALoadOp()) ||
-          call->op.same_as(TMALoadIm2ColOp())) {
-        contain_tma_load_ = true;
-        if (insert_in_evaluate_) {
-          Array<Stmt> new_seq = {expect_tx_, GetRef<Evaluate>(op)};
-          return SeqStmt(std::move(new_seq));
-        }
-      }
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  Stmt expect_tx_;
-  bool contain_tma_load_;
-  bool insert_in_evaluate_ = true;
-};
 
 class ProducerTraitsCollector : public StmtExprVisitor {
 public:
   ProducerTraitsCollector() { Clear(); }
 
-  void Clear() {
-    bulk_copy_bytes = 0;
-    loop_extents = 1;
-    has_simt_copy = false;
-  }
+  void Clear() { has_simt_copy = false; }
 
   void Collect(Stmt stmt) { VisitStmt(stmt); }
 
   bool HasSimtCopy() { return has_simt_copy; }
 
-  PrimExpr BulkCopyBytes() { return bulk_copy_bytes; }
-
 private:
-  void VisitExpr_(const CallNode *call) final {
-    if (call->op.same_as(TMALoadOp()) || call->op.same_as(TMALoadIm2ColOp())) {
-      Call access_ptr = Downcast<Call>(call->args[2]);
-      ICHECK(access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      int type_bytes = access_ptr->args[0]->dtype.bytes();
-      bulk_copy_bytes += access_ptr->args[3] * loop_extents * type_bytes;
-    }
-    StmtExprVisitor::VisitExpr_(call);
-  }
-
-  void VisitStmt_(const ForNode *op) final {
-    PrimExpr old_loop_evtents = loop_extents;
-    loop_extents *= op->extent;
-    StmtExprVisitor::VisitStmt_(op);
-    loop_extents = old_loop_evtents;
-  }
-
   void VisitStmt_(const IfThenElseNode *op) final {
     bool old_in_if_cond = in_if_cond_;
     in_if_cond_ = true;
@@ -344,8 +245,6 @@ private:
   }
 
   bool has_simt_copy;
-  PrimExpr bulk_copy_bytes;
-  PrimExpr loop_extents;
   bool in_if_cond_ = false;
 };
 
@@ -361,7 +260,7 @@ public:
 private:
   PrimExpr VisitExpr_(const CallNode *op) final {
     auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
-    if (call->op.same_as(TMALoadOp()) || call->op.same_as(TMALoadIm2ColOp())) {
+    if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
       Call access_ptr = Downcast<Call>(call->args[2]);
       ICHECK(access_ptr->op.same_as(builtin::tvm_access_ptr()));
       call.CopyOnWrite()->args.Set(1, makeGetBarrier(producer_barrier_idx_));
@@ -648,14 +547,7 @@ private:
           auto stmt =
               MbarrierRewriter::Rewrite(seq_transformed[i], release_barrier_id);
           collector.Collect(stmt);
-          if (!is_zero(collector.BulkCopyBytes())) {
-            auto expect_tx = IfThenElse(
-                EQ(thread_var_, 0),
-                makeExpectTX(release_barrier_id, collector.BulkCopyBytes()));
-            block_stmt.push_back(TMAExpectTxRewriter::Rewrite(stmt, expect_tx));
-          } else {
-            block_stmt.push_back(stmt);
-          }
+          block_stmt.push_back(stmt);
           if (collector.HasSimtCopy() > 0) {
             block_stmt.push_back(makeCpAsyncBarrier(release_barrier_id));
           }
@@ -1025,49 +917,6 @@ private:
   friend class WarpSpecializedRewriter;
 };
 
-class ThreadTagChecker : public StmtExprVisitor {
-public:
-  static bool HasOnlyThreadIdxX(const PrimFunc &f) {
-    ThreadTagChecker checker;
-    checker(f->body);
-    return checker.is_valid_;
-  }
-
-private:
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tir::attr::thread_extent) {
-      IterVar iter_var = Downcast<IterVar>(op->node);
-      String thread_tag = iter_var->thread_tag;
-      bool is_y_or_z =
-          thread_tag == "threadIdx.y" || thread_tag == "threadIdx.z";
-
-      if (!thread_tag.empty() && is_y_or_z && !is_one(iter_var->dom->extent)) {
-        is_valid_ = false;
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const ForNode *op) final {
-    if (op->kind == ForKind::kThreadBinding) {
-      ICHECK(op->thread_binding.defined());
-      String thread_tag = op->thread_binding.value()->thread_tag;
-      bool is_y_or_z =
-          thread_tag == "threadIdx.y" || thread_tag == "threadIdx.z";
-      if (!thread_tag.empty() && is_y_or_z) {
-        auto iter_var = Downcast<IterVar>(op->thread_binding);
-        if (iter_var.defined() && iter_var->dom.defined() &&
-            !is_one(iter_var->dom->extent)) {
-          is_valid_ = false;
-        }
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  bool is_valid_ = true;
-};
-
 class SetMaxNRegCollector : public StmtExprVisitor {
 public:
   static Array<IntImm> Collect(const PrimFunc &f) {
@@ -1082,7 +931,7 @@ public:
 private:
   void VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(SetMaxNReg())) {
+      if (call->op.same_as(set_max_nreg())) {
         int reg_hint = call->args[0].as<IntImmNode>()->value;
         int is_inc = call->args[1].as<IntImmNode>()->value;
         ICHECK(reg_hint <= 240 && reg_hint >= 24)
@@ -1092,7 +941,7 @@ private:
         // producer should decrease register hint while consumer should increase
         // register hint
         nreg_.Set(is_inc, IntImm(DataType::Int(32), reg_hint));
-      } else if (call->op.same_as(NoSetMaxNReg())) {
+      } else if (call->op.same_as(no_set_max_nreg())) {
         has_no_set_max_nreg_ = true;
       }
     }
@@ -1112,7 +961,7 @@ public:
     // Check if function only uses threadIdx.x before proceeding
     if (!ThreadTagChecker::HasOnlyThreadIdxX(f)) {
       LOG(WARNING) << "WarpSpecialize will be disabled because the program "
-                      "uses thread tags other than threadIdx.x\n"
+                      "uses thread tags other than threadIdx.x."
                    << "If you want to use warp specialization, please refactor "
                       "your program to use threadIdx.x only";
       // Return original function unchanged if other thread tags are found
@@ -1149,7 +998,8 @@ private:
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(SetMaxNReg()) || call->op.same_as(NoSetMaxNReg())) {
+      if (call->op.same_as(set_max_nreg()) ||
+          call->op.same_as(no_set_max_nreg())) {
         return Evaluate(0);
       }
     }
@@ -1202,7 +1052,7 @@ private:
         barrier_num_threads.push_back(arrive_thread_count);
       }
       Stmt init_barrier = Evaluate(Call(
-          DataType::Handle(), CreateListofMBarrierOp(), barrier_num_threads));
+          DataType::Handle(), create_list_of_mbarrier(), barrier_num_threads));
       block.CopyOnWrite()->body = SeqStmt({init_barrier, code});
       block_realize.CopyOnWrite()->block = block;
       return block_realize;
@@ -1224,9 +1074,9 @@ private:
     auto inc_reg_stmt = Evaluate(0);
     auto dec_reg_stmt = Evaluate(0);
     if (dec_reg >= 0 && inc_reg >= 0) {
-      inc_reg_stmt = Evaluate(Call(DataType::Handle(), SetMaxNReg(),
+      inc_reg_stmt = Evaluate(Call(DataType::Handle(), set_max_nreg(),
                                    {inc_reg == 0 ? 240 : inc_reg, 1}));
-      dec_reg_stmt = Evaluate(Call(DataType::Handle(), SetMaxNReg(),
+      dec_reg_stmt = Evaluate(Call(DataType::Handle(), set_max_nreg(),
                                    {dec_reg == 0 ? 24 : dec_reg, 0}));
     }
 
@@ -1252,7 +1102,7 @@ private:
     }
 
     Stmt init_barrier = Evaluate(Call(
-        DataType::Handle(), CreateListofMBarrierOp(), barrier_num_threads));
+        DataType::Handle(), create_list_of_mbarrier(), barrier_num_threads));
     Stmt body = IfThenElse(GE(thread_iv_->var, consumer_thread_extent),
                            producer_code, consumer_code);
     // Add an attr here to handle the partial thread count in ThreadSync pass.
@@ -1277,13 +1127,108 @@ private:
   Array<IntImm> nreg_;
 };
 
+class WarpSpecializedDetector : public IRVisitorWithAnalyzer {
+public:
+  static bool Detect(Stmt stmt, bool skip_thread_partition = false) {
+    WarpSpecializedDetector detector;
+    detector.VisitStmt(stmt);
+    return detector.has_warp_specialization_ ||
+           (detector.has_tma_op_ && detector.has_mbarrier_op_);
+  }
+
+  WarpSpecializedDetector() {
+    has_tma_op_ = false;
+    has_mbarrier_op_ = false;
+    has_warp_specialization_ = false;
+  }
+
+private:
+  void VisitStmt_(const EvaluateNode *op) final {
+    if (const CallNode *call = op->value.as<CallNode>()) {
+      if (call->op.same_as(create_list_of_mbarrier()) ||
+          call->op.same_as(mbarrier_wait_parity()) ||
+          call->op.same_as(builtin::ptx_arrive_barrier()) ||
+          call->op.same_as(builtin::ptx_cp_async_barrier())) {
+        has_mbarrier_op_ = true;
+      }
+    }
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col()) ||
+        op->op.same_as(set_max_nreg())) {
+      has_tma_op_ = true;
+    }
+    IRVisitorWithAnalyzer::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const IfThenElseNode *op) final {
+    // do not visit the body of the if-then-else statement
+    // because we only care about the condition
+    auto cond = op->condition;
+    // assert cond is a binary expression
+    PostOrderVisit(cond, [this](const ObjectRef &node) {
+      bool is_cmp_op = false;
+      if (const auto *lt = node.as<LTNode>()) {
+        is_cmp_op = true;
+      } else if (const auto *le = node.as<LENode>()) {
+        is_cmp_op = true;
+      } else if (const auto *gt = node.as<GTNode>()) {
+        is_cmp_op = true;
+      } else if (const auto *ge = node.as<GENode>()) {
+        is_cmp_op = true;
+      }
+
+      if (is_cmp_op) {
+        bool has_thread_var = false;
+        bool has_warp_group_size = false;
+        // check if has thread_var_ in lt->a or lt->b
+        PostOrderVisit(node, [this, &has_thread_var,
+                              &has_warp_group_size](const ObjectRef &node_) {
+          if (node_.as<VarNode>() == thread_var_->var.get()) {
+            has_thread_var = true;
+          } else if (const auto *imm = node_.as<IntImmNode>()) {
+            // 128 is the warp group size of nvidia gpus
+            has_warp_group_size = imm->value % 128 == 0;
+          }
+        });
+        if (has_thread_var && has_warp_group_size) {
+          has_warp_specialization_ = true;
+        }
+      }
+    });
+  }
+
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tir::attr::thread_extent) {
+      IterVar iv = Downcast<IterVar>(op->node);
+      if (iv->thread_tag == "threadIdx.x") {
+        ICHECK(iv->dom->extent.as<IntImmNode>());
+        thread_var_ = iv;
+      }
+    }
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
+  bool has_tma_op_{false};
+  IterVar thread_var_;
+  bool has_mbarrier_op_{false};
+  bool has_warp_specialization_{false};
+};
+
 using namespace tir::transform;
 
 tvm::transform::Pass WarpSpecialized() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
     bool disable_warp_specialized =
         ctx->GetConfig<Bool>(kDisableWarpSpecialized, Bool(false)).value();
-    return WarpSpecializedRewriter::Substitute(f, disable_warp_specialized);
+    bool warp_specialized = WarpSpecializedDetector::Detect(f->body);
+
+    if (!warp_specialized) {
+      return WarpSpecializedRewriter::Substitute(f, disable_warp_specialized);
+    }
+    return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.WarpSpecialized", {});
 }

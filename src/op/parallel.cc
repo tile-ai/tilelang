@@ -122,13 +122,30 @@ bool ParallelOp::IsCommonAccessIndice(const Buffer &buffer) const {
   return StructuralEqual()(indice_map_[buffer], common_indice);
 }
 
+/*! \brief Infer the layout for parallel operations based on different inference
+ * levels
+ *
+ * The inference level controls how aggressively we try to infer and optimize
+ * layouts:
+ * - kStrict (2): Most conservative level. Only allows explicitly defined
+ * layouts. Returns empty layout map if loop_layout_ is not already defined.
+ *                Used when exact layout control is required.
+ *
+ * - kCommon (1): Intermediate level between strict and free.
+ *                Allows common layout patterns while maintaining some
+ * constraints.
+ *
+ * - kFree (0):   Most permissive level. Allows maximum optimization freedom.
+ *                Will attempt layout inference even without source buffers.
+ *                Can generate new layouts based on vectorization and thread
+ * bounds. Used when maximum performance optimization is desired.
+ */
 LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   if (loop_layout_.defined())
     return {};
   if (level == InferLevel::kStrict)
     return {};
 
-  auto block_size = T.thread_bounds->extent - T.thread_bounds->min;
   // Step 1: try to infer loop's partition from a source fragment
   Buffer source_buffer, read_source_buffer;
   for (const auto &[buffer, indices] : indice_map_) {
@@ -145,6 +162,11 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
                 indice_map_[read_source_buffer].size()) {
           read_source_buffer = buffer;
         }
+        // If the buffer is not replicated, use it as source_buffer
+        // because the layout inference is more accurate
+        if (is_one(frag->ReplicateExtent())) {
+          source_buffer = buffer;
+        }
       }
     }
   }
@@ -158,7 +180,8 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
                               IterVarType::kDataPar);
       PrimExpr loop_var_to_thread =
           src_layout->ForwardThread(indice_map_[buffer], rep);
-      return Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter);
+      return Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter)
+          ->BindThreadRange(T.thread_bounds);
     }
   };
   if (source_buffer.defined()) {
@@ -166,19 +189,19 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   } else if (level == InferLevel::kFree) {
     if (read_source_buffer.defined()) {
       loop_layout_ = compute_loop_layout_from_buffer(read_source_buffer);
-      // Loop don't need to be replicated.
-      if (!is_one(loop_layout_->ReplicateExtent()))
-        loop_layout_ = loop_layout_->DeReplicate();
-      // if still has replication, add a condition
-      if (!is_one(loop_layout_->ReplicateExtent())) {
-        auto inv = loop_layout_->Inverse();
-        Array<PrimExpr> fwd;
-        for (size_t i = 0; i < loop_layout_->OutputDim(); i++)
-          fwd.push_back(0);
-        fwd.push_back(InputPlaceholder(0));
-        auto rep = inv->Forward(fwd).back();
-        AddPredicate(EQ(rep, 0));
-      }
+      // // Loop don't need to be replicated.
+      // if (!is_one(loop_layout_->ReplicateExtent()))
+      //   loop_layout_ = loop_layout_->DeReplicate();
+      // // if still has replication, add a condition
+      // if (!is_one(loop_layout_->ReplicateExtent())) {
+      //   auto inv = loop_layout_->Inverse();
+      //   Array<PrimExpr> fwd;
+      //   for (size_t i = 0; i < loop_layout_->OutputDim(); i++)
+      //     fwd.push_back(0);
+      //   fwd.push_back(InputPlaceholder(0));
+      //   auto rep = inv->Forward(fwd).back();
+      //   AddPredicate(EQ(rep, 0));
+      // }
     } else {
       // Vectorize Size must be aware of the buffer_remap
       // As the pass will do post processing to the layout
@@ -203,12 +226,28 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       }
       loop_layout_ = PlanLoopPartition(root_, vector_size, T.thread_bounds);
     }
-    PrimExpr loop_thread_extent = loop_layout_->ThreadExtent();
-    if (!analyzer_.CanProveEqual(loop_thread_extent, block_size))
-      AddPredicate(LT(InputPlaceholder(0), loop_thread_extent));
   } else {
     return {};
   }
+
+  PrimExpr loop_thread_extent = loop_layout_->ThreadExtent();
+
+  auto block_size = T.thread_bounds->extent;
+  if (loop_layout_.defined()) {
+    if (loop_layout_->ThreadRange().defined()) {
+      auto thread_range = loop_layout_->ThreadRange();
+      block_size = thread_range->extent;
+      AddPredicate(GE(InputPlaceholder(0), thread_range->min));
+      AddPredicate(
+          LT(InputPlaceholder(0), thread_range->min + thread_range->extent));
+    }
+  }
+
+  if (!analyzer_.CanProveEqual(loop_thread_extent, block_size)) {
+    AddPredicate(
+        LT(InputPlaceholder(0), loop_thread_extent + T.thread_bounds->min));
+  }
+
   // Step 2: Check that the loop's partition can correctly align with all source
   // fragment
   for (const auto &[buffer, _] : indice_map_) {
@@ -233,7 +272,8 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   LayoutMap results;
   for (const auto &[buffer, _] : indice_map_) {
     if (!T.layout_map.count(buffer)) {
-      results.Set(buffer, CompleteBufferFragment(buffer));
+      results.Set(buffer, CompleteBufferFragment(buffer)->BindThreadRange(
+                              T.thread_bounds));
     }
     // Though they may exist some conflicts, but it's fine.
 
@@ -244,13 +284,14 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       if (T.layout_map.count(buffer)) {
         const FragmentNode *src_layout =
             T.layout_map[buffer].as<Fragment>().get();
-        Fragment dst_layout_fragment = CompleteBufferFragment(buffer);
+        Fragment dst_layout_fragment =
+            CompleteBufferFragment(buffer)->BindThreadRange(T.thread_bounds);
         const FragmentNode *dst_layout =
             dst_layout_fragment.as<Fragment>().get();
         if (src_layout && dst_layout) {
           ICHECK(src_layout->IsEqual(dst_layout, true))
               << "Layout may conflict with ParallelOp for buffer " << buffer
-              << "\nError body begin:\n"
+              << " vs. " << source_buffer << "\nError body begin:\n"
               << GetRoot()->body << "\nError body end"
               << "\nLHS = " << src_layout->DebugOutput()
               << "\nRHS = " << dst_layout->DebugOutput()

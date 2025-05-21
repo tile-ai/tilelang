@@ -26,7 +26,7 @@ parser.add_argument("--sparsity", type=float, default=0.5, help="Sparsity ratio 
 parser.add_argument(
     "--use_autotune", action="store_true", default=False, help="Whether to use autotune")
 
-args = parser.parse_args()
+args, _ = parser.parse_known_args()
 M, N, K = args.m, args.n, args.k
 sparsity = args.sparsity
 use_autotune = args.use_autotune
@@ -157,7 +157,7 @@ def blocksparse_matmul(M,
     block_mask_shape = (M // block_M, N // block_N, K // block_K)
 
     @T.prim_func
-    def main(
+    def block_sparse_matmul(
             A: T.Tensor((M, K), dtype),
             B: T.Tensor((K, N), dtype),
             BlockMask: T.Tensor(block_mask_shape, "bool"),
@@ -181,10 +181,10 @@ def blocksparse_matmul(M,
             T.copy(C_local, C_shared)
             T.copy(C_shared, C[by * block_M, bx * block_N])
 
-    return main
+    return block_sparse_matmul
 
 
-if __name__ == "__main__":
+def main():
 
     # Initialize input matrices A and B on the GPU with half precision
     a = torch.randn(M, K).cuda().half()
@@ -234,3 +234,7 @@ if __name__ == "__main__":
     except AssertionError as e:
         print("❌ Verification FAILED: Results differ significantly.")
         print(e)
+
+
+if __name__ == "__main__":
+    main()

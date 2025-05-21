@@ -56,7 +56,8 @@ public:
   void VisitStmt_(const EvaluateNode *op) final {
     Proxy proxy = Proxy::kAsync;
     if (auto call = op->value.as<CallNode>()) {
-      if (call->op.same_as(LDMatrixOp()) || call->op.same_as(STMatrixOp())) {
+      if (call->op.same_as(ptx_ldmatirx()) ||
+          call->op.same_as(ptx_stmatirx())) {
         proxy = Proxy::kGeneric;
       }
     }
@@ -123,13 +124,13 @@ public:
 private:
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (auto call = op->value.as<CallNode>()) {
-      if (call->op.same_as(TMAStoreOp())) {
+      if (call->op.same_as(tma_store())) {
         Array<Stmt> new_body;
         new_body.push_back(GetRef<Evaluate>(op));
         new_body.push_back(
-            Evaluate(Call(DataType::Handle(), TMAStoreArrive(), {})));
+            Evaluate(Call(DataType::Handle(), tma_store_arrive(), {})));
         new_body.push_back(
-            Evaluate(Call(DataType::Handle(), TMAStoreWait(), {})));
+            Evaluate(Call(DataType::Handle(), tma_store_wait(), {})));
         return SeqStmt(std::move(new_body));
       }
     }
@@ -157,7 +158,7 @@ private:
     Array<Stmt> new_body;
     Proxy cur_proxy, prev_proxy;
     auto fence_stmt =
-        Evaluate(Call(DataType::Handle(), FenceProxyAsyncOp(), {}));
+        Evaluate(Call(DataType::Handle(), fence_proxy_async(), {}));
     prev_proxy = get_generic_proxy(op->seq[0]);
     new_body.push_back(VisitStmt(op->seq[0]));
     if (op->seq.size() > 1) {

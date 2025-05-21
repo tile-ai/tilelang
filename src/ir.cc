@@ -7,14 +7,12 @@
  *
  */
 
+#include "./transform/common/attr.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/script/ir_builder/tir/ir.h>
 
 namespace tvm {
 namespace tl {
-
-constexpr const char *tilelang_is_cpu_kernel_frame =
-    "tilelang.is_cpu_kernel_frame";
 
 using namespace script::ir_builder::tir;
 
@@ -162,6 +160,7 @@ KernelLaunchFrame KernelLaunch(Array<PrimExpr> grid_size,
       attrs.defined() && attrs.count(tilelang_is_cpu_kernel_frame);
 
   if (is_cpu_kernel_frame) {
+    // Launch CPU Kernel
     ICHECK(grid_size.size() >= 0);
     ICHECK(block_size.size() == 0) << "CPU kernel cannot have block size";
     ICHECK(attrs.defined());
@@ -170,7 +169,6 @@ KernelLaunchFrame KernelLaunch(Array<PrimExpr> grid_size,
       n->frames.push_back(
           MakeIterVarFrame("block_var_" + std::to_string(i), grid_size[i]));
     }
-    // Launch CPU Kernel
   } else {
     // Launch GPU Kernel
     ICHECK(grid_size.size() <= 3);
@@ -203,17 +201,15 @@ KernelLaunchFrame KernelLaunch(Array<PrimExpr> grid_size,
             CreateEnvThread("tz", "threadIdx.z", block_size[2].dtype()),
             block_size[2]));
       }
-    } else {
-      n->frames.push_back(Block(""));
     }
   }
 
   if (attrs.defined()) {
-    auto empty_block = Block("");
+    auto empty_block = Block(MainBlockName);
     empty_block->annotations = attrs;
     n->frames.push_back(empty_block);
   } else {
-    n->frames.push_back(Block(""));
+    n->frames.push_back(Block(MainBlockName));
   }
 
   return KernelLaunchFrame(n);
@@ -224,6 +220,81 @@ TVM_REGISTER_NODE_TYPE(KernelLaunchFrameNode);
 TVM_REGISTER_GLOBAL("tl.Parallel").set_body_typed(ParallelFor);
 TVM_REGISTER_GLOBAL("tl.Pipelined").set_body_typed(PipelinedFor);
 TVM_REGISTER_GLOBAL("tl.KernelLaunch").set_body_typed(KernelLaunch);
+
+class WarpSpecializeFrameNode : public TIRFrameNode {
+public:
+  Array<TIRFrame> frames;
+
+  void VisitAttrs(tvm::AttrVisitor *v) {
+    TIRFrameNode::VisitAttrs(v);
+    v->Visit("frames", &frames);
+  }
+
+  static constexpr const char *_type_key = "tl.WarpSpecializeFrame";
+  TVM_DECLARE_FINAL_OBJECT_INFO(WarpSpecializeFrameNode, TIRFrameNode);
+
+public:
+  TVM_DLL void EnterWithScope() final {
+    for (auto frame = frames.begin(); frame != frames.end(); ++frame)
+      (*frame)->EnterWithScope();
+  }
+  /*!
+   * \brief The method called when exiting RAII scope.
+   * \sa tvm::support::With
+   */
+  TVM_DLL void ExitWithScope() final {
+    for (auto frame = frames.rbegin(); frame != frames.rend(); ++frame)
+      (*frame)->ExitWithScope();
+  }
+};
+
+class WarpSpecializeFrame : public TIRFrame {
+public:
+  TVM_DEFINE_MUTABLE_NOTNULLABLE_OBJECT_REF_METHODS(WarpSpecializeFrame,
+                                                    TIRFrame,
+                                                    WarpSpecializeFrameNode);
+};
+
+WarpSpecializeFrame WarpSpecialize(Array<IntImm> warp_group_ids,
+                                   PrimExpr thread_idx,
+                                   int warp_group_size = 128) {
+  ObjectPtr<WarpSpecializeFrameNode> n = make_object<WarpSpecializeFrameNode>();
+  PrimExpr condition;
+  std::vector<int> warp_groups;
+  for (int i = 0; i < warp_group_ids.size(); i++) {
+    warp_groups.push_back(Downcast<IntImm>(warp_group_ids[i])->value);
+  }
+  std::sort(warp_groups.begin(), warp_groups.end());
+
+  // Merge consecutive groups
+  std::vector<std::pair<int, int>> merged;
+  for (int group : warp_groups) {
+    if (merged.empty() || group != merged.back().second) {
+      merged.emplace_back(group, group + 1);
+    } else {
+      merged.back().second = group + 1;
+    }
+  }
+
+  for (const auto &[start, end] : merged) {
+    PrimExpr min_bound = IntImm(thread_idx.dtype(), start) * warp_group_size;
+    PrimExpr max_bound = IntImm(thread_idx.dtype(), end) * warp_group_size;
+    PrimExpr range_cond = (thread_idx >= min_bound) && (thread_idx < max_bound);
+
+    if (condition.defined()) {
+      condition = tir::Or(condition, range_cond);
+    } else {
+      condition = range_cond;
+    }
+  }
+  IfFrame if_frame = If(condition);
+  n->frames.push_back(if_frame);
+  n->frames.push_back(Then());
+  return WarpSpecializeFrame(n);
+}
+
+TVM_REGISTER_NODE_TYPE(WarpSpecializeFrameNode);
+TVM_REGISTER_GLOBAL("tl.WarpSpecialize").set_body_typed(WarpSpecialize);
 
 } // namespace tl
 } // namespace tvm

@@ -118,6 +118,16 @@ For Copy::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   for (const auto &iv : loop_vars)
     analyzer->Bind(iv->var, iv->dom);
 
+  ICHECK(loop_vars.size() <= src_range.size())
+      << "loop_vars.size() = " << loop_vars.size()
+      << ", src_range.size() = " << src_range.size() << ", src = " << src->name
+      << ", dst = " << dst->name;
+
+  ICHECK(loop_vars.size() <= dst_range.size())
+      << "loop_vars.size() = " << loop_vars.size()
+      << ", dst_range.size() = " << dst_range.size() << ", src = " << src->name
+      << ", dst = " << dst->name;
+
   Array<PrimExpr> src_indices = MakeIndices(loop_vars, 0);
   Array<PrimExpr> dst_indices = MakeIndices(loop_vars, 1);
 
@@ -163,11 +173,16 @@ Stmt Copy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (is_cpu_target) {
     vectorized_thread_loop = VectorizeLoop(fused_loop);
   } else {
-    par_op->InferLayout(
-        {T.target, T.thread_bounds, T.layout_map, T.buffer_remap},
-        InferLevel::kFree);
-    auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
-                                     par_op->GetLoopLayout());
+    std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
+                                      InferLevel::kFree};
+    for (auto level : levels) {
+      par_op->InferLayout(
+          {T.target, T.thread_bounds, T.layout_map, T.buffer_remap}, level);
+    }
+    auto loop_layout = par_op->GetLoopLayout();
+    auto thread_var = T.thread_var;
+    auto thread_loop =
+        PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer, loop_layout);
     vectorized_thread_loop = VectorizeLoop(thread_loop);
   }
 
@@ -274,7 +289,7 @@ Stmt Copy::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
     num = 2;
 
   Array<PrimExpr> args;
-  const Op &op = is_ldmatrix ? tl::LDMatrixOp() : tl::STMatrixOp();
+  const Op &op = is_ldmatrix ? tl::ptx_ldmatirx() : tl::ptx_stmatirx();
   args.push_back(static_cast<int>(is_transposed));
   args.push_back(num);
 
@@ -323,7 +338,7 @@ Stmt Copy::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
         value1 = Cast(shared_tensor->dtype, value1);
       }
       PrimExpr value_packed =
-          Call(DataType::Int(32), PackB16Op(), {value0, value1});
+          Call(DataType::Int(32), pack_b16(), {value0, value1});
       args.push_back(value_packed);
     }
   }

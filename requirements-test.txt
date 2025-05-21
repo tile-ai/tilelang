@@ -25,3 +25,8 @@ tabulate
 wheel
 setuptools
 einops
+attrs
+decorator
+flash-attn
+scipy
+tornado

@@ -32,19 +32,21 @@
 #include <unordered_map>
 #include <vector>
 
+#include "arith/ir_visitor_with_analyzer.h"
 #include "runtime/thread_storage_scope.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+using arith::IRVisitorWithAnalyzer;
 using runtime::StorageRank;
 using runtime::StorageScope;
 
 /*!
  * \brief Base class of storage access analysis
  */
-class TileLangStorageAccessVisitor : public StmtExprVisitor {
+class TileLangStorageAccessVisitor : public IRVisitorWithAnalyzer {
 public:
   /*! \brief Storage access type */
   enum AccessType {
