@@ -18,8 +18,8 @@
 
 #include "../op/builtin.h"
 #include "../op/bulk_copy.h"
-#include "arith/pattern_match.h"
 #include "../op/distributed.h"
+#include "arith/pattern_match.h"
 #include "target/source/ptx.h"
 
 namespace tvm {

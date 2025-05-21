@@ -250,11 +250,7 @@ class Profiler:
                 ]
 
     def run_once(self, func: Optional[Callable] = None):
-        if use_distributed:
-            # self.init_distributed()
-            ins = self._get_distributed_inputs()
-        else:
-            ins = self._get_inputs()
+        ins = self._get_distributed_inputs() if use_distributed else self._get_inputs()
         if not func:
             func = self.__call__
         return func(*ins)

@@ -27,8 +27,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include "../op/distributed.h"
 #include "../op/bulk_copy.h"
+#include "../op/distributed.h"
 namespace tvm {
 namespace tl {
 
@@ -42,17 +42,17 @@ public:
     LowerCpengineIntrin substituter;
     fptr->body = substituter.VisitStmt(f->body);
     for (auto call : substituter.cpengine_calls_) {
-      fptr->body =SeqStmt({call, fptr->body});
+      fptr->body = SeqStmt({call, fptr->body});
     }
     return f;
   }
 
-
   PrimExpr VisitExpr_(const CallNode *call) final {
     if (call->op.same_as(CpengineCpAsync())) {
-        LOG(INFO) << "call CpengineCpAsync";
-        cpengine_calls_.push_back(Evaluate(
-          Call(DataType::Handle(), builtin::tvm_call_packed(), {StringImm("tvm_cpengine_cp_async")})));
+      LOG(INFO) << "call CpengineCpAsync";
+      cpengine_calls_.push_back(
+          Evaluate(Call(DataType::Handle(), builtin::tvm_call_packed(),
+                        {StringImm("tvm_cpengine_cp_async")})));
       return 0;
     } else {
       return StmtExprMutator::VisitExpr_(call);
