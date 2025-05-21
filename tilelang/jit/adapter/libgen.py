@@ -74,7 +74,6 @@ class LibraryGenerator(object):
                 "-fPIC",
                 f"--offload-arch={arch}",
                 "--shared",
-                "--ggdb",
                 src.name,
             ]
             command += [
