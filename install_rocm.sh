@@ -38,22 +38,23 @@ if $USER_IS_ROOT; then
     apt-get update
     apt-get install -y llvm-16
 else
-    # Fetch the GPG key for the LLVM repository and add it to the trusted keys using sudo
-    wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+    # # Fetch the GPG key for the LLVM repository and add it to the trusted keys using sudo
+    # wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
 
-    # Check if the repository is already present in the sources.list
-    if ! grep -q "http://apt.llvm.org/focal/ llvm-toolchain-focal-16 main" /etc/apt/sources.list; then
-        # Add the LLVM repository to sources.list using sudo
-        echo "deb http://apt.llvm.org/focal/ llvm-toolchain-focal-16 main" | sudo tee -a /etc/apt/sources.list
-        echo "deb-src http://apt.llvm.org/focal/ llvm-toolchain-focal-16 main" | sudo tee -a /etc/apt/sources.list
-    else
-        # Print a message if the repository is already added
-        echo "The repository is already added."
-    fi
+    # # Check if the repository is already present in the sources.list
+    # if ! grep -q "http://apt.llvm.org/focal/ llvm-toolchain-focal-16 main" /etc/apt/sources.list; then
+    #     # Add the LLVM repository to sources.list using sudo
+    #     echo "deb http://apt.llvm.org/focal/ llvm-toolchain-focal-16 main" | sudo tee -a /etc/apt/sources.list
+    #     echo "deb-src http://apt.llvm.org/focal/ llvm-toolchain-focal-16 main" | sudo tee -a /etc/apt/sources.list
+    # else
+    #     # Print a message if the repository is already added
+    #     echo "The repository is already added."
+    # fi
 
-    # Update package lists and install llvm-16 using sudo
-    sudo apt-get update
-    sudo apt-get install -y llvm-16
+    # # Update package lists and install llvm-16 using sudo
+    # sudo apt-get update
+    # sudo apt-get install -y llvm-16
+    echo "Skipping LLVM installation as we are not root."
 fi
 
 # Step 9: Clone and build TVM
