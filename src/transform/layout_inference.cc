@@ -301,9 +301,10 @@ public:
 
           // Check if buffer exists in use_list_
           if (!use_list_.count(buffer)) {
-            LOG(WARNING) << "Buffer " << buffer << " not found in use_list_. "
-                         << "Potential mismatch between inference updates and "
-                         << "use_list_.";
+            LOG(WARNING) << "Layout inference failed for buffer " << buffer
+                         << ". "
+                         << "The buffer cannot be inferred with current layout "
+                            "inference rules.";
             continue;
           }
 

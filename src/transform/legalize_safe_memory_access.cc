@@ -12,8 +12,6 @@
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
 
-#include <queue>
-
 #include "../op/builtin.h"
 #include "../op/parallel.h"
 #include "arith/ir_mutator_with_analyzer.h"
@@ -60,10 +58,8 @@ private:
 //    If the index might exceed the shape (upper bound too large),
 //    log a warning or handle accordingly.
 struct GlobalMemChecker : public StmtExprVisitor {
-  arith::Analyzer *analyzer;
 
-  explicit GlobalMemChecker(arith::Analyzer *analyzer) : analyzer(analyzer) {}
-
+  GlobalMemChecker(arith::Analyzer *analyzer) : analyzer_(analyzer) {}
   void VisitExpr_(const BufferLoadNode *op) final {
     // Check if the buffer is in global scope
     if (IsGlobalBuffer(op->buffer)) {
@@ -119,9 +115,14 @@ struct GlobalMemChecker : public StmtExprVisitor {
       // We want to check if index < shape_dim can be proven.
       // If analyzer->CanProve(index < shape_dim) returns false,
       // it means we cannot prove the access is within bounds.
-      PrimExpr cond = index < shape_dim;
-      if (!analyzer->CanProve(cond)) {
-        _conditions.push_back(cond);
+      PrimExpr upper_bound_cond = index < shape_dim;
+      if (!analyzer_->CanProve(upper_bound_cond)) {
+        _conditions.push_back(upper_bound_cond);
+      }
+      // Check if index >= 0 can be proven.
+      PrimExpr lower_bound_cond = index >= 0;
+      if (!analyzer_->CanProve(lower_bound_cond)) {
+        _conditions.push_back(lower_bound_cond);
       }
     }
   }
@@ -130,6 +131,7 @@ struct GlobalMemChecker : public StmtExprVisitor {
 
 private:
   Array<PrimExpr> _conditions;
+  arith::Analyzer *analyzer_;
 };
 
 class SafeMemorysRewriter : public StmtExprMutator {

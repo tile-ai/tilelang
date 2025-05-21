@@ -116,20 +116,23 @@ cdef class CythonKernelWrapper:
         # Convert tensor pointers to C void pointers for kernel call
         call_args = []
         for i in range(len(tensor_list)):
-            if isinstance(tensor_list[i], torch.Tensor):
-                call_args.append(ctypes.c_void_p(tensor_list[i].data_ptr()))
-            elif isinstance(tensor_list[i], int):
+            tensor = tensor_list[i]
+            if isinstance(tensor, torch.Tensor):
+                if not tensor.is_contiguous():
+                    raise ValueError(f"Input tensor at index {i} must be contiguous")
+                call_args.append(ctypes.c_void_p(tensor.data_ptr()))
+            elif isinstance(tensor, int):
                 # Dynamic symbolics which are passed as integer arguments
                 if i in self.ptr_map:
-                    call_args.append(ctypes.c_void_p(tensor_list[i]))
+                    call_args.append(ctypes.c_void_p(tensor))
                 else:
-                    call_args.append(tensor_list[i])
-            elif isinstance(tensor_list[i], float):
-                call_args.append(ctypes.c_float(tensor_list[i]))
-            elif isinstance(tensor_list[i], bool):
-                call_args.append(ctypes.c_bool(tensor_list[i]))
+                    call_args.append(tensor)
+            elif isinstance(tensor, float):
+                call_args.append(ctypes.c_float(tensor))
+            elif isinstance(tensor, bool):
+                call_args.append(ctypes.c_bool(tensor))
             else:
-                raise ValueError(f"Unsupported tensor type: {type(tensor_list[i])}")
+                raise ValueError(f"Unsupported tensor type: {type(tensor)}")
 
         # Check buffer device
         # cdef str tensor_list_device_type = tensor_list[0].device.type
