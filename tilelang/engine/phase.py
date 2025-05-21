@@ -8,6 +8,19 @@ from tilelang.contrib.nvcc import have_tma
 from typing import Optional
 
 
+def allow_warp_specialized(pass_ctx: Optional[PassContext] = None,
+                           target: Optional[Target] = None) -> bool:
+    # avoid circular import
+    from tilelang.jit.adapter.utils import is_cuda_target
+
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    if not is_cuda_target(target):
+        return False
+    disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
+    return not disable_warp_specialized
+
+
 def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
                                    target: Optional[Target] = None) -> bool:
     # avoid circular import
@@ -18,9 +31,7 @@ def allow_tma_and_warp_specialized(pass_ctx: Optional[PassContext] = None,
     if not is_cuda_target(target) or not have_tma(target):
         return False
     disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
-    disable_tma_lower = pass_ctx.config.get("tl.disable_tma_lower", False)
-    disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
-    return not (disable_tma_lower and disable_warp_specialized)
+    return not disable_tma_lower and allow_warp_specialized(pass_ctx=pass_ctx, target=target)
 
 
 def allow_fence_proxy(target: Optional[Target] = None) -> bool:
@@ -130,7 +141,15 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
-    mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
+
+    if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
+        # This is a workaround to avoid the bug in the MergeSharedMemoryAllocations pass
+        # when warp specialization is enabled, as different warp threads may access different
+        # buffers, but the liveness analysis is hard because we need to do pipeline.
+        mod = tir.transform.MergeSharedMemoryAllocations()(mod)
+    else:
+        mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
+
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tir.transform.LowerDeviceKernelLaunch()(mod)
 
