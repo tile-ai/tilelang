@@ -31,7 +31,7 @@ class JITKernel(object):
     torch_function : Callable
         The compiled function that can be invoked as a PyTorch-compatible function.
     """
-
+    prim_func: PrimFunc = None
     artifact: CompiledArtifact = None
     adapter: BaseKernelAdapter = None
     torch_function: Callable = None
@@ -74,6 +74,7 @@ class JITKernel(object):
         from_database : bool, optional
             Whether to create a TorchFunction from a database.
         """
+        self.prim_func = func
         self.execution_backend = execution_backend
         self.target = target
         self.target_host = target_host

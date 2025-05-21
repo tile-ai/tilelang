@@ -6,10 +6,12 @@ from tvm import tir
 from typing import Optional
 from tilelang.language import copy, macro, alloc_shared
 
+
 def _legalize_dim(buffer: tir.Buffer, dim: int):
     if dim < 0:
         dim = len(buffer.shape) + dim
     return dim
+
 
 def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clear: bool):
     """Perform a reduction operation on a buffer along a specified dimension.
