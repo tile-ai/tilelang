@@ -89,11 +89,18 @@ class MatrixCoreIntrinEmitter(object):
         if a_dtype.bits == 32:
             self.k_dim = 4
         elif a_dtype.bits in [16, 8]:
-            self.k_dim = 16
+            if str(a_dtype) in ["float8_e4m3fnuz", "e4m3fnuz_float8", "e4m3_float8"]:
+                print(f"Setting k_dim=32 for float8_e4m3fnuz type")
+                self.k_dim = 32
+                self.k_pack = 4  # Adjust k_pack for float8
+            else:
+                self.k_dim = 16
         else:
             raise ValueError(f"Unsupported a_dtype = {a_dtype}")
 
     def _initialize_local_size(self, m_dim=16, n_dim=16, k_dim=16, warp_size=32):
+        if hasattr(self, 'k_pack'):
+            k_dim = k_dim * self.k_pack
         self.local_size_a = (m_dim * k_dim) // warp_size
         self.local_size_b = (n_dim * k_dim) // warp_size
         self.local_size_out = (m_dim * n_dim) // warp_size
@@ -123,7 +130,7 @@ class MatrixCoreIntrinEmitter(object):
             "float8_e4m3fnuz":"_fp8_fp8",
         }[in_dtype]
 
-        if in_dtype == "e4m3_float8":
+        if in_dtype in ["e4m3_float8", "e4m3fnuz_float8", "float8_e4m3fnuz"]:
             k_dim = 32
 
         self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}{in_dtype_abbrv}"
@@ -309,8 +316,15 @@ class MatrixCoreIntrinEmitter(object):
         k_pack = self.k_pack
         mfma_suffix = self.mfma_suffix
         a_dtype, b_dtype, out_dtype = self.a_dtype, self.b_dtype, self.accum_dtype
-        compute_a_dtype = a_dtype if local_size_a == 1 else f"{a_dtype}x{local_size_a}"
-        compute_b_dtype = b_dtype if local_size_b == 1 else f"{b_dtype}x{local_size_b}"
+
+        # Special handling for float8_e4m3fnuz vector types
+        if a_dtype in ["float8_e4m3fnuz", "e4m3fnuz_float8"]:
+            compute_a_dtype = f"float8_e4m3fnuz_t<{local_size_a}>"
+            compute_b_dtype = f"float8_e4m3fnuz_t<{local_size_b}>"
+        else:
+            compute_a_dtype = a_dtype if local_size_a == 1 else f"{a_dtype}x{local_size_a}"
+            compute_b_dtype = b_dtype if local_size_b == 1 else f"{b_dtype}x{local_size_b}"
+
         compute_out_dtype = out_dtype if local_size_out == 1 else f"{out_dtype}x{local_size_out}"
 
         @T.macro
