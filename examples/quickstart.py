@@ -8,7 +8,7 @@ import tilelang.language as T
 # to avoid bank conflicts and maximize the performance.
 from tilelang.intrinsics import (
     make_mma_swizzle_layout as make_swizzle_layout,)  # noqa: F401
-tilelang.disable_cache()
+
 
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
@@ -21,7 +21,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             C: T.Tensor((M, N), dtype),
     ):
         # Initialize Kernel Context
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=256) as (bx, by):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -39,7 +39,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             # Clear local accumulation
             T.clear(C_local)
 
-            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=0):
+            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
                 # Copy tile of A
                 # This is a sugar syntax for parallelized copy
                 # for i, k in T.Parallel(M, block_K):
@@ -51,19 +51,19 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
                 # Perform a tile-level GEMM on the shared buffers
                 # Currently we dispatch to the cute/hip on Nvidia/AMD GPUs
-                T.gemm(A_shared, B_shared, C_local, policy=T.GemmWarpPolicy.FullCol)
+                T.gemm(A_shared, B_shared, C_local)
 
-            # Copy result back to global memorya
+            # Copy result back to global memory
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
 
 
-M = 16  # M = T.symbolic("m") if you want to use dynamic shape
-N = 576
-K = 32
-block_M = 16
-block_N = 576
+M = 1024  # M = T.symbolic("m") if you want to use dynamic shape
+N = 1024
+K = 1024
+block_M = 128
+block_N = 128
 block_K = 32
 
 # 1. Define the kernel (matmul) and compile/lower it into an executable module
@@ -73,10 +73,9 @@ func = matmul(M, N, K, block_M, block_N, block_K)
 # out_idx specifies the index of the output buffer in the argument list
 # if out_idx is specified, the tensor will be created during runtime
 # target currently can be "cuda" or "hip" or "cpu".
-
 jit_kernel = tilelang.compile(func, out_idx=[2], target="cuda", execution_backend="cython")
 # jit_kernel = tilelang.compile(func, out_idx=[2], target="cuda", execution_backend="dlpack")
-print(jit_kernel.get_kernel_source())
+
 # 3. Test the kernel in Python with PyTorch data
 import torch
 
