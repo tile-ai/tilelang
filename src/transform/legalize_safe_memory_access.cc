@@ -138,16 +138,33 @@ class SafeMemorysRewriter : public StmtExprMutator {
   arith::Analyzer *analyzer_;
 
 public:
-  explicit SafeMemorysRewriter(arith::Analyzer *analyzer)
-      : analyzer_(analyzer) {}
+  explicit SafeMemorysRewriter(Map<Buffer, PrimExpr> annotated_padding_map,
+                               arith::Analyzer *analyzer)
+      : annotated_padding_map_(annotated_padding_map), analyzer_(analyzer) {}
 
 private:
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     // Check if the buffer is in global scope
     auto store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
+
     GlobalMemChecker checker(analyzer_);
     checker(store);
     Array<PrimExpr> conditions = checker.GetConditions();
+
+    // Skip boundary check if the store value is an IfThenElse
+    if (const IfThenElseNode *if_node = store->value.as<IfThenElseNode>()) {
+      if (conditions.size() > 0) {
+        LOG(WARNING)
+            << "Skipping boundary check for store with IfThenElse value: "
+            << store->value
+            << "\nAs manual boundary check detected, potential out-of-bounds "
+               "access may occur."
+            << "\nAuto detect boundaries are " << conditions;
+        return store;
+      }
+      return store;
+    }
+
     if (conditions.size() == 0) {
       return store;
     }
@@ -164,7 +181,7 @@ private:
       for (auto cond : conditions) {
         ICHECK(cond.dtype() == DataType::Bool(1))
             << "condition is not a boolean: " << cond;
-        value = if_then_else(cond, value, make_zero(value->dtype));
+        value = if_then_else(cond, value, GetPadding(store->buffer));
       }
       store.CopyOnWrite()->value = value;
       return store;
@@ -173,7 +190,7 @@ private:
       for (auto cond : conditions) {
         ICHECK(cond.dtype() == DataType::Bool(1))
             << "condition is not a boolean: " << cond;
-        value = if_then_else(cond, value, make_zero(value->dtype));
+        value = if_then_else(cond, value, GetPadding(store->buffer));
       }
       store.CopyOnWrite()->value = value;
       return store;
@@ -227,6 +244,15 @@ private:
     String scope = buffer.scope();
     return scope == "global";
   }
+  // Get the padding of the buffer
+  PrimExpr GetPadding(const Buffer &buffer) {
+    if (annotated_padding_map_.count(buffer)) {
+      return annotated_padding_map_[buffer];
+    }
+    return make_zero(buffer->dtype);
+  }
+
+  Map<Buffer, PrimExpr> annotated_padding_map_;
 };
 
 // Class to legalize safe memory access by transforming them appropriately
@@ -239,6 +265,9 @@ public:
     SafeMemoryLegalizer substituter(&analyzer);
     // Get a mutable copy of the function node
     PrimFuncNode *fptr = f.CopyOnWrite();
+    for (const auto &[_, buffer] : f->buffer_map) {
+      substituter.buffer_data_to_buffer_.Set(buffer->data, buffer);
+    }
     // Apply the legalizer to the function body
     fptr->body = substituter.VisitStmt(f->body);
     return f;
@@ -255,7 +284,7 @@ private:
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
     auto has_inner_loop = HasInnerLoop(for_node->body);
     if (!has_inner_loop) {
-      SafeMemorysRewriter rewriter(analyzer_);
+      SafeMemorysRewriter rewriter(annotated_padding_map_, analyzer_);
       for_node.CopyOnWrite()->body = rewriter(for_node->body);
       // // Detect Buffer Load Node in the loop body, collect the indices and
       // buffer size
@@ -279,11 +308,32 @@ private:
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
+  Stmt VisitStmt_(const BlockNode *op) final {
+    for (auto buffer : op->alloc_buffers) {
+      buffer_data_to_buffer_.Set(buffer->data, buffer);
+    }
+    if (op->annotations.count(attr::kPaddingMap)) {
+      auto map = op->annotations.Get(attr::kPaddingMap)
+                     .as<Map<Var, PrimExpr>>()
+                     .value();
+      for (const auto &[var, padding] : map) {
+        ICHECK(buffer_data_to_buffer_.count(var))
+            << "buffer " << var << " is not found in the block";
+        auto buffer = buffer_data_to_buffer_[var];
+        annotated_padding_map_.Set(buffer, padding);
+      }
+    }
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
   static bool HasInnerLoop(const Stmt &stmt) {
     LeafForFinder finder;
     finder(stmt);
     return finder.leaf_for_nodes.size() > 0;
   }
+
+  Map<Var, Buffer> buffer_data_to_buffer_;
+  Map<Buffer, PrimExpr> annotated_padding_map_;
 };
 
 // Create a pass that legalizes vectorized loops in the IRModule
