@@ -235,9 +235,7 @@ struct OperandTraits<32, N, K, true, num_warp_n,
   using LayoutAtom = decltype(composition(
       Swizzle<3, 2, 3>{}, Layout<Shape<_8, _32>, Stride<_32, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy =
-      typename std::conditional<(N / num_warp_n) % 16 == 8, SM75_U32x2_LDSM_N,
-                                SM75_U32x4_LDSM_N>::type;
+  using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
 template <int N, int K, int num_warp_n>
