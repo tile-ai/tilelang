@@ -12,6 +12,11 @@
 
 namespace tvm {
 namespace tl {
+
+namespace attr {
+static constexpr const char *kPaddingMap = "padding_map";
+} // namespace attr
+
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
     "tl.debug_merge_shared_memory_allocations";
 static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
