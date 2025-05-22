@@ -163,6 +163,9 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
   }
 
   bool fail = false;
+  LOG(INFO) << "PrintType: " << t;
+  LOG(INFO) << "lanes: " << lanes;
+  LOG(INFO) << "t.bits(): " << t.bits();
   if (t.is_float()) {
     switch (t.bits()) {
     case 16:
