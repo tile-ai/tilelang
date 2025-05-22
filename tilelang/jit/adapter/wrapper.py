@@ -92,6 +92,7 @@ class TLCUDASourceWrapper(object):
         "bfloat16": "bfloat16_t",
         "e4m3_float8": "unsigned char",
         "e5m2_float8": "fp8_e5_t",
+        "e4m3fnuz_float8": "unsigned char",
         "float64": "double",
         "int64": "int64_t",
         "int32": "int",

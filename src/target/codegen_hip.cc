@@ -164,8 +164,30 @@ void CodeGenTileLangHIP::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
 
   bool fail = false;
   LOG(INFO) << "PrintType: " << t;
+  LOG(INFO) << "t is float8_e4m3fnuz: " << t.is_float8_e4m3fnuz();
+  LOG(INFO) << "t is e4m3fnuz: " << t.is_e4m3fnuz_float8();
   LOG(INFO) << "lanes: " << lanes;
   LOG(INFO) << "t.bits(): " << t.bits();
+
+  if (t.is_float8_e4m3fnuz() || t.is_e4m3fnuz_float8()) {
+    if (t.is_scalar()) {
+      os << "__hip_fp8_e4m3_fnuz";
+    } else if (lanes == 2) {
+      os << "__hip_fp8x2_e4m3_fnuz";
+    } else if (lanes == 4) {
+      os << "__hip_fp8x4_e4m3_fnuz";
+    } else if (lanes == 8) {
+      os << "__hip_fp8x8_e4m3_fnuz";
+    } else if (lanes == 16) {
+      os << "__hip_fp8x16_e4m3_fnuz";
+    } else {
+      fail = true;
+    }
+    LOG(INFO) << "t lanes: " << lanes << " fail: " << fail;
+    if (!fail)
+      return;
+  }
+
   if (t.is_float()) {
     switch (t.bits()) {
     case 16:
