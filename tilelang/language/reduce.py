@@ -7,6 +7,12 @@ from typing import Optional
 from tilelang.language import copy, macro, alloc_shared
 
 
+def _legalize_dim(buffer: tir.Buffer, dim: int):
+    if dim < 0:
+        dim = len(buffer.shape) + dim
+    return dim
+
+
 def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clear: bool):
     """Perform a reduction operation on a buffer along a specified dimension.
 
@@ -33,7 +39,7 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
     )
 
 
-def reduce_max(buffer: tir.Buffer, out: tir.Buffer, dim: int, clear: bool = True):
+def reduce_max(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True):
     """Perform reduce max on input buffer, store the result to output buffer
 
     Parameters
@@ -50,10 +56,11 @@ def reduce_max(buffer: tir.Buffer, out: tir.Buffer, dim: int, clear: bool = True
     -------
     handle : PrimExpr
     """
+    dim = _legalize_dim(buffer, dim)
     return reduce(buffer, out, "max", dim, clear)
 
 
-def reduce_min(buffer: tir.Buffer, out: tir.Buffer, dim: int, clear: bool = True):
+def reduce_min(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True):
     """Perform reduce min on input buffer, store the result to output buffer.
 
     Args:
@@ -65,10 +72,11 @@ def reduce_min(buffer: tir.Buffer, out: tir.Buffer, dim: int, clear: bool = True
     Returns:
         tir.Call: Handle to the reduction operation
     """
+    dim = _legalize_dim(buffer, dim)
     return reduce(buffer, out, "min", dim, clear)
 
 
-def reduce_sum(buffer: tir.Buffer, out: tir.Buffer, dim: int, clear: bool = True):
+def reduce_sum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True):
     """Perform reduce sum on input buffer, store the result to output buffer.
 
     Args:
@@ -89,10 +97,11 @@ def reduce_sum(buffer: tir.Buffer, out: tir.Buffer, dim: int, clear: bool = True
     Returns:
         tir.Call: Handle to the reduction operation
     """
+    dim = _legalize_dim(buffer, dim)
     return reduce(buffer, out, "sum", dim, clear)
 
 
-def reduce_abssum(buffer: tir.Buffer, out: tir.Buffer, dim: int):
+def reduce_abssum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1):
     """Perform reduce absolute sum on input buffer, store the result to output buffer.
 
     Args:
@@ -103,10 +112,11 @@ def reduce_abssum(buffer: tir.Buffer, out: tir.Buffer, dim: int):
     Returns:
         tir.Call: Handle to the reduction operation
     """
+    dim = _legalize_dim(buffer, dim)
     return reduce(buffer, out, "abssum", dim, True)
 
 
-def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int, clear: bool = True):
+def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool = True):
     """Perform reduce absolute max on input buffer, store the result to output buffer.
 
     Args:
@@ -117,6 +127,7 @@ def reduce_absmax(buffer: tir.Buffer, out: tir.Buffer, dim: int, clear: bool = T
     Returns:
         tir.Call: Handle to the reduction operation
     """
+    dim = _legalize_dim(buffer, dim)
     return reduce(buffer, out, "absmax", dim, clear)
 
 
