@@ -9,7 +9,7 @@ import tilelang as TL
 import tilelang.language as T
 from tilelang.utils.tensor import map_torch_type
 
-tilelang.testing.set_random_seed(0)
+tilelang.testing.set_random_seed(42)
 
 
 def tl_gemm(
@@ -154,9 +154,6 @@ def assert_tl_gemm_correctness(M, N, K, block_N, in_dtype, out_dtype, accum_dtyp
     # src_code is the generated cuda source
     assert src_code is not None
 
-    print(
-        f"M={M}, N={N}, K={K}, block_N={block_N}, in_dtype={in_dtype}, out_dtype={out_dtype}, accum_dtype={accum_dtype}"
-    )
     in_dtype = map_torch_type(in_dtype)
     out_dtype = map_torch_type(out_dtype)
     accum_dtype = map_torch_type(accum_dtype)
@@ -181,7 +178,7 @@ def assert_tl_gemm_correctness(M, N, K, block_N, in_dtype, out_dtype, accum_dtyp
     assert latency is not None
     print(f"latency: {latency} ms")
     tflops = 2 * M * N * K / latency / 1e9
-    print(f"tflops: {tflops}\n")
+    print(f"tflops: {tflops}")
 
 
 if __name__ == "__main__":
