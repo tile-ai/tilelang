@@ -146,8 +146,8 @@ def calc_diff(x, y):
     return 1 - sim
 
 
-def assert_tl_gemm_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
-    gemm = tl_gemm(M, N, K, in_dtype, out_dtype, accum_dtype)
+def assert_tl_gemm_correctness(M, N, K, block_N, in_dtype, out_dtype, accum_dtype):
+    gemm = tl_gemm(M, N, K, block_N, in_dtype, out_dtype, accum_dtype)
     kernel = TL.compile(gemm, out_idx=[])
     src_code = kernel.get_kernel_source()
 
@@ -169,6 +169,7 @@ def assert_tl_gemm_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     # Get Reference Result
     ref_c = ref_deepgemm_fp8(A_fp8, B_fp8, A_scale, B_scale, out_dtype)
     diff = calc_diff(C, ref_c)
+    print(f"Running deepgemm Benchmark for M={M}, N={N}, K={K}, block_N={block_N}, in_dtype={in_dtype}, out_dtype={out_dtype}, accum_dtype={accum_dtype}")
     print(f"diff: {diff}")
     assert diff < 1e-3
 
@@ -178,7 +179,7 @@ def assert_tl_gemm_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     assert latency is not None
     print(f"latency: {latency} ms")
     tflops = 2 * M * N * K / latency / 1e9
-    print(f"tflops: {tflops}")
+    print(f"tflops: {tflops}\n")
 
 
 if __name__ == "__main__":
