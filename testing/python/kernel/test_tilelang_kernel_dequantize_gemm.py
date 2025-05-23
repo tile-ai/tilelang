@@ -391,7 +391,7 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
     chunk = block_K // reduce_k
 
     is_smooth_a = False
-    can_swizzle = block_K * DataType(in_dtype).bits == 512
+    can_swizzle = block_K * DataType(in_dtype).bits % 256 == 0
     apply_pad_a = not (is_smooth_a or can_swizzle)
     pad_factor = 8
 
