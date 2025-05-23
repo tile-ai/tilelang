@@ -178,7 +178,7 @@ def matmul(M,
            accum_dtype="float"):
 
     @T.prim_func
-    def main(
+    def gemm_autotune(
             A: T.Tensor((M, K), dtype),
             B: T.Tensor((N, K), dtype),
             C: T.Tensor((M, N), dtype),
@@ -202,10 +202,10 @@ def matmul(M,
             T.copy(C_local, C_shared)
             T.copy(C_shared, C[by * block_M, bx * block_N])
 
-    return main
+    return gemm_autotune
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
     parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
     parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
@@ -244,3 +244,7 @@ if __name__ == "__main__":
     print(f"Ref latency: {ref_latency}")
     print(f"TileLang TFlops: {2 * M * N * K / tilelang_latency * 1e-9}")
     print(f"Ref TFlops: {2 * M * N * K / ref_latency * 1e-9}")
+
+
+if __name__ == "__main__":
+    main()
