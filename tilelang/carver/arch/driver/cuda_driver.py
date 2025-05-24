@@ -166,6 +166,7 @@ def get_max_dynamic_shared_size_bytes(device_id: int = 0, format: str = "bytes")
     else:
         raise RuntimeError("Failed to get device properties.")
 
+
 def get_num_sms(device_id: int = 0) -> int:
     """
     Get the number of streaming multiprocessors (SMs) on the CUDA device.
