@@ -15,8 +15,8 @@ using namespace tir;
 class ConfigIndexBitwidthRewriter : public IndexDataTypeRewriter {
 public:
   using Parent = IndexDataTypeRewriter;
-  ConfigIndexBitwidthRewriter(int index_bitwidth)
-      : _index_bitwidth_(index_bitwidth) {}
+  ConfigIndexBitwidthRewriter(int index_bitwidth, bool auto_check)
+      : _index_bitwidth_(index_bitwidth), _auto_check_(auto_check) {}
 
   Stmt operator()(Stmt s) { return VisitStmt(s); }
 
@@ -25,9 +25,15 @@ protected:
   using Parent::VisitStmt_;
 
   PrimExpr VisitExpr_(const VarNode *op) final {
-    if (op->dtype.is_int() && op->dtype.bits() < 64) {
-      DataType new_dtype = DataType::Int(64);
-      if (!var_remap_.count(op)) {
+    if (op->dtype.is_int()) {
+      DataType new_dtype = op->dtype;
+      if (_auto_check_) {
+        new_dtype = (op->dtype.bits() < 64) ? DataType::Int(64) : op->dtype;
+      } else if (op->dtype.bits() < _index_bitwidth_) {
+        new_dtype = DataType::Int(_index_bitwidth_);
+      }
+
+      if (new_dtype != op->dtype && !var_remap_.count(op)) {
         var_remap_[op] = Var(op->name_hint, new_dtype);
       }
     }
@@ -35,8 +41,14 @@ protected:
   }
 
   PrimExpr VisitExpr_(const IntImmNode *op) final {
-    if (is_enabled_ && op->dtype.is_int() && op->dtype.bits() < 64) {
-      return IntImm(DataType::Int(_index_bitwidth_), op->value);
+    if (is_enabled_ && op->dtype.is_int()) {
+      if (_auto_check_) {
+        int64_t value = op->value;
+        int required_bits = value > INT32_MAX || value < INT32_MIN ? 64 : 32;
+        return IntImm(DataType::Int(required_bits), value);
+      } else if (op->dtype.bits() < _index_bitwidth_) {
+        return IntImm(DataType::Int(_index_bitwidth_), op->value);
+      }
     }
     return GetRef<PrimExpr>(op);
   }
@@ -68,21 +80,23 @@ protected:
   }
 
   int _index_bitwidth_;
+  bool _auto_check_;
 };
 
 tvm::transform::Pass ConfigIndexBitwidth() {
   using namespace tir::transform;
   auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) {
     auto *n = f.CopyOnWrite();
-    // Get pass config `tl.config_index_bitwidth`
     tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
     Optional<Integer> opt_config_index_bitwidth =
         ctxt->GetConfig(kConfigIndexBitwidth, Optional<Integer>());
-    if (opt_config_index_bitwidth.defined()) {
-      int config_index_bitwidth = opt_config_index_bitwidth.value()->value;
-      n->body = ConfigIndexBitwidthRewriter(config_index_bitwidth)(
-          std::move(n->body));
-    }
+
+    bool auto_check = !opt_config_index_bitwidth.defined();
+    int config_index_bitwidth =
+        auto_check ? 64 : opt_config_index_bitwidth.value()->value;
+
+    n->body = ConfigIndexBitwidthRewriter(config_index_bitwidth,
+                                          auto_check)(std::move(n->body));
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ConfigIndexBitwidth", {});
