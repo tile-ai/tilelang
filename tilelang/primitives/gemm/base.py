@@ -90,36 +90,73 @@ class GemmWarpPolicy(IntEnum):
         if self.is_full_row():
             # FullRow policy: Allocate all warps to rows.
             m_warp = num_warps
-            assert (M % num_warps == 0), "M must be divisible by num_warps for FullRow policy"
+            n_warp = 1
+
+            # If M cannot be evenly divided by m_warp*16, try to split remaining warps to N
+            if M % (m_warp * 16) != 0:
+                # Calculate how many warps we can use for M
+                max_m_warps = M // 16
+                m_warp = max_m_warps
+                # Use remaining warps for N
+                n_warp = num_warps // m_warp
+                if n_warp == 0:
+                    n_warp = 1
 
         elif self.is_full_col():
             # FullCol policy: Allocate all warps to columns.
+            m_warp = 1
             n_warp = num_warps
-            assert (N % num_warps == 0), "N must be divisible by num_warps for FullCol policy"
+
+            # If N cannot be evenly divided by n_warp*8, try to split remaining warps to M
+            if N % (n_warp * 8) != 0:
+                # Calculate how many warps we can use for N
+                max_n_warps = N // 8
+                n_warp = max_n_warps
+                # Use remaining warps for M
+                m_warp = num_warps // n_warp
+                if m_warp == 0:
+                    m_warp = 1
 
         elif self.is_square():
-            # Square policy: Try to balance warps across rows and columns.
-            factors = self.to_prime_factors(num_warps)
-            for factor in factors:
-                M_divisible = (M % (factor * m_warp)) == 0
-                N_divisible = (N % (factor * n_warp)) == 0
+            # First calculate the maximum possible warps for each dimension
+            max_m_warps = M // 16  # Each warp needs at least 16 elements in M
+            max_n_warps = N // 8  # Each warp needs at least 8 elements in N
 
-                # Assign the factor to either m_warp or n_warp based on divisibility and aspect ratio.
-                if M_divisible and N_divisible:
-                    # Prefer to assign to rows if M is larger, otherwise to columns.
-                    if N / n_warp >= M / m_warp:
-                        n_warp *= factor
-                    else:
-                        m_warp *= factor
-                elif M_divisible:
-                    m_warp *= factor
-                elif N_divisible:
-                    n_warp *= factor
-                else:
-                    # If no divisibility condition is met, raise an error.
-                    raise ValueError(
-                        f"Cannot compute warp partition for shape {M} x {N} with num_warps {num_warps}"
-                    )
+            # Calculate the ideal ratio of M/N warps based on the matrix dimensions
+            ideal_ratio = 1.0
+            if N > 0:
+                ideal_ratio = float(M) / N
+
+            # Start with a balanced initial guess
+            m_warp = 1
+            n_warp = 1
+
+            # Try to find the best balanced partition
+            best_m = 1
+            best_n = 1
+            best_balance = float('inf')
+
+            # Try all possible combinations that satisfy the constraints
+            for m in range(1, min(max_m_warps, num_warps) + 1):
+                n = num_warps // m
+                if n > max_n_warps:
+                    continue
+                if m * n != num_warps:
+                    continue
+
+                # Calculate how balanced this partition is
+                m_per_warp = float(M) / (m * 16)
+                n_per_warp = float(N) / (n * 8)
+                balance = abs(m_per_warp / n_per_warp - ideal_ratio)
+
+                if balance < best_balance:
+                    best_balance = balance
+                    best_m = m
+                    best_n = n
+
+            m_warp = best_m
+            n_warp = best_n
+
         else:
             # Raise an error for unknown policies.
             raise ValueError(f"Unknown GemmWarpPolicy: {self}")

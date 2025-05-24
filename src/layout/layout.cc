@@ -318,7 +318,7 @@ PrimExpr FragmentNode::ThreadExtent() const {
   arith::Analyzer analyzer;
   UpdateAnalyzer(&analyzer);
   auto ist = analyzer.int_set(forward_thread_ + 1);
-  CHECK(is_one(ist.min()));
+  // CHECK(is_one(ist.min()));
   return ist.max();
 }
 

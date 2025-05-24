@@ -9,7 +9,7 @@ import tilelang as TL
 import tilelang.language as T
 from tilelang.utils.tensor import map_torch_type
 
-tilelang.testing.set_random_seed(0)
+tilelang.testing.set_random_seed(42)
 
 
 def tl_gemm(
@@ -146,8 +146,8 @@ def calc_diff(x, y):
     return 1 - sim
 
 
-def assert_tl_gemm_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
-    gemm = tl_gemm(M, N, K, in_dtype, out_dtype, accum_dtype)
+def assert_tl_gemm_correctness(M, N, K, block_N, in_dtype, out_dtype, accum_dtype):
+    gemm = tl_gemm(M, N, K, block_N, in_dtype, out_dtype, accum_dtype)
     kernel = TL.compile(gemm, out_idx=[])
     src_code = kernel.get_kernel_source()
 
