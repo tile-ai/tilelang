@@ -21,13 +21,13 @@
  * \file flatten_buffer.cc
  */
 
-#include <tvm/arith/iter_affine_map.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
-
 #include "arith/ir_mutator_with_analyzer.h"
 #include "tir/transforms/ir_utils.h"
+#include <tvm/arith/iter_affine_map.h>
+#include <tvm/tir/analysis.h>
+#include <tvm/tir/data_type_rewriter.h>
+#include <tvm/tir/stmt_functor.h>
+#include <tvm/tir/transform.h>
 
 namespace tvm {
 namespace tl {
@@ -58,6 +58,43 @@ private:
   using IRMutatorWithAnalyzer::VisitExpr_;
   using IRMutatorWithAnalyzer::VisitStmt;
   using IRMutatorWithAnalyzer::VisitStmt_;
+
+  class Int64Promoter : public tir::IndexDataTypeRewriter {
+  public:
+    using Parent = IndexDataTypeRewriter;
+
+    PrimExpr VisitExpr_(const VarNode *op) final {
+      if (op->dtype.is_int() && op->dtype.bits() < 64) {
+        return cast(DataType::Int(64), GetRef<Var>(op));
+      }
+      return GetRef<PrimExpr>(op);
+    }
+
+    PrimExpr VisitExpr_(const IntImmNode *op) final {
+      if (op->dtype.is_int() && op->dtype.bits() < 64) {
+        return IntImm(DataType::Int(64), op->value);
+      }
+      return GetRef<PrimExpr>(op);
+    }
+
+    PrimExpr VisitExpr_(const CastNode *op) final {
+      if (op->dtype.is_int() && op->dtype.bits() < 64) {
+        return cast(DataType::Int(64), op->value);
+      }
+      return GetRef<PrimExpr>(op);
+    }
+
+    Stmt VisitStmt_(const BufferStoreNode *op) final {
+      // Force indices to be int64
+      auto node = Downcast<BufferStore>(Parent::VisitStmt_(op));
+      return std::move(node);
+    }
+
+    PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+      auto node = Downcast<BufferLoad>(Parent::VisitExpr_(op));
+      return std::move(node);
+    }
+  };
 
   explicit BufferFlattener(arith::Analyzer *ana) : IRMutatorWithAnalyzer(ana) {}
 
@@ -239,7 +276,28 @@ private:
   Array<PrimExpr> GetSimplifiedElemOffset(const Buffer &buffer,
                                           const Array<PrimExpr> &indices) {
     auto flattened_indices = buffer->ElemOffset(indices);
-    return this->IterMapSimplifyWithContext(flattened_indices, false);
+    Array<PrimExpr> safe_indices;
+    for (auto index : flattened_indices) {
+      auto int_bound = analyzer_->const_int_bound(index);
+      DataType dtype = index->dtype;
+      if (dtype.is_int() && dtype.bits() < 64) {
+        int64_t max_value = int_bound->max_value + 1;
+        int64_t min_value = int_bound->min_value;
+        const int64_t type_max = (1LL << (dtype.bits() - 1));
+        const int64_t type_min = -(1LL << (dtype.bits() - 1));
+        if (max_value >= type_max || min_value < type_min) {
+          Int64Promoter promoter;
+          for (auto &index : flattened_indices) {
+            safe_indices.push_back(promoter(index));
+          }
+        } else {
+          safe_indices.push_back(index);
+        }
+      } else {
+        safe_indices.push_back(index);
+      }
+    }
+    return this->IterMapSimplifyWithContext(safe_indices, false);
   }
 
   template <typename Node> Node VisitBufferAccess(Node node) {
