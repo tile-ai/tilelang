@@ -21,13 +21,13 @@
  * \file flatten_buffer.cc
  */
 
-#include <tvm/arith/iter_affine_map.h>
-#include <tvm/tir/analysis.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
-#include <tvm/tir/data_type_rewriter.h>
 #include "arith/ir_mutator_with_analyzer.h"
 #include "tir/transforms/ir_utils.h"
+#include <tvm/arith/iter_affine_map.h>
+#include <tvm/tir/analysis.h>
+#include <tvm/tir/data_type_rewriter.h>
+#include <tvm/tir/stmt_functor.h>
+#include <tvm/tir/transform.h>
 
 namespace tvm {
 namespace tl {
@@ -61,39 +61,39 @@ private:
 
   class Int64Promoter : public tir::IndexDataTypeRewriter {
   public:
-  using Parent = IndexDataTypeRewriter;
+    using Parent = IndexDataTypeRewriter;
 
-    PrimExpr VisitExpr_(const VarNode* op) final {
+    PrimExpr VisitExpr_(const VarNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
         return cast(DataType::Int(64), GetRef<Var>(op));
       }
       return GetRef<PrimExpr>(op);
     }
 
-    PrimExpr VisitExpr_(const IntImmNode* op) final {
+    PrimExpr VisitExpr_(const IntImmNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
         return IntImm(DataType::Int(64), op->value);
       }
       return GetRef<PrimExpr>(op);
     }
 
-    PrimExpr VisitExpr_(const CastNode* op) final {
+    PrimExpr VisitExpr_(const CastNode *op) final {
       if (op->dtype.is_int() && op->dtype.bits() < 64) {
         return cast(DataType::Int(64), op->value);
       }
       return GetRef<PrimExpr>(op);
     }
 
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    // Force indices to be int64
-    auto node = Downcast<BufferStore>(Parent::VisitStmt_(op));
-    return std::move(node);
-  }
+    Stmt VisitStmt_(const BufferStoreNode *op) final {
+      // Force indices to be int64
+      auto node = Downcast<BufferStore>(Parent::VisitStmt_(op));
+      return std::move(node);
+    }
 
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    auto node = Downcast<BufferLoad>(Parent::VisitExpr_(op));
-    return std::move(node);
-  }
+    PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+      auto node = Downcast<BufferLoad>(Parent::VisitExpr_(op));
+      return std::move(node);
+    }
   };
 
   explicit BufferFlattener(arith::Analyzer *ana) : IRMutatorWithAnalyzer(ana) {}
