@@ -17,7 +17,7 @@ def calc_diff(x, y):
 def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
 
     @T.prim_func
-    def main(
+    def gemm_fp8(
             A: T.Tensor((M, K), dtype),
             B: T.Tensor((N, K), dtype),
             C: T.Tensor((M, N), dtype),
@@ -35,7 +35,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
 
             T.copy(C_local, C[by * block_M, bx * block_N])
 
-    return main
+    return gemm_fp8
 
 
 def test_gemm_fp8(M, N, K, dtype):
@@ -59,6 +59,10 @@ def test_gemm_fp8(M, N, K, dtype):
     assert diff < 1e-3
 
 
-if __name__ == "__main__":
+def main():
     test_gemm_fp8(1024, 1024, 1024, 'e4m3_float8')
     test_gemm_fp8(1024, 1024, 1024, 'e5m2_float8')
+
+
+if __name__ == "__main__":
+    main()

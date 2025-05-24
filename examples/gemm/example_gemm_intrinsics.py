@@ -1,8 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
-import torch
-import torch.backends
 from tilelang import tvm as tvm
 from tvm import DataType
 import tilelang
@@ -102,7 +100,7 @@ def tl_matmul(
     )
 
     @T.prim_func
-    def main(
+    def gemm_intrinsics(
             A: T.Tensor(A_shape, in_dtype),
             B: T.Tensor(B_shape, in_dtype),
             C: T.Tensor((M, N), out_dtype),
@@ -159,36 +157,33 @@ def tl_matmul(
                     j % micro_size_y,
                 ]
 
-    return main
-
-
-M, N, K = 16384, 16384, 16384
-in_dtype, out_dtype, accum_dtype = "float16", "float16", "float32"
-matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
-kernel = tilelang.compile(matmul, out_idx=[2])
-src_code = kernel.get_kernel_source()
-# src_code is the generated cuda source
-assert src_code is not None
-
-if in_dtype == "int8":
-    A = torch.randint(-128, 127, (M, K), device="cuda", dtype=torch.int8)
-    B = torch.randint(-128, 127, (N, K), device="cuda", dtype=torch.int8)
-else:
-    A = torch.rand(M, K, device="cuda", dtype=getattr(torch, in_dtype))
-    B = torch.rand(N, K, device="cuda", dtype=getattr(torch, in_dtype))
-
-profiler = kernel.get_profiler()
-
-latency = profiler.do_bench(profiler.func, warmup=25)
-
-print(latency)
-
-# Ensure that the latency is not None
-assert latency is not None
+    return gemm_intrinsics
 
 
 def ref_program(A, B):
     return A @ B.T
 
 
-profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+def main():
+    M, N, K = 16384, 16384, 16384
+    in_dtype, out_dtype, accum_dtype = "float16", "float16", "float32"
+    matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
+    kernel = tilelang.compile(matmul, out_idx=[2])
+    src_code = kernel.get_kernel_source()
+    # src_code is the generated cuda source
+    assert src_code is not None
+
+    profiler = kernel.get_profiler()
+
+    latency = profiler.do_bench(profiler.func, warmup=25)
+
+    print(latency)
+
+    # Ensure that the latency is not None
+    assert latency is not None
+
+    profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
+
+
+if __name__ == "__main__":
+    main()
