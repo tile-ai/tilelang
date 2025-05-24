@@ -1,8 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
-import torch
-import torch.backends
 from tilelang import tvm as tvm
 from tvm import DataType
 import tilelang
@@ -174,13 +172,6 @@ def main():
     src_code = kernel.get_kernel_source()
     # src_code is the generated cuda source
     assert src_code is not None
-
-    if in_dtype == "int8":
-        A = torch.randint(-128, 127, (M, K), device="cuda", dtype=torch.int8)
-        B = torch.randint(-128, 127, (N, K), device="cuda", dtype=torch.int8)
-    else:
-        A = torch.rand(M, K, device="cuda", dtype=getattr(torch, in_dtype))
-        B = torch.rand(N, K, device="cuda", dtype=getattr(torch, in_dtype))
 
     profiler = kernel.get_profiler()
 

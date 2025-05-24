@@ -28,6 +28,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
     return gemm
 
+
 def main():
     func = matmul(1024, 1024, 1024, 128, 128, 32)
 

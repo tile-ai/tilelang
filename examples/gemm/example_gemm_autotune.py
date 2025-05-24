@@ -222,8 +222,6 @@ def main():
         help="Whether to enable BitBLAS roller for search space")
     args = parser.parse_args()
     M, N, K = args.m, args.n, args.k
-    a = torch.randn(M, K).cuda().half()
-    b = torch.randn(N, K).cuda().half()
     use_autotune = args.use_autotune
     use_autotune = True
     with_roller = args.with_roller
