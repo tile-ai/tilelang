@@ -54,9 +54,11 @@ static std::string GetFP8Type(DataType type) {
 
 CodeGenTileLangCUDA::CodeGenTileLangCUDA() {
   restrict_keyword_ = "__restrict__";
-  vid_global_barrier_state_ = name_supply_->FreshName(runtime::symbol::tvm_global_barrier_state);
+  vid_global_barrier_state_ =
+      name_supply_->FreshName(runtime::symbol::tvm_global_barrier_state);
   vid_global_barrier_expect_ = name_supply_->FreshName("__barrier_expect");
-  ICHECK_EQ(vid_global_barrier_state_, runtime::symbol::tvm_global_barrier_state);
+  ICHECK_EQ(vid_global_barrier_state_,
+            runtime::symbol::tvm_global_barrier_state);
 }
 
 void CodeGenTileLangCUDA::PrintFuncPrefix(std::ostream &os) {
@@ -127,7 +129,7 @@ std::string CodeGenTileLangCUDA::Finish() {
 
   if (need_global_barrier_) {
     decl_stream << "__device__ __managed__ unsigned "
-                  << vid_global_barrier_state_ << " = 0;\n";
+                << vid_global_barrier_state_ << " = 0;\n";
   }
   decl_stream << "\n";
 
@@ -1359,9 +1361,10 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
   this->PrintStmt(op->body);
 }
 
-void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode* op) {
-  if (is_const_int(op->value)) return;
-  const CallNode* call = op->value.as<CallNode>();
+void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
+  if (is_const_int(op->value))
+    return;
+  const CallNode *call = op->value.as<CallNode>();
   if (call && call->op.same_as(builtin::tvm_global_barrier_kinit())) {
     PrintIndent();
     stream << "__shared__ unsigned " << vid_global_barrier_expect_ << ";\n";
