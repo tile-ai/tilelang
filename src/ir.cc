@@ -288,8 +288,10 @@ WarpSpecializeFrame WarpSpecialize(Array<IntImm> warp_group_ids,
     }
   }
   IfFrame if_frame = If(condition);
+  AttrFrame attr_frame = Attr(Integer(0), "warp_specialize", Integer(1));
   n->frames.push_back(if_frame);
   n->frames.push_back(Then());
+  n->frames.push_back(attr_frame);
   return WarpSpecializeFrame(n);
 }
 
