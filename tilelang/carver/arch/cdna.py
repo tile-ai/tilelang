@@ -7,6 +7,7 @@ from .arch_base import TileDevice
 from typing import List, Union
 from .driver import hip_driver
 
+
 def is_cdna_arch(arch: TileDevice) -> bool:
     return isinstance(arch, CDNA)
 
@@ -17,7 +18,7 @@ class CDNA(TileDevice):
         if isinstance(target, str):
             target = tvm.target.Target(target)
         self.target = target
-        self.name = hip_driver.get_device_name()
+        self.name = hip_driver.get_hip_device_name()
         device = tvm.runtime.rocm(0)
         if not device.exist:
             raise RuntimeError("Cannot find HIP device 0.")
@@ -28,7 +29,7 @@ class CDNA(TileDevice):
         self.warp_size = device.warp_size
         self.compute_capability = device.compute_version.replace(".", "")
         # self.reg_cap: int = 32768
-        self.reg_cap = hip_driver.get_registers_per_block()
+        self.reg_cap = hip_driver.get_hip_registers_per_block()
         self.max_smem_usage: int = 2 * self.smem_cap
         self.sm_partition: int = 4
         self.l2_cache_size_bytes: int = target.l2_cache_size_bytes

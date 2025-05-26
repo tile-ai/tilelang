@@ -5,44 +5,28 @@ import ctypes
 import sys
 from typing import Optional
 
+
 # hipDeviceProp, checked from hip_runtime_api.h's hipDeviceProp_t
 class hipDeviceProp(ctypes.Structure):
-    _fields_ = [
-        ("name", ctypes.c_char * 256),
-        ("uuid", ctypes.c_ubyte * 16),
-        ("luid", ctypes.c_char * 8),
-        ("luidDeviceNodeMask", ctypes.c_uint),
-        ("totalGlobalMem", ctypes.c_size_t),
-        ("sharedMemPerBlock", ctypes.c_size_t),
-        ("regsPerBlock", ctypes.c_int),
-        ("warpSize", ctypes.c_int),
-        ("memPitch", ctypes.c_size_t),
-        ("maxThreadsPerBlock", ctypes.c_int),
-        ("maxThreadsDim", ctypes.c_int * 3),
-        ("maxGridSize", ctypes.c_int * 3),
-        ("clockRate", ctypes.c_int),
-        ("totalConstMem", ctypes.c_size_t),
-        ("major", ctypes.c_int),
-        ("minor", ctypes.c_int),
-        ("textureAlignment", ctypes.c_size_t),
-        ("texturePitchAlignment", ctypes.c_size_t),
-        ("deviceOverlap", ctypes.c_int),
-        ("multiProcessorCount", ctypes.c_int),
-        ("kernelExecTimeoutEnabled", ctypes.c_int),
-        ("integrated", ctypes.c_int),
-        ("canMapHostMemory", ctypes.c_int),
-        ("computeMode", ctypes.c_int),
-        ("sharedMemPerMultiprocessor", ctypes.c_size_t),
-        ("regsPerMultiprocessor", ctypes.c_int),
-        ("managedMemory", ctypes.c_int),
-        ("isMultiGpuBoard", ctypes.c_int),
-        ("multiGpuBoardGroupID", ctypes.c_int),
-        ("gcnArchName", ctypes.c_char * 256),
-        ("maxSharedMemoryPerMultiProcessor", ctypes.c_size_t),
-        ("clockInstructionRate", ctypes.c_int),
-        ("isLargeBar", ctypes.c_int),
-        ("asicRevision", ctypes.c_int)
-    ]
+    _fields_ = [("name", ctypes.c_char * 256), ("uuid", ctypes.c_ubyte * 16),
+                ("luid", ctypes.c_char * 8), ("luidDeviceNodeMask", ctypes.c_uint),
+                ("totalGlobalMem", ctypes.c_size_t), ("sharedMemPerBlock", ctypes.c_size_t),
+                ("regsPerBlock", ctypes.c_int), ("warpSize", ctypes.c_int),
+                ("memPitch", ctypes.c_size_t), ("maxThreadsPerBlock", ctypes.c_int),
+                ("maxThreadsDim", ctypes.c_int * 3), ("maxGridSize", ctypes.c_int * 3),
+                ("clockRate", ctypes.c_int), ("totalConstMem", ctypes.c_size_t),
+                ("major", ctypes.c_int), ("minor", ctypes.c_int),
+                ("textureAlignment", ctypes.c_size_t), ("texturePitchAlignment", ctypes.c_size_t),
+                ("deviceOverlap", ctypes.c_int), ("multiProcessorCount", ctypes.c_int),
+                ("kernelExecTimeoutEnabled", ctypes.c_int), ("integrated", ctypes.c_int),
+                ("canMapHostMemory", ctypes.c_int), ("computeMode", ctypes.c_int),
+                ("sharedMemPerMultiprocessor", ctypes.c_size_t),
+                ("regsPerMultiprocessor", ctypes.c_int), ("managedMemory", ctypes.c_int),
+                ("isMultiGpuBoard", ctypes.c_int), ("multiGpuBoardGroupID", ctypes.c_int),
+                ("gcnArchName", ctypes.c_char * 256),
+                ("maxSharedMemoryPerMultiProcessor", ctypes.c_size_t),
+                ("clockInstructionRate", ctypes.c_int), ("isLargeBar", ctypes.c_int),
+                ("asicRevision", ctypes.c_int)]
 
 
 def get_hip_device_properties(device_id: int = 0) -> Optional[hipDeviceProp]:
@@ -67,7 +51,7 @@ def get_hip_device_properties(device_id: int = 0) -> Optional[hipDeviceProp]:
         return None
 
 
-def get_device_name(device_id: int = 0) -> Optional[str]:
+def get_hip_device_name(device_id: int = 0) -> Optional[str]:
     prop = get_hip_device_properties(device_id)
     if prop:
         return prop.name.decode()
@@ -75,7 +59,7 @@ def get_device_name(device_id: int = 0) -> Optional[str]:
         return None
 
 
-def get_shared_memory_per_block(device_id: int = 0, format: str = "bytes") -> Optional[int]:
+def get_hip_shared_memory_per_block(device_id: int = 0, format: str = "bytes") -> Optional[int]:
     assert format in ["bytes", "kb", "mb"], "Invalid format. Must be one of: bytes, kb, mb"
     prop = get_hip_device_properties(device_id)
     if prop:
@@ -89,7 +73,8 @@ def get_shared_memory_per_block(device_id: int = 0, format: str = "bytes") -> Op
     return None
 
 
-def get_max_dynamic_shared_size_bytes(device_id: int = 0, format: str = "bytes") -> Optional[int]:
+def get_hip_max_dynamic_shared_size_bytes(device_id: int = 0,
+                                          format: str = "bytes") -> Optional[int]:
     assert format in ["bytes", "kb", "mb"], "Invalid format. Must be one of: bytes, kb, mb"
     prop = get_hip_device_properties(device_id)
     if prop:
@@ -104,14 +89,15 @@ def get_max_dynamic_shared_size_bytes(device_id: int = 0, format: str = "bytes")
         raise RuntimeError("Failed to get device properties.")
 
 
-def get_num_sms(device_id: int = 0) -> int:
+def get_hip_num_sms(device_id: int = 0) -> int:
     prop = get_hip_device_properties(device_id)
     if prop:
         return prop.multiProcessorCount
     else:
         raise RuntimeError("Failed to get device properties.")
 
-def get_registers_per_block(device_id: int = 0) -> int:
+
+def get_hip_registers_per_block(device_id: int = 0) -> int:
     prop = get_hip_device_properties(device_id)
     if prop:
         return prop.regsPerBlock

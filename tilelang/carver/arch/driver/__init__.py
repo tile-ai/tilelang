@@ -11,11 +11,11 @@ from .cuda_driver import (
 )
 
 from .hip_driver import (
-    get_hip_device_properties,  
-    get_device_name,  
-    get_shared_memory_per_block,  
-    get_device_attribute,  
-    get_max_dynamic_shared_size_bytes,  
-    get_num_sms,  
-    get_registers_per_block,  
+    get_hip_device_properties,  # noqa: F401
+    get_hip_device_name,  # noqa: F401
+    get_hip_shared_memory_per_block,  # noqa: F401
+    get_hip_device_attribute,  # noqa: F401
+    get_hip_max_dynamic_shared_size_bytes,  # noqa: F401
+    get_hip_num_sms,  # noqa: F401
+    get_hip_registers_per_block,  # noqa: F401
 )
