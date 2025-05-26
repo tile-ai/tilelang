@@ -133,7 +133,7 @@ def get_rocm_version():
     return LooseVersion("5.0.0")
 
 
-def get_tilelang_version(with_cuda=True, with_system_info=True) -> str:
+def get_tilelang_version(with_cuda=True, with_system_info=True, with_commit_id=False) -> str:
     version = find_version(get_path(".", "VERSION"))
     local_version_parts = []
     if with_system_info:
@@ -153,6 +153,18 @@ def get_tilelang_version(with_cuda=True, with_system_info=True) -> str:
 
     if local_version_parts:
         version += f"+{'.'.join(local_version_parts)}"
+
+    if with_commit_id:
+        commit_id = None
+        try:
+            commit_id = subprocess.check_output(['git', 'rev-parse', 'HEAD'],
+                                                stderr=subprocess.DEVNULL,
+                                                encoding='utf-8').strip()
+        except subprocess.SubprocessError as error:
+            raise RuntimeError("Failed to get git commit id") from error
+        if commit_id:
+            version += f"+{commit_id}"
+
     return version
 
 
@@ -476,6 +488,18 @@ class TileLangBuilPydCommand(build_py):
         for item in TL_CONFIG_ITEMS:
             source_dir = os.path.join(ROOT_DIR, item)
             target_dir = os.path.join(self.build_lib, PACKAGE_NAME, item)
+            # if is VERSION file, replace the content with the new version with commit id
+            if not PYPI_BUILD and item == "VERSION":
+                version = get_tilelang_version(
+                    with_cuda=False, with_system_info=False, with_commit_id=True)
+                target_dir = os.path.dirname(target_dir)
+                if not os.path.exists(target_dir):
+                    os.makedirs(target_dir)
+                with open(os.path.join(target_dir, item), "w") as f:
+                    print(f"Writing {version} to {os.path.join(target_dir, item)}")
+                    f.write(version)
+                continue
+
             if os.path.isdir(source_dir):
                 self.mkpath(target_dir)
                 distutils.dir_util.copy_tree(source_dir, target_dir)
@@ -492,7 +516,7 @@ class TileLangSdistCommand(sdist):
     def make_distribution(self):
         self.distribution.metadata.name = PACKAGE_NAME
         self.distribution.metadata.version = get_tilelang_version(
-            with_cuda=False, with_system_info=False)
+            with_cuda=False, with_system_info=False, with_commit_id=False)
         super().make_distribution()
 
 
@@ -575,9 +599,10 @@ class CMakeBuild(build_ext):
         # Check if CMake is installed and accessible by attempting to run 'cmake --version'.
         try:
             subprocess.check_output(["cmake", "--version"])
-        except OSError as e:
+        except OSError as error:
             # If CMake is not found, raise an error.
-            raise RuntimeError("CMake must be installed to build the following extensions") from e
+            raise RuntimeError(
+                "CMake must be installed to build the following extensions") from error
 
         update_submodules()
 

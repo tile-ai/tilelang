@@ -281,11 +281,12 @@ private:
       auto int_bound = analyzer_->const_int_bound(index);
       DataType dtype = index->dtype;
       if (dtype.is_int() && dtype.bits() < 64) {
-        int64_t max_value = int_bound->max_value + 1;
+        int64_t max_value = int_bound->max_value;
         int64_t min_value = int_bound->min_value;
         const int64_t type_max = (1LL << (dtype.bits() - 1));
         const int64_t type_min = -(1LL << (dtype.bits() - 1));
-        if (max_value >= type_max || min_value < type_min) {
+
+        if (max_value >= (type_max - 1) || min_value < type_min) {
           Int64Promoter promoter;
           for (auto &index : flattened_indices) {
             safe_indices.push_back(promoter(index));

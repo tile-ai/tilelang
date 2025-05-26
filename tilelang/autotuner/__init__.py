@@ -46,18 +46,24 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 logger.propagate = False
 
-formatter = logging.Formatter('%(asctime)s %(levelname)s:%(message)s')
+# Lazy handler initialization flag
+_logger_handlers_initialized = False
 
-file_handler = logging.FileHandler('autotuner.log', mode='w')
-file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(formatter)
 
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(formatter)
-
-logger.addHandler(file_handler)
-logger.addHandler(console_handler)
+def _init_logger_handlers():
+    global _logger_handlers_initialized
+    if _logger_handlers_initialized:
+        return
+    formatter = logging.Formatter('%(asctime)s %(levelname)s:%(message)s')
+    file_handler = logging.FileHandler('autotuner.log', mode='w')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(formatter)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    _logger_handlers_initialized = True
 
 
 @dataclass(frozen=True)
@@ -241,6 +247,7 @@ class AutoTuner:
         Returns:
             AutotuneResult: Results of the auto-tuning process.
         """
+        _init_logger_handlers()
         sig = inspect.signature(self.fn)
         keys = list(sig.parameters.keys())
         bound_args = sig.bind()
