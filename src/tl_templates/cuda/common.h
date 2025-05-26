@@ -184,18 +184,15 @@ TL_DEVICE void AtomicAddx2(bfloat16_t *address, bfloat16_t *val) {
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 900))
 // AtomicAdd Functions for FLOAT16x2
 TL_DEVICE void AtomicAddx2(float *address, float *val) {
-  atomicAdd(
-      reinterpret_cast<float2 *>(address),
-      static_cast<float2>(*reinterpret_cast<float2 *>(val)));
+  atomicAdd(reinterpret_cast<float2 *>(address),
+            static_cast<float2>(*reinterpret_cast<float2 *>(val)));
 }
 // AtomicAdd Functions for FLOAT16x4
 TL_DEVICE void AtomicAddx4(float *address, float *val) {
-  atomicAdd(
-      reinterpret_cast<float4 *>(address),
-      static_cast<float4>(*reinterpret_cast<float4 *>(val)));
+  atomicAdd(reinterpret_cast<float4 *>(address),
+            static_cast<float4>(*reinterpret_cast<float4 *>(val)));
 }
 #endif
-
 
 // DP4A
 template <typename InDatatype, typename OutDatatype>
