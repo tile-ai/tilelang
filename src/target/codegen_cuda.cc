@@ -125,8 +125,8 @@ std::string CodeGenTileLangCUDA::Finish() {
   decl_stream << "#include <tl_templates/cuda/debug.h>\n";
 
   if (need_global_barrier_) {
-    decl_stream << "__device__ __managed__ unsigned "
-                << vid_global_barrier_state_ << " = 0;\n";
+    decl_stream << "__device__ unsigned " << vid_global_barrier_state_
+                << " = 0;\n";
   }
   decl_stream << "\n";
 
