@@ -33,6 +33,19 @@ def atomic_addx2(dst: Buffer, value: PrimExpr) -> PrimExpr:
     return T.call_extern("handle", "AtomicAddx2", T.address_of(dst), T.address_of(value))
 
 
+def atomic_addx4(dst: Buffer, value: PrimExpr) -> PrimExpr:
+    """Perform an atomic addition operation with double-width operands.
+
+    Args:
+        dst (Buffer): Destination buffer where the atomic addition will be performed
+        value (PrimExpr): Value to be atomically added (double-width)
+
+    Returns:
+        PrimExpr: Handle to the double-width atomic addition operation
+    """
+    return T.call_extern("handle", "AtomicAddx4", T.address_of(dst), T.address_of(value))
+
+
 def dp4a(A: Buffer, B: Buffer, C: Buffer) -> PrimExpr:
     """Perform a 4-element dot product with accumulation (DP4A).
 
