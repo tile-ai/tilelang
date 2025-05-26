@@ -120,12 +120,14 @@ class CUDA(TileDevice):
         self.device: tvm.runtime.Device = device
         self.platform: str = "CUDA"
         # TODO(lei): maybe static shared memory, can be improved in future
-        self.smem_cap = cuda_driver.get_shared_memory_per_block()
+        # self.smem_cap = cuda_driver.get_shared_memory_per_block()
+        self.smem_cap = cuda_driver.get_max_dynamic_shared_size_bytes()
         self.compute_max_core = device.multi_processor_count
         self.warp_size = device.warp_size
         self.compute_capability = device.compute_version.replace(".", "")
         self.reg_cap: int = 65536
-        self.max_smem_usage: int = 2 * self.smem_cap
+        # self.max_smem_usage: int = 2 * self.smem_cap
+        self.max_smem_usage: int = 1 * self.smem_cap
         self.sm_partition: int = 4
         self.l2_cache_size_bytes: int = target.l2_cache_size_bytes
         # the number of transaction size in bytes
