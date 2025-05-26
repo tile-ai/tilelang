@@ -72,6 +72,7 @@ def get_hip_shared_memory_per_block(device_id: int = 0, format: str = "bytes") -
             return shared_mem // (1024 * 1024)
     return None
 
+
 def get_hip_device_attribute(attr: int, device_id: int = 0) -> Optional[int]:
     try:
         if sys.platform == "win32":
@@ -93,6 +94,7 @@ def get_hip_device_attribute(attr: int, device_id: int = 0) -> Optional[int]:
     except Exception as e:
         print(f"Error getting HIP device attribute: {str(e)}")
         return None
+
 
 def get_hip_max_dynamic_shared_size_bytes(device_id: int = 0,
                                           format: str = "bytes") -> Optional[int]:
