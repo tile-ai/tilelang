@@ -20,12 +20,12 @@ def cached(
     *args,
     target: Union[str, Target] = "auto",
     target_host: Union[str, Target] = None,
-    execution_backend: Optional[Literal["dlpack", "ctypes", "cython"]] = "cython",
+    execution_backend: Optional[Literal["dlpack", "ctypes", "cython", "nvrtc"]] = "cython",
     verbose: Optional[bool] = False,
     pass_configs: Optional[dict] = None,
 ) -> JITKernel:
     """
-    Caches and reuses compiled kerne(ls (using KernelCache class).
+    Caches and reuses compiled kernels (using KernelCache class).
     """
     return _kernel_cache_instance.cached(
         func,
