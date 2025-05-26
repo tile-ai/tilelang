@@ -72,6 +72,27 @@ def get_hip_shared_memory_per_block(device_id: int = 0, format: str = "bytes") -
             return shared_mem // (1024 * 1024)
     return None
 
+def get_hip_device_attribute(attr: int, device_id: int = 0) -> Optional[int]:
+    try:
+        if sys.platform == "win32":
+            libhip = ctypes.windll.LoadLibrary("amdhip64.dll")
+        else:
+            libhip = ctypes.cdll.LoadLibrary("libamdhip64.so")
+
+        value = ctypes.c_int()
+        hipDeviceGetAttribute = libhip.hipDeviceGetAttribute
+        hipDeviceGetAttribute.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int, ctypes.c_int]
+        hipDeviceGetAttribute.restype = ctypes.c_int
+
+        ret = hipDeviceGetAttribute(ctypes.byref(value), attr, device_id)
+        if ret != 0:
+            raise RuntimeError(f"hipDeviceGetAttribute failed with error code {ret}")
+
+        return value.value
+
+    except Exception as e:
+        print(f"Error getting HIP device attribute: {str(e)}")
+        return None
 
 def get_hip_max_dynamic_shared_size_bytes(device_id: int = 0,
                                           format: str = "bytes") -> Optional[int]:
