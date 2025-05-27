@@ -155,12 +155,13 @@ def get_best_config(N, C, H, W, F, K, S, D, P, with_roller):
         kernel=kernel, configs=get_configs(N, C, H, W, F, K, S, D, P,
                                            with_roller)).set_compile_args(
                                                out_idx=[2],
+                                               target="auto",
+                                           ).set_profile_args(
                                                supply_type=tilelang.TensorSupplyType.Integer,
                                                ref_prog=ref_program(S, P, D),
                                                skip_check=False,
-                                               target="auto",
                                            )
-    return autotuner.run(warmup=10, rep=10)
+    return autotuner.run()
 
 
 def convolution(N,

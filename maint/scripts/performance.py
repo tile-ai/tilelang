@@ -64,10 +64,9 @@ def run(M, N, K):
     autotuner = AutoTuner.from_kernel(
         kernel=kernel, configs=get_configs()).set_compile_args(
             out_idx=[-1],
-            supply_type=tl.TensorSupplyType.Integer,
-            ref_prog=ref_program,
-            skip_check=False,
             target="auto",
+        ).set_profile_args(
+            ref_prog=ref_program,
         )
     return autotuner.run(warmup=3, rep=20)
 
