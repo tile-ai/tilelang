@@ -328,8 +328,7 @@ if __name__ == "__main__":
                                num_split, thread_num)
 
     if enable_autotune:
-        autotuner = AutoTuner.from_kernel(
-            kernel=wrapped_kernel, configs=get_configs())
+        autotuner = AutoTuner.from_kernel(kernel=wrapped_kernel, configs=get_configs())
         tune_result = autotuner.run(warmup=3, rep=20)
         best_latency = tune_result.latency
         best_config = tune_result.config

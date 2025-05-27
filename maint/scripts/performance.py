@@ -1,5 +1,4 @@
 import argparse
-import tilelang as tl
 import tilelang.language as T
 from tilelang.autotuner import AutoTuner
 
@@ -66,8 +65,7 @@ def run(M, N, K):
             out_idx=[-1],
             target="auto",
         ).set_profile_args(
-            ref_prog=ref_program,
-        )
+            ref_prog=ref_program,)
     return autotuner.run(warmup=3, rep=20)
 
 
