@@ -257,9 +257,12 @@ class _JitImplementation:
                 if self.debug_root_path:
                     func_name = getattr(func, '__name__', 'jit_kernel')  # Use func for name
                     kernel_file = f'tilelang_jit_kernel_{func_name}.c'
+                    program_file = f'tilelang_jit_program_{func_name}.py'
                     makedirs(self.debug_root_path, exist_ok=True)
                     with open(path.join(self.debug_root_path, kernel_file), 'w') as f:
                         print(kernel_result.get_kernel_source(), file=f)
+                    with open(path.join(self.debug_root_path, program_file), 'w') as f:
+                        print(program_result.script(), file=f)
 
                 self._program_cache[key] = program_result
                 self._kernel_cache[key] = kernel_result

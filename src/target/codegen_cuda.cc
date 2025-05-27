@@ -54,6 +54,11 @@ static std::string GetFP8Type(DataType type) {
 
 CodeGenTileLangCUDA::CodeGenTileLangCUDA() {
   restrict_keyword_ = "__restrict__";
+  vid_global_barrier_state_ =
+      name_supply_->FreshName(runtime::symbol::tvm_global_barrier_state);
+  vid_global_barrier_expect_ = name_supply_->FreshName("__barrier_expect");
+  ICHECK_EQ(vid_global_barrier_state_,
+            runtime::symbol::tvm_global_barrier_state);
 }
 
 void CodeGenTileLangCUDA::PrintFuncPrefix(std::ostream &os) {
@@ -121,7 +126,13 @@ std::string CodeGenTileLangCUDA::Finish() {
   decl_stream << "#include <tl_templates/cuda/ldsm.h>\n";
   decl_stream << "#include <tl_templates/cuda/threadblock_swizzle.h>\n";
   decl_stream << "#include <tl_templates/cuda/debug.h>\n";
+
+  if (need_global_barrier_) {
+    decl_stream << "__device__ unsigned " << vid_global_barrier_state_
+                << " = 0;\n";
+  }
   decl_stream << "\n";
+
   return CodeGenC::Finish();
 }
 
@@ -550,8 +561,6 @@ void CodeGenTileLangCUDA::PrintStorageSync(const CallNode *op) {
   } else if (sync == "global") {
     if (!need_global_barrier_) {
       need_global_barrier_ = true;
-      this->decl_stream << "extern \"C\" __device__ unsigned "
-                        << vid_global_barrier_state_ << ";\n";
     }
     // global synchronizer
     std::string is_load = PrintExpr(op->args[1]);
@@ -1350,6 +1359,24 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
 
   RegisterHandleType(op->buffer_var.get(), op->dtype);
   this->PrintStmt(op->body);
+}
+
+void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
+  if (is_const_int(op->value))
+    return;
+  const CallNode *call = op->value.as<CallNode>();
+  if (call && call->op.same_as(builtin::tvm_global_barrier_kinit())) {
+    PrintIndent();
+    stream << "__shared__ unsigned " << vid_global_barrier_expect_ << ";\n";
+    PrintIndent();
+    stream << "if (threadIdx.x == 0) {\n";
+    PrintIndent();
+    stream << "  " << vid_global_barrier_expect_ << " = 0;\n";
+    PrintIndent();
+    stream << "}\n";
+  } else {
+    CodeGenC::VisitStmt_(op);
+  }
 }
 
 void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {

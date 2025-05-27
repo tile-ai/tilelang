@@ -104,8 +104,9 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
             mod = tilelang.transform.InjectFenceProxy()(mod)
 
     mod = tir.transform.LowerOpaqueBlock()(mod)
-    mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
+    mod = tilelang.transform.ConfigIndexBitwidth()(mod)
+    mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tir.transform.Simplify()(mod)
 
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
@@ -133,11 +134,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.InferFragment()(mod)
     mod = tir.transform.LowerThreadAllreduce()(mod)
     mod = tilelang.transform.LowerHopperIntrin()(mod)
-    mod = tilelang.transform.ConfigIndexBitwidth()(mod)
-    mod = tilelang.transform.ThreadSync("shared")(mod)
-    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
-    mod = tilelang.transform.EliminateStorageSyncForMBarrier()(mod)
-    mod = tilelang.transform.InjectPTXAsyncCopy()(mod)
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
@@ -149,6 +145,14 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tir.transform.MergeSharedMemoryAllocations()(mod)
     else:
         mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
+
+    mod = tilelang.transform.ThreadSync("global")(mod)
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    mod = tilelang.transform.EliminateStorageSyncForMBarrier()(mod)
+    # Inject PTX async copy must behind the thread sync pass
+    # as ptx async copy won't be recognized as a valid buffer load
+    mod = tilelang.transform.InjectPTXAsyncCopy()(mod)
 
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tir.transform.LowerDeviceKernelLaunch()(mod)

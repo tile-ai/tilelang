@@ -64,20 +64,79 @@ Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
 std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
                                                bool maybe_hopper_wgmma) const {
   int m_warp = 1, n_warp = 1;
+  constexpr int kMPerWarp = 16; // Rows processed by a single warp
+  constexpr int kNPerWarp = 8;  // Columns processed by a single warp
   bool allow_wgmma = TargetIsHopper(target) && maybe_hopper_wgmma &&
                      (this->M >= 64) && (num_warps % 4 == 0);
   if (allow_wgmma) {
-    ICHECK(num_warps % 4 == 0) << "Use Warp Group MMA requires 128*N threads.";
-    if (this->policy == GemmWarpPolicy::kFullRow ||
-        this->policy == GemmWarpPolicy::kSquare) {
-      m_warp = num_warps;
-      n_warp = 1;
+    ICHECK(num_warps % 4 == 0) << "Warp-Group MMA requires 128×k threads.";
+
+    constexpr int kGroup = 4; // Number of warps in a warp-group
+
+    m_warp = kGroup; // Initially, only one warp-group on M dimension
+    n_warp = num_warps / m_warp; // Rest all on N dimension
+
+    if (this->policy == GemmWarpPolicy::kFullRow) {
+      // Try to put as many warp-groups as possible on M dimension
+      // (decreasing multiples of 4, ensuring divisibility by M)
+      for (int cand = num_warps; cand >= kGroup; cand -= kGroup) {
+        if (this->M % (cand * kMPerWarp) == 0) {
+          m_warp = cand;
+          n_warp = num_warps / m_warp;
+          break;
+        }
+      }
     } else if (this->policy == GemmWarpPolicy::kFullCol) {
-      m_warp = 1;
-      n_warp = num_warps;
+      // Try to use warps on N dimension; if N is not divisible, split excess
+      // groups to M
+      int cand_n = n_warp;                       // Initially assume all on N
+      if (this->N % (cand_n * kNPerWarp) != 0) { // N direction division fails
+        int max_n = this->N / kNPerWarp;
+        // Find a feasible n_warp from max possible downwards, ensuring
+        // num_warps/n_warp is multiple of 4
+        for (int n = std::min(cand_n, max_n); n >= 1; --n) {
+          if (num_warps % n == 0 && (num_warps / n) % kGroup == 0) {
+            n_warp = n;
+            m_warp = num_warps / n_warp;
+            break;
+          }
+        }
+      }
+    } else if (this->policy == GemmWarpPolicy::kSquare) {
+      // Exhaustive search, but m must be multiple of 4
+      int max_m = this->M / kMPerWarp;
+      int max_n = this->N / kNPerWarp;
+
+      float ideal = this->N > 0 ? static_cast<float>(this->M) / this->N : 1.f;
+
+      float best_score = std::numeric_limits<float>::max();
+      int best_m = kGroup, best_n = n_warp;
+
+      for (int m = kGroup; m <= num_warps && m <= max_m; m += kGroup) {
+        if (num_warps % m)
+          continue;
+        int n = num_warps / m;
+        if (n > max_n)
+          continue;
+
+        float m_per_warp = static_cast<float>(this->M) / (m * kMPerWarp);
+        float n_per_warp = static_cast<float>(this->N) / (n * kNPerWarp);
+        float score = std::abs(m_per_warp / n_per_warp - ideal);
+
+        if (score < best_score) {
+          best_score = score;
+          best_m = m;
+          best_n = n;
+        }
+      }
+      m_warp = best_m;
+      n_warp = best_n;
     } else {
       ICHECK(0) << "Unknown GemmWarpPolicy";
     }
+
+    ICHECK(m_warp * n_warp == num_warps)
+        << "m_warp * n_warp must equal num_warps";
     return {m_warp, n_warp};
   }
 
@@ -88,9 +147,9 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
 
     // If M cannot be evenly divided by m_warp*16, try to split remaining warps
     // to N
-    if (this->M % (m_warp * 16) != 0) {
+    if (this->M % (m_warp * kMPerWarp) != 0) {
       // Calculate how many warps we can use for M
-      int max_m_warps = this->M / 16;
+      int max_m_warps = this->M / kMPerWarp;
       m_warp = max_m_warps;
       // Use remaining warps for N
       n_warp = num_warps / m_warp;
@@ -104,9 +163,9 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
 
     // If N cannot be evenly divided by n_warp*8, try to split remaining warps
     // to M
-    if (this->N % (n_warp * 8) != 0) {
+    if (this->N % (n_warp * kNPerWarp) != 0) {
       // Calculate how many warps we can use for N
-      int max_n_warps = this->N / 8;
+      int max_n_warps = this->N / kNPerWarp;
       n_warp = max_n_warps;
       // Use remaining warps for M
       m_warp = num_warps / n_warp;
@@ -115,8 +174,10 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
     }
   } else if (this->policy == GemmWarpPolicy::kSquare) {
     // First calculate the maximum possible warps for each dimension
-    int max_m_warps = this->M / 16; // Each warp needs at least 16 elements in M
-    int max_n_warps = this->N / 8;  // Each warp needs at least 8 elements in N
+    int max_m_warps =
+        this->M / kMPerWarp; // Each warp needs at least 16 elements in M
+    int max_n_warps =
+        this->N / kNPerWarp; // Each warp needs at least 8 elements in N
 
     // Calculate the ideal ratio of M/N warps based on the matrix dimensions
     float ideal_ratio = 1.0f;
@@ -142,8 +203,8 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
         continue;
 
       // Calculate how balanced this partition is
-      float m_per_warp = static_cast<float>(this->M) / (m * 16);
-      float n_per_warp = static_cast<float>(this->N) / (n * 8);
+      float m_per_warp = static_cast<float>(this->M) / (m * kMPerWarp);
+      float n_per_warp = static_cast<float>(this->N) / (n * kNPerWarp);
       float balance = std::abs(m_per_warp / n_per_warp - ideal_ratio);
 
       if (balance < best_balance) {

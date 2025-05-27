@@ -165,3 +165,23 @@ def get_max_dynamic_shared_size_bytes(device_id: int = 0, format: str = "bytes")
             raise RuntimeError("Invalid format. Must be one of: bytes, kb, mb")
     else:
         raise RuntimeError("Failed to get device properties.")
+
+
+def get_num_sms(device_id: int = 0) -> int:
+    """
+    Get the number of streaming multiprocessors (SMs) on the CUDA device.
+
+    Args:
+        device_id (int, optional): The CUDA device ID. Defaults to 0.
+
+    Returns:
+        int: The number of SMs on the device.
+
+    Raises:
+        RuntimeError: If unable to get the device properties.
+    """
+    prop = get_cuda_device_properties(device_id)
+    if prop:
+        return prop.multiProcessorCount
+    else:
+        raise RuntimeError("Failed to get device properties.")

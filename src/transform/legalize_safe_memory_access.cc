@@ -318,7 +318,8 @@ private:
                      .value();
       for (const auto &[var, padding] : map) {
         ICHECK(buffer_data_to_buffer_.count(var))
-            << "buffer " << var << " is not found in the block";
+            << "buffer " << var << " is not found in the block "
+            << buffer_data_to_buffer_;
         auto buffer = buffer_data_to_buffer_[var];
         annotated_padding_map_.Set(buffer, padding);
       }

@@ -17,6 +17,7 @@ import cloudpickle
 import logging
 
 from tilelang.env import TILELANG_CACHE_DIR, is_cache_enabled
+from tilelang.version import __version__
 
 KERNEL_PATH = "kernel.cu"
 WRAPPED_KERNEL_PATH = "wrapped_kernel.cu"
@@ -89,6 +90,7 @@ class KernelCache:
         """
         func_binary = cloudpickle.dumps(func.script())
         key_data = {
+            "version": __version__,
             "func": sha256(func_binary).hexdigest(),  # Use SHA256 to generate hash key
             "out_idx": (tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx]),
             "args_repr": tuple(
@@ -149,6 +151,8 @@ class KernelCache:
         with self._lock:
             # First check in-memory cache
             if key in self._memory_cache:
+                self.logger.warning("Found kernel in memory cache. For better performance," \
+                                    " consider using `@tilelang.jit` instead of direct kernel caching.")
                 return self._memory_cache[key]
 
             # Then check disk cache
