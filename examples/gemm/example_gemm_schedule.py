@@ -2,14 +2,13 @@
 # Licensed under the MIT License.
 
 import tilelang
-from tilelang import Profiler
 import tilelang.language as T
 
 
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
 
     @T.prim_func
-    def main(
+    def gemm_schedule(
             A: T.Tensor((M, K), dtype),
             B: T.Tensor((K, N), dtype),
             C: T.Tensor((M, N), dtype),
@@ -40,30 +39,37 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
             T.copy(C_local, C[by * block_M, bx * block_N])
 
-    return main
+    return gemm_schedule
 
 
-func = matmul(1024, 1024, 1024, 128, 128, 32)
+def main():
+    func = matmul(1024, 1024, 1024, 128, 128, 32)
 
-print(func)
+    print(func)
 
-artifact = tilelang.lower(func)
+    kernel = tilelang.compile(func, out_idx=-1)
 
-profiler = Profiler(artifact.rt_mod, artifact.params, result_idx=[2])
+    import torch
 
-import torch
+    a = torch.randn(1024, 1024).cuda().half()
+    b = torch.randn(1024, 1024).cuda().half()
 
-a = torch.randn(1024, 1024).cuda().half()
-b = torch.randn(1024, 1024).cuda().half()
+    c = kernel(a, b)
 
-c = profiler(a, b)
+    ref_c = a @ b
 
-ref_c = a @ b
+    print("c:")
+    print(c)
+    print("ref_c:")
+    print(ref_c)
 
-print(c)
-print(ref_c)
+    torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+    print("All check passed.")
 
-torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+    # Get CUDA Source
+    print("CUDA Source:")
+    print(kernel.get_kernel_source())
 
-# Get CUDA Source
-print(artifact.kernel_source)
+
+if __name__ == "__main__":
+    main()

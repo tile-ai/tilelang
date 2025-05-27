@@ -14,7 +14,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
     update_interval = 128 // block_K if block_K < 128 else 1
 
     @T.prim_func
-    def main(
+    def gemm_fp8_2xAcc(
             A: T.Tensor((M, K), dtype),
             B: T.Tensor((N, K), dtype),
             C: T.Tensor((M, N), accum_dtype),
@@ -46,7 +46,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
             T.copy(C_local_accum, C_shared)
             T.copy(C_shared, C[by * block_M, bx * block_N])
 
-    return main
+    return gemm_fp8_2xAcc
 
 
 def calc_diff(x, y):
@@ -77,6 +77,10 @@ def test_gemm_fp8(M, N, K, dtype):
     assert diff < 1e-3
 
 
-if __name__ == "__main__":
+def main():
     test_gemm_fp8(1024, 1024, 8192, 'e4m3_float8')
     test_gemm_fp8(1024, 1024, 8192, 'e5m2_float8')
+
+
+if __name__ == "__main__":
+    main()
