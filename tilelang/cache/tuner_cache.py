@@ -25,7 +25,7 @@ KERNEL_LIB_PATH = "kernel_lib.so"
 PARAMS_PATH = "params.pkl"
 
 
-class KernelCache:
+class AutoTunerCache:
     """
     Caches compiled kernels using a class and database persistence to avoid redundant compilation.
     Cache files:
@@ -176,8 +176,17 @@ class KernelCache:
         if execution_backend == "dlpack":
             self.logger.warning("DLPack backend does not support cache saving to disk.")
         else:
-            with self._lock:
-                if is_cache_enabled():
+            with self._lock:  # enter critical section again to check and update disk cache
+                disk_kernel = self._load_kernel_from_disk(
+                    key,
+                    target,
+                    target_host,
+                    out_idx,
+                    execution_backend,
+                    pass_configs,
+                    func,
+                )
+                if disk_kernel is None:
                     self._save_kernel_to_disk(key, kernel, func)
 
         # Store in memory cache after compilation
