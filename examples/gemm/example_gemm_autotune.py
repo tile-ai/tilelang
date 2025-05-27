@@ -205,26 +205,13 @@ def matmul(M,
     return gemm_autotune
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
-    parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
-    parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
-    parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
-    parser.add_argument(
-        "--use_autotune",
-        action="store_true",
-        default=False,
-        help="Whether to use autotune for matmul configs")
-    parser.add_argument(
-        "--with_roller",
-        action="store_true",
-        default=True,
-        help="Whether to enable BitBLAS roller for search space")
-    args = parser.parse_args()
-    M, N, K = args.m, args.n, args.k
-    use_autotune = args.use_autotune
+def main(m: int = 16384,
+         n: int = 16384,
+         k: int = 16384,
+         use_autotune: bool = False,
+         with_roller: bool = True):
+    M, N, K = m, n, k
     use_autotune = True
-    with_roller = args.with_roller
     if use_autotune:
         result = get_best_config(M, N, K, with_roller)
         print(result.config)
@@ -245,4 +232,19 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
+    parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
+    parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
+    parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
+    parser.add_argument(
+        "--use_autotune",
+        action="store_true",
+        default=False,
+        help="Whether to use autotune for matmul configs")
+    parser.add_argument(
+        "--with_roller",
+        action="store_true",
+        default=True,
+        help="Whether to enable BitBLAS roller for search space")
+    args = parser.parse_args()
+    main(args.m, args.n, args.k, args.use_autotune, args.with_roller)

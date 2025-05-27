@@ -2,7 +2,6 @@
 # Licensed under the MIT License.
 
 import tilelang
-from tilelang import Profiler
 import tilelang.language as T
 
 
@@ -48,26 +47,28 @@ def main():
 
     print(func)
 
-    artifact = tilelang.lower(func)
-
-    profiler = Profiler(artifact.rt_mod, artifact.params, result_idx=[2])
+    kernel = tilelang.compile(func, out_idx=-1)
 
     import torch
 
     a = torch.randn(1024, 1024).cuda().half()
     b = torch.randn(1024, 1024).cuda().half()
 
-    c = profiler(a, b)
+    c = kernel(a, b)
 
     ref_c = a @ b
 
+    print("c:")
     print(c)
+    print("ref_c:")
     print(ref_c)
 
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+    print("All check passed.")
 
     # Get CUDA Source
-    print(artifact.kernel_source)
+    print("CUDA Source:")
+    print(kernel.get_kernel_source())
 
 
 if __name__ == "__main__":

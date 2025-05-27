@@ -204,7 +204,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
 
-    profiler(A, B, C)
+    C = profiler(A, B)
 
     latency = profiler.do_bench(warmup=25)
 
