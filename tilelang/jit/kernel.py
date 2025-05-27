@@ -350,7 +350,8 @@ class JITKernel(object):
     def run_once(self, func: Optional[Callable] = None) -> None:
         return self.get_profiler().run_once(func)
 
-    def update_tuner_result(self, latency: float, config: Dict[str, Any], ref_latency: float) -> "JITKernel":
+    def update_tuner_result(self, latency: float, config: Dict[str, Any],
+                            ref_latency: float) -> "JITKernel":
         """
         Updates the tuning results for this kernel.
 

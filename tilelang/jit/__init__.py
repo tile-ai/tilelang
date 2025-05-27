@@ -95,8 +95,7 @@ class _JitImplementation:
                  execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None,
-                 debug_root_path: Optional[str] = None
-                 ):
+                 debug_root_path: Optional[str] = None):
         """
         Initializes the JIT compiler decorator.
 
@@ -218,8 +217,7 @@ def jit(  # This is the new public interface
         execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
         verbose: bool = False,
         pass_configs: Optional[Dict[str, Any]] = None,
-        debug_root_path: Optional[str] = None
-        ):
+        debug_root_path: Optional[str] = None):
     """
     Just-In-Time (JIT) compiler decorator for TileLang functions.
 

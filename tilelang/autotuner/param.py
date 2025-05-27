@@ -28,6 +28,7 @@ WRAPPED_KERNEL_PATH = "wrapped_kernel.cu"
 KERNEL_LIB_PATH = "kernel_lib.so"
 PARAMS_PATH = "params.pkl"
 
+
 @dataclass(frozen=True)
 class CompileArgs:
     """Compile arguments for the auto-tuner. Detailed description can be found in `tilelang.jit.compile`.
@@ -56,25 +57,33 @@ class CompileArgs:
     pass_configs: Optional[Dict[str, Any]] = None
 
     def compile_program(self, program: PrimFunc):
-        return tilelang.compile(program,
-                                out_idx=self.out_idx,
-                                target=self.target,
-                                target_host=self.target_host,
-                                verbose=self.verbose,
-                                pass_configs=self.pass_configs)
+        return tilelang.compile(
+            program,
+            out_idx=self.out_idx,
+            target=self.target,
+            target_host=self.target_host,
+            verbose=self.verbose,
+            pass_configs=self.pass_configs)
 
     def __hash__(self):
         data = {
-            "out_idx": self.out_idx,
-            "execution_backend": self.execution_backend,
-            "target": self.target,
-            "target_host": str(self.target_host) if self.target_host else None,
-            "verbose": self.verbose,
-            "pass_configs": json.dumps(self.pass_configs, sort_keys=True) if self.pass_configs else None,
+            "out_idx":
+                self.out_idx,
+            "execution_backend":
+                self.execution_backend,
+            "target":
+                self.target,
+            "target_host":
+                str(self.target_host) if self.target_host else None,
+            "verbose":
+                self.verbose,
+            "pass_configs":
+                json.dumps(self.pass_configs, sort_keys=True) if self.pass_configs else None,
         }
 
         hash_obj = hashlib.sha256(json.dumps(data, sort_keys=True).encode('utf-8'))
         return int.from_bytes(hash_obj.digest(), byteorder='big')
+
 
 @dataclass(frozen=True)
 class ProfileArgs:
@@ -123,7 +132,8 @@ class ProfileArgs:
         }
         hash_obj = hashlib.sha256(json.dumps(data, sort_keys=True).encode('utf-8'))
         return int.from_bytes(hash_obj.digest(), byteorder='big')
-    
+
+
 @dataclass(frozen=True)
 class AutotuneResult:
     """Results from auto-tuning process.
@@ -264,7 +274,7 @@ class AutotuneResult:
         # save best config
         with open(path / BEST_CONFIG_PATH, "w") as f:
             json.dump(self.config, f)
-        
+
         # save function
         with open(path / FUNCTION_PATH, "wb") as f:
             cloudpickle.dump(self.func, f)
@@ -278,7 +288,6 @@ class AutotuneResult:
 
         # save kernel
         self._save_kernel_to_disk(path, self.kernel)
-        
 
     @classmethod
     def load_from_disk(cls, path: Path, compile_args: CompileArgs) -> 'AutotuneResult':
@@ -297,15 +306,11 @@ class AutotuneResult:
         with open(path / LATENCY_PATH, "r") as f:
             latency = json.load(f)
             latency, ref_latency = latency["latency"], latency["ref_latency"]
-        
-        kernel = cls._load_kernel_from_disk(cls,
-                                            path,
-                                            compile_args.target,
-                                            compile_args.target_host,
-                                            compile_args.out_idx,
+
+        kernel = cls._load_kernel_from_disk(cls, path, compile_args.target,
+                                            compile_args.target_host, compile_args.out_idx,
                                             compile_args.execution_backend,
-                                            compile_args.pass_configs,
-                                            func)
+                                            compile_args.pass_configs, func)
         if kernel is None:
             return None
         result = cls(
@@ -317,4 +322,3 @@ class AutotuneResult:
             ref_latency=ref_latency,
         )
         return result
-        
