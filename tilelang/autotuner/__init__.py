@@ -12,7 +12,7 @@ from tvm.tir import PrimFunc
 from tvm.target import Target
 import inspect
 from functools import partial
-from typing import (Callable, List, Literal, Any, Optional, Union, Dict, Any, overload, Tuple)
+from typing import (Callable, List, Literal, Any, Optional, Union, Dict, overload, Tuple)
 from tqdm import tqdm
 import logging
 import functools

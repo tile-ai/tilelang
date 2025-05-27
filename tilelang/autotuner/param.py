@@ -7,7 +7,7 @@ import tilelang
 from tilelang import tvm as tvm
 from tvm.tir import PrimFunc
 from tvm.target import Target
-from typing import Callable, List, Literal, Any, Optional, Union, Dict, Any
+from typing import Callable, List, Literal, Any, Optional, Union, Dict
 from dataclasses import dataclass
 from pathlib import Path
 
