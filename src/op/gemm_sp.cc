@@ -55,8 +55,9 @@ GemmSP::GemmSP(Array<PrimExpr> args, BufferMap vmap) {
   }
 }
 
-std::pair<int, int> GemmSP::ComputeWarpPartition(
-    int num_warps, Target target, bool maybe_hopper_wgmma) const {
+std::pair<int, int>
+GemmSP::ComputeWarpPartition(int num_warps, Target target,
+                             bool maybe_hopper_wgmma) const {
   int m_warp = 1, n_warp = 1;
   bool allow_wgmma = TargetIsHopper(target) && maybe_hopper_wgmma &&
                      (this->M >= 64) && (num_warps % 4 == 0);
@@ -152,7 +153,8 @@ Stmt GemmSP::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 }
 
 LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
-  if (completed_) return {};
+  if (completed_)
+    return {};
   LayoutMap results;
   ICHECK(C.scope() == "local.fragment");
   if (TargetIsHopper(T.target)) {
@@ -200,5 +202,5 @@ TIR_REGISTER_TL_OP(GemmSP, gemm_sp)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl
+} // namespace tvm

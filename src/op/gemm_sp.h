@@ -18,7 +18,7 @@ namespace tl {
 using namespace tir;
 
 class GemmSP : public Operator {
- public:
+public:
   GemmSP(Array<PrimExpr> args, BufferMap vmap);
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
   LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) final;
@@ -29,9 +29,10 @@ class GemmSP : public Operator {
     kFullCol = 2,
   } policy;
 
- private:
-  std::pair<int, int> ComputeWarpPartition(
-      int num_warps, Target target, bool maybe_hopper_wgmma = true) const;
+private:
+  std::pair<int, int>
+  ComputeWarpPartition(int num_warps, Target target,
+                       bool maybe_hopper_wgmma = true) const;
 
   Array<PrimExpr> call_args;
   tir::Buffer A, B, C, E;
@@ -42,7 +43,7 @@ class GemmSP : public Operator {
   bool completed_ = false;
 };
 
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl
+} // namespace tvm
 
-#endif  //  TVM_TL_OP_GEMM_SP_H_
+#endif //  TVM_TL_OP_GEMM_SP_H_

@@ -12,7 +12,7 @@ template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, typename ElementA, typename ElementB,
           typename ElementAccumulator>
 class GemmTensorOp {
- public:
+public:
   static_assert(num_warp_m % 4 == 0, "num_warp_m must be a multiple of 4");
 
   using TileShape_MNK =
@@ -84,13 +84,12 @@ class GemmTensorOp {
   static CUTE_DEVICE void body(ElementA *pA, ElementB *pB,
                                ElementAccumulator *pC, ElementE *pE) {
     const int tid = threadIdx.x;
-    Tensor sA = make_tensor(make_smem_ptr(recast_ptr<ElementAMma>(pA)),
-                            SmemLayoutA{});
-    Tensor sB = make_tensor(make_smem_ptr(recast_ptr<ElementBMma>(pB)),
-                            SmemLayoutB{});
+    Tensor sA =
+        make_tensor(make_smem_ptr(recast_ptr<ElementAMma>(pA)), SmemLayoutA{});
+    Tensor sB =
+        make_tensor(make_smem_ptr(recast_ptr<ElementBMma>(pB)), SmemLayoutB{});
     Tensor sE = as_position_independent_swizzle_tensor(
-        make_tensor(make_smem_ptr(recast_ptr<ElementEMma>(pE)),
-                    SmemLayoutE{}));
+        make_tensor(make_smem_ptr(recast_ptr<ElementEMma>(pE)), SmemLayoutE{}));
 
     TiledMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(tid);
@@ -139,42 +138,42 @@ class GemmTensorOp {
 
   template <class MMA_Atom, class AtomLayoutMNK, class PermutationMNK,
             class ETensor>
-  CUTE_HOST_DEVICE static constexpr auto thrfrg_E(
-      TiledMMA<MMA_Atom, AtomLayoutMNK, PermutationMNK> const &mma,
-      ETensor &&etensor) {
+  CUTE_HOST_DEVICE static constexpr auto
+  thrfrg_E(TiledMMA<MMA_Atom, AtomLayoutMNK, PermutationMNK> const &mma,
+           ETensor &&etensor) {
     using TiledMma = TiledMMA<MMA_Atom, AtomLayoutMNK, PermutationMNK>;
 
     CUTE_STATIC_ASSERT_V(rank(etensor) >= Int<2>{});
 
     // Reorder the tensor for the TiledAtom
     auto t_tile = make_tile(get<0>(PermutationMNK{}), get<2>(PermutationMNK{}));
-    auto t_tensor = logical_divide(etensor, t_tile);  // (PermM,PermK)
+    auto t_tensor = logical_divide(etensor, t_tile); // (PermM,PermK)
 
     // Tile the tensor for the Atom
     auto e_tile =
         make_tile(make_layout(size<0>(typename TiledMma::AtomShape_MNK{})),
                   make_layout(size<2>(typename TiledMma::AtomShape_MNK{})));
     auto e_tensor =
-        zipped_divide(t_tensor, e_tile);  // ((AtomM,AtomK),(RestM,RestK))
+        zipped_divide(t_tensor, e_tile); // ((AtomM,AtomK),(RestM,RestK))
 
     // Transform the Atom mode from (M,K) to (Thr,Val)
     using AtomLayoutE_TV = typename TiledMma::Atom::Traits::ELayout;
     auto tv_tensor =
-        e_tensor.compose(AtomLayoutE_TV{}, _);  // ((ThrV,FrgV),(RestM,RestK))
+        e_tensor.compose(AtomLayoutE_TV{}, _); // ((ThrV,FrgV),(RestM,RestK))
 
     // Tile the tensor for the Thread
     auto thr_tile =
         make_tile(_, make_tile(make_layout(size<1>(mma.thr_layout_vmnk_)),
                                make_layout(size<3>(mma.thr_layout_vmnk_))));
     auto thr_tensor = zipped_divide(
-        tv_tensor, thr_tile);  // ((ThrV,(ThrM,ThrK)),(FrgV,(RestM,RestK)))
+        tv_tensor, thr_tile); // ((ThrV,(ThrM,ThrK)),(FrgV,(RestM,RestK)))
 
     return thr_tensor;
   }
 
   template <class... MArgs>
-  CUTE_HOST_DEVICE static constexpr auto get_layoutE_TV(
-      TiledMMA<MArgs...> const &mma) {
+  CUTE_HOST_DEVICE static constexpr auto
+  get_layoutE_TV(TiledMMA<MArgs...> const &mma) {
     // (M,K) -> (M,K)
     auto ref_E = make_layout(make_shape(tile_size<0>(mma), tile_size<2>(mma)));
     // (ethrid,val) -> (M,K)
@@ -195,8 +194,8 @@ class GemmTensorOp {
   }
 
   template <class... MArgs, class ETensor>
-  CUTE_HOST_DEVICE static constexpr auto partition_E(
-      ThrMMA<MArgs...> const &thr_mma, ETensor &&etensor) {
+  CUTE_HOST_DEVICE static constexpr auto
+  partition_E(ThrMMA<MArgs...> const &thr_mma, ETensor &&etensor) {
     auto thr_tensor = make_tensor(static_cast<ETensor &&>(etensor).data(),
                                   thrfrg_E(thr_mma, etensor.layout()));
 
@@ -208,16 +207,17 @@ class GemmTensorOp {
   }
 
   template <class... CArgs, class... MArgs>
-  CUTE_HOST_DEVICE static constexpr auto make_tiled_copy_E(
-      Copy_Atom<CArgs...> const &copy_atom, TiledMMA<MArgs...> const &mma) {
+  CUTE_HOST_DEVICE static constexpr auto
+  make_tiled_copy_E(Copy_Atom<CArgs...> const &copy_atom,
+                    TiledMMA<MArgs...> const &mma) {
     return make_tiled_copy_impl(
         copy_atom, get_layoutE_TV(mma),
         make_shape(tile_size<0>(mma), tile_size<2>(mma)));
   }
 };
 
-}  // namespace tl_wgmma_sp
-}  // namespace cute
+} // namespace tl_wgmma_sp
+} // namespace cute
 
 namespace tl {
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
@@ -235,4 +235,4 @@ TL_DEVICE void gemm_sp_ss(A_type *pA, B_type *pB, C_type *accum, E_type *pE) {
     CUTE_GCC_UNREACHABLE;
   }
 }
-}  // namespace tl
+} // namespace tl

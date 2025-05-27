@@ -7,9 +7,7 @@ import tilelang
 from tilelang import tvm as tvm
 from torch.utils.cpp_extension import load
 
-
-cutlass_repo = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "../../../3rdparty/cutlass")
+cutlass_repo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../3rdparty/cutlass")
 
 compress_lib = load(
     name='compress_lib',
@@ -40,7 +38,6 @@ def matmul_sp(
     num_stages,
     threads,
 ):
-    A_shape = (M, K)
     A_sparse_shape = (M, K // 2)
     B_shape = (K, N)
     A_shared_shape = (block_M, block_K // 2)
@@ -101,7 +98,7 @@ def main():
     M, N, K = 1024, 1024, 128
     block_M, block_N, block_K = 128, 128, 128
 
-    assert K == block_K, "tiling k is now allowed as meta data is interleaved"
+    assert block_K == K, "tiling k is now allowed as meta data is interleaved"
     program = matmul_sp(
         M,
         N,
