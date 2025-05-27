@@ -7,12 +7,14 @@ import tilelang
 from tilelang import tvm as tvm
 from torch.utils.cpp_extension import load
 
+compress_util = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "../../../src/tl_templates/cuda/compress_sm90.cu")
 cutlass_repo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../3rdparty/cutlass")
 
 compress_lib = load(
     name='compress_lib',
     sources=[
-        'src/tl_templates/cuda/compress_sm90.cu',
+        compress_util,
     ],
     extra_cuda_cflags=[
         '-O2',
@@ -21,7 +23,6 @@ compress_lib = load(
         f'-I{cutlass_repo}/tools/util/include',
         '-arch=sm_90',
     ],
-    build_directory="./build",
 )
 
 
