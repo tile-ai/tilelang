@@ -28,7 +28,6 @@ class CDNA(TileDevice):
         self.compute_max_core = device.multi_processor_count
         self.warp_size = device.warp_size
         self.compute_capability = device.compute_version.replace(".", "")
-        # self.reg_cap: int = 32768
         self.reg_cap = hip_driver.get_hip_registers_per_block()
         self.max_smem_usage: int = 2 * self.smem_cap
         self.sm_partition: int = 4
