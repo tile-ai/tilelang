@@ -1,7 +1,6 @@
-import torch
-import pytest
 import tilelang
 from examples.norm.rms_norm import rms_norm, rms_norm_splitk, ref_program
+
 
 def test_rms_norm():
     M, N, blk_m = 1024, 1024, 128
@@ -11,10 +10,10 @@ def test_rms_norm():
         out_idx=-1,
         target="cuda",
         execution_backend="cython",
-        pass_configs={"tl.disable_tma_lower": True}
-    )
+        pass_configs={"tl.disable_tma_lower": True})
     profiler = kernel.get_profiler()
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+
 
 def test_rms_norm_splitk():
     M, N, blk_m, blk_k = 1024, 1024, 128, 128
@@ -24,10 +23,10 @@ def test_rms_norm_splitk():
         out_idx=-1,
         target="cuda",
         execution_backend="cython",
-        pass_configs={"tl.disable_tma_lower": True}
-    )
+        pass_configs={"tl.disable_tma_lower": True})
     profiler = kernel.get_profiler()
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+
 
 def test_rms_norm_edge_cases():
     # Test with small dimensions
@@ -38,8 +37,7 @@ def test_rms_norm_edge_cases():
         out_idx=-1,
         target="cuda",
         execution_backend="cython",
-        pass_configs={"tl.disable_tma_lower": True}
-    )
+        pass_configs={"tl.disable_tma_lower": True})
     profiler = kernel.get_profiler()
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
 
@@ -51,7 +49,6 @@ def test_rms_norm_edge_cases():
         out_idx=-1,
         target="cuda",
         execution_backend="cython",
-        pass_configs={"tl.disable_tma_lower": True}
-    )
+        pass_configs={"tl.disable_tma_lower": True})
     profiler = kernel.get_profiler()
-    profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01) 
+    profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
