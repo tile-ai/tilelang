@@ -313,6 +313,11 @@ class AutotuneResult:
                                             compile_args.pass_configs, func)
         if kernel is None:
             return None
+        kernel.update_tuner_result(
+            config=config,
+            latency=latency,
+            ref_latency=ref_latency,
+        )
         result = cls(
             config=config,
             func=func,

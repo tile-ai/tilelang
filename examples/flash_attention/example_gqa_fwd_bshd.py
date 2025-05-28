@@ -9,6 +9,7 @@ import tilelang.language as T
 import itertools
 import argparse
 from functools import partial
+from tilelang import jit
 
 
 class FlashAttentionTuneSpace:
@@ -192,7 +193,7 @@ def flashattn(batch, heads, seq_len, dim, is_causal, tune=False, groups=1):
             keys=["block_M", "block_N", "num_stages", "threads"],
             warmup=10,
             rep=10)
-        @jit(out_idx=[3], supply_type=tilelang.TensorSupplyType.Integer, ref_prog=None)
+        @tilelang.jit(out_idx=[3])
         def kernel(block_M=None, block_N=None, num_stages=None, threads=None):
             return kernel_func(block_M, block_N, num_stages, threads)
 

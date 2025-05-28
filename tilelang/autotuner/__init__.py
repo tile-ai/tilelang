@@ -246,18 +246,19 @@ class AutoTuner:
 
         key = self.generate_cache_key()
         with self._lock:
-            # First check in-memory cache
-            if key in self._memory_cache:
-                self.logger.warning("Found kernel in memory cache. For better performance," \
-                                    " consider using `@tilelang.autotune` instead of direct AutoTuner.from_kernel.")
-                return self._memory_cache[key]
+            if is_cache_enabled():
+                # First check in-memory cache
+                if key in self._memory_cache:
+                    self.logger.warning("Found kernel in memory cache. For better performance," \
+                                        " consider using `@tilelang.autotune` instead of direct AutoTuner.from_kernel.")
+                    return self._memory_cache[key]
 
-            # Then check disk cache
-            result = self._load_result_from_disk(key)
-            if result is not None:
-                # Populate memory cache with disk result
-                self._memory_cache[key] = result
-                return result
+                # Then check disk cache
+                result = self._load_result_from_disk(key)
+                if result is not None:
+                    # Populate memory cache with disk result
+                    self._memory_cache[key] = result
+                    return result
 
         sig = inspect.signature(self.fn)
         parameters = sig.parameters
