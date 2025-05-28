@@ -8,6 +8,7 @@ from tvm.tir import IndexMap
 from tilelang.intrinsics.utils import get_mma_micro_size
 from tilelang.tools import plot_layout
 
+
 def make_mma_load_base_layout(dtype: str = "float16",
                               matrix: Literal["A", "B"] = "A",
                               transposed: bool = False) -> T.Fragment:
