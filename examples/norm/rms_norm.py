@@ -76,9 +76,24 @@ if __name__ == "__main__":
         pass_configs={"tl.disable_tma_lower": True})
     profiler = kernel.get_profiler()
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
-    print("All checks pass.")
 
     latency = profiler.do_bench(ref_program, warmup=500)
     print("Ref: {:.2f} ms".format(latency))
     latency = profiler.do_bench(warmup=500)
     print("Tile-lang: {:.2f} ms".format(latency))
+
+    program = rms_norm_splitk(M, N, blk_m, blk_k)
+    kernel = tilelang.compile(
+        program,
+        out_idx=-1,
+        target="cuda",
+        execution_backend="cython",
+        pass_configs={"tl.disable_tma_lower": True})
+    profiler = kernel.get_profiler()
+    profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+
+    latency = profiler.do_bench(ref_program, warmup=500)
+    print("Ref: {:.2f} ms".format(latency))
+    latency = profiler.do_bench(warmup=500)
+    print("Tile-lang: {:.2f} ms".format(latency))
+    print("All checks pass.")
