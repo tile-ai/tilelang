@@ -1,3 +1,5 @@
+# Copyright (c) Tile-AI Corporation.
+# Licensed under the MIT License.
 import tilelang
 from examples.norm.rms_norm import rms_norm, rms_norm_splitk, ref_program
 
