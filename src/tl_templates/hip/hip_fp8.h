@@ -3,7 +3,6 @@
 
 #include <hip/amd_detail/amd_hip_fp8.h>
 
-
 using fp8_e4_t = __hip_fp8_e4m3_fnuz;
 using fp8_e4_2_t = __hip_fp8x2_e4m3_fnuz;
 using fp8_e4_4_t = __hip_fp8x4_e4m3_fnuz;
