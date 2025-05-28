@@ -180,6 +180,7 @@ def assert_tl_gemm_correctness(M, N, K, block_N, in_dtype, out_dtype, accum_dtyp
     tflops = 2 * M * N * K / latency / 1e9
     print(f"tflops: {tflops}")
 
+
 def main():
     assert_tl_gemm_correctness(1024, 1024, 8192, 128, "e4m3_float8", "bfloat16", "float32")
 
@@ -189,4 +190,3 @@ if __name__ == "__main__":
         for out_dtype in ["bfloat16", "float32"]:
             for block_N in [16, 32, 64, 128]:
                 assert_tl_gemm_correctness(1024, 1024, 8192, block_N, dtype, out_dtype, "float32")
-

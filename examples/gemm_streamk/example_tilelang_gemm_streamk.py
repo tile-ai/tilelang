@@ -168,6 +168,7 @@ def tl_matmul_streamk(
 
     return main
 
+
 def main():
     _tl_matmul_streamk = tl_matmul_streamk(
         m,

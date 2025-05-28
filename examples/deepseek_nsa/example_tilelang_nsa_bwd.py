@@ -780,6 +780,7 @@ def parallel_nsa(
         o = rearrange(o, "b t h d -> b h t d")
     return o
 
+
 if __name__ == "__main__":
     B, T, H, HQ, D, S, block_size, dtype = 1, 32, 1, 16, 32, 1, 32, torch.float16
     torch.random.manual_seed(0)
