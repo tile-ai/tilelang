@@ -30,6 +30,7 @@ class MatrixCoreIntrinEmitter(object):
         "int32": "int32",
         "e4m3_float8": "e4m3",
         "e5m2_float8": "e5m2",
+        "float8_e4m3fnuz": "e4m3fnuz",
     }
 
     # k_pack represents the number of elements in a vectorized instruction
@@ -83,10 +84,14 @@ class MatrixCoreIntrinEmitter(object):
 
     def _initialize_k_dim(self, a_dtype="float16"):
         if isinstance(a_dtype, str):
+            if a_dtype in ["float8_e4m3fnuz"]:
+                self.k_dim = 32
+                return
             a_dtype = DataType(a_dtype)
+
         if a_dtype.bits == 32:
             self.k_dim = 4
-        elif a_dtype.bits in [16, 8]:
+        elif a_dtype.bits in {16, 8}:
             self.k_dim = 16
         else:
             raise ValueError(f"Unsupported a_dtype = {a_dtype}")
@@ -107,7 +112,7 @@ class MatrixCoreIntrinEmitter(object):
         out_dtype_abbrv = {
             "float16": "f16",
             "float32": "f32",
-            "int8": "i8",
+            "   ": "i8",
             "int32": "i32"
         }[out_dtype]
 
@@ -115,10 +120,14 @@ class MatrixCoreIntrinEmitter(object):
             "float16": "f16",
             "float32": "f32",
             "int8": "i8",
-            "int32": "i32"
+            "int32": "i32",
+            "float8_e4m3fnuz": "fp8",
         }[in_dtype]
 
-        self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}{in_dtype_abbrv}"
+        if in_dtype_abbrv == "fp8":
+            self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_fp8_fp8"
+        else:
+            self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}{in_dtype_abbrv}"
 
     def _initialize_micro_size(self, m_dim=16, n_dim=16, k_dim=16):
         self.micro_size_x = m_dim
