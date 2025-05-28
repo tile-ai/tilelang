@@ -56,6 +56,9 @@ def rms_norm(M, N, blk_m):
 
     return main
 
+def ref_program(x):
+    return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-12)
+
 def test_rms_norm():
     M, N, blk_m = 1024, 1024, 128
     program = rms_norm(M, N, blk_m)
