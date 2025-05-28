@@ -113,8 +113,14 @@ def main(argv=None):
     a = torch.randn(N, H, W, C).cuda().half()
     b = torch.randn(K, K, C, F).cuda().half()
 
+    block_m = 64
+    block_n = 128
+    block_k = 32
+    num_stages = 3
+    threads = 256
+
     kernel = tilelang.compile(
-        convolution(N, C, H, W, F, K, S, D, P, 64, 128, 32, 3, 256), out_idx=[2])
+        convolution(N, C, H, W, F, K, S, D, P, block_m, block_n, block_k, num_stages, threads), out_idx=[2])
 
     out_c = kernel(a, b)
     ref_c = ref_program(S, P, D)(a, b)
