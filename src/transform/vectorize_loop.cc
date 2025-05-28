@@ -668,6 +668,7 @@ public:
       }
     }
   }
+
   // Allocate
   Stmt VisitStmt_(const AllocateNode *op) final {
     // Mutate the condition
@@ -678,32 +679,7 @@ public:
       return Scalarize(GetRef<Stmt>(op));
     }
 
-    // Mutate the extents
-    Array<PrimExpr> extents;
-    for (const auto &extent : op->extents) {
-      PrimExpr new_ext = this->VisitExpr(extent);
-      if (new_ext.dtype().is_scalable_or_fixed_length_vector()) {
-        LOG(WARNING) << "Cannot handle vector extent in alloc of "
-                     << op->buffer_var->name_hint;
-        return Scalarize(GetRef<Stmt>(op));
-      }
-      extents.push_back(new_ext);
-    }
-
-    // TODO(Lunderberg): Move this pass to be prior to
-    // StorageFlatten/FlattenBuffer.  That will allow this pass to be
-    // implemented as adding a new buffer dimension, which is later
-    // flattened.
-
-    // Extend the least significant dimension by a factor of
-    // var_lanes_.  Typically, this will be a 1-d index into a flat
-    // memory space.
-    extents.Set(extents.size() - 1, extents[extents.size() - 1] * var_lanes_);
-    // Rewrite access to the buffer in the body.
-    Stmt body =
-        TLVecAllocAccess(op->buffer_var.get(), var_, var_lanes_)(op->body);
-    body = this->VisitStmt(body);
-    return Allocate(op->buffer_var, op->dtype, extents, condition, body);
+    return StmtMutator::VisitStmt_(op);
   }
 
   // scalarize the statment
