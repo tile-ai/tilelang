@@ -2,10 +2,9 @@ import argparse
 import itertools
 import logging
 
-import tilelang as tl
 import tilelang.language as T
-from tilelang.autotuner import autotune, jit
-
+from tilelang.autotuner import autotune
+from tilelang import jit
 # Configure logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -160,13 +159,7 @@ def matmul(M, N, K, with_roller):
         warmup=3,
         rep=20,
     )
-    @jit(
-        out_idx=[2],
-        supply_type=tl.TensorSupplyType.Integer,
-        ref_prog=ref_program,
-        skip_check=True,
-        target="auto",
-    )
+    @jit(out_idx=[2],)
     def kernel(
         block_M=None,
         block_N=None,

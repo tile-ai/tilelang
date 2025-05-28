@@ -33,6 +33,11 @@ class JITKernel(object):
     adapter: BaseKernelAdapter = None
     torch_function: Callable = None
 
+    # tuner result
+    latency: float = None
+    config: Dict[str, Any] = None
+    ref_latency: float = None
+
     def __init__(
         self,
         func: PrimFunc = None,
@@ -341,6 +346,51 @@ class JITKernel(object):
 
     def run_once(self, func: Optional[Callable] = None) -> None:
         return self.get_profiler().run_once(func)
+
+    def update_tuner_result(self, latency: float, config: Dict[str, Any],
+                            ref_latency: float) -> "JITKernel":
+        """
+        Updates the tuning results for this kernel.
+
+        Parameters
+        ----------
+        latency : float
+            The measured latency of this kernel configuration.
+        config : Dict[str, Any]
+            The configuration parameters used for this kernel.
+        ref_latency : float
+            The reference latency to compare against.
+
+        Returns
+        -------
+        None
+        """
+        self.latency = latency
+        self.config = config
+        self.ref_latency = ref_latency
+
+        return self
+
+    def get_tuner_result(self) -> Dict[str, Any]:
+        """
+        Gets the tuning results for this kernel.
+
+        Returns
+        -------
+        Dict[str, Any]
+            A dictionary containing:
+            - latency: The measured latency of this kernel
+            - config: The configuration parameters used
+            - ref_latency: The reference latency for comparison
+        """
+        if self.latency is None:
+            raise ValueError("Tuning results are not available. Please tune the kernel first.")
+
+        return {
+            "latency": self.latency,
+            "config": self.config,
+            "ref_latency": self.ref_latency,
+        }
 
     @property
     def out_idx(self) -> List[int]:

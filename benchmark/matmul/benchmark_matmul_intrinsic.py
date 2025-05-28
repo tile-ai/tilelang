@@ -8,7 +8,7 @@ from tilelang.intrinsics import get_swizzle_layout
 from tilelang.intrinsics.mma_macro_generator import (
     TensorCoreIntrinEmitter,)
 from tilelang.transform import simplify_prim_func
-from tilelang.autotuner import autotune, jit
+from tilelang.autotuner import autotune
 import itertools
 
 # Configure logger
@@ -264,13 +264,7 @@ def matmul(M,
         warmup=3,
         rep=5,
     )
-    @jit(
-        out_idx=[2],
-        supply_type=tl.TensorSupplyType.Integer,
-        ref_prog=ref_program,
-        skip_check=True,
-        target="auto",
-    )
+    @tl.jit(out_idx=[2],)
     def kernel(
         block_row_warps=None,
         block_col_warps=None,
