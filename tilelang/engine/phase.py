@@ -134,6 +134,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.InferFragment()(mod)
     mod = tir.transform.LowerThreadAllreduce()(mod)
     mod = tilelang.transform.LowerHopperIntrin()(mod)
+    mod = tilelang.transform.ThreadSync("global")(mod)
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
@@ -146,7 +147,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     else:
         mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
 
-    mod = tilelang.transform.ThreadSync("global")(mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     mod = tilelang.transform.EliminateStorageSyncForMBarrier()(mod)

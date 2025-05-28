@@ -168,33 +168,37 @@ def tl_matmul_streamk(
 
     return main
 
+def main():
+    _tl_matmul_streamk = tl_matmul_streamk(
+        m,
+        n,
+        k,
+        streamk_tiles,
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        False,
+        True,
+        "float16",
+        "float16",
+        "float32",
+        2,
+        64,
+    )
 
-_tl_matmul_streamk = tl_matmul_streamk(
-    m,
-    n,
-    k,
-    streamk_tiles,
-    BLOCK_SIZE_M,
-    BLOCK_SIZE_N,
-    BLOCK_SIZE_K,
-    False,
-    True,
-    "float16",
-    "float16",
-    "float32",
-    2,
-    64,
-)
+    kernel = tilelang.compile(_tl_matmul_streamk)
+    print(kernel.get_kernel_source())
 
-kernel = tilelang.compile(_tl_matmul_streamk)
-print(kernel.get_kernel_source())
+    b_c = torch.zeros((m, n), device="cuda", dtype=torch.float16)
 
-b_c = torch.zeros((m, n), device="cuda", dtype=torch.float16)
+    kernel(A, B, b_c)
 
-kernel(A, B, b_c)
+    C = torch.matmul(A, B.T)
 
-C = torch.matmul(A, B.T)
+    print(b_c)
+    print(C)
+    torch.testing.assert_close(C, b_c, rtol=1e-2, atol=1e-2)
 
-print(b_c)
-print(C)
-torch.testing.assert_close(C, b_c, rtol=1e-2, atol=1e-2)
+
+if __name__ == "__main__":
+    main()

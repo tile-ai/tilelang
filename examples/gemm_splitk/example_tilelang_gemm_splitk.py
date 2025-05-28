@@ -48,23 +48,27 @@ def matmul(M, N, K, block_M, block_N, block_K, split_k, dtype="float16", accum_d
 
     return main
 
+def main():
 
-program = matmul(1024, 1024, 1024, 128, 128, 32, 4)
+    program = matmul(1024, 1024, 1024, 128, 128, 32, 4)
 
-kernel = tilelang.compile(program)
+    kernel = tilelang.compile(program)
 
-print(kernel.get_kernel_source())
+    print(kernel.get_kernel_source())
 
-import torch
+    import torch
 
-a = torch.randn(1024, 1024).cuda().half()
-b = torch.randn(1024, 1024).cuda().half()
-c = torch.zeros(1024, 1024).cuda().half()
-kernel(a, b, c)
+    a = torch.randn(1024, 1024).cuda().half()
+    b = torch.randn(1024, 1024).cuda().half()
+    c = torch.zeros(1024, 1024).cuda().half()
+    kernel(a, b, c)
 
-ref_c = a @ b
+    ref_c = a @ b
 
-print(c)
-print(ref_c)
+    print(c)
+    print(ref_c)
 
-torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+
+if __name__ == "__main__":
+    main()
