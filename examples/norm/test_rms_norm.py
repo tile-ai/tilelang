@@ -1,6 +1,10 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
+
+import torch
 import tilelang
+import tilelang.language as T
+
 
 def rms_norm_splitk(M, N, blk_m, blk_k):
     dtype = "float"
@@ -56,8 +60,10 @@ def rms_norm(M, N, blk_m):
 
     return main
 
+
 def ref_program(x):
     return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-12)
+
 
 def test_rms_norm():
     M, N, blk_m = 1024, 1024, 128
