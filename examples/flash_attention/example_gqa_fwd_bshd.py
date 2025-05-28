@@ -9,7 +9,6 @@ import tilelang.language as T
 import itertools
 import argparse
 from functools import partial
-from tilelang import jit
 
 
 class FlashAttentionTuneSpace:

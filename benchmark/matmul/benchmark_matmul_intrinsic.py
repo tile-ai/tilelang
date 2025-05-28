@@ -267,9 +267,7 @@ def matmul(M,
         warmup=3,
         rep=5,
     )
-    @tl.jit(
-        out_idx=[2],
-    )
+    @tl.jit(out_idx=[2],)
     def kernel(
         block_row_warps=None,
         block_col_warps=None,

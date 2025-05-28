@@ -163,9 +163,7 @@ def matmul(M, N, K, with_roller):
         warmup=3,
         rep=20,
     )
-    @jit(
-        out_idx=[2],
-    )
+    @jit(out_idx=[2],)
     def kernel(
         block_M=None,
         block_N=None,

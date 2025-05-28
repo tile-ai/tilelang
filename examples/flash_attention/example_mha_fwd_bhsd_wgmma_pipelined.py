@@ -11,6 +11,7 @@ import argparse
 from functools import partial
 from tilelang import jit
 
+
 def get_configs():
     block_M = [128]
     block_N = [128]

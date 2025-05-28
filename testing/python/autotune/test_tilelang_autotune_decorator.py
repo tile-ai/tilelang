@@ -150,9 +150,7 @@ def matmul(M, N, K, with_roller):
         warmup=3,
         rep=20,
     )
-    @tilelang.jit(
-        out_idx=[-1],
-    )
+    @tilelang.jit(out_idx=[-1],)
     def kernel(
         block_M=None,
         block_N=None,
