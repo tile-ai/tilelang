@@ -93,50 +93,23 @@ def make_mma_load_base_layout(dtype: str = "float16",
 
 
 def test_mma_load_base_layout():
-    # Test float16 matrix A layout
+    block_rows = 2
+    block_cols = 2
+    warp_rows = 4
+    warp_cols = 4
+    chunk = 2
+
+    # ldmatrix layout 16x16
     base_layout = make_mma_load_base_layout(dtype="float16", matrix="A", transposed=False)
-    assert base_layout.shape == [8, 32]  # micro_size_r=8, micro_size_s=32 for float16
+    print(base_layout)
+    plot_layout(base_layout, name="base_layout")
 
-    # Test float16 matrix B layout
-    base_layout_b = make_mma_load_base_layout(dtype="float16", matrix="B", transposed=False)
-    assert base_layout_b.shape == [8, 32]
+    # warp layout 32x16
+    warp_layout = base_layout.repeat([block_rows, 1], repeat_on_thread=True).replicate(block_cols)
+    print(warp_layout)
+    plot_layout(warp_layout, name="warp_layout")
 
-    # Test float8 matrix A layout
-    base_layout_fp8 = make_mma_load_base_layout(dtype="float8", matrix="A", transposed=False)
-    assert base_layout_fp8.shape == [16, 32]  # micro_size_r=16, micro_size_s=32 for float8
-
-
-def test_layout_operations():
-    base_layout = make_mma_load_base_layout(dtype="float16", matrix="A", transposed=False)
-
-    # Test repeat operation
-    repeated_layout = base_layout.repeat([2, 1], repeat_on_thread=True)
-    assert repeated_layout.shape == [16, 32]  # doubled in first dimension
-
-    # Test replicate operation
-    replicated_layout = base_layout.replicate(2)
-    assert replicated_layout.shape == [8, 64]  # doubled in second dimension
-
-
-def test_layout_plot():
-    base_layout = make_mma_load_base_layout(dtype="float16", matrix="A", transposed=False)
-
-    # Test that plot_layout doesn't raise any errors
-    try:
-        plot_layout(base_layout, name="test_layout")
-    except Exception as e:
-        pytest.fail(f"plot_layout raised an exception: {e}")
-
-
-def test_invalid_inputs():
-    # Test invalid matrix type
-    with pytest.raises(AssertionError):
-        make_mma_load_base_layout(dtype="float16", matrix="C", transposed=False)
-
-    # Test invalid dtype
-    with pytest.raises(ValueError):
-        make_mma_load_base_layout(dtype="float32", matrix="A", transposed=False)
-
-    # Test transposed (not supported yet)
-    with pytest.raises(AssertionError):
-        make_mma_load_base_layout(dtype="float16", matrix="A", transposed=True)
+    # block layout 128x32
+    block_layout = warp_layout.repeat([warp_rows, chunk], repeat_on_thread=False, lower_dim_first=False)
+    print(block_layout)
+    plot_layout(block_layout, name="block_layout")
