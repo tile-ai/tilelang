@@ -1,6 +1,5 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-import pytest
 import tilelang.language as T
 from typing import Literal, Callable
 from tvm import DataType
@@ -96,7 +95,6 @@ def test_mma_load_base_layout():
     block_rows = 2
     block_cols = 2
     warp_rows = 4
-    warp_cols = 4
     chunk = 2
 
     # ldmatrix layout 16x16
@@ -110,6 +108,8 @@ def test_mma_load_base_layout():
     plot_layout(warp_layout, name="warp_layout")
 
     # block layout 128x32
-    block_layout = warp_layout.repeat([warp_rows, chunk], repeat_on_thread=False, lower_dim_first=False)
+    block_layout = warp_layout.repeat([warp_rows, chunk],
+                                      repeat_on_thread=False,
+                                      lower_dim_first=False)
     print(block_layout)
     plot_layout(block_layout, name="block_layout")

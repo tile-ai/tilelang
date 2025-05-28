@@ -66,7 +66,7 @@ def ref_program(x):
 
 
 def test_rms_norm():
-    M, N, blk_m, blk_k = 8192, 8192, 1, 512
+    M, N, blk_m = 8192, 8192, 1
     program = rms_norm(M, N, blk_m)
     kernel = tilelang.compile(
         program,
