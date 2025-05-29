@@ -96,6 +96,7 @@ class LibraryGenerator(object):
 
         src.write(self.lib_code)
         src.flush()
+
         try:
             ret = subprocess.run(command, timeout=timeout)
         except Exception as e:

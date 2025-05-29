@@ -164,6 +164,14 @@ def get_max_dynamic_shared_size_bytes(device_id: int = 0, format: str = "bytes")
         raise RuntimeError("Failed to get device properties.")
 
 
+def get_persisting_l2_cache_max_size(device_id: int = 0) -> int:
+    prop = get_cuda_device_properties(device_id)
+    if prop:
+        return prop.persistingL2CacheMaxSize
+    else:
+        raise RuntimeError("Failed to get device properties for persisting L2 cache max size.")
+
+
 def get_num_sms(device_id: int = 0) -> int:
     """
     Get the number of streaming multiprocessors (SMs) on the CUDA device.
