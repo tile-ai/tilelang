@@ -17,13 +17,11 @@
 namespace tvm {
 namespace tl {
 
-
 namespace attr {
 // BlockAttr, Containing the layout for all the buffers in the block
 constexpr const char *kL2RatioMap = "l2_hit_ratio_map";
 constexpr const char *kL2PersistentMap = "l2_persistent_map";
 } // namespace attr
-
 
 using namespace tir;
 
@@ -52,12 +50,13 @@ public:
       init_l2_persistent_map.Set(buffer->name, l2_persistent_arguments);
     }
     if (init_l2_persistent_map.size() > 0) {
-      f = WithAttr(std::move(f), attr::kL2PersistentMap, init_l2_persistent_map);
+      f = WithAttr(std::move(f), attr::kL2PersistentMap,
+                   init_l2_persistent_map);
     }
     return f;
   }
 
- Stmt VisitStmt_(const BlockNode *op) final {
+  Stmt VisitStmt_(const BlockNode *op) final {
     // Record the mapping from buffer data var to buffer for later lookup
     for (auto buffer : op->alloc_buffers) {
       buffer_map_.insert({buffer->data, buffer});
@@ -71,8 +70,8 @@ public:
 
     if (op->annotations.count(attr::kL2RatioMap)) {
       auto hit_ratio_map = op->annotations.at(attr::kL2RatioMap)
-                            .as<Map<Var, FloatImm>>()
-                            .value();
+                               .as<Map<Var, FloatImm>>()
+                               .value();
       for (auto [buffer_var, hit_ratio] : hit_ratio_map) {
         Buffer buffer = buffer_data_to_buffer_.at(buffer_var);
         hit_ratio_map_.Set(buffer, hit_ratio);
