@@ -1,11 +1,11 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-
 import tilelang.language as T
 from typing import Literal, Callable
 from tvm import DataType
 from tvm.tir import IndexMap
 from tilelang.intrinsics.utils import get_mma_micro_size
+from tilelang.tools import plot_layout
 
 
 def make_mma_load_base_layout(dtype: str = "float16",
@@ -91,25 +91,25 @@ def make_mma_load_base_layout(dtype: str = "float16",
     return base_fragment
 
 
-block_rows = 2
-block_cols = 2
-warp_rows = 4
-warp_cols = 4
-chunk = 2
+def test_mma_load_base_layout():
+    block_rows = 2
+    block_cols = 2
+    warp_rows = 4
+    chunk = 2
 
-from tilelang.tools import plot_layout
+    # ldmatrix layout 16x16
+    base_layout = make_mma_load_base_layout(dtype="float16", matrix="A", transposed=False)
+    print(base_layout)
+    plot_layout(base_layout, name="base_layout")
 
-# ldmatrix layout 16x16
-base_layout = make_mma_load_base_layout(dtype="float16", matrix="A", transposed=False)
-print(base_layout)
-plot_layout(base_layout, name="base_layout")
+    # warp layout 32x16
+    warp_layout = base_layout.repeat([block_rows, 1], repeat_on_thread=True).replicate(block_cols)
+    print(warp_layout)
+    plot_layout(warp_layout, name="warp_layout")
 
-# warp layout 32x16
-warp_layout = base_layout.repeat([block_rows, 1], repeat_on_thread=True).replicate(block_cols)
-print(warp_layout)
-plot_layout(warp_layout, name="warp_layout")
-
-# block layout 128x32
-block_layout = warp_layout.repeat([warp_rows, chunk], repeat_on_thread=False, lower_dim_first=False)
-print(block_layout)
-plot_layout(block_layout, name="block_layout")
+    # block layout 128x32
+    block_layout = warp_layout.repeat([warp_rows, chunk],
+                                      repeat_on_thread=False,
+                                      lower_dim_first=False)
+    print(block_layout)
+    plot_layout(block_layout, name="block_layout")
