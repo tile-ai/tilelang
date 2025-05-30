@@ -25,6 +25,7 @@ def map_torch_type(intype: str) -> torch.dtype:
     typemap = {
         'e4m3_float8': torch.float8_e4m3fn,
         'e5m2_float8': torch.float8_e5m2,
+        'e4m3fnuz_float8': torch.float8_e4m3fnuz,
     }
     if intype in typemap:
         return typemap[intype]

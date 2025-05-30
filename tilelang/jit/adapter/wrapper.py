@@ -478,6 +478,26 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
     A wrapper class for the TileLang HIP backend.
     """
 
+    _TYPE_MAP = {
+        "float32": "float",
+        "float16": "half_t",
+        "bfloat16": "bfloat16_t",
+        "e4m3_float8": "fp8_e4_t",
+        "e5m2_float8": "fp8_e5_t",
+        "float8_e4m3fnuz": "fp8_e4_t",
+        "e4m3fnuz_float8": "fp8_e4_t",
+        "float64": "double",
+        "int64": "int64_t",
+        "int32": "int",
+        "uint32": "unsigned int",
+        "bool": "int8_t",
+        "int8": "int8_t",
+        "uint8": "uint8_t",
+        "int16": "int16_t",
+        "uint16": "uint16_t",
+        "uchar": "uint8_t",
+    }
+
     def __init__(self,
                  scheduled_ir_module: IRModule,
                  source: str,
