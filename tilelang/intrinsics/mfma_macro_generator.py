@@ -112,7 +112,7 @@ class MatrixCoreIntrinEmitter(object):
         out_dtype_abbrv = {
             "float16": "f16",
             "float32": "f32",
-            "   ": "i8",
+            "int8": "i8",
             "int32": "i32"
         }[out_dtype]
 

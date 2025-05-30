@@ -48,7 +48,7 @@ static std::string GetFP8Type(DataType type) {
   } else if (type.code() == DataType::kFloat8_e5m2) {
     stream << "fp8_e5" << vec << "_t";
   } else {
-    LOG(FATAL) << "Unsupported FP8 type in CUDA codegen";
+    LOG(FATAL) << "Unsupported FP8 type in HIP codegen";
   }
   return stream.str();
 }
