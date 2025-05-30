@@ -98,13 +98,15 @@ class LibraryGenerator(object):
 
         src.write(self.lib_code)
         src.flush()
+
         try:
             ret = subprocess.run(command, timeout=timeout)
         except Exception as e:
             raise RuntimeError(f"Compile kernel failed because of {e}") from e
 
         if ret.returncode != 0:
-            raise RuntimeError(f"Compilation Failed! {command}")
+            raise RuntimeError(f"Compilation Failed! {command}"
+                               f"\n {self.lib_code}")
 
         self.srcpath = src.name
         self.libpath = libpath

@@ -49,6 +49,29 @@ extern "C" int call({}) {{
 }}
 """
 
+L2_PERSISTENT_MAP_CREATE_HANDLE = """
+\tcudaStreamAttrValue stream_attribute;
+\tsize_t init_persisting_l2_cache_size;
+\tcudaDeviceGetLimit(&init_persisting_l2_cache_size, cudaLimitPersistingL2CacheSize);
+"""
+
+L2_PERSISTENT_MAP_INIT_FUNC = """
+\tstream_attribute.accessPolicyWindow.hitRatio = {1};
+\tstream_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
+\tstream_attribute.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
+\tcudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, {3});
+\tstream_attribute.accessPolicyWindow.base_ptr = (void*)({0});
+\tstream_attribute.accessPolicyWindow.num_bytes = {3};
+\tcudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &stream_attribute);
+"""
+
+L2_PERSISTENT_MAP_RESET_HANDLE = """
+\tstream_attribute.accessPolicyWindow.num_bytes = 0;
+\tcudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &stream_attribute);
+\tcudaCtxResetPersistingL2Cache();
+\tcudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, init_persisting_l2_cache_size);
+"""
+
 TMA_DESC_INIT_FUNC = """
 \tCUtensorMap {0};
 \tCUtensorMapDataType {0}_type= (CUtensorMapDataType){1};
@@ -127,6 +150,7 @@ class TLCUDASourceWrapper(object):
         self.block_info: Union[List[int], Dict] = [1, 1, 1]
         self.grid_info: Union[List[int], Dict] = [1, 1, 1]
         self.tma_descriptor_args: Optional[Dict] = None
+        self.l2_persistent_map: Optional[Dict[str, Dict]] = {}
         self.parse_source_information()
         self.srcpath: Optional[str] = None
         self.libpath: Optional[str] = None
@@ -196,7 +220,15 @@ class TLCUDASourceWrapper(object):
                 p = int(p)
             return str(p).replace("//", "/")
 
+        has_l2_persistent_map = False
+        for function_name, _ in function_informations.items():
+            if function_name in self.l2_persistent_map:
+                has_l2_persistent_map = True
+                break
+
         kernel_launch_code = """"""
+        if has_l2_persistent_map:
+            kernel_launch_code += L2_PERSISTENT_MAP_CREATE_HANDLE
         desc_name_map: Dict[str, str] = {}
         for function_name, function_info in function_informations.items():
             block_info = function_info["block_info"]
@@ -221,15 +253,36 @@ class TLCUDASourceWrapper(object):
             grid_str = "dim3({}, {}, {})".format(
                 legalize_c(grid_info[0]), legalize_c(grid_info[1]), legalize_c(grid_info[2]))
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
+            init_l2_persistent_map = self.generate_l2_persistent_map(function_name)
+            kernel_launch_code += init_l2_persistent_map
             kernel_launch_code += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(
                 function_name, grid_str, block_str, smem_str, call_args)
             kernel_launch_code += "\tTILELANG_CHECK_LAST_ERROR(\"{}\");\n".format(function_name)
+            if has_l2_persistent_map:
+                kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE
 
-        kernel_launch_code = self.generate_tma_descriptor_args(desc_name_map) + kernel_launch_code
+        init_tma_descriptor_args = self.generate_tma_descriptor_args(desc_name_map)
+        kernel_launch_code = init_tma_descriptor_args + kernel_launch_code
 
         # Wrap the kernel dispatch logic in an external C function
         host_func = PREDEF_HOST_FUNC.format(def_args, kernel_launch_code)
         return host_func
+
+    def generate_l2_persistent_map(self, function_name: str) -> str:
+        if function_name not in self.l2_persistent_map:
+            return ""
+        init_l2_persistent_map = ""
+        for buffer_name, (hit_ratio,
+                          size_in_bytes) in self.l2_persistent_map[function_name].items():
+            # get persisting_l2_cache_max_size
+            from tilelang.carver.arch.driver import get_persisting_l2_cache_max_size
+            persisting_l2_cache_max_size = get_persisting_l2_cache_max_size()
+            num_bytes = min(size_in_bytes, persisting_l2_cache_max_size)
+
+            init_l2_persistent_map += L2_PERSISTENT_MAP_INIT_FUNC.format(
+                buffer_name, float(hit_ratio), size_in_bytes, num_bytes)
+
+        return init_l2_persistent_map
 
     def generate_tma_descriptor_args(self, desc_name_map: Dict[str, str]) -> str:
         tma_descripter_init = ""
@@ -263,10 +316,19 @@ class TLCUDASourceWrapper(object):
             box_dim = remaining_args[2 * tensor_rank:3 * tensor_rank]
             element_strides = remaining_args[3 * tensor_rank:4 * tensor_rank]
 
-            global_dim = [str(i) for i in global_dim]
-            global_stride = [str(i) for i in global_stride]
-            box_dim = [str(i) for i in box_dim]
-            element_strides = [str(i) for i in element_strides]
+            def legalize_c2s(p):
+                # Convert TIR expressions to legal C expressions
+                # Directly convert to string since the special case handling
+                # does not alter the string representation for `tvm.tir.Var` and `IntImm`.
+                # Replace Python's floor division operator with C's division operator
+                if isinstance(p, tvm.tir.IntImm):
+                    p = int(p)
+                return str(p)
+
+            global_dim = [legalize_c2s(i) for i in global_dim]
+            global_stride = [legalize_c2s(i) for i in global_stride]
+            box_dim = [legalize_c2s(i) for i in box_dim]
+            element_strides = [legalize_c2s(i) for i in element_strides]
 
             # Extract remaining parameters
             try:
@@ -331,6 +393,9 @@ class TLCUDASourceWrapper(object):
         for _, func in self.host_mod.functions.items():
             if "tma_descriptor_args" in func.attrs:
                 self.tma_descriptor_args = func.attrs["tma_descriptor_args"]
+            if "l2_persistent_map" in func.attrs:
+                self.l2_persistent_map[function_name] = func.attrs["l2_persistent_map"]
+
             host_code = str(func)
             for function_name in function_names:
                 index = host_code.index(f'T.call_packed("{function_name}"')
