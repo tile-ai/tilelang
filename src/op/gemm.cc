@@ -194,10 +194,6 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
     // Try all possible combinations that satisfy the constraints
     for (int m = 1; m <= max_m_warps && m <= num_warps; m++) {
       int n = num_warps / m;
-      if (n > max_n_warps)
-        continue;
-      if (m * n != num_warps)
-        continue;
 
       // Calculate how balanced this partition is
       float m_per_warp = static_cast<float>(this->M) / (m * kMPerWarp);
