@@ -22,8 +22,8 @@ template <> struct MfmaTraits<half> {
 // Specialization for bfloat16_t
 template <> struct MfmaTraits<bfloat16_t> {
   template <typename AccType>
-  static TL_DEVICE void mfma_op(const bfloat16_t *b,
-                                const bfloat16_t *a, AccType *c) {
+  static TL_DEVICE void mfma_op(const bfloat16_t *b, const bfloat16_t *a,
+                                AccType *c) {
     bfloat16x4_vec b_vec, a_vec;
 
     // Reinterpret the pointers
