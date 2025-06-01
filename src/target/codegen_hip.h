@@ -75,6 +75,8 @@ private:
   bool need_math_constants_h_{false};
   // whether need mfma.h
   bool need_wmma_h_{false};
+  // whether need fp8.h
+  bool enable_fp8_{false};
   // The size of the barrier array in shared memory
   int barrier_count_ = -1;
   // whether need mma.h

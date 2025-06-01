@@ -64,7 +64,7 @@ using float16x16 =
 
 using half_t = float16_t;
 
-using bfloat16_t = __hip_bfloat16;
+using bfloat16_t = hip_bfloat16;
 
 struct bfloat16x2 {
   bfloat16_t data[2];
