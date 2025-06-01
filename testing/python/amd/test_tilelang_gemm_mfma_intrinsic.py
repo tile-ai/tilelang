@@ -125,7 +125,6 @@ def tl_matmul(
                 else:
                     T.copy(B[ko * block_K, bx * block_N], B_shared)
 
-
                 for ki in T.serial(0, (block_K // (k_pack * micro_size_k))):
 
                     # Load A into fragment
@@ -171,8 +170,17 @@ def tl_matmul(
     return main
 
 
-def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype="float32", a_transposed=False, b_transposed=True, k_pack=1):
-    matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed, k_pack)
+def assert_tl_matmul_correctness(M,
+                                 N,
+                                 K,
+                                 in_dtype,
+                                 out_dtype,
+                                 accum_dtype="float32",
+                                 a_transposed=False,
+                                 b_transposed=True,
+                                 k_pack=1):
+    matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed,
+                       k_pack)
     print(matmul)
     kernel = tilelang.compile(matmul)
     src_code = kernel.get_kernel_source()
@@ -199,13 +207,16 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype="floa
 
     if a_transposed and b_transposed:
         # Get Reference Result
-        ref_c = torch.matmul(A.T.to(torch.float32), B.T.to(torch.float32)).to(getattr(torch, out_dtype))
+        ref_c = torch.matmul(A.T.to(torch.float32),
+                             B.T.to(torch.float32)).to(getattr(torch, out_dtype))
     elif a_transposed and not b_transposed:
         # Get Reference Result
-        ref_c = torch.matmul(A.Tto(torch.float32), B.to(torch.float32)).to(getattr(torch, out_dtype))
+        ref_c = torch.matmul(A.Tto(torch.float32),
+                             B.to(torch.float32)).to(getattr(torch, out_dtype))
     elif not a_transposed and b_transposed:
         # Get Reference Result
-        ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(getattr(torch, out_dtype))
+        ref_c = torch.matmul(A.to(torch.float32),
+                             B.T.to(torch.float32)).to(getattr(torch, out_dtype))
     else:
         # Get Reference Result
         ref_c = torch.matmul(A.to(torch.float32), B.to(torch.float32)).to(getattr(torch, out_dtype))
@@ -213,6 +224,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype="floa
     print(C)
     print(ref_c)
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
+
 
 @tilelang.testing.requires_rocm
 def test_assert_tl_matmul():
