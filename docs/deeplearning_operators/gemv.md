@@ -252,7 +252,7 @@ def splitk_gemv_vectorized(
     return main
 ```
 
-With vectorized read, now the kernel finishs in **~0.0084 ms**, which is getting close to cuBLAS performance.
+With vectorized read, now the kernel finishes in **~0.0084 ms**, which is getting close to cuBLAS performance.
 
 
 ## `tvm_thread_allreduce` Instead of `atomicAdd`

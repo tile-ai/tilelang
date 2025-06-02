@@ -249,6 +249,59 @@ else
 fi
 echo 'tile-lang clang-format: Done'
 
+echo 'tile-lang clang-tidy: Check Start'
+# If clang-tidy is available, run it; otherwise, skip
+if command -v clang-tidy &>/dev/null; then
+    CLANG_TIDY_VERSION=$(clang-tidy --version | grep "LLVM version" | awk '{print $3}')
+    REQUIRED_VERSION=$(grep clang-tidy requirements-lint.txt | cut -d'=' -f3)
+    if [[ "$CLANG_TIDY_VERSION" != "$REQUIRED_VERSION" ]]; then
+        echo "Wrong clang-tidy version installed: $REQUIRED_VERSION is required, not $CLANG_TIDY_VERSION."
+        exit 1
+    fi
+
+    # Apply clang-tidy to specified files
+    clang_tidy() {
+        clang-tidy "$@" -- -I.
+    }
+
+    # Check all C/C++ files in the repo, excluding specified directories
+    clang_tidy_all() {
+        find . -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) \
+            -not -path "./3rdparty/*" \
+            -not -path "./build/*" \
+            -exec clang-tidy {} -- -I. \;
+    }
+
+    # Check changed C/C++ files relative to main
+    clang_tidy_changed() {
+        if git show-ref --verify --quiet refs/remotes/origin/main; then
+            BASE_BRANCH="origin/main"
+        else
+            BASE_BRANCH="main"
+        fi
+
+        MERGEBASE="$(git merge-base $BASE_BRANCH HEAD)"
+
+        if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' &>/dev/null; then
+            git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' | xargs clang-tidy -- -I.
+        fi
+    }
+
+    if [[ "$1" == '--files' ]]; then
+       # If --files is given, check only the provided files
+       clang_tidy "${@:2}"
+    elif [[ "$1" == '--all' ]]; then
+       # If --all is given, check all eligible C/C++ files
+       clang_tidy_all
+    else
+       # Otherwise, check only changed C/C++ files
+       clang_tidy_changed
+    fi
+else
+    echo "clang-tidy not found. Skipping C/C++ static analysis."
+fi
+echo 'tile-lang clang-tidy: Done'
+
 # Check if there are any uncommitted changes after all formatting steps.
 # If there are, ask the user to review and stage them.
 if ! git diff --quiet &>/dev/null; then

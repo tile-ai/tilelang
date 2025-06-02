@@ -120,7 +120,8 @@ def main(argv=None):
     threads = 256
 
     kernel = tilelang.compile(
-        convolution(N, C, H, W, F, K, S, D, P, block_m, block_n, block_k, num_stages, threads), out_idx=[2])
+        convolution(N, C, H, W, F, K, S, D, P, block_m, block_n, block_k, num_stages, threads),
+        out_idx=[2])
 
     out_c = kernel(a, b)
     ref_c = ref_program(S, P, D)(a, b)

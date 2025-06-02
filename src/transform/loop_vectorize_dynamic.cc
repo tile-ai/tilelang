@@ -245,9 +245,9 @@ private:
   std::vector<PrimExpr> conditions_;
 };
 
-class VectorizedConditionExtracter : public StmtExprVisitor {
+class VectorizedConditionExtractor : public StmtExprVisitor {
 public:
-  VectorizedConditionExtracter() = default;
+  VectorizedConditionExtractor() = default;
   std::vector<PrimExpr> GetConditions(Stmt body) {
     this->VisitStmt(body);
     return conditions_;
@@ -393,8 +393,8 @@ private:
     vmap.Set(fnode->loop_var, outer_var * vector_size_ + inner_var);
     Stmt body = Substitute(fnode->body, vmap);
 
-    VectorizedConditionExtracter extracter;
-    std::vector<PrimExpr> conditions = extracter.GetConditions(body);
+    VectorizedConditionExtractor extractor;
+    std::vector<PrimExpr> conditions = extractor.GetConditions(body);
 
     VectorizedConditionMutator condition_mutator(inner_var, vector_size_);
 
