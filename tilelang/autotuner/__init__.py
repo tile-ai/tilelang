@@ -363,9 +363,13 @@ class AutoTuner:
         config_args = []
         for config in self.configs:
             new_kwargs = {}
+            keys = config.keys()
             for name, _ in parameters.items():
                 if name in config:
                     new_kwargs[name] = config[name]
+            unused_keys = set(keys) - set(new_kwargs.keys())
+            if len(unused_keys) > 0:
+                raise ValueError(f"Unused keys in config: {unused_keys}")
             config_args.append(new_kwargs)
 
         num_workers = max(1, int(get_available_cpu_count() * 0.9))
