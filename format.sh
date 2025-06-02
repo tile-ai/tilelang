@@ -261,15 +261,18 @@ if command -v clang-tidy &>/dev/null; then
 
     # Apply clang-tidy to specified files
     clang_tidy() {
-        clang-tidy "$@" -- -I.
+        clang-tidy -p build "$@"
     }
 
     # Check all C/C++ files in the repo, excluding specified directories
     clang_tidy_all() {
         find . -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) \
-            -not -path "./3rdparty/*" \
-            -not -path "./build/*" \
-            -exec clang-tidy {} -- -I. \;
+        -not -path "./3rdparty/*" \
+        -not -path "./build/*" \
+        -not -path "./debug/*" \
+        -not -path "./docs/*" \
+        -not -path "./tilelang/*" \
+        -print0 | xargs -0 -n1 clang-tidy -p build
     }
 
     # Check changed C/C++ files relative to main
