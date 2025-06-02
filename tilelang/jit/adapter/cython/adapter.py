@@ -432,8 +432,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
     def _convert_torch_func(self) -> Callable:
         """Returns a PyTorch-compatible function wrapper for the kernel."""
 
-        def lambda_forward(*args, stream: int = -1):
-            return self.cython_wrapper.forward([*args], stream=stream)
+        def lambda_forward(*args, stream: int = -1, skip_check: bool = False):
+            return self.cython_wrapper.forward([*args], stream=stream, skip_check=skip_check)
 
         return lambda_forward
 

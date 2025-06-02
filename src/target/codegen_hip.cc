@@ -1070,7 +1070,7 @@ void CodeGenTileLangHIP::VisitExpr_(const BroadcastNode *op,
     for (int i = 0; i < lanes / 2; ++i) {
       if (i != 0)
         os << ", ";
-      os << "__pack_nv_bfloat162(" << v << ", " << v << ")";
+      os << "__pack_bfloat162(" << v << ", " << v << ")";
     }
     os << ')';
     return;
