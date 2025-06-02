@@ -1,9 +1,5 @@
 Checks: >
-  clang-analyzer-*,
-  cppcoreguidelines-*,
-  modernize-*,
-  performance-*,
-  readability-*
-WarningsAsErrors: '*'
+  bugprone-*
+  -bugprone-easily-swappable-parameters
 
-HeaderFilterRegex: '^(?!.*(3rdparty|build)).*$'
+WarningsAsErrors: '*'

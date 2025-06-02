@@ -13,12 +13,16 @@ column_limit = 100
 indent_width = 4
 
 [tool.codespell]
-ignore-words-list = "nd, te, ist, LOD, offen, NotIn, HSA"
+ignore-words-list = "nd, te, ist, LOD, offen, NotIn, HSA, ThrID"
 skip = [
     "build",
+    "debug",
     "3rdparty",
     "dist",
-    ".venv"
+    "docs",
+    ".venv",
+    "images",
+    "half.hpp"
 ]
 
 [tool.ruff.lint]

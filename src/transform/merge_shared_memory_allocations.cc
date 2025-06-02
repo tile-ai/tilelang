@@ -269,7 +269,7 @@ private:
   bool IsAppropriateSharedMemory(const Var &var) {
     return is_dynamic_ ? IsDynamicSharedMemory(var) : IsStaticSharedMemory(var);
   }
-  // Whether do dyanmic analysis.
+  // Whether do dynamic analysis.
   bool is_dynamic_{true};
   // Whether do verbose logging.
   bool verbose_{false};
@@ -834,7 +834,7 @@ private:
    */
   StorageEntry *NewAlloc(const AllocateNode *op, size_t const_nbits) {
     ICHECK(op != nullptr);
-    // Re-use not successful, allocate a new buffer.
+    // Reuse not successful, allocate a new buffer.
     StorageEntry *entry = arena_.make<StorageEntry>();
     entry->allocs.push_back({op->buffer_var.get()});
     entry->const_nbits = const_nbits;
@@ -941,7 +941,7 @@ private:
       sym_free_list_.push_back(e);
     }
   }
-  // Wheather enable dyanmic analysis.
+  // Whether enable dynamic analysis.
   bool is_dynamic_{true};
   // Whether enable verbose logging.
   bool verbose_{false};
