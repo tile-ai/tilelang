@@ -100,6 +100,7 @@ class AutoTuner:
     compile_args = CompileArgs()
     profile_args = ProfileArgs()
 
+    _kernel_parameters: Optional[Tuple[str, ...]] = None
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
     cache_dir: Path = Path(TILELANG_CACHE_DIR)
@@ -209,12 +210,26 @@ class AutoTuner:
 
         return self
 
-    def generate_cache_key(self) -> Optional[AutotuneResult]:
+    def set_kernel_parameters(self, parameters: Tuple[str, ...]):
+        # for cache key generation
+        self._kernel_parameters = parameters
+
+    def generate_cache_key(self, parameters: Dict[str, Any]) -> Optional[AutotuneResult]:
         """Generate a cache key for the auto-tuning process.
         """
+        # extract parameters from the function signature
+        op_parameters = []
+        for _, default_value in parameters.items():
+            if default_value.default is not inspect.Parameter.empty:
+                op_parameters.append(default_value.default)
+        
+        if self._kernel_parameters is not None:
+            op_parameters += self._kernel_parameters
+
         func_source = inspect.getsource(self.fn)
         key_data = {
             "version": __version__,
+            "op_parameters": tuple(op_parameters),
             "func_source": func_source,
             "configs": self.configs,
             "compile_args": hash(self.compile_args),
@@ -244,12 +259,17 @@ class AutoTuner:
         """
         _init_logger_handlers()
 
-        key = self.generate_cache_key()
+
+        sig = inspect.signature(self.fn)
+        parameters = sig.parameters
+
+        key = self.generate_cache_key(parameters)
+
         with self._lock:
             if is_cache_enabled():
                 # First check in-memory cache
                 if key in self._memory_cache:
-                    self.logger.warning("Found kernel in memory cache. For better performance," \
+                    logger.warning("Found kernel in memory cache. For better performance," \
                                         " consider using `@tilelang.autotune` instead of direct AutoTuner.from_kernel.")
                     return self._memory_cache[key]
 
@@ -260,8 +280,6 @@ class AutoTuner:
                     self._memory_cache[key] = result
                     return result
 
-        sig = inspect.signature(self.fn)
-        parameters = sig.parameters
         best_latency: float = 1e8
         best_config: Optional[Dict[str, Any]] = None
         best_kernel: Optional[tilelang.JITKernel] = None
@@ -539,6 +557,8 @@ class _AutoTunerImplementation:
                     cache_input_tensors=self.cache_input_tensors,
                 )
                 autotuner.jit_compile = jit_compile
+                autotuner.set_kernel_parameters(key)
+
                 autotuner.run = partial(autotuner.run, warmup, rep, timeout)
 
                 artifact = autotuner.run()
