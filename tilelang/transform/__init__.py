@@ -344,3 +344,9 @@ def MergeSharedMemoryAllocations():
         The result pass
     """
     return _ffi_api.MergeSharedMemoryAllocations()  # type: ignore
+
+
+def LowerL2Persistent():
+    """LowerL2Persistent
+    """
+    return _ffi_api.LowerL2Persistent()  # type: ignore
