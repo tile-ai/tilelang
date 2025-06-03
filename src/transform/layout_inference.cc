@@ -288,6 +288,20 @@ public:
         ICHECK(layout.defined()) << "InferLayout returned an undefined layout.";
 
         if (layout_map.count(buffer)) {
+          // If replicate size of this buffer is greater than the old one
+          if (buffer.scope() == "local.fragment") {
+            const FragmentNode *dst_layout = layout.as<Fragment>().get();
+            const FragmentNode *src_layout =
+                layout_map[buffer].as<Fragment>().get();
+            if (as_const_int(dst_layout->ReplicateExtent()) &&
+                as_const_int(src_layout->ReplicateExtent()) &&
+                (*as_const_int(dst_layout->ReplicateExtent()) >
+                 *as_const_int(src_layout->ReplicateExtent()))) {
+              // update map
+              layout_map.Set(buffer, layout);
+              continue;
+            }
+          }
           // If already in map, ensure they are structurally equal
           ICHECK(StructuralEqual()(layout, layout_map[buffer]))
               << "Get different layout for " << buffer
@@ -343,14 +357,29 @@ public:
       run_infer_step(i, InferLevel::kStrict, false);
     }
 
+    auto print_layout_map = [&](Map<Buffer, Layout> layout_map) {
+      for (const auto &[buffer, layout] : layout_map) {
+        LOG(INFO) << "\t buffer: " << buffer << " layout: " << layout->DebugOutput();
+      }
+    };
+
+    LOG(INFO) << "step 1 done";
+    print_layout_map(layout_map);
+
     // step 2: infer common layout with BFS
     finish_infer_queue();
+
+    LOG(INFO) << "step 2 done";
+    print_layout_map(layout_map);
 
     // step 3: relax constraints to free and re-run
     for (int i = 0; i < num_infer; i++) {
       run_infer_step(i, InferLevel::kFree, true);
       finish_infer_queue();
     }
+
+    LOG(INFO) << "step 3 done";
+    print_layout_map(layout_map);
 
     // Check that all local.fragment buffers have inferred layouts
     for (const auto &[buffer, _] : use_list_) {
