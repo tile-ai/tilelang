@@ -80,7 +80,7 @@ def compile(
 
 class _JitImplementation:
 
-    out_idx: Any
+    out_idx: Optional[Union[List[int], int]]
     target: Union[str, Target]
     target_host: Union[str, Target]
     execution_backend: Literal["dlpack", "ctypes", "cython"]
@@ -166,6 +166,18 @@ class _JitImplementation:
         def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> Any:
             # Separate out the tuning parameters from the user's kwargs
             tune_params = kwargs.pop('__tune_params', {})
+            # Whether to return the compile arguments (out_idx, target, target_host, etc.) for autotuner cache
+            return_compile_arguments = kwargs.pop('__return_compile_arguments', False)
+            if return_compile_arguments:
+                compile_args = {
+                    'out_idx': self.out_idx,
+                    'execution_backend': self.execution_backend,
+                    'target': self.target,
+                    'target_host': self.target_host,
+                    'verbose': self.verbose,
+                    'pass_configs': self.pass_configs,
+                }
+                return compile_args
 
             key_args_tuple = args
             key_kwargs_tuple = tuple(sorted(kwargs.items()))

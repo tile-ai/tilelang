@@ -47,7 +47,7 @@ class CompileArgs:
             "tl.disable_safe_memory_legalize": bool, default: False
     """
 
-    out_idx: Union[List[int], int] = -1
+    out_idx: Optional[Union[List[int], int]] = None
     execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython"
     target: Literal['auto', 'cuda', 'hip'] = 'auto'
     target_host: Union[str, Target] = None
@@ -65,8 +65,6 @@ class CompileArgs:
 
     def __hash__(self):
         data = {
-            "out_idx":
-                self.out_idx,
             "execution_backend":
                 self.execution_backend,
             "target":
@@ -206,7 +204,7 @@ class AutotuneResult:
         cache_path: Path,
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
-        out_idx: List[int] = None,
+        out_idx: Optional[Union[List[int], int]] = None,
         execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
         pass_configs: dict = None,
         func: Callable = None,
