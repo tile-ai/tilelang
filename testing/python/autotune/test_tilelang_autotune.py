@@ -4,7 +4,6 @@
 import itertools
 import logging
 
-import tilelang as tl
 import tilelang.testing
 import tilelang.language as T
 from tilelang.autotuner import AutoTuner
@@ -254,11 +253,9 @@ def matmul(M, N, K, with_roller):
     autotuner = AutoTuner.from_kernel(
         kernel=kernel, configs=get_configs(M, N, K, with_roller)).set_compile_args(
             out_idx=[-1],
-            supply_type=tl.TensorSupplyType.Integer,
-            ref_prog=ref_program,
-            skip_check=False,
             target="auto",
-        )
+        ).set_profile_args(
+            ref_prog=ref_program,)
     return autotuner.run(warmup=3, rep=20)
 
 

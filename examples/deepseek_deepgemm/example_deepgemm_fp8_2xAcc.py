@@ -9,7 +9,7 @@ import tilelang as TL
 import tilelang.language as T
 from tilelang.utils.tensor import map_torch_type
 
-tilelang.testing.set_random_seed(0)
+tilelang.testing.set_random_seed(42)
 
 
 def tl_gemm(
@@ -179,6 +179,10 @@ def assert_tl_gemm_correctness(M, N, K, block_N, in_dtype, out_dtype, accum_dtyp
     print(f"latency: {latency} ms")
     tflops = 2 * M * N * K / latency / 1e9
     print(f"tflops: {tflops}")
+
+
+def main():
+    assert_tl_gemm_correctness(1024, 1024, 8192, 128, "e4m3_float8", "bfloat16", "float32")
 
 
 if __name__ == "__main__":

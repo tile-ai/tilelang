@@ -3,7 +3,8 @@
 """The language interface for tl programs."""
 
 from tilelang import tvm as tvm
-from tilelang.language import ptx_arrive_barrier
+from tilelang.language import ptx_arrive_barrier, evaluate
+from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tvm import tir
 from typing import Union, Any
 from tvm.tir import PrimExpr, Var, Call
@@ -313,3 +314,13 @@ def sync_thread_partial(barrier_id: Union[int, PrimExpr, tir.Call]):
         tir.Call: A handle to the synchronization operation
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_thread_partial"), barrier_id)
+
+
+def sync_global():
+    """Synchronize all threads in a block.
+    """
+    tx, ty, tz = get_thread_bindings()
+    ex, ey, ez = get_block_extents()
+    print(tx, ty, tz, ex, ey, ez)
+    args = ["global", tx == 0 and ty == 0 and tz == 0, ex * ey * ez]
+    return evaluate(tir.Call("handle", "tir.tvm_storage_sync", args))

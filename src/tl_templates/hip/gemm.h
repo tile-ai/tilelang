@@ -19,16 +19,16 @@ template <> struct MfmaTraits<half> {
   }
 };
 
-// Specialization for __hip_bfloat16
-template <> struct MfmaTraits<__hip_bfloat16> {
+// Specialization for bfloat16_t
+template <> struct MfmaTraits<bfloat16_t> {
   template <typename AccType>
-  static TL_DEVICE void mfma_op(const __hip_bfloat16 *b,
-                                const __hip_bfloat16 *a, AccType *c) {
+  static TL_DEVICE void mfma_op(const bfloat16_t *b, const bfloat16_t *a,
+                                AccType *c) {
     bfloat16x4_vec b_vec, a_vec;
 
     // Reinterpret the pointers
-    short *b_short = reinterpret_cast<short *>(const_cast<__hip_bfloat16 *>(b));
-    short *a_short = reinterpret_cast<short *>(const_cast<__hip_bfloat16 *>(a));
+    short *b_short = reinterpret_cast<short *>(const_cast<bfloat16_t *>(b));
+    short *a_short = reinterpret_cast<short *>(const_cast<bfloat16_t *>(a));
 
     // Copy the data
     for (int i = 0; i < 4; ++i) {

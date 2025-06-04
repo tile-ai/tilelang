@@ -24,7 +24,8 @@ namespace tl {
 
 using namespace tir;
 
-static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout) {
+static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
+                                   Map<Var, Var> &var_remap) {
   const auto *ptr_type =
       TVM_TYPE_AS(buffer->data->type_annotation, PointerTypeNode);
   Type new_type;
@@ -38,7 +39,12 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout) {
   if (ptr_type->storage_scope == "global") {
     new_var = buffer->data;
   } else {
-    new_var = Var(buffer->data->name_hint, new_type);
+    if (var_remap.count(buffer->data)) {
+      new_var = var_remap[buffer->data];
+    } else {
+      new_var = Var(buffer->data->name_hint, new_type);
+      var_remap.Set(buffer->data, new_var);
+    }
   }
   Array<PrimExpr> layout_shape = layout->OutputShape();
   Array<PrimExpr> output_shape = layout_shape;
@@ -62,11 +68,95 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout) {
       output_shape.insert(output_shape.begin(), replicate_extent);
     }
   }
-
   return Buffer(new_var, buffer->dtype, output_shape, {}, buffer->elem_offset,
                 buffer->name, buffer->data_alignment, buffer->offset_factor,
                 buffer->buffer_type);
 }
+
+/*!
+ * \brief A class that rewrites buffer references in a statement based on a
+ * given buffer remapping.
+ *
+ * This class is used to update buffer references in a statement after buffer
+ * transformations have been applied. It specifically handles the remapping of
+ * padding annotations.
+ */
+class RemapBufferRewriter : public arith::IRMutatorWithAnalyzer {
+public:
+  /*!
+   * \brief Substitute buffer references in a statement based on a given buffer
+   * remapping. \param stmt The statement to rewrite. \param buffer_remap A map
+   * from old buffers to new buffers. \return The rewritten statement.
+   */
+  static Stmt Substitute(Stmt stmt, Map<Buffer, Buffer> buffer_remap) {
+    arith::Analyzer analyzer;
+    RemapBufferRewriter substituter(&analyzer);
+    substituter.buffer_remap_ = std::move(buffer_remap);
+    return substituter.VisitStmt(stmt);
+  }
+
+private:
+  using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
+
+  Stmt VisitStmt_(const BlockNode *op) final {
+    if (op->annotations.count(attr::kPaddingMap)) {
+      return RewritePaddingMap(op);
+    }
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
+  /*!
+   * \brief Rewrite the padding map annotation of a block.
+   * \param op The block node to rewrite.
+   * \return The rewritten block.
+   */
+  Stmt RewritePaddingMap(const BlockNode *op) {
+    auto padding_map =
+        op->annotations.Get(attr::kPaddingMap).as<Map<Var, PrimExpr>>().value();
+
+    Map<Var, Var> var_remap = CreateVarRemap();
+    Map<Var, PrimExpr> new_padding_map =
+        RemapPaddingMap(padding_map, var_remap);
+
+    auto block = Downcast<Block>(IRMutatorWithAnalyzer::VisitStmt_(op));
+    auto block_ptr = block.CopyOnWrite();
+    block_ptr->annotations.Set(attr::kPaddingMap, new_padding_map);
+    return block;
+  }
+
+  /*!
+   * \brief Create a mapping from old variables to new variables based on buffer
+   * remapping. \return A map from old variables to new variables.
+   */
+  Map<Var, Var> CreateVarRemap() const {
+    Map<Var, Var> var_remap;
+    for (const auto &[buffer, buffer_remap] : buffer_remap_) {
+      var_remap.Set(buffer->data, buffer_remap->data);
+    }
+    return var_remap;
+  }
+
+  /*!
+   * \brief Remap the padding map using the variable remapping.
+   * \param padding_map The original padding map.
+   * \param var_remap The variable remapping.
+   * \return The remapped padding map.
+   */
+  Map<Var, PrimExpr> RemapPaddingMap(const Map<Var, PrimExpr> &padding_map,
+                                     const Map<Var, Var> &var_remap) const {
+    Map<Var, PrimExpr> new_padding_map;
+    for (const auto &[var, padding] : padding_map) {
+      if (var_remap.count(var)) {
+        new_padding_map.Set(var_remap.at(var), padding);
+      } else {
+        new_padding_map.Set(var, padding);
+      }
+    }
+    return new_padding_map;
+  }
+
+  Map<Buffer, Buffer> buffer_remap_;
+};
 
 class LowerTileOpPass : arith::IRMutatorWithAnalyzer {
 public:
@@ -83,6 +173,8 @@ public:
     substituter.target_ = target.value();
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = substituter.VisitStmt(f->body);
+    fptr->body =
+        RemapBufferRewriter::Substitute(fptr->body, substituter.buffer_remap_);
     return f;
   }
 
@@ -106,7 +198,8 @@ private:
                             .as<Map<Buffer, Layout>>()
                             .value();
       for (auto [buffer, layout] : layout_map) {
-        buffer_remap_.Set(buffer, makeBufferWithLayout(buffer, layout));
+        buffer_remap_.Set(buffer,
+                          makeBufferWithLayout(buffer, layout, var_remap_));
         layout_map_.Set(buffer, layout);
       }
     }
@@ -265,21 +358,34 @@ private:
     if (is_ptx_) {
       return load;
     }
-
-    if (buffer_remap_.count(load->buffer)) {
-      auto new_indices = layout_map_[load->buffer]->Forward(load->indices);
+    auto buffer = load->buffer;
+    if (buffer_remap_.count(buffer)) {
+      auto new_indices = layout_map_[buffer]->Forward(load->indices);
       auto new_buffer = buffer_remap_[load->buffer];
       return BufferLoad(new_buffer, new_indices);
+    } else if (var_remap_.count(buffer->data)) {
+      auto new_buffer = Buffer(
+          var_remap_[buffer->data], buffer->dtype, buffer->shape,
+          buffer->strides, buffer->elem_offset, buffer->name,
+          buffer->data_alignment, buffer->offset_factor, buffer->buffer_type);
+      return BufferLoad(new_buffer, load->indices);
     }
     return load;
   }
 
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     auto store = Downcast<BufferStore>(IRMutatorWithAnalyzer::VisitStmt_(op));
-    if (buffer_remap_.count(store->buffer)) {
-      auto new_indices = layout_map_[store->buffer]->Forward(store->indices);
+    auto buffer = store->buffer;
+    if (buffer_remap_.count(buffer)) {
+      auto new_indices = layout_map_[buffer]->Forward(store->indices);
       auto new_buffer = buffer_remap_[store->buffer];
       return BufferStore(new_buffer, store->value, new_indices);
+    } else if (var_remap_.count(buffer->data)) {
+      auto new_buffer = Buffer(
+          var_remap_[buffer->data], buffer->dtype, buffer->shape,
+          buffer->strides, buffer->elem_offset, buffer->name,
+          buffer->data_alignment, buffer->offset_factor, buffer->buffer_type);
+      return BufferStore(new_buffer, store->value, store->indices);
     }
     return store;
   }
@@ -364,6 +470,7 @@ private:
   bool is_ptx_{false};
   // Mapping from data Var of a Buffer to Buffer, for lookup
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
+  Map<Var, Var> var_remap_;
 };
 
 namespace transform {

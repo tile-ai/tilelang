@@ -61,7 +61,7 @@ def flashmla_decode(batch,
             T.fill(scores_max, -T.infinity(accum_dtype))
 
             loop_range = T.ceildiv(seqlen_kv, block_N)
-            for k in T.Pipelined(loop_range, num_stages=2):
+            for k in T.Pipelined(loop_range, num_stages=0):
                 T.copy(KV[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], KV_shared)
                 T.copy(K_pe[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_pe_shared)
                 T.clear(acc_s)
@@ -328,11 +328,7 @@ if __name__ == "__main__":
                                num_split, thread_num)
 
     if enable_autotune:
-        autotuner = AutoTuner.from_kernel(
-            kernel=wrapped_kernel, configs=get_configs()).set_compile_args(
-                supply_type=tilelang.TensorSupplyType.Integer,
-                target="auto",
-            )
+        autotuner = AutoTuner.from_kernel(kernel=wrapped_kernel, configs=get_configs())
         tune_result = autotuner.run(warmup=3, rep=20)
         best_latency = tune_result.latency
         best_config = tune_result.config

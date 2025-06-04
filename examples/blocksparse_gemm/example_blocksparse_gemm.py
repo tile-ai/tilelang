@@ -110,7 +110,8 @@ def get_best_config(M, N, K):
         kernel=kernel, configs=get_configs(M, N, K)
     ).set_compile_args(
         out_idx=[-1],  # Index of the output tensor
-
+        target="auto",  # Automatically detect target
+    ).set_profile_args(
         # supply_type should not set here because we provide a custom supply
         # function `supply_prog` and `supply_type` will be ignored.
 
@@ -136,7 +137,6 @@ def get_best_config(M, N, K):
         # different configurations. Reusing cached tensors from a previous
         # configuration would lead to shape mismatches.
         cache_input_tensors=False,
-        target="auto",  # Automatically detect target
     )
     # Run the tuning process
     return autotuner.run(warmup=3, rep=20)

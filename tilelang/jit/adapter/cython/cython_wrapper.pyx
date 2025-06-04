@@ -25,6 +25,7 @@ cdef class CythonKernelWrapper:
         list param_dtypes    # Cache for parameter dtypes
         list param_shapes    # Cache for parameter shapes as native Python lists
         object get_current_device
+
     def __cinit__(self, result_idx, params, lib):
         # Initialize wrapper with kernel configuration
         self.result_idx = result_idx
@@ -66,7 +67,30 @@ cdef class CythonKernelWrapper:
         self.buffer_device_map = buffer_device_map
         return self
 
-    cpdef forward(self, list inputs, int64_t stream = -1):
+    cpdef void _check_buffer_device(self, list tensor_list):
+        if isinstance(tensor_list[0], torch.Tensor):
+            tensor_list_device_type = tensor_list[0].device.type
+        for param, (buffer_idx, device) in self.buffer_device_map.items():
+            if isinstance(tensor_list[buffer_idx], torch.Tensor):
+                tensor_device = tensor_list[buffer_idx].device
+                if (tensor_list_device_type != device.type or 
+                    (tensor_device.index is not None and device.index is not None and tensor_device.index != device.index)):
+                    raise ValueError(f"Buffer device mismatch for parameter {param}: expected {device}, got {tensor_device}")
+
+    cpdef void _check_buffer_dtype(self, list tensor_list):
+        for param, (buffer_idx, torch_dtype) in self.buffer_dtype_map.items():
+            if isinstance(tensor_list[buffer_idx], torch.Tensor):
+                if tensor_list[buffer_idx].dtype != torch_dtype:
+                    raise ValueError(f"Buffer dtype mismatch for parameter {param}: expected {torch_dtype}, got {tensor_list[buffer_idx].dtype}")
+
+    cpdef void _check_static_shape(self, list tensor_list):
+        for param, (buffer_idx, shape_list) in self.static_shape_map.items():
+            if isinstance(tensor_list[buffer_idx], torch.Tensor):
+                for shape_idx, shape in shape_list:
+                    if tensor_list[buffer_idx].shape[shape_idx] != shape:
+                        raise ValueError(f"Static shape mismatch for parameter {param}: expected {shape} at index {shape_idx}, got {tensor_list[buffer_idx].shape}")
+
+    cpdef forward(self, list inputs, int64_t stream = -1, bint skip_tensor_validation = False):
         # Validate input dimensions and prepare for kernel execution
         cdef int total_params = len(self.params)
         cdef int total_inputs = len(inputs)
@@ -135,29 +159,10 @@ cdef class CythonKernelWrapper:
                 raise ValueError(f"Unsupported tensor type: {type(tensor)}")
 
         # Check buffer device
-        # cdef str tensor_list_device_type = tensor_list[0].device.type
-        if isinstance(tensor_list[0], torch.Tensor):
-            tensor_list_device_type = tensor_list[0].device.type
-        for param, (buffer_idx, device) in self.buffer_device_map.items():
-            if isinstance(tensor_list[buffer_idx], torch.Tensor):
-                tensor_device = tensor_list[buffer_idx].device
-                # Compare device types and indices separately to handle both string and torch.device objects            
-                if (tensor_list_device_type != device.type or 
-                    (tensor_device.index is not None and device.index is not None and tensor_device.index != device.index)):
-                    raise ValueError(f"Buffer device mismatch for parameter {param}: expected {device}, got {tensor_device}")
-
-        # Check buffer dtype map
-        for param, (buffer_idx, torch_dtype) in self.buffer_dtype_map.items():
-            if isinstance(tensor_list[buffer_idx], torch.Tensor):
-                if tensor_list[buffer_idx].dtype != torch_dtype:
-                    raise ValueError(f"Buffer dtype mismatch for parameter {param}: expected {torch_dtype}, got {tensor_list[buffer_idx].dtype}")
-        
-        # Check static shape map
-        for param, (buffer_idx, shape_list) in self.static_shape_map.items():
-            if isinstance(tensor_list[buffer_idx], torch.Tensor):
-                for shape_idx, shape in shape_list:
-                    if tensor_list[buffer_idx].shape[shape_idx] != shape:
-                        raise ValueError(f"Static shape mismatch for parameter {param}: expected {shape} at index {shape_idx}, got {tensor_list[buffer_idx].shape}")
+        if not skip_tensor_validation:
+            self._check_buffer_device(tensor_list)
+            self._check_buffer_dtype(tensor_list)
+            self._check_static_shape(tensor_list)
 
         # Add dynamic dimension values to kernel arguments
         for _, (buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():

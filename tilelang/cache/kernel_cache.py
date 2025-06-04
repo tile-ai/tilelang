@@ -18,6 +18,7 @@ from tvm.tir import PrimFunc
 from tilelang.engine.param import KernelParam
 from tilelang.env import TILELANG_CACHE_DIR, is_cache_enabled
 from tilelang.jit import JITKernel
+from tilelang.version import __version__
 
 KERNEL_PATH = "kernel.cu"
 WRAPPED_KERNEL_PATH = "wrapped_kernel.cu"
@@ -94,8 +95,8 @@ class KernelCache:
         self.execution_backend = execution_backend
         func_binary = cloudpickle.dumps(func.script())
         key_data = {
-            # Use SHA256 to generate hash key
-            "func": sha256(func_binary).hexdigest(),
+            "version": __version__,
+            "func": sha256(func_binary).hexdigest(),  # Use SHA256 to generate hash key
             "out_idx": (tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx]),
             "args_repr": tuple(
                 repr(arg) for arg in args
@@ -157,6 +158,8 @@ class KernelCache:
         with self._lock:
             # First check in-memory cache
             if key in self._memory_cache:
+                self.logger.warning("Found kernel in memory cache. For better performance," \
+                                    " consider using `@tilelang.jit` instead of direct kernel caching.")
                 return self._memory_cache[key]
 
             # Then check disk cache
@@ -180,17 +183,8 @@ class KernelCache:
         if execution_backend == "dlpack":
             self.logger.warning("DLPack backend does not support cache saving to disk.")
         else:
-            with self._lock:  # enter critical section again to check and update disk cache
-                disk_kernel = self._load_kernel_from_disk(
-                    key,
-                    target,
-                    target_host,
-                    out_idx,
-                    execution_backend,
-                    pass_configs,
-                    func,
-                )
-                if disk_kernel is None:
+            with self._lock:
+                if is_cache_enabled():
                     self._save_kernel_to_disk(key, kernel, func)
 
         # Store in memory cache after compilation

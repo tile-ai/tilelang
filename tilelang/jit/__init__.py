@@ -12,13 +12,11 @@ from typing import (
     Union,
     Callable,
     Tuple,
-    TypeVar,
     overload,
     Literal,
     Dict,  # For type hinting dicts
     Optional,
 )
-from typing_extensions import ParamSpec
 from tilelang import tvm as tvm
 from tvm.tir import PrimFunc
 from tvm.target import Target
@@ -28,6 +26,7 @@ from tilelang.cache import cached
 from os import path, makedirs
 from logging import getLogger
 import functools
+from tilelang.jit.param import Kernel, _P, _RProg
 
 logger = getLogger(__name__)
 
@@ -68,6 +67,8 @@ def compile(
             "tl.dynamic_vectorize_size_bits": int, default: 128
             "tl.disable_safe_memory_legalize": bool, default: False
     """
+    assert isinstance(func, PrimFunc), f"target function must be a PrimFunc but got {type(func)}"
+
     return cached(
         func=func,
         out_idx=out_idx,
@@ -79,71 +80,16 @@ def compile(
     )
 
 
-# --- Mocking dependencies for the example to run ---
-# In your actual code, these would be your real types.
-class Program:
-    """Placeholder for the type returned by the original decorated function."""
-
-    def __init__(self, data: str):
-        self.data = data
-
-    def __repr__(self):
-        return f"Program('{self.data}')"
-
-
-class Kernel:
-    """Placeholder for the type of the compiled kernel."""
-
-    def __init__(self, source: str, out_idx: Any):
-        self.source_code = source
-        self.out_idx = out_idx
-
-    def get_kernel_source(self) -> str:
-        return self.source_code
-
-    def __repr__(self):
-        return f"Kernel('{self.source_code[:20]}...')"
-
-
-# --- End Mocking ---
-
-# P (Parameters) captures the argument types of the decorated function.
-_P = ParamSpec("_P")
-# R_prog (Return type of Program) captures the return type of the original decorated function.
-# We assume the original function returns something compatible with 'Program'.
-_RProg = TypeVar("_RProg", bound=Program)
-
-
 class _JitImplementation:
-    # Overload __init__ to help type checkers understand the effect of return_program
-    # The '-> None' is for __init__ itself. The crucial part is Literal for return_program.
-    @overload
-    def __init__(self,
-                 out_idx: Any = None,
-                 target: Union[str, Target] = "auto",
-                 target_host: Union[str, Target] = None,
-                 execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
-                 verbose: bool = False,
-                 pass_configs: Optional[Dict[str, Any]] = None,
-                 debug_root_path: Optional[str] = None,
-                 *,
-                 return_program: Literal[True]) -> None:
-        ...
 
-    @overload
-    def __init__(self,
-                 out_idx: Any = None,
-                 target: Union[str, Target] = "auto",
-                 target_host: Union[str, Target] = None,
-                 execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
-                 verbose: bool = False,
-                 pass_configs: Optional[Dict[str, Any]] = None,
-                 debug_root_path: Optional[str] = None,
-                 *,
-                 return_program: Literal[False] = False) -> None:
-        ...
+    out_idx: Any
+    target: Union[str, Target]
+    target_host: Union[str, Target]
+    execution_backend: Literal["dlpack", "ctypes", "cython"]
+    verbose: bool
+    pass_configs: Optional[Dict[str, Any]]
+    debug_root_path: Optional[str]
 
-    # Actual implementation of __init__
     def __init__(self,
                  out_idx: Any = None,
                  target: Union[str, Target] = "auto",
@@ -151,9 +97,7 @@ class _JitImplementation:
                  execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None,
-                 debug_root_path: Optional[str] = None,
-                 *,
-                 return_program: bool = False):
+                 debug_root_path: Optional[str] = None):
         """
         Initializes the JIT compiler decorator.
 
@@ -185,10 +129,6 @@ class _JitImplementation:
             If None, no debug information is saved (default: None).
             If a relative path is given, it's made absolute relative to the project root
             or current working directory.
-        return_program : bool, optional
-            If True, the decorated function will return a tuple containing the
-            original program's result and the compiled kernel. If False, only the
-            compiled kernel is returned (default: False).
         """
         self.out_idx = out_idx
         self.execution_backend = execution_backend
@@ -196,7 +136,6 @@ class _JitImplementation:
         self.target_host = target_host
         self.verbose = verbose
         self.pass_configs = pass_configs
-        self.return_program = return_program  # Stored from args
 
         # Corrected debug_root_path handling
         self.debug_root_path = debug_root_path
@@ -206,14 +145,11 @@ class _JitImplementation:
                 self.debug_root_path = path.join(base_path, self.debug_root_path)
             except NameError:
                 self.debug_root_path = path.abspath(self.debug_root_path)
-        # If debug_root_path was None initially, it remains None.
 
-        # Type hint the caches
-        self._program_cache: Dict[tuple, _RProg] = {}
         self._kernel_cache: Dict[tuple, Kernel] = {}
 
-    # Overload __call__ based on the value of self.return_program
     # This tells the type checker what the *wrapper* function will return.
+    # this is for linting, please do not remove it.
     @overload
     def __call__(self, func: Callable[_P, _RProg]) -> Callable[_P, Tuple[_RProg, Kernel]]:
         ...
@@ -230,19 +166,25 @@ class _JitImplementation:
 
         @functools.wraps(func)
         def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> Any:
+            # Separate out the tuning parameters from the user's kwargs
+            tune_params = kwargs.pop('__tune_params', {})
+
             key_args_tuple = args
             key_kwargs_tuple = tuple(sorted(kwargs.items()))
             key = (key_args_tuple, key_kwargs_tuple)
 
-            if key not in self._program_cache:
+            if key not in self._kernel_cache:
                 # Ensure 'func' (the original user function) is used correctly
                 program_result_source = func
                 if isinstance(program_result_source, PrimFunc):
                     program_result = program_result_source
                 elif callable(program_result_source):
-                    program_result = program_result_source(*args, **kwargs)
+                    program_result = program_result_source(*args, **kwargs, **tune_params)
                 else:
                     raise ValueError(f"Invalid function type: {type(program_result_source)}")
+
+                if self.verbose:
+                    logger.info(f"Verbose: Compiling for program \n {program_result.script()}")
 
                 kernel_result = compile(
                     program_result,
@@ -257,20 +199,16 @@ class _JitImplementation:
                 if self.debug_root_path:
                     func_name = getattr(func, '__name__', 'jit_kernel')  # Use func for name
                     kernel_file = f'tilelang_jit_kernel_{func_name}.c'
+                    program_file = f'tilelang_jit_program_{func_name}.py'
                     makedirs(self.debug_root_path, exist_ok=True)
                     with open(path.join(self.debug_root_path, kernel_file), 'w') as f:
                         print(kernel_result.get_kernel_source(), file=f)
+                    with open(path.join(self.debug_root_path, program_file), 'w') as f:
+                        print(program_result.script(), file=f)
 
-                self._program_cache[key] = program_result
                 self._kernel_cache[key] = kernel_result
 
-            cached_program = self._program_cache[key]
-            cached_kernel = self._kernel_cache[key]
-
-            if self.return_program:
-                return cached_program, cached_kernel
-            else:
-                return cached_kernel
+            return self._kernel_cache[key]
 
         return wrapper
 
@@ -284,16 +222,12 @@ def jit(  # This is the new public interface
         execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
         verbose: bool = False,
         pass_configs: Optional[Dict[str, Any]] = None,
-        debug_root_path: Optional[str] = None,
-        return_program: bool = False):
+        debug_root_path: Optional[str] = None):
     """
     Just-In-Time (JIT) compiler decorator for TileLang functions.
 
-    This decorator can be used in two ways:
-    1. Without arguments (e.g., `@tilelang.jit`):
+    This decorator can be used without arguments (e.g., `@tilelang.jit`):
        Applies JIT compilation with default settings.
-    2. With arguments (e.g., `@tilelang.jit(target="cuda", return_program=True)`):
-       Configures the JIT compilation process with the specified options.
 
     Parameters
     ----------
@@ -313,9 +247,6 @@ def jit(  # This is the new public interface
         Configurations for TVM's pass context. Defaults to None.
     debug_root_path : Optional[str], optional
         Directory to save compiled kernel source for debugging. Defaults to None.
-    return_program : bool, optional
-        If True, the decorated function returns a tuple (original program's result, compiled kernel).
-        Otherwise, only the compiled kernel is returned. Defaults to False.
 
     Returns
     -------
@@ -333,8 +264,7 @@ def jit(  # This is the new public interface
             execution_backend=execution_backend,
             verbose=verbose,
             pass_configs=pass_configs,
-            debug_root_path=debug_root_path,
-            return_program=return_program)
+            debug_root_path=debug_root_path)
         return default_decorator(func)
     elif isinstance(func, PrimFunc):
         raise ValueError("Use tilelang.jit to decorate prim_func is not supported yet.")
@@ -349,6 +279,5 @@ def jit(  # This is the new public interface
             execution_backend=execution_backend,
             verbose=verbose,
             pass_configs=pass_configs,
-            debug_root_path=debug_root_path,
-            return_program=return_program)
+            debug_root_path=debug_root_path)
         return configured_decorator

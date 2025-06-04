@@ -1,5 +1,6 @@
 #pragma once
 
+#include "./cuda_fp8.h"
 #include "common.h"
 
 #ifndef __CUDACC_RTC__
@@ -79,6 +80,26 @@ __device__ void debug_print_var<double>(const char *msg, double var) {
          "value=%lf\n",
          msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
          threadIdx.z, var);
+}
+
+// Specialization for fp8_e4_t type
+template <>
+__device__ void debug_print_var<fp8_e4_t>(const char *msg, fp8_e4_t var) {
+  printf(
+      "msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=fp8_e4_t "
+      "value=%f\n",
+      msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+      threadIdx.z, (float)var);
+}
+
+// Specialization for fp8_e5_t type
+template <>
+__device__ void debug_print_var<fp8_e5_t>(const char *msg, fp8_e5_t var) {
+  printf(
+      "msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=fp8_e5_t "
+      "value=%f\n",
+      msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+      threadIdx.z, (float)var);
 }
 
 // Template declaration for device-side debug printing (buffer only)
@@ -172,4 +193,26 @@ __device__ void debug_print_buffer_value<double>(const char *msg,
          "index=%d, dtype=double value=%lf\n",
          msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
          threadIdx.z, buf_name, index, var);
+}
+
+// Specialization for fp8_e4_t type
+template <>
+__device__ void debug_print_buffer_value<fp8_e4_t>(const char *msg,
+                                                   const char *buf_name,
+                                                   int index, fp8_e4_t var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): buffer=%s, "
+         "index=%d, dtype=fp8_e4_t value=%f\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, buf_name, index, (float)var);
+}
+
+// Specialization for fp8_e5_t type
+template <>
+__device__ void debug_print_buffer_value<fp8_e5_t>(const char *msg,
+                                                   const char *buf_name,
+                                                   int index, fp8_e5_t var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): buffer=%s, "
+         "index=%d, dtype=fp8_e5_t value=%f\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, buf_name, index, (float)var);
 }

@@ -107,7 +107,7 @@ def tl_matmul(
     )
 
     @T.prim_func
-    def main(
+    def gemm_fp8_intrinsic(
             A: T.Tensor(A_shape, in_dtype),
             B: T.Tensor(B_shape, in_dtype),
             C: T.Tensor((M, N), out_dtype),
@@ -175,7 +175,7 @@ def tl_matmul(
                     j % micro_size_y,
                 ]
 
-    return main
+    return gemm_fp8_intrinsic
 
 
 def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
@@ -204,7 +204,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
 
-    profiler(A, B, C)
+    C = profiler(A, B)
 
     latency = profiler.do_bench(warmup=25)
 
@@ -218,12 +218,10 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(8, 9)
-def test_assert_tl_matmul():
+def main():
     assert_tl_matmul_correctness(128, 128, 128, "e4m3_float8", "float32", "float32")
     assert_tl_matmul_correctness(128, 128, 128, "e5m2_float8", "float32", "float32")
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    main()
