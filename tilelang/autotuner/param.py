@@ -206,7 +206,7 @@ class AutotuneResult:
         cache_path: Path,
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
-        out_idx: Optional[List[int]] = None,
+        out_idx: Optional[Union[List[int], int]] = None,
         execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
         pass_configs: dict = None,
         func: Callable = None,
