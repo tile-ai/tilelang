@@ -31,6 +31,8 @@ class LibraryGenerator(object):
     def load_lib(self, lib_path: Optional[str] = None):
         if lib_path is None:
             lib_path = self.libpath
+        else:
+            self.libpath = lib_path
         return ctypes.CDLL(lib_path)
 
     def compile_lib(self, timeout: float = None):
@@ -98,13 +100,15 @@ class LibraryGenerator(object):
 
         src.write(self.lib_code)
         src.flush()
+
         try:
             ret = subprocess.run(command, timeout=timeout)
         except Exception as e:
             raise RuntimeError(f"Compile kernel failed because of {e}") from e
 
         if ret.returncode != 0:
-            raise RuntimeError(f"Compilation Failed! {command}")
+            raise RuntimeError(f"Compilation Failed! {command}"
+                               f"\n {self.lib_code}")
 
         self.srcpath = src.name
         self.libpath = libpath

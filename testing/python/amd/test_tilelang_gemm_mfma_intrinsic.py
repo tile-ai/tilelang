@@ -22,6 +22,9 @@ def tl_matmul(
     in_dtype,
     out_dtype,
     accum_dtype,
+    a_transposed=False,
+    b_transposed=True,
+    k_pack=1,
 ):
     assert in_dtype in [
         "float16",
@@ -35,27 +38,26 @@ def tl_matmul(
 
     micro_size_x = micro_size_y = micro_size_k = 16
 
-    if out_dtype == "int32":
+    if in_dtype in {"float8_e4m3fnuz", "int8"}:
         micro_size_k = 32
 
-    block_row_warps = 1
-    block_col_warps = 1
-    warp_row_tiles = 16
-    warp_col_tiles = 16
+    block_row_warps = 2
+    block_col_warps = 2
+    warp_row_tiles = 32
+    warp_col_tiles = 32
     chunk = 32
-    shared_scope = "shared.dyn"
+    shared_scope = "shared"
     cache_write_shared = False
 
     block_M = block_row_warps * warp_row_tiles
     block_N = block_col_warps * warp_col_tiles
     block_K = chunk
 
-    A_shape = (M, K)
-    B_shape = (N, K)
-    A_shared_shape = (block_M, block_K)
-    B_shared_shape = (block_N, block_K)
+    A_shape = (K, M) if a_transposed else (M, K)
+    B_shape = (N, K) if b_transposed else (K, N)
+    A_shared_shape = (block_K, block_M) if a_transposed else (block_M, block_K)
+    B_shared_shape = (block_N, block_K) if b_transposed else (block_K, block_N)
     C_shared_shape = (
-        block_M // micro_size_x,
         block_N // micro_size_y,
         micro_size_x,
         micro_size_y,
@@ -63,8 +65,8 @@ def tl_matmul(
 
     warp_size = 64
     threads = warp_size * (block_row_warps * block_col_warps)
-    local_size_a = (micro_size_x * micro_size_k) // warp_size
-    local_size_b = (micro_size_y * micro_size_k) // warp_size
+    local_size_a = (k_pack * micro_size_x * micro_size_k) // warp_size
+    local_size_b = (k_pack * micro_size_y * micro_size_k) // warp_size
     local_size_c = (micro_size_x * micro_size_y) // warp_size
     warp_rows = warp_row_tiles // micro_size_x
     warp_cols = warp_col_tiles // micro_size_y
@@ -74,13 +76,14 @@ def tl_matmul(
         a_dtype=in_dtype,
         b_dtype=in_dtype,
         accum_dtype=accum_dtype,
-        a_transposed=False,
-        b_transposed=True,
+        a_transposed=a_transposed,
+        b_transposed=b_transposed,
         block_row_warps=block_row_warps,
         block_col_warps=block_col_warps,
         warp_row_tiles=warp_row_tiles,
         warp_col_tiles=warp_col_tiles,
         chunk=chunk,
+        k_pack=k_pack,
     )
 
     @T.prim_func
@@ -111,14 +114,18 @@ def tl_matmul(
             for ko in T.Pipelined((K // block_K), num_stages=0):
 
                 # Load A into shared memory
-                for i, k in T.Parallel(block_M, block_K):
-                    A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
+                if a_transposed:
+                    T.copy(A[ko * block_K, by * block_M], A_shared)
+                else:
+                    T.copy(A[by * block_M, ko * block_K], A_shared)
 
                 # Load B into shared memory
-                for j, k in T.Parallel(block_N, block_K):
-                    B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
+                if b_transposed:
+                    T.copy(B[bx * block_N, ko * block_K], B_shared)
+                else:
+                    T.copy(B[ko * block_K, bx * block_N], B_shared)
 
-                for ki in T.serial(0, (block_K // micro_size_k)):
+                for ki in T.serial(0, (block_K // (k_pack * micro_size_k))):
 
                     # Load A into fragment
                     mfma_emitter.ldmatrix_a(
@@ -163,20 +170,30 @@ def tl_matmul(
     return main
 
 
-def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype="float32"):
-    matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
+def assert_tl_matmul_correctness(M,
+                                 N,
+                                 K,
+                                 in_dtype,
+                                 out_dtype,
+                                 accum_dtype="float32",
+                                 a_transposed=False,
+                                 b_transposed=True,
+                                 k_pack=1):
+    matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed,
+                       k_pack)
+    print(matmul)
     kernel = tilelang.compile(matmul)
     src_code = kernel.get_kernel_source()
     # src_code is the generated cuda source
     assert src_code is not None
-
+    A_shape = (K, M) if a_transposed else (M, K)
+    B_shape = (N, K) if b_transposed else (K, N)
     if in_dtype == "int8":
-        A = torch.randint(-128, 127, (M, K), device="cuda", dtype=torch.int8)
-        B = torch.randint(-128, 127, (N, K), device="cuda", dtype=torch.int8)
+        A = torch.randint(-128, 127, A_shape, device="cuda", dtype=torch.int8)
+        B = torch.randint(-128, 127, B_shape, device="cuda", dtype=torch.int8)
     else:
-        A = torch.rand(M, K, device="cuda", dtype=getattr(torch, in_dtype))
-        B = torch.rand(N, K, device="cuda", dtype=getattr(torch, in_dtype))
-
+        A = torch.rand(A_shape, device="cuda", dtype=getattr(torch, in_dtype))
+        B = torch.rand(B_shape, device="cuda", dtype=getattr(torch, in_dtype))
     C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, out_dtype))
 
     kernel(A, B, C)
@@ -188,8 +205,22 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype="floa
     # Ensure that the latency is not None
     assert latency is not None
 
-    # Get Reference Result
-    ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(getattr(torch, out_dtype))
+    if a_transposed and b_transposed:
+        # Get Reference Result
+        ref_c = torch.matmul(A.T.to(torch.float32),
+                             B.T.to(torch.float32)).to(getattr(torch, out_dtype))
+    elif a_transposed and not b_transposed:
+        # Get Reference Result
+        ref_c = torch.matmul(A.Tto(torch.float32),
+                             B.to(torch.float32)).to(getattr(torch, out_dtype))
+    elif not a_transposed and b_transposed:
+        # Get Reference Result
+        ref_c = torch.matmul(A.to(torch.float32),
+                             B.T.to(torch.float32)).to(getattr(torch, out_dtype))
+    else:
+        # Get Reference Result
+        ref_c = torch.matmul(A.to(torch.float32), B.to(torch.float32)).to(getattr(torch, out_dtype))
+
     print(C)
     print(ref_c)
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
@@ -199,6 +230,7 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype="floa
 def test_assert_tl_matmul():
     assert_tl_matmul_correctness(128, 128, 128, "float16", "float16")
     assert_tl_matmul_correctness(128, 256, 256, "float16", "float32")
+    assert_tl_matmul_correctness(128, 256, 256, "float16", "float32", k_pack=2)
 
 
 if __name__ == "__main__":

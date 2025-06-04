@@ -67,6 +67,8 @@ def compile(
             "tl.dynamic_vectorize_size_bits": int, default: 128
             "tl.disable_safe_memory_legalize": bool, default: False
     """
+    assert isinstance(func, PrimFunc), f"target function must be a PrimFunc but got {type(func)}"
+
     return cached(
         func=func,
         out_idx=out_idx,
@@ -180,6 +182,9 @@ class _JitImplementation:
                     program_result = program_result_source(*args, **kwargs, **tune_params)
                 else:
                     raise ValueError(f"Invalid function type: {type(program_result_source)}")
+
+                if self.verbose:
+                    logger.info(f"Verbose: Compiling for program \n {program_result.script()}")
 
                 kernel_result = compile(
                     program_result,
