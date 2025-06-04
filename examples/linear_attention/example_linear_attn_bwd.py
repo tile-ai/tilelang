@@ -33,13 +33,13 @@ def chunk_linear_attn_bwd_kernel(
 
     @T.prim_func
     def main(
-            Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-            K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-            V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
-            dO: T.Tensor([B, S, H, DV], dtype),  # type: ignore
-            dQ: T.Tensor([NV, B, S, H, DK], dtype),  # type: ignore
-            dK: T.Tensor([NV, B, S, H, DK], dtype),  # type: ignore
-            dV: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore
+            Q: T.Tensor([B, S, H, DK], dtype),  
+            K: T.Tensor([B, S, H, DK], dtype),  
+            V: T.Tensor([B, S, H, DV], dtype),  
+            dO: T.Tensor([B, S, H, DV], dtype),  
+            dQ: T.Tensor([NV, B, S, H, DK], dtype),  
+            dK: T.Tensor([NV, B, S, H, DK], dtype),  
+            dV: T.Tensor([NK, B, S, H, DV], dtype),  
     ):
         with T.Kernel(NV, NK, B * H) as (i_v, i_k, i_bh):
             i_b = i_bh // H
