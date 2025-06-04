@@ -130,12 +130,7 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     return {};
   if (level == InferLevel::kStrict)
     return {};
-  LOG(INFO) << "Infered Layout: ";
-  for (const auto &[buffer, layout] : T.layout_map) {
-    LOG(INFO) << "  " << buffer << " " << layout->DebugOutput();
-  }
-  LOG(INFO) << "Inference Loop Layout with level " << (int)level << " for \n\t"
-            << GetRoot();
+
   // Step 1: try to infer loop's partition from a source fragment
   Buffer source_buffer, read_source_buffer;
   for (const auto &[buffer, indices] : indice_map_) {
@@ -163,8 +158,6 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   }
   auto compute_loop_layout_from_buffer = [&](const Buffer &buffer) {
     Fragment src_layout = T.layout_map[buffer].as<Fragment>().value();
-    LOG(INFO) << "compute_loop_layout_from_buffer " << buffer << " "
-              << src_layout << " " << src_layout->DebugOutput();
     if (IsCommonAccessIndice(buffer)) {
       return src_layout;
     } else {
@@ -179,14 +172,9 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   };
   if (source_buffer.defined()) {
     loop_layout_ = compute_loop_layout_from_buffer(source_buffer);
-    LOG(INFO) << "set loop layout from source_buffer " << source_buffer << " "
-              << loop_layout_->DebugOutput();
   } else if (level == InferLevel::kFree) {
     if (read_source_buffer.defined()) {
       loop_layout_ = compute_loop_layout_from_buffer(read_source_buffer);
-      LOG(INFO) << "compute_loop_layout_from_buffer read_source_buffer "
-                << read_source_buffer << " " << loop_layout_ << " "
-                << loop_layout_->DebugOutput();
       // // Loop don't need to be replicated.
       // if (!is_one(loop_layout_->ReplicateExtent()))
       //   loop_layout_ = loop_layout_->DeReplicate();
@@ -270,8 +258,6 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   LayoutMap results;
   for (const auto &[buffer, _] : indice_map_) {
     if (!T.layout_map.count(buffer)) {
-      LOG(INFO) << "CompleteBufferFragment for " << buffer << " "
-                << CompleteBufferFragment(buffer)->DebugOutput();
       results.Set(buffer, CompleteBufferFragment(buffer)->BindThreadRange(
                               T.thread_bounds));
     }
@@ -283,7 +269,6 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       if (T.layout_map.count(buffer)) {
         const FragmentNode *src_layout =
             T.layout_map[buffer].as<Fragment>().get();
-        LOG(INFO) << "compute dst_layout_fragment for " << buffer;
         Fragment dst_layout_fragment =
             CompleteBufferFragment(buffer)->BindThreadRange(T.thread_bounds);
         const FragmentNode *dst_layout =
@@ -322,36 +307,25 @@ Optional<PrimExpr> ParallelOp::GetPredicate(Var thread_var) const {
 Fragment ParallelOp::CompleteBufferFragment(const Buffer &buffer) {
   ICHECK(loop_layout_.defined());
   if (IsCommonAccessIndice(buffer)) {
-    LOG(INFO) << "Inside CompleteBufferFragment is a common indice, return "
-                 "loop layout directly";
     return loop_layout_;
   }
-  LOG(INFO) << "Inside CompleteBufferFragment is not a common indice, need to "
-               "compute the layout";
   PrimExpr rep_b = MakeFlattenedExpression(
       DivideUnusedIterators(indice_map_[buffer], loop_vars_, &analyzer_));
-  LOG(INFO) << "rep_b " << rep_b;
   auto bijective_indice = indice_map_[buffer];
-  LOG(INFO) << "bijective_indice " << bijective_indice;
   bijective_indice.push_back(rep_b);
-  LOG(INFO) << "bijective_indice " << bijective_indice;
   Layout ind_inv = Layout(loop_vars_, bijective_indice)->Inverse();
-  LOG(INFO) << "ind_inv " << ind_inv;
   PrimExpr indice_rep_extent =
       ind_inv->InputShape().back(); // this is the size of rep_b
   PrimExpr loop_rep_extent = loop_layout_->ReplicateExtent();
   PrimExpr dest_buffer_rep_extent = indice_rep_extent * loop_rep_extent;
-  LOG(INFO) << "dest_buffer_rep_extent " << dest_buffer_rep_extent;
   Array<PrimExpr> fwd;
   for (size_t i = 0; i < buffer->shape.size(); i++) {
     fwd.push_back(InputPlaceholder(i));
   }
   fwd.push_back(FloorMod(ReplicationPlaceholder(), indice_rep_extent));
-  LOG(INFO) << "fwd " << fwd;
   PrimExpr thd_b = loop_layout_->ForwardThread(
       ind_inv->Forward(fwd),
       FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
-  LOG(INFO) << "thd_b " << thd_b;
   return Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent, NullOpt)
       ->CondenseReplicateVar();
 }

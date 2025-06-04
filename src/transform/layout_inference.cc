@@ -358,30 +358,14 @@ public:
       run_infer_step(i, InferLevel::kStrict, false);
     }
 
-    auto print_layout_map = [&](Map<Buffer, Layout> layout_map) {
-      for (const auto &[buffer, layout] : layout_map) {
-        LOG(INFO) << "\t buffer: " << buffer
-                  << " layout: " << layout->DebugOutput();
-      }
-    };
-
-    LOG(INFO) << "step 1 done";
-    print_layout_map(layout_map);
-
     // step 2: infer common layout with BFS
     finish_infer_queue();
-
-    LOG(INFO) << "step 2 done";
-    print_layout_map(layout_map);
 
     // step 3: relax constraints to free and re-run
     for (int i = 0; i < num_infer; i++) {
       run_infer_step(i, InferLevel::kFree, true);
       finish_infer_queue();
     }
-
-    LOG(INFO) << "step 3 done";
-    print_layout_map(layout_map);
 
     // Check that all local.fragment buffers have inferred layouts
     for (const auto &[buffer, _] : use_list_) {
