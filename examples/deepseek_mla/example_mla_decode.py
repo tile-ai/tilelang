@@ -25,7 +25,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
             Output: T.Tensor([batch, heads, dim], dtype),
     ):
-        with T.Kernel(batch, heads // min(block_H, kv_group_num), threads=128) as (bx, by):
+        with T.Kernel(batch, heads // min(block_H, kv_group_num), threads=256) as (bx, by):
             Q_shared = T.alloc_shared([block_H, dim], dtype)
             S_shared = T.alloc_shared([block_H, block_N], dtype)
             Q_pe_shared = T.alloc_shared([block_H, pe_dim], dtype)
