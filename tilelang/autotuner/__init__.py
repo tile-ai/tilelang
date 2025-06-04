@@ -552,6 +552,8 @@ class _AutoTunerImplementation:
                 def jit_compile(**config_arg):
                     return fn(*args, **kwargs, __tune_params=config_arg)
 
+                compile_arguments = fn(__return_compile_arguments=True)
+
                 autotuner = AutoTuner(
                     fn, configs=configs).set_profile_args(
                         supply_type=self.supply_type,
@@ -563,13 +565,22 @@ class _AutoTunerImplementation:
                         skip_check=self.skip_check,
                         manual_check_prog=self.manual_check_prog,
                         cache_input_tensors=self.cache_input_tensors,
+                    ).set_compile_args(
+                        out_idx=compile_arguments['out_idx'],
+                        execution_backend=compile_arguments['execution_backend'],
+                        target=compile_arguments['target'],
+                        target_host=compile_arguments['target_host'],
+                        verbose=compile_arguments['verbose'],
+                        pass_configs=compile_arguments['pass_configs'],
                     )
+
                 autotuner.jit_compile = jit_compile
                 autotuner.set_kernel_parameters(key)
 
                 autotuner.run = partial(autotuner.run, warmup, rep, timeout)
 
                 artifact = autotuner.run()
+
                 self._tuner_cache[key] = artifact.kernel
 
             return self._tuner_cache[key]
