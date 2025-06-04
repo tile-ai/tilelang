@@ -98,6 +98,7 @@ class AutoTuner:
     compile_args = CompileArgs()
     profile_args = ProfileArgs()
 
+    _kernel_parameters: Optional[Tuple[str, ...]] = None
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
     cache_dir: Path = Path(TILELANG_CACHE_DIR)
@@ -165,7 +166,7 @@ class AutoTuner:
                          max_mismatched_ratio: float = 0.01,
                          skip_check: bool = False,
                          manual_check_prog: Callable = None,
-                         cache_input_tensors: bool = True):
+                         cache_input_tensors: bool = False):
         """Set profiling arguments for the auto-tuner.
 
         Args:
@@ -207,12 +208,26 @@ class AutoTuner:
 
         return self
 
-    def generate_cache_key(self) -> Optional[AutotuneResult]:
+    def set_kernel_parameters(self, parameters: Tuple[str, ...]):
+        # for cache key generation
+        self._kernel_parameters = parameters
+
+    def generate_cache_key(self, parameters: Dict[str, Any]) -> Optional[AutotuneResult]:
         """Generate a cache key for the auto-tuning process.
         """
+        # extract parameters from the function signature
+        op_parameters = []
+        for _, default_value in parameters.items():
+            if default_value.default is not inspect.Parameter.empty:
+                op_parameters.append(default_value.default)
+
+        if self._kernel_parameters is not None:
+            op_parameters += self._kernel_parameters
+
         func_source = inspect.getsource(self.fn)
         key_data = {
             "version": __version__,
+            "op_parameters": tuple(op_parameters),
             "func_source": func_source,
             "configs": self.configs,
             "compile_args": hash(self.compile_args),
@@ -242,12 +257,16 @@ class AutoTuner:
         """
         _init_logger_handlers()
 
-        key = self.generate_cache_key()
+        sig = inspect.signature(self.fn)
+        parameters = sig.parameters
+
+        key = self.generate_cache_key(parameters)
+
         with self._lock:
             if is_cache_enabled():
                 # First check in-memory cache
                 if key in self._memory_cache:
-                    self.logger.warning("Found kernel in memory cache. For better performance," \
+                    logger.warning("Found kernel in memory cache. For better performance," \
                                         " consider using `@tilelang.autotune` instead of direct AutoTuner.from_kernel.")
                     return self._memory_cache[key]
 
@@ -258,8 +277,6 @@ class AutoTuner:
                     self._memory_cache[key] = result
                     return result
 
-        sig = inspect.signature(self.fn)
-        parameters = sig.parameters
         best_latency: float = 1e8
         best_config: Optional[Dict[str, Any]] = None
         best_kernel: Optional[tilelang.JITKernel] = None
@@ -343,9 +360,13 @@ class AutoTuner:
         config_args = []
         for config in self.configs:
             new_kwargs = {}
+            keys = config.keys()
             for name, _ in parameters.items():
                 if name in config:
                     new_kwargs[name] = config[name]
+            unused_keys = set(keys) - set(new_kwargs.keys())
+            if len(unused_keys) > 0:
+                raise ValueError(f"Unused keys in config: {unused_keys}")
             config_args.append(new_kwargs)
 
         num_workers = max(1, int(get_available_cpu_count() * 0.9))
@@ -461,8 +482,30 @@ class _AutoTunerImplementation:
     rep: int = 100
     timeout: int = 100
     configs: Any = None
+    supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto
+    ref_prog: Callable = None
+    supply_prog: Callable = None
+    rtol: float = 1e-2
+    atol: float = 1e-2
+    max_mismatched_ratio: float = 0.01
+    skip_check: bool = False
+    manual_check_prog: Callable = None
+    cache_input_tensors: bool = False
 
-    def __init__(self, configs: Any, warmup: int = 25, rep: int = 100, timeout: int = 100) -> None:
+    def __init__(self,
+                 configs: Any,
+                 warmup: int = 25,
+                 rep: int = 100,
+                 timeout: int = 100,
+                 supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto,
+                 ref_prog: Callable = None,
+                 supply_prog: Callable = None,
+                 rtol: float = 1e-2,
+                 atol: float = 1e-2,
+                 max_mismatched_ratio: float = 0.01,
+                 skip_check: bool = False,
+                 manual_check_prog: Callable = None,
+                 cache_input_tensors: bool = False) -> None:
         """Initialize the AutoTunerImplementation.
 
         Args:
@@ -507,8 +550,21 @@ class _AutoTunerImplementation:
                 def jit_compile(**config_arg):
                     return fn(*args, **kwargs, __tune_params=config_arg)
 
-                autotuner = AutoTuner(fn, configs=configs)
+                autotuner = AutoTuner(
+                    fn, configs=configs).set_profile_args(
+                        supply_type=self.supply_type,
+                        ref_prog=self.ref_prog,
+                        supply_prog=self.supply_prog,
+                        rtol=self.rtol,
+                        atol=self.atol,
+                        max_mismatched_ratio=self.max_mismatched_ratio,
+                        skip_check=self.skip_check,
+                        manual_check_prog=self.manual_check_prog,
+                        cache_input_tensors=self.cache_input_tensors,
+                    )
                 autotuner.jit_compile = jit_compile
+                autotuner.set_kernel_parameters(key)
+
                 autotuner.run = partial(autotuner.run, warmup, rep, timeout)
 
                 artifact = autotuner.run()
@@ -520,12 +576,24 @@ class _AutoTunerImplementation:
 
 
 def autotune(  # This is the new public interface
-        func: Union[Callable[_P, _RProg], PrimFunc, None] = None,
-        *,  # Indicates subsequent arguments are keyword-only
-        configs: Any,
-        warmup: int = 25,
-        rep: int = 100,
-        timeout: int = 100):
+    func: Union[Callable[_P, _RProg], PrimFunc, None] = None,
+    *,  # Indicates subsequent arguments are keyword-only
+    configs: Any,
+    # profile arguments
+    warmup: int = 25,
+    rep: int = 100,
+    timeout: int = 100,
+    # compile arguments
+    supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto,
+    ref_prog: Callable = None,
+    supply_prog: Callable = None,
+    rtol: float = 1e-2,
+    atol: float = 1e-2,
+    max_mismatched_ratio: float = 0.01,
+    skip_check: bool = False,
+    manual_check_prog: Callable = None,
+    cache_input_tensors: bool = False,
+):
     """
     Just-In-Time (JIT) compiler decorator for TileLang functions.
 
@@ -569,5 +637,18 @@ def autotune(  # This is the new public interface
         # Create a _AutoTunerImplementation instance with the provided/defaulted arguments.
         # This instance is a decorator that will be applied to the function later.
         configured_decorator = _AutoTunerImplementation(
-            configs=configs, warmup=warmup, rep=rep, timeout=timeout)
+            configs=configs,
+            warmup=warmup,
+            rep=rep,
+            timeout=timeout,
+            supply_type=supply_type,
+            ref_prog=ref_prog,
+            supply_prog=supply_prog,
+            rtol=rtol,
+            atol=atol,
+            max_mismatched_ratio=max_mismatched_ratio,
+            skip_check=skip_check,
+            manual_check_prog=manual_check_prog,
+            cache_input_tensors=cache_input_tensors,
+        )
         return configured_decorator

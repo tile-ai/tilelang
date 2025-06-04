@@ -29,6 +29,8 @@ class LibraryGenerator(object):
     def load_lib(self, lib_path: Optional[str] = None):
         if lib_path is None:
             lib_path = self.libpath
+        else:
+            self.libpath = lib_path
         return ctypes.CDLL(lib_path)
 
     def compile_lib(self, timeout: float = None):
