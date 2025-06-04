@@ -1,3 +1,6 @@
+# Copyright (c) Tile-AI Corporation.
+# Licensed under the MIT License.
+
 import torch
 import torch.backends
 import tilelang
@@ -32,9 +35,9 @@ M, K = A.shape
 N, K = B.shape
 # accumulator types
 # compute grid (work to do per SM on the first wave)
-num_block_m = cdiv(M, BLOCK_SIZE_M)
-num_block_n = cdiv(N, BLOCK_SIZE_N)
-iters_per_tile = cdiv(K, BLOCK_SIZE_K)
+num_block_m = tilelang.cdiv(M, BLOCK_SIZE_M)
+num_block_n = tilelang.cdiv(N, BLOCK_SIZE_N)
+iters_per_tile = tilelang.cdiv(K, BLOCK_SIZE_K)
 total_tiles = num_block_m * num_block_n
 
 # Two-tile SK + DP
@@ -169,32 +172,37 @@ def tl_matmul_streamk(
     return main
 
 
-_tl_matmul_streamk = tl_matmul_streamk(
-    m,
-    n,
-    k,
-    streamk_tiles,
-    BLOCK_SIZE_M,
-    BLOCK_SIZE_N,
-    BLOCK_SIZE_K,
-    False,
-    True,
-    "float16",
-    "float16",
-    "float32",
-    2,
-    64,
-)
+def main():
+    _tl_matmul_streamk = tl_matmul_streamk(
+        m,
+        n,
+        k,
+        streamk_tiles,
+        BLOCK_SIZE_M,
+        BLOCK_SIZE_N,
+        BLOCK_SIZE_K,
+        False,
+        True,
+        "float16",
+        "float16",
+        "float32",
+        2,
+        64,
+    )
 
-kernel = tilelang.compile(_tl_matmul_streamk)
-print(kernel.get_kernel_source())
+    kernel = tilelang.compile(_tl_matmul_streamk)
+    print(kernel.get_kernel_source())
 
-b_c = torch.zeros((m, n), device="cuda", dtype=torch.float16)
+    b_c = torch.zeros((m, n), device="cuda", dtype=torch.float16)
 
-kernel(A, B, b_c)
+    kernel(A, B, b_c)
 
-C = torch.matmul(A, B.T)
+    C = torch.matmul(A, B.T)
 
-print(b_c)
-print(C)
-torch.testing.assert_close(C, b_c, rtol=1e-2, atol=1e-2)
+    print(b_c)
+    print(C)
+    torch.testing.assert_close(C, b_c, rtol=1e-2, atol=1e-2)
+
+
+if __name__ == "__main__":
+    main()

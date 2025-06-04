@@ -351,11 +351,7 @@ class TileLangBuilPydCommand(build_py):
                 target_dir = os.path.dirname(target_dir)
                 if not os.path.exists(target_dir):
                     os.makedirs(target_dir)
-                if not os.path.exists(os.path.join(target_dir, os.path.basename(source_dir))):
-                    # if not exists, copy the file
-                    # as tox will copy the file to the build
-                    # directory based on manifest file
-                    shutil.copy2(source_dir, target_dir)
+                shutil.copy2(source_dir, target_dir)
 
         # copy the tl_templates
         TILELANG_SRC = [
