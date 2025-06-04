@@ -1,9 +1,12 @@
+# Copyright (c) Tile-AI Corporation.
+# Licensed under the MIT License.
+
 import torch
 import torch.backends
 import tilelang
 from tilelang import language as T
 import math
-tilelang.disable_cache()
+
 
 def cdiv(a, b):
     return math.ceil(a / b)
@@ -32,9 +35,9 @@ M, K = A.shape
 N, K = B.shape
 # accumulator types
 # compute grid (work to do per SM on the first wave)
-num_block_m = cdiv(M, BLOCK_SIZE_M)
-num_block_n = cdiv(N, BLOCK_SIZE_N)
-iters_per_tile = cdiv(K, BLOCK_SIZE_K)
+num_block_m = tilelang.cdiv(M, BLOCK_SIZE_M)
+num_block_n = tilelang.cdiv(N, BLOCK_SIZE_N)
+iters_per_tile = tilelang.cdiv(K, BLOCK_SIZE_K)
 total_tiles = num_block_m * num_block_n
 
 # Two-tile SK + DP
