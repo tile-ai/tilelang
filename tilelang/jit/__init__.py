@@ -82,7 +82,7 @@ def compile(
 
 class _JitImplementation:
 
-    out_idx: Optional[Any]
+    out_idx: Optional[Union[List[int], int]]
     target: Union[str, Target]
     target_host: Union[str, Target]
     execution_backend: Literal["dlpack", "ctypes", "cython"]
