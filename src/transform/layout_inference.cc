@@ -289,7 +289,8 @@ public:
 
         if (layout_map.count(buffer)) {
           // If replicate size of this buffer is greater than the old one
-          if (buffer.scope() == "local.fragment" && level != InferLevel::kStrict) {
+          if (buffer.scope() == "local.fragment" &&
+              level != InferLevel::kStrict) {
             const FragmentNode *dst_layout = layout.as<Fragment>().get();
             const FragmentNode *src_layout =
                 layout_map[buffer].as<Fragment>().get();
@@ -359,7 +360,8 @@ public:
 
     auto print_layout_map = [&](Map<Buffer, Layout> layout_map) {
       for (const auto &[buffer, layout] : layout_map) {
-        LOG(INFO) << "\t buffer: " << buffer << " layout: " << layout->DebugOutput();
+        LOG(INFO) << "\t buffer: " << buffer
+                  << " layout: " << layout->DebugOutput();
       }
     };
 
