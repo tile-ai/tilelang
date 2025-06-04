@@ -285,6 +285,21 @@ public:
         ICHECK(layout.defined()) << "InferLayout returned an undefined layout.";
 
         if (layout_map.count(buffer)) {
+          // If replicate size of this buffer is greater than the old one
+          if (buffer.scope() == "local.fragment" &&
+              level != InferLevel::kStrict) {
+            const FragmentNode *dst_layout = layout.as<Fragment>().get();
+            const FragmentNode *src_layout =
+                layout_map[buffer].as<Fragment>().get();
+            if (as_const_int(dst_layout->ReplicateExtent()) &&
+                as_const_int(src_layout->ReplicateExtent()) &&
+                (*as_const_int(dst_layout->ReplicateExtent()) >
+                 *as_const_int(src_layout->ReplicateExtent()))) {
+              // update map
+              layout_map.Set(buffer, layout);
+              continue;
+            }
+          }
           // If already in map, ensure they are structurally equal
           ICHECK(StructuralEqual()(layout, layout_map[buffer]))
               << "Get different layout for " << buffer

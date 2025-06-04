@@ -1,22 +1,3 @@
-/*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership. The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- *
- *   http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an
- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
- * specific language governing permissions and limitations
- * under the License.
- */
-
 /*!
  * \file op/parallel.cc
  * \brief Define Parallel for operator
@@ -162,9 +143,10 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
                 indice_map_[read_source_buffer].size()) {
           read_source_buffer = buffer;
         }
-        // If the buffer is not replicated, use it as source_buffer
-        // because the layout inference is more accurate
-        if (is_one(frag->ReplicateExtent())) {
+        // If the buffer is not replicated and shape is equal to the
+        // source_buffer, use it as source_buffer because the layout inference
+        // is more accurate
+        if (is_one(frag->ReplicateExtent()) && !source_buffer.defined()) {
           source_buffer = buffer;
         }
       }
@@ -275,7 +257,6 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       results.Set(buffer, CompleteBufferFragment(buffer)->BindThreadRange(
                               T.thread_bounds));
     }
-    // Though they may exist some conflicts, but it's fine.
 
     // Layout infer conflict for local.fragment can noy be handled here
     // because the source_buffer is not always available
@@ -288,6 +269,13 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
             CompleteBufferFragment(buffer)->BindThreadRange(T.thread_bounds);
         const FragmentNode *dst_layout =
             dst_layout_fragment.as<Fragment>().get();
+        if (as_const_int(dst_layout->ReplicateExtent()) &&
+            as_const_int(src_layout->ReplicateExtent()) &&
+            (*as_const_int(dst_layout->ReplicateExtent()) >
+             *as_const_int(src_layout->ReplicateExtent()))) {
+          results.Set(buffer, dst_layout_fragment);
+          continue;
+        }
         if (src_layout && dst_layout) {
           ICHECK(src_layout->IsEqual(dst_layout, true))
               << "Layout may conflict with ParallelOp for buffer " << buffer
@@ -314,21 +302,18 @@ Optional<PrimExpr> ParallelOp::GetPredicate(Var thread_var) const {
 
 Fragment ParallelOp::CompleteBufferFragment(const Buffer &buffer) {
   ICHECK(loop_layout_.defined());
-  if (IsCommonAccessIndice(buffer))
+  if (IsCommonAccessIndice(buffer)) {
     return loop_layout_;
-
+  }
   PrimExpr rep_b = MakeFlattenedExpression(
       DivideUnusedIterators(indice_map_[buffer], loop_vars_, &analyzer_));
-
   auto bijective_indice = indice_map_[buffer];
   bijective_indice.push_back(rep_b);
   Layout ind_inv = Layout(loop_vars_, bijective_indice)->Inverse();
-
   PrimExpr indice_rep_extent =
       ind_inv->InputShape().back(); // this is the size of rep_b
   PrimExpr loop_rep_extent = loop_layout_->ReplicateExtent();
   PrimExpr dest_buffer_rep_extent = indice_rep_extent * loop_rep_extent;
-
   Array<PrimExpr> fwd;
   for (size_t i = 0; i < buffer->shape.size(); i++) {
     fwd.push_back(InputPlaceholder(i));
@@ -337,7 +322,6 @@ Fragment ParallelOp::CompleteBufferFragment(const Buffer &buffer) {
   PrimExpr thd_b = loop_layout_->ForwardThread(
       ind_inv->Forward(fwd),
       FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
-
   return Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent, NullOpt)
       ->CondenseReplicateVar();
 }
