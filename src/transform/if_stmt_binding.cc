@@ -32,8 +32,10 @@ private:
     auto then_case = VisitStmt(op->then_case);
     Optional<Stmt> else_case = op->else_case;
     if (else_case.defined()) {
-      else_case = VisitStmt(else_case.value());
+      return GetRef<Stmt>(op);
     }
+    ICHECK(then_case.defined()) << "then_case must be defined";
+    ICHECK(!else_case.defined()) << "else_case must be undefined";
 
     auto bind_if_stmt = [](Optional<Stmt> body,
                            const PrimExpr condition) -> Stmt {
@@ -57,9 +59,6 @@ private:
 
     if (then_case.defined()) {
       new_seq.push_back(bind_if_stmt(then_case, condition));
-    }
-    if (else_case.defined()) {
-      new_seq.push_back(bind_if_stmt(else_case, !condition));
     }
     return new_seq.size() == 1 ? new_seq[0] : SeqStmt(std::move(new_seq));
   }

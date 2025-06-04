@@ -1,9 +1,17 @@
 import tilelang
 import tilelang.language as T
-from tvm import DataType
 
 
-def matmul(M, N, K, block_M, block_N, block_K, split_k, dtype="float16", accum_dtype="float"):
+def matmul(M,
+           N,
+           K,
+           block_M,
+           block_N,
+           block_K,
+           split_k,
+           dtype="float16",
+           accum_dtype="float",
+           out_dtype="float32"):
 
     splitK = K // split_k
 
@@ -11,20 +19,14 @@ def matmul(M, N, K, block_M, block_N, block_K, split_k, dtype="float16", accum_d
     def main(
             A: T.Tensor((M, K), dtype),
             B: T.Tensor((N, K), dtype),
-            C: T.Tensor((M, N), dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(
                 T.ceildiv(N, block_N), T.ceildiv(M, block_M), split_k, threads=128) as (bx, by, bz):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_K, block_N), dtype)
-            C_shared = T.alloc_shared((block_M, block_N), dtype)
+            C_shared = T.alloc_shared((block_M, block_N), out_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-
-            if bz == 0:
-                # fuse the zero initialization kernel
-                for i, j in T.Parallel(block_M, block_N):
-                    m, n = by * block_M + i, bx * block_N + j
-                    C[m, n] = T.cast(0, dtype)
 
             T.clear(C_local)
             for ko in T.Pipelined(T.ceildiv(splitK, block_K), num_stages=0):
@@ -34,34 +36,45 @@ def matmul(M, N, K, block_M, block_N, block_K, split_k, dtype="float16", accum_d
 
             T.copy(C_local, C_shared)
 
-            if DataType(dtype).bits == 16:
-                for i, j in T.Parallel(block_M, block_N // 2):
-                    m, n = by * block_M + i, bx * block_N + j * 2
-                    # vectorized atomic
-                    T.atomic_addx2(C[m, n], C_shared[i, j * 2])
-            else:
-                for i, j in T.Parallel(block_M, block_N):
-                    T.atomic_add(C[by * block_M + i, bx * block_N + j], C_shared[i, j])
+            # TODO: Automatically add vectorized atomic with enhancement
+            # https://github.com/tile-ai/tilelang/issues/523
+            # if DataType(dtype).bits == 16:
+            #     for i, j in T.Parallel(block_M, block_N // 2):
+            #         m, n = by * block_M + i, bx * block_N + j * 2
+            #         # vectorized atomic
+            #         T.atomic_addx2(C[m, n], C_shared[i, j * 2])
+
+            for i, j in T.Parallel(block_M, block_N):
+                T.atomic_add(C[by * block_M + i, bx * block_N + j], C_shared[i, j])
 
     return main
 
 
-program = matmul(1024, 1024, 1024, 128, 128, 32, 4)
+def main():
+    M = 1024
+    N = 1024
+    K = 1024
+    block_M = 128
+    block_N = 128
+    block_K = 32
+    split_k = 4
 
-kernel = tilelang.compile(program)
+    program = matmul(M, N, K, block_M, block_N, block_K, split_k)
 
-print(kernel.get_kernel_source())
+    kernel = tilelang.compile(program)
 
-import torch
+    import torch
 
-a = torch.randn(1024, 1024).cuda().half()
-b = torch.randn(1024, 1024).cuda().half()
-c = torch.zeros(1024, 1024).cuda().half()
-kernel(a, b, c)
+    torch.random.manual_seed(42)
+    a = torch.randn(M, K).cuda().half()
+    b = torch.randn(K, N).cuda().half()
+    c = torch.zeros(M, N).cuda().float()
+    kernel(a, b, c)
 
-ref_c = a @ b
+    ref_c = a @ b
 
-print(c)
-print(ref_c)
+    torch.testing.assert_close(c, ref_c.to(c.dtype), rtol=1e-2, atol=1e-2)
 
-torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
+
+if __name__ == "__main__":
+    main()
