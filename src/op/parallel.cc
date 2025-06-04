@@ -103,8 +103,7 @@ ParallelOp::ParallelOp(For root) : root_(root), V(this) { V.VisitStmt(root); }
 
 bool ParallelOp::IsCommonAccessIndice(const Buffer &buffer) const {
   auto common_indice = loop_vars_.Map([](const auto &iv) { return iv->var; });
-  auto indices = indice_map_[buffer];
-  return StructuralEqual()(indices, common_indice);
+  return StructuralEqual()(indice_map_[buffer], common_indice);
 }
 
 /*! \brief Infer the layout for parallel operations based on different inference
@@ -166,8 +165,8 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
                               IterVarType::kDataPar);
       PrimExpr loop_var_to_thread =
           src_layout->ForwardThread(indice_map_[buffer], rep);
-      auto fragment = Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter);
-      return fragment->BindThreadRange(T.thread_bounds);
+      return Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter)
+          ->BindThreadRange(T.thread_bounds);
     }
   };
   if (source_buffer.defined()) {
