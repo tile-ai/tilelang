@@ -1070,7 +1070,7 @@ void CodeGenTileLangHIP::VisitExpr_(const BroadcastNode *op,
     for (int i = 0; i < lanes / 2; ++i) {
       if (i != 0)
         os << ", ";
-      os << "__pack_nv_bfloat162(" << v << ", " << v << ")";
+      os << "__pack_bfloat162(" << v << ", " << v << ")";
     }
     os << ')';
     return;
@@ -1152,6 +1152,10 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
   // Type code is kBFloat
   if (op->dtype.is_bfloat16()) {
     os << "bfloat16_t";
+    os << '(' << std::scientific << op->value << 'f' << ')';
+    return;
+  } else if (op->dtype.is_float8_e4m3fnuz()) {
+    os << "fp8_e4_t";
     os << '(' << std::scientific << op->value << 'f' << ')';
     return;
   }
