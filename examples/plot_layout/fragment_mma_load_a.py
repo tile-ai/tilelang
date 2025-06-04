@@ -112,4 +112,4 @@ plot_layout(warp_layout, name="warp_layout")
 # block layout 128x32
 block_layout = warp_layout.repeat([warp_rows, chunk], repeat_on_thread=False, lower_dim_first=False)
 print(block_layout)
-plot_layout(block_layout, name="block_layout")
+# plot_layout(block_layout, name="block_layout")
