@@ -3,7 +3,7 @@ import torch.backends
 import tilelang
 from tilelang import language as T
 import math
-
+tilelang.disable_cache()
 
 def cdiv(a, b):
     return math.ceil(a / b)
