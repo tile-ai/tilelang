@@ -107,7 +107,6 @@ TL_DEVICE unsigned __pack_bfloat162(const bfloat16_t x, const bfloat16_t y) {
   return (v1 << 16) | v0;
 }
 
-
 template <typename T1, typename T2>
 TL_DEVICE void AtomicAdd(T1 *address, T2 val) {
   atomicAdd(reinterpret_cast<T1 *>(address), static_cast<T1>(val));
