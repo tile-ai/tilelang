@@ -15,15 +15,15 @@ namespace cute {
 
 using namespace SM90;
 
-namespace tl_wgmma {
-
-using namespace cutlass::gemm::collective::detail; // ss_smem_selector
-
 template <typename T> CUTE_HOST_DEVICE static void cast_float_to_tf32(T &a) {
   uint32_t x = reinterpret_cast<uint32_t const &>(a);
   x += 0x1000u;
   a = tfloat32_t::bitcast(x);
 };
+
+namespace tl_wgmma {
+
+using namespace cutlass::gemm::collective::detail; // ss_smem_selector
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, typename A_type_raw,
@@ -495,8 +495,9 @@ public:
         copy(tiled_copy_B, tCsB(_, _, k + 1), tCrB_copy_view(_, _, k + 1));
       }
       if constexpr (need_tfloat32_cast) {
-        gemm(tiled_mma, tCrA(_, _, k), tCrB_view(_, _, k), acc);
+        cute::for_each(tCrB_view(_, _, k), cast_float_to_tf32<B_type>);
       }
+      gemm(tiled_mma, tCrA(_, _, k), tCrB_view(_, _, k), acc);
     }
 
     static CUTE_DEVICE void body_sr(A_type_raw * pA, B_type_raw * pB,
