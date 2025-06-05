@@ -8,7 +8,7 @@ from typing import Dict, Tuple, Optional
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner import *
-from examples.fusedmoe.example_fusedmoe_torch import *
+from example_fusedmoe_torch import *
 
 # tilelang.disable_cache()
 
