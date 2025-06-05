@@ -324,9 +324,8 @@ public:
                                 tfloat32_t, A_type_raw>::type;
   using C_type = C_type_raw;
 
-  static constexpr bool is_tfloat32 =
-      std::is_same<A_type, tfloat32_t>::value &&
-      std::is_same<B_type, tfloat32_t>::value;
+  static constexpr bool is_tfloat32 = std::is_same<A_type, tfloat32_t>::value &&
+                                      std::is_same<B_type, tfloat32_t>::value;
 
   using Instruction =
       DispatchInstruction<A_type, B_type, C_type, num_warp_m, num_warp_n, N>;
