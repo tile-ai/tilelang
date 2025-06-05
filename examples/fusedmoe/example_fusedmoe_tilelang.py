@@ -493,7 +493,6 @@ def custom_kernel(data: Tuple[torch.Tensor, Dict, Dict]) -> torch.Tensor:
     Returns:
         Tuple containing:
             - output: Processed tensor [batch_size, seq_len, d_model]
-            - aux_data: Dictionary with auxiliary data
     """
     input_tensor, weights, config = data
 
