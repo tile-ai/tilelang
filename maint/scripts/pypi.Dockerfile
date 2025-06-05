@@ -2,7 +2,7 @@ FROM nvidia/cuda:12.1.0-devel-ubuntu18.04
 
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y wget curl libtinfo-dev zlib1g-dev libssl-dev build-essential libedit-dev libxml2-dev; \
+    apt-get install -y wget curl libtinfo-dev zlib1g-dev libssl-dev build-essential libedit-dev libxml2-dev git; \
     curl -O https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh; \
     bash Miniconda3-latest-Linux-x86_64.sh -b -p /miniconda3; \
     rm Miniconda3-latest-Linux-x86_64.sh
