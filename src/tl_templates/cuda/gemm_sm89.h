@@ -2,13 +2,14 @@
 // Licensed under the MIT License.
 #pragma once
 
-#include "common.h"
-#include "cuda_fp8.h"
 #include <cute/algorithm/clear.hpp>
 #include <cute/arch/mma_sm80.hpp>
 #include <cute/atom/mma_atom.hpp>
 #include <cute/atom/mma_traits.hpp>
 #include <cute/underscore.hpp>
+
+#include "common.h"
+#include "cuda_fp8.h"
 
 namespace cute {
 

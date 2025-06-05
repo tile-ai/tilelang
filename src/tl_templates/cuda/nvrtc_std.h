@@ -98,9 +98,9 @@ using index_sequence = index_sequence_impl::index_sequence<Ns...>;
 template <size_t N>
 using make_index_sequence = index_sequence_impl::make_index_sequence<N>;
 
-template <typename T> T min(T a, T b) { return a < b ? a : b; }
+template <typename T> constexpr T min(T a, T b) { return a < b ? a : b; }
 
-template <typename T> T max(T a, T b) { return a > b ? a : b; }
+template <typename T> constexpr T max(T a, T b) { return a > b ? a : b; }
 
 template <bool B, class T, class F> struct conditional {
   using type = T;

@@ -49,7 +49,7 @@ def compile(
     out_idx : Union[List[int], int], optional
         Index(es) of the output tensors to return (default: None).
     execution_backend : Literal["dlpack", "ctypes", "cython", "nvrtc"], optional
-        Execution backend to use for kernel execution (default: "nvrtc").
+        Execution backend to use for kernel execution (default: "cython").
     target : Union[str, Target], optional
         Compilation target, either as a string or a TVM Target object (default: "auto").
     target_host : Union[str, Target], optional

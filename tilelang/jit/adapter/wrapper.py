@@ -138,7 +138,7 @@ TMA_DESC_INIT_FUNC_PY = """
 \t\traise RuntimeError(f"Failed to initialize the TMA descriptor {0}: {{res}}")
 """
 
-KERNAL_LAUNCH_FUNC_PY = """
+KERNEL_LAUNCH_FUNC_PY = """
 \tres = cuda.bindings.driver.cuKernelSetAttribute(
 \t\tcuda.bindings.driver.CUfunction_attribute.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
 \t\t{7},
@@ -663,7 +663,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             arg_types = ", ".join([arg[1] for arg in call_args])
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             kernel_launch_code += self.generate_tma_descriptor_args(
-                desc_name_map) + KERNAL_LAUNCH_FUNC_PY.format(
+                desc_name_map) + KERNEL_LAUNCH_FUNC_PY.format(
                     function_name, legalize(grid_info[0]), legalize(grid_info[1]),
                     legalize(grid_info[2]), legalize(block_info[0]), legalize(block_info[1]),
                     legalize(block_info[2]), smem_str, arg_names, arg_types, device_index)
