@@ -1,6 +1,8 @@
 #pragma once
 
+#ifndef __CUDACC_RTC__
 #include <cuda.h>
+#endif
 
 #include "common.h"
 

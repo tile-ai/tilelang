@@ -32,7 +32,7 @@ logger = getLogger(__name__)
 def compile(
     func: PrimFunc = None,
     out_idx: Union[List[int], int, None] = None,
-    execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+    execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
     target: Union[str, Target] = "auto",
     target_host: Union[str, Target] = None,
     verbose: bool = False,
@@ -46,8 +46,8 @@ def compile(
         The TileLang TIR function to compile and wrap.
     out_idx : Union[List[int], int], optional
         Index(es) of the output tensors to return (default: None).
-    execution_backend : Literal["dlpack", "ctypes"], optional
-        Execution backend to use for kernel execution (default: "dlpack").
+    execution_backend : Literal["dlpack", "ctypes", "cython", "nvrtc"], optional
+        Execution backend to use for kernel execution (default: "cython").
     target : Union[str, Target], optional
         Compilation target, either as a string or a TVM Target object (default: "auto").
     target_host : Union[str, Target], optional

@@ -25,7 +25,7 @@ TL_DEVICE void cp_async_gs(void const *const smem_addr, void *global_ptr) {
   static_assert(N == 16 || N == 8 || N == 4);
   unsigned int addr = smem_ptr_to_uint(smem_addr);
   if constexpr (N == 16) {
-    __asm__ __volatile__(
+    asm volatile(
 #if TL_ENABLE_L2_PREFETCH
         "cp.async.cg.shared.global.L2::128B [%0], [%1], %2;"
 #else
@@ -34,7 +34,7 @@ TL_DEVICE void cp_async_gs(void const *const smem_addr, void *global_ptr) {
         ::"r"(addr),
         "l"((void *)(global_ptr)), "n"(N));
   } else {
-    __asm__ __volatile__(
+    asm volatile(
 #if TL_ENABLE_L2_PREFETCH
         "cp.async.ca.shared.global.L2::128B [%0], [%1], %2;"
 #else
@@ -52,7 +52,7 @@ TL_DEVICE void cp_async_gs_conditional(void const *const smem_addr,
   int bytes = cond ? N : 0;
   unsigned int addr = smem_ptr_to_uint(smem_addr);
   if constexpr (N == 16) {
-    __asm__ __volatile__(
+    asm volatile(
 #if TL_ENABLE_L2_PREFETCH
         "cp.async.cg.shared.global.L2::128B [%0], [%1], %2, %3;"
 #else
@@ -61,7 +61,7 @@ TL_DEVICE void cp_async_gs_conditional(void const *const smem_addr,
         ::"r"(addr),
         "l"((void *)(global_ptr)), "n"(N), "r"(bytes));
   } else {
-    __asm__ __volatile__(
+    asm volatile(
 #if TL_ENABLE_L2_PREFETCH
         "cp.async.ca.shared.global.L2::128B [%0], [%1], %2, %3;"
 #else

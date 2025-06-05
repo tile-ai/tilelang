@@ -1,17 +1,33 @@
-from typing import Optional
-from .utils import is_cuda_target, is_hip_target, is_cpu_target
-from tilelang import tvm as tvm
-from tilelang.contrib.nvcc import get_target_compute_version, get_nvcc_compiler
-from tvm.target import Target
 import ctypes
-import os
-import tempfile
-import subprocess
+import importlib
 import logging
-from tilelang.env import TILELANG_TEMPLATE_PATH
+import os
+import os.path as osp
+import subprocess
+import tempfile
+from typing import Optional
+
+from tvm.target import Target
+
+from tilelang import tvm as tvm
+from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_compute_version
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
+from tilelang.env import TILELANG_TEMPLATE_PATH
+
+from .utils import is_cpu_target, is_cuda_target, is_hip_target
 
 logger = logging.getLogger(__name__)
+
+is_nvrtc_available = False
+NVRTC_UNAVAILABLE_WARNING = "cuda-python is not available, nvrtc backend cannot be used. " \
+                            "Please install cuda-python via `pip install cuda-python` " \
+                            "if you want to use the nvrtc backend."
+try:
+    import cuda.bindings.driver as cuda
+    from tilelang.contrib.nvrtc import compile_cuda
+    is_nvrtc_available = True
+except ImportError:
+    pass
 
 
 class LibraryGenerator(object):
@@ -127,3 +143,88 @@ class LibraryGenerator(object):
 
     def set_src_path(self, srcpath):
         self.srcpath = srcpath
+
+
+class PyLibraryGenerator(LibraryGenerator):
+    host_func: Optional[str] = None
+    culib = None
+    pymodule = None
+
+    def __init__(self, target: Target):
+        if not is_nvrtc_available:
+            raise ImportError(NVRTC_UNAVAILABLE_WARNING)
+        super().__init__(target)
+
+    @staticmethod
+    def import_from_file(module_name, file_path):
+        spec = importlib.util.spec_from_file_location(module_name, file_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def update_host_func(self, host_func: str):
+        self.host_func = host_func
+
+    def load_lib(self, lib_path: Optional[str] = None):
+        if lib_path is None:
+            lib_path = self.libpath
+
+        pypath = lib_path.replace(".cubin", ".py")
+        self.pymodule = self.import_from_file("kernel", pypath)
+
+        # Ensure the context is valid
+        ctx = cuda.cuCtxGetCurrent()[1]
+        if cuda.cuCtxGetApiVersion(ctx)[0] != cuda.CUresult.CUDA_SUCCESS:
+            import torch
+            torch.cuda.synchronize()
+
+        result, self.culib = cuda.cuLibraryLoadFromFile(
+            bytes(lib_path, "utf-8"), [], [], 0, [], [], 0)
+        assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to load library: {lib_path}"
+
+    def compile_lib(self, timeout: float = None):
+        target = self.target
+        if is_cuda_target(target):
+            from tilelang.env import (CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH)
+            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
+            libpath = src.name.replace(".cu", ".cubin")
+
+            project_root = osp.join(osp.dirname(__file__), "..", "..")
+            if CUTLASS_INCLUDE_DIR is None:
+                cutlass_path = osp.abspath(osp.join(project_root, "3rdparty/cutlass/include"))
+            else:
+                cutlass_path = CUTLASS_INCLUDE_DIR
+
+            if TILELANG_TEMPLATE_PATH is None:
+                tl_template_path = osp.abspath(osp.join(project_root, "src"))
+            else:
+                tl_template_path = TILELANG_TEMPLATE_PATH
+
+            cuda_home = "/usr/local/cuda" if CUDA_HOME is None else CUDA_HOME
+
+            cubin_bytes = compile_cuda(
+                self.lib_code,
+                target_format="cubin",
+                options=[f"-I{tl_template_path}", f"-I{cutlass_path}", f"-I{cuda_home}/include"],
+                verbose=True)
+            with open(libpath, "wb") as f:
+                f.write(cubin_bytes)
+
+            src.write(self.lib_code)
+            src.flush()
+
+            self.srcpath = src.name
+            self.libpath = libpath
+
+            pypath = src.name.replace(".cu", ".py")
+            with open(pypath, "w") as f:
+                f.write(self.host_func)
+        else:
+            raise ValueError(f"Unsupported target: {target}")
+
+    def __del__(self):
+        if self.culib:
+            result = cuda.cuLibraryUnload(self.culib)[0]
+            if result != cuda.CUresult.CUDA_SUCCESS:
+                logger.warning(f"Failed to unload library: {self.libpath}")
+            self.culib = None

@@ -1,18 +1,15 @@
-from typing import List, Union, Any, Callable, Literal, Optional, Dict
+from typing import Any, Callable, Dict, List, Literal, Optional, Union
+
 from tvm.target import Target
-import tilelang
-from tilelang import tvm as tvm
 from tvm.tir import PrimFunc
 
-from tilelang.jit.adapter import (
-    TorchDLPackKernelAdapter,
-    BaseKernelAdapter,
-    CtypesKernelAdapter,
-    CythonKernelAdapter,
-)
-from tilelang.utils.target import determine_target, AVALIABLE_TARGETS
+import tilelang
+from tilelang import tvm as tvm
+from tilelang.engine.param import CompiledArtifact, KernelParam
+from tilelang.jit.adapter import (BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter,
+                                  NVRTCKernelAdapter, TorchDLPackKernelAdapter)
 from tilelang.profiler import Profiler, TensorSupplyType
-from tilelang.engine.param import KernelParam, CompiledArtifact
+from tilelang.utils.target import AVALIABLE_TARGETS, determine_target
 
 
 class JITKernel(object):
@@ -42,7 +39,7 @@ class JITKernel(object):
         self,
         func: PrimFunc = None,
         out_idx: Union[List[int], int] = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
         verbose: bool = False,
@@ -58,8 +55,8 @@ class JITKernel(object):
             The TileLang TIR function to compile and wrap.
         out_idx : Union[List[int], int], optional
             Index(es) of the output tensors to return (default: None).
-        execution_backend : Literal["dlpack", "ctypes"], optional
-            Execution backend to use for kernel execution (default: "dlpack").
+        execution_backend : Literal["dlpack", "ctypes", "cython", "nvrtc"], optional
+            Execution backend to use for kernel execution (default: "cython").
         target : Union[str, Target], optional
             Compilation target, either as a string or a TVM Target object (default: "auto").
         target_host : Union[str, Target], optional
@@ -99,6 +96,7 @@ class JITKernel(object):
             "dlpack",
             "ctypes",
             "cython",
+            "nvrtc",
         ], f"Invalid execution backend. {execution_backend}"
         if execution_backend == "cython":
             from tilelang.contrib.cc import get_cplus_compiler
@@ -127,7 +125,7 @@ class JITKernel(object):
         target: Union[str, Target],
         target_host: Union[str, Target],
         out_idx: Union[List[int], int],
-        execution_backend: Literal["dlpack", "ctypes", "cython"],
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"],
         pass_configs: Optional[Dict[str, Any]] = None,
     ):
         """
@@ -240,6 +238,18 @@ class JITKernel(object):
                 verbose=verbose,
                 pass_configs=pass_configs,
             )
+        elif execution_backend == "nvrtc":
+            adapter = NVRTCKernelAdapter(
+                params=artifact.params,
+                result_idx=out_idx,
+                target=target,
+                func_or_mod=tilelang_func,
+                host_mod=artifact.host_mod,
+                device_mod=artifact.device_mod,
+                kernel_global_source=artifact.kernel_source,
+                verbose=verbose,
+                pass_configs=pass_configs,
+            )
         else:
             # Handle invalid backend.
             raise ValueError(f"Invalid execution backend: {execution_backend}")
@@ -274,6 +284,16 @@ class JITKernel(object):
             )
         elif execution_backend == "cython":
             adapter = CythonKernelAdapter.from_database(
+                params=params,
+                result_idx=result_idx,
+                target=target,
+                func_or_mod=func_or_mod,
+                kernel_global_source=kernel_global_source,
+                kernel_lib_path=kernel_lib_path,
+                pass_configs=pass_configs,
+            )
+        elif execution_backend == "nvrtc":
+            adapter = NVRTCKernelAdapter.from_database(
                 params=params,
                 result_idx=result_idx,
                 target=target,
@@ -334,7 +354,7 @@ class JITKernel(object):
         str
             The source code of the compiled kernel function.
         """
-        if self.execution_backend in {"ctypes", "cython"}:
+        if self.execution_backend in {"ctypes", "cython", "nvrtc"}:
             return self.adapter.get_kernel_source()
         return self.artifact.kernel_source
 

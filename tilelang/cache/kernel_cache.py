@@ -1,25 +1,28 @@
 """The cache utils with class and database persistence - KernelCache Class"""
 
-import os
 import json
+import logging
+import os
 import shutil
-from pathlib import Path
+import threading
 from hashlib import sha256
-from typing import Callable, List, Literal, Union, Optional
+from pathlib import Path
+from typing import Callable, List, Literal, Optional, Union
+
+import cloudpickle
 from tvm.target import Target
 from tvm.tir import PrimFunc
-from tilelang.jit import JITKernel
-from tilelang.engine.param import KernelParam
-import threading
-import cloudpickle
-import logging
 
+from tilelang.engine.param import KernelParam
 from tilelang.env import TILELANG_CACHE_DIR, is_cache_enabled
+from tilelang.jit import JITKernel
 from tilelang.version import __version__
 
 KERNEL_PATH = "kernel.cu"
 WRAPPED_KERNEL_PATH = "wrapped_kernel.cu"
 KERNEL_LIB_PATH = "kernel_lib.so"
+KERNEL_CUBIN_PATH = "kernel.cubin"
+KERNEL_PY_PATH = "kernel.py"
 PARAMS_PATH = "params.pkl"
 
 
@@ -36,6 +39,7 @@ class KernelCache:
     _instance = None  # For implementing singleton pattern
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
+    execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython"
 
     cache_dir: Path = Path(TILELANG_CACHE_DIR)
 
@@ -66,7 +70,7 @@ class KernelCache:
         self,
         func: Callable,
         out_idx: List[int],
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         args=None,
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
@@ -86,6 +90,7 @@ class KernelCache:
         Returns:
             str: SHA256 hash key for the kernel configuration.
         """
+        self.execution_backend = execution_backend
         func_binary = cloudpickle.dumps(func.script())
         key_data = {
             "version": __version__,
@@ -99,8 +104,10 @@ class KernelCache:
             "execution_backend": execution_backend,
             "pass_configs": pass_configs,
         }
-        key_string = json.dumps(key_data, sort_keys=True)  # Sort keys to ensure consistency
-        return sha256(key_string.encode()).hexdigest()  # Use SHA256 to generate hash key
+        # Sort keys to ensure consistency
+        key_string = json.dumps(key_data, sort_keys=True)
+        # Use SHA256 to generate hash key
+        return sha256(key_string.encode()).hexdigest()
 
     def cached(
         self,
@@ -109,7 +116,7 @@ class KernelCache:
         *args,
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         verbose: bool = False,
         pass_configs: dict = None,
     ) -> JITKernel:
@@ -251,9 +258,15 @@ class KernelCache:
 
         # Save kernel library
         try:
-            kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
+            if self.execution_backend == "nvrtc":
+                kernel_lib_path = os.path.join(cache_path, KERNEL_CUBIN_PATH)
+            else:
+                kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
             src_lib_path = kernel.adapter.libpath
             shutil.copy(src_lib_path, kernel_lib_path)
+            if self.execution_backend == "nvrtc":
+                shutil.copy(
+                    src_lib_path.replace(".cubin", ".py"), os.path.join(cache_path, KERNEL_PY_PATH))
         except Exception as e:
             self.logger.error(f"Error saving kernel library to disk: {e}")
 
@@ -271,7 +284,7 @@ class KernelCache:
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
         out_idx: List[int] = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         pass_configs: dict = None,
         func: Callable = None,
     ) -> JITKernel:
@@ -304,7 +317,10 @@ class KernelCache:
         except Exception as e:
             self.logger.error(f"Error loading wrapped kernel source code from disk: {e}")
 
-        kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
+        if self.execution_backend == "nvrtc":
+            kernel_lib_path = os.path.join(cache_path, KERNEL_CUBIN_PATH)
+        else:
+            kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
 
         # Load kernel parameters
         try:
@@ -332,7 +348,7 @@ class KernelCache:
     def _clear_disk_cache(self):
         """
         Removes all cached kernels from disk.
-        
+
         Note:
             This operation will delete the entire cache directory and recreate it empty.
             Use with caution as this operation cannot be undone.
@@ -340,6 +356,7 @@ class KernelCache:
         try:
             if os.path.exists(self.cache_dir):
                 shutil.rmtree(self.cache_dir)  # Delete entire cache directory
-            os.makedirs(self.cache_dir, exist_ok=True)  # Re-create cache directory
+            # Re-create cache directory
+            os.makedirs(self.cache_dir, exist_ok=True)
         except Exception as e:
             self.logger.error(f"Error clearing disk cache: {e}")
