@@ -36,8 +36,11 @@ public:
                                tfloat32_t, B_type_raw>;
   using C_type = C_type_raw;
 
-  static constexpr bool is_tfloat32 = std::is_same<A_type, tfloat32_t>::value &&
-                                      std::is_same<B_type, tfloat32_t>::value;
+  static constexpr bool need_tfloat32_cast =
+      std::is_same<A_type_raw, float>::value &&
+      std::is_same<A_type, tfloat32_t>::value &&
+      std::is_same<B_type_raw, float>::value &&
+      std::is_same<B_type, tfloat32_t>::value;
 
   static constexpr GMMA::Major GmmaMajorA =
       trans_A ? GMMA::Major::MN : GMMA::Major::K;
@@ -90,9 +93,9 @@ public:
     if constexpr (clear_accum) {
       tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
     }
-    if constexpr (is_tfloat32) {
-      cast_float_to_tf32(tCrA);
-      cast_float_to_tf32(tCrB);
+    if constexpr (need_tfloat32_cast) {
+      cute::for_each(tCrA, cast_float_to_tf32<A_type>);
+      cute::for_each(tCrB, cast_float_to_tf32<B_type>);
     }
     CUTLASS_PRAGMA_UNROLL
     for (int k_block = 0; k_block < size<2>(tCrA); ++k_block) {
@@ -135,9 +138,9 @@ public:
     Tensor acc =
         make_tensor(make_rmem_ptr(reinterpret_cast<C_type *>(pC)),
                     partition_shape_C(tiled_mma, Shape<Int<M>, Int<N>>{}));
-    if constexpr (is_tfloat32) {
-      cast_float_to_tf32(tCrA);
-      cast_float_to_tf32(tCrB);
+    if constexpr (need_tfloat32_cast) {
+      cute::for_each(tCrA, cast_float_to_tf32<A_type>);
+      cute::for_each(tCrB, cast_float_to_tf32<B_type>);
     }
     warpgroup_fence_operand(tCrA);
     warpgroup_fence_operand(acc);
@@ -376,8 +379,11 @@ public:
                                 tfloat32_t, A_type_raw>::type;
   using C_type = C_type_raw;
 
-  static constexpr bool is_tfloat32 = std::is_same<A_type, tfloat32_t>::value &&
-                                      std::is_same<B_type, tfloat32_t>::value;
+  static constexpr bool need_tfloat32_cast =
+      std::is_same<A_type_raw, float>::value &&
+      std::is_same<A_type, tfloat32_t>::value &&
+      std::is_same<B_type_raw, float>::value &&
+      std::is_same<B_type, tfloat32_t>::value;
 
   using Instruction =
       DispatchInstruction<A_type, B_type, C_type, num_warp_m, num_warp_n, N>;
@@ -446,9 +452,9 @@ public:
     for (int k = 0; k < size<2>(tCrA); ++k) {
       copy(tiled_copy_A, tCsA(_, _, k), tCrA_copy_view(_, _, k));
       copy(tiled_copy_B, tCsB(_, _, k), tCrB_copy_view(_, _, k));
-      if constexpr (is_tfloat32) {
-        cast_float_to_tf32(tCrA_view(_, _, k));
-        cast_float_to_tf32(tCrB_view(_, _, k));
+      if constexpr (need_tfloat32_cast) {
+        cute::for_each(tCrA_view(_, _, k), cast_float_to_tf32<A_type>);
+        cute::for_each(tCrB_view(_, _, k), cast_float_to_tf32<B_type>);
       }
       gemm(tiled_mma, tCrA_view(_, _, k), tCrB_view(_, _, k), acc);
     }
@@ -475,8 +481,8 @@ public:
     Tensor tCrA =
         make_tensor(make_rmem_ptr(reinterpret_cast<A_type *>(pA)),
                     partition_shape_A(tiled_mma, Shape<Int<M>, Int<K>>{}));
-    if constexpr (is_tfloat32) {
-      cast_float_to_tf32(tCrA);
+    if constexpr (need_tfloat32_cast) {
+      cute::for_each(tCrA, cast_float_to_tf32<A_type>);
     }
     auto tCrB_view = make_tensor(tCrB.data(), remove_swizzle(tCrB.layout()));
     if constexpr (clear_accum) {
@@ -488,7 +494,7 @@ public:
       if (k < size<2>(tCrA) - 1) {
         copy(tiled_copy_B, tCsB(_, _, k + 1), tCrB_copy_view(_, _, k + 1));
       }
-      if constexpr (is_tfloat32) {
+      if constexpr (need_tfloat32_cast) {
         gemm(tiled_mma, tCrA(_, _, k), tCrB_view(_, _, k), acc);
       }
     }
@@ -514,8 +520,8 @@ public:
       Tensor tCrB =
           make_tensor(make_rmem_ptr(reinterpret_cast<B_type *>(pB)),
                       partition_shape_B(tiled_mma, Shape<Int<N>, Int<K>>{}));
-      if constexpr (is_tfloat32) {
-        cast_float_to_tf32(tCrB);
+      if constexpr (need_tfloat32_cast) {
+        cute::for_each(tCrB, cast_float_to_tf32<B_type>);
       }
       auto tCrA_view = make_tensor(tCrA.data(), remove_swizzle(tCrA.layout()));
       if constexpr (clear_accum) {
@@ -527,8 +533,8 @@ public:
         if (k < size<2>(tCrA) - 1) {
           copy(tiled_copy_A, tCsA(_, _, k + 1), tCrA_copy_view(_, _, k + 1));
         }
-        if constexpr (is_tfloat32) {
-          cast_float_to_tf32(tCrA_view(_, _, k));
+        if constexpr (need_tfloat32_cast) {
+          cute::for_each(tCrA_view(_, _, k), cast_float_to_tf32<A_type>);
         }
         gemm(tiled_mma, tCrA_view(_, _, k), tCrB(_, _, k), acc);
       }
