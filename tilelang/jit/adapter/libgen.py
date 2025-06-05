@@ -20,14 +20,16 @@ from .utils import is_cpu_target, is_cuda_target, is_hip_target
 
 logger = logging.getLogger(__name__)
 
+is_nvrtc_available = False
+NVRTC_UNAVAILABLE_WARNING = "cuda-python is not available, nvrtc backend cannot be used. " \
+                            "Please install cuda-python via `pip install cuda-python` " \
+                            "if you want to use the nvrtc backend."
 try:
     import cuda.bindings.driver as cuda
     from tilelang.contrib.nvrtc import compile_cuda
+    is_nvrtc_available = True
 except ImportError:
-    raise ImportError("cuda-python is not available, nvrtc backend cannot be used. "
-                    "Please install cuda-python via `pip install cuda-python` "
-                    "if you want to use the nvrtc backend.")
-
+    pass
 
 
 class LibraryGenerator(object):
@@ -151,6 +153,8 @@ class PyLibraryGenerator(LibraryGenerator):
     pymodule = None
 
     def __init__(self, target: Target):
+        if not is_nvrtc_available:
+            raise ImportError(NVRTC_UNAVAILABLE_WARNING)
         super().__init__(target)
 
     @staticmethod

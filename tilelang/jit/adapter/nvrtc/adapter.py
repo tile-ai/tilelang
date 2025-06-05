@@ -19,12 +19,15 @@ from ..base import BaseKernelAdapter
 
 logger = logging.getLogger(__name__)
 
+is_nvrtc_available = False
+NVRTC_UNAVAILABLE_WARNING = "cuda-python is not available, nvrtc backend cannot be used. " \
+                            "Please install cuda-python via `pip install cuda-python` " \
+                            "if you want to use the nvrtc backend."
 try:
     import cuda.bindings.driver as cuda
+    is_nvrtc_available = True
 except ImportError:
-    raise ImportError("cuda-python is not available, nvrtc backend cannot be used. "
-                      "Please install cuda-python via `pip install cuda-python` "
-                      "if you want to use the nvrtc backend.")
+    pass
 
 
 class NVRTCKernelAdapter(BaseKernelAdapter):
@@ -41,6 +44,9 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                  kernel_global_source: Optional[str] = None,
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None):
+
+        if not is_nvrtc_available:
+            raise ImportError(NVRTC_UNAVAILABLE_WARNING)
 
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
