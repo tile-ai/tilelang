@@ -224,9 +224,7 @@ public:
 
   static constexpr bool need_tfloat32_cast =
       std::is_same<A_type_raw, float>::value &&
-      // A_type will be tfloat32_t if A_type_raw is float
       std::is_same<B_type_raw, float>::value;
-  // B_type will be tfloat32_t if B_type_raw is float
 
   using Instruction =
       DispatchInstruction<A_type, B_type, C_type, num_warp_m, num_warp_n, N>;

@@ -362,12 +362,6 @@ struct OperandTraits<64, N, K, false, num_warp_n,
   using Copy = DefaultCopy;
 };
 
-template <typename T> CUTE_HOST_DEVICE static void cast_float_to_tf32(T &a) {
-  uint32_t x = reinterpret_cast<uint32_t const &>(a);
-  x += 0x1000u;
-  a = tfloat32_t::bitcast(x);
-};
-
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, typename A_type_raw,
           typename B_type_raw, typename C_type_raw>
@@ -501,48 +495,49 @@ public:
       }
       gemm(tiled_mma, tCrA(_, _, k), tCrB_view(_, _, k), acc);
     }
+  }
 
-    static CUTE_DEVICE void body_sr(A_type_raw * pA, B_type_raw * pB,
-                                    C_type_raw * pC) {
-      const int tid = threadIdx.x;
-      Tensor sA = make_tensor(make_smem_ptr(reinterpret_cast<A_type *>(pA)),
-                              SmemLayoutA{});
-      TileMma tiled_mma;
-      auto thr_mma = tiled_mma.get_thread_slice(tid);
-      auto tiled_copy_A = make_tiled_copy_A(SmemCopyA{}, tiled_mma);
-      auto thr_copy_A = tiled_copy_A.get_thread_slice(tid);
+  static CUTE_DEVICE void body_sr(A_type_raw *pA, B_type_raw *pB,
+                                  C_type_raw *pC) {
+    const int tid = threadIdx.x;
+    Tensor sA = make_tensor(make_smem_ptr(reinterpret_cast<A_type *>(pA)),
+                            SmemLayoutA{});
+    TileMma tiled_mma;
+    auto thr_mma = tiled_mma.get_thread_slice(tid);
+    auto tiled_copy_A = make_tiled_copy_A(SmemCopyA{}, tiled_mma);
+    auto thr_copy_A = tiled_copy_A.get_thread_slice(tid);
 
-      Tensor tCrA = thr_mma.partition_fragment_A(sA);
-      Tensor tCsA = thr_copy_A.partition_S(sA);
+    Tensor tCrA = thr_mma.partition_fragment_A(sA);
+    Tensor tCsA = thr_copy_A.partition_S(sA);
 
-      Tensor tCrA_copy_view = thr_copy_A.retile_D(tCrA);
+    Tensor tCrA_copy_view = thr_copy_A.retile_D(tCrA);
 
-      Tensor acc =
-          make_tensor(make_rmem_ptr(reinterpret_cast<C_type *>(pC)),
-                      partition_shape_C(tiled_mma, Shape<Int<M>, Int<N>>{}));
-      Tensor tCrB =
-          make_tensor(make_rmem_ptr(reinterpret_cast<B_type *>(pB)),
-                      partition_shape_B(tiled_mma, Shape<Int<N>, Int<K>>{}));
-      if constexpr (need_tfloat32_cast) {
-        cute::for_each(tCrB, cast_float_to_tf32<B_type>);
-      }
-      auto tCrA_view = make_tensor(tCrA.data(), remove_swizzle(tCrA.layout()));
-      if constexpr (clear_accum) {
-        tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
-      }
-      copy(tiled_copy_A, tCsA(_, _, 0), tCrA_copy_view(_, _, 0));
-      CUTE_UNROLL
-      for (int k = 0; k < size<2>(tCrA); ++k) {
-        if (k < size<2>(tCrA) - 1) {
-          copy(tiled_copy_A, tCsA(_, _, k + 1), tCrA_copy_view(_, _, k + 1));
-        }
-        if constexpr (need_tfloat32_cast) {
-          cute::for_each(tCrA_view(_, _, k), cast_float_to_tf32<A_type>);
-        }
-        gemm(tiled_mma, tCrA_view(_, _, k), tCrB(_, _, k), acc);
-      }
+    Tensor acc =
+        make_tensor(make_rmem_ptr(reinterpret_cast<C_type *>(pC)),
+                    partition_shape_C(tiled_mma, Shape<Int<M>, Int<N>>{}));
+    Tensor tCrB =
+        make_tensor(make_rmem_ptr(reinterpret_cast<B_type *>(pB)),
+                    partition_shape_B(tiled_mma, Shape<Int<N>, Int<K>>{}));
+    if constexpr (need_tfloat32_cast) {
+      cute::for_each(tCrB, cast_float_to_tf32<B_type>);
     }
-  };
+    auto tCrA_view = make_tensor(tCrA.data(), remove_swizzle(tCrA.layout()));
+    if constexpr (clear_accum) {
+      tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
+    }
+    copy(tiled_copy_A, tCsA(_, _, 0), tCrA_copy_view(_, _, 0));
+    CUTE_UNROLL
+    for (int k = 0; k < size<2>(tCrA); ++k) {
+      if (k < size<2>(tCrA) - 1) {
+        copy(tiled_copy_A, tCsA(_, _, k + 1), tCrA_copy_view(_, _, k + 1));
+      }
+      if constexpr (need_tfloat32_cast) {
+        cute::for_each(tCrA_view(_, _, k), cast_float_to_tf32<A_type>);
+      }
+      gemm(tiled_mma, tCrA_view(_, _, k), tCrB(_, _, k), acc);
+    }
+  }
+};
 
 } // namespace tl_mma
 
