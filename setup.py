@@ -37,6 +37,8 @@ ROOT_DIR = os.path.dirname(__file__)
 USE_LLVM = os.environ.get("USE_LLVM", "False").lower() == "true"
 # Add ROCM control environment variable
 USE_ROCM = os.environ.get("USE_ROCM", "False").lower() == "true"
+# Build with Debug mode
+DEBUG_MODE = os.environ.get("DEBUG_MODE", "False").lower() == "true"
 
 
 def load_module_from_path(module_name, path):
@@ -158,7 +160,7 @@ def get_tilelang_version(with_cuda=True, with_system_info=True, with_commit_id=F
                                                 stderr=subprocess.DEVNULL,
                                                 encoding='utf-8').strip()
         except subprocess.SubprocessError as error:
-            raise RuntimeError("Failed to get git commit id") from error
+            logger.warning(f"Ignore commit id because failed to get git commit id: {str(error)}")
         if commit_id:
             version += f"+{commit_id}"
 
@@ -635,8 +637,8 @@ class CMakeBuild(build_ext):
         # -DCMAKE_LIBRARY_OUTPUT_DIRECTORY sets where built libraries go
         # -DPYTHON_EXECUTABLE ensures that the correct Python is used
         cmake_args = [
-            f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}",
-            f"-DPYTHON_EXECUTABLE={sys.executable}",
+            f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}", f"-DPYTHON_EXECUTABLE={sys.executable}",
+            f"-DCMAKE_BUILD_TYPE={'Debug' if DEBUG_MODE else 'Release'}"
         ]
 
         # Create the temporary build directory (if it doesn't exist).
