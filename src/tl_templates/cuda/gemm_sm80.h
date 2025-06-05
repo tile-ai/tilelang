@@ -203,7 +203,9 @@ struct OperandTraits<64, N, K, false, num_warp_n,
 
 template <typename T> CUTE_HOST_DEVICE static void cast_float_to_tf32(T &a) {
   uint32_t x = reinterpret_cast<uint32_t const &>(a);
-  x += 0x1000u;
+  if (std::isfinite(a)) {
+    x += 0x1000u;
+  }
   a = tfloat32_t::bitcast(x);
 };
 
@@ -222,9 +224,9 @@ public:
 
   static constexpr bool need_tfloat32_cast =
       std::is_same<A_type_raw, float>::value &&
-      std::is_same<A_type, tfloat32_t>::value &&
-      std::is_same<B_type_raw, float>::value &&
-      std::is_same<B_type, tfloat32_t>::value;
+      // A_type will be tfloat32_t if A_type_raw is float
+      std::is_same<B_type_raw, float>::value;
+  // B_type will be tfloat32_t if B_type_raw is float
 
   using Instruction =
       DispatchInstruction<A_type, B_type, C_type, num_warp_m, num_warp_n, N>;
