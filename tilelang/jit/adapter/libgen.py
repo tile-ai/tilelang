@@ -173,6 +173,13 @@ class PyLibraryGenerator(LibraryGenerator):
 
         pypath = lib_path.replace(".cubin", ".py")
         self.pymodule = self.import_from_file("kernel", pypath)
+
+        # Ensure the context is valid
+        ctx = cuda.cuCtxGetCurrent()[1]
+        if cuda.cuCtxGetApiVersion(ctx)[0] != cuda.CUresult.CUDA_SUCCESS:
+            import torch
+            torch.cuda.synchronize()
+
         result, self.culib = cuda.cuLibraryLoadFromFile(
             bytes(lib_path, "utf-8"), [], [], 0, [], [], 0)
         assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to load library: {lib_path}"
