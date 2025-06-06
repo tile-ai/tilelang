@@ -46,6 +46,13 @@ def allow_vectorize(pass_ctx: Optional[PassContext] = None) -> bool:
     return not disable_vectorize
 
 
+def allow_global_thread_synchronization(pass_ctx: Optional[PassContext] = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    enable_global_thread_sync = pass_ctx.config.get("tir.detect_global_barrier", False)
+    return enable_global_thread_sync
+
+
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
     mod = tir.transform.BindTarget(target)(mod)
@@ -133,11 +140,11 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.InferFragment()(mod)
     mod = tir.transform.LowerThreadAllreduce()(mod)
     mod = tilelang.transform.LowerHopperIntrin()(mod)
-    mod = tilelang.transform.ThreadSync("global")(mod)
 
     # Global Barrier Synchronization must be applied before
     # SplitHostDevice pass, as the global barrier
-    mod = tilelang.transform.ThreadSync("global")(mod)
+    if allow_global_thread_synchronization():
+        mod = tilelang.transform.ThreadSync("global")(mod)
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
 
