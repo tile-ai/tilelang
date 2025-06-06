@@ -62,8 +62,11 @@ def matmul_sp(
             E_shared = T.alloc_shared((block_M, block_K // 8), 'uint8')
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.annotate_layout({
-                E: make_metadata_layout(E, mma_dtype="float16", arch="sm90", backend="cutlass"),
-                E_shared: make_metadata_layout(E_shared, mma_dtype="float16", arch="sm90", backend="cutlass"),
+                E:
+                    make_metadata_layout(E, mma_dtype="float16", arch="sm90", backend="cutlass"),
+                E_shared:
+                    make_metadata_layout(
+                        E_shared, mma_dtype="float16", arch="sm90", backend="cutlass"),
             })
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
@@ -100,11 +103,20 @@ def generate_2_to_4_sparse_tensor(shape, dtype=torch.float32, device='cpu'):
     sparse_tensor = full_tensor * mask
     return sparse_tensor
 
-def main():
-    torch.random.manual_seed(0)
-    M, N, K = 1024, 1024, 1024  
-    block_M, block_N, block_K = 128, 128, 128
 
+def run_gemm_sp(
+    M,
+    N,
+    K,
+    in_dtype,
+    out_dtype,
+    accum_dtype,
+    block_M,
+    block_N,
+    block_K,
+    num_stages,
+    num_threads,
+):
     program = matmul_sp(
         M,
         N,
@@ -112,16 +124,14 @@ def main():
         block_M,
         block_N,
         block_K,
-        in_dtype='float16',
-        out_dtype='float32',
-        accum_dtype='float32',
-        num_stages=1,
-        threads=128,
+        in_dtype,
+        out_dtype,
+        accum_dtype,
+        num_stages,
+        num_threads,
     )
-    kernel = tilelang.compile(program, out_idx=[-1], pass_configs={
-                "tl.disable_tma_lower": True,
-            })
-
+    # NOTE: TMA doesn't support annotation on global buffer
+    kernel = tilelang.compile(program, out_idx=[-1], pass_configs={"tl.disable_tma_lower": True})
     A = generate_2_to_4_sparse_tensor((M, K), dtype=torch.float16, device='cuda')
     A_sparse, E = compress_lib.compress_sm90(A)
     B = torch.randn((K, N), device='cuda', dtype=torch.float16)
@@ -129,9 +139,16 @@ def main():
     C_sp = kernel(A_sparse, E, B).half()
     C = torch.matmul(A, B)
 
-    torch.testing.assert_close(C_sp, C, atol=1e-3,rtol=1e-3)
+    torch.testing.assert_close(C_sp, C, atol=1e-3, rtol=1e-3)
     print("pass")
 
 
+def test_gemm_sp():
+    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 128, 128, 128, 2, 128)
+    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 128, 128, 128, 2, 128)
+    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 128, 256, 2, 128)
+    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 256, 64, 128, 2, 128)
+
+
 if __name__ == "__main__":
-    main()
+    tilelang.testing.main()

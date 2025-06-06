@@ -24,7 +24,7 @@ def __make_metadata_layout_sm90_cutlass_16bit(buffer: tvm.tir.Buffer):
 
     shape = buffer.shape
     if shape[0] < 64 or shape[1] < 16:
-        raise ValueError(f"Buffer shape {shape} is too small for sm90 cutlass 16-bit layout")
+        raise ValueError(f"Buffer shape {shape} is too small for sm90 cutlass 16-bit layout, expected multiple of [64, 16], cooreponding A matrix size [64, 128]")
 
     # atom layout
     i_basis = [8, 2, 4]
