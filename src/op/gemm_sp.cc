@@ -51,7 +51,7 @@ GemmSP::GemmSP(Array<PrimExpr> args, BufferMap vmap) {
   }
   if (args.size() > 12) {
     ICHECK(false) << "received " << args.size()
-                  << " arguments, but only 10 are expected";
+                  << " arguments, but only 12 are expected";
   }
 }
 
@@ -127,6 +127,8 @@ Stmt GemmSP::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
          (B.scope() == "shared" || B.scope() == "shared.dyn"))
       << "Only support shared.dyn scope for A and B, but received " << A.scope()
       << " and " << B.scope();
+  ICHECK((E.scope() == "shared" || E.scope() == "shared.dyn"))
+      << "Only support shared.dyn scope for E as copy from smem to rmem are delegated to cute implemntation, found " << E.scope();
   ss << op_name << "<" << M << ", " << N << ", " << K << ", ";
   ss << warp_m << ", " << warp_n << ", ";
   ss << trans_A << ", " << trans_B;
