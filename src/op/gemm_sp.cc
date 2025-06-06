@@ -63,7 +63,7 @@ GemmSP::ComputeWarpPartition(int num_warps, Target target,
   int m_warp = 1, n_warp = 1;
   bool allow_wgmma = TargetIsHopper(target) && maybe_hopper_wgmma &&
                      (this->M >= 64) && (num_warps % 4 == 0);
-  ICHECK(allow_wgmma) << "Use Warp Group MMA requires 128*N threads.";  // TODO
+  ICHECK(allow_wgmma) << "Use Warp Group MMA requires 128*N threads."; // TODO
   if (allow_wgmma) {
     ICHECK(num_warps % 4 == 0) << "Use Warp Group MMA requires 128*N threads.";
     if (this->policy == GemmWarpPolicy::kFullRow ||
