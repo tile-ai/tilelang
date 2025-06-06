@@ -10,9 +10,9 @@ from typing import Union
 
 def gemm_sp(
     A_sparse: Union[tir.Buffer, tir.Var],
+    E: Union[tir.Buffer, tir.Var],
     B: Union[tir.Buffer, tir.Var],
     C: Union[tir.Buffer, tir.Var],
-    E: Union[tir.Buffer, tir.Var],
     transpose_A: bool = False,
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
@@ -20,13 +20,14 @@ def gemm_sp(
     k_pack: int = 1,
     wg_wait: int = 0,
 ):
-    """Perform a General Matrix Multiplication (GEMM) operation.
+    """Perform a Sparse General Matrix Multiplication (GEMM-sp) operation.
 
     This function computes C = A @ B where A and B can optionally be transposed.
     The operation supports various warp policies and accumulation modes.
 
     Args:
-        A (Union[tir.Buffer, tir.Var]): First input matrix
+        A_sparse (Union[tir.Buffer, tir.Var]): First input matrix dense values
+        E (Union[tir.Buffer, tir.Var]): First input matrix sparse metadata
         B (Union[tir.Buffer, tir.Var]): Second input matrix
         C (Union[tir.Buffer, tir.Var]): Output matrix for results
         transpose_A (bool, optional): Whether to transpose matrix A. Defaults to False.
@@ -63,7 +64,7 @@ def gemm_sp(
     N = C.shape[1]
     K_A = A_sparse.shape[0] if transpose_A else A_sparse.shape[1]
     K_B = B.shape[1] if transpose_B else B.shape[0]
-    assert K_A * 2 == K_B, f"{K_A // 2} != {K_B}"
+    assert K_A * 2 == K_B, f"T.gemm K shape check failed: K_A = {K_A}, K_B = {K_B}"
     Aptr = A_sparse.access_ptr("r")
     Bptr = B.access_ptr("r")
     Cptr = C.access_ptr("rw")
@@ -72,9 +73,9 @@ def gemm_sp(
         "handle",
         tir.op.Op.get("tl.gemm_sp"),
         Aptr,
+        Eptr,
         Bptr,
         Cptr,
-        Eptr,
         transpose_A,
         transpose_B,
         M,
@@ -82,5 +83,6 @@ def gemm_sp(
         K_B,
         policy,
         clear_accum,
+        k_pack,
         wg_wait,
     )

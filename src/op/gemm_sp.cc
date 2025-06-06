@@ -36,9 +36,9 @@ static std::vector<int> toPrimeFactors(int x) {
 
 GemmSP::GemmSP(Array<PrimExpr> args, BufferMap vmap) {
   A = vmap[GetVarFromAccessPtr(args[0])];
-  B = vmap[GetVarFromAccessPtr(args[1])];
-  C = vmap[GetVarFromAccessPtr(args[2])];
-  E = vmap[GetVarFromAccessPtr(args[3])];
+  E = vmap[GetVarFromAccessPtr(args[1])];
+  B = vmap[GetVarFromAccessPtr(args[2])];
+  C = vmap[GetVarFromAccessPtr(args[3])];
   trans_A = args[4].as<Bool>().value();
   trans_B = args[5].as<Bool>().value();
   M = args[6].as<IntImm>().value()->value;
@@ -47,11 +47,13 @@ GemmSP::GemmSP(Array<PrimExpr> args, BufferMap vmap) {
   policy = static_cast<GemmWarpPolicy>(args[9].as<IntImm>().value()->value);
   clear_accum = args[10].as<Bool>().value();
   if (args.size() > 11) {
-    wg_wait = args[11].as<IntImm>().value()->value;
+    kPack = args[11].as<IntImm>().value()->value;
+    if (kPack != 1 && kPack != 2) {
+      ICHECK(false) << "kPack must be 1 or 2";
+    }
   }
   if (args.size() > 12) {
-    ICHECK(false) << "received " << args.size()
-                  << " arguments, but only 12 are expected";
+    wg_wait = args[12].as<IntImm>().value()->value;
   }
 }
 
@@ -61,6 +63,7 @@ GemmSP::ComputeWarpPartition(int num_warps, Target target,
   int m_warp = 1, n_warp = 1;
   bool allow_wgmma = TargetIsHopper(target) && maybe_hopper_wgmma &&
                      (this->M >= 64) && (num_warps % 4 == 0);
+  ICHECK(allow_wgmma) << "Use Warp Group MMA requires 128*N threads.";  // TODO
   if (allow_wgmma) {
     ICHECK(num_warps % 4 == 0) << "Use Warp Group MMA requires 128*N threads.";
     if (this->policy == GemmWarpPolicy::kFullRow ||
@@ -167,8 +170,6 @@ LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   if (TargetIsHopper(T.target)) {
     const int warp_size = 32;
     bool maybe_wgmma = (this->M >= 64) && (block_size / warp_size % 4 == 0);
-    ICHECK(maybe_wgmma) << "Only WGMMA is available for now, but disabled "
-                           "because  M < 64 or block_size % 128 != 0";
     auto [warp_m, warp_n] =
         ComputeWarpPartition(block_size / warp_size, T.target, maybe_wgmma);
     auto fragment =

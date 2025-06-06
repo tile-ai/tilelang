@@ -81,7 +81,7 @@ std::tuple<torch::Tensor, torch::Tensor> compress_sm90(torch::Tensor A) {
       {ME, KE}, torch::TensorOptions().dtype(torch::kUInt8).device(A.device()));
 
   cutlass::KernelHardwareInfo hw_info;
-  hw_info.device_id = 0;
+  hw_info.device_id = A.device().index();
   hw_info.sm_count =
       cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
           hw_info.device_id);

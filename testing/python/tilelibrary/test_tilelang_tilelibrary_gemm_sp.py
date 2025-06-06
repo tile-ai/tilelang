@@ -73,7 +73,7 @@ def matmul_sp(
                 T.copy(E[by * block_M, k * block_K // 8], E_shared)
                 T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
                 T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm_sp(A_shared, B_shared, C_local, E_shared, False, False)
+                T.gemm_sp(A_shared, E_shared, B_shared, C_local, False, False)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
