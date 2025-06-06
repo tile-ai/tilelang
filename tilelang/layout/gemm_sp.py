@@ -8,7 +8,6 @@ import tilelang.language as T
 
 from typing import List
 from math import prod
-from tilelang import _ffi_api
 
 
 def decompose_col_major(index_1d: int, basis: List[int]) -> List[int]:
@@ -24,7 +23,9 @@ def __make_metadata_layout_sm90_cutlass_16bit(buffer: tvm.tir.Buffer):
 
     shape = buffer.shape
     if shape[0] < 64 or shape[1] < 16:
-        raise ValueError(f"Buffer shape {shape} is too small for sm90 cutlass 16-bit layout, expected multiple of [64, 16], cooreponding A matrix size [64, 128]")
+        raise ValueError(
+            f"Buffer shape {shape} is too small for sm90 cutlass 16-bit layout, expected multiple of [64, 16], cooreponding A matrix size [64, 128]"
+        )
 
     # atom layout
     i_basis = [8, 2, 4]
@@ -54,11 +55,7 @@ def __make_metadata_layout_sm90_cutlass_16bit(buffer: tvm.tir.Buffer):
         j_offset = sum(j_decomposed[k] * stride_j[k] for k in range(len(j_decomposed)))
         return i_offset + j_offset
 
-    return T.Layout(
-        shape,
-        transform_sm90_cutlass_16bit
-    )
-
+    return T.Layout(shape, transform_sm90_cutlass_16bit)
 
 
 def __make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str = "float16"):
@@ -68,7 +65,10 @@ def __make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str =
         raise NotImplementedError(f"Unsupported dtype: {mma_dtype}")
 
 
-def make_metadata_layout(buffer: tvm.tir.Buffer, mma_dtype: str = "float16", arch: str = "sm90", backend: str = 'cutlass'):
+def make_metadata_layout(buffer: tvm.tir.Buffer,
+                         mma_dtype: str = "float16",
+                         arch: str = "sm90",
+                         backend: str = 'cutlass'):
     if arch == "sm90":
         if backend == 'cutlass':
             return __make_metadata_layout_sm90_cutlass(buffer, mma_dtype)
