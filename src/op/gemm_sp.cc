@@ -128,7 +128,9 @@ Stmt GemmSP::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       << "Only support shared.dyn scope for A and B, but received " << A.scope()
       << " and " << B.scope();
   ICHECK((E.scope() == "shared" || E.scope() == "shared.dyn"))
-      << "Only support shared.dyn scope for E as copy from smem to rmem are delegated to cute implemntation, found " << E.scope();
+      << "Only support shared.dyn scope for E as copy from smem to rmem are "
+         "delegated to cute implemntation, found "
+      << E.scope();
   ss << op_name << "<" << M << ", " << N << ", " << K << ", ";
   ss << warp_m << ", " << warp_n << ", ";
   ss << trans_A << ", " << trans_B;
