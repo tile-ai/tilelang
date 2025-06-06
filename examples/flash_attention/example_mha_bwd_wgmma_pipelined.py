@@ -141,7 +141,7 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
 
 
 @tilelang.jit
-def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
+def flashattn_bwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
     sm_scale = (1.0 / dim)**0.5
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     shape = [batch, seq_len, heads, dim]
@@ -160,7 +160,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
             dK: T.Tensor(shape, dtype),  # type: ignore
             dV: T.Tensor(shape, dtype),  # type: ignore
     ):
-        with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=128) as (bx, by, bz):
+        with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=256) as (bx, by, bz):
             K_shared = T.alloc_shared([block_M, dim], dtype)
             dsT_shared = T.alloc_shared([block_M, block_N], dtype)
             # should not store K to local if dim is large
@@ -193,41 +193,45 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
             T.copy(V[bz, by * block_M:(by + 1) * block_M, bx, :], V_shared)
             T.clear(dv)
             T.clear(dk)
-            loop_st = T.floordiv(by * block_M, block_N) if is_causal else 0
+            loop_st = T.floordiv(by * block_M, block_N) if is_casual else 0
             loop_ed = T.ceildiv(seq_len, block_N)
             for k in T.Pipelined(loop_st, loop_ed, num_stages=2):
                 T.copy(Q[bz, k * block_N:(k + 1) * block_N, bx, :], q)
                 T.clear(qkT)
                 T.gemm(
-                    K_shared, q, qkT, transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullRow)  # , wg_wait=-1)
+                    K_shared, q, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow, wg_wait=-1)
                 T.copy(dO[bz, k * block_N:(k + 1) * block_N, bx, :], do)
                 T.clear(dsT)
-                T.gemm(V_shared, do, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-                # wg_wait=-1)
-                # T.wait_wgmma(1)
+                T.gemm(
+                    V_shared,
+                    do,
+                    dsT,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullRow,
+                    wg_wait=-1)
+                T.wait_wgmma(1)
 
                 T.copy(lse[bz, bx, k * block_N:(k + 1) * block_N], lse_shared)
                 for i, j in T.Parallel(block_M, block_N):
                     qkT[i, j] = T.exp2(qkT[i, j] * scale - lse_shared[j])
-                if is_causal:
+                if is_casual:
                     for i, j in T.Parallel(block_M, block_N):
                         qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j],
                                                    0)
-                # T.wait_wgmma(0)
+                T.wait_wgmma(0)
                 T.copy(qkT, qkT_cast)
-                T.gemm(qkT_cast, do, dv, policy=T.GemmWarpPolicy.FullRow)  # , wg_wait=-1)
+                T.gemm(qkT_cast, do, dv, policy=T.GemmWarpPolicy.FullRow, wg_wait=-1)
 
                 T.copy(Delta[bz, bx, k * block_N:(k + 1) * block_N], delta)
 
                 for i, j in T.Parallel(block_M, block_N):
                     dsT_cast[i, j] = qkT[i, j] * (dsT[i, j] - delta[j]) * sm_scale
-                T.gemm(dsT_cast, q, dk, policy=T.GemmWarpPolicy.FullRow)  # , wg_wait=1)
+                T.gemm(dsT_cast, q, dk, policy=T.GemmWarpPolicy.FullRow, wg_wait=1)
 
                 T.copy(dsT_cast, dsT_shared)
                 T.clear(dq)
-                T.gemm(dsT_shared, K_shared, dq, transpose_A=True)  # , wg_wait=1)
-                # T.wait_wgmma(0)
+                T.gemm(dsT_shared, K_shared, dq, transpose_A=True, wg_wait=1)
+                T.wait_wgmma(0)
                 for i, j in T.Parallel(block_N, dim):
                     if k * block_N + i < seq_len:
                         T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
