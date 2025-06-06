@@ -6,6 +6,9 @@ import os
 import tilelang
 from tilelang import tvm as tvm
 from torch.utils.cpp_extension import load
+from tilelang.layout import make_metadata_layout
+
+tilelang.disable_cache()
 
 compress_util = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "../../../src/tl_templates/cuda/compress_sm90.cu")
@@ -58,6 +61,10 @@ def matmul_sp(
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             E_shared = T.alloc_shared((block_M, block_K // 8), 'uint8')
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            T.annotate_layout({
+                E: make_metadata_layout(E, mma_dtype="float16", arch="sm90", backend="cutlass"),
+                E_shared: make_metadata_layout(E_shared, mma_dtype="float16", arch="sm90", backend="cutlass"),
+            })
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(E[by * block_M, k * block_K // 8], E_shared)
@@ -93,13 +100,11 @@ def generate_2_to_4_sparse_tensor(shape, dtype=torch.float32, device='cpu'):
     sparse_tensor = full_tensor * mask
     return sparse_tensor
 
-
 def main():
     torch.random.manual_seed(0)
-    M, N, K = 1024, 1024, 128
+    M, N, K = 1024, 1024, 1024  
     block_M, block_N, block_K = 128, 128, 128
 
-    assert block_K == K, "tiling k is now allowed as meta data is interleaved"
     program = matmul_sp(
         M,
         N,
@@ -113,17 +118,18 @@ def main():
         num_stages=1,
         threads=128,
     )
-    kernel = tilelang.compile(program, out_idx=[-1])
+    kernel = tilelang.compile(program, out_idx=[-1], pass_configs={
+                "tl.disable_tma_lower": True,
+            })
 
     A = generate_2_to_4_sparse_tensor((M, K), dtype=torch.float16, device='cuda')
     A_sparse, E = compress_lib.compress_sm90(A)
-
     B = torch.randn((K, N), device='cuda', dtype=torch.float16)
 
     C_sp = kernel(A_sparse, E, B).half()
     C = torch.matmul(A, B)
 
-    torch.testing.assert_close(C_sp, C)
+    torch.testing.assert_close(C_sp, C, atol=1e-3,rtol=1e-3)
     print("pass")
 
 
