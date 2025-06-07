@@ -671,9 +671,8 @@ private:
           linear_index * loop_stack_[i].second + loop_stack_[i].first;
     }
     stage_ = FloorMod(linear_index, num_stages);
-    parity_ = FloorMod(parity_before * op->extent +
-                           FloorDiv(linear_index, num_stages),
-                       2);
+    parity_ = FloorMod(
+        parity_before * op->extent + FloorDiv(linear_index, num_stages), 2);
 
     auto result = FilterByRole(op);
 
