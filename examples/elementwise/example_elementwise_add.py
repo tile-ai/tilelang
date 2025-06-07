@@ -15,8 +15,8 @@ def ref_program(x, y):
 def elementwise_add(M, N, block_M, block_N, in_dtype, out_dtype, threads):
 
     @T.prim_func
-    def elem_add(A: T.Tensor((M, N), in_dtype), B: T.Tensor((M, N), in_dtype), C: T.Tensor((M, N),
-                                                                                       out_dtype)):
+    def elem_add(A: T.Tensor((M, N), in_dtype), B: T.Tensor((M, N), in_dtype), C: T.Tensor(
+        (M, N), out_dtype)):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             start_x = bx * block_N
             start_y = by * block_M
@@ -44,12 +44,14 @@ def get_best_config(M, N):
     autotuner = AutoTuner.from_kernel(
         kernel=kernel, configs=get_configs(M, N)).set_compile_args(
             out_idx=[-1],
+            target="cuda",
+        ).set_profile_args(
             supply_type=tilelang.TensorSupplyType.Auto,
             ref_prog=ref_program,
             skip_check=False,
-            target="cuda",
         )
     return autotuner.run(warmup=3, rep=20)
+
 
 def main():
     parser = argparse.ArgumentParser()

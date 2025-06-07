@@ -218,9 +218,13 @@ private:
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
+    loop_stack_.emplace_back(op->loop_var, op->extent);
     auto num_stages_anno = op->annotations.Get("num_stages");
-    if (!num_stages_anno.defined())
-      return StmtExprMutator::VisitStmt_(op);
+    if (!num_stages_anno.defined()) {
+      auto for_node = StmtExprMutator::VisitStmt_(op);
+      loop_stack_.pop_back();
+      return for_node;
+    }
 
     ICHECK(num_stages_anno.as<IntImmNode>());
     int num_stages = static_cast<int>(num_stages_anno.as<IntImmNode>()->value);
@@ -244,8 +248,14 @@ private:
       Buffer new_buffer = RewriteAllocBuffer(buffer, num_stages);
       buffer_remap_.Set(buffer, new_buffer);
     }
-    version_index_ = FloorMod(op->loop_var - op->min, num_stages);
+    PrimExpr linear_index = loop_stack_[0].first;
+    for (size_t i = 1; i < loop_stack_.size(); ++i) {
+      linear_index =
+          linear_index * loop_stack_[i].second + loop_stack_[i].first;
+    }
+    version_index_ = FloorMod(linear_index, num_stages);
     auto for_node = StmtExprMutator::VisitStmt_(op);
+    loop_stack_.pop_back();
 
     return for_node;
   }
@@ -315,6 +325,7 @@ private:
   }
 
   PrimExpr version_index_;
+  std::vector<std::pair<Var, PrimExpr>> loop_stack_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Optional<Stmt>> buffer_lca_;
   Map<Buffer, Buffer> buffer_remap_;

@@ -4,13 +4,13 @@
 import torch
 import torch.nn.functional as F
 import tilelang
-from tilelang import cached
 from tilelang.autotuner import *
 import tilelang.language as T
 import argparse
 
 
-def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_casual, block_M, block_N, groups=1):
+@tilelang.jit(out_idx=[3, 4])
+def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, block_N, groups=1):
     scale = (1.0 / dim_qk)**0.5 * 1.44269504  # log2(e)
     head_kv = heads // groups
     q_shape = [batch, seq_len, heads, dim_qk]
@@ -27,7 +27,7 @@ def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_casual, block_M, bloc
             Output: T.Tensor([batch, seq_len, heads, dim_v], dtype),  # type: ignore
             lse: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
     ):
-        with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=128) as (bx, by, bz):
+        with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=256) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim_qk], dtype)
             K_shared = T.alloc_shared([block_N, dim_qk], dtype)
             V_shared = T.alloc_shared([block_N, dim_v], dtype)
@@ -47,10 +47,10 @@ def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_casual, block_M, bloc
             T.fill(scores_max, -T.infinity(accum_dtype))
             loop_range = (
                 T.ceildiv(
-                    (bx + 1) * block_M, block_N) if is_casual else T.ceildiv(seq_len, block_N))
+                    (bx + 1) * block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N))
             for k in T.Pipelined(loop_range, num_stages=1):
                 T.copy(K[bz, k * block_N:(k + 1) * block_N, by // groups, :], K_shared)
-                if is_casual:
+                if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0,
                                                      -T.infinity(acc_s.dtype))
@@ -81,6 +81,7 @@ def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_casual, block_M, bloc
     return flash_fwd
 
 
+@tilelang.jit(out_idx=[2])
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim_v):
     dtype = "float16"
     accum_dtype = "float"
@@ -116,6 +117,7 @@ def make_dq_layout(dQ):
                     lambda b, l, h, d: [b, l // 8, h, d // 8, (d % 2), 4 * (l % 8) + (d % 8) // 2])
 
 
+@tilelang.jit(out_idx=[1])
 def flashattn_bwd_postprocess(batch, heads, seq_len, dim_qk):
     dtype = "float16"
     accum_dtype = "float"
@@ -137,7 +139,8 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim_qk):
     return flash_bwd_post
 
 
-def flashattn_bwd(batch, heads, seq_len, dim_qk, dim_v, is_casual, block_M, block_N, groups=1):
+@tilelang.jit
+def flashattn_bwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, block_N, groups=1):
     sm_scale = (1.0 / dim_qk)**0.5
     scale = (1.0 / dim_qk)**0.5 * 1.44269504  # log2(e)
     head_kv = heads // groups
@@ -159,7 +162,7 @@ def flashattn_bwd(batch, heads, seq_len, dim_qk, dim_v, is_casual, block_M, bloc
             dK: T.Tensor(k_shape, dtype),  # type: ignore
             dV: T.Tensor(v_shape, dtype),  # type: ignore
     ):
-        with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=256) as (bx, by, bz):
+        with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=128) as (bx, by, bz):
             K_shared = T.alloc_shared([block_M, dim_qk], dtype)
             dsT_shared = T.alloc_shared([block_M, block_N], dtype)
             q = T.alloc_shared([block_N, dim_qk], dtype)
@@ -188,7 +191,7 @@ def flashattn_bwd(batch, heads, seq_len, dim_qk, dim_v, is_casual, block_M, bloc
             T.copy(V[bz, by * block_M:(by + 1) * block_M, bx // groups, :], V_shared)
             T.clear(dv)
             T.clear(dk)
-            loop_st = T.floordiv(by * block_M, block_N) if is_casual else 0
+            loop_st = T.floordiv(by * block_M, block_N) if is_causal else 0
             loop_ed = T.ceildiv(seq_len, block_N)
             for k in T.Pipelined(loop_st, loop_ed, num_stages=1):
                 T.copy(Q[bz, k * block_N:(k + 1) * block_N, bx, :], q)
@@ -197,7 +200,7 @@ def flashattn_bwd(batch, heads, seq_len, dim_qk, dim_v, is_casual, block_M, bloc
                 T.copy(lse[bz, bx, k * block_N:(k + 1) * block_N], lse_shared)
                 for i, j in T.Parallel(block_M, block_N):
                     qkT[i, j] = T.exp2(qkT[i, j] * scale - lse_shared[j])
-                if is_casual:
+                if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
                         qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j],
                                                    0)
@@ -228,16 +231,16 @@ def flashattn_bwd(batch, heads, seq_len, dim_qk, dim_v, is_casual, block_M, bloc
     return flash_bwd
 
 
+@torch.compile
 class _attention(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, causal, groups=1):
         BATCH, N_CTX, H, D_HEAD_QK = q.shape
         D_HEAD_V = v.shape[-1]
-        block_M = 64
+        block_M = 128
         block_N = 64
-        mod = cached(flashattn_fwd, [3, 4], BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, causal, block_M,
-                     block_N, groups)
+        mod = flashattn_fwd(BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, causal, block_M, block_N, groups)
         o, lse = mod(q, k, v)
         ctx.save_for_backward(q, k, v, o, lse)
         ctx.causal = causal
@@ -246,6 +249,9 @@ class _attention(torch.autograd.Function):
     @staticmethod
     def backward(ctx, do):
         q, k, v, o, lse = ctx.saved_tensors
+        BATCH, N_CTX, H, D_HEAD_QK = q.shape
+        HEAD_KV, D_HEAD_V, = v.shape[-2], v.shape[-1]
+        groups = H // HEAD_KV
 
         def maybe_contiguous(x):
             if x.stride(-1) != 1:
@@ -253,14 +259,20 @@ class _attention(torch.autograd.Function):
             return x
 
         do, q, k, v, o = [maybe_contiguous(x) for x in (do, q, k, v, o)]
-        block_M = 128
-        block_N = 128
-        mod_prep = cached(flashattn_bwd_preprocess, [2], BATCH, H, N_CTX, D_HEAD_V)
-        mod_post = cached(flashattn_bwd_postprocess, [1], BATCH, H, N_CTX, D_HEAD_QK)
+        block_M = 64
+        block_N = 32
+        mod_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD_V)
+        mod_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD_QK)
         delta = mod_prep(o, do)
-        mod = cached(flashattn_bwd, [6, 7, 8], BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, ctx.causal,
-                     block_M, block_N, groups)
-        dq, dk, dv = mod(q, k, v, do, lse, delta)
+        kernel = flashattn_bwd(BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, ctx.causal, block_M, block_N,
+                               groups)
+        shape_q = [BATCH, N_CTX, H, D_HEAD_QK]
+        shape_k = [BATCH, N_CTX, HEAD_KV, D_HEAD_QK]
+        shape_v = [BATCH, N_CTX, HEAD_KV, D_HEAD_V]
+        dq = torch.zeros(shape_q, dtype=torch.float32, device=q.device)
+        dk = torch.zeros(shape_k, dtype=torch.float16, device=q.device)
+        dv = torch.zeros(shape_v, dtype=torch.float16, device=q.device)
+        kernel(q, k, v, do, lse, delta, dq, dk, dv)
         dq = mod_post(dq)
         return dq, dk, dv, None, None
 
@@ -293,22 +305,17 @@ def ref_program(Q, K, V, is_causal, groups=1):
     return output
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=8, help='Batch size')
-    parser.add_argument('--h', type=int, default=32, help='Number of heads')
-    parser.add_argument('--n_ctx', type=int, default=1024, help='Context size')
-    parser.add_argument('--d_head_qk', type=int, default=192, help='Head dimension for Q/K')
-    parser.add_argument('--d_head_v', type=int, default=128, help='Head dimension for V')
-    parser.add_argument('--casual', type=bool, default=False, help='Casual flag')
-    parser.add_argument('--groups', type=int, default=16, help='groups')
-    args = parser.parse_args()
-    BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, groups = args.batch, args.h, args.n_ctx, args.d_head_qk, args.d_head_v, args.groups
-    casual = args.casual
+def main(BATCH: int = 8,
+         H: int = 32,
+         N_CTX: int = 1024,
+         D_HEAD_QK: int = 192,
+         D_HEAD_V: int = 128,
+         groups: int = 16,
+         causal: bool = False):
     flops_per_qk = 2.0 * BATCH * H * N_CTX * N_CTX * D_HEAD_QK
     flops_per_v = 2.0 * BATCH * H * N_CTX * N_CTX * D_HEAD_V
     total_flops = 3 * flops_per_qk + 2 * flops_per_v
-    if casual:
+    if causal:
         total_flops *= 0.5
     Q = (
         torch.empty(BATCH, N_CTX, H, D_HEAD_QK, dtype=torch.half,
@@ -324,20 +331,21 @@ if __name__ == "__main__":
     dO = (
         torch.empty(BATCH, N_CTX, H, D_HEAD_V, dtype=torch.half,
                     device="cuda").normal_().requires_grad_())
-    O = attention(Q, K, V, casual, groups)
+    O = attention(Q, K, V, causal, groups)
     O.backward(dO, retain_graph=True)
     dQ, Q.grad = Q.grad.clone(), None
     dK, K.grad = K.grad.clone(), None
     dV, V.grad = V.grad.clone(), None
 
-    O_ref = ref_program(Q, K, V, casual, groups)
+    O_ref = ref_program(Q, K, V, causal, groups)
     O_ref.backward(dO, retain_graph=True)
     dQ_ref, Q.grad = Q.grad.clone(), None
     dK_ref, K.grad = K.grad.clone(), None
     dV_ref, V.grad = V.grad.clone(), None
 
     assert torch.allclose(O, O_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dV, dV_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(dV, dV_ref, rtol=1e-2, atol=1e-2)
+    # assert torch.allclose(dV, dV_ref, rtol=1e-2, atol=1e-2)
     assert torch.allclose(dK, dK_ref, rtol=1e-2, atol=1e-2)
     assert torch.allclose(dQ, dQ_ref, rtol=1e-2, atol=1e-2)
 
@@ -355,3 +363,16 @@ if __name__ == "__main__":
     latency = do_bench(run1, warmup=500)
     print("tilelang: {:.2f} ms".format(latency))
     print("tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--batch', type=int, default=8, help='Batch size')
+    parser.add_argument('--h', type=int, default=32, help='Number of heads')
+    parser.add_argument('--n_ctx', type=int, default=1024, help='Context size')
+    parser.add_argument('--d_head_qk', type=int, default=192, help='Head dimension for Q/K')
+    parser.add_argument('--d_head_v', type=int, default=128, help='Head dimension for V')
+    parser.add_argument('--causal', type=bool, default=False, help='Causal flag')
+    parser.add_argument('--groups', type=int, default=16, help='groups')
+    args = parser.parse_args()
+    main(args.batch, args.h, args.n_ctx, args.d_head_qk, args.d_head_v, args.groups, args.causal)

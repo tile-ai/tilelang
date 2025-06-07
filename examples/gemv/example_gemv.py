@@ -5,7 +5,8 @@ import itertools
 import tilelang as tl
 import tilelang.language as T
 from tvm import DataType
-from tilelang.autotuner import autotune, jit
+from tilelang.autotuner import autotune
+from tilelang import jit
 
 
 def ref_program(A, B):
@@ -234,9 +235,6 @@ def get_best_config(N, K):
     )
     @jit(
         out_idx=[-1],
-        supply_type=tl.TensorSupplyType.Integer,
-        ref_prog=ref_program,
-        skip_check=False,
         target="auto",
     )
     def kernel(
@@ -319,7 +317,7 @@ def main():
 
     best_result = get_best_config(N, K)
     best_config = best_result.config
-    kernel = splitk_gemv_vectorized_tvm(N, K, *best_config)
+    kernel = splitk_gemv_vectorized_tvm(N, K, **best_config)
     kernel = tl.compile(kernel, out_idx=-1)
     profiler = kernel.get_profiler()
     latency = profiler.do_bench(lambda x, y: x @ y.T, warmup=500)

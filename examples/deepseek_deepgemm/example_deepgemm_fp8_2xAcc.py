@@ -181,6 +181,10 @@ def assert_tl_gemm_correctness(M, N, K, block_N, in_dtype, out_dtype, accum_dtyp
     print(f"tflops: {tflops}")
 
 
+def main():
+    assert_tl_gemm_correctness(1024, 1024, 8192, 128, "e4m3_float8", "bfloat16", "float32")
+
+
 if __name__ == "__main__":
     for dtype in ["e4m3_float8"]:
         for out_dtype in ["bfloat16", "float32"]:
