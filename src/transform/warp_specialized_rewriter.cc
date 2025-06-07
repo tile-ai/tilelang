@@ -629,6 +629,7 @@ private:
       num_stages = static_cast<int>(num_stages_anno.as<IntImmNode>()->value);
       ICHECK(num_stages_ == 1) << "Nested pipeline not supported.";
     }
+    loop_stack_.emplace_back(op->loop_var, op->extent);
 
     Array<Array<Integer>> group_info_array;
     Array<Integer> order_info_array;
@@ -661,10 +662,14 @@ private:
 
     num_stages_ = num_stages;
     pipeline_info_ = pipeline_info;
-    stage_ = FloorMod(op->loop_var - op->min, num_stages);
-    parity_ = FloorMod(parity_before * op->extent +
-                           FloorDiv(op->loop_var - op->min, num_stages),
-                       2);
+    PrimExpr linear_index = loop_stack_[0].first;
+    for (size_t i = 1; i < loop_stack_.size(); ++i) {
+      linear_index =
+          linear_index * loop_stack_[i].second + loop_stack_[i].first;
+    }
+    stage_ = FloorMod(linear_index, num_stages);
+    parity_ = FloorMod(
+        parity_before * op->extent + FloorDiv(linear_index, num_stages), 2);
 
     auto result = FilterByRole(op);
 
@@ -692,10 +697,13 @@ private:
       }
       if (is_emitting_producer_ || !group_anno.defined() ||
           group_info_array.size() == 0) {
+        loop_stack_.pop_back();
         return for_node;
       }
+      loop_stack_.pop_back();
       return grouped_for_node;
     }
+    loop_stack_.pop_back();
     return result;
   }
 
@@ -908,6 +916,7 @@ private:
   PrimExpr parity_ = 0;
   PrimExpr stage_ = 0;
   int num_stages_ = 1;
+  std::vector<std::pair<Var, PrimExpr>> loop_stack_;
   Var thread_var_;
   bool mbarrier_only_ = false;
   PipelineInfo pipeline_info_;
