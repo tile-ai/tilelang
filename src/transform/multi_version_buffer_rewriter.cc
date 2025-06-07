@@ -254,7 +254,6 @@ private:
           linear_index * loop_stack_[i].second + loop_stack_[i].first;
     }
     version_index_ = FloorMod(linear_index, num_stages);
-    // version_index_ = FloorMod(op->loop_var - op->min, num_stages);
     auto for_node = StmtExprMutator::VisitStmt_(op);
     loop_stack_.pop_back();
 
