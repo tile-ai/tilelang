@@ -115,7 +115,7 @@ def main():
     persistent_profiler = persistent_kernel.get_profiler(
         tensor_supply_type=tilelang.TensorSupplyType.Randn)
     persistent_profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
-    print("Persisitent GEMM: All check passed.")
+    print("Persistent GEMM: All check passed.")
     persistent_latency = persistent_profiler.do_bench(warmup=500)
     print(f"Persistent GEMM Latency: {persistent_latency} ms")
     print(f"Persistent GEMM TFlops: {total_flops / persistent_latency * 1e-9} TFlops")
@@ -126,7 +126,7 @@ def main():
     non_persistent_profiler = non_persistent_kernel.get_profiler(
         tensor_supply_type=tilelang.TensorSupplyType.Randn)
     non_persistent_profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
-    print("Non-Persisitent GEMM: All check passed.")
+    print("Non-Persistent GEMM: All check passed.")
     non_persistent_latency = non_persistent_profiler.do_bench(warmup=500)
     print(f"Non-Persistent GEMM Latency: {non_persistent_latency} ms")
     print(f"Non-Persistent GEMM TFlops: {total_flops / non_persistent_latency * 1e-9} TFlops")
