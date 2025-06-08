@@ -212,6 +212,14 @@ const Op &no_set_max_nreg();
 const Op &wait_wgmma();
 
 /*!
+ * \brief Synchronize all threads in a grid
+ *
+ * sync_grid()
+ *
+ */
+const Op &sync_grid();
+
+/*!
  * \brief tvm intrinsic for amd matrix core mfma instructions.
  *
  *  void tvm_mfma(StringImm shape, StringImm A_layout, StringImm B_layout,
