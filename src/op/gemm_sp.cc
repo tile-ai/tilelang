@@ -170,7 +170,8 @@ LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   if (TargetIsHopper(T.target)) {
     const int warp_size = 32;
     constexpr int wgmma_m = 16 * 4;
-    bool maybe_wgmma = (this->M >= wgmma_m) && (block_size / warp_size % 4 == 0);
+    bool maybe_wgmma =
+        (this->M >= wgmma_m) && (block_size / warp_size % 4 == 0);
     auto [warp_m, warp_n] =
         ComputeWarpPartition(block_size / warp_size, T.target, maybe_wgmma);
     auto fragment =
@@ -201,7 +202,8 @@ LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       ICHECK(false) << "WGMMA only support B in shared.";
     }
   } else {
-    ICHECK(0) << "Not supported " << T.target->str() << " Currently only Hopper are supported";
+    ICHECK(0) << "Not supported " << T.target->str()
+              << " Currently only Hopper are supported";
   }
   completed_ = true;
   return results;

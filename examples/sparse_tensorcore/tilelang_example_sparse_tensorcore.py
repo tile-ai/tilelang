@@ -6,6 +6,7 @@ from tilelang.utils.sparse import compress_sm90
 from tilelang.layout import make_metadata_layout
 import tilelang.testing
 
+
 @tilelang.jit(out_idx=[-1])
 def matmul_sp(
     M,
@@ -118,8 +119,10 @@ def run_gemm_sp(
     torch.testing.assert_close(C_sp, C, atol=1e-3, rtol=1e-3)
     print("pass")
 
+
 def main():
     run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 128, 128, 128, 2, 128)
+
 
 if __name__ == "__main__":
     main()
