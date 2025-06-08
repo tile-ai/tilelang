@@ -1,32 +1,10 @@
 # Copyright (c) Tile-AI Organization.
 # Licensed under the MIT License.
 import torch
-
-import os
 import tilelang
-from tilelang import tvm as tvm
-from torch.utils.cpp_extension import load
+from tilelang.utils.sparse import compress_sm90
 from tilelang.layout import make_metadata_layout
-
-tilelang.disable_cache()
-
-compress_util = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "../../../src/tl_templates/cuda/compress_sm90.cu")
-cutlass_repo = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../../3rdparty/cutlass")
-
-compress_lib = load(
-    name='compress_lib',
-    sources=[
-        compress_util,
-    ],
-    extra_cuda_cflags=[
-        '-O2',
-        '-std=c++17',
-        f'-I{cutlass_repo}/include',
-        f'-I{cutlass_repo}/tools/util/include',
-        '-arch=sm_90',
-    ],
-)
+import tilelang.testing
 
 
 def matmul_sp(
@@ -130,15 +108,16 @@ def run_gemm_sp(
         num_stages,
         num_threads,
     )
-    # NOTE: TMA doesn't support annotation on global buffer
-    kernel = tilelang.compile(program, out_idx=[-1], pass_configs={"tl.disable_tma_lower": True})
+    kernel = tilelang.compile(
+        program,
+        out_idx=[-1],
+    )
     A = generate_2_to_4_sparse_tensor((M, K), dtype=torch.float16, device='cuda')
-    A_sparse, E = compress_lib.compress_sm90(A)
+    A_sparse, E = compress_sm90(A)
     B = torch.randn((K, N), device='cuda', dtype=torch.float16)
 
     C_sp = kernel(A_sparse, E, B).half()
     C = torch.matmul(A, B)
-
     torch.testing.assert_close(C_sp, C, atol=1e-3, rtol=1e-3)
     print("pass")
 
@@ -151,4 +130,5 @@ def test_gemm_sp():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 128, 128, 128, 2, 128)
