@@ -63,7 +63,7 @@ GemmSP::ComputeWarpPartition(int num_warps, Target target,
   int m_warp = 1, n_warp = 1;
   bool allow_wgmma = TargetIsHopper(target) && maybe_hopper_wgmma &&
                      (this->M >= 64) && (num_warps % 4 == 0);
-  ICHECK(allow_wgmma) << "Use Warp Group MMA requires 128*N threads."; // TODO
+
   if (allow_wgmma) {
     ICHECK(num_warps % 4 == 0) << "Use Warp Group MMA requires 128*N threads.";
     if (this->policy == GemmWarpPolicy::kFullRow ||
@@ -169,7 +169,8 @@ LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   auto block_size = *as_const_int(thread_range->extent);
   if (TargetIsHopper(T.target)) {
     const int warp_size = 32;
-    bool maybe_wgmma = (this->M >= 64) && (block_size / warp_size % 4 == 0);
+    constexpr int wgmma_m = 16 * 4;
+    bool maybe_wgmma = (this->M >= wgmma_m) && (block_size / warp_size % 4 == 0);
     auto [warp_m, warp_n] =
         ComputeWarpPartition(block_size / warp_size, T.target, maybe_wgmma);
     auto fragment =
@@ -200,7 +201,7 @@ LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       ICHECK(false) << "WGMMA only support B in shared.";
     }
   } else {
-    ICHECK(0) << "Not supported " << T.target->str();
+    ICHECK(0) << "Not supported " << T.target->str() << " Currently only Hopper are supported";
   }
   completed_ = true;
   return results;
