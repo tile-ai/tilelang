@@ -61,7 +61,7 @@ class KernelCache:
                     os.makedirs(instance.cache_dir, exist_ok=True)
 
                     instance.logger = logging.getLogger(__name__)
-                    instance.logger.setLevel(logging.ERROR)
+                    instance.logger.setLevel(logging.DEBUG)
                     instance._memory_cache = {}  # Initialize memory cache
                     cls._instance = instance
         return cls._instance
@@ -160,10 +160,16 @@ class KernelCache:
                                     " consider using `@tilelang.jit` instead of direct kernel caching.")
                 return self._memory_cache[key]
 
+            if verbose:
+                self.logger.debug(f"Checking disk cache for kernel {func.attrs['global_symbol']}")
+
             # Then check disk cache
             kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
                                                  execution_backend, pass_configs, func)
             if kernel is not None:
+                if verbose:
+                    self.logger.debug(
+                        f"Found kernel in disk cache for {func.attrs['global_symbol']}")
                 # Populate memory cache with disk result
                 self._memory_cache[key] = kernel
                 return kernel
