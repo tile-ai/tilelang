@@ -202,42 +202,54 @@ def ref_program(Q, K, V, is_causal, groups=1):
     return output
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=1, help='batch size')
-    parser.add_argument('--heads', type=int, default=64, help='heads')
-    parser.add_argument('--seq_len', type=int, default=8192, help='sequence length')
-    parser.add_argument('--dim', type=int, default=128, help='dim')
-    parser.add_argument('--is_causal', action='store_true', help='causal')
-    parser.add_argument('--tune', action='store_true', help='tune configs')
-    parser.add_argument('--groups', type=int, default=16, help='groups')
-    args = parser.parse_args()
-    batch, heads, seq_len, dim, is_causal, groups = args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups
+def main(
+    batch: int = 1,
+    heads: int = 64,
+    seq_len: int = 4096,
+    dim: int = 128,
+    is_causal: bool = False,
+    groups: int = 16,
+    tune: bool = False,
+):
     flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
     total_flops = 2 * flops_per_matmul
     if is_causal:
         total_flops *= 0.5
 
-    if (not args.tune):
+    if (not tune):
         program = flashattn(
-            batch, heads, seq_len, dim, is_causal, tune=args.tune, groups=groups)(
+            batch, heads, seq_len, dim, is_causal, tune=tune, groups=groups)(
                 block_M=128, block_N=128, num_stages=2, threads=256)
-        ref_program = partial(ref_program, is_causal=is_causal, groups=groups)
+        ref_program_processed = partial(ref_program, is_causal=is_causal, groups=groups)
         kernel = tilelang.compile(program, out_idx=[3])
         profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
-        profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+        profiler.assert_allclose(ref_program_processed, rtol=0.01, atol=0.01)
         print("All checks pass.")
-        latency = profiler.do_bench(ref_program, warmup=500)
+        latency = profiler.do_bench(ref_program_processed, warmup=500)
         print("Ref: {:.2f} ms".format(latency))
         print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
         latency = profiler.do_bench(warmup=500)
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:
-        best_result = flashattn(batch, heads, seq_len, dim, is_causal, tune=args.tune)
+        best_result = flashattn(batch, heads, seq_len, dim, is_causal, tune=tune)
         best_latency = best_result.latency
         best_config = best_result.config
         ref_latency = best_result.ref_latency
         print(f"Best latency: {best_latency}")
         print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
         print(f"Best config: {best_config}")
+        print(f"Ref latency: {ref_latency}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--batch', type=int, default=1, help='batch size')
+    parser.add_argument('--heads', type=int, default=64, help='heads')
+    parser.add_argument('--seq_len', type=int, default=4096, help='sequence length')
+    parser.add_argument('--dim', type=int, default=128, help='dim')
+    parser.add_argument('--is_causal', action='store_true', help='causal')
+    parser.add_argument('--tune', action='store_true', help='tune configs')
+    parser.add_argument('--groups', type=int, default=16, help='groups')
+    args = parser.parse_args()
+    main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups, args.tune)

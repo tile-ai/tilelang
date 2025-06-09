@@ -494,9 +494,12 @@ private:
       buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
     if (op->annotations.count(attr::kLayoutMap)) {
-      auto map =
-          op->annotations.Get(attr::kLayoutMap).as<Map<Var, Layout>>().value();
-      for (const auto &[var, layout] : map) {
+      // Check if the layout map is Map<Var, Layout>
+      auto map = op->annotations.Get(attr::kLayoutMap).as<Map<Var, Layout>>();
+      ICHECK(map.defined()) << "layout map is not defined";
+      ICHECK(map.value().defined()) << "layout map is not defined";
+
+      for (const auto &[var, layout] : map.value()) {
         ICHECK(buffer_data_to_buffer_.count(var))
             << "buffer " << var << " is not found in the block";
         auto buffer = buffer_data_to_buffer_[var];

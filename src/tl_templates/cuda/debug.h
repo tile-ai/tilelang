@@ -2,7 +2,10 @@
 
 #include "./cuda_fp8.h"
 #include "common.h"
-#include <stdio.h>
+
+#ifndef __CUDACC_RTC__
+#include <cstdio>
+#endif
 
 // Template declaration for device-side debug printing (variable only)
 template <typename T> __device__ void debug_print_var(const char *msg, T var);

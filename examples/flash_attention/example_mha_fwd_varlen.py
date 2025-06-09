@@ -48,7 +48,7 @@ def generate_qkv(q,
     assert v.shape == (batch_size, seqlen_k, nheads_k, d)
 
     if query_padding_mask is not None:
-        q_unpad, indices_q, cu_seqlens_q, max_seqlen_q = unpad_input(q, query_padding_mask)
+        q_unpad, indices_q, cu_seqlens_q, max_seqlen_q, _ = unpad_input(q, query_padding_mask)
         output_pad_fn = lambda output_unpad: pad_input(output_unpad, indices_q, batch_size, seqlen_q
                                                       )
     else:
@@ -60,8 +60,8 @@ def generate_qkv(q,
             output_unpad, "(b s) h d -> b s h d", b=batch_size)
 
     if key_padding_mask is not None:
-        k_unpad, indices_k, cu_seqlens_k, max_seqlen_k = unpad_input(k, key_padding_mask)
-        v_unpad, _, _, _ = unpad_input(v, key_padding_mask)
+        k_unpad, indices_k, cu_seqlens_k, max_seqlen_k, _ = unpad_input(k, key_padding_mask)
+        v_unpad, _, _, _, _ = unpad_input(v, key_padding_mask)
     else:
         k_unpad = rearrange(k, "b s h d -> (b s) h d")
         v_unpad = rearrange(v, "b s h d -> (b s) h d")
@@ -199,6 +199,7 @@ def attention_ref(
     dtype_og = q.dtype
     if upcast:
         q, k, v = q.float(), k.float(), v.float()
+    dim = q.shape[-1]
     scale = (1.0 / dim)**0.5  # log2(e)
     k = repeat(k, "b s h d -> b s (h g) d", g=q.shape[2] // k.shape[2])
     v = repeat(v, "b s h d -> b s (h g) d", g=q.shape[2] // v.shape[2])
@@ -360,15 +361,7 @@ def flashattn(batch_size, UQ, UKV, heads, dim, is_causal):
     return kernel_func(block_M, block_N, num_stages, threads)
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=2, help='batch size')
-    parser.add_argument('--heads', type=int, default=16, help='heads')
-    parser.add_argument('--seq_len', type=int, default=256, help='sequence length')
-    parser.add_argument('--dim', type=int, default=32, help='dim')
-
-    args = parser.parse_args()
-    batch, heads, seq_len, dim = args.batch, args.heads, args.seq_len, args.dim
+def main(batch: int = 2, heads: int = 16, seq_len: int = 256, dim: int = 32):
     flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
     total_flops = 2 * flops_per_matmul
 
@@ -410,7 +403,7 @@ if __name__ == "__main__":
     UKV = k_unpad.shape[0]  # unpadded query key length
 
     program = flashattn(batch, UQ, UKV, heads, dim, causal)
-    kernel = tilelang.compile(program, out_idx=-1, execution_backend="cython")
+    kernel = tilelang.compile(program, [6])
     print(kernel.get_kernel_source())
 
     out_unpad = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q)
@@ -439,3 +432,14 @@ if __name__ == "__main__":
     fla_out = output_pad_fn(fla_out_unpad)
     torch.testing.assert_close(out, out_ref, rtol=1e-2, atol=1e-2)
     print("Assert Equal Passed")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--batch', type=int, default=2, help='batch size')
+    parser.add_argument('--heads', type=int, default=16, help='heads')
+    parser.add_argument('--seq_len', type=int, default=256, help='sequence length')
+    parser.add_argument('--dim', type=int, default=32, help='dim')
+
+    args = parser.parse_args()
+    main(args.batch, args.heads, args.seq_len, args.dim)

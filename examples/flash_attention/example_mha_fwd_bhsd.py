@@ -185,6 +185,47 @@ def ref_program(Q, K, V, is_causal):
     return output
 
 
+def main(
+    batch: int = 1,
+    heads: int = 1,
+    seq_q: int = 256,
+    seq_kv: int = 256,
+    dim: int = 64,
+    is_causal: bool = False,
+    tune: bool = False,
+):
+    flops_per_matmul = 2.0 * batch * heads * seq_q * seq_kv * dim
+    total_flops = 2 * flops_per_matmul
+    if is_causal:
+        total_flops *= 0.5
+
+    if (not tune):
+        program = flashattn(
+            batch, heads, seq_q, seq_kv, dim, is_causal, tune=tune)(
+                block_M=64, block_N=64, num_stages=1, threads=128)
+        ref_program_processed = partial(ref_program, is_causal=is_causal)
+        kernel = tilelang.compile(program, out_idx=[3])
+
+        profiler = kernel.get_profiler()
+        profiler.assert_allclose(ref_program_processed, rtol=0.01, atol=0.01)
+        print("All checks pass.")
+        latency = profiler.do_bench(ref_program_processed, warmup=500)
+        print("Ref: {:.2f} ms".format(latency))
+        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        latency = profiler.do_bench(warmup=500)
+        print("Tile-lang: {:.2f} ms".format(latency))
+        print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    else:
+        best_result = flashattn(batch, heads, seq_q, seq_kv, dim, is_causal, tune=tune)
+        best_latency = best_result.latency
+        best_config = best_result.config
+        ref_latency = best_result.ref_latency
+        print(f"Best latency: {best_latency}")
+        print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
+        print(f"Best config: {best_config}")
+        print(f"Ref latency: {ref_latency}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=1, help='batch size')
@@ -195,33 +236,4 @@ if __name__ == "__main__":
     parser.add_argument('--is_causal', action='store_true', help='causal')
     parser.add_argument('--tune', action='store_true', help='tune configs')
     args = parser.parse_args()
-    batch, heads, seq_q, seq_kv, dim, is_causal = args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.is_causal
-    flops_per_matmul = 2.0 * batch * heads * seq_q * seq_kv * dim
-    total_flops = 2 * flops_per_matmul
-    if is_causal:
-        total_flops *= 0.5
-
-    if (not args.tune):
-        program = flashattn(
-            batch, heads, seq_q, seq_kv, dim, is_causal, tune=args.tune)(
-                block_M=64, block_N=64, num_stages=1, threads=128)
-        ref_program = partial(ref_program, is_causal=is_causal)
-        kernel = tilelang.compile(program, out_idx=[3])
-
-        profiler = kernel.get_profiler()
-        profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
-        print("All checks pass.")
-        latency = profiler.do_bench(ref_program, warmup=500)
-        print("Ref: {:.2f} ms".format(latency))
-        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-        latency = profiler.do_bench(warmup=500)
-        print("Tile-lang: {:.2f} ms".format(latency))
-        print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-    else:
-        best_result = flashattn(batch, heads, seq_q, seq_kv, dim, is_causal, tune=args.tune)
-        best_latency = best_result.latency
-        best_config = best_result.config
-        ref_latency = best_result.ref_latency
-        print(f"Best latency: {best_latency}")
-        print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
-        print(f"Best config: {best_config}")
+    main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.is_causal, args.tune)

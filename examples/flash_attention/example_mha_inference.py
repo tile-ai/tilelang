@@ -294,7 +294,7 @@ def flash_split_ref(Q, K, V, causal):
                                              3), gacc_o.to(torch.float16).permute(1, 2, 3, 0, 4)
 
 
-if __name__ == "__main__":
+def main():
     BATCH, H, Q_CTX, KV_CTX, D_HEAD = 1, 32, 128, 8192, 128
     causal = False
     flops_per_matmul = 2.0 * BATCH * H * Q_CTX * KV_CTX * D_HEAD
@@ -304,15 +304,19 @@ if __name__ == "__main__":
     BLOCK_M = 128
     BLOCK_N = 64  # if D_HEAD <= 128 else 32
     program = flashattn(BATCH, H, Q_CTX, KV_CTX, D_HEAD, causal, BLOCK_M, BLOCK_N)
-    ref_program = partial(ref_program, causal=causal)
+    ref_program_processed = partial(ref_program, causal=causal)
     kernel = tilelang.compile(program, out_idx=[5])
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Normal)
-    profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+    profiler.assert_allclose(ref_program_processed, rtol=0.01, atol=0.01)
     print("All checks passed!")
 
-    latency = profiler.do_bench(ref_program, warmup=500)
+    latency = profiler.do_bench(ref_program_processed, warmup=500)
     print("{:.2f} ms".format(latency))
     print("{:.2f} TFlops".format(total_flops / latency * 1e-9))
-    latency = profiler.do_bench(n_warmup=10, n_repeat=10, profiler="tvm")
+    latency = profiler.do_bench(n_warmup=10, n_repeat=10)
     print("{:.4f} ms".format(latency))
     print("{:.2f} TFlops".format(total_flops / latency * 1e-9))
+
+
+if __name__ == "__main__":
+    main()
