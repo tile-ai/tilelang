@@ -195,9 +195,6 @@ class _JitImplementation:
                 else:
                     raise ValueError(f"Invalid function type: {type(program_result_source)}")
 
-                if self.verbose:
-                    logger.info(f"Verbose: Compiling for program \n {program_result.script()}")
-
                 kernel_result = compile(
                     program_result,
                     out_idx=self.out_idx,
