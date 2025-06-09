@@ -170,7 +170,8 @@ class KernelCache:
                                                  execution_backend, pass_configs, func)
             if kernel is not None:
                 if verbose:
-                    self.logger.debug(f"Found kernel in disk cache for {func.attrs['global_symbol']}")
+                    self.logger.debug(
+                        f"Found kernel in disk cache for {func.attrs['global_symbol']}")
                 # Populate memory cache with disk result
                 self._memory_cache[key] = kernel
                 return kernel
