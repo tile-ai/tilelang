@@ -5,6 +5,7 @@
 
 import tvm
 import tilelang.language as T
+import warnings
 
 from typing import List
 from math import prod
@@ -19,8 +20,12 @@ def decompose_col_major(index_1d: int, basis: List[int]) -> List[int]:
 
 
 def __make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer,
-                                        mma_dtype: str = "float16",
-                                        block_k: int = 32):
+                                        mma_dtype: str,
+                                        block_k: int):
+    if block_k > 128:
+        block_k = 128
+        # Ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
+        warnings.warn(f"block_k is too large, set to 128 for {mma_dtype}.")
     if mma_dtype not in ["float16", "bfloat16", "float32", "int8", "float8"]:
         raise NotImplementedError(f"Unsupported dtype: {mma_dtype}")
 

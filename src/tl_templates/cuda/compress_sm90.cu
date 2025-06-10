@@ -32,59 +32,55 @@ using namespace cute;
       exit(EXIT_FAILURE);                                               \
     }                                                                   \
   }
+template<int BlockK>
+std::tuple<torch::Tensor, torch::Tensor> compress_impl(torch::Tensor A) {
+  using ElementA = cutlass::half_t;
+  using ElementE = uint8_t;
+  using LayoutTagA = cutlass::layout::RowMajor;
+  using ProblemShape = cute::Shape<int, int, int, int>;
 
-using ElementA = cutlass::half_t;
-using ElementE = unsigned char;
-using LayoutTagA = cutlass::layout::RowMajor;
+  using StrideA = cutlass::gemm::TagToStrideA_t<LayoutTagA>;
+  using StrideE = StrideA;
 
-using ProblemShape = Shape<int, int, int, int>;
+  using SparseConfig = cutlass::Sm90GemmSparseConfig<
+      cute::sparse_elem<2, ElementA>, cute::SM90::GMMA::Major::K,
+      cute::sparse_elem<8, ElementE>, cute::C<BlockK>>;
 
-using StrideA = cutlass::gemm::TagToStrideA_t<LayoutTagA>;
-using StrideE = StrideA;
+  using CompressorUtility =
+      cutlass::transform::kernel::StructuredSparseCompressorUtility<
+          ProblemShape, ElementA, LayoutTagA, SparseConfig>;
 
-using SparseConfig = cutlass::Sm90GemmSparseConfig<
-    cute::sparse_elem<2, ElementA>, cute::SM90::GMMA::Major::K,
-    cute::sparse_elem<8, ElementE>, cute::C<128> >;
+  using CompressorKernel = cutlass::transform::kernel::StructuredSparseCompressor<
+      ProblemShape, ElementA, LayoutTagA, SparseConfig, cutlass::arch::Sm90>;
 
-using CompressorUtility =
-    cutlass::transform::kernel::StructuredSparseCompressorUtility<
-        ProblemShape, ElementA, LayoutTagA, SparseConfig>;
+  using Compressor = cutlass::transform::device::TransformUniversalAdapter<CompressorKernel>;
 
-using CompressorKernel = cutlass::transform::kernel::StructuredSparseCompressor<
-    ProblemShape, ElementA, LayoutTagA, SparseConfig, cutlass::arch::Sm90>;
-
-using Compressor =
-    cutlass::transform::device::TransformUniversalAdapter<CompressorKernel>;
-
-std::tuple<torch::Tensor, torch::Tensor> compress_sm90(torch::Tensor A) {
-  assert(A.dim() == 2);
+  TORCH_CHECK(A.dim() == 2, "Input must be 2D");
   int M = A.size(0);
-  int N = -1;  // not used
   int K = A.size(1);
+  int N = -1;
   int L = 1;
+
   ProblemShape problem_shape = make_tuple(M, N, K, L);
-  StrideA stride_A =
-      cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, K, L));
+  StrideA stride_A = cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, K, L));
 
   CompressorUtility compressor_utility(problem_shape, stride_A);
   int ME = compressor_utility.get_metadata_m_physical();
   int KE = compressor_utility.get_metadata_k_physical();
   int KC = compressor_utility.get_tensorA_k_physical();
 
-  StrideE stride_E =
-      cutlass::make_cute_packed_stride(StrideE{}, cute::make_shape(ME, KE, L));
+  StrideE stride_E = cutlass::make_cute_packed_stride(StrideE{}, cute::make_shape(ME, KE, L));
 
-  torch::Tensor A_compressed = torch::zeros(
-      {M, KC}, torch::TensorOptions().dtype(torch::kHalf).device(A.device()));
-
-  torch::Tensor E = torch::zeros(
-      {ME, KE}, torch::TensorOptions().dtype(torch::kUInt8).device(A.device()));
+  torch::Tensor A_compressed = torch::zeros({M, KC},
+      torch::TensorOptions().dtype(torch::kHalf).device(A.device()));
+  torch::Tensor E = torch::zeros({ME, KE},
+      torch::TensorOptions().dtype(torch::kUInt8).device(A.device()));
 
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = A.device().index();
   hw_info.sm_count =
-      cutlass::KernelHardwareInfo::query_device_multiprocessor_count(
-          hw_info.device_id);
+      cutlass::KernelHardwareInfo::query_device_multiprocessor_count(hw_info.device_id);
+
   typename Compressor::Arguments arguments{problem_shape,
                                            {
                                                A.data_ptr(),
@@ -104,6 +100,20 @@ std::tuple<torch::Tensor, torch::Tensor> compress_sm90(torch::Tensor A) {
   CUDA_CHECK(cudaDeviceSynchronize());
 
   return std::make_tuple(A_compressed, E);
+}
+
+std::tuple<torch::Tensor, torch::Tensor> compress_sm90(torch::Tensor A, int64_t block_k) {
+  if (block_k == 32) {
+    return compress_impl<32>(A);
+  } else if (block_k == 64) {
+    return compress_impl<64>(A);
+  } else if (block_k == 128) {
+    return compress_impl<128>(A);
+  } else {
+    // block <= 128
+    // Ref https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
+    TORCH_CHECK(false, "Unsupported block_k value: ", block_k);
+  }
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

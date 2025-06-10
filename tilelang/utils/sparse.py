@@ -3,6 +3,7 @@
 
 import os
 import torch
+import warnings
 from torch.utils.cpp_extension import load, _import_module_from_library
 from tilelang.env import TILELANG_CACHE_DIR, TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR
 
@@ -40,8 +41,12 @@ def _get_cached_lib():
     )
 
 
-def compress_sm90(A: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def compress_sm90(A: torch.Tensor, block_k: int) -> tuple[torch.Tensor, torch.Tensor]:
+    if block_k > 128:
+        block_k = 128
+        # Ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
+        warnings.warn(f"block_k is too large, set to 128 for sm90 compression.")
     # Load the library (will use cache if available)
     compress_lib = _get_cached_lib()
 
-    return compress_lib.compress_sm90(A)
+    return compress_lib.compress_sm90(A, block_k)
