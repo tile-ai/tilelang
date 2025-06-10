@@ -179,21 +179,24 @@ LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
             ? makeGemmFragmentCHopper(M, N, M / warp_m, N / warp_n,
                                       C->dtype.bits())
             : makeGemmFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
-    results.Set(C, fragment);
+    results.Set(C, fragment->BindThreadRange(thread_range));
     if (A.scope() == "shared" || A.scope() == "shared.dyn") {
-      const int64_t mat_stride = *as_const_int(A->shape[0]);
-      const int64_t mat_continuous = *as_const_int(A->shape[1]);
+      int dim_A = A->shape.size();
+      const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
+      const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
       const int64_t continuity =
-          trans_A ? mat_continuous / (warp_m / 4) : mat_continuous;
-      results.Set(A, makeGemmABLayout(mat_stride, mat_continuous, continuity,
-                                      A->dtype.bits(), trans_A ? 1 : 2));
+          trans_A ? 4 * mat_continuous / warp_m : mat_continuous;
+      results.Set(A,
+                  makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                   A->dtype.bits(), trans_A ? 1 : 2));
     } else {
       ICHECK(false) << "Not implemented";
     }
 
     if (B.scope() == "shared" || B.scope() == "shared.dyn") {
-      const int64_t mat_stride = *as_const_int(B->shape[0]);
-      const int64_t mat_continuous = *as_const_int(B->shape[1]);
+      int dim_B = B->shape.size();
+      const int64_t mat_stride = *as_const_int(B->shape[dim_B - 2]);
+      const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
       const int64_t continuity =
           trans_B ? mat_continuous : mat_continuous / warp_n;
       results.Set(B, makeGemmABLayout(mat_stride, mat_continuous, continuity,
