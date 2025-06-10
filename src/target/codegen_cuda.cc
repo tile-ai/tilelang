@@ -905,6 +905,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                     "cooperative_groups::this_grid();\n";
     this->PrintIndent();
     this->stream << "grid.sync();\n";
+  } else if (op->op.same_as(tl::loop_break())) {
+    this->PrintIndent();
+    this->stream << "break;\n";
   } else if (op->op.same_as(builtin::tvm_fill_fragment())) {
     need_mma_h_ = true;
     ICHECK_EQ(op->args.size(), 6U);
