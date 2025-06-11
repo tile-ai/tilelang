@@ -101,7 +101,7 @@ class AutoTuner:
     _kernel_parameters: Optional[Tuple[str, ...]] = None
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
-    cache_dir: Path = Path(TILELANG_CACHE_DIR)
+    cache_dir: Path = Path(TILELANG_CACHE_DIR) / "autotuner"
 
     def __init__(self, fn: Callable, configs):
         self.fn = fn
@@ -350,6 +350,7 @@ class AutoTuner:
                         max_mismatched_ratio=max_mismatched_ratio)
             latency = profiler.do_bench(
                 warmup=warmup, rep=rep, input_tensors=self.jit_input_tensors)
+
             if self.ref_latency_cache is None and ref_prog is not None:
                 self.ref_input_tensors = ref_input_tensors_supply()
                 self.ref_latency_cache = profiler.do_bench(
@@ -421,8 +422,6 @@ class AutoTuner:
                 )
                 logger.debug(f"Error: {e}")
                 continue
-
-            logging.debug(f"Config {config} latency: {latency} at index {i}")
 
             if latency < best_latency:
                 best_latency = latency
