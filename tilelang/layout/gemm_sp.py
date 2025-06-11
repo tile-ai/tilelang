@@ -19,13 +19,11 @@ def decompose_col_major(index_1d: int, basis: List[int]) -> List[int]:
     return res
 
 
-def __make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer,
-                                        mma_dtype: str,
-                                        block_k: int):
+def __make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, block_k: int):
     if block_k > 128:
         block_k = 128
         # Ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
-        warnings.warn(f"block_k is too large, set to 128 for {mma_dtype}.")
+        warnings.warn(f"block_k {block_k} is too large, set to 128 for {mma_dtype}.", stacklevel=2)
     if mma_dtype not in ["float16", "bfloat16", "float32", "int8", "float8"]:
         raise NotImplementedError(f"Unsupported dtype: {mma_dtype}")
 
@@ -87,6 +85,11 @@ def __make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer,
     rep_k_stirde = prod(shape_i + shape_k)
     shape_k.append(rep_k)
     stride_k.append(rep_k_stirde)
+    '''
+    i_basis: [8, 2, 4, 8], j_basis: [2, 2, 4, 6], stride_i: [16, 2, 256, 1024], stride_j: [1, 128, 4, 8192]
+    i_basis: [8, 2, 4, 1], j_basis: [2, 2, 4, 2], stride_i: [16, 2, 256, 1024], stride_j: [1, 128, 4, 1024]
+    '''
+    print(f"{block_k=} {shape_i=}, {shape_k=}, {stride_i=}, {stride_k=}")
 
     def transform(i: int, k: int) -> int:
         nonlocal shape_i, shape_k, stride_i, stride_k

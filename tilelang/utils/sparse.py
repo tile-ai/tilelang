@@ -45,7 +45,8 @@ def compress_sm90(A: torch.Tensor, block_k: int) -> tuple[torch.Tensor, torch.Te
     if block_k > 128:
         block_k = 128
         # Ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
-        warnings.warn(f"block_k is too large, set to 128 for sm90 compression.")
+        warnings.warn(
+            f"block_k {block_k} is too large, set to 128 for sm90 compression.", stacklevel=2)
     # Load the library (will use cache if available)
     compress_lib = _get_cached_lib()
 
