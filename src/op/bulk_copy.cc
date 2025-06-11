@@ -202,7 +202,7 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
     } else if (StructuralEqual()(
                    shared_layout,
                    makeQuarterBankSwizzleLayout(*stride, *continuous,
-                                             shared_tensor->dtype.bits()))) {
+                                                shared_tensor->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
     } else if (StructuralEqual()(
                    shared_layout,
@@ -367,11 +367,11 @@ Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
     LOG(INFO) << "shared_layout: " << shared_layout->DebugOutput();
     if (StructuralEqual()(shared_layout,
                           makeQuarterBankSwizzleLayout(*stride, *continuous,
-                                                    dst->dtype.bits()))) {
+                                                       dst->dtype.bits()))) {
       LOG(INFO) << "Use quarter bank swizzle layout";
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
-    } else if (StructuralEqual()(shared_layout,
-                          makeHalfBankSwizzleLayout(*stride, *continuous,
+    } else if (StructuralEqual()(shared_layout, makeHalfBankSwizzleLayout(
+                                                    *stride, *continuous,
                                                     dst->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
     } else if (StructuralEqual()(shared_layout, makeFullBankSwizzleLayout(

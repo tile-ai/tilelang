@@ -319,7 +319,8 @@ PrimExpr xor8x8(const PrimExpr &i, const PrimExpr j) {
 }
 
 // Layout swizzling for 32 bytes
-Layout makeQuarterBankSwizzleLayout(int stride, int continuous, int element_size) {
+Layout makeQuarterBankSwizzleLayout(int stride, int continuous,
+                                    int element_size) {
   // Swizzle 1 bit
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
@@ -569,7 +570,8 @@ Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
     if (enable_padding)
       return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
     else
-      return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous, element_size);
+      return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
+                                          element_size);
   else if (mat_continuous % (vector_size * 8) == 0)
     return makeFullBankSwizzleLayout(mat_stride, mat_continuous, element_size);
   else if (mat_continuous % (vector_size * 4) == 0)
@@ -578,7 +580,8 @@ Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
     if (enable_padding)
       return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
     else
-      return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous, element_size);
+      return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
+                                          element_size);
   }
 }
 
