@@ -183,7 +183,8 @@ class _JitImplementation:
 
             key_args_tuple = args
             key_kwargs_tuple = tuple(sorted(kwargs.items()))
-            key = (key_args_tuple, key_kwargs_tuple)
+            tuned_key_kwargs_tuple = tuple(sorted(tune_params.items()))
+            key = (key_args_tuple, key_kwargs_tuple, tuned_key_kwargs_tuple)
 
             if key not in self._kernel_cache:
                 # Ensure 'func' (the original user function) is used correctly
