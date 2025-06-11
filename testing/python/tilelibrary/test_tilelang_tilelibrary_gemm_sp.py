@@ -123,6 +123,7 @@ def run_gemm_sp(
 
 
 def test_gemm_sp():
+    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 64, 2, 128)
     run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 128, 128, 128, 2, 128)
     run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 128, 128, 128, 2, 128)
     run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 128, 256, 2, 128)
@@ -130,6 +131,5 @@ def test_gemm_sp():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    tilelang.disable_cache()
-    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 128, 128, 128, 2, 128)
+    tilelang.testing.main()
+
