@@ -85,11 +85,6 @@ def __make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, 
     rep_k_stirde = prod(shape_i + shape_k)
     shape_k.append(rep_k)
     stride_k.append(rep_k_stirde)
-    '''
-    i_basis: [8, 2, 4, 8], j_basis: [2, 2, 4, 6], stride_i: [16, 2, 256, 1024], stride_j: [1, 128, 4, 8192]
-    i_basis: [8, 2, 4, 1], j_basis: [2, 2, 4, 2], stride_i: [16, 2, 256, 1024], stride_j: [1, 128, 4, 1024]
-    '''
-    print(f"{block_k=} {shape_i=}, {shape_k=}, {stride_i=}, {stride_k=}")
 
     def transform(i: int, k: int) -> int:
         nonlocal shape_i, shape_k, stride_i, stride_k

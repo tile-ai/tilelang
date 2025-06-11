@@ -32,10 +32,10 @@ using namespace cute;
       exit(EXIT_FAILURE);                                               \
     }                                                                   \
   }
-template<int BlockK>
+template<typename T, int BlockK>
 std::tuple<torch::Tensor, torch::Tensor> compress_impl(torch::Tensor A) {
-  using ElementA = cutlass::half_t;
-  using ElementE = uint8_t;
+  using ElementA = T;
+  using ElementE = unsigned char;
   using LayoutTagA = cutlass::layout::RowMajor;
   using ProblemShape = cute::Shape<int, int, int, int>;
 
@@ -102,18 +102,35 @@ std::tuple<torch::Tensor, torch::Tensor> compress_impl(torch::Tensor A) {
   return std::make_tuple(A_compressed, E);
 }
 
+// block <= 128
+// Ref https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
+#define DISPATCH_BLOCK_K(TYPE, BLOCK_K, FACTOR, TENSOR)                                                    \
+  [&]() -> std::tuple<torch::Tensor, torch::Tensor> {                                                      \
+    switch (BLOCK_K) {                                                                                     \
+      case int(32 * FACTOR): return compress_impl<TYPE, int(32 * FACTOR)>(TENSOR);                         \
+      case int(64 * FACTOR): return compress_impl<TYPE, int(64 * FACTOR)>(TENSOR);                         \
+      case int(128 * FACTOR): return compress_impl<TYPE, int(128 * FACTOR)>(TENSOR);                       \
+      default:                                                                                             \
+        TORCH_CHECK(false, "Unsupported block_k: ", BLOCK_K);                                              \
+    }                                                                                                      \
+  }()
+
 std::tuple<torch::Tensor, torch::Tensor> compress_sm90(torch::Tensor A, int64_t block_k) {
-  if (block_k == 32) {
-    return compress_impl<32>(A);
-  } else if (block_k == 64) {
-    return compress_impl<64>(A);
-  } else if (block_k == 128) {
-    return compress_impl<128>(A);
-  } else {
-    // block <= 128
-    // Ref https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
-    TORCH_CHECK(false, "Unsupported block_k value: ", block_k);
+  auto dtype = A.dtype().toScalarType();
+  switch (dtype) {
+    case torch::kFloat32:
+      return DISPATCH_BLOCK_K(float, block_k, 0.5, A);
+    case torch::kFloat16:
+    case torch::kBFloat16:
+      return DISPATCH_BLOCK_K(cute::half_t, block_k, 1, A);
+    case torch::kFloat8_e4m3fn:
+      return DISPATCH_BLOCK_K(cute::float_e4m3_t, block_k, 2, A);
+    case torch::kFloat8_e5m2:
+      return DISPATCH_BLOCK_K(cute::float_e5m2_t, block_k, 2, A);
+    default:
+      TORCH_CHECK(false, "Unsupported dtype");
   }
+  TORCH_CHECK(false, "Unreachable");
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
