@@ -352,7 +352,7 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
           trans_A ? 4 * mat_continuous / warp_m : mat_continuous;
       results.Set(A,
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   A->dtype.bits(), trans_A ? 1 : 2));
+                                   A->dtype.bits(), trans_A ? 1 : 2, false));
     } else {
       auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
                                         A->dtype.bits(), trans_A);
@@ -365,7 +365,7 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       const int64_t continuity =
           trans_B ? mat_continuous : mat_continuous / warp_n;
       results.Set(B, makeGemmABLayout(mat_stride, mat_continuous, continuity,
-                                      B->dtype.bits(), trans_B ? 2 : 1));
+                                      B->dtype.bits(), trans_B ? 2 : 1, false));
     } else {
       ICHECK(0) << "WGMMA only support B in shared.";
     }
