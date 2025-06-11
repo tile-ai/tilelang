@@ -9,7 +9,6 @@ from tilelang.carver.arch import driver
 from einops import rearrange, einsum
 import argparse
 
-tilelang.disable_cache()
 
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
@@ -19,7 +18,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
     VALID_BLOCK_H = min(block_H, kv_group_num)
     assert kv_head_num == 1, "kv_head_num must be 1"
     sm_num = driver.get_num_sms()
-    
+
     @T.prim_func
     def main_split_persistent(
             Q: T.Tensor([batch, heads, dim], dtype),
@@ -51,14 +50,14 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             lse_logsum_local = T.alloc_local([1], accum_dtype)
             lse_max_local = T.alloc_local([1], accum_dtype)
             scale_local = T.alloc_local([1], accum_dtype)
-            
+
             T.annotate_layout({
                 # O_shared: tilelang.layout.make_swizzled_layout(O_shared),
                 S_shared: tilelang.layout.make_swizzled_layout(S_shared),
                 lse_logsum_local: T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
             })
             T.use_swizzle(10)
-            
+
             total_tiles = batch * (heads // min(block_H, kv_group_num)) * num_split
             waves = T.ceildiv(total_tiles, sm_num)
             for w in T.serial(waves):
@@ -83,7 +82,11 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         T.copy(K_pe[bid, kv_start:kv_end, cur_kv_head, :], K_pe_shared)
                         T.clear(acc_s)
                         T.gemm(
-                            Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
+                            Q_shared,
+                            KV_shared,
+                            acc_s,
+                            transpose_B=True,
+                            policy=T.GemmWarpPolicy.FullCol)
                         T.gemm(
                             Q_pe_shared,
                             K_pe_shared,
@@ -94,14 +97,16 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         T.fill(scores_max, -T.infinity(accum_dtype))
                         T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                         for i in T.Parallel(block_H):
-                            scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+                            scores_scale[i] = T.exp2(scores_max_prev[i] * scale -
+                                                     scores_max[i] * scale)
                         for i, j in T.Parallel(block_H, block_N):
                             acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
                         T.reduce_sum(acc_s, scores_sum, dim=1)
                         T.copy(acc_s, S_shared)
                         T.copy(S_shared, acc_s_cast)
                         for i in T.Parallel(block_H):
-                            logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
+                            logsum[i] = logsum[i] * sco
+                            es_scale[i] + scores_sum[i]
                         for i, j in T.Parallel(block_H, dim):
                             acc_o[i, j] *= scores_scale[i]
                         T.gemm(acc_s_cast, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullCol)
@@ -111,8 +116,10 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
                     T.copy(logsum, glse[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, sid])
                     # T.copy(acc_o, O_shared)
-                    T.copy(acc_o, Output_partial[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, sid, :])
-        
+                    T.copy(
+                        acc_o, Output_partial[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H,
+                                              sid, :])
+
             T.sync_grid()
             waves = T.ceildiv(heads * batch, sm_num)
             for w in T.serial(waves):
@@ -138,7 +145,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                             o_accum_local[i] += po_local[i] * scale_local[0]
                     for i in T.Parallel(dim):
                         Output[bid, hid, i] = o_accum_local[i]
-    
+
     return main_split_persistent
 
 
