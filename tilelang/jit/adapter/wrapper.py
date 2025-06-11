@@ -309,7 +309,6 @@ class TLCUDASourceWrapper(object):
 
             # Identify the start of the function body to insert arguments
             index = code.index("{", index)
-            call_args = ", ".join(func_call_args(declaration, function_args, desc_name_map))
 
             block_str = "dim3({}, {}, {})".format(
                 legalize_c(block_info[0]),
@@ -321,9 +320,20 @@ class TLCUDASourceWrapper(object):
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             init_l2_persistent_map = self.generate_l2_persistent_map(function_name)
             kernel_launch_code += init_l2_persistent_map
-            kernel_launch_code += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(
-                function_name, grid_str, block_str, smem_str, call_args)
-            kernel_launch_code += "\tTILELANG_CHECK_LAST_ERROR(\"{}\");\n".format(function_name)
+
+            if self.use_cooperative_groups[function_name]:
+                args_list = func_call_args(declaration, function_args, desc_name_map)
+                args_array = [f"(void*)&{arg}" for arg in args_list]
+                call_args = f"\tvoid* {function_name}_args[] = {{{', '.join(args_array)}}};\n"
+                kernel_launch_code += call_args
+                # Using cudaLaunchCooperativeKernel to launch the kernel
+                kernel_launch_code += "\tTILELANG_CHECK(cudaLaunchCooperativeKernel((void*){}, {}, {}, {}, {}, stream));\n".format(
+                    function_name, grid_str, block_str, function_name + "_args", smem_str)
+            else:
+                call_args = ", ".join(func_call_args(declaration, function_args, desc_name_map))
+                kernel_launch_code += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(
+                    function_name, grid_str, block_str, smem_str, call_args)
+                kernel_launch_code += "\tTILELANG_CHECK_LAST_ERROR(\"{}\");\n".format(function_name)
             if has_l2_persistent_map:
                 kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE
 
@@ -427,6 +437,7 @@ class TLCUDASourceWrapper(object):
         grid_info_map = {}
         dynamic_smem_buf_map = {}
         function_names = []
+        use_cooperative_groups_map = {}
         for g_var, func in self.device_mod.functions.items():
             # Default block and grid configurations
             block_info = [1, 1, 1]
@@ -434,6 +445,9 @@ class TLCUDASourceWrapper(object):
             function_name = g_var.name_hint
             attrs = func.attrs
             dynamic_smem_buf = None
+            use_cooperative_groups = False
+            if "use_cooperative_groups" in attrs:
+                use_cooperative_groups = attrs["use_cooperative_groups"]
             if "dyn_shared_memory_buf" in attrs:
                 dynamic_smem_buf = int(attrs["dyn_shared_memory_buf"])
             if "thread_extent" in attrs:
@@ -448,12 +462,14 @@ class TLCUDASourceWrapper(object):
             block_info_map[function_name] = block_info
             grid_info_map[function_name] = grid_info
             dynamic_smem_buf_map[function_name] = dynamic_smem_buf
+            use_cooperative_groups_map[function_name] = use_cooperative_groups
             function_names.append(function_name)
 
         # Store the mappings for use in code generation
         self.block_info = block_info_map
         self.grid_info = grid_info_map
         self.dynamic_smem_buf = dynamic_smem_buf_map
+        self.use_cooperative_groups = use_cooperative_groups_map
 
         function_names_index = {}
         for _, func in self.host_mod.functions.items():

@@ -104,6 +104,9 @@ public:
         role = Role::kProducer;
         has_bulk_copy_ = true;
       }
+      if (call->op.same_as(loop_break())) {
+        role = Role::kBoth;
+      }
     }
     SetRole(op, role);
   }
