@@ -426,8 +426,6 @@ class AutoTuner:
                 logger.debug(f"Error: {e}")
                 continue
 
-            logging.debug(f"Config {config} latency: {latency} at index {i}")
-
             if latency < best_latency:
                 best_latency = latency
                 best_config = config
