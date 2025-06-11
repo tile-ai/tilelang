@@ -161,6 +161,8 @@ Layout makeGemmLayoutLinear(int stride, int continuous);
 Layout makeGemmABLayoutPadded(int stride, int continuous, int element_size);
 Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
                         int element_size, int kfactor);
+Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
+                              int continuity, int element_size, int kfactor);
 Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,
                             int kfactor);
 
@@ -175,6 +177,8 @@ Layout makeGemmVoltaABLayout(int stride, int continuous, bool is_a,
 
 Layout makeFullBankSwizzleLayout(int stride, int continuous, int element_size);
 Layout makeHalfBankSwizzleLayout(int stride, int continuous, int element_size);
+Layout makeQuarterBankSwizzleLayout(int stride, int continuous,
+                                    int element_size);
 
 namespace attr {
 // BlockAttr, Containing the layout for all the buffers in the block
