@@ -32,18 +32,19 @@ using namespace cute;
       exit(EXIT_FAILURE);                                               \
     }                                                                   \
   }
-template<typename T, int BlockK>
+template<typename T, int BlockK, bool transposed>
 std::tuple<torch::Tensor, torch::Tensor> compress_impl(torch::Tensor A) {
   using ElementA = T;
   using ElementE = unsigned char;
-  using LayoutTagA = cutlass::layout::RowMajor;
+  using LayoutTagA = conditional_t<transposed, cutlass::layout::ColumnMajor, cutlass::layout::RowMajor>;
   using ProblemShape = cute::Shape<int, int, int, int>;
 
   using StrideA = cutlass::gemm::TagToStrideA_t<LayoutTagA>;
   using StrideE = StrideA;
 
+  static constexpr GMMA::Major GmmaMajorA = transposed ? cute::SM90::GMMA::Major::MN : cute::SM90::GMMA::Major::K;
   using SparseConfig = cutlass::Sm90GemmSparseConfig<
-      cute::sparse_elem<2, ElementA>, cute::SM90::GMMA::Major::K,
+      cute::sparse_elem<2, ElementA>, GmmaMajorA,
       cute::sparse_elem<8, ElementE>, cute::C<BlockK>>;
 
   using CompressorUtility =
@@ -55,11 +56,20 @@ std::tuple<torch::Tensor, torch::Tensor> compress_impl(torch::Tensor A) {
 
   using Compressor = cutlass::transform::device::TransformUniversalAdapter<CompressorKernel>;
 
-  TORCH_CHECK(A.dim() == 2, "Input must be 2D");
-  int M = A.size(0);
-  int K = A.size(1);
-  int N = -1;
+  TORCH_CHECK(A.is_contiguous(), "A need to be contiguous");
+  TORCH_CHECK(A.dim() == 2, "Might support batch dim in the future ");
+
+  int M = -1;
+  int K = -1;
+  int N = -1;  // not used, but required for config
   int L = 1;
+  if constexpr(transposed) {
+    M = A.size(1);
+    K = A.size(0);
+  } else {
+    M = A.size(0);
+    K = A.size(1);
+  }
 
   ProblemShape problem_shape = make_tuple(M, N, K, L);
   StrideA stride_A = cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, K, L));
@@ -70,9 +80,9 @@ std::tuple<torch::Tensor, torch::Tensor> compress_impl(torch::Tensor A) {
   int KC = compressor_utility.get_tensorA_k_physical();
 
   StrideE stride_E = cutlass::make_cute_packed_stride(StrideE{}, cute::make_shape(ME, KE, L));
-
-  torch::Tensor A_compressed = torch::zeros({M, KC},
-      torch::TensorOptions().dtype(torch::kHalf).device(A.device()));
+  auto dtype = A.dtype().toScalarType();
+  torch::Tensor A_compressed = torch::zeros(KC * M,
+        torch::TensorOptions().dtype(dtype).device(A.device()));
   torch::Tensor E = torch::zeros({ME, KE},
       torch::TensorOptions().dtype(torch::kUInt8).device(A.device()));
 
@@ -99,39 +109,50 @@ std::tuple<torch::Tensor, torch::Tensor> compress_impl(torch::Tensor A) {
   CUTLASS_CHECK(compressor_op.run());
   CUDA_CHECK(cudaDeviceSynchronize());
 
-  return std::make_tuple(A_compressed, E);
+  if constexpr (transposed) {
+    return std::make_tuple(A_compressed.view({KC, M}), E);
+  } else {
+    return std::make_tuple(A_compressed.view({M, KC}), E);
+  }
 }
 
 // block <= 128
 // Ref https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
-#define DISPATCH_BLOCK_K(TYPE, BLOCK_K, FACTOR, TENSOR)                                                    \
+#define DISPATCH_BLOCK_K(TYPE, BLOCK_K, FACTOR, TENSOR, TRANSPOSED)                                        \
   [&]() -> std::tuple<torch::Tensor, torch::Tensor> {                                                      \
     switch (BLOCK_K) {                                                                                     \
-      case int(32 * FACTOR): return compress_impl<TYPE, int(32 * FACTOR)>(TENSOR);                         \
-      case int(64 * FACTOR): return compress_impl<TYPE, int(64 * FACTOR)>(TENSOR);                         \
-      case int(128 * FACTOR): return compress_impl<TYPE, int(128 * FACTOR)>(TENSOR);                       \
+      case int(32 * FACTOR): return compress_impl<TYPE, int(32 * FACTOR), TRANSPOSED>(TENSOR);             \
+      case int(64 * FACTOR): return compress_impl<TYPE, int(64 * FACTOR), TRANSPOSED>(TENSOR);             \
+      case int(128 * FACTOR): return compress_impl<TYPE, int(128 * FACTOR), TRANSPOSED>(TENSOR);           \
       default:                                                                                             \
         TORCH_CHECK(false, "Unsupported block_k: ", BLOCK_K);                                              \
     }                                                                                                      \
   }()
 
-std::tuple<torch::Tensor, torch::Tensor> compress_sm90(torch::Tensor A, int64_t block_k) {
+#define DISPATCH_CONTIGUOUS(TRANSPOSED)                                                                    \
+  [&]() -> std::tuple<torch::Tensor, torch::Tensor> {                                                      \
+    switch (dtype) {                                                                                       \
+      case torch::kFloat32:                                                                                \
+        return DISPATCH_BLOCK_K(float, block_k, 0.5, A, TRANSPOSED);                                       \
+      case torch::kFloat16:                                                                                \
+      case torch::kBFloat16:                                                                               \
+        return DISPATCH_BLOCK_K(cute::half_t, block_k, 1, A, TRANSPOSED);                                  \
+      case torch::kFloat8_e4m3fn:                                                                          \
+        return DISPATCH_BLOCK_K(cute::float_e4m3_t, block_k, 2, A, TRANSPOSED);                            \
+      case torch::kFloat8_e5m2:                                                                            \
+        return DISPATCH_BLOCK_K(cute::float_e5m2_t, block_k, 2, A, TRANSPOSED);                            \
+      default:                                                                                             \
+        TORCH_CHECK(false, "Unsupported dtype");                                                           \
+    }                                                                                                      \
+  }()
+
+std::tuple<torch::Tensor, torch::Tensor> compress_sm90(torch::Tensor A, int64_t block_k, bool transposed) {
   auto dtype = A.dtype().toScalarType();
-  switch (dtype) {
-    case torch::kFloat32:
-      return DISPATCH_BLOCK_K(float, block_k, 0.5, A);
-    case torch::kFloat16:
-    case torch::kBFloat16:
-      return DISPATCH_BLOCK_K(cute::half_t, block_k, 1, A);
-    case torch::kFloat8_e4m3fn:
-      return DISPATCH_BLOCK_K(cute::float_e4m3_t, block_k, 2, A);
-    case torch::kFloat8_e5m2:
-      return DISPATCH_BLOCK_K(cute::float_e5m2_t, block_k, 2, A);
-    default:
-      TORCH_CHECK(false, "Unsupported dtype");
-  }
-  TORCH_CHECK(false, "Unreachable");
+  return transposed ? DISPATCH_CONTIGUOUS(true) : DISPATCH_CONTIGUOUS(false);
 }
+
+#undef DISPATCH_BLOCK_K
+#undef DISPATCH_CONTIGUOUS
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("compress_sm90", torch::wrap_pybind_function(compress_sm90),

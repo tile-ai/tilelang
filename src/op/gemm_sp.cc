@@ -57,8 +57,9 @@ GemmSP::GemmSP(Array<PrimExpr> args, BufferMap vmap) {
   }
 }
 
-std::pair<int, int> GemmSP::ComputeWarpPartition(int num_warps, Target target,
-                                               bool maybe_hopper_wgmma) const {
+std::pair<int, int>
+GemmSP::ComputeWarpPartition(int num_warps, Target target,
+                             bool maybe_hopper_wgmma) const {
   int m_warp = 1, n_warp = 1;
   constexpr int kMPerWarp = 16; // Rows processed by a single warp
   constexpr int kNPerWarp = 8;  // Columns processed by a single warp

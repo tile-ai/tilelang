@@ -41,7 +41,8 @@ def _get_cached_lib():
     )
 
 
-def compress_sm90(A: torch.Tensor, block_k: int) -> tuple[torch.Tensor, torch.Tensor]:
+def compress_sm90(A: torch.Tensor, block_k: int,
+                  transposed: bool) -> tuple[torch.Tensor, torch.Tensor]:
     if block_k > 128:
         block_k = 128
         # Ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
@@ -50,4 +51,4 @@ def compress_sm90(A: torch.Tensor, block_k: int) -> tuple[torch.Tensor, torch.Te
     # Load the library (will use cache if available)
     compress_lib = _get_cached_lib()
 
-    return compress_lib.compress_sm90(A, block_k)
+    return compress_lib.compress_sm90(A, block_k, transposed)
