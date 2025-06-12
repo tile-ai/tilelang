@@ -128,10 +128,18 @@ def run_gemm_sp(
 
 
 def test_gemm_sp():
-    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 64, 1, 128)
+    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 32, 0, 128)
+    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 32, 2, 128)
+
+    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 64, 0, 128)
     run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 64, 2, 128)
+
+    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 128, 128, 128, 0, 128)
     run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 128, 128, 128, 2, 128)
+
+    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 128, 256, 0, 128)
     run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 128, 256, 2, 128)
+
 
 
 

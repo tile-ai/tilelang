@@ -116,6 +116,8 @@ def test_gemm():
 
     # GEMM tests for mixed precision (float16 + float32)
     run_gemm(512, 1024, 768, False, False, "float16", "float16", "float32", 128, 128,
+             16)  # f16f16f32_nn
+    run_gemm(512, 1024, 768, False, False, "float16", "float16", "float32", 128, 128,
              32)  # f16f16f32_nn
     run_gemm(512 + 19, 1024 + 17, 768 + 15, False, False, "float16", "float16", "float32", 128, 64,
              32)  # pad_f16f16f32_nn

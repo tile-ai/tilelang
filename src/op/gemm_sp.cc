@@ -186,9 +186,9 @@ LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
       const int64_t continuity =
           trans_A ? 4 * mat_continuous / warp_m : mat_continuous;
-      results.Set(A,
-                  makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   A->dtype.bits(), trans_A ? 1 : 2));
+      results.Set(A, makeGemmABLayoutHopper(mat_stride, mat_continuous,
+                                            mat_continuous, A->dtype.bits(),
+                                            trans_A ? 1 : 2));
     } else {
       ICHECK(false) << "Not implemented";
     }
@@ -199,8 +199,9 @@ LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
       const int64_t continuity =
           trans_B ? mat_continuous : mat_continuous / warp_n;
-      results.Set(B, makeGemmABLayout(mat_stride, mat_continuous, continuity,
-                                      B->dtype.bits(), trans_B ? 2 : 1));
+      results.Set(B,
+                  makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
+                                         B->dtype.bits(), trans_B ? 2 : 1));
     } else {
       ICHECK(false) << "WGMMA only support B in shared.";
     }
