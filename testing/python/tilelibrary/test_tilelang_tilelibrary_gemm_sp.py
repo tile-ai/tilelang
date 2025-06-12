@@ -141,8 +141,6 @@ def test_gemm_sp():
     run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 128, 256, 2, 128)
 
 
-
-
 if __name__ == "__main__":
     # tilelang.testing.main()
     tilelang.disable_cache()
