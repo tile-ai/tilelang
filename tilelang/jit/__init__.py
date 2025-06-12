@@ -183,7 +183,8 @@ class _JitImplementation:
 
             key_args_tuple = args
             key_kwargs_tuple = tuple(sorted(kwargs.items()))
-            key = (key_args_tuple, key_kwargs_tuple)
+            tuned_key_kwargs_tuple = tuple(sorted(tune_params.items()))
+            key = (key_args_tuple, key_kwargs_tuple, tuned_key_kwargs_tuple)
 
             if key not in self._kernel_cache:
                 # Ensure 'func' (the original user function) is used correctly
@@ -194,9 +195,6 @@ class _JitImplementation:
                     program_result = program_result_source(*args, **kwargs, **tune_params)
                 else:
                     raise ValueError(f"Invalid function type: {type(program_result_source)}")
-
-                if self.verbose:
-                    logger.info(f"Verbose: Compiling for program \n {program_result.script()}")
 
                 kernel_result = compile(
                     program_result,

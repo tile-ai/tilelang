@@ -53,7 +53,8 @@ def matmul_persistent(M,
                       threads,
                       num_stages,
                       dtype="float16",
-                      accum_dtype="float"):
+                      accum_dtype="float",
+                      use_persistent_primitive=True):
 
     sm_num = driver.get_num_sms()
     m_blocks = T.ceildiv(M, block_M)
@@ -88,7 +89,30 @@ def matmul_persistent(M,
                     T.copy(C_local, C_shared)
                     T.copy(C_shared, C[bx * block_M, by * block_N])
 
-    return main
+    @T.prim_func
+    def main_persistent_primitive(
+            A: T.Tensor((M, K), dtype),
+            B: T.Tensor((K, N), dtype),
+            C: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(sm_num, threads=threads) as (block_id):
+            A_shared = T.alloc_shared((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_K, block_N), dtype)
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            C_shared = T.alloc_shared((block_M, block_N), dtype)
+
+            for bx, by in T.Persistent(
+                [T.ceildiv(M, block_M), T.ceildiv(N, block_N)], sm_num, block_id):
+                T.clear(C_local)
+                for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+                    T.copy(A[bx * block_M, k * block_K], A_shared)
+                    T.copy(B[k * block_K, by * block_N], B_shared)
+                    T.gemm(A_shared, B_shared, C_local)
+
+                T.copy(C_local, C_shared)
+                T.copy(C_shared, C[bx * block_M, by * block_N])
+
+    return main_persistent_primitive if use_persistent_primitive else main
 
 
 def ref_program(A, B):

@@ -99,7 +99,9 @@ class KernelParam:
             bool: True if parameter is a boolean type, False otherwise
         """
         dtype_str = str(self.dtype)
-        return dtype_str[6:] if dtype_str.startswith("torch.") else dtype_str.startswith("bool")
+        if dtype_str.startswith("torch."):
+            dtype_str = dtype_str[6:]
+        return dtype_str.startswith("bool")
 
 
 @dataclass

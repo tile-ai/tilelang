@@ -172,8 +172,9 @@ class AutotuneResult:
         # Save kernel source code
         try:
             kernel_path = os.path.join(cache_path, KERNEL_PATH)
-            with open(kernel_path, "w") as f:
-                f.write(kernel.artifact.kernel_source)
+            if kernel.artifact.kernel_source is not None:
+                with open(kernel_path, "w") as f:
+                    f.write(kernel.artifact.kernel_source)
         except Exception as e:
             logger.error(f"Error saving kernel source code to disk: {e}")
 
@@ -181,7 +182,7 @@ class AutotuneResult:
         try:
             wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
             with open(wrapped_kernel_path, "w") as f:
-                f.write(kernel.adapter.get_kernel_source())
+                f.write(kernel.get_kernel_source())
         except Exception as e:
             logger.error(f"Error saving wrapped kernel source code to disk: {e}")
 

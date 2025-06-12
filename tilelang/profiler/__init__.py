@@ -100,11 +100,15 @@ class Profiler:
 
         if isinstance(lib_outs, torch.Tensor):
             lib_outs = [lib_outs]
+        elif isinstance(lib_outs, tuple):
+            lib_outs = list(lib_outs)
         elif lib_outs is None:
             lib_outs = []
 
         if isinstance(ref_outs, torch.Tensor):
             ref_outs = [ref_outs]
+        elif isinstance(ref_outs, tuple):
+            ref_outs = list(ref_outs)
         elif ref_outs is None:
             ref_outs = []
 
@@ -121,15 +125,18 @@ class Profiler:
             # percentage_not_close = (num_not_close / total_elements) * 100
             # print(f"{percentage_not_close:.2f}% of the elements are not close.")
             # print(f"Total elements: {total_elements}, Not close elements: {num_not_close}")
-            torch_assert_close(
-                lhs,
-                rhs,
-                rtol=rtol,
-                atol=atol,
-                max_mismatched_ratio=max_mismatched_ratio,
-                base_name="tilelang",
-                ref_name="ref",
-            )
+            if lhs is not None and rhs is not None:
+                # in case of numsplit template, the ref output may be None
+                # which means the value is invalid, so we skip the comparison
+                torch_assert_close(
+                    lhs,
+                    rhs,
+                    rtol=rtol,
+                    atol=atol,
+                    max_mismatched_ratio=max_mismatched_ratio,
+                    base_name="tilelang",
+                    ref_name="ref",
+                )
 
     def manual_assert_close(
         self,
