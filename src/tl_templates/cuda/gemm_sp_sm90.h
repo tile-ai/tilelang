@@ -15,10 +15,6 @@ class GemmTensorOp {
 public:
   static_assert(num_warp_m % 4 == 0, "num_warp_m must be a multiple of 4");
 
-  using TileShape_MNK =
-      Shape<Int<M / (num_warp_m / 4)>, Int<N / num_warp_n>, Int<K>>;
-  using AtomLayoutMNK = Layout<Shape<Int<num_warp_m / 4>, Int<num_warp_n>, _1>>;
-
   using ElementAMmaRaw =
       std::conditional_t<std::is_same<ElementA, float>::value, tfloat32_t,
                          ElementA>;
@@ -32,9 +28,9 @@ public:
 
   using TiledMma = decltype(make_tiled_mma(
       GMMA::ss_op_selector_sparse<ElementAMmaRaw, ElementBMma,
-                                  ElementAccumulator, TileShape_MNK, GmmaMajorA,
+                                  ElementAccumulator, Shape<Int<M / (num_warp_m / 4)>, Int<N / num_warp_n>, Int<K>>, GmmaMajorA,
                                   GmmaMajorB>(),
-      AtomLayoutMNK{}));
+      Layout<Shape<Int<num_warp_m / 4>, Int<num_warp_n>, _1>>{}));
 
   using ElementAMma = typename TiledMma::ValTypeA;
   using ElementAMmaSparsity = Int<ElementAMma::sparsity>;
@@ -44,20 +40,17 @@ public:
 
   using SparseConfig =
       cutlass::Sm90GemmSparseConfig<ElementAMma, GmmaMajorA, ElementEMma,
-                                    decltype(min(size<2>(TileShape_MNK{}),
-                                                 _128{}))>;
+                                    decltype(min(Int<K>{}, _128{}))>;
 
   using LayoutA = decltype(SparseConfig::deduce_layoutA());
   using LayoutE = decltype(SparseConfig::deduce_layoutE());
 
   using SmemLayoutAtomA =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector_sparse<
-               GmmaMajorA, ElementA, decltype(get<0>(TileShape_MNK{})),
-               decltype(get<2>(TileShape_MNK{})), ElementAMmaSparsity>());
+               GmmaMajorA, ElementA, Int<M>, Int<K>, ElementAMmaSparsity>());
   using SmemLayoutAtomB =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
-               GmmaMajorB, ElementB, decltype(get<1>(TileShape_MNK{})),
-               decltype(get<2>(TileShape_MNK{}))>());
+               GmmaMajorB, ElementB, Int<N>, Int<K>>());
 
   using SmemLayoutAtomE_ = typename SparseConfig::TensorEAtom;
   using SmemLayoutAtomE =
@@ -68,15 +61,16 @@ public:
 
   using SmemLayoutA = decltype(tile_to_shape(
       SmemLayoutAtomA{},
-      make_shape(shape<0>(TileShape_MNK{}), shape<2>(TileShape_MNK{})),
+      Shape<Int<M>, Int<K>>{},
       conditional_t<trans_A, Step<_2, _1>, Step<_1, _2>>{}));
   using SmemLayoutB = decltype(tile_to_shape(
       SmemLayoutAtomB{},
-      make_shape(shape<1>(TileShape_MNK{}), shape<2>(TileShape_MNK{})),
+      Shape<Int<N>, Int<K>>{},
       conditional_t<trans_B, Step<_1, _2>, Step<_2, _1>>{}));
   using SmemLayoutE = decltype(tile_to_shape(
       SmemLayoutAtomE{},
-      make_shape(shape<0>(TileShape_MNK{}), shape<2>(TileShape_MNK{}))));
+      Shape<Int<M>, Int<K>>{},
+      conditional_t<trans_A, Step<_2, _1>, Step<_1, _2>>{}));
 
   using SmemCopyAtomE = AutoVectorizingCopy;
 
