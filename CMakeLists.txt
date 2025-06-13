@@ -39,7 +39,8 @@ else()
 
   # Set default build type to RelWithDebInfo if not provided
   if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+  # Set default build type to Release if not provided
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
     message(STATUS "Setting default build type to ${CMAKE_BUILD_TYPE}")
   endif()
 endif()
@@ -210,6 +211,11 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   target_compile_definitions(tilelang PRIVATE "TVM_LOG_DEBUG")
   target_compile_definitions(tilelang_objs PRIVATE "TVM_LOG_DEBUG")
   target_compile_definitions(tilelang_static PRIVATE "TVM_LOG_DEBUG")
+endif()
+
+# Building tvm_cython modules
+if(NOT DEFINED TVM_PREBUILD_PATH)
+  add_dependencies(tilelang tvm_cython)
 endif()
 
 # Module shared library
