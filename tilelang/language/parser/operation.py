@@ -88,10 +88,10 @@ def _register_expr_op(ty: Type):  # pylint: disable=invalid-name
 
         if DataType(a.dtype).lanes == DataType(b.dtype).lanes:
             return op(a, b)
-        elif DataType(a.dtype).lanes == 1 and DataType(a.dtype).lanes != DataType(b.dtype).lanes:
+        elif (DataType(a.dtype).lanes == 1 and DataType(a.dtype).lanes != DataType(b.dtype).lanes):
             broadcast_a = tir.Broadcast(a, DataType(b.dtype).lanes)
             return op(broadcast_a, b)
-        elif DataType(b.dtype).lanes == 1 and DataType(a.dtype).lanes != DataType(b.dtype).lanes:
+        elif (DataType(b.dtype).lanes == 1 and DataType(a.dtype).lanes != DataType(b.dtype).lanes):
             broadcast_b = tir.Broadcast(b, DataType(a.dtype).lanes)
             return op(a, broadcast_b)
         else:

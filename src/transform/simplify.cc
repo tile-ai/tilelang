@@ -229,6 +229,7 @@ public:
     // Begin to remove useless var and buffer
     // First get used buffers
     simplifier.used_buffers_ = CollectUsedBuffers(func);
+
     bool param_updated = false;
     Array<Var> new_params;
     Map<Var, Buffer> new_buffer_map;
@@ -239,13 +240,17 @@ public:
             simplifier.used_buffers_.end()) {
           new_params.push_back(var);
           new_buffer_map.Set(var, func->buffer_map[var]);
+        } else if (simplifier.used_in_buffer_def_.find(func->buffer_map[var]->data.get()) !=
+                   simplifier.used_in_buffer_def_.end()) {
+          new_params.push_back(var);
+          new_buffer_map.Set(var, func->buffer_map[var]);
         } else {
           param_updated = true;
         }
       }
     }
 
-    if (simplify_arguments && param_updated) {
+    if (param_updated) {
       return PrimFunc(new_params, func.CopyOnWrite()->body, func->ret_type,
                       new_buffer_map, func->attrs, func->span);
     } else {

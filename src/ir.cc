@@ -157,7 +157,7 @@ ForFrame PersistentFor(Array<PrimExpr> domain, PrimExpr wave_size,
         Stmt());
 
     Stmt outer = For(loop_var, 0, waves, ForKind::kSerial,
-                     SeqStmt({out_if, body}), NullOpt, anno);
+                     SeqStmt({out_if, body}), std::nullopt, anno);
     for (int i = 0; i < vars.size() - 1; ++i) {
       outer = tvm::tir::LetStmt(vars[i], idxs[i + 1], outer);
     }
