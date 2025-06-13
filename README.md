@@ -32,7 +32,7 @@ Although tile-lang aims to be portable across a range of Devices, it has been sp
 - [Flash Attention](./examples/flash_attention/)
 - [Flash Linear Attention](./examples/linear_attention/)
 - [Flash MLA Decoding](./examples/deepseek_mla/)
-- [Native Sparse Attention](./examples/native_sparse_attention/)
+- [Native Sparse Attention](./examples/deepseek_nsa/)
 
 Within the `examples` directory, you will also find additional complex kernels—such as convolutions, forward/backward passes for FlashAttention, more operators will continuously be added.
 
