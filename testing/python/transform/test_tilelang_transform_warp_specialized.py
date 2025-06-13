@@ -118,4 +118,4 @@ def test_warp_specialized():
 
 
 if __name__ == "__main__":
-    test_warp_specialized()
+    tilelang.testing.main()
