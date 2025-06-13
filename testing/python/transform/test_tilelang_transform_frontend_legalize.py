@@ -10,7 +10,6 @@ def _check(original, transformed):
     func = original
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tl.transform.FrontendLegalize()(mod)
-    print(mod.script())
     tvm.ir.assert_structural_equal(mod["main"], transformed.with_attr("global_symbol", "main"),
                                    True)
 
