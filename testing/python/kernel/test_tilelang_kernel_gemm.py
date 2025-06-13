@@ -94,6 +94,11 @@ def run_gemm(
             A = A.T
         if trans_B:
             B = B.T
+        if in_dtype == "float32":
+            # Convert float32 to tfloat32 because tfloat32 mma cannot truncate
+            # float32 automatically, -0x1000 meas
+            A = ((A.view(torch.int32) - 0x1000)).view(torch.float32)
+            B = ((B.view(torch.int32) - 0x1000)).view(torch.float32)
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         C = C.to(torch.__getattribute__(out_dtype))
         return C
@@ -377,7 +382,7 @@ def run_gemm_sr(
     )
 
     kernel = tilelang.compile(program, out_idx=[2])
-    profiler = kernel.get_profiler()
+    profiler = kernel.get_profiler(tilelang.TensorSupplyType.Randn)
 
     def ref_program(A, B):
         import torch
@@ -386,7 +391,9 @@ def run_gemm_sr(
             A = A.T
         if trans_B:
             B = B.T
-        C = torch.matmul(A.to(torch.float), B.to(torch.float))
+        A = A.to(torch.float)
+        B = B.to(torch.float)
+        C = torch.matmul(A, B)
         C = C.to(torch.__getattribute__(out_dtype))
         return C
 
