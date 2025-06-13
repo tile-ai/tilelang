@@ -108,12 +108,14 @@ private:
    * \return The rewritten block.
    */
   Stmt RewritePaddingMap(const BlockNode *op) {
-    auto padding_map =
-        op->annotations.Get(attr::kPaddingMap).as<Map<Var, PrimExpr>>().value();
+    auto padding_map = op->annotations.Get(attr::kPaddingMap);
+    if (!padding_map) {
+      LOG(FATAL) << "Padding map annotation is missing";
+    }
 
     Map<Var, Var> var_remap = CreateVarRemap();
     Map<Var, PrimExpr> new_padding_map =
-        RemapPaddingMap(padding_map, var_remap);
+        RemapPaddingMap(Downcast<Map<Var, PrimExpr>>(padding_map.value()), var_remap);
 
     auto block = Downcast<Block>(IRMutatorWithAnalyzer::VisitStmt_(op));
     auto block_ptr = block.CopyOnWrite();

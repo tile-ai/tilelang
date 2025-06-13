@@ -39,7 +39,6 @@ def run_tilelang_copy(M=1024, N=1024, block_M=128, block_N=128, dtype="float16",
             "tl.disable_warp_specialized": True,
             "tl.disable_tma_lower": True
         })
-    print(kernel.get_kernel_source())
     a = torch.randn(M, N, device="cuda", dtype=getattr(torch, dtype))
     b = kernel(a)
     ref_b = torch.zeros_like(a)
