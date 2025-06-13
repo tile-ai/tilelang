@@ -364,7 +364,6 @@ Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
     auto stride = as_const_int(shared_layout->InputShape()[0]);
     auto continuous = as_const_int(shared_layout->InputShape()[1]);
     ICHECK(stride != nullptr && continuous != nullptr);
-    LOG(INFO) << "shared_layout: " << shared_layout->DebugOutput();
     if (StructuralEqual()(shared_layout,
                           makeQuarterBankSwizzleLayout(*stride, *continuous,
                                                        dst->dtype.bits()))) {
