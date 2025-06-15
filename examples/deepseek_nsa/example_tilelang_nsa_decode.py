@@ -128,7 +128,7 @@ def native_sparse_attention(
     return native_sparse_attention
 
 
-if __name__ == "__main__":
+def main():
     B, SEQ_LEN, H, HQ, D, S, block_size, dtype = 2, 64, 1, 16, 16, 1, 32, torch.float16
     groups = HQ // H
     SEQ_LEN_Q = 1
@@ -172,3 +172,7 @@ if __name__ == "__main__":
     print("out", out)
     print("ref", ref)
     torch.testing.assert_close(ref, out, atol=1e-2, rtol=1e-2)
+
+
+if __name__ == "__main__":
+    main()

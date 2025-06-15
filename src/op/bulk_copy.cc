@@ -173,8 +173,9 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   // The first stride element should be 1
   ICHECK(is_one(desc.global_stride[0])) << desc.global_stride;
   // Make global stride in bytes
-  desc.global_stride = desc.global_stride.Map(
-      [&](PrimExpr e) { return e * global_tensor->dtype.bytes(); });
+  desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
+    return cast(DataType::Int(64), e) * global_tensor->dtype.bytes();
+  });
 
   // Smem Box
   desc.smem_box =
@@ -198,6 +199,11 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
                                              *stride, *continuous,
                                              shared_tensor->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
+    } else if (StructuralEqual()(
+                   shared_layout,
+                   makeQuarterBankSwizzleLayout(*stride, *continuous,
+                                                shared_tensor->dtype.bits()))) {
+      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
     } else if (StructuralEqual()(
                    shared_layout,
                    makeHalfBankSwizzleLayout(*stride, *continuous,
@@ -325,6 +331,7 @@ Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
   desc.data_type = to_CUtensorMapDataType(src->dtype);
   desc.global_addr = src->data;
   desc.global_shape = ReverseArray(src->shape);
+
   if (!src->strides.empty()) {
     desc.global_stride = ReverseArray(src->strides);
   } else {
@@ -339,8 +346,9 @@ Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
   // The first stride element should be 1
   ICHECK(is_one(desc.global_stride[0])) << desc.global_stride;
   // Make global stride in bytes
-  desc.global_stride = desc.global_stride.Map(
-      [&](PrimExpr e) { return e * src->dtype.bytes(); });
+  desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
+    return cast(DataType::Int(64), e) * src->dtype.bytes();
+  });
   desc.elem_stride = {1, stride, stride, 1};
   desc.lower_corner = {-padding, -padding};
   desc.upper_corner = {-padding, -padding};
@@ -357,7 +365,11 @@ Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
     auto continuous = as_const_int(shared_layout->InputShape()[1]);
     ICHECK(stride != nullptr && continuous != nullptr);
     if (StructuralEqual()(shared_layout,
-                          makeHalfBankSwizzleLayout(*stride, *continuous,
+                          makeQuarterBankSwizzleLayout(*stride, *continuous,
+                                                       dst->dtype.bits()))) {
+      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
+    } else if (StructuralEqual()(shared_layout, makeHalfBankSwizzleLayout(
+                                                    *stride, *continuous,
                                                     dst->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B);
     } else if (StructuralEqual()(shared_layout, makeFullBankSwizzleLayout(

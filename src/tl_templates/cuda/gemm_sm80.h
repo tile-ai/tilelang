@@ -58,6 +58,23 @@ struct DispatchInstruction<half_t, half_t, float, num_warp_m, num_warp_n, N> {
 };
 #endif
 
+template <int N, int num_warp_n, bool transpose> struct SelectCopy {
+  static constexpr int remainder = (N / num_warp_n) % 16;
+  using type = std::conditional_t<
+      remainder == 4 || remainder == 8 || remainder == 0,
+      std::conditional_t<
+          transpose,
+          std::conditional_t<
+              remainder == 4, SM75_U32x1_LDSM_N,
+              std::conditional_t<remainder == 8, SM75_U32x2_LDSM_N,
+                                 SM75_U32x4_LDSM_N>>,
+          std::conditional_t<
+              remainder == 4, SM75_U16x2_LDSM_T,
+              std::conditional_t<remainder == 8, SM75_U16x4_LDSM_T,
+                                 SM75_U16x8_LDSM_T>>>,
+      DefaultCopy>;
+};
+
 template <int Bits, int N, int K, bool K_inner, int num_warp_n,
           typename Enable = void>
 struct OperandTraits {
@@ -77,8 +94,7 @@ struct OperandTraits<16, N, K, true, num_warp_n,
   using LayoutAtom = decltype(composition(
       Swizzle<2, 3, 3>{}, Layout<Shape<_8, _32>, Stride<_32, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = typename std::conditional<N == 8 * num_warp_n, SM75_U32x2_LDSM_N,
-                                         SM75_U32x4_LDSM_N>::type;
+  using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
 template <int N, int K, int num_warp_n>
@@ -87,8 +103,7 @@ struct OperandTraits<16, N, K, true, num_warp_n,
   using LayoutAtom = decltype(composition(
       Swizzle<3, 3, 3>{}, Layout<Shape<_8, _64>, Stride<_64, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = typename std::conditional<N == 8 * num_warp_n, SM75_U32x2_LDSM_N,
-                                         SM75_U32x4_LDSM_N>::type;
+  using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
 template <int N, int K, int num_warp_n>
@@ -98,7 +113,7 @@ struct OperandTraits<16, N, K, false, num_warp_n,
       Swizzle<2, 3, 3>{}, Layout<Shape<_32, _8>, Stride<_1, _32>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{},
                                         Step<_2, _1>{}));
-  using Copy = SM75_U16x8_LDSM_T;
+  using Copy = typename SelectCopy<N, num_warp_n, false>::type;
 };
 
 template <int N, int K, int num_warp_n>
@@ -108,7 +123,7 @@ struct OperandTraits<16, N, K, false, num_warp_n,
       Swizzle<3, 3, 3>{}, Layout<Shape<_64, _8>, Stride<_1, _64>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{},
                                         Step<_2, _1>{}));
-  using Copy = SM75_U16x8_LDSM_T;
+  using Copy = typename SelectCopy<N, num_warp_n, false>::type;
 };
 
 template <int N, int K, int num_warp_n>
@@ -117,8 +132,7 @@ struct OperandTraits<32, N, K, true, num_warp_n,
   using LayoutAtom = decltype(composition(
       Swizzle<3, 2, 3>{}, Layout<Shape<_8, _32>, Stride<_32, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = typename std::conditional<N == 8 * num_warp_n, SM75_U32x2_LDSM_N,
-                                         SM75_U32x4_LDSM_N>::type;
+  using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
 template <int N, int K, int num_warp_n>
@@ -127,8 +141,7 @@ struct OperandTraits<32, N, K, true, num_warp_n,
   using LayoutAtom = decltype(composition(
       Swizzle<2, 2, 3>{}, Layout<Shape<_8, _16>, Stride<_16, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = typename std::conditional<N == 8 * num_warp_n, SM75_U32x2_LDSM_N,
-                                         SM75_U32x4_LDSM_N>::type;
+  using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
 template <int N, int K, int num_warp_n>
@@ -157,7 +170,7 @@ struct OperandTraits<8, N, K, true, num_warp_n,
   using LayoutAtom = decltype(composition(
       Swizzle<2, 4, 3>{}, Layout<Shape<_8, _64>, Stride<_64, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = SM75_U32x4_LDSM_N;
+  using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
 template <int N, int K, int num_warp_n>
@@ -166,8 +179,7 @@ struct OperandTraits<8, N, K, true, num_warp_n,
   using LayoutAtom = decltype(composition(
       Swizzle<3, 4, 3>{}, Layout<Shape<_8, _128>, Stride<_128, _1>>{}));
   using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<K>>{}));
-  using Copy = typename std::conditional<N == 8 * num_warp_n, SM75_U32x2_LDSM_N,
-                                         SM75_U32x4_LDSM_N>::type;
+  using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
 template <int N, int K, int num_warp_n>
@@ -189,6 +201,14 @@ struct OperandTraits<64, N, K, false, num_warp_n,
   using Copy = DefaultCopy;
 };
 
+template <typename T> CUTE_HOST_DEVICE static void cast_float_to_tf32(T &a) {
+  uint32_t x = reinterpret_cast<uint32_t const &>(a);
+  if (std::isfinite(a)) {
+    x += 0x1000u;
+  }
+  a = tfloat32_t::bitcast(x);
+};
+
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, typename A_type_raw,
           typename B_type_raw, typename C_type_raw>
@@ -201,6 +221,11 @@ public:
       typename std::conditional<std::is_same<B_type_raw, float>::value,
                                 tfloat32_t, A_type_raw>::type;
   using C_type = C_type_raw;
+
+  static constexpr bool need_tfloat32_cast =
+      std::is_same<A_type_raw, float>::value &&
+      std::is_same<B_type_raw, float>::value;
+
   using Instruction =
       DispatchInstruction<A_type, B_type, C_type, num_warp_m, num_warp_n, N>;
 
@@ -269,6 +294,10 @@ public:
     for (int k = 0; k < size<2>(tCrA); ++k) {
       copy(tiled_copy_A, tCsA(_, _, k), tCrA_copy_view(_, _, k));
       copy(tiled_copy_B, tCsB(_, _, k), tCrB_copy_view(_, _, k));
+      if constexpr (need_tfloat32_cast) {
+        cute::for_each(tCrA_view(_, _, k), cast_float_to_tf32<A_type>);
+        cute::for_each(tCrB_view(_, _, k), cast_float_to_tf32<B_type>);
+      }
       gemm(tiled_mma, tCrA_view(_, _, k), tCrB_view(_, _, k), acc);
     }
   }
@@ -294,7 +323,9 @@ public:
     Tensor tCrA =
         make_tensor(make_rmem_ptr(reinterpret_cast<A_type *>(pA)),
                     partition_shape_A(tiled_mma, Shape<Int<M>, Int<K>>{}));
-
+    if constexpr (need_tfloat32_cast) {
+      cute::for_each(tCrA, cast_float_to_tf32<A_type>);
+    }
     if constexpr (clear_accum) {
       clear(acc);
     }
@@ -304,6 +335,9 @@ public:
     for (int k = 0; k < size<2>(tCrA); ++k) {
       if (k < size<2>(tCrA) - 1) {
         copy(tiled_copy_B, tCsB(_, _, k + 1), tCrB_copy_view(_, _, k + 1));
+      }
+      if constexpr (need_tfloat32_cast) {
+        cute::for_each(tCrB_view(_, _, k), cast_float_to_tf32<B_type>);
       }
       gemm(tiled_mma, tCrA(_, _, k), tCrB_view(_, _, k), acc);
     }
@@ -330,7 +364,9 @@ public:
     Tensor tCrB =
         make_tensor(make_rmem_ptr(reinterpret_cast<B_type *>(pB)),
                     partition_shape_B(tiled_mma, Shape<Int<N>, Int<K>>{}));
-
+    if constexpr (need_tfloat32_cast) {
+      cute::for_each(tCrB, cast_float_to_tf32<B_type>);
+    }
     if constexpr (clear_accum) {
       clear(acc);
     }
@@ -340,6 +376,9 @@ public:
     for (int k = 0; k < size<2>(tCrA); ++k) {
       if (k < size<2>(tCrA) - 1) {
         copy(tiled_copy_A, tCsA(_, _, k + 1), tCrA_copy_view(_, _, k + 1));
+      }
+      if constexpr (need_tfloat32_cast) {
+        cute::for_each(tCrA_view(_, _, k), cast_float_to_tf32<A_type>);
       }
       gemm(tiled_mma, tCrA_view(_, _, k), tCrB(_, _, k), acc);
     }

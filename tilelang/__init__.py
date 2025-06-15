@@ -61,6 +61,7 @@ from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
 
 import tvm
 import tvm._ffi.base
+from tvm import DataType  # noqa: F401
 
 from . import libinfo
 
@@ -95,10 +96,10 @@ from .layout import (
 )
 from . import (
     transform,  # noqa: F401
-    autotuner,  # noqa: F401
     language,  # noqa: F401
     engine,  # noqa: F401
 )
+from .autotuner import autotune  # noqa: F401
 from .transform import PassConfigKey  # noqa: F401
 
 from .engine import lower, register_cuda_postproc, register_hip_postproc  # noqa: F401

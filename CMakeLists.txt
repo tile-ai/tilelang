@@ -7,7 +7,9 @@ cmake_minimum_required(VERSION 3.18)
 project(TILE_LANG C CXX)
 
 # Set default build type to Release if not provided
-set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type")
+endif()
 
 # Define a custom macro for globbing files with conditional CONFIGURE_DEPENDS
 if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "3.12.0")

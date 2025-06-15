@@ -179,7 +179,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         ctypes_args.append(ctypes.c_void_p(stream))
         self.lib.call(*ctypes_args)
 
-    def _warp_forward_from_prebuild_lib(self,
+    def _wrap_forward_from_prebuild_lib(self,
                                         *ins: List[torch.Tensor],
                                         stream: Optional[int] = None):
         """High-level wrapper for kernel execution.
@@ -243,7 +243,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
     def _convert_torch_func(self) -> Callable:
         """Returns a PyTorch-compatible function wrapper for the kernel."""
-        return self._warp_forward_from_prebuild_lib
+        return self._wrap_forward_from_prebuild_lib
 
     @property
     def prim_func(self) -> tir.PrimFunc:

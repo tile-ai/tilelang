@@ -16,6 +16,12 @@
 namespace tvm {
 namespace tl {
 
+namespace attr {
+static constexpr const char *kPaddingMap = "padding_map";
+} // namespace attr
+
+static constexpr const char *kDebugMergeSharedMemoryAllocations =
+    "tl.debug_merge_shared_memory_allocations";
 static constexpr const char *kDisableTMALower = "tl.disable_tma_lower";
 static constexpr const char *kDisableSafeMemoryLegalize =
     "tl.disable_safe_memory_legalize";
@@ -204,6 +210,22 @@ const Op &no_set_max_nreg();
  *
  */
 const Op &wait_wgmma();
+
+/*!
+ * \brief Synchronize all threads in a grid
+ *
+ * sync_grid()
+ *
+ */
+const Op &sync_grid();
+
+/*!
+ * \brief tvm intrinsic for loop continue
+ *
+ * loop_break()
+ *
+ */
+const Op &loop_break();
 
 /*!
  * \brief tvm intrinsic for amd matrix core mfma instructions.

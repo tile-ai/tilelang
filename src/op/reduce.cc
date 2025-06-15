@@ -108,14 +108,28 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto dst_buffer = T.buffer_remap[this->dst];
   Fragment src_layout = T.layout_map[this->src].as<Fragment>().value();
   Fragment dst_layout = T.layout_map[this->dst].as<Fragment>().value();
-  ICHECK(src_layout->InputDim() == dst_layout->InputDim() + 1);
+  size_t src_dim = src_layout->InputDim();
+  size_t dst_dim = dst_layout->InputDim();
+
+  bool is_1d_reduce = src_dim == dst_dim && dst_dim == 1;
+
+  if (is_1d_reduce) {
+    ICHECK(is_one(dst_layout->OutputShape().back()))
+        << "Reduce for scalar not implemented.";
+  } else {
+    ICHECK(src_dim == dst_dim + 1) << "Reduce dimension mismatch.";
+  }
+
   Array<IterVar> dst_vars;
-  for (size_t i = 0; i < dst_layout->InputDim(); i++) {
+  for (size_t i = 0; i < dst_dim; i++) {
     Var var = Var(std::string{char('i' + i)});
     dst_vars.push_back(IterVar(Range(0, dst_layout->InputShape()[i]), var,
                                IterVarType::kDataPar));
   }
-  Array<IterVar> src_vars = dst_vars;
+  Array<IterVar> src_vars;
+  if (!is_1d_reduce) {
+    src_vars = dst_vars;
+  }
   src_vars.insert(src_vars.begin() + this->dim,
                   {Range(0, src_layout->InputShape()[this->dim]), Var("rv"),
                    IterVarType::kDataPar});

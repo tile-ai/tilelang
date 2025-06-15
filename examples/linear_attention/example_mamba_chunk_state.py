@@ -141,7 +141,7 @@ def chunk_state_fwd(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate,
     if tune:
 
         @autotune(configs=get_configs(), warmup=10, rep=10)
-        @jit(out_idx=[4], supply_type=tilelang.TensorSupplyType.Normal, ref_prog=None)
+        @tilelang.jit(out_idx=[4])
         def kernel(block_M=None, block_N=None, block_K=None, num_stages=None, threads=None):
             return kernel_func(block_M, block_N, block_K, num_stages, threads)
 

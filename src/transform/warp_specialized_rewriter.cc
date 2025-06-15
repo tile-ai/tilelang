@@ -107,6 +107,9 @@ public:
         role = Role::kProducer;
         has_bulk_copy_ = true;
       }
+      if (call->op.same_as(loop_break())) {
+        role = Role::kBoth;
+      }
     }
     SetRole(op, role);
   }
@@ -632,6 +635,7 @@ private:
       num_stages = static_cast<int>(num_stages_anno.as<IntImmNode>()->value);
       ICHECK(num_stages_ == 1) << "Nested pipeline not supported.";
     }
+    loop_stack_.emplace_back(op->loop_var, op->extent);
 
     Array<Array<Integer>> group_info_array;
     Array<Integer> order_info_array;
@@ -664,10 +668,14 @@ private:
 
     num_stages_ = num_stages;
     pipeline_info_ = pipeline_info;
-    stage_ = FloorMod(op->loop_var - op->min, num_stages);
-    parity_ = FloorMod(parity_before * op->extent +
-                           FloorDiv(op->loop_var - op->min, num_stages),
-                       2);
+    PrimExpr linear_index = loop_stack_[0].first;
+    for (size_t i = 1; i < loop_stack_.size(); ++i) {
+      linear_index =
+          linear_index * loop_stack_[i].second + loop_stack_[i].first;
+    }
+    stage_ = FloorMod(linear_index, num_stages);
+    parity_ = FloorMod(
+        parity_before * op->extent + FloorDiv(linear_index, num_stages), 2);
 
     auto result = FilterByRole(op);
 
@@ -695,10 +703,13 @@ private:
       }
       if (is_emitting_producer_ || !group_anno.defined() ||
           group_info_array.size() == 0) {
+        loop_stack_.pop_back();
         return for_node;
       }
+      loop_stack_.pop_back();
       return grouped_for_node;
     }
+    loop_stack_.pop_back();
     return result;
   }
 
@@ -911,6 +922,7 @@ private:
   PrimExpr parity_ = 0;
   PrimExpr stage_ = 0;
   int num_stages_ = 1;
+  std::vector<std::pair<Var, PrimExpr>> loop_stack_;
   Var thread_var_;
   bool mbarrier_only_ = false;
   PipelineInfo pipeline_info_;
@@ -1163,44 +1175,11 @@ private:
     IRVisitorWithAnalyzer::VisitExpr_(op);
   }
 
-  void VisitStmt_(const IfThenElseNode *op) final {
-    // do not visit the body of the if-then-else statement
-    // because we only care about the condition
-    auto cond = op->condition;
-    // assert cond is a binary expression
-    PostOrderVisit(cond, [this](const ObjectRef &node) {
-      bool is_cmp_op = false;
-      if (const auto *lt = node.as<LTNode>()) {
-        is_cmp_op = true;
-      } else if (const auto *le = node.as<LENode>()) {
-        is_cmp_op = true;
-      } else if (const auto *gt = node.as<GTNode>()) {
-        is_cmp_op = true;
-      } else if (const auto *ge = node.as<GENode>()) {
-        is_cmp_op = true;
-      }
-
-      if (is_cmp_op) {
-        bool has_thread_var = false;
-        bool has_warp_group_size = false;
-        // check if has thread_var_ in lt->a or lt->b
-        PostOrderVisit(node, [this, &has_thread_var,
-                              &has_warp_group_size](const ObjectRef &node_) {
-          if (node_.as<VarNode>() == thread_var_->var.get()) {
-            has_thread_var = true;
-          } else if (const auto *imm = node_.as<IntImmNode>()) {
-            // 128 is the warp group size of nvidia gpus
-            has_warp_group_size = imm->value % 128 == 0;
-          }
-        });
-        if (has_thread_var && has_warp_group_size) {
-          has_warp_specialization_ = true;
-        }
-      }
-    });
-  }
-
   void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == "warp_specialize" &&
+        op->value.as<IntImmNode>()->value == 1) {
+      has_warp_specialization_ = true;
+    }
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
