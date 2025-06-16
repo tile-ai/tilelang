@@ -8,6 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
+import fla
 if fla.__version__ < "0.2.1":
     from fla.ops.common.utils import prepare_token_indices
 else:
