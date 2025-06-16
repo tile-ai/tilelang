@@ -56,7 +56,7 @@ jobs:
       run: |
         source tilelang_ci/bin/activate
         python -m pip install --upgrade pip
-        if [ -f requirements-test.txt ]; then python -m pip install -r requirements-test.txt; fi
+        if [ -f requirements-test.txt ]; then PIP_NO_BUILD_ISOLATION=1 python -m pip install -r requirements-test.txt; fi
 
     - name: Install project in wheel mode
       run: |
