@@ -57,6 +57,7 @@ jobs:
         source tilelang_ci/bin/activate
         python -m pip install --upgrade pip
         if [ -f requirements-test.txt ]; then python -m pip install -r requirements-test.txt; fi
+        python -m pip install --no-build-isolation flash-attn
 
     - name: Install project in wheel mode
       run: |
