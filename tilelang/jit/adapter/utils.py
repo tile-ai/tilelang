@@ -101,3 +101,35 @@ def get_annotated_mod(
     }
 
     return dispatch[model_type](mod)
+
+
+def pythonic_expr(expr: tvm.tir.Expr) -> str:
+    python_str = ""
+    node_to_str_map = {}  # Stores string representation for each node
+
+    def _pythonic_visitor(node):
+        if isinstance(node, tvm.tir.Var):
+            s = node.name
+        elif isinstance(node, tvm.tir.IntImm):
+            # Integer constant: use value directly (ignore type)
+            s = str(node.value)
+        elif isinstance(node, tvm.tir.Cast):
+            # Type cast: skip Cast and use inner value directly
+            s = node_to_str_map.get(node.value, str(node.value))
+        elif isinstance(node, tvm.tir.Mul):
+            # Multiplication: format as 'left * right'
+            a_str = node_to_str_map.get(node.a, str(node.a))
+            b_str = node_to_str_map.get(node.b, str(node.b))
+            s = f"{a_str} * {b_str}"
+        else:
+            # Other nodes: use default string representation
+            s = str(node)
+
+        # Store current node's string representation
+        node_to_str_map[node] = s
+        nonlocal python_str
+        python_str = s  # Update global string (retain root node in the end)
+
+    # Perform post-order traversal
+    tvm.tir.stmt_functor.post_order_visit(expr, _pythonic_visitor)
+    return python_str
