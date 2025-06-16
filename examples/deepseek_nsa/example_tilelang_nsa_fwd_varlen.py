@@ -3,12 +3,14 @@
 # ruff: noqa
 import torch
 from typing import Optional, Union
+from packaging.version import parse
+
 import tilelang
 from tilelang import language as T
 import tilelang.testing
 
 import fla
-if fla.__version__ < "0.2.1":
+if parse(fla.__version__) < parse("0.2.1"):
     from fla.ops.common.utils import prepare_token_indices
 else:
     from fla.ops.utils import prepare_token_indices
