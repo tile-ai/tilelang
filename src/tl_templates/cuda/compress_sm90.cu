@@ -35,17 +35,20 @@ using namespace cute;
 template<typename T, int BlockK, bool transposed>
 std::tuple<torch::Tensor, torch::Tensor> compress_impl(torch::Tensor A) {
   using ElementA = T;
-  using ElementE = unsigned char;
+  using ElementE = uint8_t;
   using LayoutTagA = conditional_t<transposed, cutlass::layout::ColumnMajor, cutlass::layout::RowMajor>;
   using ProblemShape = cute::Shape<int, int, int, int>;
 
   using StrideA = cutlass::gemm::TagToStrideA_t<LayoutTagA>;
   using StrideE = StrideA;
 
+  // NOTE: this is derived from sparse sm90 mma atoms
+  // Ref: https://github.com/NVIDIA/cutlass/blob/dc4817921edda44a549197ff3a9dcf5df0636e7b/include/cute/atom/mma_traits_sm90_gmma_sparse.hpp
+  using SparseE = conditional_t<(sizeof_bits_v<ElementA> == 32), cute::sparse_elem<4, ElementE>, cute::sparse_elem<8, ElementE>>;
   static constexpr GMMA::Major GmmaMajorA = transposed ? cute::SM90::GMMA::Major::MN : cute::SM90::GMMA::Major::K;
   using SparseConfig = cutlass::Sm90GemmSparseConfig<
       cute::sparse_elem<2, ElementA>, GmmaMajorA,
-      cute::sparse_elem<8, ElementE>, cute::C<BlockK>>;
+      SparseE, cute::C<BlockK>>;
 
   using CompressorUtility =
       cutlass::transform::kernel::StructuredSparseCompressorUtility<

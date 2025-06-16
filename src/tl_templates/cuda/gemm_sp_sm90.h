@@ -9,17 +9,21 @@
 namespace cute {
 namespace tl_wgmma_sp {
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool clear_accum, typename ElementA, typename ElementB,
-          typename ElementAccumulator>
+          bool trans_B, bool clear_accum, typename A_type_raw, typename B_type_raw,
+          typename C_type_raw>
 class GemmTensorOp {
 public:
   static_assert(num_warp_m % 4 == 0, "num_warp_m must be a multiple of 4");
 
-  using ElementAMmaRaw =
-      std::conditional_t<std::is_same<ElementA, float>::value, tfloat32_t,
-                         ElementA>;
-  using ElementBMma = std::conditional_t<std::is_same<ElementB, float>::value,
-                                         tfloat32_t, ElementB>;
+  using A_type = conditional_t<std::is_same<A_type_raw, float>::value,
+                               tfloat32_t, A_type_raw>;
+  using B_type = conditional_t<std::is_same<B_type_raw, float>::value,
+                               tfloat32_t, B_type_raw>;
+  using C_type = C_type_raw;
+
+  static constexpr bool need_tfloat32_cast =
+      std::is_same<A_type_raw, float>::value &&
+      std::is_same<B_type_raw, float>::value;
 
   static constexpr GMMA::Major GmmaMajorA =
       trans_A ? GMMA::Major::MN : GMMA::Major::K;
@@ -27,16 +31,17 @@ public:
       trans_B ? GMMA::Major::K : GMMA::Major::MN;
 
   using TiledMma = decltype(make_tiled_mma(
-      GMMA::ss_op_selector_sparse<ElementAMmaRaw, ElementBMma,
-                                  ElementAccumulator, Shape<Int<M / (num_warp_m / 4)>, Int<N / num_warp_n>, Int<K>>, GmmaMajorA,
+      GMMA::ss_op_selector_sparse<A_type, B_type,
+                                  C_type, Shape<Int<M / (num_warp_m / 4)>, Int<N / num_warp_n>, Int<K>>, GmmaMajorA,
                                   GmmaMajorB>(),
       Layout<Shape<Int<num_warp_m / 4>, Int<num_warp_n>, _1>>{}));
 
   using ElementAMma = typename TiledMma::ValTypeA;
   using ElementAMmaSparsity = Int<ElementAMma::sparsity>;
+  using ElementBMma = typename TiledMma::ValTypeB;
   using ElementEMma = typename TiledMma::ValTypeE;
   using ElementEMmaSparsity = Int<ElementEMma::sparsity>;
-  using ElementE = typename ElementEMma::raw_type;
+  using E_type_raw = typename ElementEMma::raw_type;
 
   using SparseConfig =
       cutlass::Sm90GemmSparseConfig<ElementAMma, GmmaMajorA, ElementEMma,
@@ -47,16 +52,16 @@ public:
 
   using SmemLayoutAtomA =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector_sparse<
-               GmmaMajorA, ElementA, Int<M>, Int<K>, ElementAMmaSparsity>());
+               GmmaMajorA, A_type, Int<M>, Int<K>, ElementAMmaSparsity>());
   using SmemLayoutAtomB =
       decltype(cutlass::gemm::collective::detail::ss_smem_selector<
-               GmmaMajorB, ElementB, Int<N>, Int<K>>());
+               GmmaMajorB, B_type, Int<N>, Int<K>>());
 
   using SmemLayoutAtomE_ = typename SparseConfig::TensorEAtom;
   using SmemLayoutAtomE =
       ComposedLayout<Swizzle<0, 4, 3>,
                      smem_sparse_ptr_flag_bits<ElementEMmaSparsity::value,
-                                               sizeof_bits_v<ElementE>>,
+                                               sizeof_bits_v<E_type_raw>>,
                      SmemLayoutAtomE_>;
 
   using SmemLayoutA = decltype(tile_to_shape(
@@ -75,8 +80,8 @@ public:
   using SmemCopyAtomE = AutoVectorizingCopy;
 
   template <int wg_wait = 0>
-  static CUTE_DEVICE void body(ElementA *pA, ElementB *pB,
-                               ElementAccumulator *pC, ElementE *pE) {
+  static CUTE_DEVICE void body(A_type_raw *pA, B_type_raw *pB,
+                               C_type_raw *pC, E_type_raw *pE) {
     const int tid = threadIdx.x;
     Tensor sA =
         make_tensor(make_smem_ptr(recast_ptr<ElementAMma>(pA)), SmemLayoutA{});
@@ -111,7 +116,6 @@ public:
     if constexpr (clear_accum) {
       tiled_mma.accumulate_ = GMMA::ScaleOut::Zero;
     }
-
     copy(smem_tiled_copy_E, tEsE, tErE);
 
     CUTLASS_PRAGMA_UNROLL
