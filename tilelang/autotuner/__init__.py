@@ -520,6 +520,15 @@ class _AutoTunerImplementation:
         self.warmup = warmup
         self.rep = rep
         self.timeout = timeout
+        self.supply_type = supply_type
+        self.ref_prog = ref_prog
+        self.supply_prog = supply_prog
+        self.rtol = rtol
+        self.atol = atol
+        self.max_mismatched_ratio = max_mismatched_ratio
+        self.skip_check = skip_check
+        self.manual_check_prog = manual_check_prog
+        self.cache_input_tensors = cache_input_tensors
 
         self._tuner_cache: Dict[tuple, tilelang.JITKernel] = {}
 
