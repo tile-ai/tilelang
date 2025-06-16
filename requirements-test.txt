@@ -27,7 +27,5 @@ setuptools
 einops
 attrs
 decorator
-packaging
-wheel
 scipy
 tornado
