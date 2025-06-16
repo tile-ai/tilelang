@@ -229,8 +229,7 @@ def test_gemm_sp():
     run_gemm_sp(512, 1024, 768, "e4m3_float8", "float16", "float16", 64, 64, 64, 2, 128, False,
                 True)
 
-    run_gemm_sp(512, 1024, 768, "int8", "int8", "int32", 64, 64, 64, 2, 128, False,
-                True)
+    run_gemm_sp(512, 1024, 768, "int8", "int8", "int32", 64, 64, 64, 2, 128, False, True)
 
 
 if __name__ == "__main__":

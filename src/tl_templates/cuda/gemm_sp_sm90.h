@@ -9,8 +9,8 @@
 namespace cute {
 namespace tl_wgmma_sp {
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool clear_accum, typename A_type_raw, typename B_type_raw,
-          typename C_type_raw>
+          bool trans_B, bool clear_accum, typename A_type_raw,
+          typename B_type_raw, typename C_type_raw>
 class GemmTensorOp {
 public:
   static_assert(num_warp_m % 4 == 0, "num_warp_m must be a multiple of 4");
@@ -31,9 +31,10 @@ public:
       trans_B ? GMMA::Major::K : GMMA::Major::MN;
 
   using TiledMma = decltype(make_tiled_mma(
-      GMMA::ss_op_selector_sparse<A_type, B_type,
-                                  C_type, Shape<Int<M / (num_warp_m / 4)>, Int<N / num_warp_n>, Int<K>>, GmmaMajorA,
-                                  GmmaMajorB>(),
+      GMMA::ss_op_selector_sparse<
+          A_type, B_type, C_type,
+          Shape<Int<M / (num_warp_m / 4)>, Int<N / num_warp_n>, Int<K>>,
+          GmmaMajorA, GmmaMajorB>(),
       Layout<Shape<Int<num_warp_m / 4>, Int<num_warp_n>, _1>>{}));
 
   using ElementAMma = typename TiledMma::ValTypeA;
@@ -65,23 +66,20 @@ public:
                      SmemLayoutAtomE_>;
 
   using SmemLayoutA = decltype(tile_to_shape(
-      SmemLayoutAtomA{},
-      Shape<Int<M>, Int<K>>{},
+      SmemLayoutAtomA{}, Shape<Int<M>, Int<K>>{},
       conditional_t<trans_A, Step<_2, _1>, Step<_1, _2>>{}));
   using SmemLayoutB = decltype(tile_to_shape(
-      SmemLayoutAtomB{},
-      Shape<Int<N>, Int<K>>{},
+      SmemLayoutAtomB{}, Shape<Int<N>, Int<K>>{},
       conditional_t<trans_B, Step<_1, _2>, Step<_2, _1>>{}));
   using SmemLayoutE = decltype(tile_to_shape(
-      SmemLayoutAtomE{},
-      Shape<Int<M>, Int<K>>{},
+      SmemLayoutAtomE{}, Shape<Int<M>, Int<K>>{},
       conditional_t<trans_A, Step<_2, _1>, Step<_1, _2>>{}));
 
   using SmemCopyAtomE = AutoVectorizingCopy;
 
   template <int wg_wait = 0>
-  static CUTE_DEVICE void body(A_type_raw *pA, B_type_raw *pB,
-                               C_type_raw *pC, E_type_raw *pE) {
+  static CUTE_DEVICE void body(A_type_raw *pA, B_type_raw *pB, C_type_raw *pC,
+                               E_type_raw *pE) {
     const int tid = threadIdx.x;
     Tensor sA =
         make_tensor(make_smem_ptr(recast_ptr<ElementAMma>(pA)), SmemLayoutA{});
