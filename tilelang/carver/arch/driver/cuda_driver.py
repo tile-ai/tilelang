@@ -193,3 +193,11 @@ def get_num_sms(device_id: int = 0) -> int:
         return prop.multiProcessorCount
     else:
         raise RuntimeError("Failed to get device properties.")
+
+
+def get_registers_per_block(device_id: int = 0) -> int:
+    prop = get_cuda_device_properties(device_id)
+    if prop:
+        return prop.regsPerBlock
+    else:
+        raise RuntimeError("Failed to get device properties.")

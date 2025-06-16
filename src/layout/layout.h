@@ -163,14 +163,15 @@ Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
 Layout makeGemmLayoutLinear(int stride, int continuous);
 Layout makeGemmABLayoutPadded(int stride, int continuous, int element_size);
 Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
-                        int element_size, int kfactor,
-                        bool enable_padding = true);
+                        int element_size, int kfactor);
+Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
+                              int continuity, int element_size, int kfactor);
 Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,
                             int kfactor);
 
 Fragment makeGemmVoltaFragmentC(const int block_m, const int block_n,
                                 const int warp_m, const int warp_n,
-                                const int element_size);
+                                const int element_asize);
 Fragment makeGemmVoltaFragmentA(const int block_m, const int block_n,
                                 const int block_k, const int warp_m,
                                 const int warp_n);

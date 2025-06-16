@@ -585,6 +585,29 @@ Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
   }
 }
 
+Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
+                              int continuity, int element_size, int kfactor) {
+  if (element_size == 64) {
+    if (kfactor == 1 && continuity % 16 == 0) // float64 KxN
+      return makeGemmABLayoutF64_Kouter(mat_stride, mat_continuous);
+    if (kfactor == 2 && continuity % 16 == 0) // float64 NxK
+      return makeGemmABLayoutF64_Kinner(mat_stride, mat_continuous);
+    return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
+                                        element_size);
+  }
+  int vector_size = 128 / element_size;
+  if (kfactor == 1 && element_size == 8) // int8 KxN
+    return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
+                                        element_size);
+  else if (mat_continuous % (vector_size * 8) == 0)
+    return makeFullBankSwizzleLayout(mat_stride, mat_continuous, element_size);
+  else if (mat_continuous % (vector_size * 4) == 0)
+    return makeHalfBankSwizzleLayout(mat_stride, mat_continuous, element_size);
+  else
+    return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
+                                        element_size);
+}
+
 Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,
                             int kPack) {
   int vector_size = 128 / element_size;

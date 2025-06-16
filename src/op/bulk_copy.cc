@@ -368,7 +368,6 @@ Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
     if (StructuralEqual()(shared_layout,
                           makeQuarterBankSwizzleLayout(*stride, *continuous,
                                                        dst->dtype.bits()))) {
-      LOG(INFO) << "Use quarter bank swizzle layout";
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B);
     } else if (StructuralEqual()(shared_layout, makeHalfBankSwizzleLayout(
                                                     *stride, *continuous,
