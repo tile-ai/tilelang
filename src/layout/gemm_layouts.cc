@@ -557,7 +557,7 @@ Layout makeGemmVoltaABLayout(int stride, int continuous, bool is_a,
  * \return A Layout object representing the chosen memory layout.
  */
 Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
-                        int element_size, int kfactor, bool enable_padding) {
+                        int element_size, int kfactor) {
   if (element_size == 64) {
     if (kfactor == 1 && continuity % 16 == 0) // float64 KxN
       return makeGemmABLayoutF64_Kouter(mat_stride, mat_continuous);
@@ -567,21 +567,13 @@ Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
   }
   int vector_size = 128 / element_size;
   if (kfactor == 1 && element_size == 8) // int8 KxN
-    if (enable_padding)
-      return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
-    else
-      return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
-                                          element_size);
+    return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   else if (mat_continuous % (vector_size * 8) == 0)
     return makeFullBankSwizzleLayout(mat_stride, mat_continuous, element_size);
   else if (mat_continuous % (vector_size * 4) == 0)
     return makeHalfBankSwizzleLayout(mat_stride, mat_continuous, element_size);
   else {
-    if (enable_padding)
-      return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
-    else
-      return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
-                                          element_size);
+    return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   }
 }
 
