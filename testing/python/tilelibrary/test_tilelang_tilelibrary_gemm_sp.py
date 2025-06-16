@@ -72,6 +72,7 @@ def matmul_sp(
                         backend="cutlass",
                         block_k=block_K),
             })
+            T.no_set_max_nreg()
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(E[by * block_M, k * block_K // E_factor], E_shared)
@@ -210,8 +211,8 @@ def run_gemm_sp(
 
 
 def test_gemm_sp():
-    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 32, 0, 128)
-    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 32, 3, 128)
+    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 32, 2, 128)
+    run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 32, 0, 256)
 
     run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 64, 0, 128)
     run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 64, 2, 128)
