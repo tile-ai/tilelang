@@ -353,7 +353,11 @@ class TLCUDASourceWrapper(object):
             # get persisting_l2_cache_max_size
             from tilelang.carver.arch.driver import get_persisting_l2_cache_max_size
             persisting_l2_cache_max_size = get_persisting_l2_cache_max_size()
-            num_bytes = min(size_in_bytes, persisting_l2_cache_max_size)
+            try:
+                num_bytes = min(size_in_bytes, persisting_l2_cache_max_size)
+            except Exception:
+                # as size_in_bytes maybe a symbolic expression
+                num_bytes = persisting_l2_cache_max_size
 
             init_l2_persistent_map += L2_PERSISTENT_MAP_INIT_FUNC.format(
                 buffer_name, float(hit_ratio), size_in_bytes, num_bytes)
