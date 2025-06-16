@@ -7,7 +7,11 @@ import tilelang
 from tilelang import language as T
 import tilelang.testing
 
-from fla.ops.common.utils import prepare_token_indices
+import fla
+if fla.__version__ < "0.2.1":
+    from fla.ops.common.utils import prepare_token_indices
+else:
+    from fla.ops.utils import prepare_token_indices
 from reference import naive_nsa
 from einops import rearrange
 

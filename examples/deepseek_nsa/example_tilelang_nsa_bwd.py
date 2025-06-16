@@ -7,7 +7,11 @@ from typing import Optional, Union
 import torch
 import triton
 
-from fla.ops.common.utils import prepare_token_indices
+import fla
+if fla.__version__ < "0.2.1":
+    from fla.ops.common.utils import prepare_token_indices
+else:
+    from fla.ops.utils import prepare_token_indices
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, contiguous
 from reference import naive_nsa
 from einops import rearrange
