@@ -382,7 +382,7 @@ def run_gemm_sr(
     )
 
     kernel = tilelang.compile(program, out_idx=[2])
-    profiler = kernel.get_profiler(tilelang.TensorSupplyType.Randn)
+    profiler = kernel.get_profiler()
 
     def ref_program(A, B):
         import torch
