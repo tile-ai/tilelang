@@ -42,10 +42,15 @@ def matmul_sp(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.annotate_layout({
                 E:
-                    make_metadata_layout(E, mma_dtype="float16", arch="sm90", backend="cutlass", block_k=block_K),
+                    make_metadata_layout(
+                        E, mma_dtype="float16", arch="sm90", backend="cutlass", block_k=block_K),
                 E_shared:
                     make_metadata_layout(
-                        E_shared, mma_dtype="float16", arch="sm90", backend="cutlass", block_k=block_K),
+                        E_shared,
+                        mma_dtype="float16",
+                        arch="sm90",
+                        backend="cutlass",
+                        block_k=block_K),
             })
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
@@ -110,8 +115,8 @@ def run_gemm_sp(
         num_threads,
     )
 
-    A = generate_2_to_4_sparse_tensor((M, K), dtype=torch.float16, device='cuda')
-    A_sparse, E = compress_sm90(A)
+    A = generate_2_to_4_sparse_tensor((M, K), dtype=torch.float16, device='cuda', block_k=block_K)
+    A_sparse, E = compress_sm90(A, block_k=block_K, transposed=False)
     B = torch.randn((K, N), device='cuda', dtype=torch.float16)
 
     C_sp = kernel(A_sparse, E, B).half()

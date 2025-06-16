@@ -76,10 +76,6 @@ def get_configs(M, N, K):
     return configs
 
 
-def supply_prog(*args, **kwargs):
-    print(f"{args=} {kwargs=}")
-
-
 def matmul_sp(M, N, K):
     """
     Create an autotuned matrix multiplication kernel for matrices of shape:

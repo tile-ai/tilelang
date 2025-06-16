@@ -64,7 +64,7 @@ def gemm_sp(
     N = C.shape[1]
     K_A = A_sparse.shape[0] if transpose_A else A_sparse.shape[1]
     K_B = B.shape[1] if transpose_B else B.shape[0]
-    assert K_A * 2 == K_B, f"T.gemm K shape check failed: K_A = {K_A}, K_B = {K_B}"
+    assert K_A * 2 == K_B, f"T.gemm_sp K shape check failed: K_A = {K_A}, K_B = {K_B}"
     Aptr = A_sparse.access_ptr("r")
     Bptr = B.access_ptr("r")
     Cptr = C.access_ptr("rw")
