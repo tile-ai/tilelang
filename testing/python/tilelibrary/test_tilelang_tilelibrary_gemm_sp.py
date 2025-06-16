@@ -14,12 +14,14 @@ STR_TO_TYPE = {
     "float16": torch.float16,
     "bfloat16": torch.bfloat16,
     "e4m3_float8": torch.float8_e4m3fn,
+    "int8": torch.int8,
 }
 
 SPARSITY_MAP = {
     torch.float16: (2, 4),
     torch.bfloat16: (2, 4),
     torch.float8_e4m3fn: (2, 4),
+    torch.int8: (2, 4),
 }
 
 
@@ -177,7 +179,7 @@ def run_gemm_sp(
     else:
         B = torch.randn((K, N), device='cuda', dtype=torch.float32)
 
-    if "float8" in in_dtype:
+    if "float8" in in_dtype or "int8" in in_dtype:
         A = normalize(A)
         B = normalize(B)
 
@@ -193,7 +195,7 @@ def run_gemm_sp(
             A = A.T
         if trans_B:
             B = B.T
-        if "float8" in in_dtype:
+        if "float8" in in_dtype or "int8" in in_dtype:
             A = A.to(torch.float32)
             B = B.to(torch.float32)
         return torch.matmul(A, B).to(STR_TO_TYPE[out_dtype])
@@ -224,9 +226,10 @@ def test_gemm_sp():
     run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 64, 0, 128, True, False)
     run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 64, 0, 128, True, True)
 
-    run_gemm_sp(512, 1024, 768, "e4m3_float8", "float16", "float16", 64, 64, 64, 0, 128, False,
-                True)
     run_gemm_sp(512, 1024, 768, "e4m3_float8", "float16", "float16", 64, 64, 64, 2, 128, False,
+                True)
+
+    run_gemm_sp(512, 1024, 768, "int8", "int8", "int32", 64, 64, 64, 2, 128, False,
                 True)
 
 
