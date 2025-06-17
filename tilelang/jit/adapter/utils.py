@@ -117,8 +117,11 @@ def pythonic_expr(expr: tvm.tir.Expr) -> str:
             # Integer constant: use value directly (ignore type)
             s = str(node.value)
         elif isinstance(node, tvm.tir.Cast):
-            # Type cast: skip Cast and use inner value directly
-            s = node_to_str_map.get(node.value, str(node.value))
+            # Type cast: represent as (type)value
+            dtype_map = {"int64": "int64_t", "int32": "int32_t", "int8": "int8_t"}
+            dtype = dtype_map.get(str(node.dtype), str(node.dtype))
+            value_str = node_to_str_map.get(node.value, str(node.value))
+            s = f"({dtype}){value_str}"
         elif isinstance(node, tvm.tir.Mul):
             # Multiplication: format as 'left * right'
             a_str = node_to_str_map.get(node.a, str(node.a))
