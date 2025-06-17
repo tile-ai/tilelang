@@ -242,8 +242,20 @@ public:
 
   void VisitStmt_(const IfThenElseNode *op) final { VisitNewScope(op); }
 
+  bool ContainsSeqStmt(const Stmt &stmt) {
+    if (stmt->IsInstance<SeqStmtNode>()) {
+      return true;
+    }
+    if (const auto *if_node = stmt.as<IfThenElseNode>()) {
+      return ContainsSeqStmt(if_node->then_case) ||
+             (if_node->else_case.defined() &&
+              ContainsSeqStmt(if_node->else_case.value()));
+    }
+    return false;
+  }
+
   void VisitStmt_(const ForNode *op) final {
-    if (op->body->IsInstance<SeqStmtNode>()) {
+    if (ContainsSeqStmt(op->body)) {
       scope_level_++;
       VisitNewScope(op);
       scope_level_--;
