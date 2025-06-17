@@ -140,7 +140,7 @@ cdef class CythonKernelWrapper:
         for i in range(len(tensor_list)):
             tensor = tensor_list[i]
             if isinstance(tensor, torch.Tensor):
-                if not tensor.is_contiguous():
+                if not skip_tensor_validation and not tensor.is_contiguous():
                     raise ValueError(f"Input tensor at index {i} must be contiguous")
                 call_args.append(ctypes.c_void_p(tensor.data_ptr()))
             elif isinstance(tensor, int):
