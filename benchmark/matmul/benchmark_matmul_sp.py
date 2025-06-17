@@ -52,9 +52,10 @@ def get_configs(M, N, K):
     """
     block_M = [64, 128, 256]
     block_N = [64, 128, 256]
-    block_K = [32, 64]
+    block_K = [64, 128]
     num_stages = [0, 1, 2, 3]
-    thread_num = [128]
+    thread_num = [128, 256]
+    enable_rasterization = [True, False]
     policy = [T.GemmWarpPolicy.Square]
     _configs = list(itertools.product(
         block_M,
@@ -63,6 +64,7 @@ def get_configs(M, N, K):
         num_stages,
         thread_num,
         policy,
+        enable_rasterization,
     ))
 
     configs = [{
@@ -72,6 +74,7 @@ def get_configs(M, N, K):
         "num_stages": c[3],
         "thread_num": c[4],
         "policy": c[5],
+        "enable_rasterization": c[6],  # keep param name for backward-compat
     } for c in _configs]
     return configs
 
@@ -124,6 +127,7 @@ def matmul_sp(M, N, K):
         num_stages=None,
         thread_num=None,
         policy=None,
+        enable_rasterization=None,
     ):
         """
         The actual kernel to compute C = A @ B^T.
@@ -188,7 +192,9 @@ def matmul_sp(M, N, K):
 
                 # Clear out the accumulation buffer
                 T.clear(C_local)
+                T.no_set_max_nreg()
 
+                T.use_swizzle(panel_size=10, enable=enable_rasterization)
                 T.annotate_layout({
                     E:
                         make_metadata_layout(
