@@ -15,9 +15,10 @@ def allow_warp_specialized(pass_ctx: Optional[PassContext] = None,
 
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    if not is_cuda_target(target):
+    # Warp specialized pass is recommended for Hopper or later architectures
+    if not is_cuda_target(target) or not have_tma(target):
         return False
-    disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
+    disable_warp_specialized = passw_ctx.config.get("tl.disable_warp_specialized", False)
     return not disable_warp_specialized
 
 
