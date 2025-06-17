@@ -18,7 +18,7 @@ def allow_warp_specialized(pass_ctx: Optional[PassContext] = None,
     # Warp specialized pass is recommended for Hopper or later architectures
     if not is_cuda_target(target) or not have_tma(target):
         return False
-    disable_warp_specialized = passw_ctx.config.get("tl.disable_warp_specialized", False)
+    disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
     return not disable_warp_specialized
 
 
