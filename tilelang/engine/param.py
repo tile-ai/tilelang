@@ -56,7 +56,8 @@ class KernelParam:
         Returns:
             KernelParam instance representing a scalar (empty shape)
         """
-        return cls(var.dtype, [])
+        dtype = map_torch_type(var.dtype)
+        return cls(dtype, [])
 
     def is_scalar(self) -> bool:
         """
