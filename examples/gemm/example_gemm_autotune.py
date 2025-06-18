@@ -86,7 +86,7 @@ def get_best_config(M, N, K, with_roller=False):
         thread_num=None,
         enable_rasteration=None,
     ):
-        dtype = "float16"
+        dtype = "bfloat16"
         accum_dtype = "float"
 
         @T.prim_func
@@ -245,7 +245,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--with_roller",
         action="store_true",
-        default=True,
+        default=False,
         help="Whether to enable BitBLAS roller for search space")
     args = parser.parse_args()
     main(args.m, args.n, args.k, args.use_autotune, args.with_roller)
