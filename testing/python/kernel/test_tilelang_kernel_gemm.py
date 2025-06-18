@@ -535,18 +535,4 @@ def test_gemm_f16f16f16_rs():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    run_gemm_rs(
-        128,
-        128,
-        64,
-        True,
-        False,
-        "float16",
-        "float16",
-        "float16",
-        128,
-        128,
-        32,
-        0,
-    )
+    tilelang.testing.main()
