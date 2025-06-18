@@ -262,11 +262,9 @@ class _attention(torch.autograd.Function):
         mod_prep = cached(flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD), [2])
         mod_post = cached(flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD), [1])
         delta = mod_prep(o, do)
-        tilelang.disable_cache()
         mod = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, ctx.causal, block_M, block_N)
         dq = torch.zeros_like(q, dtype=torch.float32)
         dk, dv = mod(q, k, v, do, lse, delta, dq)
-        tilelang.enable_cache()
         dq = mod_post(dq)
         return dq, dk, dv, None
 
@@ -317,6 +315,4 @@ def test_mha_bwd():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    # test_mha_bwd()
-    assert_mha_equal(8, 32, 256, 64, False)
+    tilelang.testing.main()
