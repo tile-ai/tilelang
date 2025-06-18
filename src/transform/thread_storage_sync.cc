@@ -158,6 +158,7 @@ protected:
     std::vector<AccessEntry> head, tail;
     AccessEntry esync;
     esync.threads = this->env_threads();
+    esync.thread_range = this->ComputeThreadRange(esync.threads);
     esync.type = kSync;
     esync.scope = sync_scope_;
 
@@ -220,6 +221,13 @@ private:
     // Same index value means no conflicts
     // TODO(tqchen) more standard set based testing.
     bool has_same_index = true;
+    bool range_is_equal = true;
+    for (const auto &kv : prev.thread_range) {
+      if (!StructuralEqual()(kv.second, curr.thread_range[kv.first])) {
+        range_is_equal = false;
+        break;
+      }
+    }
 
     for (size_t i = 0; i < prev.touched.size(); i++) {
       const auto &prev_intset = prev.touched[i];
@@ -240,7 +248,7 @@ private:
         break;
       }
     }
-    if (has_same_index) {
+    if (has_same_index && range_is_equal) {
       return false;
     }
 
