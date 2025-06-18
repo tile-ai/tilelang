@@ -13,7 +13,8 @@ def allow_warp_specialized(pass_ctx: Optional[PassContext] = None,
 
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    if not is_cuda_target(target):
+    # Warp specialized pass is recommended for Hopper or later architectures
+    if not is_cuda_target(target) or not have_tma(target):
         return False
     disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
     return not disable_warp_specialized
@@ -148,13 +149,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
 
-    if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
-        # This is a workaround to avoid the bug in the MergeSharedMemoryAllocations pass
-        # when warp specialization is enabled, as different warp threads may access different
-        # buffers, but the liveness analysis is hard because we need to do pipeline.
-        mod = tir.transform.MergeSharedMemoryAllocations()(mod)
-    else:
-        mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
+    mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
 
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
