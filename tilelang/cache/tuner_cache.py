@@ -242,6 +242,11 @@ class AutoTunerCache:
             - params.pkl: The serialized kernel parameters
         """
         cache_path = self._get_cache_path(key)
+        if os.path.exists(cache_path):
+            self.logger.info(
+                f"Cache path {cache_path} already exists, skipping saving kernel to disk")
+            return
+
         os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists
 
         # Save kernel source code
