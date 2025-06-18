@@ -151,13 +151,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
 
-    if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
-        # This is a workaround to avoid the bug in the MergeSharedMemoryAllocations pass
-        # when warp specialization is enabled, as different warp threads may access different
-        # buffers, but the liveness analysis is hard because we need to do pipeline.
-        mod = tir.transform.MergeSharedMemoryAllocations()(mod)
-    else:
-        mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
+    mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
 
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
