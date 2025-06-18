@@ -136,25 +136,32 @@ cdef class CythonKernelWrapper:
                 tensor = inputs[ins_idx]
                 ins_idx += 1
             tensor_list.append(tensor)
-        
+
         # Convert tensor pointers to C void pointers for kernel call
+        cdef dict dtype_to_ctype = {
+            torch.float16: ctypes.c_float,
+            torch.float32: ctypes.c_float,
+            torch.float64: ctypes.c_double,
+            torch.int8: ctypes.c_int8,
+            torch.int16: ctypes.c_int16,
+            torch.int32: ctypes.c_int32,
+            torch.int64: ctypes.c_int64,
+        }
+        
         call_args = []
-        for i in range(len(tensor_list)):
-            tensor = tensor_list[i]
+        for i, tensor in enumerate(tensor_list):
             if isinstance(tensor, torch.Tensor):
                 if not skip_tensor_validation and not tensor.is_contiguous():
                     raise ValueError(f"Input tensor at index {i} must be contiguous")
                 call_args.append(ctypes.c_void_p(tensor.data_ptr()))
-            elif isinstance(tensor, int):
-                # Dynamic symbolics which are passed as integer arguments
+            elif isinstance(tensor, (int, float, bool)):
                 if i in self.ptr_map:
                     call_args.append(ctypes.c_void_p(tensor))
                 else:
-                    call_args.append(tensor)
-            elif isinstance(tensor, float):
-                call_args.append(ctypes.c_float(tensor))
-            elif isinstance(tensor, bool):
-                call_args.append(ctypes.c_bool(tensor))
+                    dtype = self.param_dtypes[i]
+                    if dtype not in dtype_to_ctype:
+                        raise ValueError(f"Unsupported tensor dtype: {dtype}")
+                    call_args.append(dtype_to_ctype[dtype](tensor))
             else:
                 raise ValueError(f"Unsupported tensor type: {type(tensor)}")
 
