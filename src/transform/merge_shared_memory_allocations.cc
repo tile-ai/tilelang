@@ -150,7 +150,8 @@ public:
     if (it != alloc_info_.end() && it->second.alloc) {
       ICHECK_LT(it->second.level, scope_.size());
       if (IsAppropriateSharedMemory(GetRef<Var>(buf))) {
-        scope_[scope_.size() - 1].touched.push_back(buf);
+        // set into scope_.size() - 1 for aggressive memory reuse
+        scope_[it->second.level].touched.push_back(buf);
       }
     }
     StmtEntry e = scope_.back();
@@ -184,7 +185,7 @@ public:
       ICHECK_LT(it->second.level, scope_.size())
           << "Load memory in places other than store.";
       if (IsAppropriateSharedMemory(GetRef<Var>(buf))) {
-        scope_[scope_.size() - 1].touched.push_back(buf);
+        scope_[it->second.level].touched.push_back(buf);
       }
     }
   }
@@ -195,7 +196,7 @@ public:
     if (it != alloc_info_.end() && it->second.alloc) {
       ICHECK_LT(it->second.level, scope_.size());
       if (IsAppropriateSharedMemory(GetRef<Var>(buf))) {
-        scope_[scope_.size() - 1].touched.push_back(buf);
+        scope_[it->second.level].touched.push_back(buf);
       }
     }
   }
@@ -242,8 +243,20 @@ public:
 
   void VisitStmt_(const IfThenElseNode *op) final { VisitNewScope(op); }
 
+  bool ContainsSeqStmt(const Stmt &stmt) {
+    if (stmt->IsInstance<SeqStmtNode>()) {
+      return true;
+    }
+    if (const auto *if_node = stmt.as<IfThenElseNode>()) {
+      return ContainsSeqStmt(if_node->then_case) ||
+             (if_node->else_case.defined() &&
+              ContainsSeqStmt(if_node->else_case.value()));
+    }
+    return false;
+  }
+
   void VisitStmt_(const ForNode *op) final {
-    if (op->body->IsInstance<SeqStmtNode>()) {
+    if (ContainsSeqStmt(op->body)) {
       scope_level_++;
       VisitNewScope(op);
       scope_level_--;
