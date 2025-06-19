@@ -234,9 +234,9 @@ def main(m: int = 16384,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
-    parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
-    parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
-    parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
+    parser.add_argument("--m", type=int, default=4096, help="Matrix dimension M")
+    parser.add_argument("--n", type=int, default=4096, help="Matrix dimension N")
+    parser.add_argument("--k", type=int, default=4096, help="Matrix dimension K")
     parser.add_argument(
         "--use_autotune",
         action="store_true",
