@@ -94,6 +94,11 @@ def run_gemm(
             A = A.T
         if trans_B:
             B = B.T
+        if in_dtype == "float32":
+            # Convert float32 to tfloat32 because tfloat32 mma cannot truncate
+            # float32 automatically, -0x1000 meas
+            A = ((A.view(torch.int32) - 0x1000)).view(torch.float32)
+            B = ((B.view(torch.int32) - 0x1000)).view(torch.float32)
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         C = C.to(torch.__getattribute__(out_dtype))
         return C
@@ -335,10 +340,10 @@ def matmul_sr(
                     T.copy(A[by * block_M, k * block_K], A_shared)
                 if trans_B:
                     T.copy(B[bx * block_N, k * block_K], B_shared)
-                    T.copy(B[bx * block_N, k * block_K], B_local)
+                    T.copy(B_shared, B_local)
                 else:
                     T.copy(B[k * block_K, bx * block_N], B_shared)
-                    T.copy(B[k * block_K, bx * block_N], B_local)
+                    T.copy(B_shared, B_local)
                 T.gemm(A_shared, B_local, C_local, trans_A, trans_B)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
@@ -386,7 +391,9 @@ def run_gemm_sr(
             A = A.T
         if trans_B:
             B = B.T
-        C = torch.matmul(A.to(torch.float), B.to(torch.float))
+        A = A.to(torch.float)
+        B = B.to(torch.float)
+        C = torch.matmul(A, B)
         C = C.to(torch.__getattribute__(out_dtype))
         return C
 
@@ -439,18 +446,18 @@ def matmul_rs(
             C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-            A_shared = T.alloc_shared(A_shared_shape, in_dtype)
+            A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope="shared")
             A_local = T.alloc_fragment(A_shared_shape, in_dtype)
-            B_shared = T.alloc_shared(B_shared_shape, in_dtype)
+            B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope="shared")
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 if trans_A:
                     T.copy(A[k * block_K, by * block_M], A_shared)
-                    T.copy(A[k * block_K, by * block_M], A_local)
+                    T.copy(A_shared, A_local)
                 else:
                     T.copy(A[by * block_M, k * block_K], A_shared)
-                    T.copy(A[by * block_M, k * block_K], A_local)
+                    T.copy(A_shared, A_local)
                 if trans_B:
                     T.copy(B[bx * block_N, k * block_K], B_shared)
                 else:

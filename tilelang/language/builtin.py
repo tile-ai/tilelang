@@ -324,3 +324,9 @@ def sync_global():
     print(tx, ty, tz, ex, ey, ez)
     args = ["global", tx == 0 and ty == 0 and tz == 0, ex * ey * ez]
     return evaluate(tir.Call("handle", "tir.tvm_storage_sync", args))
+
+
+def sync_grid():
+    """Synchronize all threads in a grid.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"))

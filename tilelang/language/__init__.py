@@ -25,6 +25,7 @@ from .proxy import (
 )
 from .parallel import Parallel  # noqa: F401
 from .pipeline import Pipelined  # noqa: F401
+from .persistent import Persistent  # noqa: F401
 from .frame import has_let_value, get_let_value  # noqa: F401
 from .kernel import (
     Kernel,  # noqa: F401
@@ -173,7 +174,7 @@ def annotate_l2_hit_ratio(l2_hit_ratio_map: Dict):
     _l2_hit_ratio_map = {}
     for buffer, hit_ratio in l2_hit_ratio_map.items():
         assert buffer.scope() == "global", "persistent L2 can only be applied to global buffers"
-        _l2_hit_ratio_map[buffer.data] = hit_ratio
+        _l2_hit_ratio_map[buffer.data] = float(hit_ratio)
     return block_attr({"l2_hit_ratio_map": _l2_hit_ratio_map})
 
 

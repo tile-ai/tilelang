@@ -37,7 +37,7 @@ class TimeoutException(Exception):
 
 
 def timeout_handler(signum, frame):
-    raise TimeoutException()
+    raise TimeoutException("Operation timed out")
 
 
 def run_with_timeout(func, timeout, *args, **kwargs):
@@ -45,6 +45,8 @@ def run_with_timeout(func, timeout, *args, **kwargs):
     signal.alarm(timeout)
     try:
         result = func(*args, **kwargs)
+    except Exception as e:
+        raise e
     finally:
         signal.alarm(0)
     return result

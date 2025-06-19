@@ -56,7 +56,8 @@ class KernelParam:
         Returns:
             KernelParam instance representing a scalar (empty shape)
         """
-        return cls(var.dtype, [])
+        dtype = map_torch_type(var.dtype)
+        return cls(dtype, [])
 
     def is_scalar(self) -> bool:
         """
@@ -99,7 +100,9 @@ class KernelParam:
             bool: True if parameter is a boolean type, False otherwise
         """
         dtype_str = str(self.dtype)
-        return dtype_str[6:] if dtype_str.startswith("torch.") else dtype_str.startswith("bool")
+        if dtype_str.startswith("torch."):
+            dtype_str = dtype_str[6:]
+        return dtype_str.startswith("bool")
 
 
 @dataclass

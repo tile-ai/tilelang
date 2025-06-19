@@ -318,6 +318,27 @@ PrimExpr xor8x8(const PrimExpr &i, const PrimExpr j) {
   return 2 * xor4x4(i1, j1) + xor2x2(i0, j0);
 }
 
+// Layout swizzling for 32 bytes
+Layout makeQuarterBankSwizzleLayout(int stride, int continuous,
+                                    int element_size) {
+  // Swizzle 1 bit
+  Var i = InputPlaceholder(0);
+  Var j = InputPlaceholder(1);
+  int vector_size = 128 / element_size;
+  ICHECK(stride % 8 == 0) << "stride=" << stride;
+  ICHECK(continuous % (vector_size * 2) == 0)
+      << "continuous=" << continuous << ", vector_size=" << vector_size;
+  PrimExpr ts = FloorDiv(i, 8);
+  PrimExpr s = FloorMod(i, 8);
+  PrimExpr tc = FloorDiv(FloorDiv(j, vector_size), 2);
+  PrimExpr c = FloorMod(FloorDiv(j, vector_size), 2);
+  PrimExpr vec = FloorMod(j, vector_size);
+  PrimExpr c_swizzle = xor2x2(c, FloorDiv(s, 4));
+  PrimExpr index = vec + (c_swizzle + s * 2) * vector_size;
+  return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+}
+
+// Layout swizzling for 64 bytes
 Layout makeHalfBankSwizzleLayout(int stride, int continuous, int element_size) {
   // Swizzle 2 bit
   Var i = InputPlaceholder(0);
@@ -336,6 +357,7 @@ Layout makeHalfBankSwizzleLayout(int stride, int continuous, int element_size) {
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
 }
 
+// Layout swizzling for 128 bytes
 Layout makeFullBankSwizzleLayout(int stride, int continuous, int element_size) {
   // Swizzle 3 bit
   Var i = InputPlaceholder(0);
@@ -553,6 +575,29 @@ Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
   else {
     return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   }
+}
+
+Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
+                              int continuity, int element_size, int kfactor) {
+  if (element_size == 64) {
+    if (kfactor == 1 && continuity % 16 == 0) // float64 KxN
+      return makeGemmABLayoutF64_Kouter(mat_stride, mat_continuous);
+    if (kfactor == 2 && continuity % 16 == 0) // float64 NxK
+      return makeGemmABLayoutF64_Kinner(mat_stride, mat_continuous);
+    return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
+                                        element_size);
+  }
+  int vector_size = 128 / element_size;
+  if (kfactor == 1 && element_size == 8) // int8 KxN
+    return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
+                                        element_size);
+  else if (mat_continuous % (vector_size * 8) == 0)
+    return makeFullBankSwizzleLayout(mat_stride, mat_continuous, element_size);
+  else if (mat_continuous % (vector_size * 4) == 0)
+    return makeHalfBankSwizzleLayout(mat_stride, mat_continuous, element_size);
+  else
+    return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
+                                        element_size);
 }
 
 Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,

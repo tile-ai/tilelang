@@ -6,7 +6,8 @@ from tilelang import tvm as tvm
 from typing import Optional, List, Dict, Union, Any
 from tvm import IRModule
 from tvm.target import Target
-from .utils import match_declare_kernel, match_declare_kernel_cpu, is_cuda_target, is_hip_target, is_cpu_target, get_annotated_mod
+from .utils import (match_declare_kernel, match_declare_kernel_cpu, is_cuda_target, is_hip_target,
+                    is_cpu_target, get_annotated_mod, pythonic_expr)
 import re
 import logging
 import textwrap
@@ -312,7 +313,6 @@ class TLCUDASourceWrapper(object):
 
             # Identify the start of the function body to insert arguments
             index = code.index("{", index)
-            call_args = ", ".join(func_call_args(declaration, function_args, desc_name_map))
 
             block_str = "dim3({}, {}, {})".format(
                 legalize_c(block_info[0]),
@@ -324,9 +324,20 @@ class TLCUDASourceWrapper(object):
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             init_l2_persistent_map = self.generate_l2_persistent_map(function_name)
             kernel_launch_code += init_l2_persistent_map
-            kernel_launch_code += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(
-                function_name, grid_str, block_str, smem_str, call_args)
-            kernel_launch_code += "\tTILELANG_CHECK_LAST_ERROR(\"{}\");\n".format(function_name)
+
+            if self.use_cooperative_groups[function_name]:
+                args_list = func_call_args(declaration, function_args, desc_name_map)
+                args_array = [f"(void*)&{arg}" for arg in args_list]
+                call_args = f"\tvoid* {function_name}_args[] = {{{', '.join(args_array)}}};\n"
+                kernel_launch_code += call_args
+                # Using cudaLaunchCooperativeKernel to launch the kernel
+                kernel_launch_code += "\tTILELANG_CHECK(cudaLaunchCooperativeKernel((void*){}, {}, {}, {}, {}, stream));\n".format(
+                    function_name, grid_str, block_str, function_name + "_args", smem_str)
+            else:
+                call_args = ", ".join(func_call_args(declaration, function_args, desc_name_map))
+                kernel_launch_code += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(
+                    function_name, grid_str, block_str, smem_str, call_args)
+                kernel_launch_code += "\tTILELANG_CHECK_LAST_ERROR(\"{}\");\n".format(function_name)
             if has_l2_persistent_map:
                 kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE
 
@@ -346,7 +357,11 @@ class TLCUDASourceWrapper(object):
             # get persisting_l2_cache_max_size
             from tilelang.carver.arch.driver import get_persisting_l2_cache_max_size
             persisting_l2_cache_max_size = get_persisting_l2_cache_max_size()
-            num_bytes = min(size_in_bytes, persisting_l2_cache_max_size)
+            try:
+                num_bytes = min(size_in_bytes, persisting_l2_cache_max_size)
+            except Exception:
+                # as size_in_bytes maybe a symbolic expression
+                num_bytes = persisting_l2_cache_max_size
 
             init_l2_persistent_map += L2_PERSISTENT_MAP_INIT_FUNC.format(
                 buffer_name, float(hit_ratio), size_in_bytes, num_bytes)
@@ -385,19 +400,10 @@ class TLCUDASourceWrapper(object):
             box_dim = remaining_args[2 * tensor_rank:3 * tensor_rank]
             element_strides = remaining_args[3 * tensor_rank:4 * tensor_rank]
 
-            def legalize_c2s(p):
-                # Convert TIR expressions to legal C expressions
-                # Directly convert to string since the special case handling
-                # does not alter the string representation for `tvm.tir.Var` and `IntImm`.
-                # Replace Python's floor division operator with C's division operator
-                if isinstance(p, tvm.tir.IntImm):
-                    p = int(p)
-                return str(p)
-
-            global_dim = [legalize_c2s(i) for i in global_dim]
-            global_stride = [legalize_c2s(i) for i in global_stride]
-            box_dim = [legalize_c2s(i) for i in box_dim]
-            element_strides = [legalize_c2s(i) for i in element_strides]
+            global_dim = [pythonic_expr(i) for i in global_dim]
+            global_stride = [pythonic_expr(i) for i in global_stride]
+            box_dim = [pythonic_expr(i) for i in box_dim]
+            element_strides = [pythonic_expr(i) for i in element_strides]
 
             # Extract remaining parameters
             try:
@@ -430,6 +436,7 @@ class TLCUDASourceWrapper(object):
         grid_info_map = {}
         dynamic_smem_buf_map = {}
         function_names = []
+        use_cooperative_groups_map = {}
         for g_var, func in self.device_mod.functions.items():
             # Default block and grid configurations
             block_info = [1, 1, 1]
@@ -437,6 +444,9 @@ class TLCUDASourceWrapper(object):
             function_name = g_var.name_hint
             attrs = func.attrs
             dynamic_smem_buf = None
+            use_cooperative_groups = False
+            if "use_cooperative_groups" in attrs:
+                use_cooperative_groups = attrs["use_cooperative_groups"]
             if "dyn_shared_memory_buf" in attrs:
                 dynamic_smem_buf = int(attrs["dyn_shared_memory_buf"])
             if "thread_extent" in attrs:
@@ -451,12 +461,14 @@ class TLCUDASourceWrapper(object):
             block_info_map[function_name] = block_info
             grid_info_map[function_name] = grid_info
             dynamic_smem_buf_map[function_name] = dynamic_smem_buf
+            use_cooperative_groups_map[function_name] = use_cooperative_groups
             function_names.append(function_name)
 
         # Store the mappings for use in code generation
         self.block_info = block_info_map
         self.grid_info = grid_info_map
         self.dynamic_smem_buf = dynamic_smem_buf_map
+        self.use_cooperative_groups = use_cooperative_groups_map
 
         function_names_index = {}
         for _, func in self.host_mod.functions.items():
@@ -630,14 +642,6 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                         call_args.append((match, "None"))
             return call_args
 
-        def legalize(p):
-            # Convert TIR expressions to legal Python expressions
-            # Directly convert to string since the special case handling
-            # does not alter the string representation for `tvm.tir.Var` and `IntImm`.
-            if isinstance(p, tvm.tir.IntImm):
-                p = int(p)
-            return str(p)
-
         desc_name_map: Dict[str, str] = {}
         device_index = 0
         kernel_launch_code = """"""
@@ -664,9 +668,10 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             kernel_launch_code += self.generate_tma_descriptor_args(
                 desc_name_map) + KERNEL_LAUNCH_FUNC_PY.format(
-                    function_name, legalize(grid_info[0]), legalize(grid_info[1]),
-                    legalize(grid_info[2]), legalize(block_info[0]), legalize(block_info[1]),
-                    legalize(block_info[2]), smem_str, arg_names, arg_types, device_index)
+                    function_name, pythonic_expr(grid_info[0]), pythonic_expr(grid_info[1]),
+                    pythonic_expr(grid_info[2]), pythonic_expr(block_info[0]),
+                    pythonic_expr(block_info[1]), pythonic_expr(
+                        block_info[2]), smem_str, arg_names, arg_types, device_index)
 
         # Wrap the kernel dispatch logic in an external C function
         host_func = PREDEF_HOST_FUNC_PY.format(
