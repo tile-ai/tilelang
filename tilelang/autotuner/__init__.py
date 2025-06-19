@@ -24,6 +24,7 @@ import signal
 import json
 import hashlib
 import threading
+import traceback
 from pathlib import Path
 
 from tilelang.env import TILELANG_CACHE_DIR, is_cache_enabled
@@ -420,11 +421,11 @@ class AutoTuner:
                     f"A timeout occurred while testing config {config}, checkout autotuner.log for more details"
                 )
                 continue
-            except Exception as e:
+            except Exception:
                 logger.info(
                     f"An error occurred while testing config {config}, checkout autotuner.log for more details"
                 )
-                logger.debug(f"Error: {e}")
+                logger.debug(f"Error: {traceback.format_exc()}")
                 continue
 
             if latency < best_latency:
@@ -516,13 +517,37 @@ class _AutoTunerImplementation:
             warmup: Number of warmup iterations before timing.
             rep: Number of repetitions for timing measurements.
             timeout: Maximum time (in seconds) allowed for each configuration.
+            supply_type: Strategy for generating input tensors (random/zeros/etc)
+            ref_prog: Reference implementation for validation
+            supply_prog: Custom function to provide input tensors
+            rtol: Relative tolerance for numerical validation
+            atol: Absolute tolerance for numerical validation
+            max_mismatched_ratio: Allowed percentage of mismatched values
+            skip_check: Bypass validation against reference implementation
+            manual_check_prog: Custom validation function
+            cache_input_tensors: Reuse input tensors across trials
         """
-        self.configs = configs
-        self.warmup = warmup
-        self.rep = rep
-        self.timeout = timeout
+        # Configuration and benchmarking parameters
+        self.configs = configs  # Search space of tuning configurations
+        self.warmup = warmup  # Warmup iterations for stable measurements
+        self.rep = rep  # Measurement repetitions for statistics
+        self.timeout = timeout  # Per-configuration timeout threshold
 
-        self._tuner_cache: Dict[tuple, tilelang.JITKernel] = {}
+        # Tensor handling and validation setup
+        self.supply_type = supply_type  # Input tensor generation strategy
+        self.ref_prog = ref_prog  # Ground truth implementation
+        self.supply_prog = supply_prog  # Custom input data provider
+        self.rtol = rtol  # Relative error tolerance
+        self.atol = atol  # Absolute error tolerance
+        self.max_mismatched_ratio = max_mismatched_ratio  # Allowed mismatch
+
+        # Validation control flags
+        self.skip_check = skip_check  # Bypass accuracy verification
+        self.manual_check_prog = manual_check_prog  # Custom validation
+        self.cache_input_tensors = cache_input_tensors  # Reuse inputs
+
+        # Cache for storing tuned kernel implementations
+        self._tuner_cache: Dict[tuple, tilelang.JITKernel] = {}  # (args, kwargs) -> compiled kernel
 
     # This tells the type checker what the *wrapper* function will return.
     # this is for linting, please do not remove it.
