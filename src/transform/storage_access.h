@@ -62,7 +62,7 @@ public:
     /*! \brief The thread index that access this entry */
     Array<IterVar> threads;
     /*! \brief The touched thread range */
-    Map<IterVar, Range> thread_range;
+    Map<Var, Range> thread_range;
     /*! \brief The buffer variable, if any */
     Var buffer = NullValue<Var>();
     /*! \brief The access data type */
@@ -133,7 +133,7 @@ protected:
    * \param threads The threads to compute the range for.
    * \return The thread range.
    */
-  Map<IterVar, Range> ComputeThreadRange(Array<IterVar> threads);
+  Map<Var, Range> ComputeThreadRange(Array<IterVar> threads);
 
   /*!
    * \brief Get the scope of the buffer array.

@@ -22,6 +22,7 @@
  */
 #include "storage_access.h"
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/target/target_info.h>
 #include <tvm/tir/op.h>
 
@@ -212,18 +213,27 @@ void TileLangStorageAccessVisitor::VisitStmt_(const IfThenElseNode *op) {
 
   allow_append_ = true;
   this->VisitExpr(op->condition);
+  PrimExpr real_condition = ExtractRealCondition(op->condition);
+
   curr_stmt_.access.clear();
   allow_append_ = false;
 
   scope_.push_back(std::vector<StmtEntry>());
-  this->VisitStmt(op->then_case);
+  {
+    With<arith::ConstraintContext> constraint(&analyzer_, real_condition);
+    this->VisitStmt(op->then_case);
+  }
+
   StmtEntry s;
   s.stmt = op;
   s.access = Summarize(std::move(scope_.back()), nullptr);
   scope_.pop_back();
   if (op->else_case) {
     scope_.push_back(std::vector<StmtEntry>());
-    this->VisitStmt(op->else_case.value());
+    {
+      With<arith::ConstraintContext> constraint(&analyzer_, real_condition);
+      this->VisitStmt(op->else_case.value());
+    }
     auto v = Summarize(std::move(scope_.back()), nullptr);
     scope_.pop_back();
     s.access.insert(s.access.end(), v.begin(), v.end());
@@ -324,17 +334,17 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
   }
 }
 
-Map<IterVar, Range>
+Map<Var, Range>
 TileLangStorageAccessVisitor::ComputeThreadRange(Array<IterVar> threads) {
-  Map<IterVar, Range> thread_range;
+  Map<Var, Range> thread_range;
   for (const auto &th : threads) {
     auto const_int_bound = analyzer_.const_int_bound(th->var);
     auto min_value = const_int_bound->min_value;
     auto max_value = const_int_bound->max_value;
     auto extent = max_value - min_value + 1;
     auto dtype = th->var.dtype();
-    thread_range.Set(th, Range::FromMinExtent(IntImm(dtype, min_value),
-                                              IntImm(dtype, extent)));
+    thread_range.Set(th->var, Range::FromMinExtent(IntImm(dtype, min_value),
+                                                   IntImm(dtype, extent)));
   }
   return thread_range;
 }
