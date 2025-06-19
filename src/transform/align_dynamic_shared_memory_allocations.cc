@@ -100,24 +100,24 @@ private:
                                                  int dtype_bytes) {
     if (extents.empty())
       return extents;
-    // 计算总元素数
+    // Calculate total number of elements
     PrimExpr total_elems = make_const(extents[0].dtype(), 1);
     for (auto extent : extents) {
       total_elems = total_elems * extent;
     }
-    // 计算总字节数
+    // Calculate total bytes
     PrimExpr total_bytes = total_elems * dtype_bytes;
-    // 计算是否已经对齐
+    // Check if already aligned
     PrimExpr remainder = indexmod(total_bytes, align_bytes);
     if (is_zero(remainder)) {
       return extents;
     }
-    // 需要 pad 最后一维
+    // Need to pad the last dimension
     Array<PrimExpr> adjusted;
     for (size_t i = 0; i < extents.size(); ++i) {
       adjusted.push_back(extents[i]);
     }
-    // 计算 pad 后的最后一维
+    // Calculate padded last dimension
     // pad = ceil(total_bytes / align_bytes) * align_bytes
     PrimExpr last_extent = extents.back();
     PrimExpr other_elems = make_const(extents[0].dtype(), 1);

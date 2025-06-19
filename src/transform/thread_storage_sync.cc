@@ -248,6 +248,7 @@ private:
         break;
       }
     }
+
     if (has_same_index && range_is_equal) {
       return false;
     }

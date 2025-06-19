@@ -205,7 +205,6 @@ bool IsThreadInvariant(const PrimExpr &cond) {
 }
 
 void TileLangStorageAccessVisitor::VisitStmt_(const IfThenElseNode *op) {
-  IRVisitorWithAnalyzer::VisitStmt_(op);
   bool is_thread_invariant = IsThreadInvariant(op->condition);
   if (!is_thread_invariant) {
     ++condition_counter_;
