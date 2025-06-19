@@ -206,11 +206,11 @@ def matmul(M,
     return gemm_autotune
 
 
-def main(m: int = 16384,
-         n: int = 16384,
-         k: int = 16384,
+def main(m: int = 4096,
+         n: int = 4096,
+         k: int = 4096,
          use_autotune: bool = False,
-         with_roller: bool = True):
+         with_roller: bool = False):
     M, N, K = m, n, k
     use_autotune = True
     if use_autotune:
