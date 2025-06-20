@@ -45,6 +45,7 @@ void TileLangStorageAccessVisitor::VisitExpr_(const BufferLoadNode *op) {
     e.threads = env_threads();
     e.thread_range = this->ComputeThreadRange(e.threads);
     e.buffer = buf;
+    e.buffer_indices = op->indices;
     e.dtype = op->dtype.element_of();
     for (const auto &index : op->indices) {
       e.touched.push_back(arith::IntSet::Vector(index));
@@ -69,6 +70,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const BufferStoreNode *op) {
     e.threads = env_threads();
     e.thread_range = this->ComputeThreadRange(e.threads);
     e.buffer = buf;
+    e.buffer_indices = op->indices;
     e.dtype = op->value.dtype().element_of();
     for (const auto &index : op->indices) {
       e.touched.push_back(arith::IntSet::Vector(index));
@@ -277,6 +279,7 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
         e.thread_range = this->ComputeThreadRange(e.threads);
         e.dtype = dtype;
         e.buffer = Downcast<Var>(buffer->data);
+        e.buffer_indices = load->indices;
         for (const auto &index : load->indices) {
           e.touched.push_back(arith::IntSet::Vector(index));
         }
@@ -304,6 +307,7 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
       e.thread_range = this->ComputeThreadRange(e.threads);
       e.dtype = dtype;
       e.buffer = Downcast<Var>(op->args[1]);
+      e.buffer_indices = {offset, extent};
       e.touched = {
           arith::IntSet::FromRange(Range::FromMinExtent(offset, extent))};
       e.scope = scope;
@@ -338,13 +342,17 @@ Map<Var, Range>
 TileLangStorageAccessVisitor::ComputeThreadRange(Array<IterVar> threads) {
   Map<Var, Range> thread_range;
   for (const auto &th : threads) {
-    auto const_int_bound = analyzer_.const_int_bound(th->var);
-    auto min_value = const_int_bound->min_value;
-    auto max_value = const_int_bound->max_value;
-    auto extent = max_value - min_value + 1;
-    auto dtype = th->var.dtype();
-    thread_range.Set(th->var, Range::FromMinExtent(IntImm(dtype, min_value),
-                                                   IntImm(dtype, extent)));
+    auto thread_tag = th->thread_tag;
+    if (thread_tag == "threadIdx.x" || thread_tag == "threadIdx.y" ||
+        thread_tag == "threadIdx.z") {
+      auto const_int_bound = analyzer_.const_int_bound(th->var);
+      auto min_value = const_int_bound->min_value;
+      auto max_value = const_int_bound->max_value;
+      auto extent = max_value - min_value + 1;
+      auto dtype = th->var.dtype();
+      thread_range.Set(th->var, Range::FromMinExtent(IntImm(dtype, min_value),
+                                                     IntImm(dtype, extent)));
+    }
   }
   return thread_range;
 }

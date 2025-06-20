@@ -228,20 +228,12 @@ private:
         break;
       }
     }
-
-    for (size_t i = 0; i < prev.touched.size(); i++) {
-      const auto &prev_intset = prev.touched[i];
-      const auto &curr_intset = curr.touched[i];
-
-      if (prev_intset.IsSinglePoint() && curr_intset.IsSinglePoint()) {
-        PrimExpr prev_index = prev_intset.PointValue();
-        PrimExpr curr_index = curr_intset.PointValue();
-        has_same_index = ExprDeepEqual()(prev_index, curr_index);
-      } else {
-        if (!ExprDeepEqual()(prev_intset.min(), curr_intset.min()) ||
-            !ExprDeepEqual()(prev_intset.max(), curr_intset.max())) {
-          has_same_index = false;
-        }
+    ICHECK_EQ(prev.buffer_indices.size(), curr.buffer_indices.size());
+    for (size_t i = 0; i < prev.buffer_indices.size(); i++) {
+      const auto &prev_indice = prev.buffer_indices[i];
+      const auto &curr_indice = curr.buffer_indices[i];
+      if (!ExprDeepEqual()(prev_indice, curr_indice)) {
+        has_same_index = false;
       }
 
       if (!(has_same_index)) {
@@ -258,7 +250,6 @@ private:
     if (prev.double_buffer_write && curr.type == kRead && !loop_carry) {
       return false;
     }
-
     // If nothing else allows sharing the same buffer, then they are
     // in conflict.
     return true;

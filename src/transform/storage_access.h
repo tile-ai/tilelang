@@ -64,6 +64,7 @@ public:
     /*! \brief The touched thread range */
     Map<Var, Range> thread_range;
     /*! \brief The buffer variable, if any */
+    Array<PrimExpr> buffer_indices;
     Var buffer = NullValue<Var>();
     /*! \brief The access data type */
     DataType dtype;
