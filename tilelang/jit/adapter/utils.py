@@ -106,14 +106,16 @@ def get_annotated_mod(
     return dispatch[model_type](mod)
 
 
-def pythonic_expr(expr: tvm.tir.Expr) -> str:
+def pythonic_expr(expr: tvm.tir.PrimExpr) -> str:
+    if not isinstance(expr, tvm.tir.PrimExpr):
+        return str(expr)
     python_str = ""
     node_to_str_map = {}  # Stores string representation for each node
 
     def _pythonic_visitor(node):
         if isinstance(node, tvm.tir.Var):
             s = node.name
-        elif isinstance(node, tvm.tir.IntImm):
+        elif isinstance(node, (tvm.tir.IntImm, tvm.tir.FloatImm)):
             # Integer constant: use value directly (ignore type)
             s = str(node.value)
         elif isinstance(node, tvm.tir.Cast):
