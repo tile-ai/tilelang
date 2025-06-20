@@ -177,6 +177,7 @@ public:
   }
 
   void VisitStmt_(const ForNode *op) final { HandleBodyStmt(op); }
+  void VisitStmt_(const WhileNode *op) final { HandleBodyStmt(op); }
   void VisitStmt_(const LetStmtNode *op) final { HandleBodyStmt(op); }
   void VisitStmt_(const AttrStmtNode *op) final { HandleBodyStmt(op); }
   void VisitStmt_(const AssertStmtNode *op) final { HandleBodyStmt(op); }
