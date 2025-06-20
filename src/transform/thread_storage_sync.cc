@@ -228,7 +228,12 @@ private:
         break;
       }
     }
-    ICHECK_EQ(prev.buffer_indices.size(), curr.buffer_indices.size());
+
+    if (prev.buffer_indices.size() != curr.buffer_indices.size()) {
+      // They are not the same indices, should be conflict.
+      return true;
+    }
+
     for (size_t i = 0; i < prev.buffer_indices.size(); i++) {
       const auto &prev_indice = prev.buffer_indices[i];
       const auto &curr_indice = curr.buffer_indices[i];
