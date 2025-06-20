@@ -84,7 +84,7 @@ def get_best_config(M, N, K, with_roller=False):
         thread_num=None,
         enable_rasteration=None,
     ):
-        dtype = "float16"
+        dtype = "bfloat16"
         accum_dtype = "float"
 
         @T.prim_func
@@ -204,11 +204,11 @@ def matmul(M,
     return gemm_autotune
 
 
-def main(m: int = 16384,
-         n: int = 16384,
-         k: int = 16384,
+def main(m: int = 4096,
+         n: int = 4096,
+         k: int = 4096,
          use_autotune: bool = False,
-         with_roller: bool = True):
+         with_roller: bool = False):
     M, N, K = m, n, k
     use_autotune = True
     if use_autotune:
@@ -232,9 +232,9 @@ def main(m: int = 16384,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
-    parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
-    parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
-    parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
+    parser.add_argument("--m", type=int, default=4096, help="Matrix dimension M")
+    parser.add_argument("--n", type=int, default=4096, help="Matrix dimension N")
+    parser.add_argument("--k", type=int, default=4096, help="Matrix dimension K")
     parser.add_argument(
         "--use_autotune",
         action="store_true",
@@ -243,7 +243,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--with_roller",
         action="store_true",
-        default=True,
+        default=False,
         help="Whether to enable BitBLAS roller for search space")
     args = parser.parse_args()
     main(args.m, args.n, args.k, args.use_autotune, args.with_roller)
