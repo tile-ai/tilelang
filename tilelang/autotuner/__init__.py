@@ -6,7 +6,7 @@ and performance optimization through configuration search.
 
 import tilelang
 from tilelang import tvm as tvm
-from tvm.tir import PrimFunc
+from tvm.tir import PrimFunc, Var
 from tvm.target import Target
 import inspect
 from functools import partial
@@ -323,18 +323,38 @@ class AutoTuner:
             ref_input_tensors_supply = get_input_tensors_supply(with_output=False)
 
             if cache_input_tensors:
-                if supply_prog is not None:
-                    logger.warning(
-                        "Incompatible input tensor properties detected between cached tensors and "
-                        "tensors regenerated for the current configuration trial. "
-                        "This can happen if different tuning configurations require different input shapes/dtypes "
-                        "and input tensor caching is enabled.\n"
-                        "To ensure fresh, compatible inputs are generated for every trial "
-                        "you can disable caching by setting:\n"
-                        "  `cache_input_tensors=False`\n"
-                        "within your `.set_compile_args(...)` call.\n")
-                self.jit_input_tensors = jit_input_tensors_supply(
-                ) if self.jit_input_tensors is None else self.jit_input_tensors
+                params = profiler._get_params(with_output=False)
+                if self.jit_input_tensors is None:
+                    self.jit_input_tensors = jit_input_tensors_supply()
+                else:
+                    # check if the cached tensors are compatible with the current configuration
+                    assert len(params) == len(
+                        self.jit_input_tensors), "len(params) != len(self.jit_input_tensors)"
+                    for p, c in zip(params, self.jit_input_tensors):
+                        if not isinstance(c, torch.Tensor):
+                            # skip non-tensor inputs checking
+                            continue
+
+                        # Check tensor compatibility using generator expression
+                    if len(params) == len(self.jit_input_tensors):
+                        def shape_equal(a, b):
+                            if len(a.shape) != len(b.shape):
+                                return False
+                            return all(a_dim == b_dim or isinstance(a_dim, Var) or isinstance(b_dim, Var) for a_dim, b_dim in zip(a.shape, b.shape))
+
+                        if p.dtype != c.dtype or not shape_equal(p, c):
+                            logger.warning(
+                                "\nIncompatible input tensor properties detected between cached tensors and "
+                                "tensors regenerated for the current configuration trial. "
+                                "This can happen if different tuning configurations require different input shapes/dtypes "
+                                "and input tensor caching is enabled.\n"
+                                "To ensure fresh, compatible inputs are generated for every trial "
+                                "you can disable caching by setting:\n"
+                                "  `cache_input_tensors=False`\n"
+                                "within your `.set_compile_args(...)` call.\n")
+                            # otherwise, regenerate the input tensors for safety
+                            self.jit_input_tensors = jit_input_tensors_supply()
+                            break
             else:
                 self.jit_input_tensors = jit_input_tensors_supply()
 

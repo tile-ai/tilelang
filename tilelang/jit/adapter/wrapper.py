@@ -67,9 +67,9 @@ L2_PERSISTENT_MAP_INIT_FUNC = """
 \tstream_attribute.accessPolicyWindow.hitRatio = {1};
 \tstream_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
 \tstream_attribute.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
-\tcudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, {3});
+\tcudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, {2});
 \tstream_attribute.accessPolicyWindow.base_ptr = (void*)({0});
-\tstream_attribute.accessPolicyWindow.num_bytes = {3};
+\tstream_attribute.accessPolicyWindow.num_bytes = {2};
 \tcudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &stream_attribute);
 """
 
@@ -359,9 +359,8 @@ class TLCUDASourceWrapper(object):
             except Exception:
                 # as size_in_bytes maybe a symbolic expression
                 num_bytes = persisting_l2_cache_max_size
-
             init_l2_persistent_map += L2_PERSISTENT_MAP_INIT_FUNC.format(
-                buffer_name, float(hit_ratio), size_in_bytes, num_bytes)
+                buffer_name, float(hit_ratio), pythonic_expr(num_bytes))
 
         return init_l2_persistent_map
 
