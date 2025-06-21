@@ -338,25 +338,25 @@ class AutoTuner:
                             continue
 
                         # Check tensor compatibility using generator expression
-                    if len(params) == len(self.jit_input_tensors):
-                        def shape_equal(a, b):
-                            if len(a.shape) != len(b.shape):
-                                return False
-                            return all(a_dim == b_dim or isinstance(a_dim, Var) or isinstance(b_dim, Var) for a_dim, b_dim in zip(a.shape, b.shape))
+                        if len(params) == len(self.jit_input_tensors):
+                            def shape_equal(a, b):
+                                if len(a.shape) != len(b.shape):
+                                    return False
+                                return all(a_dim == b_dim or isinstance(a_dim, Var) or isinstance(b_dim, Var) for a_dim, b_dim in zip(a.shape, b.shape))
 
-                        if p.dtype != c.dtype or not shape_equal(p, c):
-                            logger.warning(
-                                "\nIncompatible input tensor properties detected between cached tensors and "
-                                "tensors regenerated for the current configuration trial. "
-                                "This can happen if different tuning configurations require different input shapes/dtypes "
-                                "and input tensor caching is enabled.\n"
-                                "To ensure fresh, compatible inputs are generated for every trial "
-                                "you can disable caching by setting:\n"
-                                "  `cache_input_tensors=False`\n"
-                                "within your `.set_compile_args(...)` call.\n")
-                            # otherwise, regenerate the input tensors for safety
-                            self.jit_input_tensors = jit_input_tensors_supply()
-                            break
+                            if p.dtype != c.dtype or not shape_equal(p, c):
+                                logger.warning(
+                                    "\nIncompatible input tensor properties detected between cached tensors and "
+                                    "tensors regenerated for the current configuration trial. "
+                                    "This can happen if different tuning configurations require different input shapes/dtypes "
+                                    "and input tensor caching is enabled.\n"
+                                    "To ensure fresh, compatible inputs are generated for every trial "
+                                    "you can disable caching by setting:\n"
+                                    "  `cache_input_tensors=False`\n"
+                                    "within your `.set_compile_args(...)` call.\n")
+                                # otherwise, regenerate the input tensors for safety
+                                self.jit_input_tensors = jit_input_tensors_supply()
+                                break
             else:
                 self.jit_input_tensors = jit_input_tensors_supply()
 
