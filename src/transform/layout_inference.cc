@@ -145,7 +145,7 @@ public:
                 {Range::FromMinExtent(0, IntImm(index.dtype(), upper_bound))},
                 analyzer_);
 
-            loop_extents.Set(i, IntImm(index.dtype(), shape));
+            loop_extents.Set(j, IntImm(index.dtype(), shape));
             body = tir::Substitute(body,
                                    {{loop_var, inverse_index_map->MapIndices(
                                                    {loop_var}, analyzer_)[0]}});
