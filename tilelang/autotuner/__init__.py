@@ -338,11 +338,10 @@ class AutoTuner:
                             continue
 
                         # Check tensor compatibility using generator expression
-                    if len(params) == len(self.jit_input_tensors):
                         def shape_equal(a, b):
-                            if len(a.shape) != len(b.shape):
-                                return False
-                            return all(a_dim == b_dim or isinstance(a_dim, Var) or isinstance(b_dim, Var) for a_dim, b_dim in zip(a.shape, b.shape))
+                            return all(
+                                a_dim == b_dim or isinstance(a_dim, Var) or isinstance(b_dim, Var)
+                                for a_dim, b_dim in zip(a.shape, b.shape))
 
                         if p.dtype != c.dtype or not shape_equal(p, c):
                             logger.warning(
