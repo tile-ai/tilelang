@@ -167,10 +167,6 @@ class AutotuneResult:
             - kernel_lib.so: The compiled kernel library
             - params.pkl: The serialized kernel parameters
         """
-        if os.path.exists(cache_path):
-            logger.info(f"Cache path {cache_path} already exists, skipping saving kernel to disk")
-            return
-
         os.makedirs(cache_path, exist_ok=True)  # Ensure directory exists
 
         # Save kernel source code
