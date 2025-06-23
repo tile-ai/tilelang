@@ -175,8 +175,23 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   });
 
   // Smem Box
+  // check smem range and global range is legal
+  auto s_range_idx = 0;
+  for (size_t i = 0; i < global_range.size(); i++) {
+    auto g_range = global_range[i];
+    if (is_one(g_range->extent)) {
+      continue;
+    }
+    auto s_range = shared_range[s_range_idx++];
+    ICHECK(StructuralEqual()(g_range->extent, s_range->extent))
+        << "global_range[" << i << "] is illegal, global_range[" << i
+        << "] = " << g_range->extent << ", shared_range[" << s_range_idx
+        << "] = " << s_range->extent;
+  }
+
   desc.smem_box =
       ReverseArray(global_range.Map([](Range r) { return r->extent; }));
+
   desc.smem_stride = Array<PrimExpr>(desc.rank, PrimExpr(1));
 
   // L2 & OOB
@@ -248,6 +263,7 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   PrimExpr total_elements = 1;
   for (auto e : desc.smem_box)
     total_elements *= e;
+
   if ((*inner_box_dim) != instruction_dim) {
     Var loop_var("i");
     int loop_extent = (*inner_box_dim) / instruction_dim;
