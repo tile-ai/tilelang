@@ -2,13 +2,14 @@ import torch
 import tilelang as tl
 import tilelang.language as T
 from tilelang.profiler import do_bench
+from typing import Callable
 
 
 def softmax_kernel(
     M,
     N,
     dtype: str = "float16",
-) -> torch.Tensor:
+) -> "Callable":
     BN = min(tl.next_power_of_2(N), 1024)
     NN = tl.cdiv(N, BN)
 
@@ -23,10 +24,11 @@ def softmax_kernel(
     ):
         with T.Kernel(M, threads=128) as (i_m):
             x = T.alloc_fragment([BN], dtype)
+            y = T.alloc_fragment([BN], dtype)
             lse = T.alloc_fragment([1], accum_dtype)
             max_x = T.alloc_fragment([1], dtype)
             exp_x = T.alloc_fragment([BN], accum_dtype)
-            sum_exp_x = T.alloc_fragment([1], dtype)
+            sum_exp_x = T.alloc_fragment([1], accum_dtype)
             T.fill(lse, -T.infinity(accum_dtype))
 
             for i_n in T.Pipelined(0, NN):
@@ -46,13 +48,14 @@ def softmax_kernel(
                 )
 
             for i_n in T.Pipelined(0, NN):
+                T.copy(X[i_m, i_n * BN : (i_n + 1) * BN], x)
 
                 for j in T.Parallel(BN):
 
                     if j + i_n * BN < N:
-                        Y[i_m, j + i_n * BN] = T.exp2(
-                            X[i_m, j + i_n * BN] * scale - lse[0]
-                        )
+                        y[j] = T.exp2(x[j] * scale - lse[0])
+
+                T.copy(y, Y[i_m, i_n * BN : (i_n + 1) * BN])
 
     return main
 
