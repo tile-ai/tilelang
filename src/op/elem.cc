@@ -347,6 +347,13 @@ Stmt Copy::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   For for_node =
       For(local_iter, 0, FloorDiv(extent, 2 * num), ForKind::kSerial, body);
   for_node = LoopPragmaUnroll(for_node);
+  auto range = T.thread_bounds;
+  if (range.defined()) {
+    auto thread_var = T.thread_var;
+    auto thread_var_with_offset = thread_var - range->min;
+    for_node.CopyOnWrite()->body =
+        Substitute(for_node->body, {{thread_var, thread_var_with_offset}});
+  }
   return for_node;
 }
 
