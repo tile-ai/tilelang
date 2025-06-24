@@ -130,7 +130,7 @@ def extrac_params(func: tir.PrimFunc) -> List[KernelParam]:
 def canon_target_host(target: Union[str, Target], target_host: Optional[Union[str, Target]]):
 
     if not target_host:
-        target_host = "llvm" if tvm.runtime.enabled("llvm") else "stackvm"
+        target_host = "llvm" if tvm.runtime.enabled("llvm") else "c"
 
     return target_host
 

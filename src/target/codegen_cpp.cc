@@ -42,7 +42,7 @@ namespace tvm {
 namespace codegen {
 
 CodeGenTileLangCPP::CodeGenTileLangCPP() {
-  module_name_ = name_supply_->FreshName("__tvm_module_ctx");
+  module_name_ = name_supply_->FreshName("__tvm_ffi_library_ctx");
 }
 
 void CodeGenTileLangCPP::Init(bool output_ssa, bool emit_asserts,
@@ -59,7 +59,7 @@ void CodeGenTileLangCPP::Init(bool output_ssa, bool emit_asserts,
 }
 
 void CodeGenTileLangCPP::InitGlobalContext() {
-  decl_stream << "void* " << tvm::runtime::symbol::tvm_module_ctx
+  decl_stream << "void* " << tvm::runtime::symbol::tvm_ffi_library_ctx
               << " = NULL;\n";
 }
 
