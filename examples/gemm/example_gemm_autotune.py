@@ -220,7 +220,6 @@ def main(m: int = 4096,
         kernel = result.kernel
     else:
         config = get_heuristic_config()
-        # kernel = tl.compile(matmul(M, N, K, **config), out_idx=-1)
         kernel = matmul(M, N, K, **config)
 
     # benchmark
