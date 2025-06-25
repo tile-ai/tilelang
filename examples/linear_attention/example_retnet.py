@@ -4,6 +4,7 @@ import tilelang
 import tilelang.language as T
 
 
+@tilelang.jit(out_idx=[4])
 def retnet(batch, heads, seq_len, dim_qk, dim_v, block_M, block_N):
     qk_shape = [batch, seq_len, heads, dim_qk]
     v_shape = [batch, seq_len, heads, dim_v]
@@ -179,8 +180,7 @@ if __name__ == "__main__":
     total_flops = 2.0 * BATCH * H * N_CTX * N_CTX * (dim_qk + dim_v)
     BLOCK_M = 64
     BLOCK_N = 64
-    program = retnet(BATCH, H, N_CTX, dim_qk, dim_v, BLOCK_M, BLOCK_N)
-    kernel = tilelang.compile(program, out_idx=[4])
+    kernel = retnet(BATCH, H, N_CTX, dim_qk, dim_v, BLOCK_M, BLOCK_N)
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Normal)
 
     ins = profiler._get_inputs()

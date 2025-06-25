@@ -6,6 +6,8 @@ import tilelang.language as T
 from einops import rearrange, einsum
 import argparse
 import itertools
+from functools import lru_cache
+from typing import Tuple, Dict
 
 torch.random.manual_seed(0)
 
@@ -28,6 +30,30 @@ def get_configs():
     return configs
 
 
+@lru_cache(maxsize=1)
+def get_heuristic_config() -> Tuple[Dict, int]:
+    # Get CUDA device properties
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available")
+    device = torch.cuda.current_device()
+    sm_major, sm_minor = torch.cuda.get_device_capability(device)
+    sm_version = sm_major * 10 + sm_minor
+    print(f"CUDA device capability: {sm_version}")
+    if sm_version == 89:
+        cfg = dict(block_N=128, block_H=64, num_split=16, num_stages=0, threads=128)
+    else:
+        cfg = dict(block_N=128, block_H=64, num_split=16, num_stages=2, threads=128)
+    return cfg, sm_version
+
+
+def get_pass_configs():
+    _, sm_version = get_heuristic_config()
+    if sm_version == 80:
+        return {tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True}
+    else:
+        return {}
+
+
 def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     shape_q = [batch, heads, dim]
@@ -38,6 +64,7 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, tune=False):
     accum_dtype = "float"
     kv_group_num = heads // groups
 
+    @tilelang.jit(out_idx=[6], pass_configs=get_pass_configs())
     def kernel_func(block_N, block_H, num_split, num_stages, threads):
         part_shape = [batch, heads, num_split, dim]
         valid_block_H = min(block_H, kv_group_num)
@@ -457,39 +484,8 @@ def main(batch: int = 1,
     total_flops = qk_flops + pv_flops
 
     if (not tune):
-
-        def get_heuristic_config() -> dict:
-            # Get CUDA device properties
-            if not torch.cuda.is_available():
-                raise RuntimeError("CUDA is not available")
-            device = torch.cuda.current_device()
-            sm_major, sm_minor = torch.cuda.get_device_capability(device)
-            sm_version = sm_major * 10 + sm_minor
-            print(f"CUDA device capability: {sm_version}")
-            if sm_version == 89:
-                return {
-                    "block_N": 128,
-                    "block_H": 64,
-                    "num_split": 16,
-                    "num_stages": 0,
-                    "threads": 128
-                }, sm_version
-            else:
-                return {
-                    "block_N": 128,
-                    "block_H": 64,
-                    "num_split": 16,
-                    "num_stages": 2,
-                    "threads": 128
-                }, sm_version
-
         config, sm_version = get_heuristic_config()
-        program = flashattn(batch, heads, groups, kv_seqlen, dim, tune=tune)(**config)
-        if sm_version == 90:
-            kernel = tilelang.compile(
-                program, out_idx=[6], pass_configs={"tl.disable_tma_lower": True})
-        else:
-            kernel = tilelang.compile(program, out_idx=[6])
+        kernel = flashattn(batch, heads, groups, kv_seqlen, dim, tune=tune)(**config)
         profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
 
         q = torch.randn(batch, heads, dim, device="cuda", dtype=torch.float16)

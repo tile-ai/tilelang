@@ -10,6 +10,7 @@ def ref_program(x, y):
     return x + y
 
 
+@tilelang.jit(out_idx=[-1])
 def elementwise_add(M, N, block_M, block_N, in_dtype, out_dtype, threads):
 
     @T.prim_func
@@ -68,8 +69,7 @@ def main():
     else:
         # Default config
         config = {"block_M": 128, "block_N": 256, "threads": 128}
-        kernel = tilelang.compile(
-            elementwise_add(M, N, **config, in_dtype="float32", out_dtype="float32"), out_idx=-1)
+        kernel = elementwise_add(M, N, **config, in_dtype="float32", out_dtype="float32")
 
     out = kernel(a, b)
     torch.testing.assert_close(out, ref_program(a, b), rtol=1e-2, atol=1e-2)

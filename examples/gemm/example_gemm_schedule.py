@@ -2,6 +2,7 @@ import tilelang
 import tilelang.language as T
 
 
+@tilelang.jit(out_idx=[-1])
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
 
     @T.prim_func
@@ -40,11 +41,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 
 
 def main():
-    func = matmul(1024, 1024, 1024, 128, 128, 32)
-
-    print(func)
-
-    kernel = tilelang.compile(func, out_idx=-1)
+    kernel = matmul(1024, 1024, 1024, 128, 128, 32)
 
     import torch
 

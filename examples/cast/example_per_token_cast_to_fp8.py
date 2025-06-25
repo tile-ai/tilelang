@@ -7,6 +7,7 @@ from tilelang.utils.tensor import torch_assert_close
 tilelang.disable_cache()
 
 
+@tilelang.jit(out_idx=[1, 2])
 def per_token_cast_to_fp8(M, N, blk_m):
     dtype = "float"
     group_size = 128
@@ -80,13 +81,7 @@ def ref_program(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
 def main():
     M, N, blk_m = 8192, 8192, 8
-    program = per_token_cast_to_fp8(M, N, blk_m)
-    kernel = tilelang.compile(
-        program,
-        out_idx=[1, 2],
-        target="cuda",
-        execution_backend="cython",
-        pass_configs={"tl.disable_tma_lower": True})
+    kernel = per_token_cast_to_fp8(M, N, blk_m)
     print(kernel.get_kernel_source())
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
 
