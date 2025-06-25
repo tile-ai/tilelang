@@ -165,7 +165,7 @@ def get_heuristic_config() -> dict:
             "enable_rasteration": True
         }
 
-
+@tl.jit(out_idx=[-1])
 def matmul(M,
            N,
            K,
@@ -219,7 +219,8 @@ def main(m: int = 4096,
         kernel = result.kernel
     else:
         config = get_heuristic_config()
-        kernel = tl.compile(matmul(M, N, K, **config), out_idx=-1)
+        # kernel = tl.compile(matmul(M, N, K, **config), out_idx=-1)
+        kernel = matmul(M, N, K, **config)
 
     # benchmark
     profiler = kernel.get_profiler(tensor_supply_type=tl.TensorSupplyType.Auto)

@@ -82,6 +82,7 @@ def get_configs():
     return configs
 
 
+@tilelang.jit(out_idx=[7])
 def chunk_scan_fwd(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate, tune=False):
     dtype = "float16"
     accum_dtype = "float"
@@ -232,10 +233,9 @@ if __name__ == "__main__":
     total_flops = 2 * batch * seq_len * chunk_size * heads * dim * 0.5 + 2 * batch * seq_len * heads * dim * dstate
 
     if (not args.tune):
-        program = chunk_scan_fwd(
+        kernel = chunk_scan_fwd(
             batch, seq_len, chunk_size, groups, heads, dim, dstate, tune=args.tune)(
                 block_M=64, block_N=64, block_K=64, block_Dstate=128, num_stages=2, threads=128)
-        kernel = tilelang.compile(program, out_idx=[7])
         profiler = kernel.get_profiler(tilelang.TensorSupplyType.Normal)
         profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")

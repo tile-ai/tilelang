@@ -12,7 +12,7 @@ from tilelang import jit
 def ref_program(A, B):
     return A @ B.T
 
-
+@tl.jit(out_idx=[-1])
 def naive_gemv(
     N: int,
     K: int,
@@ -45,7 +45,7 @@ def naive_gemv(
 
     return main
 
-
+@tl.jit(out_idx=[-1])
 def naive_splitk_gemv(
     N: int,
     K: int,
@@ -80,7 +80,7 @@ def naive_splitk_gemv(
 
     return main
 
-
+@tl.jit(out_idx=[-1])
 def splitk_gemv(
     N: int,
     K: int,
@@ -119,7 +119,7 @@ def splitk_gemv(
 
     return main
 
-
+@tl.jit(out_idx=[-1])
 def splitk_gemv_vectorized(
     N: int,
     K: int,
@@ -159,7 +159,7 @@ def splitk_gemv_vectorized(
 
     return main
 
-
+@tl.jit(out_idx=[-1])
 def splitk_gemv_vectorized_tvm(
     N: int,
     K: int,
@@ -292,7 +292,6 @@ def get_best_config(N, K):
 
 
 def check_correctness_and_bench(kernel, N, K, bench_ref=True):
-    kernel = tl.compile(kernel, out_idx=-1)
     profiler = kernel.get_profiler()
     profiler.assert_allclose(lambda x, y: x @ y.T, atol=1e-2, rtol=1e-2)
     if bench_ref:
@@ -318,7 +317,6 @@ def main():
     best_result = get_best_config(N, K)
     best_config = best_result.config
     kernel = splitk_gemv_vectorized_tvm(N, K, **best_config)
-    kernel = tl.compile(kernel, out_idx=-1)
     profiler = kernel.get_profiler()
     latency = profiler.do_bench(lambda x, y: x @ y.T, warmup=500)
     print(f"Torch Latency: {latency} ms")
