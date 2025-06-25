@@ -12,6 +12,7 @@ from tilelang import jit
 def ref_program(A, B):
     return A @ B.T
 
+
 @tl.jit(out_idx=[-1])
 def naive_gemv(
     N: int,
@@ -44,6 +45,7 @@ def naive_gemv(
             C[bn * BLOCK_N + tn] = C_reg[0]
 
     return main
+
 
 @tl.jit(out_idx=[-1])
 def naive_splitk_gemv(
@@ -79,6 +81,7 @@ def naive_splitk_gemv(
             C[bn * BLOCK_N + tn] = C_shared[tn]
 
     return main
+
 
 @tl.jit(out_idx=[-1])
 def splitk_gemv(
@@ -119,6 +122,7 @@ def splitk_gemv(
 
     return main
 
+
 @tl.jit(out_idx=[-1])
 def splitk_gemv_vectorized(
     N: int,
@@ -158,6 +162,7 @@ def splitk_gemv_vectorized(
             C[bn * BLOCK_N + tn] = C_shared[tn]
 
     return main
+
 
 @tl.jit(out_idx=[-1])
 def splitk_gemv_vectorized_tvm(

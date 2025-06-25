@@ -9,6 +9,7 @@ from tilelang import tvm as tvm
 tilelang.testing.set_random_seed(0)
 tilelang.disable_cache()
 
+
 @tilelang.jit(pass_configs={"tl.disable_dynamic_tail_split": True, "tl.dynamic_alignment": 8})
 def matmul_dynamic_mnk(
     block_M,
@@ -64,7 +65,7 @@ def matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtyp
         f"M: {M}, N: {N}, K: {K}, block_M: {block_M}, block_N: {block_N}, block_K: {block_K}, trans_A: {trans_A}, trans_B: {trans_B}, in_dtype: {in_dtype}, out_dtype: {out_dtype}, accum_dtype: {accum_dtype}, num_stages: {num_stages}, threads: {threads}"
     )
     kernel = matmul_dynamic_mnk(block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype,
-                                 accum_dtype, num_stages, threads)
+                                accum_dtype, num_stages, threads)
 
     import torch
     if trans_A:

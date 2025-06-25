@@ -6,6 +6,7 @@ import tilelang.language as T
 from tilelang.carver.arch import driver
 import argparse
 
+
 @tilelang.jit(out_idx=[-1])
 def matmul_non_persistent(M,
                           N,
@@ -42,6 +43,7 @@ def matmul_non_persistent(M,
             T.copy(C_shared, C[bx * block_M, by * block_N])
 
     return main
+
 
 @tilelang.jit(out_idx=[-1])
 def matmul_persistent(M,
@@ -144,7 +146,7 @@ def main():
     print(f"Persistent GEMM TFlops: {total_flops / persistent_latency * 1e-9} TFlops")
 
     non_persistent_kernel = matmul_non_persistent(M, N, K, BLOCK_M, BLOCK_N, BLOCK_K, threads,
-                                                   num_stages)
+                                                  num_stages)
     non_persistent_profiler = non_persistent_kernel.get_profiler(
         tensor_supply_type=tilelang.TensorSupplyType.Randn)
     non_persistent_profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)

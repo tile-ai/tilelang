@@ -25,6 +25,7 @@ def make_swizzle_layout(shared_buf):
 
     return T.Layout(shape, transform_func)
 
+
 @tilelang.jit(out_idx=[2])
 @simplify_prim_func
 def tl_matmul(

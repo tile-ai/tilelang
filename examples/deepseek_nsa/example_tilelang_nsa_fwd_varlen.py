@@ -17,6 +17,7 @@ else:
 from reference import naive_nsa
 from einops import rearrange
 
+
 @tilelang.jit
 def native_sparse_attention_varlen(batch,
                                    heads,

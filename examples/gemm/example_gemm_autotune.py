@@ -165,6 +165,7 @@ def get_heuristic_config() -> dict:
             "enable_rasteration": True
         }
 
+
 @tl.jit(out_idx=[-1])
 def matmul(M,
            N,

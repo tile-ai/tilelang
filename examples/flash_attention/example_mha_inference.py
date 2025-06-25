@@ -7,6 +7,7 @@ from functools import partial
 
 num_split = 4
 
+
 @tilelang.jit(out_idx=[5])
 def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_N):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)

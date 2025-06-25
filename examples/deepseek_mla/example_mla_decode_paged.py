@@ -6,6 +6,7 @@ import argparse
 from tilelang.profiler import do_bench
 import math
 
+
 @tilelang.jit(out_idx=[8])
 def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, block_H, num_split,
                         block_size):
@@ -324,7 +325,7 @@ def run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s
     out_partial = torch.empty(b, h_q, num_kv_splits, dv, dtype=dtype, device=q.device)
     glse = torch.empty(b, h_q, num_kv_splits, dtype=dtype, device=q.device)
     kernel = mla_decode_tilelang(b, h_q, h_kv, max_seqlen_pad, dv, dpe, BLOCK_N, BLOCK_H,
-                                  num_kv_splits, block_size)
+                                 num_kv_splits, block_size)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
 
     def flash_mla_tilelang():

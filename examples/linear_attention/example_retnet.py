@@ -3,6 +3,7 @@ import torch
 import tilelang
 import tilelang.language as T
 
+
 @tilelang.jit(out_idx=[4])
 def retnet(batch, heads, seq_len, dim_qk, dim_v, block_M, block_N):
     qk_shape = [batch, seq_len, heads, dim_qk]

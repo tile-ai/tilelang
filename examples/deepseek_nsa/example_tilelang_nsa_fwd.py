@@ -9,6 +9,7 @@ import tilelang.testing
 
 tilelang.testing.set_random_seed(0)
 
+
 @tilelang.jit(out_idx=[-1])
 def native_sparse_attention(batch,
                             heads,

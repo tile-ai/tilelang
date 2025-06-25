@@ -56,6 +56,7 @@ def torch_convert(tensor):
             new_tensor[i][j] = _convert(tensor[i][j // 2], j % 2)
     return new_tensor
 
+
 @tilelang.jit(out_idx=[1])
 def test_convert(N, K, block_N, block_K, in_dtype, num_bits=4, threads=128):
     num_elems_per_byte = 8 // num_bits
@@ -125,6 +126,7 @@ def get_configs():
         'split': c[5]
     } for c in _configs]
     return configs
+
 
 def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
 

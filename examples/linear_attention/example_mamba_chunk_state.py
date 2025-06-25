@@ -64,6 +64,7 @@ def get_configs():
     } for c in _configs]
     return configs
 
+
 @tilelang.jit(out_idx=[4])
 def chunk_state_fwd(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate, tune=False):
     dtype = "float16"

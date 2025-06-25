@@ -15,6 +15,7 @@ import scipy
 def is_pow_of_2(n):
     return isinstance(n, int) and n > 0 and (n & (n - 1)) == 0
 
+
 @tilelang.jit(out_idx=[1])
 def hadamard(b, n, dtype):
     assert is_pow_of_2(n), "n must be a power of 2"

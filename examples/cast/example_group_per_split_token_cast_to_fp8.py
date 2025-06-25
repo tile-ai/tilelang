@@ -11,6 +11,7 @@ from tilelang.utils.tensor import torch_assert_close
 dtype = "bfloat16"
 accum_dtype = "float"
 
+
 @tilelang.jit(out_idx=[2, 3])
 def group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m):
     group_size = 128

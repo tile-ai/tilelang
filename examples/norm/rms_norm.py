@@ -35,6 +35,7 @@ def rms_norm_splitk(M, N, blk_m, blk_k):
 
     return main
 
+
 @tilelang.jit(out_idx=[-1], pass_configs={"tl.disable_tma_lower": True})
 def rms_norm(M, N, blk_m):
     dtype = "float"

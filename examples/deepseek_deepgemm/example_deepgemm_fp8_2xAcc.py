@@ -5,11 +5,12 @@ from typing import Tuple
 
 import torch
 import tilelang.testing
-import tilelang as TL
+import tilelang
 import tilelang.language as T
 from tilelang.utils.tensor import map_torch_type
 
 tilelang.testing.set_random_seed(42)
+
 
 @tilelang.jit(out_idx=[2])
 def tl_gemm(

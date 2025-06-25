@@ -13,6 +13,7 @@ def calc_diff(x, y):
     sim = 2 * (x * y).sum() / denominator
     return 1 - sim
 
+
 @tilelang.jit(out_idx=[-1])
 def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
 

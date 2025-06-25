@@ -29,6 +29,7 @@ def get_configs():
     } for c in _configs]
     return configs
 
+
 @lru_cache(maxsize=1)
 def get_heuristic_config() -> Tuple[Dict, int]:
     # Get CUDA device properties
@@ -44,12 +45,11 @@ def get_heuristic_config() -> Tuple[Dict, int]:
         cfg = dict(block_N=128, block_H=64, num_split=16, num_stages=2, threads=128)
     return cfg, sm_version
 
+
 def get_pass_configs():
     _, sm_version = get_heuristic_config()
     if sm_version == 80:
-        return {
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True
-        }
+        return {tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True}
     else:
         return {}
 

@@ -141,6 +141,7 @@ def get_best_config(M, N, K):
     # Run the tuning process
     return autotuner.run(warmup=3, rep=20)
 
+
 @tilelang.jit(out_idx=[-1])
 def blocksparse_matmul(M,
                        N,
@@ -212,8 +213,8 @@ def main():
         print(f"Reference Latency: {ref_latency:.6f} ms")
     else:
         kernel = blocksparse_matmul(M, N, K, DEFAULT_BLOCK_M, DEFAULT_BLOCK_N, DEFAULT_BLOCK_K,
-                                  DEFAULT_NUM_STAGES, DEFAULT_THREAD_NUM,
-                                  DEFAULT_ENABLE_RASTERIZATION)
+                                    DEFAULT_NUM_STAGES, DEFAULT_THREAD_NUM,
+                                    DEFAULT_ENABLE_RASTERIZATION)
         block_M, block_N, block_K = DEFAULT_BLOCK_M, DEFAULT_BLOCK_N, DEFAULT_BLOCK_K
         print(f"Using default kernel with block size ({block_M}, {block_N}, {block_K})")
 

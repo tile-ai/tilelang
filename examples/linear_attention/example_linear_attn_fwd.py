@@ -9,6 +9,7 @@ from tilelang.profiler import do_bench
 import argparse
 from fla.ops.linear_attn import fused_chunk_linear_attn  # We compare with FLA
 
+
 @tl.jit(out_idx=[3, 4])
 def chunk_linear_attn_fwd_kernel(
     B,
