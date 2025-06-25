@@ -306,20 +306,10 @@ def sparse_gqa_decode_varlen_indice(query, key, value, block_indices, cache_seql
         is_causal_or_local=True,
         max_splits=128)
 
-    # program = flashattn(batch, heads, heads_kv, dim, dim_v)(
-    #     block_N=block_size,
-    #     block_H=block_H,
-    #     num_split=T.symbolic("num_split"),
-    #     num_stages=2,
-    #     threads=128,
-    #     max_cache_seqlen=T.symbolic("max_cache_seqlen"),
-    #     max_selected_blocks=T.symbolic("max_selected_blocks"))
-
     glse = torch.empty((batch, heads, num_split), dtype=torch.float32, device='cuda')
     Output_partial = torch.empty((batch, heads, num_split, dim_v),
                                  dtype=torch.float32,
                                  device='cuda')
-    # kernel = tilelang.compile(program, out_idx=-1, target='cuda', execution_backend="cython")
     kernel = flashattn(batch, heads, heads_kv, dim, dim_v)(
         block_N=block_size,
         block_H=block_H,
@@ -328,9 +318,7 @@ def sparse_gqa_decode_varlen_indice(query, key, value, block_indices, cache_seql
         threads=128,
         max_cache_seqlen=T.symbolic("max_cache_seqlen"),
         max_selected_blocks=T.symbolic("max_selected_blocks"))
-    # print(kernel.get_kernel_source())
 
-    # output = kernel(query, key, value, block_indices, cache_seqlens, actual_num_blocks, glse, Output_partial)
     output = kernel(query, key, value, block_indices, cache_seqlens, glse, Output_partial)
     return output
 
@@ -464,7 +452,6 @@ def main(batch=8,
     ref = ref_program_torch(Q, K, V, block_indices, cache_seqlens, max_cache_seqlen, max_num_blocks,
                             block_size)
 
-    # out = sparse_gqa_decode_varlen_indice(Q, K, V, block_indices, cache_seqlens, max_cache_seqlen, block_size)
     sparse_kernel = SparseFlashAttn(batch, heads, heads_kv, dim, dim_v, block_size)
     out = sparse_kernel(Q, K, V, block_indices, cache_seqlens)
     debug("output", ref, out, atol=1e-3, rtol=1e-3)
