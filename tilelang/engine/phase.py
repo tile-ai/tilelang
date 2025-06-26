@@ -48,6 +48,20 @@ def allow_global_thread_synchronization(pass_ctx: Optional[PassContext] = None) 
     return enable_global_thread_sync
 
 
+def should_enable_aggressive_merge(pass_ctx: Optional[PassContext] = None,
+                                   target: Optional[Target] = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    enable_aggressive_merge = bool(
+        pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE, False))
+    if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
+        # This is a workaround to avoid the bug in the MergeSharedMemoryAllocations pass
+        # when warp specialization is enabled, as different warp threads may access different
+        # buffers, but the liveness analysis is hard because we need to do pipeline.
+        enable_aggressive_merge = False
+    return enable_aggressive_merge
+
+
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
     mod = tir.transform.BindTarget(target)(mod)
@@ -149,7 +163,9 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
 
-    mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
+    mod = tilelang.transform.MergeSharedMemoryAllocations(
+        enable_aggressive_merge=should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target))(
+            mod)
 
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)

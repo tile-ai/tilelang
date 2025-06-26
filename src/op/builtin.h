@@ -25,6 +25,8 @@ static constexpr const char *kDisableSafeMemoryLegalize =
 static constexpr const char *kDisableWarpSpecialized =
     "tl.disable_warp_specialized";
 static constexpr const char *kConfigIndexBitwidth = "tl.config_index_bitwidth";
+static constexpr const char *kEnableAggressiveSharedMemoryMerge =
+    "tl.enable_aggressive_shared_memory_merge";
 
 /*!
  * \brief Whether to disable dynamic tail split
