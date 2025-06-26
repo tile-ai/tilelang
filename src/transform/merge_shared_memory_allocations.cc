@@ -96,8 +96,9 @@ public:
 class SharedMemLinearAccessPatternFinder final : public StmtExprVisitor {
 public:
   explicit SharedMemLinearAccessPatternFinder(bool is_dynamic = true,
+                                              bool enable_aggressive_merge = false,
                                               bool verbose = false)
-      : is_dynamic_(is_dynamic), verbose_(verbose) {}
+      : is_dynamic_(is_dynamic), enable_aggressive_merge_(enable_aggressive_merge), verbose_(verbose) {}
   /*! \brief record the touch list of statement. */
   struct StmtEntry {
     // The statement
@@ -151,9 +152,15 @@ public:
       ICHECK_LT(it->second.level, scope_.size());
       if (IsAppropriateSharedMemory(GetRef<Var>(buf))) {
         // set into scope_.size() - 1 for aggressive memory reuse
-        scope_[it->second.level].touched.push_back(buf);
+        auto enable_aggressive_merge = enable_aggressive_merge_;
+        if (enable_aggressive_merge) {
+          scope_[scope_.size() - 1].touched.push_back(buf);
+        } else {
+          scope_[it->second.level].touched.push_back(buf);
+        }
       }
     }
+
     StmtEntry e = scope_.back();
     scope_.pop_back();
     if (e.touched.size() != 0) {
@@ -185,7 +192,12 @@ public:
       ICHECK_LT(it->second.level, scope_.size())
           << "Load memory in places other than store.";
       if (IsAppropriateSharedMemory(GetRef<Var>(buf))) {
-        scope_[it->second.level].touched.push_back(buf);
+        auto enable_aggressive_merge = enable_aggressive_merge_;
+        if (enable_aggressive_merge) {
+          scope_[scope_.size() - 1].touched.push_back(buf);
+        } else {
+          scope_[it->second.level].touched.push_back(buf);
+        }
       }
     }
   }
@@ -196,7 +208,12 @@ public:
     if (it != alloc_info_.end() && it->second.alloc) {
       ICHECK_LT(it->second.level, scope_.size());
       if (IsAppropriateSharedMemory(GetRef<Var>(buf))) {
-        scope_[it->second.level].touched.push_back(buf);
+        auto enable_aggressive_merge = enable_aggressive_merge_;
+        if (enable_aggressive_merge) {
+          scope_[scope_.size() - 1].touched.push_back(buf);
+        } else {
+          scope_[it->second.level].touched.push_back(buf);
+        }
       }
     }
   }
@@ -284,6 +301,8 @@ private:
   }
   // Whether do dyanmic analysis.
   bool is_dynamic_{true};
+  // Whether do aggressive merge.
+  bool enable_aggressive_merge_{false};
   // Whether do verbose logging.
   bool verbose_{false};
   // Whether already in thread env.
@@ -304,8 +323,7 @@ public:
       const std::unordered_map<const VarNode *, const AllocateNode *>
           &shmem_allocs,
       bool is_dynamic = true, bool verbose = false)
-      : is_dynamic_{is_dynamic}, shmem_allocs_{shmem_allocs}, verbose_{
-                                                                  verbose} {
+      : is_dynamic_{is_dynamic}, shmem_allocs_{shmem_allocs}, verbose_{verbose} {
     if (!is_dynamic) {
       merged_buf_var_ =
           Var("buf_shmem", PointerType(PrimType(DataType::UInt(8)), "shared"));
@@ -317,8 +335,9 @@ public:
    * \param stmt the statement
    */
   void PlanReuse(const Stmt &stmt, bool is_dynamic = true,
+                 bool enable_aggressive_merge = false,
                  bool verbose = false) {
-    SharedMemLinearAccessPatternFinder finder(is_dynamic, verbose);
+    SharedMemLinearAccessPatternFinder finder(is_dynamic, enable_aggressive_merge, verbose);
     finder(stmt);
     this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_);
     this->PlanMemory(finder.linear_seq_, finder.stmt_attrs_);
@@ -956,6 +975,8 @@ private:
   }
   // Wheather enable dyanmic analysis.
   bool is_dynamic_{true};
+  // The merge strategy
+  int merge_strategy_{0};
   // Whether enable verbose logging.
   bool verbose_{false};
   // The var for the merged buffer
@@ -985,18 +1006,18 @@ private:
 };
 
 Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
+                                  bool enable_aggressive_merge,
                                   bool verbose = false) {
   AllocateCollector collector;
   collector(stmt);
   if (collector.dyn_shmem_allocs_.size() > 1) {
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose);
-    rewriter.PlanReuse(stmt);
+    rewriter.PlanReuse(stmt, true, enable_aggressive_merge);
     stmt = rewriter(std::move(stmt));
   }
   if (merge_static_smem && collector.static_shmem_allocs_.size() > 1) {
-    SharedMemoryRewriter rewriter(collector.static_shmem_allocs_, false,
-                                  verbose);
-    rewriter.PlanReuse(stmt, false);
+    SharedMemoryRewriter rewriter(collector.static_shmem_allocs_, false, verbose);
+    rewriter.PlanReuse(stmt, false, enable_aggressive_merge);
     stmt = rewriter(std::move(stmt));
   }
   return stmt;
@@ -1013,9 +1034,17 @@ Pass MergeSharedMemoryAllocations() {
     bool debug_merge_shared_memory_allocations =
         ctx->GetConfig<Bool>(kDebugMergeSharedMemoryAllocations, Bool(false))
             .value();
+    
+    Optional<Bool> opt_enable_aggressive_merge =
+        ctx->GetConfig(kEnableAggressiveSharedMemoryMerge, Optional<Bool>());
+    bool enable_aggressive_merge = opt_enable_aggressive_merge.defined()
+                                        ? opt_enable_aggressive_merge.value()->value
+                                        : false;
+
     auto *n = f.CopyOnWrite();
     n->body =
         tl::MergeSharedMemoryAllocations(std::move(n->body), merge_static_smem,
+                                         enable_aggressive_merge,
                                          debug_merge_shared_memory_allocations);
     return f;
   };
