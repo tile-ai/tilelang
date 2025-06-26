@@ -31,7 +31,7 @@ class PassConfigKey(str, Enum):
 
     TL_DEBUG_MERGE_SHARED_MEMORY_ALLOCATIONS = "tl.debug_merge_shared_memory_allocations"
     """Enable debug information for merge shared memory allocations. Default: False"""
-    
+
     TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE = "tl.enable_aggressive_shared_memory_merge"
     """Enable aggressive merge of shared memory allocations. Default: False"""
 
