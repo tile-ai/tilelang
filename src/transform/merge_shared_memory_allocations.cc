@@ -977,8 +977,7 @@ private:
   }
   // Wheather enable dyanmic analysis.
   bool is_dynamic_{true};
-  // The merge strategy
-  int merge_strategy_{0};
+
   // Whether enable verbose logging.
   bool verbose_{false};
   // The var for the merged buffer
@@ -1030,21 +1029,14 @@ using namespace tir::transform;
 
 namespace transform {
 
-Pass MergeSharedMemoryAllocations() {
-  auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) {
+Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false) {
+  auto pass_func = [enable_aggressive_merge](PrimFunc f, IRModule m,
+                                             PassContext ctx) {
     bool merge_static_smem =
         ctx->GetConfig<Bool>("tir.merge_static_smem", Bool(false)).value();
     bool debug_merge_shared_memory_allocations =
         ctx->GetConfig<Bool>(kDebugMergeSharedMemoryAllocations, Bool(false))
             .value();
-
-    Optional<Bool> opt_enable_aggressive_merge =
-        ctx->GetConfig(kEnableAggressiveSharedMemoryMerge, Optional<Bool>());
-    bool enable_aggressive_merge =
-        opt_enable_aggressive_merge.defined()
-            ? opt_enable_aggressive_merge.value()->value
-            : false;
-
     auto *n = f.CopyOnWrite();
     n->body = tl::MergeSharedMemoryAllocations(
         std::move(n->body), merge_static_smem, enable_aggressive_merge,
