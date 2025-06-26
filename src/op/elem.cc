@@ -190,7 +190,6 @@ Stmt Copy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
                       vectorized_thread_loop);
   }
-
   return vectorized_thread_loop;
 }
 
@@ -470,6 +469,10 @@ Stmt Fill::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
                                      par_op->GetLoopLayout());
     auto vectorized_thread_loop = VectorizeLoop(thread_loop);
+    if (par_op->GetPredicate(T.thread_var).defined()) {
+      return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
+                        vectorized_thread_loop);
+    }
     return vectorized_thread_loop;
   } else {
     LOG(FATAL) << "Unsupported scope " << dst.scope();

@@ -335,7 +335,7 @@ def EliminateStorageSyncForMBarrier():
     return _ffi_api.EliminateStorageSyncForMBarrier()  # type: ignore
 
 
-def MergeSharedMemoryAllocations():
+def MergeSharedMemoryAllocations(align_bytes: int = 16):
     """MergeSharedMemoryAllocations
 
     Returns
@@ -343,7 +343,7 @@ def MergeSharedMemoryAllocations():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.MergeSharedMemoryAllocations()  # type: ignore
+    return _ffi_api.MergeSharedMemoryAllocations(align_bytes)  # type: ignore
 
 
 def LowerL2Persistent():

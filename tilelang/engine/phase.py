@@ -68,13 +68,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
     # Add safety checks for memory accesses
     mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
-    # Align dynamic shared memory allocations
-    if have_tma(target):
-        # Hopper Swizzling requires dynamic shared memory address to be aligned to 1024 bytes
-        mod = tilelang.transform.AlignDynamicSharedMemoryAllocations(1024)(mod)
-    else:
-        # For other devices, we align to 16 bytes
-        mod = tilelang.transform.AlignDynamicSharedMemoryAllocations(16)(mod)
     # Simplify again to clean up any duplicated conditions
     # that may have been introduced by safety checks
     mod = tir.transform.Simplify()(mod)
@@ -151,11 +144,15 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
 
-    mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
+    # mod = tilelang.transform.EliminateStorageSyncForMBarrier()(mod)
+
+    # Hopper Swizzling requires dynamic shared memory address to be aligned to 1024 bytes
+    # For other devices, we align to 16 bytes
+    smem_align_bytes = 1024 if have_tma(target) else 16
+    mod = tilelang.transform.MergeSharedMemoryAllocations(align_bytes=smem_align_bytes)(mod)
 
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
-    mod = tilelang.transform.EliminateStorageSyncForMBarrier()(mod)
     # Inject PTX async copy must behind the thread sync pass
     # as ptx async copy won't be recognized as a valid buffer load
     mod = tilelang.transform.InjectPTXAsyncCopy()(mod)

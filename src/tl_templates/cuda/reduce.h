@@ -24,7 +24,7 @@ struct MinOp {
   }
 };
 
-template <class Reducer, int threads, int scale, int all_threads = threads>
+template <class Reducer, int threads, int scale, int thread_offset = 0, int all_threads = threads>
 struct AllReduce {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
                 threads == 128 or threads == 64 or threads == 32 or
@@ -34,9 +34,9 @@ struct AllReduce {
     constexpr int offset = threads / 2;
     if constexpr (offset >= 32) {
       __syncthreads();
-      red_buf[threadIdx.x] = x;
+      red_buf[threadIdx.x - thread_offset] = x;
       __syncthreads();
-      x = Reducer()(x, red_buf[threadIdx.x ^ offset]);
+      x = Reducer()(x, red_buf[(threadIdx.x - thread_offset) ^ offset]);
     } else {
       x = Reducer()(x, T(__shfl_xor_sync(uint32_t(-1), x, offset)));
     }
@@ -52,9 +52,9 @@ struct AllReduce {
     constexpr int offset = threads / 2;
     if constexpr (offset >= 32) {
       asm volatile("bar.sync %0, %1;" : : "r"(1), "r"(all_threads));
-      red_buf[threadIdx.x] = x;
+      red_buf[threadIdx.x - thread_offset] = x;
       asm volatile("bar.sync %0, %1;" : : "r"(2), "r"(all_threads));
-      x = Reducer()(x, red_buf[threadIdx.x ^ offset]);
+      x = Reducer()(x, red_buf[(threadIdx.x - thread_offset) ^ offset]);
     } else {
       x = Reducer()(x, T(__shfl_xor_sync(uint32_t(-1), x, offset)));
     }
