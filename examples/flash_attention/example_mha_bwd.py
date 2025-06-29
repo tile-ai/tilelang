@@ -179,8 +179,8 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
             dv = T.alloc_fragment([block_M, dim], accum_dtype)
             dk = T.alloc_fragment([block_M, dim], accum_dtype)
             dq = T.alloc_fragment([block_N, dim], accum_dtype)
-            dv_shared = T.alloc_shared([block_N, dim], dtype)
-            dk_shared = T.alloc_shared([block_N, dim], dtype)
+            dv_shared = T.alloc_shared([block_M, dim], dtype)
+            dk_shared = T.alloc_shared([block_M, dim], dtype)
 
             T.annotate_layout({
                 dQ: make_dq_layout(dQ),
