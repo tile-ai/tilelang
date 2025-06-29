@@ -226,16 +226,17 @@ def mbarrier_expect_tx(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_expect_tx"), *args)
 
 
-def wait_wgmma(*args):
+def wait_wgmma(id: int):
     """Wait for WGMMA (Warp Group Matrix Multiply-Accumulate) operations to complete.
 
     Args:
-        *args: Variable arguments specifying which operations to wait for
+        id: int
+            The id of the WGMMA operation to wait for
 
     Returns:
         tir.Call: A handle to the WGMMA wait operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.wait_wgmma"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait_wgmma"), id)
 
 
 def barrier_wait(barrier_id: Union[int, PrimExpr, tir.Call], parity: Union[int, Var, None] = None):

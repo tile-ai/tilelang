@@ -145,14 +145,15 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.SplitHostDevice()(mod)
 
     # mod = tilelang.transform.EliminateStorageSyncForMBarrier()(mod)
-
+    
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     # Hopper Swizzling requires dynamic shared memory address to be aligned to 1024 bytes
     # For other devices, we align to 16 bytes
     smem_align_bytes = 1024 if have_tma(target) else 16
     mod = tilelang.transform.MergeSharedMemoryAllocations(align_bytes=smem_align_bytes)(mod)
 
-    mod = tilelang.transform.ThreadSync("shared")(mod)
-    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+
     # Inject PTX async copy must behind the thread sync pass
     # as ptx async copy won't be recognized as a valid buffer load
     mod = tilelang.transform.InjectPTXAsyncCopy()(mod)
