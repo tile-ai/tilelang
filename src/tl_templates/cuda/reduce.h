@@ -24,7 +24,8 @@ struct MinOp {
   }
 };
 
-template <class Reducer, int threads, int scale, int thread_offset = 0, int all_threads = threads>
+template <class Reducer, int threads, int scale, int thread_offset = 0,
+          int all_threads = threads>
 struct AllReduce {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
                 threads == 128 or threads == 64 or threads == 32 or

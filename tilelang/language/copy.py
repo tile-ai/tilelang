@@ -133,10 +133,11 @@ def copy(
 
     src = _to_region(src, "r")
     dst = _to_region(dst, "w")
-    
+
     if coalesced_width is None:
-        coalesced_width = -1 # PrimExpr can not be None
-    return tir.call_intrin("handle", tir.op.Op.get("tl.copy"), src, dst, coalesced_width, disable_tma)
+        coalesced_width = -1  # PrimExpr can not be None
+    return tir.call_intrin("handle", tir.op.Op.get("tl.copy"), src, dst, coalesced_width,
+                           disable_tma)
 
 
 def c2d_im2col(

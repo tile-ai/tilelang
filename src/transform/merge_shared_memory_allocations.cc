@@ -304,7 +304,8 @@ public:
       const std::unordered_map<const VarNode *, const AllocateNode *>
           &shmem_allocs,
       bool is_dynamic = true, bool verbose = false, int align_bytes = 0)
-      : is_dynamic_{is_dynamic}, shmem_allocs_{shmem_allocs}, verbose_{verbose}, align_bytes_{align_bytes} {
+      : is_dynamic_{is_dynamic}, shmem_allocs_{shmem_allocs}, verbose_{verbose},
+        align_bytes_{align_bytes} {
     if (!is_dynamic) {
       merged_buf_var_ =
           Var("buf_shmem", PointerType(PrimType(DataType::UInt(8)), "shared"));
@@ -991,7 +992,8 @@ Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
   AllocateCollector collector;
   collector(stmt);
   if (collector.dyn_shmem_allocs_.size() > 1) {
-    SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose, align_bytes);
+    SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose,
+                                  align_bytes);
     rewriter.PlanReuse(stmt);
     stmt = rewriter(std::move(stmt));
   }
@@ -1016,9 +1018,9 @@ Pass MergeSharedMemoryAllocations(int align_bytes) {
         ctx->GetConfig<Bool>(kDebugMergeSharedMemoryAllocations, Bool(false))
             .value();
     auto *n = f.CopyOnWrite();
-    n->body =
-        tl::MergeSharedMemoryAllocations(std::move(n->body), merge_static_smem,
-                                         debug_merge_shared_memory_allocations, align_bytes);
+    n->body = tl::MergeSharedMemoryAllocations(
+        std::move(n->body), merge_static_smem,
+        debug_merge_shared_memory_allocations, align_bytes);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeSharedMemoryAllocations",

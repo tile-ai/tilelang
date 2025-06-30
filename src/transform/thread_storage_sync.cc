@@ -31,13 +31,13 @@
 #include <unordered_set>
 
 #include "./storage_access.h"
+#include "arith/ir_mutator_with_analyzer.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
-#include "arith/ir_mutator_with_analyzer.h"
 
 struct ThreadBoundKey {
   int64_t tx_min, tx_max, ty_min, ty_max, tz_min, tz_max;
-  bool operator==(const ThreadBoundKey& other) const {
+  bool operator==(const ThreadBoundKey &other) const {
     return tx_min == other.tx_min && tx_max == other.tx_max &&
            ty_min == other.ty_min && ty_max == other.ty_max &&
            tz_min == other.tz_min && tz_max == other.tz_max;
@@ -45,9 +45,8 @@ struct ThreadBoundKey {
 };
 
 namespace std {
-template <>
-struct hash<ThreadBoundKey> {
-  size_t operator()(const ThreadBoundKey& k) const {
+template <> struct hash<ThreadBoundKey> {
+  size_t operator()(const ThreadBoundKey &k) const {
     size_t h = std::hash<int64_t>()(k.tx_min);
     h = h * 31 + std::hash<int64_t>()(k.tx_max);
     h = h * 31 + std::hash<int64_t>()(k.ty_min);
@@ -57,7 +56,7 @@ struct hash<ThreadBoundKey> {
     return h;
   }
 };
-}
+} // namespace std
 namespace tvm {
 namespace tl {
 
@@ -72,7 +71,6 @@ enum class ReservedNamedBarriers {
   kReduce_1 = 2,
   kFirstUsedBarrier = kReduce_1 + 1
 };
-
 
 using namespace tir;
 using arith::IRMutatorWithAnalyzer;
@@ -566,15 +564,15 @@ private:
 };
 
 class ThreadPartialSyncRewriter : public IRMutatorWithAnalyzer {
- public:
+public:
   static Stmt Rewrite(Stmt stmt) {
     arith::Analyzer analyzer;
     ThreadPartialSyncRewriter rewriter(&analyzer);
     return rewriter(std::move(stmt));
   }
 
- private:
-  explicit ThreadPartialSyncRewriter(arith::Analyzer* analyzer)
+private:
+  explicit ThreadPartialSyncRewriter(arith::Analyzer *analyzer)
       : IRMutatorWithAnalyzer(analyzer) {}
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
@@ -582,15 +580,15 @@ class ThreadPartialSyncRewriter : public IRMutatorWithAnalyzer {
     if (op->value->IsInstance<CallNode>()) {
       call = static_cast<const CallNode *>(op->value.get());
       if (call->op.same_as(builtin::tvm_storage_sync())) {
-          const auto& args = call->args;
-          ICHECK(args.size() > 0);
-          const auto* scope_node = args[0].as<StringImmNode>();
-          ICHECK(scope_node != nullptr);
-          const std::string& scope = scope_node->value;
+        const auto &args = call->args;
+        ICHECK(args.size() > 0);
+        const auto *scope_node = args[0].as<StringImmNode>();
+        ICHECK(scope_node != nullptr);
+        const std::string &scope = scope_node->value;
 
-          if (args.size() != 1 || (scope != "shared" && scope != "shared.dyn")) {
-            return IRMutatorWithAnalyzer::VisitStmt_(op);
-          }
+        if (args.size() != 1 || (scope != "shared" && scope != "shared.dyn")) {
+          return IRMutatorWithAnalyzer::VisitStmt_(op);
+        }
 
         return ProcessSharedSync(call, scope);
       }
@@ -598,14 +596,15 @@ class ThreadPartialSyncRewriter : public IRMutatorWithAnalyzer {
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
-  Stmt ProcessSharedSync(const CallNode* op, const std::string& scope) {
+  Stmt ProcessSharedSync(const CallNode *op, const std::string &scope) {
     // Get thread bounds
     auto bound_tx = analyzer_->const_int_bound(tx_);
     auto bound_ty = analyzer_->const_int_bound(ty_);
     auto bound_tz = analyzer_->const_int_bound(tz_);
 
     // Check if all threads are participating (full extent)
-    if (IsFullThreadExtent(tx_, bound_tx) && IsFullThreadExtent(ty_, bound_ty) &&
+    if (IsFullThreadExtent(tx_, bound_tx) &&
+        IsFullThreadExtent(ty_, bound_ty) &&
         IsFullThreadExtent(tz_, bound_tz)) {
       return Evaluate(IRMutatorWithAnalyzer::VisitExpr_(op));
     }
@@ -616,29 +615,27 @@ class ThreadPartialSyncRewriter : public IRMutatorWithAnalyzer {
     auto extent_tz = CalculateThreadExtent(tz_, bound_tz);
 
     // Create or get barrier info
-    ThreadBoundKey key{
-        bound_tx->min_value, bound_tx->max_value,
-        bound_ty->min_value, bound_ty->max_value,
-        bound_tz->min_value, bound_tz->max_value
-    };
+    ThreadBoundKey key{bound_tx->min_value, bound_tx->max_value,
+                       bound_ty->min_value, bound_ty->max_value,
+                       bound_tz->min_value, bound_tz->max_value};
 
-    auto [barrier_id, thread_count] = GetOrCreateBarrier(key, extent_tx, extent_ty, extent_tz);
+    auto [barrier_id, thread_count] =
+        GetOrCreateBarrier(key, extent_tx, extent_ty, extent_tz);
     if (thread_count % 32 != 0) {
-      // TODO(lei): This is a workaround for the case where the thread count is not a multiple of 32.
-      // we should enhance the pass to analysis index instead of buffer expression etc.
+      // TODO(lei): This is a workaround for the case where the thread count is
+      // not a multiple of 32. we should enhance the pass to analysis index
+      // instead of buffer expression etc.
       return Stmt();
     }
 
     // Create new sync call with barrier info
-    Array<PrimExpr> new_args = {
-        StringImm(scope),
-        IntImm(DataType::Int(32), barrier_id),
-        IntImm(DataType::Int(32), thread_count)
-    };
+    Array<PrimExpr> new_args = {StringImm(scope),
+                                IntImm(DataType::Int(32), barrier_id),
+                                IntImm(DataType::Int(32), thread_count)};
     return Evaluate(Call(op->dtype, op->op, new_args));
   }
 
-  std::pair<size_t, size_t> GetOrCreateBarrier(const ThreadBoundKey& key,
+  std::pair<size_t, size_t> GetOrCreateBarrier(const ThreadBoundKey &key,
                                                size_t extent_tx,
                                                size_t extent_ty,
                                                size_t extent_tz) {
@@ -646,7 +643,9 @@ class ThreadPartialSyncRewriter : public IRMutatorWithAnalyzer {
       return {barrier_id_map_[key], thread_count_map_[key]};
     }
 
-    size_t barrier_id = barrier_id_map_.size() + static_cast<size_t>(ReservedNamedBarriers::kFirstUsedBarrier);
+    size_t barrier_id =
+        barrier_id_map_.size() +
+        static_cast<size_t>(ReservedNamedBarriers::kFirstUsedBarrier);
     size_t thread_count = extent_tx * extent_ty * extent_tz;
 
     barrier_id_map_[key] = barrier_id;
@@ -655,14 +654,15 @@ class ThreadPartialSyncRewriter : public IRMutatorWithAnalyzer {
     return {barrier_id, thread_count};
   }
 
-  size_t CalculateThreadExtent(const IterVar& iv, const arith::ConstIntBound& bound) {
+  size_t CalculateThreadExtent(const IterVar &iv,
+                               const arith::ConstIntBound &bound) {
     if (!analyzer_->const_int_bound.IsBound(iv->var)) {
       return 1;
     }
     return bound->max_value - bound->min_value + 1;
   }
 
-  Stmt VisitStmt_(const AttrStmtNode* op) final {
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tvm::tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       if (iv->thread_tag == "threadIdx.x") {
@@ -676,13 +676,14 @@ class ThreadPartialSyncRewriter : public IRMutatorWithAnalyzer {
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
-  bool IsFullThreadExtent(const IterVar& iv, const arith::ConstIntBound& bound) {
+  bool IsFullThreadExtent(const IterVar &iv,
+                          const arith::ConstIntBound &bound) {
     if (!analyzer_->const_int_bound.IsBound(iv->var)) {
       return true;
     }
 
-    const auto* min_node = iv->dom->min.as<IntImmNode>();
-    const auto* extent_node = iv->dom->extent.as<IntImmNode>();
+    const auto *min_node = iv->dom->min.as<IntImmNode>();
+    const auto *extent_node = iv->dom->extent.as<IntImmNode>();
     ICHECK(min_node != nullptr && extent_node != nullptr);
 
     int64_t min = min_node->value;
@@ -693,26 +694,29 @@ class ThreadPartialSyncRewriter : public IRMutatorWithAnalyzer {
   }
 
   // Member variables
-  IterVar tx_ = IterVar(Range::FromMinExtent(0, 1), Var("tx"), IterVarType::kDataPar);
-  IterVar ty_ = IterVar(Range::FromMinExtent(0, 1), Var("ty"), IterVarType::kDataPar);
-  IterVar tz_ = IterVar(Range::FromMinExtent(0, 1), Var("tz"), IterVarType::kDataPar);
+  IterVar tx_ =
+      IterVar(Range::FromMinExtent(0, 1), Var("tx"), IterVarType::kDataPar);
+  IterVar ty_ =
+      IterVar(Range::FromMinExtent(0, 1), Var("ty"), IterVarType::kDataPar);
+  IterVar tz_ =
+      IterVar(Range::FromMinExtent(0, 1), Var("tz"), IterVarType::kDataPar);
   std::unordered_map<ThreadBoundKey, size_t> barrier_id_map_;
   std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
 };
 
 Stmt TileLangThreadSync(Stmt stmt, std::string storage_scope) {
   StorageScope sync_scope = StorageScope::Create(storage_scope);
-  
+
   if (sync_scope.rank == StorageRank::kShared && sync_scope.tag == "") {
     stmt = ThreadSyncAfterWaitQueueInserter(sync_scope)(stmt);
   }
-  
+
   TileLangThreadSyncPlanner planner(sync_scope);
   planner(stmt);
-  
+
   stmt = ThreadSyncInserter(sync_scope, planner.syncs_inserted_,
-                           planner.partial_syncs_inserted_)(std::move(stmt));
-  
+                            planner.partial_syncs_inserted_)(std::move(stmt));
+
   return ThreadPartialSyncRewriter::Rewrite(std::move(stmt));
 }
 

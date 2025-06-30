@@ -572,9 +572,11 @@ void CodeGenTileLangCUDA::PrintStorageSync(const CallNode *op) {
     } else if (args.size() == 3) {
       auto barrier_id = args[1].as<IntImmNode>()->value;
       auto thread_count = args[2].as<IntImmNode>()->value;
-      this->stream << "tl::__sync_thread_partial<" << barrier_id << ", " << thread_count << ">();\n";
+      this->stream << "tl::__sync_thread_partial<" << barrier_id << ", "
+                   << thread_count << ">();\n";
     } else {
-      LOG(FATAL) << "Invalid number of arguments for storage sync: " << args.size();
+      LOG(FATAL) << "Invalid number of arguments for storage sync: "
+                 << args.size();
     }
   } else if (sync == "global") {
     if (!need_global_barrier_) {

@@ -8,6 +8,7 @@ import tilelang.language as T
 from einops import rearrange, einsum
 import argparse
 
+
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     dtype = "float16"
@@ -55,7 +56,12 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.copy(KV[bid, k * block_N:(k + 1) * block_N, cur_kv_head, :], KV_shared)
                 T.copy(K_pe[bid, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_pe_shared)
                 T.gemm(
-                    Q_shared, KV_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullCol, clear_accum=True)
+                    Q_shared,
+                    KV_shared,
+                    acc_s,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullCol,
+                    clear_accum=True)
                 T.gemm(
                     Q_pe_shared,
                     K_pe_shared,
@@ -91,7 +97,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
     ):
         with T.Kernel(
-                batch, heads // min(block_H, kv_group_num), num_split, threads=256) as (bid, hid, bz):
+                batch, heads // min(block_H, kv_group_num), num_split,
+                threads=256) as (bid, hid, bz):
             Q_shared = T.alloc_shared([block_H, dim], dtype)
             S_shared = T.alloc_shared([block_H, block_N], dtype)
             Q_pe_shared = T.alloc_shared([block_H, pe_dim], dtype)
@@ -156,7 +163,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
             T.copy(logsum, glse[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, bz])
             T.copy(acc_o, O_shared)
-            T.copy(O_shared, Output_partial[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, bz, :])
+            T.copy(O_shared, Output_partial[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H,
+                                            bz, :])
 
     @T.macro
     def combine(
@@ -289,15 +297,7 @@ def main():
     program = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split)
     kernel = tilelang.compile(program, out_idx=[6])
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
-    inputs = profiler._get_inputs()
-    for i in range(10):
-        tilelang_out = kernel(*inputs)
-        ref_output = ref_program(*inputs)
-        try:
-            torch.testing.assert_close(tilelang_out, ref_output, rtol=1e-6, atol=1e-6)
-        except Exception as e:
-            print(e)
-    # profiler.assert_allclose(ref_program, rtol=1e-4, atol=1e-4)
+    profiler.assert_allclose(ref_program, rtol=1e-4, atol=1e-4)
     latency = profiler.do_bench(warmup=500)
     print(f"Latency: {latency} ms")
     print(f"TFlops: {total_flops / latency * 1e-9} TFlops")

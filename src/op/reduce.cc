@@ -213,10 +213,12 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       bool has_arch = T.target->attrs.count("arch") > 0;
       if (has_arch && Downcast<String>(T.target->attrs["arch"]) == "sm_90") {
         ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-           << reducing_threads << ", " << (*scale) << ", " << (T.thread_bounds->min) << ">::run_hopper";
+           << reducing_threads << ", " << (*scale) << ", "
+           << (T.thread_bounds->min) << ">::run_hopper";
       } else {
         ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-           << reducing_threads << ", " << (*scale) << ", " << (T.thread_bounds->min) << ">::run";
+           << reducing_threads << ", " << (*scale) << ", "
+           << (T.thread_bounds->min) << ">::run";
       }
       Array<PrimExpr> thread_reduce_args = {
           StringImm(ss.str()), BufferLoad(clear_buffer, dst_indices)};
