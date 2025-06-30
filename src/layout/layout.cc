@@ -373,16 +373,16 @@ Fragment FragmentNode::CondenseReplicateVar() const {
 
 std::string LayoutNode::DebugOutput() const {
   std::stringstream ss;
-  ss << "Layout(" << InputShape() << " -> " << OutputShape() 
-     << ", transform: " << GetForwardVars() << " -> " << GetForwardIndex() << ")";
+  ss << "Layout(" << InputShape() << " -> " << OutputShape()
+     << ", transform: " << GetForwardVars() << " -> " << GetForwardIndex()
+     << ")";
   return ss.str();
 }
 
 std::string FragmentNode::DebugOutput() const {
   std::stringstream ss;
-  ss << "Fragment(" << InputShape() << " -> " << OutputShape() 
-     << ", replicate: " << ReplicateExtent()
-     << ", thread: " << ThreadExtent()
+  ss << "Fragment(" << InputShape() << " -> " << OutputShape()
+     << ", replicate: " << ReplicateExtent() << ", thread: " << ThreadExtent()
      << ", forward_thread: " << forward_thread_
      << ", forward_index: " << GetForwardIndex();
   if (thread_range_.defined()) {

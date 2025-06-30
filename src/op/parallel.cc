@@ -177,9 +177,10 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       // // Loop don't need to be replicated.
       // if (!is_one(loop_layout_->ReplicateExtent()))
       //   loop_layout_ = loop_layout_->DeReplicate();
-      
+
       // For free layout inference
-      // If replication exists and buffer has cross-thread shared memory access, add predicate
+      // If replication exists and buffer has cross-thread shared memory access,
+      // add predicate
       bool has_cross_thread_access = false;
       PostOrderVisit(root_, [&](const ObjectRef &obj) {
         if (const auto *store = obj.as<BufferStoreNode>()) {
