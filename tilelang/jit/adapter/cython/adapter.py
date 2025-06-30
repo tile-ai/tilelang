@@ -9,7 +9,7 @@ from tilelang import tvm as tvm
 from tvm.target import Target
 from tilelang.engine.param import KernelParam
 from tvm import tir
-from tvm.relay import TensorType
+from tvm.relax import TensorType
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import is_cuda_target, is_hip_target, is_cpu_target
@@ -176,7 +176,7 @@ from cython_wrapper import CythonKernelWrapper
 
 class CythonKernelAdapter(BaseKernelAdapter):
     """Adapter class that converts TVM/TIR functions to callable CUDA kernels using ctypes.
-    
+
     This adapter handles:
     1. Converting TIR functions to compiled CUDA libraries
     2. Managing dynamic shapes in tensor operations
@@ -218,7 +218,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None):
         """Initialize the adapter with the given TIR function or module.
-        
+
         Args:
             params: List of tensor types for inputs/outputs
             result_idx: Indices of output tensors
@@ -326,7 +326,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
     def _process_dynamic_symbolic(self) -> Dict[tir.Var, Tuple[int, int]]:
         """Extract information about dynamic shapes from the TIR function.
-        
+
         Maps symbolic variables to their corresponding (buffer_index, shape_dimension)
         for runtime shape resolution.
         """
@@ -345,7 +345,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
     def _process_buffer_dtype(self) -> Dict[tir.Var, Tuple[int, torch.dtype]]:
         """Extract information about buffer dtypes from the TIR function.
-        
+
         Maps buffer variables to their corresponding dtypes.
         """
         func = self.prim_func
@@ -361,7 +361,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
     def _process_ptr_map(self) -> Dict[int, str]:
         """Extract information about pointer arguments from the TIR function.
-        
+
         Maps pointer arguments to their corresponding (buffer_index, shape_dimension)
         for runtime shape resolution.
         """
@@ -375,7 +375,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
     def _process_static_shape(self) -> Dict[tir.Var, List[Tuple[int, int]]]:
         """Extract information about static shapes from the TIR function.
-        
+
         Maps buffer variables to their corresponding static shapes.
         """
         func = self.prim_func
@@ -396,7 +396,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
     def _process_buffer_device(self) -> Dict[tir.Var, Tuple[int, torch.device]]:
         """Extract information about buffer devices from the TIR function.
-        
+
         Maps buffer variables to their corresponding devices.
         """
         func = self.prim_func
@@ -420,7 +420,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
     def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):
         """Low-level function to call the compiled CUDA kernel.
-        
+
         Converts PyTorch tensor pointers to C void pointers for ctypes interface.
         """
         ctypes_args = [

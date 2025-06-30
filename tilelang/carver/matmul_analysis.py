@@ -510,11 +510,11 @@ def normalize_to_matmul(sch: tir.Schedule,
     matmul_index_map, a_index_map, b_index_map, c_index_map = index_maps
 
     # `skip_simplify` to  avoid the bug in the 1x1 conv
-    block = sch.reindex(main_block, ("read", 0), skip_simplify=True)
+    block = sch.reindex(main_block, ("read", 0))
     sch.transform_layout(block, ("write", 0), a_index_map)
-    block = sch.reindex(main_block, ("read", 1), skip_simplify=True)
+    block = sch.reindex(main_block, ("read", 1))
     sch.transform_layout(block, ("write", 0), b_index_map)
-    block = sch.reindex(main_block, ("write", 0), skip_simplify=True)
+    block = sch.reindex(main_block, ("write", 0))
     sch.transform_layout(block, ("read", 0), c_index_map)
     sch.transform_block_layout(main_block, matmul_index_map)
     sch.mod["main"] = sch.mod["main"].with_attr("dlight.tensorcore_prenormlized", True)

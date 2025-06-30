@@ -59,6 +59,17 @@ def LowerTileOp():
     return _ffi_api.LowerTileOp()  # type: ignore
 
 
+def LowerStmtGroupBlock():
+    """LowerStmtGroupBlock
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LowerStmtGroupBlock()  # type: ignore
+
+
 def InjectSoftwarePipeline():
     """InjectSoftwarePipeline
 
@@ -89,8 +100,11 @@ def LowerHopperIntrin():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.LowerHopperIntrin() \
-        if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f # type: ignore
+    return (
+        _ffi_api.LowerHopperIntrin()
+        if hasattr(_ffi_api, "LowerHopperIntrin")
+        else lambda f: f
+    )  # type: ignore
 
 
 def WarpSpecializedPipeline():
@@ -330,8 +344,7 @@ def FlattenBuffer():
 
 
 def EliminateStorageSyncForMBarrier():
-    """EliminateStorageSyncForMBarrier
-    """
+    """EliminateStorageSyncForMBarrier"""
     return _ffi_api.EliminateStorageSyncForMBarrier()  # type: ignore
 
 
@@ -347,14 +360,12 @@ def MergeSharedMemoryAllocations(enable_aggressive_merge: bool = False):
 
 
 def LowerL2Persistent():
-    """LowerL2Persistent
-    """
+    """LowerL2Persistent"""
     return _ffi_api.LowerL2Persistent()  # type: ignore
 
 
 def PersistThreadblock():
-    """PersistThreadblock
-    """
+    """PersistThreadblock"""
     return _ffi_api.PersistThreadblock()  # type: ignore
 
 
@@ -370,3 +381,35 @@ def AlignDynamicSharedMemoryAllocations(align_bytes: int = 16):
     -------
     """
     return _ffi_api.AlignDynamicSharedMemoryAllocations(align_bytes)  # type: ignore
+
+
+def LowerThreadAllreduce():
+    """LowerThreadAllreduce
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LowerThreadAllreduce()  # type: ignore
+
+
+def StorageRewrite():
+    """StorageRewrite
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.StorageRewrite()  # type: ignore
+
+
+def LowerL2Persistent():
+    """LowerL2Persistent"""
+    return _ffi_api.LowerL2Persistent()  # type: ignore
+
+
+def PersistThreadblock():
+    """PersistThreadblock"""
+    return _ffi_api.PersistThreadblock()  # type: ignore

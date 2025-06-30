@@ -8,7 +8,7 @@ import ctypes
 from typing import List, Optional, Union, Callable, Dict, Tuple, Any
 from tilelang import tvm as tvm
 from tvm.target import Target
-from tvm.relay import TensorType
+from tvm.relax import TensorType
 from tvm import tir
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
@@ -18,7 +18,7 @@ from tilelang.utils.language import retrieve_func_from_module
 
 class CtypesKernelAdapter(BaseKernelAdapter):
     """Adapter class that converts TVM/TIR functions to callable CUDA kernels using ctypes.
-    
+
     This adapter handles:
     1. Converting TIR functions to compiled CUDA libraries
     2. Managing dynamic shapes in tensor operations
@@ -53,7 +53,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None):
         """Initialize the adapter with the given TIR function or module.
-        
+
         Args:
             params: List of tensor types for inputs/outputs
             result_idx: Indices of output tensors
@@ -153,7 +153,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
     def _process_dynamic_symbolic(self):
         """Extract information about dynamic shapes from the TIR function.
-        
+
         Maps symbolic variables to their corresponding (buffer_index, shape_dimension)
         for runtime shape resolution.
         """
@@ -170,7 +170,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
     def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):
         """Low-level function to call the compiled CUDA kernel.
-        
+
         Converts PyTorch tensor pointers to C void pointers for ctypes interface.
         """
         ctypes_args = [
@@ -183,17 +183,17 @@ class CtypesKernelAdapter(BaseKernelAdapter):
                                         *ins: List[torch.Tensor],
                                         stream: Optional[int] = None):
         """High-level wrapper for kernel execution.
-        
+
         Handles:
         1. Input validation
         2. Output tensor allocation
         3. Dynamic shape resolution
         4. CUDA stream management
-        
+
         Args:
             ins: Input PyTorch tensors
             stream: Optional CUDA stream for asynchronous execution
-        
+
         Returns:
             Single tensor or list of tensors containing the kernel results
         """

@@ -82,7 +82,7 @@ tvm::transform::Pass IfStmtBinding() {
   return CreatePrimFuncPass(pass_func, 0, "tl.IfStmtBinding", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.IfStmtBinding").set_body_typed(IfStmtBinding);
+TVM_FFI_REGISTER_GLOBAL("tl.transform.IfStmtBinding").set_body_typed(IfStmtBinding);
 
 } // namespace tl
 } // namespace tvm

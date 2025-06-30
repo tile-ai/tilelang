@@ -7,7 +7,6 @@ namespace tvm {
 namespace codegen {
 
 runtime::Module BuildCPPHost(IRModule mod, Target target) {
-  using tvm::runtime::Registry;
   bool output_ssa = false;
   bool emit_asserts = false;
   bool emit_fwd_func_decl = true;
@@ -70,7 +69,7 @@ runtime::Module BuildCPPHost(IRModule mod, Target target) {
   return CSourceModuleCreate(code, "c", cg.GetFunctionNames());
 }
 
-TVM_REGISTER_GLOBAL("target.build.tilelang_cpp").set_body_typed(BuildCPPHost);
+TVM_FFI_REGISTER_GLOBAL("target.build.tilelang_cpp").set_body_typed(BuildCPPHost);
 
 } // namespace codegen
 } // namespace tvm

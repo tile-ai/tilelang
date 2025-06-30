@@ -296,7 +296,7 @@ public:
               !strict_layout_map.count(buffer)) {
             const FragmentNode *dst_layout = layout.as<Fragment>().get();
             const FragmentNode *src_layout =
-                layout_map[buffer].as<Fragment>().get();
+                layout_map[buffer].as<FragmentNode>();
             if (as_const_int(dst_layout->ReplicateExtent()) &&
                 as_const_int(src_layout->ReplicateExtent()) &&
                 (*as_const_int(dst_layout->ReplicateExtent()) >
@@ -460,7 +460,7 @@ private:
       auto var = call->args[1].as<Var>().value();
       return buffer_data_to_buffer_[var];
     }
-    return NullOpt;
+    return std::nullopt;
   }
 
   void addToUseList(const Buffer &buffer) {
@@ -500,12 +500,9 @@ private:
       buffer_data_to_buffer_.Set(buffer->data, buffer);
     }
     if (op->annotations.count(attr::kLayoutMap)) {
-      // Check if the layout map is Map<Var, Layout>
-      auto map = op->annotations.Get(attr::kLayoutMap).as<Map<Var, Layout>>();
-      ICHECK(map.defined()) << "layout map is not defined";
-      ICHECK(map.value().defined()) << "layout map is not defined";
-
-      for (const auto &[var, layout] : map.value()) {
+      auto map =
+          op->annotations.Get(attr::kLayoutMap)->as<Map<Var, Layout>>().value();
+      for (const auto &[var, layout] : map) {
         ICHECK(buffer_data_to_buffer_.count(var))
             << "buffer " << var << " is not found in the block";
         auto buffer = buffer_data_to_buffer_[var];
@@ -665,7 +662,7 @@ tvm::transform::Pass LayoutInference() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LayoutInference", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.LayoutInference")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.LayoutInference")
     .set_body_typed(LayoutInference);
 
 } // namespace tl

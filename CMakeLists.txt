@@ -38,7 +38,8 @@ else()
 
   # Set default build type to RelWithDebInfo if not provided
   if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+  # Set default build type to Release if not provided
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
     message(STATUS "Setting default build type to ${CMAKE_BUILD_TYPE}")
   endif()
 endif()
@@ -144,6 +145,7 @@ message(STATUS "TVM_SOURCE_DIR: ${TVM_SOURCE_DIR}")
 # Include directories for TileLang
 set(TILE_LANG_INCLUDES
   ${TVM_SOURCE_DIR}/include
+  ${TVM_SOURCE_DIR}/ffi/include
   ${TVM_SOURCE_DIR}/src
   ${TVM_SOURCE_DIR}/3rdparty/dlpack/include
   ${TVM_SOURCE_DIR}/3rdparty/dmlc-core/include
@@ -161,7 +163,7 @@ if(USE_CUDA)
   set(CUDA_MAJOR_VERSION ${CUDAToolkit_VERSION_MAJOR})
   message(STATUS "Setting CUDA_MAJOR_VERSION=${CUDA_MAJOR_VERSION}")
   add_compile_definitions(CUDA_MAJOR_VERSION=${CUDA_MAJOR_VERSION})
-  
+
   list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
 endif(USE_CUDA)
 
@@ -198,6 +200,7 @@ target_compile_definitions(tilelang_objs PRIVATE -DTILE_LANG_EXPORTS)
 # Shared library
 add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
 target_link_libraries(tilelang PUBLIC tvm_runtime)
+target_link_libraries(tilelang PRIVATE tvm_ffi_header)
 
 # Static library
 add_library(tilelang_static STATIC $<TARGET_OBJECTS:tilelang_objs>)
@@ -209,6 +212,11 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   target_compile_definitions(tilelang PRIVATE "TVM_LOG_DEBUG")
   target_compile_definitions(tilelang_objs PRIVATE "TVM_LOG_DEBUG")
   target_compile_definitions(tilelang_static PRIVATE "TVM_LOG_DEBUG")
+endif()
+
+# Building tvm_cython modules
+if(NOT DEFINED TVM_PREBUILD_PATH)
+  add_dependencies(tilelang tvm_cython)
 endif()
 
 # Module shared library

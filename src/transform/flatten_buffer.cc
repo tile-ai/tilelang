@@ -352,12 +352,7 @@ private:
 };
 
 PrimFunc FlattenBufferRewriter(PrimFunc f) {
-  // Only apply this pass to TIR that is not from TE schedules
-  if (!IsFromLegacyTESchedule(f)) {
-    return BufferFlattener::Flatten(f);
-  } else {
-    return f;
-  }
+  return BufferFlattener::Flatten(f);
 }
 
 using namespace tir::transform;
@@ -368,7 +363,8 @@ tvm::transform::Pass FlattenBuffer() {
   return CreatePrimFuncPass(pass_func, 0, "tl.FlattenBuffer", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.FlattenBuffer").set_body_typed(FlattenBuffer);
+TVM_FFI_REGISTER_GLOBAL("tl.transform.FlattenBuffer")
+    .set_body_typed(FlattenBuffer);
 
 } // namespace tl
 } // namespace tvm

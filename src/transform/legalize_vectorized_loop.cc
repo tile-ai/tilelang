@@ -88,7 +88,7 @@ tvm::transform::Pass LegalizeVectorizedLoop() {
 }
 
 // Register the pass globally so it can be used in the compilation pipeline
-TVM_REGISTER_GLOBAL("tl.transform.LegalizeVectorizedLoop")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.LegalizeVectorizedLoop")
     .set_body_typed(LegalizeVectorizedLoop);
 
 } // namespace tl

@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 """Override the LetFrame to print a message when entering the frame."""
 
-from tvm._ffi import register_object as _register_object
+from tvm.ffi import register_object as _register_object
 from tvm.tir import Var, PrimExpr, BufferLoad, BufferRegion
 from tvm.ir import Range
 from tvm import DataType

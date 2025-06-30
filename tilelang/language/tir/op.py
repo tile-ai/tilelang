@@ -2605,7 +2605,7 @@ def isinf(x, span=None):
 
 def pow_of_int(x: PrimExpr, y: int) -> PrimExpr:
     """Fast power operation than pow(float, float).
-    
+
     Args:
         x (PrimExpr): Base value
         y (int): Exponent value

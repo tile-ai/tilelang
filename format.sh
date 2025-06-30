@@ -66,7 +66,7 @@ format_changed() {
     # `diff-filter=ACM` and $MERGEBASE is to ensure we only format files that
     # exist on both branches.
     UPSTREAM_REPO="https://github.com/tile-ai/tilelang"
-    
+
     if git ls-remote --exit-code "$UPSTREAM_REPO" main &>/dev/null; then
         # First try to use the upstream repository directly
         MERGEBASE="$(git fetch "$UPSTREAM_REPO" main &>/dev/null && git merge-base FETCH_HEAD HEAD)"
@@ -248,6 +248,63 @@ else
     echo "clang-format not found. Skipping C/C++ formatting."
 fi
 echo 'tile-lang clang-format: Done'
+
+
+# Check if clang-tidy is installed and get the version
+if command -v clang-tidy &>/dev/null; then
+    CLANG_TIDY_VERSION=$(clang-tidy --version | head -n 1 | awk '{print $3}')
+    tool_version_check "clang-tidy" "$CLANG_TIDY_VERSION" "$(grep clang-tidy requirements-dev.txt | cut -d'=' -f3)"
+else
+    echo "clang-tidy not found. Skipping C++ static analysis."
+    CLANG_TIDY_AVAILABLE=false
+fi
+
+# Function to run clang-tidy
+clang_tidy() {
+    clang-tidy "$@" -- -std=c++17
+}
+
+# Run clang-tidy on all C/C++ files
+clang_tidy_all() {
+    find . -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) \
+        -not -path "./3rdparty/*" -not -path "./build/*" \
+        | xargs -I{} clang-tidy -extra-arg-before=-xc++ {} -- -std=c++17
+}
+
+# Run clang-tidy on changed C/C++ files relative to main
+clang_tidy_changed() {
+    if git show-ref --verify --quiet refs/remotes/origin/main; then
+        BASE_BRANCH="origin/main"
+    else
+        BASE_BRANCH="main"
+    fi
+
+    MERGEBASE="$(git merge-base $BASE_BRANCH HEAD)"
+
+    if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' &>/dev/null; then
+        git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' | xargs -I{} clang-tidy -extra-arg-before=-xc++ {} -- -std=c++17
+    fi
+}
+
+# Add clang-tidy support to the main script logic
+echo 'tile-lang clang-tidy: Check Start'
+
+if [[ "$CLANG_TIDY_AVAILABLE" != false ]]; then
+    if [[ "$1" == '--files' ]]; then
+       # If --files is given, analyze only the provided files
+       clang_tidy "${@:2}"
+    elif [[ "$1" == '--all' ]]; then
+       # If --all is given, analyze all eligible C/C++ files
+       clang_tidy_all
+    else
+       # Otherwise, analyze only changed C/C++ files
+       clang_tidy_changed
+    fi
+else
+    echo "clang-tidy is not available. Skipping static analysis."
+fi
+
+echo 'tile-lang clang-tidy: Done'
 
 # Check if there are any uncommitted changes after all formatting steps.
 # If there are, ask the user to review and stage them.
