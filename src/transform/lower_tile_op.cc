@@ -114,8 +114,8 @@ private:
     }
 
     Map<Var, Var> var_remap = CreateVarRemap();
-    Map<Var, PrimExpr> new_padding_map =
-        RemapPaddingMap(Downcast<Map<Var, PrimExpr>>(padding_map.value()), var_remap);
+    Map<Var, PrimExpr> new_padding_map = RemapPaddingMap(
+        Downcast<Map<Var, PrimExpr>>(padding_map.value()), var_remap);
 
     auto block = Downcast<Block>(IRMutatorWithAnalyzer::VisitStmt_(op));
     auto block_ptr = block.CopyOnWrite();

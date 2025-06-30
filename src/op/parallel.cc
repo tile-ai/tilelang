@@ -307,8 +307,7 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
             T.layout_map[buffer].as<FragmentNode>();
         Fragment dst_layout_fragment =
             CompleteBufferFragment(buffer)->BindThreadRange(T.thread_bounds);
-        const FragmentNode *dst_layout =
-            dst_layout_fragment.as<FragmentNode>();
+        const FragmentNode *dst_layout = dst_layout_fragment.as<FragmentNode>();
         if (as_const_int(dst_layout->ReplicateExtent()) &&
             as_const_int(src_layout->ReplicateExtent()) &&
             (*as_const_int(dst_layout->ReplicateExtent()) >

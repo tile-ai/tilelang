@@ -14,6 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+# ruff: noqa
 
 import pytest
 import numpy as np
@@ -79,6 +80,7 @@ def test_target_host_removed():
 
     @I.ir_module
     class before:
+
         @T.prim_func
         def main(A: T.Buffer(1, "float32")):
             T.func_attr({"global_symbol": "main", "target": T.target("cuda", host=host)})
@@ -100,6 +102,7 @@ def test_internal_subroutine_call():
 
     @I.ir_module
     class before:
+
         @T.prim_func
         def main(A: T.Buffer(1, "float32")):
             T.func_attr({"target": T.target("llvm", host="llvm")})
@@ -118,8 +121,7 @@ def test_internal_subroutine_call():
     subroutine_call_op = compute_scope.body.value.op
     assert isinstance(subroutine_call_op, tvm.ir.GlobalVar), (
         f"The main function's CallNode should use the subroutine's GLobalVar as the operation, "
-        f"but instead has an operation of type {subroutine_call_op}"
-    )
+        f"but instead has an operation of type {subroutine_call_op}")
 
 
 def test_subroutine_call_to_externally_visible_subroutine():
@@ -133,6 +135,7 @@ def test_subroutine_call_to_externally_visible_subroutine():
 
     @I.ir_module
     class before:
+
         @T.prim_func
         def main(A: T.Buffer(1, "float32")):
             T.func_attr({"global_symbol": "main", "target": T.target("llvm", host="llvm")})
@@ -152,12 +155,10 @@ def test_subroutine_call_to_externally_visible_subroutine():
 
     subroutine_call_op = main_compute_scope.body.value.op
     assert (
-        isinstance(subroutine_call_op, tvm.ir.Op)
-        and subroutine_call_op.name == "tir.tvm_call_cpacked"
-    ), (
-        f"The main function's CallNode should be lowered to the builtin 'tir.tvm_call_cpacked', "
-        f"but instead has an operation of type {subroutine_call_op}"
-    )
+        isinstance(subroutine_call_op, tvm.ir.Op) and
+        subroutine_call_op.name == "tir.tvm_call_cpacked"
+    ), (f"The main function's CallNode should be lowered to the builtin 'tir.tvm_call_cpacked', "
+        f"but instead has an operation of type {subroutine_call_op}")
 
 
 def test_function_call_with_wrong_argument_count():
@@ -165,10 +166,10 @@ def test_function_call_with_wrong_argument_count():
 
     @T.prim_func
     def func(
-        A: T.Buffer([16, 16], "int32"),
-        B: T.Buffer([16, 16], "int32"),
-        C: T.Buffer([16, 16], "int32"),
-        D: T.Buffer([16, 16], "int32"),
+            A: T.Buffer([16, 16], "int32"),
+            B: T.Buffer([16, 16], "int32"),
+            C: T.Buffer([16, 16], "int32"),
+            D: T.Buffer([16, 16], "int32"),
     ):
         pass
 

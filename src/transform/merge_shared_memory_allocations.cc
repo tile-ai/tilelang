@@ -23,8 +23,8 @@
  * memory allocation. This pass merges multiple TIR-level dynamic or static
  * shared memory allocations into one allocation.
  */
+#include <tvm/ffi/function.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/runtime/registry.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>

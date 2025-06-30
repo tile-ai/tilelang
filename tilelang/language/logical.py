@@ -36,7 +36,8 @@ def any_of(buffer: Union[T.Tensor, BufferRegion]):
                     )
                 new_region.append(r.min)
         buffer_load = BufferLoad(buffer, new_region)
-        return T.call_intrin(return_type, tir.op.Op.get("tl.any_of"), T.address_of(buffer_load), extent)
+        return T.call_intrin(return_type, tir.op.Op.get("tl.any_of"), T.address_of(buffer_load),
+                             extent)
     else:
         raise ValueError(f"Invalid buffer type: {type(buffer)}")
 
@@ -70,6 +71,7 @@ def all_of(buffer: Union[T.Tensor, BufferRegion]):
                     )
                 new_region.append(r.min)
         buffer_load = BufferLoad(buffer, new_region)
-        return T.call_intrin(return_type, tir.op.Op.get("tl.all_of"), T.address_of(buffer_load), extent)
+        return T.call_intrin(return_type, tir.op.Op.get("tl.all_of"), T.address_of(buffer_load),
+                             extent)
     else:
         raise ValueError(f"Invalid buffer type: {type(buffer)}")

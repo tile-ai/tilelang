@@ -67,7 +67,8 @@ runtime::Module BuildCPPHost(IRModule mod, Target target) {
   return CSourceModuleCreate(code, "c", cg.GetFunctionNames());
 }
 
-TVM_REGISTER_GLOBAL("target.build.tilelang_cpp").set_body_typed(BuildCPPHost);
+TVM_FFI_REGISTER_GLOBAL("target.build.tilelang_cpp")
+    .set_body_typed(BuildCPPHost);
 
 } // namespace codegen
 } // namespace tvm

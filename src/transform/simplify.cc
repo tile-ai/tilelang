@@ -240,7 +240,8 @@ public:
             simplifier.used_buffers_.end()) {
           new_params.push_back(var);
           new_buffer_map.Set(var, func->buffer_map[var]);
-        } else if (simplifier.used_in_buffer_def_.find(func->buffer_map[var]->data.get()) !=
+        } else if (simplifier.used_in_buffer_def_.find(
+                       func->buffer_map[var]->data.get()) !=
                    simplifier.used_in_buffer_def_.end()) {
           new_params.push_back(var);
           new_buffer_map.Set(var, func->buffer_map[var]);
