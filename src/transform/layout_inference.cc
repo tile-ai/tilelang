@@ -598,6 +598,7 @@ private:
 
       auto loop_layout = result_.for_map[root];
       bool parallel_loop = !is_register_store && !skip_thread_partition_;
+
       if (parallel_loop) {
         for_node =
             PartitionLoop(for_node, thread_var_->var, analyzer_, loop_layout);
