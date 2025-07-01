@@ -57,25 +57,28 @@ def get_configs(M, N, K):
     thread_num = [128, 256]
     enable_rasterization = [True, False]
     policy = [T.GemmWarpPolicy.Square]
-    _configs = list(itertools.product(
-        block_M,
-        block_N,
-        block_K,
-        num_stages,
-        thread_num,
-        policy,
-        enable_rasterization,
-    ))
+    _configs = list(
+        itertools.product(
+            block_M,
+            block_N,
+            block_K,
+            num_stages,
+            thread_num,
+            policy,
+            enable_rasterization,
+        ))
 
-    configs = [{
-        "block_M": c[0],
-        "block_N": c[1],
-        "block_K": c[2],
-        "num_stages": c[3],
-        "thread_num": c[4],
-        "policy": c[5],
-        "enable_rasterization": c[6],  # keep param name for backward-compat
-    } for c in _configs]
+    configs = [
+        {
+            "block_M": c[0],
+            "block_N": c[1],
+            "block_K": c[2],
+            "num_stages": c[3],
+            "thread_num": c[4],
+            "policy": c[5],
+            "enable_rasterization": c[6],  # keep param name for backward-compat
+        } for c in _configs
+    ]
     return configs
 
 
