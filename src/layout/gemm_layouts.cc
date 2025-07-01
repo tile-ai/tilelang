@@ -18,6 +18,15 @@ static IterVar make_itervar(std::string name, PrimExpr dom) {
   return IterVar(Range(0, dom), var, IterVarType::kDataPar);
 }
 
+Fragment makeGemmFragment8x4() {
+  IterVar i = make_itervar("i", 8);
+  IterVar j = make_itervar("j", 4);
+  IterVar rep = make_itervar("rep", 1);
+  PrimExpr forward_thread = FloorDiv(j->var, 1) + 4 * i;
+  PrimExpr index = FloorMod(j->var, 1);
+  return Fragment({i, j}, {index}, forward_thread, rep);
+}
+
 Fragment makeGemmFragment8x8() {
   IterVar i = make_itervar("i", 8);
   IterVar j = make_itervar("j", 8);
@@ -26,6 +35,25 @@ Fragment makeGemmFragment8x8() {
   PrimExpr index = FloorMod(j->var, 2);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
+
+Fragment makeGemmFragment8x16() {
+  IterVar i = make_itervar("i", 8);
+  IterVar j = make_itervar("j", 16);
+  IterVar rep = make_itervar("rep", 1);
+  PrimExpr forward_thread = FloorDiv(j->var, 4) + 4 * i;
+  PrimExpr index = FloorMod(j->var, 4);
+  return Fragment({i, j}, {index}, forward_thread, rep);
+}
+
+Fragment makeGemmFragment8x8Transposed() {
+  IterVar i = make_itervar("i", 8);
+  IterVar j = make_itervar("j", 8);
+  IterVar rep = make_itervar("rep", 1);
+  PrimExpr forward_thread = FloorDiv(i->var, 2) + 4 * j;
+  PrimExpr index = FloorMod(i->var, 2);
+  return Fragment({i, j}, {index}, forward_thread, rep);
+}
+
 /*
 From https://github.com/RadeonOpenCompute/amd_matrix_instruction_calculator
 ./matrix_calculator.py --architecture cdna1 --instruction v_mfma_f32_16x16x16f16
@@ -54,24 +82,6 @@ Fragment makeGemmFragmentC16x16CDNA() {
   IterVar j = make_itervar("j", 16);
   IterVar rep = make_itervar("rep", 1);
   PrimExpr forward_thread = 16 * FloorDiv(j->var, 4) + i;
-  PrimExpr index = FloorMod(j->var, 4);
-  return Fragment({i, j}, {index}, forward_thread, rep);
-}
-
-Fragment makeGemmFragment8x8Transposed() {
-  IterVar i = make_itervar("i", 8);
-  IterVar j = make_itervar("j", 8);
-  IterVar rep = make_itervar("rep", 1);
-  PrimExpr forward_thread = FloorDiv(i->var, 2) + 4 * j;
-  PrimExpr index = FloorMod(i->var, 2);
-  return Fragment({i, j}, {index}, forward_thread, rep);
-}
-
-Fragment makeGemmFragment8x16() {
-  IterVar i = make_itervar("i", 8);
-  IterVar j = make_itervar("j", 16);
-  IterVar rep = make_itervar("rep", 1);
-  PrimExpr forward_thread = FloorDiv(j->var, 4) + 4 * i;
   PrimExpr index = FloorMod(j->var, 4);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
@@ -147,8 +157,8 @@ Fragment makeGemmFragmentA(const int block_m, const int block_n,
   ICHECK(warp_m % 16 == 0);
   ICHECK(block_k % 16 == 0);
   // Only support 8-bit and 16-bit
-  ICHECK(element_size == 8 || element_size == 16)
-      << "element bitwidth=" << element_size;
+  ICHECK(element_size == 8 || element_size == 16 || element_size == 32)
+      << "unsupported element bitwidth=" << element_size;
 
   if (transposed) {
     auto base_layout =
@@ -172,6 +182,13 @@ Fragment makeGemmFragmentA(const int block_m, const int block_n,
                              ->Replicate(block_n / warp_n);
       auto block_layout =
           warp_layout->Repeat({warp_m / 16, block_k / 16}, false, false);
+      return block_layout;
+    } else if (element_size == 32) {
+      auto base_layout = makeGemmFragment8x4()->Repeat({2, 2}, false, false);
+      auto warp_layout = base_layout->Repeat({block_m / warp_m, 1}, true)
+                             ->Replicate(block_n / warp_n);
+      auto block_layout =
+          warp_layout->Repeat({warp_m / 16, block_k / 8}, false, false);
       return block_layout;
     } else {
       ICHECK(0);
