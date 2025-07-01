@@ -1,4 +1,5 @@
 import torch
+import tilelang
 from tilelang.utils.sparse import compress_sm90
 
 
@@ -32,6 +33,8 @@ def _test_compress_sm90(M, K, block_k, dtype):
     A_sparse, E = compress_sm90(A, block_k)
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_compress_sm90():
     _test_compress_sm90(1024, 1024, 128, torch.float16)
     _test_compress_sm90(1024, 1024, 64, torch.float16)

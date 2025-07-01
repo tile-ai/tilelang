@@ -210,6 +210,8 @@ def run_gemm_sp(
     print("pass")
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_gemm_sp():
     run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 32, 2, 128)
     run_gemm_sp(512, 1024, 768, "float16", "float16", "float32", 64, 64, 32, 0, 256)
