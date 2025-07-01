@@ -30,7 +30,7 @@ def generate_2_to_4_sparse_tensor(shape, dtype=torch.float32, device='cpu'):
 
 def _test_compress_sm90(M, K, block_k, dtype):
     A = generate_2_to_4_sparse_tensor((M, K), dtype=dtype, device='cuda')
-    A_sparse, E = compress_sm90(A, block_k)
+    A_sparse, E = compress_sm90(A, block_k, False)
 
 
 @tilelang.testing.requires_cuda

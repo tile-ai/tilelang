@@ -115,7 +115,7 @@ def run_gemm_sp(
         num_threads,
     )
 
-    A = generate_2_to_4_sparse_tensor((M, K), dtype=torch.float16, device='cuda', block_k=block_K)
+    A = generate_2_to_4_sparse_tensor((M, K), dtype=torch.float16, device='cuda')
     A_sparse, E = compress_sm90(A, block_k=block_K, transposed=False)
     B = torch.randn((K, N), device='cuda', dtype=torch.float16)
 
