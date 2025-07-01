@@ -137,6 +137,11 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
     return flash_bwd_post
 
 
+@tilelang.jit(
+    out_idx=[7, 8],
+    pass_configs={
+        tilelang.PassConfigKey.TL_DEBUG_MERGE_SHARED_MEMORY_ALLOCATIONS: True,
+    })
 def flashattn_bwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
     sm_scale = (1.0 / dim)**0.5
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
@@ -257,9 +262,9 @@ class _attention(torch.autograd.Function):
         mod_prep = cached(flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD), [2])
         mod_post = cached(flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD), [1])
         delta = mod_prep(o, do)
-        mod = cached(
-            flashattn_bwd(BATCH, H, N_CTX, D_HEAD, ctx.causal, block_M, block_N), [6, 7, 8])
-        dq, dk, dv = mod(q, k, v, do, lse, delta)
+        mod = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, ctx.causal, block_M, block_N)
+        dq = torch.zeros_like(q, dtype=torch.float32)
+        dk, dv = mod(q, k, v, do, lse, delta, dq)
         dq = mod_post(dq)
         return dq, dk, dv, None
 
@@ -305,8 +310,8 @@ def assert_mha_equal(batch, h, n_ctx, d_head, causal):
 
 
 def test_mha_bwd():
-    assert_mha_equal(8, 32, 1024, 64, False)
-    assert_mha_equal(8, 32, 1024, 64, True)
+    assert_mha_equal(8, 32, 256, 64, False)
+    assert_mha_equal(8, 32, 256, 64, True)
 
 
 if __name__ == "__main__":

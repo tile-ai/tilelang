@@ -68,27 +68,43 @@ cdef class CythonKernelWrapper:
         return self
 
     cpdef void _check_buffer_device(self, list tensor_list):
-        if isinstance(tensor_list[0], torch.Tensor):
-            tensor_list_device_type = tensor_list[0].device.type
         for param, (buffer_idx, device) in self.buffer_device_map.items():
-            if isinstance(tensor_list[buffer_idx], torch.Tensor):
-                tensor_device = tensor_list[buffer_idx].device
-                if (tensor_list_device_type != device.type or 
-                    (tensor_device.index is not None and device.index is not None and tensor_device.index != device.index)):
-                    raise ValueError(f"Buffer device mismatch for parameter {param}: expected {device}, got {tensor_device}")
+            tensor = tensor_list[buffer_idx]
+            if isinstance(tensor, torch.Tensor):
+                tensor_device = tensor.device
+                device_type_match = device.type == tensor_device.type
+                device_index_match = (
+                    tensor_device.index is None or 
+                    device.index is None or 
+                    tensor_device.index == device.index
+                )
+                if not (device_type_match and device_index_match):
+                    raise ValueError(
+                        f"Buffer device mismatch for parameter {param}: "
+                        f"expected {device}, got {tensor_device}"
+                    )
 
     cpdef void _check_buffer_dtype(self, list tensor_list):
         for param, (buffer_idx, torch_dtype) in self.buffer_dtype_map.items():
-            if isinstance(tensor_list[buffer_idx], torch.Tensor):
-                if tensor_list[buffer_idx].dtype != torch_dtype:
-                    raise ValueError(f"Buffer dtype mismatch for parameter {param}: expected {torch_dtype}, got {tensor_list[buffer_idx].dtype}")
+            tensor = tensor_list[buffer_idx]
+            if isinstance(tensor, torch.Tensor) and tensor.dtype != torch_dtype:
+                raise ValueError(
+                    f"Buffer dtype mismatch for parameter {param}: "
+                    f"expected {torch_dtype}, got {tensor.dtype}"
+                )
 
     cpdef void _check_static_shape(self, list tensor_list):
         for param, (buffer_idx, shape_list) in self.static_shape_map.items():
-            if isinstance(tensor_list[buffer_idx], torch.Tensor):
-                for shape_idx, shape in shape_list:
-                    if tensor_list[buffer_idx].shape[shape_idx] != shape:
-                        raise ValueError(f"Static shape mismatch for parameter {param}: expected {shape} at index {shape_idx}, got {tensor_list[buffer_idx].shape}")
+            tensor = tensor_list[buffer_idx]
+            if isinstance(tensor, torch.Tensor):
+                for shape_idx, expected_shape in shape_list:
+                    actual_shape = tensor.shape[shape_idx]
+                    if actual_shape != expected_shape:
+                        raise ValueError(
+                            f"Static shape mismatch for parameter {param}: "
+                            f"expected {expected_shape} at index {shape_idx}, "
+                            f"got {actual_shape}"
+                        )
 
     cpdef forward(self, list inputs, int64_t stream = -1, bint skip_tensor_validation = False):
         # Validate input dimensions and prepare for kernel execution
@@ -136,25 +152,32 @@ cdef class CythonKernelWrapper:
                 tensor = inputs[ins_idx]
                 ins_idx += 1
             tensor_list.append(tensor)
-        
+
         # Convert tensor pointers to C void pointers for kernel call
+        cdef dict dtype_to_ctype = {
+            torch.float16: ctypes.c_float,
+            torch.float32: ctypes.c_float,
+            torch.float64: ctypes.c_double,
+            torch.int8: ctypes.c_int8,
+            torch.int16: ctypes.c_int16,
+            torch.int32: ctypes.c_int32,
+            torch.int64: ctypes.c_int64,
+        }
+        
         call_args = []
-        for i in range(len(tensor_list)):
-            tensor = tensor_list[i]
+        for i, tensor in enumerate(tensor_list):
             if isinstance(tensor, torch.Tensor):
                 if not tensor.is_contiguous():
                     raise ValueError(f"Input tensor at index {i} must be contiguous")
                 call_args.append(ctypes.c_void_p(tensor.data_ptr()))
-            elif isinstance(tensor, int):
-                # Dynamic symbolics which are passed as integer arguments
+            elif isinstance(tensor, (int, float, bool)):
                 if i in self.ptr_map:
                     call_args.append(ctypes.c_void_p(tensor))
                 else:
-                    call_args.append(tensor)
-            elif isinstance(tensor, float):
-                call_args.append(ctypes.c_float(tensor))
-            elif isinstance(tensor, bool):
-                call_args.append(ctypes.c_bool(tensor))
+                    dtype = self.param_dtypes[i]
+                    if dtype not in dtype_to_ctype:
+                        raise ValueError(f"Unsupported tensor dtype: {dtype}")
+                    call_args.append(dtype_to_ctype[dtype](tensor))
             else:
                 raise ValueError(f"Unsupported tensor type: {type(tensor)}")
 

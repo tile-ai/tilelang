@@ -3,12 +3,17 @@
 # ruff: noqa
 import torch
 from typing import Optional, Union
+from packaging.version import parse
 
 import torch
 import triton
 import triton.language as tl
 
-from fla.ops.common.utils import prepare_token_indices
+import fla
+if parse(fla.__version__) < parse("0.2.1"):
+    from fla.ops.common.utils import prepare_token_indices
+else:
+    from fla.ops.utils import prepare_token_indices
 from fla.utils import autocast_custom_fwd, contiguous
 from reference import naive_nsa
 from einops import rearrange

@@ -61,7 +61,10 @@ public:
   struct AccessEntry {
     /*! \brief The thread index that access this entry */
     Array<IterVar> threads;
+    /*! \brief The touched thread range */
+    Map<Var, Range> thread_range;
     /*! \brief The buffer variable, if any */
+    Array<PrimExpr> buffer_indices;
     Var buffer = NullValue<Var>();
     /*! \brief The access data type */
     DataType dtype;
@@ -125,6 +128,14 @@ protected:
    */
   virtual std::vector<AccessEntry> Summarize(std::vector<StmtEntry> seq,
                                              const ForNode *loop) = 0;
+
+  /*!
+   * \brief Compute the thread range for the given threads.
+   * \param threads The threads to compute the range for.
+   * \return The thread range.
+   */
+  Map<Var, Range> ComputeThreadRange(Array<IterVar> threads);
+
   /*!
    * \brief Get the scope of the buffer array.
    * \return The scope of the final buffer array.

@@ -158,6 +158,7 @@ protected:
     std::vector<AccessEntry> head, tail;
     AccessEntry esync;
     esync.threads = this->env_threads();
+    esync.thread_range = this->ComputeThreadRange(esync.threads);
     esync.type = kSync;
     esync.scope = sync_scope_;
 
@@ -220,39 +221,32 @@ private:
     // Same index value means no conflicts
     // TODO(tqchen) more standard set based testing.
     bool has_same_index = true;
-    // Even if access has the same index, those indices need to
-    // depend on the innermost thread id to avoid race condition
-    bool depends_on_thread_index = true;
-    const VarNode *thread_index_var = nullptr;
-    if (!curr.threads.empty()) {
-      thread_index_var = curr.threads.back()->var.get();
-    }
-
-    for (size_t i = 0; i < prev.touched.size(); i++) {
-      const auto &prev_intset = prev.touched[i];
-      const auto &curr_intset = curr.touched[i];
-
-      if (prev_intset.IsSinglePoint() && curr_intset.IsSinglePoint()) {
-        PrimExpr prev_index = prev_intset.PointValue();
-        PrimExpr curr_index = curr_intset.PointValue();
-        has_same_index = ExprDeepEqual()(prev_index, curr_index);
-        if (thread_index_var != nullptr) {
-          auto f_uses_thread_index = [=](const tvm::tir::VarNode *parameter) {
-            return parameter == thread_index_var;
-          };
-          depends_on_thread_index = depends_on_thread_index &&
-                                    UsesVar(curr_index, f_uses_thread_index) &&
-                                    UsesVar(prev_index, f_uses_thread_index);
-        }
-      } else {
-        has_same_index = false;
-      }
-
-      if (!(has_same_index && depends_on_thread_index)) {
+    bool range_is_equal = true;
+    for (const auto &kv : prev.thread_range) {
+      if (!StructuralEqual()(kv.second, curr.thread_range[kv.first])) {
+        range_is_equal = false;
         break;
       }
     }
-    if (has_same_index && depends_on_thread_index) {
+
+    if (prev.buffer_indices.size() != curr.buffer_indices.size()) {
+      // They are not the same indices, should be conflict.
+      return true;
+    }
+
+    for (size_t i = 0; i < prev.buffer_indices.size(); i++) {
+      const auto &prev_indice = prev.buffer_indices[i];
+      const auto &curr_indice = curr.buffer_indices[i];
+      if (!ExprDeepEqual()(prev_indice, curr_indice)) {
+        has_same_index = false;
+      }
+
+      if (!(has_same_index)) {
+        break;
+      }
+    }
+
+    if (has_same_index && range_is_equal) {
       return false;
     }
 
@@ -261,7 +255,6 @@ private:
     if (prev.double_buffer_write && curr.type == kRead && !loop_carry) {
       return false;
     }
-
     // If nothing else allows sharing the same buffer, then they are
     // in conflict.
     return true;

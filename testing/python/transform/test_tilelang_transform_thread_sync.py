@@ -39,33 +39,30 @@ def run_passes(func: tvm.tir.PrimFunc):
     return tilelang.transform.ThreadSync("shared")(mod)
 
 
-@tvm.testing.requires_cuda
-def test_thread_storage_sync():
-    m = te.size_var("m")
-    l = te.size_var("l")
-    A = te.placeholder((m, l), name="A")
+@tilelang.testing.requires_cuda
+def test_sync_if_with_same_index():
 
-    A1 = te.compute((m, l), lambda i, j: A[i, j], name="A1")
-    A2 = te.compute((m, l), lambda i, j: A1[i, j] + 3, name="A2")
+    @T.prim_func
+    def func(p0_arg: T.Buffer((1, 2, 1, 1), "float32"), p1: T.Buffer(2, "float32")) -> None:
+        threadIdx_x = T.env_thread("threadIdx.x")
+        threadIdx_y = T.env_thread("threadIdx.y")
+        blockIdx_x = T.env_thread("blockIdx.x")
+        p0 = T.Buffer([2], dtype="float32", data=p0_arg.data)
+        result_local = T.alloc_buffer([1], dtype="float32", scope="local")
+        temp_shared = T.alloc_buffer([1], dtype="float32", scope="shared")
+        T.launch_thread(blockIdx_x, 8)
+        T.launch_thread(threadIdx_x, 4)
+        result_local[0] = T.float32(0)
+        if threadIdx_y < 8:
+            temp_shared[threadIdx_x] = p0[0]
+            temp_shared[threadIdx_x] = temp_shared[threadIdx_x]
+        result_local[0] = result_local[0] + temp_shared[0]
 
-    s = te.create_schedule(A2.op)
-    xo, xi = s[A2].split(A2.op.axis[0], factor=8)
-    s[A2].bind(xo, te.thread_axis("blockIdx.x"))
-    s[A1].compute_at(s[A2], xo)
-    s[A1].set_scope("shared")
-
-    bounds = tvm.te.schedule.InferBound(s)
-    assert isinstance(bounds, tvm.container.Map)
-    stmt = tvm.te.schedule.ScheduleOps(s, bounds)
-
-    func = tvm.te.schedule.SchedulePostProcToPrimFunc([A, A2], stmt, None)
     mod = run_passes(func)
-    f = mod["test_kernel"]
-    body_list = tvm.tir.stmt_list(f.body.body.body.body.body.body)
-    assert body_list[1].value.op.same_as(tvm.ir.Op.get("tir.tvm_storage_sync"))
+    assert "T.tvm_storage_sync" in str(mod)
 
 
-@tvm.testing.requires_cuda
+@tilelang.testing.requires_cuda
 def test_sync_else_branch():
 
     def ir(A, B):
@@ -101,7 +98,7 @@ def test_sync_else_branch():
     assert "T.tvm_storage_sync" in str(mod)
 
 
-@tvm.testing.requires_cuda
+@tilelang.testing.requires_cuda
 def test_sync_read_thread_id_independent_location():
 
     @T.prim_func
@@ -125,7 +122,7 @@ def test_sync_read_thread_id_independent_location():
     assert "T.tvm_storage_sync" in str(mod)
 
 
-@tvm.testing.requires_cuda
+@tilelang.testing.requires_cuda
 def test_sync_let_stmt():
 
     @T.prim_func(private=True)

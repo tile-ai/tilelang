@@ -228,6 +228,7 @@ public:
 
     // Copy the annotated layout map to local variable
     Map<Buffer, Layout> layout_map = annotated_layout_map_;
+    Map<Buffer, Layout> strict_layout_map;
     int num_infer = infer_list_.size();
 
     // Prepare BFS queue for iterative inference
@@ -245,6 +246,7 @@ public:
       }
       q.push(i);
     }
+
     auto run_infer_step = [&](int cur_infer_id, InferLevel level,
                               bool update_queue) {
       // Range check for cur_infer_id
@@ -290,7 +292,8 @@ public:
         if (layout_map.count(buffer)) {
           // If replicate size of this buffer is greater than the old one
           if (buffer.scope() == "local.fragment" &&
-              level != InferLevel::kStrict) {
+              level != InferLevel::kStrict &&
+              !strict_layout_map.count(buffer)) {
             const FragmentNode *dst_layout = layout.as<Fragment>().get();
             const FragmentNode *src_layout =
                 layout_map[buffer].as<Fragment>().get();
@@ -358,6 +361,10 @@ public:
       run_infer_step(i, InferLevel::kStrict, false);
     }
 
+    for (const auto &[buffer, layout] : layout_map) {
+      strict_layout_map.Set(buffer, layout);
+    }
+
     // step 2: infer common layout with BFS
     finish_infer_queue();
 
@@ -366,7 +373,6 @@ public:
       run_infer_step(i, InferLevel::kFree, true);
       finish_infer_queue();
     }
-
     // Check that all local.fragment buffers have inferred layouts
     for (const auto &[buffer, _] : use_list_) {
       if (buffer.scope() == "local.fragment") {

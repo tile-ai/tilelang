@@ -116,12 +116,14 @@ struct GlobalMemChecker : public StmtExprVisitor {
       // If analyzer->CanProve(index < shape_dim) returns false,
       // it means we cannot prove the access is within bounds.
       PrimExpr upper_bound_cond = index < shape_dim;
-      if (!analyzer_->CanProve(upper_bound_cond)) {
+      if (!analyzer_->CanProve(upper_bound_cond,
+                               arith::ProofStrength::kSymbolicBound)) {
         _conditions.push_back(upper_bound_cond);
       }
       // Check if index >= 0 can be proven.
       PrimExpr lower_bound_cond = index >= 0;
-      if (!analyzer_->CanProve(lower_bound_cond)) {
+      if (!analyzer_->CanProve(lower_bound_cond,
+                               arith::ProofStrength::kSymbolicBound)) {
         _conditions.push_back(lower_bound_cond);
       }
     }

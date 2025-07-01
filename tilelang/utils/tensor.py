@@ -22,13 +22,21 @@ class TensorSupplyType(Enum):
 
 
 def map_torch_type(intype: str) -> torch.dtype:
-    typemap = {
-        'e4m3_float8': torch.float8_e4m3fn,
-        'e5m2_float8': torch.float8_e5m2,
-        'e4m3fnuz_float8': torch.float8_e4m3fnuz,
-    }
-    if intype in typemap:
-        return typemap[intype]
+    if intype == "e4m3_float8":
+        assert hasattr(torch, "float8_e4m3fn"), \
+            "torch.float8_e4m3fn is not supported in this version of torch" \
+                "Please upgrade torch >= 2.1.0"
+        return torch.float8_e4m3fn
+    elif intype == "e5m2_float8":
+        assert hasattr(torch, "float8_e5m2"), \
+            "torch.float8_e5m2 is not supported in this version of torch" \
+                "Please upgrade torch >= 2.1.0"
+        return torch.float8_e5m2
+    elif intype == "e4m3fnuz_float8":
+        assert hasattr(torch, "float8_e4m3fnuz"), \
+            "torch.float8_e4m3fnuz is not supported in this version of torch" \
+                "Please upgrade torch >= 2.2.0"
+        return torch.float8_e4m3fnuz
     else:
         return getattr(torch, intype)
 

@@ -432,6 +432,8 @@ def have_tma(target):
     target : tvm.target.Target
         The compilation target
     """
+    if target.kind.name != "cuda":
+        return False
     compute_version = get_target_compute_version(target)
     major, minor = parse_compute_version(compute_version)
     # TMA is supported in Ada Lovelace (9.0) or later architectures.

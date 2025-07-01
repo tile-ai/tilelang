@@ -8,7 +8,7 @@ and performance optimization through configuration search.
 
 import tilelang
 from tilelang import tvm as tvm
-from tvm.tir import PrimFunc
+from tvm.tir import PrimFunc, Var
 from tvm.target import Target
 import inspect
 from functools import partial
@@ -24,6 +24,7 @@ import signal
 import json
 import hashlib
 import threading
+import traceback
 from pathlib import Path
 
 from tilelang.env import TILELANG_CACHE_DIR, is_cache_enabled
@@ -105,7 +106,7 @@ class AutoTuner:
     _kernel_parameters: Optional[Tuple[str, ...]] = None
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
-    cache_dir: Path = Path(TILELANG_CACHE_DIR)
+    cache_dir: Path = Path(TILELANG_CACHE_DIR) / "autotuner"
 
     def __init__(self, fn: Callable, configs):
         self.fn = fn
@@ -324,18 +325,37 @@ class AutoTuner:
             ref_input_tensors_supply = get_input_tensors_supply(with_output=False)
 
             if cache_input_tensors:
-                if supply_prog is not None:
-                    logger.warning(
-                        "Incompatible input tensor properties detected between cached tensors and "
-                        "tensors regenerated for the current configuration trial. "
-                        "This can happen if different tuning configurations require different input shapes/dtypes "
-                        "and input tensor caching is enabled.\n"
-                        "To ensure fresh, compatible inputs are generated for every trial "
-                        "you can disable caching by setting:\n"
-                        "  `cache_input_tensors=False`\n"
-                        "within your `.set_compile_args(...)` call.\n")
-                self.jit_input_tensors = jit_input_tensors_supply(
-                ) if self.jit_input_tensors is None else self.jit_input_tensors
+                params = profiler._get_params(with_output=False)
+                if self.jit_input_tensors is None:
+                    self.jit_input_tensors = jit_input_tensors_supply()
+                else:
+                    # check if the cached tensors are compatible with the current configuration
+                    assert len(params) == len(
+                        self.jit_input_tensors), "len(params) != len(self.jit_input_tensors)"
+                    for p, c in zip(params, self.jit_input_tensors):
+                        if not isinstance(c, torch.Tensor):
+                            # skip non-tensor inputs checking
+                            continue
+
+                        # Check tensor compatibility using generator expression
+                        def shape_equal(a, b):
+                            return all(
+                                a_dim == b_dim or isinstance(a_dim, Var) or isinstance(b_dim, Var)
+                                for a_dim, b_dim in zip(a.shape, b.shape))
+
+                        if p.dtype != c.dtype or not shape_equal(p, c):
+                            logger.warning(
+                                "\nIncompatible input tensor properties detected between cached tensors and "
+                                "tensors regenerated for the current configuration trial. "
+                                "This can happen if different tuning configurations require different input shapes/dtypes "
+                                "and input tensor caching is enabled.\n"
+                                "To ensure fresh, compatible inputs are generated for every trial "
+                                "you can disable caching by setting:\n"
+                                "  `cache_input_tensors=False`\n"
+                                "within your `.set_compile_args(...)` call.\n")
+                            # otherwise, regenerate the input tensors for safety
+                            self.jit_input_tensors = jit_input_tensors_supply()
+                            break
             else:
                 self.jit_input_tensors = jit_input_tensors_supply()
 
@@ -354,6 +374,7 @@ class AutoTuner:
                         max_mismatched_ratio=max_mismatched_ratio)
             latency = profiler.do_bench(
                 warmup=warmup, rep=rep, input_tensors=self.jit_input_tensors)
+
             if self.ref_latency_cache is None and ref_prog is not None:
                 self.ref_input_tensors = ref_input_tensors_supply()
                 self.ref_latency_cache = profiler.do_bench(
@@ -419,11 +440,11 @@ class AutoTuner:
                     f"A timeout occurred while testing config {config}, checkout autotuner.log for more details"
                 )
                 continue
-            except Exception as e:
+            except Exception:
                 logger.info(
                     f"An error occurred while testing config {config}, checkout autotuner.log for more details"
                 )
-                logger.debug(f"Error: {e}")
+                logger.debug(f"Error: {traceback.format_exc()}")
                 continue
 
             if latency < best_latency:
@@ -515,22 +536,37 @@ class _AutoTunerImplementation:
             warmup: Number of warmup iterations before timing.
             rep: Number of repetitions for timing measurements.
             timeout: Maximum time (in seconds) allowed for each configuration.
+            supply_type: Strategy for generating input tensors (random/zeros/etc)
+            ref_prog: Reference implementation for validation
+            supply_prog: Custom function to provide input tensors
+            rtol: Relative tolerance for numerical validation
+            atol: Absolute tolerance for numerical validation
+            max_mismatched_ratio: Allowed percentage of mismatched values
+            skip_check: Bypass validation against reference implementation
+            manual_check_prog: Custom validation function
+            cache_input_tensors: Reuse input tensors across trials
         """
-        self.configs = configs
-        self.warmup = warmup
-        self.rep = rep
-        self.timeout = timeout
-        self.supply_type = supply_type
-        self.ref_prog = ref_prog
-        self.supply_prog = supply_prog
-        self.rtol = rtol
-        self.atol = atol
-        self.max_mismatched_ratio = max_mismatched_ratio
-        self.skip_check = skip_check
-        self.manual_check_prog = manual_check_prog
-        self.cache_input_tensors = cache_input_tensors
+        # Configuration and benchmarking parameters
+        self.configs = configs  # Search space of tuning configurations
+        self.warmup = warmup  # Warmup iterations for stable measurements
+        self.rep = rep  # Measurement repetitions for statistics
+        self.timeout = timeout  # Per-configuration timeout threshold
 
-        self._tuner_cache: Dict[tuple, tilelang.JITKernel] = {}
+        # Tensor handling and validation setup
+        self.supply_type = supply_type  # Input tensor generation strategy
+        self.ref_prog = ref_prog  # Ground truth implementation
+        self.supply_prog = supply_prog  # Custom input data provider
+        self.rtol = rtol  # Relative error tolerance
+        self.atol = atol  # Absolute error tolerance
+        self.max_mismatched_ratio = max_mismatched_ratio  # Allowed mismatch
+
+        # Validation control flags
+        self.skip_check = skip_check  # Bypass accuracy verification
+        self.manual_check_prog = manual_check_prog  # Custom validation
+        self.cache_input_tensors = cache_input_tensors  # Reuse inputs
+
+        # Cache for storing tuned kernel implementations
+        self._tuner_cache: Dict[tuple, tilelang.JITKernel] = {}  # (args, kwargs) -> compiled kernel
 
     # This tells the type checker what the *wrapper* function will return.
     # this is for linting, please do not remove it.

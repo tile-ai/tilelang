@@ -88,7 +88,7 @@ class AutoTunerCache:
         Returns:
             str: SHA256 hash key for the kernel configuration.
         """
-        func_binary = cloudpickle.dumps(func.script())
+        func_binary = cloudpickle.dumps(func.script(show_meta=True))
         key_data = {
             "version": __version__,
             "func": sha256(func_binary).hexdigest(),  # Use SHA256 to generate hash key

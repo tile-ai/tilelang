@@ -8,7 +8,8 @@ import example_gemm
 
 
 def test_example_gemm_autotune():
-    example_gemm_autotune.main()
+    # enable roller for fast tuning
+    example_gemm_autotune.main(with_roller=True)
 
 
 def test_example_gemm_intrinsics():

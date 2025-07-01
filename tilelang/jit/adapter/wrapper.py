@@ -6,7 +6,8 @@ from tilelang import tvm as tvm
 from typing import Optional, List, Dict, Union, Any
 from tvm import IRModule
 from tvm.target import Target
-from .utils import match_declare_kernel, match_declare_kernel_cpu, is_cuda_target, is_hip_target, is_cpu_target, get_annotated_mod
+from .utils import (match_declare_kernel, match_declare_kernel_cpu, is_cuda_target, is_hip_target,
+                    is_cpu_target, get_annotated_mod, pythonic_expr)
 import re
 import logging
 import textwrap
@@ -69,9 +70,9 @@ L2_PERSISTENT_MAP_INIT_FUNC = """
 \tstream_attribute.accessPolicyWindow.hitRatio = {1};
 \tstream_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
 \tstream_attribute.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
-\tcudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, {3});
+\tcudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, {2});
 \tstream_attribute.accessPolicyWindow.base_ptr = (void*)({0});
-\tstream_attribute.accessPolicyWindow.num_bytes = {3};
+\tstream_attribute.accessPolicyWindow.num_bytes = {2};
 \tcudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &stream_attribute);
 """
 
@@ -356,10 +357,13 @@ class TLCUDASourceWrapper(object):
             # get persisting_l2_cache_max_size
             from tilelang.carver.arch.driver import get_persisting_l2_cache_max_size
             persisting_l2_cache_max_size = get_persisting_l2_cache_max_size()
-            num_bytes = min(size_in_bytes, persisting_l2_cache_max_size)
-
+            try:
+                num_bytes = min(size_in_bytes, persisting_l2_cache_max_size)
+            except Exception:
+                # as size_in_bytes maybe a symbolic expression
+                num_bytes = persisting_l2_cache_max_size
             init_l2_persistent_map += L2_PERSISTENT_MAP_INIT_FUNC.format(
-                buffer_name, float(hit_ratio), size_in_bytes, num_bytes)
+                buffer_name, float(hit_ratio), pythonic_expr(num_bytes))
 
         return init_l2_persistent_map
 
@@ -395,19 +399,10 @@ class TLCUDASourceWrapper(object):
             box_dim = remaining_args[2 * tensor_rank:3 * tensor_rank]
             element_strides = remaining_args[3 * tensor_rank:4 * tensor_rank]
 
-            def legalize_c2s(p):
-                # Convert TIR expressions to legal C expressions
-                # Directly convert to string since the special case handling
-                # does not alter the string representation for `tvm.tir.Var` and `IntImm`.
-                # Replace Python's floor division operator with C's division operator
-                if isinstance(p, tvm.tir.IntImm):
-                    p = int(p)
-                return str(p)
-
-            global_dim = [legalize_c2s(i) for i in global_dim]
-            global_stride = [legalize_c2s(i) for i in global_stride]
-            box_dim = [legalize_c2s(i) for i in box_dim]
-            element_strides = [legalize_c2s(i) for i in element_strides]
+            global_dim = [pythonic_expr(i) for i in global_dim]
+            global_stride = [pythonic_expr(i) for i in global_stride]
+            box_dim = [pythonic_expr(i) for i in box_dim]
+            element_strides = [pythonic_expr(i) for i in element_strides]
 
             # Extract remaining parameters
             try:
@@ -646,14 +641,6 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                         call_args.append((match, "None"))
             return call_args
 
-        def legalize(p):
-            # Convert TIR expressions to legal Python expressions
-            # Directly convert to string since the special case handling
-            # does not alter the string representation for `tvm.tir.Var` and `IntImm`.
-            if isinstance(p, tvm.tir.IntImm):
-                p = int(p)
-            return str(p)
-
         desc_name_map: Dict[str, str] = {}
         device_index = 0
         kernel_launch_code = """"""
@@ -680,9 +667,10 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             kernel_launch_code += self.generate_tma_descriptor_args(
                 desc_name_map) + KERNEL_LAUNCH_FUNC_PY.format(
-                    function_name, legalize(grid_info[0]), legalize(grid_info[1]),
-                    legalize(grid_info[2]), legalize(block_info[0]), legalize(block_info[1]),
-                    legalize(block_info[2]), smem_str, arg_names, arg_types, device_index)
+                    function_name, pythonic_expr(grid_info[0]), pythonic_expr(grid_info[1]),
+                    pythonic_expr(grid_info[2]), pythonic_expr(block_info[0]),
+                    pythonic_expr(block_info[1]), pythonic_expr(
+                        block_info[2]), smem_str, arg_names, arg_types, device_index)
 
         # Wrap the kernel dispatch logic in an external C function
         host_func = PREDEF_HOST_FUNC_PY.format(
