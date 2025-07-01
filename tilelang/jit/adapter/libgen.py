@@ -133,7 +133,7 @@ class LibraryGenerator(object):
 
         if ret.returncode != 0:
             raise RuntimeError(f"Compilation Failed! {command}"
-                               f"\n {self.lib_code}")
+                               f"\n {' '.join(command)} \n {self.lib_code}")
 
         self.srcpath = src.name
         self.libpath = libpath

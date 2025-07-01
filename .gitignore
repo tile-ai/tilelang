@@ -102,3 +102,6 @@ tilelang/jit/adapter/cython/.cycache
 
 # .so
 *.so
+
+# redundant nvshmem source code
+nvshmem_src/
