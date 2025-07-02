@@ -12,6 +12,7 @@ dtype = "bfloat16"
 accum_dtype = "float"
 
 
+@tilelang.jit(out_idx=[2, 3])
 def group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m):
     group_size = 128
     fp8_min = -448.0
@@ -179,13 +180,7 @@ def main():
     print("batch_sizes:", batch_sizes)
     print("M_max:", M_max)
 
-    program = group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m)
-    kernel = tilelang.compile(
-        program,
-        out_idx=[2, 3],
-        target="cuda",
-        execution_backend="cython",
-        pass_configs={"tl.disable_tma_lower": True})
+    kernel = group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m)
     print(kernel.get_kernel_source())
     # profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
 

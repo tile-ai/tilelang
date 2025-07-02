@@ -10,6 +10,7 @@ import argparse
 from fla.ops.linear_attn import fused_chunk_linear_attn  # We compare with FLA
 
 
+@tl.jit(out_idx=[4, 5, 6])
 def chunk_linear_attn_bwd_kernel(
     B,
     S,
@@ -158,8 +159,7 @@ def main():
     v = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16, requires_grad=True)
     do = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16)
 
-    fn = chunk_linear_attn_bwd_kernel(B, S, H, D, D)
-    kernel = tl.compile(fn, out_idx=[4, 5, 6], target='cuda')
+    kernel = chunk_linear_attn_bwd_kernel(B, S, H, D, D)
     dq, dk, dv = postprocess(*kernel(q, k, v, do))
     o_ref, h_ref = fused_chunk_linear_attn(q, k, v, output_final_state=True, normalize=False)
     o_ref.backward(do, retain_graph=True)

@@ -90,6 +90,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         self.verbose = verbose
         self.wrapper = TLWrapper(self.target)
         self.lib_generator = LibraryGenerator(self.target)
+        self.lib_generator.assign_pass_configs(pass_configs)
 
         self.wrapper.assign_optimized_module(self.ir_module)
         self.wrapper.assign_pass_configs(pass_configs)
@@ -145,6 +146,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         adapter.target = Target.canon_target(determine_target(target))
         adapter.verbose = verbose
         adapter.lib_generator = LibraryGenerator(adapter.target)
+        adapter.lib_generator.assign_pass_configs(pass_configs)
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
         adapter.lib.init()
 

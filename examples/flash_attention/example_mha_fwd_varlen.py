@@ -234,6 +234,7 @@ def flashattn(batch_size, UQ, UKV, heads, dim, is_causal):
     dtype = "float16"
     accum_dtype = "float"
 
+    @tilelang.jit(out_idx=[6])
     def kernel_func(block_M, block_N, num_stages, threads):
 
         @T.prim_func
@@ -402,8 +403,7 @@ def main(batch: int = 2, heads: int = 16, seq_len: int = 256, dim: int = 32):
     UK = k_unpad.shape[0]  # unpadded key length
     UKV = k_unpad.shape[0]  # unpadded query key length
 
-    program = flashattn(batch, UQ, UKV, heads, dim, causal)
-    kernel = tilelang.compile(program, [6])
+    kernel = flashattn(batch, UQ, UKV, heads, dim, causal)
     print(kernel.get_kernel_source())
 
     out_unpad = kernel(q_unpad, k_unpad, v_unpad, cu_seqlens_q, cu_seqlens_k, max_seqlen_q)

@@ -5,13 +5,14 @@ from typing import Tuple
 
 import torch
 import tilelang.testing
-import tilelang as TL
+import tilelang
 import tilelang.language as T
 from tilelang.utils.tensor import map_torch_type
 
 tilelang.testing.set_random_seed(42)
 
 
+@tilelang.jit(out_idx=[2])
 def tl_gemm(
     M,
     N,
@@ -147,8 +148,7 @@ def calc_diff(x, y):
 
 
 def assert_tl_gemm_correctness(M, N, K, block_N, in_dtype, out_dtype, accum_dtype):
-    gemm = tl_gemm(M, N, K, block_N, in_dtype, out_dtype, accum_dtype)
-    kernel = TL.compile(gemm, out_idx=[])
+    kernel = tl_gemm(M, N, K, block_N, in_dtype, out_dtype, accum_dtype)
     src_code = kernel.get_kernel_source()
 
     # src_code is the generated cuda source

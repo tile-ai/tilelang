@@ -57,6 +57,7 @@ def torch_convert(tensor):
     return new_tensor
 
 
+@tilelang.jit(out_idx=[1])
 def test_convert(N, K, block_N, block_K, in_dtype, num_bits=4, threads=128):
     num_elems_per_byte = 8 // num_bits
     storage_dtype = "uint8"
@@ -92,15 +93,13 @@ def test_convert(N, K, block_N, block_K, in_dtype, num_bits=4, threads=128):
 def test_fp4_fp16_convert_close():
     N, K = 256, 256
     block_N, block_K = 64, 64
-    program = test_convert(
+    kernel = test_convert(
         N,
         K,
         block_N,
         block_K,
         "float16",
     )
-
-    kernel = tilelang.compile(program, out_idx=[1])
 
     B = torch.randint(0, 16, (N, K // 2), dtype=torch.uint8, device="cuda").to(torch.uint8)
     tl_out = kernel(B)
@@ -131,6 +130,7 @@ def get_configs():
 
 def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
 
+    @tilelang.jit(out_idx=[2])
     def kernel_func(block_M, block_N, block_K, num_stages, threads, split=1):
         num_elems_per_byte = 8 // num_bits
         storage_dtype = "uint8"
@@ -273,10 +273,9 @@ def main(m=256, n=256, k=256, tune=False):
     total_flops = 2 * m * n * k
 
     if (not tune):
-        program = matmul(
+        kernel = matmul(
             m, n, k, "float16", "float16", "float32", num_bits=4, tune=tune)(
                 block_M=128, block_N=128, block_K=128, num_stages=2, threads=256, split=1)
-        kernel = tilelang.compile(program, out_idx=[2])
         profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
         profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")

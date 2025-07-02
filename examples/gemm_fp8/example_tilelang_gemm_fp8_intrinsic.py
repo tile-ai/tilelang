@@ -31,6 +31,7 @@ def make_swizzle_layout(shared_buf):
     return T.Layout(shape, transform_func)
 
 
+@tilelang.jit(out_idx=[2])
 @simplify_prim_func
 def tl_matmul(
     M,
@@ -179,8 +180,7 @@ def tl_matmul(
 
 
 def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
-    matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
-    kernel = tilelang.compile(matmul, out_idx=[2])
+    kernel = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
     src_code = kernel.get_kernel_source()
     print(src_code)
     # src_code is the generated cuda source

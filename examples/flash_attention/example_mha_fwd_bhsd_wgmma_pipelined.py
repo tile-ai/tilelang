@@ -35,6 +35,7 @@ def flashattn(batch, heads, seq_q, seq_kv, dim, is_causal, tune=False):
     dtype = "float16"
     accum_dtype = "float"
 
+    @tilelang.jit(out_idx=[3])
     def kernel_func(block_M, block_N, num_stages, threads):
 
         @T.macro
@@ -205,11 +206,10 @@ def main(
         total_flops *= 0.5
 
     if (not tune):
-        program = flashattn(
+        kernel = flashattn(
             batch, heads, seq_q, seq_kv, dim, is_causal, tune=tune)(
                 block_M=128, block_N=128, num_stages=2, threads=256)
         ref_program_processed = partial(ref_program, is_causal=is_causal)
-        kernel = tilelang.compile(program, out_idx=[3])
 
         profiler = kernel.get_profiler()
         profiler.assert_allclose(ref_program_processed, rtol=0.01, atol=0.01)

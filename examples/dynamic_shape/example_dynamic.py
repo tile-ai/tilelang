@@ -10,6 +10,7 @@ tilelang.testing.set_random_seed(0)
 tilelang.disable_cache()
 
 
+@tilelang.jit(pass_configs={"tl.disable_dynamic_tail_split": True, "tl.dynamic_alignment": 8})
 def matmul_dynamic_mnk(
     block_M,
     block_N,
@@ -63,14 +64,8 @@ def matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtyp
     print(
         f"M: {M}, N: {N}, K: {K}, block_M: {block_M}, block_N: {block_N}, block_K: {block_K}, trans_A: {trans_A}, trans_B: {trans_B}, in_dtype: {in_dtype}, out_dtype: {out_dtype}, accum_dtype: {accum_dtype}, num_stages: {num_stages}, threads: {threads}"
     )
-    program = matmul_dynamic_mnk(block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype,
-                                 accum_dtype, num_stages, threads)
-
-    kernel = tilelang.compile(
-        program, pass_configs={
-            "tl.disable_dynamic_tail_split": True,
-            "tl.dynamic_alignment": 8
-        })
+    kernel = matmul_dynamic_mnk(block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype,
+                                accum_dtype, num_stages, threads)
 
     import torch
     if trans_A:

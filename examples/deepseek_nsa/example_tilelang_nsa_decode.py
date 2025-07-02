@@ -10,6 +10,7 @@ import tilelang.testing
 tilelang.testing.set_random_seed(42)
 
 
+@tilelang.jit(out_idx=[-1])
 def native_sparse_attention(
     batch,
     heads,
@@ -132,7 +133,7 @@ def main():
     B, SEQ_LEN, H, HQ, D, S, block_size, dtype = 2, 64, 1, 16, 16, 1, 32, torch.float16
     groups = HQ // H
     SEQ_LEN_Q = 1
-    program = native_sparse_attention(
+    kernel = native_sparse_attention(
         batch=B,
         heads=HQ,
         seq_len=SEQ_LEN,
@@ -142,7 +143,6 @@ def main():
         selected_blocks=S,
     )
 
-    kernel = tilelang.compile(program, out_idx=-1)
     Q = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
     K = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
     V = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)

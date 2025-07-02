@@ -26,6 +26,7 @@ def make_swizzle_layout(shared_buf):
     return T.Layout(shape, transform_func)
 
 
+@tilelang.jit(out_idx=[2])
 @simplify_prim_func
 def tl_matmul(
     M,
@@ -167,8 +168,7 @@ def ref_program(A, B):
 def main():
     M, N, K = 16384, 16384, 16384
     in_dtype, out_dtype, accum_dtype = "float16", "float16", "float32"
-    matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
-    kernel = tilelang.compile(matmul, out_idx=[2])
+    kernel = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
     src_code = kernel.get_kernel_source()
     # src_code is the generated cuda source
     assert src_code is not None

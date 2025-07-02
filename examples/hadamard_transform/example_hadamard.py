@@ -16,6 +16,7 @@ def is_pow_of_2(n):
     return isinstance(n, int) and n > 0 and (n & (n - 1)) == 0
 
 
+@tilelang.jit(out_idx=[1])
 def hadamard(b, n, dtype):
     assert is_pow_of_2(n), "n must be a power of 2"
     assert 2 <= n <= 32768, "n must be in [2, 32768]"
@@ -145,7 +146,7 @@ def main():
 
     B, D = args.batch, args.dim
     x = torch.randn((B, D), device='cuda')
-    kernel = tilelang.compile(hadamard(B, D, 'float32'), out_idx=1)
+    kernel = hadamard(B, D, 'float32')
     y = kernel(x)
     y_ref = ref_program(x)
     torch.testing.assert_close(y, y_ref, atol=1e-2, rtol=1e-2)

@@ -10,6 +10,11 @@ import math
 tilelang.disable_cache()
 
 
+@tilelang.jit(
+    out_idx=[2], pass_configs={
+        "tl.disable_tma_lower": True,
+        "tl.disable_warp_specialized": True
+    })
 def torch_gmm(a, b, batch_sizes, batch_offsets_tensor, trans_b=False):
     """
     Perform grouped matrix multiplication using PyTorch.
@@ -42,6 +47,11 @@ def torch_gmm(a, b, batch_sizes, batch_offsets_tensor, trans_b=False):
     return output
 
 
+@tilelang.jit(
+    out_idx=[2], pass_configs={
+        "tl.disable_tma_lower": True,
+        "tl.disable_warp_specialized": True
+    })
 def grouped_gemm(batch_sizes_list,
                  K,
                  N,
@@ -143,14 +153,7 @@ def run_tilelang_grouped_gemm(batch_sizes_list,
                               profile=False):
     padding_M = block_M
     batch_sum = sum(batch_sizes_list)
-    program = grouped_gemm(batch_sizes_list, K, M, block_M, block_N, block_K, num_stages, threads)
-    kernel = tilelang.compile(
-        program,
-        out_idx=[2],
-        pass_configs={
-            "tl.disable_tma_lower": True,
-            "tl.disable_warp_specialized": True
-        })
+    kernel = grouped_gemm(batch_sizes_list, K, M, block_M, block_N, block_K, num_stages, threads)
     # print(kernel.get_kernel_source())
 
     device = torch.device("cuda")

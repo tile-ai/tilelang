@@ -14,6 +14,7 @@ def calc_diff(x, y):
     return 1 - sim
 
 
+@tilelang.jit(out_idx=[-1])
 def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
 
     @T.prim_func
@@ -41,9 +42,8 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
 def test_gemm_fp8(M, N, K, dtype):
     torch_dtype = map_torch_type(dtype)
 
-    func = matmul(M, N, K, 128, 128, 64, dtype)
+    kernel = matmul(M, N, K, 128, 128, 64, dtype)
 
-    kernel = tilelang.compile(func, out_idx=-1)
     a = torch.randn(M, K, dtype=torch.float16, device='cuda').to(dtype=torch_dtype)
     b = torch.randn(N, K, dtype=torch.float16, device='cuda').to(dtype=torch_dtype)
 

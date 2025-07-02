@@ -7,6 +7,7 @@ from tilelang.profiler import do_bench
 from typing import Callable
 
 
+@tl.jit(out_idx=[1])
 def softmax_kernel(
     M,
     N,
@@ -61,10 +62,9 @@ def softmax_kernel(
 
 M = 8192
 N = 8192
-fn = softmax_kernel(M, N)
+kernel = softmax_kernel(M, N)
 dtype = torch.float16
 X = torch.randn(M, N, dtype=dtype, device="cuda")
-kernel = tl.compile(fn, out_idx=[1], target="cuda")
 Y = kernel(X).to(dtype)
 Y_ref = X.softmax(dim=1)
 

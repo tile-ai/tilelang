@@ -7,6 +7,7 @@ import tilelang.language as T
 from tilelang.utils.tensor import map_torch_type
 
 
+@tilelang.jit(out_idx=[-1])
 def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
     # for fp8 gemm, do one promote after 4 wgmma inst, i.e. block_K = 128.
     # if block_K < 128, promote after 128/block_K iters.
@@ -59,9 +60,7 @@ def calc_diff(x, y):
 def test_gemm_fp8(M, N, K, dtype):
     torch_dtype = map_torch_type(dtype)
 
-    func = matmul(M, N, K, 128, 128, 64, dtype)
-
-    kernel = tilelang.compile(func, out_idx=-1)
+    kernel = matmul(M, N, K, 128, 128, 64, dtype)
 
     a = torch.rand(M, K, dtype=torch.float16, device='cuda')
     a = (100 * (2 * a - 1)).to(dtype=torch_dtype)
