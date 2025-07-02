@@ -69,7 +69,7 @@ def main():
         kernel = result.kernel
     else:
         # Default config
-        config = {"block_M": 128, "block_N": 256, "threads": 128}
+        config = {"block_M": 32, "block_N": 32, "threads": 128}
         kernel = tilelang.compile(
             elementwise_add(M, N, **config, in_dtype="float32", out_dtype="float32"), out_idx=-1)
 
