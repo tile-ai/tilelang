@@ -5,11 +5,12 @@ import os
 import os.path as osp
 import subprocess
 import tempfile
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from tvm.target import Target
 
 from tilelang import tvm as tvm
+from tilelang.transform import PassConfigKey
 from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_compute_version
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
@@ -34,9 +35,13 @@ class LibraryGenerator(object):
     srcpath: Optional[str] = None
     libpath: Optional[str] = None
     lib_code: Optional[str] = None
+    pass_configs: Optional[Dict[str, Any]] = None
 
     def __init__(self, target: Target):
         self.target = target
+
+    def assign_pass_configs(self, pass_configs: Optional[Dict[str, Any]] = None):
+        self.pass_configs = pass_configs
 
     def update_lib_code(self, lib_code: str):
         self.lib_code = lib_code
@@ -59,6 +64,10 @@ class LibraryGenerator(object):
                 compute_version = "90a"
             libpath = src.name.replace(".cu", ".so")
 
+            disable_fast_math = self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH, False)
+            verbose_ptxas_output = self.pass_configs.get(
+                PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
+
             command = [
                 get_nvcc_compiler(),
                 "-std=c++17",
@@ -74,6 +83,10 @@ class LibraryGenerator(object):
                 "-gencode",
                 f"arch=compute_{compute_version},code=sm_{compute_version}",
             ]
+            if not disable_fast_math:
+                command += ["--use_fast_math"]
+            if verbose_ptxas_output:
+                command += ["--ptxas_options", "-v"]
             command += [
                 "-I" + CUTLASS_INCLUDE_DIR,
             ]

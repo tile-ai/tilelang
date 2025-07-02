@@ -18,6 +18,12 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_WARP_SPECIALIZED = "tl.disable_warp_specialized"
     """Disable warp specialization optimization. Default: False"""
 
+    TL_DISABLE_FAST_MATH = "tl.disable_fast_math"
+    """Disable fast math optimization. Default: False"""
+
+    TL_ENABLE_PTXAS_VERBOSE_OUTPUT = "tl.enable_ptxas_verbose_output"
+    """Enable ptxas verbose output. Default: False"""
+
     TL_CONFIG_INDEX_BITWIDTH = "tl.config_index_bitwidth"
     """Bitwidth for configuration indices. Default: 32"""
 
