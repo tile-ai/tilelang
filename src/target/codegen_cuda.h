@@ -86,6 +86,8 @@ private:
   bool enable_bf16_{false};
   // whether enable fp8
   bool enable_fp8_{false};
+  // whether enable sparse gemm
+  bool enable_sparse_gemm_{false};
   // whether enable int8
   bool enable_int8_{false};
   // whether enable warp shuffle intrinsics

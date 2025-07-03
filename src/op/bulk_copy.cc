@@ -107,6 +107,12 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Array<Range> global_range = is_load ? src_range : dst_range;
   Array<Range> shared_range = is_load ? dst_range : src_range;
 
+  if (T.layout_map.count(global_tensor)) {
+    LOG(WARNING) << "TMA bulk copy cannot support a non-swizzled global "
+                    "layout, fallback to normal copy.";
+    return Stmt();
+  }
+
   Array<PrimExpr> indices;
   for (auto r : shared_range)
     indices.push_back(r->min);
@@ -131,10 +137,6 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (T.layout_map.count(shared_tensor)) {
     shared_layout = T.layout_map[shared_tensor];
     shared_tensor = T.buffer_remap[shared_tensor];
-  }
-  if (T.layout_map.count(global_tensor)) {
-    ICHECK(T.layout_map.count(global_tensor) == 0)
-        << "Cannot support global layout.";
   }
 
   TMADesc desc;

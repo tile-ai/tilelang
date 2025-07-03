@@ -124,6 +124,9 @@ std::string CodeGenTileLangCUDA::Finish() {
   }
 
   decl_stream << "#include <tl_templates/cuda/gemm.h>\n";
+  if (enable_sparse_gemm_) {
+    decl_stream << "#include <tl_templates/cuda/gemm_sp.h>\n";
+  }
   decl_stream << "#include <tl_templates/cuda/copy.h>\n";
   decl_stream << "#include <tl_templates/cuda/reduce.h>\n";
   decl_stream << "#include <tl_templates/cuda/ldsm.h>\n";
@@ -1387,6 +1390,14 @@ void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
     stream << "  " << vid_global_barrier_expect_ << " = 0;\n";
     PrintIndent();
     stream << "}\n";
+  } else if (call && call->op.same_as(builtin::call_extern())) {
+    ICHECK(call->args.size() >= 1)
+        << "call_extern must have at least 1 argument";
+    std::string func_name = call->args[0].as<StringImmNode>()->value;
+    if (func_name.find("tl::gemm_sp") == 0) {
+      enable_sparse_gemm_ = true;
+    }
+    CodeGenC::VisitStmt_(op);
   } else {
     CodeGenC::VisitStmt_(op);
   }

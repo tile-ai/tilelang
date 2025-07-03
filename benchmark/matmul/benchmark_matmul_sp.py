@@ -1,10 +1,13 @@
 import argparse
 import itertools
 import logging
+import torch
+from triton.testing import do_bench
 
 import tilelang.language as T
 from tilelang.autotuner import autotune
 from tilelang import jit
+from tilelang.layout import make_metadata_layout
 # Configure logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -29,7 +32,7 @@ def ref_program(A, B):
     return A @ B.T
 
 
-def get_configs(M, N, K, with_roller=False):
+def get_configs(M, N, K):
     """
     Generate a list of configuration dictionaries that will be used for tuning.
     
@@ -44,82 +47,39 @@ def get_configs(M, N, K, with_roller=False):
         Each configuration dict includes various block sizes, pipeline stages,
         thread numbers, and other parameters to explore during autotuning.
     """
-    if with_roller:
-        from tilelang.carver.template import MatmulTemplate
-        from tilelang.carver.arch import CUDA
-        from tilelang.carver.roller.rasterization import NoRasterization
-        arch = CUDA("cuda")
-        topk = 10
+    block_M = [64, 128, 256]
+    block_N = [64, 128, 256]
+    block_K = [64, 128]
+    num_stages = [0, 1, 2, 3]
+    thread_num = [128, 256]
+    enable_rasterization = [True, False]
+    policy = [T.GemmWarpPolicy.Square]
+    _configs = list(
+        itertools.product(
+            block_M,
+            block_N,
+            block_K,
+            num_stages,
+            thread_num,
+            policy,
+            enable_rasterization,
+        ))
 
-        carve_template = MatmulTemplate(
-            M=M,
-            N=N,
-            K=K,
-            in_dtype="float16",
-            out_dtype="float16",
-            accum_dtype="float",
-        ).with_arch(arch)
-
-        func = carve_template.equivalent_function()
-        assert func is not None, "Function is None"
-
-        roller_hints = carve_template.recommend_hints(topk=topk)
-
-        if roller_hints is None:
-            raise ValueError("No Roller Hints Found for TensorCore Scheduling")
-
-        configs = []
-        for hint in roller_hints:
-            config = {}
-            block_m, block_n = hint.block
-            warp_m, warp_n = hint.warp
-            # block_rows, block_cols represents warp partitioning
-            block_rows, block_cols = block_m // warp_m, block_n // warp_n
-            config["block_M"] = block_m
-            config["block_N"] = block_n
-            config["block_K"] = hint.rstep[0]
-            config["num_stages"] = hint.pipeline_stage
-            config["thread_num"] = block_rows * block_cols * 32
-            config["policy"] = T.GemmWarpPolicy.from_warp_partition(block_rows, block_cols)
-            config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
-            configs.append(config)
-        for config in configs:
-            print(config)
-    else:
-
-        block_M = [64, 128, 256]
-        block_N = [64, 128, 256]
-        block_K = [32, 64]
-        num_stages = [0, 1, 2, 3]
-        thread_num = [128, 256]
-        policy = [T.GemmWarpPolicy.Square]
-        enable_rasterization = [True, False]
-        _configs = list(
-            itertools.product(
-                block_M,
-                block_N,
-                block_K,
-                num_stages,
-                thread_num,
-                policy,
-                enable_rasterization,
-            ))
-
-        configs = [
-            {
-                "block_M": c[0],
-                "block_N": c[1],
-                "block_K": c[2],
-                "num_stages": c[3],
-                "thread_num": c[4],
-                "policy": c[5],
-                "enable_rasteration": c[6],  # keep param name for backward-compat
-            } for c in _configs
-        ]
+    configs = [
+        {
+            "block_M": c[0],
+            "block_N": c[1],
+            "block_K": c[2],
+            "num_stages": c[3],
+            "thread_num": c[4],
+            "policy": c[5],
+            "enable_rasterization": c[6],  # keep param name for backward-compat
+        } for c in _configs
+    ]
     return configs
 
 
-def matmul(M, N, K, with_roller):
+def matmul_sp(M, N, K):
     """
     Create an autotuned matrix multiplication kernel for matrices of shape:
       - A: (M, K)
@@ -155,10 +115,9 @@ def matmul(M, N, K, with_roller):
     #  - HIP as the compilation target (modify as needed for your hardware)
 
     @autotune(
-        configs=get_configs(M, N, K, with_roller),
+        configs=get_configs(M, N, K),
         warmup=3,
         rep=20,
-        ref_prog=ref_program,
     )
     @jit(out_idx=[2],)
     def kernel(
@@ -168,7 +127,7 @@ def matmul(M, N, K, with_roller):
         num_stages=None,
         thread_num=None,
         policy=None,
-        enable_rasteration=None,
+        enable_rasterization=None,
     ):
         """
         The actual kernel to compute C = A @ B^T.
@@ -185,8 +144,6 @@ def matmul(M, N, K, with_roller):
             Number of pipelined stages (for asynchronous load).
         thread_num : int
             Number of threads to use per block.
-        enable_rasteration : bool
-            Whether to enable rasterization (swizzling) optimization.
         k_pack : int
             K dimension packing factor to improve memory coalescing.
 
@@ -202,7 +159,8 @@ def matmul(M, N, K, with_roller):
 
         @T.prim_func
         def main(
-                A: T.Tensor((M, K), dtype),
+                A_sparse: T.Tensor((M, K // 2), dtype),
+                E: T.Tensor((M, K // 8), 'uint8'),
                 B: T.Tensor((N, K), dtype),
                 C: T.Tensor((M, N), dtype),
         ):
@@ -222,30 +180,47 @@ def matmul(M, N, K, with_roller):
                     T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
 
                 # Allocate shared memory for A sub-block of shape (block_M, block_K)
-                A_shared = T.alloc_shared((block_M, block_K), dtype)
+                A_shared = T.alloc_shared((block_M, block_K // 2), dtype)
                 # Allocate shared memory for B sub-block of shape (block_N, block_K)
                 B_shared = T.alloc_shared((block_N, block_K), dtype)
+                # Allocate shared memory for E sub-block of shape (block_M, block_K // E_factor)
+                E_shared = T.alloc_shared((block_M, block_K // 8), 'uint8')
                 # Allocate a local fragment for intermediate accumulation
                 C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
                 # Allocate a shared memory for C sub-block of shape (block_M, block_N)
                 C_shared = T.alloc_shared((block_M, block_N), dtype)
 
-                # Enable (or disable) swizzling optimization
-                T.use_swizzle(panel_size=10, enable=enable_rasteration)
-
                 # Clear out the accumulation buffer
                 T.clear(C_local)
+                T.no_set_max_nreg()
 
+                T.use_swizzle(panel_size=10, enable=enable_rasterization)
+                T.annotate_layout({
+                    E:
+                        make_metadata_layout(
+                            E, mma_dtype="float16", arch="sm90", backend="cutlass",
+                            block_k=block_K),
+                    E_shared:
+                        make_metadata_layout(
+                            E_shared,
+                            mma_dtype="float16",
+                            arch="sm90",
+                            backend="cutlass",
+                            block_k=block_K),
+                })
                 # Loop over sub-blocks in K dimension, pipelined by num_stages
                 for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                     # Load a sub-block of A from global memory into A_shared
-                    T.copy(A[by * block_M, k * block_K], A_shared)
+                    T.copy(A_sparse[by * block_M, k * block_K], A_shared)
+                    # Load a sub-block of E from global memory into E_shared
+                    T.copy(E[by * block_M, k * block_K // 8], E_shared)
                     # Load a sub-block of B from global memory into B_shared
                     T.copy(B[bx * block_N, k * block_K], B_shared)
                     # Perform a partial matrix multiplication:
                     #   C_local += A_shared @ B_shared^T
-                    T.gemm(
+                    T.gemm_sp(
                         A_shared,
+                        E_shared,
                         B_shared,
                         C_local,
                         transpose_B=True,
@@ -266,24 +241,20 @@ if __name__ == "__main__":
     parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
     parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
     parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
-    parser.add_argument(
-        "--with_roller",
-        action="store_true",
-        help="Whether to enable BitBLAS roller for search space",
-    )
     args = parser.parse_args()
 
     M, N, K = args.m, args.n, args.k
-    with_roller = args.with_roller
 
     # Compute total floating-point operations to measure throughput
     total_flops = 2 * M * N * K
 
     # matmul(...) returns (best_latency, best_config, ref_latency)
-    best_result = matmul(M, N, K, with_roller)
+    best_result = matmul_sp(M, N, K)
     best_latency = best_result.latency
     best_config = best_result.config
-    ref_latency = best_result.ref_latency
+    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    B = torch.randn(N, K, dtype=torch.float16, device="cuda")
+    ref_latency = do_bench(lambda: A @ B.T)
 
     # Print out the benchmark results
     print(f"Best latency (s): {best_latency}")
