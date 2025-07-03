@@ -1,3 +1,5 @@
+# Copyright (c) Tile-AI Organization.
+# Licensed under the MIT License.
 import torch
 import tilelang
 from tilelang.utils.sparse import compress_sm90
