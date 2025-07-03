@@ -49,6 +49,21 @@ def _find_rocm_home() -> str:
     return rocm_home if rocm_home is not None else ""
 
 
+def _initialize_torch_cuda_arch_flags():
+    import os
+    from tilelang.contrib import nvcc
+    from tilelang.utils.target import determine_target
+
+    target = determine_target(return_object=True)
+    # create tmp source file for torch cpp extension
+    compute_version = "".join(nvcc.get_target_compute_version(target).split("."))
+    # set TORCH_CUDA_ARCH_LIST
+    major = compute_version[0]
+    minor = compute_version[1]
+
+    os.environ["TORCH_CUDA_ARCH_LIST"] = f"{major}.{minor}"
+
+
 CUDA_HOME = _find_cuda_home()
 ROCM_HOME = _find_rocm_home()
 
@@ -197,4 +212,5 @@ __all__ = [
     "enable_cache",
     "disable_cache",
     "is_cache_enabled",
+    "_initialize_torch_cuda_arch_flags",
 ]

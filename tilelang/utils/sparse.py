@@ -25,6 +25,10 @@ def _get_cached_lib():
             # If loading fails, recompile
             pass
 
+    from tilelang.env import _initialize_torch_cuda_arch_flags
+    # Set TORCH_CUDA_ARCH_LIST
+    _initialize_torch_cuda_arch_flags()
+
     # Compile if not cached or loading failed
     return load(
         name=name,

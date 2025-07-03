@@ -31,21 +31,6 @@ from tilelang.env import (
 )
 
 
-def _initialize_torch_cuda_arch_flags():
-    import os
-    from tilelang.contrib import nvcc
-    from tilelang.utils.target import determine_target
-
-    target = determine_target(return_object=True)
-    # create tmp source file for torch cpp extension
-    compute_version = "".join(nvcc.get_target_compute_version(target).split("."))
-    # set TORCH_CUDA_ARCH_LIST
-    major = compute_version[0]
-    minor = compute_version[1]
-
-    os.environ["TORCH_CUDA_ARCH_LIST"] = f"{major}.{minor}"
-
-
 def _get_workspace_dir_name() -> pathlib.Path:
     try:
         from tilelang.contrib import nvcc
@@ -64,7 +49,6 @@ def _get_workspace_dir_name() -> pathlib.Path:
     return pathlib.Path.home() / ".cache" / "tilelang" / arch
 
 
-# _initialize_torch_cuda_arch_flags()
 TILELANG_JIT_WORKSPACE_DIR = _get_workspace_dir_name()
 TILELANG_JIT_DIR = TILELANG_JIT_WORKSPACE_DIR / "cached_ops"
 TILELANG_GEN_SRC_DIR = TILELANG_JIT_WORKSPACE_DIR / "generated"
