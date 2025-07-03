@@ -111,6 +111,12 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
     return Stmt();
   }
 
+  if (T.layout_map.count(global_tensor)) {
+    LOG(WARNING) << "TMA bulk copy cannot support a non-swizzled global "
+                    "layout, fallback to normal copy.";
+    return Stmt();
+  }
+
   Array<PrimExpr> indices;
   for (auto r : shared_range)
     indices.push_back(r->min);
