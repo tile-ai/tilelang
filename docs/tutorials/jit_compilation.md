@@ -1,2 +1,0 @@
-Just In Time Compilation
-=========================
