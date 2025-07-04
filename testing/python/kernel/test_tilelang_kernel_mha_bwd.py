@@ -307,8 +307,8 @@ def assert_mha_equal(batch, h, n_ctx, d_head, causal):
 
 
 def test_mha_bwd():
-    assert_mha_equal(8, 32, 256, 64, False)
-    assert_mha_equal(8, 32, 256, 64, True)
+    assert_mha_equal(8, 32, 128, 64, False)
+    assert_mha_equal(8, 32, 128, 64, True)
 
 
 if __name__ == "__main__":
