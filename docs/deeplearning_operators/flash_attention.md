@@ -131,7 +131,7 @@ def mha_fwd(
 ```
 
 - Autotuning: Dynamically selects optimal tile sizes (`block_M`, `block_N`) and thread configuration
-- Output Indexing: `out_idx=[-2,-1]` specifies tensor contraction dimensions
+- Output Indexing: `out_idx=[-2,-1]` specifies that the last two arguments to the `main` function (`Output` and `Lse`) are the outputs of the kernel.
 
 ### Parameters
 
