@@ -157,7 +157,7 @@ K_shared = T.alloc_shared([block_N, dim], dtype)
 acc_s[i, j] = T.if_then_else(q_idx >= k_idx, 0, -T.infinity(acc_s.dtype))
 ```
 
-- Block-Level Masking: Computes valid attention ranges per tile
+- Element-wise Masking: Applies a mask within each tile to ignore future key positions.
 - Position Tracking: Uses `q_start_id` to align sequences in encoder-decoder setups
 
 ### Attention Computation
