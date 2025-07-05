@@ -640,7 +640,7 @@ class CMakeBuild(build_ext):
         # -DCMAKE_LIBRARY_OUTPUT_DIRECTORY sets where built libraries go
         # -DPYTHON_EXECUTABLE ensures that the correct Python is used
         cmake_args = [
-            f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}", f"-DPYTHON_EXECUTABLE={sys.executable}",
+            f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}",
             f"-DCMAKE_BUILD_TYPE={'Debug' if DEBUG_MODE else 'Release'}"
         ]
 
