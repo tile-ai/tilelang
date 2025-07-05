@@ -223,4 +223,5 @@ def test_assert_tl_matmul_bfloat16():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_assert_tl_matmul_bfloat16()

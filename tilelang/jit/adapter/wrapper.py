@@ -183,6 +183,8 @@ class TLCUDASourceWrapper(object):
         "float32": "float",
         "float16": "half_t",
         "bfloat16": "bfloat16_t",
+        "float8_e4m3fn": "fp8_e4_t",
+        "float8_e5m2": "fp8_e5_t",
         "e4m3_float8": "fp8_e4_t",
         "e5m2_float8": "fp8_e5_t",
         "float64": "double",

@@ -223,12 +223,12 @@ private:
     auto order_anno = loop->annotations.Get("tl_pipeline_order");
     auto stage_anno = loop->annotations.Get("tl_pipeline_stage");
     auto num_stages_anno = loop->annotations.Get("num_stages");
-    if (order_anno.defined() && stage_anno.defined()) {
+    if (order_anno && stage_anno) {
       // Check if order_anno or stage_anno contains -1, which means TMA+WS is
       // enabled
       bool ws_tma_enabled = false;
-      auto order_array = Downcast<Array<Integer>>(order_anno);
-      auto stage_array = Downcast<Array<Integer>>(stage_anno);
+      auto order_array = Downcast<Array<Integer>>(order_anno.value());
+      auto stage_array = Downcast<Array<Integer>>(stage_anno.value());
       for (const auto &val : order_array) {
         if (val->value == -1) {
           ws_tma_enabled = true;
@@ -248,20 +248,20 @@ private:
         return StmtExprMutator::VisitStmt_(loop);
       }
 
-      Map<String, ObjectRef> annotations;
+      Map<String, Any> annotations;
       for (const auto &[key, value] : loop->annotations) {
         if (key != "tl_pipeline_order") {
           annotations.Set(key, value);
         }
       }
-      annotations.Set(tir::attr::software_pipeline_order, order_anno);
+      annotations.Set(tir::attr::software_pipeline_order, order_anno.value());
 
       for (const auto &[key, value] : loop->annotations) {
         if (key != "tl_pipeline_stage") {
           annotations.Set(key, value);
         }
       }
-      annotations.Set(tir::attr::software_pipeline_stage, stage_anno);
+      annotations.Set(tir::attr::software_pipeline_stage, stage_anno.value());
       if (TargetHasAsyncCopy(target_))
         annotations.Set(tir::attr::software_pipeline_async_stages,
                         Array<Integer>{0});
@@ -270,9 +270,9 @@ private:
       return for_node;
     }
 
-    if (!num_stages_anno.defined())
+    if (!num_stages_anno)
       return StmtExprMutator::VisitStmt_(loop);
-    int num_stages = num_stages_anno.as<IntImmNode>()->value;
+    int num_stages = num_stages_anno->as<IntImmNode>()->value;
     Stmt pipeline_body{nullptr};
     if (const auto *realize = loop->body.as<BlockRealizeNode>()) {
       const auto &block = realize->block;
@@ -442,7 +442,7 @@ private:
     }
 
     // Finally, make the pipeline annotation
-    Map<String, ObjectRef> annotations;
+    Map<String, Any> annotations;
     for (const auto &[key, value] : loop->annotations) {
       if (key != "num_stages") {
         annotations.Set(key, value);
@@ -492,7 +492,7 @@ tvm::transform::Pass PipelinePlanning() {
   return CreatePrimFuncPass(pass_func, 0, "tl.PipelinePlanning", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.PipelinePlanning")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.PipelinePlanning")
     .set_body_typed(PipelinePlanning);
 
 } // namespace tl

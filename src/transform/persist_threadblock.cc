@@ -61,7 +61,7 @@ tvm::transform::Pass PersistThreadblock() {
   return CreatePrimFuncPass(pass_func, 0, "tl.PersistThreadblock", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.PersistThreadblock")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.PersistThreadblock")
     .set_body_typed(PersistThreadblock);
 
 } // namespace tl

@@ -193,7 +193,7 @@ tvm::transform::Pass InjectFenceProxy() {
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectFenceProxy", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.InjectFenceProxy")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.InjectFenceProxy")
     .set_body_typed(InjectFenceProxy);
 
 } // namespace tl
