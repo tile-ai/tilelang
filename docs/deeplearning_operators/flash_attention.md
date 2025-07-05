@@ -19,7 +19,6 @@ def mha_fwd(
     seq_len_kv,
     heads,
     dim,
-    sm_scale,
     is_causal,
     block_M=128,
     block_N=128,
