@@ -46,6 +46,7 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, BufferMap vmap) {
 PrimExpr ReduceOp::MakeInitValue() const {
   auto dst_dtype = dst->dtype;
   auto is_int = dst_dtype.is_int();
+  bool is_uint = dst_dtype.is_uint();
   auto bits = dst_dtype.bits();
 
   switch (type) {
@@ -56,12 +57,16 @@ PrimExpr ReduceOp::MakeInitValue() const {
   case ReduceType::kMax:
     if (is_int) {
       return make_const(dst->dtype, -(1 << (bits - 1)));
+    } else if (is_uint) {
+      return make_const(dst->dtype, 0);
     } else {
       return make_const(dst->dtype, -INFINITY);
     }
   case ReduceType::kMin:
     if (is_int) {
       return make_const(dst->dtype, (1 << (bits - 1)) - 1);
+    } else if (is_uint) {
+      return make_const(dst->dtype, (1 << bits) - 1);
     } else {
       return make_const(dst->dtype, INFINITY);
     }
