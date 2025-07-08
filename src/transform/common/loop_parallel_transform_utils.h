@@ -24,9 +24,8 @@
  * \brief A tool for parallel loop transform
  */
 
-
-#include <tvm/tir/stmt.h>
 #include <tvm/arith/analyzer.h>
+#include <tvm/tir/stmt.h>
 
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/index_map.h>
@@ -35,9 +34,9 @@
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
 
-#include <queue>
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
+#include <queue>
 
 namespace tvm {
 namespace tl {
@@ -139,19 +138,14 @@ public:
       }
     }
 
-
-
-
     if (condition.defined()) {
       body = IfThenElse(condition, body);
-
 
       for (int j = loop_vars.size() - 1; j >= 0; --j) {
         auto loop_var = loop_vars[j];
         auto loop_extent = loop_extents[j];
         body = For(loop_var, 0, loop_extent, ForKind::kParallel, body);
       }
-
 
       return Downcast<For>(body);
     }
@@ -195,5 +189,5 @@ public:
   };
 };
 
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl
+} // namespace tvm

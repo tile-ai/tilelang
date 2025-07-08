@@ -168,8 +168,8 @@ Stmt Copy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
 
-  auto transformed_loop = Downcast<For>(ParallelLoopTransformer::Substitute(fused_loop));
-
+  auto transformed_loop =
+      Downcast<For>(ParallelLoopTransformer::Substitute(fused_loop));
 
   For vectorized_thread_loop;
   auto par_op = std::make_unique<ParallelOp>(transformed_loop);
