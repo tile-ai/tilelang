@@ -21,13 +21,8 @@ get_started/overview
 :maxdepth: 1
 :caption: TUTORIALS
 
-tutorials/writing_kernels_with_tilelibrary
-tutorials/writing_kernels_with_thread_primitives
-tutorials/annotate_memory_layout
 tutorials/debug_tools_for_tilelang
 tutorials/auto_tuning
-tutorials/jit_compilation
-tutorials/pipelining_computations_and_data_movements
 :::
 
 :::{toctree}
@@ -37,22 +32,8 @@ tutorials/pipelining_computations_and_data_movements
 deeplearning_operators/elementwise
 deeplearning_operators/gemv
 deeplearning_operators/matmul
-deeplearning_operators/matmul_dequant
-deeplearning_operators/flash_attention
-deeplearning_operators/flash_linear_attention
 deeplearning_operators/deepseek_mla
-deeplearning_operators/convolution
-deeplearning_operators/tmac_gpu
 :::
-
-:::{toctree}
-:maxdepth: 2
-:caption: LANGUAGE REFERENCE
-
-language_ref/ast
-language_ref/primitives
-language_ref/tilelibrary
-::: 
 
 :::{toctree}
 :maxdepth: 1
