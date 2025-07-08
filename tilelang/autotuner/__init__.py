@@ -400,25 +400,27 @@ class AutoTuner:
         if len(config_args) == 0:
             raise ValueError("No configurations to tune, please check your `@autotune` decorator")
 
-        # check if the tunable arguments has been tuned.
+        # check if the tunable arguments has been set.
         # get the back config argument
         top_config, *rest = config_args
-        key_args_tuple, key_kwargs_tuple = self._kernel_parameters
-        tunable_arguments = [key for key, _ in top_config.items()]
 
-        # Check if all tunable arguments have been tuned by comparing config keys with key_kwargs_tuple
-        if any(key in top_config for key, _ in key_kwargs_tuple):
-            logger.warning(
-                f"Tunable parameters {tunable_arguments} already provided during auto-tuning. Skipping compilation and using direct JIT"
-            )
-            # compile the kernel with the provided parameters
-            jit_kernel = self.jit_compile()
-            autotuner_result = AutotuneResult(
-                libcode=jit_kernel.get_kernel_source(),
-                func=jit_kernel.prim_func,
-                kernel=jit_kernel)
-            self._memory_cache[key] = autotuner_result
-            return autotuner_result
+        if self._kernel_parameters is not None:
+            key_args_tuple, key_kwargs_tuple = self._kernel_parameters
+            tunable_arguments = [key for key, _ in top_config.items()]
+
+            # Check if all tunable arguments have been tuned by comparing config keys with key_kwargs_tuple
+            if any(key in top_config for key, _ in key_kwargs_tuple):
+                logger.warning(
+                    f"Tunable parameters {tunable_arguments} already provided during auto-tuning. Skipping compilation and using direct JIT"
+                )
+                # compile the kernel with the provided parameters
+                jit_kernel = self.jit_compile()
+                autotuner_result = AutotuneResult(
+                    libcode=jit_kernel.get_kernel_source(),
+                    func=jit_kernel.prim_func,
+                    kernel=jit_kernel)
+                self._memory_cache[key] = autotuner_result
+                return autotuner_result
 
         num_workers = max(1, int(get_available_cpu_count() * 0.9))
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)

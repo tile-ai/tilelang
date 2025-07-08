@@ -225,6 +225,7 @@ def convolution(N,
                 block_K,
                 num_stages,
                 thread_num,
+                enable_rasteration,
                 dtype="float16",
                 accum_dtype="float"):
     KH, KW = K, K
@@ -293,14 +294,14 @@ def main(n: int = 128,
          with_roller: bool = True):
     N, C, H, W, F, K, S, D, P = n, c, h, w, f, k, s, d, p
     ref_prog = ref_program(S, P, D)
-    use_autotune = True
+
     if use_autotune:
         result = get_best_config(N, C, H, W, F, K, S, D, P, ref_prog, with_roller)
         print(result.config)
         kernel = result.kernel
     else:
         config = get_heuristic_config()
-        kernel = tl.compile(convolution(N, C, H, W, F, K, S, D, P, **config), out_dix=[2])
+        kernel = tl.compile(convolution(N, C, H, W, F, K, S, D, P, **config), out_idx=[2])
 
     profiler = kernel.get_profiler(tensor_supply_type=tl.TensorSupplyType.Auto)
     tilelang_latency = profiler.do_bench()
