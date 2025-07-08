@@ -18,7 +18,15 @@ def get_configs():
 
 @autotune(configs=get_configs(), warmup=10, rep=10)
 @tilelang.jit(out_idx=[3])
-def flashattn(batch, heads, seq_len, dim, is_causal, tune=False):
+def flashattn(batch,
+              heads,
+              seq_len,
+              dim,
+              is_causal,
+              block_M=64,
+              block_N=64,
+              num_stages=1,
+              threads=128):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     shape = [batch, seq_len, heads, dim]
     dtype = "float16"
@@ -168,8 +176,15 @@ def main(
 
     if (not tune):
         kernel = flashattn(
-            batch, heads, seq_len, dim, is_causal, tune=tune)(
-                block_M=128, block_N=128, num_stages=1, threads=128)
+            batch,
+            heads,
+            seq_len,
+            dim,
+            is_causal,
+            block_M=128,
+            block_N=128,
+            num_stages=1,
+            threads=128)
         ref_program_processed = partial(ref_program, is_causal=is_causal)
         profiler = kernel.get_profiler()
         profiler.assert_allclose(ref_program_processed, rtol=0.01, atol=0.01)
