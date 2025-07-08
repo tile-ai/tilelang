@@ -20,8 +20,8 @@
  */
 
 /*!
- * \file loop_parallel_transform_utils.h
- * \brief A tool for parallel loop transform
+ * \file common.h
+ * \brief Common utilities for TL transforms
  */
 
 #include <tvm/arith/analyzer.h>
