@@ -239,6 +239,7 @@ def get_configs(args, kwargs):
 
     return configs
 
+
 @autotune(
     configs=get_configs,
     warmup=3,
@@ -265,10 +266,7 @@ def matmul(
 ):
     """Create an autotuned tensor core matrix multiplication kernel."""
 
-
-    def kernel(
-
-    ):
+    def kernel():
         return tl_matmul(
             M,
             N,

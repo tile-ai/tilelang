@@ -115,9 +115,9 @@ def get_configs(args, kwargs):
 )
 @jit(out_idx=[2],)
 def matmul(
-    M, 
-    N, 
-    K, 
+    M,
+    N,
+    K,
     with_roller,
     block_M=None,
     block_N=None,
@@ -176,8 +176,7 @@ def matmul(
         """
         # Bind x-dimension to block index in N,
         #     y-dimension to block index in M.
-        with T.Kernel(
-                T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
 
             # Allocate shared memory for A sub-block of shape (block_M, block_K)
             A_shared = T.alloc_shared((block_M, block_K), dtype)
