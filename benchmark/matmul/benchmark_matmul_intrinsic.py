@@ -221,51 +221,39 @@ def get_configs(M, N, K, with_roller=False):
             print(config)
     else:
 
-        block_rows_warps = [1, 2, 4]
-        block_col_warps = [1, 2, 4]
-        warp_row_tiles = [16, 32, 64, 128]
-        warp_col_tiles = [16, 32, 64, 128]
-        chunk = [32, 64, 128, 256]
-        stage = [0, 2]
-        enable_rasteration = [True, False]
-        _configs = list(
-            itertools.product(block_rows_warps, block_col_warps, warp_row_tiles, warp_col_tiles,
-                              chunk, stage, enable_rasteration))
-        configs = [{
-            "block_row_warps": c[0],
-            "block_col_warps": c[1],
-            "warp_row_tiles": c[2],
-            "warp_col_tiles": c[3],
-            "chunk": c[4],
-            "stage": c[5],
-            "enable_rasteration": c[6],
-        } for c in _configs]
+        iter_params = dict(
+            block_row_warps=[1, 2, 4],
+            block_col_warps=[1, 2, 4],
+            warp_row_tiles=[16, 32, 64, 128],
+            warp_col_tiles=[16, 32, 64, 128],
+            chunk=[32, 64, 128, 256],
+            stage=[0, 2],
+            enable_rasteration=[True, False],
+        )
+        return [{
+            k: v for k, v in zip(iter_params, values)
+        } for values in itertools.product(*iter_params.values())]
 
     return configs
 
 
-def matmul(M,
-           N,
-           K,
-           in_dtype="float16",
-           out_dtype="float16",
-           accum_dtype="float16",
-           with_roller=False):
+def matmul(
+    M,
+    N,
+    K,
+    in_dtype="float16",
+    out_dtype="float16",
+    accum_dtype="float16",
+    with_roller=False,
+):
     """Create an autotuned tensor core matrix multiplication kernel."""
 
     @autotune(
         configs=get_configs(M, N, K, with_roller),
-        keys=[
-            "block_row_warps",
-            "block_col_warps",
-            "warp_row_tiles",
-            "warp_col_tiles",
-            "chunk",
-            "enable_rasteration",
-            "stage",
-        ],
         warmup=3,
         rep=5,
+        ref_prog=ref_program,
+        skip_check=True,
     )
     @tl.jit(out_idx=[2],)
     def kernel(

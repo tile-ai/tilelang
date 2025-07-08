@@ -394,6 +394,29 @@ class AutoTuner:
                 raise ValueError(f"Unused keys in config: {unused_keys}")
             config_args.append(new_kwargs)
 
+        if len(config_args) == 0:
+            raise ValueError("No configurations to tune, please check your `@autotune` decorator")
+
+        # check if the tunable arguments has been tuned.
+        # get the back config argument
+        top_config, *rest = config_args
+        key_args_tuple, key_kwargs_tuple = self._kernel_parameters
+        tunable_arguments = [key for key, _ in top_config.items()]
+
+        # Check if all tunable arguments have been tuned by comparing config keys with key_kwargs_tuple
+        if any(key in top_config for key, _ in key_kwargs_tuple):
+            logger.warning(
+                f"Tunable parameters {tunable_arguments} already provided during auto-tuning. Skipping compilation and using direct JIT"
+            )
+            # compile the kernel with the provided parameters
+            jit_kernel = self.jit_compile()
+            autotuner_result = AutotuneResult(
+                libcode=jit_kernel.get_kernel_source(),
+                func=jit_kernel.prim_func,
+                kernel=jit_kernel)
+            self._memory_cache[key] = autotuner_result
+            return autotuner_result
+
         num_workers = max(1, int(get_available_cpu_count() * 0.9))
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
         futures = []
@@ -657,6 +680,16 @@ def autotune(  # This is the new public interface
 
     This decorator can be used without arguments (e.g., `@tilelang.jit`):
        Applies JIT compilation with default settings.
+    
+    Tips:
+        - If you want to skip the auto-tuning process, you can set override the tunable parameters in the function signature.
+            ```python
+                if enable_autotune:
+                    kernel = flashattn(batch, heads, seq_len, dim, is_causal)
+                else:
+                    kernel = flashattn(
+                        batch, heads, seq_len, dim, is_causal, groups=groups, block_M=128, block_N=128, num_stages=2, threads=256)
+            ```
 
     Parameters
     ----------

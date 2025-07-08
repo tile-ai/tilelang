@@ -89,36 +89,18 @@ def get_configs(M, N, K, with_roller=False):
         for config in configs:
             print(config)
     else:
-
-        block_M = [64, 128, 256]
-        block_N = [64, 128, 256]
-        block_K = [32, 64]
-        num_stages = [0, 1, 2, 3]
-        thread_num = [128, 256]
-        policy = [T.GemmWarpPolicy.Square]
-        enable_rasterization = [True, False]
-        _configs = list(
-            itertools.product(
-                block_M,
-                block_N,
-                block_K,
-                num_stages,
-                thread_num,
-                policy,
-                enable_rasterization,
-            ))
-
-        configs = [
-            {
-                "block_M": c[0],
-                "block_N": c[1],
-                "block_K": c[2],
-                "num_stages": c[3],
-                "thread_num": c[4],
-                "policy": c[5],
-                "enable_rasteration": c[6],  # keep param name for backward-compat
-            } for c in _configs
-        ]
+        iter_params = dict(
+            block_M=[64, 128, 256],
+            block_N=[64, 128, 256],
+            block_K=[32, 64],
+            num_stages=[0, 1, 2, 3],
+            thread_num=[128, 256],
+            policy=[T.GemmWarpPolicy.Square],
+            enable_rasteration=[True, False],
+        )
+        return [{
+            k: v for k, v in zip(iter_params, values)
+        } for values in itertools.product(*iter_params.values())]
     return configs
 
 
