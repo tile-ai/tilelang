@@ -265,6 +265,9 @@ class AutoTuner:
         sig = inspect.signature(self.fn)
         parameters = sig.parameters
 
+        if isinstance(self.configs, Callable):
+            self.configs = self.configs(*self._kernel_parameters)
+
         key = self.generate_cache_key(parameters)
 
         with self._lock:
@@ -394,6 +397,31 @@ class AutoTuner:
                 raise ValueError(f"Unused keys in config: {unused_keys}")
             config_args.append(new_kwargs)
 
+        if len(config_args) == 0:
+            raise ValueError("No configurations to tune, please check your `@autotune` decorator")
+
+        # check if the tunable arguments has been set.
+        # get the back config argument
+        top_config, *rest = config_args
+
+        if self._kernel_parameters is not None:
+            key_args_tuple, key_kwargs_tuple = self._kernel_parameters
+            tunable_arguments = [key for key, _ in top_config.items()]
+
+            # Check if all tunable arguments have been tuned by comparing config keys with key_kwargs_tuple
+            if any(key in top_config for key, _ in key_kwargs_tuple):
+                logger.warning(
+                    f"Tunable parameters {tunable_arguments} already provided during auto-tuning. Skipping compilation and using direct JIT"
+                )
+                # compile the kernel with the provided parameters
+                jit_kernel = self.jit_compile()
+                autotuner_result = AutotuneResult(
+                    libcode=jit_kernel.get_kernel_source(),
+                    func=jit_kernel.prim_func,
+                    kernel=jit_kernel)
+                self._memory_cache[key] = autotuner_result
+                return autotuner_result
+
         num_workers = max(1, int(get_available_cpu_count() * 0.9))
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
         futures = []
@@ -504,7 +532,7 @@ class _AutoTunerImplementation:
     warmup: int = 25
     rep: int = 100
     timeout: int = 100
-    configs: Any = None
+    configs: Union[Dict, Callable] = None
     supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto
     ref_prog: Callable = None
     supply_prog: Callable = None
@@ -516,7 +544,7 @@ class _AutoTunerImplementation:
     cache_input_tensors: bool = False
 
     def __init__(self,
-                 configs: Any,
+                 configs: Union[Dict, Callable],
                  warmup: int = 25,
                  rep: int = 100,
                  timeout: int = 100,
@@ -583,7 +611,6 @@ class _AutoTunerImplementation:
         warmup = self.warmup
         rep = self.rep
         timeout = self.timeout
-        configs = self.configs
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
@@ -600,7 +627,7 @@ class _AutoTunerImplementation:
                 compile_arguments = fn(__return_compile_arguments=True)
 
                 autotuner = AutoTuner(
-                    fn, configs=configs).set_profile_args(
+                    fn, configs=self.configs).set_profile_args(
                         supply_type=self.supply_type,
                         ref_prog=self.ref_prog,
                         supply_prog=self.supply_prog,
@@ -636,7 +663,7 @@ class _AutoTunerImplementation:
 def autotune(  # This is the new public interface
     func: Union[Callable[_P, _RProg], PrimFunc, None] = None,
     *,  # Indicates subsequent arguments are keyword-only
-    configs: Any,
+    configs: Union[Dict, Callable],
     # profile arguments
     warmup: int = 25,
     rep: int = 100,
@@ -657,6 +684,16 @@ def autotune(  # This is the new public interface
 
     This decorator can be used without arguments (e.g., `@tilelang.jit`):
        Applies JIT compilation with default settings.
+    
+    Tips:
+        - If you want to skip the auto-tuning process, you can set override the tunable parameters in the function signature.
+            ```python
+                if enable_autotune:
+                    kernel = flashattn(batch, heads, seq_len, dim, is_causal)
+                else:
+                    kernel = flashattn(
+                        batch, heads, seq_len, dim, is_causal, groups=groups, block_M=128, block_N=128, num_stages=2, threads=256)
+            ```
 
     Parameters
     ----------
@@ -664,6 +701,13 @@ def autotune(  # This is the new public interface
         If using `@tilelang.jit(...)` to configure, this is the `out_idx` parameter.
         If using `@tilelang.jit` directly on a function, this argument is implicitly
         the function to be decorated (and `out_idx` will be `None`).
+    configs : Dict or Callable
+        Configuration space to explore during auto-tuning.
+    warmup : int, optional
+        Number of warmup iterations before timing.
+    rep : int, optional
+        Number of repetitions for timing measurements.
+    timeout : int, optional
     target : Union[str, Target], optional
         Compilation target for TVM (e.g., "cuda", "llvm"). Defaults to "auto".
     target_host : Union[str, Target], optional

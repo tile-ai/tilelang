@@ -337,10 +337,6 @@ def get_best_config(N, K):
 
     @autotune(
         configs=get_configs(),
-        keys=[
-            "BLOCK_N",
-            "reduce_threads",
-        ],
         warmup=3,
         rep=20,
     )

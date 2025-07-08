@@ -144,12 +144,12 @@ class AutotuneResult:
         func: Optimized function.
         kernel: Compiled kernel function.
     """
-    latency: float
-    config: dict
-    ref_latency: float
-    libcode: str
-    func: Callable
-    kernel: Callable
+    latency: Optional[float] = None
+    config: Optional[dict] = None
+    ref_latency: Optional[float] = None
+    libcode: Optional[str] = None
+    func: Optional[Callable] = None
+    kernel: Optional[Callable] = None
 
     def _save_kernel_to_disk(self, cache_path: Path, kernel: JITKernel):
         """
