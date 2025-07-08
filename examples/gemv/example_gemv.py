@@ -221,17 +221,10 @@ def splitk_gemv_vectorized_tvm(
 def get_best_config(N, K):
 
     def get_configs():
-        BLOCK_N = [2, 4, 8, 32, 64, 128]
-        reduce_threads = [4, 8, 32]
-        _configs = list(itertools.product(
-            BLOCK_N,
-            reduce_threads,
-        ))
-        configs = [{
-            "BLOCK_N": c[0],
-            "reduce_threads": c[1],
-        } for c in _configs]
-        return configs
+        iter_params = dict(BLOCK_N=[2, 4, 8, 32, 64, 128], reduce_threads=[4, 8, 32])
+        return [
+            dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())
+        ]
 
     @autotune(
         configs=get_configs(),

@@ -49,110 +49,94 @@ def ref_program(B, x, dt, dA_cumsum):
 
 
 def get_configs():
-    block_M = [64, 128]
-    block_N = [32, 64, 128]
-    block_K = [32, 64]
-    num_stages = [1, 2, 3, 4, 5]
-    _configs = list(itertools.product(block_M, block_N, block_K, num_stages))
-
-    configs = [{
-        'block_M': c[0],
-        'block_N': c[1],
-        'block_K': c[2],
-        'num_stages': c[3],
-        'threads': c[0] * 2
-    } for c in _configs]
-    return configs
+    iter_params = dict(
+        block_M=[64, 128], block_N=[32, 64, 128], block_K=[32, 64], num_stages=[1, 2, 3, 4, 5])
+    return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
 
 
+@autotune(configs=get_configs(), warmup=10, rep=10)
 @tilelang.jit(out_idx=[4])
-def chunk_state_fwd(batch, seqlen, chunk_size, ngroups, nheads, headdim, dstate, tune=False):
+def chunk_state_fwd(batch,
+                    seqlen,
+                    chunk_size,
+                    ngroups,
+                    nheads,
+                    headdim,
+                    dstate,
+                    block_M=64,
+                    block_N=64,
+                    block_K=64,
+                    num_stages=2,
+                    threads=128):
     dtype = "float16"
     accum_dtype = "float"
     nchunks = T.ceildiv(seqlen, chunk_size)
     p = 1.44269504
 
-    def kernel_func(block_M, block_N, block_K, num_stages, threads):
+    @T.prim_func
+    def main(B: T.Tensor((batch, seqlen, ngroups, dstate), dtype), x: T.Tensor(
+        (batch, seqlen, nheads, headdim), dtype), dt: T.Tensor(
+            (batch, nheads, nchunks, chunk_size), dtype), dA_cumsum: T.Tensor(
+                (batch, nheads, nchunks, chunk_size), dtype), Output: T.Tensor(
+                    (batch, nchunks, nheads, headdim, dstate), dtype)):
+        with T.Kernel(
+                nheads,
+                T.ceildiv(headdim, block_M) * T.ceildiv(dstate, block_N),
+                batch * nchunks,
+                threads=threads) as (bz, bx, by):
+            x_shared = T.alloc_shared((block_K, block_M), dtype)
+            x_local = T.alloc_fragment((block_K, block_M), dtype)
+            xt_local = T.alloc_fragment((block_M, block_K), dtype)
+            B_shared = T.alloc_shared((block_K, block_N), dtype)
+            dt_shared = T.alloc_shared((block_K), dtype)
+            dA_cumsum_shared = T.alloc_shared((block_K), dtype)
+            acc_o = T.alloc_fragment((block_M, block_N), accum_dtype)
+            acc_o_shared = T.alloc_shared((block_M, block_N), dtype)
+            scale = T.alloc_fragment((block_K), accum_dtype)
+            dA_cs_last = T.alloc_fragment((1), accum_dtype)
+            dA_cumsum_local = T.alloc_fragment((block_K), accum_dtype)
+            dt_local = T.alloc_fragment((block_K), accum_dtype)
 
-        @T.prim_func
-        def main(B: T.Tensor((batch, seqlen, ngroups, dstate), dtype), x: T.Tensor(
-            (batch, seqlen, nheads, headdim), dtype), dt: T.Tensor(
-                (batch, nheads, nchunks, chunk_size), dtype), dA_cumsum: T.Tensor(
-                    (batch, nheads, nchunks, chunk_size), dtype), Output: T.Tensor(
-                        (batch, nchunks, nheads, headdim, dstate), dtype)):
-            with T.Kernel(
-                    nheads,
-                    T.ceildiv(headdim, block_M) * T.ceildiv(dstate, block_N),
-                    batch * nchunks,
-                    threads=threads) as (bz, bx, by):
-                x_shared = T.alloc_shared((block_K, block_M), dtype)
-                x_local = T.alloc_fragment((block_K, block_M), dtype)
-                xt_local = T.alloc_fragment((block_M, block_K), dtype)
-                B_shared = T.alloc_shared((block_K, block_N), dtype)
-                dt_shared = T.alloc_shared((block_K), dtype)
-                dA_cumsum_shared = T.alloc_shared((block_K), dtype)
-                acc_o = T.alloc_fragment((block_M, block_N), accum_dtype)
-                acc_o_shared = T.alloc_shared((block_M, block_N), dtype)
-                scale = T.alloc_fragment((block_K), accum_dtype)
-                dA_cs_last = T.alloc_fragment((1), accum_dtype)
-                dA_cumsum_local = T.alloc_fragment((block_K), accum_dtype)
-                dt_local = T.alloc_fragment((block_K), accum_dtype)
+            loop_range = T.ceildiv(chunk_size, block_K)
 
-                loop_range = T.ceildiv(chunk_size, block_K)
+            batch_idx = by % batch
+            chunk_idx = by // batch
+            m_idx = bx // T.ceildiv(dstate, block_N)
+            n_idx = bx % T.ceildiv(dstate, block_N)
 
-                batch_idx = by % batch
-                chunk_idx = by // batch
-                m_idx = bx // T.ceildiv(dstate, block_N)
-                n_idx = bx % T.ceildiv(dstate, block_N)
+            T.annotate_layout({
+                x_shared: tilelang.layout.make_swizzled_layout(x_shared),
+                acc_o_shared: tilelang.layout.make_swizzled_layout(acc_o_shared)
+            })
 
-                T.annotate_layout({
-                    x_shared: tilelang.layout.make_swizzled_layout(x_shared),
-                    acc_o_shared: tilelang.layout.make_swizzled_layout(acc_o_shared)
-                })
-
-                dA_cs_last[0] = dA_cumsum[batch_idx, bz, chunk_idx, chunk_size - 1]
-                T.clear(acc_o)
-                for k in T.Pipelined(loop_range, num_stages=num_stages):
-                    T.copy(
-                        x[batch_idx, chunk_idx * chunk_size + k * block_K:chunk_idx * chunk_size +
-                          (k + 1) * block_K, bz, m_idx * block_M:(m_idx + 1) * block_M], x_shared)
-                    T.copy(dA_cumsum[batch_idx, bz, chunk_idx, k * block_K:(k + 1) * block_K],
-                           dA_cumsum_shared)
-                    T.copy(dt[batch_idx, bz, chunk_idx, k * block_K:(k + 1) * block_K], dt_shared)
-                    T.copy(dA_cumsum_shared, dA_cumsum_local)
-                    T.copy(dt_shared, dt_local)
-                    for i in T.Parallel(block_K):
-                        scale[i] = T.exp2(dA_cs_last[0] * p - dA_cumsum_local[i] * p) * dt_local[i]
-                    T.copy(x_shared, x_local)
-                    for i, j in T.Parallel(block_M, block_K):
-                        xt_local[i, j] = x_local[j, i] * scale[j]
-                    T.copy(
-                        B[batch_idx, chunk_idx * chunk_size + k * block_K:chunk_idx * chunk_size +
-                          (k + 1) * block_K, bz // (nheads // ngroups),
-                          n_idx * block_N:(n_idx + 1) * block_N], B_shared)
-                    T.gemm(xt_local, B_shared, acc_o)
-                T.copy(acc_o, acc_o_shared)
+            dA_cs_last[0] = dA_cumsum[batch_idx, bz, chunk_idx, chunk_size - 1]
+            T.clear(acc_o)
+            for k in T.Pipelined(loop_range, num_stages=num_stages):
                 T.copy(
-                    acc_o_shared,
-                    Output[batch_idx, chunk_idx, bz, m_idx * block_M:(m_idx + 1) * block_M,
-                           n_idx * block_N:(n_idx + 1) * block_N])
+                    x[batch_idx, chunk_idx * chunk_size + k * block_K:chunk_idx * chunk_size +
+                      (k + 1) * block_K, bz, m_idx * block_M:(m_idx + 1) * block_M], x_shared)
+                T.copy(dA_cumsum[batch_idx, bz, chunk_idx, k * block_K:(k + 1) * block_K],
+                       dA_cumsum_shared)
+                T.copy(dt[batch_idx, bz, chunk_idx, k * block_K:(k + 1) * block_K], dt_shared)
+                T.copy(dA_cumsum_shared, dA_cumsum_local)
+                T.copy(dt_shared, dt_local)
+                for i in T.Parallel(block_K):
+                    scale[i] = T.exp2(dA_cs_last[0] * p - dA_cumsum_local[i] * p) * dt_local[i]
+                T.copy(x_shared, x_local)
+                for i, j in T.Parallel(block_M, block_K):
+                    xt_local[i, j] = x_local[j, i] * scale[j]
+                T.copy(
+                    B[batch_idx, chunk_idx * chunk_size + k * block_K:chunk_idx * chunk_size +
+                      (k + 1) * block_K, bz // (nheads // ngroups),
+                      n_idx * block_N:(n_idx + 1) * block_N], B_shared)
+                T.gemm(xt_local, B_shared, acc_o)
+            T.copy(acc_o, acc_o_shared)
+            T.copy(
+                acc_o_shared,
+                Output[batch_idx, chunk_idx, bz, m_idx * block_M:(m_idx + 1) * block_M,
+                       n_idx * block_N:(n_idx + 1) * block_N])
 
-        return main
-
-    if tune:
-
-        @autotune(configs=get_configs(), warmup=10, rep=10)
-        @tilelang.jit(out_idx=[4])
-        def kernel(block_M=None, block_N=None, block_K=None, num_stages=None, threads=None):
-            return kernel_func(block_M, block_N, block_K, num_stages, threads)
-
-        return kernel()
-    else:
-
-        def kernel(block_M, block_N, block_K, num_stages, threads):
-            return kernel_func(block_M, block_N, block_K, num_stages, threads)
-
-        return kernel
+    return main
 
 
 if __name__ == "__main__":
@@ -171,8 +155,18 @@ if __name__ == "__main__":
 
     if (not args.tune):
         kernel = chunk_state_fwd(
-            batch, seq_len, chunk_size, groups, heads, dim, dstate, tune=args.tune)(
-                block_M=64, block_N=128, block_K=64, num_stages=4, threads=128)
+            batch,
+            seq_len,
+            chunk_size,
+            groups,
+            heads,
+            dim,
+            dstate,
+            block_M=64,
+            block_N=128,
+            block_K=64,
+            num_stages=4,
+            threads=128)
         profiler = kernel.get_profiler(tilelang.TensorSupplyType.Normal)
         profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")
@@ -183,8 +177,7 @@ if __name__ == "__main__":
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:
-        best_result = chunk_state_fwd(
-            batch, seq_len, chunk_size, groups, heads, dim, dstate, tune=args.tune)
+        best_result = chunk_state_fwd(batch, seq_len, chunk_size, groups, heads, dim, dstate)
         best_latency = best_result.latency
         best_config = best_result.config
         ref_latency = best_result.ref_latency
