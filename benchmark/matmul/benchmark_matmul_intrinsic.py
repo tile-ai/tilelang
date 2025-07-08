@@ -165,7 +165,7 @@ def ref_program(A, B):
     return A @ B.T
 
 
-def get_configs(M, N, K, with_roller=False):
+def get_configs(args, kwargs):
     """
     Generate a list of configuration dictionaries that will be used for tuning.
     
@@ -180,6 +180,9 @@ def get_configs(M, N, K, with_roller=False):
         Each configuration dict includes various block sizes, pipeline stages,
         thread numbers, and other parameters to explore during autotuning.
     """
+    M, N, K = args[:3]
+    with_roller = args[6]
+
     if with_roller:
         from tilelang.carver.template import MatmulTemplate
         from tilelang.carver.arch import CUDA
@@ -236,7 +239,14 @@ def get_configs(M, N, K, with_roller=False):
 
     return configs
 
-
+@autotune(
+    configs=get_configs,
+    warmup=3,
+    rep=5,
+    ref_prog=ref_program,
+    skip_check=True,
+)
+@tl.jit(out_idx=[2],)
 def matmul(
     M,
     N,
@@ -245,25 +255,19 @@ def matmul(
     out_dtype="float16",
     accum_dtype="float16",
     with_roller=False,
+    block_row_warps=None,
+    block_col_warps=None,
+    warp_row_tiles=None,
+    warp_col_tiles=None,
+    chunk=None,
+    stage=None,
+    enable_rasteration=None,
 ):
     """Create an autotuned tensor core matrix multiplication kernel."""
 
-    @autotune(
-        configs=get_configs(M, N, K, with_roller),
-        warmup=3,
-        rep=5,
-        ref_prog=ref_program,
-        skip_check=True,
-    )
-    @tl.jit(out_idx=[2],)
+
     def kernel(
-        block_row_warps=None,
-        block_col_warps=None,
-        warp_row_tiles=None,
-        warp_col_tiles=None,
-        chunk=None,
-        stage=None,
-        enable_rasteration=None,
+
     ):
         return tl_matmul(
             M,

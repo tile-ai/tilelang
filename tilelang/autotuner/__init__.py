@@ -265,6 +265,9 @@ class AutoTuner:
         sig = inspect.signature(self.fn)
         parameters = sig.parameters
 
+        if isinstance(self.configs, Callable):
+            self.configs = self.configs(*self._kernel_parameters)
+
         key = self.generate_cache_key(parameters)
 
         with self._lock:
@@ -527,7 +530,7 @@ class _AutoTunerImplementation:
     warmup: int = 25
     rep: int = 100
     timeout: int = 100
-    configs: Any = None
+    configs: Union[Dict, Callable] = None
     supply_type: tilelang.TensorSupplyType = tilelang.TensorSupplyType.Auto
     ref_prog: Callable = None
     supply_prog: Callable = None
@@ -539,7 +542,7 @@ class _AutoTunerImplementation:
     cache_input_tensors: bool = False
 
     def __init__(self,
-                 configs: Any,
+                 configs: Union[Dict, Callable],
                  warmup: int = 25,
                  rep: int = 100,
                  timeout: int = 100,
@@ -606,7 +609,6 @@ class _AutoTunerImplementation:
         warmup = self.warmup
         rep = self.rep
         timeout = self.timeout
-        configs = self.configs
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
@@ -623,7 +625,7 @@ class _AutoTunerImplementation:
                 compile_arguments = fn(__return_compile_arguments=True)
 
                 autotuner = AutoTuner(
-                    fn, configs=configs).set_profile_args(
+                    fn, configs=self.configs).set_profile_args(
                         supply_type=self.supply_type,
                         ref_prog=self.ref_prog,
                         supply_prog=self.supply_prog,
@@ -659,7 +661,7 @@ class _AutoTunerImplementation:
 def autotune(  # This is the new public interface
     func: Union[Callable[_P, _RProg], PrimFunc, None] = None,
     *,  # Indicates subsequent arguments are keyword-only
-    configs: Any,
+    configs: Union[Dict, Callable],
     # profile arguments
     warmup: int = 25,
     rep: int = 100,
@@ -697,6 +699,13 @@ def autotune(  # This is the new public interface
         If using `@tilelang.jit(...)` to configure, this is the `out_idx` parameter.
         If using `@tilelang.jit` directly on a function, this argument is implicitly
         the function to be decorated (and `out_idx` will be `None`).
+    configs : Dict or Callable
+        Configuration space to explore during auto-tuning.
+    warmup : int, optional
+        Number of warmup iterations before timing.
+    rep : int, optional
+        Number of repetitions for timing measurements.
+    timeout : int, optional
     target : Union[str, Target], optional
         Compilation target for TVM (e.g., "cuda", "llvm"). Defaults to "auto".
     target_host : Union[str, Target], optional
