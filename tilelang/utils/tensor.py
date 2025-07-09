@@ -40,10 +40,10 @@ def map_torch_type(intype: str) -> torch.dtype:
 
 def adapt_torch2tvm(arg):
     float8_dtype_map = {
-        torch.float8_e4m3fn: "e4m3_float8",
-        torch.float8_e4m3fnuz: "e4m3_float8",
-        torch.float8_e5m2: "e5m2_float8",
-        torch.float8_e5m2fnuz: "e5m2_float8",
+        torch.float8_e4m3fn: "float8_e4m3",
+        torch.float8_e4m3fnuz: "float8_e4m3",
+        torch.float8_e5m2: "float8_e5m2",
+        torch.float8_e5m2fnuz: "float8_e5m2",
     }
     if isinstance(arg, torch.Tensor):
         if arg.dtype in {
