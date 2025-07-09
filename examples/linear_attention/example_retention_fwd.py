@@ -7,16 +7,10 @@ import tilelang.language as T
 from tilelang.profiler import do_bench
 
 import argparse
-from fla.ops.linear_attn import fused_chunk_linear_attn  # We compare with FLA
 
 
-@tl.jit(
-    out_idx=[3, 4],
-    pass_configs={
-        "tl.disable_tma_lower": True,
-        "tl.disable_warp_specialized": True
-    })
-def chunk_linear_attn_fwd_kernel(
+@tl.jit(out_idx=3, pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
+def chunk_retention_fwd_kernel(
     B,
     S,
     H,
@@ -38,15 +32,17 @@ def chunk_linear_attn_fwd_kernel(
     NT = tl.cdiv(S, chunk_size)
 
     @T.prim_func
-    def chunk_linear_attn_fwd(
+    def chunk_retention_fwd(
             Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
             K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
             V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
-            O: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore
-            final_state: T.Tensor([B, H, DK, DV], accum_dtype)):  # type: ignore
+            O: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore 
+    ):
         with T.Kernel(NV, NK, B * H) as (i_v, i_k, i_bh):
             i_b = i_bh // H
             i_h = i_bh % H
+            log_decay = T.alloc_var('float32')
+            log_decay = T.log2(1 - T.exp2(-5. - 1. * i_h))  # Head-specific log decay
 
             q = T.alloc_shared([chunk_size, BK], dtype)
             k = T.alloc_shared([chunk_size, BK], dtype)
@@ -67,7 +63,7 @@ def chunk_linear_attn_fwd_kernel(
             })
             T.use_swizzle(10)
 
-            for i in T.Pipelined(0, NT, num_stages=2):
+            for i in T.Pipelined(0, NT):
                 for row, col in T.Parallel(chunk_size, BK):
                     q[row, col] = Q[i_b, i * chunk_size + row, i_h, i_k * BK + col] * scale
                 T.copy(K[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_k * BK:(i_k + 1) * BK], k)
@@ -75,25 +71,30 @@ def chunk_linear_attn_fwd_kernel(
 
                 T.gemm(q, k, s, clear_accum=True, transpose_B=True)
                 for row, col in T.Parallel(chunk_size, chunk_size):
-                    s_shared[row, col] = T.if_then_else(row >= col, s[row, col], 0)
+                    s_shared[row,
+                             col] = T.if_then_else(row >= col, s[row, col] * T.exp2(
+                                 (row - col) * log_decay), 0)
 
-                T.gemm(s_shared, v, o, clear_accum=True)
                 T.copy(h, h_shared)
-                T.gemm(k, v, h, transpose_A=True)
-                T.gemm(q, h_shared, o)
+                T.gemm(q, h_shared, o, clear_accum=True)
+                for row, col in T.Parallel(chunk_size, BV):
+                    o[row, col] = T.exp2((row + 1) * log_decay) * o[row, col]
+                T.gemm(s_shared, v, o)
+
+                for row, col in T.Parallel(chunk_size, BV):
+                    v[row, col] = v[row, col] * T.exp2((chunk_size - row - 1) * log_decay)
+                for row, col in T.Parallel(BK, BV):
+                    h[row, col] = T.exp2(chunk_size * log_decay) * h[row, col]
                 T.copy(
                     o, O[i_k, i_b, i * chunk_size:(i + 1) * chunk_size, i_h,
                          i_v * BV:(i_v + 1) * BV])
+                T.gemm(k, v, h, transpose_A=True)
 
-            # Output final state
-            T.copy(h, final_state[i_b, i_h, i_k * BK:(i_k + 1) * BK, i_v * BV:(i_v + 1) * BV])
-
-    return chunk_linear_attn_fwd
+    return chunk_retention_fwd
 
 
-def postprocess(o, h):
-    o = o[0] if o.size(0) == 1 else o.sum(0)
-    return o, h
+def postprocess(o):
+    return o if o.size(0) == 1 else o.sum(0)
 
 
 def main():
@@ -101,31 +102,20 @@ def main():
     parser.add_argument('--B', type=int, default=8, help='Batch size')
     parser.add_argument('--S', type=int, default=4096, help='Seq len')
     parser.add_argument('--H', type=int, default=32, help='Num heads')
-    parser.add_argument('--D', type=int, default=256, help='Head dim')
+    parser.add_argument('--D', type=int, default=128, help='Head dim')
     args = parser.parse_args()
     B, S, H, D = args.B, args.S, args.H, args.D
+    total_flops = 2.0 * B * S * S * H * D  # causal
 
     q = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16)
     k = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16)
     v = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16)
 
-    kernel = chunk_linear_attn_fwd_kernel(B, S, H, D, D)
-    o, h = postprocess(*kernel(q, k, v))
-    o_ref, h_ref = fused_chunk_linear_attn(q, k, v, output_final_state=True, normalize=False)
+    kernel = chunk_retention_fwd_kernel(B, S, H, D, D)
 
-    if torch.allclose(o, o_ref) and torch.allclose(h, h_ref):
-        print('Passed all tests!✅')
-    else:
-        print('Failed some tests!❌')
-
-    t1 = do_bench(
-        lambda: fused_chunk_linear_attn(q, k, v, output_final_state=True, normalize=False)[0],
-        warmup=25,
-        rep=100)
-    t2 = do_bench(lambda: postprocess(*kernel(q, k, v)), warmup=25, rep=100)
-    print(f'Triton latency: {t1:.3f} ms')
-    print(f'TileLang latency: {t2:.3f} ms')
-    print(f'Speedup: {t1/t2:.3f}x')
+    t = do_bench(lambda: postprocess(kernel(q, k, v)), warmup=25, rep=100)
+    print(f'Tilelang latency: {t:.3f} ms')
+    print(f'Tilelang TFLOPs: {total_flops/t * 1e-9}')
 
 
 if __name__ == '__main__':
