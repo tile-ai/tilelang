@@ -86,7 +86,7 @@ class LibraryGenerator(object):
             if not disable_fast_math:
                 command += ["--use_fast_math"]
             if verbose_ptxas_output:
-                command += ["--ptxas_options", "-v"]
+                command += ["--ptxas-options", "-v"]
             command += [
                 "-I" + CUTLASS_INCLUDE_DIR,
             ]
