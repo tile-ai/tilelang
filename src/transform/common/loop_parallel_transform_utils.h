@@ -119,12 +119,10 @@ public:
           if (used_vars.count(loop_var)) {
             related_loop_vars.push_back(loop_var);
           }
-          ICHECK(related_loop_vars.size() <= 1)
-              << "Only one related loop var is supported currently, but got "
-              << related_loop_vars
-              << " implement multiple loop vars may not be "
-              << "too hard, please send an issue if you need "
-              << "came up with this message.";
+          if (related_loop_vars.size() > 1) {
+            // Only one related loop var is supported transformation currently.
+            return for_node;
+          }
 
           auto bound = analyzer_->const_int_bound(index);
           int64_t upper_bound = bound->max_value + 1;
