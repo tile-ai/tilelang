@@ -691,8 +691,7 @@ class TilelangExtensionBuild(build_ext):
             if isinstance(ext, CythonExtension):
                 self.build_cython(ext)
             elif isinstance(ext, CMakeExtension):
-                # self.build_cmake(ext)
-                print(f"Building extension: {ext.name}")
+                self.build_cmake(ext)
             else:
                 raise ValueError(f"Unsupported extension type: {type(ext)}")
 
@@ -718,13 +717,12 @@ class TilelangExtensionBuild(build_ext):
         cython_compiler = get_cython_compiler()
         if not cython_compiler:
             logger.info("Cython compiler not found, install it first")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "cython"])
+            subprocess.check_call(["pip", "install", "cython"])
             cython_compiler = get_cython_compiler()
             if not cython_compiler:
                 raise Exception("Cython is not installed, please install it first.")
 
         logger.info(f"Using Cython compiler: {cython_compiler}")
-        logger.info(f"CythonExtension: {ext.sourcedir}")
         cython_warpper_dir = os.path.join(ext.sourcedir, "tilelang", "jit", "adapter", "cython")
         cython_wrapper_path = os.path.join(cython_warpper_dir, "cython_wrapper.pyx")
         py_version = f"py{sys.version_info.major}{sys.version_info.minor}"
