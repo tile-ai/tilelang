@@ -10,7 +10,9 @@ import argparse
 from fla.ops.linear_attn import fused_chunk_linear_attn  # We compare with FLA
 
 
-@tl.jit(out_idx=[3, 4])
+@tl.jit(out_idx=[3, 4], 
+        pass_configs={"tl.disable_tma_lower": True, 
+                      "tl.disable_warp_specialized": True})
 def chunk_linear_attn_fwd_kernel(
     B,
     S,
@@ -26,16 +28,18 @@ def chunk_linear_attn_fwd_kernel(
     accum_dtype = 'float'
 
     chunk_size = 64
-    BK = BV = 64
+    BK = BV = 64  # Set to 128 can be faster, but has some numerical differences with FLA
     assert S % chunk_size == 0 and DK % BK == 0 and DV % BV == 0
     NK = tl.cdiv(DK, BK)
     NV = tl.cdiv(DV, BV)
     NT = tl.cdiv(S, chunk_size)
 
     @T.prim_func
-    def main(Q: T.Tensor([B, S, H, DK], dtype), K: T.Tensor([B, S, H, DK], dtype),
-             V: T.Tensor([B, S, H, DV], dtype), O: T.Tensor([NK, B, S, H, DV], dtype),
-             final_state: T.Tensor([B, H, DK, DV], accum_dtype)):
+    def chunk_linear_attn_fwd(Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+             K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+             V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
+             O: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore
+             final_state: T.Tensor([B, H, DK, DV], accum_dtype)):  # type: ignore
         with T.Kernel(NV, NK, B * H) as (i_v, i_k, i_bh):
             i_b = i_bh // H
             i_h = i_bh % H
@@ -57,9 +61,9 @@ def chunk_linear_attn_fwd_kernel(
                 h_shared: tl.layout.make_swizzled_layout(h_shared),
                 s_shared: tl.layout.make_swizzled_layout(s_shared),
             })
-            T.use_swizzle(8)
+            T.use_swizzle(10)
 
-            for i in T.Pipelined(0, NT, num_stages=1):
+            for i in T.Pipelined(0, NT, num_stages=2):
                 for row, col in T.Parallel(chunk_size, BK):
                     q[row, col] = Q[i_b, i * chunk_size + row, i_h, i_k * BK + col] * scale
                 T.copy(K[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_k * BK:(i_k + 1) * BK], k)
@@ -69,10 +73,10 @@ def chunk_linear_attn_fwd_kernel(
                 for row, col in T.Parallel(chunk_size, chunk_size):
                     s_shared[row, col] = T.if_then_else(row >= col, s[row, col], 0)
 
-                T.gemm(s_shared, v, o, clear_accum=True)
+                T.gemm(s_shared, v, o, clear_accum=True)  
                 T.copy(h, h_shared)
-                T.gemm(q, h_shared, o)
                 T.gemm(k, v, h, transpose_A=True)
+                T.gemm(q, h_shared, o)
                 T.copy(
                     o, O[i_k, i_b, i * chunk_size:(i + 1) * chunk_size, i_h,
                          i_v * BV:(i_v + 1) * BV])
@@ -80,10 +84,10 @@ def chunk_linear_attn_fwd_kernel(
             # Output final state
             T.copy(h, final_state[i_b, i_h, i_k * BK:(i_k + 1) * BK, i_v * BV:(i_v + 1) * BV])
 
-    return main
+    return chunk_linear_attn_fwd
 
 
-def postprocess(o, h):
+def postprocess(o, h): 
     o = o[0] if o.size(0) == 1 else o.sum(0)
     return o, h
 
@@ -91,8 +95,8 @@ def postprocess(o, h):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--B', type=int, default=8, help='Batch size')
-    parser.add_argument('--S', type=int, default=2048, help='Seq len')
-    parser.add_argument('--H', type=int, default=64, help='Num heads')
+    parser.add_argument('--S', type=int, default=4096, help='Seq len')
+    parser.add_argument('--H', type=int, default=32, help='Num heads')
     parser.add_argument('--D', type=int, default=256, help='Head dim')
     args = parser.parse_args()
     B, S, H, D = args.B, args.S, args.H, args.D
@@ -114,7 +118,7 @@ def main():
         lambda: fused_chunk_linear_attn(q, k, v, output_final_state=True, normalize=False)[0],
         warmup=25,
         rep=100)
-    t2 = do_bench(lambda: kernel(q, k, v)[0].sum(0), warmup=25, rep=100)
+    t2 = do_bench(lambda: postprocess(*kernel(q, k, v)), warmup=25, rep=100)
     print(f'Triton latency: {t1:.3f} ms')
     print(f'TileLang latency: {t2:.3f} ms')
     print(f'Speedup: {t1/t2:.3f}x')
