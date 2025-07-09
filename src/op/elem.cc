@@ -15,6 +15,7 @@
 
 #include "../target/utils.h"
 #include "../transform/common/loop_fusion_utils.h"
+#include "../transform/common/loop_parallel_transform_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
 #include "builtin.h"
@@ -167,11 +168,14 @@ Stmt Copy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
 
+  auto transformed_loop =
+      Downcast<For>(ParallelLoopTransformer::Substitute(fused_loop));
+
   For vectorized_thread_loop;
-  auto par_op = std::make_unique<ParallelOp>(fused_loop);
+  auto par_op = std::make_unique<ParallelOp>(transformed_loop);
 
   if (is_cpu_target) {
-    vectorized_thread_loop = VectorizeLoop(fused_loop);
+    vectorized_thread_loop = VectorizeLoop(transformed_loop);
   } else {
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                       InferLevel::kFree};
