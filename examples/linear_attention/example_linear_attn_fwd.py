@@ -10,9 +10,12 @@ import argparse
 from fla.ops.linear_attn import fused_chunk_linear_attn  # We compare with FLA
 
 
-@tl.jit(out_idx=[3, 4], 
-        pass_configs={"tl.disable_tma_lower": True, 
-                      "tl.disable_warp_specialized": True})
+@tl.jit(
+    out_idx=[3, 4],
+    pass_configs={
+        "tl.disable_tma_lower": True,
+        "tl.disable_warp_specialized": True
+    })
 def chunk_linear_attn_fwd_kernel(
     B,
     S,
@@ -35,11 +38,12 @@ def chunk_linear_attn_fwd_kernel(
     NT = tl.cdiv(S, chunk_size)
 
     @T.prim_func
-    def chunk_linear_attn_fwd(Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-             K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-             V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
-             O: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore
-             final_state: T.Tensor([B, H, DK, DV], accum_dtype)):  # type: ignore
+    def chunk_linear_attn_fwd(
+            Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+            K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+            V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
+            O: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore
+            final_state: T.Tensor([B, H, DK, DV], accum_dtype)):  # type: ignore
         with T.Kernel(NV, NK, B * H) as (i_v, i_k, i_bh):
             i_b = i_bh // H
             i_h = i_bh % H
@@ -73,7 +77,7 @@ def chunk_linear_attn_fwd_kernel(
                 for row, col in T.Parallel(chunk_size, chunk_size):
                     s_shared[row, col] = T.if_then_else(row >= col, s[row, col], 0)
 
-                T.gemm(s_shared, v, o, clear_accum=True)  
+                T.gemm(s_shared, v, o, clear_accum=True)
                 T.copy(h, h_shared)
                 T.gemm(k, v, h, transpose_A=True)
                 T.gemm(q, h_shared, o)
@@ -87,7 +91,7 @@ def chunk_linear_attn_fwd_kernel(
     return chunk_linear_attn_fwd
 
 
-def postprocess(o, h): 
+def postprocess(o, h):
     o = o[0] if o.size(0) == 1 else o.sum(0)
     return o, h
 

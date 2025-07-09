@@ -9,9 +9,7 @@ from tilelang.profiler import do_bench
 import argparse
 
 
-@tl.jit(out_idx=3, 
-        pass_configs={"tl.disable_tma_lower": True, 
-                      "tl.disable_warp_specialized": True})
+@tl.jit(out_idx=3, pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
 def chunk_retention_fwd_kernel(
     B,
     S,
@@ -35,16 +33,16 @@ def chunk_retention_fwd_kernel(
 
     @T.prim_func
     def chunk_retention_fwd(
-        Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-        K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-        V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
-        O: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore 
-    ):  
+            Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+            K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+            V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
+            O: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore 
+    ):
         with T.Kernel(NV, NK, B * H) as (i_v, i_k, i_bh):
             i_b = i_bh // H
             i_h = i_bh % H
             log_decay = T.alloc_var('float32')
-            log_decay = T.log2(1 - T.exp2(-5. - 1.* i_h)) # Head-specific log decay 
+            log_decay = T.log2(1 - T.exp2(-5. - 1. * i_h))  # Head-specific log decay
 
             q = T.alloc_shared([chunk_size, BK], dtype)
             k = T.alloc_shared([chunk_size, BK], dtype)
@@ -73,20 +71,18 @@ def chunk_retention_fwd_kernel(
 
                 T.gemm(q, k, s, clear_accum=True, transpose_B=True)
                 for row, col in T.Parallel(chunk_size, chunk_size):
-                    s_shared[row, col] = T.if_then_else(
-                        row >= col, 
-                        s[row, col] * T.exp2((row-col) * log_decay),
-                        0
-                    )
+                    s_shared[row,
+                             col] = T.if_then_else(row >= col, s[row, col] * T.exp2(
+                                 (row - col) * log_decay), 0)
 
                 T.copy(h, h_shared)
                 T.gemm(q, h_shared, o, clear_accum=True)
                 for row, col in T.Parallel(chunk_size, BV):
                     o[row, col] = T.exp2((row + 1) * log_decay) * o[row, col]
-                T.gemm(s_shared, v, o) 
+                T.gemm(s_shared, v, o)
 
                 for row, col in T.Parallel(chunk_size, BV):
-                    v[row, col] = v[row,col] * T.exp2((chunk_size - row - 1) * log_decay)
+                    v[row, col] = v[row, col] * T.exp2((chunk_size - row - 1) * log_decay)
                 for row, col in T.Parallel(BK, BV):
                     h[row, col] = T.exp2(chunk_size * log_decay) * h[row, col]
                 T.copy(
@@ -97,7 +93,7 @@ def chunk_retention_fwd_kernel(
     return chunk_retention_fwd
 
 
-def postprocess(o): 
+def postprocess(o):
     return o if o.size(0) == 1 else o.sum(0)
 
 
@@ -120,7 +116,7 @@ def main():
     t = do_bench(lambda: postprocess(kernel(q, k, v)), warmup=25, rep=100)
     print(f'Tilelang latency: {t:.3f} ms')
     print(f'Tilelang TFLOPs: {total_flops/t * 1e-9}')
-    
+
 
 if __name__ == '__main__':
     main()

@@ -10,9 +10,12 @@ import argparse
 from fla.ops.linear_attn import fused_chunk_linear_attn  # We compare with FLA
 
 
-@tl.jit(out_idx=[4, 5, 6], 
-        pass_configs={"tl.disable_tma_lower": True, 
-                      "tl.disable_warp_specialized": True})
+@tl.jit(
+    out_idx=[4, 5, 6],
+    pass_configs={
+        "tl.disable_tma_lower": True,
+        "tl.disable_warp_specialized": True
+    })
 def chunk_linear_attn_bwd_kernel(
     B,
     S,
@@ -110,7 +113,6 @@ def chunk_linear_attn_bwd_kernel(
                 T.copy(
                     dO[i_b, start * chunk_size:(start + 1) * chunk_size, i_h,
                        i_v * BV:(i_v + 1) * BV], do)
-                
 
                 # Calculate dk
                 T.gemm(
