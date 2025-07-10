@@ -211,5 +211,4 @@ def pythonic_expr(expr: tvm.tir.PrimExpr) -> str:
     # Perform post-order traversal
     tvm.tir.stmt_functor.post_order_visit(expr, _visitor)
 
-    # The final result is the string associated with the root expression
-    return node_to_result_map[expr][0]
+    return next(iter(node_to_result_map[expr]), "")
