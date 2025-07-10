@@ -113,48 +113,36 @@ def pythonic_expr(expr: tvm.tir.PrimExpr) -> str:
     node_to_str_map = {}  # Stores string representation for each node
 
     def _pythonic_visitor(node):
+        # Combine similar binary ops
+        bin_ops = {
+            tvm.tir.Mul: " * ",
+            tvm.tir.FloorDiv: " / ",
+            tvm.tir.Add: " + ",
+            tvm.tir.Sub: " - ",
+            tvm.tir.FloorMod: " % ",
+        }
+        minmax_ops = {
+            tvm.tir.Min: "min",
+            tvm.tir.Max: "max",
+        }
         if isinstance(node, tvm.tir.Var):
             s = node.name
         elif isinstance(node, (tvm.tir.IntImm, tvm.tir.FloatImm)):
-            # Integer constant: use value directly (ignore type)
             s = str(node.value)
         elif isinstance(node, tvm.tir.Cast):
-            # Type cast: represent as (type)value
             dtype_map = {"int64": "int64_t", "int32": "int32_t", "int8": "int8_t"}
             dtype = dtype_map.get(str(node.dtype), str(node.dtype))
             value_str = node_to_str_map.get(node.value, str(node.value))
             s = f"({dtype}){value_str}"
-        elif isinstance(node, tvm.tir.Mul):
-            # Multiplication: format as 'left * right'
+        elif type(node) in bin_ops:
             a_str = node_to_str_map.get(node.a, str(node.a))
             b_str = node_to_str_map.get(node.b, str(node.b))
-            s = f"{a_str} * {b_str}"
-        elif isinstance(node, tvm.tir.FloorDiv):
+            s = f"{a_str}{bin_ops[type(node)]}{b_str}"
+        elif type(node) in minmax_ops:
             a_str = node_to_str_map.get(node.a, str(node.a))
             b_str = node_to_str_map.get(node.b, str(node.b))
-            s = f"{a_str} / {b_str}"
-        elif isinstance(node, tvm.tir.Min):
-            a_str = node_to_str_map.get(node.a, str(node.a))
-            b_str = node_to_str_map.get(node.b, str(node.b))
-            s = f"min({a_str}, {b_str})"
-        elif isinstance(node, tvm.tir.Max):
-            a_str = node_to_str_map.get(node.a, str(node.a))
-            b_str = node_to_str_map.get(node.b, str(node.b))
-            s = f"max({a_str}, {b_str})"
-        elif isinstance(node, tvm.tir.Add):
-            a_str = node_to_str_map.get(node.a, str(node.a))
-            b_str = node_to_str_map.get(node.b, str(node.b))
-            s = f"{a_str} + {b_str}"
-        elif isinstance(node, tvm.tir.Sub):
-            a_str = node_to_str_map.get(node.a, str(node.a))
-            b_str = node_to_str_map.get(node.b, str(node.b))
-            s = f"{a_str} - {b_str}"
-        elif isinstance(node, tvm.tir.FloorMod):
-            a_str = node_to_str_map.get(node.a, str(node.a))
-            b_str = node_to_str_map.get(node.b, str(node.b))
-            s = f"{a_str} % {b_str}"
+            s = f"{minmax_ops[type(node)]}({a_str}, {b_str})"
         else:
-            # Other nodes: use default string representation
             s = str(node)
 
         # Store current node's string representation
