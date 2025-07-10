@@ -145,6 +145,12 @@ cdef class CythonKernelWrapper:
                     else:  # Already converted to Python int during initialization
                         shape.append(s)
                 device = inputs[0].device if len(inputs) > 0 else torch.cuda.current_device()
+                if len(shape) == 0:
+                    param_name = self.params[i].name if hasattr(self.params[i], 'name') else f'parameter_{i}'
+                    raise ValueError(
+                        f"Cannot create output tensor (name={param_name}) - 0-dimensional tensors are not supported. "
+                        f"Expected shape: {shape}"
+                    )
                 tensor = torch.empty(*shape, dtype=dtype, device=device)
             else:
                 tensor = inputs[ins_idx]

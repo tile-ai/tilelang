@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import List, Union, Optional
 import torch
 from tilelang import tvm as tvm
-from tvm.tir import Buffer, IntImm, Var
+from tvm.tir import Buffer, IntImm, Var, PrimExpr
 from tilelang.utils.tensor import map_torch_type
 
 
@@ -36,10 +36,10 @@ class KernelParam:
         for s in buffer.shape:
             if isinstance(s, IntImm):
                 shape.append(s.value)
-            elif isinstance(s, Var):
+            elif isinstance(s, (Var, PrimExpr)):
                 shape.append(s)
             else:
-                raise ValueError(f"Unsupported dimension type: {type(s)}")
+                raise ValueError(f"Unsupported dimension type: {type(s)} {s}")
         return cls(dtype, shape)
 
     @classmethod
