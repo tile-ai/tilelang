@@ -129,6 +129,30 @@ def pythonic_expr(expr: tvm.tir.PrimExpr) -> str:
             a_str = node_to_str_map.get(node.a, str(node.a))
             b_str = node_to_str_map.get(node.b, str(node.b))
             s = f"{a_str} * {b_str}"
+        elif isinstance(node, tvm.tir.FloorDiv):
+            a_str = node_to_str_map.get(node.a, str(node.a))
+            b_str = node_to_str_map.get(node.b, str(node.b))
+            s = f"{a_str} / {b_str}"
+        elif isinstance(node, tvm.tir.Min):
+            a_str = node_to_str_map.get(node.a, str(node.a))
+            b_str = node_to_str_map.get(node.b, str(node.b))
+            s = f"min({a_str}, {b_str})"
+        elif isinstance(node, tvm.tir.Max):
+            a_str = node_to_str_map.get(node.a, str(node.a))
+            b_str = node_to_str_map.get(node.b, str(node.b))
+            s = f"max({a_str}, {b_str})"
+        elif isinstance(node, tvm.tir.Add):
+            a_str = node_to_str_map.get(node.a, str(node.a))
+            b_str = node_to_str_map.get(node.b, str(node.b))
+            s = f"{a_str} + {b_str}"
+        elif isinstance(node, tvm.tir.Sub):
+            a_str = node_to_str_map.get(node.a, str(node.a))
+            b_str = node_to_str_map.get(node.b, str(node.b))
+            s = f"{a_str} - {b_str}"
+        elif isinstance(node, tvm.tir.FloorMod):
+            a_str = node_to_str_map.get(node.a, str(node.a))
+            b_str = node_to_str_map.get(node.b, str(node.b))
+            s = f"{a_str} % {b_str}"
         else:
             # Other nodes: use default string representation
             s = str(node)
