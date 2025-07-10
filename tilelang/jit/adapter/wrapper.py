@@ -278,15 +278,6 @@ class TLCUDASourceWrapper(object):
                         call_args.append(match)
             return call_args
 
-        def legalize_c(p):
-            # Convert TIR expressions to legal C expressions
-            # Directly convert to string since the special case handling
-            # does not alter the string representation for `tvm.tir.Var` and `IntImm`.
-            # Replace Python's floor division operator with C's division operator
-            if isinstance(p, tvm.tir.IntImm):
-                p = int(p)
-            return str(p).replace("//", "/")
-
         has_l2_persistent_map = False
         for function_name, _ in function_informations.items():
             if function_name in self.l2_persistent_map:
@@ -312,12 +303,13 @@ class TLCUDASourceWrapper(object):
             index = code.index("{", index)
 
             block_str = "dim3({}, {}, {})".format(
-                legalize_c(block_info[0]),
-                legalize_c(block_info[1]),
-                legalize_c(block_info[2]),
+                pythonic_expr(block_info[0]),
+                pythonic_expr(block_info[1]),
+                pythonic_expr(block_info[2]),
             )
             grid_str = "dim3({}, {}, {})".format(
-                legalize_c(grid_info[0]), legalize_c(grid_info[1]), legalize_c(grid_info[2]))
+                pythonic_expr(grid_info[0]), pythonic_expr(grid_info[1]),
+                pythonic_expr(grid_info[2]))
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             init_l2_persistent_map = self.generate_l2_persistent_map(function_name)
             kernel_launch_code += init_l2_persistent_map
@@ -890,15 +882,6 @@ class TLCPUSourceWrapper(object):
                     if arg["name"] == match:
                         call_args.append(match)
             return call_args
-
-        def legalize_c(p):
-            # Convert TIR expressions to legal C expressions
-            # Directly convert to string since the special case handling
-            # does not alter the string representation for `tvm.tir.Var` and `IntImm`.
-            # Replace Python's floor division operator with C's division operator
-            if isinstance(p, tvm.tir.IntImm):
-                p = int(p)
-            return str(p).replace("//", "/")
 
         _call_str = """"""
 

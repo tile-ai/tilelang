@@ -104,37 +104,108 @@ def get_annotated_mod(
 
 
 def pythonic_expr(expr: tvm.tir.PrimExpr) -> str:
+    """
+    Converts a TVM PrimExpr into a Python-style string, correctly handling operator precedence.
+
+    Args:
+        expr: The TVM PrimExpr to convert.
+
+    Returns:
+        A string representation of the expression.
+    """
     if not isinstance(expr, tvm.tir.PrimExpr):
         return str(expr)
-    python_str = ""
-    node_to_str_map = {}  # Stores string representation for each node
 
-    def _pythonic_visitor(node):
+    # 1. Define operator precedence (higher value means higher precedence)
+    # Based on Python's operator precedence
+    PRECEDENCE = {
+        tvm.tir.Call: 20,  # Includes min, max
+        tvm.tir.Cast: 20,  # Treated like a function call
+        tvm.tir.Mul: 13,
+        tvm.tir.FloorDiv: 13,
+        tvm.tir.Div: 13,  # For tvm.tir.Div if it appears
+        tvm.tir.FloorMod: 13,
+        tvm.tir.Add: 12,
+        tvm.tir.Sub: 12,
+        tvm.tir.LT: 10,
+        tvm.tir.LE: 10,
+        tvm.tir.GT: 10,
+        tvm.tir.GE: 10,
+        tvm.tir.EQ: 10,
+        tvm.tir.NE: 10,
+        tvm.tir.And: 5,
+        tvm.tir.Or: 4,
+        # Atoms (Var, IntImm) have the highest precedence implicitly
+    }
+    # By default, atomic expressions (variables, constants) have the highest precedence
+    ATOMIC_PRECEDENCE = 100
+
+    node_to_result_map = {}  # Stores (string, precedence) for each node
+
+    def _visitor(node):
+        # 2. Visitor returns (str, precedence) tuple
+        if node in node_to_result_map:
+            return
+
         if isinstance(node, tvm.tir.Var):
-            s = node.name
+            s, p = node.name, ATOMIC_PRECEDENCE
         elif isinstance(node, (tvm.tir.IntImm, tvm.tir.FloatImm)):
-            # Integer constant: use value directly (ignore type)
-            s = str(node.value)
+            s, p = str(node.value), ATOMIC_PRECEDENCE
         elif isinstance(node, tvm.tir.Cast):
-            # Type cast: represent as (type)value
-            dtype_map = {"int64": "int64_t", "int32": "int32_t", "int8": "int8_t"}
-            dtype = dtype_map.get(str(node.dtype), str(node.dtype))
-            value_str = node_to_str_map.get(node.value, str(node.value))
-            s = f"({dtype}){value_str}"
-        elif isinstance(node, tvm.tir.Mul):
-            # Multiplication: format as 'left * right'
-            a_str = node_to_str_map.get(node.a, str(node.a))
-            b_str = node_to_str_map.get(node.b, str(node.b))
-            s = f"{a_str} * {b_str}"
-        else:
-            # Other nodes: use default string representation
-            s = str(node)
+            # C-style cast has high precedence
+            value_str, _ = node_to_result_map[node.value]
+            s = f"({node.dtype}){value_str}"
+            p = PRECEDENCE.get(type(node), ATOMIC_PRECEDENCE)
+        elif isinstance(
+                node,
+            (tvm.tir.Mul, tvm.tir.FloorDiv, tvm.tir.Add, tvm.tir.Sub, tvm.tir.FloorMod, tvm.tir.LT,
+             tvm.tir.LE, tvm.tir.GT, tvm.tir.GE, tvm.tir.EQ, tvm.tir.NE, tvm.tir.And, tvm.tir.Or)):
+            op_map = {
+                tvm.tir.Mul: "*",
+                tvm.tir.FloorDiv: "/",
+                tvm.tir.Add: "+",
+                tvm.tir.Sub: "-",
+                tvm.tir.FloorMod: "%",
+                tvm.tir.LT: "<",
+                tvm.tir.LE: "<=",
+                tvm.tir.GT: ">",
+                tvm.tir.GE: ">=",
+                tvm.tir.EQ: "==",
+                tvm.tir.NE: "!=",
+                tvm.tir.And: "and",
+                tvm.tir.Or: "or",
+            }
+            op_str = f" {op_map[type(node)]} "
+            my_precedence = PRECEDENCE[type(node)]
 
-        # Store current node's string representation
-        node_to_str_map[node] = s
-        nonlocal python_str
-        python_str = s  # Update global string (retain root node in the end)
+            a_str, a_precedence = node_to_result_map[node.a]
+            b_str, b_precedence = node_to_result_map[node.b]
+
+            # 3. Add parentheses intelligently
+            # Add parentheses if the left operand's precedence is lower than the current operator
+            if a_precedence < my_precedence:
+                a_str = f"({a_str})"
+            # Add parentheses if the right operand's precedence is lower than or equal to the current operator
+            # 'Equal' is to handle non-associative operations, e.g., a - (b - c)
+            if b_precedence <= my_precedence:
+                b_str = f"({b_str})"
+
+            s = f"{a_str}{op_str}{b_str}"
+            p = my_precedence
+        elif isinstance(node, (tvm.tir.Min, tvm.tir.Max)):
+            op_name = "min" if isinstance(node, tvm.tir.Min) else "max"
+            a_str, _ = node_to_result_map[node.a]
+            b_str, _ = node_to_result_map[node.b]
+            s = f"{op_name}({a_str}, {b_str})"
+            # Function calls have high precedence
+            p = PRECEDENCE.get(tvm.tir.Call, ATOMIC_PRECEDENCE)
+        else:
+            # Fallback for unhandled expression types
+            s, p = str(node), 0
+
+        node_to_result_map[node] = (s, p)
 
     # Perform post-order traversal
-    tvm.tir.stmt_functor.post_order_visit(expr, _pythonic_visitor)
-    return python_str
+    tvm.tir.stmt_functor.post_order_visit(expr, _visitor)
+
+    return next(iter(node_to_result_map[expr]), "")

@@ -3,9 +3,6 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm as tvm
 
-tilelang.testing.set_random_seed(0)
-tilelang.disable_cache()
-
 
 @tilelang.jit(pass_configs={"tl.disable_dynamic_tail_split": True, "tl.dynamic_alignment": 8})
 def matmul_dynamic_mnk(
