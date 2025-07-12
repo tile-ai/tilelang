@@ -15,8 +15,7 @@ def allow_warp_specialized(pass_ctx: Optional[PassContext] = None,
 
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    # Warp specialized pass is recommended for Hopper or later architectures
-    if not is_cuda_target(target) or not have_tma(target):
+    if (not is_cuda_target(target)) or (not have_tma(target)):
         return False
     disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
     return not disable_warp_specialized
@@ -127,6 +126,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
             # so we need to inject a fence proxy before it
             mod = tilelang.transform.InjectFenceProxy()(mod)
 
+    mod = tilelang.transform.LowerStmtGroupBlock()(mod)
     mod = tir.transform.LowerOpaqueBlock()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
@@ -134,7 +134,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tir.transform.Simplify()(mod)
 
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
-    mod = tir.transform.StorageRewrite()(mod)
+    mod = tilelang.transform.StorageRewrite()(mod)
     mod = tir.transform.UnrollLoop()(mod)
     mod = tir.transform.RenormalizeSplitPattern()(mod)
     mod = tir.transform.Simplify()(mod)
@@ -155,7 +155,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # the Legalization.
     mod = tilelang.transform.ThreadPartialSync("shared.dyn")(mod)
     mod = tir.transform.InferFragment()(mod)
-    mod = tir.transform.LowerThreadAllreduce()(mod)
+    mod = tilelang.transform.LowerThreadAllreduce()(mod)
     mod = tilelang.transform.LowerHopperIntrin()(mod)
 
     # Global Barrier Synchronization must be applied before

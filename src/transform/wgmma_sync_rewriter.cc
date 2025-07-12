@@ -131,7 +131,7 @@ private:
 
   Stmt VisitStmt_(const ForNode *op) final {
     auto order_anno = op->annotations.Get("tl_pipeline_order");
-    if (!order_anno.defined()) {
+    if (!order_anno) {
       return StmtExprMutator::VisitStmt_(op);
     }
 
@@ -281,7 +281,7 @@ tvm::transform::Pass RewriteWgmmaSync() {
   return CreatePrimFuncPass(pass_func, 0, "tl.RewriteWgmmaSync", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.RewriteWgmmaSync")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.RewriteWgmmaSync")
     .set_body_typed(RewriteWgmmaSync);
 
 } // namespace tl

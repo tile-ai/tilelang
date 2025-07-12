@@ -233,7 +233,7 @@ tvm::transform::Pass InjectPTXAsyncCopy() {
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectPTXAsyncCopy", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.InjectPTXAsyncCopy")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.InjectPTXAsyncCopy")
     .set_body_typed(InjectPTXAsyncCopy);
 
 } // namespace tl

@@ -68,7 +68,7 @@ ForFrame ParallelFor(Array<PrimExpr> extents,
       Var var = vars[i];
       body =
           For(var, dom->min, dom->extent, ForKind::kParallel, std::move(body),
-              /*thread_binding=*/NullOpt, /*annotations=*/annotations);
+              /*thread_binding=*/std::nullopt, /*annotations=*/annotations);
     }
     return body;
   };
@@ -102,7 +102,7 @@ ForFrame PipelinedFor(PrimExpr start, PrimExpr stop, int num_stages,
       anno.Set("tl_pipeline_group", groups);
     body = For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kSerial,
                std::move(body),
-               /*thread_binding=*/NullOpt, /*annotations=*/anno);
+               /*thread_binding=*/std::nullopt, /*annotations=*/anno);
     return body;
   };
   return ForFrame(n);
@@ -160,7 +160,7 @@ ForFrame PersistentFor(Array<PrimExpr> domain, PrimExpr wave_size,
         Stmt());
 
     Stmt outer = For(loop_var, 0, waves, ForKind::kSerial,
-                     SeqStmt({out_if, body}), NullOpt, anno);
+                     SeqStmt({out_if, body}), std::nullopt, anno);
     for (int i = 0; i < vars.size() - 1; ++i) {
       outer = tvm::tir::LetStmt(vars[i], idxs[i + 1], outer);
     }
@@ -282,10 +282,10 @@ KernelLaunchFrame KernelLaunch(Array<PrimExpr> grid_size,
 
 TVM_REGISTER_NODE_TYPE(KernelLaunchFrameNode);
 
-TVM_REGISTER_GLOBAL("tl.Parallel").set_body_typed(ParallelFor);
-TVM_REGISTER_GLOBAL("tl.Pipelined").set_body_typed(PipelinedFor);
-TVM_REGISTER_GLOBAL("tl.Persistent").set_body_typed(PersistentFor);
-TVM_REGISTER_GLOBAL("tl.KernelLaunch").set_body_typed(KernelLaunch);
+TVM_FFI_REGISTER_GLOBAL("tl.Parallel").set_body_typed(ParallelFor);
+TVM_FFI_REGISTER_GLOBAL("tl.Pipelined").set_body_typed(PipelinedFor);
+TVM_FFI_REGISTER_GLOBAL("tl.Persistent").set_body_typed(PersistentFor);
+TVM_FFI_REGISTER_GLOBAL("tl.KernelLaunch").set_body_typed(KernelLaunch);
 
 class WarpSpecializeFrameNode : public TIRFrameNode {
 public:
@@ -362,7 +362,7 @@ WarpSpecializeFrame WarpSpecialize(Array<IntImm> warp_group_ids,
 }
 
 TVM_REGISTER_NODE_TYPE(WarpSpecializeFrameNode);
-TVM_REGISTER_GLOBAL("tl.WarpSpecialize").set_body_typed(WarpSpecialize);
+TVM_FFI_REGISTER_GLOBAL("tl.WarpSpecialize").set_body_typed(WarpSpecialize);
 
 } // namespace tl
 } // namespace tvm

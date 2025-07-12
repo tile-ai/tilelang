@@ -316,7 +316,7 @@ private:
     }
     if (op->annotations.count(attr::kPaddingMap)) {
       auto map = op->annotations.Get(attr::kPaddingMap)
-                     .as<Map<Var, PrimExpr>>()
+                     ->as<Map<Var, PrimExpr>>()
                      .value();
       for (const auto &[var, padding] : map) {
         ICHECK(buffer_data_to_buffer_.count(var))
@@ -356,7 +356,7 @@ tvm::transform::Pass LegalizeSafeMemoryAccess() {
 }
 
 // Register the pass globally so it can be used in the compilation pipeline
-TVM_REGISTER_GLOBAL("tl.transform.LegalizeSafeMemoryAccess")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.LegalizeSafeMemoryAccess")
     .set_body_typed(LegalizeSafeMemoryAccess);
 
 } // namespace tl

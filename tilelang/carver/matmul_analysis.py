@@ -510,11 +510,11 @@ def normalize_to_matmul(sch: tir.Schedule,
     matmul_index_map, a_index_map, b_index_map, c_index_map = index_maps
 
     # `skip_simplify` to  avoid the bug in the 1x1 conv
-    block = sch.reindex(main_block, ("read", 0), skip_simplify=True)
+    block = sch.reindex(main_block, ("read", 0))
     sch.transform_layout(block, ("write", 0), a_index_map)
-    block = sch.reindex(main_block, ("read", 1), skip_simplify=True)
+    block = sch.reindex(main_block, ("read", 1))
     sch.transform_layout(block, ("write", 0), b_index_map)
-    block = sch.reindex(main_block, ("write", 0), skip_simplify=True)
+    block = sch.reindex(main_block, ("write", 0))
     sch.transform_layout(block, ("read", 0), c_index_map)
     sch.transform_block_layout(main_block, matmul_index_map)
     sch.mod["main"] = sch.mod["main"].with_attr("dlight.tensorcore_prenormlized", True)
@@ -698,14 +698,14 @@ def get_propagate_map(trans: bool = True, dtype="float16", matrix_name="A", inde
         "bfloat16",
         "float16",
         "int8",
-        "e4m3_float8",
-        "e5m2_float8",
-    ], "Only support bfloat16, float16, int8, e4m3_float8, e5m2_float8"
+        "float8_e4m3",
+        "float8_e5m2",
+    ], "Only support bfloat16, float16, int8, float8_e4m3, float8_e5m2"
     # TODO(lei): actually should analyze based on bits instead of dtype
     if dtype in ["bfloat16", "float16"]:
         ldmatrix_layout = ldmatrix_32x8_to_shared_16x16_layout
         ldmatrix_layout_trans = ldmatrix_trans_32x8_to_shared_16x16_layout
-    elif dtype in ["int8", "e4m3_float8", "e5m2_float8"]:
+    elif dtype in ["int8", "float8_e4m3", "float8_e5m2"]:
         # int8 mma only support 32x16 to 16x32 layout
         if matrix_name == "A" and trans is False:
             ldmatrix_layout = ldmatrix_32x16_to_shared_16x32_layout_a
@@ -763,12 +763,12 @@ def get_ladder_stage3_map(dtype="float16", index_dtype="int32"):
         "bfloat16",
         "float16",
         "int8",
-        "e4m3_float8",
-        "e5m2_float8",
-    ], "Only support float16, int8, e4m3_float8, e5m2_float8"
+        "float8_e4m3",
+        "float8_e5m2",
+    ], "Only support float16, int8, float8_e4m3, float8_e5m2"
     if dtype in ["bfloat16", "float16"]:
         stage3_layout = shared_32x8_to_mma_32x8_layout
-    elif dtype in ["int8", "e4m3_float8", "e5m2_float8"]:
+    elif dtype in ["int8", "float8_e4m3", "float8_e5m2"]:
         stage3_layout = shared_32x16_to_mma_32x16_layout
     else:
         raise ValueError("Unknown dtype ", dtype)

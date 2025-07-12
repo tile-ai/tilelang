@@ -304,7 +304,7 @@ tvm::transform::Pass InjectTmaBarrier() {
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectTmaBarrier", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.InjectTmaBarrier")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.InjectTmaBarrier")
     .set_body_typed(InjectTmaBarrier);
 
 } // namespace tl

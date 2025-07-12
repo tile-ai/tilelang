@@ -1,13 +1,14 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 # ruff: noqa
-import tilelang
+import pytest
+
 from tilelang import tvm as tvm
 import tilelang.testing
 from tvm import te
 from tvm.script import ir as I
+
 from tilelang import language as T
-import pytest
 
 simple_target = tvm.target.Target("llvm -mtriple=x86_64-linux-gnu")
 sve_target = tvm.target.Target("llvm -device=arm_cpu -mtriple=aarch64-linux-gnu -mattr=+v8.2a,+sve")
@@ -130,14 +131,16 @@ def test_vectorize_vector_scalable_error4():
 
 
 @tilelang.testing.requires_llvm
-@pytest.mark.parametrize("extent, target", [(4, simple_target), (T.vscale() * 4, sve_target)])
-def test_vectorize_with_if(extent, target):
+def test_vectorize_with_if():
+    extent = 4
+    target = simple_target
 
     @I.ir_module
     class Before:
 
         @T.prim_func
-        def main(A: T.Tensor((25,), "float32"), n: T.int32, x: T.int32):
+        def main(a: T.handle, n: T.int32, x: T.int32):
+            A = T.match_buffer(a, (25,), "float32")
             for i in T.vectorized(extent):
                 if x < n:
                     A[i] = A[i] + T.float32(1)
@@ -149,7 +152,8 @@ def test_vectorize_with_if(extent, target):
     class After:
 
         @T.prim_func
-        def main(A: T.Tensor((25,), "float32"), n: T.int32, x: T.int32):
+        def main(a: T.handle, n: T.int32, x: T.int32):
+            A = T.match_buffer(a, (25,), "float32")
             if x < n:
                 A[T.Ramp(0, 1,
                          extent)] = A[T.Ramp(0, 1, extent)] + T.Broadcast(T.float32(1), extent)
@@ -163,18 +167,6 @@ def test_vectorize_with_if(extent, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
-@tilelang.testing.requires_llvm
-def test_vectorize_with_if_cond_int64():
-    m = te.size_var("m", dtype="int64")
-    A = te.placeholder((m,), name="A", dtype="float32")
-    B = te.compute((m,), lambda i: te.if_then_else(i < 2, A[i], A[i] * 2), name="B")
-    s = te.create_schedule(B.op)
-    x, y = s[B].split(B.op.axis[0], factor=4)
-    s[B].vectorize(y)
-    f = tvm.build(s, [A, B], "llvm")
-
-
-@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (T.vscale() * 4, sve_target)])
 def test_vectorize_let(extent, target):
 
@@ -200,7 +192,6 @@ def test_vectorize_let(extent, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
-@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (tvm.tir.vscale() * 4, sve_target)])
 def test_vectorize_with_le_cond(extent, target):
     n = te.var("n")
@@ -220,7 +211,6 @@ def test_vectorize_with_le_cond(extent, target):
         assert isinstance(stmt, tvm.tir.For)
 
 
-@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (tvm.tir.vscale() * 4, sve_target)])
 def test_vectorize_with_ge_cond(extent, target):
     n = te.var("n")
@@ -240,7 +230,6 @@ def test_vectorize_with_ge_cond(extent, target):
         assert isinstance(stmt, tvm.tir.For)
 
 
-@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (T.vscale() * 4, sve_target)])
 def test_vectorize_if_then_else_scalarize(extent, target):
 
@@ -265,7 +254,6 @@ def test_vectorize_if_then_else_scalarize(extent, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
-@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (T.vscale() * 4, sve_target)])
 def test_vectorize_if_then_else_vector(extent, target):
 
@@ -294,6 +282,32 @@ def test_vectorize_if_then_else_vector(extent, target):
 
 
 @tilelang.testing.requires_llvm
+def test_vectorize_let_if_then_else():
+
+    @I.ir_module
+    class Before:
+
+        @T.prim_func
+        def main():
+            for i in T.vectorized(4):
+                if i < 2:
+                    result: T.int32 = T.if_then_else(i < 1, 1, 2)
+
+    @I.ir_module
+    class After:
+
+        @T.prim_func
+        def main():
+            for i_s in range(4):
+                if i_s < 2:
+                    result: T.int32 = T.if_then_else(i_s < 1, 1, 2)
+                    T.evaluate(0)
+
+    with tvm.target.Target(simple_target):
+        mod = tilelang.transform.VectorizeLoop()(Before)
+        tvm.ir.assert_structural_equal(mod, After)
+
+
 def test_vectorize_while_fail():
     """A while loop inside a vectorized loop should fail."""
 
@@ -330,10 +344,9 @@ def test_vectorize_while_fail():
         name="while_vectorize",
         dtype=dtype,
     )
-    s = te.create_schedule(C.op)
 
     try:
-        tvm.lower(s, [A, B, C], "llvm")
+        tvm.compile(te.create_prim_func([A, B, C]), target="llvm")
         assert False
     except tvm.error.TVMError as e:
         error_msg = str(e).split("\n")[-1]
@@ -341,16 +354,6 @@ def test_vectorize_while_fail():
         assert expected in error_msg
 
 
-@tilelang.testing.requires_llvm
-def test_vectorize_dtype_mismatch():
-    n = tvm.tir.IntImm("int64", 4)
-    A = te.compute((n,), lambda i: tvm.tir.IntImm("int64", 2**31 - 1) + i, name="A")
-    s = te.create_schedule(A.op)
-    s[A].vectorize(A.op.axis[0])
-    tvm.lower(s, [A], "llvm", simple_mode=True)
-
-
-@tilelang.testing.requires_llvm
 @pytest.mark.parametrize(
     "extent, vec_str, target",
     [(16, "float32x16", simple_target), (T.vscale() * 8, "float32xvscalex8", sve_target)],
@@ -377,7 +380,6 @@ def test_vectorize_with_reinterpret(extent, vec_str, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
-@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (T.vscale() * 4, sve_target)])
 @pytest.mark.parametrize(
     "op",
@@ -421,7 +423,6 @@ def test_vectorize_binary(op, extent, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
-@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (T.vscale() * 4, sve_target)])
 @pytest.mark.parametrize("op", (T.And, T.Or))
 def test_vectorize_logical(op, extent, target):
@@ -446,7 +447,6 @@ def test_vectorize_logical(op, extent, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
-@tilelang.testing.requires_llvm
 @pytest.mark.parametrize("extent, target", [(4, simple_target), (T.vscale() * 4, sve_target)])
 def test_vectorize_select(extent, target):
 
@@ -474,7 +474,6 @@ def test_vectorize_select(extent, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
-@tilelang.testing.requires_llvm
 @pytest.mark.parametrize(
     "extent, vec_str, target",
     [(4, "int32x4", simple_target), (T.vscale() * 4, "int32xvscalex4", sve_target)],
@@ -501,7 +500,6 @@ def test_vectorize_cast(extent, vec_str, target):
         tvm.ir.assert_structural_equal(mod, After)
 
 
-@tilelang.testing.requires_llvm
 def test_illegal_extent():
 
     @I.ir_module(check_well_formed=False)
@@ -518,7 +516,6 @@ def test_illegal_extent():
         tilelang.transform.VectorizeLoop()(Mod)
 
 
-@tilelang.testing.requires_llvm
 def test_illegal_vscale_in_non_sve_compilation():
 
     @I.ir_module
@@ -534,6 +531,102 @@ def test_illegal_vscale_in_non_sve_compilation():
     with tvm.target.Target(simple_target):
         with pytest.raises(tvm.error.InternalError, match=msg):
             tilelang.transform.VectorizeLoop()(Mod)
+
+
+def test_vectorize_and_predicate_some_buffer_loads_stores():
+    # Currently revert to scalarizing the block if not all accesses
+    # have been predicated, otherwise incorrect code is generated.
+    @T.prim_func
+    def before(a: T.handle, b: T.handle):
+        A = T.match_buffer(a, (16,), "float32")
+        B = T.match_buffer(b, (16,), "float32")
+        T.func_attr({"global_symbol": "main", "tir.noalias": True})
+        for i_0 in T.serial(T.ceildiv(14, 4)):
+            for i_1 in T.vectorized(4):
+                if i_0 * 4 + i_1 < 14:
+                    B[i_0 * 4 + i_1] = A[i_0] + 1.0
+
+    @T.prim_func
+    def expected(a: T.handle, b: T.handle):
+        A = T.match_buffer(a, (16,), "float32")
+        B = T.match_buffer(b, (16,), "float32")
+        T.func_attr({"global_symbol": "main", "tir.noalias": True})
+        for i_0, i_1_s in T.grid(4, 4):
+            if i_0 * 4 + i_1_s < 14:
+                B[i_0 * 4 + i_1_s] = A[i_0] + T.float32(1)
+
+    mod = tvm.IRModule.from_expr(before)
+    with tvm.transform.PassContext(config={"tir.enable_buffer_level_predication": True}):
+        after = tilelang.transform.VectorizeLoop()(mod)["main"]
+    tvm.ir.assert_structural_equal(after, expected)
+
+
+def test_vectorize_and_predicate_invalid_conditions():
+
+    @T.prim_func
+    def before(a: T.handle, b: T.handle):
+        A = T.match_buffer(a, (16,), "float32")
+        B = T.match_buffer(b, (16,), "float32")
+        T.func_attr({"global_symbol": "main", "tir.noalias": True})
+        for i_0 in T.serial(T.ceildiv(14, 4)):
+            for i_1 in T.vectorized(4):
+                if i_0 * 4 + i_1 > 14:
+                    A[i_0 * 4 + i_1] = 2.0
+                if 14 < i_0 * 4 + i_1:
+                    A[i_0 * 4 + i_1] = 2.0
+                if i_0 * 4 + i_1 < i_0 * 4 + i_1:
+                    A[i_0 * 4 + i_1] = 2.0
+
+    @T.prim_func
+    def expected(a: T.handle, b: T.handle):
+        A = T.match_buffer(a, (16,), "float32")
+        B = T.match_buffer(b, (16,), "float32")
+        T.func_attr({"global_symbol": "main", "tir.noalias": True})
+        for i_0 in range(4):
+            for i_1_s in range(4):
+                if i_0 * 4 + i_1_s > 14:
+                    A[i_0 * 4 + i_1_s] = T.float32(2)
+            for i_1_s in range(4):
+                if 14 < i_0 * 4 + i_1_s:
+                    A[i_0 * 4 + i_1_s] = T.float32(2)
+            for i_1_s in range(4):
+                if i_0 * 4 + i_1_s < i_0 * 4 + i_1_s:
+                    A[i_0 * 4 + i_1_s] = T.float32(2)
+
+    before_mod = tvm.IRModule.from_expr(before)
+    with tvm.transform.PassContext(config={"tir.enable_buffer_level_predication": True}):
+        after = tilelang.transform.VectorizeLoop()(before_mod)["main"]
+    tvm.ir.assert_structural_equal(after, expected)
+
+
+def test_vectorize_with_explicitly_disabled_buffer_level_predication():
+    # Since the target has the VLA feature, buffer level predication is enabled
+    # by default. However, it has been explicitly disabled by the pass context
+    # option, so no buffer-level predicates should be added.
+    @T.prim_func
+    def before(a: T.handle, b: T.handle):
+        A = T.match_buffer(a, (16,), "float32")
+        B = T.match_buffer(b, (16,), "float32")
+        T.func_attr({"global_symbol": "main", "tir.noalias": True})
+        for i_0 in T.serial(T.ceildiv(14, 4)):
+            for i_1 in T.vectorized(4):
+                if i_0 * 4 + i_1 < 14:
+                    B[i_0 * 4 + i_1] = A[i_0 * 4 + i_1] + 1.0
+
+    @T.prim_func
+    def expected(a: T.handle, b: T.handle):
+        A = T.match_buffer(a, (16,), "float32")
+        B = T.match_buffer(b, (16,), "float32")
+        T.func_attr({"global_symbol": "main", "tir.noalias": True})
+        for i_0, i_1_s in T.grid(4, 4):
+            if i_0 * 4 + i_1_s < 14:
+                B[i_0 * 4 + i_1_s] = A[i_0 * 4 + i_1_s] + T.float32(1)
+
+    mod = tvm.IRModule.from_expr(before)
+    with tvm.transform.PassContext(config={"tir.enable_buffer_level_predication": False}):
+        with tvm.target.Target(sve_target):
+            after = tilelang.transform.VectorizeLoop()(mod)["main"]
+    tvm.ir.assert_structural_equal(after, expected)
 
 
 if __name__ == "__main__":

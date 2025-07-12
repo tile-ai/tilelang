@@ -98,9 +98,9 @@ runtime::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
   return ROCMModuleCreate("ptx", "fmt", ExtractFuncInfo(mod), code,
                           std::string());
 }
-TVM_REGISTER_GLOBAL("target.build.tilelang_hip")
+TVM_FFI_REGISTER_GLOBAL("target.build.tilelang_hip")
     .set_body_typed(BuildTileLangHIP);
-TVM_REGISTER_GLOBAL("target.build.tilelang_hip_without_compile")
+TVM_FFI_REGISTER_GLOBAL("target.build.tilelang_hip_without_compile")
     .set_body_typed(BuildTileLangHIPWithoutCompile);
 
 } // namespace codegen

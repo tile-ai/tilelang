@@ -150,7 +150,7 @@ tvm::transform::Pass LowerHopperIntrin() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerHopperIntrin", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.LowerHopperIntrin")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.LowerHopperIntrin")
     .set_body_typed(LowerHopperIntrin);
 #endif // (CUDA_MAJOR_VERSION >= 12)
 

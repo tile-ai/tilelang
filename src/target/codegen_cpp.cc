@@ -22,27 +22,22 @@
  */
 #include "codegen_cpp.h"
 
-#include <tvm/relay/executor.h>
-#include <tvm/relay/runtime.h>
 #include <tvm/runtime/module.h>
 #include <tvm/target/codegen.h>
 
-#include <algorithm>
 #include <string>
 #include <unordered_set>
 #include <utility>
-#include <vector>
 
 #include "support/str_escape.h"
 #include "target/build_common.h"
-#include "target/func_registry_generator.h"
 #include "target/source/codegen_params.h"
 
 namespace tvm {
 namespace codegen {
 
 CodeGenTileLangCPP::CodeGenTileLangCPP() {
-  module_name_ = name_supply_->FreshName("__tvm_module_ctx");
+  module_name_ = name_supply_->FreshName("__tvm_ffi_library_ctx");
 }
 
 void CodeGenTileLangCPP::Init(bool output_ssa, bool emit_asserts,
@@ -59,7 +54,7 @@ void CodeGenTileLangCPP::Init(bool output_ssa, bool emit_asserts,
 }
 
 void CodeGenTileLangCPP::InitGlobalContext() {
-  decl_stream << "void* " << tvm::runtime::symbol::tvm_module_ctx
+  decl_stream << "void* " << tvm::runtime::symbol::tvm_ffi_library_ctx
               << " = NULL;\n";
 }
 
@@ -384,13 +379,13 @@ void CodeGenTileLangCPP::VisitExpr_(const CallNode *op,
     const std::string &type = op->args[0].as<StringImmNode>()->value;
     const IntImmNode *num = op->args[1].as<IntImmNode>();
     ICHECK(num != nullptr);
-    static_assert(alignof(TVMValue) % alignof(DLTensor) == 0, "invariant");
-    size_t unit = sizeof(TVMValue);
+    static_assert(alignof(TVMFFIAny) % alignof(DLTensor) == 0, "invariant");
+    size_t unit = sizeof(TVMFFIAny);
     size_t size = 0;
     if (type == "shape") {
-      size = (num->value * sizeof(tvm_index_t) + unit - 1) / unit;
+      size = (num->value * sizeof(runtime::tvm_index_t) + unit - 1) / unit;
     } else if (type == "arg_value") {
-      size = (num->value * sizeof(TVMValue) + unit - 1) / unit;
+      size = (num->value * sizeof(TVMFFIAny) + unit - 1) / unit;
     } else if (type == "arg_tcode") {
       size = (num->value * sizeof(int) + unit - 1) / unit;
     } else if (type == "array") {
@@ -399,7 +394,7 @@ void CodeGenTileLangCPP::VisitExpr_(const CallNode *op,
       LOG(FATAL) << "Unknown stack alloca type " << type;
     }
     this->PrintIndent();
-    this->stream << "TVMValue " << stack_name << "[" << size << "];\n";
+    this->stream << "TVMFFIAny " << stack_name << "[" << size << "];\n";
     os << stack_name;
   } else if (op->op.same_as(builtin::tvm_call_packed_lowered())) {
     auto function_info = GetFunctionInfo(op, false /* has_resource_handle */);

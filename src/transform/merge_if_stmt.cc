@@ -93,7 +93,7 @@ tvm::transform::Pass MergeIfStmt() {
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeIfStmt", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.MergeIfStmt").set_body_typed(MergeIfStmt);
+TVM_FFI_REGISTER_GLOBAL("tl.transform.MergeIfStmt").set_body_typed(MergeIfStmt);
 
 } // namespace tl
 } // namespace tvm

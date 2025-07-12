@@ -150,7 +150,7 @@ tvm::transform::Pass AlignDynamicSharedMemoryAllocations(int align_bytes) {
                             "tl.AlignDynamicSharedMemoryAllocations", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.AlignDynamicSharedMemoryAllocations")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.AlignDynamicSharedMemoryAllocations")
     .set_body_typed(AlignDynamicSharedMemoryAllocations);
 
 } // namespace tl
