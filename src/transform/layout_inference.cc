@@ -155,11 +155,21 @@ public:
               continue;
             }
           }
+
           // If already in map, ensure they are structurally equal
-          ICHECK(StructuralEqual()(layout, layout_map[buffer]))
-              << "Get different layout for " << buffer
-              << "\n current layout: " << layout->DebugOutput()
-              << "\n previous layout: " << layout_map[buffer]->DebugOutput();
+          if (level == InferLevel::kStrict ||
+              !strict_layout_map.count(buffer)) {
+            // When the inference level is not kStrict, we must not modify
+            // layouts that were already determined at the kStrict level. The
+            // strict_layout_map contains these layouts. Therefore, we only
+            // perform the structural equality check if the current level is
+            // kStrict, or if the buffer does not have a pre-existing strict
+            // layout.
+            ICHECK(StructuralEqual()(layout, layout_map[buffer]))
+                << "Get different layout for " << buffer
+                << "\n current layout: " << layout->DebugOutput()
+                << "\n previous layout: " << layout_map[buffer]->DebugOutput();
+          }
         } else {
           // Otherwise, update map
           layout_map.Set(buffer, layout);
