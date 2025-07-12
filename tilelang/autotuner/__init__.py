@@ -29,9 +29,9 @@ from pathlib import Path
 
 from tilelang.env import (
     TILELANG_CACHE_DIR,
-    TILELNAG_AUTO_TUNING_CPU_UTILITIES,
-    TILELNAG_AUTO_TUNING_CPU_COUNTS,
-    TILELNAG_AUTO_TUNING_MAX_CPU_COUNT,
+    TILELANG_AUTO_TUNING_CPU_UTILITIES,
+    TILELANG_AUTO_TUNING_CPU_COUNTS,
+    TILELANG_AUTO_TUNING_MAX_CPU_COUNT,
     is_cache_enabled,
 )
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
@@ -429,9 +429,9 @@ class AutoTuner:
                 return autotuner_result
         # get the cpu count
         available_cpu_count = get_available_cpu_count()
-        cpu_utilizations = float(TILELNAG_AUTO_TUNING_CPU_UTILITIES)
-        cpu_counts = int(TILELNAG_AUTO_TUNING_CPU_COUNTS)
-        max_cpu_count = int(TILELNAG_AUTO_TUNING_MAX_CPU_COUNT)
+        cpu_utilizations = float(TILELANG_AUTO_TUNING_CPU_UTILITIES)
+        cpu_counts = int(TILELANG_AUTO_TUNING_CPU_COUNTS)
+        max_cpu_count = int(TILELANG_AUTO_TUNING_MAX_CPU_COUNT)
         if cpu_counts > 0:
             num_workers = min(cpu_counts, available_cpu_count)
             logger.info(
