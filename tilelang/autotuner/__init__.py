@@ -25,7 +25,13 @@ import threading
 import traceback
 from pathlib import Path
 
-from tilelang.env import TILELANG_CACHE_DIR, is_cache_enabled
+from tilelang.env import (
+    TILELANG_CACHE_DIR,
+    TILELANG_AUTO_TUNING_CPU_UTILITIES,
+    TILELANG_AUTO_TUNING_CPU_COUNTS,
+    TILELANG_AUTO_TUNING_MAX_CPU_COUNT,
+    is_cache_enabled,
+)
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.jit.param import _P, _RProg
 from tilelang.version import __version__
@@ -419,8 +425,28 @@ class AutoTuner:
                     kernel=jit_kernel)
                 self._memory_cache[key] = autotuner_result
                 return autotuner_result
+        # get the cpu count
+        available_cpu_count = get_available_cpu_count()
+        cpu_utilizations = float(TILELANG_AUTO_TUNING_CPU_UTILITIES)
+        cpu_counts = int(TILELANG_AUTO_TUNING_CPU_COUNTS)
+        max_cpu_count = int(TILELANG_AUTO_TUNING_MAX_CPU_COUNT)
+        if cpu_counts > 0:
+            num_workers = min(cpu_counts, available_cpu_count)
+            logger.info(
+                f"Auto-tuning with {cpu_counts} CPU counts, {available_cpu_count} CPUs available, {num_workers} CPUs will be used"
+            )
+        else:
+            num_workers = max(1, int(available_cpu_count * cpu_utilizations))
+            logger.info(
+                f"Auto-tuning with {cpu_utilizations} CPU utilizations, {available_cpu_count} CPUs available, {num_workers} CPUs will be used"
+            )
 
-        num_workers = max(1, int(get_available_cpu_count() * 0.9))
+        if max_cpu_count > 0 and num_workers > max_cpu_count:
+            logger.warning(
+                f"Auto-tuning with {cpu_utilizations} CPU utilizations, {available_cpu_count} CPUs available, {num_workers} CPUs will be used, but the max CPU count is {max_cpu_count}, so we will use {max_cpu_count} CPUs"
+            )
+            num_workers = max_cpu_count
+
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=num_workers)
         futures = []
         future_to_index = {}

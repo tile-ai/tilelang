@@ -77,6 +77,17 @@ TILELANG_CACHE_DIR: str = os.environ.get("TILELANG_CACHE_DIR",
 # Auto-clear cache if environment variable is set
 TILELANG_CLEAR_CACHE = os.environ.get("TILELANG_CLEAR_CACHE", "0")
 
+# CPU Utilizations for Auto-Tuning, default is 0.9
+TILELANG_AUTO_TUNING_CPU_UTILITIES: str = os.environ.get("TILELANG_AUTO_TUNING_CPU_UTILITIES",
+                                                         "0.9")
+
+# CPU COUNTS for Auto-Tuning, default is -1,
+# which will use TILELNAG_AUTO_TUNING_CPU_UTILITIES * get_available_cpu_count()
+TILELANG_AUTO_TUNING_CPU_COUNTS: str = os.environ.get("TILELANG_AUTO_TUNING_CPU_COUNTS", "-1")
+
+# Max CPU Count for Auto-Tuning, default is 100
+TILELANG_AUTO_TUNING_MAX_CPU_COUNT: str = os.environ.get("TILELANG_AUTO_TUNING_MAX_CPU_COUNT", "-1")
+
 # SETUP ENVIRONMENT VARIABLES
 CUTLASS_NOT_FOUND_MESSAGE = ("CUTLASS is not installed or found in the expected path")
 ", which may lead to compilation bugs when utilize tilelang backend."
