@@ -2,7 +2,6 @@ import argparse
 import itertools
 import tilelang
 import tilelang.language as T
-from tilelang.autotuner import AutoTuner
 from tilelang.engine.param import KernelParam
 from tilelang.utils.tensor import get_tensor_supply, TensorSupplyType
 import torch
@@ -34,7 +33,7 @@ print(f"Target Block Sparsity: {sparsity}")
 print(f"Using Autotuner: {use_autotune}\n")
 
 
-def get_configs(M, N, K):
+def get_configs():
     block_M = [64, 128, 256]
     block_N = [64, 128, 256]
     block_K = [32, 64]
@@ -90,55 +89,7 @@ def supply_program(params: List[KernelParam]):
     return input_tensors
 
 
-def get_best_config(M, N, K):
-
-    # Define the kernel function to be tuned.
-    # Parameters like block_M, block_N, etc., are tuned by the AutoTuner.
-    def kernel(block_M=None,
-               block_N=None,
-               block_K=None,
-               num_stages=None,
-               thread_num=None,
-               enable_rasteration=None):
-        return blocksparse_matmul(M, N, K, block_M, block_N, block_K, num_stages, thread_num,
-                                  enable_rasteration)
-
-    autotuner = AutoTuner.from_kernel(
-        kernel=kernel, configs=get_configs(M, N, K)
-    ).set_compile_args(
-        out_idx=[-1],  # Index of the output tensor
-        target="auto",  # Automatically detect target
-    ).set_profile_args(
-        # supply_type should not set here because we provide a custom supply
-        # function `supply_prog` and `supply_type` will be ignored.
-
-        # supply_prog: Provide the custom function to generate input tensors
-        # (A, B, BlockMask) for the kernel, allowing controlling sparsity via
-        # BlockMask generation.
-        supply_prog=supply_program,
-
-        # ref_prog: Using dense matmul (A @ B) as a placeholder reference.
-        # The 'correct' block-sparse reference (`ref_program` above) requires
-        # block_M, block_N, block_K parameters. However, these parameters are
-        # part of the configuration being *tuned* by the AutoTuner and cannot
-        # be fixed inputs to a static `ref_prog` function signature.
-        # This dense matmul serves only as a performance baseline.
-        ref_prog=lambda A, B, BlockMask: A @ B,
-
-        # skip_check: Set to True because the provided `ref_prog` does not
-        # compute the correct result for the block-sparse kernel.
-        skip_check=True,
-
-        # cache_input_tensors: Set to False because the shape of the BlockMask tensor
-        # (dependent on block_M, block_N, block_K being tuned) changes between
-        # different configurations. Reusing cached tensors from a previous
-        # configuration would lead to shape mismatches.
-        cache_input_tensors=False,
-    )
-    # Run the tuning process
-    return autotuner.run(warmup=3, rep=20)
-
-
+@tilelang.autotune(configs=get_configs(),)
 @tilelang.jit(out_idx=[-1])
 def blocksparse_matmul(M,
                        N,
@@ -192,22 +143,16 @@ def main():
         # Run the autotuner to find the best kernel configuration and performance
         # get_best_config is expected to return an object containing the compiled kernel,
         # the best configuration found, latency, and reference latency.
-        result = get_best_config(M, N, K)
+        kernel = blocksparse_matmul(M, N, K)
 
-        # Extract results from the autotuner run
-        kernel = result.kernel
-        best_config = result.config
-        block_M = best_config[0]
-        block_N = best_config[1]
-        block_K = best_config[2]
-        best_latency = result.latency
-        ref_latency = result.ref_latency
+        best_config = kernel.config
+        best_latency = kernel.latency
+        block_M, block_N, block_K = best_config["block_M"], best_config["block_N"], best_config[
+            "block_K"]
 
         print(f"Best Config: {best_config}")
-        print(f"Block Dimensions (BM, BN, BK): ({block_M}, {block_N}, {block_K})")
         print(f"Sparsity Ratio: {sparsity}")
         print(f"Best Kernel Latency: {best_latency:.6f} ms")
-        print(f"Reference Latency: {ref_latency:.6f} ms")
     else:
         kernel = blocksparse_matmul(M, N, K, DEFAULT_BLOCK_M, DEFAULT_BLOCK_N, DEFAULT_BLOCK_K,
                                     DEFAULT_NUM_STAGES, DEFAULT_THREAD_NUM,
