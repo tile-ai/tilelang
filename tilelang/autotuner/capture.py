@@ -4,16 +4,17 @@
 import threading
 from typing import List, Any, Optional
 
-
 # Use thread local to store the stack
 # This is to avoid the cross-thread interference
 _local = threading.local()
+
 
 class CaptureStack:
     """
     A simple stack implementation for capturing items in a thread-local context.
     Used to manage a stack of items (e.g., input tensors) for auto-tuning capture.
     """
+
     def __init__(self):
         # Initialize an empty list to use as the stack
         self.stack = []
@@ -77,16 +78,18 @@ class CaptureStack:
             bool: Whether the stack contains any items.
         """
         return bool(self.stack)
-    
+
 
 # Use thread local to store the stack
 # This is to avoid the cross-thread interference
 _local = threading.local()
 
+
 def _get_current_stack() -> CaptureStack:
     if not hasattr(_local, "capture_stack"):
         _local.capture_stack = CaptureStack()
     return _local.capture_stack
+
 
 class AutotuneInputsCapture:
 

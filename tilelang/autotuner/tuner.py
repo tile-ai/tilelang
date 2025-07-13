@@ -39,6 +39,7 @@ from tilelang.autotuner.capture import get_autotune_inputs
 from tilelang.jit.param import _P, _RProg
 from tilelang.version import __version__
 
+
 class TimeoutException(Exception):
     pass
 
@@ -201,8 +202,10 @@ class AutoTuner:
         # the `supply_prog` will be ignored and the `get_autotune_inputs` will be used instead.
         if get_autotune_inputs() is not None:
             if supply_prog is not None:
-                logger.warning("`supply_prog` will be ignored as this program is under `with set_autotune_inputs` context.")
-            supply_prog = lambda _: get_autotune_inputs()
+                logger.warning(
+                    "`supply_prog` will be ignored as this program is under `with set_autotune_inputs` context."
+                )
+            supply_prog = lambda _: get_autotune_inputs()  # noqa: E731
 
         self.profile_args = ProfileArgs(
             supply_type=supply_type,
