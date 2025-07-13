@@ -80,11 +80,6 @@ class CaptureStack:
         return bool(self.stack)
 
 
-# Use thread local to store the stack
-# This is to avoid the cross-thread interference
-_local = threading.local()
-
-
 def _get_current_stack() -> CaptureStack:
     if not hasattr(_local, "capture_stack"):
         _local.capture_stack = CaptureStack()
