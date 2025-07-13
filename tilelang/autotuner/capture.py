@@ -105,18 +105,24 @@ class AutotuneInputsCapture:
         _get_current_stack().pop()
 
 
-def set_autotune_inputs(tensors: List[Any]) -> AutotuneInputsCapture:
+def set_autotune_inputs(*args) -> AutotuneInputsCapture:
     """Set input tensors for auto-tuning.
-    
+
     This function creates a context manager for capturing input tensors
-    during the auto-tuning process.
-    
+    during the auto-tuning process. It supports both:
+        set_autotune_inputs(a, b, c)
+        set_autotune_inputs([a, b, c])
+
     Args:
-        tensors: List of input tensors to capture.
-        
+        *args: Either a single list/tuple of tensors, or multiple tensor arguments.
+
     Returns:
         AutotuneInputsCapture: A context manager for auto-tuning inputs.
     """
+    if len(args) == 1 and isinstance(args[0], (list, tuple)):
+        tensors = list(args[0])
+    else:
+        tensors = list(args)
     return AutotuneInputsCapture(tensors)
 
 
