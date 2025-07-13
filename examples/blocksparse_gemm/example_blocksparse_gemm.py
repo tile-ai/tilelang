@@ -37,12 +37,12 @@ print(f"Using Autotuner: {use_autotune}\n")
 
 
 def get_configs():
-    block_M = [64, 128]
-    block_N = [64, 128]
+    block_M = [64, 128, 256]
+    block_N = [64, 128, 256]
     block_K = [32, 64]
-    num_stages = [1, 2]
-    thread_num = [128]
-    enable_rasterization = [True]
+    num_stages = [1, 2, 3]
+    thread_num = [128, 256]
+    enable_rasterization = [True, False]
 
     _configs = list(
         itertools.product(block_M, block_N, block_K, num_stages, thread_num, enable_rasterization))
