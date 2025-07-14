@@ -70,6 +70,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
     # Legalize the frontend IR to make it compatible with TVM
     mod = tilelang.transform.FrontendLegalize()(mod)
+    # Lower the barrier to the barrier_arrive and barrier_wait
+    # mod = tilelang.transform.LowerSharedBarrier()(mod)
     # Simplify the IR expressions
     mod = tir.transform.Simplify()(mod)
     # Infer memory layouts for fragments and shared memory
@@ -158,17 +160,24 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
 
-
+    enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
     # Hopper Swizzling requires dynamic shared memory address to be aligned to 1024 bytes
     # For other devices, we align to 16 bytes
-
     smem_align_bytes = 1024 if have_tma(target) else 16
-    mod = tilelang.transform.MergeSharedMemoryAllocations(
-        enable_aggressive_merge=should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target),
-        align_bytes=smem_align_bytes)(mod)
+    if enable_aggressive_merge:
+        # Workaround, wait for a element wise synchronization pass
+        mod = tilelang.transform.MergeSharedMemoryAllocations(
+            enable_aggressive_merge=enable_aggressive_merge,
+            align_bytes=smem_align_bytes)(mod)     
+        mod = tilelang.transform.ThreadSync("shared")(mod)
+        mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    else:
+        mod = tilelang.transform.ThreadSync("shared")(mod)
+        mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+        mod = tilelang.transform.MergeSharedMemoryAllocations(
+            enable_aggressive_merge=enable_aggressive_merge,
+            align_bytes=smem_align_bytes)(mod)
 
-    mod = tilelang.transform.ThreadSync("shared")(mod)
-    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
 
     # Inject PTX async copy must behind the thread sync pass
     # as ptx async copy won't be recognized as a valid buffer load

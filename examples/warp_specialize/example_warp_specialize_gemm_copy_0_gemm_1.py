@@ -29,21 +29,26 @@ def matmul_warp_specialize_copy_0_gemm_1(M,
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
             # create mbarrier for tma
-            T.create_list_of_mbarrier(128, 128)
+            # T.create_list_of_mbarrier(128, 128)
+            
+            # data_is_ready = 0
+            # compute_is_done = 1       
+            data_is_ready = T.alloc_barrier(arrive_count=128)
+            compute_is_done = T.alloc_barrier(arrive_count=128)
 
             with T.ws(1):
                 T.clear(C_local)
 
             for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=0):
                 with T.ws(0):
-                    T.barrier_wait(1, (ko & 1) ^ 1)
+                    T.barrier_wait(compute_is_done, (ko + 1) % 2)
                     T.copy(A[by * block_M, ko * block_K], A_shared)
                     T.copy(B[ko * block_K, bx * block_N], B_shared)
-                    T.barrier_arrive(0)
+                    T.barrier_arrive(data_is_ready)
                 with T.ws(1):
-                    T.barrier_wait(0, ko & 1)
+                    T.barrier_wait(data_is_ready, ko % 2)
                     T.gemm(A_shared, B_shared, C_local)
-                    T.barrier_arrive(1)
+                    T.barrier_arrive(compute_is_done)
 
             with T.ws(1):
                 T.copy(C_local, C[by * block_M, bx * block_N])

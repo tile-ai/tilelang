@@ -370,3 +370,9 @@ def AlignDynamicSharedMemoryAllocations(align_bytes: int = 16):
     -------
     """
     return _ffi_api.AlignDynamicSharedMemoryAllocations(align_bytes)  # type: ignore
+
+
+def LowerSharedBarrier():
+    """LowerSharedBarrier
+    """
+    return _ffi_api.LowerSharedBarrier()  # type: ignore

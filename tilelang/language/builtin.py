@@ -8,6 +8,7 @@ from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tvm import tir
 from typing import Union, Any
 from tvm.tir import PrimExpr, Var, Call
+from tvm.tir import Buffer, BufferLoad
 
 
 def create_list_of_mbarrier(*args: Any) -> Call:
@@ -189,12 +190,14 @@ def mbarrier_wait_parity(mbarrier: Union[int, PrimExpr, tir.Call], parity: Union
     Returns:
         tir.Call: A handle to the barrier wait operation
     """
-    if isinstance(mbarrier, tir.Call):
+    if isinstance(mbarrier, (tir.Call, BufferLoad)):
         mbarrier = mbarrier
     elif isinstance(mbarrier, (tir.PrimExpr, int)):
         mbarrier = get_mbarrier(mbarrier)
+    elif isinstance(mbarrier, Buffer):
+        mbarrier = BufferLoad(mbarrier, [0])
     else:
-        raise TypeError("mbarrier must be an integer or a tir.Call")
+        raise TypeError(f"mbarrier must be an integer or a tir.Call, but got {type(mbarrier)}")
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
 
 
@@ -205,12 +208,14 @@ def mbarrier_arrive(mbarrier: Union[int, PrimExpr, tir.Call]):
         mbarrier: Optional[int, PrimExpr]
             The memory barrier to arrive at
     """
-    if isinstance(mbarrier, tir.Call):
+    if isinstance(mbarrier, (tir.Call, BufferLoad)):
         mbarrier = mbarrier
     elif isinstance(mbarrier, (tir.PrimExpr, int)):
         mbarrier = get_mbarrier(mbarrier)
+    elif isinstance(mbarrier, Buffer):
+        mbarrier = BufferLoad(mbarrier, [0])
     else:
-        raise TypeError("mbarrier must be an integer or a tir.Call")
+        raise TypeError(f"mbarrier must be an integer or a tir.Call, but got {type(mbarrier)}")
     return ptx_arrive_barrier(mbarrier)
 
 

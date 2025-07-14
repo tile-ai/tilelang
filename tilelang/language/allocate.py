@@ -16,6 +16,7 @@ Each function takes shape and dtype parameters and returns a TVM buffer object
 with the appropriate memory scope.
 """
 
+from tilelang.language.tir.entry import macro
 from tvm.script import tir as T
 
 
@@ -76,3 +77,15 @@ def alloc_var(dtype, scope="local.var"):
         T.Buffer: A TVM buffer object allocated as a single-element variable
     """
     return T.alloc_buffer([1], dtype, scope=scope)
+
+
+def alloc_barrier(arrive_count: int):
+    """Allocate a barrier buffer.
+
+    Args:
+        arrive_count (int): The number of threads that need to arrive at the barrier
+
+    Returns:
+        T.Buffer: A TVM buffer object allocated as a barrier
+    """
+    return T.alloc_buffer([arrive_count], "uint64", scope="shared.barrier")

@@ -437,8 +437,7 @@ def main():
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            # tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True,
-            # tilelang.PassConfigKey.TL_DEBUG_MERGE_SHARED_MEMORY_ALLOCATIONS: True,
+            tilelang.PassConfigKey.TIR_USE_ASYNC_COPY: False,
         },
     )
     print(kernel.get_kernel_source(), file=open("kernel.cu", "w"))
