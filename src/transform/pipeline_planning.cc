@@ -487,7 +487,8 @@ private:
 tvm::transform::Pass PipelinePlanning() {
   using namespace tir::transform;
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    bool use_async_copy = ctx->GetConfig<Bool>("tir.use_async_copy", Bool(true)).value();
+    bool use_async_copy =
+        ctx->GetConfig<Bool>("tir.use_async_copy", Bool(true)).value();
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = PipelinePlanner::Substitute(f, use_async_copy);
     return f;
