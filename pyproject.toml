@@ -1,6 +1,7 @@
 [build-system]
 requires = [
     "cmake>=3.26",
+    "cython",
     "packaging",
     "setuptools>=61",
     "wheel",

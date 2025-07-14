@@ -49,6 +49,21 @@ def _find_rocm_home() -> str:
     return rocm_home if rocm_home is not None else ""
 
 
+def _initialize_torch_cuda_arch_flags():
+    import os
+    from tilelang.contrib import nvcc
+    from tilelang.utils.target import determine_target
+
+    target = determine_target(return_object=True)
+    # create tmp source file for torch cpp extension
+    compute_version = "".join(nvcc.get_target_compute_version(target).split("."))
+    # set TORCH_CUDA_ARCH_LIST
+    major = compute_version[0]
+    minor = compute_version[1]
+
+    os.environ["TORCH_CUDA_ARCH_LIST"] = f"{major}.{minor}"
+
+
 CUDA_HOME = _find_cuda_home()
 ROCM_HOME = _find_rocm_home()
 
@@ -64,6 +79,17 @@ TILELANG_CACHE_DIR: str = os.environ.get("TILELANG_CACHE_DIR",
 
 # Auto-clear cache if environment variable is set
 TILELANG_CLEAR_CACHE = os.environ.get("TILELANG_CLEAR_CACHE", "0")
+
+# CPU Utilizations for Auto-Tuning, default is 0.9
+TILELANG_AUTO_TUNING_CPU_UTILITIES: str = os.environ.get("TILELANG_AUTO_TUNING_CPU_UTILITIES",
+                                                         "0.9")
+
+# CPU COUNTS for Auto-Tuning, default is -1,
+# which will use TILELNAG_AUTO_TUNING_CPU_UTILITIES * get_available_cpu_count()
+TILELANG_AUTO_TUNING_CPU_COUNTS: str = os.environ.get("TILELANG_AUTO_TUNING_CPU_COUNTS", "-1")
+
+# Max CPU Count for Auto-Tuning, default is 100
+TILELANG_AUTO_TUNING_MAX_CPU_COUNT: str = os.environ.get("TILELANG_AUTO_TUNING_MAX_CPU_COUNT", "-1")
 
 # SETUP ENVIRONMENT VARIABLES
 CUTLASS_NOT_FOUND_MESSAGE = ("CUTLASS is not installed or found in the expected path")
@@ -197,4 +223,5 @@ __all__ = [
     "enable_cache",
     "disable_cache",
     "is_cache_enabled",
+    "_initialize_torch_cuda_arch_flags",
 ]

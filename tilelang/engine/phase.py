@@ -50,6 +50,20 @@ def allow_global_thread_synchronization(pass_ctx: Optional[PassContext] = None) 
     return enable_global_thread_sync
 
 
+def should_enable_aggressive_merge(pass_ctx: Optional[PassContext] = None,
+                                   target: Optional[Target] = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    enable_aggressive_merge = bool(
+        pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE, False))
+    if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
+        # This is a workaround to avoid the bug in the MergeSharedMemoryAllocations pass
+        # when warp specialization is enabled, as different warp threads may access different
+        # buffers, but the liveness analysis is hard because we need to do pipeline.
+        enable_aggressive_merge = False
+    return enable_aggressive_merge
+
+
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
     mod = tir.transform.BindTarget(target)(mod)
@@ -68,6 +82,13 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
     # Add safety checks for memory accesses
     mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
+    # Align dynamic shared memory allocations
+    if have_tma(target):
+        # Hopper Swizzling requires dynamic shared memory address to be aligned to 1024 bytes
+        mod = tilelang.transform.AlignDynamicSharedMemoryAllocations(1024)(mod)
+    else:
+        # For other devices, we align to 16 bytes
+        mod = tilelang.transform.AlignDynamicSharedMemoryAllocations(16)(mod)
     # Simplify again to clean up any duplicated conditions
     # that may have been introduced by safety checks
     mod = tir.transform.Simplify()(mod)
@@ -144,14 +165,12 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
 
-    # mod = tilelang.transform.EliminateStorageSyncForMBarrier()(mod)
+    mod = tilelang.transform.MergeSharedMemoryAllocations(
+        enable_aggressive_merge=should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target))(
+            mod)
 
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
-    # Hopper Swizzling requires dynamic shared memory address to be aligned to 1024 bytes
-    # For other devices, we align to 16 bytes
-    smem_align_bytes = 1024 if have_tma(target) else 16
-    mod = tilelang.transform.MergeSharedMemoryAllocations(align_bytes=smem_align_bytes)(mod)
 
     # Inject PTX async copy must behind the thread sync pass
     # as ptx async copy won't be recognized as a valid buffer load

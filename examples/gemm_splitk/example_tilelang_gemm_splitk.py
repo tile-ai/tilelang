@@ -5,6 +5,7 @@ import tilelang
 import tilelang.language as T
 
 
+@tilelang.jit
 def matmul(M,
            N,
            K,
@@ -62,9 +63,7 @@ def main():
     block_K = 32
     split_k = 4
 
-    program = matmul(M, N, K, block_M, block_N, block_K, split_k)
-
-    kernel = tilelang.compile(program)
+    kernel = matmul(M, N, K, block_M, block_N, block_K, split_k)
 
     import torch
 

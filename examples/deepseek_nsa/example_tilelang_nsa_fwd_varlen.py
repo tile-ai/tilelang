@@ -18,6 +18,7 @@ from reference import naive_nsa
 from einops import rearrange
 
 
+@tilelang.jit
 def native_sparse_attention_varlen(batch,
                                    heads,
                                    c_seq_len,
@@ -173,7 +174,7 @@ def parallel_nsa_fwd(
     BS = block_size
     WS = window_size
 
-    program = native_sparse_attention_varlen(
+    kernel = native_sparse_attention_varlen(
         batch=batch,
         heads=HQ,
         c_seq_len=C_SEQ_LEN,
@@ -183,8 +184,6 @@ def parallel_nsa_fwd(
         groups=G,
         selected_blocks=S,
     )
-
-    kernel = tilelang.compile(program)
 
     o_slc = torch.empty(B, C_SEQ_LEN, HQ, V, dtype=v.dtype, device=q.device)
     kernel(

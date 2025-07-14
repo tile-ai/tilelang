@@ -10,6 +10,7 @@ import tilelang.language as T
 tilelang.testing.set_random_seed(0)
 
 
+@tilelang.jit(out_idx=[2])
 def matmul(
     M,
     N,
@@ -100,7 +101,7 @@ def run_gemm(
     num_stages=3,
     num_threads=128,
 ):
-    program = matmul(
+    kernel = matmul(
         M,
         N,
         K,
@@ -114,7 +115,6 @@ def run_gemm(
         num_threads,
     )
 
-    kernel = tilelang.compile(program, out_idx=[2])
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
 
     out = profiler.run_once()
@@ -437,7 +437,6 @@ def test_assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4():
 
 def main():
     test_run_dequantize_gemm()
-    test_assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4()
 
 
 if __name__ == "__main__":

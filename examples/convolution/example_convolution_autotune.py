@@ -3,8 +3,7 @@
 import torch
 import argparse
 import itertools
-import tilelang as tl
-from tilelang.autotuner import *
+import tilelang
 import tilelang.language as T
 from tilelang.autotuner import AutoTuner
 from tilelang.carver.template import ConvTemplate
@@ -167,7 +166,7 @@ def get_best_config(N, C, H, W, F, K, S, D, P, ref_prog, with_roller=False):
                                                out_idx=[2],
                                                target="auto",
                                            ).set_profile_args(
-                                               supply_type=tl.TensorSupplyType.Integer,
+                                               supply_type=tilelang.TensorSupplyType.Integer,
                                                ref_prog=ref_prog,
                                                skip_check=False,
                                            )
@@ -225,6 +224,7 @@ def convolution(N,
                 block_K,
                 num_stages,
                 thread_num,
+                enable_rasteration,
                 dtype="float16",
                 accum_dtype="float"):
     KH, KW = K, K
@@ -293,16 +293,16 @@ def main(n: int = 128,
          with_roller: bool = True):
     N, C, H, W, F, K, S, D, P = n, c, h, w, f, k, s, d, p
     ref_prog = ref_program(S, P, D)
-    use_autotune = True
+
     if use_autotune:
         result = get_best_config(N, C, H, W, F, K, S, D, P, ref_prog, with_roller)
         print(result.config)
         kernel = result.kernel
     else:
         config = get_heuristic_config()
-        kernel = tl.compile(convolution(N, C, H, W, F, K, S, D, P, **config), out_dix=[2])
+        kernel = tilelang.compile(convolution(N, C, H, W, F, K, S, D, P, **config), out_idx=[2])
 
-    profiler = kernel.get_profiler(tensor_supply_type=tl.TensorSupplyType.Auto)
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
     tilelang_latency = profiler.do_bench()
     ref_latency = profiler.do_bench(ref_prog)
     profiler.assert_allclose(ref_prog, atol=1e-2, rtol=1e-2)

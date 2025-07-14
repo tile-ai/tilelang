@@ -36,6 +36,7 @@ def rms_norm_splitk(M, N, blk_m, blk_k):
     return main
 
 
+@tilelang.jit(out_idx=[-1], pass_configs={"tl.disable_tma_lower": True})
 def rms_norm(M, N, blk_m):
     dtype = "float"
 
@@ -67,13 +68,7 @@ def ref_program(x):
 
 if __name__ == "__main__":
     M, N, blk_m, blk_k = 8192, 8192, 1, 512
-    program = rms_norm(M, N, blk_m)
-    kernel = tilelang.compile(
-        program,
-        out_idx=-1,
-        target="cuda",
-        execution_backend="cython",
-        pass_configs={"tl.disable_tma_lower": True})
+    kernel = rms_norm(M, N, blk_m)
     profiler = kernel.get_profiler()
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
     print("All checks pass.")

@@ -19,6 +19,7 @@
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "common/loop_fusion_utils.h"
+#include "common/loop_parallel_transform_utils.h"
 #include "loop_partition.h"
 #include "loop_vectorize.h"
 #include "runtime/thread_storage_scope.h"
@@ -50,158 +51,6 @@ using namespace tir;
 using arith::IRMutatorWithAnalyzer;
 using arith::IRVisitorWithAnalyzer;
 
-class ParallelLoopTransformer : public IRMutatorWithAnalyzer {
-public:
-  static Stmt Substitute(Stmt stmt, bool skip_thread_partition = false) {
-    arith::Analyzer analyzer;
-    ParallelLoopTransformer transformer(&analyzer);
-    return transformer.VisitStmt(stmt);
-  }
-
-  ParallelLoopTransformer(arith::Analyzer *analyzer)
-      : IRMutatorWithAnalyzer(analyzer) {}
-
-  Stmt VisitStmt_(const ForNode *op) final {
-    if (op->kind != ForKind::kParallel)
-      return StmtMutator::VisitStmt_(op);
-
-    // Collect loop variables and ranges
-    auto for_node = GetRef<For>(op);
-    Array<Var> loop_vars;
-    Array<PrimExpr> loop_extents;
-    Stmt body = op->body;
-
-    // Bind the range of outer loop variables
-    analyzer_->Bind(op->loop_var, Range::FromMinExtent(0, op->extent));
-    loop_vars.push_back(op->loop_var);
-    loop_extents.push_back(op->extent);
-
-    // If there are inner loops, bind their ranges as well
-    while (const ForNode *inner = body.as<ForNode>()) {
-      analyzer_->Bind(inner->loop_var, Range::FromMinExtent(0, inner->extent));
-      loop_vars.push_back(inner->loop_var);
-      loop_extents.push_back(inner->extent);
-      body = inner->body;
-    }
-
-    ICHECK(loop_vars.size() == loop_extents.size())
-        << "loop_vars and loop_extents size mismatch";
-
-    // Collect buffer access information
-    BufferAccessCollector collector;
-    collector(op->body);
-
-    PrimExpr condition;
-
-    for (const auto &[buffer, indices] : collector.buffer_indices) {
-      ICHECK(indices.size() == buffer->shape.size())
-          << "indices size mismatch with buffer shape";
-
-      for (size_t i = 0; i < indices.size(); ++i) {
-        auto index = indices[i];
-        auto bound = analyzer_->const_int_bound(index);
-        int64_t upper_bound = bound->max_value + 1;
-        int64_t shape = Downcast<IntImm>(buffer->shape[i])->value;
-
-        // Collect the variables that used in the index
-        std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> used_vars;
-        // post order visit the index
-        PostOrderVisit(index, [&](const ObjectRef &obj) {
-          if (const VarNode *v = obj.as<VarNode>()) {
-            used_vars.insert(GetRef<Var>(v));
-          }
-        });
-        if (used_vars.size() == 0) {
-          continue;
-        }
-
-        // find related loop vars
-        Array<Var> related_loop_vars;
-        for (size_t j = 0; j < loop_vars.size(); ++j) {
-          auto loop_var = loop_vars[j];
-          // if find related, pop the loop_vars and loop_extents
-          if (used_vars.count(loop_var)) {
-            related_loop_vars.push_back(loop_var);
-          }
-          ICHECK(related_loop_vars.size() <= 1)
-              << "Only one related loop var is supported currently, but got "
-              << related_loop_vars
-              << " implement multiple loop vars may not be "
-              << "too hard, please send an issue if you need "
-              << "came up with this message.";
-
-          auto bound = analyzer_->const_int_bound(index);
-          int64_t upper_bound = bound->max_value + 1;
-          int64_t shape = Downcast<IntImm>(buffer->shape[i])->value;
-          if (upper_bound < shape) {
-            PrimExpr predicate = LT(index, IntImm(index.dtype(), upper_bound));
-            condition =
-                condition.defined() ? And(condition, predicate) : predicate;
-
-            // replace the buffer index from A[i, r * 2] with A[i, j]
-            // where r is the original index, j is the loop_var
-            auto index_map = tir::IndexMap({loop_var}, {index});
-            auto inverse_index_map = index_map.Inverse(
-                {Range::FromMinExtent(0, IntImm(index.dtype(), upper_bound))},
-                analyzer_);
-
-            loop_extents.Set(i, IntImm(index.dtype(), shape));
-            body = tir::Substitute(body,
-                                   {{loop_var, inverse_index_map->MapIndices(
-                                                   {loop_var}, analyzer_)[0]}});
-          }
-        }
-      }
-    }
-    if (condition.defined()) {
-      body = IfThenElse(condition, body);
-      for (int j = loop_vars.size() - 1; j >= 0; --j) {
-        auto loop_var = loop_vars[j];
-        auto loop_extent = loop_extents[j];
-        body = For(loop_var, 0, loop_extent, ForKind::kParallel, body);
-      }
-      return Downcast<For>(body);
-    }
-    // Only traverse the outer loop
-    return for_node;
-  }
-
-private:
-  // Helper class for collecting buffer access information, only counts fragment
-  // buffer access
-  class BufferAccessCollector : public StmtExprVisitor {
-  public:
-    void VisitExpr_(const BufferLoadNode *op) final {
-      if (op->buffer.scope() == "local.fragment") {
-        if (buffer_indices.find(op->buffer) == buffer_indices.end()) {
-          buffer_indices[op->buffer] = op->indices;
-        } else {
-          // check equal
-          ICHECK(StructuralEqual()(buffer_indices[op->buffer], op->indices))
-              << "indices mismatch for buffer: " << op->buffer;
-        }
-      }
-      StmtExprVisitor::VisitExpr_(op);
-    }
-
-    void VisitStmt_(const BufferStoreNode *op) final {
-      if (op->buffer.scope() == "local.fragment") {
-        if (buffer_indices.find(op->buffer) == buffer_indices.end()) {
-          buffer_indices[op->buffer] = op->indices;
-        } else {
-          // check equal
-          ICHECK(StructuralEqual()(buffer_indices[op->buffer], op->indices))
-              << "indices mismatch for buffer: " << op->buffer;
-        }
-      }
-      StmtExprVisitor::VisitStmt_(op);
-    }
-
-    std::unordered_map<Buffer, Array<PrimExpr>, ObjectPtrHash, ObjectPtrEqual>
-        buffer_indices;
-  };
-};
-
 struct LayoutInferenceResult {
   Map<Buffer, Layout> layout_map;
   Map<For, Fragment> for_map;
@@ -228,6 +77,7 @@ public:
 
     // Copy the annotated layout map to local variable
     Map<Buffer, Layout> layout_map = annotated_layout_map_;
+    Map<Buffer, Layout> strict_layout_map;
     int num_infer = infer_list_.size();
 
     // Prepare BFS queue for iterative inference
@@ -245,6 +95,7 @@ public:
       }
       q.push(i);
     }
+
     auto run_infer_step = [&](int cur_infer_id, InferLevel level,
                               bool update_queue) {
       // Range check for cur_infer_id
@@ -290,7 +141,8 @@ public:
         if (layout_map.count(buffer)) {
           // If replicate size of this buffer is greater than the old one
           if (buffer.scope() == "local.fragment" &&
-              level != InferLevel::kStrict) {
+              level != InferLevel::kStrict &&
+              !strict_layout_map.count(buffer)) {
             const FragmentNode *dst_layout = layout.as<Fragment>().get();
             const FragmentNode *src_layout =
                 layout_map[buffer].as<Fragment>().get();
@@ -358,6 +210,10 @@ public:
       run_infer_step(i, InferLevel::kStrict, false);
     }
 
+    for (const auto &[buffer, layout] : layout_map) {
+      strict_layout_map.Set(buffer, layout);
+    }
+
     // step 2: infer common layout with BFS
     finish_infer_queue();
 
@@ -366,7 +222,6 @@ public:
       run_infer_step(i, InferLevel::kFree, true);
       finish_infer_queue();
     }
-
     // Check that all local.fragment buffers have inferred layouts
     for (const auto &[buffer, _] : use_list_) {
       if (buffer.scope() == "local.fragment") {
@@ -595,6 +450,7 @@ private:
 
       auto loop_layout = result_.for_map[root];
       bool parallel_loop = !is_register_store && !skip_thread_partition_;
+
       if (parallel_loop) {
         for_node =
             PartitionLoop(for_node, thread_var_->var, analyzer_, loop_layout);

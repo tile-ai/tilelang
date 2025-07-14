@@ -7,6 +7,7 @@ from tilelang.quantize import (
     _tir_packed_int_to_int_convert,)
 
 
+@tilelang.jit
 def dequantize_gemv(
     M: int,
     N: int,
@@ -173,11 +174,9 @@ def main() -> None:
     group_size = -1
     with_scaling = False
 
-    program = dequantize_gemv(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits, storage_dtype,
-                              source_format, n_partition, reduce_thread, fast_decoding, trans_A,
-                              trans_B, group_size, with_scaling)
-
-    kernel = tilelang.compile(program)
+    kernel = dequantize_gemv(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits, storage_dtype,
+                             source_format, n_partition, reduce_thread, fast_decoding, trans_A,
+                             trans_B, group_size, with_scaling)
 
     storage_nbit = int("".join(c for c in storage_dtype if c.isdigit()))
     num_elems_per_byte = storage_nbit // num_bits

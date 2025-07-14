@@ -8,6 +8,7 @@ from functools import partial
 num_split = 4
 
 
+@tilelang.jit(out_idx=[5])
 def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_N):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     shape_q = [batch, seqlen_q, heads, dim]
@@ -303,9 +304,8 @@ def main():
         total_flops *= 0.5
     BLOCK_M = 128
     BLOCK_N = 64  # if D_HEAD <= 128 else 32
-    program = flashattn(BATCH, H, Q_CTX, KV_CTX, D_HEAD, causal, BLOCK_M, BLOCK_N)
+    kernel = flashattn(BATCH, H, Q_CTX, KV_CTX, D_HEAD, causal, BLOCK_M, BLOCK_N)
     ref_program_processed = partial(ref_program, causal=causal)
-    kernel = tilelang.compile(program, out_idx=[5])
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Normal)
     profiler.assert_allclose(ref_program_processed, rtol=0.01, atol=0.01)
     print("All checks passed!")

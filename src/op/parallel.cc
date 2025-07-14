@@ -177,16 +177,38 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       // // Loop don't need to be replicated.
       // if (!is_one(loop_layout_->ReplicateExtent()))
       //   loop_layout_ = loop_layout_->DeReplicate();
-      // // if still has replication, add a condition
-      // if (!is_one(loop_layout_->ReplicateExtent())) {
-      //   auto inv = loop_layout_->Inverse();
-      //   Array<PrimExpr> fwd;
-      //   for (size_t i = 0; i < loop_layout_->OutputDim(); i++)
-      //     fwd.push_back(0);
-      //   fwd.push_back(InputPlaceholder(0));
-      //   auto rep = inv->Forward(fwd).back();
-      //   AddPredicate(EQ(rep, 0));
-      // }
+
+      // For free layout inference
+      // If replication exists and buffer has cross-thread shared memory access,
+      // add predicate
+      bool has_cross_thread_access = false;
+      PostOrderVisit(root_, [&](const ObjectRef &obj) {
+        if (const auto *store = obj.as<BufferStoreNode>()) {
+          // check if scope is shared or global
+          if (store->buffer.scope() == "shared" ||
+              store->buffer.scope() == "shared.dyn" ||
+              store->buffer.scope() == "global") {
+            has_cross_thread_access = true;
+          }
+        } else if (const auto *load = obj.as<BufferLoadNode>()) {
+          // check if scope is shared or global
+          if (load->buffer.scope() == "shared" ||
+              load->buffer.scope() == "shared.dyn" ||
+              load->buffer.scope() == "global") {
+            has_cross_thread_access = true;
+          }
+        }
+      });
+
+      if (!is_one(loop_layout_->ReplicateExtent()) && has_cross_thread_access) {
+        auto inv = loop_layout_->Inverse();
+        Array<PrimExpr> fwd;
+        for (size_t i = 0; i < loop_layout_->OutputDim(); i++)
+          fwd.push_back(0);
+        fwd.push_back(InputPlaceholder(0));
+        auto rep = inv->Forward(fwd).back();
+        AddPredicate(EQ(rep, 0));
+      }
     } else {
       // Vectorize Size must be aware of the buffer_remap
       // As the pass will do post processing to the layout

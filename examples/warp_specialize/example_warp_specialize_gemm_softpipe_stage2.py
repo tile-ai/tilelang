@@ -6,6 +6,7 @@ import tilelang.language as T
 
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
+@tilelang.jit(out_idx=[2])
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
 
     @T.prim_func
@@ -50,15 +51,10 @@ def main():
     block_M = 128
     block_N = 128
     block_K = 64
-    # 1. Define the kernel (matmul) and compile/lower it into an executable module
-    func = matmul(M, N, K, block_M, block_N, block_K)
 
-    # 2. Compile the kernel into a torch function
-    # out_idx specifies the index of the output buffer in the argument list
-    # if out_idx is specified, the tensor will be created during runtime
-    # target currently can be "cuda" or "hip" or "cpu".
+    jit_kernel = matmul(M, N, K, block_M, block_N, block_K)
+
     tilelang.disable_cache()
-    jit_kernel = tilelang.compile(func, out_idx=[2])
 
     # 3. Test the kernel in Python with PyTorch data
     import torch

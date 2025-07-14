@@ -57,6 +57,7 @@ print(f"{iters_per_tile=} ")
 sm_patition_factor = max(blocking_tiles // total_sm, 1)
 
 
+@tilelang.jit
 def tl_matmul_streamk(
     M,
     N,
@@ -173,7 +174,7 @@ def tl_matmul_streamk(
 
 
 def main():
-    _tl_matmul_streamk = tl_matmul_streamk(
+    kernel = tl_matmul_streamk(
         m,
         n,
         k,
@@ -190,7 +191,6 @@ def main():
         64,
     )
 
-    kernel = tilelang.compile(_tl_matmul_streamk)
     print(kernel.get_kernel_source())
 
     b_c = torch.zeros((m, n), device="cuda", dtype=torch.float16)

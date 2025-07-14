@@ -31,6 +31,7 @@ def get_sparse_attn_mask_from_threshold(x, threshold, use_dense_for_last_block=F
     return dense_mask
 
 
+@tilelang.jit(out_idx=[4])
 def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal):
     block_M = 64
     block_N = 64
@@ -193,9 +194,8 @@ def test_topk_sparse_attention():
     x_ds[:, :, :, 0] = 100
     block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
 
-    # Run Triton kernel
-    program = blocksparse_flashattn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
-    kernel = tilelang.compile(program, out_idx=[4])
+    # Run tilelang kernel
+    kernel = blocksparse_flashattn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
 
     tilelang_output = kernel(q, k, v, block_mask)
 

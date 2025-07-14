@@ -10,6 +10,11 @@ import tilelang.language as T
 tilelang.disable_cache()
 
 
+@tilelang.jit(
+    out_idx=[2], pass_configs={
+        "tl.disable_tma_lower": True,
+        "tl.disable_warp_specialized": True
+    })
 def grouped_gemm_fwd(batch_sum,
                      batch_count,
                      K,
@@ -106,16 +111,9 @@ class _GroupedGEMM(torch.autograd.Function):
         batch_padded_offsets = torch.tensor(
             batch_padded_offsets_list, device=a.device, dtype=torch.int32)
 
-        program = grouped_gemm_fwd(batch_sum, batch_count, K, N, block_M, block_N, block_K,
-                                   num_stages, threads)
+        kernel = grouped_gemm_fwd(batch_sum, batch_count, K, N, block_M, block_N, block_K,
+                                  num_stages, threads)
 
-        kernel = tilelang.compile(
-            program,
-            out_idx=[2],
-            pass_configs={
-                "tl.disable_tma_lower": True,
-                "tl.disable_warp_specialized": True
-            })
         o = kernel(a, b, batch_sizes, batch_offsets, batch_padded_offsets)
         ctx.save_for_backward(a, b, batch_sizes, batch_offsets)
         ctx.batch_sum = batch_sum
@@ -142,15 +140,8 @@ class _GroupedGEMM(torch.autograd.Function):
             return x
 
         A, B, batch_sizes = [maybe_contiguous(x) for x in (A, B, batch_sizes)]
-        program = grouped_gemm_bwd(ctx.batch_sum, ctx.batch_count, M, N, block_M, block_N, block_K,
-                                   num_stages, threads)
-        kernel = tilelang.compile(
-            program,
-            out_idx=[2],
-            pass_configs={
-                "tl.disable_tma_lower": True,
-                "tl.disable_warp_specialized": True
-            })
+        kernel = grouped_gemm_bwd(ctx.batch_sum, ctx.batch_count, M, N, block_M, block_N, block_K,
+                                  num_stages, threads)
 
         dB = kernel(A, grad_output, batch_sizes, batch_offsets)
         return None, dB, None
@@ -201,6 +192,11 @@ def construct_inputs(batch_sizes_list, K, M, trans_b, padding_M, device, dtype):
     return A, B, C, batch_sizes, batch_offsets, batch_padded_offsets
 
 
+@tilelang.jit(
+    out_idx=[2], pass_configs={
+        "tl.disable_tma_lower": True,
+        "tl.disable_warp_specialized": True
+    })
 def grouped_gemm_bwd(batch_sum,
                      batch_count,
                      M,

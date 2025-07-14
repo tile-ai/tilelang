@@ -12,6 +12,7 @@ import argparse
 tilelang.disable_cache()
 
 
+@tilelang.jit(out_idx=[6])
 def flashmla_decode(batch,
                     heads,
                     kv_head_num,
@@ -290,9 +291,8 @@ if __name__ == "__main__":
     BLOCK_H = 64
     num_split = 4
 
-    program = flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H,
-                              num_split)
-    kernel = tilelang.compile(program, out_idx=[6])
+    kernel = flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H,
+                             num_split)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     input_tensors = profiler._get_inputs()
     tilelang_output = kernel(*input_tensors)

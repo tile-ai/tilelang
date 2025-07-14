@@ -9,6 +9,7 @@ from einops import rearrange, einsum
 import argparse
 
 
+@tilelang.jit(out_idx=[-1])
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     dtype = "float16"
@@ -148,9 +149,7 @@ if __name__ == "__main__":
     BLOCK_N = 64
     BLOCK_H = 64
 
-    program = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H)
-    print(program)
-    kernel = tilelang.compile(program, out_idx=-1)
+    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     latency = profiler.do_bench(warmup=500)
     print(f"Latency: {latency} ms")

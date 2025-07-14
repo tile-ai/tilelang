@@ -20,6 +20,7 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
     accum_dtype = "float"
     kv_group_num = heads // heads_kv
 
+    @tilelang.jit(out_idx=[-1])
     def kernel_func(block_N, block_H, num_split, num_stages, threads, max_cache_seqlen, num_blocks):
         shape_q = [batch, heads, dim]
         shape_k = [batch, max_cache_seqlen, heads_kv, dim]
@@ -189,7 +190,7 @@ class SparseFlashAttn(torch.nn.Module):
 
         self.block_H = 64
 
-        program = flashattn(batch, heads, heads_kv, dim, dim_v)(
+        self.kernel = flashattn(batch, heads, heads_kv, dim, dim_v)(
             block_N=block_size,
             block_H=self.block_H,
             num_split=T.symbolic("num_split"),
@@ -197,9 +198,6 @@ class SparseFlashAttn(torch.nn.Module):
             threads=128,
             max_cache_seqlen=T.symbolic("max_cache_seqlen"),
             num_blocks=T.symbolic("num_blocks"))
-
-        self.kernel = tilelang.compile(
-            program, out_idx=-1, target='cuda', execution_backend="cython")
 
         props = torch.cuda.get_device_properties(torch.device("cuda:0"))
         self.num_sm = props.multi_processor_count
@@ -281,7 +279,7 @@ def sparse_gqa_decode_varlen_mask(query, key, value, block_mask, cache_seqlens, 
         is_causal_or_local=True,
         max_splits=128)
 
-    program = flashattn(batch, heads, heads_kv, dim, dim_v)(
+    kernel = flashattn(batch, heads, heads_kv, dim, dim_v)(
         block_N=block_size,
         block_H=block_H,
         num_split=T.symbolic("num_split"),
@@ -293,7 +291,6 @@ def sparse_gqa_decode_varlen_mask(query, key, value, block_mask, cache_seqlens, 
     Output_partial = torch.empty((batch, heads, num_split, dim_v),
                                  dtype=torch.float32,
                                  device='cuda')
-    kernel = tilelang.compile(program, out_idx=-1, target='cuda', execution_backend="cython")
     # print(kernel.get_kernel_source())
 
     output = kernel(query, key, value, block_mask, cache_seqlens, glse, Output_partial)

@@ -4,7 +4,6 @@
 import torch
 import torch.nn.functional as F
 import tilelang
-from tilelang import cached
 import tilelang.language as T
 
 import tilelang.testing
@@ -12,6 +11,7 @@ import tilelang.testing
 tilelang.testing.set_random_seed(42)
 
 
+@tilelang.jit(out_idx=[3, 4],)
 def flashattn_fwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     shape = [batch, seq_len, heads, dim]
@@ -81,6 +81,7 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
     return flash_fwd
 
 
+@tilelang.jit(out_idx=[2],)
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
     dtype = "float16"
     accum_dtype = "float"
@@ -116,6 +117,7 @@ def make_dq_layout(dQ):
                     lambda b, l, h, d: [b, l // 8, h, d // 8, (d % 2), 4 * (l % 8) + (d % 8) // 2])
 
 
+@tilelang.jit(out_idx=[1],)
 def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
     dtype = "float16"
     accum_dtype = "float"
@@ -137,11 +139,7 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
     return flash_bwd_post
 
 
-@tilelang.jit(
-    out_idx=[7, 8],
-    pass_configs={
-        tilelang.PassConfigKey.TL_DEBUG_MERGE_SHARED_MEMORY_ALLOCATIONS: True,
-    })
+@tilelang.jit(out_idx=[7, 8])
 def flashattn_bwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
     sm_scale = (1.0 / dim)**0.5
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
@@ -164,10 +162,6 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
         with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=32) as (bx, by, bz):
             K_shared = T.alloc_shared([block_M, dim], dtype)
             dsT_shared = T.alloc_shared([block_M, block_N], dtype)
-            # should not store K to local if dim is large
-            # K_local = T.alloc_fragment([block_M, dim], dtype)
-            # K_local_T = T.alloc_fragment([block_M, dim], dtype)
-            # V_local = T.alloc_fragment([block_M, dim], dtype)
             q = T.alloc_shared([block_N, dim], dtype)
             V_shared = T.alloc_shared([block_M, dim], dtype)
             qkT = T.alloc_fragment([block_M, block_N], accum_dtype)
@@ -185,7 +179,6 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
 
             T.annotate_layout({
                 dQ: make_dq_layout(dQ),
-                K_shared: tilelang.layout.make_swizzled_layout(K_shared),
                 dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
                 dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
             })
@@ -240,8 +233,8 @@ class _attention(torch.autograd.Function):
         BATCH, N_CTX, H, D_HEAD = q.shape
         block_M = 64
         block_N = 64 if D_HEAD <= 128 else 32
-        mod = cached(flashattn_fwd(BATCH, H, N_CTX, D_HEAD, causal, block_M, block_N), [3, 4])
-        o, lse = mod(q, k, v)
+        kernel = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, causal, block_M, block_N)
+        o, lse = kernel(q, k, v)
         ctx.save_for_backward(q, k, v, o, lse)
         ctx.causal = causal
         return o
@@ -259,13 +252,13 @@ class _attention(torch.autograd.Function):
         do, q, k, v, o = [maybe_contiguous(x) for x in (do, q, k, v, o)]
         block_M = 128
         block_N = 128 if D_HEAD <= 64 else 32
-        mod_prep = cached(flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD), [2])
-        mod_post = cached(flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD), [1])
-        delta = mod_prep(o, do)
-        mod = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, ctx.causal, block_M, block_N)
+        kernel_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD)
+        kernel_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD)
+        kernel = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, ctx.causal, block_M, block_N)
+        delta = kernel_prep(o, do)
         dq = torch.zeros_like(q, dtype=torch.float32)
-        dk, dv = mod(q, k, v, do, lse, delta, dq)
-        dq = mod_post(dq)
+        dk, dv = kernel(q, k, v, do, lse, delta, dq)
+        dq = kernel_post(dq)
         return dq, dk, dv, None
 
 
