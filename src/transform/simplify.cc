@@ -443,7 +443,8 @@ private:
     } else {
       // May have symbolic, need kSymbolicBound level prover.
       if (analyzer_->CanProve(condition) ||
-        analyzer_->CanProve(condition, arith::ProofStrength::kSymbolicBound)) {
+          analyzer_->CanProve(condition,
+                              arith::ProofStrength::kSymbolicBound)) {
         return Bool(true);
       }
       return NullOpt;
