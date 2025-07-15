@@ -2,6 +2,9 @@
  *  \file lower_shared_barrier.cc
  *  \brief Convert shared.barrier buffers to plain shared + ptx init.
  */
+#include "tvm/ir/type.h"
+#include "tvm/tir/expr.h"
+#include "tvm/tir/stmt.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/runtime/registry.h>
 #include <tvm/tir/analysis.h>
@@ -14,76 +17,183 @@ namespace tl {
 
 using namespace tir;
 
-class SharedBarrierRewriter : public StmtMutator {
+class SharedBarrierRewriter : public StmtExprMutator {
 public:
-
-  static PrimFunc Rewrite(const PrimFunc &f) {
+  static Stmt Rewrite(Stmt body) {
     SharedBarrierRewriter rewriter;
-    f.CopyOnWrite()->body = rewriter(f->body);
-    return f;
+    return rewriter(body);
   }
 
 private:
-
   Stmt VisitStmt_(const BlockNode *op) final {
-    LOG(INFO) << "BlockNode: " << op->seq.size();
-    return StmtMutator::VisitStmt_(op);
-  }
+    Block block = GetRef<Block>(op);
+    Array<Buffer> alloc_buffers = op->alloc_buffers;
 
-  Array<Stmt> MakeInitCalls(const Map<Buffer, Buffer> &old2new) {
-    // 确定 tx 维：假设已知 var "threadIdx.x"
-    Var tx("threadIdx.x");
-    PrimExpr cond = (tx == 0);
-
-    Map<Buffer, Buffer> rev = old2new;
-    Array<Stmt> inits;
-    for (const auto &kv : rev) {
-      const Buffer &old_buf = kv.first;
-      const Buffer &new_buf = kv.second;
-      int64_t count = 1;
-      for (PrimExpr d : old_buf->shape) {
-        if (auto *int_imm = d.as<IntImmNode>()) {
-          count *= int_imm->value;
-        }
-      }
-      // 构造 T.call_extern("ptx.init_barrier_thread_count", ...)
-    //   Stmt call = Evaluate(Call(DataType::Int(32), builtin::call_extern(),
-    //                             {
-    //                                 StringImm("ptx.init_barrier_thread_count"),
-    //                                 BufferLoad(new_buf, {0}),
-    //                                 PrimExpr(count),
-    //                             }));
-    //   inits.push_back(IfThenElse(cond, SeqStmt({call})));
+    // Record the mapping from buffer data var to buffer for later lookup
+    for (auto buffer : alloc_buffers) {
+      buffer_map_.insert({buffer->data, buffer});
     }
-    return inits;
+    for (auto match_buffer : op->match_buffers) {
+      buffer_map_.insert({match_buffer->buffer->data, match_buffer->buffer});
+    }
+
+    Array<Buffer> barrier_buffers;
+
+    for (auto [data, buffer] : buffer_map_) {
+      const auto *ptr_type =
+          buffer->data->type_annotation.as<PointerTypeNode>();
+      auto storage_scope = ptr_type->storage_scope;
+      ICHECK(ptr_type) << "Buffer Var's type annotation must be of PointerType";
+      if (storage_scope == "shared.barrier") {
+        barrier_buffers.push_back(buffer);
+      }
+    }
+
+    if (barrier_buffers.size() == 0) {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+
+    ICHECK(thread_var_.defined()) << "thread_var_ is not defined";
+
+    for (auto buffer : barrier_buffers) {
+      buffer_data_to_buffer_.Set(buffer->data, buffer);
+    }
+
+    /*
+    Transform the barrier buffers to new allocations
+    transform:
+        data_is_ready = T.alloc_buffer((128,), "uint64", scope="shared.barrier")
+        compute_is_done = T.alloc_buffer((128,), "uint64",
+    scope="shared.barrier")
+
+    into:
+        data_is_ready = T.alloc_buffer((1,), "uint64", scope="shared")
+        compute_is_done = T.alloc_buffer((1,), "uint64", scope="shared")
+
+        if tx == 0:
+          T.ptx_init_barrier_thread_count(data_is_ready[0], 128)
+          T.ptx_init_barrier_thread_count(compute_is_done[0], 128)
+    */
+    // 1. create new data vars
+    Array<Var> new_data_vars;
+    for (auto buffer : barrier_buffers) {
+      auto data = buffer->data;
+      auto ptr_type = data->type_annotation.as<PointerTypeNode>();
+      auto new_data =
+          Var(data->name_hint, PointerType(ptr_type->element_type, "shared"));
+      var_remap_.Set(data, new_data);
+      new_data_vars.push_back(new_data);
+    }
+
+    // 2. create new buffers
+    Array<Buffer> new_buffers;
+    for (auto buffer : barrier_buffers) {
+      auto data = buffer->data;
+      ICHECK(var_remap_.find(data) != var_remap_.end())
+          << "data not found in var_remap_";
+      auto new_data = var_remap_.at(data);
+      auto new_buffer = Buffer(new_data, buffer->dtype, Array<PrimExpr>({1}),
+                               Array<PrimExpr>({1}), PrimExpr(0), buffer->name,
+                               buffer->data_alignment, buffer->offset_factor,
+                               buffer->buffer_type);
+      new_buffers.push_back(new_buffer);
+      buffer_remap_.Set(buffer, new_buffer);
+    }
+
+    // remove the barrier buffers
+    alloc_buffers.MutateByApply([this](Buffer buf) {
+      if (buffer_remap_.find(buf) != buffer_remap_.end()) {
+        return buffer_remap_.at(buf);
+      }
+      return buf;
+    });
+    if (!alloc_buffers.same_as(op->alloc_buffers)) {
+      block.CopyOnWrite()->alloc_buffers = alloc_buffers;
+    } else {
+      return StmtExprMutator::VisitStmt_(op);
+    }
+
+    // 3. create init calls for new buffers
+    Array<Stmt> init_mbarrier_calls_;
+    for (auto buffer : barrier_buffers) {
+      auto data = buffer->data;
+      auto old_buffer = buffer_data_to_buffer_.at(data);
+      auto new_buffer = buffer_remap_.at(old_buffer);
+      auto count = old_buffer->shape[0];
+
+      auto call =
+          Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
+               {BufferLoad(new_buffer, {0}), PrimExpr(count)});
+      init_mbarrier_calls_.push_back(Evaluate(call));
+    }
+
+    Array<Stmt> new_body;
+    new_body.push_back(IfThenElse(EQ(thread_var_->var, 0),
+                                  SeqStmt(init_mbarrier_calls_), Stmt()));
+    new_body.push_back(block->body);
+
+    block.CopyOnWrite()->body = SeqStmt(new_body);
+
+    return StmtExprMutator::VisitStmt_(block.get());
   }
 
-  static void FindAndInsertAllocs(const Stmt &s,
-                                  const Map<Buffer, Buffer> &old2new,
-                                  Array<Stmt> *append_allocs) {
-    // Array<Stmt> *flat = const_cast<Array<Stmt> *>(&s->body);
-    // auto *seq = const_cast<SeqStmtNode *>(s.as<SeqStmtNode>());
-    // ICHECK(seq) << "Must visit SeqStmt";
-
-    //  for (const auto& kv : old2new) {
-    //    append_allocs->push_back(
-    //        AllocBuffer(kv.second, {}, {}, NullOpt, Span()));
-    //  }
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+    auto load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
+    auto buffer = load->buffer;
+    if (buffer_remap_.count(buffer)) {
+      auto new_buffer = buffer_remap_[load->buffer];
+      return BufferLoad(new_buffer, load->indices);
+    } else if (var_remap_.count(buffer->data)) {
+      auto new_buffer = Buffer(
+          var_remap_[buffer->data], buffer->dtype, buffer->shape,
+          buffer->strides, buffer->elem_offset, buffer->name,
+          buffer->data_alignment, buffer->offset_factor, buffer->buffer_type);
+      return BufferLoad(new_buffer, load->indices);
+    }
+    return load;
   }
 
-  Stmt InsertInitBarrier(const Stmt &body, const Map<Buffer, Buffer> &old2new) {
-    Array<Stmt> inits = MakeInitCalls(old2new);
-    // 在 body 开头插入 if-then 列表
-    Stmt new_body = inits.empty() ? body : SeqStmt::Flatten(inits, body);
-    return new_body;
+  Stmt VisitStmt_(const BufferStoreNode *op) final {
+    auto store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
+    auto buffer = store->buffer;
+    if (buffer_remap_.count(buffer)) {
+      auto new_buffer = buffer_remap_[store->buffer];
+      return BufferStore(new_buffer, store->value, store->indices);
+    } else if (var_remap_.count(buffer->data)) {
+      auto new_buffer = Buffer(
+          var_remap_[buffer->data], buffer->dtype, buffer->shape,
+          buffer->strides, buffer->elem_offset, buffer->name,
+          buffer->data_alignment, buffer->offset_factor, buffer->buffer_type);
+      return BufferStore(new_buffer, store->value, store->indices);
+    }
+    return store;
   }
 
-  std::unordered_set<const BufferNode *> barriers_;
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tir::attr::thread_extent) {
+      IterVar iv = Downcast<IterVar>(op->node);
+      if (iv->thread_tag == "threadIdx.x") {
+        ICHECK(iv->dom->extent.as<IntImmNode>());
+        thread_var_ = iv;
+      }
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+
+  // This is a workaround for cpu backend,
+  // we need to define a thread_var for the serial loop.
+  IterVar thread_var_;
+  Map<Var, Var> var_remap_;
+  Map<Var, Buffer> buffer_data_to_buffer_;
+  Map<Buffer, Buffer> buffer_remap_;
+  // Mapping from data Var of a Buffer to Buffer, for lookup
+  std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
 };
 
-PrimFunc LowerSharedBarrier(const PrimFunc &f) {
-  SharedBarrierRewriter rewriter(collector.targets);
-  return rewriter.Rewrite(f);
+PrimFunc LowerSharedBarrier(PrimFunc f) {
+  SharedBarrierRewriter rewriter;
+  f.CopyOnWrite()->body = rewriter.Rewrite(f->body);
+  return f;
 }
 
 namespace transform {

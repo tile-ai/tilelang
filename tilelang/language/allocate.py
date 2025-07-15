@@ -16,7 +16,6 @@ Each function takes shape and dtype parameters and returns a TVM buffer object
 with the appropriate memory scope.
 """
 
-from tilelang.language.tir.entry import macro
 from tvm.script import tir as T
 
 

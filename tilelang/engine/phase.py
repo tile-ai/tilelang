@@ -94,7 +94,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     pass_ctx = tilelang.transform.get_pass_context()
     # Lower the barrier to the barrier_arrive and barrier_wait
     mod = tilelang.transform.LowerSharedBarrier()(mod)
-    exit()
+
     # which may be introduced by the LegalizeSafeMemoryAccess
     if allow_tma_and_warp_specialized(pass_ctx=pass_ctx, target=target):
         mod = tilelang.transform.IfStmtBinding()(mod)
@@ -152,7 +152,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.ThreadPartialSync("shared.dyn")(mod)
     mod = tir.transform.InferFragment()(mod)
     mod = tir.transform.LowerThreadAllreduce()(mod)
-    
+
     mod = tilelang.transform.LowerHopperIntrin()(mod)
 
     # Global Barrier Synchronization must be applied before
@@ -169,17 +169,16 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     if enable_aggressive_merge:
         # Workaround, wait for a element wise synchronization pass
         mod = tilelang.transform.MergeSharedMemoryAllocations(
-            enable_aggressive_merge=enable_aggressive_merge,
-            align_bytes=smem_align_bytes)(mod)     
+            enable_aggressive_merge=enable_aggressive_merge, align_bytes=smem_align_bytes)(
+                mod)
         mod = tilelang.transform.ThreadSync("shared")(mod)
         mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     else:
         mod = tilelang.transform.ThreadSync("shared")(mod)
         mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
         mod = tilelang.transform.MergeSharedMemoryAllocations(
-            enable_aggressive_merge=enable_aggressive_merge,
-            align_bytes=smem_align_bytes)(mod)
-
+            enable_aggressive_merge=enable_aggressive_merge, align_bytes=smem_align_bytes)(
+                mod)
 
     # Inject PTX async copy must behind the thread sync pass
     # as ptx async copy won't be recognized as a valid buffer load

@@ -1,6 +1,5 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-from doctest import debug
 import torch
 import torch.nn.functional as F
 import tilelang
@@ -10,6 +9,7 @@ from einops import rearrange, einsum
 import argparse
 
 tilelang.disable_cache()
+
 
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
@@ -440,7 +440,6 @@ def main():
             tilelang.PassConfigKey.TIR_USE_ASYNC_COPY: False,
         },
     )
-    print(kernel.get_kernel_source(), file=open("kernel.cu", "w"))
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
     latency = profiler.do_bench(warmup=500)

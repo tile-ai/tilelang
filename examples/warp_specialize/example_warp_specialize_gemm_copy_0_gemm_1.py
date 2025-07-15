@@ -30,9 +30,9 @@ def matmul_warp_specialize_copy_0_gemm_1(M,
 
             # create mbarrier for tma
             # T.create_list_of_mbarrier(128, 128)
-            
+
             # data_is_ready = 0
-            # compute_is_done = 1       
+            # compute_is_done = 1
             data_is_ready = T.alloc_barrier(arrive_count=128)
             compute_is_done = T.alloc_barrier(arrive_count=128)
 

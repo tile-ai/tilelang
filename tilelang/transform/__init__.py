@@ -343,7 +343,8 @@ def MergeSharedMemoryAllocations(enable_aggressive_merge: bool = False, align_by
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.MergeSharedMemoryAllocations(enable_aggressive_merge, align_bytes)  # type: ignore
+    return _ffi_api.MergeSharedMemoryAllocations(enable_aggressive_merge,
+                                                 align_bytes)  # type: ignore
 
 
 def LowerL2Persistent():
