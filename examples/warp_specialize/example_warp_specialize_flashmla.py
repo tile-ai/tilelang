@@ -420,7 +420,6 @@ def main():
             # tilelang.PassConfigKey.TIR_USE_ASYNC_COPY: False,
         },
     )
-    print(kernel.get_kernel_source(), file=open("kernel.cu", "w"))
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
     latency = profiler.do_bench(warmup=500)
