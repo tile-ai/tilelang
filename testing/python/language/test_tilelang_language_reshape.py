@@ -76,4 +76,5 @@ def test_reshape_smem_shared():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    run_reshape_smem(1024, 32, "float32")

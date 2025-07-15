@@ -74,8 +74,6 @@ class LibraryGenerator(object):
                 get_nvcc_compiler(),
                 "-std=c++17",
                 "-w",  # Disable all warning messages
-                "-Xptxas",
-                "-v",
                 "-Xcudafe",
                 "--diag_suppress=177",
                 "--compiler-options",
