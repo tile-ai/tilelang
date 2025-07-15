@@ -104,8 +104,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         T.copy(acc_s, S_shared)
                         T.copy(S_shared, acc_s_cast)
                         for i in T.Parallel(block_H):
-                            logsum[i] = logsum[i] * sco
-                            es_scale[i] + scores_sum[i]
+                            logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
                         for i, j in T.Parallel(block_H, dim):
                             acc_o[i, j] *= scores_scale[i]
                         T.gemm(acc_s_cast, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullCol)
