@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 #include "../op/builtin.h"
-#include <tvm/runtime/registry.h>
+#include <tvm/ffi/function.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/data_type_rewriter.h>
 #include <tvm/tir/op.h>
@@ -88,7 +88,7 @@ tvm::transform::Pass ConfigIndexBitwidth() {
   return CreatePrimFuncPass(pass_func, 0, "tl.ConfigIndexBitwidth", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.ConfigIndexBitwidth")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.ConfigIndexBitwidth")
     .set_body_typed(ConfigIndexBitwidth);
 
 } // namespace tl

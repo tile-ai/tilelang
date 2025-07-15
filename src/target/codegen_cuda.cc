@@ -7,7 +7,7 @@
 
 #include "codegen_cuda.h"
 #include <tvm/arith/analyzer.h>
-#include <tvm/runtime/registry.h>
+#include <tvm/ffi/function.h>
 #include <tvm/tir/index_map.h>
 #include <tvm/tir/op.h>
 
@@ -42,14 +42,14 @@ static std::string GetFP8Type(DataType type) {
     LOG(FATAL) << "Only support scalar and vector types of width (2, 4, 8, 16) "
                   "for FP8";
   }
-  if (type.code() == DataType::kFloat8_e4m3fn) {
+  if (type.is_float8_e4m3fn() || type.is_float8_e4m3fnuz() ||
+      type.is_float8_e4m3()) {
     stream << "fp8_e4" << vec << "_t";
-  } else if (type.code() == DataType::kFloat8_e4m3fnuz) {
-    stream << "fp8_e4" << vec << "_t";
-  } else if (type.code() == DataType::kFloat8_e5m2) {
+  } else if (type.is_float8_e5m2() || type.is_float8_e5m2fnuz() ||
+             type.is_float8_e5m2()) {
     stream << "fp8_e5" << vec << "_t";
   } else {
-    LOG(FATAL) << "Unsupported FP8 type in CUDA codegen";
+    LOG(FATAL) << "Unsupported FP8 type in CUDA codegen " << type;
   }
   return stream.str();
 }
@@ -1100,8 +1100,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     // To store the 32x8 output back to a 16x16 tile in shared or global memory,
     // we invert this map to determine the output location for each 8 element.
 
-    const auto *index_map_func =
-        runtime::Registry::Get("tir.index_map.shared_16x16_to_mma_32x8_layout");
+    auto index_map_func = ffi::Function::GetGlobal(
+        "tir.index_map.shared_16x16_to_mma_32x8_layout");
 
     IndexMap index_map;
     if (!index_map_func) {

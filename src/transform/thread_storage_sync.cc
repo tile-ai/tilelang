@@ -20,7 +20,7 @@
 /*!
  * \file thread_storage_sync.cc
  */
-#include <tvm/runtime/registry.h>
+#include <tvm/ffi/function.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
@@ -281,7 +281,7 @@ private:
       scope_.pop_back();
       s.access.insert(s.access.end(), v.begin(), v.end());
 
-      num_partial_threads_ = NullOpt;
+      num_partial_threads_ = std::nullopt;
     } else {
       TileLangStorageAccessVisitor::VisitStmt_(op);
     }
@@ -551,7 +551,7 @@ tvm::transform::Pass ThreadSync(String storage_scope) {
   return CreatePrimFuncPass(pass_func, 0, "tl.ThreadSync", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.ThreadSync").set_body_typed(ThreadSync);
+TVM_FFI_REGISTER_GLOBAL("tl.transform.ThreadSync").set_body_typed(ThreadSync);
 
 } // namespace transform
 } // namespace tl

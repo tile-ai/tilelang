@@ -11,12 +11,12 @@ from tilelang.layout import Layout
 from typing import List
 
 
-@tvm._ffi.register_object("tl.Fragment")
+@tvm.ffi.register_object("tl.Fragment")
 class Fragment(Layout):
     """
     A Fragment layout object that encapsulates iteration variables (forward_vars),
-    thread iteration variables (forward_thread), and index transformations 
-    (forward_index). This class supports replication (thread_replicate) and 
+    thread iteration variables (forward_thread), and index transformations
+    (forward_index). This class supports replication (thread_replicate) and
     index mapping for fine-grained control over multi-dimensional data layouts.
     """
 
@@ -51,7 +51,7 @@ class Fragment(Layout):
             used for multi-threading or replication in the hardware threads. Defaults to 1.
         forward_index_fn : callable, optional
             A function that takes iteration variables and returns an index or list
-            of indices for this fragment. Used when `forward_fn` is None and 
+            of indices for this fragment. Used when `forward_fn` is None and
             the index transformation is derived separately.
         """
 
@@ -96,6 +96,8 @@ class Fragment(Layout):
             forward_index = [forward_index]
 
         # Call TVM FFI constructor to set up internal data structures
+        if forward_index is None:
+            forward_index = []
         self.__init_handle_by_constructor__(
             _ffi_api.Fragment,
             forward_vars,

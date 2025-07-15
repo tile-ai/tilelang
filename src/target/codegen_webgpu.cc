@@ -704,11 +704,11 @@ public:
     return runtime::ModulePropertyMask::kBinarySerializable;
   }
 
-  PackedFunc GetFunction(const String &name,
-                         const ObjectPtr<Object> &sptr_to_self) final {
+  ffi::Function GetFunction(const String &name,
+                            const ObjectPtr<Object> &sptr_to_self) final {
     LOG(FATAL) << "WebGPUSourceModule is not directly runnable, export and run "
                   "through tvmjs";
-    return PackedFunc(nullptr);
+    return ffi::Function(nullptr);
   }
 
   void SaveToBinary(dmlc::Stream *stream) final {
@@ -773,7 +773,7 @@ runtime::Module BuildTileLangWebGPU(IRModule mod, Target target) {
   return runtime::Module(n);
 }
 
-TVM_REGISTER_GLOBAL("target.build.tilelang_webgpu")
+TVM_FFI_REGISTER_GLOBAL("target.build.tilelang_webgpu")
     .set_body_typed([](IRModule mod, Target target) {
       return BuildTileLangWebGPU(mod, target);
     });

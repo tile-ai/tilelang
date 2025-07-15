@@ -100,7 +100,7 @@ tvm::transform::Pass LowerL2Persistent() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerL2Persistent", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.LowerL2Persistent")
+TVM_FFI_REGISTER_GLOBAL("tl.transform.LowerL2Persistent")
     .set_body_typed(LowerL2Persistent);
 
 } // namespace tl

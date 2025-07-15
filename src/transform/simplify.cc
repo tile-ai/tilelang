@@ -210,7 +210,7 @@ TVM_REGISTER_PASS_CONFIG_OPTION("tl.Simplify", SimplifyConfig);
 class StmtSimplifier : public IRMutatorWithAnalyzer {
 public:
   static PrimFunc Apply(PrimFunc func, Analyzer *analyzer,
-                        Optional<SimplifyConfig> config_opt = NullOpt,
+                        Optional<SimplifyConfig> config_opt = std::nullopt,
                         bool simplify_arguments = false) {
     auto config = config_opt.value_or(AttrsWithDefaultValues<SimplifyConfig>());
     analyzer->rewrite_simplify.SetEnabledExtensions(
@@ -232,6 +232,7 @@ public:
     // Begin to remove useless var and buffer
     // First get used buffers
     simplifier.used_buffers_ = CollectUsedBuffers(func);
+
     bool param_updated = false;
     Array<Var> new_params;
     Map<Var, Buffer> new_buffer_map;
@@ -240,6 +241,11 @@ public:
       if (func->buffer_map.find(var) != func->buffer_map.end()) {
         if (simplifier.used_buffers_.find(func->buffer_map[var].get()) !=
             simplifier.used_buffers_.end()) {
+          new_params.push_back(var);
+          new_buffer_map.Set(var, func->buffer_map[var]);
+        } else if (simplifier.used_in_buffer_def_.find(
+                       func->buffer_map[var]->data.get()) !=
+                   simplifier.used_in_buffer_def_.end()) {
           new_params.push_back(var);
           new_buffer_map.Set(var, func->buffer_map[var]);
         } else {
@@ -447,7 +453,7 @@ private:
                               arith::ProofStrength::kSymbolicBound)) {
         return Bool(true);
       }
-      return NullOpt;
+      return std::nullopt;
     }
   }
 
@@ -455,7 +461,7 @@ private:
   std::optional<ControlFlowGraph> touch_pattern_;
 
   Map<Var, PrimExpr> non_inlined_bindings_;
-  Optional<Stmt> current_stmt_{NullOpt};
+  Optional<Stmt> current_stmt_{std::nullopt};
   std::unordered_set<const VarNode *> used_in_buffer_def_;
   std::unordered_set<const VarNode *> used_vars_;
   std::unordered_set<const BufferNode *> used_buffers_;
@@ -472,7 +478,7 @@ tvm::transform::Pass Simplify(bool simplify_arguments = true) {
   return CreatePrimFuncPass(pass_func, 0, "tl.Simplify", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.Simplify").set_body_typed(Simplify);
+TVM_FFI_REGISTER_GLOBAL("tl.transform.Simplify").set_body_typed(Simplify);
 
 } // namespace tl
 } // namespace tvm
