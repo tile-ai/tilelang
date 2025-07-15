@@ -411,15 +411,7 @@ def main():
     num_split = 1
 
     program = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split)
-    kernel = tilelang.compile(
-        program,
-        out_idx=[6],
-        pass_configs={
-            # tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-            # tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            # tilelang.PassConfigKey.TIR_USE_ASYNC_COPY: False,
-        },
-    )
+    kernel = tilelang.compile(program, out_idx=[6])
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
     latency = profiler.do_bench(warmup=500)
