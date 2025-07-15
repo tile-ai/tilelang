@@ -682,9 +682,12 @@ private:
       return true;
     }
 
+    if (!iv->dom.defined()) {
+      return true;
+    }
+
     const auto *min_node = iv->dom->min.as<IntImmNode>();
     const auto *extent_node = iv->dom->extent.as<IntImmNode>();
-    ICHECK(min_node != nullptr && extent_node != nullptr);
 
     int64_t min = min_node->value;
     int64_t extent = extent_node->value;
