@@ -1,5 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
+from doctest import debug
 import torch
 import torch.nn.functional as F
 import tilelang
@@ -9,7 +10,6 @@ from einops import rearrange, einsum
 import argparse
 
 tilelang.disable_cache()
-
 
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
@@ -68,23 +68,43 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 O_shared_r: tilelang.layout.make_swizzled_layout(O_shared_r),
             })
 
-            kv_shared_0_l_is_ready = T.alloc_barrier(arrive_count=128)
-            kv_shared_0_r_is_ready = T.alloc_barrier(arrive_count=128)
-            kv_shared_0_pe_is_ready = T.alloc_barrier(arrive_count=128)
-            kv_shared_1_l_is_ready = T.alloc_barrier(arrive_count=128)
-            kv_shared_1_r_is_ready = T.alloc_barrier(arrive_count=128)
-            kv_shared_1_pe_is_ready = T.alloc_barrier(arrive_count=128)
-            score_max_0_ready_barrier = T.alloc_barrier(arrive_count=128)
-            scale_1_ready_barrier = T.alloc_barrier(arrive_count=128)
-            p0_1_1_ready_barrier = T.alloc_barrier(arrive_count=128)
-            lse_0_ready_barrier = T.alloc_barrier(arrive_count=128)
-            lse_1_ready_barrier = T.alloc_barrier(arrive_count=128)
-            s_shared_ready_barrier = T.alloc_barrier(arrive_count=128)
-            q_shared_ready_barrier = T.alloc_barrier(arrive_count=256)
-            k_pe_shared_1_free_barrier = T.alloc_barrier(arrive_count=128)
-            k_pe_shared_0_free_barrier = T.alloc_barrier(arrive_count=128)
-            s_shared_ready_barrier = T.alloc_barrier(arrive_count=128)
-            k_shared_1_l_free_barrier = T.alloc_barrier(arrive_count=128)
+            T.create_list_of_mbarrier([
+                128,  # for Q_shared_l, Q_shared_r, Q_pe_shared
+                128,  # for KV_shared_0_l, KV_shared_0_r, K_pe_shared_0
+                128,  # for KV_shared_1_l, KV_shared_1_r, K_pe_shared_1
+                128,  # for scores_scale_0, scores_scale_1
+                128,  # when compute acc_s_0_l is done
+                128,  # when compute acc_s_0_r is done
+                128,
+                128,
+                128,
+                128,
+                128,
+                128,
+                256,
+                128,
+                128,
+                128,
+                128,
+            ])
+
+            kv_shared_0_l_is_ready = 0
+            kv_shared_0_r_is_ready = 1
+            kv_shared_0_pe_is_ready = 2
+            kv_shared_1_l_is_ready = 3
+            kv_shared_1_r_is_ready = 4
+            kv_shared_1_pe_is_ready = 5
+            score_max_0_ready_barrier = 6
+            scale_1_ready_barrier = 7
+            p0_1_1_ready_barrier = 8
+            lse_0_ready_barrier = 9
+            lse_1_ready_barrier = 10
+            s_shared_ready_barrier = 11
+            q_shared_ready_barrier = 12
+            k_pe_shared_1_free_barrier = 13
+            k_pe_shared_0_free_barrier = 14
+            s_shared_ready_barrier = 15
+            k_shared_1_l_free_barrier = 16
 
             tx = T.get_thread_binding()
 
@@ -417,7 +437,8 @@ def main():
         pass_configs={
             # tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             # tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            # tilelang.PassConfigKey.TIR_USE_ASYNC_COPY: False,
+            # tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True,
+            # tilelang.PassConfigKey.TL_DEBUG_MERGE_SHARED_MEMORY_ALLOCATIONS: True,
         },
     )
     print(kernel.get_kernel_source(), file=open("kernel.cu", "w"))
