@@ -89,7 +89,10 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.AlignDynamicSharedMemoryAllocations(16)(mod)
     # Simplify again to clean up any duplicated conditions
     # that may have been introduced by safety checks
-    mod = tir.transform.Simplify()(mod)
+    # use an enhanced pass to simplify the dynamic symbolics
+    # TODO(lei): return to tir pass when kSymbolicBound simplification
+    # is merged into tvm.
+    mod = tilelang.transform.Simplify()(mod)
     # Try to vectorize loop with dynamic shape
     mod = tilelang.transform.LoopVectorizeDynamic()(mod)
     return mod

@@ -197,7 +197,21 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
         }
       });
 
-      if (!is_one(loop_layout_->ReplicateExtent()) && has_cross_thread_access) {
+      // check if loop body contains a "pure" buffer store (i.e., direct
+      // assignment, not compound update)
+      bool has_pure_buffer_store = false;
+      PostOrderVisit(root_, [&](const ObjectRef &obj) {
+        if (const auto *store = obj.as<BufferStoreNode>()) {
+          // Check if the value is a direct load from another buffer (i.e., b[i]
+          // = a[i])
+          if (const auto *load = store->value.as<BufferLoadNode>()) {
+            has_pure_buffer_store = true;
+          }
+        }
+      });
+
+      if (!is_one(loop_layout_->ReplicateExtent()) && has_cross_thread_access &&
+          !has_pure_buffer_store) {
         auto inv = loop_layout_->Inverse();
         Array<PrimExpr> fwd;
         for (size_t i = 0; i < loop_layout_->OutputDim(); i++)

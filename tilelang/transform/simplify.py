@@ -5,7 +5,7 @@ from typing import Union, Callable
 from . import _ffi_api
 
 
-def Simplify():
+def Simplify(simplify_arguments: bool = False):
     """Simplify
 
     Returns
@@ -13,16 +13,16 @@ def Simplify():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.Simplify()  # type: ignore
+    return _ffi_api.Simplify(simplify_arguments)  # type: ignore
 
 
 def _Simplify(stmt: Union[PrimFunc, IRModule]) -> Union[PrimFunc, IRModule]:
     if isinstance(stmt, PrimFunc):
-        mod = Simplify()(IRModule.from_expr(stmt))
+        mod = Simplify(simplify_arguments=True)(IRModule.from_expr(stmt))
         assert len(mod.functions) == 1, "Simplify should return a single function"
         return list(mod.functions.values()).pop()
     elif isinstance(stmt, IRModule):
-        return Simplify()(stmt)
+        return Simplify(simplify_arguments=True)(stmt)
     else:
         raise ValueError(f"Unsupported type: {type(stmt)}")
 

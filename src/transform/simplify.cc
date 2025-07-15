@@ -207,7 +207,8 @@ TVM_REGISTER_PASS_CONFIG_OPTION("tl.Simplify", SimplifyConfig);
 class StmtSimplifier : public IRMutatorWithAnalyzer {
 public:
   static PrimFunc Apply(PrimFunc func, Analyzer *analyzer,
-                        Optional<SimplifyConfig> config_opt = NullOpt) {
+                        Optional<SimplifyConfig> config_opt = NullOpt,
+                        bool simplify_arguments = false) {
     auto config = config_opt.value_or(AttrsWithDefaultValues<SimplifyConfig>());
     analyzer->rewrite_simplify.SetEnabledExtensions(
         config->GetEnabledExtensions());
@@ -243,8 +244,8 @@ public:
         }
       }
     }
-    // return func;
-    if (param_updated) {
+
+    if (simplify_arguments && param_updated) {
       return PrimFunc(new_params, func.CopyOnWrite()->body, func->ret_type,
                       new_buffer_map, func->attrs, func->span);
     } else {
@@ -437,6 +438,12 @@ private:
     if (const int64_t *as_int = as_const_int(condition)) {
       return Bool(*as_int);
     } else {
+      // May have symbolic, need kSymbolicBound level prover.
+      if (analyzer_->CanProve(condition) ||
+          analyzer_->CanProve(condition,
+                              arith::ProofStrength::kSymbolicBound)) {
+        return Bool(true);
+      }
       return NullOpt;
     }
   }
@@ -453,11 +460,11 @@ private:
 
 using namespace tir::transform;
 
-tvm::transform::Pass Simplify() {
+tvm::transform::Pass Simplify(bool simplify_arguments = true) {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
     arith::Analyzer analyzer;
     auto cfg = ctx->GetConfig<SimplifyConfig>("tl.Simplify");
-    return StmtSimplifier::Apply(f, &analyzer, cfg);
+    return StmtSimplifier::Apply(f, &analyzer, cfg, simplify_arguments);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.Simplify", {});
 }

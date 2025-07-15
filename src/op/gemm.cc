@@ -65,6 +65,10 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
   constexpr int kNPerWarp = 8;  // Columns processed by a single warp
   bool allow_wgmma = TargetIsHopper(target) && maybe_hopper_wgmma &&
                      (this->M >= 64) && (num_warps % 4 == 0);
+  ICHECK(this->M % kMPerWarp == 0)
+      << "M must be divisible by " << kMPerWarp << ", but got " << this->M;
+  ICHECK(this->N % kNPerWarp == 0)
+      << "N must be divisible by " << kNPerWarp << ", but got " << this->N;
   if (allow_wgmma) {
     ICHECK(num_warps % 4 == 0) << "Warp-Group MMA requires 128×k threads.";
 

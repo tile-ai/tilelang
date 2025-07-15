@@ -154,9 +154,16 @@ def main():
         print(f"Sparsity Ratio: {sparsity}")
         print(f"Best Kernel Latency: {best_latency:.6f} ms")
     else:
-        kernel = blocksparse_matmul(M, N, K, DEFAULT_BLOCK_M, DEFAULT_BLOCK_N, DEFAULT_BLOCK_K,
-                                    DEFAULT_NUM_STAGES, DEFAULT_THREAD_NUM,
-                                    DEFAULT_ENABLE_RASTERIZATION)
+        kernel = blocksparse_matmul(
+            M,
+            N,
+            K,
+            block_M=DEFAULT_BLOCK_M,
+            block_N=DEFAULT_BLOCK_N,
+            block_K=DEFAULT_BLOCK_K,
+            num_stages=DEFAULT_NUM_STAGES,
+            thread_num=DEFAULT_THREAD_NUM,
+            enable_rasteration=DEFAULT_ENABLE_RASTERIZATION)
         block_M, block_N, block_K = DEFAULT_BLOCK_M, DEFAULT_BLOCK_N, DEFAULT_BLOCK_K
         print(f"Using default kernel with block size ({block_M}, {block_N}, {block_K})")
 
