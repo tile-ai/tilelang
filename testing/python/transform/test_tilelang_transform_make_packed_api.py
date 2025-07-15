@@ -160,6 +160,7 @@ def test_subroutine_call_to_externally_visible_subroutine():
     ), (f"The main function's CallNode should be lowered to the builtin 'tir.tvm_call_cpacked', "
         f"but instead has an operation of type {subroutine_call_op}")
 
+
 @tilelang.testing.requires_llvm
 def test_function_call_with_wrong_argument_count():
     """Argument counts must be checked before accessing the type codes"""
@@ -178,6 +179,7 @@ def test_function_call_with_wrong_argument_count():
     with pytest.raises(tvm.TVMError):
         built()
 
+
 @tilelang.testing.requires_llvm
 def test_function_call_with_wrong_type_code():
     """Type codes must be checked before accessing the arguments"""
@@ -190,6 +192,7 @@ def test_function_call_with_wrong_type_code():
 
     with pytest.raises(tvm.TVMError):
         built(0)
+
 
 @tilelang.testing.requires_llvm
 def test_function_call_with_null_data_pointer():
@@ -207,6 +210,7 @@ def test_function_call_with_null_data_pointer():
 
     with pytest.raises(tvm.TVMError):
         built(A, B)
+
 
 @tilelang.testing.requires_llvm
 def test_function_call_with_wrong_dimensionality():
