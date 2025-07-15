@@ -496,7 +496,8 @@ def compare_ab(baseline, target, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal
                                        s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
 
     torch.testing.assert_close(out_b.float(), out_a.float(), atol=1e-2, rtol=1e-2), "out"
-    if target not in ["flash_infer", "flash_mla_triton", "flash_mla_tilelang"]:
+    if target not in ["flash_infer", "flash_mla_triton", "tilelang"
+                     ] and baseline not in ["flash_infer", "flash_mla_triton", "tilelang"]:
         # flash_infer has a different lse return value
         # flash_mla_triton and flash_mla_tilelang doesn't return lse
         torch.testing.assert_close(lse_b.float(), lse_a.float(), atol=1e-2, rtol=1e-2), "lse"
