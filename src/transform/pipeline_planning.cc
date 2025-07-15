@@ -262,7 +262,7 @@ private:
           annotations.Set(key, value);
         }
       }
-      annotations.Set(tir::attr::software_pipeline_stage, stage_anno);
+      annotations.Set(tir::attr::software_pipeline_stage, stage_anno.value());
       if (TargetHasAsyncCopy(target_) && use_async_copy_)
         annotations.Set(tir::attr::software_pipeline_async_stages,
                         Array<Integer>{0});

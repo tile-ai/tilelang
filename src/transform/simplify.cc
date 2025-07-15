@@ -207,7 +207,7 @@ TVM_REGISTER_PASS_CONFIG_OPTION("tl.Simplify", SimplifyConfig);
 class StmtSimplifier : public IRMutatorWithAnalyzer {
 public:
   static PrimFunc Apply(PrimFunc func, Analyzer *analyzer,
-                        Optional<SimplifyConfig> config_opt = NullOpt,
+                        Optional<SimplifyConfig> config_opt = std::nullopt,
                         bool simplify_arguments = false) {
     auto config = config_opt.value_or(AttrsWithDefaultValues<SimplifyConfig>());
     analyzer->rewrite_simplify.SetEnabledExtensions(
@@ -450,7 +450,7 @@ private:
                               arith::ProofStrength::kSymbolicBound)) {
         return Bool(true);
       }
-      return NullOpt;
+      return std::nullopt;
     }
   }
 
