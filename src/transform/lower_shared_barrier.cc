@@ -130,6 +130,8 @@ private:
     Array<Stmt> new_body;
     new_body.push_back(IfThenElse(EQ(thread_var_->var, 0),
                                   SeqStmt(init_mbarrier_calls_), Stmt()));
+    new_body.push_back(Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
+                                     {StringImm("shared")})));
     new_body.push_back(block->body);
 
     block.CopyOnWrite()->body = SeqStmt(new_body);
