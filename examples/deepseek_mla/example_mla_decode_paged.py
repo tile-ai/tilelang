@@ -36,7 +36,6 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
             K_pe_shared = T.alloc_shared([block_N, dpe], dtype)
             O_shared = T.alloc_shared([block_H, dv], dtype)
             acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
-            acc_s_cast = T.alloc_fragment([block_H, block_N], dtype)
             acc_o = T.alloc_fragment([block_H, dv], accum_dtype)
             scores_max = T.alloc_fragment([block_H], accum_dtype)
             scores_max_prev = T.alloc_fragment([block_H], accum_dtype)
@@ -86,12 +85,11 @@ def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, bloc
                     acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
                 T.reduce_sum(acc_s, scores_sum, dim=1)
                 T.copy(acc_s, S_shared)
-                T.copy(S_shared, acc_s_cast)
                 for i in T.Parallel(block_H):
                     logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
                 for i, j in T.Parallel(block_H, dv):
                     acc_o[i, j] *= scores_scale[i]
-                T.gemm(acc_s_cast, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullCol)
+                T.gemm(S_shared, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullCol)
             for i, j in T.Parallel(block_H, dv):
                 acc_o[i, j] /= logsum[i]
             T.copy(acc_o, O_shared)
