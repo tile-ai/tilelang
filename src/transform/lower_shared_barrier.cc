@@ -1,3 +1,5 @@
+// Copyright (c) Tile-AI Corporation.
+// Licensed under the MIT License.
 /*!
  *  \file lower_shared_barrier.cc
  *  \brief Convert shared.barrier buffers to plain shared + ptx init.

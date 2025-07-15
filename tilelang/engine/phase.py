@@ -95,7 +95,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     pass_ctx = tilelang.transform.get_pass_context()
-    # Lower the barrier to the barrier_arrive and barrier_wait
+    # Lower the barrier.arrive into specific initialization slot
     mod = tilelang.transform.LowerSharedBarrier()(mod)
 
     # which may be introduced by the LegalizeSafeMemoryAccess
