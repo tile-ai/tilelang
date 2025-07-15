@@ -70,8 +70,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
     # Legalize the frontend IR to make it compatible with TVM
     mod = tilelang.transform.FrontendLegalize()(mod)
-    # Lower the barrier to the barrier_arrive and barrier_wait
-    # mod = tilelang.transform.LowerSharedBarrier()(mod)
     # Simplify the IR expressions
     mod = tir.transform.Simplify()(mod)
     # Infer memory layouts for fragments and shared memory
@@ -94,6 +92,9 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     pass_ctx = tilelang.transform.get_pass_context()
+    # Lower the barrier to the barrier_arrive and barrier_wait
+    mod = tilelang.transform.LowerSharedBarrier()(mod)
+    exit()
     # which may be introduced by the LegalizeSafeMemoryAccess
     if allow_tma_and_warp_specialized(pass_ctx=pass_ctx, target=target):
         mod = tilelang.transform.IfStmtBinding()(mod)
@@ -151,6 +152,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.ThreadPartialSync("shared.dyn")(mod)
     mod = tir.transform.InferFragment()(mod)
     mod = tir.transform.LowerThreadAllreduce()(mod)
+    
     mod = tilelang.transform.LowerHopperIntrin()(mod)
 
     # Global Barrier Synchronization must be applied before
