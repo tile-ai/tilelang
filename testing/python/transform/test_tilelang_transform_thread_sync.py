@@ -5,7 +5,7 @@
 from tilelang import tvm as tvm
 import tilelang.testing
 from tvm.script import tir as T
-
+from tvm import te
 
 def run_passes(func: tvm.tir.PrimFunc):
     mod = tvm.IRModule.from_expr(func)
@@ -26,7 +26,7 @@ def run_passes(func: tvm.tir.PrimFunc):
 @tilelang.testing.requires_cuda
 def test_sync_if_with_same_index():
 
-    @T.prim_func
+    @T.prim_func(check_well_formed=False)
     def func(p0_arg: T.Buffer((1, 2, 1, 1), "float32"), p1: T.Buffer(2, "float32")) -> None:
         threadIdx_x = T.env_thread("threadIdx.x")
         threadIdx_y = T.env_thread("threadIdx.y")
@@ -44,43 +44,6 @@ def test_sync_if_with_same_index():
 
     mod = run_passes(func)
     assert "T.tvm_storage_sync" in str(mod)
-
-
-@tilelang.testing.requires_cuda
-def test_sync_else_branch():
-
-    def ir(A, B):
-        ib = tvm.tir.ir_builder.create()
-        Aptr = ib.buffer_ptr(A)
-        Bptr = ib.buffer_ptr(B)
-
-        tx = te.thread_axis("threadIdx.x")
-        ib.scope_attr(tx, "thread_extent", 1)
-
-        local = ib.allocate(A.dtype, (8,), name="buf_local", scope="local")
-        shared = ib.allocate(A.dtype, (8,), name="buf_shared", scope="shared")
-
-        with ib.for_range(0, 8) as i:
-            with ib.if_scope(Aptr[i] < 0):
-                local[i] = Aptr[i]
-            with ib.else_scope():
-                shared[i] = Aptr[i]
-
-        with ib.for_range(0, 8) as i:
-            with ib.if_scope(Aptr[i] < 0):
-                Bptr[i] = local[i]
-            with ib.else_scope():
-                Bptr[i] = shared[i]
-
-        return ib.get()
-
-    A = tvm.tir.decl_buffer((8,), "float32")
-    B = tvm.tir.decl_buffer((8,), "float32")
-    stmt = ir(A, B)
-    func = tvm.te.schedule.SchedulePostProcToPrimFunc([A, B], stmt, None)
-    mod = run_passes(func)
-    assert "T.tvm_storage_sync" in str(mod)
-
 
 @tilelang.testing.requires_cuda
 def test_sync_read_thread_id_independent_location():

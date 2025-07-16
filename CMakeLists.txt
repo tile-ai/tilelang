@@ -11,6 +11,14 @@ endif()
 
 # Enable compile command export
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+if(NOT Python_EXECUTABLE)
+  execute_process(
+    COMMAND which python
+    OUTPUT_VARIABLE Python_EXECUTABLE
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  set(Python_EXECUTABLE "${Python_EXECUTABLE}" CACHE FILEPATH "Path to the Python executable")
+endif()
 
 # Define a custom macro for globbing files with conditional CONFIGURE_DEPENDS
 if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "3.12.0")
