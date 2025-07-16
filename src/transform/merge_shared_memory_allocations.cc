@@ -323,9 +323,9 @@ public:
   explicit SharedMemoryRewriter(
       const std::unordered_map<const VarNode *, const AllocateNode *>
           &shmem_allocs,
-      bool is_dynamic = true, bool verbose = false)
-      : is_dynamic_{is_dynamic}, shmem_allocs_{shmem_allocs}, verbose_{
-                                                                  verbose} {
+      bool is_dynamic = true, bool verbose = false, int align_bytes = 0)
+      : is_dynamic_{is_dynamic}, shmem_allocs_{shmem_allocs}, verbose_{verbose},
+        align_bytes_{align_bytes} {
     if (!is_dynamic) {
       merged_buf_var_ =
           Var("buf_shmem", PointerType(PrimType(DataType::UInt(8)), "shared"));
@@ -370,6 +370,7 @@ private:
             const AllocateNode *alloc = shmem_allocs_[buffer];
             align[i] =
                 std::max(align[i], alloc->dtype.bytes() * alloc->dtype.lanes());
+            align[i] = std::max(align[i], align_bytes_);
           }
         }
       }
@@ -980,6 +981,8 @@ private:
 
   // Whether enable verbose logging.
   bool verbose_{false};
+  // The alignment bytes for the merged buffer
+  int align_bytes_{16};
   // The var for the merged buffer
   Var merged_buf_var_{"buf_dyn_shmem",
                       PointerType(PrimType(DataType::UInt(8)), "shared.dyn")};
@@ -1008,17 +1011,18 @@ private:
 
 Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
                                   bool enable_aggressive_merge,
-                                  bool verbose = false) {
+                                  int align_bytes = 16, bool verbose = false) {
   AllocateCollector collector;
   collector(stmt);
   if (collector.dyn_shmem_allocs_.size() > 1) {
-    SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose);
+    SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose,
+                                  align_bytes);
     rewriter.PlanReuse(stmt, true, enable_aggressive_merge);
     stmt = rewriter(std::move(stmt));
   }
   if (merge_static_smem && collector.static_shmem_allocs_.size() > 1) {
     SharedMemoryRewriter rewriter(collector.static_shmem_allocs_, false,
-                                  verbose);
+                                  verbose, align_bytes);
     rewriter.PlanReuse(stmt, false, enable_aggressive_merge);
     stmt = rewriter(std::move(stmt));
   }
@@ -1029,9 +1033,10 @@ using namespace tir::transform;
 
 namespace transform {
 
-Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false) {
-  auto pass_func = [enable_aggressive_merge](PrimFunc f, IRModule m,
-                                             PassContext ctx) {
+Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
+                                  int align_bytes = 16) {
+  auto pass_func = [enable_aggressive_merge,
+                    align_bytes](PrimFunc f, IRModule m, PassContext ctx) {
     bool merge_static_smem =
         ctx->GetConfig<Bool>("tir.merge_static_smem", Bool(false)).value();
     bool debug_merge_shared_memory_allocations =
@@ -1040,7 +1045,7 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false) {
     auto *n = f.CopyOnWrite();
     n->body = tl::MergeSharedMemoryAllocations(
         std::move(n->body), merge_static_smem, enable_aggressive_merge,
-        debug_merge_shared_memory_allocations);
+        align_bytes, debug_merge_shared_memory_allocations);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeSharedMemoryAllocations",
