@@ -27,6 +27,7 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include <tvm/ffi/reflection/registry.h>
 
 #include "../op/builtin.h"
 
@@ -340,8 +341,11 @@ tvm::transform::Pass MultiVersionBuffer() {
   return CreatePrimFuncPass(pass_func, 0, "tl.MultiVersionBuffer", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.MultiVersionBuffer")
-    .set_body_typed(MultiVersionBuffer);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.transform.MultiVersionBuffer", MultiVersionBuffer);
+});
 
 } // namespace tl
 } // namespace tvm

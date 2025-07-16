@@ -1,5 +1,6 @@
 #include "codegen_cuda.h"
 #include "runtime/cuda/cuda_module.h"
+#include <tvm/ffi/reflection/registry.h>
 
 namespace tvm {
 namespace codegen {
@@ -90,10 +91,12 @@ runtime::Module BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
   return runtime::CUDAModuleCreate("ptx", "ptx", ExtractFuncInfo(mod), code);
 }
 
-TVM_REGISTER_GLOBAL("target.build.tilelang_cuda")
-    .set_body_typed(BuildTileLangCUDA);
-TVM_REGISTER_GLOBAL("target.build.tilelang_cuda_without_compile")
-    .set_body_typed(BuildTileLangCUDAWithoutCompile);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("target.build.tilelang_cuda", BuildTileLangCUDA)
+    .def("target.build.tilelang_cuda_without_compile", BuildTileLangCUDAWithoutCompile);
+});
 
 } // namespace codegen
 } // namespace tvm

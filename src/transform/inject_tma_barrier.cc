@@ -30,6 +30,7 @@
 #include <tvm/tir/stmt.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include <tvm/ffi/reflection/registry.h>
 
 #include "../op/builtin.h"
 #include "./common/attr.h"
@@ -306,8 +307,11 @@ tvm::transform::Pass InjectTmaBarrier() {
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectTmaBarrier", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.InjectTmaBarrier")
-    .set_body_typed(InjectTmaBarrier);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.transform.InjectTmaBarrier", InjectTmaBarrier);
+});
 
 } // namespace tl
 } // namespace tvm

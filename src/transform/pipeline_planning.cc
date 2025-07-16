@@ -27,6 +27,7 @@
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include <tvm/ffi/reflection/registry.h>
 
 #include "../target/utils.h"
 
@@ -496,8 +497,11 @@ tvm::transform::Pass PipelinePlanning() {
   return CreatePrimFuncPass(pass_func, 0, "tl.PipelinePlanning", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.PipelinePlanning")
-    .set_body_typed(PipelinePlanning);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.transform.PipelinePlanning", PipelinePlanning);
+});
 
 } // namespace tl
 } // namespace tvm

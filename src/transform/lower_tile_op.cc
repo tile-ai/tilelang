@@ -7,6 +7,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
+#include <tvm/ffi/reflection/registry.h>
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
@@ -498,7 +499,11 @@ tvm::transform::Pass LowerTileOp() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerTileOp", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.LowerTileOp").set_body_typed(LowerTileOp);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.transform.LowerTileOp", LowerTileOp);
+});
 } // namespace transform
 
 } // namespace tl

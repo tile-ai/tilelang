@@ -27,6 +27,7 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include <tvm/ffi/reflection/registry.h>
 
 #include "storage_access.h"
 #include "tir/ir/buffer_common.h"
@@ -231,8 +232,11 @@ tvm::transform::Pass InjectPTXAsyncCopy() {
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectPTXAsyncCopy", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.InjectPTXAsyncCopy")
-    .set_body_typed(InjectPTXAsyncCopy);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.transform.InjectPTXAsyncCopy", InjectPTXAsyncCopy);
+});
 
 } // namespace tl
 } // namespace tvm

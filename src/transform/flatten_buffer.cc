@@ -28,6 +28,7 @@
 #include <tvm/tir/data_type_rewriter.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include <tvm/ffi/reflection/registry.h>
 
 namespace tvm {
 namespace tl {
@@ -368,7 +369,11 @@ tvm::transform::Pass FlattenBuffer() {
   return CreatePrimFuncPass(pass_func, 0, "tl.FlattenBuffer", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.FlattenBuffer").set_body_typed(FlattenBuffer);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.transform.FlattenBuffer", FlattenBuffer);
+});
 
 } // namespace tl
 } // namespace tvm

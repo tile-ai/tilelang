@@ -9,6 +9,7 @@
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
+#include <tvm/ffi/reflection/registry.h>
 
 #include <numeric>
 
@@ -532,8 +533,11 @@ tvm::transform::Pass LoopVectorizeDynamic() {
 }
 
 // Register the pass globally so it can be used in the compilation pipeline
-TVM_REGISTER_GLOBAL("tl.transform.LoopVectorizeDynamic")
-    .set_body_typed(LoopVectorizeDynamic);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.transform.LoopVectorizeDynamic", LoopVectorizeDynamic);
+});
 
 } // namespace tl
 } // namespace tvm

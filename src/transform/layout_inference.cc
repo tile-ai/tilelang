@@ -9,6 +9,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
+#include <tvm/ffi/reflection/registry.h>
 
 #include <queue>
 
@@ -518,8 +519,11 @@ tvm::transform::Pass LayoutInference() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LayoutInference", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.LayoutInference")
-    .set_body_typed(LayoutInference);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.transform.LayoutInference", LayoutInference);
+});
 
 } // namespace tl
 } // namespace tvm

@@ -8,6 +8,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
+#include <tvm/ffi/reflection/registry.h>
 
 #include "../op/builtin.h"
 #include "arith/ir_mutator_with_analyzer.h"
@@ -147,8 +148,11 @@ tvm::transform::Pass AlignDynamicSharedMemoryAllocations(int align_bytes) {
                             "tl.AlignDynamicSharedMemoryAllocations", {});
 }
 
-TVM_FFI_REGISTER_GLOBAL("tl.transform.AlignDynamicSharedMemoryAllocations")
-    .set_body_typed(AlignDynamicSharedMemoryAllocations);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.transform.AlignDynamicSharedMemoryAllocations", AlignDynamicSharedMemoryAllocations);
+});
 
 } // namespace tl
 } // namespace tvm

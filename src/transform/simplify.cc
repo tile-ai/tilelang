@@ -8,6 +8,7 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
+#include <tvm/ffi/reflection/registry.h>
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "tir/analysis/control_flow_graph.h"
@@ -475,7 +476,11 @@ tvm::transform::Pass Simplify(bool simplify_arguments = true) {
   return CreatePrimFuncPass(pass_func, 0, "tl.Simplify", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.Simplify").set_body_typed(Simplify);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.transform.Simplify", Simplify);
+});
 
 } // namespace tl
 } // namespace tvm

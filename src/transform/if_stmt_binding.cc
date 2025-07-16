@@ -8,6 +8,7 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include <tvm/ffi/reflection/registry.h>
 
 #include "../op/builtin.h"
 
@@ -80,8 +81,11 @@ tvm::transform::Pass IfStmtBinding() {
   return CreatePrimFuncPass(pass_func, 0, "tl.IfStmtBinding", {});
 }
 
-TVM_FFI_REGISTER_GLOBAL("tl.transform.IfStmtBinding")
-    .set_body_typed(IfStmtBinding);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.transform.IfStmtBinding", IfStmtBinding);
+});
 
 } // namespace tl
 } // namespace tvm

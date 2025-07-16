@@ -8,6 +8,7 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include <tvm/ffi/reflection/registry.h>
 
 #include "../op/builtin.h"
 
@@ -91,7 +92,11 @@ tvm::transform::Pass MergeIfStmt() {
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeIfStmt", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.MergeIfStmt").set_body_typed(MergeIfStmt);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.transform.MergeIfStmt", MergeIfStmt);
+});
 
 } // namespace tl
 } // namespace tvm

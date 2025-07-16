@@ -27,6 +27,7 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include <tvm/ffi/reflection/registry.h>
 
 #include "../op/builtin.h"
 
@@ -281,8 +282,11 @@ tvm::transform::Pass RewriteWgmmaSync() {
   return CreatePrimFuncPass(pass_func, 0, "tl.RewriteWgmmaSync", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.RewriteWgmmaSync")
-    .set_body_typed(RewriteWgmmaSync);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.transform.RewriteWgmmaSync", RewriteWgmmaSync);
+});
 
 } // namespace tl
 } // namespace tvm

@@ -28,6 +28,7 @@
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include <tvm/ffi/reflection/registry.h>
 
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
@@ -141,8 +142,11 @@ Pass LowerDeviceStorageAccessInfo() {
                             {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.LowerDeviceStorageAccessInfo")
-    .set_body_typed(LowerDeviceStorageAccessInfo);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.transform.LowerDeviceStorageAccessInfo", LowerDeviceStorageAccessInfo);
+});
 
 } // namespace transform
 } // namespace tl

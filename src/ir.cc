@@ -8,6 +8,7 @@
 #include "op/builtin.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/script/ir_builder/tir/ir.h>
+#include <tvm/ffi/reflection/registry.h>
 
 namespace tvm {
 namespace tl {
@@ -279,10 +280,14 @@ KernelLaunchFrame KernelLaunch(Array<PrimExpr> grid_size,
 
 TVM_REGISTER_NODE_TYPE(KernelLaunchFrameNode);
 
-TVM_REGISTER_GLOBAL("tl.Parallel").set_body_typed(ParallelFor);
-TVM_REGISTER_GLOBAL("tl.Pipelined").set_body_typed(PipelinedFor);
-TVM_REGISTER_GLOBAL("tl.Persistent").set_body_typed(PersistentFor);
-TVM_REGISTER_GLOBAL("tl.KernelLaunch").set_body_typed(KernelLaunch);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.Parallel", ParallelFor)
+    .def("tl.Pipelined", PipelinedFor)
+    .def("tl.Persistent", PersistentFor)
+    .def("tl.KernelLaunch", KernelLaunch);
+});
 
 class WarpSpecializeFrameNode : public TIRFrameNode {
 public:
@@ -359,7 +364,11 @@ WarpSpecializeFrame WarpSpecialize(Array<IntImm> warp_group_ids,
 }
 
 TVM_REGISTER_NODE_TYPE(WarpSpecializeFrameNode);
-TVM_REGISTER_GLOBAL("tl.WarpSpecialize").set_body_typed(WarpSpecialize);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.WarpSpecialize", WarpSpecialize);
+});
 
 } // namespace tl
 } // namespace tvm

@@ -4,6 +4,7 @@
  */
 
 #include "layout.h"
+#include <tvm/ffi/reflection/registry.h>
 
 #include <tvm/arith/pattern.h>
 #include <tvm/tir/op.h>
@@ -438,61 +439,46 @@ bool FragmentNode::IsEqual(const FragmentNode *other, bool skip_index) const {
 TVM_REGISTER_NODE_TYPE(LayoutNode);
 TVM_REGISTER_NODE_TYPE(FragmentNode);
 
-TVM_REGISTER_GLOBAL("tl.Layout").set_body([](TVMArgs args, TVMRetValue *ret) {
-  *ret = Layout(Array<IterVar>(args[0]), Array<PrimExpr>(args[1]));
-});
-
-TVM_REGISTER_GLOBAL("tl.Layout_input_shape").set_body_typed([](Layout layout) {
-  return layout->InputShape();
-});
-
-TVM_REGISTER_GLOBAL("tl.Layout_output_shape").set_body_typed([](Layout layout) {
-  return layout->OutputShape();
-});
-
-TVM_REGISTER_GLOBAL("tl.Layout_inverse").set_body_typed([](Layout layout) {
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def_packed("tl.Layout", [](PackedArgs args, Any *rv) {
+      *rv = Layout(args[0].cast<Array<IterVar>>(),
+                   args[1].cast<Array<PrimExpr>>());
+    })
+    .def("tl.Layout_input_shape", [](Layout layout) { return layout->InputShape(); })
+    .def("tl.Layout_output_shape", [](Layout layout) { return layout->OutputShape(); })
+    .def("tl.Layout_inverse", [](Layout layout) {
   return layout->Inverse();
-});
-
-TVM_REGISTER_GLOBAL("tl.Layout_index").set_body_typed([](Layout layout) {
+})
+    .def("tl.Layout_index", [](Layout layout) {
   return layout->GetForwardIndex();
-});
-
-TVM_REGISTER_GLOBAL("tl.Layout_forward_vars").set_body_typed([](Layout layout) {
-  return layout->GetForwardVars();
-});
-
-TVM_REGISTER_GLOBAL("tl.Fragment").set_body([](TVMArgs args, TVMRetValue *ret) {
-  *ret = Fragment(args[0], args[1], args[2], args[3]);
-});
-
-TVM_REGISTER_GLOBAL("tl.Fragment_thread_size")
-    .set_body_typed([](Fragment fragment) { return fragment->ThreadExtent(); });
-
-TVM_REGISTER_GLOBAL("tl.Fragment_thread").set_body_typed([](Fragment fragment) {
-  return fragment->GetForwardThread();
-});
-
-TVM_REGISTER_GLOBAL("tl.Fragment_repeat")
-    .set_body_typed([](Fragment fragment, Array<PrimExpr> repeats,
+})
+    .def("tl.Layout_forward_vars", [](Layout layout) { return layout->GetForwardVars(); })
+    .def_packed("tl.Fragment", [](PackedArgs args, Any *rv) {
+      *rv = Fragment(/*forward_var=*/args[0].cast<Array<IterVar>>(),
+                     /*forward_index=*/args[1].cast<Array<PrimExpr>>(),
+                     /*forward_thread=*/args[2].cast<PrimExpr>(),
+                     /*thread_replicate=*/args[3].cast<IterVar>());
+    })
+    .def("tl.Fragment_thread_size", [](Fragment fragment) { return fragment->ThreadExtent(); })
+    .def("tl.Fragment_thread", [](Fragment fragment) {
+      return fragment->GetForwardThread();
+    })
+    .def("tl.Fragment_repeat", [](Fragment fragment, Array<PrimExpr> repeats,
                        bool repeat_on_thread, bool lower_dim_first) {
       return fragment->Repeat(repeats, repeat_on_thread, lower_dim_first);
-    });
-
-TVM_REGISTER_GLOBAL("tl.Fragment_replicate")
-    .set_body_typed([](Fragment fragment, int repeats) {
+    })
+    .def("tl.Fragment_replicate", [](Fragment fragment, int repeats) {
       return fragment->Replicate(repeats);
-    });
-
-TVM_REGISTER_GLOBAL("tl.Fragment_condense_rep_var")
-    .set_body_typed([](Fragment fragment) {
+    })
+    .def("tl.Fragment_condense_rep_var", [](Fragment fragment) {
       return fragment->CondenseReplicateVar();
-    });
-
-TVM_REGISTER_GLOBAL("tl.make_swizzled_layout")
-    .set_body_typed([](int stride, int continuous, int element_size) {
+    })
+    .def("tl.make_swizzled_layout", [](int stride, int continuous, int element_size) {
       return makeGemmABLayout(stride, continuous, continuous, element_size, 0);
     });
+});
 
 } // namespace tl
 } // namespace tvm

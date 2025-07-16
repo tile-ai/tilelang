@@ -1,4 +1,5 @@
 #include "codegen_cpp.h"
+#include <tvm/ffi/reflection/registry.h>
 
 namespace tvm {
 namespace codegen {
@@ -67,8 +68,11 @@ runtime::Module BuildCPPHost(IRModule mod, Target target) {
   return CSourceModuleCreate(code, "c", cg.GetFunctionNames());
 }
 
-TVM_FFI_REGISTER_GLOBAL("target.build.tilelang_cpp")
-    .set_body_typed(BuildCPPHost);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("target.build.tilelang_cpp", BuildCPPHost);
+});
 
 } // namespace codegen
 } // namespace tvm

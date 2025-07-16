@@ -25,6 +25,7 @@
 #include <tvm/target/target.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/transform.h>
+#include <tvm/ffi/reflection/registry.h>
 
 #include <unordered_set>
 
@@ -1038,8 +1039,11 @@ tir::transform::Pass InjectSoftwarePipeline() {
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectSoftwarePipeline", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.InjectSoftwarePipeline")
-    .set_body_typed(InjectSoftwarePipeline);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.transform.InjectSoftwarePipeline", InjectSoftwarePipeline);
+});
 
 } // namespace tl
 } // namespace tvm

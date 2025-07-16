@@ -11,6 +11,7 @@
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
+#include <tvm/ffi/reflection/registry.h>
 
 namespace tvm {
 namespace tir {
@@ -117,8 +118,11 @@ tvm::transform::Pass ClusterPlanning() {
   return CreatePrimFuncPass(pass_func, 0, "tl.ClusterPlanning", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.ClusterPlanning")
-    .set_body_typed(ClusterPlanning);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+    .def("tl.transform.ClusterPlanning", ClusterPlanning);
+});
 } // namespace transform
 
 } // namespace tir
