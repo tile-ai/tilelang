@@ -558,12 +558,26 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
 }
 
 void CodeGenTileLangCUDA::PrintStorageSync(const CallNode *op) {
-  const std::string &sync = op->args[0].as<StringImmNode>()->value;
+  auto args = op->args;
+  const std::string &sync = args[0].as<StringImmNode>()->value;
   if (sync == "warp") {
     // DO nothing.
   } else if (sync == "shared" || sync == "shared.dyn") {
     this->PrintIndent();
-    this->stream << "__syncthreads();\n";
+    if (args.size() == 1) {
+      this->stream << "__syncthreads();\n";
+    } else if (args.size() == 2) {
+      auto barrier_id = args[1].as<IntImmNode>()->value;
+      this->stream << "tl::__sync_thread_partial<" << barrier_id << ">();\n";
+    } else if (args.size() == 3) {
+      auto barrier_id = args[1].as<IntImmNode>()->value;
+      auto thread_count = args[2].as<IntImmNode>()->value;
+      this->stream << "tl::__sync_thread_partial<" << barrier_id << ", "
+                   << thread_count << ">();\n";
+    } else {
+      LOG(FATAL) << "Invalid number of arguments for storage sync: "
+                 << args.size();
+    }
   } else if (sync == "global") {
     if (!need_global_barrier_) {
       need_global_barrier_ = true;

@@ -9,6 +9,9 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type")
 endif()
 
+# Enable compile command export
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Define a custom macro for globbing files with conditional CONFIGURE_DEPENDS
 if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "3.12.0")
   macro(tilelang_file_glob glob variable)

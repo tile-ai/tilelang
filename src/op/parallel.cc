@@ -216,7 +216,7 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
         Array<PrimExpr> fwd;
         for (size_t i = 0; i < loop_layout_->OutputDim(); i++)
           fwd.push_back(0);
-        fwd.push_back(InputPlaceholder(0));
+        fwd.push_back(InputPlaceholder(0) - T.thread_bounds->min);
         auto rep = inv->Forward(fwd).back();
         AddPredicate(EQ(rep, 0));
       }

@@ -84,7 +84,7 @@ def reshape(src: Buffer, shape: List[PrimExpr]) -> Buffer:
     Returns:
         Buffer: A new buffer view with the specified shape
     """
-    return T.Buffer(shape, src.dtype, src.data)
+    return T.Tensor(shape, src.dtype, src.data)
 
 
 def view(src: Buffer,
@@ -104,4 +104,4 @@ def view(src: Buffer,
         shape = src.shape
     if dtype is None:
         dtype = src.dtype
-    return T.Buffer(shape, dtype, src.data)
+    return T.Tensor(shape, dtype, src.data)

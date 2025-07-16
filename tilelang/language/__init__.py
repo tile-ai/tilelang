@@ -35,10 +35,11 @@ from .kernel import (
 )
 from .warpgroup import ws  # noqa: F401
 from .allocate import (
+    alloc_var,  # noqa: F401
     alloc_local,  # noqa: F401
     alloc_shared,  # noqa: F401
     alloc_fragment,  # noqa: F401
-    alloc_var,  # noqa: F401
+    alloc_barrier,  # noqa: F401
 )
 from .copy import copy, c2d_im2col  # noqa: F401
 from .gemm import GemmWarpPolicy, gemm  # noqa: F401

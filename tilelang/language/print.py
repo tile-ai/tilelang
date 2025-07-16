@@ -133,7 +133,7 @@ def print_local_buffer_with_condition(condition: tir.PrimExpr,
                             buffer[coords])
 
 
-def print(obj: Any, msg: str = "") -> tir.PrimExpr:
+def print(obj: Any, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> tir.PrimExpr:
     """
     A generic print function that handles both TIR buffers and primitive expressions.
     
@@ -143,6 +143,9 @@ def print(obj: Any, msg: str = "") -> tir.PrimExpr:
     Parameters:
         obj (Any): The object to print. It can be either a tir.Buffer or tir.PrimExpr.
         msg (str): An optional message to include in the print statement.
+        warp_group_id (int): The warp group id to print.
+        warp_id (int): The warp id to print.
+        print thread will be warp_group_id * warp_group_size + warp_id.
         
     Returns:
         tir.PrimExpr: The TIR expression for the debug print operation.
@@ -154,6 +157,9 @@ def print(obj: Any, msg: str = "") -> tir.PrimExpr:
         # Buffers must be printed in just one thread to avoid duplicate outputs.
         # Retrieve the thread bindings for thread x, y, and z.
         tx, ty, tz = get_thread_bindings()
+        warp_group_size = 128
+        warp_size = 32
+        main_lane = warp_group_id * warp_group_size + warp_id * warp_size
 
         # Flatten the buffer for consistent printing. This assumes a 1D flattened buffer.
         buffer = obj
@@ -173,7 +179,7 @@ def print(obj: Any, msg: str = "") -> tir.PrimExpr:
                 elems *= dim
 
             # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
-            condition = (tx == 0 and ty == 0 and tz == 0)
+            condition = (tx == main_lane and ty == 0 and tz == 0)
             if not msg:
                 msg = f"buffer<{buffer.name}, {buffer.dtype}>"
             return print_fragment_buffer_with_condition(condition, buffer, elems, msg)
@@ -184,7 +190,7 @@ def print(obj: Any, msg: str = "") -> tir.PrimExpr:
                 elems *= dim
 
             # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
-            condition = (tx == 0 and ty == 0 and tz == 0)
+            condition = (tx == main_lane and ty == 0 and tz == 0)
             if not msg:
                 msg = f"buffer<{buffer.name}, {buffer.dtype}>"
             return print_shared_buffer_with_condition(condition, buffer, elems, msg)

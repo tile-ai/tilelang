@@ -26,6 +26,12 @@ public:
     return checker.is_valid_;
   }
 
+  static IterVar GetThreadVar(const Stmt &body) {
+    ThreadTagChecker checker;
+    checker(body);
+    return checker.thread_var_;
+  }
+
 private:
   void VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tir::attr::thread_extent) {
@@ -45,6 +51,9 @@ private:
     if (op->kind == ForKind::kThreadBinding) {
       ICHECK(op->thread_binding.defined());
       String thread_tag = op->thread_binding.value()->thread_tag;
+      if (thread_tag == "threadIdx.x") {
+        thread_var_ = Downcast<IterVar>(op->thread_binding);
+      }
       bool is_y_or_z =
           thread_tag == "threadIdx.y" || thread_tag == "threadIdx.z";
       if (!thread_tag.empty() && is_y_or_z) {
@@ -57,7 +66,7 @@ private:
     }
     StmtExprVisitor::VisitStmt_(op);
   }
-
+  IterVar thread_var_;
   bool is_valid_ = true;
 };
 

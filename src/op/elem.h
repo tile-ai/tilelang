@@ -42,6 +42,7 @@ protected:
   Buffer src, dst;
   Array<Range> src_range, dst_range;
   IntImm coalesced_width;
+  Bool disable_tma = Bool(false);
 
   std::unique_ptr<ParallelOp> par_op_;
 };

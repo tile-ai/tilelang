@@ -39,8 +39,10 @@ def matmul_warp_specialize_copy_1_gemm_0(M,
             C_local_g0 = T.alloc_fragment((block_M, block_N // warp_group_num), accum_dtype)
             C_local_g1 = T.alloc_fragment((block_M, block_N // warp_group_num), accum_dtype)
 
-            T.clear(C_local_g0)
-            T.clear(C_local_g1)
+            with T.ws(1):
+                T.clear(C_local_g1)
+            with T.ws(0):
+                T.clear(C_local_g0)
 
             for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=0):
                 T.copy(A[by * block_M, ko * block_K], A_shared)
@@ -51,8 +53,10 @@ def matmul_warp_specialize_copy_1_gemm_0(M,
                     T.copy(B[ko * block_K, bx * block_N + block_N // warp_group_num], B_shared_g0)
                     T.gemm(A_shared, B_shared_g0, C_local_g0)
 
-            T.copy(C_local_g1, C[by * block_M, bx * block_N])
-            T.copy(C_local_g0, C[by * block_M, bx * block_N + block_N // warp_group_num])
+            with T.ws(1):
+                T.copy(C_local_g1, C[by * block_M, bx * block_N])
+            with T.ws(0):
+                T.copy(C_local_g0, C[by * block_M, bx * block_N + block_N // warp_group_num])
 
     return main
 

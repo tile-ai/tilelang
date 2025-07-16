@@ -187,12 +187,14 @@ def mbarrier_wait_parity(mbarrier: Union[int, PrimExpr, tir.Call], parity: Union
     Returns:
         tir.Call: A handle to the barrier wait operation
     """
-    if isinstance(mbarrier, tir.Call):
+    if isinstance(mbarrier, (tir.Call, tir.BufferLoad)):
         mbarrier = mbarrier
     elif isinstance(mbarrier, (tir.PrimExpr, int)):
         mbarrier = get_mbarrier(mbarrier)
+    elif isinstance(mbarrier, tir.Buffer):
+        mbarrier = tir.BufferLoad(mbarrier, [0])
     else:
-        raise TypeError("mbarrier must be an integer or a tir.Call")
+        raise TypeError(f"mbarrier must be an integer or a tir.Call, but got {type(mbarrier)}")
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
 
 
@@ -203,12 +205,14 @@ def mbarrier_arrive(mbarrier: Union[int, PrimExpr, tir.Call]):
         mbarrier: Optional[int, PrimExpr]
             The memory barrier to arrive at
     """
-    if isinstance(mbarrier, tir.Call):
+    if isinstance(mbarrier, (tir.Call, tir.BufferLoad)):
         mbarrier = mbarrier
     elif isinstance(mbarrier, (tir.PrimExpr, int)):
         mbarrier = get_mbarrier(mbarrier)
+    elif isinstance(mbarrier, tir.Buffer):
+        mbarrier = tir.BufferLoad(mbarrier, [0])
     else:
-        raise TypeError("mbarrier must be an integer or a tir.Call")
+        raise TypeError(f"mbarrier must be an integer or a tir.Call, but got {type(mbarrier)}")
     return ptx_arrive_barrier(mbarrier)
 
 
@@ -224,16 +228,17 @@ def mbarrier_expect_tx(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_expect_tx"), *args)
 
 
-def wait_wgmma(*args):
+def wait_wgmma(id: int):
     """Wait for WGMMA (Warp Group Matrix Multiply-Accumulate) operations to complete.
 
     Args:
-        *args: Variable arguments specifying which operations to wait for
+        id: int
+            The id of the WGMMA operation to wait for
 
     Returns:
         tir.Call: A handle to the WGMMA wait operation
     """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.wait_wgmma"), *args)
+    return tir.call_intrin("handle", tir.op.Op.get("tl.wait_wgmma"), id)
 
 
 def barrier_wait(barrier_id: Union[int, PrimExpr, tir.Call], parity: Union[int, Var, None] = None):

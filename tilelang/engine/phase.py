@@ -80,13 +80,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
     # Add safety checks for memory accesses
     mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
-    # Align dynamic shared memory allocations
-    if have_tma(target):
-        # Hopper Swizzling requires dynamic shared memory address to be aligned to 1024 bytes
-        mod = tilelang.transform.AlignDynamicSharedMemoryAllocations(1024)(mod)
-    else:
-        # For other devices, we align to 16 bytes
-        mod = tilelang.transform.AlignDynamicSharedMemoryAllocations(16)(mod)
     # Simplify again to clean up any duplicated conditions
     # that may have been introduced by safety checks
     # use an enhanced pass to simplify the dynamic symbolics
@@ -100,6 +93,9 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     pass_ctx = tilelang.transform.get_pass_context()
+    # Lower the barrier.arrive into specific initialization slot
+    mod = tilelang.transform.LowerSharedBarrier()(mod)
+
     # which may be introduced by the LegalizeSafeMemoryAccess
     if allow_tma_and_warp_specialized(pass_ctx=pass_ctx, target=target):
         mod = tilelang.transform.IfStmtBinding()(mod)
@@ -157,6 +153,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.ThreadPartialSync("shared.dyn")(mod)
     mod = tir.transform.InferFragment()(mod)
     mod = tir.transform.LowerThreadAllreduce()(mod)
+
     mod = tilelang.transform.LowerHopperIntrin()(mod)
 
     # Global Barrier Synchronization must be applied before
@@ -166,13 +163,24 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
 
-    mod = tilelang.transform.MergeSharedMemoryAllocations(
-        enable_aggressive_merge=should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target))(
-            mod)
+    enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
+    # Hopper Swizzling requires dynamic shared memory address to be aligned to 1024 bytes
+    # For other devices, we align to 16 bytes
+    smem_align_bytes = 1024 if have_tma(target) else 16
+    if enable_aggressive_merge:
+        # Workaround, wait for a element wise synchronization pass
+        mod = tilelang.transform.MergeSharedMemoryAllocations(
+            enable_aggressive_merge=enable_aggressive_merge, align_bytes=smem_align_bytes)(
+                mod)
+        mod = tilelang.transform.ThreadSync("shared")(mod)
+        mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    else:
+        mod = tilelang.transform.ThreadSync("shared")(mod)
+        mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+        mod = tilelang.transform.MergeSharedMemoryAllocations(
+            enable_aggressive_merge=enable_aggressive_merge, align_bytes=smem_align_bytes)(
+                mod)
 
-    mod = tilelang.transform.ThreadSync("shared")(mod)
-    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
-    mod = tilelang.transform.EliminateStorageSyncForMBarrier()(mod)
     # Inject PTX async copy must behind the thread sync pass
     # as ptx async copy won't be recognized as a valid buffer load
     mod = tilelang.transform.InjectPTXAsyncCopy()(mod)

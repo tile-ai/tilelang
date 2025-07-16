@@ -36,7 +36,14 @@ Copy::Copy(Array<PrimExpr> args, BufferMap vmap) : args_(args) {
   std::tie(this->src, this->dst) = std::tie(bf[0], bf[1]);
   std::tie(this->src_range, this->dst_range) = std::tie(rgs[0], rgs[1]);
   if (args.size() >= 3) {
-    coalesced_width = Downcast<IntImm>(args[2]);
+    auto coalesced_width = Downcast<IntImm>(args[2]);
+    if (coalesced_width->value > 0) {
+      this->coalesced_width = coalesced_width;
+    }
+  }
+  if (args.size() >= 4) {
+    auto disable_tma = Downcast<Bool>(args[3]);
+    this->disable_tma = disable_tma;
   }
 }
 
@@ -159,9 +166,12 @@ Stmt Copy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (ldsm_stmt.defined())
     return ldsm_stmt;
 
-  Stmt bulk_copy_stmt = LowerBulkCopy(T, analyzer);
-  if (bulk_copy_stmt.defined())
-    return bulk_copy_stmt;
+  if (!disable_tma) {
+    Stmt bulk_copy_stmt = LowerBulkCopy(T, analyzer);
+    if (bulk_copy_stmt.defined())
+      return bulk_copy_stmt;
+  }
+
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
 
@@ -191,7 +201,6 @@ Stmt Copy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
                       vectorized_thread_loop);
   }
-
   return vectorized_thread_loop;
 }
 
@@ -348,6 +357,13 @@ Stmt Copy::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   For for_node =
       For(local_iter, 0, FloorDiv(extent, 2 * num), ForKind::kSerial, body);
   for_node = LoopPragmaUnroll(for_node);
+  auto range = T.thread_bounds;
+  if (range.defined()) {
+    auto thread_var = T.thread_var;
+    auto thread_var_with_offset = thread_var - range->min;
+    for_node.CopyOnWrite()->body =
+        Substitute(for_node->body, {{thread_var, thread_var_with_offset}});
+  }
   return for_node;
 }
 
@@ -464,6 +480,10 @@ Stmt Fill::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
                                      par_op->GetLoopLayout());
     auto vectorized_thread_loop = VectorizeLoop(thread_loop);
+    if (par_op->GetPredicate(T.thread_var).defined()) {
+      return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
+                        vectorized_thread_loop);
+    }
     return vectorized_thread_loop;
   } else {
     LOG(FATAL) << "Unsupported scope " << dst.scope();

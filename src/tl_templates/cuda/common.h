@@ -234,4 +234,11 @@ template <int y = 1, typename T> TL_DEVICE T pow_of_int(T x) {
   return result;
 }
 
+// Thread partial barrier synchronization
+// https://docs.nvidia.com/cuda/parallel-thread-execution/#memory-consistency-model
+template <int barrier_id = 0, int thread_count = 0>
+TL_DEVICE void __sync_thread_partial() {
+  asm volatile("bar.sync %0, %1;" : : "r"(barrier_id), "r"(thread_count));
+}
+
 } // namespace tl

@@ -84,6 +84,7 @@ def copy(
     src: Union[tir.Buffer, tir.BufferLoad, tir.BufferRegion],
     dst: Union[tir.Buffer, tir.BufferLoad],
     coalesced_width: Optional[int] = None,
+    disable_tma: bool = False,
 ):
     """Copy data between memory regions.
 
@@ -130,10 +131,11 @@ def copy(
 
     src = _to_region(src, "r")
     dst = _to_region(dst, "w")
-    if coalesced_width is not None:
-        return tir.call_intrin("handle", tir.op.Op.get("tl.copy"), src, dst, coalesced_width)
-    else:
-        return tir.call_intrin("handle", tir.op.Op.get("tl.copy"), src, dst)
+
+    if coalesced_width is None:
+        coalesced_width = -1  # PrimExpr can not be None
+    return tir.call_intrin("handle", tir.op.Op.get("tl.copy"), src, dst, coalesced_width,
+                           disable_tma)
 
 
 def c2d_im2col(

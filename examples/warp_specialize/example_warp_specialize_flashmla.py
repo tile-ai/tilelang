@@ -1,13 +1,14 @@
-# use default stage 1 template, not the optimal
-# schedule, please checkout examples/deepseek_mla
 import torch
 import torch.nn.functional as F
 import tilelang
+from tilelang.autotuner import *
 import tilelang.language as T
 from einops import rearrange, einsum
+import argparse
+
+tilelang.disable_cache()
 
 
-@tilelang.jit(out_idx=[6])
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     dtype = "float16"
@@ -15,6 +16,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
     kv_group_num = heads // kv_head_num
     VALID_BLOCK_H = min(block_H, kv_group_num)
     assert kv_head_num == 1, "kv_head_num must be 1"
+    h_dim = dim // 2
 
     @T.macro
     def flash_attn(
@@ -24,81 +26,312 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
             Output: T.Tensor([batch, heads, dim], dtype),
     ):
-        with T.Kernel(batch, heads // min(block_H, kv_group_num), threads=384) as (bx, by):
-            Q_shared = T.alloc_shared([block_H, dim], dtype)
-            S_shared = T.alloc_shared([block_H, block_N], dtype)
+        with T.Kernel(heads // min(block_H, kv_group_num), batch, threads=256) as (hid, bid):
+            Q_shared_l = T.alloc_shared([block_H, h_dim], dtype)
+            Q_shared_r = T.alloc_shared([block_H, h_dim], dtype)
+
             Q_pe_shared = T.alloc_shared([block_H, pe_dim], dtype)
-            KV_shared = T.alloc_shared([block_N, dim], dtype)
-            K_pe_shared = T.alloc_shared([block_N, pe_dim], dtype)
-            O_shared = T.alloc_shared([block_H, dim], dtype)
-            acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
-            acc_o = T.alloc_fragment([block_H, dim], accum_dtype)
-            scores_max = T.alloc_fragment([block_H], accum_dtype)
-            scores_max_prev = T.alloc_fragment([block_H], accum_dtype)
-            scores_scale = T.alloc_fragment([block_H], accum_dtype)
-            scores_sum = T.alloc_fragment([block_H], accum_dtype)
-            logsum = T.alloc_fragment([block_H], accum_dtype)
+            KV_shared_0_l = T.alloc_shared([block_N, h_dim], dtype)
+            KV_shared_0_r = T.alloc_shared([block_N, h_dim], dtype)
+            KV_shared_1_l = T.alloc_shared([block_N, h_dim], dtype)
+            KV_shared_1_r = T.alloc_shared([block_N, h_dim], dtype)
+            K_pe_shared_0 = T.alloc_shared([block_N, pe_dim], dtype)
+            K_pe_shared_1 = T.alloc_shared([block_N, pe_dim], dtype)
+            O_shared_l = Q_shared_l
+            O_shared_r = Q_shared_r
+            S_shared = K_pe_shared_0
+            S_shared_ = K_pe_shared_1
 
-            cur_kv_head = by // (kv_group_num // block_H)
-            T.use_swizzle(10)
+            acc_s_0 = T.alloc_fragment([block_H, block_N], accum_dtype)
+            acc_s_1 = T.alloc_fragment([block_H, block_N], accum_dtype)
+            acc_o_l = T.alloc_fragment([block_H, h_dim], accum_dtype)
+            acc_o_r = T.alloc_fragment([block_H, h_dim], accum_dtype)
+            scores_max_0 = T.alloc_fragment([block_H], accum_dtype)
+            scores_max_1 = T.alloc_fragment([block_H], accum_dtype)
+            scores_max = T.alloc_shared([block_H], accum_dtype)
+            scores_max_prev_0 = T.alloc_fragment([block_H], accum_dtype)
+            scores_max_prev_1 = T.alloc_fragment([block_H], accum_dtype)
+            scores_scale_0 = T.alloc_shared([block_H], accum_dtype)
+            scores_scale_1 = T.alloc_shared([block_H], accum_dtype)
+            scores_sum_0 = T.alloc_fragment([block_H], accum_dtype)
+            scores_sum_1 = T.alloc_fragment([block_H], accum_dtype)
+            logsum_0 = T.alloc_fragment([block_H], accum_dtype)
+            logsum_1 = T.alloc_fragment([block_H], accum_dtype)
+            logsum = T.alloc_shared([block_H], accum_dtype)
+
+            cur_kv_head = hid // (kv_group_num // block_H)
+
             T.annotate_layout({
-                O_shared: tilelang.layout.make_swizzled_layout(O_shared),
+                O_shared_l: tilelang.layout.make_swizzled_layout(O_shared_l),
+                O_shared_r: tilelang.layout.make_swizzled_layout(O_shared_r),
             })
-            T.create_list_of_mbarrier(128, 128, 256, 128)
 
-            loop_range = T.ceildiv(seqlen_kv, block_N)
-            with T.ws(2):
-                T.dec_max_nreg(24)
-                T.copy(Q[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_shared)
-                T.copy(Q_pe[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :], Q_pe_shared)
-                T.barrier_arrive(barrier_id=3)
+            kv_shared_0_l_is_ready = T.alloc_barrier(arrive_count=128)
+            kv_shared_0_r_is_ready = T.alloc_barrier(arrive_count=128)
+            kv_shared_0_pe_is_ready = T.alloc_barrier(arrive_count=128)
+            kv_shared_1_l_is_ready = T.alloc_barrier(arrive_count=128)
+            kv_shared_1_r_is_ready = T.alloc_barrier(arrive_count=128)
+            kv_shared_1_pe_is_ready = T.alloc_barrier(arrive_count=128)
+            score_max_0_ready_barrier = T.alloc_barrier(arrive_count=128)
+            scale_1_ready_barrier = T.alloc_barrier(arrive_count=128)
+            p0_1_1_ready_barrier = T.alloc_barrier(arrive_count=128)
+            lse_0_ready_barrier = T.alloc_barrier(arrive_count=128)
+            lse_1_ready_barrier = T.alloc_barrier(arrive_count=128)
+            s_shared_ready_barrier = T.alloc_barrier(arrive_count=128)
+            q_shared_ready_barrier = T.alloc_barrier(arrive_count=256)
+            k_pe_shared_1_free_barrier = T.alloc_barrier(arrive_count=128)
+            k_pe_shared_0_free_barrier = T.alloc_barrier(arrive_count=128)
+            s_shared_ready_barrier = T.alloc_barrier(arrive_count=128)
+            k_shared_1_l_free_barrier = T.alloc_barrier(arrive_count=128)
+
+            tx = T.get_thread_binding()
+
+            T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :h_dim], Q_shared_l)
+            T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, h_dim:], Q_shared_r)
+            T.copy(Q_pe[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :], Q_pe_shared)
+            T.barrier_arrive(q_shared_ready_barrier)
+            T.barrier_wait(q_shared_ready_barrier, 0)
+            T.fill(scores_max, -T.infinity(accum_dtype))
+
+            loop_range = T.ceildiv(seqlen_kv, (block_N * 2))
+
+            if tx < 128:
+                T.fill(acc_o_l, 0)
+                T.fill(logsum_0, 0)
+
+                T.copy(KV[bid, block_N:2 * block_N, cur_kv_head, :h_dim], KV_shared_1_l)
+                T.barrier_arrive(kv_shared_1_l_is_ready)
+
+                T.copy(KV[bid, block_N:2 * block_N, cur_kv_head, h_dim:], KV_shared_1_r)
+                T.barrier_arrive(kv_shared_1_r_is_ready)
+
+                T.copy(K_pe[bid, block_N:2 * block_N, cur_kv_head, :], K_pe_shared_1)
+                T.barrier_arrive(kv_shared_1_pe_is_ready)
+
                 for k in T.serial(loop_range):
-                    T.barrier_wait(barrier_id=(k % 1) + 2, parity=(k % 2) ^ 1)
-                    T.copy(KV[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], KV_shared)
-                    T.barrier_arrive(k % 1)
-                    T.copy(K_pe[bx, k * block_N:(k + 1) * block_N, cur_kv_head, :], K_pe_shared)
-                    T.barrier_arrive(k % 1 + 1)
-            with T.ws(0, 1):
-                T.inc_max_nreg(240)
-                T.fill(acc_o, 0)
-                T.fill(logsum, 0)
-                T.fill(scores_max, -T.infinity(accum_dtype))
-                T.barrier_wait(3, 0)
-                for k in T.serial(loop_range):
-                    T.clear(acc_s)
-                    T.barrier_wait(barrier_id=k % 1, parity=(k // 1) % 2)
+
+                    T.barrier_wait(kv_shared_0_l_is_ready, k % 2)
                     T.gemm(
-                        Q_shared,
-                        KV_shared,
-                        acc_s,
+                        Q_shared_l,
+                        KV_shared_0_l,
+                        acc_s_0,
                         transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullCol)
-                    T.barrier_wait(barrier_id=k % 1 + 1, parity=(k // 1) % 2)
+                        policy=T.GemmWarpPolicy.FullCol,
+                        clear_accum=True,
+                        wg_wait=-1)
+                    T.barrier_wait(kv_shared_0_r_is_ready, k % 2)
+                    T.gemm(
+                        Q_shared_r,
+                        KV_shared_0_r,
+                        acc_s_0,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullCol,
+                        wg_wait=-1)
+
+                    T.barrier_wait(kv_shared_0_pe_is_ready, k % 2)
                     T.gemm(
                         Q_pe_shared,
-                        K_pe_shared,
-                        acc_s,
+                        K_pe_shared_0,
+                        acc_s_0,
                         transpose_B=True,
-                        policy=T.GemmWarpPolicy.FullCol)
-                    T.copy(scores_max, scores_max_prev)
-                    T.fill(scores_max, -T.infinity(accum_dtype))
-                    T.reduce_max(acc_s, scores_max, dim=1, clear=False)
-                    for i in T.Parallel(block_H):
-                        scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+                        policy=T.GemmWarpPolicy.FullCol,
+                        wg_wait=-1)
+
+                    T.wait_wgmma(0)
+
+                    # Step 3.
+                    T.copy(scores_max, scores_max_0)
+                    T.copy(scores_max_0, scores_max_prev_0)
+                    T.fill(scores_max_0, -T.infinity(accum_dtype))
+                    T.reduce_max(acc_s_0, scores_max_0, dim=1, clear=False)
+                    T.copy(scores_max_0, scores_max)
+
+                    # Step 4.
                     for i, j in T.Parallel(block_H, block_N):
-                        acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
-                    T.reduce_sum(acc_s, scores_sum, dim=1)
-                    T.copy(acc_s, S_shared)
+                        acc_s_0[i, j] = T.exp2(acc_s_0[i, j] * scale - scores_max[i] * scale)
                     for i in T.Parallel(block_H):
-                        logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-                    for i, j in T.Parallel(block_H, dim):
-                        acc_o[i, j] *= scores_scale[i]
-                    T.gemm(S_shared, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullCol)
-                    T.barrier_arrive(barrier_id=k % 1 + 2)
-                for i, j in T.Parallel(block_H, dim):
-                    acc_o[i, j] /= logsum[i]
-                T.copy(acc_o, O_shared)
-                T.copy(O_shared, Output[bx, by * VALID_BLOCK_H:(by + 1) * VALID_BLOCK_H, :])
+                        scores_scale_0[i] = T.exp2(scores_max_prev_0[i] * scale -
+                                                   scores_max[i] * scale)
+
+                    T.reduce_sum(acc_s_0, scores_sum_0, dim=1)
+
+                    # Step 5.
+                    T.copy(acc_s_0, S_shared)
+
+                    for i, j in T.Parallel(block_H, h_dim):
+                        acc_o_l[i, j] *= scores_scale_0[i]
+
+                    for i in T.Parallel(block_H):
+                        logsum_0[i] = logsum_0[i] * scores_scale_0[i] + scores_sum_0[i]
+
+                    # Step 6.
+                    T.gemm(S_shared, KV_shared_0_l, acc_o_l, policy=T.GemmWarpPolicy.FullCol)
+                    T.barrier_arrive(score_max_0_ready_barrier)
+
+                    T.barrier_wait(scale_1_ready_barrier, k % 2)
+
+                    if k < loop_range - 1:
+                        T.copy(
+                            KV[bid, (2 * k + 2) * block_N:(2 * k + 3) * block_N,
+                               cur_kv_head, :h_dim], KV_shared_0_l)
+                        T.barrier_arrive(kv_shared_0_l_is_ready)
+
+                    # Step 11.
+                    for i, j in T.Parallel(block_H, block_N):
+                        S_shared_[i, j] = acc_s_0[i, j] * scores_scale_1[i]
+
+                    T.barrier_arrive(p0_1_1_ready_barrier)
+
+                    # Step 13.
+                    for i, j in T.Parallel(block_H, h_dim):
+                        acc_o_l[i, j] *= scores_scale_1[i]
+                    for i in T.Parallel(block_H):
+                        logsum_0[i] = logsum_0[i] * scores_scale_1[i]
+                    T.barrier_wait(s_shared_ready_barrier, k % 2)
+
+                    # Step 14.
+                    T.gemm(S_shared, KV_shared_1_l, acc_o_l, policy=T.GemmWarpPolicy.FullCol)
+                    T.barrier_arrive(k_pe_shared_0_free_barrier)
+                    T.barrier_arrive(k_shared_1_l_free_barrier)
+
+                    if k < loop_range - 1:
+
+                        T.barrier_wait(k_shared_1_l_free_barrier, k % 2)
+                        T.copy(
+                            KV[bid, (2 * k + 3) * block_N:(2 * k + 4) * block_N,
+                               cur_kv_head, :h_dim], KV_shared_1_l)
+                        T.barrier_arrive(kv_shared_1_l_is_ready)
+
+                        T.barrier_wait(k_pe_shared_1_free_barrier, k % 2)
+                        T.copy(
+                            K_pe[bid, (2 * k + 3) * block_N:(2 * k + 4) * block_N, cur_kv_head, :],
+                            K_pe_shared_1)
+                        T.barrier_arrive(kv_shared_1_pe_is_ready)
+
+                T.copy(logsum_0, logsum)
+                T.barrier_arrive(lse_0_ready_barrier)
+                T.barrier_wait(lse_1_ready_barrier, 0)
+                for i, j in T.Parallel(block_H, h_dim):
+                    acc_o_l[i, j] /= logsum[i]
+                T.copy(acc_o_l, O_shared_l)
+                T.copy(O_shared_l, Output[bid,
+                                          hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :h_dim])
+
+            else:
+                T.fill(acc_o_r, 0)
+                T.fill(logsum_1, 0)
+
+                T.copy(KV[bid, :block_N, cur_kv_head, :h_dim], KV_shared_0_l)
+                T.barrier_arrive(kv_shared_0_l_is_ready)
+                T.copy(KV[bid, :block_N, cur_kv_head, h_dim:], KV_shared_0_r)
+                T.barrier_arrive(kv_shared_0_r_is_ready)
+                T.copy(K_pe[bid, :block_N, cur_kv_head, :], K_pe_shared_0)
+                T.barrier_arrive(kv_shared_0_pe_is_ready)
+
+                for k in T.serial(loop_range):
+
+                    # Step 2.
+                    T.barrier_wait(kv_shared_1_l_is_ready, k % 2)
+                    T.gemm(
+                        Q_shared_l,
+                        KV_shared_1_l,
+                        acc_s_1,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullCol,
+                        clear_accum=True,
+                        wg_wait=-1)
+
+                    T.barrier_wait(kv_shared_1_r_is_ready, k % 2)
+                    T.gemm(
+                        Q_shared_r,
+                        KV_shared_1_r,
+                        acc_s_1,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullCol,
+                        wg_wait=-1)
+
+                    T.barrier_wait(kv_shared_1_pe_is_ready, k % 2)
+                    T.gemm(
+                        Q_pe_shared,
+                        K_pe_shared_1,
+                        acc_s_1,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullCol,
+                        wg_wait=-1)
+
+                    T.wait_wgmma(0)
+
+                    # Step 7.
+                    T.barrier_wait(score_max_0_ready_barrier, k % 2)
+
+                    T.copy(scores_max, scores_max_prev_1)
+                    T.fill(scores_max_1, -T.infinity(accum_dtype))
+                    T.reduce_max(acc_s_1, scores_max_1, dim=1, clear=False)
+                    T.copy(scores_max_1, scores_max)
+
+                    for i in T.Parallel(block_H):
+                        scores_scale_1[i] = T.exp2(scores_max_prev_1[i] * scale -
+                                                   scores_max[i] * scale)
+
+                    # Step 8.
+                    for i, j in T.Parallel(block_H, block_N):
+                        acc_s_1[i, j] = T.exp2(acc_s_1[i, j] * scale - scores_max[i] * scale)
+
+                    # Step 9.
+                    T.reduce_sum(acc_s_1, scores_sum_1, dim=1)
+
+                    for i, j in T.Parallel(block_H, h_dim):
+                        acc_o_r[i, j] = acc_o_r[i, j] * (scores_scale_0[i] * scores_scale_1[i])
+
+                    for i in T.Parallel(block_H):
+                        logsum_1[i] = logsum_1[i] * scores_scale_1[i] * scores_scale_0[
+                            i] + scores_sum_1[i]
+
+                    T.barrier_arrive(scale_1_ready_barrier)
+
+                    # Step 10. compute O1 with KV_shared_1_rd
+                    T.copy(acc_s_1, S_shared)
+                    T.barrier_arrive(s_shared_ready_barrier)
+                    T.gemm(
+                        S_shared,
+                        KV_shared_1_r,
+                        acc_o_r,
+                        policy=T.GemmWarpPolicy.FullCol,
+                        wg_wait=-1)
+
+                    if k < loop_range - 1:
+                        T.copy(
+                            KV[bid, (2 * k + 3) * block_N:(2 * k + 4) * block_N, cur_kv_head,
+                               h_dim:], KV_shared_1_r)
+                        T.barrier_arrive(kv_shared_1_r_is_ready)
+
+                    T.barrier_wait(p0_1_1_ready_barrier, k % 2)
+                    # Step 12.
+                    T.gemm(S_shared_, KV_shared_0_r, acc_o_r, policy=T.GemmWarpPolicy.FullCol)
+                    T.barrier_arrive(k_pe_shared_1_free_barrier)
+
+                    if k < loop_range - 1:
+
+                        T.copy(
+                            KV[bid, (2 * k + 2) * block_N:(2 * k + 3) * block_N, cur_kv_head,
+                               h_dim:], KV_shared_0_r)
+                        T.barrier_arrive(kv_shared_0_r_is_ready)
+
+                        T.barrier_wait(k_pe_shared_0_free_barrier, k % 2)
+                        T.copy(
+                            K_pe[bid, (2 * k + 2) * block_N:(2 * k + 3) * block_N, cur_kv_head, :],
+                            K_pe_shared_0)
+                        T.barrier_arrive(kv_shared_0_pe_is_ready)
+
+                T.barrier_wait(lse_0_ready_barrier, 0)
+                for i in T.Parallel(block_H):
+                    logsum[i] += logsum_1[i]
+                T.barrier_arrive(lse_1_ready_barrier)
+                for i, j in T.Parallel(block_H, h_dim):
+                    acc_o_r[i, j] /= logsum[i]
+                T.copy(acc_o_r, O_shared_r)
+                T.copy(O_shared_r, Output[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H,
+                                          h_dim:])
 
     @T.prim_func
     def main_no_split(
@@ -159,13 +392,15 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
 
 
 def main():
-    batch = 128
-    heads = 128
-    kv_heads = 1
-    kv_ctx = 8192
-    dim = 512
-    pe_dim = 64
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--batch', type=int, default=132, help='batch size')
+    parser.add_argument('--heads', type=int, default=128, help='q heads number')
+    parser.add_argument('--kv_heads', type=int, default=1, help='kv heads number')
+    parser.add_argument('--kv_ctx', type=int, default=8192, help='kv context length')
+    parser.add_argument('--dim', type=int, default=512, help='head dim')
+    parser.add_argument('--pe_dim', type=int, default=64, help='pe head dim')
+    args = parser.parse_args()
+    batch, heads, kv_heads, kv_ctx, dim, pe_dim = args.batch, args.heads, args.kv_heads, args.kv_ctx, args.dim, args.pe_dim
     qk_flops = 2 * batch * heads * kv_ctx * (dim + pe_dim)
     pv_flops = 2 * batch * heads * kv_ctx * dim
     total_flops = qk_flops + pv_flops
@@ -173,9 +408,8 @@ def main():
     BLOCK_H = 64
     num_split = 1
 
-    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split)
-    print(kernel.get_kernel_source())
-
+    program = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split)
+    kernel = tilelang.compile(program, out_idx=[6])
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
     latency = profiler.do_bench(warmup=500)

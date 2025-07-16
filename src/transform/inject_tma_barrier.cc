@@ -243,6 +243,8 @@ public:
       if (const auto *call = node.as<CallNode>()) {
         if (call->op.same_as(create_list_of_mbarrier())) {
           has_create_list_of_mbarrier = true;
+        } else if (call->op.same_as(builtin::ptx_init_barrier_thread_count())) {
+          has_create_list_of_mbarrier = true;
         }
       }
     });
