@@ -223,6 +223,9 @@ class TLCUDASourceWrapper(object):
         self.libpath: Optional[str] = None
         self.lib_code: Optional[str] = self.update_lib_code(source)
 
+    def _pythonic_expr(self, expr: tvm.tir.PrimExpr) -> str:
+        return pythonic_expr(expr, self._TYPE_MAP)
+
     def is_tma_descriptor_arg(self, arg_name: str) -> bool:
         return arg_name in self.prim_func.buffer_map
 
@@ -303,13 +306,13 @@ class TLCUDASourceWrapper(object):
             index = code.index("{", index)
 
             block_str = "dim3({}, {}, {})".format(
-                pythonic_expr(block_info[0]),
-                pythonic_expr(block_info[1]),
-                pythonic_expr(block_info[2]),
+                self._pythonic_expr(block_info[0]),
+                self._pythonic_expr(block_info[1]),
+                self._pythonic_expr(block_info[2]),
             )
             grid_str = "dim3({}, {}, {})".format(
-                pythonic_expr(grid_info[0]), pythonic_expr(grid_info[1]),
-                pythonic_expr(grid_info[2]))
+                self._pythonic_expr(grid_info[0]), self._pythonic_expr(grid_info[1]),
+                self._pythonic_expr(grid_info[2]))
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             init_l2_persistent_map = self.generate_l2_persistent_map(function_name)
             kernel_launch_code += init_l2_persistent_map
@@ -352,7 +355,7 @@ class TLCUDASourceWrapper(object):
                 # as size_in_bytes maybe a symbolic expression
                 num_bytes = persisting_l2_cache_max_size
             init_l2_persistent_map += L2_PERSISTENT_MAP_INIT_FUNC.format(
-                buffer_name, float(hit_ratio), pythonic_expr(num_bytes))
+                buffer_name, float(hit_ratio), self._pythonic_expr(num_bytes))
 
         return init_l2_persistent_map
 
@@ -388,10 +391,10 @@ class TLCUDASourceWrapper(object):
             box_dim = remaining_args[2 * tensor_rank:3 * tensor_rank]
             element_strides = remaining_args[3 * tensor_rank:4 * tensor_rank]
 
-            global_dim = [pythonic_expr(i) for i in global_dim]
-            global_stride = [pythonic_expr(i) for i in global_stride]
-            box_dim = [pythonic_expr(i) for i in box_dim]
-            element_strides = [pythonic_expr(i) for i in element_strides]
+            global_dim = [self._pythonic_expr(i) for i in global_dim]
+            global_stride = [self._pythonic_expr(i) for i in global_stride]
+            box_dim = [self._pythonic_expr(i) for i in box_dim]
+            element_strides = [self._pythonic_expr(i) for i in element_strides]
 
             # Extract remaining parameters
             try:
@@ -656,9 +659,10 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             kernel_launch_code += self.generate_tma_descriptor_args(
                 desc_name_map) + KERNEL_LAUNCH_FUNC_PY.format(
-                    function_name, pythonic_expr(grid_info[0]), pythonic_expr(grid_info[1]),
-                    pythonic_expr(grid_info[2]), pythonic_expr(block_info[0]),
-                    pythonic_expr(block_info[1]), pythonic_expr(
+                    function_name, self._pythonic_expr(grid_info[0]),
+                    self._pythonic_expr(grid_info[1]), self._pythonic_expr(grid_info[2]),
+                    self._pythonic_expr(block_info[0]), self._pythonic_expr(block_info[1]),
+                    self._pythonic_expr(
                         block_info[2]), smem_str, arg_names, arg_types, device_index)
 
         # Wrap the kernel dispatch logic in an external C function

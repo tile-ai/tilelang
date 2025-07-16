@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Union, Optional, Literal
+from typing import Union, Optional, Literal, Dict
 from tilelang import tvm as tvm
 from tvm import IRModule, tir
 from tvm.target import Target
@@ -103,7 +103,7 @@ def get_annotated_mod(
     return dispatch[model_type](mod)
 
 
-def pythonic_expr(expr: tvm.tir.PrimExpr) -> str:
+def pythonic_expr(expr: tvm.tir.PrimExpr, dtype_map: Optional[Dict[str, str]] = None) -> str:
     """
     Converts a TVM PrimExpr into a Python-style string, correctly handling operator precedence.
 
@@ -154,7 +154,10 @@ def pythonic_expr(expr: tvm.tir.PrimExpr) -> str:
         elif isinstance(node, tvm.tir.Cast):
             # C-style cast has high precedence
             value_str, _ = node_to_result_map[node.value]
-            s = f"({node.dtype}){value_str}"
+            if dtype_map is None:
+                s = f"({node.dtype}){value_str}"
+            else:
+                s = f"({dtype_map[node.dtype]}){value_str}"
             p = PRECEDENCE.get(type(node), ATOMIC_PRECEDENCE)
         elif isinstance(
                 node,
