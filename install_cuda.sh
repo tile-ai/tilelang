@@ -144,7 +144,6 @@ TILELANG_PATH="$(pwd)"
 echo "TileLang path set to: $TILELANG_PATH"
 echo "Configuring environment variables for TVM..."
 echo "export PYTHONPATH=${TILELANG_PATH}:\$PYTHONPATH" >> ~/.bashrc
-echo "export CUDA_DEVICE_ORDER=PCI_BUS_ID" >> ~/.bashrc
 
 # Step 12: Source .bashrc to apply changes
 echo "Applying environment changes by sourcing .bashrc..."

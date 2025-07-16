@@ -91,10 +91,8 @@ cd ..
 TILELANG_PATH="$(pwd)"
 echo "Configuring environment variables for TVM..."
 echo "export PYTHONPATH=${TILELANG_PATH}:\$PYTHONPATH" >> ~/.bashrc
-echo "export CUDA_DEVICE_ORDER=PCI_BUS_ID" >> ~/.bashrc
 TVM_HOME_ENV="export TVM_HOME=${TILELANG_PATH}/3rdparty/tvm"
 TILELANG_PYPATH_ENV="export PYTHONPATH=\$TVM_HOME/python:${TILELANG_PATH}:\$PYTHONPATH"
-CUDA_DEVICE_ORDER_ENV="export CUDA_DEVICE_ORDER=PCI_BUS_ID"
 
 # Check and add the first line if not already present
 if ! grep -qxF "$TVM_HOME_ENV" ~/.bashrc; then
@@ -110,14 +108,6 @@ if ! grep -qxF "$TILELANG_PYPATH_ENV" ~/.bashrc; then
     echo "Added PYTHONPATH to ~/.bashrc"
 else
     echo "PYTHONPATH is already set in ~/.bashrc"
-fi
-
-# Check and add the third line if not already present
-if ! grep -qxF "$CUDA_DEVICE_ORDER_ENV" ~/.bashrc; then
-    echo "$CUDA_DEVICE_ORDER_ENV" >> ~/.bashrc
-    echo "Added CUDA_DEVICE_ORDER to ~/.bashrc"
-else
-    echo "CUDA_DEVICE_ORDER is already set in ~/.bashrc"
 fi
 
 # Reload ~/.bashrc to apply the changes
