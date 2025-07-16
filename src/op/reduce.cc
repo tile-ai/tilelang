@@ -225,15 +225,16 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       std::stringstream ss;
 
       bool has_arch = T.target->attrs.count("arch") > 0;
+      auto thread_offset = T.thread_bounds->min;
       if (has_arch && Downcast<String>(T.target->attrs["arch"]) == "sm_90") {
         auto all_threads = T.thread_bounds->extent;
         ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-           << reducing_threads << ", " << (*scale) << ", " << all_threads
-           << ">::run_hopper";
+           << reducing_threads << ", " << (*scale) << ", " << thread_offset
+           << ", " << all_threads << ">::run_hopper";
       } else {
         ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
-           << reducing_threads << ", " << (*scale) << ", "
-           << (T.thread_bounds->min) << ">::run";
+           << reducing_threads << ", " << (*scale) << ", " << thread_offset
+           << ">::run";
       }
       Array<PrimExpr> thread_reduce_args = {
           StringImm(ss.str()), BufferLoad(clear_buffer, dst_indices)};
