@@ -3,11 +3,11 @@
  * \brief Lower L2 persistent annotation
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
-#include <tvm/ffi/reflection/registry.h>
 
 #include "../op/builtin.h"
 #include "../op/bulk_copy.h"
@@ -101,8 +101,7 @@ tvm::transform::Pass LowerL2Persistent() {
 
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-    .def("tl.transform.LowerL2Persistent", LowerL2Persistent);
+  refl::GlobalDef().def("tl.transform.LowerL2Persistent", LowerL2Persistent);
 });
 
 } // namespace tl

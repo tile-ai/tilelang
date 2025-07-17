@@ -3,11 +3,11 @@
  * \brief Lower Hopper intrinsics cuda GPU(sm90+)
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
-#include <tvm/ffi/reflection/registry.h>
 
 #include "../op/builtin.h"
 #include "../op/bulk_copy.h"
@@ -152,8 +152,7 @@ tvm::transform::Pass LowerHopperIntrin() {
 
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-    .def("tl.transform.LowerHopperIntrin", LowerHopperIntrin);
+  refl::GlobalDef().def("tl.transform.LowerHopperIntrin", LowerHopperIntrin);
 });
 #endif // (CUDA_MAJOR_VERSION >= 12)
 

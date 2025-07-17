@@ -776,10 +776,10 @@ runtime::Module BuildTileLangWebGPU(IRModule mod, Target target) {
 
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-    .def("target.build.tilelang_webgpu", [](IRModule mod, Target target) {
-      return BuildTileLangWebGPU(mod, target);
-    });
+  refl::GlobalDef().def("target.build.tilelang_webgpu",
+                        [](IRModule mod, Target target) {
+                          return BuildTileLangWebGPU(mod, target);
+                        });
 });
 
 } // namespace codegen

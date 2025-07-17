@@ -22,10 +22,10 @@
  * \brief Legalize the program from frontend
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
-#include <tvm/ffi/reflection/registry.h>
 
 #include "arith/ir_mutator_with_analyzer.h"
 
@@ -91,8 +91,7 @@ Pass FrontendLegalize() {
 
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-    .def("tl.transform.FrontendLegalize", FrontendLegalize);
+  refl::GlobalDef().def("tl.transform.FrontendLegalize", FrontendLegalize);
 });
 
 } // namespace tl

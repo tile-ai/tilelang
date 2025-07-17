@@ -3,12 +3,12 @@
  * \brief legalize safe memory access
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
-#include <tvm/ffi/reflection/registry.h>
 
 #include "../op/builtin.h"
 #include "../op/parallel.h"
@@ -356,8 +356,8 @@ tvm::transform::Pass LegalizeSafeMemoryAccess() {
 // Register the pass globally so it can be used in the compilation pipeline
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-    .def("tl.transform.LegalizeSafeMemoryAccess", LegalizeSafeMemoryAccess);
+  refl::GlobalDef().def("tl.transform.LegalizeSafeMemoryAccess",
+                        LegalizeSafeMemoryAccess);
 });
 
 } // namespace tl

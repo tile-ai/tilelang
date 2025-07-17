@@ -5,12 +5,12 @@
 
 #include "arith/ir_visitor_with_analyzer.h"
 #include "tir/analysis/var_use_def_analysis.h"
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
-#include <tvm/ffi/reflection/registry.h>
 
 #include "../op/builtin.h"
 #include "./common/collector.h"
@@ -1233,8 +1233,7 @@ tvm::transform::Pass WarpSpecialized() {
 
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-    .def("tl.transform.WarpSpecialized", WarpSpecialized);
+  refl::GlobalDef().def("tl.transform.WarpSpecialized", WarpSpecialized);
 });
 
 } // namespace tl

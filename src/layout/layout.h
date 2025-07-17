@@ -44,7 +44,7 @@ public:
   static constexpr bool _type_has_method_sequal_reduce = true;
   static constexpr const char *_type_key = "tl.Layout";
   bool SEqualReduce(const LayoutNode *other, SEqualReducer equal) const;
-  void VisitAttrs(tvm::AttrVisitor *v);
+  static void RegisterReflection();
   TVM_DECLARE_BASE_OBJECT_INFO(LayoutNode, Object);
 
 protected:
@@ -101,7 +101,7 @@ public:
 
   bool IsEqual(const FragmentNode *other, bool skip_index = false) const;
 
-  void VisitAttrs(tvm::AttrVisitor *v);
+  static void RegisterReflection();
 
   bool SEqualReduce(const FragmentNode *other, SEqualReducer equal) const;
   static constexpr const char *_type_key = "tl.Fragment";

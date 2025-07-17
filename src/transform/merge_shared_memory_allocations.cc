@@ -24,12 +24,12 @@
  * shared memory allocations into one allocation.
  */
 #include <tvm/ffi/function.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
-#include <tvm/ffi/reflection/registry.h>
 
 #include <unordered_map>
 #include <unordered_set>
@@ -1051,8 +1051,8 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
 
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-    .def("tl.transform.MergeSharedMemoryAllocations", MergeSharedMemoryAllocations);
+  refl::GlobalDef().def("tl.transform.MergeSharedMemoryAllocations",
+                        MergeSharedMemoryAllocations);
 });
 
 } // namespace transform

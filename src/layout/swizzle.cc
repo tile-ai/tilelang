@@ -97,8 +97,9 @@ SwizzledLayout::SwizzledLayout(Array<PrimExpr> input_size,
   data_ = std::move(n);
 }
 
-void SwizzledLayoutNode::VisitAttrs(tvm::AttrVisitor *v) {
-  LayoutNode::VisitAttrs(v);
+void SwizzledLayoutNode::RegisterReflection() {
+  namespace refl = tvm::ffi::reflection;
+  refl::ObjectDef<SwizzledLayoutNode>();
 }
 
 bool SwizzledLayoutNode::SEqualReduce(const SwizzledLayoutNode *other,

@@ -7,8 +7,8 @@
 #include "./transform/common/attr.h"
 #include "op/builtin.h"
 #include <tvm/arith/analyzer.h>
-#include <tvm/script/ir_builder/tir/ir.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/script/ir_builder/tir/ir.h>
 
 namespace tvm {
 namespace tl {
@@ -179,9 +179,10 @@ class KernelLaunchFrameNode : public TIRFrameNode {
 public:
   Array<TIRFrame> frames;
 
-  void VisitAttrs(tvm::AttrVisitor *v) {
-    TIRFrameNode::VisitAttrs(v);
-    v->Visit("frames", &frames);
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<KernelLaunchFrameNode>().def_ro(
+        "frames", &KernelLaunchFrameNode::frames);
   }
 
   static constexpr const char *_type_key = "tl.KernelLaunchFrame";
@@ -283,19 +284,20 @@ TVM_REGISTER_NODE_TYPE(KernelLaunchFrameNode);
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
-    .def("tl.Parallel", ParallelFor)
-    .def("tl.Pipelined", PipelinedFor)
-    .def("tl.Persistent", PersistentFor)
-    .def("tl.KernelLaunch", KernelLaunch);
+      .def("tl.Parallel", ParallelFor)
+      .def("tl.Pipelined", PipelinedFor)
+      .def("tl.Persistent", PersistentFor)
+      .def("tl.KernelLaunch", KernelLaunch);
 });
 
 class WarpSpecializeFrameNode : public TIRFrameNode {
 public:
   Array<TIRFrame> frames;
 
-  void VisitAttrs(tvm::AttrVisitor *v) {
-    TIRFrameNode::VisitAttrs(v);
-    v->Visit("frames", &frames);
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<WarpSpecializeFrameNode>().def_ro(
+        "frames", &WarpSpecializeFrameNode::frames);
   }
 
   static constexpr const char *_type_key = "tl.WarpSpecializeFrame";
@@ -366,8 +368,7 @@ WarpSpecializeFrame WarpSpecialize(Array<IntImm> warp_group_ids,
 TVM_REGISTER_NODE_TYPE(WarpSpecializeFrameNode);
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-    .def("tl.WarpSpecialize", WarpSpecialize);
+  refl::GlobalDef().def("tl.WarpSpecialize", WarpSpecialize);
 });
 
 } // namespace tl

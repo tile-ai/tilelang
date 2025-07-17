@@ -22,12 +22,12 @@
  * \brief Warp specialized Pipeline for cuda GPU (sm90+)
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
-#include <tvm/ffi/reflection/registry.h>
 
 #include "../op/builtin.h"
 
@@ -343,8 +343,7 @@ tvm::transform::Pass MultiVersionBuffer() {
 
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-    .def("tl.transform.MultiVersionBuffer", MultiVersionBuffer);
+  refl::GlobalDef().def("tl.transform.MultiVersionBuffer", MultiVersionBuffer);
 });
 
 } // namespace tl

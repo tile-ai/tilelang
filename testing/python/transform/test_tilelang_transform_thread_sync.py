@@ -7,6 +7,7 @@ import tilelang.testing
 from tvm.script import tir as T
 from tvm import te
 
+
 def run_passes(func: tvm.tir.PrimFunc):
     mod = tvm.IRModule.from_expr(func)
 
@@ -44,6 +45,7 @@ def test_sync_if_with_same_index():
 
     mod = run_passes(func)
     assert "T.tvm_storage_sync" in str(mod)
+
 
 @tilelang.testing.requires_cuda
 def test_sync_read_thread_id_independent_location():

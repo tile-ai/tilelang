@@ -3,13 +3,13 @@
  * \brief infer the fragment/shared memory layout
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/index_map.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
-#include <tvm/ffi/reflection/registry.h>
 
 #include <queue>
 
@@ -521,8 +521,7 @@ tvm::transform::Pass LayoutInference() {
 
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-    .def("tl.transform.LayoutInference", LayoutInference);
+  refl::GlobalDef().def("tl.transform.LayoutInference", LayoutInference);
 });
 
 } // namespace tl

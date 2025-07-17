@@ -3,12 +3,12 @@
  * \brief Merge the If Stmt in SeqStmt
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
-#include <tvm/ffi/reflection/registry.h>
 
 #include "../op/builtin.h"
 
@@ -94,8 +94,7 @@ tvm::transform::Pass MergeIfStmt() {
 
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-    .def("tl.transform.MergeIfStmt", MergeIfStmt);
+  refl::GlobalDef().def("tl.transform.MergeIfStmt", MergeIfStmt);
 });
 
 } // namespace tl

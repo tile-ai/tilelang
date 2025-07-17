@@ -93,20 +93,24 @@ struct TensorMapArgs {
 };
 
 // set device api
-TVM_REGISTER_GLOBAL(tvm_tensormap_create_tiled)
-    .set_body([](TVMArgs args, TVMRetValue *ret) {
-      TensorMapArgs T = TensorMapArgs::Extract(args);
-      CUresult result = cuTensorMapEncodeTiled(
-          T.map, T.type, T.tensorRank, T.globalAddress, T.globalDim,
-          T.globalStride + 1, T.boxDim, T.elementStrides, T.interleave,
-          T.swizzle, T.l2Promotion, T.oobFill);
-      if (result != CUDA_SUCCESS) {
-        LOG_FATAL << "Failed to initialize the TMA descriptor " << result
-                  << std::endl
-                  << T.ToDebugString();
-      }
-      *ret = static_cast<int>(result);
-    });
+
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def_packed(
+      "tvm_tensormap_create_tiled", [](PackedArgs args, Any *ret) {
+        TensorMapArgs T = TensorMapArgs::Extract(args);
+        CUresult result = cuTensorMapEncodeTiled(
+            T.map, T.type, T.tensorRank, T.globalAddress, T.globalDim,
+            T.globalStride + 1, T.boxDim, T.elementStrides, T.interleave,
+            T.swizzle, T.l2Promotion, T.oobFill);
+        if (result != CUDA_SUCCESS) {
+          LOG_FATAL << "Failed to initialize the TMA descriptor " << result
+                    << std::endl
+                    << T.ToDebugString();
+        }
+        *ret = static_cast<int>(result);
+      });
+});
 
 struct TensorMapIm2ColArgs {
   CUtensorMap *map;
@@ -185,21 +189,25 @@ struct TensorMapIm2ColArgs {
   }
 };
 
-TVM_REGISTER_GLOBAL(tvm_tensormap_create_im2col)
-    .set_body([](TVMArgs args, TVMRetValue *ret) {
-      TensorMapIm2ColArgs T = TensorMapIm2ColArgs::Extract(args);
-      CUresult result = cuTensorMapEncodeIm2col(
-          T.map, T.type, T.tensorRank, T.globalAddress, T.globalDim,
-          T.globalStride + 1, T.pixelBoxLowerCorner, T.pixelBoxUpperCorner,
-          T.smem_box_channel, T.smem_box_pixel, T.elementStrides, T.interleave,
-          T.swizzle, T.l2Promotion, T.oobFill);
-      if (result != CUDA_SUCCESS) {
-        LOG_FATAL << "Failed to initialize the TMA descriptor " << result
-                  << std::endl
-                  << T.ToDebugString();
-      }
-      *ret = static_cast<int>(result);
-    });
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def_packed(
+      "tvm_tensormap_create_im2col", [](PackedArgs args, Any *ret) {
+        TensorMapIm2ColArgs T = TensorMapIm2ColArgs::Extract(args);
+        CUresult result = cuTensorMapEncodeIm2col(
+            T.map, T.type, T.tensorRank, T.globalAddress, T.globalDim,
+            T.globalStride + 1, T.pixelBoxLowerCorner, T.pixelBoxUpperCorner,
+            T.smem_box_channel, T.smem_box_pixel, T.elementStrides,
+            T.interleave, T.swizzle, T.l2Promotion, T.oobFill);
+        if (result != CUDA_SUCCESS) {
+          LOG_FATAL << "Failed to initialize the TMA descriptor " << result
+                    << std::endl
+                    << T.ToDebugString();
+        }
+        *ret = static_cast<int>(result);
+      });
+});
+
 #endif // (CUDA_MAJOR_VERSION >= 12)
 
 } // namespace tl

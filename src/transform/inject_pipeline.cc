@@ -22,10 +22,10 @@
  * \brief Transform annotated loops into pipelined one that parallelize
  * producers and consumers
  */
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/target/target.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/transform.h>
-#include <tvm/ffi/reflection/registry.h>
 
 #include <unordered_set>
 
@@ -1041,8 +1041,8 @@ tir::transform::Pass InjectSoftwarePipeline() {
 
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-    .def("tl.transform.InjectSoftwarePipeline", InjectSoftwarePipeline);
+  refl::GlobalDef().def("tl.transform.InjectSoftwarePipeline",
+                        InjectSoftwarePipeline);
 });
 
 } // namespace tl

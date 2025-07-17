@@ -3,12 +3,12 @@
  * \brief Remove useless parameters of TL PrimFunc.
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/buffer.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
-#include <tvm/ffi/reflection/registry.h>
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "tir/analysis/control_flow_graph.h"
@@ -20,38 +20,42 @@ namespace tl {
 using namespace tir;
 using namespace arith;
 
-struct SimplifyConfigNode : public tvm::AttrsNode<SimplifyConfigNode> {
+struct SimplifyConfigNode : public AttrsNodeReflAdapter<SimplifyConfigNode> {
   bool transitively_prove_inequalities;
   bool propagate_knowns_to_prove_conditional;
   bool propagate_knowns_to_simplify_expressions;
   bool convert_boolean_to_and_of_ors;
   bool apply_constraints_to_boolean_branches;
 
-  TVM_DECLARE_ATTRS(SimplifyConfigNode, "tl.transform.SimplifyConfig") {
-    TVM_ATTR_FIELD(transitively_prove_inequalities)
-        .describe("If true, simplify conditionals with transitive combinations "
-                  "of scoped constraints")
-        .set_default(false);
-
-    TVM_ATTR_FIELD(propagate_knowns_to_prove_conditional)
-        .describe("If true, known buffer values are propagated and used to "
-                  "statically prove conditionals")
-        .set_default(false);
-
-    TVM_ATTR_FIELD(propagate_knowns_to_simplify_expressions)
-        .describe("If true, known buffer values are propagated and used to "
-                  "replace BufferLoad wherever "
-                  "possible")
-        .set_default(false);
-
-    TVM_ATTR_FIELD(convert_boolean_to_and_of_ors)
-        .describe("If true, simplify conditionals into an AND of ORs")
-        .set_default(false);
-
-    TVM_ATTR_FIELD(apply_constraints_to_boolean_branches)
-        .describe("If true, simplify each branch of AND/OR "
-                  "under a constraints provided by the other branch")
-        .set_default(false);
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<SimplifyConfigNode>()
+        .def_ro("transitively_prove_inequalities",
+                &SimplifyConfigNode::transitively_prove_inequalities,
+                "If true, simplify conditionals with transitive combinations "
+                "of scoped constraints",
+                refl::DefaultValue(false))
+        .def_ro("propagate_knowns_to_prove_conditional",
+                &SimplifyConfigNode::propagate_knowns_to_prove_conditional,
+                "If true, known buffer values are propagated and used to "
+                "statically prove conditionals",
+                refl::DefaultValue(false))
+        .def_ro("propagate_knowns_to_simplify_expressions",
+                &SimplifyConfigNode::propagate_knowns_to_simplify_expressions,
+                "If true, known buffer values are propagated and used to "
+                "replace BufferLoad wherever "
+                "possible",
+                refl::DefaultValue(false))
+        .def_ro("convert_boolean_to_and_of_ors",
+                &SimplifyConfigNode::convert_boolean_to_and_of_ors,
+                "If true, simplify conditionals into an AND of ORs",
+                refl::DefaultValue(false))
+        .def_ro("apply_constraints_to_boolean_branches",
+                &SimplifyConfigNode::apply_constraints_to_boolean_branches,
+                "If true, simplify each branch of AND/OR under a constraints "
+                "provided by the other "
+                "branch",
+                refl::DefaultValue(false));
   }
 
   RewriteSimplifier::Extension GetEnabledExtensions() const {
@@ -478,8 +482,7 @@ tvm::transform::Pass Simplify(bool simplify_arguments = true) {
 
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-    .def("tl.transform.Simplify", Simplify);
+  refl::GlobalDef().def("tl.transform.Simplify", Simplify);
 });
 
 } // namespace tl

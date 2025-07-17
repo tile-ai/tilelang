@@ -22,13 +22,13 @@
  * \brief Lower the special device storage access.
  */
 #include <tvm/arith/analyzer.h>
-#include <tvm/runtime/registry.h>
+#include <tvm/ffi/function.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/target/target_info.h>
 #include <tvm/tir/buffer.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
-#include <tvm/ffi/reflection/registry.h>
 
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
@@ -144,8 +144,8 @@ Pass LowerDeviceStorageAccessInfo() {
 
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-    .def("tl.transform.LowerDeviceStorageAccessInfo", LowerDeviceStorageAccessInfo);
+  refl::GlobalDef().def("tl.transform.LowerDeviceStorageAccessInfo",
+                        LowerDeviceStorageAccessInfo);
 });
 
 } // namespace transform

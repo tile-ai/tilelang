@@ -1,10 +1,10 @@
 #include "../op/builtin.h"
-#include <tvm/runtime/registry.h>
+#include <tvm/ffi/function.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/data_type_rewriter.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/transform.h>
-#include <tvm/ffi/reflection/registry.h>
 
 namespace tvm {
 namespace tl {
@@ -88,8 +88,8 @@ tvm::transform::Pass ConfigIndexBitwidth() {
 
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-    .def("tl.transform.ConfigIndexBitwidth", ConfigIndexBitwidth);
+  refl::GlobalDef().def("tl.transform.ConfigIndexBitwidth",
+                        ConfigIndexBitwidth);
 });
 
 } // namespace tl
