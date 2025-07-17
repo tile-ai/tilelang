@@ -411,6 +411,7 @@ class TileLangBuilPydCommand(build_py):
         # copy cython files
         CYTHON_SRC = [
             "tilelang/jit/adapter/cython/cython_wrapper.pyx",
+            "tilelang/jit/adapter/cython/.cycache",
         ]
         for item in CYTHON_SRC:
             source_dir = os.path.join(ROOT_DIR, item)
