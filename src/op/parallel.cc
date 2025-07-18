@@ -289,6 +289,7 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
           << "\nLHS = " << lhs << "\nRHS = " << rhs;
     }
   }
+
   // Step 3: Infer other fragment's layout from the loop's partition
   LayoutMap results;
   for (const auto &[buffer, _] : indice_map_) {
@@ -297,7 +298,7 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
                               T.thread_bounds));
     }
 
-    // Layout infer conflict for local.fragment can noy be handled here
+    // Layout infer conflict for local.fragment can not be handled here
     // because the source_buffer is not always available
     if (buffer.scope() == "local.fragment" && source_buffer.defined() &&
         source_buffer.scope() == "local.fragment") {
@@ -308,6 +309,11 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
             CompleteBufferFragment(buffer)->BindThreadRange(T.thread_bounds);
         const FragmentNode *dst_layout =
             dst_layout_fragment.as<Fragment>().get();
+        // Do not modify a strict layout, even if it conflicts with the
+        // destination layout. This check is handled more appropriately in
+        // layout_inference.cc, which controls the final layout map. A conflict
+        // here is unlikely to affect the result, as strict layouts typically
+        // have a replication factor of 1.
         if (as_const_int(dst_layout->ReplicateExtent()) &&
             as_const_int(src_layout->ReplicateExtent()) &&
             (*as_const_int(dst_layout->ReplicateExtent()) >
