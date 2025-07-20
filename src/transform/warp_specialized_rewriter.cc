@@ -129,6 +129,8 @@ public:
     auto access = GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
     auto reads = access[0];
     Role role = Role::kProducer;
+    if (reads.size() == 0)
+      role = Role::kConsumer;
     for (auto read : reads) {
       if (read->buffer.scope() != "global") {
         role = Role::kConsumer;
