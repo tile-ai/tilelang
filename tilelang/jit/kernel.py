@@ -89,7 +89,7 @@ class JITKernel(object):
             target = determine_target(target)
 
         # Ensure the target is always a TVM Target object.
-        target = Target(target)
+        self.target = Target(target)
 
         # Validate the execution backend.
         assert execution_backend in [
