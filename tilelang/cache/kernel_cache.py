@@ -252,16 +252,17 @@ class KernelCache:
         try:
             kernel_path = os.path.join(cache_path, KERNEL_PATH)
             if kernel.artifact.kernel_source is not None:
-                operation = lambda file: file.write(kernel.artifact.kernel_source)
-                KernelCache._safe_write_file(kernel_path, "w", operation)
+                KernelCache._safe_write_file(kernel_path, "w",
+                                             lambda file: file.write(kernel.artifact.kernel_source))
         except Exception as e:
             self.logger.error(f"Error saving kernel source code to disk: {e}")
 
         # Save wrapped kernel source code
         try:
             wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
-            operation = lambda file: file.write(kernel.adapter.get_kernel_source())
-            KernelCache._safe_write_file(wrapped_kernel_path, "w", operation)
+            KernelCache._safe_write_file(
+                wrapped_kernel_path, "w",
+                lambda file: file.write(kernel.adapter.get_kernel_source()))
         except Exception as e:
             self.logger.error(f"Error saving wrapped kernel source code to disk: {e}")
 
@@ -271,23 +272,25 @@ class KernelCache:
             kernel_lib_path = KERNEL_CUBIN_PATH if self.execution_backend == "nvrtc" else KERNEL_LIB_PATH
             kernel_lib_path = os.path.join(cache_path, kernel_lib_path)
             src_lib_path = kernel.adapter.libpath
-            operation = lambda file: file.write(KernelCache._load_binary(src_lib_path))
-            KernelCache._safe_write_file(kernel_lib_path, "wb", operation)
+            KernelCache._safe_write_file(
+                kernel_lib_path, "wb",
+                lambda file: file.write(KernelCache._load_binary(src_lib_path)))
 
             # Save an extra Python file for NVRTC
             if self.execution_backend == "nvrtc":
                 kernel_py_path = os.path.join(cache_path, KERNEL_PY_PATH)
                 src_lib_path = src_lib_path.replace(".cubin", ".py")
-                operation = lambda file: file.write(KernelCache._load_binary(src_lib_path))
-                KernelCache._safe_write_file(kernel_py_path, "wb", operation)
+                KernelCache._safe_write_file(
+                    kernel_py_path, "wb",
+                    lambda file: file.write(KernelCache._load_binary(src_lib_path)))
         except Exception as e:
             self.logger.error(f"Error saving kernel library to disk: {e}")
 
         # Save kernel parameters
         try:
             params_path = os.path.join(cache_path, PARAMS_PATH)
-            operation = lambda file: cloudpickle.dump(kernel.params, file)
-            KernelCache._safe_write_file(params_path, "wb", operation)
+            KernelCache._safe_write_file(params_path, "wb",
+                                         lambda file: cloudpickle.dump(kernel.params, file))
         except Exception as e:
             self.logger.error(f"Error saving kernel parameters to disk: {e}")
 
@@ -318,8 +321,8 @@ class KernelCache:
         """
         cache_path = self._get_cache_path(key)
         wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
-        kernel_lib_path = os.path.join(cache_path,
-                                       KERNEL_CUBIN_PATH if self.execution_backend == "nvrtc" else KERNEL_LIB_PATH)
+        kernel_lib_path = os.path.join(
+            cache_path, KERNEL_CUBIN_PATH if self.execution_backend == "nvrtc" else KERNEL_LIB_PATH)
         params_path = os.path.join(cache_path, PARAMS_PATH)
         if not all([os.path.exists(file) for file in (kernel_lib_path, params_path)]):
             return None
