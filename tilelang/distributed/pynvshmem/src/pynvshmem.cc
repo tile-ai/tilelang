@@ -82,19 +82,35 @@ void check_nvshmem_init() {
 NVSHMEMI_REPT_FOR_STANDARD_RMA_TYPES(NVSHMEMI_TYPENAME_P_IMPL_PYBIND)
 #undef NVSHMEMI_TYPENAME_P_IMPL_PYBIND
 
-inline torch::Tensor nvshmem_create_tensor(const std::vector<int64_t> &shape,
+inline torch::Tensor 
+nvshmem_create_tensor(const std::vector<int64_t> &shape,
                                    c10::ScalarType dtype) {
   check_nvshmem_init();
+  auto current_device = c10::cuda::current_device();
   auto option_gpu =
-      at::TensorOptions().dtype(dtype).device(at::kCUDA).device_index(
-          c10::cuda::current_device());
-  auto size =
-      torch::elementSize(dtype) *
-      std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<>());
+      at::TensorOptions(at::kCUDA).dtype(dtype).device_index(current_device);
+  auto size = torch::elementSize(dtype) *
+              std::accumulate(shape.begin(), shape.end(), (size_t)1,
+                              std::multiplies<>());
+  PYNVSHMEM_CHECK_NE(size, 0);
+  at::cuda::device_synchronize();
   void *ptr = nvshmem_malloc(size);
   CHECK(ptr != nullptr) << " nvshmem_malloc failed for malloc " << size;
   return at::from_blob(
-      ptr, shape, [](void *ptr) { nvshmem_free(ptr); }, option_gpu);
+          ptr, shape,
+          [=](void *ptr) {
+            // std::cerr << "enter nvshmem_free "
+            // << ptr << "\n";
+            at::cuda::CUDAGuard guard(current_device);
+            at::cuda::device_synchronize();
+            // std::cerr << "do nvshmem_free " <<
+            // ptr << "\n";
+            nvshmem_free(ptr);
+            at::cuda::device_synchronize();
+            // std::cerr << "exit nvshmem_free "
+            // << ptr << "\n";
+          },
+          option_gpu);
 }
 
 std::vector<torch::Tensor>

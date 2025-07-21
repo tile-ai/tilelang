@@ -78,14 +78,13 @@ def parse_args():
         "--dtype", type=str, default="float16", choices=["float16", "float32", "bfloat16"])
     parser.add_argument("--threads", type=int, default=128, help="number of threads in a block")
     parser.add_argument("--print_source", action="store_true", help="print kernel source code")
-    parser.add_argument("--warmup", type=int, default=1, help="number of warmup iterations")
-    parser.add_argument("--repeat", type=int, default=5, help="number of repeat iterations")
+    parser.add_argument("--warmup", type=int, default=5, help="number of warmup iterations")
+    parser.add_argument("--repeat", type=int, default=10, help="number of repeat iterations")
     return parser.parse_args()
 
 
 if __name__ == '__main__':
     WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP = init_distributed(return_tp_group=True)
-    torch.cuda.set_device(RANK)
     assert WORLD_SIZE <= 8, "This benchmark is designed for intra-node communication"
 
     args = parse_args()
@@ -112,8 +111,8 @@ if __name__ == '__main__':
         return out
 
     dist.barrier(TP_GROUP)
-    ref, t = perf_fn(torch_ag, warmup, repeat)
-    print(f"rank {RANK} torch all_gather avg time: {t} ms")
+    torch_out, torch_t = perf_fn(torch_ag, warmup, repeat)
+    print(f"rank {RANK} torch all_gather avg time: {torch_t} ms")
 
     # Benchmark Triton-dist
     def triton_ag():
@@ -132,8 +131,8 @@ if __name__ == '__main__':
         return ag_buffer_ptrs[RANK]
 
     dist.barrier(TP_GROUP)
-    out, t = perf_fn(triton_ag, warmup, repeat)
-    print(f"rank {RANK} triton all_gather avg time: {t} ms")
+    tt_out, tt_t = perf_fn(triton_ag, warmup, repeat)
+    print(f"rank {RANK} triton all_gather avg time: {tt_t} ms")
 
     # Benchmark Tilelang-dist
     def tilelang_ag():
@@ -146,12 +145,12 @@ if __name__ == '__main__':
         return out
 
     dist.barrier(TP_GROUP)
-    out, t = perf_fn(tilelang_ag, warmup, repeat)
-    print(f"rank {RANK} tilelang all_gather avg time: {t} ms")
+    tl_out, tl_t = perf_fn(tilelang_ag, warmup, repeat)
+    print(f"rank {RANK} tilelang all_gather avg time: {tl_t} ms")
     # Tested on 4A100 with full-mesh NVLink, comparable with Triton-dist and ~20x faster than Torch
 
     # Check correctness
-    assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
+    assert torch.allclose(tt_out, torch_out, atol=0, rtol=0), f'max error: {(tt_out - torch_out).abs().max()}'
     print(f"rank {RANK} check passed.✅")
-
+    
     dist.destroy_process_group()

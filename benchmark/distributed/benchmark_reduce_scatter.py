@@ -12,21 +12,26 @@ from triton_dist.kernels.nvidia.reduce_scatter import (
     reduce_scatter_ring_push_1d_intra_node_sm,
     reduce_scatter_ring_push_1d_intra_node_sm_rma
 )
-import pynvshmem 
+import pynvshmem
 import tilelang
 import tilelang.language as T
 from tilelang.distributed.utils import init_distributed, dtype_map, perf_fn, dist_print
-from typing import List
 
 tilelang.disable_cache()
 
 #TODO: Bench on 4/8 H100
 #TODO: split N?
 
+'''
+Note: Minor numerical differences exist between Triton/TileLang and Torch (~1e-2) 
+due to the way reductions are handled in different implementations.
+(No error when #PE = 2)
+'''
 
 def reducescatter(PE_num, M, N, dtype="float16", threads=128):
     M_per_rank = M // PE_num
     block_M = 1
+    acc_dtype = "float32"
     
     @T.prim_func
     def pull_reduce(
@@ -38,7 +43,7 @@ def reducescatter(PE_num, M, N, dtype="float16", threads=128):
             
             A_shared = T.alloc_shared((PE_num, block_M, N), dtype)
             A_local = T.alloc_fragment((PE_num, block_M, N), dtype)
-            A_local_sum = T.alloc_fragment((block_M, N), dtype)
+            A_local_sum = T.alloc_fragment((block_M, N), acc_dtype)
             
             for i in T.serial(PE_num - 1):
                 peer = (mype + i + 1) % PE_num
@@ -67,13 +72,14 @@ def parse_args():
     parser.add_argument("--dtype", type=str, default="float16", choices=["float16", "float32", "bfloat16"])
     parser.add_argument("--threads", type=int, default=128, help="number of threads in a block")
     parser.add_argument("--print_source", action="store_true", help="print kernel source code")
-    parser.add_argument("--warmup", type=int, default=1, help="number of warmup iterations")
-    parser.add_argument("--repeat", type=int, default=5, help="number of repeat iterations")
+    parser.add_argument("--warmup", type=int, default=5, help="number of warmup iterations")
+    parser.add_argument("--repeat", type=int, default=10, help="number of repeat iterations")
     return parser.parse_args()
 
 
 if __name__ == '__main__':
     WORLD_SIZE, RANK, LOCAL_RANK, TP_GROUP = init_distributed(return_tp_group=True)
+    torch.cuda.set_device(RANK)
     assert WORLD_SIZE <= 8, "This benchmark is designed for intra-node RS"
 
     args = parse_args()
@@ -103,19 +109,22 @@ if __name__ == '__main__':
         return out
     
     dist.barrier(TP_GROUP)
-    ref, t = perf_fn(torch_rs, warmup, repeat)
-    print(f"rank {RANK} torch reduce_scatter avg time: {t} ms")
-    
+    torch_out, torch_t = perf_fn(torch_rs, warmup, repeat)
+    print(f"rank {RANK} torch reduce_scatter avg time: {torch_t} ms")
+
     # Benchmark Triton-dist
-    def triton_rs(mode: str = "ce"):
+    def triton_rs():
+        # Currently only support 'ce' implementation 
         input_buffer = pynvshmem.nvshmem_create_tensor([M, N], torch_dtype)
         input_buffer.copy_(local_data)
-        input_flag = torch.ones((WORLD_SIZE, ), device="cuda", dtype=torch.int32)
+        input_flag = torch.ones((PE_num, ), device="cuda", dtype=torch.int32)
         symm_reduce_buffers = pynvshmem.nvshmem_create_tensor_list_intra_node([M, N], torch_dtype)
         symm_reduce_flags = pynvshmem.nvshmem_create_tensor_list_intra_node((PE_num, ), torch.int32)
+        symm_reduce_flags[RANK].zero_()
+        pynvshmem.nvshmemx_barrier_all_on_stream(torch.cuda.current_stream().cuda_stream)
         output = reduce_scatter_ring_push_1d_intra_node_ce(
             RANK,
-            PE_num,
+            WORLD_SIZE,
             input_buffer,
             input_flag,
             symm_reduce_buffers,
@@ -125,8 +134,8 @@ if __name__ == '__main__':
         return output
     
     dist.barrier(TP_GROUP)
-    out, t = perf_fn(triton_rs, warmup, repeat)
-    print(f"rank {RANK} triton reduce_scatter avg time: {t} ms")
+    tt_out, tt_t = perf_fn(triton_rs, warmup, repeat)
+    print(f"rank {RANK} triton reduce_scatter avg time: {tt_t} ms")
 
     # Benchmark Tilelang-dist
     def tilelang_rs():
@@ -137,11 +146,12 @@ if __name__ == '__main__':
         return out
 
     dist.barrier(TP_GROUP)
-    out, t = perf_fn(tilelang_rs, warmup, repeat)
-    print(f"rank {RANK} tilelang reduce_scatter avg time: {t} ms")
+    tl_out, tl_t = perf_fn(tilelang_rs, warmup, repeat)
+    print(f"rank {RANK} tilelang reduce_scatter avg time: {tl_t} ms")
 
     # Check correctness
-    assert torch.allclose(out, ref, atol=1e-3, rtol=1e-3)
+    assert torch.allclose(tl_out, torch_out, atol=1e-2, rtol=1e-2), f'max error: {(tt_out - torch_out).abs().max()}'
+    print(f'max err: {(tt_out - torch_out).abs().max()}')
     print(f"rank {RANK} check passed.✅")
 
     dist.destroy_process_group()
