@@ -75,7 +75,6 @@ class JITKernel(object):
         """
         self.prim_func = func
         self.execution_backend = execution_backend
-        self.target = target
         self.target_host = target_host
         self.verbose = verbose
 
@@ -196,7 +195,7 @@ class JITKernel(object):
         # Compile the function with TVM, optimizing with shared memory lowering.
         enable_host_codegen = execution_backend == "dlpack"
         enable_device_compile = execution_backend == "dlpack"
-        with tvm.transform.PassContext(opt_level=3, config=pass_configs):
+        with tvm.transform.PassContext(opt_level=3, config=pass_configs), self.target:
             artifact = tilelang.lower(
                 tilelang_func,
                 target=target,
