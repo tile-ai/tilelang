@@ -163,7 +163,8 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.ThreadSync("global")(mod)
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tir.transform.SplitHostDevice()(mod)
-
+    # MergeSharedMemoryAllocations must be applied after SplitHostDevice
+    # because the merged allocation site is at the beginning of each device function
     enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
     # Hopper Swizzling requires dynamic shared memory address to be aligned to 1024 bytes
     # For other devices, we align to 16 bytes
