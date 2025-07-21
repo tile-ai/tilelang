@@ -23,7 +23,7 @@ jobs:
     - name: Activate virtual environment and install dependencies
       run: |
         source tilelang_ci/bin/activate
-        python -m pip install --upgrade pip
+        python -m pip install --upgrade pip --no-user
         if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt --no-user; fi
 
     - name: Update submodules recursively
@@ -55,7 +55,7 @@ jobs:
     - name: Activate virtual environment and install dependencies
       run: |
         source tilelang_ci/bin/activate
-        python -m pip install --upgrade pip
+        python -m pip install --upgrade pip --no-user
         if [ -f requirements-test.txt ]; then PIP_NO_BUILD_ISOLATION=1 python -m pip install -r requirements-test.txt --no-user; fi
 
     - name: Install project in wheel mode
