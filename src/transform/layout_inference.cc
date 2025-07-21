@@ -157,7 +157,8 @@ public:
           // level is not strict. This check should be done in certain
           // conditions, since the strict layout map is not updated in the
           // above code when current level is not strict
-          if (level == InferLevel::kStrict || !strict_layout_map.count(buffer)) {
+          if (level == InferLevel::kStrict ||
+              !strict_layout_map.count(buffer)) {
             ICHECK(StructuralEqual()(layout, layout_map[buffer]))
                 << "Get different layout for " << buffer
                 << "\n current layout: " << layout->DebugOutput()
