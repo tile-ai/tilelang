@@ -1,17 +1,18 @@
 """PrimFunc Wrapper and Block information Analaysis"""
 
+import functools
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 import tvm
 from tvm import tir
 from tvm.tir import IterVar, PrimFunc
-from typing import Any, Dict, List, Tuple, Optional
 from tvm.tir.schedule.schedule import BlockRV
-import numpy as np
-import functools
+
+from .. import analysis, normalize_prim_func
 from ..analysis import BlockInfo, get_reduction_blocks
-from .. import analysis
-from .. import normalize_prim_func
 from .shape_inference import get_analyzer_by_tir
-from dataclasses import dataclass
 
 
 def pre_order_traverse(block_analyzer, blocks, func):

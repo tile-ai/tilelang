@@ -22,8 +22,9 @@
 # pylint: disable=invalid-name,missing-function-docstring,unused-variable
 """TIR computation utilities for quantization."""
 
-from tilelang import tvm as tvm
 from tvm import tir
+
+from tilelang import tvm as tvm
 
 
 # fmt: off

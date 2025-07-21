@@ -1,9 +1,11 @@
 """The language interface for tl programs."""
 
-from tilelang.primitives.gemm.base import GemmWarpPolicy
-import tilelang.language as T
-from tvm import tir
 from typing import Union
+
+from tvm import tir
+
+import tilelang.language as T
+from tilelang.primitives.gemm.base import GemmWarpPolicy
 
 
 def gemm_sp(

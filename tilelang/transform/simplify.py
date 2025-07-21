@@ -1,7 +1,10 @@
-from tilelang import tvm as tvm
+from typing import Callable, Union
+
 from tvm import IRModule
 from tvm.tir import PrimFunc
-from typing import Union, Callable
+
+from tilelang import tvm as tvm
+
 from . import _ffi_api
 
 

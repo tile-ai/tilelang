@@ -16,7 +16,6 @@ from transformers import (
     AutoTokenizer,
     BatchEncoding,
 )
-
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import TokenizerPoolConfig

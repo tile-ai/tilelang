@@ -1,9 +1,10 @@
-from tilelang import tvm as tvm
-from tilelang.utils.target import determine_target
+import pytest
+
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-import pytest
+from tilelang import tvm as tvm
+from tilelang.utils.target import determine_target
 
 auto_target = tvm.target.Target(determine_target("auto"))
 

@@ -1,10 +1,12 @@
+import argparse
+import itertools
+
+import torch
+from tvm import tir
+
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner import *
-from tvm import tir
-import itertools
-import torch
-import argparse
 
 
 def _tir_u8_to_f4_to_f16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, dtype: str):

@@ -1,8 +1,10 @@
 """The language interface for tl programs."""
 
-from tvm import tir
 from typing import Optional
-from tilelang.language import copy, macro, alloc_shared
+
+from tvm import tir
+
+from tilelang.language import alloc_shared, copy, macro
 
 
 def _legalize_dim(buffer: tir.Buffer, dim: int):

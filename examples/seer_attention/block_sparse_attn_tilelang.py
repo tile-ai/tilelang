@@ -1,9 +1,10 @@
 import math
+
 import torch
+import torch.nn.functional as F
 
 import tilelang
 import tilelang.language as T
-import torch.nn.functional as F
 
 
 def get_sparse_attn_mask_from_topk(x, topk, use_dense_for_last_block=False):

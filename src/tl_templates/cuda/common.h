@@ -48,7 +48,7 @@ using int4_t = int4;
     }                                                                          \
   } while (0)
 
-// abs function for bfloat_t and half_t since there is no implicit convertion
+// abs function for bfloat_t and half_t since there is no implicit conversion
 // method
 TL_PATCH TL_DEVICE half_t __habs(const half_t x) {
   return half_t(__habs(x.to_half()));

@@ -14,12 +14,26 @@ column_limit = 100
 indent_width = 4
 
 [tool.codespell]
-ignore-words-list = "nd, te, ist, LOD, offen, NotIn, HSA"
+ignore-words-list = """
+    nd,
+    te,
+    ist,
+    LOD,
+    offen,
+    NotIn,
+    HSA,
+    documen,
+    ElementE,
+    tEsE
+"""
 skip = [
     "build",
     "3rdparty",
     "dist",
-    ".venv"
+    "images",
+    ".venv",
+    "./src/tl_templates/cpp/half.hpp",
+    "debug",
 ]
 
 [tool.ruff.lint]
@@ -35,7 +49,7 @@ select = [
     # flake8-simplify
     "SIM",
     # isort
-    # "I",
+    "I",
 ]
 ignore = [
     # Module level import not at top of file

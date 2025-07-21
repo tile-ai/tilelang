@@ -1,8 +1,9 @@
-from tilelang import tvm as tvm
-import tilelang.testing
-import tilelang
-from tilelang.engine.callback import register_cuda_postproc_callback
 import torch
+
+import tilelang
+import tilelang.testing
+from tilelang import tvm as tvm
+from tilelang.engine.callback import register_cuda_postproc_callback
 
 
 def matmul(

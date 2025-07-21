@@ -1,8 +1,10 @@
 """The language interface for tl programs."""
 
-import tilelang.language as T
-from tvm.tir import PrimExpr, Buffer
 from typing import List, Union
+
+from tvm.tir import Buffer, PrimExpr
+
+import tilelang.language as T
 
 
 def atomic_add(dst: Buffer, value: PrimExpr) -> PrimExpr:

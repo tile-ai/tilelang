@@ -1,12 +1,13 @@
 import torch
 import torch.backends
-import tilelang
-from tilelang import tvm as tvm
-import tilelang.testing
-import tilelang.language as T
-from tilelang.intrinsics import (
-    make_mma_swizzle_layout as make_swizzle_layout,)
 
+import tilelang
+import tilelang.language as T
+import tilelang.testing
+from tilelang import tvm as tvm
+from tilelang.intrinsics import (
+    make_mma_swizzle_layout as make_swizzle_layout,
+)
 from tilelang.intrinsics.mma_macro_generator import (
     INT4TensorCoreIntrinEmitter,
     INT4TensorCoreIntrinEmitterWithLadderTransform,

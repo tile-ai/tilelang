@@ -1,12 +1,14 @@
 """The language interface for tl programs."""
 
 from __future__ import annotations
-from typing import Any, Optional, Sequence, SupportsIndex, TYPE_CHECKING
-from typing_extensions import Self
+
+from typing import TYPE_CHECKING, Any, Optional, Sequence, SupportsIndex
 
 from tvm import tir
-from tvm.tir import Var, PrimExpr
 from tvm.script.ir_builder.tir import buffer, handle, match_buffer
+from tvm.tir import PrimExpr, Var
+from typing_extensions import Self
+
 from tilelang.utils import deprecated
 
 

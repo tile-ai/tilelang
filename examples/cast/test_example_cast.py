@@ -1,6 +1,7 @@
-import tilelang.testing
 import example_group_per_split_token_cast_to_fp8
 import example_per_token_cast_to_fp8
+
+import tilelang.testing
 
 
 def test_example_group_per_split_token_cast_to_fp8():

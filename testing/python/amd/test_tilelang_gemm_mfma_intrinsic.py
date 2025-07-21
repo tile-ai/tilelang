@@ -1,11 +1,13 @@
 import torch
 import torch.backends
+
+import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm as tvm
-import tilelang.language as T
 from tilelang.intrinsics import make_mfma_swizzle_layout as make_swizzle_layout
 from tilelang.intrinsics.mfma_macro_generator import (
-    MatrixCoreIntrinEmitter,)
+    MatrixCoreIntrinEmitter,
+)
 from tilelang.transform import simplify_prim_func
 
 tilelang.testing.set_random_seed(0)

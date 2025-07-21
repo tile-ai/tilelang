@@ -1,10 +1,12 @@
 import argparse
 import itertools
+
+from tvm import DataType
+
 import tilelang as tl
 import tilelang.language as T
-from tvm import DataType
-from tilelang.autotuner import autotune
 from tilelang import jit
+from tilelang.autotuner import autotune
 
 
 def ref_program(A, B):

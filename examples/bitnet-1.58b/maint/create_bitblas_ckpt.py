@@ -1,13 +1,13 @@
 import argparse
-import torch
-import bitblas
-from transformers.utils.hub import cached_file
-import os
-from transformers import GenerationConfig
-import time
 import json
-
+import os
 import sys
+import time
+
+import bitblas
+import torch
+from transformers import GenerationConfig
+from transformers.utils.hub import cached_file
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)) + "/../")
 from modeling_bitnet import BitnetForCausalLM

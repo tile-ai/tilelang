@@ -1,15 +1,18 @@
 import argparse
+import itertools
 import logging
-from tilelang import tvm as tvm
+
 from tvm import DataType
+
 import tilelang as tl
 import tilelang.language as T
+from tilelang import tvm as tvm
+from tilelang.autotuner import autotune
 from tilelang.intrinsics import get_swizzle_layout
 from tilelang.intrinsics.mma_macro_generator import (
-    TensorCoreIntrinEmitter,)
+    TensorCoreIntrinEmitter,
+)
 from tilelang.transform import simplify_prim_func
-from tilelang.autotuner import autotune
-import itertools
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -181,9 +184,9 @@ def get_configs(args, kwargs):
     with_roller = args[6]
 
     if with_roller:
-        from tilelang.carver.template import MatmulTemplate
         from tilelang.carver.arch import CUDA
         from tilelang.carver.roller.rasterization import NoRasterization
+        from tilelang.carver.template import MatmulTemplate
         arch = CUDA("cuda")
         topk = 10
 

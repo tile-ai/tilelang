@@ -1,12 +1,14 @@
 """Wrapping Layouts."""
 # pylint: disable=invalid-name, unsupported-binary-operation
 
+from typing import List
+
 import tvm
 from tvm.ir import Range
-from tvm.tir import IterVar, Var, PrimExpr, IndexMap
+from tvm.tir import IndexMap, IterVar, PrimExpr, Var
+
 from tilelang import _ffi_api
 from tilelang.layout import Layout
-from typing import List
 
 
 @tvm._ffi.register_object("tl.Fragment")

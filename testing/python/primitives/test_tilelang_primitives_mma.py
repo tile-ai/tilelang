@@ -1,6 +1,6 @@
-from tilelang import tvm as tvm
 import tilelang.testing
 from tilelang import primitives as P
+from tilelang import tvm as tvm
 
 
 def matmul_ssr(

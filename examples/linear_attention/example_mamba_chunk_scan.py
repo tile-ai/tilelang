@@ -1,10 +1,12 @@
 import argparse
-import torch
-import tilelang
-from tilelang.autotuner import *
-import tilelang.language as T
-from einops import rearrange, repeat
 import itertools
+
+import torch
+from einops import rearrange, repeat
+
+import tilelang
+import tilelang.language as T
+from tilelang.autotuner import *
 
 
 def chunk_scan_triton(cb, x, dt, dA_cumsum, C, states, D):

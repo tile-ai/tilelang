@@ -1,7 +1,8 @@
-import tilelang
-import tilelang.testing
-import tilelang.language as T
 import torch
+
+import tilelang
+import tilelang.language as T
+import tilelang.testing
 
 
 # add decorator @tilelang.jit if you want to return a torch function

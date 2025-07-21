@@ -1,5 +1,5 @@
-from tilelang import tvm as tvm
 import tilelang.testing
+from tilelang import tvm as tvm
 
 
 def matmul(

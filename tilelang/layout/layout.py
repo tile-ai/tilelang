@@ -1,11 +1,13 @@
 """Wrapping Layouts."""
 # pylint: disable=invalid-name, unsupported-binary-operation
 
+from typing import List
+
 import tvm
 from tvm.ir import Node, Range
-from tvm.tir import IterVar, Var, PrimExpr, IndexMap
+from tvm.tir import IndexMap, IterVar, PrimExpr, Var
+
 from tilelang import _ffi_api
-from typing import List
 
 
 # Register the Layout class as a TVM object under the name "tl.Layout"

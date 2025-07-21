@@ -1,6 +1,7 @@
-import tilelang.testing
-import tilelang
 import tilelang_example_sparse_tensorcore
+
+import tilelang
+import tilelang.testing
 
 
 @tilelang.testing.requires_cuda

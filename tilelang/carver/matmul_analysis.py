@@ -1,22 +1,24 @@
 # pylint: disable=missing-docstring, invalid-name
 """A GEMM schedule rule for GPU operators."""
+import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Set, Union, Tuple, Dict
+from typing import Dict, List, Optional, Set, Tuple, Union
+
 from tvm import tir
 from tvm.ir import Range
-from tvm.tir import IterVar, PrimExpr, Var, BufferRegion, IndexMap
+from tvm.target.target import Target
+from tvm.tir import BufferRegion, IndexMap, IterVar, PrimExpr, Var
 from tvm.tir.analysis import undefined_vars
 from tvm.tir.schedule.schedule import BlockRV
+from tvm.tir.stmt_functor import pre_order_visit
+
 from .analysis import (
     collect_block_iter_vars_used_in_access_region,
-    get_root_block,
     get_reduction_blocks,
+    get_root_block,
 )
-from tvm.target.target import Target
-from tvm.tir.stmt_functor import pre_order_visit
 from .arch import get_arch, is_tensorcore_supported_precision
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -687,8 +689,10 @@ def get_tensorized_func_and_tags(
 
 def get_propagate_map(trans: bool = True, dtype="float16", matrix_name="A", index_dtype="int32"):
     from bitblas.tl.mma_layout import (  # pylint: disable=import-outside-toplevel
-        ldmatrix_32x8_to_shared_16x16_layout, ldmatrix_trans_32x8_to_shared_16x16_layout,
-        ldmatrix_32x16_to_shared_16x32_layout_a, ldmatrix_32x16_to_shared_16x32_layout_b,
+        ldmatrix_32x8_to_shared_16x16_layout,
+        ldmatrix_32x16_to_shared_16x32_layout_a,
+        ldmatrix_32x16_to_shared_16x32_layout_b,
+        ldmatrix_trans_32x8_to_shared_16x16_layout,
     )
 
     assert dtype in [

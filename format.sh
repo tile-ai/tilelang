@@ -150,6 +150,8 @@ echo 'tile-lang codespell: Done'
 echo 'tile-lang ruff: Check Start'
 # Lint specified files
 lint() {
+    # auto fix isort error
+    ruff check --select I --fix "$@"
     ruff check "$@"
 }
 
@@ -172,7 +174,12 @@ lint_changed() {
 
     if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
         git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
-             ruff check
+            ruff check --select I --fix
+    fi
+
+    if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
+        git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
+            ruff check
     fi
 
 }

@@ -1,9 +1,9 @@
-import sys
+import glob
+import logging
 import os
 import pathlib
-import logging
 import shutil
-import glob
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,7 @@ def _find_rocm_home() -> str:
 
 def _initialize_torch_cuda_arch_flags():
     import os
+
     from tilelang.contrib import nvcc
     from tilelang.utils.target import determine_target
 

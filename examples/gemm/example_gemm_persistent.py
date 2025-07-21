@@ -1,7 +1,8 @@
+import argparse
+
 import tilelang
 import tilelang.language as T
 from tilelang.carver.arch import driver
-import argparse
 
 
 @tilelang.jit(out_idx=[-1])

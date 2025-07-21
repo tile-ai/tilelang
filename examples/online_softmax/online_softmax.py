@@ -1,8 +1,10 @@
+from typing import Callable
+
 import torch
+
 import tilelang as tl
 import tilelang.language as T
 from tilelang.profiler import do_bench
-from typing import Callable
 
 
 @tl.jit(out_idx=[1])

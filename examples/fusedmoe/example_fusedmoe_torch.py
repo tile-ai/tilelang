@@ -1,7 +1,8 @@
 import math
+from typing import Dict, Optional, Tuple
+
 import torch
 import torch.nn as nn
-from typing import Dict, Tuple, Optional
 
 
 # Reference code in PyTorch

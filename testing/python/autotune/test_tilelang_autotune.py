@@ -1,8 +1,8 @@
 import itertools
 import logging
 
-import tilelang.testing
 import tilelang.language as T
+import tilelang.testing
 from tilelang.autotuner import AutoTuner
 
 # Configure logger
@@ -45,9 +45,9 @@ def get_configs(M, N, K, with_roller=False):
         thread numbers, and other parameters to explore during autotuning.
     """
     if with_roller:
-        from tilelang.carver.template import MatmulTemplate
         from tilelang.carver.arch import CUDA
         from tilelang.carver.roller.rasterization import NoRasterization
+        from tilelang.carver.template import MatmulTemplate
         arch = CUDA("cuda")
         topk = 20
 

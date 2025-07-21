@@ -1,7 +1,8 @@
-import tilelang.testing
+import example_tilelang_gemm_fp8
 import example_tilelang_gemm_fp8_2xAcc
 import example_tilelang_gemm_fp8_intrinsic
-import example_tilelang_gemm_fp8
+
+import tilelang.testing
 
 
 def test_example_tilelang_gemm_fp8_2xAcc():

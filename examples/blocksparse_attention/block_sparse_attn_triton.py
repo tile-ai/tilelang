@@ -1,10 +1,10 @@
 # ruff: noqa: E712
 import math
-import torch
 
+import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
-import torch.nn.functional as F
 
 
 def is_hip():

@@ -28,9 +28,10 @@ def plot_layout(layout: T.Layout,
     """
     import os
     import pathlib
-    import numpy as np
-    import matplotlib.pyplot as plt
+
     import matplotlib.patches as patches
+    import matplotlib.pyplot as plt
+    import numpy as np
 
     # Get the input shape of the layout and convert it to a list of integers
     input_shape = layout.get_input_shape()

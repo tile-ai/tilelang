@@ -1,7 +1,7 @@
-import tilelang.testing
-
 import example_gqa_decode
 import example_mha_inference
+
+import tilelang.testing
 
 
 def test_example_example_gqa_decode():

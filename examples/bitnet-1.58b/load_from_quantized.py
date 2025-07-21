@@ -1,10 +1,11 @@
-import torch
+import os
+import time
+
 import bitblas
+import torch
 from modeling_bitnet import BitnetForCausalLM
 from tokenization_bitnet import BitnetTokenizer
-import os
 from transformers import GenerationConfig
-import time
 
 filepath = os.path.abspath(__file__)
 dirpath = os.path.dirname(filepath)

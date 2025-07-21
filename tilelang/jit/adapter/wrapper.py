@@ -1,13 +1,23 @@
+import logging
+import re
+import textwrap
 from abc import ABC, abstractmethod
-from tilelang import tvm as tvm
-from typing import Optional, List, Dict, Union, Any
+from typing import Any, Dict, List, Optional, Union
+
 from tvm import IRModule
 from tvm.target import Target
-from .utils import (match_declare_kernel, match_declare_kernel_cpu, is_cuda_target, is_hip_target,
-                    is_cpu_target, get_annotated_mod, pythonic_expr)
-import re
-import logging
-import textwrap
+
+from tilelang import tvm as tvm
+
+from .utils import (
+    get_annotated_mod,
+    is_cpu_target,
+    is_cuda_target,
+    is_hip_target,
+    match_declare_kernel,
+    match_declare_kernel_cpu,
+    pythonic_expr,
+)
 
 PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY = """
     cudaError_t result_{0} = cudaFuncSetAttribute({0}, cudaFuncAttributeMaxDynamicSharedMemorySize, {1});

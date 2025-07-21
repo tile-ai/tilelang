@@ -1,8 +1,8 @@
-import subprocess
-import re
-from tabulate import tabulate
-
 import os
+import re
+import subprocess
+
+from tabulate import tabulate
 
 env = os.environ.copy()
 env["TILELANG_CLEAR_CACHE"] = "1"

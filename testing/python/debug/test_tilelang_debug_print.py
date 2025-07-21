@@ -1,8 +1,8 @@
 # type: ignore
 
 import tilelang
-import tilelang.testing
 import tilelang.language as T
+import tilelang.testing
 
 
 def debug_print_buffer(M=16, N=16, dtype="float16"):

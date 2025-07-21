@@ -1,13 +1,15 @@
+import argparse
+import math
+import time
+
 import torch
 import torch.nn.functional as F
-import tilelang
-from tilelang.autotuner import *
-import tilelang.language as T
-from einops import rearrange, einsum
-import argparse
-import time
-import math
+from einops import einsum, rearrange
 from heuristic import num_splits_heuristic
+
+import tilelang
+import tilelang.language as T
+from tilelang.autotuner import *
 
 
 def flashattn(batch, heads, heads_kv, dim, dim_v):

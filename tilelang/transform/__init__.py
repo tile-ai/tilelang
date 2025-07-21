@@ -1,11 +1,13 @@
 """Wrapping transformations."""
 # pylint: disable=invalid-name, unsupported-binary-operation
 
-from . import _ffi_api
-from .simplify import Simplify, simplify_prim_func  # noqa: F401
-from .pass_config import PassConfigKey  # noqa: F401
-from tilelang import tvm as tvm  # noqa: F401
 from tvm.ir.transform import PassContext  # noqa: F401
+
+from tilelang import tvm as tvm  # noqa: F401
+
+from . import _ffi_api
+from .pass_config import PassConfigKey  # noqa: F401
+from .simplify import Simplify, simplify_prim_func  # noqa: F401
 
 
 def get_pass_context():

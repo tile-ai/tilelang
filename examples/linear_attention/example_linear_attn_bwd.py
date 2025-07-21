@@ -1,10 +1,11 @@
+import argparse
+
 import torch
+from fla.ops.linear_attn import fused_chunk_linear_attn  # We compare with FLA
+
 import tilelang as tl
 import tilelang.language as T
 from tilelang.profiler import do_bench
-
-import argparse
-from fla.ops.linear_attn import fused_chunk_linear_attn  # We compare with FLA
 
 
 @tl.jit(

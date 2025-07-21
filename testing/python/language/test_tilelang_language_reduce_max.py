@@ -1,6 +1,6 @@
-from tilelang import tvm as tvm
-import tilelang.testing
 import tilelang as tl
+import tilelang.testing
+from tilelang import tvm as tvm
 
 
 def reduce_max_test(M, N, dtype="float16"):

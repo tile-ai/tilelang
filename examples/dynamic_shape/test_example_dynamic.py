@@ -1,5 +1,6 @@
-import tilelang.testing
 import example_dynamic
+
+import tilelang.testing
 
 
 def test_example_dynamic():

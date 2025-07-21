@@ -1,5 +1,6 @@
-import tilelang.testing
 import example_blocksparse_gemm
+
+import tilelang.testing
 
 
 def test_example_blocksparse_gemm():

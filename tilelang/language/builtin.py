@@ -1,11 +1,13 @@
 """The language interface for tl programs."""
 
-from tilelang import tvm as tvm
-from tilelang.language import ptx_arrive_barrier, evaluate
-from tilelang.language.kernel import get_thread_bindings, get_block_extents
+from typing import Any, Union
+
 from tvm import tir
-from typing import Union, Any
-from tvm.tir import PrimExpr, Var, Call
+from tvm.tir import Call, PrimExpr, Var
+
+from tilelang import tvm as tvm
+from tilelang.language import evaluate, ptx_arrive_barrier
+from tilelang.language.kernel import get_block_extents, get_thread_bindings
 
 
 def create_list_of_mbarrier(*args: Any) -> Call:

@@ -1,8 +1,8 @@
-from tvm.tir import Buffer
-from typing import List
 from functools import reduce
+from typing import List
+
 from tvm import IRModule
-from tvm.tir import PrimFunc
+from tvm.tir import Buffer, PrimFunc
 
 # Scope Checkers for TVM Buffers
 # These utility functions check the memory scope of a given TVM buffer.

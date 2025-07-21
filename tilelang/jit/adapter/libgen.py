@@ -10,10 +10,10 @@ from typing import Any, Dict, Optional
 from tvm.target import Target
 
 from tilelang import tvm as tvm
-from tilelang.transform import PassConfigKey
 from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_compute_version
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
+from tilelang.transform import PassConfigKey
 
 from .utils import is_cpu_target, is_cuda_target, is_hip_target
 
@@ -25,6 +25,7 @@ NVRTC_UNAVAILABLE_WARNING = "cuda-python is not available, nvrtc backend cannot 
                             "if you want to use the nvrtc backend."
 try:
     import cuda.bindings.driver as cuda
+
     from tilelang.contrib.nvrtc import compile_cuda
     is_nvrtc_available = True
 except ImportError:
@@ -198,7 +199,11 @@ class PyLibraryGenerator(LibraryGenerator):
     def compile_lib(self, timeout: float = None):
         target = self.target
         if is_cuda_target(target):
-            from tilelang.env import (CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH)
+            from tilelang.env import (
+                CUDA_HOME,
+                CUTLASS_INCLUDE_DIR,
+                TILELANG_TEMPLATE_PATH,
+            )
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
             libpath = src.name.replace(".cu", ".cubin")
 

@@ -1,8 +1,9 @@
 import torch
+
 import tilelang
-from tilelang.utils.sparse import compress_sm90
-from tilelang.layout import make_metadata_layout
 import tilelang.testing
+from tilelang.layout import make_metadata_layout
+from tilelang.utils.sparse import compress_sm90
 
 
 @tilelang.jit(out_idx=[-1])

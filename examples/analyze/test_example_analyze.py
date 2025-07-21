@@ -1,6 +1,7 @@
-import tilelang.testing
-import example_gemm_analyze
 import example_conv_analyze
+import example_gemm_analyze
+
+import tilelang.testing
 
 
 def test_example_gemm_analyze():

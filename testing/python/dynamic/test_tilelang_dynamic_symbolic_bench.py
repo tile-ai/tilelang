@@ -1,8 +1,9 @@
 import torch
 import torch.backends
-from tilelang import tvm as tvm
-import tilelang.testing
+
 import tilelang.language as T
+import tilelang.testing
+from tilelang import tvm as tvm
 
 tilelang.testing.set_random_seed(0)
 tilelang.disable_cache()

@@ -1,7 +1,8 @@
-import tilelang
-import tilelang.testing
-import tilelang.language as T
 import torch
+
+import tilelang
+import tilelang.language as T
+import tilelang.testing
 
 
 def ref_program(A, B, BlockMask, block_M, block_N, block_K):

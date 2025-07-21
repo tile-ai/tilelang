@@ -1,7 +1,8 @@
 import torch
+
 import tilelang
-import tilelang.testing
 import tilelang.language as T
+import tilelang.testing
 
 
 def matmul(M, N, K, block_M, block_N, block_K, threads, dtype="float16", accum_dtype="float"):

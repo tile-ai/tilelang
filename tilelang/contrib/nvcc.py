@@ -6,13 +6,13 @@ from __future__ import absolute_import as _abs
 import os
 import subprocess
 import warnings
-from ..env import CUDA_HOME
 
 import tvm._ffi
-from tvm.target import Target
-
 from tvm._ffi.base import py_str
 from tvm.contrib import utils
+from tvm.target import Target
+
+from ..env import CUDA_HOME
 
 
 def compile_cuda(code,

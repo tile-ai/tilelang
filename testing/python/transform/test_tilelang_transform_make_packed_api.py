@@ -1,12 +1,12 @@
 import pytest
+from tvm import te, tir
+from tvm.driver.build_module import schedule_to_module
+from tvm.script import ir as I
 
 import tilelang
 import tilelang.testing
-from tilelang import tvm as tvm
-from tvm import te, tir
 from tilelang import language as T
-from tvm.script import ir as I
-from tvm.driver.build_module import schedule_to_module
+from tilelang import tvm as tvm
 
 
 def test_makeapi():

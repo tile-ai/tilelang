@@ -1,12 +1,12 @@
 """Analysis on TIR blocks, loops and functions."""
 from typing import List, Optional, Set, Union
-from typing_extensions import Literal
 
-from tvm import ir, tir, DataType
+from tvm import DataType, ir, tir
 from tvm._ffi import get_global_func
 from tvm.target.target import Target
-from tvm.tir import Schedule, IterVar
+from tvm.tir import IterVar, Schedule
 from tvm.tir.schedule import BlockRV
+from typing_extensions import Literal
 
 
 class IterInfo:

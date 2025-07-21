@@ -1,12 +1,12 @@
-import torch
-import triton
-import triton.language as tl
 import argparse
-from einops import rearrange, einsum
-import torch.nn.functional as F
-
 import math
 import time
+
+import torch
+import torch.nn.functional as F
+import triton
+import triton.language as tl
+from einops import einsum, rearrange
 from heuristic import num_splits_heuristic
 
 

@@ -1,8 +1,9 @@
-from tilelang import tvm as tvm
+import torch
+
+import tilelang
 import tilelang.language as T
 import tilelang.testing
-import tilelang
-import torch
+from tilelang import tvm as tvm
 from tilelang.utils.tensor import map_torch_type
 
 

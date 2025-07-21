@@ -1,7 +1,9 @@
-import tilelang.language as T
-from typing import Literal, Callable
+from typing import Callable, Literal
+
 from tvm import DataType
 from tvm.tir import IndexMap
+
+import tilelang.language as T
 from tilelang.intrinsics.utils import get_mma_micro_size
 
 
@@ -32,8 +34,8 @@ def make_mma_load_base_layout(dtype: str = "float16",
         If `local_buf` is not detected to be a fragment buffer.
     """
     from tilelang.intrinsics.mma_layout import (
-        shared_16x16_to_mma_32x8_layout_sr,
         shared_16x16_to_mma_32x8_layout_rs,
+        shared_16x16_to_mma_32x8_layout_sr,
         shared_16x32_to_mma_32x16_layout,
         shared_32x16_to_mma_32x16_layout,
     )

@@ -1,9 +1,10 @@
+import argparse
+
 import torch
+
 import tilelang as tl
 import tilelang.language as T
 from tilelang.profiler import do_bench
-
-import argparse
 
 
 @tl.jit(out_idx=3, pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})

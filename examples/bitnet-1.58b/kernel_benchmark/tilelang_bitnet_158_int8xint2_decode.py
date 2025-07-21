@@ -1,14 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import numpy as np
 import torch
 import torch.backends
+from tvm import DataType
+
 import tilelang
 import tilelang.language as T
 from tilelang import tvm as tvm
-from tvm import DataType
-import numpy as np
-
 from tilelang.transform import simplify_prim_func
 
 torch.manual_seed(42)

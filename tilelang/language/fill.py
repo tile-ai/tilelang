@@ -1,8 +1,10 @@
 """The language interface for tl programs."""
 
-from tvm import tir
 from typing import Union
-from tilelang.language import has_let_value, get_let_value
+
+from tvm import tir
+
+from tilelang.language import get_let_value, has_let_value
 
 
 def fill(buffer: Union[tir.Buffer, tir.BufferRegion], value: tir.PrimExpr):

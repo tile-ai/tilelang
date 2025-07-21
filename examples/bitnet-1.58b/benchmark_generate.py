@@ -1,10 +1,11 @@
-import torch
+import argparse
+import time
+
 import bitblas
+import torch
 from modeling_bitnet import BitnetForCausalLM
 from tokenization_bitnet import BitnetTokenizer
 from transformers import GenerationConfig
-import time
-import argparse
 
 torch.set_grad_enabled(False)
 bitblas.set_log_level("INFO")

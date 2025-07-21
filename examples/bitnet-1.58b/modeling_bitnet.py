@@ -26,9 +26,9 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
+from configuration_bitnet import BitnetConfig
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
-
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_outputs import (
@@ -47,13 +47,16 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
-from configuration_bitnet import BitnetConfig
-from utils_quant import BitLinear, BitLinearBitBLAS
 from transformers.utils.hub import cached_file
+from utils_quant import BitLinear, BitLinearBitBLAS
 
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_func, flash_attn_varlen_func
-    from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa: F401
+    from flash_attn.bert_padding import (  # noqa: F401
+        index_first_axis,
+        pad_input,
+        unpad_input,
+    )
 
 
 def find_layers(module, layers=None, name=""):

@@ -1,6 +1,6 @@
-import tilelang.testing
-
 import block_sparse_attn_tilelang
+
+import tilelang.testing
 
 
 @tilelang.testing.requires_cuda

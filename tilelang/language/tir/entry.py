@@ -1,9 +1,9 @@
+import inspect
 from typing import Callable, Optional, Union
 
-from tvm.tir.function import PrimFunc
 import tvm.script.parser.tir.entry as _tir_entry
-import inspect
 from tvm.script.parser._core import parse, scan_macro, utils
+from tvm.tir.function import PrimFunc
 
 
 def prim_func(func: Optional[Callable] = None,

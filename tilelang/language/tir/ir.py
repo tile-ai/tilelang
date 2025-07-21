@@ -1,9 +1,11 @@
+import functools
+from typing import Any, Dict
+
 import tvm.script.ir_builder.tir.ir as _ir
 from tvm.script.ir_builder.tir import frame
 from tvm.tir import PrimExpr
-from typing import Any, Dict
+
 import tilelang.language.tir.op as _tir_op
-import functools
 
 
 def serial(start: PrimExpr,

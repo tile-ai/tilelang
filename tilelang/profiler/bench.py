@@ -1,7 +1,8 @@
 """The profiler and convert to torch utils"""
 
-import torch
 from typing import Callable, List, Literal, Optional, Union
+
+import torch
 
 
 def do_bench(

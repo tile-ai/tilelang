@@ -1,7 +1,8 @@
+from typing import List
+
 import tilelang.testing
 from tilelang import carver
 from tilelang.carver.arch import auto_infer_current_arch
-from typing import List
 
 
 def run_general_reduction_recommend_hints(structure: str = "SSR",

@@ -1,13 +1,15 @@
 """Policy for tensorcore schedule"""
-import tvm
-from typing import Dict, List, Tuple, Optional
-import numpy as np
 import logging
-from ..hint import Hint, Stride, TileDict, IntrinInfo
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import tvm
+
+from ..hint import Hint, IntrinInfo, Stride, TileDict
 from ..node import PrimFuncNode
+from ..rasterization import NoRasterization, Rasterization2DColumn
 from .common import coalesced_factor, factorize, get_all_factors
 from .default import DefaultPolicy
-from ..rasterization import NoRasterization, Rasterization2DColumn
 
 logger = logging.getLogger(__name__)
 

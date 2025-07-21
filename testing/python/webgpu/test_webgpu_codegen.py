@@ -1,7 +1,7 @@
 import tilelang
-from tilelang import tvm as tvm
-import tilelang.testing
 import tilelang.language as T
+import tilelang.testing
+from tilelang import tvm as tvm
 
 
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):

@@ -22,10 +22,9 @@ from typing import Type
 
 from tvm import tir
 from tvm._ffi.runtime_ctypes import DataType, DataTypeCode
+from tvm.script.parser._core import OpMethod, doc, register_op
 from tvm.tir import IntImm
 from tvm.tir.expr import FloatImm
-
-from tvm.script.parser._core import OpMethod, doc, register_op
 
 
 def _register_expr_op(ty: Type):  # pylint: disable=invalid-name

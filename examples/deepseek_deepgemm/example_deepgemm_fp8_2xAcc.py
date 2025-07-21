@@ -1,9 +1,10 @@
 from typing import Tuple
 
 import torch
-import tilelang.testing
+
 import tilelang
 import tilelang.language as T
+import tilelang.testing
 from tilelang.utils.tensor import map_torch_type
 
 tilelang.testing.set_random_seed(42)

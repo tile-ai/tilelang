@@ -1,13 +1,15 @@
 """The language interface for tl programs."""
 
-from typing import Union, List, Tuple, Optional
-from collections import deque
-from tvm import tir
-from tvm.tir import Var
-from tvm.script.ir_builder.tir.frame import TIRFrame, BlockFrame
-from tvm._ffi import register_object
-from tilelang import _ffi_api
 import threading
+from collections import deque
+from typing import List, Optional, Tuple, Union
+
+from tvm import tir
+from tvm._ffi import register_object
+from tvm.script.ir_builder.tir.frame import BlockFrame, TIRFrame
+from tvm.tir import Var
+
+from tilelang import _ffi_api
 
 
 class FrameStack:

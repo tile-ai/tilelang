@@ -22,8 +22,9 @@
 from typing import Callable, List
 
 from tvm import tir
-from .utils import retrieve_func_from_module
+
 from .analysis import BlockInfo
+from .utils import retrieve_func_from_module
 
 
 def get_block(

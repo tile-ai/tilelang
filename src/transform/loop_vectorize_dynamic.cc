@@ -390,8 +390,8 @@ private:
     vmap.Set(fnode->loop_var, outer_var * vector_size_ + inner_var);
     Stmt body = Substitute(fnode->body, vmap);
 
-    VectorizedConditionExtracter extracter;
-    std::vector<PrimExpr> conditions = extracter.GetConditions(body);
+    VectorizedConditionExtracter extractor;
+    std::vector<PrimExpr> conditions = extractor.GetConditions(body);
 
     VectorizedConditionMutator condition_mutator(inner_var, vector_size_);
 

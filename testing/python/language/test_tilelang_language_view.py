@@ -1,6 +1,6 @@
-from tilelang import tvm as tvm
-import tilelang.testing
 import tilelang as tl
+import tilelang.testing
+from tilelang import tvm as tvm
 
 
 def view_test(N, M, dtype, new_dtype=None):

@@ -8,7 +8,18 @@ from .analysis import (
     is_broadcast_epilogue,  # noqa: F401
     normalize_prim_func,  # noqa: F401
 )  # noqa: F401
-from .common_schedules import get_block, get_output_blocks, try_inline, try_inline_contiguous_spatial  # noqa: F401
+from .arch import CDNA, CUDA  # noqa: F401
+from .common_schedules import (  # noqa: F401
+    get_block,
+    get_output_blocks,
+    try_inline,
+    try_inline_contiguous_spatial,
+)
 from .roller import *
-from .arch import CUDA, CDNA  # noqa: F401
-from .template import MatmulTemplate, GEMVTemplate, ElementwiseTemplate, GeneralReductionTemplate, FlashAttentionTemplate  # noqa: F401
+from .template import (  # noqa: F401
+    ElementwiseTemplate,
+    FlashAttentionTemplate,
+    GEMVTemplate,
+    GeneralReductionTemplate,
+    MatmulTemplate,
+)

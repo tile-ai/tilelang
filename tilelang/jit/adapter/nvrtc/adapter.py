@@ -7,8 +7,8 @@ from tvm.target import Target
 
 from tilelang import tvm as tvm
 from tilelang.engine.param import KernelParam
-from tilelang.jit.adapter.wrapper import TLPyWrapper
 from tilelang.jit.adapter.libgen import PyLibraryGenerator
+from tilelang.jit.adapter.wrapper import TLPyWrapper
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.utils.target import determine_target
 

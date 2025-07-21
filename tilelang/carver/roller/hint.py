@@ -1,8 +1,10 @@
 """Hint definition for schedule"""
-from tvm import DataType
 from typing import Dict, List, Tuple
-from . import PrimFuncNode
+
 import numpy as np
+from tvm import DataType
+
+from . import PrimFuncNode
 from .rasterization import *
 
 

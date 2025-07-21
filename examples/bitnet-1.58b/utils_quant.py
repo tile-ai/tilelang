@@ -1,12 +1,12 @@
 # pylint: disable=missing-docstring, invalid-name
 """This is modified from https://huggingface.co/1bitLLM/bitnet_b1_58-3B/blob/main/utils_quant.py to work with BitBLAS."""
 
-import torch
-from torch import nn
-from bitblas.cache import global_operator_cache, get_database_path
-from bitblas import Matmul, MatmulConfig
-from bitblas import auto_detect_nvidia_target
 from logging import getLogger
+
+import torch
+from bitblas import Matmul, MatmulConfig, auto_detect_nvidia_target
+from bitblas.cache import get_database_path, global_operator_cache
+from torch import nn
 
 logger = getLogger(__name__)
 BITBLAS_TARGET = auto_detect_nvidia_target()

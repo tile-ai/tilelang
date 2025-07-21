@@ -10,10 +10,9 @@ from __future__ import absolute_import as _abs
 import subprocess
 
 import tvm._ffi
-
-from tvm.contrib import utils
 from tvm._ffi.base import py_str
-from tvm.contrib.rocm import get_rocm_arch, find_rocm_path
+from tvm.contrib import utils
+from tvm.contrib.rocm import find_rocm_path, get_rocm_arch
 
 
 def compile_hip(code,

@@ -1,8 +1,9 @@
-import tilelang.testing
+import sys
+from unittest import mock
 
 import example_mla_decode
-from unittest import mock
-import sys
+
+import tilelang.testing
 
 
 @tilelang.testing.requires_cuda

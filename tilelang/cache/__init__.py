@@ -1,12 +1,15 @@
 """The cache utils with class and database persistence - Init file"""
 
-from typing import List, Union, Literal, Optional
 from pathlib import Path
+from typing import List, Literal, Optional, Union
+
 from tvm.target import Target
 from tvm.tir import PrimFunc
-from tilelang.jit import JITKernel
-from .kernel_cache import KernelCache
+
 from tilelang.env import TILELANG_CLEAR_CACHE
+from tilelang.jit import JITKernel
+
+from .kernel_cache import KernelCache
 
 # Create singleton instance of KernelCache
 _kernel_cache_instance = KernelCache()

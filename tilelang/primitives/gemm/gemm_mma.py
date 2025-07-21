@@ -1,9 +1,11 @@
 from dataclasses import dataclass
+
 from tvm import tir
+
 import tilelang.language as T
-from tilelang.utils import is_fragment
-from tilelang.primitives.gemm.base import GemmBaseParams
 from tilelang.intrinsics.mma_macro_generator import TensorCoreIntrinEmitter
+from tilelang.primitives.gemm.base import GemmBaseParams
+from tilelang.utils import is_fragment
 
 
 # TODO(lei): Implement GEMM_SR, GEMM_RS, GEMM_RR

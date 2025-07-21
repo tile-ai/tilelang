@@ -1,8 +1,10 @@
 import os
-import torch
 import warnings
-from torch.utils.cpp_extension import load, _import_module_from_library
-from tilelang.env import TILELANG_CACHE_DIR, TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR
+
+import torch
+from torch.utils.cpp_extension import _import_module_from_library, load
+
+from tilelang.env import CUTLASS_INCLUDE_DIR, TILELANG_CACHE_DIR, TILELANG_TEMPLATE_PATH
 
 # Define paths
 compress_util = os.path.join(TILELANG_TEMPLATE_PATH, "tl_templates/cuda/compress_sm90.cu")

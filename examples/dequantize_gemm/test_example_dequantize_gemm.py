@@ -1,7 +1,7 @@
-import tilelang.testing
-
-import example_dequant_gemv_fp16xint4
 import example_dequant_gemm_fp4_hopper
+import example_dequant_gemv_fp16xint4
+
+import tilelang.testing
 
 
 @tilelang.testing.requires_cuda

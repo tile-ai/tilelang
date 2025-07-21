@@ -11,9 +11,10 @@ up to 3 times to see if we pass.
 Run `pytest tests/models/test_marlin.py`.
 """
 
-from conftest import VllmRunner
-import os
 import argparse
+import os
+
+from conftest import VllmRunner
 
 # get the path of the current file
 current_file_path = os.path.realpath(__file__)

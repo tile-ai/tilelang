@@ -1,12 +1,13 @@
+import argparse
+import math
+
+import scipy
+import torch
+from torch.nn import functional as F
+
 import tilelang
 import tilelang.language as T
 from tilelang.intrinsics import make_mma_swizzle_layout
-
-import math
-import argparse
-import torch
-from torch.nn import functional as F
-import scipy
 
 
 def is_pow_of_2(n):

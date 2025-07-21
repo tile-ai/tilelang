@@ -1,7 +1,9 @@
+from typing import List, Union
+
 import tvm
 from tvm.target import Target
+
 from .arch_base import TileDevice
-from typing import List, Union
 from .driver import cuda_driver
 
 

@@ -1,12 +1,13 @@
 """Wrapping Layouts."""
 # pylint: disable=invalid-name, unsupported-binary-operation
 
-import tvm
-import tilelang.language as T
 import warnings
-
-from typing import List
 from math import prod
+from typing import List
+
+import tvm
+
+import tilelang.language as T
 
 
 def decompose_col_major(index_1d: int, basis: List[int]) -> List[int]:

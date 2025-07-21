@@ -1,7 +1,7 @@
 import tilelang.language as T
-from tilelang.tools import Analyzer
 from tilelang.carver.arch import CUDA
 from tilelang.layout import make_swizzled_layout
+from tilelang.tools import Analyzer
 
 N = 64
 C = 256

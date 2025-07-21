@@ -1,6 +1,6 @@
-import tilelang.testing
-
 import example_gemv
+
+import tilelang.testing
 
 
 def test_example_gemv():

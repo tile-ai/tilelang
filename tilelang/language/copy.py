@@ -1,8 +1,10 @@
 """The language interface for tl programs."""
 
-from typing import Union, List, Optional
-from tilelang import language as T
+from typing import List, Optional, Union
+
 from tvm import ir, tir
+
+from tilelang import language as T
 
 
 def region(buffer: tir.BufferLoad, access_type: str, *args: tir.PrimExpr):

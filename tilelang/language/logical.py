@@ -1,10 +1,12 @@
 """The language interface for tl programs."""
 
-from tilelang import language as T
-from tvm.tir import Buffer, BufferRegion
-from tvm.ir import Range
-from tvm import tir
 from typing import Union
+
+from tvm import tir
+from tvm.ir import Range
+from tvm.tir import Buffer, BufferRegion
+
+from tilelang import language as T
 from tilelang.utils.language import get_buffer_elems
 
 

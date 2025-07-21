@@ -1,10 +1,10 @@
-import tilelang.testing
-
 import example_warp_specialize_flashmla
 import example_warp_specialize_gemm_barrierpipe_stage2
 import example_warp_specialize_gemm_copy_0_gemm_1
 import example_warp_specialize_gemm_copy_1_gemm_0
 import example_warp_specialize_gemm_softpipe_stage2
+
+import tilelang.testing
 
 
 @tilelang.testing.requires_cuda

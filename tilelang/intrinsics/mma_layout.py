@@ -1,5 +1,7 @@
 from typing import Union
-from tvm import arith, DataType
+
+from tvm import DataType, arith
+
 import tilelang.language as T
 
 

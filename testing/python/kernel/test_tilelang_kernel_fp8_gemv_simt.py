@@ -1,13 +1,15 @@
+from typing import Optional
+
 import torch
 import torch.backends
-import tilelang.testing
-from tilelang import tvm as tvm
 from tvm import DataType
+
 import tilelang.language as T
+import tilelang.testing
 from tilelang import JITKernel
+from tilelang import tvm as tvm
 from tilelang.transform.simplify import apply_simplify
 from tilelang.utils.tensor import map_torch_type
-from typing import Optional
 
 tilelang.testing.set_random_seed(0)
 

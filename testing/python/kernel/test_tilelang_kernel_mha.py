@@ -1,6 +1,6 @@
-from tilelang import tvm as tvm
-import tilelang.testing
 import tilelang.language as T
+import tilelang.testing
+from tilelang import tvm as tvm
 
 
 def flashattn(batch, heads, seq_len, dim, is_causal, block_M, block_N, num_stages, threads):

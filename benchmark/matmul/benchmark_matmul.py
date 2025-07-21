@@ -3,8 +3,9 @@ import itertools
 import logging
 
 import tilelang.language as T
-from tilelang.autotuner import autotune
 from tilelang import jit
+from tilelang.autotuner import autotune
+
 # Configure logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -47,9 +48,9 @@ def get_configs(args, kwargs):
     M, N, K, with_roller = args[:4]
 
     if with_roller:
-        from tilelang.carver.template import MatmulTemplate
         from tilelang.carver.arch import CUDA
         from tilelang.carver.roller.rasterization import NoRasterization
+        from tilelang.carver.template import MatmulTemplate
         arch = CUDA("cuda")
         topk = 10
 

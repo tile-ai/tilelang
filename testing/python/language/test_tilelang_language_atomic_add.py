@@ -1,5 +1,5 @@
-import tilelang.testing
 import tilelang.language as T
+import tilelang.testing
 
 
 def atomic_add_program(K, M, N, block_M, block_N, dtype="float"):

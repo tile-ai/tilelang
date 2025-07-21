@@ -1,11 +1,13 @@
 import argparse
 import itertools
+from typing import List
+
+import torch
+
 import tilelang
 import tilelang.language as T
 from tilelang.engine.param import KernelParam
-from tilelang.utils.tensor import get_tensor_supply, TensorSupplyType
-import torch
-from typing import List
+from tilelang.utils.tensor import TensorSupplyType, get_tensor_supply
 
 DEFAULT_BLOCK_M = 128
 DEFAULT_BLOCK_N = 128

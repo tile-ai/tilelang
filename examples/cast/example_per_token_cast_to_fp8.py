@@ -1,7 +1,9 @@
+from typing import Tuple
+
 import torch
+
 import tilelang
 import tilelang.language as T
-from typing import Tuple
 from tilelang.utils.tensor import torch_assert_close
 
 tilelang.disable_cache()
@@ -104,8 +106,9 @@ def main():
     latency = profiler.do_bench()
     print("Tile-lang: {:.2f} ms".format(latency))
 
-    from tilelang.profiler import do_bench
     from example_triton_cast_to_fp8 import per_token_group_quant_fp8
+
+    from tilelang.profiler import do_bench
 
     def run_triton():
         x_fp8_triton_, x_amax_triton_ = per_token_group_quant_fp8(

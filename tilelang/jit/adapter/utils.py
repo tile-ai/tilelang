@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import re
-from typing import Union, Optional, Literal, Dict
-from tilelang import tvm as tvm
+from typing import Dict, Literal, Optional, Union
+
 from tvm import IRModule, tir
 from tvm.target import Target
+
+from tilelang import tvm as tvm
 from tilelang.engine.lower import (
+    canon_target_host,
+    determine_target,
     get_device_call,
     get_host_call,
-    determine_target,
-    canon_target_host,
     is_cpu_device_backend,
 )
 from tilelang.engine.phase import (

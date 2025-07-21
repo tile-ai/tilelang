@@ -1,7 +1,7 @@
-import tilelang.testing
-
 import example_convolution
 import example_convolution_autotune
+
+import tilelang.testing
 
 
 def test_example_convolution():

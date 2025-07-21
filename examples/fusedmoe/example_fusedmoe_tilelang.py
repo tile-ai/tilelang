@@ -1,11 +1,13 @@
 import math
+from typing import Dict, Optional, Tuple
+
 import torch
 import torch.nn as nn
-from typing import Dict, Tuple, Optional
+from example_fusedmoe_torch import *
+
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner import *
-from example_fusedmoe_torch import *
 
 # tilelang.disable_cache()
 

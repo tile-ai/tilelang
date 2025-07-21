@@ -1,10 +1,11 @@
-import tilelang.testing
 import block_sparse_attn_triton
 import example_tilelang_block_sparse_attn
 import example_tilelang_sparse_gqa_decode_varlen_indice
 import example_tilelang_sparse_gqa_decode_varlen_mask
 import example_triton_sparse_gqa_decode_varlen_indice
 import example_triton_sparse_gqa_decode_varlen_mask
+
+import tilelang.testing
 
 
 def test_block_sparse_attn_triton():

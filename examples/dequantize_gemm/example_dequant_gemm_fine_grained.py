@@ -1,9 +1,10 @@
 import torch
 import torch.backends
+from tvm import DataType
+
+import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm as tvm
-from tvm import DataType
-import tilelang.language as T
 
 tilelang.testing.set_random_seed(0)
 
@@ -144,11 +145,14 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
     accum_dtype,
     transform_b,
 ):
-    from tilelang.intrinsics.mma_layout import make_mma_swizzle_layout as make_swizzle_layout
-    from tilelang.intrinsics.mma_macro_generator import (
-        TensorCoreIntrinEmitterWithLadderTransform,)
-
     from bitblas.gpu.intrin.lop3 import decode_i4_to_f16
+
+    from tilelang.intrinsics.mma_layout import (
+        make_mma_swizzle_layout as make_swizzle_layout,
+    )
+    from tilelang.intrinsics.mma_macro_generator import (
+        TensorCoreIntrinEmitterWithLadderTransform,
+    )
     assert in_dtype in [
         "float16",
         "int8",

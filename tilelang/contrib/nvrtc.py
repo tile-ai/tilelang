@@ -1,6 +1,8 @@
+from typing import List, Literal, Optional, Tuple, Union
+
 import cuda.bindings.nvrtc as nvrtc
-from typing import Literal, Union, List, Optional, Tuple
 from tvm.target import Target
+
 from .nvcc import get_target_compute_version
 
 

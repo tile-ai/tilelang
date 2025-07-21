@@ -2,7 +2,7 @@
 import functools
 import math
 from queue import PriorityQueue
-from typing import Iterable, Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 import tvm
@@ -10,9 +10,9 @@ import tvm
 from ...arch import TileDevice
 from ..bestfit import BestFit
 from ..hint import Hint, Stride, TileDict
-from .common import coalesced_factor, coalesced_tensor_shape, factorize, get_all_factors
-from ..node import PrimFuncNode, OutputNode, find_topo_sort
+from ..node import OutputNode, PrimFuncNode, find_topo_sort
 from ..rasterization import NoRasterization
+from .common import coalesced_factor, coalesced_tensor_shape, factorize, get_all_factors
 
 
 class DefaultPolicy:

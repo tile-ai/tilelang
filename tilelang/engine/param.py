@@ -1,10 +1,12 @@
 """The profiler and convert to torch utils"""
 
 from dataclasses import dataclass
-from typing import List, Union, Optional
+from typing import List, Optional, Union
+
 import torch
+from tvm.tir import Buffer, IntImm, PrimExpr, Var
+
 from tilelang import tvm as tvm
-from tvm.tir import Buffer, IntImm, Var, PrimExpr
 from tilelang.utils.tensor import map_torch_type
 
 

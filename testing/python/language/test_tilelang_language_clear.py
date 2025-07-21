@@ -45,6 +45,7 @@ def run_matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype=
     kernel = tilelang.compile(
         program, out_idx=[2], target="cuda", pass_configs={"tl.disable_tma_lower": True})
     import torch
+
     from tilelang.utils import map_torch_type
     a = torch.randn((M, K), dtype=map_torch_type(dtype)).cuda()
     b = torch.randn((N, K), dtype=map_torch_type(dtype)).cuda()

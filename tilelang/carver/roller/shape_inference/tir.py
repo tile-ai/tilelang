@@ -1,7 +1,8 @@
-from typing import Dict, List, Tuple, Set, Mapping
-from tvm.tir.schedule.schedule import BlockRV
-from tvm.ir import structural_equal
+from typing import Dict, List, Mapping, Set, Tuple
+
 from tvm import arith, tir
+from tvm.ir import structural_equal
+from tvm.tir.schedule.schedule import BlockRV
 
 
 class Statement:

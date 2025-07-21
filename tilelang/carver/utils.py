@@ -1,12 +1,14 @@
+import logging
 from typing import List, Optional, Union
-from tvm import tir, IRModule
+
+from tvm import IRModule, tir
 from tvm.tir import PrimFunc
+
 from .arch import TileDevice
-from .roller.policy import TensorCorePolicy, DefaultPolicy
+from .matmul_analysis import get_tensorized_func_and_tags
 from .roller.hint import Hint
 from .roller.node import OutputNode
-from .matmul_analysis import get_tensorized_func_and_tags
-import logging
+from .roller.policy import DefaultPolicy, TensorCorePolicy
 
 logger = logging.getLogger(__name__)
 

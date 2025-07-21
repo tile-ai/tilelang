@@ -2,6 +2,7 @@ from typing import (
     Any,
     TypeVar,
 )
+
 from typing_extensions import ParamSpec
 
 

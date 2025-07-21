@@ -1,9 +1,9 @@
 import torch
+
 import tilelang
 import tilelang.testing
-
-from tilelang.utils.sparse import compress_sm90
 from tilelang.layout import make_metadata_layout
+from tilelang.utils.sparse import compress_sm90
 
 torch.set_printoptions(threshold=float('inf'), edgeitems=float('inf'), linewidth=10000)
 torch.manual_seed(42)

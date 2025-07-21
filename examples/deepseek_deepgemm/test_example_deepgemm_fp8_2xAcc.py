@@ -1,6 +1,6 @@
-import tilelang.testing
-
 from example_deepgemm_fp8_2xAcc import main
+
+import tilelang.testing
 
 
 @tilelang.testing.requires_cuda

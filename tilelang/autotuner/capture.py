@@ -1,5 +1,5 @@
 import threading
-from typing import List, Any, Optional
+from typing import Any, List, Optional
 
 # Use thread local to store the stack
 # This is to avoid the cross-thread interference

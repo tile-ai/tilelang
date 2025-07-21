@@ -1,19 +1,21 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import numpy as np
 import torch
 import torch.backends
+from tvm import DataType
+
 import tilelang
 import tilelang.language as T
 from tilelang import tvm as tvm
-from tvm import DataType
 from tilelang.intrinsics.mma_layout import (
-    make_mma_swizzle_layout as make_swizzle_layout,)
-from tilelang.intrinsics.utils import index_to_coordinates
-import numpy as np
-
+    make_mma_swizzle_layout as make_swizzle_layout,
+)
 from tilelang.intrinsics.mma_macro_generator import (
-    INT4TensorCoreIntrinEmitter,)
+    INT4TensorCoreIntrinEmitter,
+)
+from tilelang.intrinsics.utils import index_to_coordinates
 from tilelang.transform import simplify_prim_func
 
 torch.manual_seed(42)

@@ -1,7 +1,8 @@
+import torch
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-import torch
 
 tilelang.disable_cache()
 

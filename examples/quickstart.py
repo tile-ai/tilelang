@@ -6,7 +6,8 @@ import tilelang.language as T
 # which ensures the consistency with the nvidia CUTLASS Library.
 # to avoid bank conflicts and maximize the performance.
 from tilelang.intrinsics import (
-    make_mma_swizzle_layout as make_swizzle_layout,)  # noqa: F401
+    make_mma_swizzle_layout as make_swizzle_layout,  # noqa: F401
+)
 
 
 # add decorator @tilelang.jit if you want to return a torch function

@@ -1,8 +1,9 @@
-import tilelang.testing
+import example_gemm
 import example_gemm_autotune
 import example_gemm_intrinsics
 import example_gemm_schedule
-import example_gemm
+
+import tilelang.testing
 
 
 def test_example_gemm_autotune():

@@ -1,17 +1,20 @@
-from tvm import DataType
 from typing import Literal
+
+from tvm import DataType
+
+from .mfma_layout import (
+    make_mfma_swizzle_layout,  # noqa: F401
+    thread_id_shared_access_64x4_to_16x16_layout_C_n_m,
+)
 from .mma_layout import (
-    ldmatrix_32x8_to_shared_16x16_layout,
-    ldmatrix_trans_32x8_to_shared_16x16_layout,
+    get_swizzle_layout,  # noqa: F401
     ldmatrix_16x32_to_shared_16x32_layout_a,
     ldmatrix_16x32_to_shared_16x32_layout_b,
+    ldmatrix_32x8_to_shared_16x16_layout,
+    ldmatrix_trans_32x8_to_shared_16x16_layout,
+    make_mma_swizzle_layout,  # noqa: F401
     mma_store_32x8_to_shared_16x16_layout,
 )
-from .mfma_layout import (thread_id_shared_access_64x4_to_16x16_layout_C_n_m)
-
-from .mma_layout import get_swizzle_layout  # noqa: F401
-from .mma_layout import make_mma_swizzle_layout  # noqa: F401
-from .mfma_layout import make_mfma_swizzle_layout  # noqa: F401
 
 
 # the original implementation and insight is from the following code snippet

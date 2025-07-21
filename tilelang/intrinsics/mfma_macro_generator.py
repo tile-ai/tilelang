@@ -1,12 +1,15 @@
-from tilelang import tvm as tvm
-import tilelang.language as T
-from typing import Tuple
+from typing import Optional, Tuple
+
 from tvm import DataType
-from tvm.tir import PrimExpr
 from tvm.runtime import convert
-from typing import Optional
+from tvm.tir import PrimExpr
+
+import tilelang.language as T
+from tilelang import tvm as tvm
+
 from .utils import (
-    mfma_store_index_map,)
+    mfma_store_index_map,
+)
 
 lift = convert
 
@@ -141,16 +144,16 @@ class MatrixCoreIntrinEmitter(object):
 
     def get_ldmatrix_index_map(self, is_b=False):
         from .mfma_layout import (
-            shared_16x4_to_local_64x1_layout_A,
             shared_4x16_to_local_64x1_layout_B,
+            shared_16x4_to_local_64x1_layout_A,
             shared_16x16_to_local_64x4_layout_A,
             shared_16x16_to_local_64x4_layout_B,
             shared_16x32_to_local_64x8_layout_A,
             shared_16x32_to_local_64x8_layout_B,
             shared_16x64_to_local_64x16_layout_A,
             shared_16x64_to_local_64x16_layout_B,
-            thread_id_shared_access_64x1_to_16x4_layout_A,
             thread_id_shared_access_64x1_to_4x16_layout_B,
+            thread_id_shared_access_64x1_to_16x4_layout_A,
             thread_id_shared_access_64x4_to_16x16_layout_A,
             thread_id_shared_access_64x4_to_16x16_layout_B,
             thread_id_shared_access_64x8_to_16x32_layout_A,

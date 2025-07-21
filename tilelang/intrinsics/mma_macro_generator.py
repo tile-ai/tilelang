@@ -1,14 +1,17 @@
-import tilelang.language as T
-from typing import Union, Tuple, Optional, Literal, Callable
-from tilelang.common import TransformKind
+from typing import Callable, Literal, Optional, Tuple, Union
+
 from tvm import DataType
-from tvm.tir import PrimExpr, IndexMap, Buffer
 from tvm.runtime import convert
-from .utils import (
-    mma_store_index_map,
-    get_ldmatrix_offset,
-)
+from tvm.tir import Buffer, IndexMap, PrimExpr
+
+import tilelang.language as T
+from tilelang.common import TransformKind
 from tilelang.utils import is_fragment
+
+from .utils import (
+    get_ldmatrix_offset,
+    mma_store_index_map,
+)
 
 lift = convert
 
@@ -384,13 +387,13 @@ class TensorCoreIntrinEmitter(object):
         AssertionError
             If `local_buf` is not detected to be a fragment buffer.
         """
-        from tilelang.utils import is_fragment
         from tilelang.intrinsics.mma_layout import (
-            shared_16x16_to_mma_32x8_layout_sr,
             shared_16x16_to_mma_32x8_layout_rs,
+            shared_16x16_to_mma_32x8_layout_sr,
             shared_16x32_to_mma_32x16_layout,
             shared_32x16_to_mma_32x16_layout,
         )
+        from tilelang.utils import is_fragment
         assert matrix in ["A", "B"], "matrix should be either A or B"
         dtype = self.a_dtype if matrix == "A" else self.b_dtype
         dtype_bits = DataType(dtype).bits

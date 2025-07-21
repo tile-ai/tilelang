@@ -1,6 +1,6 @@
-import tilelang.testing
-
 from example_tilelang_gemm_splitk import main
+
+import tilelang.testing
 
 
 def test_example_tilelang_gemm_splitk():

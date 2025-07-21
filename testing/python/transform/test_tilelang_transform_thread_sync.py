@@ -15,11 +15,12 @@
 # specific language governing permissions and limitations
 # under the License.
 
+from tvm import te
+from tvm.script import tir as T
+
 import tilelang
 import tilelang.testing
 from tilelang import tvm as tvm
-from tvm import te
-from tvm.script import tir as T
 
 
 def run_passes(func: tvm.tir.PrimFunc):

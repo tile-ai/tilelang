@@ -1,15 +1,14 @@
 # pylint: disable=missing-docstring, invalid-name
 """This is modified from https://huggingface.co/1bitLLM/bitnet_b1_58-3B/blob/main/utils_quant.py."""
 
-import math
 import argparse
-import torch
+import math
 import random
 
+import torch
 from eval_utils import get_test_dataset
 from modeling_bitnet import BitnetForCausalLM
 from tokenization_bitnet import BitnetTokenizer
-
 from tqdm import tqdm
 
 torch.set_grad_enabled(False)

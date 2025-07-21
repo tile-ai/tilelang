@@ -1,7 +1,8 @@
-from tilelang import tvm as tvm
-import tilelang.testing
-import tilelang as tl
 import torch
+
+import tilelang as tl
+import tilelang.testing
+from tilelang import tvm as tvm
 
 
 def cumsum_smem_test(M, N, block_M, block_N, dim=0, reverse=False, dtype="float16"):

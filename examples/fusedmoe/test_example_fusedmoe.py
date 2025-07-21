@@ -1,5 +1,6 @@
-import tilelang.testing
 import example_fusedmoe_tilelang
+
+import tilelang.testing
 
 
 def test_example_fusedmoe_tilelang():

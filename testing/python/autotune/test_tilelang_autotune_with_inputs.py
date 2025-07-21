@@ -1,9 +1,10 @@
 import itertools
 import logging
+
 import tilelang
+import tilelang.language as T
 import tilelang.testing
 from tilelang.autotuner import set_autotune_inputs
-import tilelang.language as T
 
 # Configure logger
 logger = logging.getLogger(__name__)

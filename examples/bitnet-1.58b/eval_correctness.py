@@ -1,10 +1,11 @@
-import torch
+import time
+
 import bitblas
+import torch
+import transformers
 from modeling_bitnet import BitnetForCausalLM
 from tokenization_bitnet import BitnetTokenizer
 from transformers import GenerationConfig
-import time
-import transformers
 
 print(f"transformers version is {transformers.__version__}")
 

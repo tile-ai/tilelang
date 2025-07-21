@@ -1,20 +1,21 @@
 """The cache utils with class and database persistence - KernelCache Class"""
 
-import os
 import json
+import logging
+import os
 import shutil
-from pathlib import Path
+import threading
 from hashlib import sha256
-from typing import Callable, List, Literal, Union, Optional
+from pathlib import Path
+from typing import Callable, List, Literal, Optional, Union
+
+import cloudpickle
 from tvm.target import Target
 from tvm.tir import PrimFunc
-from tilelang.jit import JITKernel
-from tilelang.engine.param import KernelParam
-import threading
-import cloudpickle
-import logging
 
+from tilelang.engine.param import KernelParam
 from tilelang.env import TILELANG_CACHE_DIR, is_cache_enabled
+from tilelang.jit import JITKernel
 from tilelang.version import __version__
 
 KERNEL_PATH = "kernel.cu"

@@ -1,6 +1,6 @@
 import argparse
-import torch
 
+import torch
 from modeling_bitnet import BitnetForCausalLM
 
 torch.set_grad_enabled(False)

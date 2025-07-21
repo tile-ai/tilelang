@@ -1,10 +1,11 @@
 from typing import Any, Optional
+
 import tvm
+import tvm.tir.op as _tvm_op
 from tvm.ir import PrimExpr
 from tvm.ir.base import Span
 from tvm.runtime import const
 from tvm.tir.expr import IntImm, PrimExprWithOp
-import tvm.tir.op as _tvm_op
 
 
 def call_packed(*args, span=None):

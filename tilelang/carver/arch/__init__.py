@@ -1,9 +1,11 @@
-from .arch_base import TileDevice
-from .cuda import CUDA
-from .cpu import CPU
-from .cdna import CDNA
 from typing import Union
+
 from tvm.target import Target
+
+from .arch_base import TileDevice
+from .cdna import CDNA
+from .cpu import CPU
+from .cuda import CUDA
 
 
 def get_arch(target: Union[str, Target] = "cuda") -> TileDevice:
@@ -26,14 +28,14 @@ def auto_infer_current_arch() -> TileDevice:
     return get_arch("cuda")
 
 
+from .cdna import is_cdna_arch  # noqa: F401
 from .cpu import is_cpu_arch  # noqa: F401
 from .cuda import (
-    is_cuda_arch,  # noqa: F401
-    is_volta_arch,  # noqa: F401
-    is_ampere_arch,  # noqa: F401
+    has_mma_support,  # noqa: F401
     is_ada_arch,  # noqa: F401
+    is_ampere_arch,  # noqa: F401
+    is_cuda_arch,  # noqa: F401
     is_hopper_arch,  # noqa: F401
     is_tensorcore_supported_precision,  # noqa: F401
-    has_mma_support,  # noqa: F401
+    is_volta_arch,  # noqa: F401
 )
-from .cdna import is_cdna_arch  # noqa: F401

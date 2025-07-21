@@ -1,7 +1,8 @@
-from tilelang import tvm as tvm
-import tilelang.testing
-import tilelang
 import torch
+
+import tilelang
+import tilelang.testing
+from tilelang import tvm as tvm
 
 
 @tilelang.jit(
