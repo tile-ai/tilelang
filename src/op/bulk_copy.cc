@@ -176,6 +176,15 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
     return cast(DataType::Int(64), e) * global_tensor->dtype.bytes();
   });
 
+  for (size_t i{1}; i < desc.global_stride.size(); i++) {
+    unsigned long long stride = desc.global_stride[i].as<IntImmNode>()->value;
+    if (stride % 16 != 0 || stride >= (1ULL << 40)) {
+      LOG(WARNING) << "TMA bulk copy cannot support a global stride of "
+                   << desc.global_stride[i] << ", fallback to normal copy.";
+      return Stmt();
+    }
+  }
+
   // Smem Box
   // check smem range and global range is legal
   auto s_range_idx = 0;
@@ -230,7 +239,8 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
                                              shared_tensor->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
     } else {
-      ICHECK(0) << "Cannot detect TMA layout.";
+      // ICHECK(0) << "Cannot detect TMA layout.";
+      return Stmt();
     }
   }
 
@@ -251,6 +261,19 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
   ICHECK((*inner_box_dim) % instruction_dim == 0);
   desc.smem_box.Set(0, PrimExpr(instruction_dim));
+
+  int inner_box_dim_ = instruction_dim * shared_tensor->dtype.bytes();
+
+  if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE) && inner_box_dim_ % 256 != 0) 
+      return Stmt();
+  #define CHECK_INNER_BOX_DIM(N) \
+    if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_##N##B) && inner_box_dim_ > N) \
+      return Stmt();
+
+  CHECK_INNER_BOX_DIM(32);
+  CHECK_INNER_BOX_DIM(64);
+  CHECK_INNER_BOX_DIM(128);
+  #undef CHECK_INNER_BOX_DIM
 
   Call create_descriptor =
       Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());

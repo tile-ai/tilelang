@@ -31,6 +31,7 @@ private:
   ComputeWarpPartition(int num_warps, Target target,
                        bool maybe_hopper_wgmma = true) const;
 
+  bool CheckWGMMA() const;
   Array<PrimExpr> call_args;
   tir::Buffer A, B, C;
   // pointer to the A, B, C
