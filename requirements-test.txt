@@ -27,6 +27,6 @@ setuptools
 einops
 attrs
 decorator
-flash-attn<=2.8.0
+flash-attn==1.0.5
 scipy
 tornado
