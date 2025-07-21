@@ -264,16 +264,18 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   int inner_box_dim_ = instruction_dim * shared_tensor->dtype.bytes();
 
-  if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE) && inner_box_dim_ % 256 != 0) 
-      return Stmt();
-  #define CHECK_INNER_BOX_DIM(N) \
-    if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_##N##B) && inner_box_dim_ > N) \
-      return Stmt();
+  if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE) &&
+      inner_box_dim_ % 256 != 0)
+    return Stmt();
+#define CHECK_INNER_BOX_DIM(N)                                                 \
+  if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_##N##B) &&        \
+      inner_box_dim_ > N)                                                      \
+    return Stmt();
 
   CHECK_INNER_BOX_DIM(32);
   CHECK_INNER_BOX_DIM(64);
   CHECK_INNER_BOX_DIM(128);
-  #undef CHECK_INNER_BOX_DIM
+#undef CHECK_INNER_BOX_DIM
 
   Call create_descriptor =
       Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());

@@ -174,7 +174,7 @@ public:
         RemapBufferRewriter::Substitute(fptr->body, substituter.buffer_remap_);
     tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
     Optional<Bool> opt_disable_tma_lower =
-      ctxt->GetConfig(kDisableTMALower, Optional<Bool>());
+        ctxt->GetConfig(kDisableTMALower, Optional<Bool>());
     if (!opt_disable_tma_lower.value_or(Bool(false))) {
       ctxt->config.Set(kDisableTMALower, Bool(!substituter.has_tma_));
     }
@@ -310,10 +310,11 @@ private:
   }
 
   PrimExpr VisitExpr_(const tir::CallNode *op) final {
-    if ((!has_tma_) && (op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_load_im2col()) ||
-      op->op.same_as(tl::tma_store()))) {
+    if ((!has_tma_) && (op->op.same_as(tl::tma_load()) ||
+                        op->op.same_as(tl::tma_load_im2col()) ||
+                        op->op.same_as(tl::tma_store()))) {
       has_tma_ = true;
-    } 
+    }
     Array<RelayExpr> ptx_instructions = {builtin::ptx_ldmatrix(),
                                          builtin::mma_store()};
 
