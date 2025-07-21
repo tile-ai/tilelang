@@ -94,7 +94,6 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   bool is_load;
   if (src.scope() == "global" &&
       (dst.scope() == "shared.dyn" || dst.scope() == "shared")) {
-    // Use the Hopper TMA bulk copy instructions
     is_load = true;
   } else if (dst.scope() == "global" &&
              (src.scope() == "shared.dyn" || src.scope() == "shared")) {
@@ -239,7 +238,6 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
                                              shared_tensor->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
     } else {
-      // ICHECK(0) << "Cannot detect TMA layout.";
       return Stmt();
     }
   }
