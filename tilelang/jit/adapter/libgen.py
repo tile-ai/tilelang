@@ -81,7 +81,7 @@ class LibraryGenerator(object):
                 "-Xcudafe",
                 "--diag_suppress=177",
                 "--compiler-options",
-                "'-fPIC'",
+                "-fPIC",
                 "-lineinfo",
                 "--shared",
                 src.name,
