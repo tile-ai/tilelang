@@ -131,7 +131,9 @@ class LibraryGenerator(object):
         ]
 
         if self.compile_flags:
-            command += [item for flag in self.compile_flags for item in flag.split() if item not in command]
+            command += [
+                item for flag in self.compile_flags for item in flag.split() if item not in command
+            ]
 
         command += ["-o", libpath]
 
@@ -227,7 +229,10 @@ class PyLibraryGenerator(LibraryGenerator):
 
             options = [f"-I{tl_template_path}", f"-I{cutlass_path}", f"-I{cuda_home}/include"]
             if self.compile_flags:
-                options += [item for flag in self.compile_flags for item in flag.split() if item not in options]
+                options += [
+                    item for flag in self.compile_flags for item in flag.split()
+                    if item not in options
+                ]
 
             cubin_bytes = compile_cuda(
                 self.lib_code, target_format="cubin", options=options, verbose=True)
