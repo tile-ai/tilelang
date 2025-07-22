@@ -182,6 +182,7 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
       }
     }
   }
+
   // Smem Box
   // check smem range and global range is legal
   auto s_range_idx = 0;
@@ -190,7 +191,20 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
     if (is_one(g_range->extent)) {
       continue;
     }
-    auto s_range = shared_range[s_range_idx++];
+    // skip one range if it is 1
+    // in case of global range is [128, 64], while shared range is [1, 128, 64]
+    // A_shared[0, :, :].
+    while (is_one(shared_range[s_range_idx]->extent) &&
+           s_range_idx < shared_range.size()) {
+      s_range_idx++;
+    }
+    if (s_range_idx >= shared_range.size()) {
+      LOG(FATAL) << "TMA bulk copy cannot support a global range of "
+                 << global_range << ", shared_range " << shared_range;
+    }
+    auto s_range = shared_range[s_range_idx];
+    s_range_idx++;
+
     ICHECK(StructuralEqual()(g_range->extent, s_range->extent))
         << global_tensor->name << "[" << i << "] is illegal, "
         << global_tensor->name << "[" << i << "] = " << g_range->extent << ", "

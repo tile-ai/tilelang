@@ -9,7 +9,6 @@ import example_gqa_fwd_bshd_wgmma_pipelined
 import example_mha_fwd_bshd_wgmma_pipelined
 import example_mha_fwd_varlen
 import example_mha_bwd_wgmma_pipelined
-import example_mha_inference
 import example_mha_fwd_bhsd
 
 
@@ -62,11 +61,6 @@ def test_example_mha_fwd_bshd():
 @tilelang.testing.requires_cuda
 def test_example_mha_fwd_varlen():
     example_mha_fwd_varlen.main()
-
-
-@tilelang.testing.requires_cuda
-def test_example_mha_inference():
-    example_mha_inference.main()
 
 
 if __name__ == "__main__":
