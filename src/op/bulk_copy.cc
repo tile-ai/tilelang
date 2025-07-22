@@ -105,7 +105,6 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Buffer shared_tensor = is_load ? dst : src;
   Array<Range> global_range = is_load ? src_range : dst_range;
   Array<Range> shared_range = is_load ? dst_range : src_range;
-
   if (T.layout_map.count(global_tensor)) {
     LOG(WARNING) << "TMA bulk copy cannot support a non-swizzled global "
                     "layout, fallback to normal copy.";
@@ -115,7 +114,6 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Array<PrimExpr> indices;
   for (auto r : shared_range)
     indices.push_back(r->min);
-
   std::vector<PrimExpr> strides;
   PrimExpr stride = 1;
   for (size_t i = 0; i < shared_tensor->shape.size(); i++) {
@@ -131,7 +129,6 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   for (size_t i = 0; i < indices.size(); i++) {
     offset += indices[i] * strides[i];
   }
-
   Layout shared_layout;
   if (T.layout_map.count(shared_tensor)) {
     shared_layout = T.layout_map[shared_tensor];
@@ -139,7 +136,6 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 
   TMADesc desc;
-
   // Verify copy rank
   desc.rank = global_tensor->shape.size();
   ICHECK(desc.rank >= 1 && desc.rank <= 5) << desc.rank;
@@ -174,16 +170,17 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
     return cast(DataType::Int(64), e) * global_tensor->dtype.bytes();
   });
-
   for (size_t i{1}; i < desc.global_stride.size(); i++) {
-    unsigned long long stride = desc.global_stride[i].as<IntImmNode>()->value;
-    if (stride % 16 != 0 || stride >= (1ULL << 40)) {
-      LOG(WARNING) << "TMA bulk copy cannot support a global stride of "
-                   << desc.global_stride[i] << ", fallback to normal copy.";
-      return Stmt();
+    auto stride = desc.global_stride[i].as<IntImmNode>();
+    if (stride != nullptr) {
+      // otherwise, the stride is symbolic, we need to check in future with assumptions
+      if (stride->value % 16 != 0 || stride->value >= (1ULL << 40)) {
+        LOG(WARNING) << "TMA bulk copy cannot support a global stride of "
+                     << desc.global_stride[i] << ", fallback to normal copy.";
+        return Stmt();
+      }
     }
   }
-
   // Smem Box
   // check smem range and global range is legal
   auto s_range_idx = 0;
@@ -199,12 +196,10 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
         << shared_tensor->name << "[" << s_range_idx
         << "] = " << s_range->extent;
   }
-
   desc.smem_box =
       ReverseArray(global_range.Map([](Range r) { return r->extent; }));
 
   desc.smem_stride = Array<PrimExpr>(desc.rank, PrimExpr(1));
-
   // L2 & OOB
   desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
   desc.oob_fill = static_cast<int>(CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);

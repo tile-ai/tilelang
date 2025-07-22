@@ -87,6 +87,8 @@ class LibraryGenerator(object):
                 command += ["--use_fast_math"]
             if verbose_ptxas_output:
                 command += ["--ptxas-options", "-v"]
+            if compute_version == "90a":
+                command += ["-D", "CUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED"]
             command += [
                 "-I" + CUTLASS_INCLUDE_DIR,
             ]
