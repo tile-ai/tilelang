@@ -230,10 +230,7 @@ class PyLibraryGenerator(LibraryGenerator):
                 options += [flag for flag in self.compile_flags if flag not in options]
 
             cubin_bytes = compile_cuda(
-                self.lib_code,
-                target_format="cubin",
-                options=options,
-                verbose=True)
+                self.lib_code, target_format="cubin", options=options, verbose=True)
             with open(libpath, "wb") as f:
                 f.write(cubin_bytes)
 
