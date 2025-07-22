@@ -36,12 +36,18 @@ class LibraryGenerator(object):
     libpath: Optional[str] = None
     lib_code: Optional[str] = None
     pass_configs: Optional[Dict[str, Any]] = None
+    compile_flags: Optional[list[str]] = None
 
     def __init__(self, target: Target):
         self.target = target
 
     def assign_pass_configs(self, pass_configs: Optional[Dict[str, Any]] = None):
         self.pass_configs = pass_configs
+
+    def assign_compile_flags(self, compile_flags: Optional[list[str]] = None):
+        if compile_flags is None:
+            compile_flags = []
+        self.compile_flags = compile_flags
 
     def update_lib_code(self, lib_code: str):
         self.lib_code = lib_code
@@ -123,6 +129,10 @@ class LibraryGenerator(object):
         command += [
             "-I" + TILELANG_TEMPLATE_PATH,
         ]
+
+        if self.compile_flags:
+            command += [flag for flag in self.compile_flags if flag not in command]
+
         command += ["-o", libpath]
 
         src.write(self.lib_code)
@@ -215,10 +225,14 @@ class PyLibraryGenerator(LibraryGenerator):
 
             cuda_home = "/usr/local/cuda" if CUDA_HOME is None else CUDA_HOME
 
+            options = [f"-I{tl_template_path}", f"-I{cutlass_path}", f"-I{cuda_home}/include"]
+            if self.compile_flags:
+                options += [flag for flag in self.compile_flags if flag not in options]
+
             cubin_bytes = compile_cuda(
                 self.lib_code,
                 target_format="cubin",
-                options=[f"-I{tl_template_path}", f"-I{cutlass_path}", f"-I{cuda_home}/include"],
+                options=options,
                 verbose=True)
             with open(libpath, "wb") as f:
                 f.write(cubin_bytes)
