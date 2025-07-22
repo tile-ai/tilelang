@@ -5,7 +5,7 @@ import os
 import os.path as osp
 import subprocess
 import tempfile
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 from tvm.target import Target
 
@@ -36,7 +36,7 @@ class LibraryGenerator(object):
     libpath: Optional[str] = None
     lib_code: Optional[str] = None
     pass_configs: Optional[Dict[str, Any]] = None
-    compile_flags: Optional[list[str]] = None
+    compile_flags: Optional[List[str]] = None
 
     def __init__(self, target: Target):
         self.target = target
@@ -44,7 +44,7 @@ class LibraryGenerator(object):
     def assign_pass_configs(self, pass_configs: Optional[Dict[str, Any]] = None):
         self.pass_configs = pass_configs
 
-    def assign_compile_flags(self, compile_flags: Optional[list[str]] = None):
+    def assign_compile_flags(self, compile_flags: Optional[List[str]] = None):
         if compile_flags is None:
             compile_flags = []
         self.compile_flags = compile_flags
