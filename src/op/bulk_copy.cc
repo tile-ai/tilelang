@@ -173,7 +173,8 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   for (size_t i{1}; i < desc.global_stride.size(); i++) {
     auto stride = desc.global_stride[i].as<IntImmNode>();
     if (stride != nullptr) {
-      // otherwise, the stride is symbolic, we need to check in future with assumptions
+      // otherwise, the stride is symbolic, we need to check in future with
+      // assumptions
       if (stride->value % 16 != 0 || stride->value >= (1ULL << 40)) {
         LOG(WARNING) << "TMA bulk copy cannot support a global stride of "
                      << desc.global_stride[i] << ", fallback to normal copy.";

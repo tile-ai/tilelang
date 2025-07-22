@@ -415,7 +415,7 @@ def assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
         num_stages,
         num_threads,
     )
-    pass_configs={
+    pass_configs = {
         tilelang.PassConfigKey.TL_DISABLE_DYNAMIC_TAIL_SPLIT: dynamic_alignment != 0,
         tilelang.PassConfigKey.TL_DYNAMIC_ALIGNMENT: dynamic_alignment
     }
@@ -424,10 +424,7 @@ def assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
         pass_configs[tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER] = True
         pass_configs[tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED] = True
 
-    kernel = tilelang.compile(
-        program,
-        pass_configs=pass_configs
-    )
+    kernel = tilelang.compile(program, pass_configs=pass_configs)
 
     if trans_A:
         A = torch.rand(K, M, device="cuda", dtype=getattr(torch, in_dtype))
