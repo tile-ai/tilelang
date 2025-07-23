@@ -5,8 +5,8 @@ import logging
 import os
 import shutil
 import threading
+import uuid
 from hashlib import sha256
-from pathlib import Path
 from typing import Callable, List, Literal, Optional, Union
 
 import cloudpickle
@@ -14,7 +14,7 @@ from tvm.target import Target
 from tvm.tir import PrimFunc
 
 from tilelang.engine.param import KernelParam
-from tilelang.env import TILELANG_CACHE_DIR, is_cache_enabled
+from tilelang.env import TILELANG_CACHE_DIR, TILELANG_TMP_DIR, is_cache_enabled
 from tilelang.jit import JITKernel
 from tilelang.version import __version__
 
@@ -41,14 +41,9 @@ class KernelCache:
     _memory_cache = {}  # In-memory cache dictionary
     execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython"
 
-    cache_dir: Path = Path(TILELANG_CACHE_DIR)
-
-    def __new__(cls, cache_dir=TILELANG_CACHE_DIR):
+    def __new__(cls):
         """
         Implements singleton pattern for KernelCache class.
-
-        Args:
-            cache_dir (str): Directory path for storing kernel cache. Defaults to TILELANG_CACHE_DIR.
 
         Returns:
             KernelCache: The singleton instance of KernelCache.
@@ -57,14 +52,17 @@ class KernelCache:
             with cls._lock:
                 if cls._instance is None:  # Double-checked locking
                     instance = super().__new__(cls)
-                    instance.cache_dir = Path(cache_dir)
-                    os.makedirs(instance.cache_dir, exist_ok=True)
-
+                    KernelCache._create_dirs()
                     instance.logger = logging.getLogger(__name__)
                     instance.logger.setLevel(logging.DEBUG)
                     instance._memory_cache = {}  # Initialize memory cache
                     cls._instance = instance
         return cls._instance
+
+    @staticmethod
+    def _create_dirs():
+        os.makedirs(TILELANG_CACHE_DIR, exist_ok=True)
+        os.makedirs(TILELANG_TMP_DIR, exist_ok=True)
 
     def _generate_key(
         self,
@@ -197,18 +195,6 @@ class KernelCache:
         self._memory_cache[key] = kernel
         return kernel
 
-    def set_cache_dir(self, cache_dir: str):
-        """
-        Sets the cache directory for the kernel cache.
-        """
-        self.cache_dir = Path(cache_dir)
-
-    def get_cache_dir(self) -> Path:
-        """
-        Gets the cache directory for the kernel cache.
-        """
-        return self.cache_dir
-
     def clear_cache(self):
         """
         Clears the entire kernel cache, including both in-memory and disk cache.
@@ -227,7 +213,23 @@ class KernelCache:
         Returns:
             str: Absolute path to the cache directory for this kernel.
         """
-        return os.path.join(self.cache_dir, key)
+        return os.path.join(TILELANG_CACHE_DIR, key)
+
+    @staticmethod
+    def _load_binary(path: str):
+        with open(path, "rb") as file:
+            binary = file.read()
+        return binary
+
+    @staticmethod
+    def _safe_write_file(path: str, mode: str, operation: Callable):
+        # Random a temporary file within the same FS as the cache directory
+        temp_path = os.path.join(TILELANG_TMP_DIR, f"{os.getpid()}_{uuid.uuid4()}")
+        with open(temp_path, mode) as temp_file:
+            operation(temp_file)
+
+        # Use atomic POSIX replace, so other processes cannot see a partial write
+        os.replace(temp_path, path)
 
     def _save_kernel_to_disk(self, key: str, kernel: JITKernel, func: Callable = None):
         """
@@ -252,38 +254,45 @@ class KernelCache:
         try:
             kernel_path = os.path.join(cache_path, KERNEL_PATH)
             if kernel.artifact.kernel_source is not None:
-                with open(kernel_path, "w") as f:
-                    f.write(kernel.artifact.kernel_source)
+                KernelCache._safe_write_file(kernel_path, "w",
+                                             lambda file: file.write(kernel.artifact.kernel_source))
         except Exception as e:
             self.logger.error(f"Error saving kernel source code to disk: {e}")
 
         # Save wrapped kernel source code
         try:
             wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
-            with open(wrapped_kernel_path, "w") as f:
-                f.write(kernel.adapter.get_kernel_source())
+            KernelCache._safe_write_file(
+                wrapped_kernel_path, "w",
+                lambda file: file.write(kernel.adapter.get_kernel_source()))
         except Exception as e:
             self.logger.error(f"Error saving wrapped kernel source code to disk: {e}")
 
-        # Save kernel library
+        # Save the kernel library
         try:
-            if self.execution_backend == "nvrtc":
-                kernel_lib_path = os.path.join(cache_path, KERNEL_CUBIN_PATH)
-            else:
-                kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
+            # Save CUBIN or SO file
+            kernel_lib_path = KERNEL_CUBIN_PATH if self.execution_backend == "nvrtc" else KERNEL_LIB_PATH
+            kernel_lib_path = os.path.join(cache_path, kernel_lib_path)
             src_lib_path = kernel.adapter.libpath
-            shutil.copy(src_lib_path, kernel_lib_path)
+            KernelCache._safe_write_file(
+                kernel_lib_path, "wb",
+                lambda file: file.write(KernelCache._load_binary(src_lib_path)))
+
+            # Save an extra Python file for NVRTC
             if self.execution_backend == "nvrtc":
-                shutil.copy(
-                    src_lib_path.replace(".cubin", ".py"), os.path.join(cache_path, KERNEL_PY_PATH))
+                kernel_py_path = os.path.join(cache_path, KERNEL_PY_PATH)
+                src_lib_path = src_lib_path.replace(".cubin", ".py")
+                KernelCache._safe_write_file(
+                    kernel_py_path, "wb",
+                    lambda file: file.write(KernelCache._load_binary(src_lib_path)))
         except Exception as e:
             self.logger.error(f"Error saving kernel library to disk: {e}")
 
         # Save kernel parameters
         try:
             params_path = os.path.join(cache_path, PARAMS_PATH)
-            with open(params_path, "wb") as f:
-                cloudpickle.dump(kernel.params, f)
+            KernelCache._safe_write_file(params_path, "wb",
+                                         lambda file: cloudpickle.dump(kernel.params, file))
         except Exception as e:
             self.logger.error(f"Error saving kernel parameters to disk: {e}")
 
@@ -296,7 +305,7 @@ class KernelCache:
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         pass_configs: dict = None,
         func: Callable = None,
-    ) -> JITKernel:
+    ) -> Optional[JITKernel]:
         """
         Loads a previously compiled kernel from disk cache.
 
@@ -313,27 +322,25 @@ class KernelCache:
             JITKernel: The loaded kernel if found, None otherwise.
         """
         cache_path = self._get_cache_path(key)
-        if not os.path.exists(cache_path):
+        wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
+        kernel_lib_path = os.path.join(
+            cache_path, KERNEL_CUBIN_PATH if self.execution_backend == "nvrtc" else KERNEL_LIB_PATH)
+        params_path = os.path.join(cache_path, PARAMS_PATH)
+        if not all([os.path.exists(file) for file in (kernel_lib_path, params_path)]):
             return None
 
         kernel_global_source: Optional[str] = None
         kernel_params: Optional[List[KernelParam]] = None
 
+        # Load the kernel source file (optional)
         try:
-            wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
             with open(wrapped_kernel_path, "r") as f:
                 kernel_global_source = f.read()
         except Exception as e:
             self.logger.error(f"Error loading wrapped kernel source code from disk: {e}")
 
-        if self.execution_backend == "nvrtc":
-            kernel_lib_path = os.path.join(cache_path, KERNEL_CUBIN_PATH)
-        else:
-            kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
-
         # Load kernel parameters
         try:
-            params_path = os.path.join(cache_path, PARAMS_PATH)
             with open(params_path, "rb") as f:
                 kernel_params = cloudpickle.load(f)
         except Exception as e:
@@ -363,9 +370,10 @@ class KernelCache:
             Use with caution as this operation cannot be undone.
         """
         try:
-            if os.path.exists(self.cache_dir):
-                shutil.rmtree(self.cache_dir)  # Delete entire cache directory
-            # Re-create cache directory
-            os.makedirs(self.cache_dir, exist_ok=True)
+            # Delete the entire cache directory
+            shutil.rmtree(TILELANG_CACHE_DIR)
+
+            # Re-create the cache directory
+            KernelCache._create_dirs()
         except Exception as e:
             self.logger.error(f"Error clearing disk cache: {e}")
