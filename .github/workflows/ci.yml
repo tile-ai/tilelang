@@ -2,6 +2,10 @@ name: CI
 
 on: [pull_request]
 
+env:
+  PYTHON_VERSION: '3.9'
+  VENV_DIR: tilelang_ci
+
 jobs:
   format-check:
     runs-on: self-hosted
@@ -15,23 +19,33 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v2
       with:
-        python-version: '3.9'
+        python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Create virtual environment
-      run: python -m venv tilelang_ci
+    - name: Cache virtual environment
+      id: cache-venv
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.VENV_DIR }}
+        key: ${{ runner.os }}-py${{ env.PYTHON_VERSION }}-venv-${{ hashFiles('**/requirements-dev.txt', '**/requirements-test.txt') }}
 
-    - name: Activate virtual environment and install dependencies
+    - name: Create / ensure virtual environment
+      if: steps.cache-venv.outputs.cache-hit != 'true'
       run: |
-        source tilelang_ci/bin/activate
+        python -m venv ${{ env.VENV_DIR }}
+        source ${{ env.VENV_DIR }}/bin/activate
         python -m pip install --upgrade pip --no-user
-        if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt --no-user; fi
+        if [ -f requirements-test.txt ]; then
+          PIP_NO_BUILD_ISOLATION=1 \
+            python -m pip install -r requirements-test.txt --no-user
+        fi
+        python -m pip install . --no-user
 
     - name: Update submodules recursively
       run: git submodule update --init --recursive
 
     - name: Run format check
       run: |
-        source tilelang_ci/bin/activate
+        source ${{ env.VENV_DIR }}/bin/activate
         ./format.sh
 
   build-test:
@@ -47,32 +61,42 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v2
       with:
-        python-version: '3.9'
+        python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Create virtual environment
-      run: python -m venv tilelang_ci
+    - name: Cache virtual environment
+      id: cache-venv
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.VENV_DIR }}
+        key: ${{ runner.os }}-py${{ env.PYTHON_VERSION }}-venv-${{ hashFiles('**/requirements-dev.txt', '**/requirements-test.txt') }}
 
-    - name: Activate virtual environment and install dependencies
+    - name: Create / ensure virtual environment
+      if: steps.cache-venv.outputs.cache-hit != 'true'
       run: |
-        source tilelang_ci/bin/activate
+        python -m venv ${{ env.VENV_DIR }}
+        source ${{ env.VENV_DIR }}/bin/activate
         python -m pip install --upgrade pip --no-user
-        if [ -f requirements-test.txt ]; then PIP_NO_BUILD_ISOLATION=1 python -m pip install -r requirements-test.txt --no-user; fi
+        if [ -f requirements-test.txt ]; then
+          PIP_NO_BUILD_ISOLATION=1 \
+            python -m pip install -r requirements-test.txt --no-user
+        fi
+        python -m pip install . --no-user
 
     - name: Install project in wheel mode
       run: |
-        source tilelang_ci/bin/activate
+        source ${{ env.VENV_DIR }}/bin/activate
         python -m pip install .  --no-user
 
     - name: Run examples
       run: |
-        source tilelang_ci/bin/activate
+        source ${{ env.VENV_DIR }}/bin/activate
         cd examples
         unset PYTHONPATH
-        python -m pytest **/test*.py
+        python -m pytest -n 4 **/test*.py
 
     - name: Run tests
       run: |
-        source tilelang_ci/bin/activate
+        source ${{ env.VENV_DIR }}/bin/activate
         cd testing/python
         unset PYTHONPATH
-        python -m pytest
+        python -m pytest -n 4
