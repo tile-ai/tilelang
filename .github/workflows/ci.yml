@@ -21,6 +21,9 @@ jobs:
       with:
         python-version: ${{ env.PYTHON_VERSION }}
 
+    - name: Show CI Worker Info
+      run: echo "tool_cache=${{ runner.tool_cache }}"
+      
     - name: Cache virtual environment
       id: cache-venv
       uses: actions/cache@v4
