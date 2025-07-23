@@ -6,6 +6,7 @@ import tilelang.language as T
 from tilelang.autotuner import AutoTuner
 from tilelang.carver.template import ConvTemplate
 from tilelang.carver.arch import CUDA
+from tilelang.carver.arch import CDNA
 from tilelang.carver.roller.rasterization import NoRasterization
 
 
@@ -31,7 +32,10 @@ def ref_program(stride, padding, dilation):
 
 def get_configs(N, C, H, W, F, K, S, D, P, with_roller=False, topk=15):
     if with_roller:
-        arch = CUDA("cuda")
+        if torch.version.hip is not None:
+            arch=CDNA("hip")
+        else:
+            arch = CUDA("cuda")
         carve_template = ConvTemplate(
             N=N,
             C=C,
