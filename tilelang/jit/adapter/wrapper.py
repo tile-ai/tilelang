@@ -373,8 +373,9 @@ class TLCUDASourceWrapper(object):
                 raise ValueError(
                     f"TMA descriptor args too short: {len(args)} elements, expected at least 3")
             _, dtype, tensor_rank, globalAddress, *remaining_args = args[1:]
+            dtype = self._pythonic_expr(dtype)
+            tensor_rank = int(self._pythonic_expr(tensor_rank))
 
-            tensor_rank = int(tensor_rank)
             # Validate tensor_rank
             if not isinstance(tensor_rank, int) or tensor_rank <= 0:
                 raise ValueError(f"Invalid tensor_rank: {tensor_rank}. Must be a positive integer")
@@ -400,6 +401,10 @@ class TLCUDASourceWrapper(object):
             try:
                 interleave, swizzle, l2Promotion, oobFill = remaining_args[4 * tensor_rank:4 *
                                                                            tensor_rank + 4]
+                interleave = self._pythonic_expr(interleave)
+                swizzle = self._pythonic_expr(swizzle)
+                l2Promotion = self._pythonic_expr(l2Promotion)
+                oobFill = self._pythonic_expr(oobFill)
             except ValueError as e:
                 raise ValueError(
                     "Failed to unpack the final 4 TMA parameters (interleave, swizzle, l2Promotion, oobFill)"

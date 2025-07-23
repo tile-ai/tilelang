@@ -85,7 +85,10 @@ def run_gemm(
     kernel = tilelang.compile(
         program,
         out_idx=[2],
-        pass_configs={"tl.disable_warp_specialized": disable_warp_specialized})
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: disable_warp_specialized,
+        })
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):

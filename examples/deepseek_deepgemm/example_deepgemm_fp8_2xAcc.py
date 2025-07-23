@@ -9,7 +9,7 @@ from tilelang.utils.tensor import map_torch_type
 tilelang.testing.set_random_seed(42)
 
 
-@tilelang.jit(out_idx=[2])
+@tilelang.jit
 def tl_gemm(
     M,
     N,

@@ -291,9 +291,9 @@ def check_correctness_and_bench(kernel, N, K, bench_ref=True):
     profiler = kernel.get_profiler()
     profiler.assert_allclose(lambda x, y: x @ y.T, atol=1e-2, rtol=1e-2)
     if bench_ref:
-        latency = profiler.do_bench(lambda x, y: x @ y.T, warmup=500)
+        latency = profiler.do_bench(lambda x, y: x @ y.T, warmup=50)
         print(f"Torch Latency: {latency} ms")
-    latency = profiler.do_bench(kernel, warmup=500)
+    latency = profiler.do_bench(kernel, warmup=50)
     print(f"TileLang Latency: {latency} ms\n")
 
 

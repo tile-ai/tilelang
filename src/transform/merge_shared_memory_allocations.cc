@@ -965,10 +965,6 @@ private:
     StorageEntry *e = it->second;
     ICHECK_NE(e->allocs.size(), 0U);
 
-    // disable reuse of small arrays
-    if (e->const_nbits > 0 && e->const_nbits <= 32)
-      return;
-
     // normal free.
     if (e->const_nbits != 0) {
       const_free_map_.insert({e->const_nbits, e});
