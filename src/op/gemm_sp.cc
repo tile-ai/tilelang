@@ -303,9 +303,46 @@ LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     } else {
       ICHECK(false) << "WGMMA only support B in shared.";
     }
+  } else if (TargetIsAmpere(T.target)) {
+    const int warp_size = 32;
+    auto [warp_m, warp_n] =
+        ComputeWarpPartition(block_size / warp_size, T.target);
+    auto fragment =
+        makeGemmFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
+    results.Set(C, fragment->BindThreadRange(thread_range));
+
+    if (A.scope() == "shared" || A.scope() == "shared.dyn") {
+      int dim_A = A->shape.size();
+      const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
+      const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
+      results.Set(A,
+                  makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                   A->dtype.bits(), trans_A ? 1 : 2));
+    } else if (A.scope() == "local.fragment") {
+      // auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
+      //                                   A->dtype.bits(), trans_A);
+      // results.Set(A, fragment->BindThreadRange(thread_range));
+      ICHECK(false) << "Not Implemented";
+    } else {
+      ICHECK(0);
+    }
+    if (B.scope() == "shared" || B.scope() == "shared.dyn") {
+      int dim_B = B->shape.size();
+      const int64_t mat_stride = *as_const_int(B->shape[dim_B - 2]);
+      const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
+      results.Set(B,
+                  makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                   B->dtype.bits(), trans_B ? 2 : 1));
+    } else if (B.scope() == "local.fragment") {
+      // auto fragment =
+      //     makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
+      // results.Set(B, fragment->BindThreadRange(thread_range));
+      ICHECK(false) << "Not Implemented";
+    } else {
+      ICHECK(0);
+    }
   } else {
-    ICHECK(0) << "Not supported " << T.target->str()
-              << " Currently only Hopper are supported";
+    ICHECK(0) << "Architecture is not supported: " << T.target->str();
   }
   completed_ = true;
   return results;
