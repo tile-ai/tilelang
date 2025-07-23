@@ -415,13 +415,16 @@ def assert_tl_matmul_block_all_dynamic_correctness_with_pass_config(
         num_stages,
         num_threads,
     )
+    pass_configs = {
+        tilelang.PassConfigKey.TL_DISABLE_DYNAMIC_TAIL_SPLIT: dynamic_alignment != 0,
+        tilelang.PassConfigKey.TL_DYNAMIC_ALIGNMENT: dynamic_alignment
+    }
+    if M % 64 == 0 or N % 64 == 0 or K % 64 != 0:
+        # workaround for hopper tma lower pass
+        pass_configs[tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER] = True
+        pass_configs[tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED] = True
 
-    kernel = tilelang.compile(
-        program,
-        pass_configs={
-            "tl.disable_dynamic_tail_split": dynamic_alignment != 0,
-            "tl.dynamic_alignment": dynamic_alignment
-        })
+    kernel = tilelang.compile(program, pass_configs=pass_configs)
 
     if trans_A:
         A = torch.rand(K, M, device="cuda", dtype=getattr(torch, in_dtype))

@@ -23,7 +23,6 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
     ):
         with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=128) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
-            # Q_local = T.alloc_fragment([block_M, dim], dtype)
             K_shared = T.alloc_shared([block_N, dim], dtype)
             V_shared = T.alloc_shared([block_N, dim], dtype)
             acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
@@ -40,9 +39,7 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
-            # T.copy(Q_shared, Q_local)
-            # for i, j in T.Parallel(block_M, dim):
-            #     Q_local[i, j] *= scale
+
             loop_range = (
                 T.ceildiv(
                     (bx + 1) * block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N))
@@ -264,8 +261,8 @@ class _attention(torch.autograd.Function):
             return x
 
         do, q, k, v, o = [maybe_contiguous(x) for x in (do, q, k, v, o)]
-        block_M = 64
-        block_N = 64 if D_HEAD <= 64 else 32
+        block_M = 128
+        block_N = 128 if D_HEAD <= 64 else 32
         mod_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD)
         mod_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD)
         delta = mod_prep(o, do)

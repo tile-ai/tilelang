@@ -102,3 +102,11 @@ def requires_cuda_compute_version_gt(major_version, minor_version=0):
 
 def requires_cuda_compute_version_eq(major_version, minor_version=0):
     return requires_cuda_compute_version(major_version, minor_version, mode="eq")
+
+
+def requires_cuda_compute_version_lt(major_version, minor_version=0):
+    return requires_cuda_compute_version(major_version, minor_version, mode="lt")
+
+
+def requires_cuda_compute_version_le(major_version, minor_version=0):
+    return requires_cuda_compute_version(major_version, minor_version, mode="le")

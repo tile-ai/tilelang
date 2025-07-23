@@ -769,10 +769,22 @@ private:
                   /*body*/ seq_stmt[i]);
       auto access = GetBlockAccessRegion(block, buffer_data_to_buffer_);
       std::set<const BufferNode *> read_set, write_set;
-      for (auto region : access[0])
-        read_set.insert(region->buffer.get());
-      for (auto region : access[1])
-        write_set.insert(region->buffer.get());
+      for (auto region : access[0]) {
+        auto var = region->buffer->data;
+        if (buffer_data_to_buffer_.count(var)) {
+          read_set.insert(buffer_data_to_buffer_[var].get());
+        } else {
+          read_set.insert(region->buffer.get());
+        }
+      }
+      for (auto region : access[1]) {
+        auto var = region->buffer->data;
+        if (buffer_data_to_buffer_.count(var)) {
+          write_set.insert(buffer_data_to_buffer_[var].get());
+        } else {
+          write_set.insert(region->buffer.get());
+        }
+      }
       reads.push_back(std::move(read_set));
       writes.push_back(std::move(write_set));
     }

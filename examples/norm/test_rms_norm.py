@@ -1,5 +1,6 @@
 import torch
 import tilelang
+import tilelang.testing
 import tilelang.language as T
 
 
@@ -73,3 +74,7 @@ def test_rms_norm():
         pass_configs={"tl.disable_tma_lower": True})
     profiler = kernel.get_profiler()
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()

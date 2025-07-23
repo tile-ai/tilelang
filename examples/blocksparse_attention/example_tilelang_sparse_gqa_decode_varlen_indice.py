@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 import tilelang
-from tilelang.autotuner import *
 import tilelang.language as T
 from einops import rearrange, einsum
 import argparse
@@ -71,7 +70,7 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
                 loop_range = (blocks_per_split + T.if_then_else(sid < remaining_blocks, 1, 0))
                 start = blocks_per_split * sid + T.min(sid, remaining_blocks)
                 has_valid_block = False
-                # if (start < num_blocks):
+
                 for k in T.Pipelined(loop_range, num_stages=num_stages):
                     i_s = block_indices[bid, cur_kv_head, start + k]
                     if i_s >= 0:
@@ -238,23 +237,12 @@ class SparseFlashAttn(torch.nn.Module):
             size_one_kv_head,
             is_causal_or_local=True,
             max_splits=128)
-        # print("num_split: ", num_split)
-        # Function to compile
-        # def compute_actual_num_blocks(block_indices):
-        #     actual_num_blocks = torch.sum(block_indices != -1, dim=-1).to(torch.int32)
-        #     actual_num_blocks = actual_num_blocks[:, 0]  # [batch]
-        #     return actual_num_blocks
-        # compiled_fn = torch.compile(compute_actual_num_blocks)
-        # actual_num_blocks = compiled_fn(block_indices)
+
         glse = torch.empty((batch, heads, num_split), dtype=torch.float32, device='cuda')
         output_partial = torch.empty((batch, heads, num_split, dim_v),
                                      dtype=torch.float32,
                                      device='cuda')
 
-        # output = self.kernel(
-        #     query, key, value, block_indices, cache_seqlens,
-        #     actual_num_blocks, glse, output_partial
-        # )
         output = self.kernel(query, key, value, block_indices, cache_seqlens, glse, output_partial)
         return output
 
@@ -377,8 +365,6 @@ def debug(name, expect, actual, atol=1e-3, rtol=1e-3):
     all_close = torch.allclose(expect, actual, atol=atol, rtol=rtol)
     print(name + "  all_close={}".format(all_close))
     if not all_close:
-        # print(expect[3, 28])
-        # print(actual[3, 28])
         diff = (expect - actual).abs()
         print("all_close={}, max={}, min={}, mean={}".format(all_close,
                                                              diff.max().item(),

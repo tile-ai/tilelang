@@ -219,6 +219,62 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps, Target target,
   return {m_warp, n_warp};
 }
 
+bool Gemm::CheckWGMMA() const {
+  if (C->dtype == DataType::Float(16)) {
+    if (A->dtype == DataType::Float(16) && B->dtype == DataType::Float(16))
+      return K % 16 == 0;
+    else if (A->dtype == DataType::NVFloat8E4M3() &&
+             B->dtype == DataType::NVFloat8E4M3())
+      return (!trans_A) && trans_B && K % 32 == 0;
+    else if (A->dtype == DataType::NVFloat8E4M3() &&
+             B->dtype == DataType::NVFloat8E5M2())
+      return (!trans_A) && trans_B && K % 32 == 0;
+    else if (A->dtype == DataType::NVFloat8E5M2() &&
+             B->dtype == DataType::NVFloat8E4M3())
+      return (!trans_A) && trans_B && K % 32 == 0;
+    else if (A->dtype == DataType::NVFloat8E5M2() &&
+             B->dtype == DataType::NVFloat8E5M2())
+      return (!trans_A) && trans_B && K % 32 == 0;
+    else
+      return false;
+  } else if (C->dtype == DataType::Float(32)) {
+    if (A->dtype == DataType::Float(16) && B->dtype == DataType::Float(16))
+      return K % 16 == 0;
+    else if (A->dtype == DataType::BFloat(16) &&
+             B->dtype == DataType::BFloat(16))
+      return K % 16 == 0;
+    else if (A->dtype == DataType::Float(32) && B->dtype == DataType::Float(32))
+      return (!trans_A) && trans_B && K % 8 == 0;
+    else if (A->dtype == DataType::NVFloat8E4M3() &&
+             B->dtype == DataType::NVFloat8E4M3())
+      return (!trans_A) && trans_B && K % 32 == 0;
+    else if (A->dtype == DataType::NVFloat8E4M3() &&
+             B->dtype == DataType::NVFloat8E5M2())
+      return (!trans_A) && trans_B && K % 32 == 0;
+    else if (A->dtype == DataType::NVFloat8E5M2() &&
+             B->dtype == DataType::NVFloat8E4M3())
+      return (!trans_A) && trans_B && K % 32 == 0;
+    else if (A->dtype == DataType::NVFloat8E5M2() &&
+             B->dtype == DataType::NVFloat8E5M2())
+      return (!trans_A) && trans_B && K % 32 == 0;
+    else
+      return false;
+  } else if (C->dtype == DataType::Int(32)) {
+    if (A->dtype == DataType::Int(8) && B->dtype == DataType::Int(8))
+      return (!trans_A) && trans_B && K % 32 == 0;
+    else if (A->dtype == DataType::Int(8) && B->dtype == DataType::UInt(8))
+      return (!trans_A) && trans_B && K % 32 == 0;
+    else if (A->dtype == DataType::UInt(8) && B->dtype == DataType::Int(8))
+      return (!trans_A) && trans_B && K % 32 == 0;
+    else if (A->dtype == DataType::UInt(8) && B->dtype == DataType::UInt(8))
+      return (!trans_A) && trans_B && K % 32 == 0;
+    else
+      return false;
+  } else {
+    return false;
+  }
+}
+
 Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   int warp_size = 32;
   if (TargetIsCDNA(T.target)) {
@@ -226,7 +282,7 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
   auto block_size = *as_const_int(T.thread_bounds->extent);
   bool maybe_wgmma = TargetIsHopper(T.target) && (this->M >= 64) &&
-                     (block_size / warp_size % 4 == 0);
+                     (block_size / warp_size % 4 == 0) && CheckWGMMA();
 
   auto [warp_m, warp_n] =
       ComputeWarpPartition(block_size / warp_size, T.target, maybe_wgmma);
@@ -336,7 +392,8 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     }
   } else if (TargetIsHopper(T.target)) {
     const int warp_size = 32;
-    bool maybe_wgmma = (this->M >= 64) && (block_size / warp_size % 4 == 0);
+    bool maybe_wgmma =
+        (this->M >= 64) && (block_size / warp_size % 4 == 0) && CheckWGMMA();
     auto [warp_m, warp_n] =
         ComputeWarpPartition(block_size / warp_size, T.target, maybe_wgmma);
     auto fragment =
@@ -351,9 +408,13 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
       const int64_t continuity =
           trans_A ? 4 * mat_continuous / warp_m : mat_continuous;
-      results.Set(A, makeGemmABLayoutHopper(mat_stride, mat_continuous,
-                                            mat_continuous, A->dtype.bits(),
-                                            trans_A ? 1 : 2));
+      auto ABLayout =
+          maybe_wgmma
+              ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
+                                       A->dtype.bits(), trans_A ? 1 : 2)
+              : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                 A->dtype.bits(), trans_A ? 1 : 2);
+      results.Set(A, ABLayout);
     } else {
       auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
                                         A->dtype.bits(), trans_A);
@@ -365,9 +426,13 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
       const int64_t continuity =
           trans_B ? mat_continuous : mat_continuous / warp_n;
-      results.Set(B,
-                  makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                         B->dtype.bits(), trans_B ? 2 : 1));
+      auto ABLayout =
+          maybe_wgmma
+              ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
+                                       B->dtype.bits(), trans_B ? 2 : 1)
+              : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
+                                 B->dtype.bits(), trans_B ? 2 : 1);
+      results.Set(B, ABLayout);
     } else {
       ICHECK(0) << "WGMMA only support B in shared.";
     }

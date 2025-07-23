@@ -172,6 +172,15 @@ public:
     fptr->body = substituter.VisitStmt(f->body);
     fptr->body =
         RemapBufferRewriter::Substitute(fptr->body, substituter.buffer_remap_);
+    tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
+    Optional<Bool> opt_disable_tma_lower =
+        ctxt->GetConfig(kDisableTMALower, Optional<Bool>());
+
+    if (!opt_disable_tma_lower.value_or(Bool(false))) {
+      // @lei: this is a workaround, as if we don't disable tma lower,
+      // cp async lowering won't be generated.
+      ctxt->config.Set(kDisableTMALower, Bool(!substituter.has_tma_));
+    }
     return f;
   }
 
@@ -304,6 +313,11 @@ private:
   }
 
   PrimExpr VisitExpr_(const tir::CallNode *op) final {
+    if ((!has_tma_) && (op->op.same_as(tl::tma_load()) ||
+                        op->op.same_as(tl::tma_load_im2col()) ||
+                        op->op.same_as(tl::tma_store()))) {
+      has_tma_ = true;
+    }
     Array<RelayExpr> ptx_instructions = {builtin::ptx_ldmatrix(),
                                          builtin::mma_store()};
 
@@ -468,6 +482,7 @@ private:
   // Mapping from data Var of a Buffer to Buffer, for lookup
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   Map<Var, Var> var_remap_;
+  bool has_tma_{false};
 };
 
 namespace transform {
