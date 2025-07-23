@@ -20,10 +20,7 @@ from transformers import (
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import TokenizerPoolConfig
-from vllm.distributed import (
-    destroy_distributed_environment,
-    destroy_model_parallel,d
-)
+from vllm.distributed import (destroy_distributed_environment, destroy_model_parallel)
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
 from vllm.sequence import SampleLogprobs

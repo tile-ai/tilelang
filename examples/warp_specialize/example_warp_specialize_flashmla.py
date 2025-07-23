@@ -49,11 +49,9 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             scores_max_0 = T.alloc_fragment([block_H], accum_dtype)
             scores_max_1 = T.alloc_fragment([block_H], accum_dtype)
             scores_max = T.alloc_shared([block_H], accum_dtype)
-            # TODO(lei): this is a workaround for the bug of replicate if stmt.
-            # have to be optimized in future with index aware sync thread pass injection.
-            # scores_max_prev_0 and scores_max_prev_1 should be allocated in fragment.
-            scores_max_prev_0 = T.alloc_shared([block_H], accum_dtype)
-            scores_max_prev_1 = T.alloc_shared([block_H], accum_dtype)
+
+            scores_max_prev_0 = T.alloc_fragment([block_H], accum_dtype)
+            scores_max_prev_1 = T.alloc_fragment([block_H], accum_dtype)
 
             scores_scale_0 = T.alloc_shared([block_H], accum_dtype)
             scores_scale_1 = T.alloc_shared([block_H], accum_dtype)
