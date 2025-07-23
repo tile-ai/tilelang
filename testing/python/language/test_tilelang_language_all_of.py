@@ -231,7 +231,13 @@ def run_block_sparse_matmul_shared(M=1024, N=1024, K=1024, sparsity=0.5, conditi
         thread_num,
         enable_rasteration,
     )
-    kernel = tilelang.compile(func, out_idx=-1)
+    kernel = tilelang.compile(
+        func,
+        out_idx=-1,
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        })
     # Create block mask with desired sparsity
     mask_shape = (M // block_M, N // block_N, K // block_K)
     block_mask = torch.rand(mask_shape).cuda() > sparsity
@@ -272,7 +278,13 @@ def run_block_sparse_matmul_local(M=1024, N=1024, K=1024, sparsity=0.5, conditio
         thread_num,
         enable_rasteration,
     )
-    kernel = tilelang.compile(func, out_idx=-1)
+    kernel = tilelang.compile(
+        func,
+        out_idx=-1,
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        })
     # Create block mask with desired sparsity
     mask_shape = (M // block_M, N // block_N, K // block_K)
     block_mask = torch.rand(mask_shape).cuda() > sparsity

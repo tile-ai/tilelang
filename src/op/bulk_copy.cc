@@ -94,7 +94,6 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   bool is_load;
   if (src.scope() == "global" &&
       (dst.scope() == "shared.dyn" || dst.scope() == "shared")) {
-    // Use the Hopper TMA bulk copy instructions
     is_load = true;
   } else if (dst.scope() == "global" &&
              (src.scope() == "shared.dyn" || src.scope() == "shared")) {
@@ -106,7 +105,6 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Buffer shared_tensor = is_load ? dst : src;
   Array<Range> global_range = is_load ? src_range : dst_range;
   Array<Range> shared_range = is_load ? dst_range : src_range;
-
   if (T.layout_map.count(global_tensor)) {
     LOG(WARNING) << "TMA bulk copy cannot support a non-swizzled global "
                     "layout, fallback to normal copy.";
@@ -116,7 +114,6 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Array<PrimExpr> indices;
   for (auto r : shared_range)
     indices.push_back(r->min);
-
   std::vector<PrimExpr> strides;
   PrimExpr stride = 1;
   for (size_t i = 0; i < shared_tensor->shape.size(); i++) {
@@ -132,7 +129,6 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   for (size_t i = 0; i < indices.size(); i++) {
     offset += indices[i] * strides[i];
   }
-
   Layout shared_layout;
   if (T.layout_map.count(shared_tensor)) {
     shared_layout = T.layout_map[shared_tensor];
@@ -140,7 +136,6 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 
   TMADesc desc;
-
   // Verify copy rank
   desc.rank = global_tensor->shape.size();
   ICHECK(desc.rank >= 1 && desc.rank <= 5) << desc.rank;
@@ -175,6 +170,18 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   desc.global_stride = desc.global_stride.Map([&](PrimExpr e) {
     return cast(DataType::Int(64), e) * global_tensor->dtype.bytes();
   });
+  for (size_t i{1}; i < desc.global_stride.size(); i++) {
+    auto stride = desc.global_stride[i].as<IntImmNode>();
+    if (stride != nullptr) {
+      // otherwise, the stride is symbolic, we need to check in future with
+      // assumptions
+      if (stride->value % 16 != 0 || stride->value >= (1ULL << 40)) {
+        LOG(WARNING) << "TMA bulk copy cannot support a global stride of "
+                     << desc.global_stride[i] << ", fallback to normal copy.";
+        return Stmt();
+      }
+    }
+  }
 
   // Smem Box
   // check smem range and global range is legal
@@ -184,19 +191,30 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
     if (is_one(g_range->extent)) {
       continue;
     }
-    auto s_range = shared_range[s_range_idx++];
+    // skip one range if it is 1
+    // in case of global range is [128, 64], while shared range is [1, 128, 64]
+    // A_shared[0, :, :].
+    while (is_one(shared_range[s_range_idx]->extent) &&
+           s_range_idx < shared_range.size()) {
+      s_range_idx++;
+    }
+    if (s_range_idx >= shared_range.size()) {
+      LOG(FATAL) << "TMA bulk copy cannot support a global range of "
+                 << global_range << ", shared_range " << shared_range;
+    }
+    auto s_range = shared_range[s_range_idx];
+    s_range_idx++;
+
     ICHECK(StructuralEqual()(g_range->extent, s_range->extent))
         << global_tensor->name << "[" << i << "] is illegal, "
         << global_tensor->name << "[" << i << "] = " << g_range->extent << ", "
         << shared_tensor->name << "[" << s_range_idx
         << "] = " << s_range->extent;
   }
-
   desc.smem_box =
       ReverseArray(global_range.Map([](Range r) { return r->extent; }));
 
   desc.smem_stride = Array<PrimExpr>(desc.rank, PrimExpr(1));
-
   // L2 & OOB
   desc.l2_promotion = static_cast<int>(CU_TENSOR_MAP_L2_PROMOTION_L2_128B);
   desc.oob_fill = static_cast<int>(CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
@@ -230,7 +248,7 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
                                              shared_tensor->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
     } else {
-      ICHECK(0) << "Cannot detect TMA layout.";
+      return Stmt();
     }
   }
 
@@ -251,6 +269,21 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
   ICHECK((*inner_box_dim) % instruction_dim == 0);
   desc.smem_box.Set(0, PrimExpr(instruction_dim));
+
+  int inner_box_dim_ = instruction_dim * shared_tensor->dtype.bytes();
+
+  if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE) &&
+      inner_box_dim_ % 256 != 0)
+    return Stmt();
+#define CHECK_INNER_BOX_DIM(N)                                                 \
+  if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_##N##B) &&        \
+      inner_box_dim_ > N)                                                      \
+    return Stmt();
+
+  CHECK_INNER_BOX_DIM(32);
+  CHECK_INNER_BOX_DIM(64);
+  CHECK_INNER_BOX_DIM(128);
+#undef CHECK_INNER_BOX_DIM
 
   Call create_descriptor =
       Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());

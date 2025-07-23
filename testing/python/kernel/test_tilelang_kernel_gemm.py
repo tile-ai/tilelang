@@ -397,6 +397,8 @@ def run_gemm_sr(
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
+# WGMMA only supports B in shared
+@tilelang.testing.requires_cuda_compute_version_le(8, 9)
 def test_gemm_f16f16f16_sr():
     run_gemm_sr(
         512,
@@ -514,6 +516,8 @@ def run_gemm_rs(
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
 
+# Register source A operand GMMAs must have K-major A layout.
+@tilelang.testing.requires_cuda_compute_version_le(8, 9)
 def test_gemm_f16f16f16_rs():
     run_gemm_rs(
         512,
