@@ -4,7 +4,7 @@ on: [pull_request]
 
 env:
   PYTHON_VERSION: '3.9'
-  VENV_DIR: ${{ runner.tool_cache }}/tilelang_ci
+  VENV_DIR: tilelang_ci
 
 jobs:
   format-check:
@@ -28,13 +28,13 @@ jobs:
       id: cache-venv
       uses: actions/cache@v4
       with:
-        path: ${{ env.VENV_DIR }}
+        path: ${{ runner.tool_cache }}/${{ env.VENV_DIR }}
         key: ${{ runner.os }}-py${{ env.PYTHON_VERSION }}-venv-${{ hashFiles('**/requirements-dev.txt', '**/requirements-test.txt') }}
 
     - name: Create / ensure virtual environment
       if: steps.cache-venv.outputs.cache-hit != 'true'
       run: |
-        python -m venv ${{ env.VENV_DIR }}
+        python -m venv ${{ runner.tool_cache }}/${{ env.VENV_DIR }}
         source ${{ env.VENV_DIR }}/bin/activate
         python -m pip install --upgrade pip --no-user
         if [ -f requirements-test.txt ]; then
@@ -70,13 +70,13 @@ jobs:
       id: cache-venv
       uses: actions/cache@v4
       with:
-        path: ${{ env.VENV_DIR }}
+        path: ${{ runner.tool_cache }}/${{ env.VENV_DIR }}
         key: ${{ runner.os }}-py${{ env.PYTHON_VERSION }}-venv-${{ hashFiles('**/requirements-dev.txt', '**/requirements-test.txt') }}
 
     - name: Create / ensure virtual environment
       if: steps.cache-venv.outputs.cache-hit != 'true'
       run: |
-        python -m venv ${{ env.VENV_DIR }}
+        python -m venv ${{ runner.tool_cache }}/${{ env.VENV_DIR }}
         source ${{ env.VENV_DIR }}/bin/activate
         python -m pip install --upgrade pip --no-user
         if [ -f requirements-test.txt ]; then
