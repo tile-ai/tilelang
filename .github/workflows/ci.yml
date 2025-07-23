@@ -87,7 +87,7 @@ jobs:
     - name: Install project (wheel form)
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        pip install .
+        pip install . --no-user
 
     - name: Run examples
       run: |
