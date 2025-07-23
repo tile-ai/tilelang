@@ -35,7 +35,7 @@ jobs:
       if: steps.cache-venv.outputs.cache-hit != 'true'
       run: |
         python -m venv ${{ runner.tool_cache }}/${{ env.VENV_DIR }}
-        source ${{ env.VENV_DIR }}/bin/activate
+        source ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate
         python -m pip install --upgrade pip --no-user
         if [ -f requirements-test.txt ]; then
           PIP_NO_BUILD_ISOLATION=1 \
@@ -48,7 +48,7 @@ jobs:
 
     - name: Run format check
       run: |
-        source ${{ env.VENV_DIR }}/bin/activate
+        source ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate
         ./format.sh
 
   build-test:
