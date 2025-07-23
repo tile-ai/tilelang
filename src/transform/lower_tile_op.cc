@@ -175,7 +175,10 @@ public:
     tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
     Optional<Bool> opt_disable_tma_lower =
         ctxt->GetConfig(kDisableTMALower, Optional<Bool>());
+
     if (!opt_disable_tma_lower.value_or(Bool(false))) {
+      // @lei: this is a workaround, as if we don't disable tma lower,
+      // cp async lowering won't be generated.
       ctxt->config.Set(kDisableTMALower, Bool(!substituter.has_tma_));
     }
     return f;
