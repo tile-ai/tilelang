@@ -77,7 +77,7 @@ jobs:
       if: steps.cache-venv.outputs.cache-hit != 'true'
       run: |
         python -m venv ${{ runner.tool_cache }}/${{ env.VENV_DIR }}
-        source ${{ env.VENV_DIR }}/bin/activate
+        source ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate
         python -m pip install --upgrade pip --no-user
         if [ -f requirements-test.txt ]; then
           PIP_NO_BUILD_ISOLATION=1 \
@@ -87,19 +87,19 @@ jobs:
 
     - name: Install project in wheel mode
       run: |
-        source ${{ env.VENV_DIR }}/bin/activate
+        source ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate
         python -m pip install .  --no-user
 
     - name: Run examples
       run: |
-        source ${{ env.VENV_DIR }}/bin/activate
+        source ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate
         cd examples
         unset PYTHONPATH
         python -m pytest -n 4 **/test*.py
 
     - name: Run tests
       run: |
-        source ${{ env.VENV_DIR }}/bin/activate
+        source ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate
         cd testing/python
         unset PYTHONPATH
         python -m pytest -n 4
