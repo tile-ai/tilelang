@@ -81,7 +81,13 @@ def run_gemm(
         num_threads,
     )
 
-    kernel = tilelang.compile(program, out_idx=[2])
+    kernel = tilelang.compile(
+        program,
+        out_idx=[2],
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        })
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -99,46 +105,10 @@ def run_gemm(
 
 
 def test_gemm():
+    # More test case can be found in kernel/test_tilelang_kernel_gemm.py
     # GEMM tests for float16
     run_gemm(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32,
              2)  # f16f16f16_nn
-    run_gemm(512, 1024, 768, True, False, "float16", "float16", "float16", 128, 256, 32,
-             2)  # f16f16f16_tn
-    run_gemm(512, 1024, 768, False, True, "float16", "float16", "float16", 128, 256, 32,
-             2)  # f16f16f16_nt
-    run_gemm(512 - 8, 1024 - 32, 768 - 24, False, False, "float16", "float16", "float16", 128, 256,
-             32, 2)  # pad_aligned_f16f16f16_nn
-    run_gemm(512 - 9, 1024 - 7, 768 - 5, False, False, "float16", "float16", "float16", 128, 256,
-             32, 2)  # pad_f16f16f16_nn
-
-    # GEMM tests for mixed precision (float16 + float32)
-    run_gemm(512, 1024, 768, False, False, "float16", "float16", "float32", 128, 128,
-             16)  # f16f16f32_nn
-    run_gemm(512, 1024, 768, False, False, "float16", "float16", "float32", 128, 128,
-             32)  # f16f16f32_nn
-    run_gemm(512 + 19, 1024 + 17, 768 + 15, False, False, "float16", "float16", "float32", 128, 64,
-             32)  # pad_f16f16f32_nn
-
-    # GEMM tests for bfloat16
-    run_gemm(512, 1024, 768, False, False, "bfloat16", "bfloat16", "float32", 128, 128,
-             32)  # bf16bf16f32_nn
-
-    # GEMM tests for float32
-    run_gemm(512, 1024, 768, False, False, "float32", "float32", "float32", 64, 128,
-             32)  # f32f32f32_nn
-    run_gemm(512, 1024, 768, False, True, "float32", "float32", "float32", 64, 128,
-             32)  # f32f32f32_nt
-    run_gemm(512, 1024, 768, True, False, "float32", "float32", "float32", 64, 128,
-             32)  # f32f32f32_tn
-
-    # GEMM tests for float64
-    run_gemm(512, 512, 512, False, True, "float64", "float64", "float64", 64, 32,
-             16)  # f64f64f64_nt
-
-    # GEMM tests for int8
-    run_gemm(512, 1024, 768, False, False, "int8", "int8", "int32", 128, 128, 64)  # i8i8i32_nn
-    run_gemm(512, 1024, 768, False, True, "int8", "int8", "int32", 128, 128, 64)  # i8i8i32_nt
-    run_gemm(512, 1024, 768, True, False, "int8", "int8", "int32", 128, 128, 64)  # i8i8i32_tn
 
 
 def matmul_rs(
@@ -224,7 +194,13 @@ def run_gemm_rs(
         num_threads,
     )
 
-    kernel = tilelang.compile(program, out_idx=[2])
+    kernel = tilelang.compile(
+        program,
+        out_idx=[2],
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        })
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):

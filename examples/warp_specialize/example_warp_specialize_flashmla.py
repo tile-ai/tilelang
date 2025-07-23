@@ -49,8 +49,12 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             scores_max_0 = T.alloc_fragment([block_H], accum_dtype)
             scores_max_1 = T.alloc_fragment([block_H], accum_dtype)
             scores_max = T.alloc_shared([block_H], accum_dtype)
-            scores_max_prev_0 = T.alloc_fragment([block_H], accum_dtype)
-            scores_max_prev_1 = T.alloc_fragment([block_H], accum_dtype)
+            # TODO(lei): this is a workaround for the bug of replicate if stmt.
+            # have to be optimized in future with index aware sync thread pass injection.
+            # scores_max_prev_0 and scores_max_prev_1 should be allocated in fragment.
+            scores_max_prev_0 = T.alloc_shared([block_H], accum_dtype)
+            scores_max_prev_1 = T.alloc_shared([block_H], accum_dtype)
+
             scores_scale_0 = T.alloc_shared([block_H], accum_dtype)
             scores_scale_1 = T.alloc_shared([block_H], accum_dtype)
             scores_sum_0 = T.alloc_fragment([block_H], accum_dtype)
@@ -391,16 +395,7 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     return out
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=132, help='batch size')
-    parser.add_argument('--heads', type=int, default=128, help='q heads number')
-    parser.add_argument('--kv_heads', type=int, default=1, help='kv heads number')
-    parser.add_argument('--kv_ctx', type=int, default=8192, help='kv context length')
-    parser.add_argument('--dim', type=int, default=512, help='head dim')
-    parser.add_argument('--pe_dim', type=int, default=64, help='pe head dim')
-    args = parser.parse_args()
-    batch, heads, kv_heads, kv_ctx, dim, pe_dim = args.batch, args.heads, args.kv_heads, args.kv_ctx, args.dim, args.pe_dim
+def main(batch=132, heads=128, kv_heads=1, kv_ctx=8192, dim=512, pe_dim=64):
     qk_flops = 2 * batch * heads * kv_ctx * (dim + pe_dim)
     pv_flops = 2 * batch * heads * kv_ctx * dim
     total_flops = qk_flops + pv_flops
@@ -418,4 +413,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--batch', type=int, default=132, help='batch size')
+    parser.add_argument('--heads', type=int, default=128, help='q heads number')
+    parser.add_argument('--kv_heads', type=int, default=1, help='kv heads number')
+    parser.add_argument('--kv_ctx', type=int, default=8192, help='kv context length')
+    parser.add_argument('--dim', type=int, default=512, help='head dim')
+    parser.add_argument('--pe_dim', type=int, default=64, help='pe head dim')
+    args = parser.parse_args()
+    batch, heads, kv_heads, kv_ctx, dim, pe_dim = args.batch, args.heads, args.kv_heads, args.kv_ctx, args.dim, args.pe_dim
+    main(batch, heads, kv_heads, kv_ctx, dim, pe_dim)

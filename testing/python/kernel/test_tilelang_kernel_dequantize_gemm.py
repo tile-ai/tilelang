@@ -335,8 +335,10 @@ def run_gemm(
     profiler.assert_allclose(ref_program)
 
 
+# bitblas currently only support sm80-sm90
 @tvm.testing.requires_package("bitblas")
 @tilelang.testing.requires_llvm
+@tilelang.testing.requires_cuda_compute_version_le(8, 9)
 def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
     M,
     N,
@@ -625,6 +627,7 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
 
 
 @tilelang.testing.requires_package("bitblas")
+@tilelang.testing.requires_cuda_compute_version_le(8, 9)
 def test_run_dequantize_gemm():
     run_gemm(256, 256, 256, "float16", "float16", "float16", 128, 128, 32, num_threads=128)
     run_gemm(256, 256, 256, "int8", "int32", "int32", 128, 128, 32, num_threads=128)
@@ -632,6 +635,7 @@ def test_run_dequantize_gemm():
 
 @tilelang.testing.requires_package("bitblas")
 @tilelang.testing.requires_llvm
+@tilelang.testing.requires_cuda_compute_version_le(8, 9)
 def test_assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4():
     assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correctness(
         256, 1024, 512, "float16", "float16", "float16", 3)
