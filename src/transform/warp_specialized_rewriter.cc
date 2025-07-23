@@ -170,6 +170,12 @@ public:
     SetRole(op, GetRole(op->block));
   }
 
+  void VisitStmt_(const AllocateNode *op) final {
+    StmtVisitor::VisitStmt_(op);
+    Role role = Role::kConsumer;
+    SetRole(op, role);
+  }
+
   template <class NodeType> void HandleBodyStmt(const NodeType *op) {
     StmtVisitor::VisitStmt_(op);
     SetRole(op, GetRole(op->body));
