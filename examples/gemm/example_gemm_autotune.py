@@ -6,6 +6,7 @@ import tilelang.language as T
 from tilelang.autotuner import AutoTuner
 from tilelang.carver.template import MatmulTemplate
 from tilelang.carver.arch import CUDA
+from tilelang.carver.arch import CDNA
 from tilelang.carver.roller.rasterization import NoRasterization
 
 
@@ -15,7 +16,10 @@ def ref_program(A, B):
 
 def get_configs(M, N, K, with_roller=False, topk=20):
     if with_roller:
-        arch = CUDA("cuda")
+        if torch.version.hip is not None:
+            arch=CDNA("hip")
+        else:
+            arch = CUDA("cuda")
         carve_template = MatmulTemplate(
             M=M,
             N=N,

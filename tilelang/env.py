@@ -73,6 +73,7 @@ TILELANG_PACKAGE_PATH: str = pathlib.Path(__file__).resolve().parents[0]
 
 TILELANG_CACHE_DIR: str = os.environ.get("TILELANG_CACHE_DIR",
                                          os.path.expanduser("~/.tilelang/cache"))
+TILELANG_TMP_DIR: str = os.path.join(TILELANG_CACHE_DIR, "tmp")
 
 # Auto-clear cache if environment variable is set
 TILELANG_CLEAR_CACHE = os.environ.get("TILELANG_CLEAR_CACHE", "0")
@@ -82,7 +83,7 @@ TILELANG_AUTO_TUNING_CPU_UTILITIES: str = os.environ.get("TILELANG_AUTO_TUNING_C
                                                          "0.9")
 
 # CPU COUNTS for Auto-Tuning, default is -1,
-# which will use TILELNAG_AUTO_TUNING_CPU_UTILITIES * get_available_cpu_count()
+# which will use TILELANG_AUTO_TUNING_CPU_UTILITIES * get_available_cpu_count()
 TILELANG_AUTO_TUNING_CPU_COUNTS: str = os.environ.get("TILELANG_AUTO_TUNING_CPU_COUNTS", "-1")
 
 # Max CPU Count for Auto-Tuning, default is 100

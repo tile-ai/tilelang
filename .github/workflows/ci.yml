@@ -1,5 +1,4 @@
 name: CI
-
 on: [pull_request]
 
 env:
@@ -21,31 +20,33 @@ jobs:
       with:
         python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Cache virtual environment
-      id: cache-venv
-      uses: actions/cache@v4
-      with:
-        path: ${{ env.VENV_DIR }}
-        key: ${{ runner.os }}-py${{ env.PYTHON_VERSION }}-venv-${{ hashFiles('**/requirements-dev.txt', '**/requirements-test.txt') }}
-
-    - name: Create / ensure virtual environment
-      if: steps.cache-venv.outputs.cache-hit != 'true'
+    - name: Ensure venv (local & persistent)
       run: |
-        python -m venv ${{ env.VENV_DIR }}
-        source ${{ env.VENV_DIR }}/bin/activate
-        python -m pip install --upgrade pip --no-user
-        if [ -f requirements-test.txt ]; then
-          PIP_NO_BUILD_ISOLATION=1 \
-            python -m pip install -r requirements-test.txt --no-user
-        fi
-        python -m pip install . --no-user
+        set -e
+        REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
+        MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
 
-    - name: Update submodules recursively
+        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
+          echo "venv exists and hash matches – reuse it"
+        else
+          echo "venv stale or missing – recreating"
+          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
+          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
+          # shellcheck source=/dev/null
+          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+          python -m pip install --upgrade pip --no-user
+          [[ -f requirements-test.txt ]] && \
+            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
+          pip install . --no-user
+          touch "$MARKER"
+        fi
+
+    - name: Update submodules
       run: git submodule update --init --recursive
 
     - name: Run format check
       run: |
-        source ${{ env.VENV_DIR }}/bin/activate
+        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         ./format.sh
 
   build-test:
@@ -63,40 +64,41 @@ jobs:
       with:
         python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Cache virtual environment
-      id: cache-venv
-      uses: actions/cache@v4
-      with:
-        path: ${{ env.VENV_DIR }}
-        key: ${{ runner.os }}-py${{ env.PYTHON_VERSION }}-venv-${{ hashFiles('**/requirements-dev.txt', '**/requirements-test.txt') }}
-
-    - name: Create / ensure virtual environment
-      if: steps.cache-venv.outputs.cache-hit != 'true'
+    - name: Ensure venv (local & persistent)
       run: |
-        python -m venv ${{ env.VENV_DIR }}
-        source ${{ env.VENV_DIR }}/bin/activate
-        python -m pip install --upgrade pip --no-user
-        if [ -f requirements-test.txt ]; then
-          PIP_NO_BUILD_ISOLATION=1 \
-            python -m pip install -r requirements-test.txt --no-user
+        set -e
+        REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
+        MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
+
+        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
+          echo "venv exists and hash matches – reuse it"
+        else
+          echo "venv stale or missing – recreating"
+          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
+          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
+          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+          python -m pip install --upgrade pip --no-user
+          [[ -f requirements-test.txt ]] && \
+            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
+          pip install . --no-user
+          touch "$MARKER"
         fi
-        python -m pip install . --no-user
 
-    - name: Install project in wheel mode
+    - name: Install project (wheel form)
       run: |
-        source ${{ env.VENV_DIR }}/bin/activate
-        python -m pip install .  --no-user
+        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+        pip install . --no-user
 
     - name: Run examples
       run: |
-        source ${{ env.VENV_DIR }}/bin/activate
+        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd examples
         unset PYTHONPATH
         python -m pytest -n 4 **/test*.py
 
     - name: Run tests
       run: |
-        source ${{ env.VENV_DIR }}/bin/activate
+        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd testing/python
         unset PYTHONPATH
         python -m pytest -n 4

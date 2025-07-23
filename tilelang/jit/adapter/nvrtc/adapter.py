@@ -40,7 +40,8 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                  device_mod: Optional[tvm.IRModule] = None,
                  kernel_global_source: Optional[str] = None,
                  verbose: bool = False,
-                 pass_configs: Optional[Dict[str, Any]] = None):
+                 pass_configs: Optional[Dict[str, Any]] = None,
+                 compile_flags: Optional[List[str]] = None):
 
         if not is_nvrtc_available:
             raise ImportError(NVRTC_UNAVAILABLE_WARNING)
@@ -83,6 +84,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         self.lib_generator = PyLibraryGenerator(self.target)
         self.lib_generator.update_lib_code(self.kernel_global_source)
         self.lib_generator.update_host_func(self.host_func)
+        self.lib_generator.assign_compile_flags(compile_flags)
         self.lib_generator.compile_lib()
         self.lib_generator.load_lib()
         self.libpath = self.lib_generator.libpath

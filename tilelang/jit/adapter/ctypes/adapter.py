@@ -49,7 +49,8 @@ class CtypesKernelAdapter(BaseKernelAdapter):
                  device_mod: Optional[tvm.IRModule] = None,
                  kernel_global_source: Optional[str] = None,
                  verbose: bool = False,
-                 pass_configs: Optional[Dict[str, Any]] = None):
+                 pass_configs: Optional[Dict[str, Any]] = None,
+                 compile_flags: Optional[List[str]] = None):
         """Initialize the adapter with the given TIR function or module.
         
         Args:
@@ -89,6 +90,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         self.wrapper = TLWrapper(self.target)
         self.lib_generator = LibraryGenerator(self.target)
         self.lib_generator.assign_pass_configs(pass_configs)
+        self.lib_generator.assign_compile_flags(compile_flags)
 
         self.wrapper.assign_optimized_module(self.ir_module)
         self.wrapper.assign_pass_configs(pass_configs)
@@ -112,7 +114,8 @@ class CtypesKernelAdapter(BaseKernelAdapter):
                       kernel_global_source: str,
                       kernel_lib_path: str,
                       verbose: bool = False,
-                      pass_configs: Optional[Dict[str, Any]] = None):
+                      pass_configs: Optional[Dict[str, Any]] = None,
+                      compile_flags: Optional[List[str]] = None):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
@@ -145,6 +148,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         adapter.verbose = verbose
         adapter.lib_generator = LibraryGenerator(adapter.target)
         adapter.lib_generator.assign_pass_configs(pass_configs)
+        adapter.lib_generator.assign_compile_flags(compile_flags)
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
         adapter.lib.init()
 

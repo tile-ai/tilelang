@@ -37,6 +37,7 @@ def compile(
     target_host: Union[str, Target] = None,
     verbose: bool = False,
     pass_configs: Optional[Dict[str, Any]] = None,
+    compile_flags: Optional[Union[List[str], str]] = None,
 ) -> JITKernel:
     """
     Compile the given TileLang PrimFunc with TVM and build a JITKernel.
@@ -66,7 +67,8 @@ def compile(
             "tl.disable_safe_memory_legalize": bool, default: False
     """
     assert isinstance(func, PrimFunc), f"target function must be a PrimFunc but got {type(func)}"
-
+    if isinstance(compile_flags, str):
+        compile_flags = [compile_flags]
     return cached(
         func=func,
         out_idx=out_idx,
@@ -75,6 +77,7 @@ def compile(
         target_host=target_host,
         verbose=verbose,
         pass_configs=pass_configs,
+        compile_flags=compile_flags,
     )
 
 
@@ -87,6 +90,7 @@ class _JitImplementation:
     verbose: bool
     pass_configs: Optional[Dict[str, Any]]
     debug_root_path: Optional[str]
+    compile_flags: Optional[List[str]]
 
     def __init__(self,
                  out_idx: Any = None,
@@ -95,7 +99,8 @@ class _JitImplementation:
                  execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None,
-                 debug_root_path: Optional[str] = None):
+                 debug_root_path: Optional[str] = None,
+                 compile_flags: Optional[List[str]] = None):
         """
         Initializes the JIT compiler decorator.
 
@@ -134,6 +139,7 @@ class _JitImplementation:
         self.target_host = target_host
         self.verbose = verbose
         self.pass_configs = pass_configs
+        self.compile_flags = compile_flags
 
         # Corrected debug_root_path handling
         self.debug_root_path = debug_root_path
@@ -176,6 +182,7 @@ class _JitImplementation:
                     'target_host': self.target_host,
                     'verbose': self.verbose,
                     'pass_configs': self.pass_configs,
+                    'compile_flags': self.compile_flags,
                 }
                 return compile_args
 
@@ -202,6 +209,7 @@ class _JitImplementation:
                     target_host=self.target_host,
                     verbose=self.verbose,
                     pass_configs=self.pass_configs,
+                    compile_flags=self.compile_flags,
                 )
 
                 if self.debug_root_path:
@@ -230,7 +238,8 @@ def jit(  # This is the new public interface
         execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
         verbose: bool = False,
         pass_configs: Optional[Dict[str, Any]] = None,
-        debug_root_path: Optional[str] = None):
+        debug_root_path: Optional[str] = None,
+        compile_flags: Optional[Union[List[str], str]] = None):
     """
     Just-In-Time (JIT) compiler decorator for TileLang functions.
 
@@ -262,6 +271,9 @@ def jit(  # This is the new public interface
         Either a JIT-compiled wrapper around the input function, or a configured decorator
         instance that can then be applied to a function.
     """
+    if isinstance(compile_flags, str):
+        compile_flags = [compile_flags]
+
     if callable(func):
         # Case 1: Used as @jit (func_or_out_idx is the function, others are defaults)
         # Create a default _JitImplementation instance and apply it to the function.
@@ -272,7 +284,8 @@ def jit(  # This is the new public interface
             execution_backend=execution_backend,
             verbose=verbose,
             pass_configs=pass_configs,
-            debug_root_path=debug_root_path)
+            debug_root_path=debug_root_path,
+            compile_flags=compile_flags)
         return default_decorator(func)
     elif isinstance(func, PrimFunc):
         raise ValueError("Use tilelang.jit to decorate prim_func is not supported yet.")
@@ -287,5 +300,6 @@ def jit(  # This is the new public interface
             execution_backend=execution_backend,
             verbose=verbose,
             pass_configs=pass_configs,
-            debug_root_path=debug_root_path)
+            debug_root_path=debug_root_path,
+            compile_flags=compile_flags)
         return configured_decorator

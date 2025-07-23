@@ -1,6 +1,8 @@
 import tilelang.language as T
 from tilelang.tools import Analyzer
 from tilelang.carver.arch import CUDA
+from tilelang.carver.arch import CDNA
+import torch
 
 M = N = K = 1024
 
@@ -47,7 +49,10 @@ def kernel(
 def main():
     my_func = kernel(128, 128, 32, 3, 128, True)
 
-    cuda_device = CUDA("cuda")
+    if torch.version.hip is not None:
+        cuda_device=CDNA("hip")
+    else:
+        cuda_device = CUDA("cuda")
     result = Analyzer.analysis(my_func, cuda_device)
 
     print(f"Analyzed FLOPs: {result.total_flops}")
