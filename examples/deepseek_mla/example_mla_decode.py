@@ -277,12 +277,12 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
 
 
 def main(
-    batch = 1,
-    heads = 128,
-    kv_heads = 1,
-    kv_ctx = 8192,
-    dim = 512,
-    pe_dim = 64,
+    batch=1,
+    heads=128,
+    kv_heads=1,
+    kv_ctx=8192,
+    dim=512,
+    pe_dim=64,
 ):
     qk_flops = 2 * batch * heads * kv_ctx * (dim + pe_dim)
     pv_flops = 2 * batch * heads * kv_ctx * dim
