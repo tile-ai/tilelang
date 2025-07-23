@@ -258,6 +258,8 @@ private:
     // TODO(tqchen) more standard set based testing.
     bool has_same_index = true;
     bool range_is_equal = true;
+    bool range_is_overlap = true;
+
     for (const auto &kv : prev.thread_range) {
       if (!StructuralEqual()(kv.second, curr.thread_range[kv.first])) {
         range_is_equal = false;
@@ -274,6 +276,13 @@ private:
       const auto &prev_indice = prev.buffer_indices[i];
       const auto &curr_indice = curr.buffer_indices[i];
       if (!ExprDeepEqual()(prev_indice, curr_indice)) {
+        // if we can prove prev_indice < curr_indice or prev_indice >
+        // curr_indice, then they are not overlap
+        range_is_overlap =
+            !(analyzer_.CanProve(prev_indice < curr_indice,
+                                 arith::ProofStrength::kSymbolicBound) ||
+              analyzer_.CanProve(prev_indice > curr_indice,
+                                 arith::ProofStrength::kSymbolicBound));
         has_same_index = false;
       }
 
@@ -291,9 +300,13 @@ private:
     if (prev.double_buffer_write && curr.type == kRead && !loop_carry) {
       return false;
     }
+
     // If nothing else allows sharing the same buffer, then they are
     // in conflict.
-    return true;
+    // if range_is_overlap is true, then they are in conflict, we should return
+    // true. if range_is_overlap is false, then they are not in conflict, we
+    // should return false.
+    return range_is_overlap;
   }
 
   void VisitStmt_(const AttrStmtNode *op) final {

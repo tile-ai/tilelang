@@ -175,7 +175,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
             mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
-
     # Inject PTX async copy must behind the thread sync pass
     # as ptx async copy won't be recognized as a valid buffer load
     mod = tilelang.transform.InjectPTXAsyncCopy()(mod)

@@ -22,7 +22,7 @@ from vllm.assets.image import ImageAsset
 from vllm.config import TokenizerPoolConfig
 from vllm.distributed import (
     destroy_distributed_environment,
-    destroy_model_parallel,
+    destroy_model_parallel,d
 )
 from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
