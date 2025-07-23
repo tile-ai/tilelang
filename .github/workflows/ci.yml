@@ -67,10 +67,12 @@ jobs:
       run: |
         source tilelang_ci/bin/activate
         cd examples
+        unset PYTHONPATH
         python -m pytest **/test*.py
 
     - name: Run tests
       run: |
         source tilelang_ci/bin/activate
         cd testing/python
+        unset PYTHONPATH
         python -m pytest
