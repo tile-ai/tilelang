@@ -3,7 +3,7 @@ on: [pull_request]
 
 env:
   PYTHON_VERSION: '3.9'
-  VENV_DIR: ~/ci_venvs/tilelang_ci
+  VENV_DIR: tilelang_ci
 
 jobs:
   format-check:
@@ -24,20 +24,20 @@ jobs:
       run: |
         set -e
         REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
-        MARKER="${{ runner.temp }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
+        MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
 
-        if [[ -f "$MARKER" ]] && [[ -f "${{ env.VENV_DIR }}/bin/activate" ]]; then
+        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
           echo "venv exists and hash matches – reuse it"
         else
           echo "venv stale or missing – recreating"
-          rm -rf "${{ env.VENV_DIR }}" "$MARKER"
-          python -m venv "${{ env.VENV_DIR }}"
+          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
+          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
           # shellcheck source=/dev/null
-          source "${{ env.VENV_DIR }}/bin/activate"
-          python -m pip install --upgrade pip
+          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+          python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt
-          pip install .
+          pip install . --no-user
           touch "$MARKER"
         fi
 
@@ -46,11 +46,12 @@ jobs:
 
     - name: Run format check
       run: |
-        source "${{ env.VENV_DIR }}/bin/activate"
+        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         ./format.sh
 
   build-test:
     runs-on: self-hosted
+    needs: format-check
 
     steps:
     - name: Checkout repository
@@ -67,37 +68,37 @@ jobs:
       run: |
         set -e
         REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
-        MARKER="${{ runner.temp }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
+        MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
 
-        if [[ -f "$MARKER" ]] && [[ -f "${{ env.VENV_DIR }}/bin/activate" ]]; then
+        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
           echo "venv exists and hash matches – reuse it"
         else
           echo "venv stale or missing – recreating"
-          rm -rf "${{ env.VENV_DIR }}" "$MARKER"
-          python -m venv "${{ env.VENV_DIR }}"
-          source "${{ env.VENV_DIR }}/bin/activate"
-          python -m pip install --upgrade pip
+          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
+          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
+          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+          python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt
-          pip install .
+          pip install . --no-user
           touch "$MARKER"
         fi
 
     - name: Install project (wheel form)
       run: |
-        source "${{ env.VENV_DIR }}/bin/activate"
+        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         pip install .
 
     - name: Run examples
       run: |
-        source "${{ env.VENV_DIR }}/bin/activate"
+        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd examples
         unset PYTHONPATH
         python -m pytest -n 4 **/test*.py
 
     - name: Run tests
       run: |
-        source "${{ env.VENV_DIR }}/bin/activate"
+        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd testing/python
         unset PYTHONPATH
         python -m pytest -n 4
