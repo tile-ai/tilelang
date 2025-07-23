@@ -4,7 +4,7 @@ from .cpu import CPU
 from .cdna import CDNA
 from typing import Union
 from tvm.target import Target
-
+import torch
 
 def get_arch(target: Union[str, Target] = "cuda") -> TileDevice:
     if isinstance(target, str):
@@ -23,7 +23,12 @@ def get_arch(target: Union[str, Target] = "cuda") -> TileDevice:
 def auto_infer_current_arch() -> TileDevice:
     # TODO(lei): This is a temporary solution to infer the current architecture
     # Can be replaced by a more sophisticated method in the future
-    return get_arch("cuda")
+    if torch.version.hip is not None:
+        return get_arch("hip")
+    if torch.cuda.is_available():
+        return get_arch("cuda")
+    else:
+        return get_arch("llvm")
 
 
 from .cpu import is_cpu_arch  # noqa: F401
