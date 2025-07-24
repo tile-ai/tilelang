@@ -158,7 +158,7 @@ Fragment FragmentNode::Repeat(const Array<PrimExpr> &repeats,
     auto new_forward_thread =
         Substitute(forward_thread_, vmap) + thread_size * repeats_index;
     return Fragment(new_input_size, new_forward_index, new_forward_thread,
-                    replicate_size_, NullOpt);
+                    replicate_size_, std::nullopt);
   } else {
     ICHECK(OutputDim() == 1);
     PrimExpr frag_len = OutputShape()[0];
@@ -166,7 +166,7 @@ Fragment FragmentNode::Repeat(const Array<PrimExpr> &repeats,
                                          frag_len * repeats_index};
     PrimExpr new_forward_thread = Substitute(forward_thread_, vmap);
     return Fragment(new_input_size, new_forward_index, new_forward_thread,
-                    replicate_size_, NullOpt);
+                    replicate_size_, std::nullopt);
   }
 }
 
@@ -179,7 +179,7 @@ Fragment FragmentNode::Replicate(int repeats) const {
       Substitute(forward_thread_, vmap) +
       ThreadExtent() * FloorDiv(ReplicationPlaceholder(), ReplicateExtent());
   return Fragment(input_size_, forward_index_, new_forward_thread,
-                  ReplicateExtent() * repeats, NullOpt);
+                  ReplicateExtent() * repeats, std::nullopt);
 }
 
 Fragment FragmentNode::DeReplicate() const {
@@ -201,7 +201,7 @@ Fragment FragmentNode::DeReplicate() const {
   PrimExpr new_forward_thread = Substitute(forward_thread_, vmap);
   Array<PrimExpr> new_forward_index = {FloorDiv(forward_index_[0], factor)};
   return Fragment(input_size_, new_forward_index, new_forward_thread,
-                  int(*rep_size) / factor, NullOpt);
+                  int(*rep_size) / factor, std::nullopt);
 }
 
 Fragment FragmentNode::BindThreadRange(Range thread_range) const {

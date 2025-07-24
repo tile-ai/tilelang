@@ -705,11 +705,11 @@ public:
     return runtime::ModulePropertyMask::kBinarySerializable;
   }
 
-  PackedFunc GetFunction(const String &name,
-                         const ObjectPtr<Object> &sptr_to_self) final {
+  ffi::Function GetFunction(const String &name,
+                            const ObjectPtr<Object> &sptr_to_self) final {
     LOG(FATAL) << "WebGPUSourceModule is not directly runnable, export and run "
                   "through tvmjs";
-    return PackedFunc(nullptr);
+    return ffi::Function(nullptr);
   }
 
   void SaveToBinary(dmlc::Stream *stream) final {

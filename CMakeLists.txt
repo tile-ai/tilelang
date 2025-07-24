@@ -154,6 +154,7 @@ message(STATUS "TVM_SOURCE_DIR: ${TVM_SOURCE_DIR}")
 # Include directories for TileLang
 set(TILE_LANG_INCLUDES
   ${TVM_SOURCE_DIR}/include
+  ${TVM_SOURCE_DIR}/ffi/include
   ${TVM_SOURCE_DIR}/src
   ${TVM_SOURCE_DIR}/3rdparty/dlpack/include
   ${TVM_SOURCE_DIR}/3rdparty/dmlc-core/include

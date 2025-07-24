@@ -201,7 +201,7 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   for (int i = src_layout->OutputDim() - 1; i >= 0; i--) {
     reduce_local =
         For(src_var_compressed[i]->var, 0, src_var_compressed[i]->dom->extent,
-            ForKind::kUnrolled, reduce_local, NullOpt,
+            ForKind::kUnrolled, reduce_local, std::nullopt,
             {{tir::attr::pragma_unroll_explicit, Bool(false)}});
   }
   stmts.push_back(reduce_local);
@@ -213,7 +213,7 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       arith::NormalizeToIterSum(src_thread, ToVMap(src_vars), analyzer);
   for (const auto &iter_split : iter_sum->args) {
     auto mark = iter_split->source->source.as<Var>();
-    ICHECK(mark.defined());
+    ICHECK(mark) << "Not a normalized iterator: " << iter_split->source;
     if (mark.value().same_as(src_vars[this->dim]->var)) {
       auto scale = as_const_int(iter_split->scale);
       auto extent = as_const_int(iter_split->extent);
@@ -307,7 +307,7 @@ LayoutMap ReduceOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     auto thd = src_layout->ForwardThread(
         fwd, FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
     Fragment dst_layout =
-        Fragment(dst->shape, {}, thd, dest_buffer_rep_extent, NullOpt)
+        Fragment(dst->shape, {}, thd, dest_buffer_rep_extent, std::nullopt)
             ->CondenseReplicateVar()
             ->BindThreadRange(T.thread_bounds);
     return {{dst, dst_layout}};

@@ -238,7 +238,7 @@ private:
   }
 
   PrimExpr HandleAccessPtrAndOffset(PrimExpr access_ptr,
-                                    Optional<PrimExpr> offset = NullOpt,
+                                    Optional<PrimExpr> offset = std::nullopt,
                                     DataType dtype = DataType::Int(32)) {
     // The 2th arg of T.tvm_access_ptr call is offset, we set it to 0 and
     // accumulate it to smem_offset
@@ -321,7 +321,7 @@ private:
                         op->op.same_as(tl::tma_store()))) {
       has_tma_ = true;
     }
-    Array<RelayExpr> ptx_instructions = {builtin::ptx_ldmatrix(),
+    Array<RelaxExpr> ptx_instructions = {builtin::ptx_ldmatrix(),
                                          builtin::mma_store()};
 
     if (std::find(ptx_instructions.begin(), ptx_instructions.end(), op->op) ==
@@ -357,7 +357,7 @@ private:
       // mma_store now
       auto access_ptr = call->args[2];
       auto new_access_ptr =
-          HandleAccessPtrAndOffset(access_ptr, NullOpt, call->dtype);
+          HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
       auto new_call = call.CopyOnWrite();
       new_call->args.Set(2, new_access_ptr);
     } else {

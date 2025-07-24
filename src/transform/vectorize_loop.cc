@@ -632,7 +632,7 @@ public:
       return Scalarize(GetRef<Stmt>(op));
     }
     Stmt then_case = this->VisitStmt(op->then_case);
-    Optional<Stmt> else_case = NullOpt;
+    Optional<Stmt> else_case = std::nullopt;
     if (op->else_case) {
       else_case = this->VisitStmt(op->else_case.value());
     }
@@ -784,6 +784,10 @@ private:
   }
 };
 
+inline bool TargetHasSVE() {
+  return Target::Current()->GetFeature<Bool>("has_sve").value_or(false);
+}
+
 class LoopVectorizer : public StmtMutator {
 public:
   Stmt VisitStmt_(const ForNode *op) final {
@@ -793,7 +797,7 @@ public:
       if (!extent_as_int || extent_as_int->value < 1) {
         bool is_scalable_expr =
             CheckContains::ExprContains(op->extent, arith::IsVScaleCall);
-        ICHECK(is_scalable_expr && arith::TargetHasSVE())
+        ICHECK(is_scalable_expr && TargetHasSVE())
             << "Failed to vectorize loop with extent " << op->extent
             << " for target " << Target::Current();
       }

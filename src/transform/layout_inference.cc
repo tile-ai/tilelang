@@ -313,7 +313,7 @@ private:
       auto var = call->args[1].as<Var>().value();
       return buffer_data_to_buffer_[var];
     }
-    return NullOpt;
+    return std::nullopt;
   }
 
   void addToUseList(const Buffer &buffer) {
@@ -354,11 +354,9 @@ private:
     }
     if (op->annotations.count(attr::kLayoutMap)) {
       // Check if the layout map is Map<Var, Layout>
-      auto map = op->annotations.Get(attr::kLayoutMap).as<Map<Var, Layout>>();
-      ICHECK(map.defined()) << "layout map is not defined";
-      ICHECK(map.value().defined()) << "layout map is not defined";
-
-      for (const auto &[var, layout] : map.value()) {
+      auto map =
+          op->annotations.Get(attr::kLayoutMap)->as<Map<Var, Layout>>().value();
+      for (const auto &[var, layout] : map) {
         ICHECK(buffer_data_to_buffer_.count(var))
             << "buffer " << var << " is not found in the block";
         auto buffer = buffer_data_to_buffer_[var];

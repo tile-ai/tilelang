@@ -5,7 +5,6 @@ namespace tvm {
 namespace codegen {
 
 runtime::Module BuildCPPHost(IRModule mod, Target target) {
-  using tvm::runtime::Registry;
   bool output_ssa = false;
   bool emit_asserts = false;
   bool emit_fwd_func_decl = true;

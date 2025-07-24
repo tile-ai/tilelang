@@ -353,12 +353,7 @@ private:
 };
 
 PrimFunc FlattenBufferRewriter(PrimFunc f) {
-  // Only apply this pass to TIR that is not from TE schedules
-  if (!IsFromLegacyTESchedule(f)) {
-    return BufferFlattener::Flatten(f);
-  } else {
-    return f;
-  }
+  return BufferFlattener::Flatten(f);
 }
 
 using namespace tir::transform;

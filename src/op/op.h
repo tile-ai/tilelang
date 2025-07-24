@@ -22,7 +22,7 @@ using namespace tir;
 using AddWorkspaceCallback = std::function<PrimExpr(int, DataType)>;
 using LayoutMap = Map<Buffer, Layout>;
 using BufferMap = Map<Var, Buffer>;
-using OpBuilderFunc = TypedPackedFunc<void *(Array<PrimExpr>, BufferMap)>;
+using OpBuilderFunc = ffi::TypedFunction<void *(Array<PrimExpr>, BufferMap)>;
 
 #define TIR_REGISTER_TL_OP(Entry, OpName)                                      \
   const Op &Entry::Get() {                                                     \

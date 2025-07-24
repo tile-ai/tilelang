@@ -270,7 +270,7 @@ private:
       scope_.pop_back();
       s.access.insert(s.access.end(), v.begin(), v.end());
 
-      num_partial_threads_ = NullOpt;
+      num_partial_threads_ = std::nullopt;
     } else {
       TileLangStorageAccessVisitor::VisitStmt_(op);
     }

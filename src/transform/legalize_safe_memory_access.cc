@@ -314,7 +314,7 @@ private:
     }
     if (op->annotations.count(attr::kPaddingMap)) {
       auto map = op->annotations.Get(attr::kPaddingMap)
-                     .as<Map<Var, PrimExpr>>()
+                     ->as<Map<Var, PrimExpr>>()
                      .value();
       for (const auto &[var, padding] : map) {
         ICHECK(buffer_data_to_buffer_.count(var))

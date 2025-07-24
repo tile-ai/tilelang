@@ -66,7 +66,7 @@ ForFrame ParallelFor(Array<PrimExpr> extents,
       Var var = vars[i];
       body =
           For(var, dom->min, dom->extent, ForKind::kParallel, std::move(body),
-              /*thread_binding=*/NullOpt, /*annotations=*/annotations);
+              /*thread_binding=*/std::nullopt, /*annotations=*/annotations);
     }
     return body;
   };
@@ -100,7 +100,7 @@ ForFrame PipelinedFor(PrimExpr start, PrimExpr stop, int num_stages,
       anno.Set("tl_pipeline_group", groups);
     body = For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kSerial,
                std::move(body),
-               /*thread_binding=*/NullOpt, /*annotations=*/anno);
+               /*thread_binding=*/std::nullopt, /*annotations=*/anno);
     return body;
   };
   return ForFrame(n);

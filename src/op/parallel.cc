@@ -230,7 +230,7 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       // Check if coalesced_width is defined
       if (auto coalesced_width =
               root_->annotations.Get(tl::attr::coalesced_width)) {
-        if (const auto *imm = coalesced_width.as<IntImmNode>()) {
+        if (const auto *imm = coalesced_width->as<IntImmNode>()) {
           int expected = imm->value;
           // Verify that vector_size is divisible by expected
           if (vector_size % expected != 0) {
@@ -278,8 +278,8 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
         continue;
       auto vars =
           loop_vars_.Map([](const IterVar &iv) { return PrimExpr(iv->var); });
-      auto lhs = loop_layout_->ForwardThread(vars, NullOpt);
-      auto rhs = fragment->ForwardThread(indice_map_[buffer], NullOpt);
+      auto lhs = loop_layout_->ForwardThread(vars, std::nullopt);
+      auto rhs = fragment->ForwardThread(indice_map_[buffer], std::nullopt);
       auto diff = analyzer_.Simplify(lhs - rhs);
       ICHECK(is_zero(diff))
           << "Layout infer conflict for " << buffer << " " << source_buffer
@@ -335,7 +335,7 @@ Optional<PrimExpr> ParallelOp::GetPredicate(Var thread_var) const {
   if (predicate_.defined()) {
     return Substitute(predicate_.value(), {{InputPlaceholder(0), thread_var}});
   } else {
-    return NullOpt;
+    return std::nullopt;
   }
 }
 
@@ -361,7 +361,8 @@ Fragment ParallelOp::CompleteBufferFragment(const Buffer &buffer) {
   PrimExpr thd_b = loop_layout_->ForwardThread(
       ind_inv->Forward(fwd),
       FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
-  return Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent, NullOpt)
+  return Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent,
+                  std::nullopt)
       ->CondenseReplicateVar();
 }
 
