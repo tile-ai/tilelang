@@ -302,9 +302,9 @@ def ref_program(Q, K, V, is_causal, groups=1):
     return output
 
 
-def main(BATCH: int = 8,
+def main(BATCH: int = 1,
          H: int = 32,
-         N_CTX: int = 1024,
+         N_CTX: int = 256,
          D_HEAD_QK: int = 192,
          D_HEAD_V: int = 128,
          groups: int = 16,

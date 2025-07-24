@@ -170,10 +170,10 @@ def ref_program(Q, K, V, is_causal):
 
 
 def main(
-    batch: int = 8,
+    batch: int = 1,
     heads: int = 32,
-    seq_q: int = 4096,
-    seq_kv: int = 4096,
+    seq_q: int = 256,
+    seq_kv: int = 256,
     dim: int = 128,
     is_causal: bool = False,
     tune: bool = False,
