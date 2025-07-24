@@ -1,6 +1,4 @@
 # -*- coding: utf-8 -*-
-import os
-import sys
 
 # General information about the project.
 project = "Tile Language <br>"
@@ -34,7 +32,7 @@ autoapi_options = [
     'show-module-summary',
     'special-members',
 ]
-autoapi_keep_files = False # Useful for debugging the generated rst files
+autoapi_keep_files = False  # Useful for debugging the generated rst files
 
 autoapi_generate_api_docs = True
 
