@@ -9,7 +9,7 @@ from tilelang.layout import Layout
 from typing import List
 
 
-@tvm._ffi.register_object("tl.Fragment")
+@tvm.ffi.register_object("tl.Fragment")
 class Fragment(Layout):
     """
     A Fragment layout object that encapsulates iteration variables (forward_vars),

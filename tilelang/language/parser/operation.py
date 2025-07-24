@@ -21,7 +21,7 @@
 from typing import Type
 
 from tvm import tir
-from tvm._ffi.runtime_ctypes import DataType, DataTypeCode
+from tvm.ffi.runtime_ctypes import DataType, DataTypeCode
 from tvm.tir import IntImm
 from tvm.tir.expr import FloatImm
 

@@ -1,6 +1,6 @@
 /*!
  * \file simplify.cc
- * \brief Remove useless parameters of TL PrimFunc.
+ * \brief Statement simplifier based on analyzer and remove useless parameters of TL PrimFunc.
  */
 
 #include <tvm/ffi/reflection/registry.h>
@@ -57,6 +57,8 @@ struct SimplifyConfigNode : public AttrsNodeReflAdapter<SimplifyConfigNode> {
                 "branch",
                 refl::DefaultValue(false));
   }
+  static constexpr const char* _type_key = "tl.transform.SimplifyConfig";
+  TVM_FFI_DECLARE_FINAL_OBJECT_INFO(SimplifyConfigNode, BaseAttrsNode);
 
   RewriteSimplifier::Extension GetEnabledExtensions() const {
     RewriteSimplifier::Extension flags = RewriteSimplifier::kNone;
@@ -205,6 +207,7 @@ public:
   TVM_DEFINE_NOTNULLABLE_OBJECT_REF_METHODS(SimplifyConfig, Attrs,
                                             SimplifyConfigNode);
 };
+TVM_FFI_STATIC_INIT_BLOCK({ SimplifyConfigNode::RegisterReflection(); });
 
 TVM_REGISTER_NODE_TYPE(SimplifyConfigNode);
 TVM_REGISTER_PASS_CONFIG_OPTION("tl.Simplify", SimplifyConfig);

@@ -145,9 +145,9 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
     host_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(host_mod)
     host_mod = tir.transform.CombineContextCall()(host_mod)
     if target_host.kind.name == "llvm":
-        host_mod = tvm._ffi.get_global_func("target.build.llvm")(host_mod, target_host)
+        host_mod = tvm.ffi.get_global_func("target.build.llvm")(host_mod, target_host)
     elif target_host.kind.name == "c":
-        host_mod = tvm._ffi.get_global_func("target.build.c")(host_mod, target_host)
+        host_mod = tvm.ffi.get_global_func("target.build.c")(host_mod, target_host)
     else:
         raise ValueError(f"Target host {target_host.kind.name} is not supported")
     return host_mod
@@ -159,9 +159,9 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     device_mod = tir.transform.Simplify()(device_mod)
 
     if target.kind.name == "cuda":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_cuda")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_cuda")(device_mod, target)
     elif target.kind.name == "hip":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
     else:
         raise ValueError(f"Target {target.kind.name} is not supported")
 
@@ -172,18 +172,19 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
     device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
     device_mod = tir.transform.LowerIntrin()(device_mod)
     device_mod = tir.transform.Simplify()(device_mod)
+    print(device_mod)
     if target.kind.name == "cuda":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_cuda_without_compile")(
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_cuda_without_compile")(
             device_mod, target)
     elif target.kind.name == "hip":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_hip_without_compile")(
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip_without_compile")(
             device_mod, target)
     elif target.kind.name == "c":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_cpp")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_cpp")(device_mod, target)
     elif target.kind.name == "llvm":
-        device_mod = tvm._ffi.get_global_func("target.build.llvm")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.llvm")(device_mod, target)
     elif target.kind.name == "webgpu":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_webgpu")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_webgpu")(device_mod, target)
     else:
         raise ValueError(f"Target {target.kind.name} is not supported")
 

@@ -1,4 +1,4 @@
-from tvm._ffi.registry import register_func
+from tvm.ffi.registry import register_func
 from tvm.ir import make_node
 
 

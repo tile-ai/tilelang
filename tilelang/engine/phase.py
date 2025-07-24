@@ -108,7 +108,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         # warp_specialized pass will pack the if stmt into the block
         # so we need to lower the opaque block first
-        mod = tir.transform.LowerOpaqueBlock()(mod)
+        mod = tilelang.transform.LowerOpaqueBlock()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
         mod = tilelang.transform.RewriteWgmmaSync()(mod)
         mod = tilelang.transform.InjectFenceProxy()(mod)
@@ -123,8 +123,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
             # in hopper device, wgmma is an async proxy
             # so we need to inject a fence proxy before it
             mod = tilelang.transform.InjectFenceProxy()(mod)
-
-    mod = tir.transform.LowerOpaqueBlock()(mod)
+    mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)

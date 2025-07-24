@@ -374,7 +374,7 @@ def AlignDynamicSharedMemoryAllocations(align_bytes: int = 16):
 def LowerSharedBarrier():
     """LowerSharedBarrier
     """
-    return _ffi_api.LowerThreadAllreduce()  # type: ignore
+    return _ffi_api.LowerSharedBarrier()  # type: ignore
 
 
 def StorageRewrite():
@@ -386,3 +386,9 @@ def StorageRewrite():
         The result pass
     """
     return _ffi_api.StorageRewrite()  # type: ignore
+
+
+def LowerOpaqueBlock():
+    """LowerOpaqueBlock
+    """
+    return _ffi_api.LowerOpaqueBlock()  # type: ignore
