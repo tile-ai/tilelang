@@ -19,12 +19,12 @@ class TensorSupplyType(Enum):
 
 
 def map_torch_type(intype: str) -> torch.dtype:
-    if intype == "e4m3_float8":
+    if intype == "float8_e4m3":
         assert hasattr(torch, "float8_e4m3fn"), \
             "torch.float8_e4m3fn is not supported in this version of torch" \
                 "Please upgrade torch >= 2.1.0"
         return torch.float8_e4m3fn
-    elif intype == "e5m2_float8":
+    elif intype == "float8_e5m2":
         assert hasattr(torch, "float8_e5m2"), \
             "torch.float8_e5m2 is not supported in this version of torch" \
                 "Please upgrade torch >= 2.1.0"
