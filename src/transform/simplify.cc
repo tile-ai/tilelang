@@ -1,6 +1,7 @@
 /*!
  * \file simplify.cc
- * \brief Statement simplifier based on analyzer and remove useless parameters of TL PrimFunc.
+ * \brief Statement simplifier based on analyzer and remove useless parameters
+ * of TL PrimFunc.
  */
 
 #include <tvm/ffi/reflection/registry.h>
@@ -57,7 +58,7 @@ struct SimplifyConfigNode : public AttrsNodeReflAdapter<SimplifyConfigNode> {
                 "branch",
                 refl::DefaultValue(false));
   }
-  static constexpr const char* _type_key = "tl.transform.SimplifyConfig";
+  static constexpr const char *_type_key = "tl.transform.SimplifyConfig";
   TVM_FFI_DECLARE_FINAL_OBJECT_INFO(SimplifyConfigNode, BaseAttrsNode);
 
   RewriteSimplifier::Extension GetEnabledExtensions() const {

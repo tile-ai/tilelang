@@ -181,8 +181,8 @@ public:
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
-    refl::ObjectDef<KernelLaunchFrameNode>()
-    .def_ro("frames", &KernelLaunchFrameNode::frames);
+    refl::ObjectDef<KernelLaunchFrameNode>().def_ro(
+        "frames", &KernelLaunchFrameNode::frames);
   }
 
   static constexpr const char *_type_key = "tl.KernelLaunchFrame";
@@ -372,7 +372,6 @@ TVM_FFI_STATIC_INIT_BLOCK({
   KernelLaunchFrameNode::RegisterReflection();
   WarpSpecializeFrameNode::RegisterReflection();
 });
-
 
 } // namespace tl
 } // namespace tvm
