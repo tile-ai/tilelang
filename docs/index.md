@@ -39,7 +39,7 @@ deeplearning_operators/deepseek_mla
 :maxdepth: 1
 :caption: API Reference
 
-api/modules
+autoapi/tilelang/index
 :::
 
 :::{toctree}

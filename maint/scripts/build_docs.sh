@@ -1,9 +1,7 @@
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements-test.txt
-python -m pip install -r docs/requirements.txt
-python -m pip install -e .
+python -m pip install --upgrade pip --no-user
+python -m pip install -r docs/requirements.txt --no-user
 
 cd docs
 make html

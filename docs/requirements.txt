@@ -1,11 +1,13 @@
 fastapi
 pydantic
-sphinx == 5.2.3
-sphinx-reredirects==0.1.2
-sphinx-tabs == 3.4.1
-sphinx-toolbox == 3.4.0
-sphinxcontrib-napoleon==0.7
-sphinxcontrib_httpdomain==1.8.1
+sphinx
+sphinx-reredirects
+sphinx-tabs
+sphinx-toolbox
+sphinxcontrib-napoleon
+sphinxcontrib_httpdomain
 furo
 uvicorn
 myst-parser
+sphinx-autoapi == 3.6.0
+astroid
