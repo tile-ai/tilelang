@@ -1,5 +1,6 @@
 #include "codegen_cuda.h"
 #include "runtime/cuda/cuda_module.h"
+#include "runtime/pack_args.h"
 #include <tvm/ffi/reflection/registry.h>
 
 namespace tvm {
@@ -20,7 +21,7 @@ ExtractFuncInfo(const IRModule &mod) {
         auto ptr = f->params[i]->type_annotation.as<PointerTypeNode>();
         if (ptr && ptr->storage_scope == "grid_constant") {
           info.arg_types.push_back(
-              DataType(ffi::TypeIndex::kTVMFFIGridConstant, 64, 1));
+              DataType(runtime::kDLGridConstant, 64, 1));
           continue;
         }
       }
