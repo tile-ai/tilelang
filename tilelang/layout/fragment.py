@@ -65,7 +65,7 @@ class Fragment(Layout):
 
         # Initialize placeholders for optional outputs
         forward_thread: IterVar = None
-        forward_index: tvm.ir.container.Array = None
+        forward_index: tvm.ir.container.Array = []
         thread_replicate: IterVar = None
 
         # If a forward_fn is provided, use it to derive both thread mapping and indices
@@ -80,7 +80,7 @@ class Fragment(Layout):
                 forward_thread, forward_index = forward_fn(*vars)
         else:
             # If no forward_fn is provided, compute forward_index (if any) via forward_index_fn
-            forward_index = forward_index_fn(*vars) if forward_index_fn else None
+            forward_index = forward_index_fn(*vars) if forward_index_fn else []
             # Then compute forward_thread via forward_thread_fn
             if replicate > 1:
                 thread_replicate = IterVar(Range(0, replicate), Var("rep", "int32"), 0)
@@ -90,7 +90,7 @@ class Fragment(Layout):
                 forward_thread = forward_thread_fn(*vars)
 
         # Ensure forward_index is an array if it isn't None
-        if forward_index is not None and not isinstance(forward_index, tvm.ir.container.Array):
+        if len(forward_index) > 0:
             forward_index = [forward_index]
 
         # Call TVM FFI constructor to set up internal data structures
