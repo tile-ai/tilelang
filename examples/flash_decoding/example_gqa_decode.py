@@ -169,7 +169,7 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
             T.fill(scores_max, -T.infinity(accum_dtype))
 
             loop_range = T.ceildiv((seqlen_kv // num_split), block_N)
-            T.fill(K_shared, 0)
+
             for k in T.Pipelined(loop_range, num_stages=num_stages):
                 T.copy(
                     K[bid, (seqlen_kv // num_split) * sid +
