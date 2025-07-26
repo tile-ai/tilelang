@@ -1,5 +1,7 @@
 #include "codegen_cuda.h"
 #include "runtime/cuda/cuda_module.h"
+#include "runtime/pack_args.h"
+#include <tvm/ffi/reflection/registry.h>
 
 namespace tvm {
 namespace codegen {
@@ -18,7 +20,7 @@ ExtractFuncInfo(const IRModule &mod) {
       if (f->params[i]->dtype.is_handle()) {
         auto ptr = f->params[i]->type_annotation.as<PointerTypeNode>();
         if (ptr && ptr->storage_scope == "grid_constant") {
-          info.arg_types.push_back(DataType(kTVMGridConstant, 64, 1));
+          info.arg_types.push_back(DataType(runtime::kDLGridConstant, 64, 1));
           continue;
         }
       }
@@ -36,7 +38,6 @@ ExtractFuncInfo(const IRModule &mod) {
 }
 
 runtime::Module BuildTileLangCUDA(IRModule mod, Target target) {
-  using tvm::runtime::Registry;
   bool output_ssa = false;
   CodeGenTileLangCUDA cg;
   cg.Init(output_ssa);
@@ -52,13 +53,15 @@ runtime::Module BuildTileLangCUDA(IRModule mod, Target target) {
   }
 
   std::string code = cg.Finish();
-  if (const auto *f = Registry::Get("tilelang_callback_cuda_postproc")) {
-    code = (*f)(code, target).operator std::string();
+  if (const auto f =
+          ffi::Function::GetGlobal("tilelang_callback_cuda_postproc")) {
+    code = (*f)(code, target).cast<std::string>();
   }
   std::string fmt = "ptx";
   std::string ptx;
-  if (const auto *f = Registry::Get("tilelang_callback_cuda_compile")) {
-    ptx = (*f)(code, target).operator std::string();
+  if (const auto f =
+          ffi::Function::GetGlobal("tilelang_callback_cuda_compile")) {
+    ptx = (*f)(code, target).cast<std::string>();
     if (ptx[0] != '/')
       fmt = "cubin";
   } else {
@@ -68,7 +71,6 @@ runtime::Module BuildTileLangCUDA(IRModule mod, Target target) {
 }
 
 runtime::Module BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
-  using tvm::runtime::Registry;
   bool output_ssa = false;
   CodeGenTileLangCUDA cg;
   cg.Init(output_ssa);
@@ -84,16 +86,20 @@ runtime::Module BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
   }
 
   std::string code = cg.Finish();
-  if (const auto *f = Registry::Get("tilelang_callback_cuda_postproc")) {
-    code = (*f)(code, target).operator std::string();
+  if (const auto f =
+          ffi::Function::GetGlobal("tilelang_callback_cuda_postproc")) {
+    code = (*f)(code, target).cast<std::string>();
   }
   return runtime::CUDAModuleCreate("ptx", "ptx", ExtractFuncInfo(mod), code);
 }
 
-TVM_REGISTER_GLOBAL("target.build.tilelang_cuda")
-    .set_body_typed(BuildTileLangCUDA);
-TVM_REGISTER_GLOBAL("target.build.tilelang_cuda_without_compile")
-    .set_body_typed(BuildTileLangCUDAWithoutCompile);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+      .def("target.build.tilelang_cuda", BuildTileLangCUDA)
+      .def("target.build.tilelang_cuda_without_compile",
+           BuildTileLangCUDAWithoutCompile);
+});
 
 } // namespace codegen
 } // namespace tvm

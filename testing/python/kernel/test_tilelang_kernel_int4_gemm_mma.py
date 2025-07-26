@@ -14,9 +14,10 @@ from tilelang.intrinsics.mma_macro_generator import (
 from tilelang.transform import simplify_prim_func
 
 tilelang.testing.set_random_seed(42)
+tilelang.disable_cache()
 
 
-@simplify_prim_func
+# @simplify_prim_func
 def tl_matmul(
     M,
     N,
@@ -164,7 +165,13 @@ def tl_matmul(
 
 def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
-    kernel = tilelang.compile(matmul, out_idx=[2])
+    kernel = tilelang.compile(
+        matmul,
+        out_idx=[2],
+        pass_configs={
+            tilelang.PassConfigKey.TL_DEBUG_MERGE_SHARED_MEMORY_ALLOCATIONS: True,
+        })
+    print(kernel.get_kernel_source())
     profiler = kernel.get_profiler()
 
     src_code = kernel.get_kernel_source()
@@ -400,4 +407,5 @@ def test_assert_tl_matmul_weight_only_transform():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    assert_tl_matmul_correctness(128, 128, 128, "int8", "int32", "int32")

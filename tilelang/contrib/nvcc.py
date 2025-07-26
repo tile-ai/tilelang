@@ -8,10 +8,10 @@ import subprocess
 import warnings
 from ..env import CUDA_HOME
 
-import tvm._ffi
+import tvm.ffi
 from tvm.target import Target
 
-from tvm._ffi.base import py_str
+from tvm.base import py_str
 from tvm.contrib import utils
 
 
@@ -181,14 +181,14 @@ def get_cuda_version(cuda_path=None):
     raise RuntimeError("Cannot read cuda version file")
 
 
-@tvm._ffi.register_func("tilelang_callback_cuda_compile", override=True)
+@tvm.ffi.register_func("tilelang_callback_cuda_compile", override=True)
 def tilelang_callback_cuda_compile(code, target):  # pylint: disable=unused-argument
     """use nvcc to generate fatbin code for better optimization"""
     ptx = compile_cuda(code, target_format="fatbin")
     return ptx
 
 
-@tvm._ffi.register_func("tilelang_callback_libdevice_path", override=True)
+@tvm.ffi.register_func("tilelang_callback_libdevice_path", override=True)
 def find_libdevice_path(arch):
     """Utility function to find libdevice
 
@@ -253,7 +253,7 @@ def callback_libdevice_path(arch):
         return ""
 
 
-@tvm._ffi.register_func("tvm.contrib.nvcc.get_compute_version", override=True)
+@tvm.ffi.register_func("tvm.contrib.nvcc.get_compute_version", override=True)
 def get_target_compute_version(target=None):
     """Utility function to get compute capability of compilation target.
 
@@ -391,7 +391,7 @@ def have_cudagraph():
         return False
 
 
-@tvm._ffi.register_func("tvm.contrib.nvcc.supports_bf16", override=True)
+@tvm.ffi.register_func("tvm.contrib.nvcc.supports_bf16", override=True)
 def have_bf16(compute_version):
     """Either bf16 support is provided in the compute capability or not
 
@@ -404,7 +404,7 @@ def have_bf16(compute_version):
     return major >= 8
 
 
-@tvm._ffi.register_func("tvm.contrib.nvcc.supports_fp8", override=True)
+@tvm.ffi.register_func("tvm.contrib.nvcc.supports_fp8", override=True)
 def have_fp8(compute_version):
     """Whether fp8 support is provided in the specified compute capability or not
 
@@ -421,7 +421,7 @@ def have_fp8(compute_version):
     return any(conditions)
 
 
-@tvm._ffi.register_func("tvm.contrib.nvcc.supports_tma", override=True)
+@tvm.ffi.register_func("tvm.contrib.nvcc.supports_tma", override=True)
 def have_tma(target):
     """Whether TMA support is provided in the specified compute capability or not
 

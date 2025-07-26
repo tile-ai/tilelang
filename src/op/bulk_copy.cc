@@ -40,7 +40,7 @@ static int to_CUtensorMapDataType(DataType dtype) {
     }
   } else if (dtype.is_bfloat16()) {
     tp = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
-  } else if (dtype.is_e4m3_float8() or dtype.is_e5m2_float8()) {
+  } else if (dtype.is_float8_e4m3() || dtype.is_float8_e5m2()) {
     tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
   } else if (dtype.is_int()) {
     switch (dtype.bits()) {
@@ -105,6 +105,12 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Buffer shared_tensor = is_load ? dst : src;
   Array<Range> global_range = is_load ? src_range : dst_range;
   Array<Range> shared_range = is_load ? dst_range : src_range;
+  if (T.layout_map.count(global_tensor)) {
+    LOG(WARNING) << "TMA bulk copy cannot support a non-swizzled global "
+                    "layout, fallback to normal copy.";
+    return Stmt();
+  }
+
   if (T.layout_map.count(global_tensor)) {
     LOG(WARNING) << "TMA bulk copy cannot support a non-swizzled global "
                     "layout, fallback to normal copy.";

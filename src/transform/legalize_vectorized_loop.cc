@@ -22,6 +22,7 @@
  * \brief infer the fragment/shared memory layout
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
@@ -88,8 +89,11 @@ tvm::transform::Pass LegalizeVectorizedLoop() {
 }
 
 // Register the pass globally so it can be used in the compilation pipeline
-TVM_REGISTER_GLOBAL("tl.transform.LegalizeVectorizedLoop")
-    .set_body_typed(LegalizeVectorizedLoop);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.LegalizeVectorizedLoop",
+                        LegalizeVectorizedLoop);
+});
 
 } // namespace tl
 } // namespace tvm

@@ -87,8 +87,8 @@ def LowerHopperIntrin():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.LowerHopperIntrin() \
-        if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f # type: ignore
+    return (_ffi_api.LowerHopperIntrin() if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f
+           )  # type: ignore
 
 
 def WarpSpecializedPipeline():
@@ -375,3 +375,20 @@ def LowerSharedBarrier():
     """LowerSharedBarrier
     """
     return _ffi_api.LowerSharedBarrier()  # type: ignore
+
+
+def StorageRewrite():
+    """StorageRewrite
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.StorageRewrite()  # type: ignore
+
+
+def LowerOpaqueBlock():
+    """LowerOpaqueBlock
+    """
+    return _ffi_api.LowerOpaqueBlock()  # type: ignore

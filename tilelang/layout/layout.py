@@ -9,7 +9,7 @@ from typing import List
 
 
 # Register the Layout class as a TVM object under the name "tl.Layout"
-@tvm._ffi.register_object("tl.Layout")
+@tvm.ffi.register_object("tl.Layout")
 class Layout(Node):
 
     def __init__(self, shape, forward_fn):

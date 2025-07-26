@@ -599,7 +599,7 @@ public:
       return Scalarize(GetRef<Stmt>(op));
     }
     Stmt then_case = this->VisitStmt(op->then_case);
-    Optional<Stmt> else_case = NullOpt;
+    Optional<Stmt> else_case = std::nullopt;
     if (op->else_case) {
       else_case = this->VisitStmt(op->else_case.value());
     }
@@ -680,10 +680,6 @@ public:
     Var idx(var_->name_hint + ".s", var_->dtype);
     stmt = Substitute(stmt, {{var_, idx}});
     return For(idx, IntImm(var_->dtype, 0), var_lanes_, ForKind::kSerial, stmt);
-  }
-  // ProducerStore
-  Stmt VisitStmt_(const ProducerStoreNode *op) final {
-    LOG(FATAL) << "ProducerProvide cannot appear in a TIR PrimFunc";
   }
 
 private:

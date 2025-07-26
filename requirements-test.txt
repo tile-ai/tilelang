@@ -1,6 +1,7 @@
 # lint requirements
 -r requirements-lint.txt
 # build requirements
+Cython
 cmake>=3.26
 # runtime requirements
 cffi

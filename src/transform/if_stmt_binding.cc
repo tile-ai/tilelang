@@ -3,6 +3,7 @@
  * \brief Bind the If Stmt to each Stmt in SeqStmt
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
@@ -80,7 +81,10 @@ tvm::transform::Pass IfStmtBinding() {
   return CreatePrimFuncPass(pass_func, 0, "tl.IfStmtBinding", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.IfStmtBinding").set_body_typed(IfStmtBinding);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.IfStmtBinding", IfStmtBinding);
+});
 
 } // namespace tl
 } // namespace tvm

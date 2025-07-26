@@ -6,7 +6,7 @@ import ctypes
 from typing import List, Optional, Union, Callable, Dict, Tuple, Any
 from tilelang import tvm as tvm
 from tvm.target import Target
-from tvm.relay import TensorType
+from tvm.relax import TensorType
 from tvm import tir
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator

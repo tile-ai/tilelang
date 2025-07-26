@@ -22,6 +22,7 @@
  * \brief Legalize the program from frontend
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
@@ -88,8 +89,10 @@ Pass FrontendLegalize() {
   return CreatePrimFuncPass(pass_func, 0, "tl.FrontendLegalize", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.FrontendLegalize")
-    .set_body_typed(FrontendLegalize);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.FrontendLegalize", FrontendLegalize);
+});
 
 } // namespace tl
 } // namespace tvm

@@ -51,9 +51,11 @@ def test_simple_pipeline():
             for ko in T.serial(
                     32,
                     annotations={
-                        "software_pipeline_async_stages": [0],
-                        "software_pipeline_order": [0, 1, 2],
-                        "software_pipeline_stage": [3, 3, 3]
+                        "software_pipeline_async_stages": [T.int32(0)],
+                        "software_pipeline_order": [T.int32(0), T.int32(1),
+                                                    T.int32(2)],
+                        "software_pipeline_stage": [T.int32(3), T.int32(3),
+                                                    T.int32(3)]
                     }):
                 T.copy(A[by * 128, ko * 32], A_shared)
                 T.copy(B[ko * 32, bx * 128], B_shared)

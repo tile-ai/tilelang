@@ -5,7 +5,7 @@ from collections import deque
 from tvm import tir
 from tvm.tir import Var
 from tvm.script.ir_builder.tir.frame import TIRFrame, BlockFrame
-from tvm._ffi import register_object
+from tvm.ffi import register_object
 from tilelang import _ffi_api
 import threading
 

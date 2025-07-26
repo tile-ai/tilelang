@@ -3,6 +3,7 @@
  * \brief legalize safe memory access
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
@@ -313,7 +314,7 @@ private:
     }
     if (op->annotations.count(attr::kPaddingMap)) {
       auto map = op->annotations.Get(attr::kPaddingMap)
-                     .as<Map<Var, PrimExpr>>()
+                     ->as<Map<Var, PrimExpr>>()
                      .value();
       for (const auto &[var, padding] : map) {
         ICHECK(buffer_data_to_buffer_.count(var))
@@ -353,8 +354,11 @@ tvm::transform::Pass LegalizeSafeMemoryAccess() {
 }
 
 // Register the pass globally so it can be used in the compilation pipeline
-TVM_REGISTER_GLOBAL("tl.transform.LegalizeSafeMemoryAccess")
-    .set_body_typed(LegalizeSafeMemoryAccess);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.LegalizeSafeMemoryAccess",
+                        LegalizeSafeMemoryAccess);
+});
 
 } // namespace tl
 } // namespace tvm

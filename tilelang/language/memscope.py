@@ -1,4 +1,4 @@
-from tvm._ffi.registry import register_func
+from tvm.ffi.registry import register_func
 from tvm.ir import make_node
 
 
@@ -10,7 +10,7 @@ def mem_info_local_var():
         tvm.ir.make_node: A node containing memory information
     """
     return make_node(
-        "MemoryInfo",
+        "target.MemoryInfo",
         unit_bits=8,
         max_num_bits=64,
         max_simd_bits=128,

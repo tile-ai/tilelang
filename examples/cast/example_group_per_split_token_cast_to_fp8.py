@@ -17,7 +17,7 @@ def group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m):
 
     @T.prim_func
     def group_per_split_token_cast(X: T.Tensor((M, N), dtype), batch_sizes: T.Tensor(
-        (BG,), "int32"), X_fp8: T.Tensor((BG, M_max, N), "e4m3_float8"), X_amax: T.Tensor(
+        (BG,), "int32"), X_fp8: T.Tensor((BG, M_max, N), "float8_e4m3"), X_amax: T.Tensor(
             (BG, M_max, T.ceildiv(N, group_size)), accum_dtype)):
         with T.Kernel(
                 T.ceildiv(M_max, blk_m), T.ceildiv(N, group_size), BG, threads=128) as (bx, by, bz):
@@ -28,7 +28,7 @@ def group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m):
             y_amax_local = T.alloc_fragment((blk_m,), accum_dtype)
             y_s_local = T.alloc_fragment((blk_m,), accum_dtype)
             y_q_local = T.alloc_fragment((blk_m, group_size), accum_dtype)
-            y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), "e4m3_float8")
+            y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), "float8_e4m3")
             row_offset = T.alloc_local((1,), "int32")
 
             T.annotate_layout({

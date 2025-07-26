@@ -57,8 +57,8 @@ def test_gemm_fp8(M, N, K, dtype):
 
 
 def main():
-    test_gemm_fp8(1024, 1024, 1024, 'e4m3_float8')
-    test_gemm_fp8(1024, 1024, 1024, 'e5m2_float8')
+    test_gemm_fp8(1024, 1024, 1024, 'float8_e4m3')
+    test_gemm_fp8(1024, 1024, 1024, 'float8_e5m2')
 
 
 if __name__ == "__main__":

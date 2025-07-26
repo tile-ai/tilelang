@@ -5,6 +5,7 @@
 
 #include "arith/ir_visitor_with_analyzer.h"
 #include "tir/analysis/var_use_def_analysis.h"
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
@@ -447,7 +448,7 @@ private:
       order_anno.push_back(Integer(op_info.order));
       stage_anno.push_back(Integer(op_info.stage));
     }
-    Map<String, ObjectRef> for_annotations = op->annotations;
+    Map<String, Any> for_annotations = op->annotations;
     for_annotations.erase("tl_pipeline_group");
     for_annotations.Set("software_pipeline_order", order_anno);
     for_annotations.Set("software_pipeline_stage", stage_anno);
@@ -636,9 +637,9 @@ private:
   Stmt VisitStmt_(const ForNode *op) final {
     int num_stages = 1;
     auto num_stages_anno = op->annotations.Get("num_stages");
-    if (num_stages_anno.defined()) {
-      ICHECK(num_stages_anno.as<IntImmNode>());
-      num_stages = static_cast<int>(num_stages_anno.as<IntImmNode>()->value);
+    if (num_stages_anno) {
+      ICHECK(num_stages_anno->as<IntImmNode>());
+      num_stages = static_cast<int>(num_stages_anno->as<IntImmNode>()->value);
       ICHECK(num_stages_ == 1) << "Nested pipeline not supported.";
     }
     loop_stack_.emplace_back(op->loop_var, op->extent);
@@ -648,16 +649,16 @@ private:
     Array<Integer> stage_info_array;
 
     auto group_anno = op->annotations.Get("tl_pipeline_group");
-    if (group_anno.defined()) {
-      group_info_array = Downcast<Array<Array<Integer>>>(group_anno);
+    if (group_anno) {
+      group_info_array = Downcast<Array<Array<Integer>>>(group_anno.value());
     }
     auto order_anno = op->annotations.Get("tl_pipeline_order");
-    if (order_anno.defined()) {
-      order_info_array = Downcast<Array<Integer>>(order_anno);
+    if (order_anno) {
+      order_info_array = Downcast<Array<Integer>>(order_anno.value());
     }
     auto stage_anno = op->annotations.Get("tl_pipeline_stage");
-    if (stage_anno.defined()) {
-      stage_info_array = Downcast<Array<Integer>>(stage_anno);
+    if (stage_anno) {
+      stage_info_array = Downcast<Array<Integer>>(stage_anno.value());
     }
 
     PipelineInfo pipeline_info(group_info_array, order_info_array,
@@ -686,8 +687,8 @@ private:
     auto result = FilterByRole(op);
 
     Stmt grouped_for_node;
-    if (result.as<ForNode>() && group_anno.defined() &&
-        group_info_array.size() > 0 && !is_emitting_producer_) {
+    if (result.as<ForNode>() && group_anno && group_info_array.size() > 0 &&
+        !is_emitting_producer_) {
       GroupOpRewriter group_op_rewriter(pipeline_info_);
       auto for_node = Downcast<For>(result);
       grouped_for_node = group_op_rewriter(for_node);
@@ -707,7 +708,7 @@ private:
         for_node.CopyOnWrite()->annotations.erase("tl_pipeline_order");
         for_node.CopyOnWrite()->annotations.erase("tl_pipeline_stage");
       }
-      if (is_emitting_producer_ || !group_anno.defined() ||
+      if (is_emitting_producer_ || !group_anno ||
           group_info_array.size() == 0) {
         loop_stack_.pop_back();
         return for_node;
@@ -1230,8 +1231,10 @@ tvm::transform::Pass WarpSpecialized() {
   return CreatePrimFuncPass(pass_func, 0, "tl.WarpSpecialized", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.WarpSpecialized")
-    .set_body_typed(WarpSpecialized);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.WarpSpecialized", WarpSpecialized);
+});
 
 } // namespace tl
 } // namespace tvm

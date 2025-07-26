@@ -3,6 +3,7 @@
  * \brief Lower L2 persistent annotation
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
@@ -59,8 +60,10 @@ tvm::transform::Pass PersistThreadblock() {
   return CreatePrimFuncPass(pass_func, 0, "tl.PersistThreadblock", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.PersistThreadblock")
-    .set_body_typed(PersistThreadblock);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.PersistThreadblock", PersistThreadblock);
+});
 
 } // namespace tl
 } // namespace tvm

@@ -11,6 +11,14 @@ endif()
 
 # Enable compile command export
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+if(NOT Python_EXECUTABLE)
+  execute_process(
+    COMMAND which python
+    OUTPUT_VARIABLE Python_EXECUTABLE
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  set(Python_EXECUTABLE "${Python_EXECUTABLE}" CACHE FILEPATH "Path to the Python executable")
+endif()
 
 # Define a custom macro for globbing files with conditional CONFIGURE_DEPENDS
 if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "3.12.0")
@@ -39,7 +47,8 @@ else()
 
   # Set default build type to RelWithDebInfo if not provided
   if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+  # Set default build type to Release if not provided
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
     message(STATUS "Setting default build type to ${CMAKE_BUILD_TYPE}")
   endif()
 endif()
@@ -145,6 +154,7 @@ message(STATUS "TVM_SOURCE_DIR: ${TVM_SOURCE_DIR}")
 # Include directories for TileLang
 set(TILE_LANG_INCLUDES
   ${TVM_SOURCE_DIR}/include
+  ${TVM_SOURCE_DIR}/ffi/include
   ${TVM_SOURCE_DIR}/src
   ${TVM_SOURCE_DIR}/3rdparty/dlpack/include
   ${TVM_SOURCE_DIR}/3rdparty/dmlc-core/include
@@ -210,6 +220,11 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   target_compile_definitions(tilelang PRIVATE "TVM_LOG_DEBUG")
   target_compile_definitions(tilelang_objs PRIVATE "TVM_LOG_DEBUG")
   target_compile_definitions(tilelang_static PRIVATE "TVM_LOG_DEBUG")
+endif()
+
+# Building tvm_cython modules
+if(NOT DEFINED TVM_PREBUILD_PATH)
+  add_dependencies(tilelang tvm_cython)
 endif()
 
 # Module shared library

@@ -25,8 +25,8 @@ class MatrixCoreIntrinEmitter(object):
         "float32": "fp32",
         "int8": "int8",
         "int32": "int32",
-        "e4m3_float8": "e4m3",
-        "e5m2_float8": "e5m2",
+        "float8_e4m3": "e4m3",
+        "float8_e5m2": "e5m2",
         "float8_e4m3fnuz": "e4m3fnuz",
     }
 

@@ -44,7 +44,7 @@ def test_warp_specialized():
             A_shared = T.alloc_buffer((3, 1, 8, 256), "float16", scope="shared.dyn")
             B_shared = T.alloc_buffer((3, 1, 4, 512), "float16", scope="shared.dyn")
             C_local = T.alloc_buffer((32,), scope="local")
-            for k in T.serial(16, annotations={"num_stages": 3}):
+            for k in T.serial(16, annotations={"num_stages": T.int32(3)}):
                 if v == 0:
                     T.tma_load(
                         T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2,
@@ -118,4 +118,4 @@ def test_warp_specialized():
 
 
 if __name__ == "__main__":
-    test_warp_specialized()
+    tilelang.testing.main()

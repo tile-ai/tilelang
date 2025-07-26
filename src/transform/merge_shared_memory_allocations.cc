@@ -23,8 +23,9 @@
  * memory allocation. This pass merges multiple TIR-level dynamic or static
  * shared memory allocations into one allocation.
  */
+#include <tvm/ffi/function.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/runtime/registry.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
@@ -1048,8 +1049,11 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
                             {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.MergeSharedMemoryAllocations")
-    .set_body_typed(MergeSharedMemoryAllocations);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.MergeSharedMemoryAllocations",
+                        MergeSharedMemoryAllocations);
+});
 
 } // namespace transform
 } // namespace tl

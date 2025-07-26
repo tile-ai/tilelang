@@ -8,7 +8,7 @@ from tvm.script.parser._core import parse, scan_macro, utils
 
 def prim_func(func: Optional[Callable] = None,
               private: bool = False,
-              check_well_formed=True) -> Union[PrimFunc, Callable]:
+              check_well_formed=False) -> Union[PrimFunc, Callable]:
     """The parsing method for tir prim func, by using `@prim_func` as decorator.
 
     Parameters
