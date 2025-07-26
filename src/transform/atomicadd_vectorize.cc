@@ -51,7 +51,8 @@ class AtomicAddVectorizePlanner : public arith::IRVisitorWithAnalyzer {
 public:
   AtomicAddVectorizePlanner() = default;
   int max_vector_size = 1;
-  AtomicAddVectorizePlanResult Plan(const For &node, Var thread_var, Range thread_bounds, int vectorize_hint) {
+  AtomicAddVectorizePlanResult Plan(const For &node, Var thread_var,
+                                    Range thread_bounds, int vectorize_hint) {
     this->max_vector_size = vectorize_hint;
     this->thread_var = thread_var;
     this->thread_bounds = thread_bounds;
@@ -144,9 +145,8 @@ private:
       LOG(INFO) << "elem_offset: " << elem_offset;
       LOG(INFO) << "inner_for_->loop_var " << inner_for_->loop_var;
       PrimExpr thread_extent = thread_bounds->extent;
-      while (!IndiceCanVectorize(elem_offset, thread_var,
-                                 thread_extent, vector_size_,
-                                 &analyzer_)) {
+      while (!IndiceCanVectorize(elem_offset, thread_var, thread_extent,
+                                 vector_size_, &analyzer_)) {
         LOG(INFO) << "devide2";
         vector_size_ /= 2;
       }
@@ -168,14 +168,15 @@ private:
   PrimExpr condition_;
 };
 
-
 // AtomicAddIndiceCanVectorize(PrimExpr expr, Var var, PrimExpr iter_var_size,
-//                         int target_vectorized_size, arith::Analyzer *analyzer) {
+//                         int target_vectorized_size, arith::Analyzer
+//                         *analyzer) {
 //   ICHECK(target_vectorized_size >= 1);
 //   if (target_vectorized_size == 1)
 //     return true;
 
-//   if (!analyzer->CanProveEqual(FloorMod(iter_var_size, target_vectorized_size),
+//   if (!analyzer->CanProveEqual(FloorMod(iter_var_size,
+//   target_vectorized_size),
 //                                0))
 //     return false;
 //   Var v1("v1");
@@ -306,7 +307,8 @@ static int GetVectorizeSizeMax(int compute_capability, DataType dtype) {
   return 1;
 }
 
-For VectorizeAtomicAdd(const For &for_node, Var thread_var, Range thread_bounds, int compute_capability) {
+For VectorizeAtomicAdd(const For &for_node, Var thread_var, Range thread_bounds,
+                       int compute_capability) {
 
   int vectorize_size_max = 1;
 

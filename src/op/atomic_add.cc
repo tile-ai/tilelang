@@ -203,8 +203,8 @@ Stmt AtomicAdd::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     Range thread_bounds = T.thread_bounds;
     auto thread_loop =
         PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer, loop_layout);
-    vectorized_thread_loop =
-        VectorizeAtomicAdd(thread_loop, thread_var, thread_bounds, GetArchInt(target));
+    vectorized_thread_loop = VectorizeAtomicAdd(
+        thread_loop, thread_var, thread_bounds, GetArchInt(target));
   }
 
   if (par_op->GetPredicate(T.thread_var).defined()) {
