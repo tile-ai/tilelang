@@ -1,10 +1,21 @@
 #include <cutlass/gemm/threadblock/default_mma_core_sparse_sm80.h>
-
+#include <stdio.h>
 using cutlass::gemm::GemmShape;
+
+// template <typename T>
+// static __device__ void print_type() {
+//   printf("%s\n", __PRETTY_FUNCTION__);
+// }
 
 namespace tl {
 
-template <typename Type> struct DispatchInstructionShape;
+static int const kSparse = 2;
+
+template <typename Type>
+struct DispatchInstructionShape {
+  static_assert(std::is_same<Type, void>::value, "Unsupported type for DispatchInstructionShape");
+};
+
 template<>
 struct DispatchInstructionShape<cutlass::half_t> {
   using Shape = GemmShape<16, 8, 32>;
@@ -35,6 +46,39 @@ struct DispatchInstructionShape<cutlass::int4b_t> {
   using Shape = GemmShape<16, 8, 128>;
 };
 
+template <typename T, bool transpose, int M, int K>
+struct DispatchSharedMemoryLayoutA;
+
+template <typename T, int M, int K>
+struct DispatchSharedMemoryLayoutA<T, false, M, K> {
+  using SmemLayoutA = cutlass::layout::RowMajorTensorOpMultiplicandCrosswise<cutlass::sizeof_bits<T>::value, K / kSparse>;
+};
+
+template <typename T, int M, int K>
+struct DispatchSharedMemoryLayoutA<T, true, M, K> {
+  static int const Crosswise_A = cutlass::platform::min(int(128 / sizeof(T)), M);
+  using SmemLayoutA = cutlass::layout::ColumnMajorTensorOpMultiplicandCongruous<cutlass::sizeof_bits<T>::value, Crosswise_A>;
+};
+
+template <typename T, bool transpose, int N, int K>
+struct DispatchSharedMemoryLayoutB;
+
+template <typename T, int N, int K>
+struct DispatchSharedMemoryLayoutB<T, false, N, K> {
+  static int const Crosswise_B = cutlass::platform::min(int(128 / sizeof(T)), N);
+  using SmemLayoutB = cutlass::layout::RowMajorTensorOpMultiplicandCongruous<cutlass::sizeof_bits<T>::value, Crosswise_B>;
+};
+
+template <typename T, int N, int K>
+struct DispatchSharedMemoryLayoutB<T, true, N, K> {
+  static int const kCrosswiseB =
+      (K > (1024 / cutlass::sizeof_bits<T>::value))
+          ? (1024 / cutlass::sizeof_bits<T>::value)
+          : K;
+  using SmemLayoutB = cutlass::layout::ColumnMajorTensorOpMultiplicandCrosswise<
+      cutlass::sizeof_bits<T>::value, kCrosswiseB>;
+};
+
 template <typename Shape, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, typename A_type_raw,
           typename B_type_raw, typename C_type_raw>
@@ -45,75 +89,76 @@ public:
 
   using ElementA = A_type_raw;
   using ElementB = B_type_raw;
-  using ElementAccumulator = C_type_raw;
+  using ElementC = C_type_raw;
   using LayoutA =
       typename std::conditional_t<trans_A, cutlass::layout::ColumnMajor,
                                   cutlass::layout::RowMajor>;
   using LayoutB =
       typename std::conditional_t<trans_B, cutlass::layout::ColumnMajor,
                                   cutlass::layout::RowMajor>;
-
-  using InstructionShape = typename DispatchInstructionShape<ElementA>::Shape;
-  static_assert(Shape::kK % InstructionShape::kK == 0, "K dimension must be divisible by instruction shape K.");
-  static_assert(std::is_same_v<InstructionShape, typename DispatchInstructionShape<ElementB>::Shape>, "Divergent shape dispatch.");
-
+  using LayoutC = cutlass::layout::RowMajor;
   using ThreadblockShape = Shape;
+  using SmemLayoutA = typename DispatchSharedMemoryLayoutA<ElementA, trans_A, ThreadblockShape::kM, ThreadblockShape::kK>::SmemLayoutA;
+  using SmemLayoutB = typename DispatchSharedMemoryLayoutB<ElementB, trans_B, ThreadblockShape::kN, ThreadblockShape::kK>::SmemLayoutB;
+
   using WarpShape =
       GemmShape<ThreadblockShape::kM / num_warp_m,
-                ThreadblockShape::kN / num_warp_n, InstructionShape::kK>;
+                ThreadblockShape::kN / num_warp_n, ThreadblockShape::kK>;
+  using InstructionShape = typename DispatchInstructionShape<ElementA>::Shape;
+  static_assert(std::is_same_v<InstructionShape, typename DispatchInstructionShape<ElementB>::Shape>, "Divergent shape dispatch.");
+  static_assert(WarpShape::kK % InstructionShape::kK == 0, "K dimension must be divisible by instruction shape K.");
 
-  using MmaCore = typename cutlass::gemm::threadblock::DefaultSparseMmaCore<
-      /*ThreadblockShape=*/Shape, /*WarpShape=*/WarpShape,
-      /*InstructionShape=*/InstructionShape, /*ElementA=*/ElementA,
-      /*LayoutA=*/LayoutA,
-      /*ElementB=*/ElementB, /*LayoutB=*/LayoutB,
-      /*ElementAccumulator=*/ElementAccumulator,
-      /*LayoutC=*/cutlass::layout::RowMajor, /*OpClass=*/cutlass::arch::OpClassTensorOp,
-      /*Stages=*/1, /*Operator=*/cutlass::arch::OpMultiplyAdd, /*IsRowMajor=*/false,
-      /*CacheOpA=*/cutlass::arch::CacheOperation::Always,
-      /*CacheOpB=*/cutlass::arch::CacheOperation::Always>;
+  // instruction/warp level
+  using Policy = cutlass::gemm::warp::MmaTensorOpPolicy<
+      cutlass::arch::SparseMma<InstructionShape, 32, ElementA,
+                               cutlass::layout::RowMajor, ElementB,
+                               cutlass::layout::ColumnMajor, ElementC,
+                               cutlass::layout::RowMajor, cutlass::arch::OpMultiplyAdd>,
+      cutlass::MatrixShape<1, 1> >;
+  using MmaWarp = cutlass::gemm::warp::SparseMmaTensorOp<
+      WarpShape, ElementA, SmemLayoutA, ElementB, SmemLayoutB, ElementC, LayoutC,
+      Policy>;
 
-  using SmemLayoutA = typename MmaCore::SmemLayoutA;
-  using SmemLayoutB = typename MmaCore::SmemLayoutB;
-  using SmemLayoutE = typename MmaCore::SmemLayoutE;
+  using SmemLayoutE = typename MmaWarp::LayoutE;
+  static_assert(std::is_same_v<SmemLayoutE, cutlass::layout::ColumnMajor>,
+                "Meta data layout must be ColumnMajor for sparse mma.");
 
-  using MmaTensorOp = typename MmaCore::MmaTensorOp;
 
-  using FragmentA = typename MmaTensorOp::FragmentA;
-  using FragmentB = typename MmaTensorOp::FragmentB;
-  using FragmentC = typename MmaTensorOp::FragmentC;
-  using FragmentE = typename MmaTensorOp::FragmentE;
+  // other traits
+  using FragmentA = typename MmaWarp::FragmentA;
+  using FragmentB = typename MmaWarp::FragmentB;
+  using FragmentC = typename MmaWarp::FragmentC;
+  using FragmentE = typename MmaWarp::FragmentE;
 
-  using IteratorA = typename MmaTensorOp::IteratorA;
-  using IteratorB = typename MmaTensorOp::IteratorB;
-  using IteratorE = typename MmaTensorOp::IteratorE;
+  using IteratorA = typename MmaWarp::IteratorA;
+  using IteratorB = typename MmaWarp::IteratorB;
+  using IteratorE = typename MmaWarp::IteratorE;
 
   using TensorRefA = typename IteratorA::TensorRef;
   using TensorRefB = typename IteratorB::TensorRef;
   using TensorRefE = typename IteratorE::TensorRef;
   using ElementE = typename TensorRefE::Element;
 
-  static int const kElementsPerElementE = MmaTensorOp::kElementsPerElementE;
-  static int const kSparse = MmaTensorOp::kSparse;
-  static_assert(kSparse == 2, "not 2:4 structured sparse");
+  static int const kElementsPerElementE = MmaWarp::kElementsPerElementE;
+  static_assert(kSparse == MmaWarp::kSparse, "not 2:4 structured sparse");
 
   using ShapeA = cutlass::MatrixShape<Shape::kM, Shape::kK / kSparse>;
   using ShapeB = cutlass::MatrixShape<Shape::kK, Shape::kN>;
   using ShapeE = cutlass::MatrixShape<Shape::kM * 2, Shape::kK / kSparse / kElementsPerElementE / 2>;
 
-  static int constexpr kKgroups = ThreadblockShape::kK / InstructionShape::kK;
+  static int constexpr kKgroups = WarpShape::kK / InstructionShape::kK;
 
   template <typename E_type_raw>
   static CUTLASS_DEVICE void
   body(A_type_raw *pA, E_type_raw *pE, B_type_raw *pB, FragmentC &accum,
        const int warp_idx_m, const int warp_idx_n, const int lane_id) {
-    MmaTensorOp mma_op;
+    MmaWarp mma_op;
     FragmentA frag_a;
     FragmentB frag_b;
     FragmentE frag_e;
-    const TensorRefA ref_A((ElementA *)pA, SmemLayoutA::packed({ShapeA::kRow, ShapeA::kColumn}));
-    const TensorRefE ref_E((ElementE *)pE, SmemLayoutE::packed({ShapeE::kRow, ShapeE::kColumn}));
-    const TensorRefB ref_B((ElementB *)pB, SmemLayoutB::packed({ShapeB::kRow, ShapeB::kColumn}));
+    const TensorRefA ref_A((ElementA *)pA, MmaWarp::LayoutA::packed({ShapeA::kRow, ShapeA::kColumn}));
+    const TensorRefE ref_E((ElementE *)pE, MmaWarp::LayoutE::packed({ShapeE::kRow, ShapeE::kColumn}));
+    const TensorRefB ref_B((ElementB *)pB, MmaWarp::LayoutB::packed({ShapeB::kRow, ShapeB::kColumn}));
     IteratorA iter_A(ref_A, lane_id);
     IteratorE iter_E(ref_E, lane_id);
     IteratorB iter_B(ref_B, lane_id);
