@@ -51,7 +51,6 @@ static std::string GetFP8Type(DataType type) {
   return stream.str();
 }
 
-
 std::string GetFP6Type(DataType type) {
   std::stringstream stream;
   int32_t lanes = type.lanes();
@@ -67,7 +66,8 @@ std::string GetFP6Type(DataType type) {
   } else if (lanes == 16) {
     vec = "x16";
   } else {
-    LOG(FATAL) << "Only support scalar and vector types of width (2, 4) for FP6";
+    LOG(FATAL)
+        << "Only support scalar and vector types of width (2, 4) for FP6";
   }
   stream << "__nv_fp6";
   std::string suffix;
@@ -97,7 +97,8 @@ std::string GetFP4Type(DataType type) {
   } else if (lanes == 16) {
     vec = "x16";
   } else {
-    LOG(FATAL) << "Only support scalar and vector types of width (2, 4) for FP4";
+    LOG(FATAL)
+        << "Only support scalar and vector types of width (2, 4) for FP4";
   }
   stream << "__nv_fp4";
   std::string suffix;
@@ -201,7 +202,7 @@ std::string CodeGenTileLangCUDA::Finish() {
   return CodeGenC::Finish();
 }
 
-void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode* op) {
+void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
   ICHECK(is_const_int(op->min, 0));
   if (op->kind == tir::ForKind::kUnrolled) {
     PrintIndent();
@@ -209,7 +210,6 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode* op) {
   }
   CodeGenC::VisitStmt_(op);
 }
-
 
 void CodeGenTileLangCUDA::BindThreadIndex(const IterVar &iv) {
   ICHECK(!var_idmap_.count(iv->var.get()));
@@ -303,7 +303,7 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     }
     if (!fail)
       return;
-  }  else if (t.is_float8()) {
+  } else if (t.is_float8()) {
     enable_fp8_ = true;
     if (t.lanes() <= 4) {
       os << GetFP8Type(t);
@@ -717,9 +717,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   ICHECK_EQ(target_ty.lanes(), from_ty.lanes());
 
   // Emit simple C-style type conversion.
-  if (from_ty.is_scalar()) return CodeGenC::VisitExpr_(op, os);
+  if (from_ty.is_scalar())
+    return CodeGenC::VisitExpr_(op, os);
 
-  if (target_ty.code() == DataType::kFloat8_e3m4 || target_ty.code() == DataType::kFloat8_e4m3 ||
+  if (target_ty.code() == DataType::kFloat8_e3m4 ||
+      target_ty.code() == DataType::kFloat8_e4m3 ||
       target_ty.code() == DataType::kFloat8_e4m3b11fnuz ||
       target_ty.code() == DataType::kFloat8_e4m3fn ||
       target_ty.code() == DataType::kFloat8_e4m3fnuz ||
@@ -728,11 +730,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       target_ty.code() == DataType::kFloat8_e8m0fnu ||
       target_ty.code() == DataType::kFloat4_e2m1fn ||
 
-      from_ty.code() == DataType::kFloat8_e3m4 || from_ty.code() == DataType::kFloat8_e4m3 ||
+      from_ty.code() == DataType::kFloat8_e3m4 ||
+      from_ty.code() == DataType::kFloat8_e4m3 ||
       from_ty.code() == DataType::kFloat8_e4m3b11fnuz ||
-      from_ty.code() == DataType::kFloat8_e4m3fn || from_ty.code() == DataType::kFloat8_e4m3fnuz ||
-      from_ty.code() == DataType::kFloat8_e5m2 || from_ty.code() == DataType::kFloat8_e5m2fnuz ||
-      from_ty.code() == DataType::kFloat8_e8m0fnu || from_ty.code() == DataType::kFloat4_e2m1fn) {
+      from_ty.code() == DataType::kFloat8_e4m3fn ||
+      from_ty.code() == DataType::kFloat8_e4m3fnuz ||
+      from_ty.code() == DataType::kFloat8_e5m2 ||
+      from_ty.code() == DataType::kFloat8_e5m2fnuz ||
+      from_ty.code() == DataType::kFloat8_e8m0fnu ||
+      from_ty.code() == DataType::kFloat4_e2m1fn) {
     std::ostringstream val;
     if (target_ty.code() == DataType::kBFloat && target_ty.lanes() == 2) {
       val << "cast_to_nv_bfloat162(" << PrintExpr(op->value) << ")";
@@ -892,10 +898,10 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
 
 void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   auto print_extern_call_stmt = [&](std::string name, size_t offset = 0) {
-    // Cache context into a private ss, otherwise the let node may generate within
-    // the function call arguments.
+    // Cache context into a private ss, otherwise the let node may generate
+    // within the function call arguments.
     std::ostringstream ss;
-    
+
     for (size_t i = offset; i < op->args.size(); i++) {
       if (i > offset)
         ss << ", ";
@@ -1399,15 +1405,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     if (!src_dtype.is_float4_e2m1fn() && !tgt_dtype.is_float4_e2m1fn()) {
       return CodeGenC::VisitExpr_(op, os);
     }
-    if (src_dtype == tgt_dtype ||
-        tgt_dtype.lanes() * tgt_dtype.bits() == src_dtype.lanes() * src_dtype.bits()) {
+    if (src_dtype == tgt_dtype || tgt_dtype.lanes() * tgt_dtype.bits() ==
+                                      src_dtype.lanes() * src_dtype.bits()) {
       return CodeGenC::VisitExpr_(op, os);
     }
     CHECK_EQ(tgt_dtype.lanes(), src_dtype.lanes())
-        << "E2M1 float4 reinterpret expects source and target to have the same number of lanes. "
+        << "E2M1 float4 reinterpret expects source and target to have the same "
+           "number of lanes. "
         << "Source dtype: " << src_dtype << ", Target dtype: " << tgt_dtype;
     CHECK_EQ(tgt_dtype.bytes(), src_dtype.bytes())
-        << "E2M1 float4 reinterpret expects source and target to have the same number of bytes. "
+        << "E2M1 float4 reinterpret expects source and target to have the same "
+           "number of bytes. "
         << "Source dtype: " << src_dtype << ", Target dtype: " << tgt_dtype;
 
     int lanes = tgt_dtype.lanes();
@@ -1415,55 +1423,69 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     int ssa_scope = BeginScope();
     if (lanes == 1) {
       // The case of lane=1 is same as the normal reinterpret,
-      // except that we allow the src and dst dtype to have different number of bits.
+      // except that we allow the src and dst dtype to have different number of
+      // bits.
       std::string rhs = SSAGetID(PrintExpr(value), src_dtype);
       os << "(*(";
       this->PrintType(tgt_dtype, os);
       os << " *)(&(" << rhs << ")))";
     } else if (lanes == 2) {
       if (tgt_dtype.is_float4_e2m1fn()) {
-        // We view the source as an uint16, and then extract bits of two fp4 numbers,
-        // and finally reinterpret the result as fp4x2.
-        value = tir::Call(DataType::UInt(16), tir::builtin::reinterpret(), {value});
+        // We view the source as an uint16, and then extract bits of two fp4
+        // numbers, and finally reinterpret the result as fp4x2.
+        value =
+            tir::Call(DataType::UInt(16), tir::builtin::reinterpret(), {value});
         tir::Var temp_var("temp_var", DataType::UInt(16));
-        value = tir::Let(
-            temp_var, value,
-            tir::Cast(DataType::UInt(8), (temp_var & IntImm(DataType::UInt(16), 0xF)) |
-                                             ((temp_var >> 4) & IntImm(DataType::UInt(16), 0xF0))));
+        value =
+            tir::Let(temp_var, value,
+                     tir::Cast(DataType::UInt(8),
+                               (temp_var & IntImm(DataType::UInt(16), 0xF)) |
+                                   ((temp_var >> 4) &
+                                    IntImm(DataType::UInt(16), 0xF0))));
       } else {
-        value = tir::Cast(DataType::UInt(16),
-                          tir::Call(DataType::UInt(8), tir::builtin::reinterpret(), {value}));
+        value = tir::Cast(
+            DataType::UInt(16),
+            tir::Call(DataType::UInt(8), tir::builtin::reinterpret(), {value}));
         tir::Var temp_var("temp_var", DataType::UInt(16));
-        value = tir::Let(temp_var, value,
-                         (temp_var & IntImm(DataType::UInt(16), 0xF)) |
-                             ((temp_var & IntImm(DataType::UInt(16), 0xF0)) << 4));
+        value =
+            tir::Let(temp_var, value,
+                     (temp_var & IntImm(DataType::UInt(16), 0xF)) |
+                         ((temp_var & IntImm(DataType::UInt(16), 0xF0)) << 4));
       }
-      os << PrintExpr(tir::Call(tgt_dtype, tir::builtin::reinterpret(), {value}));
+      os << PrintExpr(
+          tir::Call(tgt_dtype, tir::builtin::reinterpret(), {value}));
     } else if (lanes == 4) {
       if (tgt_dtype.is_float4_e2m1fn()) {
-        // We view the source as an uint32, and then extract bits of four fp4 numbers,
-        // and finally reinterpret the result as fp4x4.
-        value = tir::Call(DataType::UInt(32), tir::builtin::reinterpret(), {value});
+        // We view the source as an uint32, and then extract bits of four fp4
+        // numbers, and finally reinterpret the result as fp4x4.
+        value =
+            tir::Call(DataType::UInt(32), tir::builtin::reinterpret(), {value});
         tir::Var temp_var("temp_var", DataType::UInt(32));
-        value = tir::Let(temp_var, value,
-                         tir::Cast(DataType::UInt(16),
-                                   (temp_var & IntImm(DataType::UInt(32), 0xF)) |
-                                       ((temp_var >> 4) & IntImm(DataType::UInt(32), 0xF0)) |
-                                       ((temp_var >> 8) & IntImm(DataType::UInt(32), 0xF00)) |
-                                       ((temp_var >> 12) & IntImm(DataType::UInt(32), 0xF000))));
+        value = tir::Let(
+            temp_var, value,
+            tir::Cast(
+                DataType::UInt(16),
+                (temp_var & IntImm(DataType::UInt(32), 0xF)) |
+                    ((temp_var >> 4) & IntImm(DataType::UInt(32), 0xF0)) |
+                    ((temp_var >> 8) & IntImm(DataType::UInt(32), 0xF00)) |
+                    ((temp_var >> 12) & IntImm(DataType::UInt(32), 0xF000))));
       } else {
         value = tir::Cast(DataType::UInt(32),
-                          tir::Call(DataType::UInt(16), tir::builtin::reinterpret(), {value}));
+                          tir::Call(DataType::UInt(16),
+                                    tir::builtin::reinterpret(), {value}));
         tir::Var temp_var("temp_var", DataType::UInt(32));
-        value = tir::Let(temp_var, value,
-                         (temp_var & IntImm(DataType::UInt(32), 0xF)) |
-                             ((temp_var & IntImm(DataType::UInt(32), 0xF0)) << 4) |
-                             ((temp_var & IntImm(DataType::UInt(32), 0xF00)) << 8) |
-                             ((temp_var & IntImm(DataType::UInt(32), 0xF000)) << 12));
+        value = tir::Let(
+            temp_var, value,
+            (temp_var & IntImm(DataType::UInt(32), 0xF)) |
+                ((temp_var & IntImm(DataType::UInt(32), 0xF0)) << 4) |
+                ((temp_var & IntImm(DataType::UInt(32), 0xF00)) << 8) |
+                ((temp_var & IntImm(DataType::UInt(32), 0xF000)) << 12));
       }
-      os << PrintExpr(tir::Call(tgt_dtype, tir::builtin::reinterpret(), {value}));
+      os << PrintExpr(
+          tir::Call(tgt_dtype, tir::builtin::reinterpret(), {value}));
     } else {
-      LOG(FATAL) << "Invalid number of lanes for float4_e2m1fn reinterpret: " << lanes;
+      LOG(FATAL) << "Invalid number of lanes for float4_e2m1fn reinterpret: "
+                 << lanes;
     }
     EndScope(ssa_scope);
   } else if (op->op.same_as(builtin::thread_return())) {

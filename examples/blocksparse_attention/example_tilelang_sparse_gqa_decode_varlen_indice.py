@@ -7,7 +7,6 @@ import argparse
 import time
 import math
 from heuristic import num_splits_heuristic
-from tilelang.transform import pass_config
 
 
 def flashattn(batch, heads, heads_kv, dim, dim_v):
