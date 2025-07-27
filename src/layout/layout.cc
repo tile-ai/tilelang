@@ -489,5 +489,12 @@ TVM_FFI_STATIC_INIT_BLOCK({
            });
 });
 
+
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  LayoutNode::RegisterReflection();
+  FragmentNode::RegisterReflection();
+});
+
 } // namespace tl
 } // namespace tvm

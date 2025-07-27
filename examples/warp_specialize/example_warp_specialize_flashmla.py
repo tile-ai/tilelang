@@ -80,7 +80,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             p0_1_1_ready_barrier = T.alloc_barrier(arrive_count=128)
             lse_0_ready_barrier = T.alloc_barrier(arrive_count=128)
             lse_1_ready_barrier = T.alloc_barrier(arrive_count=128)
-            s_shared_ready_barrier = T.alloc_barrier(arrive_count=128)
             q_shared_ready_barrier = T.alloc_barrier(arrive_count=256)
             k_pe_shared_1_free_barrier = T.alloc_barrier(arrive_count=128)
             k_pe_shared_0_free_barrier = T.alloc_barrier(arrive_count=128)
