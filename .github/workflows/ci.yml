@@ -1,5 +1,6 @@
 name: CI
-on: [pull_request]
+on: 
+  pull_request_target:
 
 env:
   PYTHON_VERSION: '3.9'
@@ -9,11 +10,19 @@ jobs:
   format-check:
     runs-on: self-hosted
 
+    permissions:
+      contents: write
+      pull-requests: write
+    
+
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
+        repository: ${{ github.event.pull_request.head.repo.full_name }}
+        ref: ${{ github.event.pull_request.head.ref }}
+        token: ${{ secrets.PAT }}
 
     - name: Set up Python
       uses: actions/setup-python@v2
@@ -41,9 +50,6 @@ jobs:
           touch "$MARKER"
         fi
 
-    - name: Update submodules
-      run: git submodule update --init --recursive
-
     - name: Run format check
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
@@ -55,8 +61,7 @@ jobs:
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
         commit_message: "lint"
-        commit_user_name: github-actions[bot]
-        commit_user_email: github-actions[bot]@users.noreply.github.com
+
 
   build-test:
     runs-on: self-hosted
