@@ -392,3 +392,9 @@ def LowerOpaqueBlock():
     """LowerOpaqueBlock
     """
     return _ffi_api.LowerOpaqueBlock()  # type: ignore
+
+
+def LowerThreadAllreduce():
+    """LowerThreadAllreduce
+    """
+    return _ffi_api.LowerThreadAllreduce()  # type: ignore
