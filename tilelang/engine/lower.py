@@ -34,7 +34,7 @@ def is_device_call_c_device(func: tir.PrimFunc):
 
     # Check if it's a C target
     if "target" in attrs and attrs["target"].kind.name == "c" and not is_cpacked:
-        return True    
+        return True
 
     return has_device_kernel_launch(attrs)
 
