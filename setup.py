@@ -818,6 +818,8 @@ class TilelangExtensionBuild(build_ext):
             f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}", f"-DPYTHON_EXECUTABLE={sys.executable}",
             f"-DCMAKE_BUILD_TYPE={'Debug' if DEBUG_MODE else 'Release'}"
         ]
+        if not USE_ROCM:
+            cmake_args.append(f"-DCMAKE_CUDA_COMPILER={os.path.join(CUDA_HOME, 'bin', 'nvcc')}")
 
         # Create the temporary build directory (if it doesn't exist).
         build_temp = os.path.abspath(self.build_temp)
