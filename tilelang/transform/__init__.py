@@ -398,3 +398,9 @@ def LowerThreadAllreduce():
     """LowerThreadAllreduce
     """
     return _ffi_api.LowerThreadAllreduce()  # type: ignore
+
+
+def LowerDeviceKernelLaunch():
+    """LowerDeviceKernelLaunch
+    """
+    return _ffi_api.LowerDeviceKernelLaunch()  # type: ignore

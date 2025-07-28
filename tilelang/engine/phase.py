@@ -176,9 +176,9 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # Inject PTX async copy must behind the thread sync pass
     # as ptx async copy won't be recognized as a valid buffer load
     mod = tilelang.transform.InjectPTXAsyncCopy()(mod)
-
     mod = tilelang.transform.MakePackedAPI()(mod)
-    mod = tir.transform.LowerDeviceKernelLaunch()(mod)
+    mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
+
     # Transform threadblock to persistent threadblock
     mod = tilelang.transform.PersistThreadblock()(mod)
 

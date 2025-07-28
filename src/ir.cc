@@ -6,6 +6,7 @@
 
 #include "./transform/common/attr.h"
 #include "op/builtin.h"
+#include "tvm/ffi/any.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/script/ir_builder/tir/ir.h>
@@ -215,13 +216,15 @@ public:
 };
 
 KernelLaunchFrame KernelLaunch(Array<PrimExpr> grid_size,
-                               Array<PrimExpr> block_size,
-                               Map<String, ObjectRef> attrs) {
+                               Optional<Array<PrimExpr>> block_size_opt,
+                               Map<String, ffi::Any> attrs) {
   ObjectPtr<KernelLaunchFrameNode> n = make_object<KernelLaunchFrameNode>();
 
   // If the kernel is a CPU kernel, we don't need to launch any threads.
   bool is_cpu_kernel_frame =
       attrs.defined() && attrs.count(tilelang_is_cpu_kernel_frame);
+
+  auto block_size = block_size_opt.value_or(Array<PrimExpr>());
 
   if (is_cpu_kernel_frame) {
     // Launch CPU Kernel
