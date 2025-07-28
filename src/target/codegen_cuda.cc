@@ -203,12 +203,24 @@ std::string CodeGenTileLangCUDA::Finish() {
 }
 
 void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
-  ICHECK(is_const_int(op->min, 0));
   if (op->kind == tir::ForKind::kUnrolled) {
     PrintIndent();
     stream << "#pragma unroll\n";
   }
-  CodeGenC::VisitStmt_(op);
+  std::string extent =
+      PrintExpr(arith::Analyzer().Simplify(op->extent + op->min));
+  PrintIndent();
+  std::string vid = AllocVarID(op->loop_var.get());
+  std::string start = PrintExpr(op->min);
+  stream << "for (";
+  PrintType(op->loop_var.dtype(), stream);
+  stream << ' ' << vid << " = " << start << "; " << vid << " < " << extent
+         << "; ++" << vid << ") {\n";
+  int for_scope = BeginScope();
+  PrintStmt(op->body);
+  this->EndScope(for_scope);
+  PrintIndent();
+  stream << "}\n";
 }
 
 void CodeGenTileLangCUDA::BindThreadIndex(const IterVar &iv) {
@@ -305,11 +317,7 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
       return;
   } else if (t.is_float8()) {
     enable_fp8_ = true;
-    if (t.lanes() <= 4) {
-      os << GetFP8Type(t);
-    } else {
-      os << "uint" << t.lanes() / 4;
-    }
+    os << GetFP8Type(t);
     return;
   } else if (t.is_float6()) {
     enable_fp6_ = true;
@@ -719,37 +727,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   // Emit simple C-style type conversion.
   if (from_ty.is_scalar())
     return CodeGenC::VisitExpr_(op, os);
-
-  if (target_ty.code() == DataType::kFloat8_e3m4 ||
-      target_ty.code() == DataType::kFloat8_e4m3 ||
-      target_ty.code() == DataType::kFloat8_e4m3b11fnuz ||
-      target_ty.code() == DataType::kFloat8_e4m3fn ||
-      target_ty.code() == DataType::kFloat8_e4m3fnuz ||
-      target_ty.code() == DataType::kFloat8_e5m2 ||
-      target_ty.code() == DataType::kFloat8_e5m2fnuz ||
-      target_ty.code() == DataType::kFloat8_e8m0fnu ||
-      target_ty.code() == DataType::kFloat4_e2m1fn ||
-
-      from_ty.code() == DataType::kFloat8_e3m4 ||
-      from_ty.code() == DataType::kFloat8_e4m3 ||
-      from_ty.code() == DataType::kFloat8_e4m3b11fnuz ||
-      from_ty.code() == DataType::kFloat8_e4m3fn ||
-      from_ty.code() == DataType::kFloat8_e4m3fnuz ||
-      from_ty.code() == DataType::kFloat8_e5m2 ||
-      from_ty.code() == DataType::kFloat8_e5m2fnuz ||
-      from_ty.code() == DataType::kFloat8_e8m0fnu ||
-      from_ty.code() == DataType::kFloat4_e2m1fn) {
-    std::ostringstream val;
-    if (target_ty.code() == DataType::kBFloat && target_ty.lanes() == 2) {
-      val << "cast_to_nv_bfloat162(" << PrintExpr(op->value) << ")";
-    } else {
-      val << "(";
-      PrintType(target_ty, val);
-      val << ")(" << PrintExpr(op->value) << ")";
-    }
-    os << val.str();
-    return;
-  }
 
   // We could emit make_float4 like calls, but the emitted code looks
   // too compact to read. Emit this as vectorized unary ops.
