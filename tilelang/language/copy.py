@@ -2,6 +2,7 @@
 
 from typing import Union, List, Optional
 from tilelang import language as T
+from tilelang.utils.language import get_buffer_region_from_load
 from tvm import ir, tir
 
 
@@ -109,6 +110,11 @@ def copy(
             return data.shape
         elif isinstance(data, tir.BufferRegion):
             return [x.extent for x in data.region]
+        elif isinstance(data, tir.BufferLoad):
+            region = get_buffer_region_from_load(data)
+            if region is None:
+                return None
+            return [x.extent for x in region.region]
         else:
             return None
 
@@ -126,6 +132,11 @@ def copy(
             return buffer_to_tile_region(data, access_type)
         elif isinstance(data, tir.BufferRegion):
             return buffer_region_to_tile_region(data, access_type, extent)
+        elif isinstance(data, tir.BufferLoad):
+            region = get_buffer_region_from_load(data)
+            if region is None:
+                return buffer_load_to_tile_region(data, access_type, extent)
+            return buffer_region_to_tile_region(region, access_type, extent)
         else:
             return buffer_load_to_tile_region(data, access_type, extent)
 

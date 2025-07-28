@@ -3,6 +3,7 @@
 from tvm import tir
 from typing import Union
 from tilelang.language import has_let_value, get_let_value
+from tilelang.utils.language import get_buffer_region_from_load
 
 
 def fill(buffer: Union[tir.Buffer, tir.BufferRegion], value: tir.PrimExpr):
@@ -36,6 +37,12 @@ def clear(buffer: Union[tir.Buffer, tir.Var]):
         buffer_region = get_let_value(buffer)  # Get the actual buffer region from variable
         if isinstance(buffer_region, tir.BufferRegion):
             return fill(buffer_region, 0)
+        elif isinstance(buffer_region, tir.BufferLoad):
+            region = get_buffer_region_from_load(buffer_region)
+            if region is None:
+                raise ValueError(
+                    f"Invalid buffer region: {buffer_region}, type: {type(buffer_region)}")
+            return fill(region, 0)
         else:
-            raise ValueError(f"Invalid buffer region: {buffer_region}")
+            raise ValueError(f"Invalid buffer region: {buffer_region}, type: {type(buffer_region)}")
     return fill(buffer, 0)
