@@ -4,7 +4,7 @@
 
 namespace tl {
 
-template <int panel_width> TL_DEVICE dim3 rasterization2DRow() {
+template <int panel_width, int offset> TL_DEVICE dim3 rasterization2DRow() {
   const unsigned int block_idx = blockIdx.x + blockIdx.y * gridDim.x;
   const unsigned int grid_size = gridDim.x * gridDim.y;
   const unsigned int panel_size = panel_width * gridDim.x;
@@ -18,11 +18,11 @@ template <int panel_width> TL_DEVICE dim3 rasterization2DRow() {
   const unsigned int col_idx = (panel_idx & 1)
                                    ? gridDim.x - 1 - panel_offset / stride
                                    : panel_offset / stride;
-  const unsigned int row_idx = panel_offset % stride + panel_idx * panel_width;
+  const unsigned int row_idx = (panel_offset % stride + panel_idx * panel_width + offset) % gridDim.y;
   return {col_idx, row_idx, blockIdx.z};
 }
 
-template <int panel_width> TL_DEVICE dim3 rasterization2DColumn() {
+template <int panel_width, int offset> TL_DEVICE dim3 rasterization2DColumn() {
   const unsigned int block_idx = blockIdx.x + blockIdx.y * gridDim.x;
   const unsigned int grid_size = gridDim.x * gridDim.y;
   const unsigned int panel_size = panel_width * gridDim.y;
@@ -36,7 +36,7 @@ template <int panel_width> TL_DEVICE dim3 rasterization2DColumn() {
   const unsigned int row_idx = (panel_idx & 1)
                                    ? gridDim.y - 1 - panel_offset / stride
                                    : panel_offset / stride;
-  const unsigned int col_idx = panel_offset % stride + panel_idx * panel_width;
+  const unsigned int col_idx = (panel_offset % stride + panel_idx * panel_width + offset) % gridDim.x;
   return {col_idx, row_idx, blockIdx.z};
 }
 
