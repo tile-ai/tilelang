@@ -278,12 +278,41 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
         continue;
       auto vars =
           loop_vars_.Map([](const IterVar &iv) { return PrimExpr(iv->var); });
-      auto lhs = loop_layout_->ForwardThread(vars, std::nullopt);
-      auto rhs = fragment->ForwardThread(indice_map_[buffer], std::nullopt);
-      auto diff = analyzer_.Simplify(lhs - rhs);
-      ICHECK(is_zero(diff))
-          << "Layout infer conflict for " << buffer << " " << source_buffer
-          << "\nLHS = " << lhs << "\nRHS = " << rhs;
+      {
+        Var rep_loop("__checking_rep_loop");
+        analyzer_.Bind(rep_loop,
+                       Range(IntImm(loop_layout_->ReplicateExtent()->dtype, 0),
+                             loop_layout_->ReplicateExtent()),
+                       true);
+        auto thread = loop_layout_->ForwardThread(vars, rep_loop);
+        auto logical_address = indice_map_[buffer];
+        auto physical_address_and_thread = fragment->Forward(logical_address);
+        physical_address_and_thread.push_back(thread);
+        auto inverse_fragment = fragment->Inverse();
+        auto inv_frag = inverse_fragment->Forward(physical_address_and_thread);
+        auto rep_frag = inv_frag[inv_frag.size() - 1];
+        auto check_thread = fragment->ForwardThread(logical_address, rep_frag);
+        auto diff = analyzer_.Simplify(thread - check_thread);
+        if (!is_zero(diff)) {
+          std::ostringstream oss;
+          oss << "[WARNING] Might be buggy: layout infer conflict between "
+              << buffer << " and " << source_buffer
+              << " in T.Parallel loop:" << std::endl
+              << "Intermediates: " << std::endl
+              << "    loop " << loop_layout_->DebugOutput() << std::endl
+              << "    fragment " << fragment->DebugOutput() << std::endl
+              << "    thread " << thread << std::endl
+              << "    logical_address " << logical_address << std::endl
+              << "    physical_address_and_thread "
+              << physical_address_and_thread << std::endl
+              << "    inverse_fragment " << inverse_fragment->DebugOutput()
+              << std::endl
+              << "    rep_frag " << rep_frag << std::endl
+              << "    check_thread " << check_thread << std::endl
+              << "    diff " << diff << std::endl;
+          throw LayoutConflictException(oss.str());
+        }
+      }
     }
   }
   // Step 3: Infer other fragment's layout from the loop's partition
