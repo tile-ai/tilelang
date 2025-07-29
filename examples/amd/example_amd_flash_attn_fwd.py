@@ -94,7 +94,6 @@ def fast_flashattn_v2(
     dtype = "float16"
     accum_dtype = "float"
 
-    dtype_size = 2
     v_vec_size = 4
 
     vec_size = 4 * k_pack
