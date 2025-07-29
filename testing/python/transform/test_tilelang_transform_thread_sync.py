@@ -1,5 +1,3 @@
-# Copyright (c) Tile-AI Corporation.
-# Licensed under the MIT License.
 # ruff: noqa
 
 from tilelang import tvm as tvm

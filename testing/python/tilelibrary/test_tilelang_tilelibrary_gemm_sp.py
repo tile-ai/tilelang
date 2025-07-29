@@ -1,5 +1,3 @@
-# Copyright (c) Tile-AI Organization.
-# Licensed under the MIT License.
 import torch
 import tilelang
 import tilelang.testing

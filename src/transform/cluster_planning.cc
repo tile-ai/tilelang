@@ -1,6 +1,3 @@
-// Copyright (c) Tile-AI Corporation.
-// Licensed under the MIT License.
-
 /*!
  * \file clasuter_planning.cc
  * \brief Plan the cluster for GPU(sm90+) blocks
