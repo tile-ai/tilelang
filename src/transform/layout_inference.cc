@@ -461,6 +461,7 @@ private:
         // write
         LayoutMap tmp_layout_map = layout_map;
         // infer from attempt_infer_root in free mode
+        bool do_update = true;
         try {
           RunInferStep(attempt_infer_root, InferLevel::kFree, true,
                        tmp_layout_map, strict_layout_map, q, in_queue);
@@ -485,27 +486,29 @@ private:
           }
         } catch (LayoutConflictException e) {
           // such an order fails, try others
-          continue;
+          do_update = false;
         }
 
-        // compute total register number
-        int64_t reg_num = 0;
-        for (auto &&[buffer, layout] : tmp_layout_map) {
-          if (auto frag = layout.as<Fragment>(); frag.defined()) {
-            int64_t frag_reg_num = 1;
-            for (auto i : frag.get()->OutputShape()) {
-              auto pci = as_const_int(i);
-              ICHECK(pci != nullptr);
-              frag_reg_num *= *pci;
+        if (do_update) {
+          // compute total register number
+          int64_t reg_num = 0;
+          for (auto &&[buffer, layout] : tmp_layout_map) {
+            if (auto frag = layout.as<Fragment>(); frag.defined()) {
+              int64_t frag_reg_num = 1;
+              for (auto i : frag.get()->OutputShape()) {
+                auto pci = as_const_int(i);
+                ICHECK(pci != nullptr);
+                frag_reg_num *= *pci;
+              }
+              reg_num += frag_reg_num;
             }
-            reg_num += frag_reg_num;
           }
-        }
-        // if it's any better, update the best_* storage
-        if (reg_num < min_reg_num) {
-          best_infer_list = std::move(infer_list_);
-          best_layout_map = tmp_layout_map;
-          min_reg_num = reg_num;
+          // if it's any better, update the best_* storage
+          if (reg_num < min_reg_num) {
+            best_infer_list = std::move(infer_list_);
+            best_layout_map = tmp_layout_map;
+            min_reg_num = reg_num;
+          }
         }
         // recover stateful infer_list_, head on next
         infer_list_ = std::move(back_infer_list);
