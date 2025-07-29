@@ -7,7 +7,7 @@ env:
 
 jobs:
   format-check:
-    runs-on: [ubuntu-latest, self-hosted]
+    runs-on: ubuntu-latest
 
     permissions:
       contents: write 
