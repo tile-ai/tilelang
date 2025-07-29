@@ -1,5 +1,5 @@
 name: CI
-on: [pull_request]
+on: [pull_request_target]
 
 env:
   PYTHON_VERSION: '3.9'
@@ -7,57 +7,56 @@ env:
 
 jobs:
   format-check:
-    runs-on: self-hosted
+    runs-on: [ubuntu-latest, self-hosted]
+
+    permissions:
+      contents: write 
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
+        repository: ${{ github.event.pull_request.head.repo.full_name }}
+        ref: ${{ github.event.pull_request.head.ref }}
+        token: ${{ secrets.PAT }}
 
     - name: Set up Python
       uses: actions/setup-python@v2
       with:
         python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Ensure venv (local & persistent)
+    - name: Install dependencies
       run: |
-        set -e
-        REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
-        MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
-
-        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
-          echo "venv exists and hash matches – reuse it"
-        else
-          echo "venv stale or missing – recreating"
-          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
-          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
-          # shellcheck source=/dev/null
-          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-          python -m pip install --upgrade pip --no-user
-          [[ -f requirements-test.txt ]] && \
-            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
-          pip install . --no-user
-          touch "$MARKER"
-        fi
-
-    - name: Update submodules
-      run: git submodule update --init --recursive
+        python -m pip install --upgrade pip
+        pip install yapf==0.40.2 toml==0.10.2 tomli==2.0.1 ruff==0.6.5 codespell==2.3.0 clang-format==15.0.7
 
     - name: Run format check
       run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        ./format.sh
+        git clone https://github.com/tile-ai/tilelang.git main_repo
+        cp main_repo/format.sh .
+        rm -rf main_repo
+        if ! output=$(./format.sh 2>&1); then
+          printf '%s\n' "$output" | grep "Please review and stage the changes."
+        fi
+    
+    - name: Commit and Push Changes
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "lint"
 
   build-test:
     runs-on: self-hosted
     needs: format-check
-
+    permissions:
+      contents: read
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
+        repository: ${{ github.event.pull_request.head.repo.full_name }}
+        ref: ${{ github.event.pull_request.head.ref }}
 
     - name: Set up Python
       uses: actions/setup-python@v2
