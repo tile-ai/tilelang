@@ -93,7 +93,6 @@ struct TensorMapArgs {
 };
 
 // set device api
-
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def_packed(
