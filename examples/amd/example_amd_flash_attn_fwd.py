@@ -1,8 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
-#
-# Modified to implement FlashAttention-2 forward pass principles.
-# Corrected loop implementation using T.while_loop.
+
 
 import torch
 import torch.nn.functional as F
@@ -13,7 +11,6 @@ import argparse
 from functools import partial
 
 
-# PyTorch 参考实现保持不变
 def ref_program(Q, K, V, is_causal, groups=1):
     assert Q.size(
         2) == K.size(2) * groups, f"Q heads {Q.size(2)} K heads {K.size(2)} groups {groups}"
@@ -34,7 +31,7 @@ def ref_program(Q, K, V, is_causal, groups=1):
     return output
 
 
-def get_v2_configs():
+def get_configs():
     """Generates configurations for the autotuner, tailored for FA-2 style parallelism."""
     block_M = [64, 128, 256]
     block_N = [32, 64, 128]
@@ -69,9 +66,9 @@ def get_v2_configs():
     return valid_configs
 
 
-@tilelang.autotune(configs=get_v2_configs(), cache_input_tensors=True)
+@tilelang.autotune(configs=get_configs(), cache_input_tensors=True)
 @tilelang.jit(out_idx=[3])
-def fast_flashattn_v2(
+def fast_flashattn(
     batch,
     heads,
     seq_len,
@@ -198,8 +195,7 @@ def fast_flashattn_v2(
     return main
 
 
-# main 函数保持不变
-def main_v2(batch: int = 1,
+def main(batch: int = 1,
             heads: int = 8,
             seq_len: int = 4096,
             dim: int = 128,
@@ -212,7 +208,7 @@ def main_v2(batch: int = 1,
         total_flops *= 0.5
 
     print("Starting autotuning for FlashAttention-V2...")
-    kernel = fast_flashattn_v2(batch, heads, seq_len, dim, is_causal, groups=groups)
+    kernel = fast_flashattn(batch, heads, seq_len, dim, is_causal, groups=groups)
     print(f"Autotuning finished. Best Configuration: {kernel.config}")
 
     ref_program_processed = partial(ref_program, is_causal=is_causal, groups=groups)
@@ -241,5 +237,5 @@ if __name__ == "__main__":
     parser.add_argument('--is_causal', action='store_true', help='causal')
     parser.add_argument('--groups', type=int, default=1, help='groups')
     args = parser.parse_args()
-    main_v2(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups)
+    main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups)
 
