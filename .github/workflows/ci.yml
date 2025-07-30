@@ -7,7 +7,7 @@ env:
 
 jobs:
   format-check:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     permissions:
       contents: write 
@@ -26,21 +26,37 @@ jobs:
       with:
         python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Install dependencies
+    - name: Ensure venv (local & persistent)
       run: |
-        python -m pip install --upgrade pip
-        pip install yapf==0.40.2 toml==0.10.2 tomli==2.0.1 ruff==0.6.5 codespell==2.3.0 clang-format==15.0.7
+        set -e
+        REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
+        MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
+
+        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
+          echo "venv exists and hash matches – reuse it"
+        else
+          echo "venv stale or missing – recreating"
+          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
+          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
+          # shellcheck source=/dev/null
+          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+          python -m pip install --upgrade pip --no-user
+          [[ -f requirements-test.txt ]] && \
+            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
+          pip install . --no-user
+          touch "$MARKER"
+        fi
 
     - name: Run format check
       run: |
-        git clone https://github.com/tile-ai/tilelang.git main_repo
-        cp main_repo/format.sh .
-        rm -rf main_repo
+        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         if ! output=$(./format.sh 2>&1); then
+          echo "------------------------------------"
           echo "message:"
           echo "$output"
-          echo "------------------------------------"
           printf '%s\n' "$output" | grep "Please review and stage the changes."
+          echo "------------------------------------"
+          exit 1
         fi
     
     - name: Commit and Push Changes
