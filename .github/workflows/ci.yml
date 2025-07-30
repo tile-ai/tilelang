@@ -37,6 +37,9 @@ jobs:
         cp main_repo/format.sh .
         rm -rf main_repo
         if ! output=$(./format.sh 2>&1); then
+          echo "message:"
+          echo "$output"
+          echo "------------------------------------"
           printf '%s\n' "$output" | grep "Please review and stage the changes."
         fi
     
