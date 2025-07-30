@@ -1,8 +1,8 @@
 name: CI
-on: [pull_request_target]
+on: [pull_request]
 
 env:
-  PYTHON_VERSION: '3.9'
+  PYTHON_VERSION: '3.12'
   VENV_DIR: tilelang_ci
 
 jobs:
@@ -17,9 +17,6 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
-        repository: ${{ github.event.pull_request.head.repo.full_name }}
-        ref: ${{ github.event.pull_request.head.ref }}
-        token: ${{ secrets.PAT }}
 
     - name: Set up Python
       uses: actions/setup-python@v2
@@ -42,8 +39,7 @@ jobs:
           source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
           python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
-            PIP_NO_BUILD_ISOLATION=0 pip install -r requirements-test.txt --no-user
-          pip install . --no-user
+            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
           touch "$MARKER"
         fi
 
@@ -97,7 +93,7 @@ jobs:
           source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
           python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
-            PIP_NO_BUILD_ISOLATION=0 pip install -r requirements-test.txt --no-user
+            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
           pip install . --no-user
           touch "$MARKER"
         fi
