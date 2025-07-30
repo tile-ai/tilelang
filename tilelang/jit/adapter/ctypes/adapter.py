@@ -88,7 +88,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         self.target = Target.canon_target(determine_target(target))
         self.verbose = verbose
         self.wrapper = TLWrapper(self.target)
-        self.lib_generator = LibraryGenerator(self.target)
+        self.lib_generator = LibraryGenerator(self.target, verbose=verbose)
         self.lib_generator.assign_pass_configs(pass_configs)
         self.lib_generator.assign_compile_flags(compile_flags)
 
@@ -146,7 +146,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
         adapter.target = Target.canon_target(determine_target(target))
         adapter.verbose = verbose
-        adapter.lib_generator = LibraryGenerator(adapter.target)
+        adapter.lib_generator = LibraryGenerator(adapter.target, verbose=verbose)
         adapter.lib_generator.assign_pass_configs(pass_configs)
         adapter.lib_generator.assign_compile_flags(compile_flags)
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)
