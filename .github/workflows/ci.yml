@@ -42,7 +42,7 @@ jobs:
           source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
           python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
-            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
+            PIP_NO_BUILD_ISOLATION=0 pip install -r requirements-test.txt --no-user
           pip install . --no-user
           touch "$MARKER"
         fi
@@ -97,7 +97,7 @@ jobs:
           source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
           python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
-            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
+            PIP_NO_BUILD_ISOLATION=0 pip install -r requirements-test.txt --no-user
           pip install . --no-user
           touch "$MARKER"
         fi
