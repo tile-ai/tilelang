@@ -7,8 +7,7 @@ tilelang.disable_cache()
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
 @tilelang.jit(
-    out_idx=[2],
-    pass_configs={
+    out_idx=[2], pass_configs={
         "tl.disable_tma_lower": True,
         "tl.disable_warp_specialized": True,
     })

@@ -24,6 +24,7 @@ def ref_program(stride, padding, dilation):
 
     return main
 
+
 @tilelang.jit(out_idx=[2])
 def convolution(N,
                 C,

@@ -32,10 +32,7 @@ def ref_program(stride, padding, dilation):
 
 def get_configs(N, C, H, W, F, K, S, D, P, with_roller=False, topk=15):
     if with_roller:
-        if torch.version.hip is not None:
-            arch=CDNA("hip")
-        else:
-            arch = CUDA("cuda")
+        arch = CDNA("hip") if torch.version.hip is not None else CUDA("cuda")
         carve_template = ConvTemplate(
             N=N,
             C=C,
@@ -211,6 +208,7 @@ def get_heuristic_config() -> dict:
             "thread_num": 128,
             "enable_rasteration": True
         }
+
 
 @tilelang.jit(out_idx=[2])
 def convolution(N,
