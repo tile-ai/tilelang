@@ -6,6 +6,7 @@ from tvm.tir import PrimFunc
 import tilelang
 from tilelang import tvm as tvm
 from tilelang.engine.param import CompiledArtifact, KernelParam
+from tilelang.env import TILELANG_PRINT_ON_COMPILATION
 from tilelang.jit.adapter import (BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter,
                                   NVRTCKernelAdapter, TorchDLPackKernelAdapter)
 from tilelang.profiler import Profiler, TensorSupplyType
@@ -109,6 +110,12 @@ class JITKernel(object):
 
         if from_database:
             return
+
+        # Print log on compilation starts
+        # NOTE(Chenggang): printing could let the training/inference framework easier to know
+        # whether the communication timeout is from compilation
+        if TILELANG_PRINT_ON_COMPILATION.lower() in ("1", "true", "yes", "on"):
+            print(f"TileLang begins to compile kernel `{func.__name__}` with `{out_idx=}`")
 
         # Compile the TileLang function and create a kernel adapter for execution.
         adapter = self._compile_and_create_adapter(func, out_idx)
