@@ -1,7 +1,6 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
-
 import torch
 import torch.nn.functional as F
 import tilelang
@@ -136,14 +135,15 @@ def fast_flashattn(
                     Q_shared,
                     coalesced_width=vec_size)
 
-                loop_end_k = T.ceildiv(q_block_offset + block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N)
-                
+                loop_end_k = T.ceildiv(q_block_offset + block_M,
+                                       block_N) if is_causal else T.ceildiv(seq_len, block_N)
+
                 for k in T.Pipelined(loop_end_k, num_stages=num_stages):
                     kv_idx = k * block_N
-                    
+
                     T.copy(
-                        K[bz, kv_idx:kv_idx + block_N, by // groups, :], 
-                        K_shared, 
+                        K[bz, kv_idx:kv_idx + block_N, by // groups, :],
+                        K_shared,
                         coalesced_width=vec_size)
                     T.copy(
                         V[bz, kv_idx:kv_idx + block_N, by // groups, :],
@@ -155,8 +155,8 @@ def fast_flashattn(
 
                     if is_causal:
                         for i, j in T.Parallel(block_M, block_N):
-                            acc_s[i, j] = T.if_then_else(q_block_offset + i >= kv_idx + j, acc_s[i, j],
-                                                         -T.infinity(acc_s.dtype))
+                            acc_s[i, j] = T.if_then_else(q_block_offset + i >= kv_idx + j,
+                                                         acc_s[i, j], -T.infinity(acc_s.dtype))
 
                     T.copy(m_i, m_prev)
                     T.reduce_max(acc_s, m_i, dim=1, clear=False)
@@ -196,11 +196,11 @@ def fast_flashattn(
 
 
 def main(batch: int = 1,
-            heads: int = 8,
-            seq_len: int = 4096,
-            dim: int = 128,
-            is_causal: bool = False,
-            groups: int = 1):
+         heads: int = 8,
+         seq_len: int = 4096,
+         dim: int = 128,
+         is_causal: bool = False,
+         groups: int = 1):
 
     flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
     total_flops = 2 * flops_per_matmul
@@ -238,4 +238,3 @@ if __name__ == "__main__":
     parser.add_argument('--groups', type=int, default=1, help='groups')
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups)
-
