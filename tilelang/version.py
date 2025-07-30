@@ -24,24 +24,5 @@ else:
 with open(version_file_path, "r") as version_file:
     __version__ = version_file.read().strip()
 
-
-def get_git_commit_id() -> Union[str, None]:
-    """Get the current git commit hash.
-    
-    Returns:
-        str | None: The git commit hash if available, None otherwise.
-    """
-    try:
-        return subprocess.check_output(['git', 'rev-parse', 'HEAD'],
-                                       stderr=subprocess.DEVNULL,
-                                       encoding='utf-8').strip()
-    except subprocess.SubprocessError:
-        return None
-
-
-# Append git commit hash to version if not already present
-if "+" not in __version__ and (commit_id := get_git_commit_id()):
-    __version__ = f"{__version__}+{commit_id}"
-
 # Define the public API for the module
 __all__ = ["__version__"]
