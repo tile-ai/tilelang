@@ -1,2 +1,0 @@
-att: TARGET_CU=1
-KERNEL=main
