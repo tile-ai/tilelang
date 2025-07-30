@@ -65,8 +65,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
     mod = tir.transform.BindTarget(target)(mod)
 
-    # Legalize the frontend IR to make it compatible with TVM
-    mod = tilelang.transform.FrontendLegalize()(mod)
     # Simplify the IR expressions
     mod = tir.transform.Simplify()(mod)
     # Infer memory layouts for fragments and shared memory
