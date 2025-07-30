@@ -102,6 +102,7 @@ def get_configs(N, C, H, W, F, K, S, D, P, with_roller=False, topk=15):
 
 def get_best_config(N, C, H, W, F, K, S, D, P, ref_prog, with_roller=False):
 
+    @tilelang.jit(out_idx=[2])
     def kernel(
         block_M=None,
         block_N=None,
@@ -211,7 +212,7 @@ def get_heuristic_config() -> dict:
             "enable_rasteration": True
         }
 
-
+@tilelang.jit(out_idx=[2])
 def convolution(N,
                 C,
                 H,
@@ -302,7 +303,7 @@ def main(n: int = 128,
         kernel = result.kernel
     else:
         config = get_heuristic_config()
-        kernel = tilelang.compile(convolution(N, C, H, W, F, K, S, D, P, **config), out_idx=[2])
+        kernel = convolution(N, C, H, W, F, K, S, D, P, **config)
 
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
     tilelang_latency = profiler.do_bench()

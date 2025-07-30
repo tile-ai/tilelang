@@ -9,8 +9,8 @@ tilelang.disable_cache()
 @tilelang.jit(
     out_idx=[2],
     pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        # tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        "tl.disable_tma_lower": True,
+        "tl.disable_warp_specialized": True,
     })
 def matmul_warp_specialize_copy_1_gemm_0(M,
                                          N,
