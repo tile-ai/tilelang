@@ -40,9 +40,9 @@ def get_v2_configs():
     block_N = [32, 64, 128]
     threads = [128, 256, 512]
     num_split_q = [32, 64, 128]
-    num_stages = [1, 2, 3]
-    enable_rasterization = [True]
-    k_pack = [2]
+    num_stages = [0, 1, 2]
+    enable_rasterization = [True, False]
+    k_pack = [1, 2]
 
     valid_configs = []
 
@@ -57,16 +57,15 @@ def get_v2_configs():
             "enable_rasterization": r,
             "k_pack": k
         })
-    if not valid_configs:
-        valid_configs.append({
-            'block_M': 64,
-            'block_N': 64,
-            'num_split_q': 64,
-            'threads': 256,
-            'num_stages': 1,
-            'enable_rasterization': True,
-            'k_pack': 2
-        })
+    valid_configs.append({
+        'block_M': 64,
+        'block_N': 64,
+        'num_split_q': 64,
+        'threads': 256,
+        'num_stages': 1,
+        'enable_rasterization': True,
+        'k_pack': 2
+    })
     return valid_configs
 
 
@@ -95,89 +94,15 @@ def fast_flashattn_v2(
     accum_dtype = "float"
 
     v_vec_size = 4
-
     vec_size = 4 * k_pack
 
-    @T.macro
-    def compute_block(
-            bz,
-            by,
-            bx,
+    @T.prim_func
+    def main(
             Q: T.Tensor(q_shape, dtype),
             K: T.Tensor(kv_shape, dtype),
             V: T.Tensor(kv_shape, dtype),
-            acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
-            m_i: T.FragmentBuffer([block_M], accum_dtype),
-            l_i: T.FragmentBuffer([block_M], accum_dtype),
+            Output: T.Tensor(q_shape, dtype),
     ):
-        Q_shared = T.alloc_shared([block_M, dim], dtype)
-        K_shared = T.alloc_shared([block_N, dim], dtype)
-        V_shared = T.alloc_shared([block_N, dim], dtype)
-        P_shared = T.alloc_shared([block_M, block_N], dtype)
-
-        acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
-        m_prev = T.alloc_fragment([block_M], accum_dtype)
-        scale_factor = T.alloc_fragment([block_M], accum_dtype)
-
-        q_block_offset = bx * block_M
-        T.copy(
-            Q[bz, q_block_offset:q_block_offset + block_M, by, :],
-            Q_shared,
-            coalesced_width=vec_size)
-
-        loop_end_k = T.ceildiv(q_block_offset +
-                               block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N)
-        for k in T.Pipelined(loop_end_k, num_stages=num_stages):
-            kv_idx = k * block_N
-            T.copy(
-                K[bz, kv_idx:kv_idx + block_N, by // groups, :], K_shared, coalesced_width=vec_size)
-            T.copy(
-                V[bz, kv_idx:kv_idx + block_N, by // groups, :],
-                V_shared,
-                coalesced_width=v_vec_size)
-
-            T.clear(acc_s)
-            T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, k_pack=k_pack)
-
-            if is_causal:
-                for i, j in T.Parallel(block_M, block_N):
-                    acc_s[i, j] = T.if_then_else(q_block_offset + i >= kv_idx + j, acc_s[i, j],
-                                                 -T.infinity(acc_s.dtype))
-
-            T.copy(m_i, m_prev)
-            T.reduce_max(acc_s, m_i, dim=1, clear=False)
-
-            for i in T.Parallel(block_M):
-                sf = T.exp2(m_prev[i] * scale - m_i[i] * scale)
-                l_i[i] *= sf
-                scale_factor[i] = sf
-
-            for i, j in T.Parallel(block_M, dim):
-                acc_o[i, j] *= scale_factor[i]
-
-            for i, j in T.Parallel(block_M, block_N):
-                acc_s[i, j] = T.exp2(acc_s[i, j] * scale - m_i[i] * scale)
-
-            row_sum = T.alloc_fragment([block_M], accum_dtype)
-            T.reduce_sum(acc_s, row_sum, dim=1)
-            for i in T.Parallel(block_M):
-                l_i[i] += row_sum[i]
-
-            T.copy(acc_s, P_shared)
-            T.sync_threads()
-
-            T.gemm(P_shared, V_shared, acc_o)
-
-    # 修复：将宏移至内核外部，以实现清晰的代码结构。
-    @T.macro
-    def scale_and_write_back(src_buffer, scale_vector, dest_tensor, bz, by, q_block_offset):
-        # 此宏执行融合的缩放和写回操作，这对性能至关重要。
-        for i, j in T.Parallel(block_M, dim):
-            dest_tensor[bz, q_block_offset + i, by, j] = src_buffer[i, j] * scale_vector[i]
-
-    @T.macro
-    def flash_attn_forward_kernel(Q: T.Tensor(q_shape, dtype), K: T.Tensor(kv_shape, dtype),
-                                  V: T.Tensor(kv_shape, dtype), Output: T.Tensor(q_shape, dtype)):
         with T.Kernel(num_split_q, batch * heads, threads=threads) as (b_split, byz_combined):
             T.use_swizzle(10, enable=enable_rasterization)
 
@@ -198,28 +123,77 @@ def fast_flashattn_v2(
                 T.fill(l_i, 0)
 
                 current_bx = bx[0]
+                q_block_offset = current_bx * block_M
 
-                compute_block(bz, by, current_bx, Q, K, V, acc_o, m_i, l_i)
+                Q_shared = T.alloc_shared([block_M, dim], dtype)
+                K_shared = T.alloc_shared([block_N, dim], dtype)
+                V_shared = T.alloc_shared([block_N, dim], dtype)
+                P_shared = T.alloc_shared([block_M, block_N], dtype)
+
+                acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
+                m_prev = T.alloc_fragment([block_M], accum_dtype)
+                scale_factor = T.alloc_fragment([block_M], accum_dtype)
+
+                T.copy(
+                    Q[bz, q_block_offset:q_block_offset + block_M, by, :],
+                    Q_shared,
+                    coalesced_width=vec_size)
+
+                loop_end_k = T.ceildiv(q_block_offset + block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N)
+                
+                for k in T.Pipelined(loop_end_k, num_stages=num_stages):
+                    kv_idx = k * block_N
+                    
+                    T.copy(
+                        K[bz, kv_idx:kv_idx + block_N, by // groups, :], 
+                        K_shared, 
+                        coalesced_width=vec_size)
+                    T.copy(
+                        V[bz, kv_idx:kv_idx + block_N, by // groups, :],
+                        V_shared,
+                        coalesced_width=v_vec_size)
+
+                    T.clear(acc_s)
+                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, k_pack=k_pack)
+
+                    if is_causal:
+                        for i, j in T.Parallel(block_M, block_N):
+                            acc_s[i, j] = T.if_then_else(q_block_offset + i >= kv_idx + j, acc_s[i, j],
+                                                         -T.infinity(acc_s.dtype))
+
+                    T.copy(m_i, m_prev)
+                    T.reduce_max(acc_s, m_i, dim=1, clear=False)
+
+                    for i in T.Parallel(block_M):
+                        sf = T.exp2(m_prev[i] * scale - m_i[i] * scale)
+                        l_i[i] *= sf
+                        scale_factor[i] = sf
+
+                    for i, j in T.Parallel(block_M, dim):
+                        acc_o[i, j] *= scale_factor[i]
+
+                    for i, j in T.Parallel(block_M, block_N):
+                        acc_s[i, j] = T.exp2(acc_s[i, j] * scale - m_i[i] * scale)
+
+                    row_sum = T.alloc_fragment([block_M], accum_dtype)
+                    T.reduce_sum(acc_s, row_sum, dim=1)
+                    for i in T.Parallel(block_M):
+                        l_i[i] += row_sum[i]
+
+                    T.copy(acc_s, P_shared)
+                    T.sync_threads()
+
+                    T.gemm(P_shared, V_shared, acc_o)
 
                 l_inv = T.alloc_fragment([block_M], accum_dtype)
                 for i in T.Parallel(block_M):
                     safe_l = T.if_then_else(l_i[i] > 1e-6, l_i[i], 1.0)
                     l_inv[i] = 1.0 / safe_l
 
-                # 修复：现在对宏的调用对编译器来说更清晰。
-                q_block_offset = current_bx * block_M
-                scale_and_write_back(acc_o, l_inv, Output, bz, by, q_block_offset)
+                for i, j in T.Parallel(block_M, dim):
+                    Output[bz, q_block_offset + i, by, j] = acc_o[i, j] * l_inv[i]
 
                 bx[0] = current_bx + num_split_q
-
-    @T.prim_func
-    def main(
-            Q: T.Tensor(q_shape, dtype),
-            K: T.Tensor(kv_shape, dtype),
-            V: T.Tensor(kv_shape, dtype),
-            Output: T.Tensor(q_shape, dtype),
-    ):
-        flash_attn_forward_kernel(Q, K, V, Output)
 
     return main
 
@@ -268,3 +242,4 @@ if __name__ == "__main__":
     parser.add_argument('--groups', type=int, default=1, help='groups')
     args = parser.parse_args()
     main_v2(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups)
+
