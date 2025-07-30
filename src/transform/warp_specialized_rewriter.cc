@@ -50,8 +50,6 @@ public:
     for (const auto &buffer : usage.buffer_use_count_) {
       used_in_producer_cond_.insert(buffer.first);
     }
-    for (const auto &buffer : used_in_producer_cond_) {
-    }
   }
 
   void VisitStmt_(const IfThenElseNode *op) final {
@@ -74,6 +72,16 @@ public:
       InsertBuffer(op->extent);
     }
     StmtExprVisitor::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
+      for (auto arg : op->args) {
+        if (auto buffer_load = arg.as<BufferLoadNode>()) {
+          used_in_producer_cond_.insert(buffer_load->buffer.get());
+        }
+      }
+    }
   }
 
 private:
