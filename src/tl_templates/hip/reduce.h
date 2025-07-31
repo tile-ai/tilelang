@@ -22,7 +22,7 @@ struct MinOp {
   }
 };
 
-template <class Reducer, int threads, int scale> struct AllReduce {
+template <class Reducer, int threads, int scale, int thread_offset = 0> struct AllReduce {
   static_assert(threads == 1024 || threads == 512 || threads == 256 ||
                 threads == 128 || threads == 64 || threads == 32 ||
                 threads == 16 || threads == 8 || threads == 4 || threads == 2);
@@ -43,7 +43,7 @@ template <class Reducer, int threads, int scale> struct AllReduce {
     if constexpr (offset == scale) {
       return x;
     } else {
-      return AllReduce<Reducer, offset, scale>::run(x, red_buf);
+      return AllReduce<Reducer, offset, scale, thread_offset>::run(x, red_buf);
     }
   }
 };

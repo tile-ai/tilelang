@@ -39,11 +39,7 @@ def torch_gmm(a, b, batch_sizes, batch_offsets_tensor, trans_b=False):
     return output
 
 
-@tilelang.jit(
-    out_idx=[2], pass_configs={
-        "tl.disable_tma_lower": True,
-        "tl.disable_warp_specialized": True
-    })
+@tilelang.jit(out_idx=[2])
 def grouped_gemm(batch_sizes_list,
                  K,
                  N,
