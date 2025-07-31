@@ -1,76 +1,118 @@
 name: CI
-
 on: [pull_request]
+
+env:
+  PYTHON_VERSION: '3.12'
+  VENV_DIR: tilelang_ci
 
 jobs:
   format-check:
     runs-on: self-hosted
 
+    permissions:
+      contents: write 
+
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
     - name: Set up Python
       uses: actions/setup-python@v2
       with:
-        python-version: '3.9'
+        python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Create virtual environment
-      run: python -m venv tilelang_ci
-
-    - name: Activate virtual environment and install dependencies
+    - name: Ensure venv (local & persistent)
       run: |
-        source tilelang_ci/bin/activate
-        python -m pip install --upgrade pip
-        if [ -f requirements-dev.txt ]; then python -m pip install -r requirements-dev.txt; fi
+        set -e
+        REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
+        MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
 
-    - name: Update submodules recursively
-      run: git submodule update --init --recursive
+        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
+          echo "venv exists and hash matches – reuse it"
+        else
+          echo "venv stale or missing – recreating"
+          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
+          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
+          # shellcheck source=/dev/null
+          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+          python -m pip install --upgrade pip --no-user
+          [[ -f requirements-test.txt ]] && \
+            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
+          touch "$MARKER"
+        fi
 
     - name: Run format check
       run: |
-        source tilelang_ci/bin/activate
-        ./format.sh
+        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+        if ! output=$(./format.sh 2>&1); then
+          echo "------------------------------------"
+          echo "message:"
+          echo "$output"
+          printf '%s\n' "$output" | grep "Please review and stage the changes."
+          echo "------------------------------------"
+          exit 1
+        fi
+    
+    - name: Commit and Push Changes
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "lint"
 
   build-test:
     runs-on: self-hosted
     needs: format-check
-
+    permissions:
+      contents: read
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
+        repository: ${{ github.event.pull_request.head.repo.full_name }}
+        ref: ${{ github.event.pull_request.head.ref }}
 
     - name: Set up Python
       uses: actions/setup-python@v2
       with:
-        python-version: '3.9'
+        python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Create virtual environment
-      run: python -m venv tilelang_ci
-
-    - name: Activate virtual environment and install dependencies
+    - name: Ensure venv (local & persistent)
       run: |
-        source tilelang_ci/bin/activate
-        python -m pip install --upgrade pip
-        if [ -f requirements-test.txt ]; then PIP_NO_BUILD_ISOLATION=1 python -m pip install -r requirements-test.txt; fi
+        set -e
+        REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
+        MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
 
-    - name: Install project in wheel mode
+        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
+          echo "venv exists and hash matches – reuse it"
+        else
+          echo "venv stale or missing – recreating"
+          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
+          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
+          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+          python -m pip install --upgrade pip --no-user
+          [[ -f requirements-test.txt ]] && \
+            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
+          pip install . --no-user
+          touch "$MARKER"
+        fi
+
+    - name: Install project (wheel form)
       run: |
-        source tilelang_ci/bin/activate
-        python -m pip install .
+        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+        pip install . --no-user
 
     - name: Run examples
       run: |
-        source tilelang_ci/bin/activate
+        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd examples
-        python -m pytest **/test*.py
+        unset PYTHONPATH
+        python -m pytest -n 8 **/test*.py
 
     - name: Run tests
       run: |
-        source tilelang_ci/bin/activate
+        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd testing/python
-        python -m pytest
+        unset PYTHONPATH
+        python -m pytest -n 8
