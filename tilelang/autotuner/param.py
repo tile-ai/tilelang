@@ -149,14 +149,14 @@ class AutotuneResult:
     func: Optional[Callable] = None
     kernel: Optional[Callable] = None
 
-    def _save_kernel_to_disk(self, cache_path: Path, kernel: JITKernel):
+    def _save_kernel_to_disk(self, cache_path: Path, kernel: JITKernel, verbose: bool = False):
         """
         Persists a compiled kernel to disk cache.
 
         Args:
-            key (str): The hash key identifying the kernel.
+            cache_path (Path): The root path for the cache files.
             kernel (JITKernel): The compiled kernel to be saved.
-            func (Callable, optional): The original function.
+            verbose (bool): Enable verbose log messages.
 
         Note:
             Saves the following files:
@@ -170,6 +170,8 @@ class AutotuneResult:
         # Save kernel source code
         try:
             kernel_path = os.path.join(cache_path, KERNEL_PATH)
+            if verbose:
+                logger.debug(f"Saving kernel source code to file: {kernel_path}")
             if kernel.artifact.kernel_source is not None:
                 with open(kernel_path, "w") as f:
                     f.write(kernel.artifact.kernel_source)
@@ -179,6 +181,8 @@ class AutotuneResult:
         # Save wrapped kernel source code
         try:
             wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
+            if verbose:
+                logger.debug(f"Saving wrapped kernel source code to file: {wrapped_kernel_path}")
             with open(wrapped_kernel_path, "w") as f:
                 f.write(kernel.get_kernel_source())
         except Exception as e:
@@ -188,6 +192,8 @@ class AutotuneResult:
         try:
             kernel_lib_path = os.path.join(cache_path, KERNEL_LIB_PATH)
             src_lib_path = kernel.adapter.libpath
+            if verbose:
+                logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
             shutil.copy(src_lib_path, kernel_lib_path)
         except Exception as e:
             logger.error(f"Error saving kernel library to disk: {e}")
@@ -195,6 +201,8 @@ class AutotuneResult:
         # Save kernel parameters
         try:
             params_path = os.path.join(cache_path, PARAMS_PATH)
+            if verbose:
+                logger.debug(f"Saving kernel parameters to disk: {params_path}")
             with open(params_path, "wb") as f:
                 cloudpickle.dump(kernel.params, f)
         except Exception as e:
@@ -209,6 +217,7 @@ class AutotuneResult:
         execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
         pass_configs: dict = None,
         func: Callable = None,
+        verbose: bool = False,
     ) -> JITKernel:
         """
         Loads a previously compiled kernel from disk cache.
@@ -221,6 +230,7 @@ class AutotuneResult:
             execution_backend (Literal): Backend type for execution. Defaults to "cython".
             pass_configs (dict, optional): Configuration for compiler passes.
             func (Callable, optional): The original function.
+            verbose (bool): Enable verbose log messages.
 
         Returns:
             JITKernel: The loaded kernel if found, None otherwise.
@@ -234,6 +244,8 @@ class AutotuneResult:
 
         try:
             wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
+            if verbose:
+                logger.debug(f"Loading wrapped kernel source code from file: {wrapped_kernel_path}")
             with open(wrapped_kernel_path, "r") as f:
                 kernel_global_source = f.read()
         except Exception as e:
@@ -244,6 +256,8 @@ class AutotuneResult:
         # Load kernel parameters
         try:
             params_path = os.path.join(cache_path, PARAMS_PATH)
+            if verbose:
+                logger.debug(f"Loading kernel parameters from file: {params_path}")
             with open(params_path, "rb") as f:
                 kernel_params = cloudpickle.load(f)
         except Exception as e:
@@ -264,19 +278,25 @@ class AutotuneResult:
         else:
             return None
 
-    def save_to_disk(self, path: Path):
+    def save_to_disk(self, path: Path, verbose: bool = False):
         if not os.path.exists(path):
             os.makedirs(path)
 
         # save best config
+        if verbose:
+            logger.debug(f"Saving best config to file: {path / BEST_CONFIG_PATH}")
         with open(path / BEST_CONFIG_PATH, "w") as f:
             json.dump(self.config, f)
 
         # save function
+        if verbose:
+            logger.debug(f"Saving function to file: {path / FUNCTION_PATH}")
         with open(path / FUNCTION_PATH, "wb") as f:
             cloudpickle.dump(self.func, f)
 
         # save ref latency
+        if verbose:
+            logger.debug(f"Saving latency to file: {path / LATENCY_PATH}")
         with open(path / LATENCY_PATH, "w") as f:
             json.dump({
                 "latency": self.latency,
@@ -291,15 +311,22 @@ class AutotuneResult:
         if not os.path.exists(path):
             return None
 
+        verbose = compile_args.verbose
         # load best config
+        if verbose:
+            logger.debug(f"Loading best config from file: {path / BEST_CONFIG_PATH}")
         with open(path / BEST_CONFIG_PATH, "r") as f:
             config = json.load(f)
 
         # load function
+        if verbose:
+            logger.debug(f"Loading function from file: {path / FUNCTION_PATH}")
         with open(path / FUNCTION_PATH, "rb") as f:
             func = cloudpickle.load(f)
 
         # load latency
+        if verbose:
+            logger.debug(f"Loading latency from file: {path / LATENCY_PATH}")
         with open(path / LATENCY_PATH, "r") as f:
             latency = json.load(f)
             latency, ref_latency = latency["latency"], latency["ref_latency"]
