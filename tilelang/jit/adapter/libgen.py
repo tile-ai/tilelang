@@ -38,8 +38,9 @@ class LibraryGenerator(object):
     pass_configs: Optional[Dict[str, Any]] = None
     compile_flags: Optional[List[str]] = None
 
-    def __init__(self, target: Target):
+    def __init__(self, target: Target, verbose: bool = False):
         self.target = target
+        self.verbose = verbose
 
     def assign_pass_configs(self, pass_configs: Optional[Dict[str, Any]] = None):
         self.pass_configs = pass_configs
@@ -62,6 +63,7 @@ class LibraryGenerator(object):
 
     def compile_lib(self, timeout: float = None):
         target = self.target
+        verbose = self.verbose
         if is_cuda_target(target):
             from tilelang.env import CUTLASS_INCLUDE_DIR
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
@@ -143,6 +145,8 @@ class LibraryGenerator(object):
         src.flush()
 
         try:
+            if verbose:
+                print(f"compile_lib compilation command: {' '.join(command)}")
             ret = subprocess.run(command, timeout=timeout)
         except Exception as e:
             raise RuntimeError(f"Compile kernel failed because of {e}") from e
@@ -211,6 +215,7 @@ class PyLibraryGenerator(LibraryGenerator):
 
     def compile_lib(self, timeout: float = None):
         target = self.target
+        verbose = self.verbose
         if is_cuda_target(target):
             from tilelang.env import (CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH)
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
@@ -237,7 +242,7 @@ class PyLibraryGenerator(LibraryGenerator):
                 ]
 
             cubin_bytes = compile_cuda(
-                self.lib_code, target_format="cubin", options=options, verbose=True)
+                self.lib_code, target_format="cubin", options=options, verbose=verbose)
             with open(libpath, "wb") as f:
                 f.write(cubin_bytes)
 

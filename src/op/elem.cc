@@ -154,7 +154,7 @@ For Copy::MakeSIMTLoop(arith::Analyzer *analyzer) const {
       annotations.Set("coalesced_width", coalesced_width);
     }
     body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
-               ForKind::kParallel, body, NullOpt, annotations);
+               ForKind::kParallel, body, std::nullopt, annotations);
   }
   return Downcast<For>(body);
 }
@@ -254,12 +254,12 @@ Stmt Copy::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   IterVar col_var = loop_vars[loop_vars.size() - 1];
   IterVar row_var = loop_vars[loop_vars.size() - 2];
   PrimExpr local_layout_thread_map =
-      FloorMod(local_layout->ForwardThread(local_indices, NullOpt), 32);
+      FloorMod(local_layout->ForwardThread(local_indices, std::nullopt), 32);
   PrimExpr matrix_8x8_thread_map = makeGemmFragment8x8()->ForwardThread(
-      {FloorMod(row_var, 8), FloorMod(col_var, 8)}, NullOpt);
+      {FloorMod(row_var, 8), FloorMod(col_var, 8)}, std::nullopt);
   PrimExpr matrix_8x8_thread_map_trans =
       makeGemmFragment8x8Transposed()->ForwardThread(
-          {FloorMod(row_var, 8), FloorMod(col_var, 8)}, NullOpt);
+          {FloorMod(row_var, 8), FloorMod(col_var, 8)}, std::nullopt);
   PrimExpr local_indices_flattened =
       local_tensor.OffsetOf(local_indices_transformed).back();
   if (analyzer->CanProveEqual(matrix_8x8_thread_map, local_layout_thread_map) &&
@@ -376,13 +376,13 @@ LayoutMap Copy::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   if (T.layout_map.count(src) && T.layout_map.count(dst)) {
     // Only compare fragment layout
     if (src.scope() == "local.fragment" && dst.scope() == "local.fragment") {
-      const FragmentNode *src_layout = T.layout_map[src].as<Fragment>().get();
-      const FragmentNode *dst_layout = T.layout_map[dst].as<Fragment>().get();
+      const auto &src_layout = T.layout_map[src].as<Fragment>();
+      const auto &dst_layout = T.layout_map[dst].as<Fragment>();
       if (src_layout && dst_layout) {
-        ICHECK(src_layout->IsEqual(dst_layout, true))
+        ICHECK((*src_layout)->IsEqual(dst_layout->get(), true))
             << "Get different layout for " << src << " and " << dst
-            << "\nLHS = " << src_layout->DebugOutput()
-            << "\nRHS = " << dst_layout->DebugOutput()
+            << "\nLHS = " << (*src_layout)->DebugOutput()
+            << "\nRHS = " << (*dst_layout)->DebugOutput()
             << "\nYou may need to use a shared memory to transform the layout";
       }
     }

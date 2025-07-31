@@ -3,6 +3,7 @@
  * \brief align dynamic shared memory allocations
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
@@ -147,8 +148,11 @@ tvm::transform::Pass AlignDynamicSharedMemoryAllocations(int align_bytes) {
                             "tl.AlignDynamicSharedMemoryAllocations", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.AlignDynamicSharedMemoryAllocations")
-    .set_body_typed(AlignDynamicSharedMemoryAllocations);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.AlignDynamicSharedMemoryAllocations",
+                        AlignDynamicSharedMemoryAllocations);
+});
 
 } // namespace tl
 } // namespace tvm

@@ -46,7 +46,7 @@ public:
   bool IsEqual(const SwizzledLayoutNode *other, bool skip_index = false) const;
   static constexpr const char *_type_key = "tl.SwizzledLayout";
   bool SEqualReduce(const SwizzledLayoutNode *other, SEqualReducer equal) const;
-  void VisitAttrs(tvm::AttrVisitor *v);
+  static void RegisterReflection();
   TVM_DECLARE_FINAL_OBJECT_INFO(SwizzledLayoutNode, LayoutNode);
 
 private:

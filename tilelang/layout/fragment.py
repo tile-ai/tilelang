@@ -9,7 +9,7 @@ from tilelang.layout import Layout
 from typing import List
 
 
-@tvm._ffi.register_object("tl.Fragment")
+@tvm.ffi.register_object("tl.Fragment")
 class Fragment(Layout):
     """
     A Fragment layout object that encapsulates iteration variables (forward_vars),
@@ -90,7 +90,9 @@ class Fragment(Layout):
                 forward_thread = forward_thread_fn(*vars)
 
         # Ensure forward_index is an array if it isn't None
-        if forward_index is not None and not isinstance(forward_index, tvm.ir.container.Array):
+        if forward_index is None:
+            forward_index = []
+        elif not isinstance(forward_index, tvm.ir.container.Array):
             forward_index = [forward_index]
 
         # Call TVM FFI constructor to set up internal data structures

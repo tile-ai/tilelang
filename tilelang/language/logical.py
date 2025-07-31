@@ -1,8 +1,7 @@
 """The language interface for tl programs."""
 
 from tilelang import language as T
-from tvm.tir import Buffer, BufferRegion
-from tvm.ir import Range
+from tvm.tir import Buffer, BufferRegion, BufferLoad
 from tvm import tir
 from typing import Union
 from tilelang.utils.language import get_buffer_elems
@@ -28,16 +27,17 @@ def any_of(buffer: Union[T.Tensor, BufferRegion]):
         for i, r in enumerate(region):
             extent = r.extent
             if extent == 1:
-                new_region.append(r)
+                new_region.append(r.min)
             else:
                 # check the idx is the last dimension
                 if i != len(region) - 1:
                     raise ValueError(
                         "Only support the last dimension to be for T.any currently, please contact us if you need this feature"
                     )
-                new_region.append(Range(r.min, 1))
-        buffer = BufferRegion(buffer, new_region)
-        return T.call_intrin(return_type, tir.op.Op.get("tl.any_of"), T.address_of(buffer), extent)
+                new_region.append(r.min)
+        buffer_load = BufferLoad(buffer, new_region)
+        return T.call_intrin(return_type, tir.op.Op.get("tl.any_of"), T.address_of(buffer_load),
+                             extent)
     else:
         raise ValueError(f"Invalid buffer type: {type(buffer)}")
 
@@ -62,15 +62,16 @@ def all_of(buffer: Union[T.Tensor, BufferRegion]):
         for i, r in enumerate(region):
             extent = r.extent
             if extent == 1:
-                new_region.append(r)
+                new_region.append(r.min)
             else:
                 # check the idx is the last dimension
                 if i != len(region) - 1:
                     raise ValueError(
                         "Only support the last dimension to be for T.any currently, please contact us if you need this feature"
                     )
-                new_region.append(Range(r.min, 1))
-        buffer = BufferRegion(buffer, new_region)
-        return T.call_intrin(return_type, tir.op.Op.get("tl.all_of"), T.address_of(buffer), extent)
+                new_region.append(r.min)
+        buffer_load = BufferLoad(buffer, new_region)
+        return T.call_intrin(return_type, tir.op.Op.get("tl.all_of"), T.address_of(buffer_load),
+                             extent)
     else:
         raise ValueError(f"Invalid buffer type: {type(buffer)}")

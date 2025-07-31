@@ -6,7 +6,9 @@
 
 #include "./transform/common/attr.h"
 #include "op/builtin.h"
+#include "tvm/ffi/any.h"
 #include <tvm/arith/analyzer.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/script/ir_builder/tir/ir.h>
 
 namespace tvm {
@@ -65,7 +67,7 @@ ForFrame ParallelFor(Array<PrimExpr> extents,
       Var var = vars[i];
       body =
           For(var, dom->min, dom->extent, ForKind::kParallel, std::move(body),
-              /*thread_binding=*/NullOpt, /*annotations=*/annotations);
+              /*thread_binding=*/std::nullopt, /*annotations=*/annotations);
     }
     return body;
   };
@@ -99,7 +101,7 @@ ForFrame PipelinedFor(PrimExpr start, PrimExpr stop, int num_stages,
       anno.Set("tl_pipeline_group", groups);
     body = For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kSerial,
                std::move(body),
-               /*thread_binding=*/NullOpt, /*annotations=*/anno);
+               /*thread_binding=*/std::nullopt, /*annotations=*/anno);
     return body;
   };
   return ForFrame(n);
@@ -157,7 +159,7 @@ ForFrame PersistentFor(Array<PrimExpr> domain, PrimExpr wave_size,
         Stmt());
 
     Stmt outer = For(loop_var, 0, waves, ForKind::kSerial,
-                     SeqStmt({out_if, body}), NullOpt, anno);
+                     SeqStmt({out_if, body}), std::nullopt, anno);
     for (int i = 0; i < vars.size() - 1; ++i) {
       outer = tvm::tir::LetStmt(vars[i], idxs[i + 1], outer);
     }
@@ -178,9 +180,10 @@ class KernelLaunchFrameNode : public TIRFrameNode {
 public:
   Array<TIRFrame> frames;
 
-  void VisitAttrs(tvm::AttrVisitor *v) {
-    TIRFrameNode::VisitAttrs(v);
-    v->Visit("frames", &frames);
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<KernelLaunchFrameNode>().def_ro(
+        "frames", &KernelLaunchFrameNode::frames);
   }
 
   static constexpr const char *_type_key = "tl.KernelLaunchFrame";
@@ -213,13 +216,15 @@ public:
 };
 
 KernelLaunchFrame KernelLaunch(Array<PrimExpr> grid_size,
-                               Array<PrimExpr> block_size,
-                               Map<String, ObjectRef> attrs) {
+                               Optional<Array<PrimExpr>> block_size_opt,
+                               Map<String, ffi::Any> attrs) {
   ObjectPtr<KernelLaunchFrameNode> n = make_object<KernelLaunchFrameNode>();
 
   // If the kernel is a CPU kernel, we don't need to launch any threads.
   bool is_cpu_kernel_frame =
       attrs.defined() && attrs.count(tilelang_is_cpu_kernel_frame);
+
+  auto block_size = block_size_opt.value_or(Array<PrimExpr>());
 
   if (is_cpu_kernel_frame) {
     // Launch CPU Kernel
@@ -279,18 +284,23 @@ KernelLaunchFrame KernelLaunch(Array<PrimExpr> grid_size,
 
 TVM_REGISTER_NODE_TYPE(KernelLaunchFrameNode);
 
-TVM_REGISTER_GLOBAL("tl.Parallel").set_body_typed(ParallelFor);
-TVM_REGISTER_GLOBAL("tl.Pipelined").set_body_typed(PipelinedFor);
-TVM_REGISTER_GLOBAL("tl.Persistent").set_body_typed(PersistentFor);
-TVM_REGISTER_GLOBAL("tl.KernelLaunch").set_body_typed(KernelLaunch);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+      .def("tl.Parallel", ParallelFor)
+      .def("tl.Pipelined", PipelinedFor)
+      .def("tl.Persistent", PersistentFor)
+      .def("tl.KernelLaunch", KernelLaunch);
+});
 
 class WarpSpecializeFrameNode : public TIRFrameNode {
 public:
   Array<TIRFrame> frames;
 
-  void VisitAttrs(tvm::AttrVisitor *v) {
-    TIRFrameNode::VisitAttrs(v);
-    v->Visit("frames", &frames);
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<WarpSpecializeFrameNode>().def_ro(
+        "frames", &WarpSpecializeFrameNode::frames);
   }
 
   static constexpr const char *_type_key = "tl.WarpSpecializeFrame";
@@ -359,7 +369,12 @@ WarpSpecializeFrame WarpSpecialize(Array<IntImm> warp_group_ids,
 }
 
 TVM_REGISTER_NODE_TYPE(WarpSpecializeFrameNode);
-TVM_REGISTER_GLOBAL("tl.WarpSpecialize").set_body_typed(WarpSpecialize);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.WarpSpecialize", WarpSpecialize);
+  KernelLaunchFrameNode::RegisterReflection();
+  WarpSpecializeFrameNode::RegisterReflection();
+});
 
 } // namespace tl
 } // namespace tvm

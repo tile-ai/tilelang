@@ -2,16 +2,19 @@ name: CI
 on: [pull_request]
 
 env:
-  PYTHON_VERSION: '3.9'
+  PYTHON_VERSION: '3.12'
   VENV_DIR: tilelang_ci
 
 jobs:
   format-check:
     runs-on: self-hosted
 
+    permissions:
+      contents: write 
+
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
@@ -37,27 +40,38 @@ jobs:
           python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
-          pip install . --no-user
           touch "$MARKER"
         fi
-
-    - name: Update submodules
-      run: git submodule update --init --recursive
 
     - name: Run format check
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        ./format.sh
+        if ! output=$(./format.sh 2>&1); then
+          echo "------------------------------------"
+          echo "message:"
+          echo "$output"
+          printf '%s\n' "$output" | grep "Please review and stage the changes."
+          echo "------------------------------------"
+          exit 1
+        fi
+    
+    - name: Commit and Push Changes
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "lint"
 
   build-test:
     runs-on: self-hosted
     needs: format-check
-
+    permissions:
+      contents: read
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
+        repository: ${{ github.event.pull_request.head.repo.full_name }}
+        ref: ${{ github.event.pull_request.head.ref }}
 
     - name: Set up Python
       uses: actions/setup-python@v2

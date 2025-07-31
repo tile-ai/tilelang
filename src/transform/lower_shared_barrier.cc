@@ -6,7 +6,7 @@
 #include "tvm/tir/expr.h"
 #include "tvm/tir/stmt.h"
 #include <tvm/arith/analyzer.h>
-#include <tvm/runtime/registry.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
@@ -209,8 +209,10 @@ tvm::transform::Pass LowerSharedBarrier() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerSharedBarrier", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.LowerSharedBarrier")
-    .set_body_typed(LowerSharedBarrier);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.LowerSharedBarrier", LowerSharedBarrier);
+});
 
 } // namespace transform
 } // namespace tl

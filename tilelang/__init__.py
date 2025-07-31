@@ -57,7 +57,7 @@ from .env import SKIP_LOADING_TILELANG_SO
 from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
 
 import tvm
-import tvm._ffi.base
+import tvm.base
 from tvm import DataType  # noqa: F401
 
 from . import libinfo
@@ -69,7 +69,7 @@ def _load_tile_lang_lib():
         for path in libinfo.get_dll_directories():
             os.add_dll_directory(path)
     # pylint: disable=protected-access
-    lib_name = "tilelang" if tvm._ffi.base._RUNTIME_ONLY else "tilelang_module"
+    lib_name = "tilelang" if tvm.base._RUNTIME_ONLY else "tilelang_module"
     # pylint: enable=protected-access
     lib_path = libinfo.find_lib_path(lib_name, optional=False)
     return ctypes.CDLL(lib_path[0]), lib_path[0]

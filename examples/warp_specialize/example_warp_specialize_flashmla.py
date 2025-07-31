@@ -9,6 +9,7 @@ import argparse
 tilelang.disable_cache()
 
 
+@tilelang.jit(out_idx=[6])
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     dtype = "float16"
@@ -79,7 +80,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             p0_1_1_ready_barrier = T.alloc_barrier(arrive_count=128)
             lse_0_ready_barrier = T.alloc_barrier(arrive_count=128)
             lse_1_ready_barrier = T.alloc_barrier(arrive_count=128)
-            s_shared_ready_barrier = T.alloc_barrier(arrive_count=128)
             q_shared_ready_barrier = T.alloc_barrier(arrive_count=256)
             k_pe_shared_1_free_barrier = T.alloc_barrier(arrive_count=128)
             k_pe_shared_0_free_barrier = T.alloc_barrier(arrive_count=128)
@@ -401,8 +401,7 @@ def main(batch=1, heads=128, kv_heads=1, kv_ctx=8192, dim=512, pe_dim=64):
     BLOCK_H = 64
     num_split = 1
 
-    program = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split)
-    kernel = tilelang.compile(program, out_idx=[6])
+    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
     latency = profiler.do_bench(warmup=500)

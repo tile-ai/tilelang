@@ -223,17 +223,13 @@ bool Gemm::CheckWGMMA() const {
   if (C->dtype == DataType::Float(16)) {
     if (A->dtype == DataType::Float(16) && B->dtype == DataType::Float(16))
       return K % 16 == 0;
-    else if (A->dtype == DataType::NVFloat8E4M3() &&
-             B->dtype == DataType::NVFloat8E4M3())
+    else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e4m3())
       return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype == DataType::NVFloat8E4M3() &&
-             B->dtype == DataType::NVFloat8E5M2())
+    else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e5m2())
       return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype == DataType::NVFloat8E5M2() &&
-             B->dtype == DataType::NVFloat8E4M3())
+    else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e4m3())
       return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype == DataType::NVFloat8E5M2() &&
-             B->dtype == DataType::NVFloat8E5M2())
+    else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e5m2())
       return (!trans_A) && trans_B && K % 32 == 0;
     else
       return false;
@@ -245,17 +241,13 @@ bool Gemm::CheckWGMMA() const {
       return K % 16 == 0;
     else if (A->dtype == DataType::Float(32) && B->dtype == DataType::Float(32))
       return (!trans_A) && trans_B && K % 8 == 0;
-    else if (A->dtype == DataType::NVFloat8E4M3() &&
-             B->dtype == DataType::NVFloat8E4M3())
+    else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e4m3())
       return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype == DataType::NVFloat8E4M3() &&
-             B->dtype == DataType::NVFloat8E5M2())
+    else if (A->dtype.is_float8_e4m3() && B->dtype.is_float8_e5m2())
       return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype == DataType::NVFloat8E5M2() &&
-             B->dtype == DataType::NVFloat8E4M3())
+    else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e4m3())
       return (!trans_A) && trans_B && K % 32 == 0;
-    else if (A->dtype == DataType::NVFloat8E5M2() &&
-             B->dtype == DataType::NVFloat8E5M2())
+    else if (A->dtype.is_float8_e5m2() && B->dtype.is_float8_e5m2())
       return (!trans_A) && trans_B && K % 32 == 0;
     else
       return false;

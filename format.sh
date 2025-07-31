@@ -255,13 +255,4 @@ if ! git diff --quiet &>/dev/null; then
     exit 1
 fi
 
-if ! git diff --quiet &>/dev/null; then
-    echo 'Reformatted files. Please review and stage the changes.'
-    echo 'Changes not staged for commit:'
-    echo
-    git --no-pager diff --name-only
-
-    exit 1
-fi
-
 echo 'tile-lang: All checks passed'

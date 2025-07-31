@@ -23,6 +23,7 @@
  */
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
@@ -306,8 +307,10 @@ tvm::transform::Pass InjectTmaBarrier() {
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectTmaBarrier", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.InjectTmaBarrier")
-    .set_body_typed(InjectTmaBarrier);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.InjectTmaBarrier", InjectTmaBarrier);
+});
 
 } // namespace tl
 } // namespace tvm

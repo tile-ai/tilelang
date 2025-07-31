@@ -22,8 +22,9 @@
  * \brief Split device function from host.
  */
 #include "tir/transforms/ir_utils.h"
+#include <tvm/ffi/function.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/transform.h>
-#include <tvm/runtime/registry.h>
 #include <tvm/target/target.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
@@ -87,8 +88,11 @@ tvm::transform::Pass AnnotateDeviceRegions() {
   return CreatePrimFuncPass(pass_func, 0, "tl.AnnotateDeviceRegions", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.AnnotateDeviceRegions")
-    .set_body_typed(AnnotateDeviceRegions);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.AnnotateDeviceRegions",
+                        AnnotateDeviceRegions);
+});
 
 } // namespace tl
 } // namespace tvm

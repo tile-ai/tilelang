@@ -24,6 +24,7 @@
 #include "arith/ir_mutator_with_analyzer.h"
 #include "tir/transforms/ir_utils.h"
 #include <tvm/arith/iter_affine_map.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/data_type_rewriter.h>
 #include <tvm/tir/stmt_functor.h>
@@ -352,12 +353,7 @@ private:
 };
 
 PrimFunc FlattenBufferRewriter(PrimFunc f) {
-  // Only apply this pass to TIR that is not from TE schedules
-  if (!IsFromLegacyTESchedule(f)) {
-    return BufferFlattener::Flatten(f);
-  } else {
-    return f;
-  }
+  return BufferFlattener::Flatten(f);
 }
 
 using namespace tir::transform;
@@ -368,7 +364,10 @@ tvm::transform::Pass FlattenBuffer() {
   return CreatePrimFuncPass(pass_func, 0, "tl.FlattenBuffer", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.FlattenBuffer").set_body_typed(FlattenBuffer);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.FlattenBuffer", FlattenBuffer);
+});
 
 } // namespace tl
 } // namespace tvm

@@ -1,8 +1,10 @@
 /*!
  * \file simplify.cc
- * \brief Remove useless parameters of TL PrimFunc.
+ * \brief Statement simplifier based on analyzer and remove useless parameters
+ * of TL PrimFunc.
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/buffer.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
@@ -19,39 +21,45 @@ namespace tl {
 using namespace tir;
 using namespace arith;
 
-struct SimplifyConfigNode : public tvm::AttrsNode<SimplifyConfigNode> {
+struct SimplifyConfigNode : public AttrsNodeReflAdapter<SimplifyConfigNode> {
   bool transitively_prove_inequalities;
   bool propagate_knowns_to_prove_conditional;
   bool propagate_knowns_to_simplify_expressions;
   bool convert_boolean_to_and_of_ors;
   bool apply_constraints_to_boolean_branches;
 
-  TVM_DECLARE_ATTRS(SimplifyConfigNode, "tl.transform.SimplifyConfig") {
-    TVM_ATTR_FIELD(transitively_prove_inequalities)
-        .describe("If true, simplify conditionals with transitive combinations "
-                  "of scoped constraints")
-        .set_default(false);
-
-    TVM_ATTR_FIELD(propagate_knowns_to_prove_conditional)
-        .describe("If true, known buffer values are propagated and used to "
-                  "statically prove conditionals")
-        .set_default(false);
-
-    TVM_ATTR_FIELD(propagate_knowns_to_simplify_expressions)
-        .describe("If true, known buffer values are propagated and used to "
-                  "replace BufferLoad wherever "
-                  "possible")
-        .set_default(false);
-
-    TVM_ATTR_FIELD(convert_boolean_to_and_of_ors)
-        .describe("If true, simplify conditionals into an AND of ORs")
-        .set_default(false);
-
-    TVM_ATTR_FIELD(apply_constraints_to_boolean_branches)
-        .describe("If true, simplify each branch of AND/OR "
-                  "under a constraints provided by the other branch")
-        .set_default(false);
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<SimplifyConfigNode>()
+        .def_ro("transitively_prove_inequalities",
+                &SimplifyConfigNode::transitively_prove_inequalities,
+                "If true, simplify conditionals with transitive combinations "
+                "of scoped constraints",
+                refl::DefaultValue(false))
+        .def_ro("propagate_knowns_to_prove_conditional",
+                &SimplifyConfigNode::propagate_knowns_to_prove_conditional,
+                "If true, known buffer values are propagated and used to "
+                "statically prove conditionals",
+                refl::DefaultValue(false))
+        .def_ro("propagate_knowns_to_simplify_expressions",
+                &SimplifyConfigNode::propagate_knowns_to_simplify_expressions,
+                "If true, known buffer values are propagated and used to "
+                "replace BufferLoad wherever "
+                "possible",
+                refl::DefaultValue(false))
+        .def_ro("convert_boolean_to_and_of_ors",
+                &SimplifyConfigNode::convert_boolean_to_and_of_ors,
+                "If true, simplify conditionals into an AND of ORs",
+                refl::DefaultValue(false))
+        .def_ro("apply_constraints_to_boolean_branches",
+                &SimplifyConfigNode::apply_constraints_to_boolean_branches,
+                "If true, simplify each branch of AND/OR under a constraints "
+                "provided by the other "
+                "branch",
+                refl::DefaultValue(false));
   }
+  static constexpr const char *_type_key = "tl.transform.SimplifyConfig";
+  TVM_FFI_DECLARE_FINAL_OBJECT_INFO(SimplifyConfigNode, BaseAttrsNode);
 
   RewriteSimplifier::Extension GetEnabledExtensions() const {
     RewriteSimplifier::Extension flags = RewriteSimplifier::kNone;
@@ -200,6 +208,7 @@ public:
   TVM_DEFINE_NOTNULLABLE_OBJECT_REF_METHODS(SimplifyConfig, Attrs,
                                             SimplifyConfigNode);
 };
+TVM_FFI_STATIC_INIT_BLOCK({ SimplifyConfigNode::RegisterReflection(); });
 
 TVM_REGISTER_NODE_TYPE(SimplifyConfigNode);
 TVM_REGISTER_PASS_CONFIG_OPTION("tl.Simplify", SimplifyConfig);
@@ -207,7 +216,7 @@ TVM_REGISTER_PASS_CONFIG_OPTION("tl.Simplify", SimplifyConfig);
 class StmtSimplifier : public IRMutatorWithAnalyzer {
 public:
   static PrimFunc Apply(PrimFunc func, Analyzer *analyzer,
-                        Optional<SimplifyConfig> config_opt = NullOpt,
+                        Optional<SimplifyConfig> config_opt = std::nullopt,
                         bool simplify_arguments = false) {
     auto config = config_opt.value_or(AttrsWithDefaultValues<SimplifyConfig>());
     analyzer->rewrite_simplify.SetEnabledExtensions(
@@ -229,6 +238,7 @@ public:
     // Begin to remove useless var and buffer
     // First get used buffers
     simplifier.used_buffers_ = CollectUsedBuffers(func);
+
     bool param_updated = false;
     Array<Var> new_params;
     Map<Var, Buffer> new_buffer_map;
@@ -239,13 +249,18 @@ public:
             simplifier.used_buffers_.end()) {
           new_params.push_back(var);
           new_buffer_map.Set(var, func->buffer_map[var]);
+        } else if (simplifier.used_in_buffer_def_.find(
+                       func->buffer_map[var]->data.get()) !=
+                   simplifier.used_in_buffer_def_.end()) {
+          new_params.push_back(var);
+          new_buffer_map.Set(var, func->buffer_map[var]);
         } else {
           param_updated = true;
         }
       }
     }
 
-    if (simplify_arguments && param_updated) {
+    if (param_updated) {
       return PrimFunc(new_params, func.CopyOnWrite()->body, func->ret_type,
                       new_buffer_map, func->attrs, func->span);
     } else {
@@ -444,7 +459,7 @@ private:
                               arith::ProofStrength::kSymbolicBound)) {
         return Bool(true);
       }
-      return NullOpt;
+      return std::nullopt;
     }
   }
 
@@ -452,7 +467,7 @@ private:
   std::optional<ControlFlowGraph> touch_pattern_;
 
   Map<Var, PrimExpr> non_inlined_bindings_;
-  Optional<Stmt> current_stmt_{NullOpt};
+  Optional<Stmt> current_stmt_{std::nullopt};
   std::unordered_set<const VarNode *> used_in_buffer_def_;
   std::unordered_set<const VarNode *> used_vars_;
   std::unordered_set<const BufferNode *> used_buffers_;
@@ -469,7 +484,10 @@ tvm::transform::Pass Simplify(bool simplify_arguments = true) {
   return CreatePrimFuncPass(pass_func, 0, "tl.Simplify", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.Simplify").set_body_typed(Simplify);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.Simplify", Simplify);
+});
 
 } // namespace tl
 } // namespace tvm

@@ -7,7 +7,7 @@ from tilelang import tvm as tvm
 from tvm.target import Target
 from tilelang.engine.param import KernelParam
 from tvm import tir
-from tvm.relay import TensorType
+from tvm.relax import TensorType
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import is_cuda_target, is_hip_target, is_cpu_target
@@ -244,7 +244,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
         self.verbose = verbose
         self.wrapper = TLWrapper(self.target)
-        self.lib_generator = LibraryGenerator(self.target)
+        self.lib_generator = LibraryGenerator(self.target, verbose=verbose)
         self.lib_generator.assign_pass_configs(pass_configs)
         self.lib_generator.assign_compile_flags(compile_flags)
 
@@ -306,7 +306,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.buffer_device_map = adapter._process_buffer_device()
 
         adapter.verbose = verbose
-        adapter.lib_generator = LibraryGenerator(adapter.target)
+        adapter.lib_generator = LibraryGenerator(adapter.target, verbose=verbose)
         adapter.lib_generator.assign_pass_configs(pass_configs)
         adapter.lib_generator.assign_compile_flags(compile_flags)
         adapter.lib = adapter.lib_generator.load_lib(lib_path=kernel_lib_path)

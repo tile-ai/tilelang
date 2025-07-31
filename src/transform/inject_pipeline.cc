@@ -22,6 +22,7 @@
  * \brief Transform annotated loops into pipelined one that parallelize
  * producers and consumers
  */
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/target/target.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/transform.h>
@@ -737,7 +738,7 @@ private:
     }
 
     if (!is_unit_loop) {
-      Map<String, ObjectRef> preserved_annotations;
+      Map<String, Any> preserved_annotations;
       for (const auto &kv : pipeline_loop_->annotations) {
         const String &key = kv.first;
         if (kv.first != tir::attr::software_pipeline_stage &&
@@ -748,7 +749,7 @@ private:
       }
       new_loop = For(Downcast<Var>(new_loop_var), pipeline_loop_->min, extent,
                      unroll_loop ? ForKind::kUnrolled : pipeline_loop_->kind,
-                     std::move(new_loop), NullOpt, preserved_annotations);
+                     std::move(new_loop), std::nullopt, preserved_annotations);
     }
     // Update producer heads in the global async states.
     for (const auto &[stage_id, state] : async_states_local) {
@@ -955,7 +956,7 @@ private:
     std::unordered_set<int> pipeline_async_stages;
     if (auto annot =
             op->annotations.Get(tir::attr::software_pipeline_async_stages)) {
-      for (auto s : Downcast<Array<Integer>>(annot)) {
+      for (auto s : Downcast<Array<Integer>>(annot.value())) {
         pipeline_async_stages.insert(s->value);
       }
     }
@@ -1038,8 +1039,11 @@ tir::transform::Pass InjectSoftwarePipeline() {
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectSoftwarePipeline", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.InjectSoftwarePipeline")
-    .set_body_typed(InjectSoftwarePipeline);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.InjectSoftwarePipeline",
+                        InjectSoftwarePipeline);
+});
 
 } // namespace tl
 } // namespace tvm

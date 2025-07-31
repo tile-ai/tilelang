@@ -1,7 +1,8 @@
 /*!
  * \file thread_storage_sync.cc
  */
-#include <tvm/runtime/registry.h>
+#include <tvm/ffi/function.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
@@ -269,7 +270,7 @@ private:
       scope_.pop_back();
       s.access.insert(s.access.end(), v.begin(), v.end());
 
-      num_partial_threads_ = NullOpt;
+      num_partial_threads_ = std::nullopt;
     } else {
       TileLangStorageAccessVisitor::VisitStmt_(op);
     }
@@ -371,8 +372,11 @@ Pass TileLangThreadPartialSync(String storage_scope) {
   return CreatePrimFuncPass(pass_func, 0, "tl.ThreadPartialSync", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.ThreadPartialSync")
-    .set_body_typed(TileLangThreadPartialSync);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.ThreadPartialSync",
+                        TileLangThreadPartialSync);
+});
 
 } // namespace transform
 } // namespace tl

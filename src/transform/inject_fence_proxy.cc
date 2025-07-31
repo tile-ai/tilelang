@@ -22,6 +22,7 @@
  * \brief Inject fence between generic and async proxies (sm90+)
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
@@ -193,8 +194,10 @@ tvm::transform::Pass InjectFenceProxy() {
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectFenceProxy", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.InjectFenceProxy")
-    .set_body_typed(InjectFenceProxy);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.InjectFenceProxy", InjectFenceProxy);
+});
 
 } // namespace tl
 } // namespace tvm

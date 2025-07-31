@@ -27,7 +27,9 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=0):
                 # Copy tile of A
                 # This is a sugar syntax for parallelized copy
-                T.copy(A[by * block_M, ko * block_K], X_shared)
+                aliased_offset = T.int32()
+                T.let(aliased_offset, ko * block_K)
+                T.copy(A[by * block_M, aliased_offset], X_shared)
 
                 # Demonstrate parallelized copy from global to shared for B
                 T.copy(B[bx * block_N, ko * block_K], B_shared[:block_N, :block_K])

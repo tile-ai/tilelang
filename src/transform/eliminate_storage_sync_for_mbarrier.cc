@@ -5,7 +5,8 @@
 #include "./storage_access.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
-#include <tvm/runtime/registry.h>
+#include <tvm/ffi/function.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
@@ -115,8 +116,11 @@ tvm::transform::Pass EliminateStorageSyncForMBarrier() {
                             {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.EliminateStorageSyncForMBarrier")
-    .set_body_typed(EliminateStorageSyncForMBarrier);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.EliminateStorageSyncForMBarrier",
+                        EliminateStorageSyncForMBarrier);
+});
 
 } // namespace transform
 } // namespace tl

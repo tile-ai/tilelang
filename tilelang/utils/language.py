@@ -1,8 +1,9 @@
 from tvm.tir import Buffer
-from typing import List
+from typing import List, Optional
 from functools import reduce
 from tvm import IRModule
 from tvm.tir import PrimFunc
+from tvm import ir, tir
 
 # Scope Checkers for TVM Buffers
 # These utility functions check the memory scope of a given TVM buffer.
@@ -118,3 +119,20 @@ def retrieve_func_from_module(ir_module: IRModule) -> PrimFunc:
         "The optimized module should only have one global variable for default schedule.")
     func = list(ir_module.functions.values())[0]
     return func
+
+
+def get_buffer_region_from_load(buffer_load: tir.BufferLoad) -> Optional[tir.BufferRegion]:
+    """
+    Get the buffer region from a buffer load.
+
+    May encounter buffer load like C[0:128, 0:32], ref to pull request
+    for buffer wise op: https://github.com/apache/tvm/pull/14693
+    convert load to region
+    """
+    buffer, indices = buffer_load.buffer, buffer_load.indices
+    regions = []
+    for indice in indices:
+        if not isinstance(indice, tir.Ramp):
+            return None
+        regions.append(ir.Range.from_min_extent(indice.base, indice.lanes))
+    return tir.BufferRegion(buffer, regions)
