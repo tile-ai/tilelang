@@ -58,9 +58,6 @@ private:
           if (addr_call && addr_call->op == builtin::address_of() &&
               addr_call->args.size() == 1) {
 
-            LOG(INFO) << "here!";
-            LOG(INFO) << "vector_size_ = " << vector_size_;
-
             const BufferLoadNode *buffer_load_dst =
                 addr_call->args[0].as<BufferLoadNode>();
             const BufferLoadNode *buffer_load_src =
@@ -71,11 +68,9 @@ private:
               Buffer dst_buffer = buffer_load_dst->buffer;
               Array<PrimExpr> indices_dst = buffer_load_dst->indices;
               UpdateVectorSize(indices_dst, dst_buffer);
-              LOG(INFO) << "vector_size_ = " << vector_size_;
               Buffer src_buffer = buffer_load_src->buffer;
               Array<PrimExpr> indices_src = buffer_load_src->indices;
               UpdateVectorSize(indices_src, src_buffer);
-              LOG(INFO) << "vector_size_ = " << vector_size_;
             }
           }
         }
@@ -113,7 +108,6 @@ private:
         max_vector_size = gcd_base;
       }
 
-      LOG(INFO) << "max_vector_size " << max_vector_size;
       vector_size_ = arith::ZeroAwareGCD(max_vector_size, vector_size_);
 
       PrimExpr elem_offset = 0;
@@ -122,12 +116,9 @@ private:
         elem_offset = elem_offset + indices[i] * stride;
         stride = stride * buffer->shape[i];
       }
-      LOG(INFO) << "elem_offset: " << elem_offset;
-      LOG(INFO) << "inner_for_->loop_var " << inner_for_->loop_var;
       PrimExpr thread_extent = thread_bounds->extent;
       while (!IndiceCanVectorize(elem_offset, thread_var, thread_extent,
                                  vector_size_, &analyzer_)) {
-        LOG(INFO) << "devide2";
         vector_size_ /= 2;
       }
     } else if (vector_size_ <= 4) {
@@ -258,8 +249,6 @@ For VectorizeAtomicAdd(const For &for_node, Var thread_var, Range thread_bounds,
 
   int vectorize_size_max = 1;
 
-  LOG(INFO) << "for_node \n" << for_node;
-
   PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
     if (const auto *call = obj.as<CallNode>()) {
       if (call->op == builtin::call_extern() && call->args.size() >= 2) {
@@ -279,8 +268,6 @@ For VectorizeAtomicAdd(const For &for_node, Var thread_var, Range thread_bounds,
     AtomicAddVectorizePlanner planner;
     res = planner.Plan(for_node, thread_var, thread_bounds, vectorize_hint);
     vectorize_hint = res.vector_size;
-
-    LOG(INFO) << "vectorize_hint" << vectorize_hint;
 
     if (vectorize_hint == 1)
       return for_node;
