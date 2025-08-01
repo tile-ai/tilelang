@@ -73,7 +73,8 @@ class LibraryGenerator(object):
             libpath = src.name.replace(".cu", ".so")
 
             disable_fast_math = self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH, False)
-            ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
+            ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL,
+                                                      None)
             verbose_ptxas_output = self.pass_configs.get(
                 PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
 
