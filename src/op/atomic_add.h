@@ -1,6 +1,3 @@
-// Copyright (c) Tile-AI Corporation.
-// Licensed under the MIT License.
-
 /*!
  * \file tl/op/atomic_add.h
  * \brief Define atomic add operator.
@@ -27,9 +24,6 @@ public:
   static const Op &Get();
 
 protected:
-  Stmt LowerBulkAtomicAdd(const LowerArgs &T, arith::Analyzer *analyzer) const;
-  Stmt LowerLDSMAtomicAdd(const LowerArgs &T, arith::Analyzer *analyzer) const;
-
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;
   Array<IterVar> MakeIterVars() const;
 
@@ -52,4 +46,4 @@ protected:
 } // namespace tl
 } // namespace tvm
 
-#endif //  TVM_TL_OP_ELEM_H_
+#endif //  TVM_TL_OP_ATOMIC_ADD_H_

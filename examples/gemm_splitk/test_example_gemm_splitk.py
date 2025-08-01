@@ -1,6 +1,3 @@
-# Copyright (c) Tile-AI Corporation.
-# Licensed under the MIT License.
-
 import tilelang.testing
 
 import example_tilelang_gemm_splitk
