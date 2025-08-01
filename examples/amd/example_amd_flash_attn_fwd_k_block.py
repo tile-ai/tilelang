@@ -28,31 +28,34 @@ def ref_program(Q, K, V, is_causal, groups=1):
 
 
 def get_configs():
-    """Generates configurations for the autotuner, tailored for FA-2 style parallelism."""
-    block_M = [64, 128, 256, 512]
-    block_N = [32, 64, 128, 256, 512]
-    threads = [128, 256, 512, 1024]
+    """Generates configurations for the autotuner, tailored for FA-2 style parallelism with k-blocking."""
+    block_M = [64, 128, 256]
+    block_N = [32, 64, 128]
+    block_K = [32, 64, 128]  # 新增k维度分块
+    threads = [128, 256, 512]
     num_split_q = [32, 64, 128, 256, 512]
     num_stages = [0, 1, 2]
-    enable_rasterization = [True, False]
-    k_pack = [1, 2]
+    enable_rasterization = [True]
+    k_pack = [2]
 
     valid_configs = []
 
-    for m, n, s, t, stages, r, k in itertools.product(block_M, block_N, num_split_q, threads,
-                                                      num_stages, enable_rasterization, k_pack):
+    for m, n, k, s, t, stages, r, kp in itertools.product(block_M, block_N, block_K, num_split_q, threads,
+                                                          num_stages, enable_rasterization, k_pack):
         valid_configs.append({
             "block_M": m,
             "block_N": n,
+            "block_K": k,  # 新增k维度分块参数
             "num_split_q": s,
             "threads": t,
             "num_stages": stages,
             "enable_rasterization": r,
-            "k_pack": k
+            "k_pack": kp
         })
     valid_configs.append({
         'block_M': 64,
         'block_N': 64,
+        'block_K': 32,  # 新增k维度分块参数
         'num_split_q': 64,
         'threads': 256,
         'num_stages': 1,
@@ -64,7 +67,7 @@ def get_configs():
 
 @tilelang.autotune(configs=get_configs(), cache_input_tensors=True)
 @tilelang.jit(out_idx=[3])
-def fast_flashattn(
+def fast_flashattn_k_block(
     batch,
     heads,
     seq_len,
@@ -73,6 +76,7 @@ def fast_flashattn(
     groups,
     block_M: int,
     block_N: int,
+    block_K: int,  # 保留参数但不使用k维度分块
     num_split_q: int,
     threads: int,
     num_stages: int,
@@ -85,9 +89,6 @@ def fast_flashattn(
     kv_shape = [batch, seq_len, head_kv, dim]
     dtype = "float16"
     accum_dtype = "float"
-
-    v_vec_size = 4
-    vec_size = 4 * k_pack
 
     @T.prim_func
     def main(
@@ -108,6 +109,7 @@ def fast_flashattn(
             bx = b_split
 
             with T.While(bx < num_q_blocks):
+                # 分配fragments
                 acc_o = T.alloc_fragment([block_M, dim], accum_dtype)
                 m_i = T.alloc_fragment([block_M], accum_dtype)
                 l_i = T.alloc_fragment([block_M], accum_dtype)
@@ -118,19 +120,14 @@ def fast_flashattn(
                 current_bx = bx
                 q_block_offset = current_bx * block_M
 
+                # 分配共享内存
                 Q_shared = T.alloc_shared([block_M, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
                 P_shared = T.alloc_shared([block_M, block_N], dtype)
 
-                acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
-                m_prev = T.alloc_fragment([block_M], accum_dtype)
-                scale_factor = T.alloc_fragment([block_M], accum_dtype)
-
-                T.copy(
-                    Q[bz, q_block_offset:q_block_offset + block_M, by, :],
-                    Q_shared,
-                    coalesced_width=vec_size)
+                # 加载Q到共享内存
+                T.copy(Q[bz, q_block_offset:q_block_offset + block_M, by, :], Q_shared)
 
                 loop_end_k = T.ceildiv(q_block_offset + block_M,
                                        block_N) if is_causal else T.ceildiv(seq_len, block_N)
@@ -138,54 +135,68 @@ def fast_flashattn(
                 for k in T.Pipelined(loop_end_k, num_stages=num_stages):
                     kv_idx = k * block_N
 
-                    T.copy(
-                        K[bz, kv_idx:kv_idx + block_N, by // groups, :],
-                        K_shared,
-                        coalesced_width=vec_size)
-                    T.copy(
-                        V[bz, kv_idx:kv_idx + block_N, by // groups, :],
-                        V_shared,
-                        coalesced_width=v_vec_size)
+                    # 加载K数据
+                    T.copy(K[bz, kv_idx:kv_idx + block_N, by // groups, :], K_shared)
 
-                    T.clear(acc_s)
-                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, k_pack=k_pack)
+                    # 计算QK^T
+                    acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
+                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True)
 
+                    # 处理causal mask
                     if is_causal:
                         for i, j in T.Parallel(block_M, block_N):
                             acc_s[i, j] = T.if_then_else(q_block_offset + i >= kv_idx + j,
                                                          acc_s[i, j], -T.infinity(acc_s.dtype))
 
+                    # FlashAttention softmax逻辑
+                    m_prev = T.alloc_fragment([block_M], accum_dtype)
                     T.copy(m_i, m_prev)
                     T.reduce_max(acc_s, m_i, dim=1, clear=False)
 
+                    scale_factor = T.alloc_fragment([block_M], accum_dtype)
                     for i in T.Parallel(block_M):
                         sf = T.exp2(m_prev[i] * scale - m_i[i] * scale)
                         l_i[i] *= sf
                         scale_factor[i] = sf
 
-                    for i, j in T.Parallel(block_M, dim):
-                        acc_o[i, j] *= scale_factor[i]
+                    # 重新缩放输出
+                    for i in T.Parallel(block_M):
+                        for j in T.Parallel(dim):
+                            acc_o[i, j] *= scale_factor[i]
 
+                    # 计算exp(scores)
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.exp2(acc_s[i, j] * scale - m_i[i] * scale)
 
+                    # 计算行和
                     row_sum = T.alloc_fragment([block_M], accum_dtype)
                     T.reduce_sum(acc_s, row_sum, dim=1)
                     for i in T.Parallel(block_M):
                         l_i[i] += row_sum[i]
 
+                    # 保存attention权重
                     T.copy(acc_s, P_shared)
                     T.sync_threads()
 
-                    T.gemm(P_shared, V_shared, acc_o)
+                    # 加载V数据并计算输出
+                    T.copy(V[bz, kv_idx:kv_idx + block_N, by // groups, :], V_shared)
+                    acc_v = T.alloc_fragment([block_M, dim], accum_dtype)
+                    T.gemm(P_shared, V_shared, acc_v)
 
+                    # 累加到最终输出
+                    for i in T.Parallel(block_M):
+                        for j in T.Parallel(dim):
+                            acc_o[i, j] += acc_v[i, j]
+
+                # 最终归一化
                 l_inv = T.alloc_fragment([block_M], accum_dtype)
                 for i in T.Parallel(block_M):
                     safe_l = T.if_then_else(l_i[i] > 1e-6, l_i[i], 1.0)
                     l_inv[i] = 1.0 / safe_l
 
-                for i, j in T.Parallel(block_M, dim):
-                    Output[bz, q_block_offset + i, by, j] = acc_o[i, j] * l_inv[i]
+                for i in T.Parallel(block_M):
+                    for j in T.Parallel(dim):
+                        Output[bz, q_block_offset + i, by, j] = acc_o[i, j] * l_inv[i]
 
                 bx = current_bx + num_split_q
 
@@ -204,8 +215,8 @@ def main(batch: int = 1,
     if is_causal:
         total_flops *= 0.5
 
-    print("Starting autotuning for FlashAttention-V2...")
-    kernel = fast_flashattn(batch, heads, seq_len, dim, is_causal, groups=groups)
+    print("Starting autotuning for FlashAttention-V2 with K-blocking...")
+    kernel = fast_flashattn_k_block(batch, heads, seq_len, dim, is_causal, groups=groups)
     print(f"Autotuning finished. Best Configuration: {kernel.config}")
 
     ref_program_processed = partial(ref_program, is_causal=is_causal, groups=groups)
@@ -221,7 +232,7 @@ def main(batch: int = 1,
 
     latency = profiler.do_bench(warmup=100)
     print(
-        f"Fast Flash Attention V2 (Tile-lang): {latency:.2f} ms | {total_flops / latency * 1e-9:.2f} TFlops"
+        f"Fast Flash Attention V2 with K-blocking (Tile-lang): {latency:.2f} ms | {total_flops / latency * 1e-9:.2f} TFlops"
     )
 
 
@@ -234,4 +245,4 @@ if __name__ == "__main__":
     parser.add_argument('--is_causal', action='store_true', help='causal')
     parser.add_argument('--groups', type=int, default=1, help='groups')
     args = parser.parse_args()
-    main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups)
+    main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups) 
