@@ -74,10 +74,10 @@ Gemm::GemmInst Gemm::GetGemmInst(int block_size, Target target) const {
   }
 }
 
-std::pair<int, int> Gemm::ComputeWarpPartition(int num_warps,
+std::pair<int, int> Gemm::ComputeWarpPartition(int block_size,
                                                GemmInst gemm_inst,
                                                Target target) const {
-  int warp_size = TargetGetWarpSize(target);
+  int num_warps = block_size / TargetGetWarpSize(target);
   int m_warp = 1, n_warp = 1;
   constexpr int kMPerWarp = 16; // Rows processed by a single warp
   constexpr int kNPerWarp = 8;  // Columns processed by a single warp
@@ -287,9 +287,7 @@ bool Gemm::CheckWGMMA() const {
 Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
   GemmInst gemm_inst = GetGemmInst(block_size, T.target);
-  int warp_size = TargetGetWarpSize(T.target);
-  auto [warp_m, warp_n] =
-      ComputeWarpPartition(block_size / warp_size, gemm_inst, T.target);
+  auto [warp_m, warp_n] = ComputeWarpPartition(block_size, gemm_inst, T.target);
 
   std::stringstream ss;
   std::string op_name = "tl::gemm_ss";
@@ -335,7 +333,6 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   auto block_size = *as_const_int(thread_range->extent);
   GemmInst gemm_inst = GetGemmInst(block_size, T.target);
   auto [warp_m, warp_n] = ComputeWarpPartition(block_size, gemm_inst, T.target);
-  int warp_size = TargetGetWarpSize(T.target);
 
   if (TargetIsVolta(T.target)) {
     auto fragment =
