@@ -97,5 +97,12 @@ bool TargetHasStmatrix(Target target) {
   return arch >= 90;
 }
 
+int TargetGetWarpSize(Target target) {
+  int res = 32;
+  if (TargetIsCDNA(target))
+    res = 64;
+  return res;
+}
+
 } // namespace tl
 } // namespace tvm
