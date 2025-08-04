@@ -110,6 +110,9 @@ public:
         // If new layout contains the old one, update map
         if (buffer.scope() == "local.fragment" &&
             level != InferLevel::kStrict && !strict_layout_map.count(buffer)) {
+          // Actually this test has been done in ParallelOp::InferLayout
+          // already. Just do it again to avoid missing implementations in other
+          // `Operator`s.
           auto dst_layout = layout.as<Fragment>().value();
           auto src_layout = layout_map[buffer].as<Fragment>().value();
           ICHECK(dst_layout->InputDim() == src_layout->InputDim());
@@ -218,20 +221,10 @@ public:
       q.push(i);
     }
 
-    auto run_infer_step = [&](int cur_infer_id, InferLevel level,
-                              bool update_queue) {
-      RunInferStep(cur_infer_id, level, update_queue, layout_map,
-                   strict_layout_map, q, in_queue);
-    };
-
-    auto finish_infer_queue = [&]() {
-      FinishInferQueue(InferLevel::kCommon, layout_map, strict_layout_map, q,
-                       in_queue);
-    };
-
     // step 1: infer strict layout
     for (int i = 0; i < num_infer; i++) {
-      run_infer_step(i, InferLevel::kStrict, false);
+      RunInferStep(i, InferLevel::kStrict, false, layout_map, strict_layout_map,
+                   q, in_queue);
     }
 
     for (const auto &[buffer, layout] : layout_map) {
@@ -239,7 +232,8 @@ public:
     }
 
     // step 2: infer common layout with BFS
-    finish_infer_queue();
+    FinishInferQueue(InferLevel::kCommon, layout_map, strict_layout_map, q,
+                     in_queue);
 
     // step 3: relax constraints to free and re-run
     InferInFreeMode(layout_map, strict_layout_map);
@@ -497,8 +491,8 @@ private:
           // such an order fails, try others
           do_update = false;
         } catch (NormalizeIterException e) {
-          // such an order encounters iterators that is not normalizable, try others
-          // e.g. i * 576 % 2048
+          // such an order encounters iterators that is not normalizable, try
+          // others e.g. i * 576 % 2048
           do_update = false;
         }
 

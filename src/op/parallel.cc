@@ -315,52 +315,51 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   // Step 3: Infer other fragment's layout from the loop's partition
   LayoutMap results;
   for (const auto &[buffer, _] : indice_map_) {
+    auto dst_layout =
+        CompleteBufferFragment(buffer)->BindThreadRange(T.thread_bounds);
     if (!T.layout_map.count(buffer)) {
-      results.Set(buffer, CompleteBufferFragment(buffer)->BindThreadRange(
-                              T.thread_bounds));
+      results.Set(buffer, dst_layout);
+      continue;
     }
 
-    // Layout infer conflict for local.fragment can not be handled here
-    // because the source_buffer is not always available
-    // (zhengju) do not modify strict layout even if it is conflict with the
-    // dst layout. This will not influence the result because the strict
-    // layout is usually with rep = 1 Since the real layout map is
-    // controlled by layout_inference.cc, we should add this check there
+    // Check new layout being compatible with existing, and update only if it
+    // has larger replicate extent
     if (buffer.scope() == "local.fragment" && source_buffer.defined() &&
         source_buffer.scope() == "local.fragment") {
-      if (T.layout_map.count(buffer)) {
-        auto src_layout = T.layout_map[buffer].as<Fragment>().value();
-        Fragment dst_layout =
-            CompleteBufferFragment(buffer)->BindThreadRange(T.thread_bounds);
-        ICHECK(dst_layout->InputDim() == src_layout->InputDim());
-        Array<PrimExpr> indices;
-        indices.reserve(dst_layout->InputDim());
-        arith::Analyzer inner_analyzer;
-        for (int i = 0; i < dst_layout->InputDim(); ++i) {
-          auto x = InputPlaceholder(i);
-          indices.push_back(x);
-          // should be literal - literal = 0, any analyzer will work
-          ICHECK(is_zero(inner_analyzer.Simplify(dst_layout->InputShape()[i] -
-                                                 src_layout->InputShape()[i])));
-          inner_analyzer.Bind(x, Range(0, dst_layout->InputShape()[i]));
-        }
-        if (ProveFragmentContains(src_layout, dst_layout, indices, indices,
-                                  inner_analyzer)) {
-          results.Set(buffer, dst_layout);
-          continue;
-        }
+      auto src_layout = T.layout_map[buffer].as<Fragment>().value();
+      ICHECK(dst_layout->InputDim() == src_layout->InputDim());
+      Array<PrimExpr> indices;
+      indices.reserve(dst_layout->InputDim());
+      arith::Analyzer inner_analyzer;
+      for (int i = 0; i < dst_layout->InputDim(); ++i) {
+        auto x = InputPlaceholder(i);
+        indices.push_back(x);
+        // should be literal - literal = 0, any analyzer will work
+        ICHECK(is_zero(inner_analyzer.Simplify(dst_layout->InputShape()[i] -
+                                               src_layout->InputShape()[i])));
+        inner_analyzer.Bind(x, Range(0, dst_layout->InputShape()[i]));
+      }
 
-        if (!src_layout->IsEqual(dst_layout.get(), true)) {
-          std::ostringstream oss;
-          oss << "Layout may conflict with ParallelOp for buffer " << buffer
-              << " vs. " << source_buffer << "\nError body begin:\n"
-              << GetRoot()->body << "\nError body end"
-              << "\nLHS = " << src_layout->DebugOutput()
-              << "\nRHS = " << dst_layout->DebugOutput()
-              << "\nYou may need to use a shared memory to transform the "
-                 "layout";
-          throw LayoutConflictException(oss.str());
-        }
+      ICHECK(as_const_int(dst_layout->ReplicateExtent()));
+      ICHECK(as_const_int(src_layout->ReplicateExtent()));
+      auto dst_rep = *as_const_int(dst_layout->ReplicateExtent());
+      auto src_rep = *as_const_int(src_layout->ReplicateExtent());
+      if (dst_rep < src_rep ||
+          !ProveFragmentContains(src_layout, dst_layout, indices, indices,
+                                 inner_analyzer)) {
+        std::ostringstream oss;
+        oss << "Layout may conflict with ParallelOp for buffer " << buffer
+            << " vs. " << source_buffer << "\nError body begin:\n"
+            << GetRoot()->body << "\nError body end"
+            << "\nLHS = " << src_layout->DebugOutput()
+            << "\nRHS = " << dst_layout->DebugOutput()
+            << "\nYou may need to use a shared memory to transform the "
+               "layout";
+        throw LayoutConflictException(oss.str());
+      }
+
+      if (dst_rep > src_rep) {
+        results.Set(buffer, dst_layout);
       }
     }
   }

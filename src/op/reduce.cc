@@ -329,7 +329,13 @@ LayoutMap ReduceOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
             dst_layout->InputShape()[i] - orig_dst_layout->InputShape()[i])));
         inner_analyzer.Bind(x, Range(0, dst_layout->InputShape()[i]));
       }
-      if (!ProveFragmentContains(orig_dst_layout, dst_layout, indices, indices,
+
+      ICHECK(as_const_int(dst_layout->ReplicateExtent()));
+      ICHECK(as_const_int(src_layout->ReplicateExtent()));
+      auto dst_rep = *as_const_int(dst_layout->ReplicateExtent());
+      auto src_rep = *as_const_int(src_layout->ReplicateExtent());
+      if (dst_rep < src_rep ||
+          !ProveFragmentContains(orig_dst_layout, dst_layout, indices, indices,
                                  inner_analyzer)) {
         std::ostringstream oss;
         oss << "Layout may conflict with ReduceOp for buffer " << dst << " vs. "
@@ -338,6 +344,10 @@ LayoutMap ReduceOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
             << "\nYou may need to use a shared memory to transform the "
                "layout";
         throw LayoutConflictException(oss.str());
+      }
+
+      if (dst_rep > src_rep) {
+        return {{dst, dst_layout}};
       }
     }
   }
