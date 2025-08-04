@@ -53,3 +53,19 @@ def compress_sm90(A: torch.Tensor, block_k: int,
     compress_lib = _get_cached_lib()
 
     return compress_lib.compress_sm90(A, block_k, transposed)
+
+
+def compress_sm80(A: torch.Tensor, transposed: bool) -> tuple[torch.Tensor, torch.Tensor]:
+    try:
+        from torch.sparse import to_sparse_semi_structured, SparseSemiStructuredTensor
+    except ImportError:
+        raise ImportError(
+            "SparseSemiStructuredTensor is not available in this version of PyTorch. "
+            "Please install a compatible version.")
+
+    orig_val = SparseSemiStructuredTensor._FORCE_CUTLASS
+    SparseSemiStructuredTensor._FORCE_CUTLASS = True
+    compressed = to_sparse_semi_structured(A, transposed=transposed)
+    SparseSemiStructuredTensor._FORCE_CUTLASS = orig_val
+
+    return compressed.packed, compressed.meta
