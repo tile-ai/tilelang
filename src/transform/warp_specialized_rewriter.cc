@@ -242,10 +242,15 @@ static PrimExpr makeGetBarrier(PrimExpr barrier_id) {
   return Call(DataType::Handle(), get_mbarrier(), {barrier_id});
 }
 
-static Stmt makeArriveBarrier(PrimExpr barrier_id) {
-  auto call = Call(DataType::Handle(), builtin::ptx_arrive_barrier(),
-                   {makeGetBarrier(barrier_id)});
-  return Evaluate(call);
+static Stmt makeArriveBarrier(PrimExpr barrier_id, int cta_id = -1,
+                              PrimExpr pred = 1) {
+  Array<PrimExpr> args = {makeGetBarrier(barrier_id)};
+  if (cta_id != -1) {
+    args.push_back(cta_id);
+    args.push_back(pred);
+  }
+  return Evaluate(
+      Call(DataType::Handle(), builtin::ptx_arrive_barrier(), args));
 }
 
 static Stmt makeCpAsyncBarrier(PrimExpr barrier_id) {
@@ -630,7 +635,8 @@ private:
             int pattern_idx = map.release[i][j];
             PrimExpr release_barrier_id =
                 stage_ + num_barriers_ + num_stages_ * pattern_idx;
-            block_stmt.push_back(makeArriveBarrier(release_barrier_id));
+            block_stmt.push_back(makeArriveBarrier(
+                release_barrier_id, 0, EQ(FloorMod(thread_var_, 128), 0)));
             for (int s = 0; s < num_stages_; s++) {
               released_barrier_.insert(s + num_barriers_ +
                                        num_stages_ * pattern_idx);
@@ -1162,9 +1168,10 @@ private:
     Array<PrimExpr> barrier_num_threads;
     barrier_num_threads.reserve(num_barriers);
     for (int i = 0; i < num_barriers; i++) {
-      PrimExpr arrive_thread_count = producer.released_barrier_.count(i)
-                                         ? producer_thread_extent
-                                         : consumer_thread_extent;
+      PrimExpr arrive_thread_count =
+          producer.released_barrier_.count(i)
+              ? (marker.HasSimtCopy() ? producer_thread_extent : 1)
+              : FloorDiv(consumer_thread_extent, 128);
       barrier_num_threads.push_back(arrive_thread_count);
     }
 

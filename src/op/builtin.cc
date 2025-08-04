@@ -88,7 +88,7 @@ TIR_DEFINE_TL_BUILTIN(ptx_stmatirx)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(sync_thread_partial)
-    .set_num_inputs(1)
+    .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

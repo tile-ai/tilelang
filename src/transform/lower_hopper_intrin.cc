@@ -121,14 +121,6 @@ public:
                  {mbarrier, call->args[i]})));
       }
       return 0;
-    } else if (call->op.same_as(sync_thread_partial())) {
-      int barrier_id = init_mbarrier_calls_.size();
-      PrimExpr mbarrier =
-          Call(DataType::Handle(), get_mbarrier(), {barrier_id});
-      init_mbarrier_calls_.push_back(Evaluate(
-          Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
-               {mbarrier, call->args[0]})));
-      return Call(DataType::Handle(), sync_thread_partial(), {mbarrier});
     } else {
       return StmtExprMutator::VisitExpr_(call);
     }

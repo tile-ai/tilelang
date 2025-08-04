@@ -164,10 +164,14 @@ private:
 
 class TmaBarrierCollector : public IRVisitorWithAnalyzer {
 public:
+  TmaBarrierCollector(Map<Var, Buffer> buffer_data_to_buffer)
+      : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)) {}
+
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id() {
     return tma_op_to_barrier_id_;
   }
   Map<PrimExpr, IntImm> barrier_id_to_range() { return barrier_id_to_range_; }
+  bool HasSimtCopy() const { return has_simt_copy_; }
 
 private:
   void UpdateBarrierRange(PrimExpr barrier_id, IntImm extent) {
@@ -218,10 +222,34 @@ private:
     IRVisitorWithAnalyzer::VisitStmt_(op);
   }
 
+  void VisitStmt_(const BufferStoreNode *op) {
+    bool is_shared_store =
+        op->buffer.scope() == "shared.dyn" || op->buffer.scope() == "shared";
+    if (!is_shared_store) {
+      return;
+    }
+
+    Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
+                /*body*/ GetRef<Stmt>(op));
+    auto access = GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
+    auto reads = access[0];
+
+    if (reads.empty())
+      return;
+    for (auto read : reads) {
+      if (read->buffer.scope() != "global") {
+        return;
+      }
+    }
+    has_simt_copy_ = true;
+  }
+
   IterVar thread_var_;
   std::vector<Call> pending_tma_ops_;
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
   Map<PrimExpr, IntImm> barrier_id_to_range_;
+  bool has_simt_copy_{false};
+  Map<Var, Buffer> buffer_data_to_buffer_;
 };
 // we trust mbarrier_wait_parity to be correct
 class TmaBarrierRewriter : public IRMutatorWithAnalyzer {
@@ -229,16 +257,22 @@ public:
   TmaBarrierRewriter(arith::Analyzer *analyzer,
                      Map<ObjectRef, PrimExpr> tma_op_to_barrier_id,
                      Map<PrimExpr, IntImm> barrier_id_to_range,
-                     bool has_create_list_of_mbarrier)
+                     bool has_create_list_of_mbarrier, bool has_simt_copy)
       : IRMutatorWithAnalyzer(analyzer),
         tma_op_to_barrier_id_(tma_op_to_barrier_id),
         barrier_id_to_range_(barrier_id_to_range),
-        has_create_list_of_mbarrier_(has_create_list_of_mbarrier) {}
+        has_create_list_of_mbarrier_(has_create_list_of_mbarrier),
+        has_simt_copy_(has_simt_copy) {}
 
   static PrimFunc Rewrite(PrimFunc f, arith::Analyzer *analyzer) {
+    auto buffer_lca = DetectBufferAccessLCA(f);
+    Map<Var, Buffer> buffer_data_to_buffer_;
+    for (auto [buffer, _] : buffer_lca)
+      buffer_data_to_buffer_.Set(buffer->data, buffer);
     f = TmaExpectTxRewriter::Rewrite(f, analyzer);
-    TmaBarrierCollector collector;
+    TmaBarrierCollector collector(buffer_data_to_buffer_);
     collector(f->body);
+    auto has_simt_copy = collector.HasSimtCopy();
     bool has_create_list_of_mbarrier = false;
     PostOrderVisit(f->body, [&](const ObjectRef &node) {
       if (const auto *call = node.as<CallNode>()) {
@@ -251,7 +285,7 @@ public:
     });
     TmaBarrierRewriter rewriter(analyzer, collector.tma_op_to_barrier_id(),
                                 collector.barrier_id_to_range(),
-                                has_create_list_of_mbarrier);
+                                has_create_list_of_mbarrier, has_simt_copy);
     f.CopyOnWrite()->body = rewriter(f->body);
     return f;
   }
@@ -281,13 +315,26 @@ private:
       auto barrier_id = tma_op_to_barrier_id_[GetRef<Call>(op)];
       auto new_args = op->args;
       new_args.Set(0, barrier_id);
+      clear_arrive_ = !has_simt_copy_;
+      if (clear_arrive_) {
+        return Call(op->dtype, builtin::ptx_arrive_barrier_expect_tx(),
+                    new_args);
+      }
       return Call(op->dtype, op->op, new_args);
+    } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
+      if (clear_arrive_) {
+        clear_arrive_ = false;
+        return 0;
+      }
+      return Call(op->dtype, op->op, op->args);
     }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
   Map<PrimExpr, IntImm> barrier_id_to_range_;
   bool has_create_list_of_mbarrier_;
+  bool clear_arrive_{false};
+  bool has_simt_copy_{false};
 };
 
 tvm::transform::Pass InjectTmaBarrier() {

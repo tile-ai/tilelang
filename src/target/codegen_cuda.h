@@ -125,6 +125,9 @@ private:
                       const VarNode *variable, std::ostream &os);
   int32_t GetWmmaFragmentSize(const std::string &scope, const VarNode *variable,
                               int32_t size);
+
+  std::vector<std::string> eviction_policy_names_ = {
+      "EVICT_NORMAL", "EVICT_FIRST", "EVICT_LAST"};
 };
 
 } // namespace codegen
