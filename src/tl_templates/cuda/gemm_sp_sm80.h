@@ -1,11 +1,6 @@
 #include <cutlass/gemm/threadblock/default_mma_core_sparse_sm80.h>
 #include <stdio.h>
-using cutlass::gemm::GemmShape;
 
-// template <typename T>
-// static __device__ void print_type() {
-//   printf("%s\n", __PRETTY_FUNCTION__);
-// }
 
 namespace tl {
 
@@ -18,32 +13,32 @@ struct DispatchInstructionShape {
 
 template<>
 struct DispatchInstructionShape<cutlass::half_t> {
-  using Shape = GemmShape<16, 8, 32>;
+  using Shape = cutlass::gemm::GemmShape<16, 8, 32>;
 };
 
 template<>
 struct DispatchInstructionShape<cutlass::bfloat16_t> {
-  using Shape = GemmShape<16, 8, 32>;
+  using Shape = cutlass::gemm::GemmShape<16, 8, 32>;
 };
 
 template<>
 struct DispatchInstructionShape<cutlass::tfloat32_t> {
-  using Shape = GemmShape<16, 8, 16>;
+  using Shape = cutlass::gemm::GemmShape<16, 8, 16>;
 };
 
 template<>
 struct DispatchInstructionShape<int8_t> {
-  using Shape = GemmShape<16, 8, 64>;
+  using Shape = cutlass::gemm::GemmShape<16, 8, 64>;
 };
 
 template<>
 struct DispatchInstructionShape<uint8_t> {
-  using Shape = GemmShape<16, 8, 64>;
+  using Shape = cutlass::gemm::GemmShape<16, 8, 64>;
 };
 
 template<>
 struct DispatchInstructionShape<cutlass::int4b_t> {
-  using Shape = GemmShape<16, 8, 128>;
+  using Shape = cutlass::gemm::GemmShape<16, 8, 128>;
 };
 
 template <typename T, bool transpose, int M, int K>
@@ -108,7 +103,7 @@ public:
   static_assert(std::is_same_v<InstructionShape, typename DispatchInstructionShape<ElementB>::Shape>, "Divergent shape dispatch.");
   static_assert(WarpShape::kK % InstructionShape::kK == 0, "K dimension must be divisible by instruction shape K.");
 
-  // instruction/warp level
+  // instruction/warp config
   using Policy = cutlass::gemm::warp::MmaTensorOpPolicy<
       cutlass::arch::SparseMma<InstructionShape, 32, ElementA,
                                cutlass::layout::RowMajor, ElementB,
@@ -122,7 +117,6 @@ public:
   using SmemLayoutE = typename MmaWarp::LayoutE;
   static_assert(std::is_same_v<SmemLayoutE, cutlass::layout::ColumnMajor>,
                 "Meta data layout must be ColumnMajor for sparse mma.");
-
 
   // other traits
   using FragmentA = typename MmaWarp::FragmentA;
