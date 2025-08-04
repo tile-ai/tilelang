@@ -1131,7 +1131,7 @@ private:
       ICHECK(thread_tag == "threadIdx.x") << "Only support threadIdx.x";
       Var thread_iv = Downcast<Var>(for_node->loop_var);
       Stmt new_body =
-          ThreadIdxRewriter::Rewrite(for_node->body, thread_iv, thread_iv_);
+          ThreadIdxRewriter::Rewrite(for_node->body, thread_iv, thread_iv_, 0);
       return new_body;
     }
     return for_node;
