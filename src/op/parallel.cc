@@ -22,6 +22,29 @@ namespace attr {
 constexpr const char *coalesced_width = "coalesced_width";
 } // namespace attr
 
+bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
+                           Array<PrimExpr> small_frag_indices,
+                           Array<PrimExpr> large_frag_indices,
+                           arith::Analyzer &analyzer_) {
+  Var rep_small("__checking_frag_contains_rep");
+  analyzer_.Bind(rep_small,
+                 Range(IntImm(small_frag->ReplicateExtent()->dtype, 0),
+                       small_frag->ReplicateExtent()),
+                 true);
+  auto thread = small_frag->ForwardThread(small_frag_indices, rep_small);
+  auto large_frag_physical_and_thread = large_frag->Forward(large_frag_indices);
+  large_frag_physical_and_thread.push_back(thread);
+  auto inv_large_frag = large_frag->Inverse();
+  auto inv_large_frag_logical_and_rep =
+      inv_large_frag->Forward(large_frag_physical_and_thread);
+  auto inv_large_frag_rep =
+      inv_large_frag_logical_and_rep[inv_large_frag_logical_and_rep.size() - 1];
+  auto check_thread =
+      large_frag->ForwardThread(large_frag_indices, inv_large_frag_rep);
+  auto diff = analyzer_.Simplify(thread - check_thread);
+  return is_zero(diff);
+}
+
 class IfBufferRemapLoopGenerator : public StmtExprMutator {
 public:
   static For run(Stmt stmt, Map<Buffer, Buffer> buffer_remap,
@@ -278,40 +301,14 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
         continue;
       auto vars =
           loop_vars_.Map([](const IterVar &iv) { return PrimExpr(iv->var); });
-      {
-        Var rep_loop("__checking_rep_loop");
-        analyzer_.Bind(rep_loop,
-                       Range(IntImm(loop_layout_->ReplicateExtent()->dtype, 0),
-                             loop_layout_->ReplicateExtent()),
-                       true);
-        auto thread = loop_layout_->ForwardThread(vars, rep_loop);
-        auto logical_address = indice_map_[buffer];
-        auto physical_address_and_thread = fragment->Forward(logical_address);
-        physical_address_and_thread.push_back(thread);
-        auto inverse_fragment = fragment->Inverse();
-        auto inv_frag = inverse_fragment->Forward(physical_address_and_thread);
-        auto rep_frag = inv_frag[inv_frag.size() - 1];
-        auto check_thread = fragment->ForwardThread(logical_address, rep_frag);
-        auto diff = analyzer_.Simplify(thread - check_thread);
-        if (!is_zero(diff)) {
-          std::ostringstream oss;
-          oss << "[WARNING] Might be buggy: layout infer conflict between "
-              << buffer << " and " << source_buffer
-              << " in T.Parallel loop:" << std::endl
-              << "Intermediates: " << std::endl
-              << "    loop " << loop_layout_->DebugOutput() << std::endl
-              << "    fragment " << fragment->DebugOutput() << std::endl
-              << "    thread " << thread << std::endl
-              << "    logical_address " << logical_address << std::endl
-              << "    physical_address_and_thread "
-              << physical_address_and_thread << std::endl
-              << "    inverse_fragment " << inverse_fragment->DebugOutput()
-              << std::endl
-              << "    rep_frag " << rep_frag << std::endl
-              << "    check_thread " << check_thread << std::endl
-              << "    diff " << diff << std::endl;
-          throw LayoutConflictException(oss.str());
-        }
+      if (!ProveFragmentContains(loop_layout_, fragment, vars,
+                                 indice_map_[buffer], analyzer_)) {
+        std::ostringstream oss;
+        oss << "Layout infer conflict between " << buffer << " and "
+            << source_buffer << " in T.Parallel loop:" << std::endl
+            << "    loop " << loop_layout_->DebugOutput() << std::endl
+            << "    fragment " << fragment->DebugOutput() << std::endl;
+        throw LayoutConflictException(oss.str());
       }
     }
   }
@@ -332,27 +329,37 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     if (buffer.scope() == "local.fragment" && source_buffer.defined() &&
         source_buffer.scope() == "local.fragment") {
       if (T.layout_map.count(buffer)) {
-        const FragmentNode *src_layout =
-            T.layout_map[buffer].as<FragmentNode>();
-        Fragment dst_layout_fragment =
+        auto src_layout = T.layout_map[buffer].as<Fragment>().value();
+        Fragment dst_layout =
             CompleteBufferFragment(buffer)->BindThreadRange(T.thread_bounds);
-        const FragmentNode *dst_layout = dst_layout_fragment.as<FragmentNode>();
-        if (as_const_int(dst_layout->ReplicateExtent()) &&
-            as_const_int(src_layout->ReplicateExtent()) &&
-            (*as_const_int(dst_layout->ReplicateExtent()) >
-             *as_const_int(src_layout->ReplicateExtent()))) {
-          results.Set(buffer, dst_layout_fragment);
+        ICHECK(dst_layout->InputDim() == src_layout->InputDim());
+        Array<PrimExpr> indices;
+        indices.reserve(dst_layout->InputDim());
+        arith::Analyzer inner_analyzer;
+        for (int i = 0; i < dst_layout->InputDim(); ++i) {
+          auto x = InputPlaceholder(i);
+          indices.push_back(x);
+          // should be literal - literal = 0, any analyzer will work
+          ICHECK(is_zero(inner_analyzer.Simplify(dst_layout->InputShape()[i] -
+                                                 src_layout->InputShape()[i])));
+          inner_analyzer.Bind(x, Range(0, dst_layout->InputShape()[i]));
+        }
+        if (ProveFragmentContains(src_layout, dst_layout, indices, indices,
+                                  inner_analyzer)) {
+          results.Set(buffer, dst_layout);
           continue;
         }
-        if (src_layout && dst_layout) {
-          ICHECK(src_layout->IsEqual(dst_layout, true))
-              << "Layout may conflict with ParallelOp for buffer " << buffer
+
+        if (!src_layout->IsEqual(dst_layout.get(), true)) {
+          std::ostringstream oss;
+          oss << "Layout may conflict with ParallelOp for buffer " << buffer
               << " vs. " << source_buffer << "\nError body begin:\n"
               << GetRoot()->body << "\nError body end"
               << "\nLHS = " << src_layout->DebugOutput()
               << "\nRHS = " << dst_layout->DebugOutput()
               << "\nYou may need to use a shared memory to transform the "
                  "layout";
+          throw LayoutConflictException(oss.str());
         }
       }
     }

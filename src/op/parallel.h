@@ -26,6 +26,11 @@ private:
   std::string msg_;
 };
 
+bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
+                           Array<PrimExpr> small_frag_indices,
+                           Array<PrimExpr> large_frag_indices,
+                           arith::Analyzer &analyzer_);
+
 class ParallelOp;
 
 class ParallelLoopNestVisitor : public StmtExprVisitor {

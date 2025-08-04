@@ -13,6 +13,7 @@
 
 #include <queue>
 
+#include "../layout/utils.h"
 #include "../op/parallel.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
@@ -106,17 +107,25 @@ public:
       ICHECK(layout.defined()) << "InferLayout returned an undefined layout.";
 
       if (layout_map.count(buffer)) {
-        // If replicate size of this buffer is greater than the old one
+        // If new layout contains the old one, update map
         if (buffer.scope() == "local.fragment" &&
             level != InferLevel::kStrict && !strict_layout_map.count(buffer)) {
-          const FragmentNode *dst_layout = layout.as<Fragment>().get();
-          const FragmentNode *src_layout =
-              layout_map[buffer].as<Fragment>().get();
-          if (as_const_int(dst_layout->ReplicateExtent()) &&
-              as_const_int(src_layout->ReplicateExtent()) &&
-              (*as_const_int(dst_layout->ReplicateExtent()) >
-               *as_const_int(src_layout->ReplicateExtent()))) {
-            // update map
+          auto dst_layout = layout.as<Fragment>().value();
+          auto src_layout = layout_map[buffer].as<Fragment>().value();
+          ICHECK(dst_layout->InputDim() == src_layout->InputDim());
+          Array<PrimExpr> indices;
+          indices.reserve(dst_layout->InputDim());
+          arith::Analyzer inner_analyzer;
+          for (int i = 0; i < dst_layout->InputDim(); ++i) {
+            auto x = InputPlaceholder(i);
+            indices.push_back(x);
+            // should be literal - literal = 0, any analyzer will work
+            ICHECK(is_zero(inner_analyzer.Simplify(
+                dst_layout->InputShape()[i] - src_layout->InputShape()[i])));
+            inner_analyzer.Bind(x, Range(0, dst_layout->InputShape()[i]));
+          }
+          if (ProveFragmentContains(src_layout, dst_layout, indices, indices,
+                                    inner_analyzer)) {
             layout_map.Set(buffer, layout);
             continue;
           }
@@ -486,6 +495,10 @@ private:
           }
         } catch (LayoutConflictException e) {
           // such an order fails, try others
+          do_update = false;
+        } catch (NormalizeIterException e) {
+          // such an order encounters iterators that is not normalizable, try others
+          // e.g. i * 576 % 2048
           do_update = false;
         }
 
