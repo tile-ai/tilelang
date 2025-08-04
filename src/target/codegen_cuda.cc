@@ -1523,6 +1523,42 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
     this->stream << "const dim3 blockIdx = " << pattern->value << "();\n";
     this->VisitStmt(op->body);
     return;
+  } else if (op->attr_key == "shuffle_and_elect") {
+    int value = op->value.as<IntImmNode>()->value;
+    auto if_then_else = op->body.as<IfThenElseNode>();
+    if (op->body.as<SeqStmtNode>()) {
+      for (const auto &stmt : op->body.as<SeqStmtNode>()->seq) {
+        if (stmt.as<IfThenElseNode>()) {
+          if_then_else = stmt.as<IfThenElseNode>();
+          break;
+        } else {
+          this->VisitStmt(stmt);
+        }
+      }
+    }
+    ICHECK(if_then_else);
+    this->PrintIndent();
+    if (value != 0)
+      this->stream << "if (__shfl_sync(0xffffffff, (threadIdx.x / 32) % ("
+                   << value << " / 32), 0) == 0 && cute::elect_one_sync()) {\n";
+    else
+      this->stream << "if (cutlass::canonical_warp_idx_sync() == 0 && "
+                      "cute::elect_one_sync()) {\n";
+    int then_scope = BeginScope();
+    this->VisitStmt(if_then_else->then_case);
+    EndScope(then_scope);
+    this->PrintIndent();
+    this->stream << "}\n";
+    if (if_then_else->else_case) {
+      this->PrintIndent();
+      this->stream << "else {\n";
+      int else_scope = BeginScope();
+      this->VisitStmt(if_then_else->else_case.value());
+      EndScope(else_scope);
+      this->PrintIndent();
+      this->stream << "}\n";
+    }
+    return;
   }
   CodeGenC::VisitStmt_(op);
 }
