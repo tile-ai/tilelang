@@ -323,7 +323,7 @@ private:
   Optional<Buffer> getBufferFromAccessPtr(const PrimExpr &expr) {
     auto call = expr.as<CallNode>();
     if (!call) {
-      return NullOpt;
+      return std::nullopt;
     }
     if (call->op.same_as(builtin::tvm_access_ptr())) {
       auto var = call->args[1].as<Var>().value();
@@ -500,9 +500,9 @@ private:
           // compute total register number
           int64_t reg_num = 0;
           for (auto &&[buffer, layout] : tmp_layout_map) {
-            if (auto frag = layout.as<Fragment>(); frag.defined()) {
+            if (auto frag = layout.as<Fragment>()) {
               int64_t frag_reg_num = 1;
-              for (auto i : frag.get()->OutputShape()) {
+              for (auto i : frag.value()->OutputShape()) {
                 auto pci = as_const_int(i);
                 ICHECK(pci != nullptr);
                 frag_reg_num *= *pci;

@@ -23,6 +23,19 @@ public:
 
   static const Op &Get();
 
+  AtomicAdd(const AtomicAdd &other)
+      : args_(other.args_), src(other.src), dst(other.dst),
+        src_range(other.src_range), dst_range(other.dst_range),
+        coalesced_width(other.coalesced_width) {
+    // No clone nullptr
+    if (other.par_op_)
+      par_op_ = std::unique_ptr<ParallelOp>(
+          static_cast<ParallelOp *>(other.par_op_->Clone().release()));
+  }
+  std::unique_ptr<Operator> Clone() const final {
+    return std::make_unique<AtomicAdd>(*this);
+  }
+
 protected:
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;
   Array<IterVar> MakeIterVars() const;
