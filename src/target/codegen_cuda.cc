@@ -192,6 +192,9 @@ std::string CodeGenTileLangCUDA::Finish() {
   decl_stream << "#include <tl_templates/cuda/ldsm.h>\n";
   decl_stream << "#include <tl_templates/cuda/threadblock_swizzle.h>\n";
   decl_stream << "#include <tl_templates/cuda/debug.h>\n";
+  decl_stream << "#ifdef ENABLE_BF16\n";
+  decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
+  decl_stream << "#endif\n";
 
   if (need_global_barrier_) {
     decl_stream << "__device__ unsigned " << vid_global_barrier_state_
@@ -734,17 +737,66 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   this->PrintIndent();
   this->PrintType(target_ty, stream);
   stream << ' ' << sret << ";\n";
-  {
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
-    for (int i = 0, lanes = from_ty.lanes(); i < lanes; ++i) {
-      std::ostringstream val;
-      val << "(";
-      PrintType(target_ty.element_of(), val);
-      val << ")(";
-      PrintVecElemLoad(src, from_ty, i, val);
-      val << ")";
-      PrintVecElemStore(sret, target_ty, i, val.str());
+  std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+
+  // Handle bfloat16 special cases with supported ops
+  bool used_bf16_op = false;
+  if (from_ty.is_bfloat16() || target_ty.is_bfloat16()) {
+    std::ostringstream func_name;
+    if (from_ty.is_bfloat16())
+      func_name << "bf16";
+    else if (from_ty.is_float())
+      func_name << "float";
+    if (from_ty.lanes() > 1)
+      func_name << from_ty.lanes();
+    func_name << "2";
+    if (target_ty.is_bfloat16())
+      func_name << "bf16";
+    else if (target_ty.is_float())
+      func_name << "float";
+    else if (target_ty == DataType::Int(16))
+      func_name << "int16";
+    if (target_ty.lanes() > 1)
+      func_name << target_ty.lanes();
+
+    auto fname = func_name.str();
+    if (bf16_supported_ops_.count(fname)) {
+      used_bf16_op = true;
+      stream << "#ifdef ENABLE_BF16\n";
+      PrintIndent();
+      stream << "reinterpret_cast<";
+      if (target_ty.is_bfloat16())
+        stream << "__nv_bfloat16";
+      else
+        PrintType(target_ty.element_of(), stream);
+      if (target_ty.lanes() > 1)
+        stream << target_ty.lanes();
+      stream << " &>(" << sret << ") = fastertransformer::" << fname
+             << "(reinterpret_cast<";
+      if (from_ty.is_bfloat16())
+        stream << "__nv_bfloat16";
+      else
+        PrintType(from_ty.element_of(), stream);
+      if (from_ty.lanes() > 1)
+        stream << from_ty.lanes();
+      stream << " const &>(" << src << "));\n";
+      stream << "#else\n";
     }
+  }
+
+  // Fallback: elementwise cast
+  for (int i = 0, lanes = from_ty.lanes(); i < lanes; ++i) {
+    std::ostringstream val;
+    val << "(";
+    PrintType(target_ty.element_of(), val);
+    val << ")(";
+    PrintVecElemLoad(src, from_ty, i, val);
+    val << ")";
+    PrintVecElemStore(sret, target_ty, i, val.str());
+  }
+
+  if (used_bf16_op) {
+    stream << "#endif\n";
   }
   os << sret;
 }
