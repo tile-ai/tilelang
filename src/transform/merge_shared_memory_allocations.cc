@@ -426,30 +426,28 @@ private:
           }
         }
       }
-      // calculate offset for each buffer based on the align of each layer
-      PrimExpr tail_bubble_size = 0;
+
       for (const StorageEntry *e : all_entry) {
         PrimExpr max_inner_offset = 0;
         for (int i = 0; i < static_cast<int>(e->allocs.size()); i++) {
           PrimExpr inner_offset = 0;
           for (const VarNode *buffer : e->allocs[i]) {
             const AllocateNode *alloc = shmem_allocs_[buffer];
-            buffer_byte_offsets_[buffer] = merged_alloc_size_ + inner_offset;
-            inner_offset +=
-                alloc->extents[0] * alloc->dtype.bytes() * alloc->dtype.lanes();
-
+            auto alignment = align[i];
             // Modern nvidia architecture performs hardware swizzling (hopper
             // wgmma/tma for exmaple) requires dynamic shared memory address to
             // be aligned to 1024 bytes For other devices, we align to 16 bytes
-            auto alignment = align[i];
             if (shmem_alignment_map_.find(buffer) !=
                 shmem_alignment_map_.end()) {
               alignment = std::max(align[i], shmem_alignment_map_[buffer]);
             }
-
-            tail_bubble_size = indexmod(
-                alignment - indexmod(inner_offset, alignment), alignment);
-            inner_offset += tail_bubble_size;
+            PrimExpr start_offset = merged_alloc_size_ + inner_offset;
+            PrimExpr aligned_offset =
+                indexdiv(start_offset + alignment - 1, alignment) * alignment;
+            buffer_byte_offsets_[buffer] = aligned_offset;
+            inner_offset =
+                aligned_offset - merged_alloc_size_ +
+                alloc->extents[0] * alloc->dtype.bytes() * alloc->dtype.lanes();
           }
           max_inner_offset = max(max_inner_offset, inner_offset);
         }
