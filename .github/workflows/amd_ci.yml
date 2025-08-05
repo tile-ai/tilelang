@@ -32,6 +32,7 @@ jobs:
         
         cp -r /usr/local/lib/python3.12/dist-packages/torch ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/lib/python3.12/site-packages/
         cp -r /usr/local/lib/python3.12/dist-packages/torchvision ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/lib/python3.12/site-packages/
+        bash ./install_rocm.sh
 
         if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
           echo "venv exists and hash matches – reuse it"
@@ -41,7 +42,6 @@ jobs:
           python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
           source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
           python -m pip install --upgrade pip --no-user
-          
           if [[ -f requirements-test.txt ]]; then
             echo "Removing 'flash-attn' from requirements before installing..."
             sed -i '/flash-attn/d' requirements-test.txt
