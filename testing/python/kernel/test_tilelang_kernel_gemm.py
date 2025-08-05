@@ -536,5 +536,4 @@ def test_gemm_f16f16f16_rs():
 
 
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    test_gemm_i8i8i32_tn()
+    tilelang.testing.main()
