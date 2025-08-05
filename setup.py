@@ -588,6 +588,30 @@ class TileLangSdistCommand(sdist):
         super().make_distribution()
 
 
+# ------------------------------------------------------------------------
+# NEW: Add a custom 'develop' command so that `pip install -e .` works.
+# ------------------------------------------------------------------------
+class TileLangDevelopCommand(develop):
+    """
+    Customized setuptools 'develop' command for an editable install.
+    Ensures the extension is built and all necessary assets are copied.
+    """
+
+    def run(self):
+        logger.info("Running TileLangDevelopCommand")
+        # 1. Build the C/C++ extension modules
+        self.run_command("build_ext")
+
+        build_ext_cmd = self.get_finalized_command("build_ext")
+        ext_modules = build_ext_cmd.extensions
+        for ext in ext_modules:
+            extdir = build_ext_cmd.get_ext_fullpath(ext.name)
+            logger.info(f"Extension {ext.name} output directory: {extdir}")
+
+        ext_output_dir = os.path.dirname(extdir)
+        logger.info(f"Extension output directory (parent): {ext_output_dir}")
+
+
 class CMakeExtension(Extension):
     """
     A specialized setuptools Extension class for building a CMake project.
@@ -838,5 +862,6 @@ setup(
         "build_py": TileLangBuilPydCommand,
         "sdist": TileLangSdistCommand,
         "build_ext": TilelangExtensionBuild,
+        "develop": TileLangDevelopCommand,
     },
 )
