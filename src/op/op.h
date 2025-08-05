@@ -59,15 +59,9 @@ struct LayoutInferArgs {
   Map<Buffer, Buffer> buffer_remap;
 };
 
-struct CanonializeArgs {
-  Target target;
-};
-
 class Operator {
 public:
   virtual Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const;
-  virtual Stmt Canonialize(const CanonializeArgs &T,
-                           arith::Analyzer *analyzer) const;
   virtual LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level);
   virtual ~Operator() = default;
 };
