@@ -37,8 +37,7 @@ def matmul(M,
 
             T.copy(C_local, C_shared)
 
-            for i, j in T.Parallel(block_M, block_N):
-                T.atomic_add(C[by * block_M + i, bx * block_N + j], C_shared[i, j])
+            T.atomic_add(C[by * block_M, bx * block_N], C_shared)
 
     return main
 
