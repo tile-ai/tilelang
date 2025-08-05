@@ -300,6 +300,31 @@ private:
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
 
+  Stmt VisitStmt_(const IfThenElseNode *op) {
+    if (has_warp_specialization_) {
+      has_warp_specialization_ = false;
+      return StmtExprMutator::VisitStmt_(op);
+    }
+    if_depth_ += 1;
+    Stmt then_case = this->VisitStmt(op->then_case);
+    Stmt else_case;
+    if (op->else_case) {
+      else_case = this->VisitStmt(op->else_case.value());
+    }
+    if_depth_ -= 1;
+    return IfThenElse(op->condition, then_case, else_case);
+  }
+
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == "kWarpSpecializationScope") {
+      has_warp_specialization_ = true;
+    } else if (op->attr_key == tir::attr::thread_extent &&
+               Downcast<IterVar>(op->node)->thread_tag == "threadIdx.x") {
+      thread_var_ = Downcast<IterVar>(op->node)->var;
+    }
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
   PrimExpr VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tma_load())) {
       // check this must be in the tma_op_to_barrier_id_
@@ -315,7 +340,7 @@ private:
       auto barrier_id = tma_op_to_barrier_id_[GetRef<Call>(op)];
       auto new_args = op->args;
       new_args.Set(0, barrier_id);
-      clear_arrive_ = !has_simt_copy_;
+      clear_arrive_ = !has_simt_copy_ && if_depth_ == 1;
       if (clear_arrive_) {
         return Call(op->dtype, builtin::ptx_arrive_barrier_expect_tx(),
                     new_args);
@@ -326,7 +351,13 @@ private:
         clear_arrive_ = false;
         return 0;
       }
-      return Call(op->dtype, op->op, op->args);
+      auto new_args = op->args;
+      if (new_args.size() == 1) {
+        new_args.push_back(0);                                 // cta id
+        new_args.push_back(EQ(FloorMod(thread_var_, 128), 0)); // pred
+      }
+
+      return Call(op->dtype, op->op, new_args);
     }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
   }
@@ -335,6 +366,9 @@ private:
   bool has_create_list_of_mbarrier_;
   bool clear_arrive_{false};
   bool has_simt_copy_{false};
+  bool has_warp_specialization_{false};
+  int if_depth_{0};
+  Var thread_var_;
 };
 
 tvm::transform::Pass InjectTmaBarrier() {
