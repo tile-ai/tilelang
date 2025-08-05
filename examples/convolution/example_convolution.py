@@ -25,6 +25,7 @@ def ref_program(stride, padding, dilation):
     return main
 
 
+@tilelang.jit(out_idx=[2])
 def convolution(N,
                 C,
                 H,
@@ -116,8 +117,7 @@ def main(argv=None):
     block_k = 32
     num_stages = 3
     threads = 256
-    program = convolution(N, C, H, W, F, K, S, D, P, block_m, block_n, block_k, num_stages, threads)
-    kernel = tilelang.compile(program, out_idx=[2])
+    kernel = convolution(N, C, H, W, F, K, S, D, P, block_m, block_n, block_k, num_stages, threads)
 
     out_c = kernel(a, b)
     ref_c = ref_program(S, P, D)(a, b)

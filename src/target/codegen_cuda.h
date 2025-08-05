@@ -125,6 +125,9 @@ private:
                       const VarNode *variable, std::ostream &os);
   int32_t GetWmmaFragmentSize(const std::string &scope, const VarNode *variable,
                               int32_t size);
+
+  std::unordered_set<std::string> bf16_supported_ops_ = {
+      "bf1622float2", "bf1622int16", "float22bf162", "bf162bf162"};
 };
 
 } // namespace codegen
