@@ -38,12 +38,15 @@ jobs:
           echo "venv stale or missing – recreating"
           rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
           python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
-          # shellcheck source=/dev/null
           source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
           python -m pip install --upgrade pip --no-user
-          [[ -f requirements-test.txt ]] && \
-            sed -i '/flash-attn/d' requirements-test.txt && \
+          
+          if [[ -f requirements-test.txt ]]; then
+            echo "Removing 'flash-attn' from requirements before installing..."
+            sed -i '/flash-attn/d' requirements-test.txt
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
+          fi
+
           touch "$MARKER"
         fi
 
@@ -96,8 +99,13 @@ jobs:
           python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
           source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
           python -m pip install --upgrade pip --no-user
-          [[ -f requirements-test.txt ]] && \
+          
+          if [[ -f requirements-test.txt ]]; then
+            echo "Removing 'flash-attn' from requirements before installing..."
+            sed -i '/flash-attn/d' requirements-test.txt
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
+          fi
+
           USE_ROCM=True pip install . --no-user
           touch "$MARKER"
         fi
