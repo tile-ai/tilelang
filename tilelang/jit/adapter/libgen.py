@@ -73,6 +73,8 @@ class LibraryGenerator(object):
             libpath = src.name.replace(".cu", ".so")
 
             disable_fast_math = self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH, False)
+            ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL,
+                                                      None)
             verbose_ptxas_output = self.pass_configs.get(
                 PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
 
@@ -93,10 +95,10 @@ class LibraryGenerator(object):
             ]
             if not disable_fast_math:
                 command += ["--use_fast_math"]
+            if ptxas_usage_level is not None:
+                command += [f"--ptxas-options=--register-usage-level={ptxas_usage_level}"]
             if verbose_ptxas_output:
-                command += ["--ptxas-options", "-v"]
-            if compute_version == "90a":
-                command += ["-D", "CUTE_SM90_EXTENDED_MMA_SHAPES_ENABLED"]
+                command += ["--ptxas-options=--verbose"]
             command += [
                 "-I" + CUTLASS_INCLUDE_DIR,
             ]
