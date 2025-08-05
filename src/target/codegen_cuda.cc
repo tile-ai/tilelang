@@ -1470,14 +1470,21 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
   } else if (op->op.same_as(tl::tl_gemm())) {
-    ICHECK(op->args.size() == 4) << "tl_gemm expects 4 arguments <op_instance, A_ptr, B_ptr, C_ptr>, but got " << op->args.size();
+    ICHECK(op->args.size() == 4) << "tl_gemm expects 4 arguments <op_instance, "
+                                    "A_ptr, B_ptr, C_ptr>, but got "
+                                 << op->args.size();
     auto op_instance = Downcast<StringImm>(op->args[0]);
-    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value, op->args, true, os);
+    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
+                          op->args, true, os);
   } else if (op->op.same_as(tl::tl_gemm_sp())) {
-    ICHECK(op->args.size() == 5) << "tl_gemm_sp expects 5 arguments <op_instance, A_ptr, B_ptr, C_ptr, E_ptr>, but got " << op->args.size();
+    ICHECK(op->args.size() == 5)
+        << "tl_gemm_sp expects 5 arguments <op_instance, A_ptr, B_ptr, C_ptr, "
+           "E_ptr>, but got "
+        << op->args.size();
     auto op_instance = Downcast<StringImm>(op->args[0]);
     enable_sparse_gemm_ = true;
-    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value, op->args, true, os);
+    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
+                          op->args, true, os);
   } else {
     CodeGenC::VisitExpr_(op, os);
   }

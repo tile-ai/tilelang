@@ -35,11 +35,11 @@
 #include <unordered_set>
 
 #include "../op/builtin.h"
+#include "../target/utils.h"
 #include "runtime/thread_storage_scope.h"
 #include "support/arena.h"
 #include "tir/transforms/ir_utils.h"
 #include "tvm/tir/function.h"
-#include "../target/utils.h"
 
 namespace tvm {
 namespace tl {
@@ -320,7 +320,7 @@ private:
 class SharedMemoryAlignmentPlanner : public StmtExprVisitor {
 
 public:
-  static std::unordered_map<const VarNode *, int> Plan(const Stmt& stmt) {
+  static std::unordered_map<const VarNode *, int> Plan(const Stmt &stmt) {
     SharedMemoryAlignmentPlanner planner;
     planner(stmt);
     return planner.shmem_alignment_map_;
@@ -328,7 +328,8 @@ public:
 
 private:
   void VisitExpr_(const CallNode *op) {
-    if (op->op.same_as(tl::tl_gemm()) || op->op.same_as(tl::tl_gemm_sp()) || op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store())) {
+    if (op->op.same_as(tl::tl_gemm()) || op->op.same_as(tl::tl_gemm_sp()) ||
+        op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store())) {
       under_alignment_scope_ = true;
       StmtExprVisitor::VisitExpr_(op);
       under_alignment_scope_ = false;
@@ -344,7 +345,7 @@ private:
       if (scope == "shared" || scope == "shared.dyn") {
         auto target = Target::Current();
         ICHECK(target.defined()) << "Target is not defined";
-        const int alignment = TargetIsHopper(target)?1024:16;
+        const int alignment = TargetIsHopper(target) ? 1024 : 16;
         shmem_alignment_map_[op] = alignment;
       }
     }
@@ -401,14 +402,14 @@ private:
       for (const StorageEntry *e : sym_free_list_) {
         all_entry.push_back(e);
       }
-      // Sort the storage entries in descending order of their total allocation size (in bits).
-      // This ensures that larger allocations are placed first, which can help minimize fragmentation
-      // and improve memory packing efficiency when merging shared memory buffers.
-      std::sort(
-          all_entry.begin(), all_entry.end(),
-          [](const StorageEntry *a, const StorageEntry *b) {
-            return a->const_nbits > b->const_nbits;
-          });
+      // Sort the storage entries in descending order of their total allocation
+      // size (in bits). This ensures that larger allocations are placed first,
+      // which can help minimize fragmentation and improve memory packing
+      // efficiency when merging shared memory buffers.
+      std::sort(all_entry.begin(), all_entry.end(),
+                [](const StorageEntry *a, const StorageEntry *b) {
+                  return a->const_nbits > b->const_nbits;
+                });
       for (const StorageEntry *e : all_entry) {
         max_layer_num =
             std::max(max_layer_num, static_cast<int>(e->allocs.size()));
@@ -436,16 +437,18 @@ private:
             buffer_byte_offsets_[buffer] = merged_alloc_size_ + inner_offset;
             inner_offset +=
                 alloc->extents[0] * alloc->dtype.bytes() * alloc->dtype.lanes();
-            
-            // Modern nvidia architecture performs hardware swizzling (hopper wgmma/tma for exmaple)
-            // requires dynamic shared memory address to be aligned to 1024 bytes
-            // For other devices, we align to 16 bytes
+
+            // Modern nvidia architecture performs hardware swizzling (hopper
+            // wgmma/tma for exmaple) requires dynamic shared memory address to
+            // be aligned to 1024 bytes For other devices, we align to 16 bytes
             auto alignment = align[i];
-            if (shmem_alignment_map_.find(buffer) != shmem_alignment_map_.end()) {
+            if (shmem_alignment_map_.find(buffer) !=
+                shmem_alignment_map_.end()) {
               alignment = std::max(align[i], shmem_alignment_map_[buffer]);
             }
 
-            tail_bubble_size = indexmod(alignment - indexmod(inner_offset, alignment), alignment);
+            tail_bubble_size = indexmod(
+                alignment - indexmod(inner_offset, alignment), alignment);
             inner_offset += tail_bubble_size;
           }
           max_inner_offset = max(max_inner_offset, inner_offset);
@@ -636,12 +639,14 @@ private:
     std::vector<const VarNode *> kill;
   };
 
-  void PlanAlignment(const Stmt& stmt) {
+  void PlanAlignment(const Stmt &stmt) {
     LOG(INFO) << "PlanAlignment";
     PostOrderVisit(stmt, [&](const ObjectRef &node) {
       if (const auto *call = node.as<CallNode>()) {
-        if (call->op.same_as(tl::tl_gemm()) || call->op.same_as(tl::tl_gemm_sp())) {
-          LOG(INFO) << "PostOrderVisit CallNode tl_gemm and tl_gemm_sp: " << call->op;
+        if (call->op.same_as(tl::tl_gemm()) ||
+            call->op.same_as(tl::tl_gemm_sp())) {
+          LOG(INFO) << "PostOrderVisit CallNode tl_gemm and tl_gemm_sp: "
+                    << call->op;
         }
       }
     });

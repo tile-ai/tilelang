@@ -248,7 +248,11 @@ Stmt GemmSP::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto C_buffer = T.buffer_remap[C];
   auto E_buffer = T.buffer_remap.count(E) ? T.buffer_remap[E] : E;
 
-  auto new_call = Call(DataType::Handle(), tl::tl_gemm_sp(), Array<PrimExpr>{StringImm(ss.str()), A_buffer.access_ptr(1), B_buffer.access_ptr(1), C_buffer.access_ptr(3), E_buffer.access_ptr(1)});
+  auto new_call =
+      Call(DataType::Handle(), tl::tl_gemm_sp(),
+           Array<PrimExpr>{StringImm(ss.str()), A_buffer.access_ptr(1),
+                           B_buffer.access_ptr(1), C_buffer.access_ptr(3),
+                           E_buffer.access_ptr(1)});
   return Evaluate(new_call);
 }
 

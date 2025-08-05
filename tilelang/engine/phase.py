@@ -165,7 +165,8 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # because the merged allocation site is at the beginning of each device function
     enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
     mod = tilelang.transform.MergeSharedMemoryAllocations(
-        enable_aggressive_merge=enable_aggressive_merge)(mod)
+        enable_aggressive_merge=enable_aggressive_merge)(
+            mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     # Inject PTX async copy must behind the thread sync pass

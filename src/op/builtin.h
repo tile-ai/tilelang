@@ -287,7 +287,8 @@ TVM_DLL const Op &tvm_rdna_wmma_store();
 TVM_DLL const Op &tl_gemm();
 
 /*!
- * \brief tilelang intrinsic for sparse matrix multiplication (GEMM with sparsity).
+ * \brief tilelang intrinsic for sparse matrix multiplication (GEMM with
+ * sparsity).
  *
  *  This op is used to represent a sparse GEMM operation in tilelang.
  */
