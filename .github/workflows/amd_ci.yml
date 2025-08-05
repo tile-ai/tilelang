@@ -6,69 +6,9 @@ env:
   VENV_DIR: tilelang_ci
 
 jobs:
-  format-check:
-    runs-on: self-hosted
-
-    permissions:
-      contents: write 
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
-    - name: Set up Python
-      uses: actions/setup-python@v2
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
-
-    - name: Ensure venv (local & persistent)
-      run: |
-        set -e
-        REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
-        MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
-        cp -r /usr/local/lib/python3.12/dist-packages/torch ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/lib/python3.12/site-packages/
-        cp -r /usr/local/lib/python3.12/dist-packages/torchvision ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/lib/python3.12/site-packages/
-
-        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
-          echo "venv exists and hash matches – reuse it"
-        else
-          echo "venv stale or missing – recreating"
-          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
-          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
-          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-          python -m pip install --upgrade pip --no-user
-          
-          if [[ -f requirements-test.txt ]]; then
-            echo "Removing 'flash-attn' from requirements before installing..."
-            sed -i '/flash-attn/d' requirements-test.txt
-            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
-          fi
-
-          touch "$MARKER"
-        fi
-
-    - name: Run format check
-      run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        if ! output=$(./format.sh 2>&1); then
-          echo "------------------------------------"
-          echo "message:"
-          echo "$output"
-          printf '%s\n' "$output" | grep "Please review and stage the changes."
-          echo "------------------------------------"
-          exit 1
-        fi
-    
-    - name: Commit and Push Changes
-      uses: stefanzweifel/git-auto-commit-action@v5
-      with:
-        commit_message: "lint"
 
   build-test:
     runs-on: self-hosted
-    needs: format-check
     permissions:
       contents: read
     steps:
@@ -89,6 +29,9 @@ jobs:
         set -e
         REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
         MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
+        
+        cp -r /usr/local/lib/python3.12/dist-packages/torch ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/lib/python3.12/site-packages/
+        cp -r /usr/local/lib/python3.12/dist-packages/torchvision ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/lib/python3.12/site-packages/
 
         if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
           echo "venv exists and hash matches – reuse it"
