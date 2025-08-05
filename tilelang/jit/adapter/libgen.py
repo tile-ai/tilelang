@@ -92,6 +92,7 @@ class LibraryGenerator(object):
                 "-lcuda",
                 "-gencode",
                 f"arch=compute_{compute_version},code=sm_{compute_version}",
+                "--expt-relaxed-constexpr",
             ]
             if not disable_fast_math:
                 command += ["--use_fast_math"]
