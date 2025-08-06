@@ -27,9 +27,12 @@ public:
   } policy;
 
 private:
-  std::pair<int, int>
-  ComputeWarpPartition(int num_warps, Target target,
-                       bool maybe_hopper_wgmma = true) const;
+  // Target GEMM instruction
+  enum class GemmInst { kMMA, kWGMMA, kUTCMMA, kMFMA };
+  GemmInst GetGemmInst(int block_size, Target target) const;
+
+  std::pair<int, int> ComputeWarpPartition(int num_warps, GemmInst gemm_inst,
+                                           Target target) const;
 
   bool CheckWGMMA() const;
   Array<PrimExpr> call_args;

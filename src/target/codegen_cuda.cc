@@ -192,6 +192,9 @@ std::string CodeGenTileLangCUDA::Finish() {
   decl_stream << "#include <tl_templates/cuda/ldsm.h>\n";
   decl_stream << "#include <tl_templates/cuda/threadblock_swizzle.h>\n";
   decl_stream << "#include <tl_templates/cuda/debug.h>\n";
+  decl_stream << "#ifdef ENABLE_BF16\n";
+  decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
+  decl_stream << "#endif\n";
 
   if (need_global_barrier_) {
     decl_stream << "__device__ unsigned " << vid_global_barrier_state_
@@ -734,17 +737,66 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   this->PrintIndent();
   this->PrintType(target_ty, stream);
   stream << ' ' << sret << ";\n";
-  {
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
-    for (int i = 0, lanes = from_ty.lanes(); i < lanes; ++i) {
-      std::ostringstream val;
-      val << "(";
-      PrintType(target_ty.element_of(), val);
-      val << ")(";
-      PrintVecElemLoad(src, from_ty, i, val);
-      val << ")";
-      PrintVecElemStore(sret, target_ty, i, val.str());
+  std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+
+  // Handle bfloat16 special cases with supported ops
+  bool used_bf16_op = false;
+  if (from_ty.is_bfloat16() || target_ty.is_bfloat16()) {
+    std::ostringstream func_name;
+    if (from_ty.is_bfloat16())
+      func_name << "bf16";
+    else if (from_ty.is_float())
+      func_name << "float";
+    if (from_ty.lanes() > 1)
+      func_name << from_ty.lanes();
+    func_name << "2";
+    if (target_ty.is_bfloat16())
+      func_name << "bf16";
+    else if (target_ty.is_float())
+      func_name << "float";
+    else if (target_ty == DataType::Int(16))
+      func_name << "int16";
+    if (target_ty.lanes() > 1)
+      func_name << target_ty.lanes();
+
+    auto fname = func_name.str();
+    if (bf16_supported_ops_.count(fname)) {
+      used_bf16_op = true;
+      stream << "#ifdef ENABLE_BF16\n";
+      PrintIndent();
+      stream << "reinterpret_cast<";
+      if (target_ty.is_bfloat16())
+        stream << "__nv_bfloat16";
+      else
+        PrintType(target_ty.element_of(), stream);
+      if (target_ty.lanes() > 1)
+        stream << target_ty.lanes();
+      stream << " &>(" << sret << ") = fastertransformer::" << fname
+             << "(reinterpret_cast<";
+      if (from_ty.is_bfloat16())
+        stream << "__nv_bfloat16";
+      else
+        PrintType(from_ty.element_of(), stream);
+      if (from_ty.lanes() > 1)
+        stream << from_ty.lanes();
+      stream << " const &>(" << src << "));\n";
+      stream << "#else\n";
     }
+  }
+
+  // Fallback: elementwise cast
+  for (int i = 0, lanes = from_ty.lanes(); i < lanes; ++i) {
+    std::ostringstream val;
+    val << "(";
+    PrintType(target_ty.element_of(), val);
+    val << ")(";
+    PrintVecElemLoad(src, from_ty, i, val);
+    val << ")";
+    PrintVecElemStore(sret, target_ty, i, val.str());
+  }
+
+  if (used_bf16_op) {
+    stream << "#endif\n";
   }
   os << sret;
 }
@@ -939,6 +991,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::mbarrier_wait");
   } else if (op->op.same_as(tl::sync_thread_partial())) {
     print_extern_call_stmt("tl::syncthreads_partial");
+  } else if (op->op.same_as(tl::no_set_max_nreg())) {
+    return;
   } else if (op->op.same_as(tl::tma_load())) {
     std::ostringstream ss;
     ICHECK_GE(op->args.size(), 2);
@@ -1467,6 +1521,22 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     EndScope(ssa_scope);
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
+  } else if (op->op.same_as(tl::tl_gemm())) {
+    ICHECK(op->args.size() == 4) << "tl_gemm expects 4 arguments <op_instance, "
+                                    "A_ptr, B_ptr, C_ptr>, but got "
+                                 << op->args.size();
+    auto op_instance = Downcast<StringImm>(op->args[0]);
+    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
+                          op->args, true, os);
+  } else if (op->op.same_as(tl::tl_gemm_sp())) {
+    ICHECK(op->args.size() == 5)
+        << "tl_gemm_sp expects 5 arguments <op_instance, A_ptr, B_ptr, C_ptr, "
+           "E_ptr>, but got "
+        << op->args.size();
+    auto op_instance = Downcast<StringImm>(op->args[0]);
+    enable_sparse_gemm_ = true;
+    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
+                          op->args, true, os);
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
@@ -1582,14 +1652,6 @@ void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
     stream << "  " << vid_global_barrier_expect_ << " = 0;\n";
     PrintIndent();
     stream << "}\n";
-  } else if (call && call->op.same_as(builtin::call_extern())) {
-    ICHECK(call->args.size() >= 1)
-        << "call_extern must have at least 1 argument";
-    std::string func_name = call->args[0].as<StringImmNode>()->value;
-    if (func_name.find("tl::gemm_sp") == 0) {
-      enable_sparse_gemm_ = true;
-    }
-    CodeGenC::VisitStmt_(op);
   } else {
     CodeGenC::VisitStmt_(op);
   }
