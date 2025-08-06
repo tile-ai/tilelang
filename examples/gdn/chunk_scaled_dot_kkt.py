@@ -1,12 +1,13 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
+# Reference: fla/ops/common/chunk_scaled_dot_kkt.py
+
 import tilelang
 import tilelang.language as T
 import sys
 
 # Add your fla repository path to sys.path
-# You can set the FLA_REPO_PATH environment variable to point to your fla repository
 # Currently we use the fla repository from the flash-linear-attention project at commit id f03cb3ae
 
 sys.path.insert(0, "/home/tzj/flash-linear-attention")
@@ -175,5 +176,9 @@ def run_test(
         print(kernel.get_kernel_source())
 
 
-if __name__ == "__main__":
+def main():
     run_test(B=1, S=32768, H=32, DK=128, chunk_size=64, input_dtype="bfloat16", output_dtype="bfloat16", accum_dtype="float32", use_g=True, block_DK=64, threads=128, num_stages=2)
+
+
+if __name__ == "__main__":
+    main()

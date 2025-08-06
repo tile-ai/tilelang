@@ -2,14 +2,13 @@
 # Licensed under the MIT License.
 
 # Util functions for flash linear attention cumsum
-# reference: fla/ops/utils/cumsum.py
+# Reference: fla/ops/utils/cumsum.py
 
 import tilelang
 import tilelang.language as T
 import sys
 
 # Add your fla repository path to sys.path
-# You can set the FLA_REPO_PATH environment variable to point to your fla repository
 # Currently we use the fla repository from the flash-linear-attention project at commit id f03cb3ae
 
 sys.path.insert(0, "/home/tzj/flash-linear-attention")
@@ -146,8 +145,9 @@ def run_test(
         print(G_new_ref.view(-1))
 
 
-if __name__ == "__main__":
-    # run_test(B=1, S=64, H=1, chunk_size=64, reverse=False, head_first=False, input_dtype="float16", output_dtype="float16", threads=256, use_fragment=True)
-    # run_test(B=2, S=2048, H=8, chunk_size=64, reverse=True, head_first=False, input_dtype="float16", output_dtype="float16", threads=256, use_fragment=True)
+def main():
     run_test(B=1, S=32768, H=32, chunk_size=64, reverse=True, head_first=False, input_dtype="float32", output_dtype="float32", threads=256, use_fragment=False)
-    
+
+
+if __name__ == "__main__":
+    main()

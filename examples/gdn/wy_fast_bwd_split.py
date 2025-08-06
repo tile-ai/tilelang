@@ -1,13 +1,14 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
+# Reference: fla/ops/gated_delta_rule/wy_fast.py
+
 import sys
 
 import tilelang
 import tilelang.language as T
 
 # Add your fla repository path to sys.path
-# You can set the FLA_REPO_PATH environment variable to point to your fla repository
 # Currently we use the fla repository from the flash-linear-attention project at commit id 00000000
 
 sys.path.insert(0, "/home/tzj/flash-linear-attention")
@@ -459,7 +460,8 @@ def run_test(
     assert_similar(dbeta_ref, dbeta_tilelang, eps=1e-5, name="dbeta", raise_assert=False)
     assert_similar(dg_ref, dg_tilelang, eps=1e-5, name="dg", raise_assert=False)
 
-if __name__ == "__main__":
+
+def main():
     DK = 128
     DV = 128
     run_test(
@@ -479,3 +481,7 @@ if __name__ == "__main__":
         threads=128,
         num_stages=0,
     )
+
+
+if __name__ == "__main__":
+    main()

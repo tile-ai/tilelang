@@ -1,14 +1,14 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
+
+# Reference: fla/ops/common/chunk_delta_h.py
+
 import sys
 import os
-# (zhengju) To use the debug code, you need to set the customized tilelang repository path to sys.path
-
 import tilelang
 import tilelang.language as T
 
 # Add your fla repository path to sys.path
-# You can set the FLA_REPO_PATH environment variable to point to your fla repository
 # Currently we use the fla repository from the flash-linear-attention project at commit id f03cb3ae
 
 sys.path.insert(0, "/home/tzj/flash-linear-attention")
@@ -235,7 +235,6 @@ def do_bench(fn, *args, warmup=10, rep=10, **kwargs):
         dtype=torch.float,
     )
 
-    # return (end_time - start_time) * 1000 / rep
     return times.mean().item()
 
 def run_test(
@@ -317,7 +316,7 @@ def run_test(
     print(f"fla time: {fla_time} ms")
 
 
-if __name__ == "__main__":
+def main():
     run_test(
         B=1,
         S=32768,
@@ -339,3 +338,7 @@ if __name__ == "__main__":
         threads=128,
         num_stages=1,
     )
+
+
+if __name__ == "__main__":
+    main()

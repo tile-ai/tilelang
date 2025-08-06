@@ -1,12 +1,13 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 
+# Reference: fla/ops/common/chunk_o.py
+
 import tilelang
 import tilelang.language as T
 import sys
 
 # Add your fla repository path to sys.path
-# You can set the FLA_REPO_PATH environment variable to point to your fla repository
 # Currently we use the fla repository from the flash-linear-attention project at commit id f03cb3ae
 
 sys.path.insert(0, "/home/tzj/flash-linear-attention")
@@ -198,7 +199,7 @@ def run_test(
         print(e)
 
 
-if __name__ == "__main__":
+def main():
     run_test(
         B=1,
         S=32768,
@@ -216,20 +217,7 @@ if __name__ == "__main__":
         threads=128,
         num_stages=1,
     )
-    # run_test(
-    #     B=8,
-    #     S=1024,
-    #     H=4,
-    #     DK=1024,
-    #     DV=1024,
-    #     chunk_size=64,
-    #     input_dtype="float16",
-    #     output_dtype="float16",
-    #     accum_dtype="float32",
-    #     gate_dtype="float32",
-    #     use_g=True,
-    #     block_DK=64,
-    #     block_DV=64,
-    #     threads=256,
-    #     num_stages=0,
-    # )
+
+
+if __name__ == "__main__":
+    main()
