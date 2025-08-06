@@ -10,8 +10,7 @@ import tilelang.language as T
 
 # Add your fla repository path to sys.path
 # Currently we use the fla repository from the flash-linear-attention project at commit id 00000000
-
-sys.path.insert(0, "/home/tzj/flash-linear-attention")
+# sys.path.insert(0, "/home/tzj/flash-linear-attention")
 import fla
 
 print(fla.__file__)
