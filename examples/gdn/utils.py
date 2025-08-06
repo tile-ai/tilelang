@@ -2,7 +2,6 @@ import torch
 
 
 def print_red_warning(message):
-    # ANSI转义序列：\033[31m 设置文本为红色，\033[0m 重置颜色
     print(f"\033[31mWARNING: {message}\033[0m")
 
 
