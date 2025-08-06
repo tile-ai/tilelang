@@ -8,6 +8,8 @@ import tilelang.language as T
 from tilelang.intrinsics import (
     make_mma_swizzle_layout as make_swizzle_layout,)  # noqa: F401
 
+tilelang.disable_cache()
+
 
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
