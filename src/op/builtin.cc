@@ -132,13 +132,11 @@ TIR_DEFINE_TL_BUILTIN(loop_break)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(tvm_mfma)
-    .set_num_inputs(-1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+TIR_DEFINE_TL_BUILTIN(tl_gemm).set_num_inputs(4).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(tvm_mfma_store)
-    .set_num_inputs(-1)
+TIR_DEFINE_TL_BUILTIN(tl_gemm_sp)
+    .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

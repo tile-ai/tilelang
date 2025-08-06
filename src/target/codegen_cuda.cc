@@ -991,6 +991,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::mbarrier_wait");
   } else if (op->op.same_as(tl::sync_thread_partial())) {
     print_extern_call_stmt("tl::syncthreads_partial");
+  } else if (op->op.same_as(tl::no_set_max_nreg())) {
+    return;
   } else if (op->op.same_as(tl::tma_load())) {
     std::ostringstream ss;
     ICHECK_GE(op->args.size(), 2);
@@ -1519,6 +1521,22 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     EndScope(ssa_scope);
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
+  } else if (op->op.same_as(tl::tl_gemm())) {
+    ICHECK(op->args.size() == 4) << "tl_gemm expects 4 arguments <op_instance, "
+                                    "A_ptr, B_ptr, C_ptr>, but got "
+                                 << op->args.size();
+    auto op_instance = Downcast<StringImm>(op->args[0]);
+    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
+                          op->args, true, os);
+  } else if (op->op.same_as(tl::tl_gemm_sp())) {
+    ICHECK(op->args.size() == 5)
+        << "tl_gemm_sp expects 5 arguments <op_instance, A_ptr, B_ptr, C_ptr, "
+           "E_ptr>, but got "
+        << op->args.size();
+    auto op_instance = Downcast<StringImm>(op->args[0]);
+    enable_sparse_gemm_ = true;
+    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
+                          op->args, true, os);
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
@@ -1634,14 +1652,6 @@ void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
     stream << "  " << vid_global_barrier_expect_ << " = 0;\n";
     PrintIndent();
     stream << "}\n";
-  } else if (call && call->op.same_as(builtin::call_extern())) {
-    ICHECK(call->args.size() >= 1)
-        << "call_extern must have at least 1 argument";
-    std::string func_name = call->args[0].as<StringImmNode>()->value;
-    if (func_name.find("tl::gemm_sp") == 0) {
-      enable_sparse_gemm_ = true;
-    }
-    CodeGenC::VisitStmt_(op);
   } else {
     CodeGenC::VisitStmt_(op);
   }
