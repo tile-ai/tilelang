@@ -21,13 +21,13 @@ def assert_similar(x, y, eps=1e-8, name="tensor", data="", raise_assert=True):
     if not torch.all(x_mask == y_mask):
         print_red_warning(f'{name} Error: isfinite mask mismatch')
         if raise_assert:
-            assert False
+            raise AssertionError
     if not torch.isclose(
             x.masked_fill(x_mask, 0), y.masked_fill(y_mask, 0), rtol=0, atol=0,
             equal_nan=True).all():
         print_red_warning(f'{name} Error: nonfinite value mismatch')
         if raise_assert:
-            assert False
+            raise AssertionError
     x = x.masked_fill(~x_mask, 0)
     y = y.masked_fill(~y_mask, 0)
     sim = calc_sim(x, y, name)
@@ -35,6 +35,6 @@ def assert_similar(x, y, eps=1e-8, name="tensor", data="", raise_assert=True):
     if not (0 <= diff <= eps):
         print_red_warning(f'{name} Error: {diff}')
         if raise_assert:
-            assert False
+            raise AssertionError
     else:
         print(f"{name} {data} passed")

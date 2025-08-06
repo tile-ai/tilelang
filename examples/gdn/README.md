@@ -2,7 +2,7 @@
 
 ## Requirement
 
-### The Tilelang version for test is 0.1.5+87c8ad
+### The Tilelang version for test is 0.1.5+fdbf4d6cbc3c856e475244c5796fa88687d79cd4
 
 ### We currently use triton=3.3.0 and FLA commit id=f03cb3ae for comparison
 
