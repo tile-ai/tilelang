@@ -4,8 +4,6 @@ import shutil
 from setuptools import setup, find_packages, Extension
 from setuptools.command.build_py import build_py
 from setuptools.command.sdist import sdist
-from setuptools.command.develop import develop
-import distutils.dir_util
 from typing import List, Optional
 import re
 import tarfile
@@ -18,7 +16,7 @@ import hashlib
 import sysconfig
 import functools
 import urllib.request
-from distutils.version import LooseVersion
+from packaging.version import Version
 import platform
 import multiprocessing
 from setuptools.command.build_ext import build_ext
@@ -767,14 +765,15 @@ class TilelangExtensionBuild(build_ext):
         # we need to change the build destination to tilelang/lib, where it's actually loaded
         if self.inplace:
             extdir = os.path.abspath('./tilelang/lib/')
-        
+
         logger.info(f"{extdir=}")
 
         # Prepare arguments for the CMake configuration step.
         # -DCMAKE_LIBRARY_OUTPUT_DIRECTORY sets where built libraries go
         # -DPYTHON_EXECUTABLE ensures that the correct Python is used
         cmake_args = [
-            f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}", f"-DPython_EXECUTABLE={sys.executable}",
+            f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}",
+            f"-DPython_EXECUTABLE={sys.executable}",
             f"-DCMAKE_BUILD_TYPE={'Debug' if DEBUG_MODE else 'Release'}",
             "-G",
             "Ninja",

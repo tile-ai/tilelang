@@ -547,7 +547,7 @@ private:
   LayoutInferencer(const LayoutInferenceResult result,
                    bool skip_thread_partition, arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer), result_(result),
-        skip_thread_partition_(skip_thread_partition) {};
+        skip_thread_partition_(skip_thread_partition){};
 
   Stmt VisitStmt_(const BlockNode *op) final {
     Block block = Downcast<Block>(IRMutatorWithAnalyzer::VisitStmt_(op));

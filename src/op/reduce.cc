@@ -316,7 +316,8 @@ LayoutMap ReduceOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     else {
       // Check if computed layout is compatible with existing: the existing one
       // must strictly contains the computed layout
-      auto orig_dst_layout = T.layout_map.Get(dst).value().as<Fragment>().value();
+      auto orig_dst_layout =
+          T.layout_map.Get(dst).value().as<Fragment>().value();
       ICHECK(dst_layout->InputDim() == orig_dst_layout->InputDim());
       Array<PrimExpr> indices;
       indices.reserve(dst_layout->InputDim());
