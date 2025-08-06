@@ -1,6 +1,6 @@
 # Reference: fla/ops/gated_delta_rule/wy_fast.py
 
-import sys
+import sys  # noqa: F401
 
 import tilelang
 import tilelang.language as T

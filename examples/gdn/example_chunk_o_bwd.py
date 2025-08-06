@@ -1,7 +1,7 @@
 # Reference: fla/ops/common/chunk_o.py
 
 import math
-import sys
+import sys  # noqa: F401
 
 import tilelang
 import tilelang.language as T

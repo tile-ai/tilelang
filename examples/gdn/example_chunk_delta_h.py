@@ -1,6 +1,6 @@
 # Reference: fla/ops/common/chunk_delta_h.py
 
-import sys
+import sys  # noqa: F401
 import tilelang
 import tilelang.language as T
 
