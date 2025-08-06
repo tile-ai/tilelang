@@ -52,7 +52,7 @@ def prepare_input(
     G = F.logsigmoid(G)
     try:
         G = chunk_local_cumsum(G, chunk_size)
-    except:
+    except ImportError:
         print("fla not found, skip cumsum")
 
     h0 = torch.randn(B, H, DK, DV, dtype=input_dtype).cuda()

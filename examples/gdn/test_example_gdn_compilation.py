@@ -3,26 +3,26 @@ import torch
 
 tilelang.disable_cache()
 
-B=1
-S=32768
-H=32
-DK=128
-DV=128
-input_dtype="bfloat16"
-output_dtype="bfloat16"
-accum_dtype="float32"
-gate_dtype="float32"
-state_dtype="float32"
-chunk_size=64
-use_g=True
-use_initial_state=True
-store_final_state=True
-use_final_state_gradient=True
-save_new_value=True
-block_DK=64
-block_DV=32
-threads=128
-num_stages=1
+B = 1
+S = 32768
+H = 32
+DK = 128
+DV = 128
+input_dtype = "bfloat16"
+output_dtype = "bfloat16"
+accum_dtype = "float32"
+gate_dtype = "float32"
+state_dtype = "float32"
+chunk_size = 64
+use_g = True
+use_initial_state = True
+store_final_state = True
+use_final_state_gradient = True
+save_new_value = True
+block_DK = 64
+block_DV = 32
+threads = 128
+num_stages = 1
 
 
 def test_example_wy_fast_compilation():
@@ -98,10 +98,8 @@ def test_example_wy_fast_bwd_split_compilation():
 
 def test_example_chunk_o_compilation():
     from example_chunk_o import tilelang_chunk_fwd_o, prepare_input, prepare_output
-    Q, K, V, HIDDEN, G = prepare_input(B, S, H, DK, DV, chunk_size,
-                                       getattr(torch, input_dtype),
-                                       getattr(torch, output_dtype),
-                                       getattr(torch, accum_dtype),
+    Q, K, V, HIDDEN, G = prepare_input(B, S, H, DK, DV, chunk_size, getattr(torch, input_dtype),
+                                       getattr(torch, output_dtype), getattr(torch, accum_dtype),
                                        getattr(torch, gate_dtype))
     scale = 1.0 / DK**0.5
     block_S = chunk_size
@@ -109,7 +107,7 @@ def test_example_chunk_o_compilation():
     kernel = tilelang_chunk_fwd_o(B, S, H, DK, DV, input_dtype, output_dtype, accum_dtype,
                                   gate_dtype, chunk_size, scale, use_g, block_S, block_DK, block_DV,
                                   threads, num_stages)
-    O_tilelang = kernel(Q, K, V, HIDDEN, G)
+    O_tilelang = kernel(Q, K, V, HIDDEN, G)  # noqa: F841
 
 
 def test_example_chunk_o_bwd_compilation():
@@ -126,7 +124,8 @@ def test_example_chunk_o_bwd_compilation():
     kernel = tilelang_chunk_o_bwd_dqkwg(B, S, H, DK, DV, input_dtype, output_dtype, accum_dtype,
                                         gate_dtype, state_dtype, chunk_size, 1.0, use_g, True,
                                         block_DK, block_DV, threads, num_stages)
-    dq_tilelang, dk_tilelang, dw_tilelang, dg_tilelang = kernel(Q, K, V, h, G, dO, dh, dv, W)
+    dq_tilelang, dk_tilelang, dw_tilelang, dg_tilelang = kernel(Q, K, V, h, G, dO, dh, dv,
+                                                                W)  # noqa: F841
     if use_g:
         dg_tilelang = dg_tilelang.sum(dim=0)
 
@@ -140,7 +139,7 @@ def test_example_chunk_scaled_dot_kkt_compilation():
     kernel = tilelang_chunk_scaled_dot_kkt_fwd(B, S, H, DK, chunk_size, input_dtype, output_dtype,
                                                accum_dtype, use_g, block_S, block_DK, threads,
                                                num_stages)
-    A_tilelang = kernel(K, Beta, G)
+    A_tilelang = kernel(K, Beta, G)  # noqa: F841
 
 
 def test_example_cumsum_compilation():
@@ -161,7 +160,7 @@ def test_example_cumsum_compilation():
         threads=threads,
         use_fragment=False,
     )
-    G_new_tilelang = kernel(G)
+    G_new_tilelang = kernel(G)  # noqa: F841
 
 
 def test_example_chunk_delta_h_compilation():
@@ -179,7 +178,8 @@ def test_example_chunk_delta_h_compilation():
                                                    use_g, use_initial_state, store_final_state,
                                                    save_new_value, block_DK, block_DV, threads,
                                                    num_stages)
-    h_tilelang, final_state_tilelang, V_new_tilelang = kernel(K, W, U, G, initial_state)
+    h_tilelang, final_state_tilelang, V_new_tilelang = kernel(K, W, U, G,
+                                                              initial_state)  # noqa: F841
 
 
 def test_example_chunk_delta_bwd_compilation():
@@ -199,7 +199,7 @@ def test_example_chunk_delta_bwd_compilation():
                                                      chunk_size, 1.0, use_g, use_initial_state,
                                                      use_final_state_gradient, block_DV, threads,
                                                      num_stages)
-    dh_tilelang, dh0_tilelang, dv2_tilelang = kernel(Q, K, W, G, h0, dht, dO, dv)
+    dh_tilelang, dh0_tilelang, dv2_tilelang = kernel(Q, K, W, G, h0, dht, dO, dv)  # noqa: F841
 
 
 if __name__ == "__main__":

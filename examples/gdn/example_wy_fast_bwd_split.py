@@ -99,8 +99,7 @@ def prepare_output(
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True
-    }
-)
+    })
 def tilelang_wy_fast_bwd(
     # task config
     B,
@@ -274,8 +273,7 @@ def tilelang_wy_fast_bwd(
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True
-    }
-)
+    })
 def tilelang_wy_fast_bwd_split(
     # task config
     B,
