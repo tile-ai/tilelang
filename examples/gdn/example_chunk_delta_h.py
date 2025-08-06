@@ -1,6 +1,3 @@
-# Copyright (c) Tile-AI Corporation.
-# Licensed under the MIT License.
-
 # Reference: fla/ops/common/chunk_delta_h.py
 
 import sys

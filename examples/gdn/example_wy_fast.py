@@ -1,6 +1,3 @@
-# Copyright (c) Tile-AI Corporation.
-# Licensed under the MIT License.
-
 # Reference: fla/ops/gated_delta_rule/wy_fast.py
 
 import tilelang

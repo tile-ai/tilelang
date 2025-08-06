@@ -1,6 +1,3 @@
-# Copyright (c) Tile-AI Corporation.
-# Licensed under the MIT License.
-
 # Reference: fla/ops/common/chunk_o.py
 
 import math

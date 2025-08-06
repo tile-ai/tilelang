@@ -1,6 +1,3 @@
-# Copyright (c) Tile-AI Corporation.
-# Licensed under the MIT License.
-
 # Util functions for flash linear attention cumsum
 # Reference: fla/ops/utils/cumsum.py
 
