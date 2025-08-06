@@ -14,7 +14,6 @@ try:
     import fla
     print(fla.__file__, flush=True)
     from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu
-    from fla.ops.utils.cumsum import chunk_local_cumsum
 except ImportError:
     print("fla not found, using tilelang implementation")
     fla = None
@@ -51,6 +50,7 @@ def prepare_input(
     G = torch.randn(B, S, H, dtype=gate_dtype).cuda()
     G = F.logsigmoid(G)
     try:
+        from fla.ops.utils.cumsum import chunk_local_cumsum
         G = chunk_local_cumsum(G, chunk_size)
     except ImportError:
         print("fla not found, skip cumsum")
