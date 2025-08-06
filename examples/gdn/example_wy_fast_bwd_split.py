@@ -8,11 +8,13 @@ import tilelang.language as T
 # Add your fla repository path to sys.path
 # Currently we use the fla repository from the flash-linear-attention project at commit id 00000000
 # sys.path.insert(0, "/home/tzj/flash-linear-attention")
-import fla
-
-print(fla.__file__)
-
-from fla.ops.gated_delta_rule.wy_fast import bwd_prepare_wy_repr
+try:
+    import fla
+    print(fla.__file__)
+    from fla.ops.gated_delta_rule.wy_fast import bwd_prepare_wy_repr
+except ImportError:
+    print("fla not found, using tilelang implementation")
+    fla = None
 
 import torch
 import torch.nn.functional as F
@@ -92,7 +94,13 @@ def prepare_output(
     return dk, dv, dbeta, dg
 
 
-@tilelang.jit(out_idx=[-5, -4, -3, -2, -1])
+@tilelang.jit(
+    out_idx=[-5, -4, -3, -2, -1],
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True
+    }
+)
 def tilelang_wy_fast_bwd(
     # task config
     B,
@@ -262,7 +270,12 @@ def tilelang_wy_fast_bwd(
     return kernel
 
 
-@tilelang.jit
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True
+    }
+)
 def tilelang_wy_fast_bwd_split(
     # task config
     B,

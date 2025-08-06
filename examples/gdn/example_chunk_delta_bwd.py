@@ -10,12 +10,15 @@ print(tilelang.__file__, flush=True)
 # Add your fla repository path to sys.path
 # Currently we use the fla repository from the flash-linear-attention project at commit id f03cb3ae
 # sys.path.insert(0, "/home/tzj/flash-linear-attention")
-import fla
+try:
+    import fla
+    print(fla.__file__, flush=True)
+    from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu
+    from fla.ops.utils.cumsum import chunk_local_cumsum
+except ImportError:
+    print("fla not found, using tilelang implementation")
+    fla = None
 
-print(fla.__file__, flush=True)
-
-from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu
-from fla.ops.utils.cumsum import chunk_local_cumsum
 import torch
 import torch.nn.functional as F
 
@@ -47,7 +50,11 @@ def prepare_input(
     # Note: G should be in logspace and do chunkwise cumsum
     G = torch.randn(B, S, H, dtype=gate_dtype).cuda()
     G = F.logsigmoid(G)
-    G = chunk_local_cumsum(G, chunk_size)
+    try:
+        G = chunk_local_cumsum(G, chunk_size)
+    except:
+        print("fla not found, skip cumsum")
+
     h0 = torch.randn(B, H, DK, DV, dtype=input_dtype).cuda()
     dht = torch.randn(B, H, DK, DV, dtype=input_dtype).cuda()
     dO = torch.randn(B, S, H, DV, dtype=input_dtype).cuda()
@@ -270,7 +277,6 @@ def tilelang_chunk_gated_delta_rule_bwd_dhu(
                 dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
                 dO_shared: tilelang.layout.make_swizzled_layout(dO_shared),
                 dO_shared_t: tilelang.layout.make_swizzled_layout(dO_shared_t),
-                # dO_shared_t: T.Layout((block_S, block_DV), lambda i_s, i_v: [i_v, i_s]),
                 K_shared: tilelang.layout.make_swizzled_layout(K_shared),
                 Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
                 Q_shared_fp32: tilelang.layout.make_swizzled_layout(Q_shared_fp32),

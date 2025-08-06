@@ -7,12 +7,15 @@ import tilelang.language as T
 # Add your fla repository path to sys.path
 # Currently we use the fla repository from the flash-linear-attention project at commit id f03cb3ae
 # sys.path.insert(0, "/home/tzj/flash-linear-attention")
-import fla
+try:
+    import fla
+    print(fla.__file__)
+    from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
+    from fla.ops.utils.cumsum import chunk_local_cumsum
+except ImportError:
+    print("fla not found, using tilelang implementation")
+    fla = None
 
-print(fla.__file__)
-
-from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
-from fla.ops.utils.cumsum import chunk_local_cumsum
 import torch
 import torch.nn.functional as F
 from tilelang.engine.callback import register_cuda_postproc_callback  # noqa: F401
@@ -53,7 +56,11 @@ def prepare_input(
     U = F.normalize(U, dim=-1, p=2)
     G = torch.randn(B, S, H, dtype=gate_dtype).cuda()
     G = F.logsigmoid(G)
-    G = chunk_local_cumsum(G, chunk_size)
+    try:
+        G = chunk_local_cumsum(G, chunk_size)
+    except:
+        print("fla not found, skip cumsum")
+
     initial_state = torch.randn(B, H, DK, DV, dtype=input_dtype).cuda()
     return K, W, U, G, initial_state
 

@@ -7,11 +7,14 @@ import sys  # noqa: F401
 # Add your fla repository path to sys.path
 # Currently we use the fla repository from the flash-linear-attention project at commit id f03cb3ae
 # sys.path.insert(0, "/home/tzj/flash-linear-attention")
-import fla
+try:
+    import fla
+    print(fla.__file__)
+    from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
+except ImportError:
+    print("fla not found, using tilelang implementation")
+    fla = None
 
-print(fla.__file__)
-
-from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 import torch
 
 torch.set_printoptions(profile="full")
