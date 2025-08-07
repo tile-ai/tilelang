@@ -339,8 +339,8 @@ public:
     Tensor sB_all = make_tensor(make_smem_ptr(reinterpret_cast<B_type *>(pB)),
                             SmemLayoutB{});
     // Tensor sB = flat_divide(sB_all, Shape<Int<N>, Int<K>>{})(_, _, _0{}, _0{});
-    // TileMma tiled_mma;
     Tensor sB = get_region_tensor<offset_b, N, K, trans_B, ldb>(sB_all);
+    TileMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(tid);
     auto tiled_copy_B = make_tiled_copy_B(SmemCopyB{}, tiled_mma);
     auto thr_copy_B = tiled_copy_B.get_thread_slice(tid);
