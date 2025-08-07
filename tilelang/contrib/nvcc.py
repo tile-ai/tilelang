@@ -52,9 +52,9 @@ def compile_cuda(code,
         #   "-gencode", "arch=compute_52,code=sm_52",
         #   "-gencode", "arch=compute_70,code=sm_70"
         # ]
-        compute_version = "".join(
-            get_target_compute_version(Target.current(allow_none=True)).split("."))
-        arch = ["-gencode", f"arch=compute_{compute_version},code=sm_{compute_version}"]
+        compute_version = get_target_compute_version(Target.current(allow_none=True))
+        target_arch = get_target_arch(compute_version)
+        arch = ["-gencode", f"arch=compute_{target_arch},code=sm_{target_arch}"]
 
     temp = utils.tempdir()
     file_name = "tvm_kernels"
@@ -298,7 +298,7 @@ def get_target_compute_version(target=None):
                      "Try specifying it by adding '-arch=sm_xx' to your target.")
 
 
-def parse_compute_version(compute_version):
+def parse_compute_version(compute_version) -> tuple[int, int]:
     """Parse compute capability string to divide major and minor version
 
     Parameters
@@ -321,6 +321,14 @@ def parse_compute_version(compute_version):
     except (IndexError, ValueError) as err:
         # pylint: disable=raise-missing-from
         raise RuntimeError("Compute version parsing error") from err
+
+
+def get_target_arch(compute_version) -> str:
+    major, minor = parse_compute_version(compute_version)
+    target_arch = str(major * 10 + minor)
+    if major >= 9:
+        target_arch += "a"
+    return target_arch
 
 
 def have_fp16(compute_version):

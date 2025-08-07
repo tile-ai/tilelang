@@ -53,11 +53,10 @@ def _initialize_torch_cuda_arch_flags():
 
     target = determine_target(return_object=True)
     # create tmp source file for torch cpp extension
-    compute_version = "".join(nvcc.get_target_compute_version(target).split("."))
-    # set TORCH_CUDA_ARCH_LIST
-    major = compute_version[0]
-    minor = compute_version[1]
+    compute_version = nvcc.get_target_compute_version(target)
+    major, minor = nvcc.parse_compute_version(compute_version)
 
+    # set TORCH_CUDA_ARCH_LIST
     os.environ["TORCH_CUDA_ARCH_LIST"] = f"{major}.{minor}"
 
 
