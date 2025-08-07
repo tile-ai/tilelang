@@ -19,7 +19,7 @@ def decompose_col_major(index_1d: int, basis: List[int]) -> List[int]:
     return res
 
 
-def __make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, block_k: int):
+def _make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, block_k: int):
     """Make a layout of metadata that is compatible with cutlass sm90 compression kernel. Note that layout atom is the same for smem and gmem.
     
     Args:
@@ -105,7 +105,7 @@ def __make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, 
     return T.Layout(shape, transform)
 
 
-def __make_metadata_layout_sm8x_cutlass(buffer: tvm.tir.Buffer):
+def _make_metadata_layout_sm8x_cutlass(buffer: tvm.tir.Buffer):
     """Make a layout of metadata that is compatible with cutlass sm8x compression kernel. Note that layout atom is the same for smem and gmem.
     
     Args:
@@ -142,12 +142,12 @@ def make_metadata_layout(buffer: tvm.tir.Buffer,
 
     if compute_version >= (9, 0):
         if backend == 'cutlass':
-            return __make_metadata_layout_sm90_cutlass(buffer, mma_dtype, **extra_args)
+            return _make_metadata_layout_sm90_cutlass(buffer, mma_dtype, **extra_args)
         else:
             raise NotImplementedError(f"Arch {arch}, Unsupported backend: {backend}")
     elif compute_version >= (8, 0):
         if backend == 'cutlass':
-            return __make_metadata_layout_sm8x_cutlass(buffer)
+            return _make_metadata_layout_sm8x_cutlass(buffer)
         else:
             raise NotImplementedError(f"Arch {arch}, Unsupported backend: {backend}")
     else:
