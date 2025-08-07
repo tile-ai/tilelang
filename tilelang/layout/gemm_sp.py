@@ -1,10 +1,12 @@
 """Wrapping Layouts."""
 # pylint: disable=invalid-name, unsupported-binary-operation
 
+from tilelang.autotuner.capture import Optional
 import tvm
 import tilelang.language as T
 import warnings
 
+from tilelang.contrib import nvcc
 from typing import List
 from math import prod
 
@@ -130,15 +132,20 @@ def __make_metadata_layout_sm8x_cutlass(buffer: tvm.tir.Buffer):
 
 def make_metadata_layout(buffer: tvm.tir.Buffer,
                          mma_dtype: str = "float16",
-                         arch: str = "sm90",
                          backend: str = 'cutlass',
+                         arch: Optional[str] = None,
                          **extra_args):
-    if arch == "sm90":
+    if arch is None:
+        arch = nvcc.get_target_compute_version()
+
+    compute_version = nvcc.parse_compute_version(arch)
+
+    if compute_version >= (9, 0):
         if backend == 'cutlass':
             return __make_metadata_layout_sm90_cutlass(buffer, mma_dtype, **extra_args)
         else:
             raise NotImplementedError(f"Arch {arch}, Unsupported backend: {backend}")
-    elif arch in ["sm80", "sm89"]:
+    elif compute_version >= (8, 0):
         if backend == 'cutlass':
             return __make_metadata_layout_sm8x_cutlass(buffer)
         else:

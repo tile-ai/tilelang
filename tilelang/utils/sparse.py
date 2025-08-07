@@ -1,6 +1,8 @@
 import os
 import torch
 import warnings
+from typing import Optional
+from tilelang.contrib import nvcc
 from torch.utils.cpp_extension import load, _import_module_from_library
 from tilelang.env import TILELANG_CACHE_DIR, TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR
 
@@ -69,3 +71,20 @@ def compress_sm80(A: torch.Tensor, transposed: bool) -> tuple[torch.Tensor, torc
     SparseSemiStructuredTensor._FORCE_CUTLASS = orig_val
 
     return compressed.packed, compressed.meta
+
+def compress(A: torch.Tensor, transposed: bool, arch: Optional[str]=None, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compress a tensor using the appropriate method based on the CUDA architecture.
+    """
+    if arch is None:
+        arch = nvcc.get_target_compute_version()
+
+    compute_version = nvcc.parse_compute_version(arch)
+
+    if compute_version >= (9, 0):
+        return compress_sm90(A, transposed=transposed, **kwargs)
+    elif compute_version >= (8, 0):
+        return compress_sm80(A, transposed=transposed)
+    else:
+        raise ValueError(f"Unsupported CUDA compute version: {compute_version}. "
+                         "Supported versions are sm_80 and sm_90.")
