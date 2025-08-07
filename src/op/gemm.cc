@@ -49,14 +49,16 @@ Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
   clear_accum = args[9].as<Bool>().value();
   stride_A = args[10].as<IntImm>().value()->value;
   stride_B = args[11].as<IntImm>().value()->value;
-  if (args.size() > 12) {
-    kPack = args[12].as<IntImm>().value()->value;
+  offset_A = args[12].as<IntImm>().value()->value;
+  offset_B = args[13].as<IntImm>().value()->value;
+  if (args.size() > 14) {
+    kPack = args[14].as<IntImm>().value()->value;
     if (kPack != 1 && kPack != 2) {
       ICHECK(false) << "kPack must be 1 or 2";
     }
   }
-  if (args.size() > 13) {
-    wg_wait = args[13].as<IntImm>().value()->value;
+  if (args.size() > 15) {
+    wg_wait = args[15].as<IntImm>().value()->value;
   }
 }
 
@@ -318,6 +320,7 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   ss << ", " << clear_accum;
   if (TargetIsCuda(T.target) && GetArchInt(T.target) == 89) {
     ss << ", " << stride_A << ", " << stride_B;
+    ss << ", " << offset_A << ", " << offset_B;
   }
   if (TargetIsCDNA(T.target)) {
     // for cdna gemm, we need to specify kPack

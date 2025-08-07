@@ -221,6 +221,7 @@ struct OperandTraits<64, N, K, false, num_warp_n, leading_dim,
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum,
           int lda, int ldb,
+          int offset_a, int offset_b,
           typename A_type_raw,
           typename B_type_raw, typename C_type_raw>
 class GemmTensorOp {
@@ -265,14 +266,38 @@ public:
       return layout;
   }
 
+  template <int offset, int NN, int KK, bool trans, int lddim, typename Engine0, typename Layout0>
+  static CUTE_DEVICE auto get_region_tensor(Tensor<Engine0, Layout0> & sa) {
+    if constexpr (offset == 0) {
+      return composition(sa, Layout<Shape<Int<NN>, Int<KK>>,
+      Stride<_1, typename std::conditional<trans, Int<NN>, Int<lddim>>::type>>{});
+    } else {
+      if constexpr (trans) {
+        static_assert(offset % KK == 0,
+                      "Offset must be a multiple of K");
+        constexpr int offset_n = offset / KK;
+        return flat_divide(sa, Shape<Int<NN>, Int<KK>>{})(_, _, _0{}, Int<offset_n>{});
+      } else {
+        static_assert(offset % NN == 0,
+                      "Offset must be a multiple of N");
+        constexpr int offset_n = offset / NN;
+        return flat_divide(sa, Shape<Int<NN>, Int<KK>>{})(_, _, Int<offset_n>{}, _0{});
+      }
+    }
+  }
+
   static CUTE_DEVICE void body(A_type_raw *pA, B_type_raw *pB, C_type_raw *pC) {
     const int tid = threadIdx.x;
     Tensor sA_all = make_tensor(make_smem_ptr(reinterpret_cast<A_type *>(pA)),
                             SmemLayoutA{});
     Tensor sB_all = make_tensor(make_smem_ptr(reinterpret_cast<B_type *>(pB)),
                             SmemLayoutB{});
-    Tensor sA = flat_divide(sA_all, Shape<Int<M>, Int<K>>{})(_, _, _0{}, _0{});
-    Tensor sB = flat_divide(sB_all, Shape<Int<N>, Int<K>>{})(_, _, _0{}, _0{});
+    // Tensor sA = composition(sA_all, Layout<Shape<Int<M>, Int<K>>, 
+    //   Stride<_1, typename std::conditional<trans_A, Int<lda>, Int<M>>::type>>{});
+    // Tensor sB = composition(sB_all, Layout<Shape<Int<N>, Int<K>>,
+    //   Stride<_1, typename std::conditional<trans_B, Int<N>, Int<ldb>>::type>>{});
+    Tensor sA = get_region_tensor<offset_a, M, K, !trans_A, lda>(sA_all);
+    Tensor sB = get_region_tensor<offset_b, N, K, trans_B, ldb>(sB_all);
     TileMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(tid);
     auto tiled_copy_A = make_tiled_copy_A(SmemCopyA{}, tiled_mma);
@@ -313,8 +338,9 @@ public:
     const int tid = threadIdx.x;
     Tensor sB_all = make_tensor(make_smem_ptr(reinterpret_cast<B_type *>(pB)),
                             SmemLayoutB{});
-    Tensor sB = flat_divide(sB_all, Shape<Int<N>, Int<K>>{})(_, _, _0{}, _0{});
-    TileMma tiled_mma;
+    // Tensor sB = flat_divide(sB_all, Shape<Int<N>, Int<K>>{})(_, _, _0{}, _0{});
+    // TileMma tiled_mma;
+    Tensor sB = get_region_tensor<offset_b, N, K, trans_B, ldb>(sB_all);
     auto thr_mma = tiled_mma.get_thread_slice(tid);
     auto tiled_copy_B = make_tiled_copy_B(SmemCopyB{}, tiled_mma);
     auto thr_copy_B = tiled_copy_B.get_thread_slice(tid);
@@ -350,7 +376,8 @@ public:
     const int tid = threadIdx.x;
     Tensor sA_all = make_tensor(make_smem_ptr(reinterpret_cast<A_type *>(pA)),
                             SmemLayoutA{});
-    Tensor sA = flat_divide(sA_all, Shape<Int<M>, Int<K>>{})(_, _, _0{}, _0{});
+    // Tensor sA = flat_divide(sA_all, Shape<Int<M>, Int<K>>{})(_, _, _0{}, _0{});
+    Tensor sA = get_region_tensor<offset_a, M, K, !trans_A, lda>(sA_all);
     TileMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(tid);
     auto tiled_copy_A = make_tiled_copy_A(SmemCopyA{}, tiled_mma);
@@ -389,11 +416,12 @@ namespace tl {
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum,
           int lda, int ldb,
+          int offset_a, int offset_b,
           typename A_type, typename B_type,
           typename C_type>
 CUTLASS_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
   using MMA = cute::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, clear_accum, lda, ldb,
+                                 trans_B, clear_accum, lda, ldb, offset_a, offset_b,
                                  A_type, B_type, C_type>;
   MMA::body(pA, pB, accum);
 }
@@ -401,11 +429,12 @@ CUTLASS_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum,
           int lda, int ldb,
+          int offset_a, int offset_b,
           typename A_type, typename B_type,
           typename C_type>
 CUTLASS_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
   using MMA = cute::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, clear_accum, lda, ldb,
+                                 trans_B, clear_accum, lda, ldb, offset_a, offset_b,
                                  A_type, B_type, C_type>;
   MMA::body_rs(pA, pB, accum);
 }
@@ -413,11 +442,12 @@ CUTLASS_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum,
           int lda, int ldb,
+          int offset_a, int offset_b,
           typename A_type, typename B_type,
           typename C_type>
 CUTLASS_DEVICE void gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
   using MMA = cute::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, clear_accum, lda, ldb,
+                                 trans_B, clear_accum, lda, ldb, offset_a, offset_b,
                                  A_type, B_type, C_type>;
   MMA::body_sr(pA, pB, accum);
 }

@@ -130,12 +130,33 @@ def gemm(
                 strides.insert(0, stride)
                 stride *= s
             offset = 0
-            for i in range(len(indices)):
+            # not offset the last two dimension
+            for i in range(len(indices) - 2):
                 offset += indices[i] * strides[i]
             return buffer.access_ptr(access_mask=access_type, offset=offset)
         else:
             raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
 
+    def retrieve_offset(object: Union[tir.Buffer, tir.BufferRegion]) -> tir.PrimExpr:
+        """Retrieve the offset of the buffer or buffer region."""
+        if isinstance(object, tir.Buffer):
+            return [0]*len(object.shape)
+        elif isinstance(object, tir.BufferRegion):
+            buffer, region = object.buffer, object.region
+            indices = []
+            for r in region:
+                indices.append(r.min)
+            return indices
+        else:
+            raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
+        
+    A_offset = retrieve_offset(A)
+    B_offset = retrieve_offset(B)
+    assert A_offset[-2] == 0, "The offset of the first dimension of A must be 0"
+    assert B_offset[-2] == 0, "The offset of the first dimension of B must be 0"
+    offset_a = A_offset[-1]
+    offset_b = B_offset[-1]
+    
     Aptr = retrieve_ptr(A, "r")
     Bptr = retrieve_ptr(B, "r")
     Cptr = retrieve_ptr(C, "rw")
@@ -154,6 +175,8 @@ def gemm(
         clear_accum,
         stride_a,
         stride_b,
+        offset_a,
+        offset_b,
         k_pack,
         wg_wait,
     )
