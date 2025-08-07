@@ -209,6 +209,31 @@ GemmSP::ComputeWarpPartition(int num_warps, Target target,
   } else {
     ICHECK(0) << "Unknown GemmWarpPolicy";
   }
+
+  // Special handling for gemm_sp when the tiling size is not a multiple of (32, 32).
+  // In this case, we skip previous checks and fall back to either
+  // GemmWarpPolicy::kFullRow or GemmWarpPolicy::kFullColumn,
+  // using a fixed granularity of 32 × 32.
+  if (TargetIsAmpere(target)) {
+    int warp_shape_m = this->M / m_warp;
+    int warp_shape_n = this->N / n_warp;
+    if (warp_shape_m % 32 != 0) { // GemmWarpPolicy::kFullRow
+      m_warp = this->M / 32;
+      warp_shape_m = 32;
+      n_warp = num_warps / m_warp;
+      warp_shape_n = this->N / n_warp;
+      ICHECK(warp_shape_n % 32 == 0) << "Cannot arrange the warp shape to be a multiple of (32, 32), please reduce num threads or increase tiling size";
+    } else if (warp_shape_n % 32 != 0) { // GemmWarpPolicy::kFullColumn
+      n_warp = this->N / 32;
+      warp_shape_n = 32;
+      m_warp = num_warps / n_warp;
+      warp_shape_m = this->M / m_warp;
+      ICHECK(warp_shape_m % 32 == 0) << "Cannot arrange the warp shape to be a multiple of (32, 32), please reduce num threads or increase tiling size";
+    }
+    ICHECK(m_warp * n_warp == num_warps)
+        << "m_warp * n_warp must equal num_warps, please report an issue when encounter this";
+  }
+
   return {m_warp, n_warp};
 }
 
@@ -308,7 +333,7 @@ LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     auto [warp_m, warp_n] =
         ComputeWarpPartition(block_size / warp_size, T.target);
     auto fragment =
-        makeGemmFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
+        makeGemmFragmentCSparse(M, N, M / warp_m, N / warp_n, C->dtype.bits());
     results.Set(C, fragment->BindThreadRange(thread_range));
 
     if (A.scope() == "shared" || A.scope() == "shared.dyn") {

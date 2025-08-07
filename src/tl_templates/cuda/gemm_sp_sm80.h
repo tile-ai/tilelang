@@ -14,32 +14,42 @@ struct DispatchInstructionShape {
 template<>
 struct DispatchInstructionShape<cutlass::half_t> {
   using Shape = cutlass::gemm::GemmShape<16, 8, 32>;
+  using Operator = cutlass::arch::OpMultiplyAdd;
 };
 
 template<>
 struct DispatchInstructionShape<cutlass::bfloat16_t> {
   using Shape = cutlass::gemm::GemmShape<16, 8, 32>;
+  using Operator = cutlass::arch::OpMultiplyAdd;
 };
 
-template<>
-struct DispatchInstructionShape<cutlass::tfloat32_t> {
-  using Shape = cutlass::gemm::GemmShape<16, 8, 16>;
-};
+// TODO: Not supported for now
+// template<>
+// struct DispatchInstructionShape<cutlass::tfloat32_t> {
+//   using Shape = cutlass::gemm::GemmShape<16, 8, 16>;
+//   using Operator = cutlass::arch::OpMultiplyAdd;
+// };
 
-template<>
-struct DispatchInstructionShape<int8_t> {
-  using Shape = cutlass::gemm::GemmShape<16, 8, 64>;
-};
+// TODO: Not supported for now
+// template<>
+// struct DispatchInstructionShape<int8_t> {
+//   using Shape = cutlass::gemm::GemmShape<16, 8, 64>;
+//   using Operator = cutlass::arch::OpMultiplyAddSaturate;
+// };
 
-template<>
-struct DispatchInstructionShape<uint8_t> {
-  using Shape = cutlass::gemm::GemmShape<16, 8, 64>;
-};
+// TODO: Not supported for now
+// template<>
+// struct DispatchInstructionShape<uint8_t> {
+//   using Shape = cutlass::gemm::GemmShape<16, 8, 64>;
+//   using Operator = cutlass::arch::OpMultiplyAddSaturate;
+// };
 
-template<>
-struct DispatchInstructionShape<cutlass::int4b_t> {
-  using Shape = cutlass::gemm::GemmShape<16, 8, 128>;
-};
+// TODO: Not supported for now
+// template<>
+// struct DispatchInstructionShape<cutlass::int4b_t> {
+//   using Shape = cutlass::gemm::GemmShape<16, 8, 128>;
+//   using Operator = cutlass::arch::OpMultiplyAddSaturate;
+// };
 
 template <typename T, bool transpose, int M, int K>
 struct DispatchSharedMemoryLayoutA;
@@ -74,6 +84,31 @@ struct DispatchSharedMemoryLayoutB<T, true, N, K> {
       cutlass::sizeof_bits<T>::value, kCrosswiseB>;
 };
 
+template <typename T>
+struct DispatchTVMTypeToCutlass {
+  static_assert(std::is_same<T, void>::value, "Unsupported type for DispatchTVMTypeToCutlass");
+};
+
+template <>
+struct DispatchTVMTypeToCutlass<cutlass::half_t> {
+  using Type = cutlass::half_t;
+};
+
+template <>
+struct DispatchTVMTypeToCutlass<cutlass::bfloat16_t> {
+  using Type = cutlass::bfloat16_t;
+};
+
+template <>
+struct DispatchTVMTypeToCutlass<unsigned char> {
+  using Type = uint8_t;
+};
+
+template <>
+struct DispatchTVMTypeToCutlass<signed char> {
+  using Type = int8_t;
+};
+
 template <typename Shape, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, typename A_type_raw,
           typename B_type_raw, typename C_type_raw>
@@ -81,9 +116,12 @@ class GemmTensorOp {
 public:
   static_assert(Shape::kM % num_warp_m == 0);
   static_assert(Shape::kN % num_warp_n == 0);
+  static_assert(Shape::kM % 32 == 0, "Tile size M must be a multiple of 32");
+  static_assert(Shape::kN % 32 == 0, "Tile size N must be a multiple of 32");
+  static_assert(Shape::kK % 64 == 0, "Tile size K must be a multiple of 64");
 
-  using ElementA = A_type_raw;
-  using ElementB = B_type_raw;
+  using ElementA = typename DispatchTVMTypeToCutlass<A_type_raw>::Type;
+  using ElementB = typename DispatchTVMTypeToCutlass<B_type_raw>::Type;
   using ElementC = C_type_raw;
   using LayoutA =
       typename std::conditional_t<trans_A, cutlass::layout::ColumnMajor,
@@ -100,6 +138,7 @@ public:
       GemmShape<ThreadblockShape::kM / num_warp_m,
                 ThreadblockShape::kN / num_warp_n, ThreadblockShape::kK>;
   using InstructionShape = typename DispatchInstructionShape<ElementA>::Shape;
+  using Operator = typename DispatchInstructionShape<ElementA>::Operator;
   static_assert(std::is_same_v<InstructionShape, typename DispatchInstructionShape<ElementB>::Shape>, "Divergent shape dispatch.");
   static_assert(WarpShape::kK % InstructionShape::kK == 0, "K dimension must be divisible by instruction shape K.");
 
@@ -108,7 +147,7 @@ public:
       cutlass::arch::SparseMma<InstructionShape, 32, ElementA,
                                cutlass::layout::RowMajor, ElementB,
                                cutlass::layout::ColumnMajor, ElementC,
-                               cutlass::layout::RowMajor, cutlass::arch::OpMultiplyAdd>,
+                               cutlass::layout::RowMajor, Operator>,
       cutlass::MatrixShape<1, 1> >;
   using MmaWarp = cutlass::gemm::warp::SparseMmaTensorOp<
       WarpShape, ElementA, SmemLayoutA, ElementB, SmemLayoutB, ElementC, LayoutC,
@@ -185,8 +224,8 @@ TL_DEVICE void gemm_sp_ss(A_type *pA, B_type *pB, C_type *accum, E_type *pE) {
 
   int warp_id = threadIdx.x / 32;
   int lane_id = threadIdx.x % 32;
-  MMA::body(pA, pE, pB, *(FragmentC *)(accum), warp_id / num_warp_n,
-            warp_id % num_warp_n, lane_id);
+  MMA::body(pA, pE, pB, *(FragmentC *)(accum), warp_id % num_warp_m,
+            warp_id / num_warp_m, lane_id);
 }
 
 } // namespace tl

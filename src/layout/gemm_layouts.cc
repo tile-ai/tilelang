@@ -117,6 +117,25 @@ Fragment makeGemmFragmentC(const int block_m, const int block_n,
   return block_layout;
 }
 
+Fragment makeGemmFragmentCSparse(const int block_m, const int block_n,
+                           const int warp_m, const int warp_n,
+                           const int element_size) {
+  if (element_size == 64) {
+    ICHECK(false) << "Not supported";
+  }
+  ICHECK(block_m % warp_m == 0);
+  ICHECK(block_n % warp_n == 0);
+  ICHECK(warp_m % 16 == 0) << "warp_m=" << warp_m;
+  ICHECK(warp_n % 8 == 0) << "warp_n=" << warp_n;
+  auto base_layout = makeGemmFragment8x8()->Repeat({2, 1}, false);
+  // NOTE: I haven't reviewed the CUTLASS 2 iterator code in detail,
+  // but by inspecting the output, it appears that we first need to
+  // repeat the warp layout while avoiding duplicate thread mappings.
+  auto warp_layout = base_layout->Repeat({warp_m / 16, warp_n / 8}, false, false);
+  auto block_layout = warp_layout->Repeat({block_m / warp_m, block_n / warp_n}, true, false);
+  return block_layout;
+}
+
 Fragment makeGemmFragmentCCDNA(const int block_m, const int block_n,
                                const int warp_m, const int warp_n,
                                const int element_size) {
