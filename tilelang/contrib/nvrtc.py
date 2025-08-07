@@ -42,8 +42,8 @@ def compile_cuda(code: str,
     if arch is None:
         # If None, then it will use `tvm.target.Target.current().arch`.
         # Target arch could be a str like "80", "90", "90a", etc.
-        compute_version = get_target_compute_version(Target.current(allow_none=True))
-        arch = parse_compute_version(compute_version)
+        major, minor = parse_compute_version(get_target_compute_version(Target.current(allow_none=True)))
+        arch = major * 10 + minor
     prefix = "compute" if target_format == "ptx" else "sm"
     suffix = "a" if arch >= 90 else ""
     arch_option = f"--gpu-architecture={prefix}_{arch}{suffix}"
