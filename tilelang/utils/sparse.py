@@ -67,7 +67,11 @@ def compress_sm80(A: torch.Tensor, transposed: bool) -> tuple[torch.Tensor, torc
 
     orig_val = SparseSemiStructuredTensor._FORCE_CUTLASS
     SparseSemiStructuredTensor._FORCE_CUTLASS = True
-    compressed = to_sparse_semi_structured(A, transposed=transposed)
+
+    if transposed is not False:
+        raise NotImplementedError("transposed flag is deprecated by pytorch, but ideally we could implement this")
+
+    compressed = to_sparse_semi_structured(A)
     SparseSemiStructuredTensor._FORCE_CUTLASS = orig_val
 
     return compressed.packed, compressed.meta
