@@ -68,7 +68,7 @@ def gemm(
             return shape
         else:
             raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
-        
+
     def retrieve_stride(object: Union[tir.Buffer, tir.BufferRegion]) -> List[int]:
         if isinstance(object, tir.Buffer):
             strides = []
@@ -78,7 +78,7 @@ def gemm(
                 stride *= s
             return strides
         elif isinstance(object, tir.BufferRegion):
-            buffer, region = object.buffer, object.region
+            buffer, _ = object.buffer, object.region
             strides = []
             stride = 1
             for s in reversed(buffer.shape):
@@ -91,7 +91,7 @@ def gemm(
     A_shape = retrieve_shape(A)
     B_shape = retrieve_shape(B)
     C_shape = retrieve_shape(C)
-    
+
     A_stride = retrieve_stride(A)
     B_stride = retrieve_stride(B)
 
@@ -111,7 +111,7 @@ def gemm(
     K = A_shape[-2] if transpose_A else A_shape[-1]
     K_B = B_shape[-1] if transpose_B else B_shape[-2]
     assert K == K_B, f"T.gemm K shape check failed: K_A = {K}, K_B = {K_B}"
-    
+
     stride_a = A_stride[-2]
     stride_b = B_stride[-2]
 
@@ -140,23 +140,23 @@ def gemm(
     def retrieve_offset(object: Union[tir.Buffer, tir.BufferRegion]) -> tir.PrimExpr:
         """Retrieve the offset of the buffer or buffer region."""
         if isinstance(object, tir.Buffer):
-            return [0]*len(object.shape)
+            return [0] * len(object.shape)
         elif isinstance(object, tir.BufferRegion):
-            buffer, region = object.buffer, object.region
+            _, region = object.buffer, object.region
             indices = []
             for r in region:
                 indices.append(r.min)
             return indices
         else:
             raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
-        
+
     A_offset = retrieve_offset(A)
     B_offset = retrieve_offset(B)
     assert A_offset[-2] == 0, "The offset of the first dimension of A must be 0"
     assert B_offset[-2] == 0, "The offset of the first dimension of B must be 0"
     offset_a = A_offset[-1]
     offset_b = B_offset[-1]
-    
+
     Aptr = retrieve_ptr(A, "r")
     Bptr = retrieve_ptr(B, "r")
     Cptr = retrieve_ptr(C, "rw")

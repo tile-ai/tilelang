@@ -1,8 +1,8 @@
 import tilelang
 import tilelang.language as T
-from tilelang.transform import pass_config
 # print(tilelang.__path__)
 tilelang.disable_cache()
+
 
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
@@ -59,10 +59,14 @@ func = matmul(M, N, K, block_M, block_N, block_K)
 # out_idx specifies the index of the output buffer in the argument list
 # if out_idx is specified, the tensor will be created during runtime
 # target currently can be "cuda" or "hip" or "cpu".
-jit_kernel = tilelang.compile(func, out_idx=[2], target="cuda", pass_configs={
-    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-})
+jit_kernel = tilelang.compile(
+    func,
+    out_idx=[2],
+    target="cuda",
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    })
 print(jit_kernel.get_kernel_source())
 # 3. Test the kernel in Python with PyTorch data
 import torch

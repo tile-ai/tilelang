@@ -91,8 +91,7 @@ template <int N, int num_warp_n, bool transpose> struct SelectCopy {
       DefaultCopy>;
 };
 
-template <int Bits, int N, int K, bool K_inner, int num_warp_n,
-          int leading_dim,
+template <int Bits, int N, int K, bool K_inner, int num_warp_n, int leading_dim,
           typename Enable = void>
 struct OperandTraits {
   // Primary template, use padded layout and default copy
@@ -110,7 +109,8 @@ struct OperandTraits<16, N, K, true, num_warp_n, leading_dim,
                      typename std::enable_if<leading_dim % 64 == 32>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 3, 3>{}, Layout<Shape<_8, _32>, Stride<_32, _1>>{}));
-  using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<leading_dim>>{}));
+  using Layout =
+      decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<leading_dim>>{}));
   using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
@@ -119,7 +119,8 @@ struct OperandTraits<16, N, K, true, num_warp_n, leading_dim,
                      typename std::enable_if<leading_dim % 64 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<3, 3, 3>{}, Layout<Shape<_8, _64>, Stride<_64, _1>>{}));
-  using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<leading_dim>>{}));
+  using Layout =
+      decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<leading_dim>>{}));
   using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
@@ -128,8 +129,8 @@ struct OperandTraits<16, N, K, false, num_warp_n, leading_dim,
                      typename std::enable_if<leading_dim % 64 == 32>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 3, 3>{}, Layout<Shape<_32, _8>, Stride<_1, _32>>{}));
-  using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<leading_dim>, Int<K>>{},
-                                        Step<_2, _1>{}));
+  using Layout = decltype(tile_to_shape(
+      LayoutAtom{}, Shape<Int<leading_dim>, Int<K>>{}, Step<_2, _1>{}));
   using Copy = typename SelectCopy<N, num_warp_n, false>::type;
 };
 
@@ -138,8 +139,8 @@ struct OperandTraits<16, N, K, false, num_warp_n, leading_dim,
                      typename std::enable_if<leading_dim % 64 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<3, 3, 3>{}, Layout<Shape<_64, _8>, Stride<_1, _64>>{}));
-  using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<leading_dim>, Int<K>>{},
-                                        Step<_2, _1>{}));
+  using Layout = decltype(tile_to_shape(
+      LayoutAtom{}, Shape<Int<leading_dim>, Int<K>>{}, Step<_2, _1>{}));
   using Copy = typename SelectCopy<N, num_warp_n, false>::type;
 };
 
@@ -148,7 +149,8 @@ struct OperandTraits<32, N, K, true, num_warp_n, leading_dim,
                      typename std::enable_if<leading_dim % 32 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<3, 2, 3>{}, Layout<Shape<_8, _32>, Stride<_32, _1>>{}));
-  using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<leading_dim>>{}));
+  using Layout =
+      decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<leading_dim>>{}));
   using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
@@ -157,7 +159,8 @@ struct OperandTraits<32, N, K, true, num_warp_n, leading_dim,
                      typename std::enable_if<leading_dim % 32 == 16>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 2, 3>{}, Layout<Shape<_8, _16>, Stride<_16, _1>>{}));
-  using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<leading_dim>>{}));
+  using Layout =
+      decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<leading_dim>>{}));
   using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
@@ -166,8 +169,8 @@ struct OperandTraits<32, N, K, false, num_warp_n, leading_dim,
                      typename std::enable_if<leading_dim % 32 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<3, 2, 3>{}, Layout<Shape<_32, _8>, Stride<_1, _32>>{}));
-  using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<leading_dim>, Int<K>>{},
-                                        Step<_2, _1>{}));
+  using Layout = decltype(tile_to_shape(
+      LayoutAtom{}, Shape<Int<leading_dim>, Int<K>>{}, Step<_2, _1>{}));
   using Copy = UniversalCopy<tfloat32_t>;
 };
 
@@ -176,8 +179,8 @@ struct OperandTraits<32, N, K, false, num_warp_n, leading_dim,
                      typename std::enable_if<leading_dim % 32 == 16>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 2, 3>{}, Layout<Shape<_16, _8>, Stride<_1, _16>>{}));
-  using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<leading_dim>, Int<K>>{},
-                                        Step<_2, _1>{}));
+  using Layout = decltype(tile_to_shape(
+      LayoutAtom{}, Shape<Int<leading_dim>, Int<K>>{}, Step<_2, _1>{}));
   using Copy = UniversalCopy<tfloat32_t>;
 };
 
@@ -186,7 +189,8 @@ struct OperandTraits<8, N, K, true, num_warp_n, leading_dim,
                      typename std::enable_if<leading_dim % 128 == 64>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 4, 3>{}, Layout<Shape<_8, _64>, Stride<_64, _1>>{}));
-  using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<leading_dim>>{}));
+  using Layout =
+      decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<leading_dim>>{}));
   using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
@@ -195,7 +199,8 @@ struct OperandTraits<8, N, K, true, num_warp_n, leading_dim,
                      typename std::enable_if<leading_dim % 128 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<3, 4, 3>{}, Layout<Shape<_8, _128>, Stride<_128, _1>>{}));
-  using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<leading_dim>>{}));
+  using Layout =
+      decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<leading_dim>>{}));
   using Copy = typename SelectCopy<N, num_warp_n, true>::type;
 };
 
@@ -204,7 +209,8 @@ struct OperandTraits<64, N, K, true, num_warp_n, leading_dim,
                      typename std::enable_if<leading_dim % 16 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 0, 4>{}, Layout<Shape<_4, _16>, Stride<_16, _1>>{}));
-  using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<leading_dim>>{}));
+  using Layout =
+      decltype(tile_to_shape(LayoutAtom{}, Shape<Int<N>, Int<leading_dim>>{}));
   using Copy = DefaultCopy;
 };
 
@@ -213,17 +219,15 @@ struct OperandTraits<64, N, K, false, num_warp_n, leading_dim,
                      typename std::enable_if<leading_dim % 16 == 0>::type> {
   using LayoutAtom = decltype(composition(
       Swizzle<2, 2, 2>{}, Layout<Shape<_16, _4>, Stride<_1, _16>>{}));
-  using Layout = decltype(tile_to_shape(LayoutAtom{}, Shape<Int<leading_dim>, Int<K>>{},
-                                        Step<_2, _1>{}));
+  using Layout = decltype(tile_to_shape(
+      LayoutAtom{}, Shape<Int<leading_dim>, Int<K>>{}, Step<_2, _1>{}));
   using Copy = DefaultCopy;
 };
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool clear_accum,
-          int lda, int ldb,
-          int offset_a, int offset_b,
-          typename A_type_raw,
-          typename B_type_raw, typename C_type_raw>
+          bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
+          int offset_b, typename A_type_raw, typename B_type_raw,
+          typename C_type_raw>
 class GemmTensorOp {
 public:
   using A_type =
@@ -237,8 +241,8 @@ public:
   using Instruction =
       DispatchInstruction<A_type, B_type, C_type, num_warp_m, num_warp_n, N>;
 
-  using OperandATraits =
-      OperandTraits<sizeof_bits<A_type>::value, M, K, !trans_A, num_warp_m, lda>;
+  using OperandATraits = OperandTraits<sizeof_bits<A_type>::value, M, K,
+                                       !trans_A, num_warp_m, lda>;
   using OperandBTraits =
       OperandTraits<sizeof_bits<B_type>::value, N, K, trans_B, num_warp_n, ldb>;
 
@@ -266,22 +270,26 @@ public:
       return layout;
   }
 
-  template <int offset, int NN, int KK, bool trans, int lddim, typename Engine0, typename Layout0>
-  static CUTE_DEVICE auto get_region_tensor(Tensor<Engine0, Layout0> & sa) {
+  template <int offset, int NN, int KK, bool trans, int lddim, typename Engine0,
+            typename Layout0>
+  static CUTE_DEVICE auto get_region_tensor(Tensor<Engine0, Layout0> &sa) {
     if constexpr (offset == 0) {
-      return composition(sa, Layout<Shape<Int<NN>, Int<KK>>,
-      Stride<_1, typename std::conditional<trans, Int<NN>, Int<lddim>>::type>>{});
+      return composition(
+          sa,
+          Layout<Shape<Int<NN>, Int<KK>>,
+                 Stride<_1, typename std::conditional<trans, Int<NN>,
+                                                      Int<lddim>>::type>>{});
     } else {
       if constexpr (trans) {
-        static_assert(offset % KK == 0,
-                      "Offset must be a multiple of K");
+        static_assert(offset % KK == 0, "Offset must be a multiple of K");
         constexpr int offset_n = offset / KK;
-        return flat_divide(sa, Shape<Int<NN>, Int<KK>>{})(_, _, _0{}, Int<offset_n>{});
+        return flat_divide(sa, Shape<Int<NN>, Int<KK>>{})(_, _, _0{},
+                                                          Int<offset_n>{});
       } else {
-        static_assert(offset % NN == 0,
-                      "Offset must be a multiple of N");
+        static_assert(offset % NN == 0, "Offset must be a multiple of N");
         constexpr int offset_n = offset / NN;
-        return flat_divide(sa, Shape<Int<NN>, Int<KK>>{})(_, _, Int<offset_n>{}, _0{});
+        return flat_divide(sa, Shape<Int<NN>, Int<KK>>{})(_, _, Int<offset_n>{},
+                                                          _0{});
       }
     }
   }
@@ -289,13 +297,15 @@ public:
   static CUTE_DEVICE void body(A_type_raw *pA, B_type_raw *pB, C_type_raw *pC) {
     const int tid = threadIdx.x;
     Tensor sA_all = make_tensor(make_smem_ptr(reinterpret_cast<A_type *>(pA)),
-                            SmemLayoutA{});
+                                SmemLayoutA{});
     Tensor sB_all = make_tensor(make_smem_ptr(reinterpret_cast<B_type *>(pB)),
-                            SmemLayoutB{});
-    // Tensor sA = composition(sA_all, Layout<Shape<Int<M>, Int<K>>, 
-    //   Stride<_1, typename std::conditional<trans_A, Int<lda>, Int<M>>::type>>{});
+                                SmemLayoutB{});
+    // Tensor sA = composition(sA_all, Layout<Shape<Int<M>, Int<K>>,
+    //   Stride<_1, typename std::conditional<trans_A, Int<lda>,
+    //   Int<M>>::type>>{});
     // Tensor sB = composition(sB_all, Layout<Shape<Int<N>, Int<K>>,
-    //   Stride<_1, typename std::conditional<trans_B, Int<N>, Int<ldb>>::type>>{});
+    //   Stride<_1, typename std::conditional<trans_B, Int<N>,
+    //   Int<ldb>>::type>>{});
     Tensor sA = get_region_tensor<offset_a, M, K, !trans_A, lda>(sA_all);
     Tensor sB = get_region_tensor<offset_b, N, K, trans_B, ldb>(sB_all);
     TileMma tiled_mma;
@@ -337,8 +347,9 @@ public:
                                   C_type_raw *pC) {
     const int tid = threadIdx.x;
     Tensor sB_all = make_tensor(make_smem_ptr(reinterpret_cast<B_type *>(pB)),
-                            SmemLayoutB{});
-    // Tensor sB = flat_divide(sB_all, Shape<Int<N>, Int<K>>{})(_, _, _0{}, _0{});
+                                SmemLayoutB{});
+    // Tensor sB = flat_divide(sB_all, Shape<Int<N>, Int<K>>{})(_, _, _0{},
+    // _0{});
     Tensor sB = get_region_tensor<offset_b, N, K, trans_B, ldb>(sB_all);
     TileMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(tid);
@@ -375,8 +386,9 @@ public:
                                   C_type_raw *pC) {
     const int tid = threadIdx.x;
     Tensor sA_all = make_tensor(make_smem_ptr(reinterpret_cast<A_type *>(pA)),
-                            SmemLayoutA{});
-    // Tensor sA = flat_divide(sA_all, Shape<Int<M>, Int<K>>{})(_, _, _0{}, _0{});
+                                SmemLayoutA{});
+    // Tensor sA = flat_divide(sA_all, Shape<Int<M>, Int<K>>{})(_, _, _0{},
+    // _0{});
     Tensor sA = get_region_tensor<offset_a, M, K, !trans_A, lda>(sA_all);
     TileMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(tid);
@@ -414,41 +426,32 @@ public:
 namespace tl {
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool clear_accum,
-          int lda, int ldb,
-          int offset_a, int offset_b,
-          typename A_type, typename B_type,
-          typename C_type>
+          bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
+          int offset_b, typename A_type, typename B_type, typename C_type>
 CUTLASS_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
   using MMA = cute::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, clear_accum, lda, ldb, offset_a, offset_b,
-                                 A_type, B_type, C_type>;
+                                 trans_B, clear_accum, lda, ldb, offset_a,
+                                 offset_b, A_type, B_type, C_type>;
   MMA::body(pA, pB, accum);
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool clear_accum,
-          int lda, int ldb,
-          int offset_a, int offset_b,
-          typename A_type, typename B_type,
-          typename C_type>
+          bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
+          int offset_b, typename A_type, typename B_type, typename C_type>
 CUTLASS_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
   using MMA = cute::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, clear_accum, lda, ldb, offset_a, offset_b,
-                                 A_type, B_type, C_type>;
+                                 trans_B, clear_accum, lda, ldb, offset_a,
+                                 offset_b, A_type, B_type, C_type>;
   MMA::body_rs(pA, pB, accum);
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool clear_accum,
-          int lda, int ldb,
-          int offset_a, int offset_b,
-          typename A_type, typename B_type,
-          typename C_type>
+          bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
+          int offset_b, typename A_type, typename B_type, typename C_type>
 CUTLASS_DEVICE void gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
   using MMA = cute::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, clear_accum, lda, ldb, offset_a, offset_b,
-                                 A_type, B_type, C_type>;
+                                 trans_B, clear_accum, lda, ldb, offset_a,
+                                 offset_b, A_type, B_type, C_type>;
   MMA::body_sr(pA, pB, accum);
 }
 
