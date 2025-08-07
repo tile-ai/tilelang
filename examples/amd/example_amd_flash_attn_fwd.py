@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import tilelang
 import tilelang.language as T
+from tilelang.primitives.gemm.base import GemmWarpPolicy
 import itertools
 import argparse
 from functools import partial
@@ -29,10 +30,10 @@ def ref_program(Q, K, V, is_causal, groups=1):
 
 def get_configs():
     """Generates configurations for the autotuner, tailored for FA-2 style parallelism."""
-    block_M = [64, 128, 256, 512]
-    block_N = [32, 64, 128, 256, 512]
+    block_M = [16, 32, 64, 128, 256, 512]
+    block_N = [16, 32, 64, 128, 256, 512]
     threads = [128, 256, 512, 1024]
-    num_split_q = [32, 64, 128, 256, 512]
+    num_split_q = [16, 32, 64, 128, 256, 512]
     num_stages = [0, 1, 2]
     enable_rasterization = [True, False]
     k_pack = [1, 2]
@@ -148,7 +149,7 @@ def fast_flashattn(
                         coalesced_width=v_vec_size)
 
                     T.clear(acc_s)
-                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, k_pack=k_pack)
+                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, k_pack=k_pack, policy=GemmWarpPolicy.FullRow)
 
                     if is_causal:
                         for i, j in T.Parallel(block_M, block_N):
@@ -177,7 +178,7 @@ def fast_flashattn(
                     T.copy(acc_s, P_shared)
                     T.sync_threads()
 
-                    T.gemm(P_shared, V_shared, acc_o)
+                    T.gemm(P_shared, V_shared, acc_o, policy=GemmWarpPolicy.FullRow)
 
                 l_inv = T.alloc_fragment([block_M], accum_dtype)
                 for i in T.Parallel(block_M):
