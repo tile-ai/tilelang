@@ -68,10 +68,32 @@ def gemm(
             return shape
         else:
             raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
+        
+    def retrieve_stride(object: Union[tir.Buffer, tir.BufferRegion]) -> List[int]:
+        if isinstance(object, tir.Buffer):
+            strides = []
+            stride = 1
+            for s in reversed(object.shape):
+                strides.insert(0, stride)
+                stride *= s
+            return strides
+        elif isinstance(object, tir.BufferRegion):
+            buffer, region = object.buffer, object.region
+            strides = []
+            stride = 1
+            for s in reversed(buffer.shape):
+                strides.insert(0, stride)
+                stride *= s
+            return strides
+        else:
+            raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
 
     A_shape = retrieve_shape(A)
     B_shape = retrieve_shape(B)
     C_shape = retrieve_shape(C)
+    
+    A_stride = retrieve_stride(A)
+    B_stride = retrieve_stride(B)
 
     assert len(C_shape) == 2, "current only support C as a 2D tensor"
     assert len(A_shape) >= 2, "current only support A as a 2D or higher-order tensor"
@@ -89,6 +111,9 @@ def gemm(
     K = A_shape[-2] if transpose_A else A_shape[-1]
     K_B = B_shape[-1] if transpose_B else B_shape[-2]
     assert K == K_B, f"T.gemm K shape check failed: K_A = {K}, K_B = {K_B}"
+    
+    stride_a = A_stride[-2]
+    stride_b = B_stride[-2]
 
     def retrieve_ptr(object: Union[tir.Buffer, tir.BufferRegion],
                      access_type: str = "r") -> tir.PrimExpr:
@@ -127,6 +152,8 @@ def gemm(
         K,
         policy,
         clear_accum,
+        stride_a,
+        stride_b,
         k_pack,
         wg_wait,
     )
