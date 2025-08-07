@@ -15,12 +15,12 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, dtype
     mask = tir.const((1 << nbit) - 1, "uint16")
     f4 = (val >> (pos.astype("uint16") * tir.const(nbit, "uint16"))) & mask
     s = f4 >> tir.const(3, "uint16")
-    e_f4 = (f4 & tir.const(6, "uint16")) >> 1
+    e_f4 = (f4 & tir.const(6, "uint16")) >> tir.const(1, "uint16")
     # Exponential bias between f4 and bf16 is 2^(8-1) - 2^(2-1) = 126
     e_bf16 = e_f4 + tir.const(126, "uint16")
     m_f4 = f4 & tir.const(1, "uint16") 
     val_bf16 = tir.reinterpret(
-        "bfloat16", ((((s << 8) | e_bf16) << 7) | (m_f4 << tir.const(6, "uint16"))).astype("uint16")
+        "bfloat16", ((((s << tir.const(8, "uint16")) | e_bf16) << tir.const(7, "uint16")) | (m_f4 << tir.const(6, "uint16"))).astype("uint16")
     )
     return val_bf16
 
