@@ -22,6 +22,28 @@ namespace attr {
 constexpr const char *coalesced_width = "coalesced_width";
 } // namespace attr
 
+// ProveFragmentContains checks whether the threads that access elements of a
+// smaller fragment (small_frag) are a subset of the threads that access
+// elements of a larger fragment (large_frag) for any given loop index. This
+// function ensures that if the small fragment's layout corresponds to the loop
+// itself, accessing the large fragment's elements is valid. Additionally, if
+// small is updated to large, the originally valid access remains valid. The
+// proof is performed by:
+//
+// 1. Defining a variable `rep_small` to represent the replicate index of the
+//    small fragment that is being checked.
+// 2. Using the `small_frag_indices` and `rep_small` to derive the thread
+// accessing
+//    the element in the small fragment.
+// 3. Using `large_frag_indices` to derive the physical index of the large
+// fragment
+//    along with the thread information, and then feeding these into the inverse
+//    of the large fragment to obtain the logical index and replicate index.
+// 4. Verifying the mapping by checking whether the computed thread using the
+// inverse
+//    layout corresponds to the original thread calculated for the small
+//    fragment. If they don't match, this indicates that the inverse layout's
+//    domain does not include the thread and thus the access is invalid.
 bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
                            Array<PrimExpr> small_frag_indices,
                            Array<PrimExpr> large_frag_indices,
@@ -30,18 +52,31 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
   analyzer_.Bind(rep_small,
                  Range(IntImm(small_frag->ReplicateExtent()->dtype, 0),
                        small_frag->ReplicateExtent()),
-                 true);
+                 true); // Bind the replicate extent of small_frag.
+  // Derive thread for small_frag.
   auto thread = small_frag->ForwardThread(small_frag_indices, rep_small);
+
+  // Get physical index and thread for large_frag.
   auto large_frag_physical_and_thread = large_frag->Forward(large_frag_indices);
+  // Add small_frag's thread to the large fragment's thread info.
   large_frag_physical_and_thread.push_back(thread);
+  // Get the inverse of the large fragment.
   auto inv_large_frag = large_frag->Inverse();
+  // Compute logical index and replicate index using inverse layout.
   auto inv_large_frag_logical_and_rep =
       inv_large_frag->Forward(large_frag_physical_and_thread);
+
+  // Extract replicate index from the result.
   auto inv_large_frag_rep =
       inv_large_frag_logical_and_rep[inv_large_frag_logical_and_rep.size() - 1];
+
+  // Calculate thread based on the logical index and replicate index.
   auto check_thread =
       large_frag->ForwardThread(large_frag_indices, inv_large_frag_rep);
+
+  // Simplify the difference between the threads.
   auto diff = analyzer_.Simplify(thread - check_thread);
+  // If the difference is zero, the threads match and the access is valid.
   return is_zero(diff);
 }
 
