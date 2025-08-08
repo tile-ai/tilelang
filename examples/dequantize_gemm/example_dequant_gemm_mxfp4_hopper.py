@@ -238,6 +238,7 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, scale_size=32,
                 T.annotate_layout({
                     B_shared: tilelang.layout.make_swizzled_layout(B_shared),
                     Ct_shared: tilelang.layout.make_swizzled_layout(Ct_shared),
+                    Scale_shared: tilelang.layout.make_swizzled_layout(Scale_shared),
                 })
 
                 T.clear(Ct_local)
@@ -283,8 +284,8 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, scale_size=32,
                 B_dequantize_prev_local = T.alloc_fragment(B_dequantize_shared_shape, in_dtype)
                 Ct_local = T.alloc_fragment((block_N, block_M), accum_dtype)
                 Ct_shared = T.alloc_shared((block_N, block_M), out_dtype)
-                Scale_shared = T.alloc_shared((block_N, block_M // scale_size), storage_dtype)
-                Scale_local = T.alloc_fragment((block_N, block_M // scale_size), storage_dtype)
+                Scale_shared = T.alloc_shared((block_N, block_K // scale_size), storage_dtype)
+                Scale_local = T.alloc_fragment((block_N, block_K // scale_size), storage_dtype)
 
                 T.annotate_layout({
                     B_shared: tilelang.layout.make_swizzled_layout(B_shared),
