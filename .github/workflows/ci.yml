@@ -26,7 +26,7 @@ jobs:
     - name: Ensure venv (local & persistent)
       run: |
         set -e
-        REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
+        REQS_HASH=$(sha256sum requirements-test.txt 2>/dev/null | awk '{print $1}' || echo "no_requirements")
         MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
 
         if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
