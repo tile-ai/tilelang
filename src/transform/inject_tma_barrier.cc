@@ -468,7 +468,7 @@ private:
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
   Map<PrimExpr, IntImm> barrier_id_to_range_;
   bool has_create_list_of_mbarrier_;
-  bool clear_arrive_{true};
+  bool clear_arrive_{false};
   bool first_if{false}, has_warp_specialization_{false}, is_producer_{false};
   Var thread_var_;
   int tma_expect_tx_{0}, cur_expect_idx_{0};
