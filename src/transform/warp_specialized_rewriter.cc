@@ -548,11 +548,12 @@ public:
       auto op_name = std::string(op->args[0].as<StringImmNode>()->value);
 
       if (op_name.find("gemm") != std::string::npos && has_wgmma_) {
-        has_wgmma_ = op_name.find("false") == std::string::npos && !in_if_scope_;
+        has_wgmma_ =
+            op_name.find("false") == std::string::npos && !in_if_scope_;
       }
     }
     StmtExprVisitor::VisitExpr_(op);
-  } 
+  }
 
   void VisitStmt_(const IfThenElseNode *op) final {
     in_if_scope_ = true;
@@ -583,10 +584,10 @@ public:
         buffer_data_to_buffer_(buffer_data_to_buffer), marker_(marker),
         thread_var_(thread_iv->var), mbarrier_only_(mbarrier_only) {}
 
+  bool onlyHasWgMMA() const { return only_has_wgmma_; }
 
-  bool onlyHasWgMMA() const { return only_has_wgmma_; }    
-  
   bool hasSimtCopy() const { return has_simit_copy_; }
+
 private:
   template <typename NodeType> Stmt FilterByRole(const NodeType *op) {
     Role role = marker_.GetRole(op);
@@ -1265,7 +1266,8 @@ private:
       PrimExpr arrive_thread_count =
           producer.released_barrier_.count(i)
               ? (producer.hasSimtCopy() ? producer_thread_extent : 1)
-              : (only_has_wgmma ? FloorDiv(consumer_thread_extent, 128) : consumer_thread_extent);
+              : (only_has_wgmma ? FloorDiv(consumer_thread_extent, 128)
+                                : consumer_thread_extent);
       barrier_num_threads.push_back(arrive_thread_count);
     }
 
