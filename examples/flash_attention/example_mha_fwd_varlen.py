@@ -7,7 +7,7 @@ import argparse
 
 import torch
 from einops import rearrange, repeat
-from flash_attn.bert_padding import pad_input, unpad_input
+from bert_padding import pad_input, unpad_input
 
 
 def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random"):
@@ -410,7 +410,19 @@ def main(batch: int = 2, heads: int = 16, seq_len: int = 256, dim: int = 32):
         key_padding_mask,
         causal=causal,
     )
-    import flash_attn
+    torch.testing.assert_close(out, out_ref, rtol=1e-2, atol=1e-2)
+
+    is_flash_attn_2_available = False
+    try:
+        import flash_attn
+        is_flash_attn_2_available = True
+    except:
+        pass
+
+    if not is_flash_attn_2_available:
+        print("FlashAttn 2 is not available, skipping FA reference and performance measurement")
+        return
+
     fla_out_unpad = flash_attn.flash_attn_varlen_func(
         q_unpad,
         k_unpad,
@@ -423,8 +435,8 @@ def main(batch: int = 2, heads: int = 16, seq_len: int = 256, dim: int = 32):
         causal=causal,
     )
     fla_out = output_pad_fn(fla_out_unpad)
-    torch.testing.assert_close(out, out_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(out, fla_out, rtol=1e-2, atol=1e-2)
+
     print("Assert Equal Passed")
 
 

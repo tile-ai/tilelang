@@ -311,16 +311,9 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     ss << ", " << wg_wait;
   }
   ss << ">";
-  auto A_buffer = T.buffer_remap.count(A) ? T.buffer_remap[A] : A;
-  auto B_buffer = T.buffer_remap.count(B) ? T.buffer_remap[B] : B;
-  auto C_buffer = T.buffer_remap[C];
 
-  Array<PrimExpr> new_args;
-  new_args.push_back(StringImm(ss.str()));
-  new_args.push_back(Aptr);
-  new_args.push_back(Bptr);
-  new_args.push_back(Cptr);
-  auto new_call = Call(DataType::Handle(), builtin::call_extern(), new_args);
+  auto new_call = Call(DataType::Handle(), tl::tl_gemm(),
+                       Array<PrimExpr>{StringImm(ss.str()), Aptr, Bptr, Cptr});
   return Evaluate(new_call);
 }
 

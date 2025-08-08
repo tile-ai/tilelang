@@ -79,11 +79,6 @@ Stmt Operator::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return Evaluate(0);
 }
 
-Stmt Operator::Canonialize(const CanonializeArgs &T,
-                           arith::Analyzer *analyzer) const {
-  return {};
-}
-
 LayoutMap Operator::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   return {};
 }
