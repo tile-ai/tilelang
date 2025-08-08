@@ -344,8 +344,6 @@ private:
     }
   }
 
-
-
   Stmt VisitStmt_(const IfThenElseNode *op) final {
     auto f_uses_thread_index = [=](const tvm::tir::VarNode *parameter) {
       return parameter == thread_var_.get();
@@ -358,12 +356,13 @@ private:
       if (eq_op->a.as<VarNode>() == thread_var_.get() ||
           eq_op->b.as<VarNode>() == thread_var_.get()) {
         maybe_thread_opt_ = true;
-      } 
+      }
       maybe_thread_opt_ = do_shuffle_ && maybe_thread_opt_;
     }
     if (maybe_thread_opt_)
-      return IfThenElse(Call(DataType::Bool(), tl_shuffle_elect(), {thread_extent_}), StmtExprMutator::VisitStmt(op->then_case),
-                       std::nullopt);
+      return IfThenElse(
+          Call(DataType::Bool(), tl_shuffle_elect(), {thread_extent_}),
+          StmtExprMutator::VisitStmt(op->then_case), std::nullopt);
     else
       return StmtExprMutator::VisitStmt_(op);
   }
@@ -539,10 +538,9 @@ public:
   WgMMACollector() = default;
 
   void VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(builtin::call_extern())) {
+    if (op->op.same_as(tl_gemm())) {
       auto op_name = std::string(op->args[0].as<StringImmNode>()->value);
-
-      if (op_name.find("gemm") != std::string::npos && has_wgmma_) {
+      if (has_wgmma_) {
         has_wgmma_ =
             op_name.find("false") == std::string::npos && !in_if_scope_;
       }

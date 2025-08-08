@@ -80,8 +80,8 @@ public:
           } else {
             condition = EQ(iv->var, 0);
           }
-          auto stmt_ = IfThenElse(
-              condition, stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
+          auto stmt_ = IfThenElse(condition,
+                                  stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
           stmt_seq.push_back(stmt_);
           if (!init_mbarrier_calls_.empty()) {
             Stmt mem_sync =

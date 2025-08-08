@@ -144,7 +144,7 @@ TIR_DEFINE_TL_BUILTIN(tl_gemm_sp)
 TIR_DEFINE_TL_BUILTIN(tl_shuffle_elect)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+                               Integer(CallEffectKind::kPure));
 
 } // namespace tl
 } // namespace tvm

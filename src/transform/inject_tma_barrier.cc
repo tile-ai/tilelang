@@ -122,8 +122,11 @@ private:
 
   Stmt VisitStmt_(const IfThenElseNode *op) {
     // Check if this is the TMA block
-    const EQNode *eq = op->condition.as<EQNode>();
-    if (eq != nullptr) {
+    bool flag = false;
+    if (op->condition.as<CallNode>()) {
+      flag = op->condition.as<CallNode>()->op.same_as(tl_shuffle_elect());
+    }
+    if (op->condition.as<EQNode>() || flag) {
       Stmt ret = IRMutatorWithAnalyzer::VisitStmt_(op);
 
       if (visited_tma_load_) {

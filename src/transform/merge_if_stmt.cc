@@ -88,7 +88,6 @@ private:
 
     return new_seq.size() == 1 ? new_seq[0] : SeqStmt(new_seq);
   }
-
 };
 
 using namespace tir::transform;
