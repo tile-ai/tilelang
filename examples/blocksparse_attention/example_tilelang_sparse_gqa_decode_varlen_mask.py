@@ -419,16 +419,7 @@ def main(batch=8,
     out = model(Q, K, V, block_mask, cache_seqlens)
     debug("output", ref, out, atol=1e-3, rtol=1e-3)
 
-    is_flash_attn_2_available = False
-    try:
-        import flash_attn  # noqa: F401
-        is_flash_attn_2_available = True
-    except ImportError:
-        pass
-
-    if not is_flash_attn_2_available:
-        print("FlashAttn 2 is not available, skipping FA reference and performance measurement")
-        return
+    import flash_attn  # noqa: F401
 
     ## latency reference
     for _ in range(10):

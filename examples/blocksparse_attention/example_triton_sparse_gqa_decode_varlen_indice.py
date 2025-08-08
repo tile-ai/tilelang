@@ -449,16 +449,7 @@ def main(batch=64,
     print(f"Average time: {avg_time:.6f} seconds")
 
     # Measure performance of reference implementation
-    is_flash_attn_2_available = False
-    try:
-        import flash_attn  # noqa: F401
-        is_flash_attn_2_available = True
-    except ImportError:
-        pass
-
-    if not is_flash_attn_2_available:
-        print("FlashAttn 2 is not available, skipping FA reference and performance measurement")
-        return
+    import flash_attn  # noqa: F401
 
     start = time.time()
     for _ in range(1000):
