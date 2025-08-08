@@ -23,6 +23,19 @@ public:
 
   static const Op &Get();
 
+  Copy(const Copy &other)
+      : args_(other.args_), src(other.src), dst(other.dst),
+        src_range(other.src_range), dst_range(other.dst_range),
+        coalesced_width(other.coalesced_width), disable_tma(other.disable_tma) {
+    // No clone nullptr
+    if (other.par_op_)
+      par_op_ = std::unique_ptr<ParallelOp>(
+          static_cast<ParallelOp *>(other.par_op_->Clone().release()));
+  }
+  std::unique_ptr<Operator> Clone() const final {
+    return std::make_unique<Copy>(*this);
+  }
+
 protected:
   Stmt LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
   Stmt LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
@@ -52,6 +65,10 @@ public:
   Fill(Array<PrimExpr> args, BufferMap vmap);
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
   static const Op &Get();
+
+  std::unique_ptr<Operator> Clone() const final {
+    return std::make_unique<Fill>(*this);
+  }
 
 private:
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;

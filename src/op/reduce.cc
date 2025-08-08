@@ -12,6 +12,7 @@
 #include <tvm/tir/stmt_functor.h>
 
 #include "../layout/utils.h"
+#include "../op/parallel.h"
 #include "../transform/loop_partition.h"
 #include "tir/transforms/ir_utils.h"
 
@@ -287,7 +288,7 @@ LayoutMap ReduceOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   if (level >= InferLevel::kStrict)
     return {};
   if (src.scope() == "local.fragment" && dst.scope() == "local.fragment" &&
-      T.layout_map.count(src) && !T.layout_map.count(dst)) {
+      T.layout_map.count(src)) {
     auto src_layout = T.layout_map[src].as<Fragment>().value();
 
     PrimExpr indice_rep_extent = src->shape[dim];
@@ -310,7 +311,46 @@ LayoutMap ReduceOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
         Fragment(dst->shape, {}, thd, dest_buffer_rep_extent, std::nullopt)
             ->CondenseReplicateVar()
             ->BindThreadRange(T.thread_bounds);
-    return {{dst, dst_layout}};
+    if (!T.layout_map.count(dst))
+      return {{dst, dst_layout}};
+    else {
+      // Check if computed layout is compatible with existing: the existing one
+      // must strictly contains the computed layout
+      auto orig_dst_layout =
+          T.layout_map.Get(dst).value().as<Fragment>().value();
+      ICHECK(dst_layout->InputDim() == orig_dst_layout->InputDim());
+      Array<PrimExpr> indices;
+      indices.reserve(dst_layout->InputDim());
+      arith::Analyzer inner_analyzer;
+      for (int i = 0; i < dst_layout->InputDim(); ++i) {
+        auto x = InputPlaceholder(i);
+        indices.push_back(x);
+        // should be literal - literal = 0, any analyzer will work
+        ICHECK(is_zero(inner_analyzer.Simplify(
+            dst_layout->InputShape()[i] - orig_dst_layout->InputShape()[i])));
+        inner_analyzer.Bind(x, Range(0, dst_layout->InputShape()[i]));
+      }
+
+      ICHECK(as_const_int(dst_layout->ReplicateExtent()));
+      ICHECK(as_const_int(src_layout->ReplicateExtent()));
+      auto dst_rep = *as_const_int(dst_layout->ReplicateExtent());
+      auto src_rep = *as_const_int(src_layout->ReplicateExtent());
+      if (dst_rep < src_rep ||
+          !ProveFragmentContains(orig_dst_layout, dst_layout, indices, indices,
+                                 inner_analyzer)) {
+        std::ostringstream oss;
+        oss << "Layout may conflict with ReduceOp for buffer " << dst << " vs. "
+            << src << "\nLHS = " << src_layout->DebugOutput()
+            << "\nRHS = " << orig_dst_layout->DebugOutput()
+            << "\nYou may need to use a shared memory to transform the "
+               "layout";
+        throw LayoutConflictException(oss.str());
+      }
+
+      if (dst_rep > src_rep) {
+        return {{dst, dst_layout}};
+      }
+    }
   }
   return {};
 }

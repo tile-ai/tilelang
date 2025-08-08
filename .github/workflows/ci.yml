@@ -26,7 +26,7 @@ jobs:
     - name: Ensure venv (local & persistent)
       run: |
         set -e
-        REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
+        REQS_HASH=$(sha256sum requirements-test.txt 2>/dev/null | awk '{print $1}' || echo "no_requirements")
         MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
 
         if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
@@ -40,6 +40,7 @@ jobs:
           python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
+          pip install flash_attn==2.5.8 --no-user --no-build-isolation
           touch "$MARKER"
         fi
 
@@ -94,6 +95,8 @@ jobs:
           python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
+          # flash attention usually requires no isolation build
+          pip install flash_attn==2.5.8 --no-user --no-build-isolation
           pip install . --no-user
           touch "$MARKER"
         fi
