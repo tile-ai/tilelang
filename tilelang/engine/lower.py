@@ -64,15 +64,10 @@ def tilelang_callback_cuda_compile(code, target):
         cutlass_path = os.environ["TL_CUTLASS_PATH"]
     else:
         cutlass_path = osp.abspath(osp.join(project_root, "3rdparty/cutlass/include"))
-    compute_version = "".join(nvcc.get_target_compute_version(target).split("."))
+    target_arch = nvcc.get_target_arch(nvcc.get_target_compute_version(target))
 
-    # special handle for Hopper
-    if compute_version == "90":
-        arch = ["-arch=sm_90a"]
-        format = "cubin"
-    else:
-        arch = [f"-arch=sm_{compute_version}"]
-        format = "cubin"
+    arch = [f"-arch=sm_{target_arch}"]
+    format = "cubin"
 
     # printing out number of registers
     debug_option = "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage"
