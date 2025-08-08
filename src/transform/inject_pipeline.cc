@@ -508,7 +508,7 @@ private:
     // We optimize a few case where the number of versions can be smaller than
     // the upper bound
     int num_versions = buffer_info.use - buffer_info.def + 1;
-    if (num_versions == 2) {
+    if (num_versions >= 2) {
       // A special case when `use - def + 1 == 2`. Double buffering is only
       // needed in this case when these exists a reader block_i and a writer
       // block_j such that order(block_i) < order(block_j) and stage(block_i) <
@@ -547,7 +547,7 @@ private:
         }
       }
       if (!need_multi_version) {
-        num_versions = 1;
+        num_versions--;
       }
     }
     if (num_versions == 1 && double_buffers_.count(buffer)) {
@@ -647,6 +647,7 @@ private:
       arith::Analyzer *ana_normalized,
       const std::unordered_map<const BufferNode *, int> &buffer_to_commit_group,
       std::map<int, AsyncStateLocal> *async_states_local) {
+
     for (size_t i = 0; i < new_blocks.size(); ++i) {
       if (new_blocks[i].is_async) {
         // Record the fact that we have encountered these write buffers.
@@ -716,16 +717,28 @@ private:
       // head at compute points to the copy done by the previous iteration, so
       // its wait_count is calculated as ((i - 1) + 3) - i. The sum of the two
       // wait_counts gives 5.
+      // print async_states_local
 
       auto &dep_local_state = (*async_states_local)[producer_stage_idx];
       const auto num_commit_group = dep_local_state.commit_groups.size();
       std::vector<Optional<PrimExpr>> producer_head_per_commit;
 
+      auto add_unique_producer_head =
+          [&](const Optional<PrimExpr> &producer_head) {
+            // if producer_head already in producer_head_per_commit, return
+            for (const auto &head : producer_head_per_commit) {
+              if (StructuralEqual()(head, producer_head)) {
+                return;
+              }
+            }
+            producer_head_per_commit.push_back(producer_head);
+          };
+
       if (num_commit_group == 0) {
         // Epilogue, no async producer. Since "local" producer_head is not
         // available, use "global" producer_head.
         ICHECK(!dep_local_state.producer_head);
-        producer_head_per_commit.push_back(
+        add_unique_producer_head(
             async_states[producer_stage_idx].producer_head);
       } else {
         ICHECK(dep_local_state.producer_head);
@@ -742,12 +755,10 @@ private:
           if (!dep_local_state.seen.count(read_region->buffer.get())) {
             // Multiple async producers interleaved: The most recent async write
             // is from the previous iteration. This is the B_shared case above.
-            producer_head_per_commit.push_back(
-                dep_local_state.producer_head.value() - 1);
+            add_unique_producer_head(dep_local_state.producer_head.value() - 1);
           } else {
             // Normal case
-            producer_head_per_commit.push_back(
-                dep_local_state.producer_head.value());
+            add_unique_producer_head(dep_local_state.producer_head.value());
           }
 
           need_wait_count[commit_group_id] = false;
@@ -756,7 +767,7 @@ private:
 
       auto wait_count = [=, &ana_normalized]() {
         auto sum = PrimExpr(0);
-        for (auto producer_head : producer_head_per_commit) {
+        for (const auto &producer_head : producer_head_per_commit) {
           if (producer_head &&
               ana_normalized->CanProve(producer_head.value() >= 0)) {
             // Here, new_blocks[i].access_index corresponds to "consumer_head".
@@ -1279,23 +1290,6 @@ private:
       }
     }
     return pipeline;
-  }
-
-  /*!
-   * \brief Add buffer allocations to a block and update the write region of the
-   * block. \param n The block pointer to which the buffer allocations are
-   * added. \param alloc_buffers The buffer allocations to be added.
-   */
-  void AddAllocBuffers(BlockNode *n, const Array<Buffer> alloc_buffers) {
-    for (const Buffer &alloc_buffer : alloc_buffers) {
-      n->alloc_buffers.push_back(alloc_buffer);
-      Region region;
-      region.reserve(alloc_buffer->shape.size());
-      for (const PrimExpr &dim : alloc_buffer->shape) {
-        region.push_back(Range::FromMinExtent(0, dim));
-      }
-      n->writes.push_back(BufferRegion(alloc_buffer, region));
-    }
   }
 
   Stmt VisitStmt_(const BlockNode *op) final {
