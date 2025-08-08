@@ -74,15 +74,15 @@ public:
           auto stmts = prefetch_calls_;
           stmts.insert(stmts.end(), init_mbarrier_calls_.begin(),
                        init_mbarrier_calls_.end());
-          auto init_stmt = IfThenElse(
-              EQ(iv->var, 0), stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
+          PrimExpr condition;
           if (!disable_shuffle_elect_) {
-            auto stmt_ = AttrStmt(make_zero(DataType::Int(32)),
-                                  "shuffle_and_elect", 0, init_stmt);
-            stmt_seq.push_back(stmt_);
+            condition = Call(DataType::Bool(), tl_shuffle_elect(), {0});
           } else {
-            stmt_seq.push_back(init_stmt);
+            condition = EQ(iv->var, 0);
           }
+          auto stmt_ = IfThenElse(
+              condition, stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
+          stmt_seq.push_back(stmt_);
           if (!init_mbarrier_calls_.empty()) {
             Stmt mem_sync =
                 Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),

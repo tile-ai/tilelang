@@ -294,6 +294,13 @@ TVM_DLL const Op &tl_gemm();
  */
 TVM_DLL const Op &tl_gemm_sp();
 
+/*!
+ * \brief tilelang intrinsic for shuffle elect.
+ *
+ *  This op is used to represent a shuffle elect operation in tilelang.
+ */
+TVM_DLL const Op &tl_shuffle_elect();
+
 } // namespace tl
 } // namespace tvm
 

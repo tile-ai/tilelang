@@ -344,33 +344,28 @@ private:
     }
   }
 
-  PrimExpr VisitExpr_(const EQNode *op) final {
-    if (op->a.as<VarNode>() == thread_var_.get() ||
-        op->b.as<VarNode>() == thread_var_.get()) {
 
-    } else {
-      maybe_thread_opt_ = false;
-    }
-    return StmtExprMutator::VisitExpr_(op);
-  }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
     auto f_uses_thread_index = [=](const tvm::tir::VarNode *parameter) {
       return parameter == thread_var_.get();
     };
-
+    maybe_thread_opt_ = false;
     if (!op->else_case.defined() && op->condition.as<EQNode>() &&
         UsesVar(op->condition, f_uses_thread_index) &&
         !(UsesVar(op->then_case, f_uses_thread_index))) {
-      maybe_thread_opt_ = do_shuffle_;
+      auto eq_op = Downcast<EQ>(op->condition);
+      if (eq_op->a.as<VarNode>() == thread_var_.get() ||
+          eq_op->b.as<VarNode>() == thread_var_.get()) {
+        maybe_thread_opt_ = true;
+      } 
+      maybe_thread_opt_ = do_shuffle_ && maybe_thread_opt_;
     }
-    auto res = StmtExprMutator::VisitStmt_(op);
-    if (maybe_thread_opt_) {
-      res = AttrStmt(make_zero(DataType::Int(32)), "shuffle_and_elect",
-                     thread_extent_, res);
-      maybe_thread_opt_ = false;
-    }
-    return res;
+    if (maybe_thread_opt_)
+      return IfThenElse(Call(DataType::Bool(), tl_shuffle_elect(), {thread_extent_}), StmtExprMutator::VisitStmt(op->then_case),
+                       std::nullopt);
+    else
+      return StmtExprMutator::VisitStmt_(op);
   }
 
   Var thread_var_;
