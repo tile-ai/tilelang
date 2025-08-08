@@ -221,7 +221,6 @@ private:
     IRVisitorWithAnalyzer::VisitStmt_(op);
   }
 
-
   IterVar thread_var_;
   std::vector<Call> pending_tma_ops_;
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
@@ -239,7 +238,7 @@ public:
     int zero_idx = -1;
     int zero_count = 0;
 
-    for (auto v : sequence){
+    for (auto v : sequence) {
       if (v == 0) {
         zero_count += 1;
         zero_idx += 1;
@@ -265,23 +264,22 @@ public:
         zero_count = 0;
       }
     }
-    
+
     return clear_zero_list;
   }
 
-
-  std::vector<int> GetRestoreBarrierIds() {
-    return restore_barrier_ids_;
-  }
+  std::vector<int> GetRestoreBarrierIds() { return restore_barrier_ids_; }
 
   void VisitStmt_(const ForNode *op) final {
-    var_int_set_.Set(op->loop_var, arith::IntSet::FromMinExtent(op->min, op->extent));
+    var_int_set_.Set(op->loop_var,
+                     arith::IntSet::FromMinExtent(op->min, op->extent));
     IRVisitorWithAnalyzer::VisitStmt_(op);
   }
 
   void VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(mbarrier_expect_tx())) {
-      PrimExpr e = tma_op_to_barrier_id_[GetRef<Call>(op)].as<CallNode>()->args[0];
+      PrimExpr e =
+          tma_op_to_barrier_id_[GetRef<Call>(op)].as<CallNode>()->args[0];
       auto int_set = arith::EvalSet(e, var_int_set_);
       expect_.push_back(if_depth_ == 1);
       sequence.push_back(0);
@@ -380,7 +378,8 @@ public:
                                 collector.barrier_id_to_range(),
                                 has_create_list_of_mbarrier);
     f.CopyOnWrite()->body = rewriter(f->body);
-    auto barrier_creation_rewriter = BarrierCreationRewriter(rewriter.restore_barrier_ids_);
+    auto barrier_creation_rewriter =
+        BarrierCreationRewriter(rewriter.restore_barrier_ids_);
     f.CopyOnWrite()->body = barrier_creation_rewriter(f->body);
     return f;
   }
@@ -410,7 +409,7 @@ private:
 
       is_producer_ = false;
       Stmt else_case;
-      if (op->else_case.defined()) 
+      if (op->else_case.defined())
         else_case = StmtExprMutator::VisitStmt(op->else_case.value());
       return IfThenElse(op->condition, then_case, else_case);
     }
