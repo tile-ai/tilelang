@@ -20,8 +20,8 @@ requests
 cloudpickle
 ml_dtypes
 psutil
-torch
-thefuzz
+torch==2.3.0
+flash_attn==2.5.8
 tabulate
 wheel
 setuptools
