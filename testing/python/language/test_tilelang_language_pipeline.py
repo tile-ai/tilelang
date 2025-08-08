@@ -84,10 +84,13 @@ def run_gemm(
         stage,
     )
 
-    kernel = tilelang.compile(program, out_idx=[2], pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    })
+    kernel = tilelang.compile(
+        program,
+        out_idx=[2],
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        })
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -108,12 +111,12 @@ def run_gemm(
 
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
+
 def test_pipeline_order_stage():
     run_gemm(order=[0, 1, 2], stage=[0, 0, 1])
     run_gemm(order=[0, 1, 2], stage=[0, 0, 2])
     run_gemm(order=[1, 2, 0], stage=[0, 0, 2])
     run_gemm(order=[1, 2, 0], stage=[0, 0, 1])
-
 
 
 if __name__ == "__main__":

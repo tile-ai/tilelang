@@ -162,21 +162,30 @@ private:
    *
    * \param reads Array of buffer regions read by this stage
    * \param writes Array of buffer regions written by this stage
-   * \param original_order Original position of this stage in the pipeline
+   * \param original_stmt_index Original position of this stage in the pipeline
    * before reordering \param order Current position of this stage in the
    * pipeline after reordering (-1 if not yet assigned) \param stage Pipeline
    * stage number this operation belongs to (-1 if not yet assigned) \param
    * copy_stage Whether this stage is a memory copy operation \param
-   * last_use_stage Last pipeline stage that uses the results of this stage (-1
-   * if not yet determined)
+   * last_use_stmt_index Index of the last statement (in original order) that
+   * uses the results of this stage (-1 if not yet determined). This field is
+   * crucial for pipeline optimization:
+   * - For copy stages: indicates the index of the last statement that reads
+   * from the copied data, helping determine optimal placement of copy
+   * operations
+   * - Used to ensure copy operations are scheduled before their consumers
+   * - A value of -1 means no subsequent statement uses this stage's output
+   * - This information enables better pipeline scheduling by minimizing data
+   *   dependencies and maximizing parallelism
    */
   struct PipelineStageInfo {
     Array<BufferRegion> reads, writes;
-    int original_order;
+    int original_stmt_index;
     int order = -1, stage = -1;
     bool copy_stage = false;
     bool prepare_for_condition = false;
-    int last_use_stage = -1;
+    int last_use_stmt_index =
+        -1; // Initialized to -1, indicating no consumers found yet
     // represent the stage is used in a conditional statement
     PrimExpr conditonal_expr;
   };
@@ -191,7 +200,7 @@ private:
     PipelineStageInfo pinfo;
     pinfo.reads = std::move(collector.GetReads());
     pinfo.writes = std::move(collector.GetWrites());
-    pinfo.original_order = idx;
+    pinfo.original_stmt_index = idx;
     pinfo.copy_stage = collector.GetGlobalCopyPattern();
     pinfo.conditonal_expr = collector.GetConditonalExpr();
     return std::move(pinfo);
@@ -306,21 +315,39 @@ private:
       }
     }
 
-    // analysis use-def chain
+    // Analysis use-def chain to determine last_use_stmt_index for copy
+    // operations This step is critical for pipeline optimization as it
+    // identifies the index of the last statement that consumes data produced by
+    // copy stages, enabling optimal placement of copy operations in the
+    // pipeline schedule.
     for (auto &pinfo : pipeline_stage_infos) {
-      for (int i = pinfo.original_order + 1;
+      // Only analyze copy stages (memory copy operations)
+      if (!pinfo.copy_stage)
+        continue;
+
+      // Check all subsequent statements to find the latest consumer
+      for (int i = pinfo.original_stmt_index + 1;
            i < static_cast<int>(pipeline_body_seq->size()); i++) {
-        if (!pinfo.copy_stage)
-          continue;
+
+        // Check if any read operation in statement 'i' uses data written by
+        // this copy stage
         for (const BufferRegion &read : pipeline_stage_infos[i].reads) {
+          // Look for overlapping buffer regions between this stage's writes and
+          // stage 'i's reads
           if (std::find_if(pinfo.writes.begin(), pinfo.writes.end(),
                            [&](const BufferRegion &r) {
                              return r->buffer == read->buffer &&
                                     MayConflict(r->region, read->region);
                            }) != pinfo.writes.end()) {
-            pinfo.last_use_stage = std::max(pinfo.last_use_stage, i);
+            // Update last_use_stmt_index to the maximum (latest) statement
+            // index that uses this data This ensures we capture the final
+            // consumer of the copied data
+            pinfo.last_use_stmt_index = std::max(pinfo.last_use_stmt_index, i);
           }
         }
+        // Check for write-after-write conflicts (multiple stages writing to
+        // same buffer region) This is important for pipeline correctness and
+        // affects last_use_stmt_index analysis
         for (const BufferRegion &write : pipeline_stage_infos[i].writes) {
           if (std::find_if(pinfo.writes.begin(), pinfo.writes.end(),
                            [&](const BufferRegion &r) {
@@ -329,8 +356,9 @@ private:
                            }) != pinfo.writes.end()) {
             LOG(FATAL) << "Pipeline planning error: Multiple writes to "
                           "overlapping buffer regions detected. "
-                       << "Stage " << pinfo.original_order << " and stage " << i
-                       << " are both writing to buffer '" << write->buffer->name
+                       << "Stage " << pinfo.original_stmt_index << " and stage "
+                       << i << " are both writing to buffer '"
+                       << write->buffer->name
                        << "' with overlapping regions. This is not supported "
                           "in pipeline planning.";
           }
@@ -338,14 +366,32 @@ private:
       }
     }
 
+    auto print_pipeline_stage_infos = [&]() {
+      Array<Integer> orders, stages, last_use_stmt_indexs;
+
+      for (auto &pinfo : pipeline_stage_infos) {
+        orders.push_back(pinfo.order);
+        stages.push_back(pinfo.stage);
+        last_use_stmt_indexs.push_back(pinfo.last_use_stmt_index);
+      }
+      LOG(INFO) << "orders: " << orders;
+      LOG(INFO) << "stages: " << stages;
+      LOG(INFO) << "last_use_stmt_indexs: " << last_use_stmt_indexs;
+    };
+
+    LOG(INFO) << "After stage -1: ";
+    print_pipeline_stage_infos();
+
     // Making stages and orders
     int order_idx = 0;
-    // Create pipeline stages and assign order
+    // Stage 0. Create pipeline stages and assign order
     for (auto &pinfo : pipeline_stage_infos) {
       // Skip elements that must be in first stage:
-      // 1. Copy stages (with active last_use_stage)
+      // 1. Copy stages (with active last_use_stmt_index) - these need special
+      // handling
+      //    because they have consumers that depend on their data
       // 2. Condition preparation stages
-      if ((pinfo.copy_stage && pinfo.last_use_stage != -1) ||
+      if ((pinfo.copy_stage && pinfo.last_use_stmt_index != -1) ||
           pinfo.prepare_for_condition)
         continue;
 
@@ -355,16 +401,22 @@ private:
       pinfo.order = order_idx++;
       pinfo.stage = num_stages;
 
+      // Schedule copy stages that have this stage as their last consumer
+      // This ensures copy operations are placed right before their final
+      // consumer for optimal pipeline efficiency
       for (auto &pinfo_1 : pipeline_stage_infos) {
         if ((pinfo_1.copy_stage &&
-             pinfo_1.last_use_stage == pinfo.original_order)) {
+             pinfo_1.last_use_stmt_index == pinfo.original_stmt_index)) {
           pinfo_1.order = order_idx++;
-          pinfo_1.stage = 0;
+          pinfo_1.stage = 0; // Copy stages are typically assigned to stage 0
         }
       }
     }
 
-    // Handle trailing unassigned copy stages:
+    LOG(INFO) << "After stage 0: ";
+    print_pipeline_stage_infos();
+
+    // Stage 1. Handle trailing unassigned copy stages:
     // These are typically final copy operations needing post-main-stage
     // insertion
     auto &head_pinfo = pipeline_stage_infos.at(0);
@@ -386,14 +438,17 @@ private:
       }
     }
 
+    LOG(INFO) << "After stage 1: ";
+    print_pipeline_stage_infos();
+
     ICHECK(size_t(order_idx) == pipeline_stage_infos.size())
         << "The number of stages should be equal to the number of pipeline "
            "stages. "
         << "Got " << order_idx << " stages and " << pipeline_stage_infos.size()
         << " pipeline stages.";
 
-    // if all the copy is at the end of the order, we can move these copy to the
-    // beginning of the order and shrink the stage offset by 1.
+    // Step 2. if all the copy is at the end of the order, we can move these
+    // copy to the beginning of the order and shrink the stage offset by 1.
     int copy_stage_at_end = [&]() {
       int copy_stage_cnt = 0;
       int copy_order_min = pipeline_stage_infos.size();
@@ -418,6 +473,9 @@ private:
           pinfo.stage--;
       }
     }
+
+    LOG(INFO) << "After stage 2: ";
+    print_pipeline_stage_infos();
 
     // Finally, make the pipeline annotation
     Map<String, Any> annotations;
