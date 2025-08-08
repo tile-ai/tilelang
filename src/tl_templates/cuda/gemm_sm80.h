@@ -207,10 +207,9 @@ struct OperandTraits<64, N, K, false, num_warp_n, leading_dim,
 };
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool clear_accum,
-          int lda, int ldb, int offset_a, int offset_b,
-          typename A_type_raw,
-          typename B_type_raw, typename C_type_raw>
+          bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
+          int offset_b, typename A_type_raw, typename B_type_raw,
+          typename C_type_raw>
 class GemmTensorOp {
 public:
   using A_type =
@@ -323,7 +322,7 @@ public:
                                   C_type_raw *pC) {
     const int tid = threadIdx.x;
     Tensor sB_all = make_tensor(make_smem_ptr(reinterpret_cast<B_type *>(pB)),
-                            SmemLayoutB{});
+                                SmemLayoutB{});
     Tensor sB = get_region_tensor<offset_b, N, K, trans_B, ldb>(sB_all);
     TileMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(tid);
@@ -359,7 +358,7 @@ public:
                                   C_type_raw *pC) {
     const int tid = threadIdx.x;
     Tensor sA_all = make_tensor(make_smem_ptr(reinterpret_cast<A_type *>(pA)),
-                            SmemLayoutA{});
+                                SmemLayoutA{});
     Tensor sA = get_region_tensor<offset_a, M, K, !trans_A, lda>(sA_all);
     TileMma tiled_mma;
     auto thr_mma = tiled_mma.get_thread_slice(tid);
@@ -397,39 +396,32 @@ public:
 namespace tl {
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool clear_accum,
-          int lda, int ldb, int offset_a, int offset_b,
-          typename A_type, typename B_type,
-          typename C_type>
+          bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
+          int offset_b, typename A_type, typename B_type, typename C_type>
 CUTLASS_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
   using MMA = cute::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, clear_accum,
-                                 lda, ldb, offset_a, offset_b,
-                                 A_type, B_type, C_type>;
+                                 trans_B, clear_accum, lda, ldb, offset_a,
+                                 offset_b, A_type, B_type, C_type>;
   MMA::body(pA, pB, accum);
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool clear_accum,
-          int lda, int ldb, int offset_a, int offset_b,
-          typename A_type, typename B_type,
-          typename C_type>
+          bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
+          int offset_b, typename A_type, typename B_type, typename C_type>
 CUTLASS_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
   using MMA = cute::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, clear_accum, lda, ldb, offset_a, offset_b,
-                                 A_type, B_type, C_type>;
+                                 trans_B, clear_accum, lda, ldb, offset_a,
+                                 offset_b, A_type, B_type, C_type>;
   MMA::body_rs(pA, pB, accum);
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
-          bool trans_B, bool clear_accum,
-          int lda, int ldb, int offset_a, int offset_b,
-          typename A_type, typename B_type,
-          typename C_type>
+          bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
+          int offset_b, typename A_type, typename B_type, typename C_type>
 CUTLASS_DEVICE void gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
   using MMA = cute::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, clear_accum, lda, ldb, offset_a, offset_b,
-                                 A_type, B_type, C_type>;
+                                 trans_B, clear_accum, lda, ldb, offset_a,
+                                 offset_b, A_type, B_type, C_type>;
   MMA::body_sr(pA, pB, accum);
 }
 

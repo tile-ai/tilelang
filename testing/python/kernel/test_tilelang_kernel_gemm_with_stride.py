@@ -3,6 +3,7 @@ import tilelang
 import tilelang.language as T
 import torch
 
+
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
 
     @T.prim_func
@@ -62,24 +63,24 @@ def run_gemm_with_stride_ss(M: int, N: int, K: int, block_M: int, block_N: int, 
     # Create random input tensors on the GPU
     a = torch.randn(M, K, device="cuda", dtype=torch.float16)
     b = torch.randn(K, N, device="cuda", dtype=torch.float16)
-    
+
     # Run the kernel through the Profiler
     c = jit_kernel(a, b)
-    
+
     print(c)
     # Reference multiplication using PyTorch
     ref_c = a @ b
-    
+
     # Validate correctness
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
     print("Kernel output matches PyTorch reference.")
 
-    
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(7, 5)
 def test_tilelang_kernel_gemm_with_stride():
     run_gemm_with_stride_ss(128, 128, 64, 32, 32, 32)
+
 
 if __name__ == "__main__":
     tilelang.testing.main()

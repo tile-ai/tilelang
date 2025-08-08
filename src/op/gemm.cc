@@ -318,7 +318,7 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   ss << warp_m << ", " << warp_n << ", ";
   ss << trans_A << ", " << trans_B;
   ss << ", " << clear_accum;
-  if (TargetIsCuda(T.target) && (GetArchInt(T.target) >= 75) ) {
+  if (TargetIsCuda(T.target) && (GetArchInt(T.target) >= 75)) {
     ss << ", " << stride_A << ", " << stride_B;
     ss << ", " << offset_A << ", " << offset_B;
   }
