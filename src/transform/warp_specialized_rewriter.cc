@@ -538,6 +538,41 @@ private:
 
   PipelineInfo pipeline_info_;
 };
+
+class WgMMACollector : public StmtExprVisitor {
+public:
+  WgMMACollector() = default;
+
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(builtin::call_extern())) {
+      auto op_name = std::string(op->args[0].as<StringImmNode>()->value);
+
+      if (op_name.find("gemm") != std::string::npos && has_wgmma_) {
+        has_wgmma_ = op_name.find("false") == std::string::npos && !in_if_scope_;
+      }
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  } 
+
+  void VisitStmt_(const IfThenElseNode *op) final {
+    in_if_scope_ = true;
+    StmtExprVisitor::VisitStmt(op->then_case);
+    if (op->else_case.defined()) {
+      StmtExprVisitor::VisitStmt(op->else_case.value());
+    }
+    in_if_scope_ = false;
+  }
+
+  static bool HasWgMMA(Stmt stmt) {
+    auto collector = WgMMACollector();
+    collector(stmt);
+    return collector.has_wgmma_;
+  }
+
+  bool has_wgmma_{true};
+  bool in_if_scope_{false};
+};
+
 class WSCodeEmitter : public StmtMutator {
 public:
   WSCodeEmitter(bool is_emitting_producer, IterVar thread_iv,
@@ -548,6 +583,10 @@ public:
         buffer_data_to_buffer_(buffer_data_to_buffer), marker_(marker),
         thread_var_(thread_iv->var), mbarrier_only_(mbarrier_only) {}
 
+
+  bool onlyHasWgMMA() const { return only_has_wgmma_; }    
+  
+  bool hasSimtCopy() const { return has_simit_copy_; }
 private:
   template <typename NodeType> Stmt FilterByRole(const NodeType *op) {
     Role role = marker_.GetRole(op);
@@ -583,6 +622,9 @@ private:
         op->seq.Map([&](Stmt stmt) { return VisitStmt(stmt); });
 
     auto map = ExtractSyncPattern(op->seq);
+
+    only_has_wgmma_ = WgMMACollector::HasWgMMA(SeqStmt(op->seq));
+
     /*
       std::cout << "Print ExtractSyncPattern" << std::endl;
       for (int i = 0; i < static_cast<int>(op->seq.size()); i++) {
@@ -635,8 +677,9 @@ private:
               MbarrierRewriter::Rewrite(seq_transformed[i], release_barrier_id);
           collector.Collect(stmt);
           block_stmt.push_back(stmt);
-          if (collector.HasSimtCopy() > 0) {
+          if (collector.HasSimtCopy()) {
             block_stmt.push_back(makeCpAsyncBarrier(release_barrier_id));
+            has_simit_copy_ = true;
           }
           if (map.release_after[i][j]) {
             block_stmt.push_back(makeArriveBarrier(release_barrier_id));
@@ -671,8 +714,11 @@ private:
             int pattern_idx = map.release[i][j];
             PrimExpr release_barrier_id =
                 stage_ + num_barriers_ + num_stages_ * pattern_idx;
-            block_stmt.push_back(makeArriveBarrier(
-                release_barrier_id, 0, EQ(FloorMod(thread_var_, 128), 0)));
+            if (only_has_wgmma_)
+              block_stmt.push_back(makeArriveBarrier(
+                  release_barrier_id, 0, EQ(FloorMod(thread_var_, 128), 0)));
+            else
+              block_stmt.push_back(makeArriveBarrier(release_barrier_id));
             for (int s = 0; s < num_stages_; s++) {
               released_barrier_.insert(s + num_barriers_ +
                                        num_stages_ * pattern_idx);
@@ -1024,6 +1070,8 @@ private:
   bool mbarrier_only_ = false;
   PipelineInfo pipeline_info_;
   friend class WarpSpecializedRewriter;
+  bool only_has_wgmma_ = false;
+  bool has_simit_copy_ = false;
 };
 
 class SetMaxNRegCollector : public StmtExprVisitor {
@@ -1174,6 +1222,7 @@ private:
     WSCodeEmitter consumer(false, thread_iv_, buffer_data_to_buffer_, marker);
     Stmt producer_code = producer(block->body);
     Stmt consumer_code = consumer(block->body);
+    bool only_has_wgmma = consumer.onlyHasWgMMA();
     PrimExpr consumer_thread_extent = thread_iv_->dom->extent;
     PrimExpr producer_thread_extent = thread_iv_->dom->extent;
     // Need one warp-group for bulk-copy only case
@@ -1215,8 +1264,8 @@ private:
     for (int i = 0; i < num_barriers; i++) {
       PrimExpr arrive_thread_count =
           producer.released_barrier_.count(i)
-              ? (marker.HasSimtCopy() ? producer_thread_extent : 1)
-              : FloorDiv(consumer_thread_extent, 128);
+              ? (producer.hasSimtCopy() ? producer_thread_extent : 1)
+              : (only_has_wgmma ? FloorDiv(consumer_thread_extent, 128) : consumer_thread_extent);
       barrier_num_threads.push_back(arrive_thread_count);
     }
 
