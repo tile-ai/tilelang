@@ -8,6 +8,12 @@
 
 #include "codegen_hip.h"
 #include "runtime/rocm/rocm_module.h"
+#include <tvm/ffi/function.h>
+
+// Define kTVMGridConstant if not already defined
+#ifndef kTVMGridConstant
+#define kTVMGridConstant 130  // Use a value after kCustomBegin
+#endif
 
 namespace tvm {
 namespace codegen {
@@ -44,7 +50,6 @@ ExtractFuncInfo(const IRModule &mod) {
 }
 
 runtime::Module BuildTileLangHIP(IRModule mod, Target target) {
-  using tvm::runtime::Registry;
   bool output_ssa = false;
   CodeGenTileLangHIP cg;
   cg.Init(output_ssa);
@@ -59,13 +64,17 @@ runtime::Module BuildTileLangHIP(IRModule mod, Target target) {
   }
 
   std::string code = cg.Finish();
-  if (const auto *f = Registry::Get("tilelang_callback_hip_postproc")) {
-    code = (*f)(code, target).operator std::string();
+  
+  // Use the new FFI API to get registered functions
+  using ffi::Function;
+  if (auto f = Function::GetGlobal("tilelang_callback_hip_postproc")) {
+    code = (*f)(code, target).cast<std::string>();
   }
+  
   std::string fmt = "ptx";
   std::string ptx;
-  if (const auto *f = Registry::Get("tilelang_callback_hip_compile")) {
-    ptx = (*f)(code, target).operator std::string();
+  if (auto f = Function::GetGlobal("tilelang_callback_hip_compile")) {
+    ptx = (*f)(code, target).cast<std::string>();
     if (ptx[0] != '/')
       fmt = "hsaco";
   } else {
@@ -75,7 +84,6 @@ runtime::Module BuildTileLangHIP(IRModule mod, Target target) {
 }
 
 runtime::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
-  using tvm::runtime::Registry;
   bool output_ssa = false;
   CodeGenTileLangHIP cg;
   cg.Init(output_ssa);
@@ -90,12 +98,17 @@ runtime::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
   }
 
   std::string code = cg.Finish();
-  if (const auto *f = Registry::Get("tilelang_callback_hip_postproc")) {
-    code = (*f)(code, target).operator std::string();
+  
+  // Use the new FFI API to get registered functions
+  using ffi::Function;
+  if (auto f = Function::GetGlobal("tilelang_callback_hip_postproc")) {
+    code = (*f)(code, target).cast<std::string>();
   }
+  
   return ROCMModuleCreate("ptx", "fmt", ExtractFuncInfo(mod), code,
                           std::string());
 }
+
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()

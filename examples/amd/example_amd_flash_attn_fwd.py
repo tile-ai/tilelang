@@ -29,10 +29,10 @@ def ref_program(Q, K, V, is_causal, groups=1):
 
 def get_configs():
     """Generates configurations for the autotuner, tailored for FA-2 style parallelism."""
-    block_M = [64, 128, 256]
-    block_N = [32, 64, 128]
-    threads = [128, 256, 512]
-    num_split_q = [32, 64, 128]
+    block_M = [64, 128, 256, 512]
+    block_N = [32, 64, 128, 256, 512]
+    threads = [128, 256, 512, 1024]
+    num_split_q = [32, 64, 128, 256, 512]
     num_stages = [0, 1, 2]
     enable_rasterization = [True, False]
     k_pack = [1, 2]
@@ -105,9 +105,9 @@ def fast_flashattn(
             num_q_blocks = T.ceildiv(seq_len, block_M)
 
             bx = T.alloc_var("int32")
-            bx[0] = b_split
+            bx = b_split
 
-            with T.While(bx[0] < num_q_blocks):
+            with T.While(bx < num_q_blocks):
                 acc_o = T.alloc_fragment([block_M, dim], accum_dtype)
                 m_i = T.alloc_fragment([block_M], accum_dtype)
                 l_i = T.alloc_fragment([block_M], accum_dtype)
@@ -115,7 +115,7 @@ def fast_flashattn(
                 T.fill(m_i, -T.infinity(accum_dtype))
                 T.fill(l_i, 0)
 
-                current_bx = bx[0]
+                current_bx = bx
                 q_block_offset = current_bx * block_M
 
                 Q_shared = T.alloc_shared([block_M, dim], dtype)
@@ -187,7 +187,7 @@ def fast_flashattn(
                 for i, j in T.Parallel(block_M, dim):
                     Output[bz, q_block_offset + i, by, j] = acc_o[i, j] * l_inv[i]
 
-                bx[0] = current_bx + num_split_q
+                bx = current_bx + num_split_q
 
     return main
 

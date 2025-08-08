@@ -4,7 +4,7 @@
 
 #include "codegen_hip.h"
 #include <tvm/arith/analyzer.h>
-#include <tvm/runtime/registry.h>
+#include <tvm/ffi/function.h>
 #include <tvm/tir/index_map.h>
 #include <tvm/tir/op.h>
 
@@ -882,7 +882,7 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintExpr(op->args[i * 2 + 1], os);
       os << "]" << ((i < 3) ? ", " : ")");
     }
-  } else if (op->op.same_as(builtin::tvm_mfma())) {
+  } else if (op->op.same_as(tl::tvm_mfma())) {
     // arg 0: prefix: {otype}_16x16x16{itype}
     // arg 1: A layout: row/col
     // arg 2: B layout: row/col
