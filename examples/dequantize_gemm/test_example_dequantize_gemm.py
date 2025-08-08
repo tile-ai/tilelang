@@ -21,5 +21,6 @@ def test_example_dequant_gemm_fp4_hopper():
 def test_example_dequant_gemm_mxfp4_hopper():
     example_dequant_gemm_mxfp4_hopper.main()
 
+
 if __name__ == "__main__":
     tilelang.testing.main()
