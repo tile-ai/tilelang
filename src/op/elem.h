@@ -58,6 +58,8 @@ protected:
   Bool disable_tma = Bool(false);
 
   std::unique_ptr<ParallelOp> par_op_;
+
+  int eviction_policy;
 };
 
 class Fill : public Operator {

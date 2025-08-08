@@ -32,7 +32,7 @@ static constexpr const char *kPtxasRegisterUsageLevel =
     "tl.ptxas_register_usage_level";
 static constexpr const char *kEnablePTXASVerboseOutput =
     "tl.enable_ptxas_verbose_output";
-
+static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 /*!
  * \brief Whether to disable dynamic tail split
  *
@@ -293,6 +293,13 @@ TVM_DLL const Op &tl_gemm();
  *  This op is used to represent a sparse GEMM operation in tilelang.
  */
 TVM_DLL const Op &tl_gemm_sp();
+
+/*!
+ * \brief tilelang intrinsic for shuffle elect.
+ *
+ *  This op is used to represent a shuffle elect operation in tilelang.
+ */
+TVM_DLL const Op &tl_shuffle_elect();
 
 } // namespace tl
 } // namespace tvm

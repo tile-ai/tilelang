@@ -45,6 +45,9 @@ Copy::Copy(Array<PrimExpr> args, BufferMap vmap) : args_(args) {
     auto disable_tma = Downcast<Bool>(args[3]);
     this->disable_tma = disable_tma;
   }
+  if (args.size() >= 5) {
+    this->eviction_policy = args[4].as<IntImmNode>()->value;
+  }
 }
 
 Array<IterVar> Copy::MakeIterVars() const {
@@ -477,7 +480,7 @@ Stmt Fill::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 }
 
 TIR_REGISTER_TL_OP(Copy, copy)
-    .set_num_inputs(3)
+    .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

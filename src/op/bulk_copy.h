@@ -57,7 +57,7 @@ public:
 
 private:
   Buffer src, dst;
-  int stride, padding, dilation, kernel;
+  int stride, padding, dilation, kernel, eviction_policy;
   PrimExpr nhw_step, c_step;
 };
 

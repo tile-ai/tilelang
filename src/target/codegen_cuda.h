@@ -126,6 +126,8 @@ private:
   int32_t GetWmmaFragmentSize(const std::string &scope, const VarNode *variable,
                               int32_t size);
 
+  std::vector<std::string> eviction_policy_names_ = {
+      "EVICT_NORMAL", "EVICT_FIRST", "EVICT_LAST"};
   std::unordered_set<std::string> bf16_supported_ops_ = {
       "bf1622float2", "bf1622int16", "float22bf162", "bf162bf162"};
 };

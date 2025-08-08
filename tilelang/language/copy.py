@@ -1,6 +1,6 @@
 """The language interface for tl programs."""
 
-from typing import Union, List, Optional
+from typing import Union, List, Optional, Literal
 from tilelang import language as T
 from tilelang.utils.language import get_buffer_region_from_load
 from tvm import ir, tir
@@ -81,12 +81,11 @@ def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: s
     return region(T.BufferLoad(buffer_region.buffer, mins), access_type, *region_extents)
 
 
-def copy(
-    src: Union[tir.Buffer, tir.BufferLoad, tir.BufferRegion],
-    dst: Union[tir.Buffer, tir.BufferLoad],
-    coalesced_width: Optional[int] = None,
-    disable_tma: bool = False,
-):
+def copy(src: Union[tir.Buffer, tir.BufferLoad, tir.BufferRegion],
+         dst: Union[tir.Buffer, tir.BufferLoad],
+         coalesced_width: Optional[int] = None,
+         disable_tma: bool = False,
+         eviction_policy: Optional[Literal["evict_normal", "evict_first", "evict_last"]] = None):
     """Copy data between memory regions.
 
     Args:
@@ -145,20 +144,24 @@ def copy(
 
     if coalesced_width is None:
         coalesced_width = -1  # PrimExpr can not be None
+    if eviction_policy is None:
+        eviction_policy = 0
+    else:
+        eviction_policy = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}[eviction_policy]
     return tir.call_intrin("handle", tir.op.Op.get("tl.copy"), src, dst, coalesced_width,
-                           disable_tma)
+                           disable_tma, eviction_policy)
 
 
-def c2d_im2col(
-    img: tir.Buffer,
-    col: tir.Buffer,
-    nhw_step: tir.PrimExpr,
-    c_step: tir.PrimExpr,
-    kernel: int,
-    stride: int,
-    dilation: int,
-    pad: int,
-):
+def c2d_im2col(img: tir.Buffer,
+               col: tir.Buffer,
+               nhw_step: tir.PrimExpr,
+               c_step: tir.PrimExpr,
+               kernel: int,
+               stride: int,
+               dilation: int,
+               pad: int,
+               eviction_policy: Optional[Literal["evict_normal", "evict_first",
+                                                 "evict_last"]] = None):
     """Perform im2col transformation for 2D convolution.
 
     Args:
@@ -174,15 +177,10 @@ def c2d_im2col(
     Returns:
         tir.Call: A handle to the im2col operation
     """
-    return tir.call_intrin(
-        "handle",
-        tir.op.Op.get("tl.c2d_im2col"),
-        img.access_ptr("r"),
-        col.access_ptr("w"),
-        nhw_step,
-        c_step,
-        kernel,
-        stride,
-        dilation,
-        pad,
-    )
+    if eviction_policy is None:
+        eviction_policy = 0
+    else:
+        eviction_policy = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}[eviction_policy]
+    return tir.call_intrin("handle", tir.op.Op.get("tl.c2d_im2col"), img.access_ptr("r"),
+                           col.access_ptr("w"), nhw_step, c_step, kernel, stride, dilation, pad,
+                           eviction_policy)
