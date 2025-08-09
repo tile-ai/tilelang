@@ -286,7 +286,7 @@ private:
       // Add a region if not already present (by structural equality)
       void AddUnique(const BufferRegion &region) {
         for (const BufferRegion &copy_read : regions) {
-          if (StructuralEqual()(region->buffer, copy_read->buffer)) {
+          if (region->buffer.same_as(copy_read->buffer)) {
             return;
           }
         }
@@ -296,7 +296,7 @@ private:
       // Check if a region is present (by structural equality)
       bool Contains(const BufferRegion &region) const {
         for (const BufferRegion &copy_read : regions) {
-          if (StructuralEqual()(region->buffer, copy_read->buffer)) {
+          if (region->buffer.same_as(copy_read->buffer)) {
             return true;
           }
         }
@@ -323,42 +323,53 @@ private:
     // bounded by the number of pipeline stages, since each stage can only be
     // marked as producer_for_copy once, and each read can only be added once.
     // But for safety, we add a hard limit.
-    const size_t max_iterations = pipeline_stage_infos.size() * 4 + 16;
+    const size_t max_iterations = (pipeline_stage_infos.size() * 4) + 16;
     size_t iter_count = 0;
-    bool updated = true;
-    while (updated) {
-      updated = false;
-      for (auto &pinfo : pipeline_stage_infos) {
-        if (pinfo.is_copy_stage()) {
-          continue;
-        }
-        bool should_prepare = false;
-        for (const BufferRegion &write : pinfo.writes) {
-          if (copy_stage_dependency_reads_mgr.Contains(write)) {
-            should_prepare = true;
+
+    for (auto &pinfo : pipeline_stage_infos) {
+      if (!pinfo.is_copy_stage()) {
+        continue;
+      }
+      auto original_copy_stmt_index = pinfo.original_stmt_index;
+      bool updated = true;
+      while (updated) {
+        updated = false;
+        for (auto &pinfo_inner : pipeline_stage_infos) {
+          if (pinfo_inner.is_copy_stage()) {
+            continue;
+          }
+          if (pinfo_inner.original_stmt_index >= original_copy_stmt_index) {
             break;
           }
-        }
-        if (should_prepare && !pinfo.is_producer_for_copy()) {
-          pinfo.producer_for_copy = true;
-          updated = true;
-        }
-        if (should_prepare) {
-          for (const BufferRegion &read : pinfo.reads) {
-            size_t before = copy_stage_dependency_reads_mgr.Size();
-            copy_stage_dependency_reads_mgr.AddUnique(read);
-            if (copy_stage_dependency_reads_mgr.Size() > before) {
-              updated = true;
+
+          bool should_prepare = false;
+          for (const BufferRegion &write : pinfo_inner.writes) {
+            if (copy_stage_dependency_reads_mgr.Contains(write)) {
+              should_prepare = true;
+              break;
+            }
+          }
+          if (should_prepare && !pinfo_inner.is_producer_for_copy()) {
+            pinfo_inner.producer_for_copy = true;
+            updated = true;
+          }
+          if (should_prepare) {
+            for (const BufferRegion &read : pinfo_inner.reads) {
+              size_t before = copy_stage_dependency_reads_mgr.Size();
+              copy_stage_dependency_reads_mgr.AddUnique(read);
+              if (copy_stage_dependency_reads_mgr.Size() > before) {
+                updated = true;
+              }
             }
           }
         }
-      }
-      iter_count++;
-      if (iter_count > max_iterations) {
-        LOG(FATAL)
-            << "Pipeline planning: Exceeded maximum iterations ("
-            << max_iterations << ") in copy stage dependency propagation. "
-            << "This may indicate a cyclic or pathological dependency graph.";
+        iter_count++;
+        if (iter_count > max_iterations) {
+          LOG(FATAL)
+              << "Pipeline planning: Exceeded maximum iterations ("
+              << max_iterations << ") in copy stage dependency propagation. "
+              << "This may indicate a cyclic or pathological dependency graph.";
+        }
       }
     }
 
