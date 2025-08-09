@@ -286,7 +286,7 @@ private:
       // Add a region if not already present (by structural equality)
       void AddUnique(const BufferRegion &region) {
         for (const BufferRegion &copy_read : regions) {
-          if (StructuralEqual()(region, copy_read)) {
+          if (StructuralEqual()(region->buffer, copy_read->buffer)) {
             return;
           }
         }
@@ -296,7 +296,7 @@ private:
       // Check if a region is present (by structural equality)
       bool Contains(const BufferRegion &region) const {
         for (const BufferRegion &copy_read : regions) {
-          if (StructuralEqual()(region, copy_read)) {
+          if (StructuralEqual()(region->buffer, copy_read->buffer)) {
             return true;
           }
         }
