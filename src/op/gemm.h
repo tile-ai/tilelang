@@ -45,6 +45,8 @@ private:
   PrimExpr Aptr, Bptr, Cptr;
   bool trans_A, trans_B;
   int M, N, K;
+  int stride_A, stride_B;
+  int offset_A, offset_B;
   bool clear_accum = false;
   // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
   // only will be enabled under cdna mfma instructions

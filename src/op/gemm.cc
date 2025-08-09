@@ -47,14 +47,18 @@ Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
   K = args[7].as<IntImm>().value()->value;
   policy = static_cast<GemmWarpPolicy>(args[8].as<IntImm>().value()->value);
   clear_accum = args[9].as<Bool>().value();
-  if (args.size() > 10) {
-    kPack = args[10].as<IntImm>().value()->value;
+  stride_A = args[10].as<IntImm>().value()->value;
+  stride_B = args[11].as<IntImm>().value()->value;
+  offset_A = args[12].as<IntImm>().value()->value;
+  offset_B = args[13].as<IntImm>().value()->value;
+  if (args.size() > 14) {
+    kPack = args[14].as<IntImm>().value()->value;
     if (kPack != 1 && kPack != 2) {
       ICHECK(false) << "kPack must be 1 or 2";
     }
   }
-  if (args.size() > 11) {
-    wg_wait = args[11].as<IntImm>().value()->value;
+  if (args.size() > 15) {
+    wg_wait = args[15].as<IntImm>().value()->value;
   }
 }
 
@@ -284,6 +288,19 @@ bool Gemm::CheckWGMMA() const {
   }
 }
 
+static int GetArchInt(Target target) {
+  int arch_int = 0;
+  auto s = target->GetAttr<String>("arch");
+  ICHECK(s.defined());
+  const char *arch_str = s.value().c_str();
+  if (arch_str[0] == 's' && arch_str[1] == 'm' && arch_str[2] == '_') {
+    arch_int = atoi(&arch_str[3]);
+  } else {
+    arch_int = 0;
+  }
+  return arch_int;
+}
+
 Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
   GemmInst gemm_inst = GetGemmInst(block_size, T.target);
@@ -301,6 +318,10 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   ss << warp_m << ", " << warp_n << ", ";
   ss << trans_A << ", " << trans_B;
   ss << ", " << clear_accum;
+  if (TargetIsCuda(T.target) && (GetArchInt(T.target) >= 75)) {
+    ss << ", " << stride_A << ", " << stride_B;
+    ss << ", " << offset_A << ", " << offset_B;
+  }
   if (TargetIsCDNA(T.target)) {
     // for cdna gemm, we need to specify kPack
     ss << ", " << kPack;
