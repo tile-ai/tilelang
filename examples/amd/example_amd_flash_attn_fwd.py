@@ -30,11 +30,11 @@ def ref_program(Q, K, V, is_causal, groups=1):
 
 def get_configs():
     """Generates configurations for the autotuner, tailored for FA-2 style parallelism."""
-    block_M = [32, 64, 128, 192, 256]
-    block_N = [32, 64, 128, 192, 256]
-    threads = [64, 128, 192, 256]
-    num_split_q = [32, 64, 128, 192, 256]
-    num_stages = [0, 1, 2, 3]
+    block_M = [32, 64, 128]
+    block_N = [32, 64, 128]
+    threads = [512]
+    num_split_q = [32, 64]
+    num_stages = [0]
     enable_rasterization = [True]
     k_pack = [2]
     panel_size = [7, 8, 9, 10]
@@ -133,14 +133,14 @@ def fast_flashattn(
                 current_bx = bx
                 q_block_offset = current_bx * block_M
 
-                # Keep Q in shared for the first GEMM to match AMD GEMM expectations
                 Q_shared = T.alloc_shared([block_M, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
+                # Use register fragment for P instead of shared memory to reduce LDS usage
+                acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
 
                 acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
-                acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
-                m_prev = T.alloc_fragment([block_M], accum_dtype) 
+                m_prev = T.alloc_fragment([block_M], accum_dtype)
                 scale_factor = T.alloc_fragment([block_M], accum_dtype)
 
                 T.copy(
@@ -190,6 +190,7 @@ def fast_flashattn(
                     for i in T.Parallel(block_M):
                         l_i[i] += row_sum[i]
 
+                    # Cast acc_s (accum_dtype) to dtype in registers and directly GEMM with V
                     T.copy(acc_s, acc_s_cast)
 
                     T.gemm(acc_s_cast, V_shared, acc_o, policy=GemmWarpPolicy.FullRow)
