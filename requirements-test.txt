@@ -21,7 +21,6 @@ cloudpickle
 ml_dtypes
 psutil
 torch
-thefuzz
 tabulate
 wheel
 setuptools

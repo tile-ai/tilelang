@@ -26,6 +26,10 @@ public:
     kFullCol = 2,
   } policy;
 
+  std::unique_ptr<Operator> Clone() const final {
+    return std::make_unique<Gemm>(*this);
+  }
+
 private:
   // Target GEMM instruction
   enum class GemmInst { kMMA, kWGMMA, kUTCMMA, kMFMA };

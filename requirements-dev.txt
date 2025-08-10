@@ -21,7 +21,6 @@ ml_dtypes
 psutil
 scipy
 torch
-thefuzz
 tabulate
 wheel
 setuptools

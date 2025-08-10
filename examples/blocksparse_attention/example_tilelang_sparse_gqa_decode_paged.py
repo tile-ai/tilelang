@@ -517,19 +517,10 @@ def main(args):
     output_sparse = sparse_attn.forward(Q, K_cache, V_cache, block_indices, cache_seqlens,
                                         block_table)
 
-    is_flash_attn_2_available = False
-    try:
-        import flash_attn  # noqa: F401
-        is_flash_attn_2_available = True
-    except:
-        pass
+    import flash_attn  # noqa: F401
 
     output_ref_torch = ref_program_torch_paged(Q, K_cache, V_cache, block_indices, cache_seqlens,
                                                block_table, page_block_size, block_N)
-
-    if not is_flash_attn_2_available:
-        print("FlashAttn 2 is not available, skipping FA reference and performance measurement")
-        return
 
     output_ref_fa = ref_program_fa(Q, K_cache, V_cache, cache_seqlens, block_table)
     # Check correctness
