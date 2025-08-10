@@ -6,8 +6,6 @@ import itertools
 import torch
 import argparse
 
-tilelang.disable_cache()
-
 
 def _tir_u8_to_f4_to_f16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, dtype: str):
     assert nbit == 4
