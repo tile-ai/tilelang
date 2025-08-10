@@ -1552,7 +1552,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
                           op->args, true, os);
   } else if (op->op.same_as(tl::tl_shuffle_elect())) {
-    os << "tl::tl_shuffle_elect<" << op->args[0] << ">()";
+    os << "tl::tl_shuffle_elect<" << PrintExpr(op->args[0]) << ">()";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }

@@ -321,8 +321,10 @@ public:
 
 class BarrierCreationRewriter : public StmtExprMutator {
 public:
-  BarrierCreationRewriter(std::vector<int> restore_barrier_ids)
-      : restore_barrier_ids_(std::move(restore_barrier_ids)) {}
+  BarrierCreationRewriter(std::vector<int> restore_barrier_ids,
+                          PrimExpr producer_thread_extent)
+      : restore_barrier_ids_(std::move(restore_barrier_ids)),
+        producer_thread_extent_(producer_thread_extent) {}
 
   PrimExpr VisitExpr_(const CallNode *op) {
     if (op->op.same_as(create_list_of_mbarrier())) {
@@ -334,7 +336,7 @@ public:
 
       for (size_t i{0}; i < op->args.size(); ++i) {
         if (tmp_[i]) {
-          new_args.push_back(128);
+          new_args.push_back(producer_thread_extent_);
         } else {
           new_args.push_back(op->args[i]);
         }
@@ -345,6 +347,7 @@ public:
     }
   }
   std::vector<int> restore_barrier_ids_;
+  PrimExpr producer_thread_extent_;
 };
 
 // we trust mbarrier_wait_parity to be correct
@@ -381,8 +384,8 @@ public:
                                 collector.barrier_id_to_range(),
                                 has_create_list_of_mbarrier);
     f.CopyOnWrite()->body = rewriter(f->body);
-    auto barrier_creation_rewriter =
-        BarrierCreationRewriter(rewriter.restore_barrier_ids_);
+    auto barrier_creation_rewriter = BarrierCreationRewriter(
+        rewriter.restore_barrier_ids_, rewriter.producer_thread_extent_);
     f.CopyOnWrite()->body = barrier_creation_rewriter(f->body);
     return f;
   }
@@ -399,11 +402,14 @@ private:
 
   Stmt VisitStmt_(const IfThenElseNode *op) {
     if (first_if) {
+      if (op->condition.as<GENode>()) {
+        producer_thread_extent_ =
+            thread_var_->dom->extent - op->condition.as<GENode>()->b;
+      }
       TmaSequenceCollector collector(tma_op_to_barrier_id_);
       collector(op->then_case);
       clear_expect_list_ = collector.GetSequence();
       restore_barrier_ids_ = collector.GetRestoreBarrierIds();
-
       first_if = false;
 
       is_producer_ = true;
@@ -425,7 +431,7 @@ private:
       first_if = true;
     } else if (op->attr_key == tir::attr::thread_extent &&
                Downcast<IterVar>(op->node)->thread_tag == "threadIdx.x") {
-      thread_var_ = Downcast<IterVar>(op->node)->var;
+      thread_var_ = Downcast<IterVar>(op->node);
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
@@ -470,10 +476,11 @@ private:
   bool has_create_list_of_mbarrier_;
   bool clear_arrive_{false};
   bool first_if{false}, has_warp_specialization_{false}, is_producer_{false};
-  Var thread_var_;
+  IterVar thread_var_;
   int tma_expect_tx_{0}, cur_expect_idx_{0};
   std::vector<bool> clear_expect_list_;
   std::vector<int> restore_barrier_ids_;
+  PrimExpr producer_thread_extent_;
 };
 
 tvm::transform::Pass InjectTmaBarrier() {
