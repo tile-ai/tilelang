@@ -30,18 +30,23 @@ def ref_program(Q, K, V, is_causal, groups=1):
 
 def get_configs():
     """Generates configurations for the autotuner, tailored for FA-2 style parallelism."""
-    block_M = [16, 32, 64, 128, 256, 512]
-    block_N = [16, 32, 64, 128, 256, 512]
-    threads = [128, 256, 512, 1024]
-    num_split_q = [16, 32, 64, 128, 256, 512]
-    num_stages = [0, 1, 2]
-    enable_rasterization = [True, False]
-    k_pack = [1, 2]
+    block_M = [32, 64, 128]
+    block_N = [32, 64, 128]
+    threads = [512]
+    num_split_q = [32, 64]
+    num_stages = [0]
+    enable_rasterization = [True]
+    k_pack = [2]
+    panel_size = [7, 8, 9, 10]
+    qk_coalesced_width = [8]
+    v_coalesced_width = [4, 8]
 
     valid_configs = []
 
-    for m, n, s, t, stages, r, k in itertools.product(block_M, block_N, num_split_q, threads,
-                                                      num_stages, enable_rasterization, k_pack):
+    for m, n, s, t, stages, r, k, p, qkw, vw in itertools.product(
+            block_M, block_N, num_split_q, threads,
+            num_stages, enable_rasterization, k_pack, panel_size,
+            qk_coalesced_width, v_coalesced_width):
         valid_configs.append({
             "block_M": m,
             "block_N": n,
@@ -49,7 +54,10 @@ def get_configs():
             "threads": t,
             "num_stages": stages,
             "enable_rasterization": r,
-            "k_pack": k
+            "k_pack": k,
+            "panel_size": p,
+            "qk_coalesced_width": qkw,
+            "v_coalesced_width": vw,
         })
     valid_configs.append({
         'block_M': 64,
@@ -58,7 +66,10 @@ def get_configs():
         'threads': 256,
         'num_stages': 1,
         'enable_rasterization': True,
-        'k_pack': 2
+        'k_pack': 2,
+        'panel_size': 64,
+        'qk_coalesced_width': 8,
+        'v_coalesced_width': 8,
     })
     return valid_configs
 
@@ -79,6 +90,9 @@ def fast_flashattn(
     num_stages: int,
     enable_rasterization: bool,
     k_pack: int,
+    panel_size: int,
+    qk_coalesced_width: int,
+    v_coalesced_width: int,
 ):
     scale = (1.0 / dim)**0.5 * 1.44269504
     head_kv = heads // groups
@@ -87,8 +101,8 @@ def fast_flashattn(
     dtype = "float16"
     accum_dtype = "float"
 
-    v_vec_size = 4
-    vec_size = 4 * k_pack
+    vec_size = qk_coalesced_width
+    v_vec_size = v_coalesced_width
 
     @T.prim_func
     def main(
@@ -98,7 +112,7 @@ def fast_flashattn(
             Output: T.Tensor(q_shape, dtype),
     ):
         with T.Kernel(num_split_q, batch * heads, threads=threads) as (b_split, byz_combined):
-            T.use_swizzle(10, enable=enable_rasterization)
+            T.use_swizzle(panel_size, enable=enable_rasterization)
 
             bz = byz_combined // heads
             by = byz_combined % heads
