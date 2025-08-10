@@ -13,6 +13,28 @@ enum class CacheHintSm90 : uint64_t {
   EVICT_LAST = 0x14F0000000000000,
 };
 
+TL_DEVICE void tma_load(void *smem_ptr, void *gmem_ptr, uint64_t &smem_mbar,
+                        uint32_t size) {
+  uint32_t smem_int_mbar = smem_ptr_to_uint(&smem_mbar);
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::"
+               "bytes [%0], [%1], %2, [%3]; \n" ::"r"(smem_int_ptr),
+               "l"(gmem_ptr), "r"(size), "r"(smem_int_mbar)
+               :);
+}
+
+TL_DEVICE void tma_load_multicast(void *smem_ptr, void *gmem_ptr,
+                                  uint64_t &smem_mbar, uint32_t size,
+                                  uint16_t mask) {
+  uint32_t smem_int_mbar = smem_ptr_to_uint(&smem_mbar);
+  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
+  asm volatile(
+      "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes."
+      "multicast::cluster [%0], [%1], %2, [%3], %4; \n" ::"r"(smem_int_ptr),
+      "l"(gmem_ptr), "r"(size), "r"(smem_int_mbar), "h"(mask)
+      :);
+}
+
 template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
 TL_DEVICE void tma_load(const CUtensorMap &descriptor, uint64_t &smem_mbar,
                         void const *const smem_ptr, int32_t const &crd0) {
@@ -22,7 +44,7 @@ TL_DEVICE void tma_load(const CUtensorMap &descriptor, uint64_t &smem_mbar,
   if constexpr (cache_hint == CacheHintSm90::EVICT_NORMAL) {
     asm volatile("cp.async.bulk.tensor.1d.shared::cluster.global.mbarrier::"
                  "complete_tx::bytes"
-                 " [%0], [%1, {%2}], [%3];"
+                 " [%0], [%1, {%3}], [%2];"
                  :
                  : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
                    "r"(crd0)
@@ -30,7 +52,7 @@ TL_DEVICE void tma_load(const CUtensorMap &descriptor, uint64_t &smem_mbar,
   } else {
     asm volatile("cp.async.bulk.tensor.1d.shared::cluster.global.mbarrier::"
                  "complete_tx::bytes.L2::cache_hint"
-                 " [%0], [%1, {%2}], [%3], %4;"
+                 " [%0], [%1, {%3}], [%2], %4;"
                  :
                  : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
                    "r"(crd0), "l"(cache_hint)
@@ -185,13 +207,13 @@ TL_DEVICE void tma_store(const CUtensorMap &descriptor,
 
   if constexpr (cache_hint == CacheHintSm90::EVICT_NORMAL) {
     asm volatile("cp.async.bulk.tensor.1d.global.shared::cta.bulk_group [%0, "
-                 "{%1}], [%2];"
+                 "{%2}], [%1];"
                  :
                  : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0)
                  : "memory");
   } else {
     asm volatile("cp.async.bulk.tensor.1d.global.shared::cta.bulk_group "
-                 "::cache_hint [%0, {%1}], [%2], %3;"
+                 "::cache_hint [%0, {%2}], [%1], %3;"
                  :
                  : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0),
                    "l"(cache_hint)
