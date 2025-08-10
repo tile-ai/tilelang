@@ -32,7 +32,7 @@ def get_configs():
     """Generates configurations for the autotuner, tailored for FA-2 style parallelism."""
     block_M = [32, 64, 128, 256]
     block_N = [32, 64, 128, 256]
-    threads = [64, 128, 192, 256]
+    threads = [64, 128, 192, 256, 512, 1024]
     num_split_q = [32, 64, 128, 256, 256]
     num_stages = [0]
     enable_rasterization = [True]
@@ -151,6 +151,8 @@ def fast_flashattn(
                 loop_end_k = T.ceildiv(q_block_offset + block_M,
                                        block_N) if is_causal else T.ceildiv(seq_len, block_N)
 
+                row_sum = T.alloc_fragment([block_M], accum_dtype)
+
                 for k in T.Pipelined(loop_end_k, num_stages=num_stages):
                     kv_idx = k * block_N
 
@@ -163,13 +165,20 @@ def fast_flashattn(
                         V_shared,
                         coalesced_width=v_vec_size)
 
-                    T.clear(acc_s)
-                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, k_pack=k_pack, policy=GemmWarpPolicy.FullRow)
-
                     if is_causal:
                         for i, j in T.Parallel(block_M, block_N):
-                            acc_s[i, j] = T.if_then_else(q_block_offset + i >= kv_idx + j,
-                                                         acc_s[i, j], -T.infinity(acc_s.dtype))
+                            acc_s[i, j] = T.if_then_else(
+                                q_block_offset + i >= kv_idx + j, 0, -T.infinity(acc_s.dtype))
+                    else:
+                        T.clear(acc_s)
+                    T.gemm(
+                        Q_shared,
+                        K_shared,
+                        acc_s,
+                        transpose_B=True,
+                        k_pack=k_pack,
+                        policy=GemmWarpPolicy.FullRow,
+                    )
 
                     T.copy(m_i, m_prev)
                     T.reduce_max(acc_s, m_i, dim=1, clear=False)
@@ -185,7 +194,6 @@ def fast_flashattn(
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.exp2(acc_s[i, j] * scale - m_i[i] * scale)
 
-                    row_sum = T.alloc_fragment([block_M], accum_dtype)
                     T.reduce_sum(acc_s, row_sum, dim=1)
                     for i in T.Parallel(block_M):
                         l_i[i] += row_sum[i]
