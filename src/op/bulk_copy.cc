@@ -273,7 +273,9 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
         << "inner_box_dim: " << *inner_box_dim << " is not divisible by 256";
     instruction_dim = 256;
   }
-  ICHECK((*inner_box_dim) % instruction_dim == 0) << "inner_box_dim: " << *inner_box_dim << " is not divisible by instruction_dim: " << instruction_dim;
+  ICHECK((*inner_box_dim) % instruction_dim == 0)
+      << "inner_box_dim: " << *inner_box_dim
+      << " is not divisible by instruction_dim: " << instruction_dim;
   desc.smem_box.Set(0, PrimExpr(instruction_dim));
 
   int inner_box_dim_ = instruction_dim * shared_tensor->dtype.bytes();
