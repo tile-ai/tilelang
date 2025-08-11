@@ -580,8 +580,10 @@ template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           int wg_wait = 0, typename A_type, typename B_type, typename C_type>
 TL_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
   if constexpr (use_wgmma) {
-    static_assert((trans_A && lda == M) || (!trans_A && lda == K));
-    static_assert((trans_B && ldb == K) || (!trans_B && ldb == N));
+    static_assert((trans_A && lda == M) || (!trans_A && lda == K),
+                  "Hopper wgmma doesn't support custom stride for A");
+    static_assert((trans_B && ldb == K) || (!trans_B && ldb == N),
+                  "Hopper wgmma doesn't support custom stride for B");
     static_assert(offset_a == 0 && offset_b == 0,
                   "offset_a and offset_b must be zero for wgmma");
     using MMA = cute::tl_wgmma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n,
@@ -603,8 +605,10 @@ template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           int wg_wait = 0, typename A_type, typename B_type, typename C_type>
 TL_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
   if constexpr (use_wgmma) {
-    static_assert((trans_A && lda == M) || (!trans_A && lda == K));
-    static_assert((trans_B && ldb == K) || (!trans_B && ldb == N));
+    static_assert((trans_A && lda == M) || (!trans_A && lda == K),
+                  "Hopper wgmma doesn't support custom stride for A");
+    static_assert((trans_B && ldb == K) || (!trans_B && ldb == N),
+                  "Hopper wgmma doesn't support custom stride for B");
     static_assert(offset_a == 0 && offset_b == 0,
                   "offset_a and offset_b must be zero for wgmma");
     using MMA = cute::tl_wgmma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n,
