@@ -220,12 +220,14 @@ GemmSP::ComputeWarpPartition(int num_warps, Target target,
     if (warp_shape_m % 32 != 0) { // GemmWarpPolicy::kFullRow
       m_warp = this->M / 32;
       warp_shape_m = 32;
+      ICHECK(m_warp > 0) << "Cannot arrange the warp shape to be a multiple of (32, 32), please reduce num threads or increase tiling size";
       n_warp = num_warps / m_warp;
       warp_shape_n = this->N / n_warp;
       ICHECK(warp_shape_n % 32 == 0) << "Cannot arrange the warp shape to be a multiple of (32, 32), please reduce num threads or increase tiling size";
     } else if (warp_shape_n % 32 != 0) { // GemmWarpPolicy::kFullColumn
       n_warp = this->N / 32;
       warp_shape_n = 32;
+      ICHECK(n_warp > 0) << "Cannot arrange the warp shape to be a multiple of (32, 32), please reduce num threads or increase tiling size";
       m_warp = num_warps / n_warp;
       warp_shape_m = this->M / m_warp;
       ICHECK(warp_shape_m % 32 == 0) << "Cannot arrange the warp shape to be a multiple of (32, 32), please reduce num threads or increase tiling size";
