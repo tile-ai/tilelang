@@ -538,7 +538,7 @@ public:
   WgMMACollector() = default;
 
   void VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(tl_gemm())) {
+    if (op->op.same_as(tl_gemm()) || op->op.same_as(tl_gemm_sp())) {
       auto op_name = std::string(op->args[0].as<StringImmNode>()->value);
       if (has_wgmma_) {
         has_wgmma_ =
@@ -579,7 +579,7 @@ public:
 
   bool onlyHasWgMMA() const { return only_has_wgmma_; }
 
-  bool hasSimtCopy() const { return has_simit_copy_; }
+  bool hasSimtCopy() const { return has_simt_copy_; }
 
 private:
   template <typename NodeType> Stmt FilterByRole(const NodeType *op) {
@@ -673,7 +673,7 @@ private:
           block_stmt.push_back(stmt);
           if (collector.HasSimtCopy()) {
             block_stmt.push_back(makeCpAsyncBarrier(release_barrier_id));
-            has_simit_copy_ = true;
+            has_simt_copy_ = true;
           }
           if (map.release_after[i][j]) {
             block_stmt.push_back(makeArriveBarrier(release_barrier_id));
@@ -1065,7 +1065,7 @@ private:
   PipelineInfo pipeline_info_;
   friend class WarpSpecializedRewriter;
   bool only_has_wgmma_ = false;
-  bool has_simit_copy_ = false;
+  bool has_simt_copy_ = false;
 };
 
 class SetMaxNRegCollector : public StmtExprVisitor {
