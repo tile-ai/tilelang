@@ -288,7 +288,7 @@ def main(
     pv_flops = 2 * batch * heads * kv_ctx * dim
     total_flops = qk_flops + pv_flops
     BLOCK_N = 64
-    BLOCK_H = 64
+    BLOCK_H = min(64, heads // kv_heads)
     num_split = 1
 
     kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split)

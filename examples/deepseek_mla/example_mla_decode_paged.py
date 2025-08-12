@@ -318,7 +318,7 @@ def run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s
     dpe = d - dv
     num_kv_splits = 1
     BLOCK_N = 64
-    BLOCK_H = 64
+    BLOCK_H = min(64, h_q // h_kv)
 
     out_partial = torch.empty(b, h_q, num_kv_splits, dv, dtype=dtype, device=q.device)
     glse = torch.empty(b, h_q, num_kv_splits, dtype=dtype, device=q.device)
