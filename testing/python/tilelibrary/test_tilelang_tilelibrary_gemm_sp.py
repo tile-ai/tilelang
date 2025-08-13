@@ -5,6 +5,7 @@ import tilelang.testing
 from tilelang.utils.sparse import compress
 from tilelang.layout import make_metadata_layout
 
+tilelang.disable_cache()
 torch.set_printoptions(threshold=float('inf'), edgeitems=float('inf'), linewidth=10000)
 torch.manual_seed(42)
 
@@ -14,6 +15,7 @@ STR_TO_TYPE = {
     "bfloat16": torch.bfloat16,
     "float8_e4m3": torch.float8_e4m3fn,
     "int8": torch.int8,
+    "int32": torch.int32,
 }
 
 SPARSITY_MAP = {
@@ -104,7 +106,8 @@ def matmul_sp_sm80(
     trans_A,
     trans_B,
 ):
-    E_factor = 16
+    is_8_bit = in_dtype in ["int8", "float8_e4m3"]
+    E_factor = 32 if is_8_bit else 16
     A_sparse_shape = (M, K // 2) if not trans_A else (K // 2, M)
     B_shape = (K, N) if not trans_B else (N, K)
     A_shared_shape = (block_M, block_K // 2) if not trans_A else (block_K // 2, block_M)
@@ -115,14 +118,14 @@ def matmul_sp_sm80(
     @T.prim_func
     def main(
             A_sparse: T.Tensor(A_sparse_shape, in_dtype),
-            E: T.Tensor((M, K // E_factor), 'int16'),
+            E: T.Tensor((M, K // E_factor), 'int32' if is_8_bit else 'int16'),
             B: T.Tensor(B_shape, in_dtype),
             C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
-            E_shared = T.alloc_shared((block_M, block_K // E_factor), 'int16')
+            E_shared = T.alloc_shared((block_M, block_K // E_factor), 'int32' if is_8_bit else 'int16')
             C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.annotate_layout({
                 E:

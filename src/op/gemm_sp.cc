@@ -210,27 +210,33 @@ GemmSP::ComputeWarpPartition(int num_warps, Target target,
     ICHECK(0) << "Unknown GemmWarpPolicy";
   }
 
-  // Special handling for gemm_sp when the tiling size is not a multiple of (32, 32).
+  // Special handling for gemm_sp when the tiling size is not a multiple of (tm, tn).
+  // due to ldsm constraint on matrix and metadata
   // In this case, we skip previous checks and fall back to either
   // GemmWarpPolicy::kFullRow or GemmWarpPolicy::kFullColumn,
-  // using a fixed granularity of 32 × 32.
+  // 16-bit type: 32 * 16; 8-bit type: 16 * 8
+  ICHECK(A->dtype.bits() == B->dtype.bits())
+      << "A and B must have the same dtype, but received "
+      << A->dtype << " and " << B->dtype;
+  int m_atom_size = A->dtype.bits() == 16 ? 32 : 16;
+  int n_atom_size = A->dtype.bits() == 16 ? 16 : 8;
   if (TargetIsAmpere(target)) {
     int warp_shape_m = this->M / m_warp;
     int warp_shape_n = this->N / n_warp;
-    if (warp_shape_m % 32 != 0) { // GemmWarpPolicy::kFullRow
-      m_warp = this->M / 32;
-      warp_shape_m = 32;
-      ICHECK(m_warp > 0) << "Cannot arrange the warp shape to be a multiple of (32, 32), please reduce num threads or increase tiling size";
+    if (warp_shape_m % m_atom_size) { // GemmWarpPolicy::kFullRow
+      m_warp = this->M / m_atom_size;
+      warp_shape_m = m_atom_size;
+      ICHECK(m_warp > 0) << "Cannot arrange the warp shape to be a multiple of atom size, please reduce num threads or increase tiling size";
       n_warp = num_warps / m_warp;
       warp_shape_n = this->N / n_warp;
-      ICHECK(warp_shape_n % 32 == 0) << "Cannot arrange the warp shape to be a multiple of (32, 32), please reduce num threads or increase tiling size";
-    } else if (warp_shape_n % 32 != 0) { // GemmWarpPolicy::kFullColumn
-      n_warp = this->N / 32;
-      warp_shape_n = 32;
-      ICHECK(n_warp > 0) << "Cannot arrange the warp shape to be a multiple of (32, 32), please reduce num threads or increase tiling size";
+      ICHECK(warp_shape_n % n_atom_size == 0) << "Cannot arrange the warp shape to be a multiple of atom size, please reduce num threads or increase tiling size";
+    } else if (warp_shape_n % n_atom_size != 0) { // GemmWarpPolicy::kFullColumn
+      n_warp = this->N / n_atom_size;
+      warp_shape_n = n_atom_size;
+      ICHECK(n_warp > 0) << "Cannot arrange the warp shape to be a multiple of atom size, please reduce num threads or increase tiling size";
       m_warp = num_warps / n_warp;
       warp_shape_m = this->M / m_warp;
-      ICHECK(warp_shape_m % 32 == 0) << "Cannot arrange the warp shape to be a multiple of (32, 32), please reduce num threads or increase tiling size";
+      ICHECK(warp_shape_m % m_atom_size == 0) << "Cannot arrange the warp shape to be a multiple of atom size, please reduce num threads or increase tiling size";
     }
     ICHECK(m_warp * n_warp == num_warps)
         << "m_warp * n_warp must equal num_warps, please report an issue when encounter this";
@@ -335,7 +341,7 @@ LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     auto [warp_m, warp_n] =
         ComputeWarpPartition(block_size / warp_size, T.target);
     auto fragment =
-        makeGemmFragmentCSparse(M, N, M / warp_m, N / warp_n, C->dtype.bits());
+        makeGemmSparseFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
     results.Set(C, fragment->BindThreadRange(thread_range));
 
     if (A.scope() == "shared" || A.scope() == "shared.dyn") {
@@ -343,8 +349,7 @@ LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
       results.Set(A,
-                  makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   A->dtype.bits(), trans_A ? 1 : 2));
+                  makeGemmSparseAmpereABLayout(mat_stride, mat_continuous, A->dtype.bits()));
     } else if (A.scope() == "local.fragment") {
       // auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
       //                                   A->dtype.bits(), trans_A);
@@ -357,9 +362,7 @@ LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       int dim_B = B->shape.size();
       const int64_t mat_stride = *as_const_int(B->shape[dim_B - 2]);
       const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
-      results.Set(B,
-                  makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   B->dtype.bits(), trans_B ? 2 : 1));
+      results.Set(B, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous, B->dtype.bits()));
     } else if (B.scope() == "local.fragment") {
       // auto fragment =
       //     makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);

@@ -5,10 +5,47 @@
 namespace tl {
 
 static int const kSparse = 2;
+template <typename T, typename Shape>
+struct ShapeCheck {
+    static constexpr bool value = false;
+};
 
-template <typename Type>
+template <typename Shape>
+struct ShapeCheck<cutlass::half_t, Shape> {
+    static constexpr bool value =
+        (Shape::kM % 32 == 0) &&
+        (Shape::kN % 16 == 0) &&
+        (Shape::kK % 64 == 0);
+};
+
+template <typename Shape>
+struct ShapeCheck<cutlass::bfloat16_t, Shape> {
+    static constexpr bool value =
+        (Shape::kM % 32 == 0) &&
+        (Shape::kN % 16 == 0) &&
+        (Shape::kK % 64 == 0);
+};
+
+template <typename Shape>
+struct ShapeCheck<int8_t, Shape> {
+    static constexpr bool value =
+        (Shape::kM % 16 == 0) &&
+        (Shape::kN % 8 == 0) &&
+        (Shape::kK % 128 == 0);
+};
+
+template <typename Shape>
+struct ShapeCheck<uint8_t, Shape> {
+    static constexpr bool value =
+        (Shape::kM % 16 == 0) &&
+        (Shape::kN % 8 == 0) &&
+        (Shape::kK % 128 == 0);
+};
+
+
+template <typename T>
 struct DispatchInstructionShape {
-  static_assert(std::is_same<Type, void>::value, "Unsupported type for DispatchInstructionShape");
+  static_assert(!std::is_same_v<T, T>, "Unsupported type for DispatchInstructionShape");
 };
 
 template<>
@@ -30,19 +67,17 @@ struct DispatchInstructionShape<cutlass::bfloat16_t> {
 //   using Operator = cutlass::arch::OpMultiplyAdd;
 // };
 
-// TODO: Not supported for now
-// template<>
-// struct DispatchInstructionShape<int8_t> {
-//   using Shape = cutlass::gemm::GemmShape<16, 8, 64>;
-//   using Operator = cutlass::arch::OpMultiplyAddSaturate;
-// };
+template<>
+struct DispatchInstructionShape<int8_t> {
+  using Shape = cutlass::gemm::GemmShape<16, 8, 64>;
+  using Operator = cutlass::arch::OpMultiplyAddSaturate;
+};
 
-// TODO: Not supported for now
-// template<>
-// struct DispatchInstructionShape<uint8_t> {
-//   using Shape = cutlass::gemm::GemmShape<16, 8, 64>;
-//   using Operator = cutlass::arch::OpMultiplyAddSaturate;
-// };
+template<>
+struct DispatchInstructionShape<uint8_t> {
+  using Shape = cutlass::gemm::GemmShape<16, 8, 64>;
+  using Operator = cutlass::arch::OpMultiplyAddSaturate;
+};
 
 // TODO: Not supported for now
 // template<>
@@ -70,6 +105,7 @@ struct DispatchSharedMemoryLayoutB;
 
 template <typename T, int N, int K>
 struct DispatchSharedMemoryLayoutB<T, false, N, K> {
+  static_assert(cutlass::sizeof_bits<T>::value != 8, "int8, uint8, float8 only support column major layout for matrix B");
   static int const Crosswise_B = cutlass::platform::min(int(128 / sizeof(T)), N);
   using SmemLayoutB = cutlass::layout::RowMajorTensorOpMultiplicandCongruous<cutlass::sizeof_bits<T>::value, Crosswise_B>;
 };
@@ -85,27 +121,27 @@ struct DispatchSharedMemoryLayoutB<T, true, N, K> {
 };
 
 template <typename T>
-struct DispatchTVMTypeToCutlass {
-  static_assert(std::is_same<T, void>::value, "Unsupported type for DispatchTVMTypeToCutlass");
+struct DispatchType {
+  static_assert(std::is_same<T, void>::value, "Unsupported dtype");
 };
 
 template <>
-struct DispatchTVMTypeToCutlass<cutlass::half_t> {
+struct DispatchType<cutlass::half_t> {
   using Type = cutlass::half_t;
 };
 
 template <>
-struct DispatchTVMTypeToCutlass<cutlass::bfloat16_t> {
+struct DispatchType<cutlass::bfloat16_t> {
   using Type = cutlass::bfloat16_t;
 };
 
 template <>
-struct DispatchTVMTypeToCutlass<unsigned char> {
+struct DispatchType<unsigned char> {
   using Type = uint8_t;
 };
 
 template <>
-struct DispatchTVMTypeToCutlass<signed char> {
+struct DispatchType<signed char> {
   using Type = int8_t;
 };
 
@@ -116,13 +152,13 @@ class GemmTensorOp {
 public:
   static_assert(Shape::kM % num_warp_m == 0);
   static_assert(Shape::kN % num_warp_n == 0);
-  static_assert(Shape::kM % 32 == 0, "Tile size M must be a multiple of 32");
-  static_assert(Shape::kN % 32 == 0, "Tile size N must be a multiple of 32");
-  static_assert(Shape::kK % 64 == 0, "Tile size K must be a multiple of 64");
-
-  using ElementA = typename DispatchTVMTypeToCutlass<A_type_raw>::Type;
-  using ElementB = typename DispatchTVMTypeToCutlass<B_type_raw>::Type;
+  using ElementA = typename DispatchType<A_type_raw>::Type;
+  using ElementB = typename DispatchType<B_type_raw>::Type;
   using ElementC = C_type_raw;
+
+  static_assert(std::is_same_v<ElementA, ElementB>, "A and B are not the same type");
+  static_assert(ShapeCheck<ElementA, Shape>::value, "Invalid shape for ElementA");
+
   using LayoutA =
       typename std::conditional_t<trans_A, cutlass::layout::ColumnMajor,
                                   cutlass::layout::RowMajor>;
@@ -139,7 +175,6 @@ public:
                 ThreadblockShape::kN / num_warp_n, ThreadblockShape::kK>;
   using InstructionShape = typename DispatchInstructionShape<ElementA>::Shape;
   using Operator = typename DispatchInstructionShape<ElementA>::Operator;
-  static_assert(std::is_same_v<InstructionShape, typename DispatchInstructionShape<ElementB>::Shape>, "Divergent shape dispatch.");
   static_assert(WarpShape::kK % InstructionShape::kK == 0, "K dimension must be divisible by instruction shape K.");
 
   // instruction/warp config
