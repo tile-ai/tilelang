@@ -26,13 +26,16 @@ jobs:
 
     - name: Ensure venv (local & persistent)
       run: |
+        echo "Running on AMD GPU"
         set -e
         REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
         MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
         
+        echo "Copying torch and torchvision to venv"
         cp -r /usr/local/lib/python3.12/dist-packages/torch ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/lib/python3.12/site-packages/
         cp -r /usr/local/lib/python3.12/dist-packages/torchvision ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/lib/python3.12/site-packages/
 
+        echo "Installing requirements"
         if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
           echo "venv exists and hash matches – reuse it"
         else
@@ -53,11 +56,13 @@ jobs:
 
     - name: Install project (wheel form)
       run: |
+        echo "Installing project (wheel form)"
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         USE_ROCM=True pip install . --no-user
 
     - name: Run tests
       run: |
+        echo "Running tests"
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd testing/python/amd
         unset PYTHONPATH
