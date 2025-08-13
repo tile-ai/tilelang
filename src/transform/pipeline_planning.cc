@@ -6,6 +6,7 @@
 #include <tvm/tir/transform.h>
 
 #include "../target/utils.h"
+#include "tvm/ir/expr.h"
 
 namespace tvm {
 namespace tl {
@@ -81,7 +82,11 @@ private:
     auto load_region = BufferRegion(load_buffer, region);
     reads_.push_back(load_region);
 
-    if (op->buffer.scope() == "global") {
+    if (op->buffer.scope() == "global" && !within_condition_expr_) {
+      // skip condition expr of if_then_else node
+      // shared[i] = T.if_then_else(global[i] < n, register_a[i], register_b[i])
+      // is not a global read shared[i] = T.if_then_else(global[i] < n,
+      // global_a[i], global_b[i]) is a global read
       is_global_read_ = true;
     }
   }
@@ -103,8 +108,27 @@ private:
         // because we only care about the buffer itself instead of indices
         reads_.push_back(buffer_region);
       }
+    } else if (op->op.same_as(builtin::if_then_else())) {
+      within_condition_expr_ = true;
+      this->VisitExpr(op->args[0]);
+      within_condition_expr_ = false;
+      for (auto i = 1; i < op->args.size(); i++) {
+        this->VisitExpr(op->args[i]);
+      }
     } else {
       StmtExprVisitor::VisitExpr_(op);
+    }
+  }
+
+  void VisitStmt_(const IfThenElseNode *op) final {
+    within_condition_expr_ = true;
+    this->VisitExpr(op->condition);
+    within_condition_expr_ = false;
+    this->VisitStmt(op->then_case);
+    if (op->else_case.defined()) {
+      within_condition_expr_ = true;
+      this->VisitStmt(op->else_case.value());
+      within_condition_expr_ = false;
     }
   }
 
@@ -115,6 +139,7 @@ private:
   bool is_global_read_ = false;
   bool under_buffer_store_ = false;
   bool is_global_copy_pattern_ = false;
+  bool within_condition_expr_ = false;
 };
 
 class PipelinePlanner : public StmtExprMutator {
