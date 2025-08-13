@@ -73,6 +73,7 @@ runtime::Module BuildTileLangHIP(IRModule mod, Target target) {
   
   std::string fmt = "ptx";
   std::string ptx;
+
   if (auto f = Function::GetGlobal("tilelang_callback_hip_compile")) {
     ptx = (*f)(code, target).cast<std::string>();
     if (ptx[0] != '/')
@@ -80,6 +81,7 @@ runtime::Module BuildTileLangHIP(IRModule mod, Target target) {
   } else {
     ICHECK(false) << "tilelang_callback_hip_compile is not set";
   }
+  
   return ROCMModuleCreate(ptx, fmt, ExtractFuncInfo(mod), code, std::string());
 }
 
