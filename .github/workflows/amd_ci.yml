@@ -8,7 +8,7 @@ env:
 jobs:
 
   build-test:
-    runs-on: self-hosted
+    runs-on: [self-hosted, amd, gpu]
     permissions:
       contents: read
     steps:
