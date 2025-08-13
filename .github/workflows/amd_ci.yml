@@ -32,8 +32,8 @@ jobs:
         MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
         
         echo "Copying torch and torchvision to venv"
-        cp -r /usr/local/lib/python3.12/dist-packages/torch ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/lib/python3.12/site-packages/
-        cp -r /usr/local/lib/python3.12/dist-packages/torchvision ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/lib/python3.12/site-packages/
+        # cp -r /usr/local/lib/python3.12/dist-packages/torch ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/lib/python3.12/site-packages/
+        # cp -r /usr/local/lib/python3.12/dist-packages/torchvision ${{ runner.tool_cache }}/${{ env.VENV_DIR }}/lib/python3.12/site-packages/
 
         echo "Installing requirements"
         if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
