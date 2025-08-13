@@ -43,10 +43,11 @@ def get_configs():
 
     valid_configs = []
 
-    for m, n, s, t, stages, r, k, p, qkw, vw in itertools.product(
-            block_M, block_N, num_split_q, threads,
-            num_stages, enable_rasterization, k_pack, panel_size,
-            qk_coalesced_width, v_coalesced_width):
+    for m, n, s, t, stages, r, k, p, qkw, vw in itertools.product(block_M, block_N, num_split_q,
+                                                                  threads, num_stages,
+                                                                  enable_rasterization, k_pack,
+                                                                  panel_size, qk_coalesced_width,
+                                                                  v_coalesced_width):
         valid_configs.append({
             "block_M": m,
             "block_N": n,
@@ -167,8 +168,8 @@ def fast_flashattn(
 
                     if is_causal:
                         for i, j in T.Parallel(block_M, block_N):
-                            acc_s[i, j] = T.if_then_else(
-                                q_block_offset + i >= kv_idx + j, 0, -T.infinity(acc_s.dtype))
+                            acc_s[i, j] = T.if_then_else(q_block_offset + i >= kv_idx + j, 0,
+                                                         -T.infinity(acc_s.dtype))
                     else:
                         T.clear(acc_s)
                     T.gemm(
