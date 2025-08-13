@@ -10,9 +10,8 @@
 #include "runtime/rocm/rocm_module.h"
 #include <tvm/ffi/function.h>
 
-// Define kTVMGridConstant if not already defined
 #ifndef kTVMGridConstant
-#define kTVMGridConstant 130  // Use a value after kCustomBegin
+#define kTVMGridConstant 130  
 #endif
 
 namespace tvm {
@@ -81,7 +80,7 @@ runtime::Module BuildTileLangHIP(IRModule mod, Target target) {
   } else {
     ICHECK(false) << "tilelang_callback_hip_compile is not set";
   }
-  
+
   return ROCMModuleCreate(ptx, fmt, ExtractFuncInfo(mod), code, std::string());
 }
 
