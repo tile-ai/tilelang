@@ -572,12 +572,11 @@ public:
   WSCodeEmitter(bool is_emitting_producer, IterVar thread_iv,
                 Map<Var, Buffer> buffer_data_to_buffer,
                 const WarpSpecializedRoleMarker &marker,
-                bool mbarrier_only = false)
+                bool mbarrier_only = false, bool only_has_wgmma = false)
       : is_emitting_producer_(is_emitting_producer),
         buffer_data_to_buffer_(buffer_data_to_buffer), marker_(marker),
-        thread_var_(thread_iv->var), mbarrier_only_(mbarrier_only) {}
-
-  bool onlyHasWgMMA() const { return only_has_wgmma_; }
+        thread_var_(thread_iv->var), mbarrier_only_(mbarrier_only),
+        only_has_wgmma_(only_has_wgmma) {}
 
   bool hasSimtCopy() const { return has_simt_copy_; }
 
@@ -616,8 +615,6 @@ private:
         op->seq.Map([&](Stmt stmt) { return VisitStmt(stmt); });
 
     auto map = ExtractSyncPattern(op->seq);
-
-    only_has_wgmma_ = WgMMACollector::HasWgMMA(SeqStmt(op->seq));
 
     /*
       std::cout << "Print ExtractSyncPattern" << std::endl;
@@ -1212,11 +1209,12 @@ private:
       block_realize.CopyOnWrite()->block = block;
       return block_realize;
     }
+    only_has_wgmma_ = WgMMACollector::HasWgMMA(block->body);
     WSCodeEmitter producer(true, thread_iv_, buffer_data_to_buffer_, marker);
-    WSCodeEmitter consumer(false, thread_iv_, buffer_data_to_buffer_, marker);
+    WSCodeEmitter consumer(false, thread_iv_, buffer_data_to_buffer_, marker,
+                           false, only_has_wgmma_);
     Stmt producer_code = producer(block->body);
     Stmt consumer_code = consumer(block->body);
-    bool only_has_wgmma = consumer.onlyHasWgMMA();
     PrimExpr consumer_thread_extent = thread_iv_->dom->extent;
     PrimExpr producer_thread_extent = thread_iv_->dom->extent;
     // Need one warp-group for bulk-copy only case
@@ -1259,8 +1257,8 @@ private:
       PrimExpr arrive_thread_count =
           producer.released_barrier_.count(i)
               ? (producer.hasSimtCopy() ? producer_thread_extent : 1)
-              : (only_has_wgmma ? FloorDiv(consumer_thread_extent, 128)
-                                : consumer_thread_extent);
+              : (only_has_wgmma_ ? FloorDiv(consumer_thread_extent, 128)
+                                 : consumer_thread_extent);
       barrier_num_threads.push_back(arrive_thread_count);
     }
 
@@ -1289,6 +1287,7 @@ private:
   bool disable_warp_specialized_ = false;
   bool disable_shuffle_elect_ = false;
   Array<IntImm> nreg_;
+  bool only_has_wgmma_ = false;
 };
 
 class WarpSpecializedDetector : public IRVisitorWithAnalyzer {
