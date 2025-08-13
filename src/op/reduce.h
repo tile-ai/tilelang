@@ -21,6 +21,10 @@ public:
   LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) final;
   static const Op &Get();
 
+  std::unique_ptr<Operator> Clone() const final {
+    return std::make_unique<ReduceOp>(*this);
+  }
+
 private:
   tir::Buffer src, dst;
   int dim;
@@ -44,6 +48,10 @@ public:
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
   LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) final;
   static const Op &Get();
+
+  std::unique_ptr<Operator> Clone() const final {
+    return std::make_unique<CumSumOp>(*this);
+  }
 
 private:
   tir::Buffer src, dst;

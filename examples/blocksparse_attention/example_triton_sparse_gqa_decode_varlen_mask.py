@@ -429,10 +429,12 @@ def main(batch=64,
     print(f"Average time: {avg_time:.6f} seconds")
     print(f"Average flops: {avg_flops:.2f} GFLOPS")
 
-    # Measure performance of reference implementation
+    import flash_attn  # noqa: F401
+
     start = time.time()
     for _ in range(1000):
         ref_program_fa(Q, K, V, cache_seqlens)
+
     torch.cuda.synchronize()
     end = time.time()
     elapsed_time_ref = end - start

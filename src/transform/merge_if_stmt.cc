@@ -44,11 +44,13 @@ private:
             continue;
           } else {
             if (!current_if_bodies.empty()) {
-              new_seq.push_back(IfThenElse(current_condition,
-                                           current_if_bodies.size() == 1
-                                               ? current_if_bodies[0]
-                                               : SeqStmt(current_if_bodies),
-                                           Stmt()));
+              auto if_stmt =
+                  IfThenElse(current_condition,
+                             current_if_bodies.size() == 1
+                                 ? current_if_bodies[0]
+                                 : this->VisitStmt(SeqStmt(current_if_bodies)),
+                             Stmt());
+              new_seq.push_back(if_stmt);
               current_if_bodies.clear();
             }
 
@@ -60,11 +62,13 @@ private:
       }
 
       if (!current_if_bodies.empty()) {
-        new_seq.push_back(IfThenElse(current_condition,
-                                     current_if_bodies.size() == 1
-                                         ? current_if_bodies[0]
-                                         : SeqStmt(current_if_bodies),
-                                     Stmt()));
+        auto if_stmt =
+            IfThenElse(current_condition,
+                       current_if_bodies.size() == 1
+                           ? current_if_bodies[0]
+                           : this->VisitStmt(SeqStmt(current_if_bodies)),
+                       Stmt());
+        new_seq.push_back(if_stmt);
         current_condition = PrimExpr();
         current_if_bodies.clear();
       }
@@ -73,11 +77,13 @@ private:
     }
 
     if (!current_if_bodies.empty()) {
-      new_seq.push_back(IfThenElse(current_condition,
-                                   current_if_bodies.size() == 1
-                                       ? current_if_bodies[0]
-                                       : SeqStmt(current_if_bodies),
-                                   Stmt()));
+      auto if_stmt =
+          IfThenElse(current_condition,
+                     current_if_bodies.size() == 1
+                         ? current_if_bodies[0]
+                         : this->VisitStmt(SeqStmt(current_if_bodies)),
+                     Stmt());
+      new_seq.push_back(if_stmt);
     }
 
     return new_seq.size() == 1 ? new_seq[0] : SeqStmt(new_seq);

@@ -26,6 +26,10 @@ public:
     kFullCol = 2,
   } policy;
 
+  std::unique_ptr<Operator> Clone() const final {
+    return std::make_unique<GemmSP>(*this);
+  }
+
 private:
   std::pair<int, int>
   ComputeWarpPartition(int num_warps, Target target,

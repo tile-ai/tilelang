@@ -29,7 +29,8 @@ public:
 
   // The syncs inserted before each statement
   std::unordered_set<const Object *> syncs_inserted_;
-  std::unordered_map<const Object *, int> partial_syncs_inserted_;
+  std::unordered_map<const Object *, std::tuple<int, int>>
+      partial_syncs_inserted_;
 
 protected:
   bool Enabled(const VarNode *buf, const StorageScope &scope) const final {
@@ -257,17 +258,24 @@ private:
 
       scope_.push_back(std::vector<StmtEntry>());
       num_partial_threads_ = partitions[0];
+      barrier_id_ += 1;
       this->VisitStmt(body->then_case);
       StmtEntry s;
       s.stmt = op;
       s.access = Summarize(std::move(scope_.back()), nullptr);
       scope_.pop_back();
-
+      if (!has_sync_)
+        barrier_id_ -= 1;
+      has_sync_ = false;
       num_partial_threads_ = partitions[1];
       scope_.push_back(std::vector<StmtEntry>());
+      barrier_id_ += 1;
       VisitStmt(body->else_case.value());
       auto v = Summarize(std::move(scope_.back()), nullptr);
       scope_.pop_back();
+      if (!has_sync_)
+        barrier_id_ -= 1;
+      has_sync_ = false;
       s.access.insert(s.access.end(), v.begin(), v.end());
 
       num_partial_threads_ = std::nullopt;
@@ -281,10 +289,12 @@ private:
     // condition";
     if (syncs_inserted_.count(obj))
       return;
-    if (num_partial_threads_.defined()) {
+    if (num_partial_threads_.defined() && barrier_id_ >= 0 &&
+        barrier_id_ < 16) {
       syncs_inserted_.insert(obj);
-      partial_syncs_inserted_[obj] =
-          static_cast<int>(num_partial_threads_.value()->value);
+      partial_syncs_inserted_[obj] = std::make_tuple(
+          static_cast<int>(num_partial_threads_.value()->value), barrier_id_);
+      has_sync_ = true;
     } else {
       syncs_inserted_.insert(obj);
     }
@@ -294,6 +304,8 @@ private:
   Optional<IntImm> num_partial_threads_;
   // synchronization scope
   StorageScope sync_scope_;
+  int barrier_id_{-1};
+  bool has_sync_{false};
 };
 
 // There are cases where necessary syncthreads is not inserted by
@@ -318,7 +330,7 @@ class ThreadPartialSyncInserter : public StmtExprMutator {
 public:
   ThreadPartialSyncInserter(
       StorageScope sync_scope, const std::unordered_set<const Object *> &syncs,
-      std::unordered_map<const Object *, int> partial_syncs)
+      std::unordered_map<const Object *, std::tuple<int, int>> partial_syncs)
       : sync_scope_(sync_scope), syncs_(syncs), partial_syncs_(partial_syncs) {}
 
   Stmt VisitStmt(const Stmt &stmt) final {
@@ -329,8 +341,10 @@ public:
       if (partial_syncs_.count(stmt.get())) {
         auto iter = partial_syncs_.find(stmt.get());
         ICHECK(sync_scope_.rank == StorageRank::kShared);
-        barrier = Evaluate(
-            Call(DataType::Int(32), tl::sync_thread_partial(), {iter->second}));
+        int num_threads, barrier_id;
+        std::tie(num_threads, barrier_id) = iter->second;
+        barrier = Evaluate(Call(DataType::Int(32), tl::sync_thread_partial(),
+                                {num_threads, barrier_id}));
       } else {
         return StmtExprMutator::VisitStmt(stmt);
       }
@@ -347,7 +361,8 @@ private:
   // data structure.
   StorageScope sync_scope_;
   const std::unordered_set<const Object *> &syncs_;
-  const std::unordered_map<const Object *, int> &partial_syncs_;
+  const std::unordered_map<const Object *, std::tuple<int, int>>
+      &partial_syncs_;
 };
 
 Stmt TileLangThreadPartialSync(Stmt stmt, std::string storage_scope) {

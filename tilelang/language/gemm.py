@@ -69,9 +69,31 @@ def gemm(
         else:
             raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
 
+    def retrieve_stride(object: Union[tir.Buffer, tir.BufferRegion]) -> List[int]:
+        if isinstance(object, tir.Buffer):
+            strides = []
+            stride = 1
+            for s in reversed(object.shape):
+                strides.insert(0, stride)
+                stride *= s
+            return strides
+        elif isinstance(object, tir.BufferRegion):
+            buffer, _ = object.buffer, object.region
+            strides = []
+            stride = 1
+            for s in reversed(buffer.shape):
+                strides.insert(0, stride)
+                stride *= s
+            return strides
+        else:
+            raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
+
     A_shape = retrieve_shape(A)
     B_shape = retrieve_shape(B)
     C_shape = retrieve_shape(C)
+
+    A_stride = retrieve_stride(A)
+    B_stride = retrieve_stride(B)
 
     assert len(C_shape) == 2, "current only support C as a 2D tensor"
     assert len(A_shape) >= 2, "current only support A as a 2D or higher-order tensor"
@@ -90,6 +112,9 @@ def gemm(
     K_B = B_shape[-1] if transpose_B else B_shape[-2]
     assert K == K_B, f"T.gemm K shape check failed: K_A = {K}, K_B = {K_B}"
 
+    stride_a = A_stride[-2]
+    stride_b = B_stride[-2]
+
     def retrieve_ptr(object: Union[tir.Buffer, tir.BufferRegion],
                      access_type: str = "r") -> tir.PrimExpr:
         if isinstance(object, tir.Buffer):
@@ -105,11 +130,32 @@ def gemm(
                 strides.insert(0, stride)
                 stride *= s
             offset = 0
-            for i in range(len(indices)):
+            # not offset the last two dimension
+            for i in range(len(indices) - 2):
                 offset += indices[i] * strides[i]
             return buffer.access_ptr(access_mask=access_type, offset=offset)
         else:
             raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
+
+    def retrieve_offset(object: Union[tir.Buffer, tir.BufferRegion]) -> tir.PrimExpr:
+        """Retrieve the offset of the buffer or buffer region."""
+        if isinstance(object, tir.Buffer):
+            return [0] * len(object.shape)
+        elif isinstance(object, tir.BufferRegion):
+            _, region = object.buffer, object.region
+            indices = []
+            for r in region:
+                indices.append(r.min)
+            return indices
+        else:
+            raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
+
+    A_offset = retrieve_offset(A)
+    B_offset = retrieve_offset(B)
+    assert A_offset[-2] == 0, "The offset of the first dimension of A must be 0"
+    assert B_offset[-2] == 0, "The offset of the first dimension of B must be 0"
+    offset_a = A_offset[-1]
+    offset_b = B_offset[-1]
 
     Aptr = retrieve_ptr(A, "r")
     Bptr = retrieve_ptr(B, "r")
@@ -127,6 +173,10 @@ def gemm(
         K,
         policy,
         clear_accum,
+        stride_a,
+        stride_b,
+        offset_a,
+        offset_b,
         k_pack,
         wg_wait,
     )

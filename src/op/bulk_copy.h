@@ -51,9 +51,13 @@ public:
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
   static const Op &Get();
 
+  std::unique_ptr<Operator> Clone() const final {
+    return std::make_unique<Conv2DIm2ColOp>(*this);
+  }
+
 private:
   Buffer src, dst;
-  int stride, padding, dilation, kernel;
+  int stride, padding, dilation, kernel, eviction_policy;
   PrimExpr nhw_step, c_step;
 };
 

@@ -7,6 +7,11 @@
 #include "common.h"
 
 namespace tl {
+enum class CacheHintSm90 : uint64_t {
+  EVICT_NORMAL = 0x1000000000000000,
+  EVICT_FIRST = 0x12F0000000000000,
+  EVICT_LAST = 0x14F0000000000000,
+};
 
 TL_DEVICE void tma_load(void *smem_ptr, void *gmem_ptr, uint64_t &smem_mbar,
                         uint32_t size) {
@@ -30,50 +35,83 @@ TL_DEVICE void tma_load_multicast(void *smem_ptr, void *gmem_ptr,
       :);
 }
 
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
 TL_DEVICE void tma_load(const CUtensorMap &descriptor, uint64_t &smem_mbar,
                         void const *const smem_ptr, int32_t const &crd0) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_mbar = smem_ptr_to_uint(&smem_mbar);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile("cp.async.bulk.tensor.1d.shared::cluster.global.mbarrier::"
-               "complete_tx::bytes"
-               " [%0], [%1, {%3}], [%2];"
-               :
-               : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
-                 "r"(crd0)
-               : "memory");
+  if constexpr (cache_hint == CacheHintSm90::EVICT_NORMAL) {
+    asm volatile("cp.async.bulk.tensor.1d.shared::cluster.global.mbarrier::"
+                 "complete_tx::bytes"
+                 " [%0], [%1, {%3}], [%2];"
+                 :
+                 : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                   "r"(crd0)
+                 : "memory");
+  } else {
+    asm volatile("cp.async.bulk.tensor.1d.shared::cluster.global.mbarrier::"
+                 "complete_tx::bytes.L2::cache_hint"
+                 " [%0], [%1, {%3}], [%2], %4;"
+                 :
+                 : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                   "r"(crd0), "l"(cache_hint)
+                 : "memory");
+  }
 }
 
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
 TL_DEVICE void tma_load(const CUtensorMap &descriptor, uint64_t &smem_mbar,
                         void const *const smem_ptr, int32_t const &crd0,
                         int32_t const &crd1) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_mbar = smem_ptr_to_uint(&smem_mbar);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::"
-               "complete_tx::bytes"
-               " [%0], [%1, {%3, %4}], [%2];"
-               :
-               : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
-                 "r"(crd0), "r"(crd1)
-               : "memory");
+  if constexpr (cache_hint == CacheHintSm90::EVICT_NORMAL) {
+    asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::"
+                 "complete_tx::bytes"
+                 " [%0], [%1, {%3, %4}], [%2];"
+                 :
+                 : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                   "r"(crd0), "r"(crd1)
+                 : "memory");
+  } else {
+    asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::"
+                 "complete_tx::bytes.L2::cache_hint"
+                 " [%0], [%1, {%3, %4}], [%2], %5;"
+                 :
+                 : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                   "r"(crd0), "r"(crd1), "l"(cache_hint)
+                 : "memory");
+  }
 }
 
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
 TL_DEVICE void tma_load(const CUtensorMap &descriptor, uint64_t &smem_mbar,
                         void const *const smem_ptr, int32_t const &crd0,
                         int32_t const &crd1, int32_t const &crd2) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_mbar = smem_ptr_to_uint(&smem_mbar);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::"
-               "complete_tx::bytes"
-               " [%0], [%1, {%3, %4, %5}], [%2];"
-               :
-               : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
-                 "r"(crd0), "r"(crd1), "r"(crd2)
-               : "memory");
+  if constexpr (cache_hint == CacheHintSm90::EVICT_NORMAL) {
+    asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::"
+                 "complete_tx::bytes"
+                 " [%0], [%1, {%3, %4, %5}], [%2];"
+                 :
+                 : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                   "r"(crd0), "r"(crd1), "r"(crd2)
+                 : "memory");
+  } else {
+    asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::"
+                 "complete_tx::bytes.L2::cache_hint"
+                 " [%0], [%1, {%3, %4, %5}], [%2], %6;"
+                 :
+                 : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                   "r"(crd0), "r"(crd1), "r"(crd2), "l"(cache_hint)
+                 : "memory");
+  }
 }
-
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
 TL_DEVICE void tma_load(const CUtensorMap &descriptor, uint64_t &smem_mbar,
                         void const *const smem_ptr, int32_t const &crd0,
                         int32_t const &crd1, int32_t const &crd2,
@@ -81,15 +119,26 @@ TL_DEVICE void tma_load(const CUtensorMap &descriptor, uint64_t &smem_mbar,
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_mbar = smem_ptr_to_uint(&smem_mbar);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::"
-               "complete_tx::bytes"
-               " [%0], [%1, {%3, %4, %5, %6}], [%2];"
-               :
-               : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
-                 "r"(crd0), "r"(crd1), "r"(crd2), "r"(crd3)
-               : "memory");
+  if constexpr (cache_hint == CacheHintSm90::EVICT_NORMAL) {
+    asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::"
+                 "complete_tx::bytes"
+                 " [%0], [%1, {%3, %4, %5, %6}], [%2];"
+                 :
+                 : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                   "r"(crd0), "r"(crd1), "r"(crd2), "r"(crd3)
+                 : "memory");
+  } else {
+    asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::"
+                 "complete_tx::bytes.L2::cache_hint"
+                 " [%0], [%1, {%3, %4, %5, %6}], [%2], %7;"
+                 :
+                 : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                   "r"(crd0), "r"(crd1), "r"(crd2), "r"(crd3), "l"(cache_hint)
+                 : "memory");
+  }
 }
 
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
 TL_DEVICE void tma_load(const CUtensorMap &descriptor, uint64_t &smem_mbar,
                         void const *const smem_ptr, int32_t const &crd0,
                         int32_t const &crd1, int32_t const &crd2,
@@ -97,15 +146,27 @@ TL_DEVICE void tma_load(const CUtensorMap &descriptor, uint64_t &smem_mbar,
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_mbar = smem_ptr_to_uint(&smem_mbar);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile("cp.async.bulk.tensor.5d.shared::cluster.global.mbarrier::"
-               "complete_tx::bytes"
-               " [%0], [%1, {%3, %4, %5, %6, %7}], [%2];"
-               :
-               : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
-                 "r"(crd0), "r"(crd1), "r"(crd2), "r"(crd3), "r"(crd4)
-               : "memory");
+  if constexpr (cache_hint == CacheHintSm90::EVICT_NORMAL) {
+    asm volatile("cp.async.bulk.tensor.5d.shared::cluster.global.mbarrier::"
+                 "complete_tx::bytes"
+                 " [%0], [%1, {%3, %4, %5, %6, %7}], [%2];"
+                 :
+                 : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                   "r"(crd0), "r"(crd1), "r"(crd2), "r"(crd3), "r"(crd4)
+                 : "memory");
+  } else {
+    asm volatile("cp.async.bulk.tensor.5d.shared::cluster.global.mbarrier::"
+                 "complete_tx::bytes.L2::cache_hint"
+                 " [%0], [%1, {%3, %4, %5, %6, %7}], [%2], %8;"
+                 :
+                 : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                   "r"(crd0), "r"(crd1), "r"(crd2), "r"(crd3), "r"(crd4),
+                   "l"(cache_hint)
+                 : "memory");
+  }
 }
 
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
 TL_DEVICE void tma_load_im2col(const CUtensorMap &descriptor,
                                uint64_t &smem_mbar, void const *const smem_ptr,
                                int32_t const &coord_c, int32_t const &coord_w,
@@ -115,64 +176,99 @@ TL_DEVICE void tma_load_im2col(const CUtensorMap &descriptor,
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_mbar = smem_ptr_to_uint(&smem_mbar);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.im2col.mbarrier:"
-               ":complete_tx::bytes"
-               " [%0], [%1, {%3, %4, %5, %6}], [%2], {%7, %8};"
-               :
-               : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
-                 "r"(coord_c), "r"(coord_w), "r"(coord_h), "r"(coord_n),
-                 "h"(offset_w), "h"(offset_h)
-               : "memory");
+  if constexpr (cache_hint == CacheHintSm90::EVICT_NORMAL) {
+    asm volatile(
+        "cp.async.bulk.tensor.4d.shared::cluster.global.im2col.mbarrier:"
+        ":complete_tx::bytes"
+        " [%0], [%1, {%3, %4, %5, %6}], [%2], {%7, %8};"
+        :
+        : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+          "r"(coord_c), "r"(coord_w), "r"(coord_h), "r"(coord_n), "h"(offset_w),
+          "h"(offset_h)
+        : "memory");
+  } else {
+    asm volatile(
+        "cp.async.bulk.tensor.4d.shared::cluster.global.im2col.mbarrier:"
+        ":complete_tx::bytes.L2::cache_hint"
+        " [%0], [%1, {%3, %4, %5, %6}], [%2], {%7, %8}, %9;"
+        :
+        : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+          "r"(coord_c), "r"(coord_w), "r"(coord_h), "r"(coord_n), "h"(offset_w),
+          "h"(offset_h), "l"(cache_hint)
+        : "memory");
+  }
 }
 
-TL_DEVICE void tma_store(void *dst_gmem_ptr, void *smem_ptr, uint32_t size) {
-  uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile(
-      "cp.async.bulk.global.shared::cta.bulk_group [%1], [%0], %2; \n" ::"r"(
-          smem_int_ptr),
-      "l"(dst_gmem_ptr), "r"(size)
-      :);
-}
-
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
 TL_DEVICE void tma_store(const CUtensorMap &descriptor,
                          void const *const smem_ptr, int32_t const &crd0) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
 
-  asm volatile(
-      "cp.async.bulk.tensor.1d.global.shared::cta.bulk_group [%0, {%2}], [%1];"
-      :
-      : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0)
-      : "memory");
+  if constexpr (cache_hint == CacheHintSm90::EVICT_NORMAL) {
+    asm volatile("cp.async.bulk.tensor.1d.global.shared::cta.bulk_group [%0, "
+                 "{%2}], [%1];"
+                 :
+                 : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0)
+                 : "memory");
+  } else {
+    asm volatile("cp.async.bulk.tensor.1d.global.shared::cta.bulk_group "
+                 "::cache_hint [%0, {%2}], [%1], %3;"
+                 :
+                 : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0),
+                   "l"(cache_hint)
+                 : "memory");
+  }
 }
 
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
 TL_DEVICE void tma_store(const CUtensorMap &descriptor,
                          void const *const smem_ptr, int32_t const &crd0,
                          int32_t const &crd1) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
 
-  asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%0, "
-               "{%2, %3}], [%1];"
-               :
-               : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1)
-               : "memory");
+  if constexpr (cache_hint == CacheHintSm90::EVICT_NORMAL) {
+    asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group [%0, "
+                 "{%2, %3}], [%1];"
+                 :
+                 : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1)
+                 : "memory");
+  } else {
+    asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group "
+                 "::cache_hint [%0, {%2, %3}], [%1], %4;"
+                 :
+                 : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
+                   "l"(cache_hint)
+                 : "memory");
+  }
 }
 
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
 TL_DEVICE void tma_store(const CUtensorMap &descriptor,
                          void const *const smem_ptr, int32_t const &crd0,
                          int32_t const &crd1, int32_t const &crd2) {
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
 
-  asm volatile("cp.async.bulk.tensor.3d.global.shared::cta.bulk_group [%0, "
-               "{%2, %3, %4}], [%1];"
-               :
-               : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
-                 "r"(crd2)
-               : "memory");
+  if constexpr (cache_hint == CacheHintSm90::EVICT_NORMAL) {
+    asm volatile("cp.async.bulk.tensor.3d.global.shared::cta.bulk_group [%0, "
+                 "{%2, %3, %4}], [%1];"
+                 :
+                 : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
+                   "r"(crd2)
+                 : "memory");
+  } else {
+    asm volatile("cp.async.bulk.tensor.3d.global.shared::cta.bulk_group "
+                 "::cache_hint [%0, {%2, %3, %4}], [%1], %5;"
+                 :
+                 : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
+                   "r"(crd2), "l"(cache_hint)
+                 : "memory");
+  }
 }
 
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
 TL_DEVICE void tma_store(const CUtensorMap &descriptor,
                          void const *const smem_ptr, int32_t const &crd0,
                          int32_t const &crd1, int32_t const &crd2,
@@ -180,14 +276,24 @@ TL_DEVICE void tma_store(const CUtensorMap &descriptor,
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
 
-  asm volatile("cp.async.bulk.tensor.4d.global.shared::cta.bulk_group [%0, "
-               "{%2, %3, %4, %5}], [%1];"
-               :
-               : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
-                 "r"(crd2), "r"(crd3)
-               : "memory");
+  if constexpr (cache_hint == CacheHintSm90::EVICT_NORMAL) {
+    asm volatile("cp.async.bulk.tensor.4d.global.shared::cta.bulk_group [%0, "
+                 "{%2, %3, %4, %5}], [%1];"
+                 :
+                 : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
+                   "r"(crd2), "r"(crd3)
+                 : "memory");
+  } else {
+    asm volatile("cp.async.bulk.tensor.4d.global.shared::cta.bulk_group "
+                 "::cache_hint [%0, {%2, %3, %4, %5}], [%1], %6;"
+                 :
+                 : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
+                   "r"(crd2), "r"(crd3), "l"(cache_hint)
+                 : "memory");
+  }
 }
 
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
 TL_DEVICE void tma_store(const CUtensorMap &descriptor,
                          void const *const smem_ptr, int32_t const &crd0,
                          int32_t const &crd1, int32_t const &crd2,
@@ -195,12 +301,21 @@ TL_DEVICE void tma_store(const CUtensorMap &descriptor,
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
 
-  asm volatile("cp.async.bulk.tensor.5d.global.shared::cta.bulk_group [%0, "
-               "{%2, %3, %4, %5, %6}], [%1];"
-               :
-               : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
-                 "r"(crd2), "r"(crd3), "r"(crd4)
-               : "memory");
+  if constexpr (cache_hint == CacheHintSm90::EVICT_NORMAL) {
+    asm volatile("cp.async.bulk.tensor.5d.global.shared::cta.bulk_group [%0, "
+                 "{%2, %3, %4, %5, %6}], [%1];"
+                 :
+                 : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
+                   "r"(crd2), "r"(crd3), "r"(crd4)
+                 : "memory");
+  } else {
+    asm volatile("cp.async.bulk.tensor.5d.global.shared::cta.bulk_group "
+                 "::cache_hint [%0, {%2, %3, %4, %5, %6}], [%1], %7;"
+                 :
+                 : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
+                   "r"(crd2), "r"(crd3), "r"(crd4), "l"(cache_hint)
+                 : "memory");
+  }
 }
 
 TL_DEVICE void prefetch_tma_descriptor(const CUtensorMap &descriptor) {
@@ -215,20 +330,73 @@ TL_DEVICE void mbarrier_init(uint64_t &smem_barrier, uint32_t arrive_count) {
                : "r"(arrive_count), "r"(smem_int_ptr));
 }
 
-TL_DEVICE void mbarrier_wait(uint64_t &smem_barrier, int phase_bit) {
+TL_DEVICE uint32_t mbarrier_try_wait(uint64_t &smem_barrier, int phase_bit) {
+
   uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
-  asm volatile("{\n"
-               ".reg .pred                P1;\n"
-               "LAB_WAIT:\n"
-               "mbarrier.try_wait.parity.shared.b64 P1, [%0], %1;\n"
-               "@!P1                      bra.uni LAB_WAIT;\n"
-               "}\n" ::"r"(smem_int_ptr),
-               "r"(phase_bit));
+  uint32_t waitComplete;
+
+  asm volatile("{\n\t"
+               ".reg .pred P1; \n\t"
+               "mbarrier.try_wait.parity.shared.b64 P1, [%1], %2; \n\t"
+               "selp.b32 %0, 1, 0, P1; \n\t"
+               "}"
+               : "=r"(waitComplete)
+               : "r"(smem_int_ptr), "r"(phase_bit));
+
+  return waitComplete;
+}
+
+TL_DEVICE void mbarrier_wait(uint64_t &smem_barrier, int phase_bit) {
+  if (mbarrier_try_wait(smem_barrier, phase_bit) == 0) {
+    uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
+    // Arbitrarily large timer value after which try-wait expires and re-tries.
+    uint32_t ticks = 0x989680;
+    asm volatile("{\n\t"
+                 ".reg .pred       P1; \n\t"
+                 "LAB_WAIT: \n\t"
+                 "mbarrier.try_wait.parity.shared.b64 P1, [%0], %1, %2; \n\t"
+                 "@P1 bra DONE; \n\t"
+                 "bra     LAB_WAIT; \n\t"
+                 "DONE: \n\t"
+                 "}"
+                 :
+                 : "r"(smem_int_ptr), "r"(phase_bit), "r"(ticks));
+  }
+}
+
+TL_DEVICE void mbarrier_test_wait(uint64_t &smem_barrier, int phase_bit) {
+  uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
+  asm volatile(
+      "{\n"
+      ".reg .pred                P1;\n"
+      "LAB_WAIT:\n"
+      "mbarrier.test_wait.parity.shared::cta.b64 P1, [%0], %1;\n"
+      "@P1                       bra.uni DONE;\n"
+      "nanosleep.u32 5;\n" // wait a few nanoseconds on pre-Hopper architectures
+                           // to save instruction issue slots
+      "bra.uni                   LAB_WAIT;\n"
+      "DONE:\n"
+      "}\n" ::"r"(smem_int_ptr),
+      "r"(phase_bit));
 }
 
 TL_DEVICE void mbarrier_arrive(uint64_t &smem_barrier) {
   uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
   asm volatile("mbarrier.arrive.shared.b64 _, [%0];" : : "r"(smem_int_ptr));
+}
+
+TL_DEVICE void mbarrier_arrive(uint64_t &smem_barrier, int cta_id,
+                               uint32_t pred) {
+  uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);
+  if (pred) {
+    asm volatile("{\n\t"
+                 ".reg .b32 remAddr32;\n\t"
+                 "mapa.shared::cluster.u32  remAddr32, %0, %1;\n\t"
+                 "mbarrier.arrive.shared::cluster.b64  _, [remAddr32];\n\t"
+                 "}"
+                 :
+                 : "r"(smem_int_ptr), "r"(cta_id));
+  }
 }
 
 TL_DEVICE void mbarrier_expect_tx(uint64_t &smem_barrier,

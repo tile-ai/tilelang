@@ -64,12 +64,17 @@ public:
   virtual Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const;
   virtual LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level);
   virtual ~Operator() = default;
+  virtual std::unique_ptr<Operator> Clone() const = 0;
 };
 
 class RegionOp : public Operator {
 public:
   RegionOp(Array<PrimExpr> args, BufferMap vmap);
   static const Op &Get();
+
+  std::unique_ptr<Operator> Clone() const final {
+    return std::make_unique<RegionOp>(*this);
+  }
 
   const Buffer &GetBuffer() const { return buffer_; }
   const Array<Range> &GetRanges() const { return ranges_; }

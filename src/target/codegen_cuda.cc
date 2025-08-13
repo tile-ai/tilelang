@@ -926,13 +926,14 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
 }
 
 void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
-  auto print_extern_call_stmt = [&](std::string name, size_t offset = 0) {
+  auto print_extern_call_stmt = [&](std::string name, size_t start = 0,
+                                    size_t end = 0) {
     // Cache context into a private ss, otherwise the let node may generate
     // within the function call arguments.
     std::ostringstream ss;
 
-    for (size_t i = offset; i < op->args.size(); i++) {
-      if (i > offset)
+    for (size_t i = start; i < op->args.size() - end; i++) {
+      if (i > start)
         ss << ", ";
       ss << this->PrintExpr(op->args[i]);
     }
@@ -990,13 +991,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
     print_extern_call_stmt("tl::mbarrier_wait");
   } else if (op->op.same_as(tl::sync_thread_partial())) {
-    print_extern_call_stmt("tl::syncthreads_partial");
+    print_extern_call_stmt("cutlass::arch::NamedBarrier::sync");
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     return;
   } else if (op->op.same_as(tl::tma_load())) {
     std::ostringstream ss;
     ICHECK_GE(op->args.size(), 2);
-    ss << "tl::tma_load(";
+    auto eviction_policy =
+        this->eviction_policy_names_
+            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+    ss << "tl::tma_load<tl::CacheHintSm90::" << eviction_policy << ">(";
     auto desc = op->args[0];
     ss << this->PrintExpr(desc) << ", ";
     if (const IntImmNode *imm = op->args[1].as<IntImmNode>()) {
@@ -1004,7 +1008,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     } else {
       ss << this->PrintExpr(op->args[1]) << ", ";
     }
-    for (size_t i = 2; i < op->args.size(); i++) {
+    for (size_t i = 2; i < op->args.size() - 1; i++) {
       if (i > 2)
         ss << ", ";
       ss << this->PrintExpr(op->args[i]);
@@ -1013,9 +1017,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << ss.str();
   } else if (op->op.same_as(tl::tma_load_im2col())) {
-    print_extern_call_stmt("tl::tma_load_im2col");
+    std::stringstream ss;
+    ss << "tl::tma_load_im2col<tl::CacheHintSm90::"
+       << this->eviction_policy_names_
+              [op->args[op->args.size() - 1].as<IntImmNode>()->value]
+       << ">";
+    print_extern_call_stmt(ss.str(), 0, 1);
   } else if (op->op.same_as(tl::tma_store())) {
-    print_extern_call_stmt("tl::tma_store");
+    std::stringstream ss;
+    ss << "tl::tma_store<tl::CacheHintSm90::"
+       << this->eviction_policy_names_
+              [op->args[op->args.size() - 1].as<IntImmNode>()->value]
+       << ">";
+    print_extern_call_stmt(ss.str(), 0, 1);
   } else if (op->op.same_as(tl::ptx_ldmatirx())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
@@ -1537,6 +1551,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     enable_sparse_gemm_ = true;
     this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
                           op->args, true, os);
+  } else if (op->op.same_as(tl::tl_shuffle_elect())) {
+    os << "tl::tl_shuffle_elect<" << PrintExpr(op->args[0]) << ">()";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }

@@ -9,8 +9,8 @@ import math
 
 @tilelang.jit(out_idx=[8])
 def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, block_H, num_split,
-                        block_size):
-    scale = (1.0 / (dv + dpe))**0.5 * 1.44269504  # log2(e)
+                        block_size, softmax_scale):
+    scale = float(softmax_scale * 1.44269504)  # log2(e)
     dtype = "float16"
     accum_dtype = "float"
     kv_group_num = h_q // h_kv
@@ -318,12 +318,13 @@ def run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s
     dpe = d - dv
     num_kv_splits = 1
     BLOCK_N = 64
-    BLOCK_H = 64
+    BLOCK_H = min(64, h_q // h_kv)
+    softmax_scale = (d + dv)**-0.5
 
     out_partial = torch.empty(b, h_q, num_kv_splits, dv, dtype=dtype, device=q.device)
     glse = torch.empty(b, h_q, num_kv_splits, dtype=dtype, device=q.device)
     kernel = mla_decode_tilelang(b, h_q, h_kv, max_seqlen_pad, dv, dpe, BLOCK_N, BLOCK_H,
-                                 num_kv_splits, block_size)
+                                 num_kv_splits, block_size, softmax_scale)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
 
     def flash_mla_tilelang():

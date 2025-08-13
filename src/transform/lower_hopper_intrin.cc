@@ -6,6 +6,7 @@
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
+#include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
@@ -21,9 +22,9 @@ using namespace tir;
 #if (CUDA_MAJOR_VERSION >= 12)
 class LowerHopperIntrin : public StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc &f) {
+  static PrimFunc Substitute(PrimFunc &f, bool disable_shuffle_elect) {
     PrimFuncNode *fptr = f.CopyOnWrite();
-    LowerHopperIntrin substituter;
+    LowerHopperIntrin substituter(disable_shuffle_elect);
     fptr->body = substituter.VisitStmt(f->body);
     Map<String, Array<PrimExpr>> init_desc_arg_map;
     for (auto [call, var] : substituter.desc_map_) {
@@ -73,10 +74,15 @@ public:
           auto stmts = prefetch_calls_;
           stmts.insert(stmts.end(), init_mbarrier_calls_.begin(),
                        init_mbarrier_calls_.end());
-          auto init_stmt =
-              IfThenElse(EQ(iv->var, IntImm(iv->var->dtype, 0)),
-                         stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
-          stmt_seq.push_back(init_stmt);
+          PrimExpr condition;
+          if (!disable_shuffle_elect_) {
+            condition = Call(DataType::Bool(), tl_shuffle_elect(), {0});
+          } else {
+            condition = EQ(iv->var, 0);
+          }
+          auto stmt_ = IfThenElse(condition,
+                                  stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
+          stmt_seq.push_back(stmt_);
           if (!init_mbarrier_calls_.empty()) {
             Stmt mem_sync =
                 Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
@@ -121,14 +127,6 @@ public:
                  {mbarrier, call->args[i]})));
       }
       return 0;
-    } else if (call->op.same_as(sync_thread_partial())) {
-      int barrier_id = init_mbarrier_calls_.size();
-      PrimExpr mbarrier =
-          Call(DataType::Handle(), get_mbarrier(), {barrier_id});
-      init_mbarrier_calls_.push_back(Evaluate(
-          Call(DataType::Handle(), builtin::ptx_init_barrier_thread_count(),
-               {mbarrier, call->args[0]})));
-      return Call(DataType::Handle(), sync_thread_partial(), {mbarrier});
     } else {
       return StmtExprMutator::VisitExpr_(call);
     }
@@ -138,14 +136,18 @@ private:
   Array<Stmt> prefetch_calls_;
   Array<Stmt> init_mbarrier_calls_;
   std::unordered_map<Call, Var, StructuralHash, ExprDeepEqual> desc_map_;
-  LowerHopperIntrin() = default;
+  LowerHopperIntrin(bool disable_shuffle_elect)
+      : disable_shuffle_elect_(disable_shuffle_elect) {}
+  bool disable_shuffle_elect_;
 };
 
 using namespace tir::transform;
 
 tvm::transform::Pass LowerHopperIntrin() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    return LowerHopperIntrin::Substitute(f);
+    bool disable_shuffle_elect =
+        ctx->GetConfig<Bool>(kDisableShuffleElect, Bool(false)).value();
+    return LowerHopperIntrin::Substitute(f, disable_shuffle_elect);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerHopperIntrin", {});
 }

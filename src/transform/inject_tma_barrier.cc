@@ -122,8 +122,11 @@ private:
 
   Stmt VisitStmt_(const IfThenElseNode *op) {
     // Check if this is the TMA block
-    const EQNode *eq = op->condition.as<EQNode>();
-    if (eq != nullptr) {
+    bool flag = false;
+    if (op->condition.as<CallNode>()) {
+      flag = op->condition.as<CallNode>()->op.same_as(tl_shuffle_elect());
+    }
+    if (op->condition.as<EQNode>() || flag) {
       Stmt ret = IRMutatorWithAnalyzer::VisitStmt_(op);
 
       if (visited_tma_load_) {
@@ -164,6 +167,9 @@ private:
 
 class TmaBarrierCollector : public IRVisitorWithAnalyzer {
 public:
+  TmaBarrierCollector(Map<Var, Buffer> buffer_data_to_buffer)
+      : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)) {}
+
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id() {
     return tma_op_to_barrier_id_;
   }
@@ -222,7 +228,128 @@ private:
   std::vector<Call> pending_tma_ops_;
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
   Map<PrimExpr, IntImm> barrier_id_to_range_;
+  Map<Var, Buffer> buffer_data_to_buffer_;
 };
+
+class TmaSequenceCollector : public IRVisitorWithAnalyzer {
+public:
+  TmaSequenceCollector(Map<ObjectRef, PrimExpr> tma_op_to_barrier_id)
+      : tma_op_to_barrier_id_(std::move(tma_op_to_barrier_id)) {}
+
+  std::vector<bool> GetSequence() {
+    std::vector<bool> clear_zero_list(expect_tx_count_, false);
+    int zero_idx = -1;
+    int zero_count = 0;
+
+    for (auto v : sequence) {
+      if (v == 0) {
+        zero_count += 1;
+        zero_idx += 1;
+      } else {
+        if (zero_count == 1) {
+          clear_zero_list[zero_idx] = expect_[zero_idx] && !has_simt_copy_;
+          if (clear_zero_list[zero_idx] == false) {
+            int begin = int_sets_[zero_idx].min().as<IntImmNode>()->value;
+            int end = int_sets_[zero_idx].max().as<IntImmNode>()->value;
+            for (int i = begin; i <= end; ++i) {
+              restore_barrier_ids_.push_back(i);
+            }
+          }
+        } else {
+          for (int i{zero_idx}; i > zero_idx - zero_count; --i) {
+            int begin = int_sets_[i].min().as<IntImmNode>()->value;
+            int end = int_sets_[i].max().as<IntImmNode>()->value;
+            for (int i = begin; i <= end; ++i) {
+              restore_barrier_ids_.push_back(i);
+            }
+          }
+        }
+        zero_count = 0;
+      }
+    }
+
+    return clear_zero_list;
+  }
+
+  std::vector<int> GetRestoreBarrierIds() { return restore_barrier_ids_; }
+
+  void VisitStmt_(const ForNode *op) final {
+    var_int_set_.Set(op->loop_var,
+                     arith::IntSet::FromMinExtent(op->min, op->extent));
+    IRVisitorWithAnalyzer::VisitStmt_(op);
+  }
+
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(mbarrier_expect_tx())) {
+      PrimExpr e =
+          tma_op_to_barrier_id_[GetRef<Call>(op)].as<CallNode>()->args[0];
+      auto int_set = arith::EvalSet(e, var_int_set_);
+      expect_.push_back(if_depth_ == 1);
+      sequence.push_back(0);
+      int_sets_.push_back(int_set);
+      expect_tx_count_ += 1;
+    } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
+      sequence.push_back(1);
+    } else if (op->op.same_as(builtin::ptx_cp_async_barrier())) {
+      has_simt_copy_ = true;
+    }
+    IRVisitorWithAnalyzer::VisitExpr_(op);
+  }
+
+  void VisitStmt_(const IfThenElseNode *op) final {
+    if_depth_ += 1;
+
+    IRVisitorWithAnalyzer::VisitStmt(op->then_case);
+
+    if (op->else_case) {
+      IRVisitorWithAnalyzer::VisitStmt(op->else_case.value());
+    }
+    if_depth_ -= 1;
+  }
+
+  std::vector<int> sequence;
+  int expect_tx_count_{0};
+  std::vector<bool> expect_;
+  bool has_simt_copy_{false};
+  std::vector<int> restore_barrier_ids_;
+  int if_depth_{0};
+  Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
+  arith::Analyzer *analyzer_;
+  Map<Var, arith::IntSet> var_int_set_;
+  std::vector<arith::IntSet> int_sets_;
+};
+
+class BarrierCreationRewriter : public StmtExprMutator {
+public:
+  BarrierCreationRewriter(std::vector<int> restore_barrier_ids,
+                          PrimExpr producer_thread_extent)
+      : restore_barrier_ids_(std::move(restore_barrier_ids)),
+        producer_thread_extent_(producer_thread_extent) {}
+
+  PrimExpr VisitExpr_(const CallNode *op) {
+    if (op->op.same_as(create_list_of_mbarrier())) {
+      std::vector<bool> tmp_(op->args.size(), false);
+      Array<PrimExpr> new_args;
+      for (auto &id : restore_barrier_ids_) {
+        tmp_[id] = true;
+      }
+
+      for (size_t i{0}; i < op->args.size(); ++i) {
+        if (tmp_[i]) {
+          new_args.push_back(producer_thread_extent_);
+        } else {
+          new_args.push_back(op->args[i]);
+        }
+      }
+      return Call(op->dtype, op->op, new_args);
+    } else {
+      return StmtExprMutator::VisitExpr_(op);
+    }
+  }
+  std::vector<int> restore_barrier_ids_;
+  PrimExpr producer_thread_extent_;
+};
+
 // we trust mbarrier_wait_parity to be correct
 class TmaBarrierRewriter : public IRMutatorWithAnalyzer {
 public:
@@ -236,8 +363,12 @@ public:
         has_create_list_of_mbarrier_(has_create_list_of_mbarrier) {}
 
   static PrimFunc Rewrite(PrimFunc f, arith::Analyzer *analyzer) {
+    auto buffer_lca = DetectBufferAccessLCA(f);
+    Map<Var, Buffer> buffer_data_to_buffer_;
+    for (auto [buffer, _] : buffer_lca)
+      buffer_data_to_buffer_.Set(buffer->data, buffer);
     f = TmaExpectTxRewriter::Rewrite(f, analyzer);
-    TmaBarrierCollector collector;
+    TmaBarrierCollector collector(buffer_data_to_buffer_);
     collector(f->body);
     bool has_create_list_of_mbarrier = false;
     PostOrderVisit(f->body, [&](const ObjectRef &node) {
@@ -253,6 +384,9 @@ public:
                                 collector.barrier_id_to_range(),
                                 has_create_list_of_mbarrier);
     f.CopyOnWrite()->body = rewriter(f->body);
+    auto barrier_creation_rewriter = BarrierCreationRewriter(
+        rewriter.restore_barrier_ids_, rewriter.producer_thread_extent_);
+    f.CopyOnWrite()->body = barrier_creation_rewriter(f->body);
     return f;
   }
 
@@ -262,6 +396,42 @@ private:
     if (!has_create_list_of_mbarrier_ && barrier_id_to_range_.size() > 0 &&
         op->name_hint == MainBlockName) {
       ICHECK(false) << "Please declare create_list_of_mbarrier.";
+    }
+    return IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
+  Stmt VisitStmt_(const IfThenElseNode *op) {
+    if (first_if) {
+      if (op->condition.as<GENode>()) {
+        producer_thread_extent_ =
+            thread_var_->dom->extent - op->condition.as<GENode>()->b;
+      }
+      TmaSequenceCollector collector(tma_op_to_barrier_id_);
+      collector(op->then_case);
+      clear_expect_list_ = collector.GetSequence();
+      restore_barrier_ids_ = collector.GetRestoreBarrierIds();
+      first_if = false;
+
+      is_producer_ = true;
+
+      auto then_case = StmtExprMutator::VisitStmt(op->then_case);
+
+      is_producer_ = false;
+      Stmt else_case;
+      if (op->else_case.defined())
+        else_case = StmtExprMutator::VisitStmt(op->else_case.value());
+      return IfThenElse(op->condition, then_case, else_case);
+    }
+    return StmtExprMutator::VisitStmt_(op);
+  }
+
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == "kWarpSpecializationScope") {
+      has_warp_specialization_ = true;
+      first_if = true;
+    } else if (op->attr_key == tir::attr::thread_extent &&
+               Downcast<IterVar>(op->node)->thread_tag == "threadIdx.x") {
+      thread_var_ = Downcast<IterVar>(op->node);
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
   }
@@ -281,6 +451,22 @@ private:
       auto barrier_id = tma_op_to_barrier_id_[GetRef<Call>(op)];
       auto new_args = op->args;
       new_args.Set(0, barrier_id);
+      if (!has_warp_specialization_)
+        clear_arrive_ = false;
+      else
+        clear_arrive_ = clear_expect_list_[cur_expect_idx_++];
+      if (clear_arrive_) {
+        return Call(op->dtype, builtin::ptx_arrive_barrier_expect_tx(),
+                    new_args);
+      }
+      return Call(op->dtype, op->op, new_args);
+    } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
+      if (clear_arrive_) {
+        clear_arrive_ = false;
+        return 0;
+      }
+      // by default, all threads must wait.
+      auto new_args = op->args;
       return Call(op->dtype, op->op, new_args);
     }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
@@ -288,6 +474,13 @@ private:
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
   Map<PrimExpr, IntImm> barrier_id_to_range_;
   bool has_create_list_of_mbarrier_;
+  bool clear_arrive_{false};
+  bool first_if{false}, has_warp_specialization_{false}, is_producer_{false};
+  IterVar thread_var_;
+  int tma_expect_tx_{0}, cur_expect_idx_{0};
+  std::vector<bool> clear_expect_list_;
+  std::vector<int> restore_barrier_ids_;
+  PrimExpr producer_thread_extent_;
 };
 
 tvm::transform::Pass InjectTmaBarrier() {
