@@ -4,11 +4,19 @@ on: [pull_request]
 env:
   PYTHON_VERSION: '3.12'
   VENV_DIR: tilelang_ci
+  PYTORCH_INDEX_URL: https://download.pytorch.org/whl/nightly/rocm6.3/
 
 jobs:
+  format-check:
+    uses: ./.github/workflows/ci.yml@${{ github.ref }}
+    with:
+      python-version: ${{ env.PYTHON_VERSION }}
+      repository: ${{ github.event.pull_request.head.repo.full_name }}
+      ref: ${{ github.event.pull_request.head.ref }}
 
   build-test:
     runs-on: [self-hosted, amd, gpu]
+    needs: format-check 
     permissions:
       contents: read
     steps:
@@ -28,7 +36,7 @@ jobs:
       run: |
         echo "Running on AMD GPU"
         set -e
-        REQS_HASH=$(cat requirements-rocm.txt 2>/dev/null || true)
+        REQS_HASH=$(sha256sum requirements-rocm.txt | cut -d ' ' -f 1)
         MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
         
         echo "Installing requirements"
@@ -41,9 +49,9 @@ jobs:
           source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
           python -m pip install --upgrade pip --no-user
           if [[ -f requirements-rocm.txt ]]; then
-            pip uninstall torch torchvision torchaudio
-            pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/rocm6.3/
-            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-rocm.txt --no-user
+            pip uninstall -y torch torchvision torchaudio
+            pip install --pre torch torchvision torchaudio --index-url ${{ env.PYTORCH_INDEX_URL }}
+            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-rocm.txt --index-url ${{ env.PYTORCH_INDEX_URL }} --no-user
           fi
 
           USE_ROCM=True pip install . --no-user
