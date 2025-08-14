@@ -235,7 +235,7 @@ def jit(  # This is the new public interface
         out_idx: Any = None,
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         verbose: bool = False,
         pass_configs: Optional[Dict[str, Any]] = None,
         debug_root_path: Optional[str] = None,
