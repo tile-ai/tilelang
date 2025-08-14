@@ -1,7 +1,7 @@
 #pragma once
 
-#include <cute/arch/mma_sm120.hpp>
 #include "cuda_fp8.h"
+#include <cute/arch/mma_sm120.hpp>
 
 #define JUST_POC_FOR_SM120
 

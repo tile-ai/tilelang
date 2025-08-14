@@ -50,12 +50,14 @@ struct DispatchInstruction<double, double, double, num_warp_m, num_warp_n, N> {
 };
 #ifdef JUST_POC_FOR_SM120
 template <int num_warp_m, int num_warp_n, int N>
-struct DispatchInstruction<fp8_e4_t, fp8_e4_t, float, num_warp_m, num_warp_n, N> {
+struct DispatchInstruction<fp8_e4_t, fp8_e4_t, float, num_warp_m, num_warp_n,
+                           N> {
   using MMA = MMA_Atom<SM120_16x8x32_TN<fp8_e4_t, fp8_e4_t, float>>;
   using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _X>;
 };
 template <int num_warp_m, int num_warp_n, int N>
-struct DispatchInstruction<fp8_e5_t, fp8_e5_t, float, num_warp_m, num_warp_n, N> {
+struct DispatchInstruction<fp8_e5_t, fp8_e5_t, float, num_warp_m, num_warp_n,
+                           N> {
   using MMA = MMA_Atom<SM120_16x8x32_TN<fp8_e5_t, fp8_e5_t, float>>;
   using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _X>;
 };
