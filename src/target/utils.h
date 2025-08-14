@@ -19,6 +19,7 @@ bool TargetIsVolta(Target target);
 bool TargetIsTuring(Target target);
 bool TargetIsAmpere(Target target);
 bool TargetIsHopper(Target target);
+bool TargetIsBlackwellWmma(Target target);
 bool TargetIsCDNA(Target target);
 
 bool TargetHasAsyncCopy(Target target);

@@ -370,7 +370,7 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     results.Set(B, makeGemmVoltaABLayout(*as_const_int(B->shape[dim_B - 2]),
                                          *as_const_int(B->shape[dim_B - 1]),
                                          false, trans_B ? 2 : 1));
-  } else if (TargetIsAmpere(T.target) || TargetIsTuring(T.target)) {
+  } else if (TargetIsAmpere(T.target) || TargetIsTuring(T.target) || TargetIsBlackwellWmma(T.target)) {
     auto fragment =
         makeGemmFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
     results.Set(C, fragment->BindThreadRange(thread_range));

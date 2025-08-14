@@ -48,6 +48,18 @@ struct DispatchInstruction<double, double, double, num_warp_m, num_warp_n, N> {
   using MMA = MMA_Atom<SM80_8x8x4_F64F64F64F64_TN>;
   using MMA_Group = Tile<Int<num_warp_m * 16>, Int<num_warp_n * 16>, _X>;
 };
+#ifdef JUST_POC_FOR_SM120
+template <int num_warp_m, int num_warp_n, int N>
+struct DispatchInstruction<fp8_e4_t, fp8_e4_t, float, num_warp_m, num_warp_n, N> {
+  using MMA = MMA_Atom<SM120_16x8x32_TN<fp8_e4_t, fp8_e4_t, float>>;
+  using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _X>;
+};
+template <int num_warp_m, int num_warp_n, int N>
+struct DispatchInstruction<fp8_e5_t, fp8_e5_t, float, num_warp_m, num_warp_n, N> {
+  using MMA = MMA_Atom<SM120_16x8x32_TN<fp8_e5_t, fp8_e5_t, float>>;
+  using MMA_Group = Tile<_X, Int<num_warp_n * 16>, _X>;
+};
+#endif // JUST_POC_FOR_SM120
 #elif (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 750))
 template <int num_warp_m, int num_warp_n, int N>
 struct DispatchInstruction<half_t, half_t, float, num_warp_m, num_warp_n, N> {
