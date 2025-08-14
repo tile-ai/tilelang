@@ -1,4 +1,5 @@
 #include "../op/builtin.h"
+#include "arith/ir_mutator_with_analyzer.h"
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/builtin.h>
@@ -10,6 +11,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+using namespace arith;
 class ConfigIndexBitwidthRewriter : public IndexDataTypeRewriter {
 public:
   using Parent = IndexDataTypeRewriter;
@@ -68,6 +70,92 @@ protected:
   int _index_bitwidth_;
 };
 
+class IndexLegalizer : public IRMutatorWithAnalyzer {
+
+public:
+  static Stmt Rewrite(Stmt stmt) {
+    Analyzer ana;
+    auto pass = IndexLegalizer(&ana);
+    return pass.VisitStmt(stmt);
+  }
+
+private:
+  explicit IndexLegalizer(arith::Analyzer *ana) : IRMutatorWithAnalyzer(ana) {}
+
+  class Int64Promoter : public IndexDataTypeRewriter {
+  public:
+    using Parent = IndexDataTypeRewriter;
+
+    PrimExpr VisitExpr_(const VarNode *op) final {
+      if (op->dtype.is_int() && op->dtype.bits() < 64) {
+        return cast(DataType::Int(64), GetRef<Var>(op));
+      }
+      return GetRef<PrimExpr>(op);
+    }
+
+    PrimExpr VisitExpr_(const IntImmNode *op) final {
+      if (op->dtype.is_int() && op->dtype.bits() < 64) {
+        return IntImm(DataType::Int(64), op->value);
+      }
+      return GetRef<PrimExpr>(op);
+    }
+
+    PrimExpr VisitExpr_(const CastNode *op) final {
+      if (op->dtype.is_int() && op->dtype.bits() < 64) {
+        return cast(DataType::Int(64), op->value);
+      }
+      return GetRef<PrimExpr>(op);
+    }
+
+    Stmt VisitStmt_(const BufferStoreNode *op) final {
+      // Force indices to be int64
+      auto node = Downcast<BufferStore>(Parent::VisitStmt_(op));
+      return std::move(node);
+    }
+
+    PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+      auto node = Downcast<BufferLoad>(Parent::VisitExpr_(op));
+      return std::move(node);
+    }
+  };
+
+  Stmt VisitStmt_(const BufferStoreNode *op) final {
+    auto buffer_store =
+        Downcast<BufferStore>(IRMutatorWithAnalyzer::VisitStmt_(op));
+    auto indices = buffer_store->indices;
+    for (auto index : indices) {
+      if (index->dtype.is_int() && index->dtype.bits() < 64) {
+        auto int_bound = analyzer_->const_int_bound(index);
+        if (int_bound->max_value >= (1LL << (index->dtype.bits() - 1)) - 1 ||
+            int_bound->min_value < -(1LL << (index->dtype.bits() - 1))) {
+          Int64Promoter promoter;
+          index = promoter(index);
+        }
+      }
+    }
+    buffer_store.CopyOnWrite()->indices = indices;
+    return std::move(buffer_store);
+  }
+
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+    auto buffer_load =
+        Downcast<BufferLoad>(IRMutatorWithAnalyzer::VisitExpr_(op));
+    auto indices = buffer_load->indices;
+    for (auto index : indices) {
+      if (index->dtype.is_int() && index->dtype.bits() < 64) {
+        auto int_bound = analyzer_->const_int_bound(index);
+        if (int_bound->max_value >= (1LL << (index->dtype.bits() - 1)) - 1 ||
+            int_bound->min_value < -(1LL << (index->dtype.bits() - 1))) {
+          Int64Promoter promoter;
+          index = promoter(index);
+        }
+      }
+    }
+    buffer_load.CopyOnWrite()->indices = indices;
+    return std::move(buffer_load);
+  }
+};
+
 tvm::transform::Pass ConfigIndexBitwidth() {
   using namespace tir::transform;
   auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) {
@@ -81,6 +169,8 @@ tvm::transform::Pass ConfigIndexBitwidth() {
       n->body = ConfigIndexBitwidthRewriter(config_index_bitwidth)(
           std::move(n->body));
     }
+    // Legalize out-of-bound indices to be int64
+    n->body = IndexLegalizer::Rewrite(std::move(n->body));
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ConfigIndexBitwidth", {});
