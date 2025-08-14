@@ -11,7 +11,7 @@
 #include <tvm/ffi/function.h>
 
 #ifndef kTVMGridConstant
-#define kTVMGridConstant 130  
+#define kTVMGridConstant 130
 #endif
 
 namespace tvm {
@@ -63,13 +63,13 @@ runtime::Module BuildTileLangHIP(IRModule mod, Target target) {
   }
 
   std::string code = cg.Finish();
-  
+
   // Use the new FFI API to get registered functions
   using ffi::Function;
   if (auto f = Function::GetGlobal("tilelang_callback_hip_postproc")) {
     code = (*f)(code, target).cast<std::string>();
   }
-  
+
   std::string fmt = "ptx";
   std::string ptx;
 
@@ -99,13 +99,13 @@ runtime::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
   }
 
   std::string code = cg.Finish();
-  
+
   // Use the new FFI API to get registered functions
   using ffi::Function;
   if (auto f = Function::GetGlobal("tilelang_callback_hip_postproc")) {
     code = (*f)(code, target).cast<std::string>();
   }
-  
+
   return ROCMModuleCreate("ptx", "fmt", ExtractFuncInfo(mod), code,
                           std::string());
 }
