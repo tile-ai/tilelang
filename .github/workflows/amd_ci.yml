@@ -9,6 +9,7 @@ jobs:
 
   build-test:
     runs-on: [self-hosted, amd, gpu]
+    needs: format-check
     permissions:
       contents: read
     steps:
@@ -41,8 +42,7 @@ jobs:
           source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
           python -m pip install --upgrade pip --no-user
           if [[ -f requirements-rocm.txt ]]; then
-            echo "Removing 'flash-attn' from requirements before installing..."
-            sed -i '/flash-attn/d' requirements-rocm.txt
+            pip uninstall torch torchvision torchaudio
             pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/rocm6.3/
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-rocm.txt --no-user
           fi
