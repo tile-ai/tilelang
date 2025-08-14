@@ -253,8 +253,8 @@ CodeGenTileLangWebGPU::AddFunction(const PrimFunc &f, bool skip_readonly_decl) {
   func_info.launch_param_tags.push_back(os_param_access.str());
 
   ICHECK(!info.has_block_index_z)
-      << "blockIdx.z is not supported in WebGPU to accomodate large blockIdx.x";
-  // anotate workgroup
+      << "blockIdx.z is not supported in WebGPU to accommodate large blockIdx.x";
+  // annotate workgroup
   this->stream << "@compute @workgroup_size(" << info.workgroup_size[0] << ", "
                << info.workgroup_size[1] << ", " << info.workgroup_size[2]
                << ")\n";

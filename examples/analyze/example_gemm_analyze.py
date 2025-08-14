@@ -50,7 +50,7 @@ def main():
     my_func = kernel(128, 128, 32, 3, 128, True)
 
     if torch.version.hip is not None:
-        cuda_device=CDNA("hip")
+        cuda_device = CDNA("hip")
     else:
         cuda_device = CUDA("cuda")
     result = Analyzer.analysis(my_func, cuda_device)

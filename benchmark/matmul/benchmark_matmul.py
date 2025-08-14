@@ -54,7 +54,7 @@ def get_configs(args, kwargs):
         import torch
 
         if torch.version.hip is not None:
-            arch=CDNA("hip")
+            arch = CDNA("hip")
         else:
             arch = CUDA("cuda")
         topk = 10

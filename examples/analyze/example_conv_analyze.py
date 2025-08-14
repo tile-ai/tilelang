@@ -4,6 +4,7 @@ from tilelang.carver.arch import CUDA
 from tilelang.carver.arch import CDNA
 from tilelang.layout import make_swizzled_layout
 import torch
+
 N = 64
 C = 256
 H = 512
@@ -96,7 +97,7 @@ def kernel(N,
 def main():
     my_func = kernel(N, C, H, W, F, K, S, D, P, 64, 128, 32, 3, 256)
     if torch.version.hip is not None:
-        cuda_device=CDNA("hip")
+        cuda_device = CDNA("hip")
     else:
         cuda_device = CUDA("cuda")
     result = Analyzer.analysis(my_func, cuda_device)

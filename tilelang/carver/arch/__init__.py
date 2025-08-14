@@ -6,6 +6,7 @@ from typing import Union
 from tvm.target import Target
 import torch
 
+
 def get_arch(target: Union[str, Target] = "cuda") -> TileDevice:
     if isinstance(target, str):
         target = Target(target)

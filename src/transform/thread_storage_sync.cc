@@ -189,7 +189,7 @@ protected:
         }
       }
     }
-    // return the exposed entries, remove unecessary ones.
+    // return the exposed entries, remove unnecessary ones.
     int sync_count = 0;
     // head are before first sync, tail are after last sync
     std::vector<AccessEntry> head, tail;

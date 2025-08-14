@@ -203,7 +203,7 @@ class AutoTuner:
                 logger.warning(
                     "`supply_prog` will be ignored as this program is under `with set_autotune_inputs` context."
                 )
-            supply_prog = lambda _: get_autotune_inputs()  # noqa: E731·
+            supply_prog = lambda _: get_autotune_inputs()  # noqa: E731
 
         self.profile_args = ProfileArgs(
             supply_type=supply_type,
