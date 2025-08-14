@@ -7,7 +7,7 @@ env:
 
 jobs:
   format-check:
-    runs-on: self-hosted
+    runs-on: [self-hosted, nvidia]
 
     permissions:
       contents: write 
