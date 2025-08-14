@@ -20,6 +20,7 @@ requests
 cloudpickle
 ml_dtypes
 psutil
+torch
 tabulate
 wheel
 setuptools
