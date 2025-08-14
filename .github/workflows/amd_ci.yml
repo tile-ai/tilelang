@@ -8,6 +8,7 @@ env:
 
 jobs:
   format-check:
+    runs-on: self-hosted
     uses: ./.github/workflows/ci.yml@${{ github.ref }}
     with:
       python-version: ${{ env.PYTHON_VERSION }}
