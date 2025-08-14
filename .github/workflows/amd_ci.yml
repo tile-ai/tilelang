@@ -7,6 +7,13 @@ env:
   PYTORCH_INDEX_URL: https://download.pytorch.org/whl/nightly/rocm6.3/
 
 jobs:
+  format-check:
+    uses: ./.github/workflows/ci.yml@${{ github.ref }}
+    with:
+      python-version: ${{ env.PYTHON_VERSION }}
+      repository: ${{ github.event.pull_request.head.repo.full_name }}
+      ref: ${{ github.event.pull_request.head.ref }}
+
   build-test:
     runs-on: [self-hosted, amd, gpu]
     needs: format-check
