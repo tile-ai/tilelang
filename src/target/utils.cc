@@ -53,11 +53,11 @@ bool TargetIsHopper(Target target) {
   return arch >= 90 && arch < 100;
 }
 
-bool TargetIsBlackwellWmma(Target target) {
+bool TargetIsSM120(Target target) {
   if (!TargetIsCuda(target))
     return false;
   int arch = GetArchInt(target);
-  return arch > 110 && arch < 130;
+  return arch >= 120 && arch < 130;
 }
 
 bool TargetIsCDNA(Target target) {
