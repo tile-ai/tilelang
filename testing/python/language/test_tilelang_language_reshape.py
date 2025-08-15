@@ -88,6 +88,7 @@ def reshape_test_smem_2d_2_1d(N, M, dtype):
 
     return main
 
+
 def run_reshape_smem_2d_2_1d(N, M, dtype):
     program = reshape_test_smem_2d_2_1d(N, M, dtype)
     jit_kernel = tl.compile(program, out_idx=-1)
@@ -98,10 +99,10 @@ def run_reshape_smem_2d_2_1d(N, M, dtype):
 
     profiler.assert_allclose(ref_program, atol=1e-2, rtol=1e-2)
 
+
 def test_reshape_smem_2d_2_1d():
     run_reshape_smem_2d_2_1d(1024, 32, "float32")
     run_reshape_smem_2d_2_1d(2048, 64, "float16")
-
 
 
 if __name__ == "__main__":

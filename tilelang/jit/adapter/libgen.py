@@ -181,10 +181,10 @@ class PyLibraryGenerator(LibraryGenerator):
     culib = None
     pymodule = None
 
-    def __init__(self, target: Target):
+    def __init__(self, target: Target, verbose: bool = False):
         if not is_nvrtc_available:
             raise ImportError(NVRTC_UNAVAILABLE_WARNING)
-        super().__init__(target)
+        super().__init__(target, verbose)
 
     @staticmethod
     def import_from_file(module_name, file_path):

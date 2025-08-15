@@ -9,7 +9,6 @@ def _check(original, transformed):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
     mod = tl.transform.Simplify()(mod)
-    print(mod["main"])
     tvm.ir.assert_structural_equal(mod["main"], transformed.with_attr("global_symbol", "main"),
                                    True)
 
@@ -40,21 +39,29 @@ def test_trival_pipeline():
                         C[tx, i] = B[tx, 0] + T.float32(1)
 
     @T.prim_func
-    def expected(A: T.Tensor((16, 1), "float32"), C: T.Tensor((16, 1), "float32")) -> None:
+    def expected(A: T.Buffer((16, 1), "float32"), C: T.Buffer((16, 1), "float32")):
         for tx in T.thread_binding(16, thread="threadIdx.x"):
-            with T.block(""):
+            with T.block():
                 T.reads(A[tx, 0])
                 T.writes(C[tx, 0])
                 B = T.alloc_buffer((2, 16, 1), scope="shared")
-                with T.block(""):
+                with T.block():
                     T.reads(A[tx, 0])
                     T.writes(B[0, tx, 0])
                     B[0, tx, 0] = A[tx, 0] * T.float32(2.0)
-                with T.block(""):
-                    T.reads()
-                    T.writes()
-                    T.evaluate(0)
-                with T.block(""):
+                with T.block():
+                    T.reads(A[tx, 1:1], B[0:2, tx, 0])
+                    T.writes(B[1:1, tx, 0], C[tx, 0:0])
+                    for i in range(0):
+                        with T.block():
+                            T.reads(A[tx, i + 1])
+                            T.writes(B[i + 1, tx, 0])
+                            B[i + 1, tx, 0] = A[tx, i + 1] * T.float32(2.0)
+                        with T.block():
+                            T.reads(B[i, tx, 0])
+                            T.writes(C[tx, i])
+                            C[tx, i] = B[i, tx, 0] + T.float32(1.0)
+                with T.block():
                     T.reads(B[0, tx, 0])
                     T.writes(C[tx, 0])
                     C[tx, 0] = B[0, tx, 0] + T.float32(1.0)

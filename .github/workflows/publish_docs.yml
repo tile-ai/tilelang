@@ -27,11 +27,10 @@ jobs:
           TARGET_REPO: ${{ secrets.TARGET_REPO }}
           TARGET_TOKEN: ${{ secrets.TARGET_TOKEN }}
         run: |
+          git clone https://github.com/${TARGET_REPO}.git -b main target_repo
+          cd target_repo
           git config --local user.name "github-actions[bot]"
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git clone https://github.com/${TARGET_REPO}.git target_repo
-          cd target_repo
-          git checkout main
           find . -mindepth 1 -maxdepth 1 ! -name ".github" ! -name "." ! -name ".git" -exec rm -rf {} +
           cp -r ../docs/_build/html/* ./
           git add .

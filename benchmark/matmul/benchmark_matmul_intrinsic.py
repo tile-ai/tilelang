@@ -187,10 +187,7 @@ def get_configs(args, kwargs):
         from tilelang.carver.roller.rasterization import NoRasterization
         import torch
 
-        if torch.version.hip is not None:
-            arch=CDNA("hip")
-        else:
-            arch = CUDA("cuda")
+        arch = CDNA("cuda") if torch.version.hip is None else CUDA("hip")
         topk = 10
 
         carve_template = MatmulTemplate(

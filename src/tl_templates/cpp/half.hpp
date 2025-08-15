@@ -284,7 +284,7 @@
 #endif
 
 #ifndef HALF_ENABLE_F16C_INTRINSICS
-/// Enable F16C intruction set intrinsics.
+/// Enable F16C instruction set intrinsics.
 /// Defining this to 1 enables the use of [F16C compiler
 /// intrinsics](https://en.wikipedia.org/wiki/F16C) for converting between
 /// half-precision and single-precision values which may result in improved
@@ -1674,7 +1674,7 @@ template <typename T> T half2float(unsigned int value) {
 /// \tparam R rounding mode to use
 /// \tparam E `true` for round to even, `false` for round away from zero
 /// \tparam I `true` to raise INEXACT exception (if inexact), `false` to never
-/// raise it \tparam T type to convert to (buitlin integer type with at least 16
+/// raise it \tparam T type to convert to (builtin integer type with at least 16
 /// bits precision, excluding any implicit sign bits) \param value
 /// half-precision value to convert \return rounded integer value \exception
 /// FE_INVALID if value is not representable in type \a T \exception FE_INEXACT
@@ -1778,7 +1778,7 @@ inline uint32 divide64(uint32 x, uint32 y, int &s) {
 /// \tparam R `true` to compute signed remainder, `false` for positive remainder
 /// \param x first operand as positive finite half-precision value
 /// \param y second operand as positive finite half-precision value
-/// \param quo adress to store quotient at, `nullptr` if \a Q `false`
+/// \param quo address to store quotient at, `nullptr` if \a Q `false`
 /// \return modulus of \a x / \a y
 template <bool Q, bool R>
 unsigned int mod(unsigned int x, unsigned int y, int *quo = NULL) {
@@ -2435,7 +2435,7 @@ template <typename, typename, std::float_round_style> struct half_caster;
 /// Half-precision floating-point type.
 /// This class implements an IEEE-conformant half-precision floating-point type
 /// with the usual arithmetic operators and conversions. It is implicitly
-/// convertible to single-precision floating-point, which makes artihmetic
+/// convertible to single-precision floating-point, which makes arithmetic
 /// expressions and functions with mixed-type operands to be of the most precise
 /// operand type.
 ///
@@ -2445,9 +2445,9 @@ template <typename, typename, std::float_round_style> struct half_caster;
 /// which means it can be standard-conformantly copied using raw binary copies.
 /// But in this context some more words about the actual size of the type.
 /// Although the half is representing an IEEE 16-bit type, it does not
-/// neccessarily have to be of exactly 16-bits size. But on any reasonable
+/// necessarily have to be of exactly 16-bits size. But on any reasonable
 /// implementation the actual binary representation of this type will most
-/// probably not ivolve any additional "magic" or padding beyond the simple
+/// probably not involve any additional "magic" or padding beyond the simple
 /// binary representation of the underlying 16-bit IEEE number, even if not
 /// strictly guaranteed by the standard. But even then it only has an actual
 /// size of 16 bits if your C++ implementation supports an unsigned integer type
@@ -2801,7 +2801,7 @@ public:
   static HALF_CONSTEXPR_CONST bool traps = true;
 #else
   /// Traps only if [HALF_ERRHANDLING_THROW_...](\ref
-  /// HALF_ERRHANDLING_THROW_INVALID) is acitvated.
+  /// HALF_ERRHANDLING_THROW_INVALID) is activated.
   static HALF_CONSTEXPR_CONST bool traps = false;
 #endif
 
@@ -5067,7 +5067,7 @@ inline half frexp(half arg, int *exp) {
 /// [std::scalbln](https://en.cppreference.com/w/cpp/numeric/math/scalbn).
 /// \param arg number to modify
 /// \param exp power of two to multiply with
-/// \return \a arg multplied by 2 raised to \a exp
+/// \return \a arg multiplied by 2 raised to \a exp
 /// \exception FE_INVALID for signaling NaN
 /// \exception FE_OVERFLOW, ...UNDERFLOW, ...INEXACT according to rounding
 inline half scalbln(half arg, long exp) {
@@ -5096,7 +5096,7 @@ inline half scalbln(half arg, long exp) {
 /// **See also:** Documentation for
 /// [std::scalbn](https://en.cppreference.com/w/cpp/numeric/math/scalbn). \param
 /// arg number to modify \param exp power of two to multiply with \return \a arg
-/// multplied by 2 raised to \a exp \exception FE_INVALID for signaling NaN
+/// multiplied by 2 raised to \a exp \exception FE_INVALID for signaling NaN
 /// \exception FE_OVERFLOW, ...UNDERFLOW, ...INEXACT according to rounding
 inline half scalbn(half arg, int exp) { return scalbln(arg, exp); }
 
@@ -5106,7 +5106,7 @@ inline half scalbn(half arg, int exp) { return scalbln(arg, exp); }
 /// **See also:** Documentation for
 /// [std::ldexp](https://en.cppreference.com/w/cpp/numeric/math/ldexp). \param
 /// arg number to modify \param exp power of two to multiply with \return \a arg
-/// multplied by 2 raised to \a exp \exception FE_INVALID for signaling NaN
+/// multiplied by 2 raised to \a exp \exception FE_INVALID for signaling NaN
 /// \exception FE_OVERFLOW, ...UNDERFLOW, ...INEXACT according to rounding
 inline half ldexp(half arg, int exp) { return scalbln(arg, exp); }
 
@@ -5379,7 +5379,7 @@ inline HALF_CONSTEXPR bool islessequal(half x, half y) {
          !isnan(x) && !isnan(y);
 }
 
-/// Quiet comarison for less or greater.
+/// Quiet comparison for less or greater.
 /// **See also:** Documentation for
 /// [std::islessgreater](https://en.cppreference.com/w/cpp/numeric/math/islessgreater).
 /// \param x first operand
@@ -5503,7 +5503,7 @@ inline int feraiseexcept(int excepts) {
 ///
 /// **See also:** Documentation for
 /// [std::fegetexceptflag](https://en.cppreference.com/w/cpp/numeric/fenv/feexceptflag).
-/// \param flagp adress to store flag state at
+/// \param flagp address to store flag state at
 /// \param excepts OR of flags to save
 /// \retval 0 for success
 inline int fegetexceptflag(int *flagp, int excepts) {
@@ -5520,7 +5520,7 @@ inline int fegetexceptflag(int *flagp, int excepts) {
 ///
 /// **See also:** Documentation for
 /// [std::fesetexceptflag](https://en.cppreference.com/w/cpp/numeric/fenv/feexceptflag).
-/// \param flagp adress to take flag state from
+/// \param flagp address to take flag state from
 /// \param excepts OR of flags to restore
 /// \retval 0 for success
 inline int fesetexceptflag(const int *flagp, int excepts) {

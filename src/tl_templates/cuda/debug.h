@@ -118,7 +118,7 @@ debug_print_buffer_value<signed char>(const char *msg, const char *buf_name,
          threadIdx.z, buf_name, index, var);
 }
 
-// Specialization for unsiged char type
+// Specialization for unsigned char type
 template <>
 __device__ void
 debug_print_buffer_value<unsigned char>(const char *msg, const char *buf_name,
