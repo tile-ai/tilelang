@@ -42,12 +42,12 @@ TL_DEVICE void tma_load(const CUtensorMap &descriptor, uint64_t &smem_mbar,
   uint32_t smem_int_mbar = smem_ptr_to_uint(&smem_mbar);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile("cp.async.bulk.tensor.1d.shared::cluster.global.mbarrier::"
-                "complete_tx::bytes.L2::cache_hint"
-                " [%0], [%1, {%3}], [%2], %4;"
-                :
-                : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
-                  "r"(crd0), "l"(cache_hint)
-                : "memory");
+               "complete_tx::bytes.L2::cache_hint"
+               " [%0], [%1, {%3}], [%2], %4;"
+               :
+               : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                 "r"(crd0), "l"(cache_hint)
+               : "memory");
 }
 
 template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
@@ -58,12 +58,12 @@ TL_DEVICE void tma_load(const CUtensorMap &descriptor, uint64_t &smem_mbar,
   uint32_t smem_int_mbar = smem_ptr_to_uint(&smem_mbar);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::"
-                "complete_tx::bytes.L2::cache_hint"
-                " [%0], [%1, {%3, %4}], [%2], %5;"
-                :
-                : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
-                  "r"(crd0), "r"(crd1), "l"(cache_hint)
-                : "memory");
+               "complete_tx::bytes.L2::cache_hint"
+               " [%0], [%1, {%3, %4}], [%2], %5;"
+               :
+               : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                 "r"(crd0), "r"(crd1), "l"(cache_hint)
+               : "memory");
 }
 
 template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
@@ -74,12 +74,12 @@ TL_DEVICE void tma_load(const CUtensorMap &descriptor, uint64_t &smem_mbar,
   uint32_t smem_int_mbar = smem_ptr_to_uint(&smem_mbar);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::"
-                "complete_tx::bytes.L2::cache_hint"
-                " [%0], [%1, {%3, %4, %5}], [%2], %6;"
-                :
-                : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
-                  "r"(crd0), "r"(crd1), "r"(crd2), "l"(cache_hint)
-                : "memory");
+               "complete_tx::bytes.L2::cache_hint"
+               " [%0], [%1, {%3, %4, %5}], [%2], %6;"
+               :
+               : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                 "r"(crd0), "r"(crd1), "r"(crd2), "l"(cache_hint)
+               : "memory");
 }
 template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
 TL_DEVICE void tma_load(const CUtensorMap &descriptor, uint64_t &smem_mbar,
@@ -90,12 +90,12 @@ TL_DEVICE void tma_load(const CUtensorMap &descriptor, uint64_t &smem_mbar,
   uint32_t smem_int_mbar = smem_ptr_to_uint(&smem_mbar);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::"
-                "complete_tx::bytes.L2::cache_hint"
-                " [%0], [%1, {%3, %4, %5, %6}], [%2], %7;"
-                :
-                : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
-                  "r"(crd0), "r"(crd1), "r"(crd2), "r"(crd3), "l"(cache_hint)
-                : "memory");
+               "complete_tx::bytes.L2::cache_hint"
+               " [%0], [%1, {%3, %4, %5, %6}], [%2], %7;"
+               :
+               : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                 "r"(crd0), "r"(crd1), "r"(crd2), "r"(crd3), "l"(cache_hint)
+               : "memory");
 }
 
 template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
@@ -107,13 +107,13 @@ TL_DEVICE void tma_load(const CUtensorMap &descriptor, uint64_t &smem_mbar,
   uint32_t smem_int_mbar = smem_ptr_to_uint(&smem_mbar);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile("cp.async.bulk.tensor.5d.shared::cluster.global.mbarrier::"
-                "complete_tx::bytes.L2::cache_hint"
-                " [%0], [%1, {%3, %4, %5, %6, %7}], [%2], %8;"
-                :
-                : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
-                  "r"(crd0), "r"(crd1), "r"(crd2), "r"(crd3), "r"(crd4),
-                  "l"(cache_hint)
-                : "memory");
+               "complete_tx::bytes.L2::cache_hint"
+               " [%0], [%1, {%3, %4, %5, %6, %7}], [%2], %8;"
+               :
+               : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                 "r"(crd0), "r"(crd1), "r"(crd2), "r"(crd3), "r"(crd4),
+                 "l"(cache_hint)
+               : "memory");
 }
 
 template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
@@ -126,15 +126,14 @@ TL_DEVICE void tma_load_im2col(const CUtensorMap &descriptor,
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_mbar = smem_ptr_to_uint(&smem_mbar);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
-  asm volatile(
-      "cp.async.bulk.tensor.4d.shared::cluster.global.im2col.mbarrier:"
-      ":complete_tx::bytes.L2::cache_hint"
-      " [%0], [%1, {%3, %4, %5, %6}], [%2], {%7, %8}, %9;"
-      :
-      : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
-        "r"(coord_c), "r"(coord_w), "r"(coord_h), "r"(coord_n), "h"(offset_w),
-        "h"(offset_h), "l"(cache_hint)
-      : "memory");
+  asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.im2col.mbarrier:"
+               ":complete_tx::bytes.L2::cache_hint"
+               " [%0], [%1, {%3, %4, %5, %6}], [%2], {%7, %8}, %9;"
+               :
+               : "r"(smem_int_ptr), "l"(gmem_int_desc), "r"(smem_int_mbar),
+                 "r"(coord_c), "r"(coord_w), "r"(coord_h), "r"(coord_n),
+                 "h"(offset_w), "h"(offset_h), "l"(cache_hint)
+               : "memory");
 }
 
 template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
@@ -143,11 +142,11 @@ TL_DEVICE void tma_store(const CUtensorMap &descriptor,
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile("cp.async.bulk.tensor.1d.global.shared::cta.bulk_group "
-                ".L2::cache_hint [%0, {%2}], [%1], %3;"
-                :
-                : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0),
-                  "l"(cache_hint)
-                : "memory");
+               ".L2::cache_hint [%0, {%2}], [%1], %3;"
+               :
+               : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0),
+                 "l"(cache_hint)
+               : "memory");
 }
 
 template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
@@ -157,11 +156,11 @@ TL_DEVICE void tma_store(const CUtensorMap &descriptor,
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.bulk_group "
-                ".L2::cache_hint [%0, {%2, %3}], [%1], %4;"
-                :
-                : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
-                  "l"(cache_hint)
-                : "memory");
+               ".L2::cache_hint [%0, {%2, %3}], [%1], %4;"
+               :
+               : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
+                 "l"(cache_hint)
+               : "memory");
 }
 
 template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
@@ -171,11 +170,11 @@ TL_DEVICE void tma_store(const CUtensorMap &descriptor,
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile("cp.async.bulk.tensor.3d.global.shared::cta.bulk_group "
-                ".L2::cache_hint [%0, {%2, %3, %4}], [%1], %5;"
-                :
-                : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
-                  "r"(crd2), "l"(cache_hint)
-                : "memory");
+               ".L2::cache_hint [%0, {%2, %3, %4}], [%1], %5;"
+               :
+               : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
+                 "r"(crd2), "l"(cache_hint)
+               : "memory");
 }
 
 template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
@@ -186,11 +185,11 @@ TL_DEVICE void tma_store(const CUtensorMap &descriptor,
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile("cp.async.bulk.tensor.4d.global.shared::cta.bulk_group "
-                ".L2::cache_hint [%0, {%2, %3, %4, %5}], [%1], %6;"
-                :
-                : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
-                  "r"(crd2), "r"(crd3), "l"(cache_hint)
-                : "memory");
+               ".L2::cache_hint [%0, {%2, %3, %4, %5}], [%1], %6;"
+               :
+               : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
+                 "r"(crd2), "r"(crd3), "l"(cache_hint)
+               : "memory");
 }
 
 template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL>
@@ -201,11 +200,11 @@ TL_DEVICE void tma_store(const CUtensorMap &descriptor,
   uint64_t gmem_int_desc = reinterpret_cast<uint64_t>(&descriptor);
   uint32_t smem_int_ptr = smem_ptr_to_uint(smem_ptr);
   asm volatile("cp.async.bulk.tensor.5d.global.shared::cta.bulk_group "
-                ".L2::cache_hint [%0, {%2, %3, %4, %5, %6}], [%1], %7;"
-                :
-                : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
-                  "r"(crd2), "r"(crd3), "r"(crd4), "l"(cache_hint)
-                : "memory");
+               ".L2::cache_hint [%0, {%2, %3, %4, %5, %6}], [%1], %7;"
+               :
+               : "l"(gmem_int_desc), "r"(smem_int_ptr), "r"(crd0), "r"(crd1),
+                 "r"(crd2), "r"(crd3), "r"(crd4), "l"(cache_hint)
+               : "memory");
 }
 
 TL_DEVICE void prefetch_tma_descriptor(const CUtensorMap &descriptor) {

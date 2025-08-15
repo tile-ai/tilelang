@@ -1002,7 +1002,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
             [op->args[op->args.size() - 1].as<IntImmNode>()->value];
     // Simplify the code by using the default eviction policy
     if (eviction_policy != "EVICT_NORMAL") {
-      ss << "tl::tma_load<tl::CacheHintSm90::" << eviction_policy << ">(" ;
+      ss << "tl::tma_load<tl::CacheHintSm90::" << eviction_policy << ">(";
     } else {
       ss << "tl::tma_load(";
     }
