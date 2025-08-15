@@ -624,6 +624,19 @@ TL_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
   }
 }
 
+template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
+          bool trans_B, bool clear_accum = false, int lda = 0, int ldb = 0,
+          int offset_a = 0, int offset_b = 0, bool use_wgmma = true,
+          int wg_wait = 0, typename A_type, typename B_type, typename C_type>
+TL_DEVICE void gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
+  static_assert(!use_wgmma, "wgmma doesn't support gemm_sr");
+  using MMA =
+      cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
+                                 trans_B, clear_accum, lda, ldb, offset_a,
+                                 offset_b, A_type, B_type, C_type>;
+  MMA::body_sr(pA, pB, accum);
+}
+
 template <int num_mma> TL_DEVICE void wait_wgmma() {
   cute::warpgroup_wait<num_mma>();
 }
