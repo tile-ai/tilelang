@@ -1,4 +1,4 @@
-name: AMD CI
+name: CI Test on AMD
 on: [pull_request]
 
 env:
@@ -62,7 +62,7 @@ jobs:
       with:
         commit_message: "lint"
 
-  build-test:
+  build-test-amd:
     runs-on: [self-hosted, amd, gpu]
     needs: format-check
     permissions:
