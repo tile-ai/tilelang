@@ -96,7 +96,7 @@ def kernel(N,
 
 def main():
     my_func = kernel(N, C, H, W, F, K, S, D, P, 64, 128, 32, 3, 256)
-    cuda_device = CDNA("cuda") if torch.version.hip is None else CUDA("hip")
+    cuda_device = CUDA("cuda") if torch.version.hip is None else CDNA("hip")
     result = Analyzer.analysis(my_func, cuda_device)
     print(result)
     print(f"Analyzed FLOPs: {result.total_flops}")
