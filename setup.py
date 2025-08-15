@@ -15,8 +15,6 @@ from pathlib import Path
 import os
 import sys
 import site
-import hashlib
-import sysconfig
 import functools
 import urllib.request
 from packaging.version import Version
@@ -25,7 +23,6 @@ import multiprocessing
 from setuptools.command.build_ext import build_ext
 import importlib
 import logging
-import fcntl
 
 # Configure logging with basic settings
 logging.basicConfig(

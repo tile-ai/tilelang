@@ -151,7 +151,8 @@ class TensorProxy(BaseTensorProxy):
         return tuple(reversed(strides))
 
     def __call__(self, shape: Tuple[Any], dtype: str = "float32", data=None) -> tir.Buffer:
-        return super().__call__(shape, dtype=dtype, strides=TensorProxy._construct_strides(shape), data=data)
+        return super().__call__(
+            shape, dtype=dtype, strides=TensorProxy._construct_strides(shape), data=data)
 
 
 class StridedTensorProxy(BaseTensorProxy):
