@@ -446,7 +446,6 @@ LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
                                  B->dtype.bits(), trans_B ? 2 : 1);
       results.Set(B, ABLayout);
     } else {
-      // ICHECK(0) << "WGMMA only support B in shared.";
       auto fragment =
           makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
       results.Set(B, fragment->BindThreadRange(thread_range));
