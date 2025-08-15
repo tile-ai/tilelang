@@ -346,7 +346,6 @@ TL_DEVICE uint32_t mbarrier_try_wait(uint64_t &smem_barrier, int phase_bit) {
   return waitComplete;
 }
 
-
 TL_DEVICE uint32_t mbarrier_try_wait(uint64_t &smem_barrier, int phase_bit) {
 
   uint32_t smem_int_ptr = smem_ptr_to_uint(&smem_barrier);

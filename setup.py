@@ -15,7 +15,7 @@ from pathlib import Path
 import os
 import sys
 import site
-import functools
+import sysconfig
 import urllib.request
 from packaging.version import Version
 import platform
