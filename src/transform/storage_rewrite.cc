@@ -140,9 +140,9 @@ public:
 //
 class LinearAccessPatternFinder final : public StmtExprVisitor {
 public:
-  /*! \brief record the touch hist of statment. */
+  /*! \brief record the touch hist of statement. */
   struct StmtEntry {
-    // The statment
+    // The statement
     const Object *stmt;
     // The index in the linear_seq_ to point to end of the nested scope.
     // This is only set to non-zero if stmt is a nested scope.
@@ -150,7 +150,7 @@ public:
     // offset if offset < 0, means this is the end, the begin entry is
     // current_index + offset
     int64_t scope_pair_offset{0};
-    // The buffer variables this statment touched.
+    // The buffer variables this statement touched.
     std::vector<const VarNode *> touched;
   };
   // The scope of each allocation
@@ -675,7 +675,7 @@ private:
            scope.tag != ".workspace" && scope.tag != ".vtcm";
   }
 
-  // Alllocate entry of node.
+  // Allocate entry of node.
   // Event entry in liveness analysis
   struct EventEntry {
     // variables we generate
@@ -785,10 +785,10 @@ private:
           for (const AllocateNode *op : e->allocs) {
             ICHECK_EQ(op->extents.size(), 1)
                 << "Buffer var " << op->buffer_var->name_hint
-                << " was identified as a re-usable allocation, but has "
+                << " was identified as a reusable allocation, but has "
                 << op->extents.size() << " physical dimensions.  "
                 << "Currently, only flat 1-d memory spaces should be "
-                   "identified as re-usable "
+                   "identified as reusable "
                    "allocations.";
             PrimExpr sz = op->extents[0];
             auto nbits = op->dtype.bits() * op->dtype.lanes();
@@ -905,7 +905,7 @@ private:
   void PlanNewScope(const Object *op) {
     if (thread_scope_ != nullptr) {
       ICHECK(thread_scope_ == op);
-      // erase all memory atatched to this scope.
+      // erase all memory attached to this scope.
       for (auto it = const_free_map_.begin(); it != const_free_map_.end();) {
         if (it->second->attach_scope_ == op) {
           it = const_free_map_.erase(it);
@@ -1023,7 +1023,7 @@ private:
   StorageEntry *NewAlloc(const AllocateNode *op, const Object *attach_scope,
                          const StorageScope &scope, size_t const_nbits) {
     ICHECK(op != nullptr);
-    // Re-use not successful, allocate a new buffer.
+    // Reuse not successful, allocate a new buffer.
     auto entry = std::make_unique<StorageEntry>();
     entry->attach_scope_ = attach_scope;
     entry->scope = scope;
@@ -1050,7 +1050,7 @@ private:
     // have its own allocation with size determined at runtime.
     bool is_known_size = (const_nbits != 0);
 
-    // Currently, only flat memory spaces can be re-used.  Packing
+    // Currently, only flat memory spaces can be reused.  Packing
     // into N-d space (e.g. 2-d texture memory on GPUs) will require
     // more in-depth algorithms.
     bool is_flat_memory_space = (num_physical_dimensions == 1);

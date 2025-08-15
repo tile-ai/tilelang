@@ -303,7 +303,7 @@ private:
   bool IsAppropriateSharedMemory(const Var &var) {
     return is_dynamic_ ? IsDynamicSharedMemory(var) : IsStaticSharedMemory(var);
   }
-  // Whether do dyanmic analysis.
+  // Whether do dynamic analysis.
   bool is_dynamic_{true};
   // Whether do aggressive merge.
   bool enable_aggressive_merge_{false};
@@ -435,7 +435,7 @@ private:
             const AllocateNode *alloc = shmem_allocs_[buffer];
             auto alignment = align[i];
             // Modern nvidia architecture performs hardware swizzling (hopper
-            // wgmma/tma for exmaple) requires dynamic shared memory address to
+            // wgmma/tma for example) requires dynamic shared memory address to
             // be aligned to 1024 bytes For other devices, we align to 16 bytes
             if (shmem_alignment_map_.find(buffer) !=
                 shmem_alignment_map_.end()) {
@@ -943,7 +943,7 @@ private:
    */
   StorageEntry *NewAlloc(const AllocateNode *op, size_t const_nbits) {
     ICHECK(op != nullptr);
-    // Re-use not successful, allocate a new buffer.
+    // Reuse not successful, allocate a new buffer.
     StorageEntry *entry = arena_.make<StorageEntry>();
     entry->allocs.push_back({op->buffer_var.get()});
     entry->const_nbits = const_nbits;
@@ -1046,7 +1046,7 @@ private:
       sym_free_list_.push_back(e);
     }
   }
-  // Wheather enable dyanmic analysis.
+  // Whether enable dynamic analysis.
   bool is_dynamic_{true};
 
   // Whether enable verbose logging.

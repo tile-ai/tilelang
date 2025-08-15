@@ -16,10 +16,7 @@ def ref_program(A, B):
 
 def get_configs(M, N, K, with_roller=False, topk=20):
     if with_roller:
-        if torch.version.hip is not None:
-            arch=CDNA("hip")
-        else:
-            arch = CUDA("cuda")
+        arch = CDNA("cuda") if torch.version.hip is None else CUDA("hip")
         carve_template = MatmulTemplate(
             M=M,
             N=N,

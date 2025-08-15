@@ -1,6 +1,6 @@
 /*!
  * \file atomicadd_vectorize.cc
- * \brief A tool to atomatically vectorize atomic add
+ * \brief A tool to automatically vectorize atomic add
  */
 
 #include "../layout/layout.h"
