@@ -1,35 +1,30 @@
+import inspect
 from typing import Callable, Optional, Union
 
-from tvm.tir.function import PrimFunc
 import tvm.script.parser.tir.entry as _tir_entry
-import inspect
+from tvm.tir.function import PrimFunc
 from tvm.script.parser._core import parse, scan_macro, utils
 
 
 def prim_func(func: Optional[Callable] = None,
               private: bool = False,
-              check_well_formed=False) -> Union[PrimFunc, Callable]:
-    """The parsing method for tir prim func, by using `@prim_func` as decorator.
-
-    Parameters
-    ----------
-    func : Callable
-        The function to be parsed as prim func.
-        (Listed as optional to allow the decorator to be used
-        without arguments, like `@prim_func`,
-        or with an argument, `@prim_func(private=True)`)
-
-    private : bool, optional
-        Whether the function should be treated as private.
-        A private function has no global symbol attribute;
-        if the function is not private, it will have a global symbol
-        matching the function name.
-
-    Returns
-    -------
-    res : Union[PrimFunc, Callable]
-        The parsed tir prim func.
+              check_well_formed: bool = False) -> Union[PrimFunc, Callable]:
     """
+              Decorator factory that parses a Python function into a TVM TIR PrimFunc.
+              
+              When applied to a top-level Python function (either as @prim_func or @prim_func(...)), the decorator parses the function into a PrimFunc via the TIR parser and returns that PrimFunc with the original function name preserved. If the decorated function is defined inside a class, it is returned unchanged.
+              
+              Parameters:
+                  func (Callable, optional): The function to parse. Passed as None when using the decorator with keyword arguments (e.g., `@prim_func(private=True)`).
+                  private (bool, optional): If True, the resulting PrimFunc is treated as private (no global symbol will be created). Defaults to False.
+                  check_well_formed (bool, optional): If True, the parser will perform well-formedness checks on the generated PrimFunc. Defaults to False.
+              
+              Returns:
+                  Union[PrimFunc, Callable]: If `func` is provided, returns the parsed PrimFunc; otherwise returns a decorator that will parse a function when invoked.
+              
+              Raises:
+                  TypeError: If the decorator is applied to a non-function object.
+              """
     # pylint: disable=unused-argument
     # (private will be used in the parser, but not immediately)
 

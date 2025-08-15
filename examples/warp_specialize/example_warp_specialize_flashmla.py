@@ -11,6 +11,29 @@ tilelang.disable_cache()
 
 @tilelang.jit(out_idx=[6])
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split):
+    """
+    Create a tiled, JIT-compiled fused attention kernel specialized for the given shapes and tiling.
+    
+    The returned callable (a TileLang `prim_func`) implements a numerically stable, tiled/blocked attention that fuses Q·K, softmax (log-sum-exp stabilization), and the weighted sum with V, including optional positional embedding parts (Q_pe / K_pe). The kernel is specialized for the provided dimensions and block sizes and is configured to run with GPU thread/block bindings and shared-memory tiling.
+    
+    Parameters:
+        batch (int): batch size.
+        heads (int): total number of attention heads.
+        kv_head_num (int): number of KV heads (must be 1; an AssertionError is raised otherwise).
+        seqlen_kv (int): key/value sequence length (context length).
+        dim (int): per-head feature dimension for Q/K/V (output dimension is `dim`).
+        pe_dim (int): positional-embedding dimension concatenated to Q/K.
+        block_N (int): tile size along the key/value (N) axis.
+        block_H (int): tile size along the head (H) axis.
+        num_split (int): number of output splits (affects output layout/partial buffers).
+    
+    Returns:
+        prim_func: A TileLang JIT-ed prim_func with signature
+            (Q, Q_pe, KV, K_pe, glse, Output_partial, Output) that executes the fused attention for the provided shapes.
+    
+    Raises:
+        AssertionError: if kv_head_num != 1.
+    """
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     dtype = "float16"
     accum_dtype = "float"
@@ -27,7 +50,26 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
             Output: T.Tensor([batch, heads, dim], dtype),
     ):
-        with T.Kernel(heads // min(block_H, kv_group_num), batch, threads=256) as (hid, bid):
+        """
+            Fused, tiled GPU kernel that computes attention outputs from queries, keys/values and their positional encodings and writes the result into `Output`.
+            
+            This kernel implements a numerically-stable, blocked (tile-based) attention algorithm that fuses QK score computation, softmax (log-sum-exp scaling), and value accumulation into a single GPU kernel using shared memory and thread synchronization. It consumes:
+            - Q and Q_pe (query and query positional embedding) per [batch, heads, ...],
+            - KV and K_pe (key/value and key positional embedding) over the key/value sequence,
+            and produces the normalized attention output in-place into `Output`.
+            
+            Parameters:
+                Q: Query tensor with shape [batch, heads, dim].
+                Q_pe: Query positional embeddings with shape [batch, heads, pe_dim].
+                KV: Key/Value tensor with shape [batch, seqlen_kv, kv_head_num, dim].
+                K_pe: Key positional embeddings with shape [batch, seqlen_kv, kv_head_num, pe_dim].
+                Output: Destination tensor with shape [batch, heads, dim]; the computed attention outputs are written here.
+            
+            Notes:
+            - The kernel uses tiled processing over the key sequence and per-head blocks, performing fused GEMMs and stable softmax updates (log-sum-exp) to avoid numerical instability for long contexts.
+            - The function writes results directly into `Output` (no return value).
+            """
+            with T.Kernel(heads // min(block_H, kv_group_num), batch, threads=256) as (hid, bid):
             # smem_sQ
             Q_shared_l = T.alloc_shared([block_H, h_dim], dtype)
             Q_shared_r = T.alloc_shared([block_H, h_dim], dtype)
@@ -145,20 +187,10 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         clear_accum=True,
                         wg_wait=-1)
                     T.barrier_wait(kv_shared_0_r_is_ready, k % 2)
-                    T.gemm(
-                        Q_shared_r,
-                        KV_shared_0_r,
-                        acc_s_0,
-                        transpose_B=True,
-                        wg_wait=-1)
+                    T.gemm(Q_shared_r, KV_shared_0_r, acc_s_0, transpose_B=True, wg_wait=-1)
 
                     T.barrier_wait(kv_shared_0_pe_is_ready, k % 2)
-                    T.gemm(
-                        Q_pe_local_0,
-                        K_pe_shared_0,
-                        acc_s_0,
-                        transpose_B=True,
-                        wg_wait=-1)
+                    T.gemm(Q_pe_local_0, K_pe_shared_0, acc_s_0, transpose_B=True, wg_wait=-1)
 
                     T.wait_wgmma(0)
 
@@ -261,20 +293,10 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         wg_wait=-1)
 
                     T.barrier_wait(kv_shared_1_r_is_ready, k % 2)
-                    T.gemm(
-                        Q_shared_r,
-                        KV_shared_1_r,
-                        acc_s_1,
-                        transpose_B=True,
-                        wg_wait=-1)
+                    T.gemm(Q_shared_r, KV_shared_1_r, acc_s_1, transpose_B=True, wg_wait=-1)
 
                     T.barrier_wait(kv_shared_1_pe_is_ready, k % 2)
-                    T.gemm(
-                        Q_pe_local_1,
-                        K_pe_shared_1,
-                        acc_s_1,
-                        transpose_B=True,
-                        wg_wait=-1)
+                    T.gemm(Q_pe_local_1, K_pe_shared_1, acc_s_1, transpose_B=True, wg_wait=-1)
 
                     T.wait_wgmma(0)
 
@@ -308,11 +330,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
                     # Step 10. compute O1 with KV_shared_1_rd
                     T.copy(acc_s_1, acc_s_1_cast)
-                    T.gemm(
-                        acc_s_1_cast,
-                        KV_shared_1_r,
-                        acc_o_r,
-                        wg_wait=-1)
+                    T.gemm(acc_s_1_cast, KV_shared_1_r, acc_o_r, wg_wait=-1)
                     T.copy(acc_s_1_cast, SP1_shared)
                     T.barrier_arrive(s_shared_ready_barrier)
 

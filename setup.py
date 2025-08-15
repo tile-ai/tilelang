@@ -1,3 +1,6 @@
+import fcntl
+import functools
+import hashlib
 import io
 import subprocess
 import shutil
@@ -12,9 +15,7 @@ from pathlib import Path
 import os
 import sys
 import site
-import hashlib
 import sysconfig
-import functools
 import urllib.request
 from packaging.version import Version
 import platform
@@ -22,7 +23,6 @@ import multiprocessing
 from setuptools.command.build_ext import build_ext
 import importlib
 import logging
-import fcntl
 
 # Configure logging with basic settings
 logging.basicConfig(
@@ -658,9 +658,28 @@ class TilelangExtensionBuild(build_ext):
 
     def build_cython(self, ext):
         """
-        Build a single Cython-based extension.
-
-        :param ext: The extension (an instance of CythonExtension).
+        Build the Cython-based JIT adapter for a single CythonExtension and add its cache directory to sys.path.
+        
+        This routine:
+        - Ensures a Cython compiler is available (will attempt `pip install cython` if missing).
+        - Reads the extension's cython wrapper source (expected at <ext.sourcedir>/tilelang/jit/adapter/cython/cython_wrapper.pyx).
+        - Uses a content-hash cache under a .cycache/<pyXY> directory to avoid rebuilding unchanged code.
+        - Serializes concurrent builds across processes with a filesystem lock file.
+        - Compiles the .pyx to C++ and links a shared object, writes a checksum file, and places the resulting `.so` in the cache directory.
+        - Appends the cache directory to sys.path for importability.
+        
+        Parameters:
+            ext: CythonExtension
+                The CythonExtension being built; its sourcedir must contain the cython wrapper at
+                "tilelang/jit/adapter/cython/cython_wrapper.pyx".
+        
+        Side effects:
+        - May invoke `pip install cython`.
+        - Creates and modifies files under the extension's cache directory (.cycache).
+        - Appends the cache directory to sys.path.
+        
+        Exceptions:
+        - Raises Exception if a Cython compiler cannot be located after attempting installation, or if compilation/linking fails.
         """
         cython_compiler = get_cython_compiler()
         if not cython_compiler:
@@ -692,15 +711,15 @@ class TilelangExtensionBuild(build_ext):
                 with open(md5_path, "r") as f:
                     cached_hash = f.read().strip()
                     if cached_hash == code_hash:
-                        logger.info("Cython jit adapter is up to date, no need to compile...")
+                        logger.info("Cython JIT adapter is up to date, no need to compile...")
                         need_compile = False
                     else:
-                        logger.info("Cython jit adapter is out of date, need to recompile...")
+                        logger.info("Cython JIT adapter is out of date, need to recompile...")
             else:
-                logger.info("No cached version found for cython jit adapter, need to compile...")
+                logger.info("No cached version found for Cython JIT adapter, need to compile...")
 
             if need_compile:
-                logger.info("Waiting for lock to compile cython jit adapter...")
+                logger.info("Waiting for lock to compile Cython JIT adapter...")
                 with open(lock_file, 'w') as lock:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
                     try:
@@ -715,7 +734,7 @@ class TilelangExtensionBuild(build_ext):
                                     need_compile = False
 
                         if need_compile:
-                            logger.info("Compiling cython jit adapter...")
+                            logger.info("Compiling Cython JIT adapter...")
                             temp_path = cache_dir / f"temp_{code_hash}.so"
 
                             with open(md5_path, "w") as f:
@@ -736,7 +755,7 @@ class TilelangExtensionBuild(build_ext):
                     except Exception as e:
                         if 'temp_path' in locals() and temp_path.exists():
                             temp_path.unlink()
-                        raise Exception(f"Failed to compile cython jit adapter: {e}") from e
+                        raise Exception(f"Failed to compile Cython JIT adapter: {e}") from e
                     finally:
                         if lock_file.exists():
                             lock_file.unlink()
