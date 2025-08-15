@@ -1673,6 +1673,19 @@ void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
   }
 }
 
+/**
+ * @brief Lower a Ramp expression to an explicit vector "make_type(...)" expression and write it to the output stream.
+ *
+ * Expands a Ramp(base, stride, lanes) into a call of the form
+ * `make_<dtype>((base) + (stride)*0, (base) + (stride)*1, ..., (base) + (stride)*(lanes-1))`
+ * using the node's dtype. Emits the generated code into the provided output stream.
+ *
+ * This routine requires the lane count to be <= 4 and will DCHECK/abort if a larger
+ * lane count is encountered.
+ *
+ * @param op Pointer to the Ramp node to lower.
+ * @param os Output stream to which the emitted expression is written.
+ */
 void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
   CHECK_LE(lanes, 4) << "Translate Ramp Node " << GetRef<Ramp>(op) << " with "
@@ -1689,6 +1702,118 @@ void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {
   os << "))";
 }
 
+/**
+ * @brief Emit CUDA code for a TIR BufferLoad expression.
+ *
+ * Generates code that loads a value (scalar or fixed-length vector) from a 1-D TVM buffer
+ * into the output stream. Supports three code paths:
+ * - Direct element-width match: emit a single pointer-based load via GetBufferRef and apply
+ *   volatile-handling.
+ * - Vectorized ramp index: when the index is a contiguous ramp matching the requested
+ *   vector lanes, emit a vector load via GetVecLoad and apply volatile-handling.
+ * - Scalar fallback: when vector load is not possible, emit per-lane loads (possibly via
+ *   a casted buffer pointer) and reconstruct the requested vector using per-lane helpers.
+ *
+ * Special cases:
+ * - Loads from non-flat memory (indices.size() != 1) or predicated loads are not supported
+ *   and will trigger an ICHECK failure with explanatory messages.
+ * - 4-bit float format (`float4_e2m1fn`) elements cannot be vector-loaded; the implementation
+ *   falls back to the scalar per-lane path.
+ *
+ * @param op Pointer to the BufferLoadNode being lowered. Must have exactly one index and no predicate.
+ * @param os Output stream to which the generated CUDA/C expression is written.
+ */
+void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
+                                     std::ostream &os) { // NOLINT(*)
+  ICHECK_EQ(op->indices.size(), 1)
+      << "Load from non-flat memory not supported.";
+  ICHECK(!op->predicate.defined())
+      << "Predicated buffer load is not supported.";
+
+  DataType value_dtype = op->dtype;
+  PrimExpr index = op->indices[0];
+  Var buffer_var = op->buffer->data;
+  DataType element_dtype = op->buffer->dtype;
+
+  int lanes = op->dtype.lanes();
+  // delcare type.
+  if (value_dtype.lanes() == element_dtype.lanes()) {
+    std::string ref = GetBufferRef(op->dtype, op->buffer.get(), index);
+    HandleVolatileLoads(ref, op, os);
+  } else {
+    bool can_vector_load = false;
+    arith::PVar<PrimExpr> base;
+    if (arith::ramp(base, 1, op->dtype.lanes()).Match(index)) {
+      const RampNode *ramp = index.as<RampNode>();
+      ICHECK(ramp);
+      can_vector_load = true;
+      // arith::ModularSet me = arith::Analyzer().modular_set(ramp->base);
+      // The condition: {k * coeff + base} divisible by the alignment for any k
+      // if (me->coeff % op->dtype.lanes() == 0 && me->base % op->dtype.lanes()
+      // == 0) {
+      //   can_vector_load = true;
+      // }
+    }
+
+    if (value_dtype.is_float4_e2m1fn() && lanes != 1) {
+      // A float4_e2m1fn element has 4 bits, which is an incomplete byte.
+      // So we cannot vector load it.
+      can_vector_load = false;
+    }
+    if (can_vector_load) {
+      std::string ref = GetVecLoad(op->dtype, op->buffer.get(), base.Eval());
+      HandleVolatileLoads(ref, op, os);
+    } else {
+      std::ostringstream svalue_expr;
+      std::string sindex = SSAGetID(PrintExpr(index), index.dtype());
+      std::string vid = GetVarID(buffer_var.get());
+      DataType elem_type = op->dtype.element_of();
+      for (int i = 0; i < lanes; ++i) {
+        std::ostringstream value_temp;
+        if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
+          value_temp << "((";
+          if (buffer_var.get()->dtype.is_handle()) {
+            auto it = alloc_storage_scope_.find(buffer_var.get());
+            if (it != alloc_storage_scope_.end()) {
+              PrintStorageScope(it->second, value_temp);
+            }
+          }
+          PrintType(elem_type, value_temp);
+          value_temp << "*)" << vid << ')';
+        } else {
+          value_temp << vid;
+        }
+        value_temp << '[';
+        PrintVecElemLoad(sindex, index.dtype(), i, value_temp);
+        value_temp << ']';
+        PrintVecElemLoadExpr(op->dtype, i, value_temp.str(), svalue_expr);
+      }
+      os << svalue_expr.str();
+    }
+  }
+}
+
+/**
+ * @brief Emit CUDA code for a Broadcast expression.
+ *
+ * Emits a CUDA/C-style construction of a vector value that repeats a scalar across
+ * all lanes and writes it to the provided output stream. Handles several optimized
+ * representations and special cases:
+ * - 8-bit 4-lane integer/unsigned integer: emits a packed int8x4 constant.
+ * - float16: uses __pack_half2 pairs inside a `make_<type>(...)` call.
+ * - bfloat16: uses __pack_nv_bfloat162 pairs inside a `make_<type>(...)` call.
+ * - float32 with 8 lanes: emits `make_ulonglong4` built from repeated `make_float2`
+ *   values (bit-casted to unsigned long long) to represent packed float8.
+ * - 4-bit integer types: emits packed constants for lanes of 4/8/16/32 where supported,
+ *   including composing into larger make_<type> constructions when needed.
+ * - Fallback: emits `make_<type>(v, v, ..., v)` repeating the scalar for each lane.
+ *
+ * The function expects `op->lanes` to be an integer immediate. Output uses CUDA-specific
+ * packing intrinsics and type constructors where appropriate.
+ *
+ * @param op The Broadcast node containing the scalar value and target dtype/lanes.
+ * @param os  Output stream to which the generated code is written.
+ */
 void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
                                      std::ostream &os) { // NOLINT(*)
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);

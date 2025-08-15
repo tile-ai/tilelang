@@ -231,10 +231,28 @@ class TLCUDASourceWrapper(object):
 
     def create_dispatch_func(self, code, function_informations):
         # Extract the set of dynamic symbolic names used in the primary function
+        """
+        Builds and returns a C host-side dispatch function that prepares kernel arguments and launches each generated device kernel.
+        
+        This inspects the primary function's parameters and buffer map to assemble the host function argument list (buffers, scalar params, dynamic shape symbols, and a stream), discovers each kernel's device declaration in the provided device source, extracts the matching call arguments, and emits kernel-launch code (regular or cooperative) including optional L2-persistent map and TMA descriptor initialization.
+        
+        Parameters:
+            code (str): Complete device-source text containing kernel declarations and definitions.
+            function_informations (Dict[str, Dict]): Mapping from kernel function name to its metadata. Each metadata dict must contain at least "block_info", "grid_info", and "dynamic_smem_buf" entries used to format launches.
+        
+        Returns:
+            str: A C source string defining the external host dispatch function that takes the assembled arguments and launches the device kernels.
+        
+        Raises:
+            ValueError: If a primary-function parameter is neither a buffer in the primary function's buffer_map nor a TIR Var.
+        """
         dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
 
         function_args = []
+
         # Collect function arguments based on primary function's parameters and buffer mappings
+        # QA(@lei): Why don't use device_mod.params?
+        # device func lack buffer map (to convert buffer handle to buffer)
         for param in self.prim_func.params:
             if param in self.prim_func.buffer_map:
                 buffer = self.prim_func.buffer_map[param]
@@ -483,17 +501,59 @@ class TLCUDASourceWrapper(object):
 
     def get_dynamic_symbolic_set(self, prim_func):
         # Determine the set of dynamic symbols used in the function
+        """
+        Return a list of dynamic symbolic names used by a TIR PrimFunc.
+        
+        Scans buffer parameters in `prim_func.buffer_map` and collects symbolic variables that appear
+        in buffer shapes and strides. Names are unique and preserved in the order first seen:
+        all symbols appearing in shapes are listed (in discovery order), followed by any additional
+        symbols that appear only in strides.
+        
+        Parameters:
+            prim_func: The TIR PrimFunc whose buffer shapes and strides are inspected.
+        
+        Returns:
+            A list of dynamic symbolic variable names (strings). The list is deduplicated and
+            preserves discovery order (shapes first, then strides).
+        """
         dynamic_symbolic_set: List[str] = []
+
+        def unique_push_back(name: str):
+            """
+            Append `name` to the enclosing `dynamic_symbolic_set` list if it is not already present.
+            
+            This helper enforces uniqueness by checking membership before appending; it has no return value and mutates the surrounding `dynamic_symbolic_set`.
+            """
+            if name not in dynamic_symbolic_set:
+                dynamic_symbolic_set.append(name)
+
         for param in prim_func.params:
             if param in prim_func.buffer_map:
                 buffer = prim_func.buffer_map[param]
                 for dim in buffer.shape:
-                    if isinstance(dim, tvm.tir.Var) and (dim.name not in dynamic_symbolic_set):
-                        dynamic_symbolic_set.append(dim.name)
+                    if isinstance(dim, tvm.tir.Var):
+                        unique_push_back(dim.name)
+
+        # Note: In buffer definitions, any dynamic symbols appearing in strides are listed after those in the shape.
+        for param in prim_func.params:
+            if param in prim_func.buffer_map:
+                buffer = prim_func.buffer_map[param]
+                for stride in buffer.strides:
+                    if isinstance(stride, tvm.tir.Var):
+                        unique_push_back(stride.name)
+
         return dynamic_symbolic_set
 
     def get_init_func(self):
         # Initialize an empty string for the CUDA function call
+        """
+        Builds and returns the C/C++ initialization function source that sets per-kernel dynamic shared-memory attributes.
+        
+        This inspects the wrapper's dynamic_smem_buf mapping and, for each kernel with a non-None dynamic shared-memory size, emits a call using PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY. The collected calls are then inserted into the PREDEF_INIT_FUNC template and returned as a single string containing the initialization function source.
+        
+        Returns:
+            str: Complete C/C++ source for the initialization function (ready to prepend to the generated library code).
+        """
         call_str = """"""
         # If dynamic shared memory buffer is specified, prepare the cudaFuncSetAttribute call
         for function_name, dynamic_smem_buf in self.dynamic_smem_buf.items():
@@ -538,12 +598,48 @@ class TLCUDASourceWrapper(object):
 
     @property
     def prim_func(self):
+        """
+        Return the primary TIR function from the wrapped IRModule.
+        
+        Selection order:
+        1. If the module has exactly one global var, return its function.
+        2. Else if a symbol named "main" exists, return that function.
+        3. Else return the first function with attribute "tir.is_global_func" set truthy.
+        
+        Raises:
+            ValueError: if no primary function can be found in the module.
+        """
         if len(self.mod.get_global_vars()) == 1:
             return self.mod[self.mod.get_global_vars()[0]]
         elif "main" in self.mod:
             return self.mod["main"]
         else:
             for _, function in self.mod.functions_items():
+                attr = function.attrs
+                if "tir.is_global_func" in attr and attr["tir.is_global_func"]:
+                    return function
+            raise ValueError("Cannot find primary function in the module.")
+
+    @property
+    def device_func(self):
+        """
+        Return the primary device function from the wrapped device module.
+        
+        Resolution order:
+        1. If the module contains exactly one global var, return its function.
+        2. If the module contains a global named "main", return that function.
+        3. Otherwise, return the first function whose attributes include `tir.is_global_func` set to true.
+        Raises a ValueError if no primary function can be located.
+        
+        Returns:
+            The resolved device function object from `self.device_mod`.
+        """
+        if len(self.device_mod.get_global_vars()) == 1:
+            return self.device_mod[self.device_mod.get_global_vars()[0]]
+        elif "main" in self.device_mod:
+            return self.device_mod["main"]
+        else:
+            for _, function in self.device_mod.functions.items():
                 attr = function.attrs
                 if "tir.is_global_func" in attr and attr["tir.is_global_func"]:
                     return function

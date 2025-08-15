@@ -116,7 +116,33 @@ class CtypesKernelAdapter(BaseKernelAdapter):
                       verbose: bool = False,
                       pass_configs: Optional[Dict[str, Any]] = None,
                       compile_flags: Optional[List[str]] = None):
-        adapter = cls.__new__(cls)
+        """
+                      Create a CtypesKernelAdapter instance from a prebuilt kernel library.
+                      
+                      This alternative constructor builds an adapter without compiling the kernel:
+                      it wraps the provided TIR function or IRModule into the adapter's internal
+                      IRModule, caches parameter dtypes and shapes (preserving tir.Var for dynamic
+                      dimensions), computes the dynamic symbolic mapping, loads the precompiled
+                      shared library at kernel_lib_path, initializes it, and performs post-initialization.
+                      
+                      Parameters:
+                          params: List of TIR buffer/parameter descriptors; their .dtype and .shape
+                              are recorded for later runtime argument preparation.
+                          result_idx: Indices of parameters that are outputs (will be returned by the
+                              runtime wrapper). Will be legalized by the adapter.
+                          target: Target string used to canonicalize the target representation.
+                          func_or_mod: Either a tir.PrimFunc or a tvm.IRModule containing the kernel;
+                              a PrimFunc will be wrapped into an IRModule using its global_symbol.
+                          kernel_global_source: Kernel source text (used to populate wrapped_source).
+                          kernel_lib_path: Filesystem path to the prebuilt shared library to load.
+                          verbose: If True, enables verbose behavior in the library generator.
+                          pass_configs: Optional pass configuration mapping passed to the library generator.
+                          compile_flags: Optional compile flags passed to the library generator (not used for loading).
+                      
+                      Returns:
+                          An initialized CtypesKernelAdapter instance whose library has been loaded and initialized.
+                      """
+                      adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
         adapter.kernel_global_source = kernel_global_source
@@ -155,27 +181,54 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         adapter._post_init()
         return adapter
 
-    def _process_dynamic_symbolic(self):
-        """Extract information about dynamic shapes from the TIR function.
+    def _process_dynamic_symbolic(self) -> Dict[tir.Var, Tuple[int, int]]:
+        """
+        Return a mapping of symbolic TIR variables used for dynamic shapes/strides to runtime resolution descriptors.
         
-        Maps symbolic variables to their corresponding (buffer_index, shape_dimension)
-        for runtime shape resolution.
+        Scans the primary TIR function's buffer_map and records each symbolic variable appearing in buffer shapes or strides (except when the symbol is a direct function parameter). Each mapped value is a 3-tuple (ref_id, buffer_index, index) where:
+        - ref_id: 0 for a shape dimension, 1 for a stride.
+        - buffer_index: the index of the corresponding function parameter (into func.params).
+        - index: the position inside the buffer's shape or strides tuple.
+        
+        Returns:
+            Dict[tir.Var, Tuple[int, int, int]]: Mapping from a symbolic variable to its (ref_id, buffer_index, index).
         """
         func = self.prim_func
         params = func.params
         buffer_map = func.buffer_map
         dynamic_symbolic_map = {}
         for i, param in enumerate(params):
-            buffer = buffer_map[param]
-            for j, shape in enumerate(buffer.shape):
-                if isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map):
-                    dynamic_symbolic_map[shape] = (i, j)
+            if param in buffer_map:
+                buffer = buffer_map[param]
+                for j, shape in enumerate(buffer.shape):
+                    if (isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map) and
+                        (shape not in params)):
+                        dynamic_symbolic_map[shape] = (0, i, j)
+        for i, param in enumerate(params):
+            if param in buffer_map:
+                buffer = buffer_map[param]
+                for j, stride in enumerate(buffer.strides):
+                    if (isinstance(stride, tir.Var) and (stride not in dynamic_symbolic_map) and
+                        (stride not in params)):
+                        dynamic_symbolic_map[stride] = (1, i, j)
         return dynamic_symbolic_map
 
     def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):
-        """Low-level function to call the compiled CUDA kernel.
+        """
+        Call the compiled CUDA kernel via ctypes using raw device pointers.
         
-        Converts PyTorch tensor pointers to C void pointers for ctypes interface.
+        This low-level helper converts each positional argument that is not an integer into a ctypes.c_void_p
+        using its .data_ptr() (expected to be a torch.Tensor or object exposing data_ptr()), appends the
+        CUDA stream pointer, and invokes self.lib.call(...) to execute the kernel.
+        
+        Parameters:
+            *args: Positional kernel arguments — typically tensors (converted to device pointers) or
+                integers (passed through unchanged).
+            stream (Optional[int]): CUDA stream pointer (device address) to pass to the kernel; None is
+                converted to a null pointer.
+        
+        Returns:
+            None
         """
         ctypes_args = [
             ctypes.c_void_p(arr.data_ptr()) if not isinstance(arr, int) else arr for arr in args
@@ -186,21 +239,26 @@ class CtypesKernelAdapter(BaseKernelAdapter):
     def _wrap_forward_from_prebuild_lib(self,
                                         *ins: List[torch.Tensor],
                                         stream: Optional[int] = None):
-        """High-level wrapper for kernel execution.
-        
-        Handles:
-        1. Input validation
-        2. Output tensor allocation
-        3. Dynamic shape resolution
-        4. CUDA stream management
-        
-        Args:
-            ins: Input PyTorch tensors
-            stream: Optional CUDA stream for asynchronous execution
-        
-        Returns:
-            Single tensor or list of tensors containing the kernel results
         """
+                                        Wraps and executes the prebuilt CUDA kernel with PyTorch tensors, handling output allocation, dynamic-shape resolution, and CUDA stream selection.
+                                        
+                                        This function:
+                                        - Validates that the total number of provided input tensors plus expected outputs equals the kernel parameter count (raises ValueError on mismatch).
+                                        - Allocates output tensors for parameters listed in self.result_idx using cached param shapes/dtypes; dynamic dimensions (tir.Var) are resolved from the corresponding input tensor shapes.
+                                        - Assembles the full kernel argument list (inputs and allocated outputs) and appends dynamic symbolic values. dynamic_symbolic_map entries must be tuples of (ref_id, buffer_idx, dim_index) where ref_id == 0 means "shape" and ref_id == 1 means "stride"; the runtime value appended is either ins[buffer_idx].shape[dim_index] or ins[buffer_idx].stride(dim_index).
+                                        - Selects a CUDA stream if none is provided (uses current CUDA stream when target is CUDA and CUDA is available); otherwise uses 0.
+                                        - Calls the low-level library invocation and returns the result tensors.
+                                        
+                                        Parameters:
+                                            ins: Positional input PyTorch tensors matching the kernel's non-output parameters.
+                                            stream: Optional CUDA stream handle (integer); if omitted, a suitable default stream is chosen.
+                                        
+                                        Returns:
+                                            If a single output is expected, returns that torch.Tensor. If multiple outputs are expected, returns a list of torch.Tensor in the same order as self.result_idx.
+                                        
+                                        Raises:
+                                            ValueError: if the number of provided inputs plus outputs does not match the kernel parameter count.
+                                        """
         if len(ins) + len(self.result_idx) != len(self.params):
             raise ValueError(
                 f"Expected {len(self.params)} inputs, got {len(ins) + len(self.result_idx)} with {len(ins)} inputs and {len(self.result_idx)} outputs"
@@ -228,8 +286,11 @@ class CtypesKernelAdapter(BaseKernelAdapter):
             args.append(tensor)
 
         # dynamic symbolics
-        for _, (buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():
-            args.append(ins[buffer_idx].shape[shape_idx])
+        for _, (ref_id, buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():
+            if ref_id == 0:
+                args.append(ins[buffer_idx].shape[shape_idx])
+            else:
+                args.append(ins[buffer_idx].stride(shape_idx))
 
         # if stream is not None, we need to pass the stream to the library
         if stream is None:

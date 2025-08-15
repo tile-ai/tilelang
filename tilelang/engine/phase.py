@@ -91,6 +91,18 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
 
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
+    """
+    Lower and optimize an IRModule for a specific Target.
+    
+    This runs a target-aware compilation pipeline that performs shared-barrier lowering, optional TMA/warp-specialized transformations (when the target and pass config permit), pipeline planning and software-pipelining, buffer/opaque-block lowering, index-width and datatype normalization, loop/vector transformations, memory/storage rewrites, synchronization insertion (thread/shared/global as applicable), device-region splitting, shared-memory allocation merging (with a configurable aggressive-merge heuristic), PTX async-copy injection, API/kernel lowering, and final persistent-threadblock transformation.
+    
+    Parameters:
+        mod (IRModule): The module to transform.
+        target (Target): Target device description used to select target-specific passes and heuristics.
+    
+    Returns:
+        IRModule: The transformed module ready for device code generation.
+    """
     pass_ctx = tilelang.transform.get_pass_context()
     # Lower the barrier.arrive into specific initialization slot
     mod = tilelang.transform.LowerSharedBarrier()(mod)
@@ -124,8 +136,10 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
             mod = tilelang.transform.InjectFenceProxy()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
-    mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
+    # ConfigIndexBitwidth must be applied after FlattenBuffer
+    # as it will flatten index computing
+    mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tir.transform.Simplify()(mod)
 
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
