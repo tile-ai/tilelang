@@ -345,7 +345,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter._post_init()
         return adapter
 
-    def _process_dynamic_symbolic(self) -> Dict[tir.Var, Tuple[int, int]]:
+    def _process_dynamic_symbolic(self) -> Dict[tir.Var, Tuple[int, int, int]]:
         """Extract information about dynamic shapes from the TIR function.
         
         Maps symbolic variables to their corresponding (id, buffer_index, dimension)
