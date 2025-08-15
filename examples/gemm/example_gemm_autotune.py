@@ -1,5 +1,4 @@
 import argparse
-import torch
 import itertools
 import tilelang as tl
 import tilelang.language as T
@@ -8,6 +7,7 @@ from tilelang.carver.template import MatmulTemplate
 from tilelang.carver.arch import CUDA
 from tilelang.carver.arch import CDNA
 from tilelang.carver.roller.rasterization import NoRasterization
+import torch
 
 
 def ref_program(A, B):

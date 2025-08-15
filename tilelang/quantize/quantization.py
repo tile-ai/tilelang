@@ -27,6 +27,26 @@ from tvm import tir
 
 
 # fmt: off
+def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale: tir.PrimExpr,
+                          dtype: str):
+    assert nbit == 4
+    assert dtype == "bfloat16"
+    assert val.dtype == "uint8"
+    mask = tir.const((1 << nbit) - 1, "uint16")
+    f4 = (val >> (pos.astype("uint16") * tir.const(nbit, "uint16"))) & mask
+    s = f4 >> tir.const(3, "uint16")
+    e_f4 = (f4 & tir.const(6, "uint16")) >> tir.const(1, "uint16")
+    # Exponential bias between f4 and bf16 is 2^(8-1) - 2^(2-1) = 126
+    e_bf16 = e_f4 + tir.const(126, "uint16")
+    # Scale is the exponential part, within the representation of uint8
+    # To handle the overflow, we use the max function to limit the exponential part to 8 bits
+    e_bf16 = min(e_bf16 + scale, tir.const((1 << 8) - 1, "uint16"))
+    m_f4 = f4 & tir.const(1, "uint16")
+    val_bf16 = tir.reinterpret("bfloat16",
+                               ((((s << tir.const(8, "uint16")) | e_bf16) << tir.const(7, "uint16"))
+                                | (m_f4 << tir.const(6, "uint16"))).astype("uint16"))
+    return val_bf16
+
 def _tir_f32x2_to_bf16x2_to_u32(v0: tir.PrimExpr, v1: tir.PrimExpr, round_to_even: bool = True):
     mask = tir.const((1 << 16) - 1, "uint32")
     res = []

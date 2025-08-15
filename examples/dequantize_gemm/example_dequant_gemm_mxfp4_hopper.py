@@ -1,6 +1,6 @@
 import tilelang
 import tilelang.language as T
-from tilelang.autotuner import *
+from tilelang.autotuner import AutoTuner
 from tvm import tir
 import argparse
 import itertools
@@ -197,7 +197,12 @@ def get_configs():
 
 def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, scale_size=32, tune=False):
 
-    @tilelang.jit(out_idx=[-1])
+    # To use the autotuner, we need to return a PrimFunc
+    # So we need to comment out the @tilelang.jit decorator
+    @tilelang.jit(
+        out_idx=[-1],
+        debug_root_path="/home/tzj/tilelang/examples/dequantize_gemm/",
+    )
     def kernel_func(block_M, block_N, block_K, num_stages, threads, split=1):
         num_elems_per_byte = 8 // num_bits
         storage_dtype = "uint8"
@@ -281,7 +286,6 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, scale_size=32,
                 B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
                 B_local = T.alloc_fragment(B_shared_shape, storage_dtype)
                 B_dequantize_local = T.alloc_fragment(B_dequantize_shared_shape, in_dtype)
-                B_dequantize_prev_local = T.alloc_fragment(B_dequantize_shared_shape, in_dtype)
                 Ct_local = T.alloc_fragment((block_N, block_M), accum_dtype)
                 Ct_shared = T.alloc_shared((block_N, block_M), out_dtype)
                 Scale_shared = T.alloc_shared((block_N, block_K // scale_size), storage_dtype)
@@ -308,8 +312,7 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, scale_size=32,
                             Scale_local[i, j // scale_size],
                             dtype=in_dtype,
                         )
-                    T.copy(B_dequantize_local, B_dequantize_prev_local)
-                    T.gemm(B_dequantize_prev_local, A_shared, Ct_local, transpose_B=True)
+                    T.gemm(B_dequantize_local, A_shared, Ct_local, transpose_B=True)
                 T.copy(Ct_local, Ct_shared)
                 T.copy(Ct_shared, Ct[bx * block_N:(bx + 1) * block_N,
                                      by * block_M:(by + 1) * block_M])
@@ -320,22 +323,23 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, scale_size=32,
             return main_split
 
     if tune:
-
-        @autotune(
+        autotuner = AutoTuner.from_kernel(
+            kernel=kernel_func,
             configs=get_configs(),
-            keys=["block_M", "block_N", "block_K", "num_stages", "threads", "split"],
-            warmup=10,
-            rep=10)
-        @tilelang.jit(out_idx=[-1])
-        def kernel(block_M=None,
-                   block_N=None,
-                   block_K=None,
-                   num_stages=None,
-                   threads=None,
-                   split=None):
-            return kernel_func(block_M, block_N, block_K, num_stages, threads, split)
+        ).set_compile_args(
+            out_idx=[-1],
+            target="auto",
+        ).set_profile_args(
+            supply_type=tilelang.TensorSupplyType.Integer,
+            ref_prog=ref_program_scale,
+            skip_check=False,
+        )
+        result = autotuner.run(
+            warmup=3,
+            rep=10,
+        )
+        return result
 
-        return kernel()
     else:
 
         def kernel(block_M, block_N, block_K, num_stages, threads, split=1):
@@ -363,43 +367,18 @@ def ref_program_scale(A, qB, Scale):
 def main(m=256, n=256, k=256, scale_size=32, tune=False):
     total_flops = 2 * m * n * k
 
-    if (not tune):
-        kernel = matmul(
-            m,
-            n,
-            k,
-            "bfloat16",
-            "bfloat16",
-            "float32",
-            num_bits=4,
-            scale_size=scale_size,
-            tune=tune)(
-                block_M=128, block_N=128, block_K=128, num_stages=2, threads=256, split=1)
-        profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
-        profiler.assert_allclose(ref_program_scale, rtol=0.01, atol=0.01)
-        print("All checks pass.")
-        latency = profiler.do_bench(ref_program_scale, warmup=500)
-        print("Ref: {:.2f} ms".format(latency))
-        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-        latency = profiler.do_bench(warmup=500)
-        print("Tile-lang: {:.2f} ms".format(latency))
-        print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-    else:
-        best_result = matmul(
-            m,
-            n,
-            k,
-            "bfloat16",
-            "bfloat16",
-            "float32",
-            num_bits=4,
-            scale_size=scale_size,
-            tune=tune)
-        best_latency = best_result.latency
-        best_config = best_result.config
-        print(f"Best latency: {best_latency}")
-        print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
-        print(f"Best config: {best_config}")
+    kernel = matmul(
+        m, n, k, "bfloat16", "bfloat16", "float32", num_bits=4, scale_size=scale_size, tune=tune)(
+            block_M=256, block_N=128, block_K=128, num_stages=2, threads=256, split=1)
+    profiler = kernel.get_profiler(tilelang.TensorSupplyType.Integer)
+    profiler.assert_allclose(ref_program_scale, rtol=0.01, atol=0.01)
+    print("All checks pass.")
+    latency = profiler.do_bench(ref_program_scale, warmup=5)
+    print("Ref: {:.2f} ms".format(latency))
+    print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    latency = profiler.do_bench(warmup=3, rep=5)
+    print("Tile-lang: {:.2f} ms".format(latency))
+    print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 
 
 def test_convert():
@@ -408,6 +387,7 @@ def test_convert():
 
 
 if __name__ == "__main__":
+    # From Triton: the benchmark is batch*8192*8192
     parser = argparse.ArgumentParser()
     parser.add_argument('--m', type=int, default=256, help='M')
     parser.add_argument('--n', type=int, default=256, help='N')
