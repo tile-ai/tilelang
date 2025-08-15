@@ -60,6 +60,13 @@ bool TargetIsSM120(Target target) {
   return arch >= 120 && arch < 130;
 }
 
+bool TargetIsSM120(Target target) {
+  if (!TargetIsCuda(target))
+    return false;
+  int arch = GetArchInt(target);
+  return arch >= 120 && arch < 130;
+}
+
 bool TargetIsCDNA(Target target) {
   if (!TargetIsRocm(target))
     return false;

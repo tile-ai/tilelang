@@ -1,3 +1,6 @@
+import fcntl
+import functools
+import hashlib
 import io
 import subprocess
 import shutil
@@ -692,15 +695,15 @@ class TilelangExtensionBuild(build_ext):
                 with open(md5_path, "r") as f:
                     cached_hash = f.read().strip()
                     if cached_hash == code_hash:
-                        logger.info("Cython jit adapter is up to date, no need to compile...")
+                        logger.info("Cython JIT adapter is up to date, no need to compile...")
                         need_compile = False
                     else:
-                        logger.info("Cython jit adapter is out of date, need to recompile...")
+                        logger.info("Cython JIT adapter is out of date, need to recompile...")
             else:
-                logger.info("No cached version found for cython jit adapter, need to compile...")
+                logger.info("No cached version found for Cython JIT adapter, need to compile...")
 
             if need_compile:
-                logger.info("Waiting for lock to compile cython jit adapter...")
+                logger.info("Waiting for lock to compile Cython JIT adapter...")
                 with open(lock_file, 'w') as lock:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
                     try:
@@ -715,7 +718,7 @@ class TilelangExtensionBuild(build_ext):
                                     need_compile = False
 
                         if need_compile:
-                            logger.info("Compiling cython jit adapter...")
+                            logger.info("Compiling Cython JIT adapter...")
                             temp_path = cache_dir / f"temp_{code_hash}.so"
 
                             with open(md5_path, "w") as f:
@@ -736,7 +739,7 @@ class TilelangExtensionBuild(build_ext):
                     except Exception as e:
                         if 'temp_path' in locals() and temp_path.exists():
                             temp_path.unlink()
-                        raise Exception(f"Failed to compile cython jit adapter: {e}") from e
+                        raise Exception(f"Failed to compile Cython JIT adapter: {e}") from e
                     finally:
                         if lock_file.exists():
                             lock_file.unlink()

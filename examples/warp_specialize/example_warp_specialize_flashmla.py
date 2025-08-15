@@ -145,20 +145,10 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         clear_accum=True,
                         wg_wait=-1)
                     T.barrier_wait(kv_shared_0_r_is_ready, k % 2)
-                    T.gemm(
-                        Q_shared_r,
-                        KV_shared_0_r,
-                        acc_s_0,
-                        transpose_B=True,
-                        wg_wait=-1)
+                    T.gemm(Q_shared_r, KV_shared_0_r, acc_s_0, transpose_B=True, wg_wait=-1)
 
                     T.barrier_wait(kv_shared_0_pe_is_ready, k % 2)
-                    T.gemm(
-                        Q_pe_local_0,
-                        K_pe_shared_0,
-                        acc_s_0,
-                        transpose_B=True,
-                        wg_wait=-1)
+                    T.gemm(Q_pe_local_0, K_pe_shared_0, acc_s_0, transpose_B=True, wg_wait=-1)
 
                     T.wait_wgmma(0)
 
@@ -261,20 +251,10 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         wg_wait=-1)
 
                     T.barrier_wait(kv_shared_1_r_is_ready, k % 2)
-                    T.gemm(
-                        Q_shared_r,
-                        KV_shared_1_r,
-                        acc_s_1,
-                        transpose_B=True,
-                        wg_wait=-1)
+                    T.gemm(Q_shared_r, KV_shared_1_r, acc_s_1, transpose_B=True, wg_wait=-1)
 
                     T.barrier_wait(kv_shared_1_pe_is_ready, k % 2)
-                    T.gemm(
-                        Q_pe_local_1,
-                        K_pe_shared_1,
-                        acc_s_1,
-                        transpose_B=True,
-                        wg_wait=-1)
+                    T.gemm(Q_pe_local_1, K_pe_shared_1, acc_s_1, transpose_B=True, wg_wait=-1)
 
                     T.wait_wgmma(0)
 
@@ -308,11 +288,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
                     # Step 10. compute O1 with KV_shared_1_rd
                     T.copy(acc_s_1, acc_s_1_cast)
-                    T.gemm(
-                        acc_s_1_cast,
-                        KV_shared_1_r,
-                        acc_o_r,
-                        wg_wait=-1)
+                    T.gemm(acc_s_1_cast, KV_shared_1_r, acc_o_r, wg_wait=-1)
                     T.copy(acc_s_1_cast, SP1_shared)
                     T.barrier_arrive(s_shared_ready_barrier)
 
