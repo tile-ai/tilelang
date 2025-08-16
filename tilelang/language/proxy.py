@@ -150,7 +150,10 @@ class TensorProxy(BaseTensorProxy):
             strides.append(s)
         return tuple(reversed(strides))
 
-    def __call__(self, shape: Union[Tuple[Any], PrimExpr, int], dtype: str = "float32", data=None) -> tir.Buffer:
+    def __call__(self,
+                 shape: Union[Tuple[Any], PrimExpr, int],
+                 dtype: str = "float32",
+                 data=None) -> tir.Buffer:
         if isinstance(shape, (int, PrimExpr)):
             shape = (shape,)
         return super().__call__(
