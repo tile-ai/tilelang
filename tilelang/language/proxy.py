@@ -1,7 +1,7 @@
 """The language interface for tl programs."""
 
 from __future__ import annotations
-from typing import Any, Optional, Sequence, SupportsIndex, TYPE_CHECKING, Tuple
+from typing import Any, Optional, Sequence, SupportsIndex, TYPE_CHECKING, Tuple, Union
 from typing_extensions import Self
 
 from tvm import tir
@@ -150,7 +150,9 @@ class TensorProxy(BaseTensorProxy):
             strides.append(s)
         return tuple(reversed(strides))
 
-    def __call__(self, shape: Tuple[Any], dtype: str = "float32", data=None) -> tir.Buffer:
+    def __call__(self, shape: Union[Tuple[Any], PrimExpr, int], dtype: str = "float32", data=None) -> tir.Buffer:
+        if isinstance(shape, (int, PrimExpr)):
+            shape = (shape,)
         return super().__call__(
             shape, dtype=dtype, strides=TensorProxy._construct_strides(shape), data=data)
 
