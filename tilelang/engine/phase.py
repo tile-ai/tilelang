@@ -124,8 +124,10 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
             mod = tilelang.transform.InjectFenceProxy()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
-    mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
+    # ConfigIndexBitwidth must be applied after FlattenBuffer
+    # as it will flatten index computing
+    mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tir.transform.Simplify()(mod)
 
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)

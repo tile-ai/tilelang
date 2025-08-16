@@ -1689,6 +1689,76 @@ void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {
   os << "))";
 }
 
+void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
+                                     std::ostream &os) { // NOLINT(*)
+  ICHECK_EQ(op->indices.size(), 1)
+      << "Load from non-flat memory not supported.";
+  ICHECK(!op->predicate.defined())
+      << "Predicated buffer load is not supported.";
+
+  DataType value_dtype = op->dtype;
+  PrimExpr index = op->indices[0];
+  Var buffer_var = op->buffer->data;
+  DataType element_dtype = op->buffer->dtype;
+
+  int lanes = op->dtype.lanes();
+  // delcare type.
+  if (value_dtype.lanes() == element_dtype.lanes()) {
+    std::string ref = GetBufferRef(op->dtype, op->buffer.get(), index);
+    HandleVolatileLoads(ref, op, os);
+  } else {
+    bool can_vector_load = false;
+    arith::PVar<PrimExpr> base;
+    if (arith::ramp(base, 1, op->dtype.lanes()).Match(index)) {
+      const RampNode *ramp = index.as<RampNode>();
+      ICHECK(ramp);
+      can_vector_load = true;
+      // arith::ModularSet me = arith::Analyzer().modular_set(ramp->base);
+      // The condition: {k * coeff + base} divisible by the alignment for any k
+      // if (me->coeff % op->dtype.lanes() == 0 && me->base % op->dtype.lanes()
+      // == 0) {
+      //   can_vector_load = true;
+      // }
+    }
+
+    if (value_dtype.is_float4_e2m1fn() && lanes != 1) {
+      // A float4_e2m1fn element has 4 bits, which is an incomplete byte.
+      // So we cannot vector load it.
+      can_vector_load = false;
+    }
+    if (can_vector_load) {
+      std::string ref = GetVecLoad(op->dtype, op->buffer.get(), base.Eval());
+      HandleVolatileLoads(ref, op, os);
+    } else {
+      std::ostringstream svalue_expr;
+      std::string sindex = SSAGetID(PrintExpr(index), index.dtype());
+      std::string vid = GetVarID(buffer_var.get());
+      DataType elem_type = op->dtype.element_of();
+      for (int i = 0; i < lanes; ++i) {
+        std::ostringstream value_temp;
+        if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
+          value_temp << "((";
+          if (buffer_var.get()->dtype.is_handle()) {
+            auto it = alloc_storage_scope_.find(buffer_var.get());
+            if (it != alloc_storage_scope_.end()) {
+              PrintStorageScope(it->second, value_temp);
+            }
+          }
+          PrintType(elem_type, value_temp);
+          value_temp << "*)" << vid << ')';
+        } else {
+          value_temp << vid;
+        }
+        value_temp << '[';
+        PrintVecElemLoad(sindex, index.dtype(), i, value_temp);
+        value_temp << ']';
+        PrintVecElemLoadExpr(op->dtype, i, value_temp.str(), svalue_expr);
+      }
+      os << svalue_expr.str();
+    }
+  }
+}
+
 void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
                                      std::ostream &os) { // NOLINT(*)
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);

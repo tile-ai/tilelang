@@ -155,21 +155,31 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         adapter._post_init()
         return adapter
 
-    def _process_dynamic_symbolic(self):
+    def _process_dynamic_symbolic(self) -> Dict[tir.Var, Tuple[int, int, int]]:
         """Extract information about dynamic shapes from the TIR function.
         
-        Maps symbolic variables to their corresponding (buffer_index, shape_dimension)
+        Maps symbolic variables to their corresponding (id, buffer_index, dimension)
         for runtime shape resolution.
+        id represents shape or stride, 0 represents shape, 1 represents stride
         """
         func = self.prim_func
         params = func.params
         buffer_map = func.buffer_map
         dynamic_symbolic_map = {}
         for i, param in enumerate(params):
-            buffer = buffer_map[param]
-            for j, shape in enumerate(buffer.shape):
-                if isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map):
-                    dynamic_symbolic_map[shape] = (i, j)
+            if param in buffer_map:
+                buffer = buffer_map[param]
+                for j, shape in enumerate(buffer.shape):
+                    if (isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map) and
+                        (shape not in params)):
+                        dynamic_symbolic_map[shape] = (0, i, j)
+        for i, param in enumerate(params):
+            if param in buffer_map:
+                buffer = buffer_map[param]
+                for j, stride in enumerate(buffer.strides):
+                    if (isinstance(stride, tir.Var) and (stride not in dynamic_symbolic_map) and
+                        (stride not in params)):
+                        dynamic_symbolic_map[stride] = (1, i, j)
         return dynamic_symbolic_map
 
     def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):
@@ -228,8 +238,11 @@ class CtypesKernelAdapter(BaseKernelAdapter):
             args.append(tensor)
 
         # dynamic symbolics
-        for _, (buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():
-            args.append(ins[buffer_idx].shape[shape_idx])
+        for _, (ref_id, buffer_idx, shape_idx) in self.dynamic_symbolic_map.items():
+            if ref_id == 0:
+                args.append(ins[buffer_idx].shape[shape_idx])
+            else:
+                args.append(ins[buffer_idx].stride(shape_idx))
 
         # if stream is not None, we need to pass the stream to the library
         if stream is None:

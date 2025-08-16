@@ -7,8 +7,6 @@ import tilelang.language as T
 from tilelang.autotuner import *
 from example_fusedmoe_torch import *
 
-# tilelang.disable_cache()
-
 
 @tilelang.jit(pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True})
 def moe_forward_tilelang_shared(d_hidden,
