@@ -1000,7 +1000,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto eviction_policy =
         this->eviction_policy_names_
             [op->args[op->args.size() - 1].as<IntImmNode>()->value];
-    ss << "tl::tma_load<tl::CacheHintSm90::" << eviction_policy << ">(";
+    // Simplify the code by using the default eviction policy
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << "tl::tma_load<tl::CacheHintSm90::" << eviction_policy << ">(";
+    } else {
+      ss << "tl::tma_load(";
+    }
     auto desc = op->args[0];
     ss << this->PrintExpr(desc) << ", ";
     if (const IntImmNode *imm = op->args[1].as<IntImmNode>()) {
@@ -1018,17 +1023,25 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << ss.str();
   } else if (op->op.same_as(tl::tma_load_im2col())) {
     std::stringstream ss;
-    ss << "tl::tma_load_im2col<tl::CacheHintSm90::"
-       << this->eviction_policy_names_
-              [op->args[op->args.size() - 1].as<IntImmNode>()->value]
-       << ">";
+    auto eviction_policy =
+        this->eviction_policy_names_
+            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << "tl::tma_load_im2col<tl::CacheHintSm90::" << eviction_policy << ">";
+    } else {
+      ss << "tl::tma_load_im2col";
+    }
     print_extern_call_stmt(ss.str(), 0, 1);
   } else if (op->op.same_as(tl::tma_store())) {
     std::stringstream ss;
-    ss << "tl::tma_store<tl::CacheHintSm90::"
-       << this->eviction_policy_names_
-              [op->args[op->args.size() - 1].as<IntImmNode>()->value]
-       << ">";
+    auto eviction_policy =
+        this->eviction_policy_names_
+            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << "tl::tma_store<tl::CacheHintSm90::" << eviction_policy << ">";
+    } else {
+      ss << "tl::tma_store";
+    }
     print_extern_call_stmt(ss.str(), 0, 1);
   } else if (op->op.same_as(tl::ptx_ldmatirx())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
