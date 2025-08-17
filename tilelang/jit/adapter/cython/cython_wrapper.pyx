@@ -104,7 +104,9 @@ cdef class CythonKernelWrapper:
     cpdef void _check_static_shape(self, list tensor_list):
         for param, (buffer_idx, shape_list) in self.static_shape_map.items():
             tensor = tensor_list[buffer_idx]
-            assert isinstance(tensor, torch.Tensor)
+            if not isinstance(tensor, torch.Tensor):
+                # otherwise, maybe torch.data_ptr() for T.ptr inputs
+                continue
             for shape_idx, expected_shape in shape_list:
                 actual_shape = tensor.shape[shape_idx]
                 if actual_shape != expected_shape:
@@ -117,7 +119,9 @@ cdef class CythonKernelWrapper:
     cpdef void _check_static_strides(self, list tensor_list):
         for param, (buffer_idx, strides_list) in self.static_strides_map.items():
             tensor = tensor_list[buffer_idx]
-            assert isinstance(tensor, torch.Tensor)
+            if not isinstance(tensor, torch.Tensor):
+                # otherwise, maybe torch.data_ptr() for T.ptr inputs
+                continue
             for stride_idx, expected_stride in strides_list:
                 actual_stride = tensor.stride(stride_idx)
                 if actual_stride != expected_stride:
@@ -130,7 +134,9 @@ cdef class CythonKernelWrapper:
     cpdef void _check_static_contiguous(self, list tensor_list):
         for buffer_idx, param in self.static_contiguous_list:
             tensor = tensor_list[buffer_idx]
-            assert isinstance(tensor, torch.Tensor)
+            if not isinstance(tensor, torch.Tensor):
+                # otherwise, maybe torch.data_ptr() for T.ptr inputs
+                continue
             if not tensor.is_contiguous():
                 raise ValueError(f"Expected parameter {param} to be a contiguous tensor")
 
