@@ -236,7 +236,7 @@ class TLCUDASourceWrapper(object):
         function_args = []
 
         # Collect function arguments based on primary function's parameters and buffer mappings
-        # QA(@lei): Why don't use device_mod.params?
+        # QA(@lei): Why not use device_mod.params?
         # device func lack buffer map (to convert buffer handle to buffer)
         for param in self.prim_func.params:
             if param in self.prim_func.buffer_map:
