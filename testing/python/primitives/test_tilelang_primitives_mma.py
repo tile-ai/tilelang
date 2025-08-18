@@ -83,7 +83,6 @@ def run_matmul_ssr(
     )
     kernel = tilelang.compile(program, out_idx=[2])
     profiler = kernel.get_profiler()
-    print(kernel.get_kernel_source())
 
     def ref_program(A, B):
         import torch
@@ -204,7 +203,6 @@ def run_matmul_rsr(
     )
     kernel = tilelang.compile(program, out_idx=[2])
     profiler = kernel.get_profiler()
-    print(kernel.get_kernel_source())
 
     def ref_program(A, B):
         import torch

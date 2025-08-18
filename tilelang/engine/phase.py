@@ -13,8 +13,7 @@ def allow_warp_specialized(pass_ctx: Optional[PassContext] = None,
 
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    # Warp specialized pass is recommended for Hopper or later architectures
-    if not is_cuda_target(target) or not have_tma(target):
+    if (not is_cuda_target(target)) or (not have_tma(target)):
         return False
     disable_warp_specialized = pass_ctx.config.get("tl.disable_warp_specialized", False)
     return not disable_warp_specialized
@@ -80,7 +79,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
     # Add safety checks for memory accesses
     mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
-    # Align dynamic shared memory allocations
     # Simplify again to clean up any duplicated conditions
     # that may have been introduced by safety checks
     # use an enhanced pass to simplify the dynamic symbolics
@@ -109,7 +107,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         # warp_specialized pass will pack the if stmt into the block
         # so we need to lower the opaque block first
-        mod = tir.transform.LowerOpaqueBlock()(mod)
+        mod = tilelang.transform.LowerOpaqueBlock()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
         mod = tilelang.transform.RewriteWgmmaSync()(mod)
         mod = tilelang.transform.InjectFenceProxy()(mod)
@@ -124,15 +122,16 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
             # in hopper device, wgmma is an async proxy
             # so we need to inject a fence proxy before it
             mod = tilelang.transform.InjectFenceProxy()(mod)
-
-    mod = tir.transform.LowerOpaqueBlock()(mod)
+    mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
-    mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
+    # ConfigIndexBitwidth must be applied after FlattenBuffer
+    # as it will flatten index computing
+    mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tir.transform.Simplify()(mod)
 
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
-    mod = tir.transform.StorageRewrite()(mod)
+    mod = tilelang.transform.StorageRewrite()(mod)
     mod = tir.transform.UnrollLoop()(mod)
     mod = tir.transform.RenormalizeSplitPattern()(mod)
     mod = tir.transform.Simplify()(mod)
@@ -153,7 +152,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # the Legalization.
     mod = tilelang.transform.ThreadPartialSync("shared.dyn")(mod)
     mod = tir.transform.InferFragment()(mod)
-    mod = tir.transform.LowerThreadAllreduce()(mod)
+    mod = tilelang.transform.LowerThreadAllreduce()(mod)
 
     mod = tilelang.transform.LowerHopperIntrin()(mod)
 
@@ -166,21 +165,17 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
     # because the merged allocation site is at the beginning of each device function
     enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
-    # Hopper Swizzling requires dynamic shared memory address to be aligned to 1024 bytes
-    # For other devices, we align to 16 bytes
-    smem_align_bytes = 1024 if have_tma(target) else 16
-    # Workaround, wait for a element wise synchronization pass
     mod = tilelang.transform.MergeSharedMemoryAllocations(
-        enable_aggressive_merge=enable_aggressive_merge, align_bytes=smem_align_bytes)(
+        enable_aggressive_merge=enable_aggressive_merge)(
             mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     # Inject PTX async copy must behind the thread sync pass
     # as ptx async copy won't be recognized as a valid buffer load
     mod = tilelang.transform.InjectPTXAsyncCopy()(mod)
-
     mod = tilelang.transform.MakePackedAPI()(mod)
-    mod = tir.transform.LowerDeviceKernelLaunch()(mod)
+    mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
+
     # Transform threadblock to persistent threadblock
     mod = tilelang.transform.PersistThreadblock()(mod)
 

@@ -3,6 +3,7 @@
  * \brief Merge the If Stmt in SeqStmt
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
@@ -43,11 +44,13 @@ private:
             continue;
           } else {
             if (!current_if_bodies.empty()) {
-              new_seq.push_back(IfThenElse(current_condition,
-                                           current_if_bodies.size() == 1
-                                               ? current_if_bodies[0]
-                                               : SeqStmt(current_if_bodies),
-                                           Stmt()));
+              auto if_stmt =
+                  IfThenElse(current_condition,
+                             current_if_bodies.size() == 1
+                                 ? current_if_bodies[0]
+                                 : this->VisitStmt(SeqStmt(current_if_bodies)),
+                             Stmt());
+              new_seq.push_back(if_stmt);
               current_if_bodies.clear();
             }
 
@@ -59,11 +62,13 @@ private:
       }
 
       if (!current_if_bodies.empty()) {
-        new_seq.push_back(IfThenElse(current_condition,
-                                     current_if_bodies.size() == 1
-                                         ? current_if_bodies[0]
-                                         : SeqStmt(current_if_bodies),
-                                     Stmt()));
+        auto if_stmt =
+            IfThenElse(current_condition,
+                       current_if_bodies.size() == 1
+                           ? current_if_bodies[0]
+                           : this->VisitStmt(SeqStmt(current_if_bodies)),
+                       Stmt());
+        new_seq.push_back(if_stmt);
         current_condition = PrimExpr();
         current_if_bodies.clear();
       }
@@ -72,11 +77,13 @@ private:
     }
 
     if (!current_if_bodies.empty()) {
-      new_seq.push_back(IfThenElse(current_condition,
-                                   current_if_bodies.size() == 1
-                                       ? current_if_bodies[0]
-                                       : SeqStmt(current_if_bodies),
-                                   Stmt()));
+      auto if_stmt =
+          IfThenElse(current_condition,
+                     current_if_bodies.size() == 1
+                         ? current_if_bodies[0]
+                         : this->VisitStmt(SeqStmt(current_if_bodies)),
+                     Stmt());
+      new_seq.push_back(if_stmt);
     }
 
     return new_seq.size() == 1 ? new_seq[0] : SeqStmt(new_seq);
@@ -91,7 +98,10 @@ tvm::transform::Pass MergeIfStmt() {
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeIfStmt", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.MergeIfStmt").set_body_typed(MergeIfStmt);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.MergeIfStmt", MergeIfStmt);
+});
 
 } // namespace tl
 } // namespace tvm

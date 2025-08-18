@@ -203,7 +203,7 @@ class AutoTuner:
                 logger.warning(
                     "`supply_prog` will be ignored as this program is under `with set_autotune_inputs` context."
                 )
-            supply_prog = lambda _: get_autotune_inputs()  # noqa: E731·
+            supply_prog = lambda _: get_autotune_inputs()  # noqa: E731
 
         self.profile_args = ProfileArgs(
             supply_type=supply_type,
@@ -257,7 +257,7 @@ class AutoTuner:
         return hashlib.sha256(key_string.encode()).hexdigest()
 
     def _save_result_to_disk(self, key, result: AutotuneResult):
-        result.save_to_disk(self.cache_dir / key)
+        result.save_to_disk(self.cache_dir / key, self.compile_args.verbose)
 
     def _load_result_from_disk(self, key) -> AutotuneResult:
         result = AutotuneResult.load_from_disk(self.cache_dir / key, self.compile_args)

@@ -23,8 +23,9 @@
  * memory allocation. This pass merges multiple TIR-level dynamic or static
  * shared memory allocations into one allocation.
  */
+#include <tvm/ffi/function.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/runtime/registry.h>
 #include <tvm/tir/expr.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
@@ -34,9 +35,11 @@
 #include <unordered_set>
 
 #include "../op/builtin.h"
+#include "../target/utils.h"
 #include "runtime/thread_storage_scope.h"
 #include "support/arena.h"
 #include "tir/transforms/ir_utils.h"
+#include "tvm/tir/function.h"
 
 namespace tvm {
 namespace tl {
@@ -300,7 +303,7 @@ private:
   bool IsAppropriateSharedMemory(const Var &var) {
     return is_dynamic_ ? IsDynamicSharedMemory(var) : IsStaticSharedMemory(var);
   }
-  // Whether do dyanmic analysis.
+  // Whether do dynamic analysis.
   bool is_dynamic_{true};
   // Whether do aggressive merge.
   bool enable_aggressive_merge_{false};
@@ -312,6 +315,46 @@ private:
   std::vector<StmtEntry> scope_;
   // The size of the scope.
   size_t scope_level_{0};
+};
+
+class SharedMemoryAlignmentPlanner : public StmtExprVisitor {
+
+public:
+  static std::unordered_map<const VarNode *, int> Plan(const Stmt &stmt) {
+    SharedMemoryAlignmentPlanner planner;
+    planner(stmt);
+    return planner.shmem_alignment_map_;
+  }
+
+private:
+  void VisitExpr_(const CallNode *op) {
+    if (op->op.same_as(tl::tl_gemm()) || op->op.same_as(tl::tl_gemm_sp()) ||
+        op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store())) {
+      under_alignment_scope_ = true;
+      StmtExprVisitor::VisitExpr_(op);
+      under_alignment_scope_ = false;
+    } else {
+      StmtExprVisitor::VisitExpr_(op);
+    }
+  }
+
+  void VisitExpr_(const VarNode *op) {
+    auto ptr_type = op->type_annotation.as<PointerTypeNode>();
+    if (ptr_type && under_alignment_scope_) {
+      auto scope = GetPtrStorageScope(GetRef<Var>(op));
+      if (scope == "shared" || scope == "shared.dyn") {
+        auto target = Target::Current();
+        ICHECK(target.defined()) << "Target is not defined";
+        const int alignment = TargetIsHopper(target) ? 1024 : 16;
+        shmem_alignment_map_[op] = alignment;
+      }
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+
+  bool under_alignment_scope_{false};
+
+  std::unordered_map<const VarNode *, int> shmem_alignment_map_;
 };
 
 /*!
@@ -341,6 +384,7 @@ public:
     SharedMemLinearAccessPatternFinder finder(is_dynamic,
                                               enable_aggressive_merge, verbose);
     finder(stmt);
+    shmem_alignment_map_ = SharedMemoryAlignmentPlanner::Plan(stmt);
     this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_);
     this->PlanMemory(finder.linear_seq_, finder.stmt_attrs_);
   }
@@ -358,6 +402,14 @@ private:
       for (const StorageEntry *e : sym_free_list_) {
         all_entry.push_back(e);
       }
+      // Sort the storage entries in descending order of their total allocation
+      // size (in bits). This ensures that larger allocations are placed first,
+      // which can help minimize fragmentation and improve memory packing
+      // efficiency when merging shared memory buffers.
+      std::sort(all_entry.begin(), all_entry.end(),
+                [](const StorageEntry *a, const StorageEntry *b) {
+                  return a->const_nbits > b->const_nbits;
+                });
       for (const StorageEntry *e : all_entry) {
         max_layer_num =
             std::max(max_layer_num, static_cast<int>(e->allocs.size()));
@@ -374,18 +426,28 @@ private:
           }
         }
       }
-      // calculate offset for each buffer based on the align of each layer
+
       for (const StorageEntry *e : all_entry) {
         PrimExpr max_inner_offset = 0;
         for (int i = 0; i < static_cast<int>(e->allocs.size()); i++) {
           PrimExpr inner_offset = 0;
           for (const VarNode *buffer : e->allocs[i]) {
             const AllocateNode *alloc = shmem_allocs_[buffer];
-            buffer_byte_offsets_[buffer] = merged_alloc_size_ + inner_offset;
-            inner_offset +=
+            auto alignment = align[i];
+            // Modern nvidia architecture performs hardware swizzling (hopper
+            // wgmma/tma for example) requires dynamic shared memory address to
+            // be aligned to 1024 bytes For other devices, we align to 16 bytes
+            if (shmem_alignment_map_.find(buffer) !=
+                shmem_alignment_map_.end()) {
+              alignment = std::max(align[i], shmem_alignment_map_[buffer]);
+            }
+            PrimExpr start_offset = merged_alloc_size_ + inner_offset;
+            PrimExpr aligned_offset =
+                indexdiv(start_offset + alignment - 1, alignment) * alignment;
+            buffer_byte_offsets_[buffer] = aligned_offset;
+            inner_offset =
+                aligned_offset - merged_alloc_size_ +
                 alloc->extents[0] * alloc->dtype.bytes() * alloc->dtype.lanes();
-            inner_offset +=
-                indexmod(align[i] - indexmod(inner_offset, align[i]), align[i]);
           }
           max_inner_offset = max(max_inner_offset, inner_offset);
         }
@@ -575,6 +637,18 @@ private:
     std::vector<const VarNode *> kill;
   };
 
+  void PlanAlignment(const Stmt &stmt) {
+    LOG(INFO) << "PlanAlignment";
+    PostOrderVisit(stmt, [&](const ObjectRef &node) {
+      if (const auto *call = node.as<CallNode>()) {
+        if (call->op.same_as(tl::tl_gemm()) ||
+            call->op.same_as(tl::tl_gemm_sp())) {
+          LOG(INFO) << "PostOrderVisit CallNode tl_gemm and tl_gemm_sp: "
+                    << call->op;
+        }
+      }
+    });
+  }
   /*!
    * \brief Liveness analysis to find gen and kill point of each variable.
    * \param seq the linear pattern of storage access
@@ -869,7 +943,7 @@ private:
    */
   StorageEntry *NewAlloc(const AllocateNode *op, size_t const_nbits) {
     ICHECK(op != nullptr);
-    // Re-use not successful, allocate a new buffer.
+    // Reuse not successful, allocate a new buffer.
     StorageEntry *entry = arena_.make<StorageEntry>();
     entry->allocs.push_back({op->buffer_var.get()});
     entry->const_nbits = const_nbits;
@@ -972,7 +1046,7 @@ private:
       sym_free_list_.push_back(e);
     }
   }
-  // Wheather enable dyanmic analysis.
+  // Whether enable dynamic analysis.
   bool is_dynamic_{true};
 
   // Whether enable verbose logging.
@@ -1003,6 +1077,8 @@ private:
   std::unordered_map<const VarNode *, StorageEntry *> alloc_map_;
   /*! \brief allocator of all the StorageEntry*/
   support::Arena arena_;
+  // The mapping of buffer bytes alignment
+  std::unordered_map<const VarNode *, int> shmem_alignment_map_;
 };
 
 Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
@@ -1048,8 +1124,11 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
                             {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.MergeSharedMemoryAllocations")
-    .set_body_typed(MergeSharedMemoryAllocations);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.MergeSharedMemoryAllocations",
+                        MergeSharedMemoryAllocations);
+});
 
 } // namespace transform
 } // namespace tl

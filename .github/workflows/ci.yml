@@ -2,16 +2,19 @@ name: CI
 on: [pull_request]
 
 env:
-  PYTHON_VERSION: '3.9'
+  PYTHON_VERSION: '3.12'
   VENV_DIR: tilelang_ci
 
 jobs:
   format-check:
-    runs-on: self-hosted
+    runs-on: [self-hosted, nvidia]
+
+    permissions:
+      contents: write 
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
@@ -23,7 +26,7 @@ jobs:
     - name: Ensure venv (local & persistent)
       run: |
         set -e
-        REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
+        REQS_HASH=$(sha256sum requirements-test.txt 2>/dev/null | awk '{print $1}' || echo "no_requirements")
         MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
 
         if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
@@ -37,27 +40,39 @@ jobs:
           python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
-          pip install . --no-user
+          pip install flash_attn==2.5.8 --no-user --no-build-isolation
           touch "$MARKER"
         fi
-
-    - name: Update submodules
-      run: git submodule update --init --recursive
 
     - name: Run format check
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        ./format.sh
+        if ! output=$(./format.sh 2>&1); then
+          echo "------------------------------------"
+          echo "message:"
+          echo "$output"
+          printf '%s\n' "$output" | grep "Please review and stage the changes."
+          echo "------------------------------------"
+          exit 1
+        fi
+    
+    - name: Commit and Push Changes
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "lint"
 
-  build-test:
-    runs-on: self-hosted
+  build-test-nvidia:
+    runs-on: [self-hosted, nvidia]
     needs: format-check
-
+    permissions:
+      contents: read
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
+        repository: ${{ github.event.pull_request.head.repo.full_name }}
+        ref: ${{ github.event.pull_request.head.ref }}
 
     - name: Set up Python
       uses: actions/setup-python@v2
@@ -80,6 +95,8 @@ jobs:
           python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
+          # flash attention usually requires no isolation build
+          pip install flash_attn==2.5.8 --no-user --no-build-isolation
           pip install . --no-user
           touch "$MARKER"
         fi
@@ -94,11 +111,11 @@ jobs:
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd examples
         unset PYTHONPATH
-        python -m pytest -n 8 **/test*.py
+        python -m pytest -n 4 **/test*.py
 
     - name: Run tests
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd testing/python
         unset PYTHONPATH
-        python -m pytest -n 8
+        python -m pytest -n 4

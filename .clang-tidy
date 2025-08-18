@@ -3,7 +3,8 @@ Checks: >
   cppcoreguidelines-*,
   modernize-*,
   performance-*,
-  readability-*
+  readability-*,
+  -readability-identifier-length
 WarningsAsErrors: '*'
 
 HeaderFilterRegex: '^(?!.*(3rdparty|build)).*$'

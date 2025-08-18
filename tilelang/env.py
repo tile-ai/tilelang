@@ -53,11 +53,10 @@ def _initialize_torch_cuda_arch_flags():
 
     target = determine_target(return_object=True)
     # create tmp source file for torch cpp extension
-    compute_version = "".join(nvcc.get_target_compute_version(target).split("."))
-    # set TORCH_CUDA_ARCH_LIST
-    major = compute_version[0]
-    minor = compute_version[1]
+    compute_version = nvcc.get_target_compute_version(target)
+    major, minor = nvcc.parse_compute_version(compute_version)
 
+    # set TORCH_CUDA_ARCH_LIST
     os.environ["TORCH_CUDA_ARCH_LIST"] = f"{major}.{minor}"
 
 
@@ -74,6 +73,9 @@ TILELANG_PACKAGE_PATH: str = pathlib.Path(__file__).resolve().parents[0]
 TILELANG_CACHE_DIR: str = os.environ.get("TILELANG_CACHE_DIR",
                                          os.path.expanduser("~/.tilelang/cache"))
 TILELANG_TMP_DIR: str = os.path.join(TILELANG_CACHE_DIR, "tmp")
+
+# Print the kernel name on every compilation
+TILELANG_PRINT_ON_COMPILATION: str = os.environ.get("TILELANG_PRINT_COMPILATION", "0")
 
 # Auto-clear cache if environment variable is set
 TILELANG_CLEAR_CACHE = os.environ.get("TILELANG_CLEAR_CACHE", "0")

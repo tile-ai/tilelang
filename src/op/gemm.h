@@ -26,10 +26,17 @@ public:
     kFullCol = 2,
   } policy;
 
+  std::unique_ptr<Operator> Clone() const final {
+    return std::make_unique<Gemm>(*this);
+  }
+
 private:
-  std::pair<int, int>
-  ComputeWarpPartition(int num_warps, Target target,
-                       bool maybe_hopper_wgmma = true) const;
+  // Target GEMM instruction
+  enum class GemmInst { kMMA, kWGMMA, kUTCMMA, kMFMA };
+  GemmInst GetGemmInst(int block_size, Target target) const;
+
+  std::pair<int, int> ComputeWarpPartition(int num_warps, GemmInst gemm_inst,
+                                           Target target) const;
 
   bool CheckWGMMA() const;
   Array<PrimExpr> call_args;
@@ -38,6 +45,8 @@ private:
   PrimExpr Aptr, Bptr, Cptr;
   bool trans_A, trans_B;
   int M, N, K;
+  int stride_A, stride_B;
+  int offset_A, offset_B;
   bool clear_accum = false;
   // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
   // only will be enabled under cdna mfma instructions

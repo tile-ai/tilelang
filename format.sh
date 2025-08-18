@@ -18,6 +18,11 @@ builtin cd "$(dirname "${BASH_SOURCE:-$0}")"
 ROOT="$(git rev-parse --show-toplevel)"
 builtin cd "$ROOT" || exit 1
 
+# If yapf/ruff/codespell is not installed, install according to the requirements
+if ! (yapf --version &>/dev/null && ruff --version &>/dev/null && codespell --version &>/dev/null); then
+    pip install -r requirements-lint.txt
+fi
+
 YAPF_VERSION=$(yapf --version | awk '{print $2}')
 RUFF_VERSION=$(ruff --version | awk '{print $2}')
 CODESPELL_VERSION=$(codespell --version)
@@ -26,7 +31,7 @@ CODESPELL_VERSION=$(codespell --version)
 tool_version_check() {
     if [[ $2 != $3 ]]; then
         echo "Wrong $1 version installed: $3 is required, not $2."
-        exit 1
+        pip install -r requirements-lint.txt
     fi
 }
 
@@ -246,15 +251,6 @@ echo 'tile-lang clang-format: Done'
 
 # Check if there are any uncommitted changes after all formatting steps.
 # If there are, ask the user to review and stage them.
-if ! git diff --quiet &>/dev/null; then
-    echo 'Reformatted files. Please review and stage the changes.'
-    echo 'Changes not staged for commit:'
-    echo
-    git --no-pager diff --name-only
-
-    exit 1
-fi
-
 if ! git diff --quiet &>/dev/null; then
     echo 'Reformatted files. Please review and stage the changes.'
     echo 'Changes not staged for commit:'

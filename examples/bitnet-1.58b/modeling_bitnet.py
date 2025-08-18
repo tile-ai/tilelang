@@ -1373,7 +1373,7 @@ class BitnetForCausalLM(BitnetPreTrainedModel):
                     cache_length + input_ids.shape[1] > max_cache_length):
                 attention_mask = attention_mask[:, -max_cache_length:]
 
-        position_ids = kwargs.get("position_ids", None)
+        position_ids = kwargs.get("position_ids")
         if attention_mask is not None and position_ids is None:
             # create position_ids on the fly for batch generation
             position_ids = attention_mask.long().cumsum(-1) - 1

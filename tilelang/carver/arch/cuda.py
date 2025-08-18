@@ -68,15 +68,15 @@ ada_tensorcore_supported = [
     ("float16", "float32"),
     ("float16", "float16"),
     ("int8", "int32"),
-    ("e5m2_float8", "float32"),
-    ("e4m3_float8", "float32"),
+    ("float8_e5m2", "float32"),
+    ("float8_e4m3", "float32"),
 ]
 hopper_tensorcore_supported = ada_tensorcore_supported
 
 
 # TODO(lei): we should consider the dtype of the input a and b
 # instead of assuming both a and b share the same dtype.
-# As the tensorcore may supports e4m3_float8 * e5m2_float8
+# As the tensorcore may supports float8_e4m3 * float8_e5m2
 def is_tensorcore_supported_precision(in_dtype: str, accum_dtype: str, arch: TileDevice) -> bool:
 
     if is_volta_arch(arch):

@@ -517,11 +517,12 @@ def main(args):
     output_sparse = sparse_attn.forward(Q, K_cache, V_cache, block_indices, cache_seqlens,
                                         block_table)
 
-    output_ref_fa = ref_program_fa(Q, K_cache, V_cache, cache_seqlens, block_table)
+    import flash_attn  # noqa: F401
 
     output_ref_torch = ref_program_torch_paged(Q, K_cache, V_cache, block_indices, cache_seqlens,
                                                block_table, page_block_size, block_N)
 
+    output_ref_fa = ref_program_fa(Q, K_cache, V_cache, cache_seqlens, block_table)
     # Check correctness
     if sparse_ratio == 0.0:
         max_diff = torch.max(torch.abs(output_sparse - output_ref_fa)).item()

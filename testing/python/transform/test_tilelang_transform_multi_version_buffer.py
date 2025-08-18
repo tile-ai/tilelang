@@ -46,7 +46,7 @@ def test_multi_version_buffer():
             for i in T.unroll(16, annotations={"pragma_unroll_explicit": T.bool(False)}):
                 for vec in T.vectorized(2):
                     C_local[i * 2 + vec] = T.float32(0)
-            for k in T.serial(16, annotations={"num_stages": 3}):
+            for k in T.serial(16, annotations={"num_stages": T.int32(3)}):
                 if v == 0:
                     T.tma_load(
                         T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2,
@@ -79,7 +79,7 @@ def test_multi_version_buffer():
             for i in T.unroll(16, annotations={"pragma_unroll_explicit": T.bool(False)}):
                 for vec in T.vectorized(2):
                     C_local[i * 2 + vec] = T.float32(0)
-            for k in T.serial(16, annotations={"num_stages": 3}):
+            for k in T.serial(16, annotations={"num_stages": T.int32(3)}):
                 if v == 0:
                     T.tma_load(
                         T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1, 0, 2,

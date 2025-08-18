@@ -50,7 +50,14 @@ bool TargetIsHopper(Target target) {
   if (!TargetIsCuda(target))
     return false;
   int arch = GetArchInt(target);
-  return arch >= 90;
+  return arch >= 90 && arch < 100;
+}
+
+bool TargetIsSM120(Target target) {
+  if (!TargetIsCuda(target))
+    return false;
+  int arch = GetArchInt(target);
+  return arch >= 120 && arch < 130;
 }
 
 bool TargetIsCDNA(Target target) {
@@ -95,6 +102,13 @@ bool TargetHasStmatrix(Target target) {
     return false;
   int arch = GetArchInt(target);
   return arch >= 90;
+}
+
+int TargetGetWarpSize(Target target) {
+  int res = 32;
+  if (TargetIsCDNA(target))
+    res = 64;
+  return res;
 }
 
 } // namespace tl

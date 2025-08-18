@@ -40,7 +40,7 @@ static int to_CUtensorMapDataType(DataType dtype) {
     }
   } else if (dtype.is_bfloat16()) {
     tp = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
-  } else if (dtype.is_e4m3_float8() or dtype.is_e5m2_float8()) {
+  } else if (dtype.is_float8_e4m3() || dtype.is_float8_e5m2()) {
     tp = CU_TENSOR_MAP_DATA_TYPE_UINT8;
   } else if (dtype.is_int()) {
     switch (dtype.bits()) {
@@ -105,6 +105,12 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Buffer shared_tensor = is_load ? dst : src;
   Array<Range> global_range = is_load ? src_range : dst_range;
   Array<Range> shared_range = is_load ? dst_range : src_range;
+  if (T.layout_map.count(global_tensor)) {
+    LOG(WARNING) << "TMA bulk copy cannot support a non-swizzled global "
+                    "layout, fallback to normal copy.";
+    return Stmt();
+  }
+
   if (T.layout_map.count(global_tensor)) {
     LOG(WARNING) << "TMA bulk copy cannot support a non-swizzled global "
                     "layout, fallback to normal copy.";
@@ -267,7 +273,9 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
         << "inner_box_dim: " << *inner_box_dim << " is not divisible by 256";
     instruction_dim = 256;
   }
-  ICHECK((*inner_box_dim) % instruction_dim == 0);
+  ICHECK((*inner_box_dim) % instruction_dim == 0)
+      << "inner_box_dim: " << *inner_box_dim
+      << " is not divisible by instruction_dim: " << instruction_dim;
   desc.smem_box.Set(0, PrimExpr(instruction_dim));
 
   int inner_box_dim_ = instruction_dim * shared_tensor->dtype.bytes();
@@ -289,7 +297,7 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
       Call(DataType::Handle(), create_tma_descriptor(), desc.EncodeCallArgs());
 
   Array<PrimExpr> args;
-  args.reserve(desc.rank + 3);
+  args.reserve(desc.rank + 4);
   args.push_back(create_descriptor);
   if (is_load)
     args.push_back(0); // mbarrier id placeholder
@@ -311,6 +319,7 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
     global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
     for (auto coord : global_coords)
       args.push_back(coord);
+    args.push_back(this->eviction_policy);
     tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
                    Evaluate(Call(DataType::Handle(), op, args)));
   } else {
@@ -319,6 +328,7 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
     args.push_back(shared_addr);
     for (auto coord : global_coords)
       args.push_back(coord);
+    args.push_back(this->eviction_policy);
     tma_copy = Evaluate(Call(DataType::Handle(), op, args));
   }
   tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
@@ -360,6 +370,7 @@ Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args, BufferMap vmap) {
   stride = args[5].as<IntImm>().value()->value;
   dilation = args[6].as<IntImm>().value()->value;
   padding = args[7].as<IntImm>().value()->value;
+  eviction_policy = args[8].as<IntImm>().value()->value;
 }
 
 Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
@@ -469,7 +480,7 @@ Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
       FloorDiv(nhw_step * desc.smem_box_pixel, w_dim * h_dim));
 
   Array<PrimExpr> args;
-  args.reserve(desc.rank * 2 + 1);
+  args.reserve(desc.rank * 2 + 2);
   args.push_back(create_desc);
   args.push_back(0); // mbar placeholder
   auto dst_buffer = T.buffer_remap.count(dst) ? T.buffer_remap[dst] : dst;
@@ -479,7 +490,7 @@ Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
     args.push_back(coord);
   for (auto offset : image_offset)
     args.push_back(offset);
-
+  args.push_back(this->eviction_policy);
   Stmt tma_copy =
       IfThenElse(EQ(T.thread_var, T.thread_bounds->min),
                  Evaluate(Call(DataType::Handle(), tma_load_im2col(), args)));
@@ -514,7 +525,7 @@ Array<PrimExpr> TMAIm2ColDesc::EncodeCallArgs() const {
 }
 
 TIR_REGISTER_TL_OP(Conv2DIm2ColOp, c2d_im2col)
-    .set_num_inputs(8)
+    .set_num_inputs(9)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

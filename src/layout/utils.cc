@@ -124,13 +124,17 @@ Array<IterSplitExpr> DivideUnusedIterators(const Array<PrimExpr> &exprs,
   Array<IterSplitExpr> results;
 
   for (const IterMark &mark : collector.visited_) {
-    ICHECK(mark->source.as<Var>()) << "Not a normalized iterator: " << mark;
+    if (!mark->source.as<Var>()) {
+      std::ostringstream oss;
+      oss << "Not a normalized iterator: " << mark;
+      throw NormalizeIterException(oss.str());
+    }
   }
 
   for (const IterVar &iter : input_iters) {
     IterMark iv_mark;
     for (const IterMark &mark : collector.visited_) {
-      if (mark->source.as<Var>().same_as(iter->var)) {
+      if (mark->source.as<Var>()->same_as(iter->var)) {
         iv_mark = mark;
         break;
       }

@@ -28,9 +28,11 @@ static constexpr const char *kConfigIndexBitwidth = "tl.config_index_bitwidth";
 static constexpr const char *kEnableAggressiveSharedMemoryMerge =
     "tl.enable_aggressive_shared_memory_merge";
 static constexpr const char *kDisableFastMath = "tl.disable_fast_math";
+static constexpr const char *kPtxasRegisterUsageLevel =
+    "tl.ptxas_register_usage_level";
 static constexpr const char *kEnablePTXASVerboseOutput =
     "tl.enable_ptxas_verbose_output";
-
+static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 /*!
  * \brief Whether to disable dynamic tail split
  *
@@ -276,6 +278,28 @@ TVM_DLL const Op &tvm_rdna_wmma();
  * src_offset, Var dst_stride);
  */
 TVM_DLL const Op &tvm_rdna_wmma_store();
+
+/*!
+ * \brief tilelang intrinsic for general matrix multiplication (GEMM).
+ *
+ *  This op is used to represent a generic GEMM operation in tilelang.
+ */
+TVM_DLL const Op &tl_gemm();
+
+/*!
+ * \brief tilelang intrinsic for sparse matrix multiplication (GEMM with
+ * sparsity).
+ *
+ *  This op is used to represent a sparse GEMM operation in tilelang.
+ */
+TVM_DLL const Op &tl_gemm_sp();
+
+/*!
+ * \brief tilelang intrinsic for shuffle elect.
+ *
+ *  This op is used to represent a shuffle elect operation in tilelang.
+ */
+TVM_DLL const Op &tl_shuffle_elect();
 
 } // namespace tl
 } // namespace tvm

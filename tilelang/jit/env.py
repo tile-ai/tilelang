@@ -36,11 +36,7 @@ def _get_workspace_dir_name() -> pathlib.Path:
 
         target = determine_target(return_object=True)
         # create tmp source file for torch cpp extension
-        compute_version = "".join(nvcc.get_target_compute_version(target).split("."))
-        # set TORCH_CUDA_ARCH_LIST
-        major = compute_version[0]
-        minor = compute_version[1]
-        arch = f"{major}_{minor}"
+        arch = nvcc.get_target_arch(nvcc.get_target_compute_version(target))
     except Exception:
         arch = "noarch"
     # e.g.: $HOME/.cache/tilelang/75_80_89_90/

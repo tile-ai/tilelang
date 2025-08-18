@@ -3,6 +3,7 @@
  * \brief Lower the tile op for further codegen.
  */
 
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
@@ -108,12 +109,14 @@ private:
    * \return The rewritten block.
    */
   Stmt RewritePaddingMap(const BlockNode *op) {
-    auto padding_map =
-        op->annotations.Get(attr::kPaddingMap).as<Map<Var, PrimExpr>>().value();
+    auto padding_map = op->annotations.Get(attr::kPaddingMap);
+    if (!padding_map) {
+      LOG(FATAL) << "Padding map annotation is missing";
+    }
 
     Map<Var, Var> var_remap = CreateVarRemap();
-    Map<Var, PrimExpr> new_padding_map =
-        RemapPaddingMap(padding_map, var_remap);
+    Map<Var, PrimExpr> new_padding_map = RemapPaddingMap(
+        Downcast<Map<Var, PrimExpr>>(padding_map.value()), var_remap);
 
     auto block = Downcast<Block>(IRMutatorWithAnalyzer::VisitStmt_(op));
     auto block_ptr = block.CopyOnWrite();
@@ -235,7 +238,7 @@ private:
   }
 
   PrimExpr HandleAccessPtrAndOffset(PrimExpr access_ptr,
-                                    Optional<PrimExpr> offset = NullOpt,
+                                    Optional<PrimExpr> offset = std::nullopt,
                                     DataType dtype = DataType::Int(32)) {
     // The 2th arg of T.tvm_access_ptr call is offset, we set it to 0 and
     // accumulate it to smem_offset
@@ -318,7 +321,7 @@ private:
                         op->op.same_as(tl::tma_store()))) {
       has_tma_ = true;
     }
-    Array<RelayExpr> ptx_instructions = {builtin::ptx_ldmatrix(),
+    Array<RelaxExpr> ptx_instructions = {builtin::ptx_ldmatrix(),
                                          builtin::mma_store()};
 
     if (std::find(ptx_instructions.begin(), ptx_instructions.end(), op->op) ==
@@ -354,7 +357,7 @@ private:
       // mma_store now
       auto access_ptr = call->args[2];
       auto new_access_ptr =
-          HandleAccessPtrAndOffset(access_ptr, NullOpt, call->dtype);
+          HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
       auto new_call = call.CopyOnWrite();
       new_call->args.Set(2, new_access_ptr);
     } else {
@@ -496,7 +499,10 @@ tvm::transform::Pass LowerTileOp() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerTileOp", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.LowerTileOp").set_body_typed(LowerTileOp);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.LowerTileOp", LowerTileOp);
+});
 } // namespace transform
 
 } // namespace tl

@@ -37,14 +37,6 @@ def matmul(M,
 
             T.copy(C_local, C_shared)
 
-            # TODO: Automatically add vectorized atomic with enhancement
-            # https://github.com/tile-ai/tilelang/issues/523
-            # if DataType(dtype).bits == 16:
-            #     for i, j in T.Parallel(block_M, block_N // 2):
-            #         m, n = by * block_M + i, bx * block_N + j * 2
-            #         # vectorized atomic
-            #         T.atomic_addx2(C[m, n], C_shared[i, j * 2])
-
             for i, j in T.Parallel(block_M, block_N):
                 T.atomic_add(C[by * block_M + i, bx * block_N + j], C_shared[i, j])
 

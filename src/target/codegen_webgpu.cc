@@ -21,6 +21,7 @@
  * \file codegen_webgpu.cc
  */
 #include "codegen_webgpu.h"
+#include <tvm/ffi/reflection/registry.h>
 
 #include <tvm/arith/analyzer.h>
 #include <tvm/tir/builtin.h>
@@ -251,9 +252,9 @@ CodeGenTileLangWebGPU::AddFunction(const PrimFunc &f, bool skip_readonly_decl) {
   os_param_access << "]";
   func_info.launch_param_tags.push_back(os_param_access.str());
 
-  ICHECK(!info.has_block_index_z)
-      << "blockIdx.z is not supported in WebGPU to accomodate large blockIdx.x";
-  // anotate workgroup
+  ICHECK(!info.has_block_index_z) << "blockIdx.z is not supported in WebGPU to "
+                                     "accommodate large blockIdx.x";
+  // annotate workgroup
   this->stream << "@compute @workgroup_size(" << info.workgroup_size[0] << ", "
                << info.workgroup_size[1] << ", " << info.workgroup_size[2]
                << ")\n";
@@ -704,11 +705,11 @@ public:
     return runtime::ModulePropertyMask::kBinarySerializable;
   }
 
-  PackedFunc GetFunction(const String &name,
-                         const ObjectPtr<Object> &sptr_to_self) final {
+  ffi::Function GetFunction(const String &name,
+                            const ObjectPtr<Object> &sptr_to_self) final {
     LOG(FATAL) << "WebGPUSourceModule is not directly runnable, export and run "
                   "through tvmjs";
-    return PackedFunc(nullptr);
+    return ffi::Function(nullptr);
   }
 
   void SaveToBinary(dmlc::Stream *stream) final {
@@ -773,10 +774,13 @@ runtime::Module BuildTileLangWebGPU(IRModule mod, Target target) {
   return runtime::Module(n);
 }
 
-TVM_REGISTER_GLOBAL("target.build.tilelang_webgpu")
-    .set_body_typed([](IRModule mod, Target target) {
-      return BuildTileLangWebGPU(mod, target);
-    });
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("target.build.tilelang_webgpu",
+                        [](IRModule mod, Target target) {
+                          return BuildTileLangWebGPU(mod, target);
+                        });
+});
 
 } // namespace codegen
 } // namespace tvm

@@ -4,6 +4,7 @@
  */
 
 #include "layout.h"
+#include <tvm/ffi/reflection/registry.h>
 
 #include <tvm/arith/pattern.h>
 #include <tvm/tir/op.h>
@@ -73,9 +74,11 @@ Layout::Layout(Array<PrimExpr> input_size, Array<PrimExpr> forward_index) {
   data_ = std::move(n);
 }
 
-void LayoutNode::VisitAttrs(AttrVisitor *v) {
-  v->Visit("input_size", &input_size_);
-  v->Visit("forward_index", &forward_index_);
+void LayoutNode::RegisterReflection() {
+  namespace refl = tvm::ffi::reflection;
+  refl::ObjectDef<LayoutNode>()
+      .def_ro("input_size", &LayoutNode::input_size_)
+      .def_ro("forward_index", &LayoutNode::forward_index_);
 }
 
 void LayoutNode::UpdateAnalyzer(arith::Analyzer *analyzer) const {
@@ -155,7 +158,7 @@ Fragment FragmentNode::Repeat(const Array<PrimExpr> &repeats,
     auto new_forward_thread =
         Substitute(forward_thread_, vmap) + thread_size * repeats_index;
     return Fragment(new_input_size, new_forward_index, new_forward_thread,
-                    replicate_size_, NullOpt);
+                    replicate_size_, std::nullopt);
   } else {
     ICHECK(OutputDim() == 1);
     PrimExpr frag_len = OutputShape()[0];
@@ -163,7 +166,7 @@ Fragment FragmentNode::Repeat(const Array<PrimExpr> &repeats,
                                          frag_len * repeats_index};
     PrimExpr new_forward_thread = Substitute(forward_thread_, vmap);
     return Fragment(new_input_size, new_forward_index, new_forward_thread,
-                    replicate_size_, NullOpt);
+                    replicate_size_, std::nullopt);
   }
 }
 
@@ -176,7 +179,7 @@ Fragment FragmentNode::Replicate(int repeats) const {
       Substitute(forward_thread_, vmap) +
       ThreadExtent() * FloorDiv(ReplicationPlaceholder(), ReplicateExtent());
   return Fragment(input_size_, forward_index_, new_forward_thread,
-                  ReplicateExtent() * repeats, NullOpt);
+                  ReplicateExtent() * repeats, std::nullopt);
 }
 
 Fragment FragmentNode::DeReplicate() const {
@@ -198,7 +201,7 @@ Fragment FragmentNode::DeReplicate() const {
   PrimExpr new_forward_thread = Substitute(forward_thread_, vmap);
   Array<PrimExpr> new_forward_index = {FloorDiv(forward_index_[0], factor)};
   return Fragment(input_size_, new_forward_index, new_forward_thread,
-                  int(*rep_size) / factor, NullOpt);
+                  int(*rep_size) / factor, std::nullopt);
 }
 
 Fragment FragmentNode::BindThreadRange(Range thread_range) const {
@@ -304,18 +307,11 @@ Fragment::Fragment(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
   data_ = std::move(n);
 }
 
-void FragmentNode::VisitAttrs(tvm::AttrVisitor *v) {
-  LayoutNode::VisitAttrs(v);
-  v->Visit("forward_thread", &forward_thread_);
-  v->Visit("replicate_size", &replicate_size_);
-}
-
 PrimExpr FragmentNode::ThreadExtent() const {
   Array<PrimExpr> ret(OutputDim(), 1);
   arith::Analyzer analyzer;
   UpdateAnalyzer(&analyzer);
   auto ist = analyzer.int_set(forward_thread_ + 1);
-  // CHECK(is_one(ist.min()));
   return ist.max();
 }
 
@@ -435,64 +431,69 @@ bool FragmentNode::IsEqual(const FragmentNode *other, bool skip_index) const {
   return ret;
 }
 
+void FragmentNode::RegisterReflection() {
+  namespace refl = tvm::ffi::reflection;
+  refl::ObjectDef<FragmentNode>()
+      .def_ro("forward_thread", &FragmentNode::forward_thread_)
+      .def_ro("replicate_size", &FragmentNode::replicate_size_);
+}
+
 TVM_REGISTER_NODE_TYPE(LayoutNode);
 TVM_REGISTER_NODE_TYPE(FragmentNode);
 
-TVM_REGISTER_GLOBAL("tl.Layout").set_body([](TVMArgs args, TVMRetValue *ret) {
-  *ret = Layout(Array<IterVar>(args[0]), Array<PrimExpr>(args[1]));
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+      .def_packed("tl.Layout",
+                  [](PackedArgs args, Any *rv) {
+                    *rv = Layout(args[0].cast<Array<IterVar>>(),
+                                 args[1].cast<Array<PrimExpr>>());
+                  })
+      .def("tl.Layout_input_shape",
+           [](Layout layout) { return layout->InputShape(); })
+      .def("tl.Layout_output_shape",
+           [](Layout layout) { return layout->OutputShape(); })
+      .def("tl.Layout_inverse", [](Layout layout) { return layout->Inverse(); })
+      .def("tl.Layout_index",
+           [](Layout layout) { return layout->GetForwardIndex(); })
+      .def("tl.Layout_forward_vars",
+           [](Layout layout) { return layout->GetForwardVars(); })
+      .def_packed("tl.Fragment",
+                  [](PackedArgs args, Any *rv) {
+                    *rv = Fragment(
+                        /*forward_var=*/args[0].cast<Array<IterVar>>(),
+                        /*forward_index=*/args[1].cast<Array<PrimExpr>>(),
+                        /*forward_thread=*/args[2].cast<PrimExpr>(),
+                        /*thread_replicate=*/args[3].cast<IterVar>());
+                  })
+      .def("tl.Fragment_thread_size",
+           [](Fragment fragment) { return fragment->ThreadExtent(); })
+      .def("tl.Fragment_thread",
+           [](Fragment fragment) { return fragment->GetForwardThread(); })
+      .def("tl.Fragment_repeat",
+           [](Fragment fragment, Array<PrimExpr> repeats, bool repeat_on_thread,
+              bool lower_dim_first) {
+             return fragment->Repeat(repeats, repeat_on_thread,
+                                     lower_dim_first);
+           })
+      .def("tl.Fragment_replicate",
+           [](Fragment fragment, int repeats) {
+             return fragment->Replicate(repeats);
+           })
+      .def("tl.Fragment_condense_rep_var",
+           [](Fragment fragment) { return fragment->CondenseReplicateVar(); })
+      .def("tl.make_swizzled_layout",
+           [](int stride, int continuous, int element_size) {
+             return makeGemmABLayout(stride, continuous, continuous,
+                                     element_size, 0);
+           });
 });
 
-TVM_REGISTER_GLOBAL("tl.Layout_input_shape").set_body_typed([](Layout layout) {
-  return layout->InputShape();
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  LayoutNode::RegisterReflection();
+  FragmentNode::RegisterReflection();
 });
-
-TVM_REGISTER_GLOBAL("tl.Layout_output_shape").set_body_typed([](Layout layout) {
-  return layout->OutputShape();
-});
-
-TVM_REGISTER_GLOBAL("tl.Layout_inverse").set_body_typed([](Layout layout) {
-  return layout->Inverse();
-});
-
-TVM_REGISTER_GLOBAL("tl.Layout_index").set_body_typed([](Layout layout) {
-  return layout->GetForwardIndex();
-});
-
-TVM_REGISTER_GLOBAL("tl.Layout_forward_vars").set_body_typed([](Layout layout) {
-  return layout->GetForwardVars();
-});
-
-TVM_REGISTER_GLOBAL("tl.Fragment").set_body([](TVMArgs args, TVMRetValue *ret) {
-  *ret = Fragment(args[0], args[1], args[2], args[3]);
-});
-
-TVM_REGISTER_GLOBAL("tl.Fragment_thread_size")
-    .set_body_typed([](Fragment fragment) { return fragment->ThreadExtent(); });
-
-TVM_REGISTER_GLOBAL("tl.Fragment_thread").set_body_typed([](Fragment fragment) {
-  return fragment->GetForwardThread();
-});
-
-TVM_REGISTER_GLOBAL("tl.Fragment_repeat")
-    .set_body_typed([](Fragment fragment, Array<PrimExpr> repeats,
-                       bool repeat_on_thread, bool lower_dim_first) {
-      return fragment->Repeat(repeats, repeat_on_thread, lower_dim_first);
-    });
-
-TVM_REGISTER_GLOBAL("tl.Fragment_replicate")
-    .set_body_typed([](Fragment fragment, int repeats) {
-      return fragment->Replicate(repeats);
-    });
-
-TVM_REGISTER_GLOBAL("tl.Fragment_condense_rep_var")
-    .set_body_typed([](Fragment fragment) {
-      return fragment->CondenseReplicateVar();
-    });
-
-TVM_REGISTER_GLOBAL("tl.make_swizzled_layout")
-    .set_body_typed([](int stride, int continuous, int element_size) {
-      return makeGemmABLayout(stride, continuous, continuous, element_size, 0);
-    });
 
 } // namespace tl
 } // namespace tvm

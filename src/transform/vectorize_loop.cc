@@ -22,7 +22,8 @@
  */
 // Loop vectorizer as in Halide pipeline.
 #include <tvm/arith/analyzer.h>
-#include <tvm/runtime/registry.h>
+#include <tvm/ffi/function.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/expr.h>
@@ -526,7 +527,7 @@ public:
     // A single var can be binded in multiple lets
     // but they have to bind to the same value.
     // This is used to allow cases when we reuse a single let
-    // expression to cosntruct a nested expr.
+    // expression to construct a nested expr.
     // (let x = 1 in x + 1) * (let x = 1 in x + 1)
     auto it = let_binding_.find(op->var);
     if (it != let_binding_.end()) {
@@ -631,7 +632,7 @@ public:
       return Scalarize(GetRef<Stmt>(op));
     }
     Stmt then_case = this->VisitStmt(op->then_case);
-    Optional<Stmt> else_case = NullOpt;
+    Optional<Stmt> else_case = std::nullopt;
     if (op->else_case) {
       else_case = this->VisitStmt(op->else_case.value());
     }
@@ -682,15 +683,11 @@ public:
     return StmtMutator::VisitStmt_(op);
   }
 
-  // scalarize the statment
+  // scalarize the statement
   Stmt Scalarize(Stmt stmt) {
     Var idx(var_->name_hint + ".s", var_->dtype);
     stmt = Substitute(stmt, {{var_, idx}});
     return For(idx, IntImm(var_->dtype, 0), var_lanes_, ForKind::kSerial, stmt);
-  }
-  // ProducerStore
-  Stmt VisitStmt_(const ProducerStoreNode *op) final {
-    LOG(FATAL) << "ProducerProvide cannot appear in a TIR PrimFunc";
   }
 
 private:
@@ -704,7 +701,7 @@ private:
   PrimExpr var_lanes_;
   // ramp representing the var.
   PrimExpr ramp_;
-  // flag to mark requirment of scalarization.
+  // flag to mark requirement of scalarization.
   bool need_scalarize_{false};
   // Let binding
   std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual> let_binding_;
@@ -787,6 +784,10 @@ private:
   }
 };
 
+inline bool TargetHasSVE() {
+  return Target::Current()->GetFeature<Bool>("has_sve").value_or(false);
+}
+
 class LoopVectorizer : public StmtMutator {
 public:
   Stmt VisitStmt_(const ForNode *op) final {
@@ -796,7 +797,7 @@ public:
       if (!extent_as_int || extent_as_int->value < 1) {
         bool is_scalable_expr =
             CheckContains::ExprContains(op->extent, arith::IsVScaleCall);
-        ICHECK(is_scalable_expr && arith::TargetHasSVE())
+        ICHECK(is_scalable_expr && TargetHasSVE())
             << "Failed to vectorize loop with extent " << op->extent
             << " for target " << Target::Current();
       }
@@ -837,7 +838,10 @@ tvm::transform::Pass VectorizeLoop(bool enable_vectorize = true) {
   return CreatePrimFuncPass(pass_func, 0, "tl.VectorizeLoop", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.VectorizeLoop").set_body_typed(VectorizeLoop);
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.VectorizeLoop", VectorizeLoop);
+});
 
 } // namespace tl
 } // namespace tvm

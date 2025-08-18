@@ -20,8 +20,10 @@
 /*!
  * \file make_packed_api.cc Lower PrimFunc to use the packed function API.
  */
+#include <tvm/ffi/function.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/device_api.h>
-#include <tvm/runtime/registry.h>
+#include <tvm/runtime/module.h>
 #include <tvm/target/target.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/buffer.h>
@@ -30,7 +32,6 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -75,7 +76,7 @@ public:
 
 private:
   struct ConvertedInfo {
-    int tcode{-1};
+    int type_index{-1};
     PrimExpr expr;
     Buffer dummy_val_buffer;
     Buffer dummy_tcode_buffer;
@@ -87,13 +88,13 @@ private:
     // convert val's data type to FFI data type, return type code
     DataType dtype = val.dtype();
     if (dtype.is_int() || dtype.is_uint()) {
-      info.tcode = kTVMArgInt;
+      info.type_index = ffi::TypeIndex::kTVMFFIInt;
       info.expr = Cast(DataType::Int(64), val);
     } else if (dtype.is_float()) {
-      info.tcode = kTVMArgFloat;
+      info.type_index = ffi::TypeIndex::kTVMFFIFloat;
       info.expr = Cast(DataType::Float(64), val);
     } else if (dtype.is_void()) {
-      info.tcode = kTVMNullptr;
+      info.type_index = ffi::TypeIndex::kTVMFFINone;
       info.expr = val;
     } else {
       LOG(FATAL) << "data type " << dtype << " not supported yet";
@@ -101,18 +102,18 @@ private:
 
     // If multiple return locations have the same data type, use the
     // same dummy buffer declaration.
-    auto it = dummy_val_buffer_map_.find(info.tcode);
+    auto it = dummy_val_buffer_map_.find(info.type_index);
     if (it != dummy_val_buffer_map_.end()) {
       info.dummy_val_buffer = it->second;
     } else {
       info.dummy_val_buffer =
           Buffer(ret_var_, info.expr.dtype(), {1}, {1}, ConstInt32(0),
                  ret_var_->name_hint, 0, 0, kDefault);
-      dummy_val_buffer_map_[info.tcode] = info.dummy_val_buffer;
+      dummy_val_buffer_map_[info.type_index] = info.dummy_val_buffer;
     }
 
-    // The tcode is always a 32-bit int, so we don't need to have a separate
-    // map.
+    // The type_index is always a 32-bit int, so we don't need to have a
+    // separate map.
     if (!dummy_tcode_buffer_.defined()) {
       dummy_tcode_buffer_ =
           Buffer(ret_tcode_, DataType::Int(32), {1}, {1}, ConstInt32(0),
@@ -126,7 +127,8 @@ private:
   Stmt WriteToOut(PrimExpr val) {
     auto info = ConvertForFFI(val);
     Stmt store_val = BufferStore(info.dummy_val_buffer, info.expr, {0});
-    Stmt store_tcode = BufferStore(info.dummy_tcode_buffer, info.tcode, {0});
+    Stmt store_tcode =
+        BufferStore(info.dummy_tcode_buffer, info.type_index, {0});
     Stmt ret_zero = Evaluate(tvm::ret(0));
     return SeqStmt({store_val, store_tcode, ret_zero});
   }
@@ -153,7 +155,7 @@ public:
     if (rewriter.made_change_) {
       return stmt;
     } else {
-      return NullOpt;
+      return std::nullopt;
     }
   }
 
@@ -204,21 +206,21 @@ inline Stmt MakeAssertNotNull(PrimExpr ptr, std::string msg) {
  * \param func The function to be inspected
  *
  * \returns The global_symbol to be used for the function at call
- * sites, or NullOpt if the function is to remain unchanged.
+ * sites, or std::nullopt if the function is to remain unchanged.
  */
 Optional<String> RequiresPackedAPI(const PrimFunc &func) {
   // A function with an explicit calling convention has already been
   // lowered, and should not be modified.
   if (auto opt = func->GetAttr<Integer>(tvm::attr::kCallingConv)) {
     if (CallingConv(opt.value()->value) != CallingConv::kDefault) {
-      return NullOpt;
+      return std::nullopt;
     }
   }
 
   // Internal function calls do not need the PackedFunc API
   auto global_symbol = func->GetAttr<String>(tvm::attr::kGlobalSymbol);
   if (!global_symbol.defined()) {
-    return NullOpt;
+    return std::nullopt;
   }
 
   return global_symbol;
@@ -344,9 +346,9 @@ PrimFunc MakePackedAPI(PrimFunc func) {
     }
 
     // type code checks
-    Var tcode(param->name_hint + ".code", DataType::Int(32));
+    Var type_index(param->name_hint + ".code", DataType::Int(32));
     seq_init.emplace_back(LetStmt(
-        tcode,
+        type_index,
         BufferLoad(buf_packed_arg_type_ids, {IntImm(DataType::Int(32), i)}),
         nop));
     DataType t = param.dtype();
@@ -354,20 +356,22 @@ PrimFunc MakePackedAPI(PrimFunc func) {
       std::ostringstream msg;
       msg << name_hint << ": Expect arg[" << i << "] to be pointer";
       seq_init.emplace_back(
-          AssertStmt(tcode == kTVMOpaqueHandle || tcode == kTVMNDArrayHandle ||
-                         tcode == kTVMDLTensorHandle || tcode == kTVMNullptr,
+          AssertStmt(type_index == ffi::TypeIndex::kTVMFFINone ||
+                         type_index == ffi::TypeIndex::kTVMFFIOpaquePtr ||
+                         type_index == ffi::TypeIndex::kTVMFFIDLTensorPtr ||
+                         type_index >= ffi::TypeIndex::kTVMFFIStaticObjectBegin,
                      tvm::tir::StringImm(msg.str()), nop));
     } else if (t.is_int() || t.is_uint()) {
       std::ostringstream msg;
       msg << name_hint << ": Expect arg[" << i << "] to be int";
-      seq_init.emplace_back(
-          AssertStmt(tcode == kDLInt, tvm::tir::StringImm(msg.str()), nop));
+      seq_init.emplace_back(AssertStmt(type_index == kDLInt,
+                                       tvm::tir::StringImm(msg.str()), nop));
     } else {
       ICHECK(t.is_float());
       std::ostringstream msg;
       msg << name_hint << ": Expect arg[" << i << "] to be float";
-      seq_init.emplace_back(
-          AssertStmt(tcode == kDLFloat, tvm::tir::StringImm(msg.str()), nop));
+      seq_init.emplace_back(AssertStmt(type_index == kDLFloat,
+                                       tvm::tir::StringImm(msg.str()), nop));
     }
   }
 
@@ -406,13 +410,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
     seq_check.push_back(
         AttrStmt(node, tir::attr::device_type, device_type, nop));
 
-    bool need_set_device =
-        (target_device_type != kDLMicroDev &&
-         (
-             // or is c source target
-             target_device_type != kDLCPU || target->kind->name != "llvm"));
-
-    if (need_set_device) {
+    if (runtime::DeviceAPI::NeedSetDevice(target_device_type)) {
       Stmt set_device =
           Evaluate(Call(DataType::Int(32), builtin::tvm_call_packed(),
                         {StringImm(runtime::symbol::tvm_set_device),
@@ -468,7 +466,6 @@ PrimFunc MakePackedAPI(PrimFunc func) {
       << " are used, but are not passed in as API arguments";
 
   func_ptr->buffer_map = Map<Var, Buffer>();
-  func_ptr->checked_type_ = func_ptr->func_type_annotation();
   func_ptr->ret_type = PrimType(DataType::Int(32)); // return the function.
   return func;
 }
@@ -516,8 +513,10 @@ tvm::transform::Pass MakePackedAPI() {
   return tvm::transform::CreateModulePass(pass_func, 0, "tl.MakePackedAPI", {});
 }
 
-TVM_REGISTER_GLOBAL("tl.transform.MakePackedAPI").set_body_typed([]() {
-  return MakePackedAPI();
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.transform.MakePackedAPI",
+                        []() { return MakePackedAPI(); });
 });
 
 } // namespace tl

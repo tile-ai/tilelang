@@ -24,7 +24,7 @@ import subprocess
 import sys
 from typing import Dict
 
-from tvm._ffi.base import py_str
+from tvm.base import py_str
 from tvm.contrib import tar as _tar
 from tvm.contrib import utils as _utils
 

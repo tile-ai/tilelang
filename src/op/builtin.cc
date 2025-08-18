@@ -25,7 +25,9 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kDisableDynamicTailSplit, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDynamicAlignment, Integer);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableAggressiveSharedMemoryMerge, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableFastMath, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kPtxasRegisterUsageLevel, Integer);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnablePTXASVerboseOutput, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kDisableShuffleElect, Bool);
 
 #define TIR_DEFINE_TL_BUILTIN(OpName)                                          \
   const Op &OpName() {                                                         \
@@ -87,7 +89,7 @@ TIR_DEFINE_TL_BUILTIN(ptx_stmatirx)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(sync_thread_partial)
-    .set_num_inputs(1)
+    .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
@@ -130,5 +132,37 @@ TIR_DEFINE_TL_BUILTIN(loop_break)
     .set_num_inputs(0)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tl_gemm).set_num_inputs(4).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tl_gemm_sp)
+    .set_num_inputs(5)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tvm_mfma).set_num_inputs(12).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tvm_mfma_store)
+    .set_num_inputs(6)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tvm_rdna_wmma)
+    .set_num_inputs(12)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tvm_rdna_wmma_store)
+    .set_num_inputs(6)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(tl_shuffle_elect)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
 } // namespace tl
 } // namespace tvm

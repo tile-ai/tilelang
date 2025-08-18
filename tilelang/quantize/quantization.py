@@ -180,7 +180,7 @@ def _tir_u8_to_f8_e4m3_to_f16(nbit: int, val: tir.PrimExpr, dtype: str):
 def _tir_u8_to_f8_e5m2_to_f16(nbit: int, val: tir.PrimExpr, dtype: str):
     assert nbit == 8
     assert dtype == "float16"
-    return tir.reinterpret("e5m2_float8", val).astype("float16")
+    return tir.reinterpret("float8_e5m2", val).astype("float16")
 
 
 def _tir_packed_to_signed_convert(storage_type="uint", storage_nbit=8):

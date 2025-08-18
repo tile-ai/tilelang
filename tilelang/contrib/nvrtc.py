@@ -1,7 +1,7 @@
 import cuda.bindings.nvrtc as nvrtc
 from typing import Literal, Union, List, Optional, Tuple
 from tvm.target import Target
-from .nvcc import get_target_compute_version
+from .nvcc import get_target_compute_version, parse_compute_version
 
 
 def get_nvrtc_version() -> Tuple[int, int]:
@@ -42,9 +42,9 @@ def compile_cuda(code: str,
     if arch is None:
         # If None, then it will use `tvm.target.Target.current().arch`.
         # Target arch could be a str like "80", "90", "90a", etc.
-        compute_version = "".join(
-            get_target_compute_version(Target.current(allow_none=True)).split("."))
-        arch = int(compute_version)
+        major, minor = parse_compute_version(
+            get_target_compute_version(Target.current(allow_none=True)))
+        arch = major * 10 + minor
     prefix = "compute" if target_format == "ptx" else "sm"
     suffix = "a" if arch >= 90 else ""
     arch_option = f"--gpu-architecture={prefix}_{arch}{suffix}"

@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import tilelang
 import tilelang.language as T
+from tilelang.primitives.gemm.base import GemmWarpPolicy
 import itertools
 import argparse
 from functools import partial
@@ -29,18 +30,24 @@ def ref_program(Q, K, V, is_causal, groups=1):
 
 def get_configs():
     """Generates configurations for the autotuner, tailored for FA-2 style parallelism."""
-    block_M = [64, 128, 256]
-    block_N = [32, 64, 128]
-    threads = [128, 256, 512]
-    num_split_q = [32, 64, 128]
-    num_stages = [0, 1, 2]
-    enable_rasterization = [True, False]
-    k_pack = [1, 2]
+    block_M = [32, 64, 128, 256]
+    block_N = [32, 64, 128, 256]
+    threads = [64, 128, 192, 256, 512, 1024]
+    num_split_q = [32, 64, 128, 256, 256]
+    num_stages = [0]
+    enable_rasterization = [True]
+    k_pack = [2]
+    panel_size = [7, 8, 9, 10]
+    qk_coalesced_width = [8]
+    v_coalesced_width = [4]
 
     valid_configs = []
 
-    for m, n, s, t, stages, r, k in itertools.product(block_M, block_N, num_split_q, threads,
-                                                      num_stages, enable_rasterization, k_pack):
+    for m, n, s, t, stages, r, k, p, qkw, vw in itertools.product(block_M, block_N, num_split_q,
+                                                                  threads, num_stages,
+                                                                  enable_rasterization, k_pack,
+                                                                  panel_size, qk_coalesced_width,
+                                                                  v_coalesced_width):
         valid_configs.append({
             "block_M": m,
             "block_N": n,
@@ -48,7 +55,10 @@ def get_configs():
             "threads": t,
             "num_stages": stages,
             "enable_rasterization": r,
-            "k_pack": k
+            "k_pack": k,
+            "panel_size": p,
+            "qk_coalesced_width": qkw,
+            "v_coalesced_width": vw,
         })
     valid_configs.append({
         'block_M': 64,
@@ -57,7 +67,10 @@ def get_configs():
         'threads': 256,
         'num_stages': 1,
         'enable_rasterization': True,
-        'k_pack': 2
+        'k_pack': 2,
+        'panel_size': 64,
+        'qk_coalesced_width': 8,
+        'v_coalesced_width': 8,
     })
     return valid_configs
 
@@ -78,6 +91,9 @@ def fast_flashattn(
     num_stages: int,
     enable_rasterization: bool,
     k_pack: int,
+    panel_size: int,
+    qk_coalesced_width: int,
+    v_coalesced_width: int,
 ):
     scale = (1.0 / dim)**0.5 * 1.44269504
     head_kv = heads // groups
@@ -86,8 +102,8 @@ def fast_flashattn(
     dtype = "float16"
     accum_dtype = "float"
 
-    v_vec_size = 4
-    vec_size = 4 * k_pack
+    vec_size = qk_coalesced_width
+    v_vec_size = v_coalesced_width
 
     @T.prim_func
     def main(
@@ -97,7 +113,7 @@ def fast_flashattn(
             Output: T.Tensor(q_shape, dtype),
     ):
         with T.Kernel(num_split_q, batch * heads, threads=threads) as (b_split, byz_combined):
-            T.use_swizzle(10, enable=enable_rasterization)
+            T.use_swizzle(panel_size, enable=enable_rasterization)
 
             bz = byz_combined // heads
             by = byz_combined % heads
@@ -105,9 +121,9 @@ def fast_flashattn(
             num_q_blocks = T.ceildiv(seq_len, block_M)
 
             bx = T.alloc_var("int32")
-            bx[0] = b_split
+            bx = b_split
 
-            with T.While(bx[0] < num_q_blocks):
+            with T.While(bx < num_q_blocks):
                 acc_o = T.alloc_fragment([block_M, dim], accum_dtype)
                 m_i = T.alloc_fragment([block_M], accum_dtype)
                 l_i = T.alloc_fragment([block_M], accum_dtype)
@@ -115,13 +131,14 @@ def fast_flashattn(
                 T.fill(m_i, -T.infinity(accum_dtype))
                 T.fill(l_i, 0)
 
-                current_bx = bx[0]
+                current_bx = bx
                 q_block_offset = current_bx * block_M
 
                 Q_shared = T.alloc_shared([block_M, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
-                P_shared = T.alloc_shared([block_M, block_N], dtype)
+                # Use register fragment for P instead of shared memory to reduce LDS usage
+                acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
 
                 acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
                 m_prev = T.alloc_fragment([block_M], accum_dtype)
@@ -135,6 +152,8 @@ def fast_flashattn(
                 loop_end_k = T.ceildiv(q_block_offset + block_M,
                                        block_N) if is_causal else T.ceildiv(seq_len, block_N)
 
+                row_sum = T.alloc_fragment([block_M], accum_dtype)
+
                 for k in T.Pipelined(loop_end_k, num_stages=num_stages):
                     kv_idx = k * block_N
 
@@ -147,13 +166,20 @@ def fast_flashattn(
                         V_shared,
                         coalesced_width=v_vec_size)
 
-                    T.clear(acc_s)
-                    T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, k_pack=k_pack)
-
                     if is_causal:
                         for i, j in T.Parallel(block_M, block_N):
-                            acc_s[i, j] = T.if_then_else(q_block_offset + i >= kv_idx + j,
-                                                         acc_s[i, j], -T.infinity(acc_s.dtype))
+                            acc_s[i, j] = T.if_then_else(q_block_offset + i >= kv_idx + j, 0,
+                                                         -T.infinity(acc_s.dtype))
+                    else:
+                        T.clear(acc_s)
+                    T.gemm(
+                        Q_shared,
+                        K_shared,
+                        acc_s,
+                        transpose_B=True,
+                        k_pack=k_pack,
+                        policy=GemmWarpPolicy.FullRow,
+                    )
 
                     T.copy(m_i, m_prev)
                     T.reduce_max(acc_s, m_i, dim=1, clear=False)
@@ -169,15 +195,14 @@ def fast_flashattn(
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.exp2(acc_s[i, j] * scale - m_i[i] * scale)
 
-                    row_sum = T.alloc_fragment([block_M], accum_dtype)
                     T.reduce_sum(acc_s, row_sum, dim=1)
                     for i in T.Parallel(block_M):
                         l_i[i] += row_sum[i]
 
-                    T.copy(acc_s, P_shared)
-                    T.sync_threads()
+                    # Cast acc_s (accum_dtype) to dtype in registers and directly GEMM with V
+                    T.copy(acc_s, acc_s_cast)
 
-                    T.gemm(P_shared, V_shared, acc_o)
+                    T.gemm(acc_s_cast, V_shared, acc_o, policy=GemmWarpPolicy.FullRow)
 
                 l_inv = T.alloc_fragment([block_M], accum_dtype)
                 for i in T.Parallel(block_M):
@@ -187,7 +212,7 @@ def fast_flashattn(
                 for i, j in T.Parallel(block_M, dim):
                     Output[bz, q_block_offset + i, by, j] = acc_o[i, j] * l_inv[i]
 
-                bx[0] = current_bx + num_split_q
+                bx = current_bx + num_split_q
 
     return main
 

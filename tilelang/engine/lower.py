@@ -29,9 +29,11 @@ def has_device_kernel_launch(attrs) -> bool:
 
 def is_device_call_c_device(func: tir.PrimFunc):
     attrs = func.attrs
+    calling_conv = attrs.get("calling_conv", CallingConv.DEFAULT)
+    is_cpacked = (calling_conv == CallingConv.C_PACKED_FUNC)
 
     # Check if it's a C target
-    if "target" in attrs and attrs["target"].kind.name == "c":
+    if "target" in attrs and attrs["target"].kind.name == "c" and not is_cpacked:
         return True
 
     return has_device_kernel_launch(attrs)
@@ -62,15 +64,10 @@ def tilelang_callback_cuda_compile(code, target):
         cutlass_path = os.environ["TL_CUTLASS_PATH"]
     else:
         cutlass_path = osp.abspath(osp.join(project_root, "3rdparty/cutlass/include"))
-    compute_version = "".join(nvcc.get_target_compute_version(target).split("."))
+    target_arch = nvcc.get_target_arch(nvcc.get_target_compute_version(target))
 
-    # special handle for Hopper
-    if compute_version == "90":
-        arch = ["-arch=sm_90a"]
-        format = "cubin"
-    else:
-        arch = [f"-arch=sm_{compute_version}"]
-        format = "cubin"
+    arch = [f"-arch=sm_{target_arch}"]
+    format = "cubin"
 
     # printing out number of registers
     debug_option = "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage"
@@ -130,7 +127,7 @@ def extrac_params(func: tir.PrimFunc) -> List[KernelParam]:
 def canon_target_host(target: Union[str, Target], target_host: Optional[Union[str, Target]]):
 
     if not target_host:
-        target_host = "llvm" if tvm.runtime.enabled("llvm") else "stackvm"
+        target_host = "llvm" if tvm.runtime.enabled("llvm") else "c"
 
     return target_host
 
@@ -145,9 +142,9 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
     host_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(host_mod)
     host_mod = tir.transform.CombineContextCall()(host_mod)
     if target_host.kind.name == "llvm":
-        host_mod = tvm._ffi.get_global_func("target.build.llvm")(host_mod, target_host)
+        host_mod = tvm.ffi.get_global_func("target.build.llvm")(host_mod, target_host)
     elif target_host.kind.name == "c":
-        host_mod = tvm._ffi.get_global_func("target.build.c")(host_mod, target_host)
+        host_mod = tvm.ffi.get_global_func("target.build.c")(host_mod, target_host)
     else:
         raise ValueError(f"Target host {target_host.kind.name} is not supported")
     return host_mod
@@ -159,9 +156,9 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     device_mod = tir.transform.Simplify()(device_mod)
 
     if target.kind.name == "cuda":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_cuda")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_cuda")(device_mod, target)
     elif target.kind.name == "hip":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip")(device_mod, target)
     else:
         raise ValueError(f"Target {target.kind.name} is not supported")
 
@@ -173,17 +170,17 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
     device_mod = tir.transform.LowerIntrin()(device_mod)
     device_mod = tir.transform.Simplify()(device_mod)
     if target.kind.name == "cuda":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_cuda_without_compile")(
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_cuda_without_compile")(
             device_mod, target)
     elif target.kind.name == "hip":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_hip_without_compile")(
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip_without_compile")(
             device_mod, target)
     elif target.kind.name == "c":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_cpp")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_cpp")(device_mod, target)
     elif target.kind.name == "llvm":
-        device_mod = tvm._ffi.get_global_func("target.build.llvm")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.llvm")(device_mod, target)
     elif target.kind.name == "webgpu":
-        device_mod = tvm._ffi.get_global_func("target.build.tilelang_webgpu")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.tilelang_webgpu")(device_mod, target)
     else:
         raise ValueError(f"Target {target.kind.name} is not supported")
 

@@ -22,7 +22,7 @@ using namespace tir;
 using AddWorkspaceCallback = std::function<PrimExpr(int, DataType)>;
 using LayoutMap = Map<Buffer, Layout>;
 using BufferMap = Map<Var, Buffer>;
-using OpBuilderFunc = TypedPackedFunc<void *(Array<PrimExpr>, BufferMap)>;
+using OpBuilderFunc = ffi::TypedFunction<void *(Array<PrimExpr>, BufferMap)>;
 
 #define TIR_REGISTER_TL_OP(Entry, OpName)                                      \
   const Op &Entry::Get() {                                                     \
@@ -59,23 +59,22 @@ struct LayoutInferArgs {
   Map<Buffer, Buffer> buffer_remap;
 };
 
-struct CanonializeArgs {
-  Target target;
-};
-
 class Operator {
 public:
   virtual Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const;
-  virtual Stmt Canonialize(const CanonializeArgs &T,
-                           arith::Analyzer *analyzer) const;
   virtual LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level);
   virtual ~Operator() = default;
+  virtual std::unique_ptr<Operator> Clone() const = 0;
 };
 
 class RegionOp : public Operator {
 public:
   RegionOp(Array<PrimExpr> args, BufferMap vmap);
   static const Op &Get();
+
+  std::unique_ptr<Operator> Clone() const final {
+    return std::make_unique<RegionOp>(*this);
+  }
 
   const Buffer &GetBuffer() const { return buffer_; }
   const Array<Range> &GetRanges() const { return ranges_; }

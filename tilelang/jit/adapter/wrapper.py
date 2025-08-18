@@ -180,8 +180,8 @@ class TLCUDASourceWrapper(object):
         "float32": "float",
         "float16": "half_t",
         "bfloat16": "bfloat16_t",
-        "e4m3_float8": "fp8_e4_t",
-        "e5m2_float8": "fp8_e5_t",
+        "float8_e4m3": "fp8_e4_t",
+        "float8_e5m2": "fp8_e5_t",
         "float64": "double",
         "int64": "int64_t",
         "int32": "int",
@@ -234,7 +234,10 @@ class TLCUDASourceWrapper(object):
         dynamic_symbolic_set = self.get_dynamic_symbolic_set(self.prim_func)
 
         function_args = []
+
         # Collect function arguments based on primary function's parameters and buffer mappings
+        # QA(@lei): Why not use device_mod.params?
+        # device func lack buffer map (to convert buffer handle to buffer)
         for param in self.prim_func.params:
             if param in self.prim_func.buffer_map:
                 buffer = self.prim_func.buffer_map[param]
@@ -484,12 +487,26 @@ class TLCUDASourceWrapper(object):
     def get_dynamic_symbolic_set(self, prim_func):
         # Determine the set of dynamic symbols used in the function
         dynamic_symbolic_set: List[str] = []
+
+        def unique_push_back(name: str):
+            if name not in dynamic_symbolic_set:
+                dynamic_symbolic_set.append(name)
+
         for param in prim_func.params:
             if param in prim_func.buffer_map:
                 buffer = prim_func.buffer_map[param]
                 for dim in buffer.shape:
-                    if isinstance(dim, tvm.tir.Var) and (dim.name not in dynamic_symbolic_set):
-                        dynamic_symbolic_set.append(dim.name)
+                    if isinstance(dim, tvm.tir.Var):
+                        unique_push_back(dim.name)
+
+        # Note: In buffer definitions, any dynamic symbols appearing in strides are listed after those in the shape.
+        for param in prim_func.params:
+            if param in prim_func.buffer_map:
+                buffer = prim_func.buffer_map[param]
+                for stride in buffer.strides:
+                    if isinstance(stride, tvm.tir.Var):
+                        unique_push_back(stride.name)
+
         return dynamic_symbolic_set
 
     def get_init_func(self):
@@ -549,6 +566,19 @@ class TLCUDASourceWrapper(object):
                     return function
             raise ValueError("Cannot find primary function in the module.")
 
+    @property
+    def device_func(self):
+        if len(self.device_mod.get_global_vars()) == 1:
+            return self.device_mod[self.device_mod.get_global_vars()[0]]
+        elif "main" in self.device_mod:
+            return self.device_mod["main"]
+        else:
+            for _, function in self.device_mod.functions.items():
+                attr = function.attrs
+                if "tir.is_global_func" in attr and attr["tir.is_global_func"]:
+                    return function
+            raise ValueError("Cannot find primary function in the module.")
+
 
 class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
     """
@@ -559,8 +589,8 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         "float32": "ctypes.c_float",
         "float16": "ctypes.c_uint16",
         "bfloat16": "ctypes.c_uint16",
-        "e4m3_float8": "ctypes.c_uint8",
-        "e5m2_float8": "ctypes.c_uint8",
+        "float8_e4m3": "ctypes.c_uint8",
+        "float8_e5m2": "ctypes.c_uint8",
         "float64": "ctypes.c_double",
         "int64": "ctypes.c_int64",
         "int32": "ctypes.c_int32",
@@ -766,8 +796,8 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
         "float32": "float",
         "float16": "half_t",
         "bfloat16": "bfloat16_t",
-        "e4m3_float8": "fp8_e4_t",
-        "e5m2_float8": "fp8_e5_t",
+        "float8_e4m3": "fp8_e4_t",
+        "float8_e5m2": "fp8_e5_t",
         "float8_e4m3fnuz": "fp8_e4_t",
         "e4m3fnuz_float8": "fp8_e4_t",
         "float64": "double",

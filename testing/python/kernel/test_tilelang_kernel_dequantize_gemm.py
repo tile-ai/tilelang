@@ -97,7 +97,7 @@ def test_fp4_fp16_convert_close():
         block_K,
         "float16",
     )
-
+    print(program.script())
     kernel = tilelang.compile(program, out_idx=[1])
 
     B = torch.randint(0, 16, (N, K // 2), dtype=torch.uint8, device="cuda").to(torch.uint8)
@@ -642,4 +642,5 @@ def test_assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_fp4_fp16_convert_close()

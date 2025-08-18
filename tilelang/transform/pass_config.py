@@ -21,6 +21,10 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_FAST_MATH = "tl.disable_fast_math"
     """Disable fast math optimization. Default: False"""
 
+    TL_PTXAS_REGISTER_USAGE_LEVEL = "tl.ptxas_register_usage_level"
+    """The PTXAS register usage level in [0, 10], which controls the 
+    aggressiveness of optimizations that affect register usage. Default: None"""
+
     TL_ENABLE_PTXAS_VERBOSE_OUTPUT = "tl.enable_ptxas_verbose_output"
     """Enable ptxas verbose output. Default: False"""
 
@@ -38,6 +42,9 @@ class PassConfigKey(str, Enum):
 
     TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE = "tl.enable_aggressive_shared_memory_merge"
     """Enable aggressive merge of shared memory allocations. Default: False"""
+
+    TL_DISABLE_SHUFFLE_ELECT = "tl.disable_shuffle_elect"
+    """Disable shuffle election optimization. Default: False"""
 
     # TIR related configs
     TIR_ENABLE_EQUIV_TERMS_IN_CSE = "tir.enable_equiv_terms_in_cse_tir"

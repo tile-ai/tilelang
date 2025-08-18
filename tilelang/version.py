@@ -26,13 +26,10 @@ with open(version_file_path, "r") as version_file:
 
 
 def get_git_commit_id() -> Union[str, None]:
-    """Get the current git commit hash.
-    
-    Returns:
-        str | None: The git commit hash if available, None otherwise.
-    """
+    """Get the current git commit hash by running git in the current file's directory."""
     try:
         return subprocess.check_output(['git', 'rev-parse', 'HEAD'],
+                                       cwd=os.path.dirname(os.path.abspath(__file__)),
                                        stderr=subprocess.DEVNULL,
                                        encoding='utf-8').strip()
     except subprocess.SubprocessError:
@@ -40,6 +37,9 @@ def get_git_commit_id() -> Union[str, None]:
 
 
 # Append git commit hash to version if not already present
+# NOTE(lei): Although the local commit id cannot capture locally staged changes,
+# the local commit id can help mitigate issues caused by incorrect cache to some extent,
+# so it should still be kept.
 if "+" not in __version__ and (commit_id := get_git_commit_id()):
     __version__ = f"{__version__}+{commit_id}"
 
