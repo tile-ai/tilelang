@@ -84,7 +84,6 @@ jobs:
       run: |
         echo "Running on AMD GPU"
         set -e
-        rm -rf "${{ runner.tool_cache }}"
         REQS_HASH=$(sha256sum requirements-rocm.txt | cut -d ' ' -f 1)
         MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
         
