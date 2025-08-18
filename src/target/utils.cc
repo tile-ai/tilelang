@@ -53,6 +53,13 @@ bool TargetIsHopper(Target target) {
   return arch >= 90 && arch < 100;
 }
 
+bool TargetIsSM100(Target target) {
+  if (!TargetIsCuda(target))
+    return false;
+  int arch = GetArchInt(target);
+  return arch >= 100 && arch < 120;
+}
+
 bool TargetIsSM120(Target target) {
   if (!TargetIsCuda(target))
     return false;
