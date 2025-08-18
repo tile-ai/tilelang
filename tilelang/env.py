@@ -75,7 +75,7 @@ TILELANG_CACHE_DIR: str = os.environ.get("TILELANG_CACHE_DIR",
 TILELANG_TMP_DIR: str = os.path.join(TILELANG_CACHE_DIR, "tmp")
 
 # Print the kernel name on every compilation
-TILELANG_PRINT_ON_COMPILATION: str = os.environ.get("TILELANG_PRINT_COMPILATION", "0")
+TILELANG_PRINT_ON_COMPILATION: str = os.environ.get("TILELANG_PRINT_ON_COMPILATION", "0")
 
 # Auto-clear cache if environment variable is set
 TILELANG_CLEAR_CACHE = os.environ.get("TILELANG_CLEAR_CACHE", "0")
