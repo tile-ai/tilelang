@@ -78,6 +78,46 @@ Gemm::GemmInst Gemm::GetGemmInst(int block_size, Target target) const {
   }
 }
 
+/**
+ * @brief Compute how warps are partitioned between the M and N GEMM dimensions.
+ *
+ * Determines the number of warps assigned to the M (rows) and N (columns)
+ * dimensions for a block given the selected GEMM implementation and target.
+ * The function enforces constraints required by the implementations (e.g.,
+ * per-warp tile sizes) and adapts the partition according to the configured
+ * GemmWarpPolicy (FullRow, FullCol, Square).
+ *
+ * @param block_size Total number of threads in the block (used to derive num_warps).
+ * @param gemm_inst The chosen GEMM implementation (e.g., kWGMMA, kMFMA, kMMA).
+ * @param target Target device information (used for warp size and target-specific rules).
+ * @return std::pair<int, int> {m_warp, n_warp} where m_warp * n_warp == num_warps.
+ *
+ * Constraints and behavior:
+ * - Each warp is assumed to cover 16 rows (M) and 8 columns (N). The function
+ *   checks that M % 16 == 0 and N % 8 == 0.
+ * - num_warps is computed as block_size / warp_size(target).
+ * - For WGMMA (kWGMMA):
+ *   - num_warps must be a multiple of 4 (warp-groups of 4).
+ *   - m_warp is always a multiple of 4.
+ *   - The warp partition respects the GemmWarpPolicy:
+ *     - FullRow: maximize warps on M (in multiples of 4) while keeping divisibility.
+ *     - FullCol: maximize warps on N, but if N is not evenly divisible, move
+ *       whole warp-groups to M to achieve feasibility.
+ *     - Square: choose a multiple-of-4 m_warp that best balances per-warp work
+ *       between M and N.
+ * - For non-WGMMA implementations:
+ *   - FullRow: favor allocating warps to M first; if M cannot use all warps,
+ *     remaining warps are placed on N.
+ *   - FullCol: favor allocating warps to N first; if N cannot use all warps,
+ *     remaining warps are placed on M.
+ *   - Square: search for the m/n split that best balances per-warp work given
+ *     integer warp counts and the per-warp tile sizes.
+ *
+ * Error handling:
+ * - The function performs internal checks (ICHECK) and will fail if required
+ *   divisibility or policy conditions are not met (e.g., M/N tile divisibility,
+ *   invalid policy, or WGMMA-specific warp-group requirements).
+ */
 std::pair<int, int> Gemm::ComputeWarpPartition(int block_size,
                                                GemmInst gemm_inst,
                                                Target target) const {
@@ -240,6 +280,34 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int block_size,
   return {m_warp, n_warp};
 }
 
+/**
+ * @brief Checks whether WGMMA (warp-group MMA) can be used for this GEMM.
+ *
+ * Evaluates device-memory placement, data-type combinations, transpose flags,
+ * and K divisibility constraints required for the Hopper WGMMA code path.
+ *
+ * The check returns true only when:
+ * - B resides in shared memory ("shared" or "shared.dyn"); and
+ * - (C, A, B) dtypes match one of the supported combinations below and K
+ *   satisfies the required alignment; and
+ * - for combinations that require specific orientations, A is not transposed
+ *   and B is transposed.
+ *
+ * Supported combinations and constraints:
+ * - C=float16:
+ *   - A=float16, B=float16: K % 16 == 0
+ *   - Various float8 mixes (e4m3/e5m2): require (!trans_A && trans_B) and K % 32 == 0
+ * - C=float32:
+ *   - A=float16, B=float16: K % 16 == 0
+ *   - A=bfloat16, B=bfloat16: K % 16 == 0
+ *   - A=float32, B=float32: require (!trans_A && trans_B) and K % 8 == 0
+ *   - Various float8 mixes: require (!trans_A && trans_B) and K % 32 == 0
+ * - C=int32:
+ *   - 8-bit integer combinations (Int8/UInt8): require (!trans_A && trans_B) and K % 32 == 0
+ *
+ * @return true if WGMMA is supported for the current buffers, dtypes, and
+ *         transpose/shape constraints; false otherwise.
+ */
 bool Gemm::CheckWGMMA() const {
   if (B.scope() != "shared.dyn" && B.scope() != "shared") {
     return false;
@@ -342,6 +410,29 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return Evaluate(new_call);
 }
 
+/**
+ * @brief Infer memory/layout mappings for A, B, and C buffers for this GEMM op.
+ *
+ * Generates and returns a LayoutMap that binds buffer A, B, and C to
+ * target- and architecture-specific fragment or shared-memory layouts based
+ * on the current target, thread bounds, warp partitioning, data types, and
+ * transpose flags. This performs target dispatch (Volta, Ampere/Turing/SM120,
+ * Hopper, CDNA), selects the appropriate fragment or shared layout creators,
+ * and binds fragment layouts to the thread range when buffers are local
+ * fragments.
+ *
+ * Preconditions:
+ * - C.scope() must be "local.fragment".
+ *
+ * Postconditions / side effects:
+ * - Marks the operator's layout inference as completed (sets completed_ = true).
+ * - May abort via ICHECK on unsupported targets, invalid buffer scopes, or
+ *   incompatible shape constraints.
+ *
+ * @param T Layout inference inputs (thread bounds and target).
+ * @param level Inference level (unused for side effects but retained for API).
+ * @return LayoutMap mapping each of A, B, and C to their inferred layouts.
+ */
 LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   if (completed_)
     return {};

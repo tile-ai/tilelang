@@ -533,7 +533,85 @@ public:
 
 } // namespace tl_mma
 
-} // namespace cute
+} /**
+ * Execute a tiled GEMM where both A and B tiles are sourced from shared memory.
+ *
+ * Dispatches to tl_mma::GemmTensorOp<M,N,K,...>::body to perform the computation.
+ *
+ * @param pA Pointer to the A tile region (device memory).
+ * @param pB Pointer to the B tile region (device memory).
+ * @param accum Pointer to the accumulator/output tile region (device memory).
+ */
+/**
+ * Execute a tiled GEMM where A is read from global memory and B is staged in shared memory.
+ *
+ * Dispatches to tl_mma::GemmTensorOp<M,N,K,...>::body_rs to perform the computation.
+ *
+ * @param pA Pointer to the A tile region (device memory).
+ * @param pB Pointer to the B tile region (device memory).
+ * @param accum Pointer to the accumulator/output tile region (device memory).
+ */
+/**
+ * Execute a tiled GEMM where A is staged in shared memory and B is read from global memory.
+ *
+ * Dispatches to tl_mma::GemmTensorOp<M,N,K,...>::body_sr to perform the computation.
+ *
+ * @param pA Pointer to the A tile region (device memory).
+ * @param pB Pointer to the B tile region (device memory).
+ * @param accum Pointer to the accumulator/output tile region (device memory).
+ */
+/**
+ * Perform a tiled GEMM (both operands in shared memory or selected backend) and write to accum.
+ *
+ * If use_wgmma is true, validates wgmma constraints (strides and offsets) and dispatches to
+ * the Hopper wgmma implementation; otherwise dispatches to the tl_mma implementation.
+ *
+ * @param pA Pointer to the A tile region (device memory).
+ * @param pB Pointer to the B tile region (device memory).
+ * @param accum Pointer to the accumulator/output tile region (device memory).
+ */
+/**
+ * Perform a tiled GEMM with A in global memory and B in shared memory (or selected backend).
+ *
+ * If use_wgmma is true, validates wgmma constraints (strides and offsets) and dispatches to
+ * the Hopper wgmma read-share implementation; otherwise dispatches to the tl_mma read-share.
+ *
+ * @param pA Pointer to the A tile region (device memory).
+ * @param pB Pointer to the B tile region (device memory).
+ * @param accum Pointer to the accumulator/output tile region (device memory).
+ */
+/**
+ * Perform a tiled GEMM with A staged in shared memory and B in global memory (tl_mma only).
+ *
+ * wgmma does not support this variant; caller must set use_wgmma == false.
+ * Dispatches to tl_mma::GemmTensorOp<M,N,K,...>::body_sr.
+ *
+ * @param pA Pointer to the A tile region (device memory).
+ * @param pB Pointer to the B tile region (device memory).
+ * @param accum Pointer to the accumulator/output tile region (device memory).
+ */
+/**
+ * Wait for a warp-group of WMMA/MMA warps to complete.
+ *
+ * Wrapper around cute::warpgroup_wait for the specified number of MMA warps.
+ */
+/**
+ * Synchronize a named barrier across NumMmaThreads MMA threads.
+ *
+ * Calls cutlass::arch::NamedBarrier::sync with the canonical warp-group id.
+ */
+/**
+ * Arrive at a named barrier for NumMmaThreads MMA threads using architecture-aware mapping.
+ *
+ * Supported NumMmaThreads values: 256 or 384. The function issues one or two barrier arrives
+ * depending on the thread-group topology to ensure proper rendezvous ordering.
+ */
+/**
+ * Initialize named-barrier state for multi-warp MMA execution.
+ *
+ * For NumMmaThreads == 256 or 384, performs the required initial barrier arrivals for
+ * non-zero canonical warp-group indices to set up subsequent barrier synchronization.
+ */
 
 namespace tl {
 
@@ -603,7 +681,23 @@ template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum = false, int lda = 0, int ldb = 0,
           int offset_a = 0, int offset_b = 0, bool use_wgmma = true,
           int wg_wait = 0, typename A_type, typename B_type, typename C_type>
-TL_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
+TL_DEVICE /**
+ * Perform a read-share (B in shared memory, A in global) tiled GEMM and accumulate into `accum`.
+ *
+ * Dispatches at compile time to either the Hopper wgmma implementation or the fallback MMA implementation
+ * depending on `use_wgmma`. The selected GemmTensorOp::body_rs performs the region-tiled GEMM loop and
+ * updates the accumulator in-place.
+ *
+ * When `use_wgmma == true`, this function enforces wgmma constraints at compile time:
+ * - A's leading dimension must equal (trans_A ? M : K)
+ * - B's leading dimension must equal (trans_B ? K : N)
+ * - offset_a and offset_b must be zero
+ *
+ * @param pA Pointer to operand A (global memory). Layout/stride expectations depend on template parameters.
+ * @param pB Pointer to operand B (base for shared-memory staging). Layout/stride expectations depend on template parameters.
+ * @param accum Pointer to the accumulator/output C buffer updated in-place.
+ */
+void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
   if constexpr (use_wgmma) {
     static_assert((trans_A && lda == M) || (!trans_A && lda == K),
                   "Hopper wgmma doesn't support custom stride for A");
@@ -628,7 +722,18 @@ template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum = false, int lda = 0, int ldb = 0,
           int offset_a = 0, int offset_b = 0, bool use_wgmma = true,
           int wg_wait = 0, typename A_type, typename B_type, typename C_type>
-TL_DEVICE void gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
+TL_DEVICE /**
+ * Perform a non-wgmma tiled GEMM where A regions are staged into shared memory
+ * and B is read directly from global memory, accumulating into `accum`.
+ *
+ * This overload dispatches to the tl_mma::GemmTensorOp::body_sr implementation.
+ * Must be instantiated with `use_wgmma = false` (enforced via static_assert).
+ *
+ * @param pA Pointer to the A operand in global memory (source that will be staged to shared memory).
+ * @param pB Pointer to the B operand in global memory (read directly).
+ * @param accum Pointer to the output accumulator matrix in global memory.
+ */
+void gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
   static_assert(!use_wgmma, "wgmma doesn't support gemm_sr");
   using MMA =
       cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
@@ -637,7 +742,13 @@ TL_DEVICE void gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
   MMA::body_sr(pA, pB, accum);
 }
 
-template <int num_mma> TL_DEVICE void wait_wgmma() {
+template <int num_mma> TL_DEVICE /**
+ * Wait for all WMMA/MMA warps in the current warp-group to synchronize.
+ *
+ * Blocks until the warp-group-wide rendezvous for `num_mma` MMA lanes completes,
+ * ensuring all participating warps have arrived before proceeding.
+ */
+void wait_wgmma() {
   cute::warpgroup_wait<num_mma>();
 }
 
