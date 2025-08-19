@@ -1,6 +1,7 @@
 import tilelang
 import os
 
+
 def test_env_var():
     # test default value
     assert tilelang.env.TILELANG_PRINT_ON_COMPILATION == "1"
@@ -14,4 +15,3 @@ def test_env_var():
 
 if __name__ == "__main__":
     test_env_var()
-    
