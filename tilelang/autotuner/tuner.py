@@ -25,7 +25,7 @@ import threading
 import traceback
 from pathlib import Path
 
-from tilelang import env, is_cache_enabled
+from tilelang import env
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.capture import get_autotune_inputs
 from tilelang.jit.param import _P, _RProg
@@ -279,7 +279,7 @@ class AutoTuner:
         key = self.generate_cache_key(parameters)
 
         with self._lock:
-            if is_cache_enabled():
+            if env.is_cache_enabled():
                 # First check in-memory cache
                 if key in self._memory_cache:
                     logger.warning("Found kernel in memory cache. For better performance," \
@@ -537,7 +537,7 @@ class AutoTuner:
             logger.warning("DLPack backend does not support cache saving to disk.")
         else:
             with self._lock:
-                if is_cache_enabled():
+                if env.is_cache_enabled():
                     self._save_result_to_disk(key, autotuner_result)
 
         self._memory_cache[key] = autotuner_result
