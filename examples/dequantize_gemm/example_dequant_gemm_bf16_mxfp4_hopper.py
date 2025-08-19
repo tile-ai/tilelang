@@ -96,7 +96,6 @@ def matmul(M,
            num_stages=2,
            threads=256,
            split=1):
-
     """
         Construct and return a tiled matrix-multiply TIR kernel that multiplies A (shape MxK) by a quantized B (shape Nx(QK)) and writes an MxN output in out_dtype.
         

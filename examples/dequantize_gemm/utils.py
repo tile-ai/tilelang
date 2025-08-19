@@ -2,7 +2,6 @@ import torch
 
 
 def torch_convert_bit_twiddling(tensor):
-
     """
     Convert a 2-D uint8 tensor into a bfloat16 tensor by decoding pairs of input bytes with a bit-twiddling scheme.
     
@@ -17,6 +16,7 @@ def torch_convert_bit_twiddling(tensor):
     Raises:
         AssertionError: If any byte inputs used for a conversion are not dtype `torch.uint8`.
     """
+
     def _convert(val0, val1, pos) -> torch.bfloat16:
         assert val0.dtype == torch.uint8
         assert val1.dtype == torch.uint8
@@ -51,7 +51,6 @@ def torch_convert_bit_twiddling(tensor):
 
 
 def torch_convert(tensor, scale_size=None, Scale=None):
-
     """
     Decode a 2D uint8 tensor into a 2D bfloat16 tensor by expanding each byte into two bf16 values using a 4-bit (nibble) encoding.
     
@@ -65,6 +64,7 @@ def torch_convert(tensor, scale_size=None, Scale=None):
     Returns:
         torch.Tensor: A new tensor of shape (N, K*2) and dtype torch.bfloat16 containing the decoded bf16 values.
     """
+
     def _convert(val, pos, scale=None):
         assert val.dtype == torch.uint8
         # val = val.view(torch.int8)

@@ -201,8 +201,8 @@ def bitnet_158_int8xint2_prefill(
             
             Side effects:
                 Writes results into C. Calls external device decode functions to expand B from its packed representation into shared memory before computation.
-            """
-            with T.Kernel(
+        """
+        with T.Kernel(
                 T.ceildiv(N, block_N),
                 T.ceildiv(M, block_M),
                 threads=threads,
