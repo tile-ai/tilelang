@@ -6,7 +6,7 @@ from __future__ import absolute_import as _abs
 import os
 import subprocess
 import warnings
-from ..env import CUDA_HOME
+from tilelang.env import CUDA_HOME
 
 import tvm.ffi
 from tvm.target import Target

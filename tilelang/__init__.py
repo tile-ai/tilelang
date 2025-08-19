@@ -53,8 +53,8 @@ _init_logger()
 
 logger = logging.getLogger(__name__)
 
-from .env import SKIP_LOADING_TILELANG_SO
 from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
+from .env import env as env  # noqa: F401
 
 import tvm
 import tvm.base
@@ -76,12 +76,12 @@ def _load_tile_lang_lib():
 
 
 # only load once here
-if SKIP_LOADING_TILELANG_SO == "0":
+if env.SKIP_LOADING_TILELANG_SO == "0":
     _LIB, _LIB_PATH = _load_tile_lang_lib()
 
 from .jit import jit, JITKernel, compile  # noqa: F401
 from .profiler import Profiler  # noqa: F401
-from .cache import cached  # noqa: F401
+from .cache import clear_cache  # noqa: F401
 
 from .utils import (
     TensorSupplyType,  # noqa: F401
