@@ -56,9 +56,29 @@ def get_mxfp_intrin_group(
     use_twiddling: bool = False,
 ) -> Dict[str, str]:
     """
-    This function is used to get the intrinsic group of the MXFP operation to avoid the overhead of fast decoding.
-    MXFP is a type of logic operation that takes three inputs. The intrinsic group refers to the set of
-    intrinsic operations that can be performed on these inputs. This function retrieves and returns this group.
+    Return metadata for an MXFP decoding intrinsic: function name and C source string.
+    
+    Validates the requested output dtype, source format, and storage dtype, then constructs
+    a lookup key of the form `fp{source_bit}_to_{f16|bf16}` (appending `_twiddling` when
+    use_twiddling is True) to select the corresponding C source snippet and a matching
+    function name `decode_fp{source_bit}_to_{f16|bf16}` (also optionally suffixed with
+    `_twiddling`).
+    
+    Parameters:
+        out_dtype: Target floating-point type for decoded values; either "float16" or "bfloat16".
+        source_format: Integer source representation; "int" or "uint".
+        source_bit: Bit width of the packed source format (e.g., 4).
+        storage_dtype: Underlying storage integer dtype (one of "int32", "int8", "uint8").
+        use_twiddling: When True, select the twiddling variant of the decoding intrinsic.
+    
+    Returns:
+        A dict with:
+          - "func_name": the generated C function name string for the requested decode intrinsic.
+          - "c_source": the C source string for that intrinsic.
+    
+    Raises:
+        AssertionError: if out_dtype, source_format, or storage_dtype are not supported.
+        KeyError: if the constructed key does not match any available C source implementation.
     """
     assert out_dtype in ["float16", "bfloat16"
                         ], f"Invalid out_dtype: {out_dtype}. Expected 'float16' or 'bfloat16'."

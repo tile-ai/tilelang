@@ -4,24 +4,16 @@ from tvm.tir import PrimExpr
 
 def index_to_coordinates(index, shape) -> list[PrimExpr]:
     """
-    Convert a flat (linear) index to multi-dimensional coordinates for a given shape.
-
-    Example:
-        shape = (4, 5, 6)
-        index = 53
-        index_to_coordinates(53, (4, 5, 6)) -> [1, 3, 5]
-        # Explanation:
-        # 53 // (5*6) = 1  (1st coordinate)
-        # 53 % (5*6) = 23
-        # 23 // 6 = 3      (2nd coordinate)
-        # 23 % 6 = 5       (3rd coordinate)
-
-    Args:
-        index (int): The flat index to convert.
-        shape (tuple or list of int): The shape of the multi-dimensional array.
-
+    Convert a flat (linear) index into multi-dimensional coordinates for a given shape.
+    
+    Given a linear index and a shape (sequence of dimension extents), returns a list of coordinates (one per dimension) such that converting those coordinates back to a linear index using the usual row-major / C-order formula yields the original index. The computation iterates from the last dimension to the first using modulo and integer division, then reverses the collected coordinates.
+    
+    Parameters:
+        index (int or PrimExpr): The flat index to convert.
+        shape (Sequence[int]): The extents of each dimension (length >= 1).
+    
     Returns:
-        list: A list of coordinates corresponding to each dimension.
+        list[PrimExpr]: Coordinates for each dimension in the same order as `shape`.
     """
     coordinates = []
     dims = len(shape)
@@ -34,18 +26,29 @@ def index_to_coordinates(index, shape) -> list[PrimExpr]:
 
 def linear_index(*args: PrimExpr) -> PrimExpr:
     """
-    Convert a list of coordinates to a flat (linear) index using strides.
-
-    Usage examples:
-        linear_index(i)                         -> i
-        linear_index(i, j)                      -> i * stride + j
-        linear_index(i, j, stride_j)            -> i * stride_j + j
-        linear_index(i, j, k, stride_j, stride_k)
-                                                -> i * stride_j * stride_k + j * stride_k + k
-
-        Example for index = i * threads * local_size + tx * local_size + v:
-        Suppose you have i, tx, v as coordinates, and threads, local_size as strides:
-        linear_index(i, tx, v, threads, local_size) == i * threads * local_size + tx * local_size + v
+    Compute a flat (linear) index from multi-dimensional coordinates and strides.
+    
+    The function accepts a sequence of PrimExpr arguments where the first portion are coordinates
+    and the trailing portion are the corresponding strides. The number of strides must equal
+    (number of coordinates - 1). The linear index is computed as:
+    
+        linear = coords[0]
+        for each (coord, stride) in zip(coords[1:], strides):
+            linear = linear * stride + coord
+    
+    Examples:
+        - linear_index(i) -> i
+        - linear_index(i, j) -> i * j_stride + j  (requires j_stride provided as stride when needed)
+        - linear_index(i, j, stride_j) -> i * stride_j + j
+        - linear_index(i, j, k, stride_j, stride_k) -> i*stride_j*stride_k + j*stride_k + k
+        - linear_index(i, tx, v, threads, local_size) -> i*threads*local_size + tx*local_size + v
+    
+    Raises:
+        ValueError: If called with no arguments, or if the number of strides is not one less than
+                    the number of coordinates.
+    
+    Returns:
+        PrimExpr: The computed linear index expression.
     """
     n = len(args)
     if n == 0:
