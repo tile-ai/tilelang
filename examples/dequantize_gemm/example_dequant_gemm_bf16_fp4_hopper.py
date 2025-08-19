@@ -14,7 +14,7 @@ def get_configs():
     Each dictionary is a single combination (Cartesian product) of the following parameters:
     - block_M: tile size for M dimension (one of 64, 128, 256)
     - block_N: tile size for N dimension (one of 64, 128, 256)
-    - block_K: tile size for K dimension (fixed to 128)
+    - block_K: tile size for K dimension 
     - num_stages: pipeline stages for K-loop (0 or 2)
     - threads: number of threads to launch (128, 256, or 512)
     - split: K-splitting factor (1 or 2)
@@ -89,7 +89,7 @@ def matmul(M,
            Returns:
                A TileLang/TIR prim_func (the compiled `main`) implementing the described dequantize-then-GEMM kernel.
            """
-           num_elems_per_byte = 8 // num_bits
+    num_elems_per_byte = 8 // num_bits
     storage_dtype = "uint8"
 
     QK = K // num_elems_per_byte
@@ -104,6 +104,9 @@ def matmul(M,
     from tilelang.quantize import get_mxfp_intrin_group
 
     # fast_dequant_bf16_fp4_twiddling
+    # It requires that the 2 consecutive uint8 elements (16bits) contains 4 fp4 elements in a bit-twiddling way.
+    # The bit-twiddling way is shown here: The pair (x,y) shows that the bit in this position is the y-th bit of the x-th fp4 element.
+    # (0,0)(3,0)(3,3)(1,0)(3,1)(3,2)(2,0)(0,1)(0,2)(0,3)(1,1)(1,2)(1,3)(2,1)(2,2)(2,3)
     mxfp_intrin_info = get_mxfp_intrin_group(
         out_dtype=in_dtype,
         source_format=source_format,
@@ -215,29 +218,29 @@ def matmul(M,
         def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr,
                                   scale: tir.PrimExpr, dtype: str):
             """
-                                  Convert a 4-bit FP4 value packed in a uint8 byte into a bfloat16 value.
-                                  
-                                  This helper extracts the 4-bit field located at the bit position `pos` within the
-                                  byte `val`, interprets it as an FP4 (sign, exponent, mantissa) value, applies an
-                                  exponent `scale` offset to align it with bfloat16 exponent bias, clamps the
-                                  resulting exponent to 8 bits, and returns the assembled bfloat16 bit pattern.
-                                  
-                                  Parameters:
-                                      nbit (int): Number of bits in the packed element; must be 4.
-                                      val (tir.PrimExpr): A uint8 value containing packed FP4 elements.
-                                      pos (tir.PrimExpr): Index (0-based) of which FP4 nibble inside `val` to extract.
-                                      scale (tir.PrimExpr): Exponent offset applied when converting FP4 exponent to bfloat16.
-                                      dtype (str): Target dtype string; must be "bfloat16".
-                                  
-                                  Returns:
-                                      tir.PrimExpr: A bfloat16-typed PrimExpr containing the converted value.
-                                  
-                                  Notes:
-                                      - The function asserts `nbit == 4`, `dtype == "bfloat16"`, and that `val.dtype` is "uint8".
-                                      - The conversion uses a fixed mapping from FP4 exponent/mantissa layout into bfloat16
-                                        bit fields and clamps the computed exponent to fit into 8 bits.
-                                  """
-                                  assert nbit == 4
+                Convert a 4-bit FP4 value packed in a uint8 byte into a bfloat16 value.
+                
+                This helper extracts the 4-bit field located at the bit position `pos` within the
+                byte `val`, interprets it as an FP4 (sign, exponent, mantissa) value, applies an
+                exponent `scale` offset to align it with bfloat16 exponent bias, clamps the
+                resulting exponent to 8 bits, and returns the assembled bfloat16 bit pattern.
+                
+                Parameters:
+                    nbit (int): Number of bits in the packed element; must be 4.
+                    val (tir.PrimExpr): A uint8 value containing packed FP4 elements.
+                    pos (tir.PrimExpr): Index (0-based) of which FP4 nibble inside `val` to extract.
+                    scale (tir.PrimExpr): Exponent offset applied when converting FP4 exponent to bfloat16.
+                    dtype (str): Target dtype string; must be "bfloat16".
+                
+                Returns:
+                    tir.PrimExpr: A bfloat16-typed PrimExpr containing the converted value.
+                
+                Notes:
+                    - The function asserts `nbit == 4`, `dtype == "bfloat16"`, and that `val.dtype` is "uint8".
+                    - The conversion uses a fixed mapping from FP4 exponent/mantissa layout into bfloat16
+                    bit fields and clamps the computed exponent to fit into 8 bits.
+            """
+            assert nbit == 4
             assert dtype == "bfloat16"
             assert val.dtype == "uint8"
             mask = tir.const((1 << nbit) - 1, "uint16")
@@ -315,8 +318,8 @@ def matmul(M,
             - Uses and updates shared memory buffers and per-thread accumulators.
             
             No value is returned.
-            """
-            with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+        """
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
             B_dequantize_shared = T.alloc_shared(B_dequantize_shared_shape, in_dtype)

@@ -10,27 +10,27 @@ from utils import torch_convert_bit_twiddling, torch_convert
 def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale: tir.PrimExpr,
                           dtype: str):
     """
-                          Convert a 4-bit field packed in a uint8 into a bfloat16 value, applying an exponent scale.
-                          
-                          This helper extracts a 4-bit nibble from `val` at byte-nibble position `pos`, interprets its
-                          bits as a sign/exponent/mantissa in the 4-bit custom FP4 layout, adjusts the exponent by
-                          `scale` (clamped to an 8-bit range), and assembles the corresponding bfloat16 representation.
-                          
-                          Parameters:
-                              nbit (int): Number of bits in the packed field (must be 4).
-                              val (tir.PrimExpr): Packed input value of dtype `uint8` containing one or more 4-bit fields.
-                              pos (tir.PrimExpr): Index of the nibble within `val` (used to shift/extract the 4-bit field).
-                              scale (tir.PrimExpr): Per-element exponent adjustment added to the extracted exponent (uint-like).
-                              dtype (str): Destination dtype string (must be "bfloat16").
-                          
-                          Returns:
-                              tir.PrimExpr: The resulting value reinterpreted as `bfloat16`.
-                          
-                          Notes:
-                          - Preconditions are enforced via assertions: nbit == 4, dtype == "bfloat16", and val.dtype == "uint8".
-                          - The function clamps the adjusted exponent to the 8-bit range before assembling the bfloat16 bit pattern.
-                          """
-                          assert nbit == 4
+        Convert a 4-bit field packed in a uint8 into a bfloat16 value, applying an exponent scale.
+        
+        This helper extracts a 4-bit nibble from `val` at byte-nibble position `pos`, interprets its
+        bits as a sign/exponent/mantissa in the 4-bit custom FP4 layout, adjusts the exponent by
+        `scale` (clamped to an 8-bit range), and assembles the corresponding bfloat16 representation.
+        
+        Parameters:
+            nbit (int): Number of bits in the packed field (must be 4).
+            val (tir.PrimExpr): Packed input value of dtype `uint8` containing one or more 4-bit fields.
+            pos (tir.PrimExpr): Index of the nibble within `val` (used to shift/extract the 4-bit field).
+            scale (tir.PrimExpr): Per-element exponent adjustment added to the extracted exponent (uint-like).
+            dtype (str): Destination dtype string (must be "bfloat16").
+        
+        Returns:
+            tir.PrimExpr: The resulting value reinterpreted as `bfloat16`.
+        
+        Notes:
+        - Preconditions are enforced via assertions: nbit == 4, dtype == "bfloat16", and val.dtype == "uint8".
+        - The function clamps the adjusted exponent to the 8-bit range before assembling the bfloat16 bit pattern.
+        """
+    assert nbit == 4
     assert dtype == "bfloat16"
     assert val.dtype == "uint8"
     mask = tir.const((1 << nbit) - 1, "uint16")
@@ -98,43 +98,43 @@ def matmul(M,
            split=1):
 
     """
-           Construct and return a tiled matrix-multiply TIR kernel that multiplies A (shape MxK) by a quantized B (shape Nx(QK)) and writes an MxN output in out_dtype.
-           
-           The generated kernel accepts:
-            - A: dense matrix with element type `in_dtype`.
-            - B: packed quantized matrix stored as uint8 with `num_bits` bits per element (QK = K / (8/num_bits)).
-            - Scale: per-block scale/exponent information used to dequantize B.
-           The kernel dequantizes B to a working floating format (out_dtype/accum_dtype) using one of two paths:
-            - fast_dequant (True): uses an external, hardware/implementation-specific intrinsic group (twiddling) for batch dequantization.
-            - fast_dequant (False): uses a simple elementwise dequantization helper.
-           
-           Parameters:
-            M, N, K (int): matrix dimensions (A is MxK, result is MxN). K must be divisible by (block_K * split).
-            in_dtype (str): element type of A (e.g., "fp4" in this file).
-            out_dtype (str): output tensor element type (e.g., "bfloat16").
-            accum_dtype (str): accumulation type used for the inner GEMM.
-            source_format (str, optional): format string passed to intrinsic selector (default "uint").
-            num_bits (int, optional): number of bits per quantized element in B (default 4).
-            scale_size (int, optional): number of elements grouped per scale entry (default 32).
-            fast_dequant (bool, optional): choose the fast intrinsic dequantization path when available (default True).
-            block_M, block_N, block_K (int, optional): tile sizes for M, N, and K dimensions (defaults 256, 128, 128).
-            num_stages (int, optional): pipelining stages for K loop (default 2).
-            threads (int, optional): threads per block used by the kernel (default 256).
-            split (int, optional): split factor along K used by the scheduler (default 1).
-           
-           Returns:
-            A T.prim_func implementing the tiled, pipelined GEMM that:
-            - loads tiled blocks of A and packed B to shared memory,
-            - dequantizes B via the chosen path into a shared dequantized tile,
-            - performs a tiled GEMM accumulating into local fragments,
-            - writes the final MxN block to the global output tensor.
-           
-           Notes:
-            - The function queries an intrinsic group to obtain a fast dequantization implementation when fast_dequant is enabled; that intrinsic must supply a valid C source and function name.
-            - The kernel layout uses swizzled shared-memory layouts for A, B, and the shared C tile.
-            - An assertion enforces that K % (block_K * split) == 0.
-           """
-           num_elems_per_byte = 8 // num_bits
+        Construct and return a tiled matrix-multiply TIR kernel that multiplies A (shape MxK) by a quantized B (shape Nx(QK)) and writes an MxN output in out_dtype.
+        
+        The generated kernel accepts:
+        - A: dense matrix with element type `in_dtype`.
+        - B: packed quantized matrix stored as uint8 with `num_bits` bits per element (QK = K / (8/num_bits)).
+        - Scale: per-block scale/exponent information used to dequantize B.
+        The kernel dequantizes B to a working floating format (out_dtype/accum_dtype) using one of two paths:
+        - fast_dequant (True): uses an external, hardware/implementation-specific intrinsic group (twiddling) for batch dequantization.
+        - fast_dequant (False): uses a simple elementwise dequantization helper.
+        
+        Parameters:
+        M, N, K (int): matrix dimensions (A is MxK, result is MxN). K must be divisible by (block_K * split).
+        in_dtype (str): element type of A (e.g., "fp4" in this file).
+        out_dtype (str): output tensor element type (e.g., "bfloat16").
+        accum_dtype (str): accumulation type used for the inner GEMM.
+        source_format (str, optional): format string passed to intrinsic selector (default "uint").
+        num_bits (int, optional): number of bits per quantized element in B (default 4).
+        scale_size (int, optional): number of elements grouped per scale entry (default 32).
+        fast_dequant (bool, optional): choose the fast intrinsic dequantization path when available (default True).
+        block_M, block_N, block_K (int, optional): tile sizes for M, N, and K dimensions (defaults 256, 128, 128).
+        num_stages (int, optional): pipelining stages for K loop (default 2).
+        threads (int, optional): threads per block used by the kernel (default 256).
+        split (int, optional): split factor along K used by the scheduler (default 1).
+        
+        Returns:
+        A T.prim_func implementing the tiled, pipelined GEMM that:
+        - loads tiled blocks of A and packed B to shared memory,
+        - dequantizes B via the chosen path into a shared dequantized tile,
+        - performs a tiled GEMM accumulating into local fragments,
+        - writes the final MxN block to the global output tensor.
+        
+        Notes:
+        - The function queries an intrinsic group to obtain a fast dequantization implementation when fast_dequant is enabled; that intrinsic must supply a valid C source and function name.
+        - The kernel layout uses swizzled shared-memory layouts for A, B, and the shared C tile.
+        - An assertion enforces that K % (block_K * split) == 0.
+    """
+    num_elems_per_byte = 8 // num_bits
     storage_dtype = "uint8"
     QK = K // num_elems_per_byte
     Block_QK = block_K // num_elems_per_byte
@@ -324,8 +324,8 @@ def matmul(M,
             - The selected dequantization path is controlled by the outer-scope flag `fast_dequant`.
             - The GEMM uses transpose_B=True (i.e., multiplies A · B^T after dequantization).
             - The function writes results in-place into C.
-            """
-            with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+        """
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
             B_dequantize_shared = T.alloc_shared(B_dequantize_shared_shape, in_dtype)

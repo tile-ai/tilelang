@@ -30,31 +30,31 @@ from tvm import tir
 def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale: tir.PrimExpr,
                           dtype: str):
     """
-                          Convert a packed 4-bit field stored in a uint8 into a bfloat16 value using an exponent scale.
-                          
-                          This function expects a storage field of width `nbit == 4` packed into the 8-bit input `val` and returns
-                          a bfloat16 constructed from the unpacked sign, a scaled exponent, and the 1-bit mantissa.
-                          
-                          Behavior:
-                          - Validates `nbit == 4`, `dtype == "bfloat16"`, and `val.dtype == "uint8"` (AssertionError if violated).
-                          - Extracts the 4-bit field at position `pos` (fields are packed consecutively in `val`).
-                          - Interprets the 4-bit field as: sign = bit3, exponent = bits1-2, mantissa = bit0.
-                          - Converts the 2-bit exponent to bf16 exponent space by adding a bias of 126, adds `scale` to that exponent,
-                            and clamps the result to the 8-bit exponent range (0..255).
-                          - Assembles a 16-bit bfloat16 bit pattern from (sign, biased-and-scaled-exponent, mantissa) and
-                            returns it reinterpreted as `bfloat16`.
-                          
-                          Parameters:
-                          - nbit: must be 4 (width of the packed field).
-                          - val: uint8 expression containing packed fields.
-                          - pos: index of the field within `val` (0-based); used to compute the bit shift.
-                          - scale: exponent-scale to add to the converted exponent (treated as an unsigned integer expression).
-                          - dtype: must be "bfloat16".
-                          
-                          Returns:
-                          - A tir.PrimExpr of dtype "bfloat16" representing the decoded and scaled value.
-                          """
-                          assert nbit == 4
+        Convert a packed 4-bit field stored in a uint8 into a bfloat16 value using an exponent scale.
+        
+        This function expects a storage field of width `nbit == 4` packed into the 8-bit input `val` and returns
+        a bfloat16 constructed from the unpacked sign, a scaled exponent, and the 1-bit mantissa.
+        
+        Behavior:
+        - Validates `nbit == 4`, `dtype == "bfloat16"`, and `val.dtype == "uint8"` (AssertionError if violated).
+        - Extracts the 4-bit field at position `pos` (fields are packed consecutively in `val`).
+        - Interprets the 4-bit field as: sign = bit3, exponent = bits1-2, mantissa = bit0.
+        - Converts the 2-bit exponent to bf16 exponent space by adding a bias of 126, adds `scale` to that exponent,
+        and clamps the result to the 8-bit exponent range (0..255).
+        - Assembles a 16-bit bfloat16 bit pattern from (sign, biased-and-scaled-exponent, mantissa) and
+        returns it reinterpreted as `bfloat16`.
+        
+        Parameters:
+        - nbit: must be 4 (width of the packed field).
+        - val: uint8 expression containing packed fields.
+        - pos: index of the field within `val` (0-based); used to compute the bit shift.
+        - scale: exponent-scale to add to the converted exponent (treated as an unsigned integer expression).
+        - dtype: must be "bfloat16".
+        
+        Returns:
+        - A tir.PrimExpr of dtype "bfloat16" representing the decoded and scaled value.
+        """
+    assert nbit == 4
     assert dtype == "bfloat16"
     assert val.dtype == "uint8"
     mask = tir.const((1 << nbit) - 1, "uint16")
