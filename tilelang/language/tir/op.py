@@ -1596,25 +1596,6 @@ def create_barriers(barrier_count):
     return _tvm_op.create_barriers(barrier_count)
 
 
-def allocate_barrier(name, barrier_count):
-    """TVM intrinsic to allocate a barrier
-
-    Parameters
-    ----------
-    name : str
-        The name of the barrier.
-
-    barrier_count : int
-        The number of barriers to allocate.
-
-    Returns
-    -------
-    call : PrimExpr
-        The call expression.
-    """
-    return _tvm_op.allocate_barrier(name, barrier_count)
-
-
 def vectorlow(dtype, vec):
     """Get the low level half of the vector
 

@@ -301,15 +301,6 @@ TVM_DLL const Op &tl_gemm_sp();
  */
 TVM_DLL const Op &tl_shuffle_elect();
 
-/*!
- * \brief tilelang intrinsic to allocate a barrier.
- *
- * allocate_barrier(string name)
- * allocate_barrier(string name, int arrive_count)
- *
- */
-TVM_DLL const Op &allocate_barrier();
-
 } // namespace tl
 } // namespace tvm
 

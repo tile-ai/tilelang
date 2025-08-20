@@ -990,17 +990,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << "auto " << mbarrier_name_ << " = reinterpret_cast<"
                  << mbarrier_dtype_ << "*>(" << mbarrier_storage_name << ");\n";
-  } else if (op->op.same_as(tl::allocate_barrier())) {
-    ICHECK_EQ(op->args.size(), 1);
-    this->PrintIndent();
-    std::string barrier_name = this->PrintExpr(op->args[0]);
-    std::string barrier_storage_name = barrier_name + "_mem";
-    int barrier_count = Downcast<IntImm>(op->args[1])->value;
-    this->stream << "__shared__ uint64_t " << barrier_storage_name << "["
-                 << barrier_count << "];\n";
-    this->PrintIndent();
-    this->stream << "auto " << barrier_name << " = reinterpret_cast<"
-                 << mbarrier_dtype_ << "*>(" << barrier_storage_name << ");\n";
   } else if (op->op.same_as(tl::get_mbarrier())) {
     ICHECK_EQ(op->args.size(), 1);
     std::string barrier_id = this->PrintExpr(op->args[0]);
