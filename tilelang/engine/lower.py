@@ -169,8 +169,6 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
     device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
     device_mod = tir.transform.LowerIntrin()(device_mod)
     device_mod = tir.transform.Simplify()(device_mod)
-    print("device_codegen_without_compile")
-    print(device_mod)
     if target.kind.name == "cuda":
         device_mod = tvm.ffi.get_global_func("target.build.tilelang_cuda_without_compile")(
             device_mod, target)

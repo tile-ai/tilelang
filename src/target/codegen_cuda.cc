@@ -695,7 +695,7 @@ void CodeGenTileLangCUDA::PrintStorageScope(const std::string &scope,
   ICHECK_NE(scope, "global")
       << "Cannot allocate global memory when targeting CUDA. You must pass "
          "all global arrays as input instead";
-  if (scope == "shared") {
+  if (scope == "shared" || scope == "shared.barrier") {
     os << "__shared__ ";
   } else if (scope == "shared.dyn") {
     os << "extern __shared__ __align__(1024) ";
@@ -947,9 +947,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::ostringstream ss;
     if (barrier_id.as<IntImmNode>()) {
       // incase the barrier_id is an integer, we need to print the barrier_id as an integer
-      ss << mbarrier_name_ << "[" << barrier_id << "];\n";
+      ss << mbarrier_name_ << "[" << barrier_id << "]";
     } else {
-      // otherwise may be a T.get_mbarrier() call, we need to print the barrier_id as a string
+      // otherwise may be a T.get_mbarrier() call or BufferLoad Node
+      // we need to print the barrier_id as a string
       ss << this->PrintExpr(barrier_id);
     }
     return ss.str();
@@ -987,6 +988,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                  << barrier_count << "];\n";
     this->PrintIndent();
     this->stream << "auto " << mbarrier_name_ << " = reinterpret_cast<" << mbarrier_dtype_ << "*>(" << mbarrier_storage_name << ");\n";
+  } else if (op->op.same_as(tl::allocate_barrier())) {
+    ICHECK_EQ(op->args.size(), 1);
+    this->PrintIndent();
+    std::string barrier_name = this->PrintExpr(op->args[0]);
+    std::string barrier_storage_name = barrier_name + "_mem";
+    int barrier_count = Downcast<IntImm>(op->args[1])->value;
+    this->stream << "__shared__ uint64_t " << barrier_storage_name << "[" << barrier_count << "];\n";
+    this->PrintIndent();
+    this->stream << "auto " << barrier_name << " = reinterpret_cast<" << mbarrier_dtype_ << "*>(" << barrier_storage_name << ");\n";
   } else if (op->op.same_as(tl::get_mbarrier())) {
     ICHECK_EQ(op->args.size(), 1);
     std::string barrier_id = this->PrintExpr(op->args[0]);
@@ -1060,11 +1070,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
     auto desc = op->args[0];
     ss << this->PrintExpr(desc) << ", ";
-    if (const IntImmNode *imm = op->args[1].as<IntImmNode>()) {
-      ss << mbarrier_name_ << "[" << imm->value << "], ";
-    } else {
-      ss << this->PrintExpr(op->args[1]) << ", ";
-    }
+    ss << print_mbarrier_obj(op->args[1]) << ", ";
     for (size_t i = 2; i < op->args.size() - 1; i++) {
       if (i > 2)
         ss << ", ";
@@ -1683,6 +1689,11 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
     }
     if (scope == "shared") {
       stream << ' ' << vid << '[' << constant_size << "];\n";
+    } else if (scope == "shared.barrier") {
+      auto v_id_mem = vid + "_mem";
+      stream << ' ' << v_id_mem << "[" << constant_size << "];\n";
+      PrintIndent();
+      stream << "auto " << vid << " = reinterpret_cast<" << mbarrier_dtype_ << "*>(" << v_id_mem << ");\n";
     } else if (scope == "local") {
       stream << ' ' << vid << '[' << constant_size << "];\n";
     } else if (scope == "local.var") {

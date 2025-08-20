@@ -117,20 +117,17 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
-
         if allow_fence_proxy(target=target):
             # in hopper device, wgmma is an async proxy
             # so we need to inject a fence proxy before it
             mod = tilelang.transform.InjectFenceProxy()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
-
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     # ConfigIndexBitwidth must be applied after FlattenBuffer
     # as it will flatten index computing
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tir.transform.Simplify()(mod)
-
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
     mod = tir.transform.UnrollLoop()(mod)
@@ -156,8 +153,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
 
     mod = tilelang.transform.LowerHopperIntrin()(mod)
-    print("after warp specialized")
-    print(mod)
     # Global Barrier Synchronization must be applied before
     # SplitHostDevice pass, as the global barrier
     if allow_global_thread_synchronization():
