@@ -807,8 +807,6 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::mbarrier_expect_tx");
   } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
     print_extern_call_stmt("tl::mbarrier_wait");
-  } else if (op->op.same_as(tl::sync_thread_partial())) {
-    print_extern_call_stmt("tl::syncthreads_partial");
   } else if (op->op.same_as(tl::ptx_stmatirx())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;

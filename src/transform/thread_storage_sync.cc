@@ -61,11 +61,10 @@ protected:
     // Redirect all "shared.dyn" buffer access to the same buffer var
     // so that the accesses can be planned together.
     Var shared_dyn_buf;
-    for (StmtEntry& entry : seq) {
-      for (AccessEntry& access : entry.access) {
-        if (access.scope.rank == StorageRank::kShared && access.scope.tag ==
-        ".dyn" &&
-            access.buffer.defined()) {
+    for (StmtEntry &entry : seq) {
+      for (AccessEntry &access : entry.access) {
+        if (access.scope.rank == StorageRank::kShared &&
+            access.scope.tag == ".dyn" && access.buffer.defined()) {
           if (!shared_dyn_buf.defined()) {
             shared_dyn_buf = access.buffer;
           } else {
@@ -320,7 +319,7 @@ private:
   void insert_syncs(const Object *obj) {
     if (syncs_inserted_.count(obj))
       return;
-      syncs_inserted_.insert(obj);
+    syncs_inserted_.insert(obj);
   }
 
 private:
@@ -699,7 +698,8 @@ Stmt TileLangThreadSync(Stmt stmt, std::string storage_scope) {
   TileLangThreadSyncPlanner planner(sync_scope);
   planner(stmt);
 
-  stmt = ThreadSyncInserter(sync_scope, planner.syncs_inserted_)(std::move(stmt));
+  stmt =
+      ThreadSyncInserter(sync_scope, planner.syncs_inserted_)(std::move(stmt));
 
   return ThreadPartialSyncRewriter::Rewrite(std::move(stmt));
 }

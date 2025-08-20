@@ -990,8 +990,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::mbarrier_expect_tx");
   } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
     print_extern_call_stmt("tl::mbarrier_wait");
-  } else if (op->op.same_as(tl::sync_thread_partial())) {
-    print_extern_call_stmt("cutlass::arch::NamedBarrier::sync");
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     return;
   } else if (op->op.same_as(tl::tma_load())) {
