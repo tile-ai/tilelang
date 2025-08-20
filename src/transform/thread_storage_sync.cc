@@ -31,47 +31,14 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "./common/thread_sync_types.h"
 #include "./storage_access.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
 
-struct ThreadBoundKey {
-  int64_t tx_min, tx_max, ty_min, ty_max, tz_min, tz_max;
-  bool operator==(const ThreadBoundKey &other) const {
-    return tx_min == other.tx_min && tx_max == other.tx_max &&
-           ty_min == other.ty_min && ty_max == other.ty_max &&
-           tz_min == other.tz_min && tz_max == other.tz_max;
-  }
-};
-
-namespace std {
-template <> struct hash<ThreadBoundKey> {
-  size_t operator()(const ThreadBoundKey &k) const {
-    size_t h = std::hash<int64_t>()(k.tx_min);
-    h = h * 31 + std::hash<int64_t>()(k.tx_max);
-    h = h * 31 + std::hash<int64_t>()(k.ty_min);
-    h = h * 31 + std::hash<int64_t>()(k.ty_max);
-    h = h * 31 + std::hash<int64_t>()(k.tz_min);
-    h = h * 31 + std::hash<int64_t>()(k.tz_max);
-    return h;
-  }
-};
-} // namespace std
 namespace tvm {
 namespace tl {
-
-// There are 16 Named Barriers provided by Hardware starting in Hopper
-// Their IDs are in the range 0-15
-// Number of threads syncing using the barrier must be a multiple of warp-size
-// ID 0 should not be used for safety, as other driver APIs (i.e. __syncthreads)
-// may use it and conflict with other uses.
-enum class ReservedNamedBarriers {
-  kSyncThreads = 0,
-  kReduce_0 = 1,
-  kReduce_1 = 2,
-  kFirstUsedBarrier = kReduce_1 + 1
-};
 
 using namespace tir;
 using arith::IRMutatorWithAnalyzer;
@@ -83,7 +50,6 @@ public:
 
   // The syncs inserted before each statement
   std::unordered_set<const Object *> syncs_inserted_;
-  std::unordered_map<const Object *, int> partial_syncs_inserted_;
 
 protected:
   bool Enabled(const VarNode *buf, const StorageScope &scope) const final {
@@ -95,19 +61,19 @@ protected:
     // Redirect all "shared.dyn" buffer access to the same buffer var
     // so that the accesses can be planned together.
     Var shared_dyn_buf;
-    // for (StmtEntry& entry : seq) {
-    //   for (AccessEntry& access : entry.access) {
-    //     if (access.scope.rank == StorageRank::kShared && access.scope.tag ==
-    //     ".dyn" &&
-    //         access.buffer.defined()) {
-    //       if (!shared_dyn_buf.defined()) {
-    //         shared_dyn_buf = access.buffer;
-    //       } else {
-    //         access.buffer = shared_dyn_buf;
-    //       }
-    //     }
-    //   }
-    // }
+    for (StmtEntry& entry : seq) {
+      for (AccessEntry& access : entry.access) {
+        if (access.scope.rank == StorageRank::kShared && access.scope.tag ==
+        ".dyn" &&
+            access.buffer.defined()) {
+          if (!shared_dyn_buf.defined()) {
+            shared_dyn_buf = access.buffer;
+          } else {
+            access.buffer = shared_dyn_buf;
+          }
+        }
+      }
+    }
 
     // Unsynced reads and writes
     std::vector<AccessEntry> reads;
@@ -348,48 +314,16 @@ private:
   }
 
   void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == "kWarpSpecializationScope") {
-      IfThenElse body = Downcast<IfThenElse>(op->body);
-      auto partitions = Downcast<Array<IntImm>>(op->node);
-      ICHECK(partitions.size() == 2);
-
-      scope_.push_back(std::vector<StmtEntry>());
-      num_partial_threads_ = partitions[0];
-      this->VisitStmt(body->then_case);
-      StmtEntry s;
-      s.stmt = op;
-      s.access = Summarize(std::move(scope_.back()), nullptr);
-      scope_.pop_back();
-
-      num_partial_threads_ = partitions[1];
-      scope_.push_back(std::vector<StmtEntry>());
-      VisitStmt(body->else_case.value());
-      auto v = Summarize(std::move(scope_.back()), nullptr);
-      scope_.pop_back();
-      s.access.insert(s.access.end(), v.begin(), v.end());
-
-      num_partial_threads_ = std::nullopt;
-    } else {
-      TileLangStorageAccessVisitor::VisitStmt_(op);
-    }
+    TileLangStorageAccessVisitor::VisitStmt_(op);
   }
 
   void insert_syncs(const Object *obj) {
-    // ICHECK_EQ(condition_counter(), 0) << "Cannot insert syncs inside
-    // condition";
     if (syncs_inserted_.count(obj))
       return;
-    if (num_partial_threads_.defined()) {
       syncs_inserted_.insert(obj);
-      partial_syncs_inserted_[obj] =
-          static_cast<int>(num_partial_threads_.value()->value);
-    } else {
-      syncs_inserted_.insert(obj);
-    }
   }
 
 private:
-  Optional<IntImm> num_partial_threads_;
   // synchronization scope
   StorageScope sync_scope_;
 };
@@ -443,9 +377,8 @@ private:
 class ThreadSyncInserter : public StmtExprMutator {
 public:
   ThreadSyncInserter(StorageScope sync_scope,
-                     const std::unordered_set<const Object *> &syncs,
-                     std::unordered_map<const Object *, int> partial_syncs)
-      : sync_scope_(sync_scope), syncs_(syncs), partial_syncs_(partial_syncs) {}
+                     const std::unordered_set<const Object *> &syncs)
+      : sync_scope_(sync_scope), syncs_(syncs) {}
 
   Stmt VisitStmt(const Stmt &stmt) final {
     if (syncs_.size() == 0)
@@ -454,8 +387,6 @@ public:
       Stmt barrier;
       if (sync_scope_.rank == StorageRank::kGlobal) {
         barrier = MakeGlobalBarrier();
-      } else if (partial_syncs_.count(stmt.get())) {
-        return StmtExprMutator::VisitStmt(stmt);
       } else {
         barrier = Evaluate(Call(DataType::Int(32), builtin::tvm_storage_sync(),
                                 {StringImm(sync_scope_.to_string())}));
@@ -602,7 +533,7 @@ private:
   // data structure.
   StorageScope sync_scope_;
   const std::unordered_set<const Object *> &syncs_;
-  const std::unordered_map<const Object *, int> &partial_syncs_;
+
   // The read write statistics of storage
   std::unordered_map<Var, Entry, ObjectPtrHash, ObjectPtrEqual> rw_stats_;
   // The statistics for global barrier
@@ -768,8 +699,7 @@ Stmt TileLangThreadSync(Stmt stmt, std::string storage_scope) {
   TileLangThreadSyncPlanner planner(sync_scope);
   planner(stmt);
 
-  stmt = ThreadSyncInserter(sync_scope, planner.syncs_inserted_,
-                            planner.partial_syncs_inserted_)(std::move(stmt));
+  stmt = ThreadSyncInserter(sync_scope, planner.syncs_inserted_)(std::move(stmt));
 
   return ThreadPartialSyncRewriter::Rewrite(std::move(stmt));
 }

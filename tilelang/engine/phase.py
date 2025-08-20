@@ -150,7 +150,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # We can find a way better to create var instead
     # of putting the LowerThreadAllreduce before
     # the Legalization.
-    mod = tilelang.transform.ThreadPartialSync("shared.dyn")(mod)
     mod = tir.transform.InferFragment()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
 
