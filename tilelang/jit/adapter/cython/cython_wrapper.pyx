@@ -123,6 +123,11 @@ cdef class CythonKernelWrapper:
                 # otherwise, maybe torch.data_ptr() for T.ptr inputs
                 continue
             for stride_idx, expected_stride in strides_list:
+                # Ensure the stride index is within the valid range of tensor dimensions
+                # (stride_idx should be less than the number of dimensions of the tensor)
+                assert stride_idx < tensor.dim(), f"Stride index {stride_idx} out of bounds for tensor with {tensor.dim()} dimensions"
+                if tensor.shape[stride_idx] == 1:
+                    continue
                 actual_stride = tensor.stride(stride_idx)
                 if actual_stride != expected_stride:
                     raise ValueError(
