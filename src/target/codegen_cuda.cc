@@ -943,6 +943,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << ss.str();
     this->stream << ");\n";
   };
+  auto print_mbarrier_obj = [&](PrimExpr barrier_id) {
+    std::ostringstream ss;
+    if (barrier_id.as<IntImmNode>()) {
+      // incase the barrier_id is an integer, we need to print the barrier_id as an integer
+      ss << mbarrier_name_ << "[" << barrier_id << "];\n";
+    } else {
+      // otherwise may be a T.get_mbarrier() call, we need to print the barrier_id as a string
+      ss << this->PrintExpr(barrier_id);
+    }
+    return ss.str();
+  };
   if (op->op.same_as(builtin::ptx_cp_async())) {
     std::string dst = this->PrintExpr(op->args[0]);
     std::string dst_offset = this->PrintExpr(op->args[1]);
@@ -971,25 +982,66 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(builtin::create_barriers())) {
     this->PrintIndent();
     int barrier_count = Downcast<IntImm>(op->args[0])->value;
-    std::string barrier_name = "_mbarrier";
-    this->stream << "__shared__ uint64_t " << barrier_name << "["
+    auto mbarrier_storage_name = mbarrier_name_ + "_mem";
+    this->stream << "__shared__ uint64_t " << mbarrier_storage_name << "["
                  << barrier_count << "];\n";
+    this->PrintIndent();
+    this->stream << "auto " << mbarrier_name_ << " = reinterpret_cast<" << mbarrier_dtype_ << "*>(" << mbarrier_storage_name << ");\n";
   } else if (op->op.same_as(tl::get_mbarrier())) {
-    std::string barrier_name = "_mbarrier";
+    ICHECK_EQ(op->args.size(), 1);
     std::string barrier_id = this->PrintExpr(op->args[0]);
-    os << barrier_name + "[" + barrier_id + "]";
+    os << mbarrier_name_ + "[" + barrier_id + "]";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
-    print_extern_call_stmt("tl::mbarrier_arrive");
+    if (op->args.size() == 1) {
+      this->PrintIndent();
+      auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+      this->stream << mbarrier_obj << ".arrive();\n";
+    } else if (op->args.size() == 3) {
+      this->PrintIndent();
+      auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+      auto cta_id = this->PrintExpr(op->args[1]);
+      auto pred = this->PrintExpr(op->args[2]);
+      this->stream << mbarrier_obj << ".arrive(" << cta_id << ", " << pred << ");\n";
+    } else {
+      LOG(FATAL) << "Invalid parameter  for tl::arrive_barrier " << op->args.size();
+    }
   } else if (op->op.same_as(builtin::ptx_init_barrier_thread_count())) {
-    print_extern_call_stmt("tl::mbarrier_init");
+    ICHECK_EQ(op->args.size(), 2);
+    this->PrintIndent();
+    auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+    auto arrive_count = this->PrintExpr(op->args[1]);
+    this->stream << mbarrier_obj << ".init(" << arrive_count << ");\n";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier_expect_tx())) {
-    print_extern_call_stmt("tl::mbarrier_arrive_expect_tx");
+    if (op->args.size() == 2) {
+      this->PrintIndent();
+      auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+      auto transaction_bytes = this->PrintExpr(op->args[1]);
+      this->stream << mbarrier_obj << ".arrive_and_expect_tx(" << transaction_bytes << ");\n";
+    } else if (op->args.size() == 4) {
+      this->PrintIndent();
+      auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+      auto transaction_bytes = this->PrintExpr(op->args[1]);
+      auto cta_id = this->PrintExpr(op->args[2]);
+      auto pred = this->PrintExpr(op->args[3]);
+      this->stream << mbarrier_obj << ".arrive_and_expect_tx(" << transaction_bytes << ", " << cta_id << ", " << pred << ");\n";
+    }
+    else {
+      LOG(FATAL) << "Invalid parameter  for tl::arrive_barrier_expect_tx " << op->args.size();
+    }
   } else if (op->op.same_as(builtin::ptx_cp_async_barrier())) {
     print_extern_call_stmt("tl::mbarrier_cp_async_arrive");
   } else if (op->op.same_as(tl::mbarrier_expect_tx())) {
-    print_extern_call_stmt("tl::mbarrier_expect_tx");
+    ICHECK_EQ(op->args.size(), 2);
+    this->PrintIndent();
+    auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+    auto transaction_bytes = this->PrintExpr(op->args[1]);
+    this->stream << mbarrier_obj << ".expect_transaction(" << transaction_bytes << ");\n";
   } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
-    print_extern_call_stmt("tl::mbarrier_wait");
+    ICHECK_EQ(op->args.size(), 2);
+    this->PrintIndent();
+    auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+    auto phase = this->PrintExpr(op->args[1]);
+    this->stream << mbarrier_obj << ".wait(" << phase << ");\n";
   } else if (op->op.same_as(tl::sync_thread_partial())) {
     print_extern_call_stmt("cutlass::arch::NamedBarrier::sync");
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
@@ -1009,7 +1061,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto desc = op->args[0];
     ss << this->PrintExpr(desc) << ", ";
     if (const IntImmNode *imm = op->args[1].as<IntImmNode>()) {
-      ss << "_mbarrier[" << imm->value << "], ";
+      ss << mbarrier_name_ << "[" << imm->value << "], ";
     } else {
       ss << this->PrintExpr(op->args[1]) << ", ";
     }
@@ -1050,7 +1102,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     if (trans == 1)
       func_name += "_trans";
     print_extern_call_stmt(func_name, 2);
-  } else if (op->op.same_as(tl::ptx_stmatirx())) {
+  } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
     std::string func_name = "tl::ptx_stmatrix_x" + std::to_string(num);
@@ -1407,22 +1459,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string barrier =
         barrier_name_ + "[" + std::to_string(barrier_id) + "]";
     this->stream << PrintWaitBarrierAsm(barrier);
-  } else if (op->op.same_as(builtin::create_barriers())) {
-    CHECK_EQ(barrier_count_, -1);
-    int barrier_count = Downcast<IntImm>(op->args[0])->value;
-    // pad barrier alignment to avoid runtime alignment errors
-    CHECK_EQ(barrier_alignment_bytes_ % sizeof(uint64_t), 0);
-    int barrier_alignment_count = barrier_alignment_bytes_ / sizeof(uint64_t);
-    if (barrier_count % barrier_alignment_count != 0) {
-      barrier_count = ((barrier_count / barrier_alignment_count) + 1) *
-                      barrier_alignment_count;
-    }
-    barrier_count_ = barrier_count;
-    this->stream << "__shared__ __align__(" << barrier_alignment_bytes_
-                 << ") uint64_t " << barrier_name_ << "[" << barrier_count
-                 << "];\n";
-    this->stream << "for (int i = 0; i < " << barrier_count << "; ++i) { "
-                 << barrier_name_ << "[i] = 0; }\n";
   } else if (op->op.same_as(builtin::ptx_ldg32())) {
     /*
     asm volatile (

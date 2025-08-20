@@ -149,7 +149,7 @@ const Op &ptx_ldmatirx();
  * ptx_ldmatirx(transposed, num, shared_addr, int32_values...)
  *
  */
-const Op &ptx_stmatirx();
+const Op &ptx_stmatrix();
 
 /*!
  * \brief Pack two b16 value into a b32 value
