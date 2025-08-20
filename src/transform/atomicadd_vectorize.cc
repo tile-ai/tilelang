@@ -146,6 +146,28 @@ public:
         dynamic_(plan.dynamic) {}
 
 private:
+  /**
+   * @brief Visits a For node and rewrites the innermost loop for atomic-add vectorization.
+   *
+   * If the visited For node is the recorded innermost loop, this method validates that the
+   * loop extent is a constant, divisible by the planned vector size, and has a zero minimum.
+   * When vectorization is enabled (dynamic_ == false) it:
+   *  - locates the thread index variable named "tx" inside the loop body,
+   *  - creates a new outer loop variable named "<old_loop_var>_outer",
+   *  - substitutes occurrences of `tx` with `tx * vector_size_` and the old loop var with
+   *    `outer_var * vector_size_` so each outer iteration maps to a contiguous vector-sized
+   *    chunk,
+   *  - returns a new For with extent divided by vector_size_ and the transformed body.
+   *
+   * If dynamic_ is true, the method returns the (possibly mutated) inner For unchanged.
+   *
+   * Side effects:
+   *  - updates inner_for_ to point to the current For node during visitation.
+   *  - performs runtime checks (ICHECK) to enforce: constant extent, extent % vector_size_ == 0,
+   *    and zero loop minimum; violations terminate execution.
+   *
+   * @return The original or transformed For statement as a Stmt.
+   */
   Stmt VisitStmt_(const ForNode *node) final {
     inner_for_ = node;
     auto ret = StmtExprMutator::VisitStmt_(node);
