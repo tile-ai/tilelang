@@ -1,8 +1,6 @@
 import tilelang
 import tilelang.language as T
 
-tilelang.disable_cache()
-
 
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
@@ -68,7 +66,6 @@ def main():
 
     # Run the kernel through the Profiler
     c = jit_kernel(a, b)
-    print(jit_kernel.get_kernel_source())
     # Reference multiplication using PyTorch
     ref_c = a @ b
 
