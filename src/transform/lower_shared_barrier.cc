@@ -2,6 +2,7 @@
  *  \file lower_shared_barrier.cc
  *  \brief Convert shared.barrier buffers to plain shared + ptx init.
  */
+#include "../op/builtin.h"
 #include "tvm/ir/type.h"
 #include "tvm/tir/expr.h"
 #include "tvm/tir/stmt.h"
@@ -11,7 +12,6 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
-#include "../op/builtin.h"
 
 namespace tvm {
 namespace tl {
@@ -20,7 +20,6 @@ using namespace tir;
 
 class SharedBarrierRewriter : public StmtExprMutator {
 public:
-
   static Stmt Rewrite(Stmt body, bool disable_shuffle_elect = false) {
     SharedBarrierRewriter rewriter(disable_shuffle_elect);
     return rewriter(body);
@@ -28,7 +27,7 @@ public:
 
 private:
   SharedBarrierRewriter(bool disable_shuffle_elect)
-  : disable_shuffle_elect_(disable_shuffle_elect) {}
+      : disable_shuffle_elect_(disable_shuffle_elect) {}
 
   Stmt VisitStmt_(const BlockNode *op) final {
     Block block = GetRef<Block>(op);
@@ -126,8 +125,8 @@ private:
     } else {
       condition = EQ(thread_var_->var, 0);
     }
-    new_body.push_back(IfThenElse(condition,
-                                  SeqStmt(init_mbarrier_calls_), Stmt()));
+    new_body.push_back(
+        IfThenElse(condition, SeqStmt(init_mbarrier_calls_), Stmt()));
     new_body.push_back(
         Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
                       {StringImm("shared")})));
@@ -181,7 +180,8 @@ private:
 };
 
 PrimFunc LowerSharedBarrier(PrimFunc f, bool disable_shuffle_elect) {
-  f.CopyOnWrite()->body = SharedBarrierRewriter::Rewrite(f->body, disable_shuffle_elect);
+  f.CopyOnWrite()->body =
+      SharedBarrierRewriter::Rewrite(f->body, disable_shuffle_elect);
   return f;
 }
 

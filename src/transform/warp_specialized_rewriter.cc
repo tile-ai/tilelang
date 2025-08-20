@@ -12,10 +12,10 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include "runtime/thread_storage_scope.h"
-#include "tir/transforms/ir_utils.h"
 #include "../op/builtin.h"
 #include "./common/collector.h"
+#include "runtime/thread_storage_scope.h"
+#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {

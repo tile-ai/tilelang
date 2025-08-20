@@ -671,8 +671,9 @@ private:
   // Checks whether the storage_scope is especially tagged for a specific
   // memory. Special memory is all combined into a single allocation.
   bool IsSpecialTaggedMemory(const StorageScope &scope) {
-    return scope.tag.length() != 0 && scope.tag != ".dyn" && scope.tag != ".barrier" &&
-           scope.tag != ".workspace" && scope.tag != ".vtcm";
+    return scope.tag.length() != 0 && scope.tag != ".dyn" &&
+           scope.tag != ".barrier" && scope.tag != ".workspace" &&
+           scope.tag != ".vtcm";
   }
 
   // Allocate entry of node.
@@ -1787,7 +1788,8 @@ public:
     PrimExpr last_extent = extents[extents.size() - 1];
     extents.Set(extents.size() - 1,
                 last_extent / make_const(last_extent.dtype(), info.factor()));
-    LOG(INFO) << "Allocate with " << new_buffer_var << " and " << info.new_element_dtype << " extents: " << extents;
+    LOG(INFO) << "Allocate with " << new_buffer_var << " and "
+              << info.new_element_dtype << " extents: " << extents;
     return Allocate(new_buffer_var, info.new_element_dtype, extents,
                     op->condition, op->body);
   }

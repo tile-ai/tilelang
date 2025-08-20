@@ -41,9 +41,8 @@ def get_configs():
         k: v for k, v in zip(iter_params, values)
     } for values in itertools.product(*iter_params.values())]
 
-@tilelang.autotune(
-    configs=get_configs(),
-)
+
+@tilelang.autotune(configs=get_configs(),)
 @tilelang.jit(out_idx=[-1])
 def matmul(M,
            N,

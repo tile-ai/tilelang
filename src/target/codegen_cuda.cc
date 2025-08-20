@@ -946,7 +946,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   auto print_mbarrier_obj = [&](PrimExpr barrier_id) {
     std::ostringstream ss;
     if (barrier_id.as<IntImmNode>()) {
-      // incase the barrier_id is an integer, we need to print the barrier_id as an integer
+      // incase the barrier_id is an integer, we need to print the barrier_id as
+      // an integer
       ss << mbarrier_name_ << "[" << barrier_id << "]";
     } else {
       // otherwise may be a T.get_mbarrier() call or BufferLoad Node
@@ -987,16 +988,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << "__shared__ uint64_t " << mbarrier_storage_name << "["
                  << barrier_count << "];\n";
     this->PrintIndent();
-    this->stream << "auto " << mbarrier_name_ << " = reinterpret_cast<" << mbarrier_dtype_ << "*>(" << mbarrier_storage_name << ");\n";
+    this->stream << "auto " << mbarrier_name_ << " = reinterpret_cast<"
+                 << mbarrier_dtype_ << "*>(" << mbarrier_storage_name << ");\n";
   } else if (op->op.same_as(tl::allocate_barrier())) {
     ICHECK_EQ(op->args.size(), 1);
     this->PrintIndent();
     std::string barrier_name = this->PrintExpr(op->args[0]);
     std::string barrier_storage_name = barrier_name + "_mem";
     int barrier_count = Downcast<IntImm>(op->args[1])->value;
-    this->stream << "__shared__ uint64_t " << barrier_storage_name << "[" << barrier_count << "];\n";
+    this->stream << "__shared__ uint64_t " << barrier_storage_name << "["
+                 << barrier_count << "];\n";
     this->PrintIndent();
-    this->stream << "auto " << barrier_name << " = reinterpret_cast<" << mbarrier_dtype_ << "*>(" << barrier_storage_name << ");\n";
+    this->stream << "auto " << barrier_name << " = reinterpret_cast<"
+                 << mbarrier_dtype_ << "*>(" << barrier_storage_name << ");\n";
   } else if (op->op.same_as(tl::get_mbarrier())) {
     ICHECK_EQ(op->args.size(), 1);
     std::string barrier_id = this->PrintExpr(op->args[0]);
@@ -1011,9 +1015,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
       auto cta_id = this->PrintExpr(op->args[1]);
       auto pred = this->PrintExpr(op->args[2]);
-      this->stream << mbarrier_obj << ".arrive(" << cta_id << ", " << pred << ");\n";
+      this->stream << mbarrier_obj << ".arrive(" << cta_id << ", " << pred
+                   << ");\n";
     } else {
-      LOG(FATAL) << "Invalid parameter  for tl::arrive_barrier " << op->args.size();
+      LOG(FATAL) << "Invalid parameter  for tl::arrive_barrier "
+                 << op->args.size();
     }
   } else if (op->op.same_as(builtin::ptx_init_barrier_thread_count())) {
     ICHECK_EQ(op->args.size(), 2);
@@ -1026,17 +1032,20 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       this->PrintIndent();
       auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
       auto transaction_bytes = this->PrintExpr(op->args[1]);
-      this->stream << mbarrier_obj << ".arrive_and_expect_tx(" << transaction_bytes << ");\n";
+      this->stream << mbarrier_obj << ".arrive_and_expect_tx("
+                   << transaction_bytes << ");\n";
     } else if (op->args.size() == 4) {
       this->PrintIndent();
       auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
       auto transaction_bytes = this->PrintExpr(op->args[1]);
       auto cta_id = this->PrintExpr(op->args[2]);
       auto pred = this->PrintExpr(op->args[3]);
-      this->stream << mbarrier_obj << ".arrive_and_expect_tx(" << transaction_bytes << ", " << cta_id << ", " << pred << ");\n";
-    }
-    else {
-      LOG(FATAL) << "Invalid parameter  for tl::arrive_barrier_expect_tx " << op->args.size();
+      this->stream << mbarrier_obj << ".arrive_and_expect_tx("
+                   << transaction_bytes << ", " << cta_id << ", " << pred
+                   << ");\n";
+    } else {
+      LOG(FATAL) << "Invalid parameter  for tl::arrive_barrier_expect_tx "
+                 << op->args.size();
     }
   } else if (op->op.same_as(builtin::ptx_cp_async_barrier())) {
     print_extern_call_stmt("tl::mbarrier_cp_async_arrive");
@@ -1045,7 +1054,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
     auto transaction_bytes = this->PrintExpr(op->args[1]);
-    this->stream << mbarrier_obj << ".expect_transaction(" << transaction_bytes << ");\n";
+    this->stream << mbarrier_obj << ".expect_transaction(" << transaction_bytes
+                 << ");\n";
   } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
     ICHECK_EQ(op->args.size(), 2);
     this->PrintIndent();
@@ -1693,7 +1703,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
       auto v_id_mem = vid + "_mem";
       stream << ' ' << v_id_mem << "[" << constant_size << "];\n";
       PrintIndent();
-      stream << "auto " << vid << " = reinterpret_cast<" << mbarrier_dtype_ << "*>(" << v_id_mem << ");\n";
+      stream << "auto " << vid << " = reinterpret_cast<" << mbarrier_dtype_
+             << "*>(" << v_id_mem << ");\n";
     } else if (scope == "local") {
       stream << ' ' << vid << '[' << constant_size << "];\n";
     } else if (scope == "local.var") {
