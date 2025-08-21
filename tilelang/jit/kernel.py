@@ -117,7 +117,7 @@ class JITKernel(object):
         # Print log on compilation starts
         # NOTE(Chenggang): printing could let the training/inference framework easier to know
         # whether the communication timeout is from compilation
-        if env.TILELANG_PRINT_ON_COMPILATION.lower() in ("1", "true", "yes", "on"):
+        if env.is_print_on_compilation_enabled():
             # assert func must have "global_symbol"
             func_name = func.attrs.get("global_symbol")
             assert func_name is not None, "func must have global_symbol"
@@ -125,6 +125,11 @@ class JITKernel(object):
 
         # Compile the TileLang function and create a kernel adapter for execution.
         adapter = self._compile_and_create_adapter(func, out_idx)
+
+        if env.is_print_on_compilation_enabled():
+            func_name = func.attrs.get("global_symbol")
+            assert func_name is not None, "func must have global_symbol"
+            logger.info(f"TileLang completes to compile kernel `{func_name}`")
 
         # The adapter's function is assigned as the callable function for this instance.
         self.adapter = adapter

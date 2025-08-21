@@ -8,7 +8,8 @@ import tilelang.testing
 tilelang.testing.set_random_seed(42)
 
 
-# TODO(@yu): checkout tma with nsa
+# TODO(lei): workaround, as threads is not divisible by warp group size,
+# auto warp specialization may have some bugs.
 @tilelang.jit(
     out_idx=[-1],
     pass_configs={
@@ -173,8 +174,6 @@ def main():
         block_counts=block_counts,
         block_size=block_size,
     )
-    print("out", out)
-    print("ref", ref)
     torch.testing.assert_close(ref, out, atol=1e-2, rtol=1e-2)
 
 

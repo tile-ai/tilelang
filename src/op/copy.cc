@@ -881,6 +881,8 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     auto stride = as_const_int(shared_layout->InputShape()[0]);
     auto continuous = as_const_int(shared_layout->InputShape()[1]);
     ICHECK(stride != nullptr && continuous != nullptr);
+    // We also need to check if the shape satisfies the following doc:
+    // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html#group__CUDA__TENSOR__MEMORY_1ga7c7d2aaac9e49294304e755e6f341d7
     if (StructuralEqual()(shared_layout, makeGemmABLayoutPadded(
                                              *stride, *continuous,
                                              shared_tensor->dtype.bits()))) {

@@ -1405,17 +1405,36 @@ private:
 
 class WarpSpecializedDetector : public IRVisitorWithAnalyzer {
 public:
+  // return true means this aws will be disabled
   static bool Detect(Stmt stmt, bool skip_thread_partition = false) {
     WarpSpecializedDetector detector;
     detector.VisitStmt(stmt);
-    return detector.has_warp_specialization_ ||
-           (detector.has_tma_op_ && detector.has_mbarrier_op_);
+    if (!detector.num_threads_is_divisible_by_warp_group_) {
+      LOG(WARNING)
+          << "Auto warp specialization will be disabled because the number of "
+             "threads"
+          << detector.thread_var_->dom->extent
+          << "is not divisible by warp group size";
+      return true;
+    }
+    if (detector.has_warp_specialization_) {
+      LOG(WARNING) << "Auto warp specialization will be disabled because warp "
+                      "specialization is manually enabled";
+      return true;
+    }
+    if (detector.has_tma_op_ && detector.has_mbarrier_op_) {
+      LOG(WARNING) << "Auto warp specialization will be disabled because TMA "
+                      "and mbarrier are both present";
+      return true;
+    }
+    return false;
   }
 
   WarpSpecializedDetector() {
     has_tma_op_ = false;
     has_mbarrier_op_ = false;
     has_warp_specialization_ = false;
+    num_threads_is_divisible_by_warp_group_ = false;
   }
 
 private:
@@ -1449,6 +1468,8 @@ private:
       if (iv->thread_tag == "threadIdx.x") {
         ICHECK(iv->dom->extent.as<IntImmNode>());
         thread_var_ = iv;
+        num_threads_is_divisible_by_warp_group_ =
+            iv->dom->extent.as<IntImmNode>()->value % warp_group_size_ == 0;
       }
     }
     IRVisitorWithAnalyzer::VisitStmt_(op);
@@ -1458,6 +1479,8 @@ private:
   IterVar thread_var_;
   bool has_mbarrier_op_{false};
   bool has_warp_specialization_{false};
+  bool num_threads_is_divisible_by_warp_group_{false};
+  const int warp_group_size_ = 128;
 };
 
 using namespace tir::transform;
