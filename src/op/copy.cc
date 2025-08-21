@@ -22,6 +22,7 @@
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
+#include <tvm/tir/transform.h>
 
 namespace tvm {
 namespace tl {
@@ -130,8 +131,7 @@ Copy::Copy(Array<PrimExpr> args, BufferMap vmap) : args_(args) {
     }
   }
   if (args.size() >= 4) {
-    auto disable_tma = Downcast<Bool>(args[3]);
-    this->disable_tma = disable_tma;
+    this->disable_tma = Downcast<Bool>(args[3]);
   }
   if (args.size() >= 5) {
     this->eviction_policy = args[4].as<IntImmNode>()->value;
@@ -318,7 +318,11 @@ Layout Copy::ComputeLinearLayout(const Buffer &shared_tensor) const {
  */
 LayoutMap Copy::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   auto target = T.target;
-  auto copy_inst = GetCopyInst(target);
+  using namespace tvm::transform;
+  PassContext pass_ctx = PassContext::Current();
+  bool disable_tma_lower =
+      pass_ctx->GetConfig<bool>(kDisableTMALower, false).value();
+  auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma);
   if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore) {
     // if can apply swizzling, we skip layout inference
     // for bulk load/store, we can directly apply the layout of normal copy
@@ -435,10 +439,13 @@ bool Copy::CheckSTSMCopy(Target target) const {
  * copy if no specialized instruction is applicable. \param target Target
  * device. \return CopyInst representing the copy instruction type.
  */
-Copy::CopyInst Copy::GetCopyInst(Target target) const {
-  if (CheckBulkLoad(target)) {
+Copy::CopyInst Copy::GetCopyInst(Target target, bool disable_tma_lower) const {
+  // disable_tma_lower is from pass_configs
+  // when tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER is True,
+  // we will not use tma for bulk load/store
+  if (!disable_tma_lower && CheckBulkLoad(target)) {
     return CopyInst::kBulkLoad;
-  } else if (CheckBulkStore(target)) {
+  } else if (!disable_tma_lower && CheckBulkStore(target)) {
     return CopyInst::kBulkStore;
   } else if (CheckLDSMCopy(target)) {
     return CopyInst::kLDSM;
@@ -463,9 +470,12 @@ Copy::CopyInst Copy::GetCopyInst(Target target) const {
  */
 Stmt Copy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Target target = T.target;
-  auto copy_inst = GetCopyInst(target);
-  if ((copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore) &&
-      !disable_tma) {
+  using namespace tvm::transform;
+  PassContext pass_ctx = PassContext::Current();
+  bool disable_tma_lower =
+      pass_ctx->GetConfig<bool>(kDisableTMALower, false).value();
+  auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma);
+  if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore) {
     auto bulk_copy = LowerBulkCopy(T, analyzer, copy_inst);
     ICHECK(bulk_copy.defined()) << "Failed to lower bulk copy";
     return bulk_copy;

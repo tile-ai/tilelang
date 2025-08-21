@@ -145,7 +145,7 @@ public:
   /*!
    * \brief Get the copy instruction type.
    */
-  CopyInst GetCopyInst(Target target) const;
+  CopyInst GetCopyInst(Target target, bool disable_tma_lower) const;
 
   /*!
    * \brief Copy constructor (deep clones ParallelOp if present).
