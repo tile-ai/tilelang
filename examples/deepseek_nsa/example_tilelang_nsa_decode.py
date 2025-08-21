@@ -8,7 +8,11 @@ import tilelang.testing
 tilelang.testing.set_random_seed(42)
 
 
-@tilelang.jit(out_idx=[-1])
+# TODO(@yu): checkout tma with nsa
+@tilelang.jit(out_idx=[-1], pass_configs={
+    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+})
 def native_sparse_attention(
     batch,
     heads,
@@ -22,7 +26,7 @@ def native_sparse_attention(
     if scale is None:
         scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     head_kv = heads // groups
-    # Modified shapes for inference (q has seq_len=1)
+    # Modified shapes for inference (q has seq_len=1)a
     q_shape = [batch, 1, heads, dim]  # Changed seq_len to 1
     kv_shape = [batch, seq_len, head_kv, dim]
     block_indices_shape = [batch, 1, head_kv, selected_blocks]  # Changed seq_len to 1
