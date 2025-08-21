@@ -1,11 +1,11 @@
 /*!
  * \file tl/op/copy.cc
- * \brief Define copy operator for various memory transfer strategies (Normal, 
+ * \brief Define copy operator for various memory transfer strategies (Normal,
  *        Bulk/TMA, LDSM/STSM) and lowering logic for GPU code generation.
  *
- * This module is part of TVM TensorIR's Tensor Layout (TL) operations, 
- * implementing memory copy operations that can target CPUs or GPUs with 
- * optimization for different instructions like bulk copy, matrix load/store, 
+ * This module is part of TVM TensorIR's Tensor Layout (TL) operations,
+ * implementing memory copy operations that can target CPUs or GPUs with
+ * optimization for different instructions like bulk copy, matrix load/store,
  * and Hopper's new TMA (Tensor Memory Accelerator).
  */
 
@@ -30,7 +30,8 @@ using namespace tir;
 
 /*!
  * \brief Helper to map TVM's DataType to CUDA's CUtensorMapDataType enum value.
- * This function converts TVM data types to CUDA tensor map data types for TMA operations.
+ * This function converts TVM data types to CUDA tensor map data types for TMA
+ * operations.
  */
 static int to_CUtensorMapDataType(DataType dtype) {
   CUtensorMapDataType tp;
@@ -105,8 +106,9 @@ template <typename T> static Array<T> ReverseArray(Array<T> array) {
 
 /*!
  * \brief Constructor for Copy operator.
- * \param args Array of PrimExpr representing the arguments of the copy operation.
- * \param vmap BufferMap mapping original buffer names to new buffer names.
+ * \param args Array of PrimExpr representing the arguments of the copy
+ * operation. \param vmap BufferMap mapping original buffer names to new buffer
+ * names.
  */
 Copy::Copy(Array<PrimExpr> args, BufferMap vmap) : args_(args) {
   Array<Range> rgs[2];
@@ -138,8 +140,9 @@ Copy::Copy(Array<PrimExpr> args, BufferMap vmap) : args_(args) {
 
 /*!
  * \brief Create iterator variables for the copy operation.
- * This function creates iteration variables for dimensions that have extent > 1.
- * \return Array of IterVar representing the iterator variables for the copy operation.
+ * This function creates iteration variables for dimensions that have extent
+ * > 1. \return Array of IterVar representing the iterator variables for the
+ * copy operation.
  */
 Array<IterVar> Copy::MakeIterVars() const {
   Array<IterVar> loop_vars;
@@ -157,11 +160,12 @@ Array<IterVar> Copy::MakeIterVars() const {
 
 /*!
  * \brief Create indices for the copy operation.
- * This function generates the actual index expressions for accessing source or destination buffers.
- * For dimensions with extent=1, it uses the range minimum; for others, it adds the iteration variable.
- * \param ivs Array of IterVar returned by MakeIterVars().
- * \param src_dst 0 for src_indices, 1 for dst_indices.
- * \return Array of PrimExpr representing the indices for the copy operation.
+ * This function generates the actual index expressions for accessing source or
+ * destination buffers. For dimensions with extent=1, it uses the range minimum;
+ * for others, it adds the iteration variable. \param ivs Array of IterVar
+ * returned by MakeIterVars(). \param src_dst 0 for src_indices, 1 for
+ * dst_indices. \return Array of PrimExpr representing the indices for the copy
+ * operation.
  */
 Array<PrimExpr> Copy::MakeIndices(const Array<IterVar> &ivs,
                                   int src_dst) const {
@@ -185,11 +189,10 @@ Array<PrimExpr> Copy::MakeIndices(const Array<IterVar> &ivs,
 /*!
  * \brief Create predicate for the copy operation.
  * This function generates boundary checks to ensure memory access safety.
- * It creates conditions like (min + iv) < extent and (min + iv) >= 0 for each dimension.
- * \param analyzer Arithmetic analyzer for simplification.
- * \param ivs Array of IterVar.
- * \param extents Array of PrimExpr representing the extents of the copy operation.
- * \param src_dst 0 for src_indices, 1 for dst_indices.
+ * It creates conditions like (min + iv) < extent and (min + iv) >= 0 for each
+ * dimension. \param analyzer Arithmetic analyzer for simplification. \param ivs
+ * Array of IterVar. \param extents Array of PrimExpr representing the extents
+ * of the copy operation. \param src_dst 0 for src_indices, 1 for dst_indices.
  * \return PrimExpr representing the predicate for the copy operation.
  */
 PrimExpr Copy::MakePredicate(arith::Analyzer *analyzer,
@@ -224,10 +227,11 @@ PrimExpr Copy::MakePredicate(arith::Analyzer *analyzer,
 
 /*!
  * \brief Create SIMT loop for the copy operation.
- * This function generates a single-threaded loop structure for the copy operation.
- * It handles scalar copies (single element) and multi-dimensional copies with nested loops.
- * \param analyzer Arithmetic analyzer for simplification.
- * \return For representing the SIMT loop for the copy operation.
+ * This function generates a single-threaded loop structure for the copy
+ * operation. It handles scalar copies (single element) and multi-dimensional
+ * copies with nested loops. \param analyzer Arithmetic analyzer for
+ * simplification. \return For representing the SIMT loop for the copy
+ * operation.
  */
 For Copy::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
@@ -278,11 +282,12 @@ For Copy::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 
 /*!
  * \brief Compute linear layout for TMA copy.
- * This function creates a linear layout transformation for shared memory in TMA operations.
- * It transforms multi-dimensional indices into a linear address using a 256-element block pattern.
- * The transformation follows: [i, j] -> [i//256, j//256, i%256, j%256]
- * \param shared_tensor Buffer representing the shared tensor.
- * \return Layout representing the linear layout for the TMA copy.
+ * This function creates a linear layout transformation for shared memory in TMA
+ * operations. It transforms multi-dimensional indices into a linear address
+ * using a 256-element block pattern. The transformation follows: [i, j] ->
+ * [i//256, j//256, i%256, j%256] \param shared_tensor Buffer representing the
+ * shared tensor. \return Layout representing the linear layout for the TMA
+ * copy.
  */
 Layout Copy::ComputeLinearLayout(const Buffer &shared_tensor) const {
   Array<PrimExpr> input_size = shared_tensor->shape;
@@ -303,12 +308,13 @@ Layout Copy::ComputeLinearLayout(const Buffer &shared_tensor) const {
 
 /*!
  * \brief Infer layout for the copy operation.
- * This function determines the optimal memory layout for the copy operation based on the target architecture.
- * For bulk load/store operations, it may apply swizzling layouts for better performance.
- * For LDSM/STSM operations, it uses register layout inference from the underlying parallel op.
- * \param T LayoutInferArgs containing target and layout map.
- * \param level InferLevel indicating the level of layout inference.
- * \return LayoutMap containing the inferred layout.
+ * This function determines the optimal memory layout for the copy operation
+ * based on the target architecture. For bulk load/store operations, it may
+ * apply swizzling layouts for better performance. For LDSM/STSM operations, it
+ * uses register layout inference from the underlying parallel op. \param T
+ * LayoutInferArgs containing target and layout map. \param level InferLevel
+ * indicating the level of layout inference. \return LayoutMap containing the
+ * inferred layout.
  */
 LayoutMap Copy::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   auto target = T.target;
@@ -316,7 +322,8 @@ LayoutMap Copy::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore) {
     // if can apply swizzling, we skip layout inference
     // for bulk load/store, we can directly apply the layout of normal copy
-    // This must be a global/shared layout, so we can skip the parallel op layout inference (parallel layout inference only annotate the loop layout
+    // This must be a global/shared layout, so we can skip the parallel op
+    // layout inference (parallel layout inference only annotate the loop layout
     // and the register layout).
     bool is_load = copy_inst == CopyInst::kBulkLoad;
     Buffer global_tensor = is_load ? src : dst;
@@ -342,11 +349,11 @@ LayoutMap Copy::InferLayout(const LayoutInferArgs &T, InferLevel level) {
 
 /*!
  * \brief Check if the copy operation is a bulk load.
- * This function verifies if the copy operation can be implemented using CUDA's Bulk Load instruction.
- * Requirements include: target supports bulk copy, source is global memory, destination is shared.dyn,
- * and both buffers have the same data type.
- * \param target Target device.
- * \return True if the copy operation is a bulk load, false otherwise.
+ * This function verifies if the copy operation can be implemented using CUDA's
+ * Bulk Load instruction. Requirements include: target supports bulk copy,
+ * source is global memory, destination is shared.dyn, and both buffers have the
+ * same data type. \param target Target device. \return True if the copy
+ * operation is a bulk load, false otherwise.
  */
 bool Copy::CheckBulkLoad(Target target) const {
   // 1. arch must have bulk copy support
@@ -369,11 +376,11 @@ bool Copy::CheckBulkLoad(Target target) const {
 
 /*!
  * \brief Check if the copy operation is a bulk store.
- * This function verifies if the copy operation can be implemented using CUDA's Bulk Store instruction.
- * Requirements include: target supports bulk copy, source is shared.dyn, destination is global memory,
- * and both buffers have the same data type.
- * \param target Target device.
- * \return True if the copy operation is a bulk store, false otherwise.
+ * This function verifies if the copy operation can be implemented using CUDA's
+ * Bulk Store instruction. Requirements include: target supports bulk copy,
+ * source is shared.dyn, destination is global memory, and both buffers have the
+ * same data type. \param target Target device. \return True if the copy
+ * operation is a bulk store, false otherwise.
  */
 bool Copy::CheckBulkStore(Target target) const {
   // 1. arch must have bulk copy support
@@ -396,10 +403,11 @@ bool Copy::CheckBulkStore(Target target) const {
 
 /*!
  * \brief Check if the copy operation is a LDSM copy.
- * This function verifies if the copy operation can be implemented using CUDA's Load Matrix (LDSM) instruction.
- * Requirements include: target supports LDMATRIX, source is shared.dyn, destination is local.fragment.
- * \param target Target device.
- * \return True if the copy operation is a LDSM copy, false otherwise.
+ * This function verifies if the copy operation can be implemented using CUDA's
+ * Load Matrix (LDSM) instruction. Requirements include: target supports
+ * LDMATRIX, source is shared.dyn, destination is local.fragment. \param target
+ * Target device. \return True if the copy operation is a LDSM copy, false
+ * otherwise.
  */
 bool Copy::CheckLDSMCopy(Target target) const {
   return TargetHasLdmatrix(target) && src.scope() == "shared.dyn" &&
@@ -408,10 +416,11 @@ bool Copy::CheckLDSMCopy(Target target) const {
 
 /*!
  * \brief Check if the copy operation is a STSM copy.
- * This function verifies if the copy operation can be implemented using CUDA's Store Matrix (STSM) instruction.
- * Requirements include: target supports STMATRIX, source is local.fragment, destination is shared.dyn.
- * \param target Target device.
- * \return True if the copy operation is a STSM copy, false otherwise.
+ * This function verifies if the copy operation can be implemented using CUDA's
+ * Store Matrix (STSM) instruction. Requirements include: target supports
+ * STMATRIX, source is local.fragment, destination is shared.dyn. \param target
+ * Target device. \return True if the copy operation is a STSM copy, false
+ * otherwise.
  */
 bool Copy::CheckSTSMCopy(Target target) const {
   return TargetHasStmatrix(target) && src.scope() == "local.fragment" &&
@@ -420,11 +429,11 @@ bool Copy::CheckSTSMCopy(Target target) const {
 
 /*!
  * \brief Get the copy instruction type.
- * This function determines the most appropriate copy instruction based on the target architecture
- * and buffer memory scopes. It checks for specialized instructions (TMA, LDSM, STSM) in order of preference,
- * falling back to normal copy if no specialized instruction is applicable.
- * \param target Target device.
- * \return CopyInst representing the copy instruction type.
+ * This function determines the most appropriate copy instruction based on the
+ * target architecture and buffer memory scopes. It checks for specialized
+ * instructions (TMA, LDSM, STSM) in order of preference, falling back to normal
+ * copy if no specialized instruction is applicable. \param target Target
+ * device. \return CopyInst representing the copy instruction type.
  */
 Copy::CopyInst Copy::GetCopyInst(Target target) const {
   if (CheckBulkLoad(target)) {
@@ -442,8 +451,9 @@ Copy::CopyInst Copy::GetCopyInst(Target target) const {
 
 /*!
  * \brief Lower the copy operation to PTX code.
- * This function converts the high-level copy operation into low-level PTX instructions.
- * It dispatches to specialized lowering functions based on the determined copy instruction type:
+ * This function converts the high-level copy operation into low-level PTX
+ * instructions. It dispatches to specialized lowering functions based on the
+ * determined copy instruction type:
  * - Bulk Load/Store: Uses Tensor Memory Accelerator (TMA) instructions
  * - LDSM/STSM: Uses matrix load/store instructions for tensor cores
  * - Normal: Uses standard load/store operations with loop transformations
@@ -472,12 +482,12 @@ Stmt Copy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
 /*!
  * \brief Lower the copy operation to a normal copy.
- * This function generates standard load/store operations for targets that don't support
- * specialized copy instructions. It applies loop fusion, parallelization, and vectorization
- * transformations to optimize performance on both CPU and GPU targets.
- * \param T LowerArgs containing target and layout map.
- * \param analyzer Arithmetic analyzer for simplification.
- * \return Stmt representing the normal copy code.
+ * This function generates standard load/store operations for targets that don't
+ * support specialized copy instructions. It applies loop fusion,
+ * parallelization, and vectorization transformations to optimize performance on
+ * both CPU and GPU targets. \param T LowerArgs containing target and layout
+ * map. \param analyzer Arithmetic analyzer for simplification. \return Stmt
+ * representing the normal copy code.
  */
 Stmt Copy::LowerNormalCopy(const LowerArgs &T,
                            arith::Analyzer *analyzer) const {
@@ -516,10 +526,10 @@ Stmt Copy::LowerNormalCopy(const LowerArgs &T,
 
 /*!
  * \brief Lower the copy operation to LDSM/STSM copy.
- * This function generates PTX code for matrix load/store operations (LDSM/STSM).
- * It handles 8x8 fragment layout validation, shared memory stride checking,
- * and generates optimized matrix transfer instructions for tensor cores.
- * Falls back to normal copy if layout constraints are not satisfied.
+ * This function generates PTX code for matrix load/store operations
+ * (LDSM/STSM). It handles 8x8 fragment layout validation, shared memory stride
+ * checking, and generates optimized matrix transfer instructions for tensor
+ * cores. Falls back to normal copy if layout constraints are not satisfied.
  * \param T LowerArgs containing target and layout map.
  * \param analyzer Arithmetic analyzer for simplification.
  * \param copy_inst CopyInst representing the copy instruction type.
@@ -556,7 +566,8 @@ Stmt Copy::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   local_tensor = T.buffer_remap[local_tensor];
   // currently only support 1-d case
   if (local_layout->OutputDim() != 1) {
-    // TMA ldmatrix/stmatrix cannot support non-1-d layout, will be fallback to normal copy
+    // TMA ldmatrix/stmatrix cannot support non-1-d layout, will be fallback to
+    // normal copy
     return LowerNormalCopy(T, analyzer);
   }
 
@@ -571,8 +582,9 @@ Stmt Copy::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
 
   // Check local_layout follows 8x8 layout
   // LDSM/STSM instructions require 8x8 matrix fragment layout
-  // This matches the warp-level matrix multiplication pattern used in tensor cores
-  // We check both normal and transposed layouts to support different access patterns
+  // This matches the warp-level matrix multiplication pattern used in tensor
+  // cores We check both normal and transposed layouts to support different
+  // access patterns
   bool is_transposed;
   IterVar col_var = loop_vars[loop_vars.size() - 1];
   IterVar row_var = loop_vars[loop_vars.size() - 2];
@@ -595,21 +607,24 @@ Stmt Copy::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
                                 row_var->dom->extent, 2, analyzer)) {
     is_transposed = true;
   } else {
-    // TMA ldmatrix/stmatrix cannot support non-8x8 layout, will be fallback to normal copy
+    // TMA ldmatrix/stmatrix cannot support non-8x8 layout, will be fallback to
+    // normal copy
     return LowerNormalCopy(T, analyzer);
   }
   // Check shared_layout is 16 bytes continuous
   // LDSM/STSM instructions require 16-byte aligned data (half-precision floats)
   // This is a hardware constraint for matrix load/store operations
   if (shared_tensor->dtype.bytes() != 2) {
-    // TMA ldmatrix/stmatrix cannot support non-16 bytes continuous layout, will be fallback to normal copy
+    // TMA ldmatrix/stmatrix cannot support non-16 bytes continuous layout, will
+    // be fallback to normal copy
     return LowerNormalCopy(T, analyzer);
   }
   PrimExpr flattened_indice =
       shared_tensor.OffsetOf(shared_indices_transformed).back();
   if (!IndiceCanVectorize(flattened_indice, loop_vars.back()->var,
                           loop_vars.back()->dom->extent, 8, analyzer)) {
-    // TMA ldmatrix/stmatrix cannot support non-16 bytes continuous layout, will be fallback to normal copy
+    // TMA ldmatrix/stmatrix cannot support non-16 bytes continuous layout, will
+    // be fallback to normal copy
     return LowerNormalCopy(T, analyzer);
   }
 
@@ -617,7 +632,8 @@ Stmt Copy::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   for (size_t i = 0; i < dst_range.size(); i++) {
     if (!is_zero(dst_range[i]->min) ||
         !analyzer->CanProveEqual(dst_range[i]->extent, dst->shape[i]))
-      // TMA ldmatrix/stmatrix cannot support non-full range, will be fallback to normal copy
+      // TMA ldmatrix/stmatrix cannot support non-full range, will be fallback
+      // to normal copy
       return LowerNormalCopy(T, analyzer);
   }
 
@@ -664,7 +680,8 @@ Stmt Copy::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   if (is_ldmatrix) {
     // Can only support same dtype for ldmatrx
     if (local_tensor->dtype != shared_tensor->dtype) {
-      // TMA ldmatrix cannot support different dtype, will be fallback to normal copy
+      // TMA ldmatrix cannot support different dtype, will be fallback to normal
+      // copy
       return LowerNormalCopy(T, analyzer);
     }
     PrimExpr local_addr = local_tensor.access_ptr(
@@ -702,14 +719,14 @@ Stmt Copy::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
 
 /*!
  * \brief Lower the copy operation to bulk copy using TMA.
- * This function generates PTX code for Tensor Memory Accelerator (TMA) bulk copy operations.
- * It creates TMA descriptors, handles shared memory layout detection (including swizzling),
- * and generates optimized bulk load/store instructions for Hopper architecture.
- * Falls back to normal copy if layout or shape constraints are not satisfied.
- * \param T LowerArgs containing target and layout map.
- * \param analyzer Arithmetic analyzer for simplification.
- * \param copy_inst CopyInst representing the copy instruction type.
- * \return Stmt representing the bulk copy code.
+ * This function generates PTX code for Tensor Memory Accelerator (TMA) bulk
+ * copy operations. It creates TMA descriptors, handles shared memory layout
+ * detection (including swizzling), and generates optimized bulk load/store
+ * instructions for Hopper architecture. Falls back to normal copy if layout or
+ * shape constraints are not satisfied. \param T LowerArgs containing target and
+ * layout map. \param analyzer Arithmetic analyzer for simplification. \param
+ * copy_inst CopyInst representing the copy instruction type. \return Stmt
+ * representing the bulk copy code.
  */
 Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
                          CopyInst copy_inst) const {
@@ -720,7 +737,8 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   Buffer shared_tensor = is_load ? dst : src;
   Array<Range> global_range = is_load ? src_range : dst_range;
   Array<Range> shared_range = is_load ? dst_range : src_range;
-  // TMA bulk copy cannot support a non-swizzled global layout, will be fallback to normal copy
+  // TMA bulk copy cannot support a non-swizzled global layout, will be fallback
+  // to normal copy
   if (T.layout_map.count(global_tensor)) {
     LOG(WARNING) << "TMA bulk copy cannot support a non-swizzled global "
                     "layout, fallback to normal copy.";
@@ -840,9 +858,9 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
 
   // Detect smem layout
   // Shared memory swizzling is crucial for TMA performance
-  // It determines how data is arranged in shared memory banks to minimize bank conflicts
-  // Different swizzle patterns (32B, 64B, 128B) offer different trade-offs between
-  // access efficiency and memory usage
+  // It determines how data is arranged in shared memory banks to minimize bank
+  // conflicts Different swizzle patterns (32B, 64B, 128B) offer different
+  // trade-offs between access efficiency and memory usage
   desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
   if (!shared_layout.defined()) {
     desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
@@ -853,9 +871,10 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     ICHECK(stride != nullptr && continuous != nullptr);
     if (StructuralEqual()(shared_layout, linear_layout)) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
-    } else if (StructuralEqual()(shared_layout, makeGemmABLayoutPadded(
-                                             *stride, *continuous,
-                                             shared_tensor->dtype.bits()))) {
+    } else if (StructuralEqual()(
+                   shared_layout,
+                   makeGemmABLayoutPadded(*stride, *continuous,
+                                          shared_tensor->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
     } else if (StructuralEqual()(
                    shared_layout,
@@ -901,9 +920,12 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
 
   int inner_box_dim_ = instruction_dim * shared_tensor->dtype.bytes();
 
-  if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE) && inner_box_dim_ % 256 != 0) {
-    LOG(WARNING) << "TMA bulk copy cannot support a non-swizzled global layout with inner_box_dim_ % 256 != 0"
-                << "inner_box_dim_: " << inner_box_dim_ << ", will be fallback to normal copy";
+  if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE) &&
+      inner_box_dim_ % 256 != 0) {
+    LOG(WARNING) << "TMA bulk copy cannot support a non-swizzled global layout "
+                    "with inner_box_dim_ % 256 != 0"
+                 << "inner_box_dim_: " << inner_box_dim_
+                 << ", will be fallback to normal copy";
     return LowerNormalCopy(T, analyzer);
   }
   // Check inner_box_dim_ for each swizzle type in a cleaner way
@@ -918,8 +940,9 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   };
   for (const auto &check : swizzle_checks) {
     if (desc.swizzle == check.swizzle && inner_box_dim_ > check.max_dim) {
-      LOG(WARNING) << "TMA bulk copy cannot support a swizzled global layout with inner_box_dim_ > " << check.max_dim
-                   << ", will be fallback to normal copy";
+      LOG(WARNING) << "TMA bulk copy cannot support a swizzled global layout "
+                      "with inner_box_dim_ > "
+                   << check.max_dim << ", will be fallback to normal copy";
       return LowerNormalCopy(T, analyzer);
     }
   }
@@ -999,10 +1022,11 @@ Array<PrimExpr> TMADesc::EncodeCallArgs() const {
 
 /*!
  * \brief Constructor for Conv2DIm2ColOp.
- * This operation performs im2col transformation for 2D convolution on GPU using TMA.
- * It extracts patches from the input tensor and rearranges them for efficient matrix multiplication.
- * \param args Array of PrimExpr representing the arguments of the Conv2DIm2ColOp.
- * \param vmap BufferMap mapping original buffer names to new buffer names.
+ * This operation performs im2col transformation for 2D convolution on GPU using
+ * TMA. It extracts patches from the input tensor and rearranges them for
+ * efficient matrix multiplication. \param args Array of PrimExpr representing
+ * the arguments of the Conv2DIm2ColOp. \param vmap BufferMap mapping original
+ * buffer names to new buffer names.
  */
 Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args, BufferMap vmap) {
   src = vmap[GetVarFromAccessPtr(args[0])];
@@ -1018,11 +1042,11 @@ Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args, BufferMap vmap) {
 
 /*!
  * \brief Lower the Conv2DIm2ColOp to PTX code.
- * This function generates optimized im2col transformation using TMA instructions.
- * It creates a TMA descriptor for the im2col operation, handling convolution parameters
- * like kernel size, stride, padding, and dilation. The operation is optimized for
- * Hopper architecture with support for different shared memory layouts.
- * \param T LowerArgs containing target and layout map.
+ * This function generates optimized im2col transformation using TMA
+ * instructions. It creates a TMA descriptor for the im2col operation, handling
+ * convolution parameters like kernel size, stride, padding, and dilation. The
+ * operation is optimized for Hopper architecture with support for different
+ * shared memory layouts. \param T LowerArgs containing target and layout map.
  * \param analyzer Arithmetic analyzer for simplification.
  * \return Stmt representing the PTX code for the Conv2DIm2ColOp.
  */
@@ -1153,10 +1177,10 @@ Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
 /*!
  * \brief Encode the TMA im2col descriptor into an array of PrimExpr.
  * This function serializes the TMA im2col descriptor fields for passing to the
- * create_tma_im2col_descriptor() builtin function. It includes convolution-specific
- * parameters like kernel size, stride, padding, and dilation in addition to standard
- * tensor descriptor fields.
- * \return Array of PrimExpr representing the encoded TMA im2col descriptor.
+ * create_tma_im2col_descriptor() builtin function. It includes
+ * convolution-specific parameters like kernel size, stride, padding, and
+ * dilation in addition to standard tensor descriptor fields. \return Array of
+ * PrimExpr representing the encoded TMA im2col descriptor.
  */
 Array<PrimExpr> TMAIm2ColDesc::EncodeCallArgs() const {
   Array<PrimExpr> args;
@@ -1196,7 +1220,8 @@ TIR_REGISTER_TL_OP(Copy, copy)
 
 // Register the Conv2DIm2Col operation with TVM's TIR system
 // This operation performs im2col transformation for 2D convolutions using TMA
-// - Takes 9 inputs: src_buffer, dst_buffer, nhw_step, c_step, kernel, stride, dilation, padding, eviction_policy
+// - Takes 9 inputs: src_buffer, dst_buffer, nhw_step, c_step, kernel, stride,
+// dilation, padding, eviction_policy
 // - Marked as opaque since it has side effects (memory writes)
 TIR_REGISTER_TL_OP(Conv2DIm2ColOp, c2d_im2col)
     .set_num_inputs(9)

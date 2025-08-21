@@ -115,10 +115,10 @@ public:
    * \brief Copy instruction type.
    */
   enum class CopyInst {
-    kNormal = 0, // utilize ldg/stg or cpasync or any buffer copy
-    kLDSM = 1, // ldmatrix memory copy
-    kSTSM = 2, // stmatrix memory copy
-    kBulkLoad = 3, // utilize tma load
+    kNormal = 0,    // utilize ldg/stg or cpasync or any buffer copy
+    kLDSM = 1,      // ldmatrix memory copy
+    kSTSM = 2,      // stmatrix memory copy
+    kBulkLoad = 3,  // utilize tma load
     kBulkStore = 4, // utilize tma store
   };
 
@@ -171,13 +171,15 @@ protected:
   /*!
    * \brief Generate lowering for bulk/global-to-shared copy.
    */
-  Stmt LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer, CopyInst copy_inst) const;
+  Stmt LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
+                     CopyInst copy_inst) const;
 
   /*!
    * \brief Generate lowering for LDS Memory Copy (shared memory to shared
    * memory or smem usage).
    */
-  Stmt LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer, CopyInst copy_inst) const;
+  Stmt LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
+                     CopyInst copy_inst) const;
 
   /*!
    * \brief Generate lowering for normal copy.
@@ -215,7 +217,6 @@ protected:
    */
   PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
                          Array<PrimExpr> extents, int src_dst) const;
-
 
   Array<PrimExpr> args_; // Copy parameters (indices, sizes, etc.)
 
