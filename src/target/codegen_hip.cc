@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "../op/builtin.h"
+#include "../op/bulk_copy.h"
 #include "target/source/ptx.h"
 
 namespace tvm {
