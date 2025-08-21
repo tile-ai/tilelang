@@ -9,10 +9,12 @@ tilelang.testing.set_random_seed(42)
 
 
 # TODO(@yu): checkout tma with nsa
-@tilelang.jit(out_idx=[-1], pass_configs={
-    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-})
+@tilelang.jit(
+    out_idx=[-1],
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    })
 def native_sparse_attention(
     batch,
     heads,
