@@ -330,7 +330,7 @@ LayoutMap Copy::InferLayout(const LayoutInferArgs &T, InferLevel level) {
     Buffer shared_tensor = is_load ? dst : src;
     // check shared layout is non-swizzle
     // skip layout inference if shared layout is already annotated
-    if (!T.layout_map.count(shared_tensor)) {
+    if (level == InferLevel::kFree && !T.layout_map.count(shared_tensor)) {
       // create a new layout map for tma linear layout
       Layout linear_layout = ComputeLinearLayout(shared_tensor);
       return Map<Buffer, Layout>({{shared_tensor, linear_layout}});
@@ -646,7 +646,7 @@ Stmt Copy::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     num = 2;
 
   Array<PrimExpr> args;
-  const Op &op = is_ldmatrix ? tl::ptx_ldmatirx() : tl::ptx_stmatirx();
+  const Op &op = is_ldmatrix ? tl::ptx_ldmatrix() : tl::ptx_stmatrix();
   args.push_back(static_cast<int>(is_transposed));
   args.push_back(num);
 

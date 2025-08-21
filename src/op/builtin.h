@@ -146,15 +146,15 @@ TVM_DLL const Op &mbarrier_expect_tx();
 /*!
  * \brief tvm intrinsics for ldmatrix
  *
- * ptx_ldmatirx(transposed, num, shared_addr, local_addr)
+ * ptx_ldmatrix(transposed, num, shared_addr, local_addr)
  *
  */
-TVM_DLL const Op &ptx_ldmatirx();
+TVM_DLL const Op &ptx_ldmatrix();
 
 /*!
  * \brief tvm intrinsics for stmatrix
  *
- * ptx_ldmatirx(transposed, num, shared_addr, int32_values...)
+ * ptx_ldmatrix(transposed, num, shared_addr, int32_values...)
  *
  */
 TVM_DLL const Op &ptx_stmatrix();
