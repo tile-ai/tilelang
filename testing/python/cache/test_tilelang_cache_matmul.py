@@ -1,6 +1,6 @@
 from tilelang import tvm as tvm
 import tilelang.testing
-from tilelang import cached
+from tilelang.cache import cached
 import tilelang.language as T
 
 
