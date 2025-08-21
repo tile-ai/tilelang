@@ -929,16 +929,6 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
 
   int inner_box_dim_ = instruction_dim * shared_tensor->dtype.bytes();
 
-  if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE) &&
-      inner_box_dim_ % 256 != 0) {
-    LOG(WARNING)
-        << "TMA bulk copy fallback to normal copy: "
-        << "non-swizzled global layout with inner_box_dim_ % 256 != 0. "
-        << "inner_box_dim_: " << inner_box_dim_ << ", src buffer: " << src->name
-        << ", dst buffer: " << dst->name << ", smem_box: " << desc.smem_box
-        << ", src shape: " << src->shape << ", dst shape: " << dst->shape;
-    return LowerNormalCopy(T, analyzer);
-  }
   // Check inner_box_dim_ for each swizzle type in a cleaner way
   struct SwizzleCheck {
     int swizzle;
