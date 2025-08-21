@@ -14,7 +14,6 @@
 #include <vector>
 
 #include "../op/builtin.h"
-#include "../op/bulk_copy.h"
 #include "arith/pattern_match.h"
 #include "target/source/ptx.h"
 

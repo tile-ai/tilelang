@@ -55,6 +55,14 @@ static constexpr const char *kDisableDynamicTailSplit =
 static constexpr const char *kDynamicAlignment = "tl.dynamic_alignment";
 
 /*!
+ * \brief Get the type of the CUDA tensor map
+ *
+ * DataType cuTensorMapType()
+ *
+ */
+DataType cuTensorMapType();
+
+/*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load
  *
  * CuTensorMap* create_tma_descriptor(data_type, rank, global_addr,
