@@ -14,11 +14,14 @@
 
 #include "../op/builtin.h"
 #include "./common/collector.h"
+#include "runtime/thread_storage_scope.h"
+#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+using namespace runtime;
 using arith::IRVisitorWithAnalyzer;
 
 enum class Role { kConsumer, kProducer, kBoth };
@@ -149,8 +152,8 @@ public:
   }
 
   void VisitStmt_(const BufferStoreNode *op) final {
-    bool is_shared_store =
-        op->buffer.scope() == "shared.dyn" || op->buffer.scope() == "shared";
+    auto scope = StorageScope::Create(GetPtrStorageScope(op->buffer->data));
+    bool is_shared_store = scope.rank == StorageRank::kShared;
     if (producer_buffers_.count(op->buffer.get())) {
       SetRole(op, Role::kBoth);
       return;
@@ -570,29 +573,35 @@ public:
 class WSCodeEmitter : public StmtMutator {
 public:
   /**
-         * @brief Construct a warp-specialized code emitter configured for producer or consumer emission.
-         *
-         * Initializes a WSCodeEmitter that will emit barrier-aware, role-filtered code for a single
-         * warp-specialized block. The emitter is configured with the loop/thread iteration variable,
-         * buffer mapping, role marker used to classify statements, and two flags that control emission
-         * behavior:
-         *
-         * - `mbarrier_only`: when true, emission is restricted to barrier-related operations only.
-         * - `only_has_wgmma`: when true, the emitter will account for the presence of WgMMA
-         *   (workgroup MMA) operations when computing barrier/thread gating behavior.
-         *
-         * @param is_emitting_producer True to emit producer-side groups; false to emit consumer-side groups.
-         * @param thread_iv IterVar representing the thread iteration variable (threadIdx.*) whose Var is used
-         *                  for thread-index rewrites and gating.
-         * @param buffer_data_to_buffer Map from buffer data Var to the corresponding Buffer (used to resolve
-         *                              buffer references during emission).
-         * @param marker Role marker that classifies statements as producer/consumer/both; used to filter
-         *               which statements are emitted on this path.
-         * @param mbarrier_only If true, restrict emission to mbarrier-related statements and helpers.
-         * @param only_has_wgmma If true, adjust emission and barrier-thread-count logic for blocks that
-         *                       contain WgMMA operations.
-         */
-        WSCodeEmitter(bool is_emitting_producer, IterVar thread_iv,
+   * @brief Construct a warp-specialized code emitter configured for producer or
+   * consumer emission.
+   *
+   * Initializes a WSCodeEmitter that will emit barrier-aware, role-filtered
+   * code for a single warp-specialized block. The emitter is configured with
+   * the loop/thread iteration variable, buffer mapping, role marker used to
+   * classify statements, and two flags that control emission behavior:
+   *
+   * - `mbarrier_only`: when true, emission is restricted to barrier-related
+   * operations only.
+   * - `only_has_wgmma`: when true, the emitter will account for the presence of
+   * WgMMA (workgroup MMA) operations when computing barrier/thread gating
+   * behavior.
+   *
+   * @param is_emitting_producer True to emit producer-side groups; false to
+   * emit consumer-side groups.
+   * @param thread_iv IterVar representing the thread iteration variable
+   * (threadIdx.*) whose Var is used for thread-index rewrites and gating.
+   * @param buffer_data_to_buffer Map from buffer data Var to the corresponding
+   * Buffer (used to resolve buffer references during emission).
+   * @param marker Role marker that classifies statements as
+   * producer/consumer/both; used to filter which statements are emitted on this
+   * path.
+   * @param mbarrier_only If true, restrict emission to mbarrier-related
+   * statements and helpers.
+   * @param only_has_wgmma If true, adjust emission and barrier-thread-count
+   * logic for blocks that contain WgMMA operations.
+   */
+  WSCodeEmitter(bool is_emitting_producer, IterVar thread_iv,
                 Map<Var, Buffer> buffer_data_to_buffer,
                 const WarpSpecializedRoleMarker &marker,
                 bool mbarrier_only = false, bool only_has_wgmma = false)
@@ -602,14 +611,15 @@ public:
         only_has_wgmma_(only_has_wgmma) {}
 
   /**
- * @brief Whether a SIMT-style bulk copy was detected.
- *
- * Returns true when a simulated SIMT (thread-parallel) copy pattern was observed
- * during analysis/emission, which can affect barrier insertion and copy emission.
- *
- * @return true if a SIMT copy was detected; false otherwise.
- */
-bool hasSimtCopy() const { return has_simt_copy_; }
+   * @brief Whether a SIMT-style bulk copy was detected.
+   *
+   * Returns true when a simulated SIMT (thread-parallel) copy pattern was
+   * observed during analysis/emission, which can affect barrier insertion and
+   * copy emission.
+   *
+   * @return true if a SIMT copy was detected; false otherwise.
+   */
+  bool hasSimtCopy() const { return has_simt_copy_; }
 
 private:
   template <typename NodeType> Stmt FilterByRole(const NodeType *op) {
@@ -628,18 +638,18 @@ private:
   }
 
   /**
-   * @brief Visit and transform a SeqStmt node, emitting grouped blocks with barrier
-   * synchronization according to producer/consumer roles.
+   * @brief Visit and transform a SeqStmt node, emitting grouped blocks with
+   * barrier synchronization according to producer/consumer roles.
    *
    * This method examines the sequence to determine whether producer-side
-   * synchronization is required (based on marker_ roles). If no producer sync is
-   * needed it delegates to FilterByRole. Otherwise it:
+   * synchronization is required (based on marker_ roles). If no producer sync
+   * is needed it delegates to FilterByRole. Otherwise it:
    * - Recursively visits and transforms each child statement.
    * - Extracts an acquire/release sync pattern for the sequence via
    *   ExtractSyncPattern.
    * - For producer emission (is_emitting_producer_ == true):
-   *   - Skips consumer-only statements unless marker_ marks a statement as Both,
-   *     in which case the statement is emitted as its own group.
+   *   - Skips consumer-only statements unless marker_ marks a statement as
+   * Both, in which case the statement is emitted as its own group.
    *   - For each statement, inserts parity waits for acquire patterns, rewrites
    *     release statements with MbarrierRewriter using a computed barrier id,
    *     collects SimT-copy presence (setting has_simt_copy_ and inserting
@@ -1248,21 +1258,21 @@ private:
   }
 
   /**
-   * @brief Rewrite a BlockRealize for warp specialization, inserting barriers and
-   *        emitting producer/consumer bodies.
+   * @brief Rewrite a BlockRealize for warp specialization, inserting barriers
+   * and emitting producer/consumer bodies.
    *
    * This visitor handles BlockRealize nodes when a thread IterVar (thread_iv_)
    * is defined and warp-specialization is applicable. It:
    * - Determines producer/consumer roles via WarpSpecializedRoleMarker and
    *   returns the original block if no producer is detected.
-   * - If warp specialization is disabled, emits only mbarrier initialization and
-   *   the mbarrier-only transformed body.
+   * - If warp specialization is disabled, emits only mbarrier initialization
+   * and the mbarrier-only transformed body.
    * - Otherwise, detects WgMMA usage for the block body and constructs separate
    *   WSCodeEmitter instances for producer and consumer paths (propagating the
    *   WgMMA flag to the consumer emitter).
-   * - Generates producer/consumer code, applies register hint calls (set_max_nreg)
-   *   when available, and rewrites thread indices with ThreadIdxRewriter to
-   *   partition threads between producer and consumer roles.
+   * - Generates producer/consumer code, applies register hint calls
+   * (set_max_nreg) when available, and rewrites thread indices with
+   * ThreadIdxRewriter to partition threads between producer and consumer roles.
    * - Computes and initializes a list of mbarrier handles with per-barrier
    *   arrive thread counts (taking SIMT-copy and WgMMA cases into account).
    * - Wraps the transformed body in an IfThenElse that dispatches producer vs

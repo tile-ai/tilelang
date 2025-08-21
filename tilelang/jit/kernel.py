@@ -11,6 +11,9 @@ from tilelang.jit.adapter import (BaseKernelAdapter, CtypesKernelAdapter, Cython
                                   NVRTCKernelAdapter, TorchDLPackKernelAdapter)
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import AVALIABLE_TARGETS, determine_target
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class JITKernel(object):
@@ -115,7 +118,10 @@ class JITKernel(object):
         # NOTE(Chenggang): printing could let the training/inference framework easier to know
         # whether the communication timeout is from compilation
         if env.TILELANG_PRINT_ON_COMPILATION.lower() in ("1", "true", "yes", "on"):
-            print(f"TileLang begins to compile kernel `{func.__name__}` with `{out_idx=}`")
+            # assert func must have "global_symbol"
+            func_name = func.attrs.get("global_symbol")
+            assert func_name is not None, "func must have global_symbol"
+            logger.info(f"TileLang begins to compile kernel `{func_name}` with `{out_idx=}`")
 
         # Compile the TileLang function and create a kernel adapter for execution.
         adapter = self._compile_and_create_adapter(func, out_idx)

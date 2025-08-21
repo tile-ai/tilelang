@@ -1,5 +1,4 @@
 import torch
-import torch.backends
 from tilelang import tvm as tvm
 import tilelang.testing
 from tvm import DataType
