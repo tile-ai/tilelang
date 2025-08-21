@@ -66,7 +66,6 @@ def main():
 
     # Run the kernel through the Profiler
     c = jit_kernel(a, b)
-
     # Reference multiplication using PyTorch
     ref_c = a @ b
 

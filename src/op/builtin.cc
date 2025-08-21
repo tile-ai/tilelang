@@ -83,7 +83,7 @@ TIR_DEFINE_TL_BUILTIN(ptx_ldmatirx)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TIR_DEFINE_TL_BUILTIN(ptx_stmatirx)
+TIR_DEFINE_TL_BUILTIN(ptx_stmatrix)
     .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));

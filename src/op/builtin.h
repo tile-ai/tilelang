@@ -62,7 +62,7 @@ static constexpr const char *kDynamicAlignment = "tl.dynamic_alignment";
  * swizzle, l2_promotion, oob_fill)
  *
  */
-const Op &create_tma_descriptor();
+TVM_DLL const Op &create_tma_descriptor();
 
 /*!
  * \brief tvm intrinsics for TMADescriptor creation for image to column load
@@ -73,7 +73,7 @@ const Op &create_tma_descriptor();
  * l2_promotion, oob_fill)
  *
  */
-const Op &create_tma_im2col_descriptor();
+TVM_DLL const Op &create_tma_im2col_descriptor();
 
 /*!
  * \brief Create a list of mbarrier with num_threads
@@ -81,7 +81,7 @@ const Op &create_tma_im2col_descriptor();
  * create_list_of_mbarrier(num_threads0, num_threads1, ...)
  *
  */
-const Op &create_list_of_mbarrier();
+TVM_DLL const Op &create_list_of_mbarrier();
 
 /*!
  * \brief Get the mbarrier with barrier_id
@@ -89,7 +89,7 @@ const Op &create_list_of_mbarrier();
  * int64_t* GetMBarrier(barrier_id)
  *
  */
-const Op &get_mbarrier();
+TVM_DLL const Op &get_mbarrier();
 
 /*!
  * \brief tvm intrinsics for loading data from global tensor descriptor to
@@ -98,7 +98,7 @@ const Op &get_mbarrier();
  * tma_load(descriptor, mbarrier, smem_data, coord_0, coord_1, ...)
  *
  */
-const Op &tma_load();
+TVM_DLL const Op &tma_load();
 
 /*!
  * \brief tvm intrinsics for loading image from global tensor to columns in
@@ -108,7 +108,7 @@ const Op &tma_load();
  * image_offset, ...)
  *
  */
-const Op &tma_load_im2col();
+TVM_DLL const Op &tma_load_im2col();
 
 /*!
  * \brief tvm intrinsics for storing data from shared memory to global tensor
@@ -117,7 +117,7 @@ const Op &tma_load_im2col();
  * tma_store(descriptor, smem_data, coord_0, coord_1, ...)
  *
  */
-const Op &tma_store();
+TVM_DLL const Op &tma_store();
 
 /*!
  * \brief tvm intrinsics for mbarrier wait with parity bit
@@ -125,7 +125,7 @@ const Op &tma_store();
  * mbarrier_wait_parity(mbarrier, parity)
  *
  */
-const Op &mbarrier_wait_parity();
+TVM_DLL const Op &mbarrier_wait_parity();
 
 /*!
  * \brief tvm intrinsics for mbarrier expect tx
@@ -133,7 +133,7 @@ const Op &mbarrier_wait_parity();
  * mbarrier_expect_tx(mbarrier, transaction_bytes)
  *
  */
-const Op &mbarrier_expect_tx();
+TVM_DLL const Op &mbarrier_expect_tx();
 
 /*!
  * \brief tvm intrinsics for ldmatrix
@@ -141,7 +141,7 @@ const Op &mbarrier_expect_tx();
  * ptx_ldmatirx(transposed, num, shared_addr, local_addr)
  *
  */
-const Op &ptx_ldmatirx();
+TVM_DLL const Op &ptx_ldmatirx();
 
 /*!
  * \brief tvm intrinsics for stmatrix
@@ -149,7 +149,7 @@ const Op &ptx_ldmatirx();
  * ptx_ldmatirx(transposed, num, shared_addr, int32_values...)
  *
  */
-const Op &ptx_stmatirx();
+TVM_DLL const Op &ptx_stmatrix();
 
 /*!
  * \brief Pack two b16 value into a b32 value
@@ -157,7 +157,7 @@ const Op &ptx_stmatirx();
  * int32 pack_b16(b16_value, b16_value)
  *
  */
-const Op &pack_b16();
+TVM_DLL const Op &pack_b16();
 
 /*!
  * \brief Issue a shared memory fence for async operations
@@ -165,7 +165,7 @@ const Op &pack_b16();
  * FenceProxyAsync()
  *
  */
-const Op &fence_proxy_async();
+TVM_DLL const Op &fence_proxy_async();
 
 /*!
  * \brief Indicate arrival of warp issuing TMA_STORE
@@ -173,7 +173,7 @@ const Op &fence_proxy_async();
  * tma_store_arrive()
  *
  */
-const Op &tma_store_arrive();
+TVM_DLL const Op &tma_store_arrive();
 
 /*!
  * \brief Wait for TMA_STORE to finish
@@ -181,7 +181,7 @@ const Op &tma_store_arrive();
  * tma_store_wait()
  *
  */
-const Op &tma_store_wait();
+TVM_DLL const Op &tma_store_wait();
 
 /*!
  * \brief Set reg hint for warp-specialized branched
@@ -189,7 +189,7 @@ const Op &tma_store_wait();
  * SetMaxNRegInc(num_reg, is_inc)
  *
  */
-const Op &set_max_nreg();
+TVM_DLL const Op &set_max_nreg();
 
 /*!
  * \brief No set reg hint for warp-specialized branched
@@ -197,7 +197,7 @@ const Op &set_max_nreg();
  * no_set_max_nreg()
  *
  */
-const Op &no_set_max_nreg();
+TVM_DLL const Op &no_set_max_nreg();
 
 /*!
  * \brief Wait the previous wgmma to finish
@@ -205,7 +205,7 @@ const Op &no_set_max_nreg();
  * wait_wgmma(num_mma)
  *
  */
-const Op &wait_wgmma();
+TVM_DLL const Op &wait_wgmma();
 
 /*!
  * \brief Synchronize all threads in a grid
@@ -213,7 +213,7 @@ const Op &wait_wgmma();
  * sync_grid()
  *
  */
-const Op &sync_grid();
+TVM_DLL const Op &sync_grid();
 
 /*!
  * \brief tvm intrinsic for loop continue
@@ -221,7 +221,7 @@ const Op &sync_grid();
  * loop_break()
  *
  */
-const Op &loop_break();
+TVM_DLL const Op &loop_break();
 
 /*!
  * \brief tvm intrinsic for amd matrix core mfma instructions.

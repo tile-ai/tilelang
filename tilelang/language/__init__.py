@@ -17,6 +17,7 @@ from .proxy import (
     make_tensor,  # noqa: F401
     Buffer,  # noqa: F401
     Tensor,  # noqa: F401
+    StridedTensor,  # noqa: F401
     FragmentBuffer,  # noqa: F401
     SharedBuffer,  # noqa: F401
     LocalBuffer,  # noqa: F401
@@ -67,7 +68,6 @@ from .customize import (
 from .logical import any_of, all_of  # noqa: F401
 from .builtin import *  # noqa: F401
 
-from .memscope import *  # noqa: F401
 from .utils import index_to_coordinates  # noqa: F401
 
 

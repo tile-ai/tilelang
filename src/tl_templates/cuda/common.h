@@ -250,4 +250,12 @@ template <int thread_extent> TL_DEVICE bool tl_shuffle_elect() {
          cute::elect_one_sync();
 }
 
+template <uint32_t RegCount> TL_DEVICE void warpgroup_reg_alloc() {
+  asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" : : "n"(RegCount));
+}
+
+template <uint32_t RegCount> TL_DEVICE void warpgroup_reg_dealloc() {
+  asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" : : "n"(RegCount));
+}
+
 } // namespace tl

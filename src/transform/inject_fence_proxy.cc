@@ -58,7 +58,7 @@ public:
     Proxy proxy = Proxy::kAsync;
     if (auto call = op->value.as<CallNode>()) {
       if (call->op.same_as(ptx_ldmatirx()) ||
-          call->op.same_as(ptx_stmatirx())) {
+          call->op.same_as(ptx_stmatrix())) {
         proxy = Proxy::kGeneric;
       }
     }

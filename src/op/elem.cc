@@ -302,7 +302,7 @@ Stmt Copy::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
     num = 2;
 
   Array<PrimExpr> args;
-  const Op &op = is_ldmatrix ? tl::ptx_ldmatirx() : tl::ptx_stmatirx();
+  const Op &op = is_ldmatrix ? tl::ptx_ldmatirx() : tl::ptx_stmatrix();
   args.push_back(static_cast<int>(is_transposed));
   args.push_back(num);
 
