@@ -204,6 +204,73 @@ TL_DEVICE void DP4A(InDatatype *a, InDatatype *b, OutDatatype *c) {
   *c = __dp4a(a_int, b_int, c_int);
 }
 
+/**
+ * Return true if any element in the array is non-zero.
+ *
+ * @tparam T Element type.
+ * @param a Pointer to the array to test.
+ * @param size Number of elements in the array.
+ * @return true if at least one element compares non-zero, false otherwise.
+ */
+ 
+/**
+ * Return true if all elements in the array are non-zero.
+ *
+ * @tparam T Element type.
+ * @param a Pointer to the array to test.
+ * @param size Number of elements in the array.
+ * @return true if every element compares non-zero, false otherwise.
+ */
+
+/**
+ * Compute x raised to the compile-time integer power `y`.
+ *
+ * @tparam y Exponent (compile-time constant, defaults to 1).
+ * @tparam T Value type.
+ * @param x Base value.
+ * @return x^y computed by repeated multiplication.
+ */
+
+/**
+ * Perform a partial thread-block barrier (bar.sync) on device.
+ *
+ * This issues an inline PTX bar.sync instruction using the compile-time
+ * barrier_id and thread_count arguments. Both template parameters are
+ * compile-time integers and control the PTX barrier identifier and the
+ * number of threads that must rendezvous.
+ *
+ * @tparam barrier_id Barrier identifier used by bar.sync (default 0).
+ * @tparam thread_count Number of threads participating in the barrier (default 0).
+ */
+
+/**
+ * Elect a single leader within a thread group of size `thread_extent`.
+ *
+ * If `thread_extent == 0`, a canonical warp index and cute::elect_one_sync()
+ * are used for leader election. Otherwise a warp-level shuffle-based test
+ * combined with cute::elect_one_sync() determines the leader.
+ *
+ * @tparam thread_extent Total thread group size (0 selects canonical-warp-based path).
+ * @return true for the elected leader thread, false for others.
+ */
+
+/**
+ * Increase the warp-group register allocation by `RegCount`.
+ *
+ * Emits the PTX `setmaxnreg.inc.sync.aligned.u32` instruction with the
+ * compile-time immediate `RegCount`. `RegCount` must be a compile-time constant.
+ *
+ * @tparam RegCount Number of registers to allocate (compile-time constant).
+ */
+
+/**
+ * Decrease the warp-group register allocation by `RegCount`.
+ *
+ * Emits the PTX `setmaxnreg.dec.sync.aligned.u32` instruction with the
+ * compile-time immediate `RegCount`. `RegCount` must be a compile-time constant.
+ *
+ * @tparam RegCount Number of registers to deallocate (compile-time constant).
+ */
 namespace tl {
 // Any
 template <typename T> TL_DEVICE bool Any(T *a, int size) {

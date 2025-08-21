@@ -7,6 +7,174 @@
 #include "barrier.h"
 #include "common.h"
 
+/**
+ * Enqueue an asynchronous bulk CP.async load from global memory into shared memory.
+ *
+ * @tparam BarrierType Type of the shared-memory barrier (e.g., uint64_t or pointer type).
+ * @param smem_ptr Destination pointer in shared memory.
+ * @param gmem_ptr Source pointer in global memory.
+ * @param smem_mbar Barrier used to complete the TMA transaction.
+ * @param size Number of bytes to transfer.
+ */
+
+/**
+ * Enqueue an asynchronous multicast bulk CP.async load from global memory into shared memory.
+ *
+ * Multicast sends the same source region to multiple destinations as selected by mask.
+ *
+ * @param smem_ptr Destination pointer in shared memory.
+ * @param gmem_ptr Source pointer in global memory.
+ * @param smem_mbar Barrier used to complete the TMA transaction.
+ * @param size Number of bytes to transfer.
+ * @param mask 16-bit multicast mask selecting destination lanes/clusters.
+ */
+
+/**
+ * Enqueue an asynchronous 1D tensor-structured CP.async load from global memory into shared memory.
+ *
+ * Uses a CUtensorMap descriptor and a coordinate to index the tensor in global memory.
+ *
+ * @tparam cache_hint Cache hint passed to the CP.async instruction (controls eviction behavior).
+ * @tparam BarrierType Type of the shared-memory barrier.
+ * @param descriptor Tensor map descriptor describing global layout.
+ * @param smem_mbar Barrier used to complete the TMA transaction.
+ * @param smem_ptr Destination pointer in shared memory.
+ * @param crd0 First tensor coordinate (dimension 0).
+ */
+
+/**
+ * Enqueue an asynchronous 2D tensor-structured CP.async load from global memory into shared memory.
+ *
+ * @tparam cache_hint Cache hint passed to the CP.async instruction (controls eviction behavior).
+ * @tparam BarrierType Type of the shared-memory barrier.
+ * @param descriptor Tensor map descriptor describing global layout.
+ * @param smem_mbar Barrier used to complete the TMA transaction.
+ * @param smem_ptr Destination pointer in shared memory.
+ * @param crd0 First tensor coordinate (dimension 0).
+ * @param crd1 Second tensor coordinate (dimension 1).
+ */
+
+/**
+ * Enqueue an asynchronous 3D tensor-structured CP.async load from global memory into shared memory.
+ *
+ * @tparam cache_hint Cache hint passed to the CP.async instruction (controls eviction behavior).
+ * @tparam BarrierType Type of the shared-memory barrier.
+ * @param descriptor Tensor map descriptor describing global layout.
+ * @param smem_mbar Barrier used to complete the TMA transaction.
+ * @param smem_ptr Destination pointer in shared memory.
+ * @param crd0 First tensor coordinate (dimension 0).
+ * @param crd1 Second tensor coordinate (dimension 1).
+ * @param crd2 Third tensor coordinate (dimension 2).
+ */
+
+/**
+ * Enqueue an asynchronous 4D tensor-structured CP.async load from global memory into shared memory.
+ *
+ * @tparam cache_hint Cache hint passed to the CP.async instruction (controls eviction behavior).
+ * @tparam BarrierType Type of the shared-memory barrier.
+ * @param descriptor Tensor map descriptor describing global layout.
+ * @param smem_mbar Barrier used to complete the TMA transaction.
+ * @param smem_ptr Destination pointer in shared memory.
+ * @param crd0 First tensor coordinate (dimension 0).
+ * @param crd1 Second tensor coordinate (dimension 1).
+ * @param crd2 Third tensor coordinate (dimension 2).
+ * @param crd3 Fourth tensor coordinate (dimension 3).
+ */
+
+/**
+ * Enqueue an asynchronous 5D tensor-structured CP.async load from global memory into shared memory.
+ *
+ * @tparam cache_hint Cache hint passed to the CP.async instruction (controls eviction behavior).
+ * @tparam BarrierType Type of the shared-memory barrier.
+ * @param descriptor Tensor map descriptor describing global layout.
+ * @param smem_mbar Barrier used to complete the TMA transaction.
+ * @param smem_ptr Destination pointer in shared memory.
+ * @param crd0 First tensor coordinate (dimension 0).
+ * @param crd1 Second tensor coordinate (dimension 1).
+ * @param crd2 Third tensor coordinate (dimension 2).
+ * @param crd3 Fourth tensor coordinate (dimension 3).
+ * @param crd4 Fifth tensor coordinate (dimension 4).
+ */
+
+/**
+ * Enqueue an asynchronous 4D im2col CP.async load from global memory into shared memory.
+ *
+ * This variant interprets the descriptor as an im2col mapping and accepts channel/width/height/batch
+ * coordinates plus per-element width/height offsets.
+ *
+ * @tparam cache_hint Cache hint passed to the CP.async instruction (controls eviction behavior).
+ * @tparam BarrierType Type of the shared-memory barrier.
+ * @param descriptor Tensor map descriptor describing global layout for im2col.
+ * @param smem_mbar Barrier used to complete the TMA transaction.
+ * @param smem_ptr Destination pointer in shared memory.
+ * @param coord_c Channel coordinate.
+ * @param coord_w Width coordinate.
+ * @param coord_h Height coordinate.
+ * @param coord_n Batch (N) coordinate.
+ * @param offset_w Per-element width offset.
+ * @param offset_h Per-element height offset.
+ */
+
+/**
+ * Enqueue an asynchronous 1D tensor-structured CP.async store from shared memory to global memory.
+ *
+ * @tparam cache_hint Cache hint passed to the CP.async instruction (controls eviction behavior).
+ * @param descriptor Tensor map descriptor describing global layout.
+ * @param smem_ptr Source pointer in shared memory.
+ * @param crd0 First tensor coordinate (dimension 0).
+ */
+
+/**
+ * Enqueue an asynchronous 2D tensor-structured CP.async store from shared memory to global memory.
+ *
+ * @tparam cache_hint Cache hint passed to the CP.async instruction (controls eviction behavior).
+ * @param descriptor Tensor map descriptor describing global layout.
+ * @param smem_ptr Source pointer in shared memory.
+ * @param crd0 First tensor coordinate (dimension 0).
+ * @param crd1 Second tensor coordinate (dimension 1).
+ */
+
+/**
+ * Enqueue an asynchronous 3D tensor-structured CP.async store from shared memory to global memory.
+ *
+ * @tparam cache_hint Cache hint passed to the CP.async instruction (controls eviction behavior).
+ * @param descriptor Tensor map descriptor describing global layout.
+ * @param smem_ptr Source pointer in shared memory.
+ * @param crd0 First tensor coordinate (dimension 0).
+ * @param crd1 Second tensor coordinate (dimension 1).
+ * @param crd2 Third tensor coordinate (dimension 2).
+ */
+
+/**
+ * Enqueue an asynchronous 4D tensor-structured CP.async store from shared memory to global memory.
+ *
+ * @tparam cache_hint Cache hint passed to the CP.async instruction (controls eviction behavior).
+ * @param descriptor Tensor map descriptor describing global layout.
+ * @param smem_ptr Source pointer in shared memory.
+ * @param crd0 First tensor coordinate (dimension 0).
+ * @param crd1 Second tensor coordinate (dimension 1).
+ * @param crd2 Third tensor coordinate (dimension 2).
+ * @param crd3 Fourth tensor coordinate (dimension 3).
+ */
+
+/**
+ * Enqueue an asynchronous 5D tensor-structured CP.async store from shared memory to global memory.
+ *
+ * @tparam cache_hint Cache hint passed to the CP.async instruction (controls eviction behavior).
+ * @param descriptor Tensor map descriptor describing global layout.
+ * @param smem_ptr Source pointer in shared memory.
+ * @param crd0 First tensor coordinate (dimension 0).
+ * @param crd1 Second tensor coordinate (dimension 1).
+ * @param crd2 Third tensor coordinate (dimension 2).
+ * @param crd3 Fourth tensor coordinate (dimension 3).
+ * @param crd4 Fifth tensor coordinate (dimension 4).
+ */
+
+/**
+ * Prefetch a CUtensorMap descriptor into a closer cache level.
+ *
+ * @param descriptor Tensor map descriptor to prefetch.
+ */
 namespace tl {
 enum class CacheHintSm90 : uint64_t {
   EVICT_NORMAL = 0x1000000000000000,

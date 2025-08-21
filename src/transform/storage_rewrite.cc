@@ -669,7 +669,17 @@ private:
   };
 
   // Checks whether the storage_scope is especially tagged for a specific
-  // memory. Special memory is all combined into a single allocation.
+  /**
+   * @brief Determine whether a storage scope represents a special tagged memory region.
+   *
+   * Returns true when the StorageScope has a non-empty tag that is treated as "special",
+   * i.e., it is not one of the recognized non-special tags: ".dyn", ".barrier", ".workspace",
+   * or ".vtcm".
+   *
+   * @param scope The storage scope to inspect; its `tag` field is evaluated.
+   * @return true if the scope's tag is non-empty and not equal to ".dyn", ".barrier",
+   *         ".workspace", or ".vtcm"; false otherwise.
+   */
   bool IsSpecialTaggedMemory(const StorageScope &scope) {
     return scope.tag.length() != 0 && scope.tag != ".dyn" &&
            scope.tag != ".barrier" && scope.tag != ".workspace" &&
@@ -837,7 +847,32 @@ private:
       }
     }
   }
-  // New allocation for merged data
+  /**
+   * @brief Create a new backing allocation that merges the storage entry and its children.
+   *
+   * This function computes a single contiguous allocation for the given StorageEntry `e`
+   * and any entries in `e->merged_children`. It:
+   * - Requires a non-empty storage tag and a non-zero element bit size.
+   * - Optionally queries MemoryInfo for the storage tag unless the tag is ".barrier" or ".var".
+   * - Computes the total number of bits required for `e` and its merged children, rounding
+   *   each component up to the required alignment. The default alignment is 32 bits; if
+   *   MemoryInfo is available its `max_simd_bits` overrides the default.
+   * - Assigns `e->alloc_var` as the backing variable and sets each child's `bits_offset`
+   *   to the offset (in bits) within that backing allocation.
+   * - Builds an Allocate node sized to hold the rounded total bit capacity (converted to
+   *   element count using `e->elem_type`) and appends it to `e->alloc_nest`.
+   * - If MemoryInfo is present, checks that the total allocation fits within
+   *   `info->max_num_bits`.
+   *
+   * Side effects:
+   * - Mutates fields of `e`: `alloc_var`, children's `bits_offset` and `alloc_var`, and
+   *   pushes a new Allocate into `e->alloc_nest`.
+   * - Emits ICHECK failures on violated invariants (e.g., empty tag, zero bit sizes,
+   *   allocation exceeding memory-tag bounds), which abort execution when triggered.
+   *
+   * @param e StorageEntry to allocate and merge; must contain at least one backing alloc
+   *          in `e->allocs` and a valid `elem_type`/`const_nbits`.
+   */
   void NewAllocTagMerged(StorageEntry *e) {
     ICHECK_NE(e->scope.tag.length(), 0U);
     // allocate with element type.
@@ -1771,6 +1806,20 @@ public:
     }
   }
 
+  /**
+   * @brief Rewrite Allocate nodes for buffers that are scheduled for vectorization.
+   *
+   * If the allocate's buffer variable appears in rewrite_map_, this visitor replaces the
+   * allocation with a new Allocate that uses the rewritten buffer Var and element dtype.
+   * The last extent is divided by the rewrite factor (to account for wider element lanes)
+   * and the resulting Allocate is returned. If the buffer is not being rewritten, the
+   * original statement is returned unchanged.
+   *
+   * The function emits an informational log with the new buffer Var, element dtype, and
+   * computed extents when a rewrite occurs.
+   *
+   * @return The potentially rewritten Allocate statement (original if no rewrite applied).
+   */
   Stmt VisitStmt_(const AllocateNode *op) final {
     Stmt stmt = StmtExprMutator::VisitStmt_(op);
     op = stmt.as<AllocateNode>();

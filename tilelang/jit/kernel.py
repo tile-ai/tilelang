@@ -52,31 +52,23 @@ class JITKernel(object):
         compile_flags: Optional[List[str]] = None,
     ):
         """
-        Initializes a TorchFunction instance.
-
-        Parameters
-        ----------
-        func : tvm.tir.PrimFunc, optional
-            The TileLang TIR function to compile and wrap.
-        out_idx : Union[List[int], int], optional
-            Index(es) of the output tensors to return (default: None).
-        execution_backend : Literal["dlpack", "ctypes", "cython", "nvrtc"], optional
-            Execution backend to use for kernel execution (default: "cython").
-        target : Union[str, Target], optional
-            Compilation target, either as a string or a TVM Target object (default: "auto").
-        target_host : Union[str, Target], optional
-            Target host for cross-compilation (default: None).
-        verbose : bool, optional
-            Whether to enable verbose output (default: False).
-        pass_configs : dict, optional
-            Additional keyword arguments to pass to the Compiler PassContext.
-            Available options:
-                "tir.disable_vectorize": bool, default: False
-                "tl.disable_tma_lower": bool, default: False
-                "tl.disable_dynamic_tail_split": bool, default: False
-                "tl.dynamic_vectorize_size_bits": int, default: 128
-        from_database : bool, optional
-            Whether to create a TorchFunction from a database.
+        Create a JIT-wrapped Torch callable for a TileLang (TVM TIR) PrimFunc by compiling it (unless created from database).
+        
+        Parameters:
+            func (tvm.tir.PrimFunc | None): TileLang TIR function to compile and wrap. Required when not creating from a database.
+            out_idx (int | list[int] | None): Index or list of indices of output tensor(s) to expose from the compiled kernel.
+            execution_backend (Literal["dlpack","ctypes","cython","nvrtc"]): Backend used to run the compiled kernel. If "cython", a C++ compiler must be available.
+            target (str | tvm.target.Target): Compilation target; string aliases are resolved to a TVM Target.
+            target_host (str | tvm.target.Target | None): Host target used for cross-compilation.
+            verbose (bool): Enable verbose compilation behavior.
+            pass_configs (dict | None): Compiler PassContext configuration flags (e.g., "tir.disable_vectorize", "tl.disable_tma_lower").
+            from_database (bool): If True, skip compilation and return an instance intended to be populated from stored artifacts.
+            compile_flags (list[str] | None): Additional flags forwarded to the compilation pipeline.
+        
+        Notes:
+            - If from_database is True, the constructor returns early (no compilation is performed).
+            - When TILELANG_PRINT_ON_COMPILATION is enabled, the function requires func.attrs["global_symbol"] and will emit an informational log about the compilation start.
+            - On successful compilation, an adapter is created and its callable is stored as self.torch_function.
         """
         self.prim_func = func
         self.execution_backend = execution_backend

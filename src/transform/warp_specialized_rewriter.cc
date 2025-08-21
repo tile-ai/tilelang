@@ -137,6 +137,16 @@ public:
 
   Role GetRole(const Stmt &stmt) const { return GetRole(stmt.get()); }
 
+  /**
+   * @brief Determine and record the WarpSpecialized role for an Evaluate statement.
+   *
+   * Inspects an EvaluateNode whose value may be a CallNode and assigns a role:
+   * - Marks producer for `tma_load` or `tma_load_im2col` calls and records that a bulk copy was observed.
+   * - Marks both producer and consumer for `loop_break` calls.
+   * - Defaults to consumer for other Evaluate nodes.
+   *
+   * The chosen role is stored via SetRole(op). Also updates the has_bulk_copy_ flag when a bulk copy is detected.
+   */
   void VisitStmt_(const EvaluateNode *op) final {
     Role role = Role::kConsumer;
     if (auto call = op->value.as<CallNode>()) {
@@ -151,6 +161,26 @@ public:
     SetRole(op, role);
   }
 
+  /**
+   * @brief Visit a BufferStore node and assign its warp-specialization role.
+   *
+   * Examines a BufferStore to determine whether it should be treated as a producer,
+   * consumer, or both and records the result via SetRole. Decision logic:
+   * - If the store's buffer is in the producer_buffers_ set, mark as kBoth.
+   * - If the store is not a shared-memory store, mark as kConsumer.
+   * - Otherwise (shared-memory store), analyze the store's read footprints:
+   *   - If there are no reads, classify as kConsumer.
+   *   - If all reads originate from global memory, classify as kProducer and set
+   *     has_simt_copy_ = true.
+   *   - If any read is not from global memory, classify as kConsumer.
+   *
+   * Side effects:
+   * - Calls SetRole(op, Role) to record the role for this statement.
+   * - May set has_simt_copy_ to true when the store is identified as a producer
+   *   whose reads come exclusively from global memory.
+   *
+   * @param op The BufferStoreNode being visited.
+   */
   void VisitStmt_(const BufferStoreNode *op) final {
     auto scope = StorageScope::Create(GetPtrStorageScope(op->buffer->data));
     bool is_shared_store = scope.rank == StorageRank::kShared;
@@ -622,7 +652,21 @@ public:
   bool hasSimtCopy() const { return has_simt_copy_; }
 
 private:
-  template <typename NodeType> Stmt FilterByRole(const NodeType *op) {
+  template <typename NodeType> /**
+   * @brief Emit or filter a statement based on its WarpSpecialized role and current emission mode.
+   *
+   * Determines the role of the given statement node via the role marker and decides whether to:
+   * - delegate to the generic visitor (when restricted to mbarrier-only emission and the node is not a producer),
+   * - keep the node as-is (when the node's role matches the current emission path or the node is both producer and consumer),
+   * - or replace it with a no-op Evaluate(0) (when the node belongs to the other path).
+   *
+   * @param op The statement node to filter.
+   * @return Stmt The resulting statement to emit:
+   *   - the result of visiting `op` (delegate) when mbarrier-only filtering excludes non-producer nodes;
+   *   - `op` unchanged when it should be emitted on this path or when its role is `kBoth`;
+   *   - `Evaluate(0)` when the node is filtered out for the current emission path.
+   */
+  Stmt FilterByRole(const NodeType *op) {
     Role role = marker_.GetRole(op);
     if (mbarrier_only_) {
       if (role != Role::kProducer)
@@ -1241,7 +1285,22 @@ private:
 
   // If users define a thread binding, we will replace the thread binding with
   // threadIdx.x We require the thread binding is threadIdx.x, and the extent is
-  // the same as the thread extent
+  /**
+   * @brief Handle For nodes by rewriting thread-bound loops into their thread-extents.
+   *
+   * Visits a For node; if it is a thread-binding to `threadIdx.x`, replaces the loop
+   * body with a version where the loop variable is substituted by the rewriter's
+   * `thread_iv_` (using ThreadIdxRewriter::Rewrite with a thread extent of 0) and
+   * returns that rewritten body (i.e., the loop is removed). For non-thread-bound
+   * For nodes, returns the (possibly mutated) For node unchanged.
+   *
+   * Preconditions:
+   * - `thread_iv_` must be defined.
+   * - If the loop is a thread binding, its `thread_tag` must be `"threadIdx.x"`.
+   *
+   * @return Stmt The rewritten statement: either the original For node or the
+   *               loop body with thread-index substitutions applied.
+   */
   Stmt VisitStmt_(const ForNode *op) final {
     ICHECK(thread_iv_.defined());
     For for_node = Downcast<For>(StmtExprMutator::VisitStmt_(op));

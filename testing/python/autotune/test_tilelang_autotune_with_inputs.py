@@ -30,6 +30,21 @@ def ref_program(A, B):
 
 
 def get_configs():
+    """
+    Generate the Cartesian product of autotuning configuration parameters.
+    
+    Returns a list of dictionaries, each representing one autotuning configuration mapping
+    the parameter names to a chosen value. The explored parameters and their candidate
+    values are:
+    - block_M: [64]
+    - block_N: [64]
+    - block_K: [32]
+    - num_stages: [0, 1]
+    - thread_num: [128]
+    - enable_rasterization: [False]
+    
+    Each dictionary is produced by iterating over the Cartesian product of these value lists.
+    """
     iter_params = dict(
         block_M=[64],
         block_N=[64],
@@ -54,7 +69,28 @@ def matmul(M,
            thread_num=128,
            enable_rasterization=False):
 
-    dtype = "float16"
+    """
+           Create a tiled, autotune-ready TVM kernel (prim_func) that computes block-wise matrix multiplication C = A @ B.T.
+           
+           The returned prim_func expects:
+           - A with shape (M, K) and dtype float16
+           - B with shape (N, K) and dtype float16
+           - C with shape (M, N) and dtype float16
+           
+           Parameters that affect tiling and execution:
+           - block_M, block_N, block_K: sizes of the M, N, and K sub-blocks used for shared-memory tiling.
+           - num_stages: number of pipeline stages used when iterating over K sub-blocks (0 = no pipelining).
+           - thread_num: number of threads provided to the kernel launch.
+           - enable_rasterization: when True, enables swizzling (panel-based memory layout) to improve memory access patterns.
+           
+           Implementation details (high level):
+           - Uses shared memory buffers for A and B sub-blocks, a local accumulator for partial results, and writes back the accumulated block to global C.
+           - Accumulation uses float (accum_dtype) while inputs use float16.
+           
+           Returns:
+               A TVM prim_func implementing the described block-level matmul ready for JIT/autotuning.
+           """
+           dtype = "float16"
     accum_dtype = "float"
 
     @T.prim_func
@@ -64,15 +100,24 @@ def matmul(M,
             C: T.Tensor((M, N), dtype),
     ):
         """
-        The compiled TVM function for block-level matrix multiplication.
-
-        - We divide the entire (M, N) domain into blocks of shape
-            (block_M, block_N).
-        - Each block has its own allocated shared memory for sub-blocks
-            of A and B.
-        - The partial results go into C_local, and then we copy them back
-            to global memory C.
-        """
+            Block-level tiled matrix multiplication kernel produced for JIT compilation.
+            
+            This function computes a tile of the MxN output C by:
+            - Tiling the (M, N) domain into blocks of shape (block_M, block_N) and binding
+              the kernel grid to (ceildiv(N, block_N), ceildiv(M, block_M)).
+            - Allocating shared buffers A_shared (block_M x block_K) and B_shared
+              (block_N x block_K) and a local accumulator C_local (block_M x block_N).
+            - Optionally enabling swizzling via T.use_swizzle(panel_size=10, enable=enable_rasterization).
+            - Iterating over K in sub-blocks (ceildiv(K, block_K)) with pipelining controlled
+              by num_stages:
+              - Loading sub-blocks of A and B into shared buffers.
+              - Performing partial multiply–accumulate into C_local using T.gemm with B transposed.
+            - Writing the accumulated C_local back into the global output C at
+              (by * block_M, bx * block_N).
+            
+            Inputs A, B, C are the tiled global tensors corresponding to shapes (M, K), (N, K),
+            and (M, N) respectively; the kernel writes the computed tile into C.
+            """
         # Bind x-dimension to block index in N,
         #     y-dimension to block index in M.
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):

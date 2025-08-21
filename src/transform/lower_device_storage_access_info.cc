@@ -42,6 +42,30 @@ using runtime::StorageScope;
 
 class StorageAccessInfoLower : public StmtExprMutator {
 public:
+  /**
+   * @brief Visit an Allocate node and lower device-specific allocations using tracked memory info.
+   *
+   * If the allocation's pointer storage scope has a non-empty tag other than ".dyn", ".var",
+   * or ".barrier", this method looks up the corresponding MemoryInfo, records it in
+   * storage_info_ for the buffer, and lowers the allocation:
+   * - If the MemoryInfo has a defined head_address, the Allocate is replaced with a
+   *   LetStmt that binds the buffer variable to head_address and keeps the original body.
+   * - If head_address is not defined, the Allocate node is removed and its body is returned.
+   *
+   * For other scopes (empty tag, ".dyn", ".var", or ".barrier"), the node is processed by
+   * the base StmtExprMutator implementation.
+   *
+   * Side effects:
+   * - Inserts an entry into storage_info_ mapping the buffer variable to its MemoryInfo
+   *   when lowering is performed.
+   *
+   * Error conditions:
+   * - Asserts (ICHECK) if no MemoryInfo is found for a scope that requires lowering.
+   * - Asserts (ICHECK) if the same buffer variable is lowered (allocated) more than once.
+   *
+   * @return The transformed statement (possibly a LetStmt, the original body, or the result
+   *         from the base visitor).
+   */
   Stmt VisitStmt_(const AllocateNode *op) final {
     auto scope = StorageScope::Create(GetPtrStorageScope(op->buffer_var));
     if (scope.tag.length() != 0 && scope.tag != ".dyn" && scope.tag != ".var" &&

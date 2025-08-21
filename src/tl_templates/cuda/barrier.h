@@ -6,6 +6,125 @@
 // Reuse cutlass advanced barrier abstraction
 using Barrier = cutlass::arch::ClusterTransactionBarrier;
 
+/**
+ * Initialize a shared-memory transaction barrier.
+ *
+ * Initializes the barrier object referenced by `smem_barrier` with the specified
+ * number of arrivals required to complete the barrier.
+ *
+ * @param smem_barrier Reference to the barrier stored in shared memory.
+ * @param arrive_count Number of arrivals required for the barrier to complete.
+ */
+
+/**
+ * Try to complete a barrier wait without blocking.
+ *
+ * Performs a non-blocking probe of the barrier's parity for the given phase.
+ *
+ * @param smem_barrier Reference to the barrier stored in shared memory.
+ * @param phase_bit Phase/parity bit to test (usually 0 or 1).
+ * @return 1 if the wait is already satisfied (barrier completed for this phase), otherwise 0.
+ */
+
+/**
+ * Blocking wait on a shared-memory transaction barrier.
+ *
+ * Blocks the calling context until the barrier referenced by `smem_barrier`
+ * advances for the specified `phase_bit`. Internally uses a try-wait loop
+ * and will spin until completion.
+ *
+ * @param smem_barrier Reference to the barrier stored in shared memory.
+ * @param phase_bit Phase/parity bit to wait on (usually 0 or 1).
+ */
+
+/**
+ * Test-wait on a barrier with cooperative yielding.
+ *
+ * Repeatedly tests the barrier parity for `phase_bit` and yields briefly
+ * between attempts (uses nanosleep on pre-Hopper architectures) to reduce
+ * busy-wait pressure.
+ *
+ * @param smem_barrier Reference to the barrier stored in shared memory.
+ * @param phase_bit Phase/parity bit to test (usually 0 or 1).
+ */
+
+/**
+ * Signal arrival to the local shared-memory barrier.
+ *
+ * Marks this context as having arrived at the barrier referenced by
+ * `smem_barrier`.
+ *
+ * @param smem_barrier Reference to the barrier stored in shared memory.
+ */
+
+/**
+ * Conditionally signal arrival to a cluster-local barrier for a given CTA.
+ *
+ * If `pred` is non-zero, computes the cluster-shared address for `smem_barrier`
+ * for the CTA specified by `cta_id` and signals arrival on that remote barrier.
+ *
+ * @param smem_barrier Reference to the barrier stored in shared memory.
+ * @param cta_id Cluster CTA identifier whose barrier instance should be targeted.
+ * @param pred Predicate; arrival is performed only if non-zero.
+ */
+
+/**
+ * Set the expected transaction size for the barrier.
+ *
+ * Informs the barrier of the number of transaction bytes that will be issued,
+ * used to track in-flight transactional work associated with the barrier.
+ *
+ * @param smem_barrier Reference to the barrier stored in shared memory.
+ * @param transaction_bytes Expected transaction size in bytes.
+ */
+
+/**
+ * Signal arrival and indicate expected transaction size in a single operation.
+ *
+ * Combines an arrival with a provided expected transaction byte count.
+ *
+ * @param smem_barrier Reference to the barrier stored in shared memory.
+ * @param transaction_bytes Expected transaction size in bytes.
+ */
+
+/**
+ * Issue an asynchronous cp.async arrival to a shared-memory barrier.
+ *
+ * Enqueues a cp.async mbarrier arrival for the barrier referenced by
+ * `smem_mbar`. `BarrierType` may be a pointer or a barrier object type.
+ *
+ * @param smem_mbar Barrier (or pointer to barrier) located in shared memory.
+ */
+
+/**
+ * Issue a fence.proxy.async for shared-memory proxy operations.
+ *
+ * Ensures ordering for prior asynchronous proxy operations.
+ */
+
+/**
+ * Indicate arrival of a warp involved in a TMA_STORE bulk CP async operation.
+ *
+ * Marks completion of a warp's contribution to the current cp.async bulk group.
+ */
+
+/**
+ * Wait for a TMA_STORE cp.async bulk group to complete.
+ *
+ * Blocks until the cp.async bulk read group identified by `Count` has finished.
+ *
+ * @tparam Count The cp.async bulk read group identifier/count to wait for (compile-time constant).
+ */
+
+/**
+ * Partial-threadgroup synchronization using a shared barrier.
+ *
+ * Performs a single arrival on `smem_barrier` and then spins with try-wait
+ * until the barrier for the arriving subset completes. Intended for
+ * synchronizing a subset of threads without full __syncthreads().
+ *
+ * @param smem_barrier Reference to the barrier stored in shared memory.
+ */
 namespace tl {
 
 TL_DEVICE void mbarrier_init(uint64_t &smem_barrier, uint32_t arrive_count) {

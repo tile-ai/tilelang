@@ -91,6 +91,21 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
 
 
 def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
+    """
+    Optimize an IRModule for a specific target using TileLang and TIR transformation pipelines.
+    
+    This applies a sequence of legalization, simplification, planning and lowering passes to prepare and optimize
+    the given IRModule for the provided target. The exact pipeline branches based on target capabilities and
+    pass-context-configured features (e.g., TMA support, warp specialization, fence proxy injection, vectorization,
+    and aggressive shared-memory merging). Returns a new IRModule with the transformations applied.
+    
+    Parameters:
+        mod (IRModule): The module to optimize.
+        target (Target): Compilation target that may enable or disable target-specific passes (e.g., TMA/warp features).
+    
+    Returns:
+        IRModule: The transformed module optimized for the given target.
+    """
     pass_ctx = tilelang.transform.get_pass_context()
     # Lower the barrier.arrive into specific initialization slot
     mod = tilelang.transform.LowerSharedBarrier()(mod)

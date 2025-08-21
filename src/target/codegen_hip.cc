@@ -749,6 +749,33 @@ std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
   return os.str();
 }
 
+/**
+ * @brief Emit HIP-specific code for a TIR CallNode.
+ *
+ * Handles recognized builtin and target intrinsics by emitting appropriate HIP/Tensor
+ * Language (tl::) or NVIDIA WMMA/AMD MFMA calls into the provided output stream.
+ * Supports:
+ *  - cp.async (predicated and unpredicated) -> tl::cp_async_gs[_conditional]
+ *  - cp.async commit/wait -> tl::cp_async_commit / tl::cp_async_wait<N>
+ *  - partial synchronizations -> tl::syncthreads_partial
+ *  - stmatrix -> tl::ptx_stmatrix_x<num>[_trans] (first two args are trans and num)
+ *  - wait_wgmma, pack_b16
+ *  - nvcuda::wmma intrinsics: fill_fragment, load_matrix_sync, store_matrix_sync,
+ *    mma_sync, bmma_sync (marks need_mma_h_)
+ *  - AMD MFMA via __builtin_amdgcn_mfma (tvm_mfma)
+ *  - tl_gemm -> delegated external call; tl_gemm_sp is not supported (fatal)
+ *  - thread_return -> emits `return`
+ *
+ * Unrecognized calls are delegated to CodeGenC::VisitExpr_.
+ *
+ * Side effects:
+ *  - Writes generated code to `os` or the internal stream via PrintIndent()/stream.
+ *  - May set the member flag `need_mma_h_` when WMMA/MFMA intrinsics are emitted.
+ *  - May LOG(FATAL) or ICHECK-fail on invalid or unsupported argument patterns.
+ *
+ * @param op The TIR CallNode to lower; expected to encode a builtin/target intrinsic.
+ * @param os The output stream to append the generated expression or statement.
+ */
 void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
   auto print_extern_call_stmt = [&](std::string name, size_t offset = 0) {
     this->PrintIndent();

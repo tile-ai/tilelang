@@ -690,6 +690,17 @@ void CodeGenTileLangCUDA::PrintStorageSync(const CallNode *op) {
   }
 }
 
+/**
+ * @brief Emit CUDA storage-class qualifier for an allocation scope.
+ *
+ * Writes the appropriate CUDA storage qualifier to the provided output stream:
+ * - "shared" and "shared.barrier" -> "__shared__ "
+ * - "shared.dyn"                  -> "extern __shared__ __align__(1024) "
+ *
+ * Passing "global" is not allowed and triggers a runtime check failure.
+ *
+ * @param scope The storage scope string (e.g., "shared", "shared.dyn", "shared.barrier").
+ */
 void CodeGenTileLangCUDA::PrintStorageScope(const std::string &scope,
                                             std::ostream &os) { // NOLINT(*)
   ICHECK_NE(scope, "global")
@@ -925,6 +936,45 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   return os.str();
 }
 
+/**
+ * @brief Emit CUDA/Tensor-language code for TIR Call nodes.
+ *
+ * This visitor lowers TIR CallNode intrinsics, builtins, and device-side
+ * API calls into CUDA/TL/C++ code written to the provided output stream.
+ * It handles a wide range of operations including:
+ * - CP.Async variants and their commit/wait forms
+ * - Creation and manipulation of multi-block barrier objects backed by
+ *   shared memory (create_barriers, get_mbarrier, arrive/init/expect_tx/wait)
+ * - TL TMA loads/stores (tma_load, tma_store, tma_load_im2col, and variants)
+ * - PTX/TL matrix load/store and MMA/PTX MMA/SP lowering (ldmatrix/stmatrix,
+ *   ptx_mma/ptx_mma_sp, PrintMMAAssembly, WMMA builtin wrappers)
+ * - TL synchronization primitives (sync_grid, sync_thread_partial, wait_wgmma)
+ * - Auxiliary helpers (pack_b16, loop_break, set_max_nreg, fence_proxy_async)
+ * - Buffer/ldg/assembly-backed loads (ptx_ldg32, cp_async bulk/assembly forms)
+ * - Reinterpret casts for special packed FP4 E2M1 formats (float4_e2m1fn path)
+ * - High-level TL op instance calls (tl_gemm, tl_gemm_sp) via PrintCallExtern
+ * - Default fallback to CodeGenC for unhandled calls
+ *
+ * Side effects:
+ * - Writes generated code to the class output stream and/or the provided
+ *   `os` stream parameter.
+ * - May set internal codegen flags such as need_mma_h_, need_cooperative_groups_,
+ *   need_cast_smem_ptr_to_int_, and enable_sparse_gemm_ to request includes or
+ *   additional emitted helpers.
+ * - Emits shared-memory allocations and reinterpret casts for barrier objects.
+ *
+ * Error handling:
+ * - Performs DCHECK/ICHECK on expected argument counts and will LOG(FATAL) for
+ *   invalid parameterizations or unsupported cases encountered during lowering.
+ *
+ * Notes:
+ * - This routine is specific to the CUDA/TL backend and assumes caller-supplied
+ *   state (e.g., mbarrier_name_, mbarrier_dtype_, eviction_policy_names_,
+ *   barrier_count_, barrier_name_, etc.) is valid.
+ * - For complex assembly-based intrinsics (MMA/ldmatrix/cp.async) it delegates
+ *   to helper emitters such as PrintMMAAssembly, PrintLoadMatrixAssembly and
+ *   various Print*Asm helpers.
+ */
 void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   auto print_extern_call_stmt = [&](std::string name, size_t start = 0,
                                     size_t end = 0) {
@@ -1646,6 +1696,34 @@ void CodeGenTileLangCUDA::VisitStmt_(const AttrStmtNode *op) {
   CodeGenC::VisitStmt_(op);
 }
 
+/**
+ * @brief Emit CUDA allocation code for a TIR Allocate node and recurse into its body.
+ *
+ * This emits the appropriate CUDA storage qualifier, type, and storage declaration for the
+ * allocation described by `op`, handling special scopes and backend-specific layouts:
+ * - WMMA scopes ("wmma.matrix_a", "wmma.matrix_b", "wmma.accumulator") are validated for
+ *   supported dtypes and emitted via PrintWmmaScope.
+ * - Shared memory:
+ *   - "shared.dyn" emits an extern dynamic shared array (unsized).
+ *   - "shared" emits a fixed-size __shared__ array (with packing adjustments for 4-bit/1-bit).
+ *   - "shared.barrier" allocates a backing shared array named "<vid>_mem" and then emits
+ *     a reinterpret_cast to a barrier-object pointer (`auto <vid> = reinterpret_cast<...>(<vid>_mem);`).
+ * - Local storage:
+ *   - "local" emits a stack array.
+ *   - "local.var" emits a scalar initialized to zero.
+ *
+ * The function asserts that the allocation has a constant positive size (except for
+ * "shared.dyn"), transforms sizes for WMMA fragments and bit-packed element widths,
+ * prints the declaration into the current output stream, registers the buffer handle
+ * type, and then emits the allocation body by visiting `op->body`.
+ *
+ * Error conditions:
+ * - Fails (ICHECK) if the allocation condition is zero, if the constant allocation size
+ *   is non-positive, if an unsupported dtype is used with a WMMA scope, or if an
+ *   unrecognized storage scope is encountered.
+ *
+ * @param op The Allocate node describing the buffer allocation, element dtype, and body.
+ */
 void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
   ICHECK(!is_zero(op->condition));
   std::string vid = AllocVarID(op->buffer_var.get());

@@ -100,11 +100,82 @@ private:
   bool enable_warp_shuffle_{false};
   // whether need math_constants.h
   bool need_math_constants_h_{false};
-  // whether need mma.h
+  /**
+ * CUDA codegen helper fields and utilities used internally by CodeGenTileLangCUDA.
+ *
+ * Holds flags that indicate required CUDA headers or helper functions (e.g., MMA,
+ * cooperative groups, smem pointer casting), an operator attribute map for
+ * warp-shuffle requirements, identifiers and alignment for shared-memory barrier
+ * arrays, and metadata for WMMA fragments and eviction/bfloat16 support.
+ *
+ * These members are internal implementation details used when emitting CUDA
+ * code: `barrier_name_`, `barrier_count_`, `mbarrier_name_`, `mbarrier_dtype_`,
+ * and `barrier_alignment_bytes_` control naming, sizing, typing, and alignment
+ * of per-kernel shared-memory barrier storage; `fragment_shapes` and
+ * `fragment_layouts` record WMMA fragment shape/layout strings keyed by
+ * fragment variables; `eviction_policy_names_` and `bf16_supported_ops_` are
+ * lookup tables used during code emission. The boolean flags (e.g.
+ * `need_mma_h_`, `need_cooperative_groups_`) indicate required auxiliary
+ * headers or helpers and are consulted when finalizing emitted code.
+ *
+ * Related helper methods:
+ * - PrintWmmaScope(...) : emit WMMA fragment scope declaration for a variable.
+ * - GetWmmaFragmentSize(...) : compute the element count for a WMMA fragment.
+ */
   bool need_mma_h_{false};
-  // whether need cast_smem_ptr_to_int helper function
+  /** The name of the secondary barrier array placed in shared memory. */
+ 
+/** The element type name used for the secondary barrier array (e.g., a POD
+ * struct or typedef exposed to emitted CUDA code). */
+
+/**
+ * Emit the WMMA fragment scope qualifier for a variable.
+ *
+ * @param scope The WMMA scope string (e.g., "matrix_a", "matrix_b", "accumulator").
+ * @param t The element data type of the fragment.
+ * @param variable The TIR variable node that represents the fragment.
+ * @param os Output stream to which the scope/qualifier should be printed.
+ */
+
+/**
+ * Compute the number of scalar elements for a WMMA fragment.
+ *
+ * Returns the total element count for the fragment described by `scope` and
+ * `variable`, constrained by the provided `size` when applicable. Used to
+ * allocate or index WMMA fragment storage during code emission.
+ *
+ * @param scope The WMMA scope string (e.g., "matrix_a", "matrix_b", "accumulator").
+ * @param variable The TIR variable node that represents the fragment.
+ * @param size A hint or requested number of elements; interpretation may vary
+ *             by scope and fragment layout.
+ * @return The computed fragment element count (int32_t).
+ */
   bool need_cast_smem_ptr_to_int_{false};
-  // whether need cooperative_groups.h
+  /**
+ * Print WMMA fragment scope qualifiers for a variable.
+ *
+ * Emits the appropriate WMMA memory scope and layout qualifiers for `variable`
+ * based on `scope` and element `t`, writing the result to `os`.
+ *
+ * @param scope WMMA scope name (e.g., "wmma.matrix_a", "wmma.matrix_b", "wmma.accumulator").
+ * @param t element data type of the fragment.
+ * @param variable pointer to the VarNode representing the fragment variable.
+ * @param os output stream to which the scope qualifiers are printed.
+ */
+ 
+/**
+ * Compute the number of scalar elements in a WMMA fragment.
+ *
+ * Returns the fragment size (number of elements) for `variable` under the
+ * given WMMA `scope`. `size` is a fallback or context-dependent value (e.g.,
+ * requested number of elements or vector length) used when the fragment shape
+ * cannot be derived directly from metadata.
+ *
+ * @param scope WMMA scope name.
+ * @param variable pointer to the VarNode representing the fragment variable.
+ * @param size contextual size/value used as a fallback when fragment shape is unknown.
+ * @return the fragment size in number of scalar elements.
+ */
   bool need_cooperative_groups_{false};
   // Op attribute map
   OpAttrMap<bool> op_need_warp_shuffle_ =

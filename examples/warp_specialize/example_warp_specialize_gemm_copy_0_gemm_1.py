@@ -49,6 +49,18 @@ def matmul_warp_specialize_copy_0_gemm_1(M,
 
 
 def main():
+    """
+    Run a host test harness that builds, executes, validates, and profiles the JIT GEMM kernel.
+    
+    Creates large random GPU tensors (float16), instantiates the tiled JIT GEMM kernel with fixed block sizes,
+    executes the kernel, compares the result against PyTorch's matmul (asserting numerical closeness),
+    and measures execution latency via the kernel profiler. Prints confirmation on successful validation and
+    the measured latency in milliseconds.
+    
+    Notes:
+    - Requires a CUDA-capable device and PyTorch with CUDA.
+    - Exits by raising an assertion error if the kernel output does not match the PyTorch reference.
+    """
     M = 16384
     N = 16384
     K = 16384

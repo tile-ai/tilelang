@@ -54,6 +54,19 @@ public:
 
   Proxy GetProxy(const Stmt &stmt) const { return GetProxy(stmt.get()); }
 
+  /**
+   * @brief Visit an EvaluateNode and record its proxy classification.
+   *
+   * Determines whether the given EvaluateNode should be treated as a generic or
+   * async proxy and stores the result via SetProxy.
+   *
+   * By default the node is classified as Proxy::kAsync. If the evaluated value
+   * is a CallNode whose operator is either `ptx_ldmatirx()` or
+   * `ptx_stmatrix()`, the node is classified as Proxy::kGeneric instead.
+   *
+   * @note This function overrides the visitor for EvaluateNode and has the side
+   * effect of calling SetProxy(op, proxy).
+   */
   void VisitStmt_(const EvaluateNode *op) final {
     Proxy proxy = Proxy::kAsync;
     if (auto call = op->value.as<CallNode>()) {

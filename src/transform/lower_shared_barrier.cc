@@ -20,15 +20,61 @@ using namespace tir;
 
 class SharedBarrierRewriter : public StmtExprMutator {
 public:
+  /**
+   * @brief Rewrite shared.barrier allocations and inserts PTX barrier initialization.
+   *
+   * Constructs a SharedBarrierRewriter with the given flag and applies it to the provided
+   * statement body. Barrier buffers in `body` with storage scope "shared.barrier" are
+   * replaced by one-element shared buffers and an initialization sequence (PTX `init_barrier`
+   * calls plus `tvm_storage_sync("shared")`) is prepended to the corresponding block(s).
+   *
+   * @param body The statement (IR) to transform.
+   * @param disable_shuffle_elect If false (default), the inserted initialization is gated
+   *        by `tl_shuffle_elect()`; if true, the gating falls back to checking the
+   *        thread index equals zero (uses recorded `threadIdx.x` IterVar).
+   * @return Stmt The transformed statement with barrier buffers rewritten and
+   *         initialization logic inserted.
+   */
   static Stmt Rewrite(Stmt body, bool disable_shuffle_elect = false) {
     SharedBarrierRewriter rewriter(disable_shuffle_elect);
     return rewriter(body);
   }
 
 private:
-  SharedBarrierRewriter(bool disable_shuffle_elect)
+  /**
+       * @brief Construct a SharedBarrierRewriter.
+       *
+       * @param disable_shuffle_elect When true, disables the shuffle-elect heuristic and
+       *                              uses a fallback (thread == 0) to gate barrier initialization.
+       */
+      SharedBarrierRewriter(bool disable_shuffle_elect)
       : disable_shuffle_elect_(disable_shuffle_elect) {}
 
+  /**
+   * @brief Rewrite a Block that contains "shared.barrier" buffers.
+   *
+   * Scans the block's alloc_buffers and match_buffers for buffers whose
+   * pointer type has storage_scope == "shared.barrier". For each such barrier
+   * buffer this method:
+   * - records the original Buffer in buffer_data_to_buffer_,
+   * - creates a replacement one-element Buffer with scope "shared" and
+   *   records the mapping in buffer_remap_,
+   * - replaces the block's alloc_buffers with the remapped buffers,
+   * - inserts initialization calls `ptx_init_barrier_thread_count(new_buf[0], original_count)`
+   *   for each barrier buffer, guarded by either `tl_shuffle_elect()` (when
+   *   disable_shuffle_elect_ is false) or `thread_var_.var == 0` (when true),
+   * - inserts a `tvm_storage_sync("shared")` call, and
+   * - prepends the original block body after these setup statements.
+   *
+   * If no "shared.barrier" buffers are found this method delegates to the
+   * base StmtExprMutator visitor and returns that result unchanged.
+   *
+   * Notes:
+   * - Mutates the BlockNode in-place (alloc_buffers and body) when replacements occur.
+   * - Requires that thread_var_ is defined; an internal check will fail if it is not.
+   *
+   * @return The transformed statement (or the result of the base visitor if no changes).
+   */
   Stmt VisitStmt_(const BlockNode *op) final {
     Block block = GetRef<Block>(op);
     Array<Buffer> alloc_buffers = op->alloc_buffers;
@@ -137,6 +183,17 @@ private:
     return StmtExprMutator::VisitStmt_(block.get());
   }
 
+  /**
+   * @brief Rewrite buffer loads to use a remapped buffer when applicable.
+   *
+   * If the loaded buffer has an entry in `buffer_remap_`, returns a new BufferLoad
+   * that targets the remapped Buffer while preserving the original indices.
+   * Otherwise returns the original BufferLoad unchanged.
+   *
+   * @param op The BufferLoad AST node being visited.
+   * @return PrimExpr A BufferLoad expression referencing the remapped buffer when present,
+   *         or the original load expression.
+   */
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     auto load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
     auto buffer = load->buffer;
@@ -147,6 +204,16 @@ private:
     return load;
   }
 
+  /**
+   * @brief Visit and rewrite buffer store statements, remapping barrier buffers.
+   *
+   * If the store's target buffer was replaced during rewriting (present in
+   * buffer_remap_), returns a new BufferStore that writes to the remapped buffer
+   * with the same value and indices. Otherwise returns the (possibly mutated)
+   * original store.
+   *
+   * @return Stmt The rewritten BufferStore or the original store statement.
+   */
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     auto store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
     auto buffer = store->buffer;
@@ -179,6 +246,21 @@ private:
   bool disable_shuffle_elect_;
 };
 
+/**
+ * @brief Lower shared.barrier buffers in a PrimFunc by rewriting them and inserting PTX
+ * initialization calls.
+ *
+ * Rewrites the function body to replace `shared.barrier` buffers with plain shared buffers
+ * and inserts the corresponding barrier initialization sequence. The transformed body is
+ * written back into the given PrimFunc (the input is modified in place) and the same
+ * PrimFunc is returned.
+ *
+ * @param f The PrimFunc whose body will be transformed.
+ * @param disable_shuffle_elect When false (default behavior), the pass may use a
+ *        shuffle-elect heuristic to select the initializing thread; when true, the
+ *        initializer is gated on `threadIdx.x == 0`.
+ * @return PrimFunc The same PrimFunc with its body replaced by the lowered form.
+ */
 PrimFunc LowerSharedBarrier(PrimFunc f, bool disable_shuffle_elect) {
   f.CopyOnWrite()->body =
       SharedBarrierRewriter::Rewrite(f->body, disable_shuffle_elect);
@@ -188,6 +270,15 @@ PrimFunc LowerSharedBarrier(PrimFunc f, bool disable_shuffle_elect) {
 namespace transform {
 using namespace tir::transform;
 
+/**
+ * @brief Create a transform pass that lowers shared.barrier buffers in PrimFunc bodies.
+ *
+ * The pass reads the PassContext boolean config option `kDisableShuffleElect` (default false)
+ * and invokes tl::LowerSharedBarrier on each PrimFunc, forwarding the flag to control whether
+ * barrier initialization uses the shuffle-elect heuristic or a thread-0 fallback.
+ *
+ * @return tvm::transform::Pass A PrimFunc pass named "tl.LowerSharedBarrier" (opt level 0).
+ */
 tvm::transform::Pass LowerSharedBarrier() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
     bool disable_shuffle_elect =

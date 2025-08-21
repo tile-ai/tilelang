@@ -207,6 +207,38 @@ Stmt Copy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return vectorized_thread_loop;
 }
 
+/**
+ * @brief Attempt specialized lowering to PTX ldmatrix/stmatrix style memory intrinsics.
+ *
+ * This function tries to lower the element-wise Copy into a GPU-specific
+ * LDMatrix/STMatrix sequence when the target and buffer scopes permit a
+ * shared<->local.fragment transfer that matches the expected layouts and
+ * alignment constraints. If the conditions are not met it returns an empty
+ * Stmt().
+ *
+ * Detailed behavior:
+ * - Detects whether to perform ldmatrix (shared -> local.fragment) or stmatrix
+ *   (local.fragment -> shared) based on target capabilities and buffer scopes.
+ * - Verifies there are at least two data-parallel iter vars and that no
+ *   source/destination predicates are required (out-of-bounds checks would
+ *   prevent this lowering).
+ * - Validates the local fragment layout corresponds to an 8x8 GEMM fragment
+ *   (either transposed or not) and that the shared memory layout and element
+ *   size permit the required vectorization (16-byte continuity).
+ * - Requires the local region to be a full-range slice of the destination.
+ * - Chooses a vectorization factor (num = 4, 2, or 1) based on the local extent.
+ * - Builds PTX intrinsic call arguments (transpose flag, vector factor, shared
+ *   address, and either local address for ldmatrix or packed values for
+ *   stmatrix), constructs an unrolled serial loop over the fragment, and
+ *   returns that For node. If thread bounds are provided in T, the thread
+ *   variable is adjusted by the bounds' minimum.
+ *
+ * @param T Lowering context (layouts, buffer remapping, target/thread info).
+ * @param analyzer Arithmetic analyzer used to prove equalities/inequalities
+ *                 required by the lowering checks.
+ * @return Stmt A For loop performing the PTX ldmatrix/stmatrix sequence on
+ *         success; an empty Stmt() if the lowering is not applicable.
+ */
 Stmt Copy::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer) const {
   // Check buffer scope
   bool is_ldmatrix;

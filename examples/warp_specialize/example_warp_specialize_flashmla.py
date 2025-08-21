@@ -383,6 +383,27 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
 
 
 def main(batch=1, heads=128, kv_heads=1, kv_ctx=8192, dim=512, pe_dim=64):
+    """
+    Builds a tiled flash-attention kernel, validates it against the PyTorch reference, runs a benchmark, and prints kernel source, latency, and TFlops.
+    
+    Detailed behavior:
+    - Constructs a TileLang JIT kernel configured by the provided dimensions and tiling constants.
+    - Prints the generated kernel source to stdout.
+    - Creates a profiler that supplies random input tensors, verifies numerical correctness against ref_program (raises AssertionError on mismatch), and runs a benchmark.
+    - Prints measured latency (milliseconds) and computed TFlops (based on theoretical FLOPs for QK and PV passes divided by latency).
+    
+    Parameters:
+    - batch (int): Batch size.
+    - heads (int): Number of attention heads.
+    - kv_heads (int): Number of key/value heads (expected to be 1 for the kernel).
+    - kv_ctx (int): Context length (sequence length for keys/values).
+    - dim (int): Per-head dimensionality for queries/values.
+    - pe_dim (int): Positional embedding dimensionality concatenated to queries/keys.
+    
+    Side effects:
+    - Prints kernel source and benchmark results to stdout.
+    - May raise AssertionError if numerical checks against ref_program fail.
+    """
     qk_flops = 2 * batch * heads * kv_ctx * (dim + pe_dim)
     pv_flops = 2 * batch * heads * kv_ctx * dim
     total_flops = qk_flops + pv_flops
