@@ -874,14 +874,14 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
   if (!shared_layout.defined()) {
     desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
+  } else if (StructuralEqual()(shared_layout, linear_layout)) {
+    desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
   } else {
     ICHECK(shared_layout->InputDim() == 2) << "Cannot detect TMA layout.";
     auto stride = as_const_int(shared_layout->InputShape()[0]);
     auto continuous = as_const_int(shared_layout->InputShape()[1]);
     ICHECK(stride != nullptr && continuous != nullptr);
-    if (StructuralEqual()(shared_layout, linear_layout)) {
-      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
-    } else if (StructuralEqual()(
+    if (StructuralEqual()(
                    shared_layout,
                    makeGemmABLayoutPadded(*stride, *continuous,
                                           shared_tensor->dtype.bits()))) {
@@ -932,10 +932,14 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
 
   if (desc.swizzle == static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE) &&
       inner_box_dim_ % 256 != 0) {
-    LOG(WARNING) << "TMA bulk copy cannot support a non-swizzled global layout "
-                    "with inner_box_dim_ % 256 != 0"
+    LOG(WARNING) << "TMA bulk copy fallback to normal copy: "
+                 << "non-swizzled global layout with inner_box_dim_ % 256 != 0. "
                  << "inner_box_dim_: " << inner_box_dim_
-                 << ", will be fallback to normal copy";
+                 << ", src buffer: " << src->name
+                 << ", dst buffer: " << dst->name
+                 << ", smem_box: " << desc.smem_box
+                 << ", src shape: " << src->shape
+                 << ", dst shape: " << dst->shape;
     return LowerNormalCopy(T, analyzer);
   }
   // Check inner_box_dim_ for each swizzle type in a cleaner way
