@@ -338,7 +338,7 @@ def matmul(M,
                 C_shared: tilelang.layout.make_swizzled_layout(C_shared),
             })
             if threads == 512:
-                T.no_set_max_nreg()
+                T.disable_warp_group_reg_alloc()
 
             T.clear(C_local)
             for k in T.Pipelined(K // block_K, num_stages=num_stages):

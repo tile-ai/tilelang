@@ -101,6 +101,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.MultiVersionBuffer()(mod)
         mod = tilelang.transform.WarpSpecialized()(mod)
         mod = tilelang.transform.InjectTmaBarrier()(mod)
+        mod = tilelang.transform.AnnotateWarpGroupRegAlloc()(mod)
         # if tma is not enabled, we can also do pipeline planning
         # to get better performance with async copy
         mod = tilelang.transform.PipelinePlanning()(mod)

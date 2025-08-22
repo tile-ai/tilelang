@@ -11,7 +11,6 @@
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
-#include "../op/bulk_copy.h"
 #include "../runtime/runtime.h"
 
 namespace tvm {

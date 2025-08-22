@@ -192,7 +192,7 @@ def matmul_sp(M, N, K):
 
                 # Clear out the accumulation buffer
                 T.clear(C_local)
-                T.no_set_max_nreg()
+                T.disable_warp_group_reg_alloc()
 
                 T.use_swizzle(panel_size=10, enable=enable_rasterization)
                 T.annotate_layout({

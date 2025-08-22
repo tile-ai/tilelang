@@ -203,12 +203,9 @@ private:
         Stmt body = Substitute(fnode->body, vmap);
         return For(outer_var, 0, extent / vector_size_, fnode->kind, body,
                    fnode->thread_binding, fnode->annotations, fnode->span);
-      } else {
-        return fnode;
       }
-    } else {
-      return ret;
     }
+    return ret;
   }
 
   PrimExpr VisitExpr_(const CallNode *node) final {

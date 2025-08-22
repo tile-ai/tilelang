@@ -101,7 +101,7 @@ def tilelang_chunk_scaled_dot_kkt_fwd(
             })
 
             T.fill(A_fragment, 0)
-            T.no_set_max_nreg()
+            T.disable_warp_group_reg_alloc()
             for i_s in T.Parallel(block_S):
                 Beta_shared[i_s] = Beta[bb, bs * block_S + i_s, bh]
 

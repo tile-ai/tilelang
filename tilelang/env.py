@@ -232,6 +232,9 @@ class Environment:
     def disable_cache(self) -> None:
         CacheState.disable()
 
+    def is_print_on_compilation_enabled(self) -> bool:
+        return self.TILELANG_PRINT_ON_COMPILATION.lower() in ("1", "true", "yes", "on")
+
 
 # Instantiate as a global configuration object
 env = Environment()

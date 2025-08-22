@@ -430,11 +430,6 @@ private:
       return workspace.access_ptr(2); // write
     };
 
-    // Get pass config `tl.disable_tma_lower`
-    tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
-    Optional<Bool> opt_disable_tma_lower =
-        ctxt->GetConfig(kDisableTMALower, Optional<Bool>());
-    bool disable_tma_lower = opt_disable_tma_lower.value_or(Bool(false));
     Range thread_bounds;
 
     if (analyzer_->const_int_bound.IsBound(thread_var_->var)) {
@@ -449,10 +444,10 @@ private:
       thread_bounds = Range::FromMinExtent(0, 1);
     }
 
-    auto lowered = tile_op->Lower(
-        LowerArgs{target_, thread_bounds, thread_var_->var, callback,
-                  layout_map_, buffer_remap_, disable_tma_lower},
-        analyzer_);
+    auto lowered =
+        tile_op->Lower(LowerArgs{target_, thread_bounds, thread_var_->var,
+                                 callback, layout_map_, buffer_remap_},
+                       analyzer_);
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
   }
 

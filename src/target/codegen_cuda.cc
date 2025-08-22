@@ -14,7 +14,6 @@
 #include <vector>
 
 #include "../op/builtin.h"
-#include "../op/bulk_copy.h"
 #include "arith/pattern_match.h"
 #include "target/source/ptx.h"
 
@@ -1094,7 +1093,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       ss << "tl::tma_store";
     }
     print_extern_call_stmt(ss.str(), 0, 1);
-  } else if (op->op.same_as(tl::ptx_ldmatirx())) {
+  } else if (op->op.same_as(tl::ptx_ldmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
     std::string func_name = "tl::ptx_ldmatrix_x" + std::to_string(num);

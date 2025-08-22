@@ -142,10 +142,28 @@ def dec_max_nreg(reg_count: int):
     return set_max_nreg(reg_count, 0)
 
 
+def annotate_producer_reg_dealloc(reg_count: int = 24):
+    """Annotate the producer reg dealloc.
+    """
+    return dec_max_nreg(reg_count)
+
+
+def annotate_consumer_reg_alloc(reg_count: int = 240):
+    """Annotate the consumer reg alloc.
+    """
+    return inc_max_nreg(reg_count)
+
+
 def no_set_max_nreg():
     """Disable the maximum register limit setting.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.no_set_max_nreg"))
+
+
+def disable_warp_group_reg_alloc():
+    """Disable the warp group reg alloc.
+    """
+    return no_set_max_nreg()
 
 
 def mbarrier_wait_parity(mbarrier: Union[int, PrimExpr, tir.Call], parity: Union[int, Var]):
