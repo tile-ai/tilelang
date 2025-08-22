@@ -68,8 +68,6 @@ def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype="float32", sc
 
     tilelang_res = jit_kernel(A)
     ref_res = ref_program(A)
-    print(tilelang_res)
-    print(ref_res)
     torch.testing.assert_close(tilelang_res, ref_res, atol=1e-3, rtol=1e-3)
 
 

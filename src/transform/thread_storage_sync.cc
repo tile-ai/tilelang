@@ -88,6 +88,7 @@ protected:
         reads.clear();
         writes.clear();
       }
+
       for (const AccessEntry &acc : s.access) {
         if (acc.type == kRead) {
           if (FindConflict(writes, acc, false)) {
@@ -285,22 +286,24 @@ private:
         // so we should split tx into tx0 and tx1.
 
         struct ThreadVarInfo {
-          const char* name_prev;
-          const char* name_curr;
+          const char *name_prev;
+          const char *name_curr;
           IterVar iv;
         } thread_vars[] = {
-          {"tx1", "tx2", tx_},
-          {"ty1", "ty2", ty_},
-          {"tz1", "tz2", tz_},
+            {"tx1", "tx2", tx_},
+            {"ty1", "ty2", ty_},
+            {"tz1", "tz2", tz_},
         };
 
-        for (const auto& info : thread_vars) {
+        for (const auto &info : thread_vars) {
           Var prev_var(info.name_prev, prev_indice.dtype());
           Var curr_var(info.name_curr, curr_indice.dtype());
           analyzer_.Bind(prev_var, info.iv->dom);
           analyzer_.Bind(curr_var, info.iv->dom);
-          prev_indice_bytes = Substitute(prev_indice_bytes, {{info.iv->var, prev_var}});
-          curr_indice_bytes = Substitute(curr_indice_bytes, {{info.iv->var, curr_var}});
+          prev_indice_bytes =
+              Substitute(prev_indice_bytes, {{info.iv->var, prev_var}});
+          curr_indice_bytes =
+              Substitute(curr_indice_bytes, {{info.iv->var, curr_var}});
         }
 
         bool provably_disjoint =
@@ -313,6 +316,12 @@ private:
           range_is_overlap = false;
           break;
         }
+      } else if (prev.is_pointer_access || curr.is_pointer_access) {
+        // If either access is a pointer access, conservatively assume a
+        // conflict. For example, address_of(A[0, 0]) may refer to an unknown
+        // memory region, so we cannot safely determine if it overlaps with
+        // previous accesses.
+        return true;
       }
 
       if (!(has_same_index)) {
@@ -359,8 +368,6 @@ private:
   }
 
 private:
-
-
   // Member variables
   IterVar tx_ =
       IterVar(Range::FromMinExtent(0, 1), Var("tx"), IterVarType::kDataPar);
@@ -733,20 +740,24 @@ private:
   std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
 };
 
-Stmt TileLangThreadSync(Stmt stmt, std::string storage_scope) {
+PrimFunc TileLangThreadSync(PrimFunc func, std::string storage_scope) {
   StorageScope sync_scope = StorageScope::Create(storage_scope);
-
+  auto *n = func.CopyOnWrite();
+  auto stmt = n->body;
   if (sync_scope.rank == StorageRank::kShared && sync_scope.tag == "") {
     stmt = ThreadSyncAfterWaitQueueInserter(sync_scope)(stmt);
   }
 
   TileLangThreadSyncPlanner planner(sync_scope);
+  for (const auto &[_, buffer] : func->buffer_map) {
+    planner.SetBufferDataToBuffer(buffer->data, buffer);
+  }
   planner(stmt);
 
   stmt =
       ThreadSyncInserter(sync_scope, planner.syncs_inserted_)(std::move(stmt));
-
-  return ThreadPartialSyncRewriter::Rewrite(std::move(stmt));
+  n->body = ThreadPartialSyncRewriter::Rewrite(std::move(stmt));
+  return func;
 }
 
 using namespace tir::transform;
@@ -756,8 +767,8 @@ namespace transform {
 tvm::transform::Pass ThreadSync(String storage_scope) {
   auto pass_func = [storage_scope](PrimFunc f, IRModule m, PassContext ctx) {
     auto *n = f.CopyOnWrite();
-    n->body = tl::TileLangThreadSync(std::move(n->body), storage_scope);
-    return f;
+    return tl::TileLangThreadSync(std::move(f), storage_scope);
+    ;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ThreadSync", {});
 }
