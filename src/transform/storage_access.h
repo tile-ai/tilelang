@@ -65,6 +65,8 @@ public:
     Map<Var, Range> thread_range;
     /*! \brief The buffer variable, if any */
     Array<PrimExpr> buffer_indices;
+    /*! \brief The buffer ranges for pointer access */
+    Array<Range> buffer_ranges;
     Var buffer = NullValue<Var>();
     /*! \brief The access data type */
     DataType dtype;

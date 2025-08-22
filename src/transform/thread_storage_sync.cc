@@ -239,6 +239,14 @@ private:
       return true;
     }
 
+    if (prev.is_pointer_access || curr.is_pointer_access) {
+      // If either access is a pointer access, conservatively assume a
+      // conflict. For example, address_of(A[0, 0]) may refer to an unknown
+      // memory region, so we cannot safely determine if it overlaps with
+      // previous accesses.
+      return true;
+    }
+
     for (size_t i = 0; i < prev.buffer_indices.size(); i++) {
       auto prev_dtype = prev.dtype;
       auto curr_dtype = curr.dtype;
@@ -316,12 +324,6 @@ private:
           range_is_overlap = false;
           break;
         }
-      } else if (prev.is_pointer_access || curr.is_pointer_access) {
-        // If either access is a pointer access, conservatively assume a
-        // conflict. For example, address_of(A[0, 0]) may refer to an unknown
-        // memory region, so we cannot safely determine if it overlaps with
-        // previous accesses.
-        return true;
       }
 
       if (!(has_same_index)) {
