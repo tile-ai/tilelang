@@ -15,6 +15,8 @@ namespace tl {
 
 namespace attr {
 static constexpr const char *kPaddingMap = "padding_map";
+static constexpr const char *kWarpSpecializationScope =
+    "kWarpSpecializationScope";
 } // namespace attr
 
 static constexpr const char *kDebugMergeSharedMemoryAllocations =

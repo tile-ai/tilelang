@@ -189,6 +189,21 @@ def WarpSpecialized():
     return _ffi_api.WarpSpecialized()  # type: ignore
 
 
+def AnnotateWarpGroupRegAlloc():
+    """Inject set_max_nreg calls into warp-specialized functions.
+
+    This pass analyzes the function to collect register hints from set_max_nreg
+    and no_set_max_nreg calls, then injects appropriate set_max_nreg calls into
+    producer and consumer branches of warp-specialized code.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.AnnotateWarpGroupRegAlloc()  # type: ignore
+
+
 def InjectTmaBarrier():
     """InjectTmaBarrier
 
