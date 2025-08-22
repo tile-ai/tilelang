@@ -246,9 +246,9 @@ private:
       const auto &curr_indice = curr.buffer_indices[i];
 
       if (!ExprDeepEqual()(prev_indice, curr_indice)) {
-        auto prev_indice_bytes =
+        PrimExpr prev_indice_bytes =
             analyzer_.Simplify(prev_indice * prev_dtype.bytes());
-        auto curr_indice_bytes =
+        PrimExpr curr_indice_bytes =
             analyzer_.Simplify(curr_indice * curr_dtype.bytes());
 
         has_same_index = false;
@@ -275,6 +275,32 @@ private:
           // can not support different lanes binary op like <, >, <=, >=
           // skip otherwise it will lead to error
           continue;
+        }
+
+        // provably disjoint means no overlap, for example:
+        // we can prove that tx - 128 < tx + 128, tx in [0, 128]
+        // However, we should apply tx split because
+        // tx < tx + 32 when tx in [0, 128] is not disjoint
+        // because [0, 128] is not disjoint with [32, 160]
+        // so we should split tx into tx0 and tx1.
+
+        struct ThreadVarInfo {
+          const char* name_prev;
+          const char* name_curr;
+          IterVar iv;
+        } thread_vars[] = {
+          {"tx1", "tx2", tx_},
+          {"ty1", "ty2", ty_},
+          {"tz1", "tz2", tz_},
+        };
+
+        for (const auto& info : thread_vars) {
+          Var prev_var(info.name_prev, prev_indice.dtype());
+          Var curr_var(info.name_curr, curr_indice.dtype());
+          analyzer_.Bind(prev_var, info.iv->dom);
+          analyzer_.Bind(curr_var, info.iv->dom);
+          prev_indice_bytes = Substitute(prev_indice_bytes, {{info.iv->var, prev_var}});
+          curr_indice_bytes = Substitute(curr_indice_bytes, {{info.iv->var, curr_var}});
         }
 
         bool provably_disjoint =
@@ -313,6 +339,16 @@ private:
   }
 
   void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == tvm::tir::attr::thread_extent) {
+      IterVar iv = Downcast<IterVar>(op->node);
+      if (iv->thread_tag == "threadIdx.x") {
+        tx_ = iv;
+      } else if (iv->thread_tag == "threadIdx.y") {
+        ty_ = iv;
+      } else if (iv->thread_tag == "threadIdx.z") {
+        tz_ = iv;
+      }
+    }
     TileLangStorageAccessVisitor::VisitStmt_(op);
   }
 
@@ -323,6 +359,15 @@ private:
   }
 
 private:
+
+
+  // Member variables
+  IterVar tx_ =
+      IterVar(Range::FromMinExtent(0, 1), Var("tx"), IterVarType::kDataPar);
+  IterVar ty_ =
+      IterVar(Range::FromMinExtent(0, 1), Var("ty"), IterVarType::kDataPar);
+  IterVar tz_ =
+      IterVar(Range::FromMinExtent(0, 1), Var("tz"), IterVarType::kDataPar);
   // synchronization scope
   StorageScope sync_scope_;
 };
