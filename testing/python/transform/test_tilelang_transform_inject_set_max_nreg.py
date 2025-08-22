@@ -100,7 +100,7 @@ def test_inject_set_max_nreg_no_set_max_nreg():
             T.writes()
 
             # Add no_set_max_nreg to disable register hinting
-            T.no_set_max_nreg()
+            T.disable_warp_group_reg_alloc()
 
             T.create_list_of_mbarrier(128, 128)
             T.attr([128, 128], "kWarpSpecializationScope", 0)

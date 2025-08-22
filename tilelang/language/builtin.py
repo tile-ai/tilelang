@@ -159,6 +159,10 @@ def no_set_max_nreg():
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.no_set_max_nreg"))
 
+def disable_warp_group_reg_alloc():
+    """Disable the warp group reg alloc.
+    """
+    return no_set_max_nreg()
 
 def mbarrier_wait_parity(mbarrier: Union[int, PrimExpr, tir.Call], parity: Union[int, Var]):
     """Wait for memory barrier parity condition.

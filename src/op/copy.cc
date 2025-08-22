@@ -363,8 +363,8 @@ bool Copy::CheckBulkLoad(Target target) const {
   // 1. arch must have bulk copy support
   if (!TargetHasBulkCopy(target))
     return false;
-  // 2. src and dst must be shared.dyn and local.fragment
-  if (src.scope() != "global" || dst.scope() != "shared.dyn")
+  // 2. src and dst must be global and shared
+  if (src.scope() != "global" || (dst.scope() != "shared.dyn" && dst.scope() != "shared"))
     return false;
   // 3. check shape.
   // TODO(lei): validate if we can utilize tma under this shape.
@@ -391,7 +391,7 @@ bool Copy::CheckBulkStore(Target target) const {
   if (!TargetHasBulkCopy(target))
     return false;
   // 2. src and dst must be shared.dyn and local.fragment
-  if (src.scope() != "shared.dyn" || dst.scope() != "global")
+  if ((src.scope() != "shared.dyn" && src.scope() != "shared") || dst.scope() != "global")
     return false;
   // 3. check shape.
   // TODO(lei): validate if we can utilize tma under this shape.
@@ -414,7 +414,7 @@ bool Copy::CheckBulkStore(Target target) const {
  * otherwise.
  */
 bool Copy::CheckLDSMCopy(Target target) const {
-  return TargetHasLdmatrix(target) && src.scope() == "shared.dyn" &&
+  return TargetHasLdmatrix(target) && (src.scope() == "shared.dyn" || src.scope() == "shared") &&
          dst.scope() == "local.fragment";
 }
 
@@ -428,7 +428,7 @@ bool Copy::CheckLDSMCopy(Target target) const {
  */
 bool Copy::CheckSTSMCopy(Target target) const {
   return TargetHasStmatrix(target) && src.scope() == "local.fragment" &&
-         dst.scope() == "shared.dyn";
+         (dst.scope() == "shared.dyn" || dst.scope() == "shared");
 }
 
 /*!
@@ -883,11 +883,7 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     ICHECK(stride != nullptr && continuous != nullptr);
     // We also need to check if the shape satisfies the following doc:
     // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html#group__CUDA__TENSOR__MEMORY_1ga7c7d2aaac9e49294304e755e6f341d7
-    if (StructuralEqual()(shared_layout, makeGemmABLayoutPadded(
-                                             *stride, *continuous,
-                                             shared_tensor->dtype.bits()))) {
-      desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
-    } else if (StructuralEqual()(
+    if (StructuralEqual()(
                    shared_layout,
                    makeQuarterBankSwizzleLayout(*stride, *continuous,
                                                 shared_tensor->dtype.bits()))) {
@@ -902,9 +898,18 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
                    makeFullBankSwizzleLayout(*stride, *continuous,
                                              shared_tensor->dtype.bits()))) {
       desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B);
+    } else if (StructuralEqual()(shared_layout, makeGemmABLayoutPadded(
+      *stride, *continuous,
+      shared_tensor->dtype.bits()))) {
+      LOG(WARNING) << "Bulk copy cannot support a padded layout for src: " 
+                   << src->name << ", dst: " << dst->name 
+                   << ", fallback to normal copy";
+      return LowerNormalCopy(T, analyzer);
     } else {
       LOG(WARNING)
-          << "Came across unsupported swizzle layout, fallback to normal copy";
+          << "Came across unsupported swizzle layout for src: " 
+          << src->name << ", dst: " << dst->name 
+          << ", fallback to normal copy";
       return LowerNormalCopy(T, analyzer);
     }
   }

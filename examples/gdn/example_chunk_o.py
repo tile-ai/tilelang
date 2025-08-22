@@ -122,7 +122,7 @@ def tilelang_chunk_fwd_o(
 
             T.clear(A_fragment)
             T.clear(O_fragment)
-            T.no_set_max_nreg()
+            T.disable_warp_group_reg_alloc()
             for i_k in T.Pipelined(T.ceildiv(DK, block_DK), num_stages=num_stages):
                 T.copy(
                     Q[bb, bs * block_S:(bs + 1) * block_S, bh, i_k * block_DK:(i_k + 1) * block_DK],

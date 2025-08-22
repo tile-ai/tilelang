@@ -70,7 +70,7 @@ def matmul_sp(
                         backend="cutlass",
                         block_k=block_K),
             })
-            T.no_set_max_nreg()
+            T.disable_warp_group_reg_alloc()
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(E[by * block_M, k * block_K // E_factor], E_shared)
