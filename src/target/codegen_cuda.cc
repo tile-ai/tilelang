@@ -1045,7 +1045,11 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << mbarrier_obj << ".expect_transaction(" << transaction_bytes
                  << ");\n";
   } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
-    print_extern_call_stmt("tl::mbarrier_wait");
+    ICHECK_EQ(op->args.size(), 2);
+    this->PrintIndent();
+    auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+    auto phase = this->PrintExpr(op->args[1]);
+    this->stream << mbarrier_obj << ".wait(" << phase << ");\n";
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     return;
   } else if (op->op.same_as(tl::tma_load())) {
