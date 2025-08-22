@@ -9,8 +9,8 @@
 #include <unordered_set>
 #include <vector>
 
-#include "tir/transforms/ir_utils.h"
 #include "../op/builtin.h"
+#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -18,7 +18,7 @@ namespace tl {
 using namespace tir;
 
 class SetMaxNRegCollector : public StmtExprVisitor {
- public:
+public:
   static Array<IntImm> Collect(const PrimFunc &f) {
     SetMaxNRegCollector collector;
     collector(f->body);
@@ -28,7 +28,7 @@ class SetMaxNRegCollector : public StmtExprVisitor {
                : collector.nreg_;
   }
 
- private:
+private:
   void VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
       if (call->op.same_as(set_max_nreg())) {
@@ -54,7 +54,7 @@ class SetMaxNRegCollector : public StmtExprVisitor {
 };
 
 class SetMaxNRegInjector : public StmtExprMutator {
- public:
+public:
   static PrimFunc Inject(PrimFunc f) {
     auto T = SetMaxNRegInjector();
     T.nreg_ = SetMaxNRegCollector::Collect(f);
@@ -62,7 +62,7 @@ class SetMaxNRegInjector : public StmtExprMutator {
     return f;
   }
 
- private:
+private:
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
       if (call->op.same_as(set_max_nreg()) ||
@@ -97,7 +97,6 @@ class SetMaxNRegInjector : public StmtExprMutator {
       Optional<Stmt> consumer_body = if_then_else->else_case;
       ICHECK(consumer_body.defined()) << "Consumer body is undefined";
 
-
       int dec_reg = nreg_[0].as<IntImmNode>()->value;
       int inc_reg = nreg_[1].as<IntImmNode>()->value;
 
@@ -107,13 +106,13 @@ class SetMaxNRegInjector : public StmtExprMutator {
       // Only inject if we have valid register hints and no SIMT copy
       // For now, we assume no SIMT copy detection is available here
       // TODO: Add SIMT copy detection if needed
-      bool has_simt_copy = false;  // Placeholder
+      bool has_simt_copy = false; // Placeholder
 
       if (dec_reg >= 0 && inc_reg >= 0 && !has_simt_copy) {
         inc_reg_stmt = Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                                   {inc_reg == 0 ? 240 : inc_reg, 1}));
+                                     {inc_reg == 0 ? 240 : inc_reg, 1}));
         dec_reg_stmt = Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                                   {dec_reg == 0 ? 24 : dec_reg, 0}));
+                                     {dec_reg == 0 ? 24 : dec_reg, 0}));
       }
 
       // Inject register setting statements
@@ -127,7 +126,8 @@ class SetMaxNRegInjector : public StmtExprMutator {
       consumer_stmts.push_back(consumer_body.value());
       auto new_consumer_body = SeqStmt(consumer_stmts);
 
-      auto new_if_stmt = IfThenElse(if_then_else->condition, new_producer_body, new_consumer_body);
+      auto new_if_stmt = IfThenElse(if_then_else->condition, new_producer_body,
+                                    new_consumer_body);
       auto new_attr = AttrStmt(op->node, op->attr_key, op->value, new_if_stmt);
 
       return new_attr;
@@ -153,8 +153,9 @@ tvm::transform::Pass AnnotateWarpGroupRegAlloc() {
 
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.AnnotateWarpGroupRegAlloc", AnnotateWarpGroupRegAlloc);
+  refl::GlobalDef().def("tl.transform.AnnotateWarpGroupRegAlloc",
+                        AnnotateWarpGroupRegAlloc);
 });
 
-}  // namespace tl
-}  // namespace tvm
+} // namespace tl
+} // namespace tvm
