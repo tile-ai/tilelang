@@ -296,8 +296,8 @@ private:
         };
 
         for (const auto &info : thread_vars) {
-          Var prev_var(info.name_prev, prev_indice.dtype());
-          Var curr_var(info.name_curr, curr_indice.dtype());
+          Var prev_var(info.name_prev, info.iv->var.dtype());
+          Var curr_var(info.name_curr, info.iv->var.dtype());
           analyzer_.Bind(prev_var, info.iv->dom);
           analyzer_.Bind(curr_var, info.iv->dom);
           prev_indice_bytes =
