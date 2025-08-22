@@ -322,39 +322,7 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
     if (Enabled(buffer_var, scope)) {
       ICHECK(allow_append_);
       Array<PrimExpr> buffer_indices;
-      if (buffer_data_to_buffer_.find(GetRef<Var>(buffer_var)) ==
-          buffer_data_to_buffer_.end()) {
-        // cannot find buffer map, use the default buffer
-        buffer_indices = {Ramp(offset, 1, extent)};
-      } else {
-        Buffer buffer = buffer_data_to_buffer_.at(GetRef<Var>(buffer_var));
-        auto buffer_shape = buffer->shape;
-        // convert 1d offset to multi-dimensional index
-        auto linear_to_indices = [this](PrimExpr offset,
-                                        const Array<PrimExpr> &shape) {
-          Array<PrimExpr> indices;
-          PrimExpr remaining = offset;
-          for (size_t i = 0; i < shape.size(); ++i) {
-            PrimExpr stride = make_const(DataType::Int(32), 1);
-            for (size_t j = i + 1; j < shape.size(); ++j) {
-              stride = stride * shape[j];
-            }
-            PrimExpr idx = FloorDiv(remaining, stride);
-            remaining = FloorMod(remaining, stride);
-            indices.push_back(analyzer_.Simplify(idx));
-          }
-          return indices;
-        };
-        Array<PrimExpr> start_indices = linear_to_indices(offset, buffer_shape);
-        Array<PrimExpr> end_indices =
-            linear_to_indices(offset + extent, buffer_shape);
-        for (size_t i = 0; i < buffer_shape.size(); ++i) {
-          buffer_indices.push_back(
-              Ramp(start_indices[i], 1,
-                   analyzer_.Simplify(end_indices[i] - start_indices[i])));
-        }
-      }
-
+      buffer_indices = {Ramp(offset, 1, extent)};
       AccessEntry e;
       e.threads = env_threads();
       e.thread_range = this->ComputeThreadRange(e.threads);
