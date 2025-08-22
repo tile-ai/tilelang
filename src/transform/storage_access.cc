@@ -330,8 +330,8 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
         Buffer buffer = buffer_data_to_buffer_.at(GetRef<Var>(buffer_var));
         auto buffer_shape = buffer->shape;
         // convert 1d offset to multi-dimensional index
-        auto linear_to_indices = [](PrimExpr offset,
-                                    const Array<PrimExpr> &shape) {
+        auto linear_to_indices = [this](PrimExpr offset,
+                                        const Array<PrimExpr> &shape) {
           Array<PrimExpr> indices;
           PrimExpr remaining = offset;
           for (size_t i = 0; i < shape.size(); ++i) {
@@ -341,7 +341,7 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
             }
             PrimExpr idx = FloorDiv(remaining, stride);
             remaining = FloorMod(remaining, stride);
-            indices.push_back(idx);
+            indices.push_back(analyzer_.Simplify(idx));
           }
           return indices;
         };
@@ -350,7 +350,8 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
             linear_to_indices(offset + extent, buffer_shape);
         for (size_t i = 0; i < buffer_shape.size(); ++i) {
           buffer_indices.push_back(
-              Ramp(start_indices[i], 1, end_indices[i] - start_indices[i]));
+              Ramp(start_indices[i], 1,
+                   analyzer_.Simplify(end_indices[i] - start_indices[i])));
         }
       }
 
