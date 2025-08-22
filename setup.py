@@ -821,6 +821,10 @@ class TilelangExtensionBuild(build_ext):
         else:
             print(f"[Config] No changes: {dst_config}")
 
+        # Run CMake to configure the project with the given arguments.
+        if not os.path.exists(build_temp + "/build.ninja"):
+            subprocess.check_call(["cmake", ext.sourcedir] + cmake_args, cwd=build_temp)
+
         # Build the project in "Release" mode with all available CPU cores ("-j").
         num_jobs = max(1, int(multiprocessing.cpu_count() * 0.75))
         subprocess.check_call(["cmake", "--build", ".", "--config", "Release", "-j",
