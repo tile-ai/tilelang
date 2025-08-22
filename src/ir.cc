@@ -158,8 +158,13 @@ ForFrame PersistentFor(Array<PrimExpr> domain, PrimExpr wave_size,
             tvm::tir::Call(DataType::Handle(), tvm::tl::loop_break(), {})),
         Stmt());
 
-    Stmt outer = For(loop_var, 0, waves, ForKind::kSerial,
-                     SeqStmt({out_if, body}), std::nullopt, anno);
+    arith::Analyzer analyzer;
+    Stmt new_body = body;
+    if (analyzer.CanProveGreaterEqual(waves, 2)) {
+      new_body = SeqStmt({out_if, body});
+    }
+    Stmt outer =
+        For(loop_var, 0, waves, ForKind::kSerial, new_body, std::nullopt, anno);
     for (int i = 0; i < vars.size() - 1; ++i) {
       outer = tvm::tir::LetStmt(vars[i], idxs[i + 1], outer);
     }
