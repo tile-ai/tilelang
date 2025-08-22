@@ -109,10 +109,13 @@ def run_reshape_smem_2d_2_1d(N, M, dtype):
     program = reshape_test_smem_2d_2_1d(N, M, dtype)
     # TODO(lei): reshape cannot apply shared memory
     # layout transform propagation
-    jit_kernel = tl.compile(program, out_idx=-1, pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    })
+    jit_kernel = tl.compile(
+        program,
+        out_idx=-1,
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        })
     profiler = jit_kernel.get_profiler()
 
     def ref_program(A):

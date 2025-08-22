@@ -1,7 +1,6 @@
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang as tl
-from tilelang.transform import pass_config
 
 tilelang.testing.set_random_seed()
 
@@ -45,6 +44,7 @@ def test_reduce_sum():
     run_reduce_sum(512, 128)
     run_reduce_sum(128, 512)
 
+
 def reduce_sum_test_clear(M, N, dtype="float32"):
     import tilelang.language as T
 
@@ -67,10 +67,7 @@ def reduce_sum_test_clear(M, N, dtype="float32"):
 
 def run_reduce_sum_clear(M, N, dtype="float32"):
     program = reduce_sum_test_clear(M, N, dtype)
-    jit_kernel = tl.compile(
-        program,
-        out_idx=-1
-    )
+    jit_kernel = tl.compile(program, out_idx=-1)
 
     def ref_program(A):
         return A.sum(dim=1) + 1
@@ -80,6 +77,7 @@ def run_reduce_sum_clear(M, N, dtype="float32"):
     ref_out = ref_program(dummp_A)
     tl_out = jit_kernel(dummp_A)
     torch.testing.assert_close(tl_out, ref_out, atol=1e-2, rtol=1e-2)
+
 
 def test_reduce_sum_clear():
     run_reduce_sum_clear(256, 256, "float32")
