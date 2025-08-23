@@ -24,12 +24,11 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
     Returns:
         tir.Call: Handle to the reduction operation
     """
-    expected_shape = buffer.shape[:dim] + buffer.shape[dim+1:]
+    expected_shape = buffer.shape[:dim] + buffer.shape[dim + 1:]
     if expected_shape != list(out.shape):
         raise ValueError(
             f"Invalid reduce output shape, buffer shape is {buffer.shape}, dim is {dim}, "
-            f"expected output shape {expected_shape}, got output shape {out.shape}"
-        )
+            f"expected output shape {expected_shape}, got output shape {out.shape}")
     buffer = buffer.access_ptr("r")
     out = out.access_ptr("w")
     return tir.call_intrin(
