@@ -238,7 +238,6 @@ private:
       // They are not the same indices, should be conflict.
       return true;
     }
-
     if (prev.is_pointer_access || curr.is_pointer_access) {
       // If either access is a pointer access, conservatively assume a
       // conflict. For example, address_of(A[0, 0]) may refer to an unknown
@@ -749,7 +748,6 @@ PrimFunc TileLangThreadSync(PrimFunc func, std::string storage_scope) {
   if (sync_scope.rank == StorageRank::kShared && sync_scope.tag == "") {
     stmt = ThreadSyncAfterWaitQueueInserter(sync_scope)(stmt);
   }
-
   TileLangThreadSyncPlanner planner(sync_scope);
   for (const auto &[_, buffer] : func->buffer_map) {
     planner.SetBufferDataToBuffer(buffer->data, buffer);
