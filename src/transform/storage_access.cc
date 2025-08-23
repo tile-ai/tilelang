@@ -38,6 +38,7 @@ using namespace tir;
 
 void TileLangStorageAccessVisitor::VisitExpr_(const BufferLoadNode *op) {
   Var buf = op->buffer->data;
+  buffer_data_to_buffer_.Set(GetRef<Var>(buf.get()), op->buffer);
   StorageScope scope = GetScope(buf);
   if (Enabled(buf.get(), scope)) {
     ICHECK(allow_append_) << GetRef<BufferLoad>(op) << " " << scope.to_string();
@@ -64,6 +65,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const BufferStoreNode *op) {
   curr_stmt_.stmt = op;
 
   Var buf = op->buffer->data;
+  buffer_data_to_buffer_.Set(GetRef<Var>(buf.get()), op->buffer);
   StorageScope scope = GetScope(buf);
   if (Enabled(buf.get(), scope)) {
     AccessEntry e;
@@ -113,6 +115,15 @@ void TileLangStorageAccessVisitor::VisitStmt_(const LetStmtNode *op) {
   allow_append_ = false;
   // traverse body block
   this->VisitStmt(op->body);
+}
+
+void TileLangStorageAccessVisitor::VisitStmt_(const BlockNode *op) {
+  auto block = Downcast<Block>(op);
+  for (const auto &buffer : block->alloc_buffers) {
+    ICHECK(buffer->IsInstance<BufferNode>());
+    buffer_data_to_buffer_.Set(buffer->data, buffer);
+  }
+  IRVisitorWithAnalyzer::VisitStmt_(op);
 }
 
 void TileLangStorageAccessVisitor::VisitStmt_(const AttrStmtNode *op) {
@@ -271,7 +282,15 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
       Buffer buffer = load->buffer;
       DataType dtype = buffer->dtype;
       const VarNode *buffer_var = buffer->data.as<VarNode>();
+      buffer_data_to_buffer_.Set(GetRef<Var>(buffer_var), buffer);
       StorageScope scope = GetScope(GetRef<Var>(buffer_var));
+      Array<Range> buffer_ranges;
+      // from indices to buffer indices
+      ICHECK(buffer->shape.size() == load->indices.size());
+      for (size_t i = 0; i < buffer->shape.size(); ++i) {
+        buffer_ranges.push_back(
+            Range::FromMinExtent(load->indices[i], buffer->shape[i]));
+      }
       if (Enabled(buffer_var, scope)) {
         ICHECK(allow_append_);
         AccessEntry e;
@@ -279,10 +298,11 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
         e.thread_range = this->ComputeThreadRange(e.threads);
         e.dtype = dtype;
         e.buffer = Downcast<Var>(buffer->data);
-        e.buffer_indices = load->indices;
+        e.buffer_ranges = buffer_ranges;
         for (const auto &index : load->indices) {
           e.touched.push_back(arith::IntSet::Vector(index));
         }
+        e.is_pointer_access = true;
         e.type = kRead;
         e.scope = scope;
         curr_stmt_.access.emplace_back(e);
@@ -294,20 +314,54 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
   } else if (op->op.same_as(builtin::tvm_access_ptr())) {
     ICHECK_EQ(op->args.size(), 5U);
     DataType dtype = op->args[0].dtype();
-    const VarNode *buffer = op->args[1].as<VarNode>();
+    const VarNode *buffer_var = op->args[1].as<VarNode>();
     PrimExpr offset = op->args[2];
     PrimExpr extent = op->args[3];
     const IntImmNode *flag = op->args[4].as<IntImmNode>();
-    StorageScope scope = GetScope(GetRef<Var>(buffer));
+    StorageScope scope = GetScope(GetRef<Var>(buffer_var));
     // The buffer scope.
-    if (Enabled(buffer, scope)) {
+    if (Enabled(buffer_var, scope)) {
       ICHECK(allow_append_);
+      Array<Range> buffer_ranges;
+      if (buffer_data_to_buffer_.find(GetRef<Var>(buffer_var)) ==
+          buffer_data_to_buffer_.end()) {
+        // cannot find buffer map, use the default buffer
+        buffer_ranges = {Range::FromMinExtent(offset, extent)};
+      } else {
+        Buffer buffer = buffer_data_to_buffer_.at(GetRef<Var>(buffer_var));
+        auto buffer_shape = buffer->shape;
+        // convert 1d offset to multi-dimensional index
+        auto linear_to_indices = [this](PrimExpr offset,
+                                        const Array<PrimExpr> &shape) {
+          Array<PrimExpr> indices;
+          PrimExpr remaining = offset;
+          for (size_t i = 0; i < shape.size(); ++i) {
+            PrimExpr stride = make_const(DataType::Int(32), 1);
+            for (size_t j = i + 1; j < shape.size(); ++j) {
+              stride = stride * shape[j];
+            }
+            PrimExpr idx = FloorDiv(remaining, stride);
+            remaining = FloorMod(remaining, stride);
+            indices.push_back(analyzer_.Simplify(idx));
+          }
+          return indices;
+        };
+        Array<PrimExpr> start_indices = linear_to_indices(offset, buffer_shape);
+        Array<PrimExpr> end_indices =
+            linear_to_indices(offset + extent, buffer_shape);
+        for (size_t i = 0; i < buffer_shape.size(); ++i) {
+          buffer_ranges.push_back(Range::FromMinExtent(
+              start_indices[i],
+              analyzer_.Simplify(end_indices[i] - start_indices[i])));
+        }
+      }
       AccessEntry e;
       e.threads = env_threads();
       e.thread_range = this->ComputeThreadRange(e.threads);
       e.dtype = dtype;
-      e.buffer = Downcast<Var>(op->args[1]);
-      e.buffer_indices = {offset, extent};
+      e.buffer = GetRef<Var>(buffer_var);
+      e.buffer_ranges = buffer_ranges;
+      e.is_pointer_access = true;
       e.touched = {
           arith::IntSet::FromRange(Range::FromMinExtent(offset, extent))};
       e.scope = scope;

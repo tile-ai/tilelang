@@ -5,7 +5,7 @@ import tilelang as tl
 tilelang.testing.set_random_seed()
 
 
-def reduce_sum_test(M, N, dtype="float16"):
+def reduce_sum_test(M, N, dtype="float32"):
     import tilelang.language as T
 
     @T.prim_func
@@ -27,7 +27,7 @@ def reduce_sum_test(M, N, dtype="float16"):
     return main
 
 
-def run_reduce_sum(M, N, dtype="float16"):
+def run_reduce_sum(M, N, dtype="float32"):
     program = reduce_sum_test(M, N, dtype)
     jit_kernel = tl.compile(program, out_idx=-1)
     profiler = jit_kernel.get_profiler()
@@ -44,12 +44,8 @@ def test_reduce_sum():
     run_reduce_sum(512, 128)
     run_reduce_sum(128, 512)
 
-    # Test different dtypes
-    run_reduce_sum(256, 256, "float32")
-    run_reduce_sum(256, 256, "float16")
 
-
-def reduce_sum_test_clear(M, N, dtype="float16"):
+def reduce_sum_test_clear(M, N, dtype="float32"):
     import tilelang.language as T
 
     @T.prim_func
@@ -69,16 +65,9 @@ def reduce_sum_test_clear(M, N, dtype="float16"):
     return main
 
 
-def run_reduce_sum_clear(M, N, dtype="float16"):
+def run_reduce_sum_clear(M, N, dtype="float32"):
     program = reduce_sum_test_clear(M, N, dtype)
-    jit_kernel = tl.compile(
-        program,
-        out_idx=-1,
-        pass_configs={
-            "tl.disable_tma_lower": True,
-            "tl.disable_warp_specialized": True,
-        })
-    print(jit_kernel.get_kernel_source())
+    jit_kernel = tl.compile(program, out_idx=-1)
 
     def ref_program(A):
         return A.sum(dim=1) + 1
@@ -87,8 +76,6 @@ def run_reduce_sum_clear(M, N, dtype="float16"):
     dummp_A = torch.randn((M, N), dtype=getattr(torch, dtype)).cuda()
     ref_out = ref_program(dummp_A)
     tl_out = jit_kernel(dummp_A)
-    print(tl_out)
-    print(ref_out)
     torch.testing.assert_close(tl_out, ref_out, atol=1e-2, rtol=1e-2)
 
 

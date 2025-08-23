@@ -1050,8 +1050,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
     auto phase = this->PrintExpr(op->args[1]);
     this->stream << mbarrier_obj << ".wait(" << phase << ");\n";
-  } else if (op->op.same_as(tl::sync_thread_partial())) {
-    print_extern_call_stmt("cutlass::arch::NamedBarrier::sync");
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     return;
   } else if (op->op.same_as(tl::tma_load())) {

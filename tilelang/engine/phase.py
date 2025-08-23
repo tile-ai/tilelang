@@ -149,7 +149,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # We can find a way better to create var instead
     # of putting the LowerThreadAllreduce before
     # the Legalization.
-    mod = tilelang.transform.ThreadPartialSync("shared.dyn")(mod)
     mod = tir.transform.InferFragment()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
 
@@ -166,6 +165,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.MergeSharedMemoryAllocations(
         enable_aggressive_merge=enable_aggressive_merge)(
             mod)
+    print("mod \n", mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     # Inject PTX async copy must behind the thread sync pass

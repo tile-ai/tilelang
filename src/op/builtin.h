@@ -170,14 +170,6 @@ TVM_DLL const Op &ptx_stmatrix();
 TVM_DLL const Op &pack_b16();
 
 /*!
- * \brief Similar to __syncthreads(), but can be used to sync partial threads
- *
- * sync_thread_partial(num_partial_threads or mbarrier)
- *
- */
-TVM_DLL const Op &sync_thread_partial();
-
-/*!
  * \brief Issue a shared memory fence for async operations
  *
  * FenceProxyAsync()

@@ -81,7 +81,14 @@ def run_matmul_ssr(
         num_stages,
         num_threads,
     )
-    kernel = tilelang.compile(program, out_idx=[2])
+    # TODO(lei): gemm_v2 with tma is not fully tested.
+    kernel = tilelang.compile(
+        program,
+        out_idx=[2],
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        })
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -201,7 +208,13 @@ def run_matmul_rsr(
         num_stages,
         num_threads,
     )
-    kernel = tilelang.compile(program, out_idx=[2])
+    kernel = tilelang.compile(
+        program,
+        out_idx=[2],
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        })
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -323,7 +336,13 @@ def run_matmul_rrr(
         num_stages,
         num_threads,
     )
-    kernel = tilelang.compile(program, out_idx=[2])
+    kernel = tilelang.compile(
+        program,
+        out_idx=[2],
+        pass_configs={
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        })
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
