@@ -104,18 +104,18 @@ jobs:
     - name: Install project (wheel form)
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        pip install . --no-user
+        pip install . --no-user -v
 
     - name: Run examples
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd examples
         unset PYTHONPATH
-        python -m pytest -n 4 **/test*.py
+        python -m pytest -n 4 **/test*.py -v -r fE
 
     - name: Run tests
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd testing/python
         unset PYTHONPATH
-        python -m pytest -n 4
+        python -m pytest -n 4 -v -r fE

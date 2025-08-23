@@ -65,6 +65,8 @@ public:
     Map<Var, Range> thread_range;
     /*! \brief The buffer variable, if any */
     Array<PrimExpr> buffer_indices;
+    /*! \brief The buffer ranges for pointer access */
+    Array<Range> buffer_ranges;
     Var buffer = NullValue<Var>();
     /*! \brief The access data type */
     DataType dtype;
@@ -79,7 +81,10 @@ public:
     StorageScope scope;
     /*! \brief Whether the access is double buffer write */
     bool double_buffer_write = false;
+    /*! \brief Whether the access is pointer access */
+    bool is_pointer_access = false;
   };
+
   /*! \brief Access pattern about a single statement */
   struct StmtEntry {
     /*! \brief The statement */
@@ -97,6 +102,11 @@ public:
   void VisitStmt_(const IfThenElseNode *op) final;
   void VisitStmt_(const WhileNode *op) final;
   void VisitExpr_(const CallNode *op) final;
+  void VisitStmt_(const BlockNode *op) final;
+
+  void SetBufferDataToBuffer(const Var &buffer_var, const Buffer &buffer) {
+    buffer_data_to_buffer_.Set(buffer_var, buffer);
+  }
 
 protected:
   TileLangStorageAccessVisitor() { scope_.push_back(std::vector<StmtEntry>()); }
@@ -157,6 +167,8 @@ private:
   StmtEntry curr_stmt_;
   // The involving threads
   Array<IterVar> env_threads_;
+  // The buffer map
+  Map<Var, Buffer> buffer_data_to_buffer_;
 };
 } // namespace tl
 } // namespace tvm

@@ -324,19 +324,6 @@ def sync_threads():
     return tir.op.tvm_storage_sync("shared")
 
 
-def sync_thread_partial(barrier_id: Union[int, PrimExpr, tir.Call]):
-    """Synchronize threads within a warp.
-
-    Args:
-        barrier_id: Optional[int, PrimExpr]
-            The memory barrier to synchronize
-
-    Returns:
-        tir.Call: A handle to the synchronization operation
-    """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.sync_thread_partial"), barrier_id)
-
-
 def sync_global():
     """Synchronize all threads in a block.
     """
