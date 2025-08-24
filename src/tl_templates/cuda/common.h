@@ -4,7 +4,6 @@
 #include <cuda_runtime.h>
 #endif
 
-#include "intrin.h"
 #include <cutlass/fast_math.h>
 #include <cutlass/numeric_types.h>
 #include <math_constants.h>

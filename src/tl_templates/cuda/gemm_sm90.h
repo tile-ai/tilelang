@@ -2,6 +2,7 @@
 
 #include "common.h"
 #include "cuda_fp8.h"
+#include "intrin.h"
 #include <cute/arch/mma_sm80.hpp>
 #include <cute/arch/mma_sm90.hpp>
 #include <cute/atom/mma_atom.hpp>
