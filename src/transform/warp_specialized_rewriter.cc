@@ -24,6 +24,12 @@ using namespace tir;
 using namespace runtime;
 using arith::IRVisitorWithAnalyzer;
 
+struct LoopInfo {
+  Var loop_var;
+  PrimExpr extent;
+  PrimExpr min;
+};
+
 enum class Role { kConsumer, kProducer, kBoth };
 
 class ProducerBufferDetector : public StmtExprVisitor {
@@ -838,7 +844,7 @@ private:
       num_stages = static_cast<int>(num_stages_anno->as<IntImmNode>()->value);
       ICHECK(num_stages_ == 1) << "Nested pipeline not supported.";
     }
-    loop_stack_.emplace_back(op->loop_var, op->extent);
+    loop_stack_.emplace_back(LoopInfo{op->loop_var, op->extent, op->min});
 
     Array<Array<Integer>> group_info_array;
     Array<Integer> order_info_array;
@@ -871,15 +877,14 @@ private:
 
     num_stages_ = num_stages;
     pipeline_info_ = pipeline_info;
-    PrimExpr linear_index = loop_stack_[0].first;
+    PrimExpr linear_index = loop_stack_[0].loop_var - loop_stack_[0].min;
     for (size_t i = 1; i < loop_stack_.size(); ++i) {
-      linear_index =
-          linear_index * loop_stack_[i].second + loop_stack_[i].first;
+      linear_index = linear_index * loop_stack_[i].extent +
+                     (loop_stack_[i].loop_var - loop_stack_[i].min);
     }
     stage_ = FloorMod(linear_index, num_stages);
     parity_ = FloorMod(
         parity_before * op->extent + FloorDiv(linear_index, num_stages), 2);
-
     auto result = FilterByRole(op);
 
     Stmt grouped_for_node;
@@ -1137,7 +1142,7 @@ private:
   PrimExpr parity_ = 0;
   PrimExpr stage_ = 0;
   int num_stages_ = 1;
-  std::vector<std::pair<Var, PrimExpr>> loop_stack_;
+  std::vector<LoopInfo> loop_stack_;
   Var thread_var_;
   bool mbarrier_only_ = false;
   PipelineInfo pipeline_info_;
