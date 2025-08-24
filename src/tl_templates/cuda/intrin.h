@@ -4,6 +4,7 @@
 #include "cute/arch/cluster_sm90.hpp"
 #include "cutlass/cutlass.h"
 
+namespace tl {
 // Template parameter:
 //   thread_extent: the logical size (in number of threads) of each "group"
 //                  within which we want to elect exactly ONE representative
@@ -51,5 +52,5 @@ template <uint32_t RegCount> TL_DEVICE void warpgroup_reg_alloc() {
 template <uint32_t RegCount> TL_DEVICE void warpgroup_reg_dealloc() {
   asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" : : "n"(RegCount));
 }
-
+} // namespace tl
 #endif
