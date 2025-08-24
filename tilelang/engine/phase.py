@@ -165,7 +165,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.MergeSharedMemoryAllocations(
         enable_aggressive_merge=enable_aggressive_merge)(
             mod)
-    print("mod \n", mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     # Inject PTX async copy must behind the thread sync pass

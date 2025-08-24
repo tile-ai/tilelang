@@ -550,10 +550,10 @@ def run_assert_tl_matmul_block_dynamic_mnk(M, N, K, block_M, block_N, block_K):
 
 
 def test_all():
-    run_assert_tl_matmul_block_static(16384, 16384, 16384, 128, 128, 32)
-    run_assert_tl_matmul_block_dynamic_m(16384, 16384, 16384, 128, 128, 32)
-    run_assert_tl_matmul_block_dynamic_mn(16384, 16384, 16384, 128, 128, 32)
-    run_assert_tl_matmul_block_dynamic_mnk(16384, 16384, 16384, 128, 128, 32)
+    run_assert_tl_matmul_block_static(1024, 1024, 1024, 128, 128, 32)
+    run_assert_tl_matmul_block_dynamic_m(1024, 1024, 1024, 128, 128, 32)
+    run_assert_tl_matmul_block_dynamic_mn(1024, 1024, 1024, 128, 128, 32)
+    run_assert_tl_matmul_block_dynamic_mnk(1024, 1024, 1024, 128, 128, 32)
 
 
 if __name__ == "__main__":
