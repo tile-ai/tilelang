@@ -6,7 +6,7 @@
 #include <cutlass/arch/barrier.h>
 #include <cutlass/cutlass.h>
 #include <cutlass/gemm/collective/collective_builder.hpp>
-
+#include "cuda_fp8.h"
 #include "common.h"
 
 namespace cute {
