@@ -1,8 +1,8 @@
 #pragma once
 
 #if __CUDA_ARCH_LIST__ >= 900
-#include "cutlass/cutlass.h"
 #include "cute/arch/cluster_sm90.hpp"
+#include "cutlass/cutlass.h"
 
 // Template parameter:
 //   thread_extent: the logical size (in number of threads) of each "group"
