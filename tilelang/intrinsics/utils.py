@@ -76,29 +76,21 @@ def mfma_store_index_map(thread_id, local_id):
 def get_mma_micro_size(dtype: Literal["float16", "int8"]):
     # TODO(lei): FP8 related precision support.
     # Basic Tensor Core Matrix Multiply operation Unit
+    """
+    Return the MMA (Tensor Core) micro-tile dimensions for a given data type.
+    
+    This function returns the micro tile sizes (x, y, k) used by MMA/Tensor Core operations.
+    - x: tile width in the output/result dimension
+    - y: tile height in the output/result dimension
+    - k: tile depth in the reduction/K dimension
+    
+    Accepted dtype strings include "float16", "int8" and some FP8 identifiers ("float8_e4m3", "float8_e5m2"). For FP8 and int8 types the reduction depth (`k`) is 32; for float16 it is 16.
+    
+    Returns:
+        tuple[int, int, int]: (micro_size_x, micro_size_y, micro_size_k)
+    """
     micro_size_x = micro_size_y = 16
     micro_size_k = 16
     if dtype in {"float8_e4m3", "float8_e5m2", "int8"}:
         micro_size_k = 32
     return micro_size_x, micro_size_y, micro_size_k
-
-
-def index_to_coordinates(index, shape):
-    '''
-    General Implementation of:
-        vjj = index % (micro_size_k // num_elems_per_byte)
-        coordinates[-1] = index % shape[-1]; 
-        vii = index // (micro_size_k // num_elems_per_byte) % micro_size_y
-        index = index // shape[-1]; coordinates[-2] = index % shape[-2];
-        vj = index // (micro_size_k // num_elems_per_byte * micro_size_y) % block_K // (micro_size_k // num_elems_per_byte)
-        index = index // shape[-2]; coordinates[-3] = index % shape[-3];
-        vi = index // (micro_size_k // num_elems_per_byte * micro_size_y * (block_K // (micro_size_k // num_elems_per_byte))) % block_N // micro_size_y
-        index = index // shape[-3]; coordinates[-4] = index % shape[-4];
-    '''
-    coordinates = []
-    dims = len(shape)
-    for i in range(dims):
-        coordinates.append(index % shape[dims - i - 1])
-        index = index // shape[dims - i - 1]
-    coordinates.reverse()
-    return coordinates

@@ -4,13 +4,16 @@ from tvm.target import Target
 from tvm.tir import PrimFunc
 
 import tilelang
-from tilelang import tvm as tvm
+from tilelang import tvm
+from tilelang import env
 from tilelang.engine.param import CompiledArtifact, KernelParam
-from tilelang.env import TILELANG_PRINT_ON_COMPILATION
 from tilelang.jit.adapter import (BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter,
                                   NVRTCKernelAdapter, TorchDLPackKernelAdapter)
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import AVALIABLE_TARGETS, determine_target
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class JITKernel(object):
@@ -114,11 +117,19 @@ class JITKernel(object):
         # Print log on compilation starts
         # NOTE(Chenggang): printing could let the training/inference framework easier to know
         # whether the communication timeout is from compilation
-        if TILELANG_PRINT_ON_COMPILATION.lower() in ("1", "true", "yes", "on"):
-            print(f"TileLang begins to compile kernel `{func.__name__}` with `{out_idx=}`")
+        if env.is_print_on_compilation_enabled():
+            # assert func must have "global_symbol"
+            func_name = func.attrs.get("global_symbol")
+            assert func_name is not None, "func must have global_symbol"
+            logger.info(f"TileLang begins to compile kernel `{func_name}` with `{out_idx=}`")
 
         # Compile the TileLang function and create a kernel adapter for execution.
         adapter = self._compile_and_create_adapter(func, out_idx)
+
+        if env.is_print_on_compilation_enabled():
+            func_name = func.attrs.get("global_symbol")
+            assert func_name is not None, "func must have global_symbol"
+            logger.info(f"TileLang completes to compile kernel `{func_name}`")
 
         # The adapter's function is assigned as the callable function for this instance.
         self.adapter = adapter

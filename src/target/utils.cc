@@ -104,6 +104,13 @@ bool TargetHasStmatrix(Target target) {
   return arch >= 90;
 }
 
+bool TargetHasBulkCopy(Target target) {
+  if (!TargetIsCuda(target))
+    return false;
+  int arch = GetArchInt(target);
+  return arch >= 90;
+}
+
 int TargetGetWarpSize(Target target) {
   int res = 32;
   if (TargetIsCDNA(target))

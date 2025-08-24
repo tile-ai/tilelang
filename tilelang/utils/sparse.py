@@ -2,12 +2,12 @@ import os
 import torch
 import warnings
 from torch.utils.cpp_extension import load, _import_module_from_library
-from tilelang.env import TILELANG_CACHE_DIR, TILELANG_TEMPLATE_PATH, CUTLASS_INCLUDE_DIR
+from tilelang import env
 
 # Define paths
-compress_util = os.path.join(TILELANG_TEMPLATE_PATH, "tl_templates/cuda/compress_sm90.cu")
+compress_util = os.path.join(env.TILELANG_TEMPLATE_PATH, "tl_templates/cuda/compress_sm90.cu")
 # Cache directory for compiled extensions
-_CACHE_DIR = os.path.join(TILELANG_CACHE_DIR, "sparse_compressor")
+_CACHE_DIR = os.path.join(env.TILELANG_CACHE_DIR, "sparse_compressor")
 os.makedirs(_CACHE_DIR, exist_ok=True)
 
 
@@ -22,9 +22,8 @@ def _get_cached_lib():
             # If loading fails, recompile
             pass
 
-    from tilelang.env import _initialize_torch_cuda_arch_flags
     # Set TORCH_CUDA_ARCH_LIST
-    _initialize_torch_cuda_arch_flags()
+    env._initialize_torch_cuda_arch_flags()
 
     # Compile if not cached or loading failed
     return load(
@@ -34,8 +33,8 @@ def _get_cached_lib():
             '-O2',
             '-std=c++17',
             '-lineinfo',
-            f'-I{CUTLASS_INCLUDE_DIR}',
-            f'-I{CUTLASS_INCLUDE_DIR}/../tools/util/include',
+            f'-I{env.CUTLASS_INCLUDE_DIR}',
+            f'-I{env.CUTLASS_INCLUDE_DIR}/../tools/util/include',
             '-arch=sm_90',
         ],
         build_directory=_CACHE_DIR,

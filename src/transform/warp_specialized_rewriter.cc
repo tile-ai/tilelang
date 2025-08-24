@@ -14,11 +14,14 @@
 
 #include "../op/builtin.h"
 #include "./common/collector.h"
+#include "runtime/thread_storage_scope.h"
+#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+using namespace runtime;
 using arith::IRVisitorWithAnalyzer;
 
 enum class Role { kConsumer, kProducer, kBoth };
@@ -149,8 +152,8 @@ public:
   }
 
   void VisitStmt_(const BufferStoreNode *op) final {
-    bool is_shared_store =
-        op->buffer.scope() == "shared.dyn" || op->buffer.scope() == "shared";
+    auto scope = StorageScope::Create(GetPtrStorageScope(op->buffer->data));
+    bool is_shared_store = scope.rank == StorageRank::kShared;
     if (producer_buffers_.count(op->buffer.get())) {
       SetRole(op, Role::kBoth);
       return;
@@ -570,29 +573,35 @@ public:
 class WSCodeEmitter : public StmtMutator {
 public:
   /**
-         * @brief Construct a warp-specialized code emitter configured for producer or consumer emission.
-         *
-         * Initializes a WSCodeEmitter that will emit barrier-aware, role-filtered code for a single
-         * warp-specialized block. The emitter is configured with the loop/thread iteration variable,
-         * buffer mapping, role marker used to classify statements, and two flags that control emission
-         * behavior:
-         *
-         * - `mbarrier_only`: when true, emission is restricted to barrier-related operations only.
-         * - `only_has_wgmma`: when true, the emitter will account for the presence of WgMMA
-         *   (workgroup MMA) operations when computing barrier/thread gating behavior.
-         *
-         * @param is_emitting_producer True to emit producer-side groups; false to emit consumer-side groups.
-         * @param thread_iv IterVar representing the thread iteration variable (threadIdx.*) whose Var is used
-         *                  for thread-index rewrites and gating.
-         * @param buffer_data_to_buffer Map from buffer data Var to the corresponding Buffer (used to resolve
-         *                              buffer references during emission).
-         * @param marker Role marker that classifies statements as producer/consumer/both; used to filter
-         *               which statements are emitted on this path.
-         * @param mbarrier_only If true, restrict emission to mbarrier-related statements and helpers.
-         * @param only_has_wgmma If true, adjust emission and barrier-thread-count logic for blocks that
-         *                       contain WgMMA operations.
-         */
-        WSCodeEmitter(bool is_emitting_producer, IterVar thread_iv,
+   * @brief Construct a warp-specialized code emitter configured for producer or
+   * consumer emission.
+   *
+   * Initializes a WSCodeEmitter that will emit barrier-aware, role-filtered
+   * code for a single warp-specialized block. The emitter is configured with
+   * the loop/thread iteration variable, buffer mapping, role marker used to
+   * classify statements, and two flags that control emission behavior:
+   *
+   * - `mbarrier_only`: when true, emission is restricted to barrier-related
+   * operations only.
+   * - `only_has_wgmma`: when true, the emitter will account for the presence of
+   * WgMMA (workgroup MMA) operations when computing barrier/thread gating
+   * behavior.
+   *
+   * @param is_emitting_producer True to emit producer-side groups; false to
+   * emit consumer-side groups.
+   * @param thread_iv IterVar representing the thread iteration variable
+   * (threadIdx.*) whose Var is used for thread-index rewrites and gating.
+   * @param buffer_data_to_buffer Map from buffer data Var to the corresponding
+   * Buffer (used to resolve buffer references during emission).
+   * @param marker Role marker that classifies statements as
+   * producer/consumer/both; used to filter which statements are emitted on this
+   * path.
+   * @param mbarrier_only If true, restrict emission to mbarrier-related
+   * statements and helpers.
+   * @param only_has_wgmma If true, adjust emission and barrier-thread-count
+   * logic for blocks that contain WgMMA operations.
+   */
+  WSCodeEmitter(bool is_emitting_producer, IterVar thread_iv,
                 Map<Var, Buffer> buffer_data_to_buffer,
                 const WarpSpecializedRoleMarker &marker,
                 bool mbarrier_only = false, bool only_has_wgmma = false)
@@ -602,14 +611,15 @@ public:
         only_has_wgmma_(only_has_wgmma) {}
 
   /**
- * @brief Whether a SIMT-style bulk copy was detected.
- *
- * Returns true when a simulated SIMT (thread-parallel) copy pattern was observed
- * during analysis/emission, which can affect barrier insertion and copy emission.
- *
- * @return true if a SIMT copy was detected; false otherwise.
- */
-bool hasSimtCopy() const { return has_simt_copy_; }
+   * @brief Whether a SIMT-style bulk copy was detected.
+   *
+   * Returns true when a simulated SIMT (thread-parallel) copy pattern was
+   * observed during analysis/emission, which can affect barrier insertion and
+   * copy emission.
+   *
+   * @return true if a SIMT copy was detected; false otherwise.
+   */
+  bool hasSimtCopy() const { return has_simt_copy_; }
 
 private:
   template <typename NodeType> Stmt FilterByRole(const NodeType *op) {
@@ -628,18 +638,18 @@ private:
   }
 
   /**
-   * @brief Visit and transform a SeqStmt node, emitting grouped blocks with barrier
-   * synchronization according to producer/consumer roles.
+   * @brief Visit and transform a SeqStmt node, emitting grouped blocks with
+   * barrier synchronization according to producer/consumer roles.
    *
    * This method examines the sequence to determine whether producer-side
-   * synchronization is required (based on marker_ roles). If no producer sync is
-   * needed it delegates to FilterByRole. Otherwise it:
+   * synchronization is required (based on marker_ roles). If no producer sync
+   * is needed it delegates to FilterByRole. Otherwise it:
    * - Recursively visits and transforms each child statement.
    * - Extracts an acquire/release sync pattern for the sequence via
    *   ExtractSyncPattern.
    * - For producer emission (is_emitting_producer_ == true):
-   *   - Skips consumer-only statements unless marker_ marks a statement as Both,
-   *     in which case the statement is emitted as its own group.
+   *   - Skips consumer-only statements unless marker_ marks a statement as
+   * Both, in which case the statement is emitted as its own group.
    *   - For each statement, inserts parity waits for acquire patterns, rewrites
    *     release statements with MbarrierRewriter using a computed barrier id,
    *     collects SimT-copy presence (setting has_simt_copy_ and inserting
@@ -1136,42 +1146,6 @@ private:
   bool has_simt_copy_ = false;
 };
 
-class SetMaxNRegCollector : public StmtExprVisitor {
-public:
-  static Array<IntImm> Collect(const PrimFunc &f) {
-    SetMaxNRegCollector collector;
-    collector(f->body);
-    return collector.has_no_set_max_nreg_
-               ? Array<IntImm>({IntImm(DataType::Int(32), -1),
-                                IntImm(DataType::Int(32), -1)})
-               : collector.nreg_;
-  }
-
-private:
-  void VisitStmt_(const EvaluateNode *op) final {
-    if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(set_max_nreg())) {
-        int reg_hint = call->args[0].as<IntImmNode>()->value;
-        int is_inc = call->args[1].as<IntImmNode>()->value;
-        ICHECK(reg_hint <= 240 && reg_hint >= 24)
-            << "Invalid reg hint: " << reg_hint;
-        ICHECK(is_inc == 0 || is_inc == 1) << "Invalid is_inc: " << is_inc;
-
-        // producer should decrease register hint while consumer should increase
-        // register hint
-        nreg_.Set(is_inc, IntImm(DataType::Int(32), reg_hint));
-      } else if (call->op.same_as(no_set_max_nreg())) {
-        has_no_set_max_nreg_ = true;
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  Array<IntImm> nreg_{IntImm(DataType::Int(32), 0),
-                      IntImm(DataType::Int(32), 0)};
-  bool has_no_set_max_nreg_ = false;
-};
-
 class WarpSpecializedRewriter : public StmtExprMutator {
 public:
   WarpSpecializedRewriter(bool disable_warp_specialized,
@@ -1192,7 +1166,6 @@ public:
 
     auto T = WarpSpecializedRewriter(disable_warp_specialized,
                                      disable_shuffle_elect);
-    T.nreg_ = SetMaxNRegCollector::Collect(f);
     T.buffer_lca_ = DetectBufferAccessLCA(f);
     for (auto [buffer, _] : T.buffer_lca_)
       T.buffer_data_to_buffer_.Set(buffer->data, buffer);
@@ -1219,16 +1192,6 @@ private:
     }
   }
 
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(set_max_nreg()) ||
-          call->op.same_as(no_set_max_nreg())) {
-        return Evaluate(0);
-      }
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
   // If users define a thread binding, we will replace the thread binding with
   // threadIdx.x We require the thread binding is threadIdx.x, and the extent is
   // the same as the thread extent
@@ -1248,21 +1211,21 @@ private:
   }
 
   /**
-   * @brief Rewrite a BlockRealize for warp specialization, inserting barriers and
-   *        emitting producer/consumer bodies.
+   * @brief Rewrite a BlockRealize for warp specialization, inserting barriers
+   * and emitting producer/consumer bodies.
    *
    * This visitor handles BlockRealize nodes when a thread IterVar (thread_iv_)
    * is defined and warp-specialization is applicable. It:
    * - Determines producer/consumer roles via WarpSpecializedRoleMarker and
    *   returns the original block if no producer is detected.
-   * - If warp specialization is disabled, emits only mbarrier initialization and
-   *   the mbarrier-only transformed body.
+   * - If warp specialization is disabled, emits only mbarrier initialization
+   * and the mbarrier-only transformed body.
    * - Otherwise, detects WgMMA usage for the block body and constructs separate
    *   WSCodeEmitter instances for producer and consumer paths (propagating the
    *   WgMMA flag to the consumer emitter).
-   * - Generates producer/consumer code, applies register hint calls (set_max_nreg)
-   *   when available, and rewrites thread indices with ThreadIdxRewriter to
-   *   partition threads between producer and consumer roles.
+   * - Generates producer/consumer code, applies register hint calls
+   * (set_max_nreg) when available, and rewrites thread indices with
+   * ThreadIdxRewriter to partition threads between producer and consumer roles.
    * - Computes and initializes a list of mbarrier handles with per-barrier
    *   arrive thread counts (taking SIMT-copy and WgMMA cases into account).
    * - Wraps the transformed body in an IfThenElse that dispatches producer vs
@@ -1324,22 +1287,6 @@ private:
     if (!marker.HasSimtCopy())
       producer_thread_extent = 128;
 
-    // TODO: estimate the correct reg usage.
-    int dec_reg = nreg_[0].as<IntImmNode>()->value;
-    int inc_reg = nreg_[1].as<IntImmNode>()->value;
-
-    auto inc_reg_stmt = Evaluate(0);
-    auto dec_reg_stmt = Evaluate(0);
-    if (dec_reg >= 0 && inc_reg >= 0 && !marker.HasSimtCopy()) {
-      inc_reg_stmt = Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                                   {inc_reg == 0 ? 240 : inc_reg, 1}));
-      dec_reg_stmt = Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                                   {dec_reg == 0 ? 24 : dec_reg, 0}));
-    }
-
-    producer_code = SeqStmt({dec_reg_stmt, producer_code});
-    consumer_code = SeqStmt({inc_reg_stmt, consumer_code});
-
     updated_thread_extent_ = consumer_thread_extent + producer_thread_extent;
 
     producer_code = ThreadIdxRewriter::Rewrite(
@@ -1372,7 +1319,7 @@ private:
     // Add an attr here to handle the partial thread count in ThreadSync pass.
     Array<IntImm> ws_partition = {Downcast<IntImm>(producer_thread_extent),
                                   Downcast<IntImm>(consumer_thread_extent)};
-    body = AttrStmt(ws_partition, "kWarpSpecializationScope", 0, body);
+    body = AttrStmt(ws_partition, attr::kWarpSpecializationScope, 0, body);
 
     block.CopyOnWrite()->body = SeqStmt({init_barrier, body});
     block_realize.CopyOnWrite()->block = block;
@@ -1389,17 +1336,26 @@ private:
   bool need_update_thread_extent_ = false;
   bool disable_warp_specialized_ = false;
   bool disable_shuffle_elect_ = false;
-  Array<IntImm> nreg_;
   bool only_has_wgmma_ = false;
 };
 
 class WarpSpecializedDetector : public IRVisitorWithAnalyzer {
 public:
+  // return true means this aws will be disabled
   static bool Detect(Stmt stmt, bool skip_thread_partition = false) {
     WarpSpecializedDetector detector;
     detector.VisitStmt(stmt);
-    return detector.has_warp_specialization_ ||
-           (detector.has_tma_op_ && detector.has_mbarrier_op_);
+    if (detector.has_warp_specialization_) {
+      LOG(WARNING) << "Auto warp specialization will be disabled because warp "
+                      "specialization is manually enabled";
+      return true;
+    }
+    if (detector.has_tma_op_ && detector.has_mbarrier_op_) {
+      LOG(WARNING) << "Auto warp specialization will be disabled because TMA "
+                      "and mbarrier are both present";
+      return true;
+    }
+    return false;
   }
 
   WarpSpecializedDetector() {

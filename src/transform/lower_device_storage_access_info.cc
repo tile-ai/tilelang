@@ -44,7 +44,8 @@ class StorageAccessInfoLower : public StmtExprMutator {
 public:
   Stmt VisitStmt_(const AllocateNode *op) final {
     auto scope = StorageScope::Create(GetPtrStorageScope(op->buffer_var));
-    if (scope.tag.length() != 0 && scope.tag != ".dyn" && scope.tag != ".var") {
+    if (scope.tag.length() != 0 && scope.tag != ".dyn" && scope.tag != ".var" &&
+        scope.tag != ".barrier") {
       auto info = GetMemoryInfo(GetPtrStorageScope(op->buffer_var));
       ICHECK(info.defined())
           << "Cannot find memory info of " << scope.to_string();

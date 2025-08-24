@@ -107,7 +107,7 @@ def tilelang_recompute_w_u_fwd(
                 U_Beta_shared: tilelang.layout.make_swizzled_layout(U_Beta_shared),
             })
 
-            T.no_set_max_nreg()
+            T.disable_warp_group_reg_alloc()
             for i_s in T.Parallel(block_S):
                 Beta_shared[i_s] = Beta[bb, bs * block_S + i_s, bh]
                 G_shared[i_s] = T.exp(G[bb, bs * block_S + i_s, bh])

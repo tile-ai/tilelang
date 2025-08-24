@@ -182,27 +182,25 @@ For AtomicAdd::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 
 Stmt AtomicAdd::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Target target = T.target;
-  bool is_cpu_target = target->GetTargetDeviceType() == kDLCPU;
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
-  For vectorized_thread_loop;
   auto par_op = std::make_unique<ParallelOp>(fused_loop);
 
-  if (!is_cpu_target) {
-    std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
-                                      InferLevel::kFree};
-    for (auto level : levels) {
-      par_op->InferLayout(
-          {T.target, T.thread_bounds, T.layout_map, T.buffer_remap}, level);
-    }
-    auto loop_layout = par_op->GetLoopLayout();
-    Var thread_var = T.thread_var;
-    Range thread_bounds = T.thread_bounds;
-    auto thread_loop =
-        PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer, loop_layout);
-    vectorized_thread_loop = VectorizeAtomicAdd(
-        thread_loop, thread_var, thread_bounds, GetArchInt(target));
+  std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
+                                    InferLevel::kFree};
+  for (auto level : levels) {
+    par_op->InferLayout(
+        {T.target, T.thread_bounds, T.layout_map, T.buffer_remap}, level);
   }
+  auto loop_layout = par_op->GetLoopLayout();
+  Var thread_var = T.thread_var;
+  Range thread_bounds = T.thread_bounds;
+  auto thread_loop =
+      PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer, loop_layout);
+  // TODO(@dyq): buggy implementation, need to fix
+  // vectorized_thread_loop = VectorizeAtomicAdd(
+  //     thread_loop, thread_var, thread_bounds, GetArchInt(target));
+  auto vectorized_thread_loop = VectorizeLoop(thread_loop);
 
   if (par_op->GetPredicate(T.thread_var).defined()) {
     return IfThenElse(par_op->GetPredicate(T.thread_var).value(),

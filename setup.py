@@ -112,7 +112,8 @@ def get_nvcc_cuda_version():
 
     Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
     """
-    nvcc_output = subprocess.check_output(["nvcc", "-V"], universal_newlines=True)
+    nvcc_path = os.path.join(CUDA_HOME, "bin", "nvcc")
+    nvcc_output = subprocess.check_output([nvcc_path, "-V"], universal_newlines=True)
     output = nvcc_output.split()
     release_idx = output.index("release") + 1
     nvcc_cuda_version = Version(output[release_idx].split(",")[0])
@@ -788,26 +789,46 @@ class TilelangExtensionBuild(build_ext):
             build_temp = os.path.abspath(self.build_temp)
         os.makedirs(build_temp, exist_ok=True)
 
-        # Copy the default 'config.cmake' from the source tree into our build directory.
-        src_config_cmake = os.path.join(ext.sourcedir, "3rdparty", "tvm", "cmake", "config.cmake")
-        dst_config_cmake = os.path.join(build_temp, "config.cmake")
-        shutil.copy(src_config_cmake, dst_config_cmake)
+        # Paths to the source and destination config.cmake files
+        src_config = Path(ext.sourcedir) / "3rdparty" / "tvm" / "cmake" / "config.cmake"
+        dst_config = Path(build_temp) / "config.cmake"
 
-        # Append some configuration variables to 'config.cmake'
-        with open(dst_config_cmake, "a") as config_file:
-            config_file.write(f"set(USE_LLVM {llvm_config_path})\n")
-            if USE_ROCM:
-                config_file.write(f"set(USE_ROCM {ROCM_HOME})\n")
-                config_file.write("set(USE_CUDA OFF)\n")
-            else:
-                config_file.write(f"set(USE_CUDA {CUDA_HOME})\n")
-                config_file.write("set(USE_ROCM OFF)\n")
+        # Read the default config template
+        content_lines = src_config.read_text().splitlines()
+
+        # Add common LLVM configuration
+        content_lines.append(f"set(USE_LLVM {llvm_config_path})")
+
+        # Append GPU backend configuration based on environment
+        if USE_ROCM:
+            content_lines += [
+                f"set(USE_ROCM {ROCM_HOME})",
+                "set(USE_CUDA OFF)",
+            ]
+        else:
+            content_lines += [
+                f"set(USE_CUDA {CUDA_HOME})",
+                "set(USE_ROCM OFF)",
+            ]
+
+        # Create the final file content
+        new_content = "\n".join(content_lines) + "\n"
+
+        # Write the file only if it does not exist or has changed
+        if not dst_config.exists() or dst_config.read_text() != new_content:
+            dst_config.write_text(new_content)
+            print(f"[Config] Updated: {dst_config}")
+        else:
+            print(f"[Config] No changes: {dst_config}")
 
         # Run CMake to configure the project with the given arguments.
-        subprocess.check_call(["cmake", ext.sourcedir] + cmake_args, cwd=build_temp)
+        if not os.path.exists(build_temp + "/build.ninja"):
+            subprocess.check_call(["cmake", ext.sourcedir] + cmake_args, cwd=build_temp)
 
         # Build the project in "Release" mode with all available CPU cores ("-j").
-        subprocess.check_call(["cmake", "--build", ".", "--config", "Release", "-j"],
+        num_jobs = max(1, int(multiprocessing.cpu_count() * 0.75))
+        subprocess.check_call(["cmake", "--build", ".", "--config", "Release", "-j",
+                               str(num_jobs)],
                               cwd=build_temp)
 
 

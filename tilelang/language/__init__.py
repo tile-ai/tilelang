@@ -68,10 +68,20 @@ from .customize import (
 from .logical import any_of, all_of  # noqa: F401
 from .builtin import *  # noqa: F401
 
-from .memscope import *  # noqa: F401
+from .utils import index_to_coordinates  # noqa: F401
 
 
 def symbolic(name: str, dtype: str = "int32"):
+    """
+    Create a TIR symbolic variable.
+    
+    Parameters:
+        name (str): Identifier for the variable in generated TIR.
+        dtype (str): Data type string for the variable (e.g., "int32"). Defaults to "int32".
+    
+    Returns:
+        tir.Var: A TIR variable with the given name and dtype for use in TIR/TensorIR kernels.
+    """
     return tir.Var(name, dtype)
 
 

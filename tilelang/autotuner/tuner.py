@@ -25,13 +25,7 @@ import threading
 import traceback
 from pathlib import Path
 
-from tilelang.env import (
-    TILELANG_CACHE_DIR,
-    TILELANG_AUTO_TUNING_CPU_UTILITIES,
-    TILELANG_AUTO_TUNING_CPU_COUNTS,
-    TILELANG_AUTO_TUNING_MAX_CPU_COUNT,
-    is_cache_enabled,
-)
+from tilelang import env
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.capture import get_autotune_inputs
 from tilelang.jit.param import _P, _RProg
@@ -111,7 +105,7 @@ class AutoTuner:
     _kernel_parameters: Optional[Tuple[str, ...]] = None
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
-    cache_dir: Path = Path(TILELANG_CACHE_DIR) / "autotuner"
+    cache_dir: Path = Path(env.TILELANG_CACHE_DIR) / "autotuner"
 
     def __init__(self, fn: Callable, configs):
         self.fn = fn
@@ -285,7 +279,7 @@ class AutoTuner:
         key = self.generate_cache_key(parameters)
 
         with self._lock:
-            if is_cache_enabled():
+            if env.is_cache_enabled():
                 # First check in-memory cache
                 if key in self._memory_cache:
                     logger.warning("Found kernel in memory cache. For better performance," \
@@ -437,9 +431,9 @@ class AutoTuner:
                 return autotuner_result
         # get the cpu count
         available_cpu_count = get_available_cpu_count()
-        cpu_utilizations = float(TILELANG_AUTO_TUNING_CPU_UTILITIES)
-        cpu_counts = int(TILELANG_AUTO_TUNING_CPU_COUNTS)
-        max_cpu_count = int(TILELANG_AUTO_TUNING_MAX_CPU_COUNT)
+        cpu_utilizations = float(env.TILELANG_AUTO_TUNING_CPU_UTILITIES)
+        cpu_counts = int(env.TILELANG_AUTO_TUNING_CPU_COUNTS)
+        max_cpu_count = int(env.TILELANG_AUTO_TUNING_MAX_CPU_COUNT)
         if cpu_counts > 0:
             num_workers = min(cpu_counts, available_cpu_count)
             logger.info(
@@ -543,7 +537,7 @@ class AutoTuner:
             logger.warning("DLPack backend does not support cache saving to disk.")
         else:
             with self._lock:
-                if is_cache_enabled():
+                if env.is_cache_enabled():
                     self._save_result_to_disk(key, autotuner_result)
 
         self._memory_cache[key] = autotuner_result

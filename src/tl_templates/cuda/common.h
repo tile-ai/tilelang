@@ -240,14 +240,4 @@ template <int barrier_id = 0, int thread_count = 0>
 TL_DEVICE void __sync_thread_partial() {
   asm volatile("bar.sync %0, %1;" : : "r"(barrier_id), "r"(thread_count));
 }
-
-template <int thread_extent> TL_DEVICE bool tl_shuffle_elect() {
-  if constexpr (thread_extent == 0) {
-    return cutlass::canonical_warp_idx_sync() == 0 && cute::elect_one_sync();
-  }
-  return __shfl_sync(0xffffffff, (threadIdx.x / 32) % (thread_extent / 32),
-                     0) == 0 &&
-         cute::elect_one_sync();
-}
-
 } // namespace tl

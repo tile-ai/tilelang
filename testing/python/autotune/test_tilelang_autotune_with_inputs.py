@@ -42,6 +42,7 @@ def get_configs():
     } for values in itertools.product(*iter_params.values())]
 
 
+@tilelang.autotune(configs=get_configs(),)
 @tilelang.jit(out_idx=[-1])
 def matmul(M,
            N,
@@ -51,7 +52,7 @@ def matmul(M,
            block_K=32,
            num_stages=0,
            thread_num=128,
-           enable_rasteration=False):
+           enable_rasterization=False):
 
     dtype = "float16"
     accum_dtype = "float"
@@ -84,7 +85,7 @@ def matmul(M,
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
             # Enable (or disable) swizzling optimization
-            T.use_swizzle(panel_size=10, enable=enable_rasteration)
+            T.use_swizzle(panel_size=10, enable=enable_rasterization)
 
             # Clear out the accumulation buffer
             T.clear(C_local)

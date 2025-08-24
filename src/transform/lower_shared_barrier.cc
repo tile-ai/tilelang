@@ -2,6 +2,7 @@
  *  \file lower_shared_barrier.cc
  *  \brief Convert shared.barrier buffers to plain shared + ptx init.
  */
+#include "../op/builtin.h"
 #include "tvm/ir/type.h"
 #include "tvm/tir/expr.h"
 #include "tvm/tir/stmt.h"
@@ -19,12 +20,15 @@ using namespace tir;
 
 class SharedBarrierRewriter : public StmtExprMutator {
 public:
-  static Stmt Rewrite(Stmt body) {
-    SharedBarrierRewriter rewriter;
+  static Stmt Rewrite(Stmt body, bool disable_shuffle_elect = false) {
+    SharedBarrierRewriter rewriter(disable_shuffle_elect);
     return rewriter(body);
   }
 
 private:
+  SharedBarrierRewriter(bool disable_shuffle_elect)
+      : disable_shuffle_elect_(disable_shuffle_elect) {}
+
   Stmt VisitStmt_(const BlockNode *op) final {
     Block block = GetRef<Block>(op);
     Array<Buffer> alloc_buffers = op->alloc_buffers;
@@ -74,25 +78,12 @@ private:
           T.ptx_init_barrier_thread_count(data_is_ready[0], 128)
           T.ptx_init_barrier_thread_count(compute_is_done[0], 128)
     */
-    // 1. create new data vars
-    Array<Var> new_data_vars;
-    for (auto buffer : barrier_buffers) {
-      auto data = buffer->data;
-      auto ptr_type = data->type_annotation.as<PointerTypeNode>();
-      auto new_data =
-          Var(data->name_hint, PointerType(ptr_type->element_type, "shared"));
-      var_remap_.Set(data, new_data);
-      new_data_vars.push_back(new_data);
-    }
 
     // 2. create new buffers
     Array<Buffer> new_buffers;
     for (auto buffer : barrier_buffers) {
       auto data = buffer->data;
-      ICHECK(var_remap_.find(data) != var_remap_.end())
-          << "data not found in var_remap_";
-      auto new_data = var_remap_.at(data);
-      auto new_buffer = Buffer(new_data, buffer->dtype, Array<PrimExpr>({1}),
+      auto new_buffer = Buffer(data, buffer->dtype, Array<PrimExpr>({1}),
                                Array<PrimExpr>({1}), PrimExpr(0), buffer->name,
                                buffer->data_alignment, buffer->offset_factor,
                                buffer->buffer_type);
@@ -128,8 +119,14 @@ private:
     }
 
     Array<Stmt> new_body;
-    new_body.push_back(IfThenElse(EQ(thread_var_->var, 0),
-                                  SeqStmt(init_mbarrier_calls_), Stmt()));
+    PrimExpr condition;
+    if (!disable_shuffle_elect_) {
+      condition = Call(DataType::Bool(), tl_shuffle_elect(), {0});
+    } else {
+      condition = EQ(thread_var_->var, 0);
+    }
+    new_body.push_back(
+        IfThenElse(condition, SeqStmt(init_mbarrier_calls_), Stmt()));
     new_body.push_back(
         Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
                       {StringImm("shared")})));
@@ -146,12 +143,6 @@ private:
     if (buffer_remap_.count(buffer)) {
       auto new_buffer = buffer_remap_[load->buffer];
       return BufferLoad(new_buffer, load->indices);
-    } else if (var_remap_.count(buffer->data)) {
-      auto new_buffer = Buffer(
-          var_remap_[buffer->data], buffer->dtype, buffer->shape,
-          buffer->strides, buffer->elem_offset, buffer->name,
-          buffer->data_alignment, buffer->offset_factor, buffer->buffer_type);
-      return BufferLoad(new_buffer, load->indices);
     }
     return load;
   }
@@ -161,12 +152,6 @@ private:
     auto buffer = store->buffer;
     if (buffer_remap_.count(buffer)) {
       auto new_buffer = buffer_remap_[store->buffer];
-      return BufferStore(new_buffer, store->value, store->indices);
-    } else if (var_remap_.count(buffer->data)) {
-      auto new_buffer = Buffer(
-          var_remap_[buffer->data], buffer->dtype, buffer->shape,
-          buffer->strides, buffer->elem_offset, buffer->name,
-          buffer->data_alignment, buffer->offset_factor, buffer->buffer_type);
       return BufferStore(new_buffer, store->value, store->indices);
     }
     return store;
@@ -186,16 +171,17 @@ private:
   // This is a workaround for cpu backend,
   // we need to define a thread_var for the serial loop.
   IterVar thread_var_;
-  Map<Var, Var> var_remap_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Buffer> buffer_remap_;
   // Mapping from data Var of a Buffer to Buffer, for lookup
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
+  // Disable shuffle elect for the warp specialized kernel
+  bool disable_shuffle_elect_;
 };
 
-PrimFunc LowerSharedBarrier(PrimFunc f) {
-  SharedBarrierRewriter rewriter;
-  f.CopyOnWrite()->body = rewriter.Rewrite(f->body);
+PrimFunc LowerSharedBarrier(PrimFunc f, bool disable_shuffle_elect) {
+  f.CopyOnWrite()->body =
+      SharedBarrierRewriter::Rewrite(f->body, disable_shuffle_elect);
   return f;
 }
 
@@ -204,7 +190,9 @@ using namespace tir::transform;
 
 tvm::transform::Pass LowerSharedBarrier() {
   auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    return tl::LowerSharedBarrier(std::move(f));
+    bool disable_shuffle_elect =
+        ctx->GetConfig<Bool>(kDisableShuffleElect, Bool(false)).value();
+    return tl::LowerSharedBarrier(std::move(f), disable_shuffle_elect);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerSharedBarrier", {});
 }
