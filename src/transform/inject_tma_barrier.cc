@@ -138,14 +138,11 @@ private:
     if (op->condition.as<EQNode>() || flag) {
       Stmt ret = IRMutatorWithAnalyzer::VisitStmt_(op);
 
-      std::cerr << "visited_tma_load_ " << visited_tma_load_ << std::endl;
       if (visited_tma_load_) {
         auto then_case = op->then_case;
         TmaTraitsCollector collector;
         collector.Collect(then_case);
 
-        std::cerr << "collector.BulkCopyBytes() " << collector.BulkCopyBytes()
-                  << std::endl;
         Array<Stmt> stmts;
         if (!is_zero(collector.BulkCopyBytes())) {
           auto expect_tx = makeExpectTX(0, collector.BulkCopyBytes());

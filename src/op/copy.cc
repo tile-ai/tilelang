@@ -829,11 +829,6 @@ Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
       global_total_elements *= global_range[i]->extent;
     bool s_g_equal =
         analyzer->CanProveEqual(global_total_elements, shared_total_elements);
-    std::cerr << "global = " << global_tensor << " cont " << g_cont
-              << std::endl;
-    std::cerr << "shared = " << shared_tensor << " cont " << s_cont
-              << std::endl;
-    std::cerr << "s_g_equal = " << s_g_equal << std::endl;
     if (s_cont && g_cont && s_g_equal) {
       shared_total_elements = analyzer->Simplify(shared_total_elements);
       PrimExpr shared_addr =
