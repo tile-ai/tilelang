@@ -10,6 +10,7 @@
 #include <tvm/tir/stmt_functor.h>
 
 #include "../layout/layout.h"
+#include "../transform/layout_reducer.h"
 #include "op.h"
 
 namespace tvm {
@@ -77,6 +78,7 @@ private:
   Map<Buffer, Array<PrimExpr>> indice_map_;
   std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_is_write_;
   Array<IterVar> loop_vars_;
+  Map<Var, ReducerInfo> reducer_info_map_;
 
   Fragment loop_layout_;
   mutable arith::Analyzer analyzer_;

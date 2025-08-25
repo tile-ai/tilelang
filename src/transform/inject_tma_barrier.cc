@@ -62,10 +62,19 @@ public:
 private:
   void VisitExpr_(const CallNode *call) final {
     if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
-      Call access_ptr = Downcast<Call>(call->args[2]);
-      ICHECK(access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      int type_bytes = access_ptr->args[0]->dtype.bytes();
-      bulk_copy_bytes += access_ptr->args[3] * loop_extents * type_bytes;
+      PrimExpr single_copy_bytes;
+      if (auto arg0 = call->args[0].as<Call>();
+          call->op.same_as(tma_load()) && arg0 &&
+          !arg0.value()->op.same_as(create_tma_descriptor())) {
+        // 1D TMA
+        single_copy_bytes = call->args[3];
+      } else {
+        Call access_ptr = Downcast<Call>(call->args[2]);
+        ICHECK(access_ptr->op.same_as(builtin::tvm_access_ptr()));
+        int type_bytes = access_ptr->args[0]->dtype.bytes();
+        single_copy_bytes = access_ptr->args[3] * type_bytes;
+      }
+      bulk_copy_bytes += single_copy_bytes * loop_extents;
     }
     StmtExprVisitor::VisitExpr_(call);
   }
@@ -129,11 +138,14 @@ private:
     if (op->condition.as<EQNode>() || flag) {
       Stmt ret = IRMutatorWithAnalyzer::VisitStmt_(op);
 
+      std::cerr << "visited_tma_load_ " << visited_tma_load_ << std::endl;
       if (visited_tma_load_) {
         auto then_case = op->then_case;
         TmaTraitsCollector collector;
         collector.Collect(then_case);
 
+        std::cerr << "collector.BulkCopyBytes() " << collector.BulkCopyBytes()
+                  << std::endl;
         Array<Stmt> stmts;
         if (!is_zero(collector.BulkCopyBytes())) {
           auto expect_tx = makeExpectTX(0, collector.BulkCopyBytes());
@@ -156,9 +168,12 @@ private:
   PrimExpr VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tma_load())) {
       visited_tma_load_ = true;
+      auto arg0 = op->args[0].as<Call>();
+      auto is_1d_tma = op->op.same_as(tma_load()) && arg0 &&
+                       !arg0.value()->op.same_as(create_tma_descriptor());
       Array<PrimExpr> new_args = op->args;
-      new_args.Set(1, Call(DataType::Handle(), get_mbarrier(),
-                           {IntImm(DataType::Int(32), 0)}));
+      new_args.Set(is_1d_tma ? 2 : 1, Call(DataType::Handle(), get_mbarrier(),
+                                           {IntImm(DataType::Int(32), 0)}));
       return Call(op->dtype, op->op, new_args);
     }
     return IRMutatorWithAnalyzer::VisitExpr_(op);
@@ -443,7 +458,12 @@ private:
           << "tma_load must be in the tma_op_to_barrier_id_";
       auto barrier_id = tma_op_to_barrier_id_[GetRef<Call>(op)];
       auto new_args = op->args;
-      new_args.Set(1, barrier_id);
+      // 1D TMA has mbar at args[2]
+      if (auto arg0 = op->args[0].as<Call>();
+          arg0 && !arg0.value()->op.same_as(create_tma_descriptor()))
+        new_args.Set(2, barrier_id);
+      else
+        new_args.Set(1, barrier_id);
       return Call(op->dtype, op->op, new_args);
     } else if (op->op.same_as(mbarrier_expect_tx())) {
       ICHECK(tma_op_to_barrier_id_.count(GetRef<Call>(op)))

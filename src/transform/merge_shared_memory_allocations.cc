@@ -962,11 +962,6 @@ private:
     uint64_t op_elem_bits = op->dtype.bits() * op->dtype.lanes();
     uint64_t const_nbits =
         static_cast<uint64_t>(op->ConstantAllocationSize() * op_elem_bits);
-    // disable reuse of small arrays, they will be lowered to registers in LLVM
-    // This rules only apply if we are using non special memory
-    if (const_nbits > 0 && const_nbits <= 32) {
-      return NewAlloc(op, const_nbits);
-    }
 
     if (const_nbits != 0) {
       // constant allocation.

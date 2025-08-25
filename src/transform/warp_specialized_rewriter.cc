@@ -321,9 +321,17 @@ private:
   PrimExpr VisitExpr_(const CallNode *op) final {
     auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
     if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
-      Call access_ptr = Downcast<Call>(call->args[2]);
-      ICHECK(access_ptr->op.same_as(builtin::tvm_access_ptr()));
-      call.CopyOnWrite()->args.Set(1, makeGetBarrier(producer_barrier_idx_));
+      auto mbar = makeGetBarrier(producer_barrier_idx_);
+      // 1D TMA has mbar at args[2]
+      if (auto arg0 = op->args[0].as<Call>();
+          call->op.same_as(tma_load()) && arg0 &&
+          !arg0.value()->op.same_as(create_tma_descriptor())) {
+        call.CopyOnWrite()->args.Set(2, mbar);
+      } else {
+        Call access_ptr = Downcast<Call>(call->args[2]);
+        ICHECK(access_ptr->op.same_as(builtin::tvm_access_ptr()));
+        call.CopyOnWrite()->args.Set(1, mbar);
+      }
     }
     return call;
   }
@@ -626,6 +634,8 @@ public:
    * @return true if a SIMT copy was detected; false otherwise.
    */
   bool hasSimtCopy() const { return has_simt_copy_; }
+
+  bool onlyHasWgMMA() const { return only_has_wgmma_; }
 
 private:
   template <typename NodeType> Stmt FilterByRole(const NodeType *op) {

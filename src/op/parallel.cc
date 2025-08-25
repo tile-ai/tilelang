@@ -124,6 +124,12 @@ void ParallelLoopNestVisitor::VisitStmt_(const ForNode *op) {
   p->loop_vars_.push_back(
       IterVar(Range(op->min, op->extent), op->loop_var, IterVarType::kDataPar));
   p->analyzer_.Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
+  auto reducer_info_map =
+      op->annotations.Get(attr::kReducerInfo)->as<Map<Var, ReducerInfo>>();
+  if (reducer_info_map) {
+    for (auto &&[buffer, info] : reducer_info_map.value())
+      p->reducer_info_map_.Set(buffer, info);
+  }
   StmtExprVisitor::VisitStmt_(op);
 }
 
@@ -189,6 +195,11 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   Buffer source_buffer, read_source_buffer;
   for (const auto &[buffer, indices] : indice_map_) {
     if (T.layout_map.count(buffer)) {
+      // skip reducers with rep=ALL
+      if (auto info = reducer_info_map_.Get(buffer->data);
+          info && info.value()->rep == ReducerRepType::ALL)
+        continue;
+
       auto frag = T.layout_map[buffer].as<Fragment>().value();
       if (buffer_is_write_.count(buffer)) {
         source_buffer = buffer;
@@ -284,6 +295,16 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       auto maybe_remapped_root_ =
           IfBufferRemapLoopGenerator::run(root_, T.buffer_remap, T.layout_map);
       int vector_size = GetVectorizeSize(maybe_remapped_root_);
+
+      PrimExpr loop_total_size = 1;
+      for (Stmt l = root_; l.as<For>().has_value();
+           l = l.as<For>().value()->body)
+        loop_total_size = loop_total_size * l.as<For>().value()->extent;
+      while (!analyzer_.CanProve(
+                 floormod(loop_total_size,
+                          T.thread_bounds->extent * vector_size) == 0) &&
+             vector_size > 1)
+        vector_size /= 2;
 
       // Check if coalesced_width is defined
       if (auto coalesced_width =

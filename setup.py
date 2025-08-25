@@ -766,6 +766,8 @@ class TilelangExtensionBuild(build_ext):
         # we need to change the build destination to tilelang/lib, where it's actually loaded
         if self.inplace:
             extdir = os.path.abspath('./tilelang/lib/')
+        
+        logger.info(f"{extdir=}")
 
         logger.info(f"{extdir=}")
 

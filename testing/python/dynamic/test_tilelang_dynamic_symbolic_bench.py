@@ -1,11 +1,7 @@
 import torch
-import torch.backends
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
-
-tilelang.testing.set_random_seed(0)
-tilelang.disable_cache()
 
 
 def tl_matmul_block_static(

@@ -3,8 +3,6 @@ import math
 import tilelang
 import tilelang.language as T
 
-tilelang.disable_cache()
-
 
 def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal):
     block_M = 64
