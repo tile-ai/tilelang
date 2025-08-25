@@ -7,6 +7,15 @@ from tvm import ir
 from tvm.tir import PrimExpr, Buffer, BufferLoad, BufferRegion, Var, op
 from typing import List, Union
 
+_MEMORY_ORDER_ID_MAP = {
+    "relaxed": 0,
+    "consume": 1,
+    "acquire": 2,
+    "release": 3,
+    "acq_rel": 4,
+    "seq_cst": 5,
+}
+
 
 def region(buffer: BufferLoad, access_type: str, *args: PrimExpr):
     """Create a memory region descriptor for tile operations.
@@ -83,7 +92,41 @@ def buffer_region_to_tile_region(buffer_region: BufferRegion, access_type: str,
     return region(T.BufferLoad(buffer_region.buffer, mins), access_type, *region_extents)
 
 
-def atomic_add(dst: Buffer, value: PrimExpr) -> PrimExpr:
+def atomic_max(dst: Buffer, value: PrimExpr, memory_order: str | None = None) -> PrimExpr:
+    """Perform an atomic maximum operation.
+
+    Args:
+        dst (Buffer): Destination buffer where the atomic maximum will be performed
+        value (PrimExpr): Value to be atomically added
+
+    Returns:
+        PrimExpr: Handle to the atomic maximum operation
+    """
+    if memory_order is None:
+        return T.call_extern("handle", "AtomicMax", T.address_of(dst), value)
+    else:
+        return T.call_extern("handle", "AtomicMax", T.address_of(dst), value,
+                             _MEMORY_ORDER_ID_MAP[memory_order])
+
+
+def atomic_min(dst: Buffer, value: PrimExpr, memory_order: str | None = None) -> PrimExpr:
+    """Perform an atomic minimum operation.
+
+    Args:
+        dst (Buffer): Destination buffer where the atomic minimum will be performed
+        value (PrimExpr): Value to be atomically added
+
+    Returns:
+        PrimExpr: Handle to the atomic minimum operation
+    """
+    if memory_order is None:
+        return T.call_extern("handle", "AtomicMin", T.address_of(dst), value)
+    else:
+        return T.call_extern("handle", "AtomicMin", T.address_of(dst), value,
+                             _MEMORY_ORDER_ID_MAP[memory_order])
+
+
+def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None) -> PrimExpr:
     """Perform an atomic addition operation.
 
     Args:
@@ -93,10 +136,6 @@ def atomic_add(dst: Buffer, value: PrimExpr) -> PrimExpr:
     Returns:
         PrimExpr: Handle to the atomic addition operation
     """
-    if isinstance(dst, BufferLoad) and isinstance(value, BufferLoad):
-        return T.call_extern("handle", "AtomicAdd", T.address_of(dst), value)
-    if isinstance(dst, Buffer) and isinstance(value, Buffer):
-        ir.assert_structural_equal(dst.shape, value.shape)
 
     def get_extent(data):
         if isinstance(data, Var) and T.has_let_value(data):
@@ -110,6 +149,17 @@ def atomic_add(dst: Buffer, value: PrimExpr) -> PrimExpr:
 
     src_extent = get_extent(value)
     dst_extent = get_extent(dst)
+
+    if dst_extent is None and src_extent is None:
+        if memory_order is None:
+            return T.call_extern("handle", "AtomicAdd", T.address_of(dst), value)
+        else:
+            return T.call_extern("handle", "AtomicAdd", T.address_of(dst), value,
+                                 _MEMORY_ORDER_ID_MAP[memory_order])
+
+    if isinstance(dst, Buffer) and isinstance(value, Buffer):
+        ir.assert_structural_equal(dst.shape, value.shape)
+
     assert src_extent or dst_extent, "Can't deduce atomicadd extents from args"
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
@@ -217,3 +267,32 @@ def view(src: Buffer,
     if dtype is None:
         dtype = src.dtype
     return T.Tensor(shape, dtype, src.data)
+
+
+def atomic_load(src: Buffer, memory_order: str = "seq_cst") -> PrimExpr:
+    """Loads a value from the input buffer with specified memory_order.
+
+    Args:
+        src (Buffer): Input buffer to load from
+        memory_order (str, optional): Atomicity level for the load operation. Defaults to "seq_cst".
+
+    Returns:
+        PrimExpr: The loaded value from the buffer
+    """
+    return T.call_extern(src.dtype, "AtomicLoad", T.address_of(src),
+                         _MEMORY_ORDER_ID_MAP[memory_order])
+
+
+def atomic_store(dst: Buffer, src: PrimExpr, memory_order: str = "seq_cst") -> PrimExpr:
+    """Stores a value to the input buffer with specified memory_order.
+
+    Args:
+        dst (Buffer): Input buffer to store to
+        src (PrimExpr): Value to store
+        memory_order (str, optional): Atomicity level for the load operation. Defaults to "seq_cst".
+
+    Returns:
+        PrimExpr: The handle of the store operation
+    """
+    return T.call_extern("handle", "AtomicStore", T.address_of(dst), src,
+                         _MEMORY_ORDER_ID_MAP[memory_order])

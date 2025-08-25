@@ -130,6 +130,14 @@ TVM_DLL const Op &tma_load_im2col();
 TVM_DLL const Op &tma_store();
 
 /*!
+ * \brief tvm intrinsics for barrier initialization fence
+ *
+ * ptx_fence_barrier_init()
+ *
+ */
+const Op &ptx_fence_barrier_init();
+
+/*!
  * \brief tvm intrinsics for mbarrier wait with parity bit
  *
  * mbarrier_wait_parity(mbarrier, parity)
