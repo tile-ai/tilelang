@@ -154,7 +154,8 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None) ->
         if memory_order is None:
             return T.call_extern("handle", "AtomicAdd", T.address_of(dst), value)
         else:
-            return T.call_extern("handle", "AtomicAdd", T.address_of(dst), value, _MEMORY_ORDER_ID_MAP[memory_order])
+            return T.call_extern("handle", "AtomicAdd", T.address_of(dst), value,
+                                 _MEMORY_ORDER_ID_MAP[memory_order])
 
     if isinstance(dst, Buffer) and isinstance(value, Buffer):
         ir.assert_structural_equal(dst.shape, value.shape)

@@ -43,7 +43,7 @@ using int4_t = int4;
   do {                                                                         \
     cudaError_t __err = cudaGetLastError();                                    \
     if (__err != cudaSuccess) {                                                \
-      snprintf(error_buf, ERROR_BUF_SIZE, kernel_name ": %s - %s",              \
+      snprintf(error_buf, ERROR_BUF_SIZE, kernel_name ": %s - %s",             \
                cudaGetErrorName(__err), cudaGetErrorString(__err));            \
       return -1;                                                               \
     }                                                                          \
@@ -148,14 +148,16 @@ template <> TL_DEVICE __nv_bfloat16 cuda_cast<__nv_bfloat16, float>(float val) {
 #endif
 
 template <typename T1, typename T2>
-TL_DEVICE void AtomicMax(T1 *address, T2 val, int memory_order = int(cuda::memory_order_relaxed)) {
+TL_DEVICE void AtomicMax(T1 *address, T2 val,
+                         int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
   cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
   aref.fetch_max(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
 }
 
 template <typename T1, typename T2>
-TL_DEVICE void AtomicMin(T1 *address, T2 val, int memory_order = int(cuda::memory_order_relaxed)) {
+TL_DEVICE void AtomicMin(T1 *address, T2 val,
+                         int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
   cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
   aref.fetch_min(cuda_cast<NT1>(val), cuda::memory_order(memory_order));

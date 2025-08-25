@@ -11,12 +11,12 @@
 template <typename T> __device__ void debug_print_var(const char *msg, T var);
 
 // Overload for pointer type (supports any cv-qualified T*)
-template <typename T>
-__device__ void debug_print_var(const char *msg, T* var) {
-  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=pointer "
-         "value=%p\n",
-         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
-         threadIdx.z, var);
+template <typename T> __device__ void debug_print_var(const char *msg, T *var) {
+  printf(
+      "msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=pointer "
+      "value=%p\n",
+      msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+      threadIdx.z, var);
 }
 
 // Specialization for signed char type
