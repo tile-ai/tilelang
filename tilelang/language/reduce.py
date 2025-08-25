@@ -187,9 +187,16 @@ def cumsum(src: tir.Buffer, dst: Optional[tir.Buffer] = None, dim: int = 0, reve
     )
 
 
-@macro
 def finalize_reducer(reducer: tir.Buffer):
-    tir.call_intrin(
+    """Finalize the reducer buffer.
+
+    Args:
+        reducer (tir.Buffer): The reducer buffer
+
+    Returns:
+        tir.Call: Handle to the finalize reducer operation
+    """
+    return tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.finalize_reducer"),
         reducer.access_ptr("w"),
