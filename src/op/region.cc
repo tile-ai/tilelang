@@ -16,7 +16,6 @@ TIR_REGISTER_TL_OP(RegionOp, region)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 
-
 RegionOp::RegionOp(Array<PrimExpr> args, BufferMap vmap) {
   size_t n = args.size();
   size_t ndim = n - 2;
@@ -47,7 +46,8 @@ Stmt RegionOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return Evaluate(0);
 }
 
-LayoutMap RegionOp::InferLayout(const LayoutInferArgs &T, InferLevel level) const {
+LayoutMap RegionOp::InferLayout(const LayoutInferArgs &T,
+                                InferLevel level) const {
   return {};
 }
 

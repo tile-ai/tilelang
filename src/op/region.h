@@ -7,11 +7,11 @@
 #ifndef TVM_TL_OP_REGION_H_
 #define TVM_TL_OP_REGION_H_
 
+#include "./operator.h"
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/op.h>
 #include <tvm/target/target.h>
 #include <tvm/tir/buffer.h>
-#include "./operator.h"
 
 namespace tvm {
 namespace tl {
@@ -22,7 +22,8 @@ class RegionOp : public TileOperator {
 public:
   RegionOp(Array<PrimExpr> args, BufferMap vmap);
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
   static const Op &Get();
 
   std::unique_ptr<TileOperator> Clone() const override {
