@@ -7,21 +7,22 @@
 #ifndef TVM_TL_OP_REDUCE_H_
 #define TVM_TL_OP_REDUCE_H_
 
-#include "op.h"
+#include "operator.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
 
-class ReduceOp : public Operator {
+class ReduceOp : public TileOperator {
 public:
   ReduceOp(Array<PrimExpr> args, BufferMap vmap);
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) final;
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
   static const Op &Get();
 
-  std::unique_ptr<Operator> Clone() const final {
+  std::unique_ptr<TileOperator> Clone() const override {
     return std::make_unique<ReduceOp>(*this);
   }
 
@@ -42,14 +43,15 @@ private:
   std::string MakeCodegenReducer() const;
 };
 
-class CumSumOp : public Operator {
+class CumSumOp : public TileOperator {
 public:
   CumSumOp(Array<PrimExpr> args, BufferMap vmap);
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) final;
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
   static const Op &Get();
 
-  std::unique_ptr<Operator> Clone() const final {
+  std::unique_ptr<TileOperator> Clone() const override {
     return std::make_unique<CumSumOp>(*this);
   }
 

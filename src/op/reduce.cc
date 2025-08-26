@@ -284,7 +284,8 @@ Stmt ReduceOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return body;
 }
 
-LayoutMap ReduceOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
+LayoutMap ReduceOp::InferLayout(const LayoutInferArgs &T,
+                                InferLevel level) const {
   if (level >= InferLevel::kStrict)
     return {};
   if (src.scope() == "local.fragment" && dst.scope() == "local.fragment" &&
@@ -402,7 +403,8 @@ Stmt CumSumOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return Stmt();
 }
 
-LayoutMap CumSumOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
+LayoutMap CumSumOp::InferLayout(const LayoutInferArgs &T,
+                                InferLevel level) const {
   return {};
 }
 

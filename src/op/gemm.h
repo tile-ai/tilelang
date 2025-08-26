@@ -7,18 +7,19 @@
 #ifndef TVM_TL_OP_GEMM_H_
 #define TVM_TL_OP_GEMM_H_
 
-#include "op.h"
+#include "operator.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
 
-class Gemm : public Operator {
+class Gemm : public TileOperator {
 public:
   Gemm(Array<PrimExpr> args, BufferMap vmap);
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) final;
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
   static const Op &Get();
   enum class GemmWarpPolicy {
     kSquare = 0,
@@ -26,7 +27,7 @@ public:
     kFullCol = 2,
   } policy;
 
-  std::unique_ptr<Operator> Clone() const final {
+  std::unique_ptr<TileOperator> Clone() const override {
     return std::make_unique<Gemm>(*this);
   }
 
@@ -52,7 +53,7 @@ private:
   // only will be enabled under cdna mfma instructions
   int kPack = 1;
   int wg_wait = 0;
-  bool completed_ = false;
+  mutable bool completed_ = false;
 };
 
 } // namespace tl

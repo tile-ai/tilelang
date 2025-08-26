@@ -15,6 +15,7 @@
 #include "../transform/common/loop_parallel_transform_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
+#include "region.h"
 
 #include "../target/cuda.h"
 #include "../target/utils.h"
@@ -316,7 +317,7 @@ Layout Copy::ComputeLinearLayout(const Buffer &shared_tensor) const {
  * indicating the level of layout inference. \return LayoutMap containing the
  * inferred layout.
  */
-LayoutMap Copy::InferLayout(const LayoutInferArgs &T, InferLevel level) {
+LayoutMap Copy::InferLayout(const LayoutInferArgs &T, InferLevel level) const {
   auto target = T.target;
   using namespace tvm::transform;
   PassContext pass_ctx = PassContext::Current();
@@ -1227,6 +1228,11 @@ TIR_REGISTER_TL_OP(Copy, copy)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+LayoutMap Conv2DIm2ColOp::InferLayout(const LayoutInferArgs &T,
+                                      InferLevel level) const {
+  return {};
+}
 
 // Register the Conv2DIm2Col operation with TVM's TIR system
 // This operation performs im2col transformation for 2D convolutions using TMA

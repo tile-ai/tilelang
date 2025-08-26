@@ -7,7 +7,7 @@
 #ifndef TVM_TL_OP_ATOMIC_ADD_H_
 #define TVM_TL_OP_ATOMIC_ADD_H_
 
-#include "op.h"
+#include "operator.h"
 #include "parallel.h"
 
 namespace tvm {
@@ -15,11 +15,12 @@ namespace tl {
 
 using namespace tir;
 
-class AtomicAdd : public Operator {
+class AtomicAdd : public TileOperator {
 public:
   AtomicAdd(Array<PrimExpr> args, BufferMap vmap);
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) final;
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
 
   static const Op &Get();
 
@@ -32,7 +33,7 @@ public:
       par_op_ = std::unique_ptr<ParallelOp>(
           static_cast<ParallelOp *>(other.par_op_->Clone().release()));
   }
-  std::unique_ptr<Operator> Clone() const final {
+  std::unique_ptr<TileOperator> Clone() const override {
     return std::make_unique<AtomicAdd>(*this);
   }
 
@@ -53,7 +54,7 @@ protected:
   Array<Range> src_range, dst_range;
   IntImm coalesced_width;
 
-  std::unique_ptr<ParallelOp> par_op_;
+  mutable std::unique_ptr<ParallelOp> par_op_;
 };
 
 } // namespace tl

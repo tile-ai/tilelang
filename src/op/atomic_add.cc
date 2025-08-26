@@ -4,8 +4,8 @@
  * Define elment-wise operators.
  */
 
-#include "atomic_add.h"
-
+#include "./atomic_add.h"
+#include "./region.h"
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
@@ -210,7 +210,8 @@ Stmt AtomicAdd::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return vectorized_thread_loop;
 }
 
-LayoutMap AtomicAdd::InferLayout(const LayoutInferArgs &T, InferLevel level) {
+LayoutMap AtomicAdd::InferLayout(const LayoutInferArgs &T,
+                                 InferLevel level) const {
   if (par_op_ == nullptr) {
     arith::Analyzer analyzer;
     par_op_ = std::make_unique<ParallelOp>(MakeSIMTLoop(&analyzer));

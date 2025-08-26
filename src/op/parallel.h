@@ -10,7 +10,7 @@
 #include <tvm/tir/stmt_functor.h>
 
 #include "../layout/layout.h"
-#include "op.h"
+#include "operator.h"
 
 namespace tvm {
 namespace tl {
@@ -36,25 +36,27 @@ class ParallelOp;
 class ParallelLoopNestVisitor : public StmtExprVisitor {
 private:
   ParallelLoopNestVisitor(ParallelOp *op) : p(op){};
-  void VisitStmt_(const ForNode *op) final;
-  void VisitStmt_(const BufferStoreNode *op) final;
-  void VisitExpr_(const BufferLoadNode *op) final;
+  void VisitStmt_(const ForNode *op) override;
+  void VisitStmt_(const BufferStoreNode *op) override;
+  void VisitExpr_(const BufferLoadNode *op) override;
 
   ParallelOp *p;
 
   friend class ParallelOp;
 };
 
-class ParallelOp : public Operator {
+class ParallelOp : public TileOperator {
 public:
   ParallelOp(For root);
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) final;
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
 
   ParallelOp(const ParallelOp &other) : ParallelOp(other.root_) {
     loop_layout_ = other.loop_layout_;
     predicate_ = other.predicate_;
   }
-  std::unique_ptr<Operator> Clone() const final {
+  std::unique_ptr<TileOperator> Clone() const override {
     return std::make_unique<ParallelOp>(*this);
   }
 
@@ -64,9 +66,9 @@ public:
   Optional<PrimExpr> GetPredicate(Var thread_var) const;
 
 private:
-  Fragment CompleteBufferFragment(const Buffer &buffer);
+  Fragment CompleteBufferFragment(const Buffer &buffer) const;
   bool IsCommonAccessIndice(const Buffer &buffer) const;
-  void AddPredicate(PrimExpr expr) {
+  void AddPredicate(PrimExpr expr) const {
     predicate_ = predicate_.defined() ? And(expr, predicate_.value()) : expr;
   }
 
@@ -78,9 +80,9 @@ private:
   std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_is_write_;
   Array<IterVar> loop_vars_;
 
-  Fragment loop_layout_;
+  mutable Fragment loop_layout_;
   mutable arith::Analyzer analyzer_;
-  Optional<PrimExpr> predicate_;
+  mutable Optional<PrimExpr> predicate_;
 
   friend class ParallelLoopNestVisitor;
 };

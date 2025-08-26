@@ -15,6 +15,7 @@
 
 #include "../layout/utils.h"
 #include "../op/parallel.h"
+#include "../op/region.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "common/loop_fusion_utils.h"
@@ -112,7 +113,7 @@ public:
             level != InferLevel::kStrict && !strict_layout_map.count(buffer)) {
           // Actually this test has been done in ParallelOp::InferLayout
           // already. Just do it again to avoid missing implementations in other
-          // `Operator`s.
+          // `TileOperator`s.
           auto dst_layout = layout.as<Fragment>().value();
           auto src_layout = layout_map[buffer].as<Fragment>().value();
           ICHECK(dst_layout->InputDim() == src_layout->InputDim());
@@ -253,7 +254,7 @@ public:
     ICHECK(infer_list_.size() == thread_var_vec_.size())
         << "infer_list_ and thread_var_vec_ size mismatch";
     for (int i = 0; i < infer_list_.size(); i++) {
-      std::unique_ptr<Operator> base_infer = std::move(infer_list_[i]);
+      std::unique_ptr<TileOperator> base_infer = std::move(infer_list_[i]);
       auto thread_var = thread_var_vec_[i];
 
       // Check if base_infer is valid
@@ -399,7 +400,7 @@ private:
 
   Map<Var, Buffer> buffer_data_to_buffer_;
   std::vector<ObjectRef> infer_list_stmt_;
-  std::vector<std::unique_ptr<Operator>> infer_list_;
+  std::vector<std::unique_ptr<TileOperator>> infer_list_;
   std::unordered_map<Buffer, std::vector<int>, ObjectPtrHash, ObjectPtrEqual>
       use_list_;
   // This is a workaround for cpu backend,
@@ -412,8 +413,8 @@ private:
   LayoutMap annotated_layout_map_;
   bool skip_thread_partition_{false};
 
-  std::vector<std::unique_ptr<Operator>> BackupInferList() {
-    std::vector<std::unique_ptr<Operator>> back_infer_list;
+  std::vector<std::unique_ptr<TileOperator>> BackupInferList() {
+    std::vector<std::unique_ptr<TileOperator>> back_infer_list;
     back_infer_list.reserve(infer_list_.size());
     for (auto &&p : infer_list_) {
       back_infer_list.push_back(p->Clone());

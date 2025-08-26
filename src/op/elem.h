@@ -7,7 +7,7 @@
 #ifndef TVM_TL_OP_ELEM_H_
 #define TVM_TL_OP_ELEM_H_
 
-#include "op.h"
+#include "operator.h"
 #include "parallel.h"
 
 namespace tvm {
@@ -15,13 +15,15 @@ namespace tl {
 
 using namespace tir;
 
-class Fill : public Operator {
+class Fill : public TileOperator {
 public:
   Fill(Array<PrimExpr> args, BufferMap vmap);
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
   static const Op &Get();
 
-  std::unique_ptr<Operator> Clone() const final {
+  std::unique_ptr<TileOperator> Clone() const override {
     return std::make_unique<Fill>(*this);
   }
 

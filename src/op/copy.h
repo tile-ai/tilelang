@@ -11,7 +11,7 @@
 #ifndef TVM_TL_OP_COPY_H_
 #define TVM_TL_OP_COPY_H_
 
-#include "op.h"
+#include "operator.h"
 #include "parallel.h"
 
 namespace tvm {
@@ -83,7 +83,7 @@ struct TMAIm2ColDesc {
  * block-wise or element-wise data transfer, possibly optimized with
  * parallelization or TMA hardware acceleration.
  */
-class Copy : public Operator {
+class Copy : public TileOperator {
 public:
   /*!
    * \brief Constructor.
@@ -97,14 +97,15 @@ public:
    * \param T        Arguments for lowering.
    * \param analyzer Analyzer for simplification and bounds checks.
    */
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
 
   /*!
    * \brief Infer buffer layouts after applying this operator.
    * \param T     Arguments for layout inference.
    * \param level Level of inference (basic or detailed).
    */
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) final;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
 
   /*!
    * \brief Get the TVM Op handle corresponding to this Copy op.
@@ -163,7 +164,7 @@ public:
   /*!
    * \brief Clone this copy operator.
    */
-  std::unique_ptr<Operator> Clone() const final {
+  std::unique_ptr<TileOperator> Clone() const override {
     return std::make_unique<Copy>(*this);
   }
 
@@ -225,7 +226,7 @@ protected:
   IntImm coalesced_width; // Width (in elements) for coalesced memory access
   Bool disable_tma = Bool(false); // Whether to disable TMA acceleration
 
-  std::unique_ptr<ParallelOp>
+  mutable std::unique_ptr<ParallelOp>
       par_op_; // Optional associated parallelization operator
 
   enum class EvictionPolicy {
@@ -243,7 +244,7 @@ protected:
  * This operator converts input image layout into columnar format suitable
  * for matrix multiplication-based convolution lowering.
  */
-class Conv2DIm2ColOp : public Operator {
+class Conv2DIm2ColOp : public TileOperator {
 public:
   /*!
    * \brief Constructor.
@@ -255,7 +256,13 @@ public:
   /*!
    * \brief Lower to TIR statement.
    */
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+
+  /*!
+   * \brief Infer layout for this operator.
+   */
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
 
   /*!
    * \brief Get TVM Op handle.
@@ -265,7 +272,7 @@ public:
   /*!
    * \brief Clone this operator.
    */
-  std::unique_ptr<Operator> Clone() const final {
+  std::unique_ptr<TileOperator> Clone() const override {
     return std::make_unique<Conv2DIm2ColOp>(*this);
   }
 

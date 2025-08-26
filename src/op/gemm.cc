@@ -87,10 +87,13 @@ Gemm::GemmInst Gemm::GetGemmInst(int block_size, Target target) const {
  * per-warp tile sizes) and adapts the partition according to the configured
  * GemmWarpPolicy (FullRow, FullCol, Square).
  *
- * @param block_size Total number of threads in the block (used to derive num_warps).
+ * @param block_size Total number of threads in the block (used to derive
+ * num_warps).
  * @param gemm_inst The chosen GEMM implementation (e.g., kWGMMA, kMFMA, kMMA).
- * @param target Target device information (used for warp size and target-specific rules).
- * @return std::pair<int, int> {m_warp, n_warp} where m_warp * n_warp == num_warps.
+ * @param target Target device information (used for warp size and
+ * target-specific rules).
+ * @return std::pair<int, int> {m_warp, n_warp} where m_warp * n_warp ==
+ * num_warps.
  *
  * Constraints and behavior:
  * - Each warp is assumed to cover 16 rows (M) and 8 columns (N). The function
@@ -100,7 +103,8 @@ Gemm::GemmInst Gemm::GetGemmInst(int block_size, Target target) const {
  *   - num_warps must be a multiple of 4 (warp-groups of 4).
  *   - m_warp is always a multiple of 4.
  *   - The warp partition respects the GemmWarpPolicy:
- *     - FullRow: maximize warps on M (in multiples of 4) while keeping divisibility.
+ *     - FullRow: maximize warps on M (in multiples of 4) while keeping
+ * divisibility.
  *     - FullCol: maximize warps on N, but if N is not evenly divisible, move
  *       whole warp-groups to M to achieve feasibility.
  *     - Square: choose a multiple-of-4 m_warp that best balances per-warp work
@@ -296,14 +300,16 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int block_size,
  * Supported combinations and constraints:
  * - C=float16:
  *   - A=float16, B=float16: K % 16 == 0
- *   - Various float8 mixes (e4m3/e5m2): require (!trans_A && trans_B) and K % 32 == 0
+ *   - Various float8 mixes (e4m3/e5m2): require (!trans_A && trans_B) and K %
+ * 32 == 0
  * - C=float32:
  *   - A=float16, B=float16: K % 16 == 0
  *   - A=bfloat16, B=bfloat16: K % 16 == 0
  *   - A=float32, B=float32: require (!trans_A && trans_B) and K % 8 == 0
  *   - Various float8 mixes: require (!trans_A && trans_B) and K % 32 == 0
  * - C=int32:
- *   - 8-bit integer combinations (Int8/UInt8): require (!trans_A && trans_B) and K % 32 == 0
+ *   - 8-bit integer combinations (Int8/UInt8): require (!trans_A && trans_B)
+ * and K % 32 == 0
  *
  * @return true if WGMMA is supported for the current buffers, dtypes, and
  *         transpose/shape constraints; false otherwise.
@@ -425,7 +431,8 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
  * - C.scope() must be "local.fragment".
  *
  * Postconditions / side effects:
- * - Marks the operator's layout inference as completed (sets completed_ = true).
+ * - Marks the operator's layout inference as completed (sets completed_ =
+ * true).
  * - May abort via ICHECK on unsupported targets, invalid buffer scopes, or
  *   incompatible shape constraints.
  *
@@ -433,7 +440,7 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
  * @param level Inference level (unused for side effects but retained for API).
  * @return LayoutMap mapping each of A, B, and C to their inferred layouts.
  */
-LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
+LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) const {
   if (completed_)
     return {};
   LayoutMap results;

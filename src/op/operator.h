@@ -11,6 +11,8 @@
 #include <tvm/ir/op.h>
 #include <tvm/target/target.h>
 #include <tvm/tir/buffer.h>
+#include <tvm/tir/stmt.h>
+#include <tvm/tir/op_attr_types.h>
 
 #include "../layout/layout.h"
 
@@ -58,38 +60,30 @@ struct LayoutInferArgs {
   Map<Buffer, Buffer> buffer_remap;
 };
 
-class Operator {
-public:
-  virtual Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const;
-  virtual LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level);
-  virtual ~Operator() = default;
-  virtual std::unique_ptr<Operator> Clone() const = 0;
-};
-
-class RegionOp : public Operator {
-public:
-  RegionOp(Array<PrimExpr> args, BufferMap vmap);
-  static const Op &Get();
-
-  std::unique_ptr<Operator> Clone() const final {
-    return std::make_unique<RegionOp>(*this);
+class TileOperator {
+ public:
+  // Lower 接口
+  virtual Stmt Lower(const LowerArgs& T, arith::Analyzer* analyzer) const {
+    ICHECK(0) << "Not Implemented Lower method.";
+    return Evaluate(0);
   }
 
-  const Buffer &GetBuffer() const { return buffer_; }
-  const Array<Range> &GetRanges() const { return ranges_; }
-  int GetAccessMask() const { return access_mask_; }
-  bool IsFullRegion() const;
+  // InferLayout 接口
+  virtual LayoutMap InferLayout(const LayoutInferArgs& T, InferLevel level) const {
+    return {};
+  }
 
-private:
-  Buffer buffer_;
-  Array<Range> ranges_;
-  int access_mask_;
+  // Clone 接口
+  virtual std::unique_ptr<TileOperator> Clone() const = 0;
+  
+  // 虚析构函数
+  virtual ~TileOperator() = default;
 };
 
 Var GetVarFromAccessPtr(const PrimExpr &expr);
 
-std::unique_ptr<Operator> ParseOperator(Call call, BufferMap vmap);
-std::unique_ptr<Operator> ParseOperator(Stmt stmt, BufferMap vmap);
+std::unique_ptr<TileOperator> ParseOperator(Call call, BufferMap vmap);
+std::unique_ptr<TileOperator> ParseOperator(Stmt stmt, BufferMap vmap);
 
 } // namespace tl
 } // namespace tvm

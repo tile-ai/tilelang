@@ -122,6 +122,10 @@ Stmt Fill::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 }
 
+LayoutMap Fill::InferLayout(const LayoutInferArgs &T, InferLevel level) const {
+  return {};
+}
+
 TIR_REGISTER_TL_OP(Fill, fill)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",

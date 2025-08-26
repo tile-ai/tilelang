@@ -156,6 +156,10 @@ void ParallelLoopNestVisitor::VisitExpr_(const BufferLoadNode *op) {
 
 ParallelOp::ParallelOp(For root) : root_(root), V(this) { V.VisitStmt(root); }
 
+Stmt ParallelOp::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+  return root_;
+}
+
 bool ParallelOp::IsCommonAccessIndice(const Buffer &buffer) const {
   auto common_indice = loop_vars_.Map([](const auto &iv) { return iv->var; });
   return StructuralEqual()(indice_map_[buffer], common_indice);
@@ -179,7 +183,8 @@ bool ParallelOp::IsCommonAccessIndice(const Buffer &buffer) const {
  *                Can generate new layouts based on vectorization and thread
  * bounds. Used when maximum performance optimization is desired.
  */
-LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
+LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T,
+                                  InferLevel level) const {
   if (loop_layout_.defined())
     return {};
   if (level == InferLevel::kStrict)
@@ -363,7 +368,7 @@ Optional<PrimExpr> ParallelOp::GetPredicate(Var thread_var) const {
   }
 }
 
-Fragment ParallelOp::CompleteBufferFragment(const Buffer &buffer) {
+Fragment ParallelOp::CompleteBufferFragment(const Buffer &buffer) const {
   ICHECK(loop_layout_.defined());
   if (IsCommonAccessIndice(buffer)) {
     return loop_layout_;

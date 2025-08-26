@@ -256,7 +256,8 @@ Stmt GemmSP::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return Evaluate(new_call);
 }
 
-LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
+LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T,
+                              InferLevel level) const {
   if (completed_)
     return {};
   LayoutMap results;
