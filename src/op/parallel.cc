@@ -351,6 +351,18 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   for (const auto &[buffer, _] : indice_map_) {
     if (T.layout_map.count(buffer)) {
       auto fragment = T.layout_map[buffer].as<Fragment>().value();
+      // This is a workaround to check replicated cases
+      // If loop replicate is less than fragment, it must be incomplete
+      if (!analyzer_.CanProve(loop_layout_->ReplicateExtent() -
+                                  fragment->ReplicateExtent() >=
+                              0)) {
+        std::ostringstream oss;
+        oss << "Layout infer conflict between" << buffer << " and "
+            << source_buffer << " in T.Parallel loop:" << std::endl
+            << "    loop " << loop_layout_->DebugOutput() << std::endl
+            << "    fragment " << fragment->DebugOutput() << std::endl;
+        throw LayoutConflictException(oss.str());
+      }
       // TODO: Add thread checks for replicated cases
       // need to wildcard match the rhs with lhs
       if (!is_one(loop_layout_->ReplicateExtent()) ||
