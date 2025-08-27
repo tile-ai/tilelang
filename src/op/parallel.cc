@@ -351,7 +351,8 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   for (const auto &[buffer, _] : indice_map_) {
     if (T.layout_map.count(buffer)) {
       auto fragment = T.layout_map[buffer].as<Fragment>().value();
-      auto vars = loop_vars_.Map([](const IterVar &iv) { return PrimExpr(iv->var); });
+      auto vars =
+          loop_vars_.Map([](const IterVar &iv) { return PrimExpr(iv->var); });
       if (!ProveFragmentContains(loop_layout_, fragment, vars,
                                  indice_map_[buffer], analyzer_)) {
         std::ostringstream oss;
