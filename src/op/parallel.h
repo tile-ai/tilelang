@@ -31,39 +31,41 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
                            Array<PrimExpr> large_frag_indices,
                            arith::Analyzer &analyzer_);
 
-class ParallelOp;
+class ParallelOpNode;
 
 class ParallelLoopNestVisitor : public StmtExprVisitor {
 private:
-  ParallelLoopNestVisitor(ParallelOp *op) : p(op){};
+  ParallelLoopNestVisitor(ParallelOpNode *op) : p(op){};
   void VisitStmt_(const ForNode *op) override;
   void VisitStmt_(const BufferStoreNode *op) override;
   void VisitExpr_(const BufferLoadNode *op) override;
 
-  ParallelOp *p;
+  ParallelOpNode *p;
 
-  friend class ParallelOp;
+  friend class ParallelOpNode;
 };
 
-class ParallelOp : public TileOperator {
+class ParallelOpNode : public TileOperatorNode {
 public:
-  ParallelOp(For root);
+  static constexpr const char *_type_key = "tl.ParallelOp";
+  TVM_DECLARE_FINAL_OBJECT_INFO(ParallelOpNode, TileOperatorNode);
+
+  ParallelOpNode(For root);
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
 
-  ParallelOp(const ParallelOp &other) : ParallelOp(other.root_) {
+  ParallelOpNode(const ParallelOpNode &other) : ParallelOpNode(other.root_) {
     loop_layout_ = other.loop_layout_;
     predicate_ = other.predicate_;
-  }
-  std::unique_ptr<TileOperator> Clone() const override {
-    return std::make_unique<ParallelOp>(*this);
   }
 
   Fragment GetLoopLayout() const { return loop_layout_; }
   For GetRoot() const { return root_; }
   Map<Buffer, Array<PrimExpr>> GetIndiceMap() const { return indice_map_; }
   Optional<PrimExpr> GetPredicate(Var thread_var) const;
+
+  TileOperator Clone() const;
 
 private:
   Fragment CompleteBufferFragment(const Buffer &buffer) const;
@@ -85,6 +87,16 @@ private:
   mutable Optional<PrimExpr> predicate_;
 
   friend class ParallelLoopNestVisitor;
+};
+
+class ParallelOp : public TileOperator {
+public:
+  TVM_DEFINE_OBJECT_REF_METHODS(ParallelOp, TileOperator, ParallelOpNode);
+
+  ParallelOp(For root) {
+    auto op = make_object<ParallelOpNode>(root);
+    data_ = std::move(op);
+  }
 };
 
 } // namespace tl

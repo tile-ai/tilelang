@@ -18,33 +18,34 @@ namespace tl {
 
 using namespace tir;
 
-class RegionOp : public TileOperator {
+class RegionOpNode : public TileOperatorNode {
 public:
-  RegionOp(Array<PrimExpr> args, BufferMap vmap);
+  Buffer buffer_;
+  Array<Range> ranges_;
+  int access_mask_;
+
+  static constexpr const char *_type_key = "tl.RegionOp";
+  TVM_DECLARE_FINAL_OBJECT_INFO(RegionOpNode, TileOperatorNode);
+
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
-  static const Op &Get();
-
-  std::unique_ptr<TileOperator> Clone() const override {
-    return std::make_unique<RegionOp>(*this);
-  }
 
   const Buffer &GetBuffer() const { return buffer_; }
   const Array<Range> &GetRanges() const { return ranges_; }
   int GetAccessMask() const { return access_mask_; }
   bool IsFullRegion() const;
 
-private:
-  Buffer buffer_;
-  Array<Range> ranges_;
-  int access_mask_;
+  TileOperator Clone() const;
 };
 
-Var GetVarFromAccessPtr(const PrimExpr &expr);
+class RegionOp : public TileOperator {
+public:
+  TVM_DEFINE_OBJECT_REF_METHODS(RegionOp, TileOperator, RegionOpNode);
+  TVM_DLL RegionOp(Array<PrimExpr> args, BufferMap vmap);
 
-std::unique_ptr<TileOperator> ParseOperator(Call call, BufferMap vmap);
-std::unique_ptr<TileOperator> ParseOperator(Stmt stmt, BufferMap vmap);
+  static const Op &Get();
+};
 
 } // namespace tl
 } // namespace tvm

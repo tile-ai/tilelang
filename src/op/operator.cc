@@ -15,24 +15,23 @@ namespace tl {
 
 using namespace tir;
 
-std::unique_ptr<TileOperator> ParseOperator(Call call, BufferMap vmap) {
+TileOperator ParseOperator(Call call, BufferMap vmap) {
   auto op_map = Op::GetAttrMap<OpBuilderFunc>("TLOpBuilder");
   Op op = call->op.as<Op>().value();
   if (op_map.count(op)) {
-    TileOperator *ptr =
-        static_cast<TileOperator *>(op_map[op](call->args, vmap));
-    ICHECK(ptr != nullptr);
-    return std::unique_ptr<TileOperator>(ptr);
+    auto tile_op = op_map[op](call->args, vmap);
+    ICHECK(tile_op.defined());
+    return tile_op;
   }
-  return nullptr;
+  return TileOperator();
 }
 
-std::unique_ptr<TileOperator> ParseOperator(Stmt stmt, BufferMap vmap) {
+TileOperator ParseOperator(Stmt stmt, BufferMap vmap) {
   if (stmt.as<Evaluate>() && stmt.as<EvaluateNode>()->value.as<CallNode>()) {
     auto call = stmt.as<EvaluateNode>()->value.as<CallNode>();
     return ParseOperator(GetRef<Call>(call), vmap);
   }
-  return nullptr;
+  return TileOperator();
 }
 
 Var GetVarFromAccessPtr(const PrimExpr &expr) {

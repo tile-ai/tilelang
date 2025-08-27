@@ -24,19 +24,6 @@ using namespace tir;
 using AddWorkspaceCallback = std::function<PrimExpr(int, DataType)>;
 using LayoutMap = Map<Buffer, Layout>;
 using BufferMap = Map<Var, Buffer>;
-using OpBuilderFunc = ffi::TypedFunction<void *(Array<PrimExpr>, BufferMap)>;
-
-#define TIR_REGISTER_TL_OP(Entry, OpName)                                      \
-  const Op &Entry::Get() {                                                     \
-    static const Op &op = Op::Get("tl." #OpName);                              \
-    return op;                                                                 \
-  }                                                                            \
-  TVM_REGISTER_OP("tl." #OpName)                                               \
-      .set_attr<TScriptPrinterName>("TScriptPrinterName", #OpName)             \
-      .set_attr<OpBuilderFunc>("TLOpBuilder",                                  \
-                               [](Array<PrimExpr> a, BufferMap b) {            \
-                                 return (void *)(new Entry(a, b));             \
-                               })
 
 enum class InferLevel {
   kFree = 0,
@@ -60,30 +47,48 @@ struct LayoutInferArgs {
   Map<Buffer, Buffer> buffer_remap;
 };
 
-class TileOperator {
+class TileOperatorNode;
+class TileOperator;
+
+class TileOperatorNode: public Object {
  public:
-  // Lower 接口
-  virtual Stmt Lower(const LowerArgs& T, arith::Analyzer* analyzer) const {
-    ICHECK(0) << "Not Implemented Lower method.";
-    return Evaluate(0);
-  }
+  virtual Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const = 0;
 
-  // InferLayout 接口
-  virtual LayoutMap InferLayout(const LayoutInferArgs& T, InferLevel level) const {
-    return {};
-  }
+  virtual LayoutMap InferLayout(const LayoutInferArgs& T,
+                                InferLevel level) const = 0;
 
-  // Clone 接口
-  virtual std::unique_ptr<TileOperator> Clone() const = 0;
-  
-  // 虚析构函数
-  virtual ~TileOperator() = default;
+  virtual TileOperator Clone() const = 0;
+
+  static constexpr const char* _type_key = "tl.TileOperator";
+
+  TVM_DECLARE_BASE_OBJECT_INFO(TileOperatorNode, Object);
 };
+
+class TileOperator : public ObjectRef {
+  public:
+   TVM_DEFINE_OBJECT_REF_METHODS(TileOperator, ObjectRef, TileOperatorNode);
+};
+
 
 Var GetVarFromAccessPtr(const PrimExpr &expr);
 
-std::unique_ptr<TileOperator> ParseOperator(Call call, BufferMap vmap);
-std::unique_ptr<TileOperator> ParseOperator(Stmt stmt, BufferMap vmap);
+TileOperator ParseOperator(Call call, BufferMap vmap);
+TileOperator ParseOperator(Stmt stmt, BufferMap vmap);
+
+using OpBuilderFunc = ffi::TypedFunction<TileOperator(Array<PrimExpr>, BufferMap)>;
+
+#define TIR_REGISTER_TL_OP(Entry, OpName)                                      \
+  const Op &Entry::Get() {                                                     \
+    static const Op &op = Op::Get("tl." #OpName);                              \
+    return op;                                                                 \
+  }                                                                            \
+  TVM_REGISTER_OP("tl." #OpName)                                               \
+      .set_attr<TScriptPrinterName>("TScriptPrinterName", #OpName)             \
+      .set_attr<OpBuilderFunc>("TLOpBuilder",                                  \
+                               [](Array<PrimExpr> args, BufferMap vmap) {            \
+                                 return Entry(args, vmap);                          \
+                               })
+
 
 } // namespace tl
 } // namespace tvm

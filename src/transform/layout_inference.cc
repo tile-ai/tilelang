@@ -80,8 +80,8 @@ public:
     auto iter_var = thread_var_vec_[cur_infer_id];
     auto thread_bounds = thread_bounds_vec_[cur_infer_id];
     // Double-check that 'next' is valid
-    ICHECK(next != nullptr)
-        << "infer_list_[" << cur_infer_id << "] is null inside run_infer_step.";
+    ICHECK(next.defined()) << "infer_list_[" << cur_infer_id
+                           << "] is null inside run_infer_step.";
 
     // Check iter_var->dom and dom->extent
     ICHECK(iter_var.defined())
@@ -211,7 +211,7 @@ public:
     std::vector<bool> in_queue(num_infer, true);
     for (int i = 0; i < num_infer; i++) {
       // Check that each infer_list_ entry is valid
-      ICHECK(infer_list_[i] != nullptr)
+      ICHECK(infer_list_[i].defined())
           << "infer_list_[" << i
           << "] is null. The inference object is not allocated properly.";
 
@@ -254,13 +254,13 @@ public:
     ICHECK(infer_list_.size() == thread_var_vec_.size())
         << "infer_list_ and thread_var_vec_ size mismatch";
     for (int i = 0; i < infer_list_.size(); i++) {
-      std::unique_ptr<TileOperator> base_infer = std::move(infer_list_[i]);
+      TileOperator base_infer = std::move(infer_list_[i]);
       auto thread_var = thread_var_vec_[i];
 
       // Check if base_infer is valid
-      ICHECK(base_infer != nullptr) << "Null pointer encountered in "
-                                       "infer_list_ while collecting for_map.";
-      if (auto for_infer = dynamic_cast<ParallelOp *>(base_infer.get())) {
+      ICHECK(base_infer.defined()) << "Null pointer encountered in "
+                                      "infer_list_ while collecting for_map.";
+      if (auto for_infer = base_infer.as<ParallelOpNode>()) {
         // Check that the loop layout is defined
         ICHECK(for_infer->GetLoopLayout().defined())
             << "The Layout for Parallel for cannot be inferred correctly:\n"
@@ -298,7 +298,7 @@ private:
       return;
 
     auto p = ParseOperator(GetRef<Call>(op), buffer_data_to_buffer_);
-    if (p != nullptr) {
+    if (p.defined()) {
       for (const auto &arg : op->args) {
         if (auto buffer = getBufferFromAccessPtr(arg)) {
           addToUseList(buffer.value());
@@ -345,7 +345,7 @@ private:
 
   void VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kParallel) {
-      auto infer = std::make_unique<ParallelOp>(GetRef<For>(op));
+      auto infer = ParallelOp(GetRef<For>(op));
       for (const auto &[buffer, _] : infer->GetIndiceMap()) {
         addToUseList(buffer);
       }
@@ -400,7 +400,7 @@ private:
 
   Map<Var, Buffer> buffer_data_to_buffer_;
   std::vector<ObjectRef> infer_list_stmt_;
-  std::vector<std::unique_ptr<TileOperator>> infer_list_;
+  std::vector<TileOperator> infer_list_;
   std::unordered_map<Buffer, std::vector<int>, ObjectPtrHash, ObjectPtrEqual>
       use_list_;
   // This is a workaround for cpu backend,
@@ -413,8 +413,8 @@ private:
   LayoutMap annotated_layout_map_;
   bool skip_thread_partition_{false};
 
-  std::vector<std::unique_ptr<TileOperator>> BackupInferList() {
-    std::vector<std::unique_ptr<TileOperator>> back_infer_list;
+  std::vector<TileOperator> BackupInferList() {
+    std::vector<TileOperator> back_infer_list;
     back_infer_list.reserve(infer_list_.size());
     for (auto &&p : infer_list_) {
       back_infer_list.push_back(p->Clone());

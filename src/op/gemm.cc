@@ -34,35 +34,44 @@ static std::vector<int> toPrimeFactors(int x) {
 }
 
 Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
-  Aptr = args[0];
-  Bptr = args[1];
-  Cptr = args[2];
-  A = vmap[GetVarFromAccessPtr(Aptr)];
-  B = vmap[GetVarFromAccessPtr(Bptr)];
-  C = vmap[GetVarFromAccessPtr(Cptr)];
-  trans_A = args[3].as<Bool>().value();
-  trans_B = args[4].as<Bool>().value();
-  M = args[5].as<IntImm>().value()->value;
-  N = args[6].as<IntImm>().value()->value;
-  K = args[7].as<IntImm>().value()->value;
-  policy = static_cast<GemmWarpPolicy>(args[8].as<IntImm>().value()->value);
-  clear_accum = args[9].as<Bool>().value();
-  stride_A = args[10].as<IntImm>().value()->value;
-  stride_B = args[11].as<IntImm>().value()->value;
-  offset_A = args[12].as<IntImm>().value()->value;
-  offset_B = args[13].as<IntImm>().value()->value;
+  ObjectPtr<GemmNode> node = make_object<GemmNode>();
+
+  node->Aptr = args[0];
+  node->Bptr = args[1];
+  node->Cptr = args[2];
+  node->A = vmap[GetVarFromAccessPtr(node->Aptr)];
+  node->B = vmap[GetVarFromAccessPtr(node->Bptr)];
+  node->C = vmap[GetVarFromAccessPtr(node->Cptr)];
+  node->trans_A = args[3].as<Bool>().value();
+  node->trans_B = args[4].as<Bool>().value();
+  node->M = args[5].as<IntImm>().value()->value;
+  node->N = args[6].as<IntImm>().value()->value;
+  node->K = args[7].as<IntImm>().value()->value;
+  node->policy =
+      static_cast<GemmWarpPolicy>(args[8].as<IntImm>().value()->value);
+  node->clear_accum = args[9].as<Bool>().value();
+  node->stride_A = args[10].as<IntImm>().value()->value;
+  node->stride_B = args[11].as<IntImm>().value()->value;
+  node->offset_A = args[12].as<IntImm>().value()->value;
+  node->offset_B = args[13].as<IntImm>().value()->value;
   if (args.size() > 14) {
-    kPack = args[14].as<IntImm>().value()->value;
-    if (kPack != 1 && kPack != 2) {
+    node->kPack = args[14].as<IntImm>().value()->value;
+    if (node->kPack != 1 && node->kPack != 2) {
       ICHECK(false) << "kPack must be 1 or 2";
     }
   }
   if (args.size() > 15) {
-    wg_wait = args[15].as<IntImm>().value()->value;
+    node->wg_wait = args[15].as<IntImm>().value()->value;
   }
+  data_ = std::move(node);
 }
 
-Gemm::GemmInst Gemm::GetGemmInst(int block_size, Target target) const {
+TileOperator GemmNode::Clone() const {
+  auto op = make_object<GemmNode>(*this);
+  return Gemm(op);
+}
+
+GemmNode::GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
   int warp_size = TargetGetWarpSize(target);
   int num_warps = block_size / warp_size;
   bool allow_wgmma = TargetIsHopper(target) && (this->M >= 64) &&
@@ -122,9 +131,9 @@ Gemm::GemmInst Gemm::GetGemmInst(int block_size, Target target) const {
  *   divisibility or policy conditions are not met (e.g., M/N tile divisibility,
  *   invalid policy, or WGMMA-specific warp-group requirements).
  */
-std::pair<int, int> Gemm::ComputeWarpPartition(int block_size,
-                                               GemmInst gemm_inst,
-                                               Target target) const {
+std::pair<int, int> GemmNode::ComputeWarpPartition(int block_size,
+                                                   GemmInst gemm_inst,
+                                                   Target target) const {
   int num_warps = block_size / TargetGetWarpSize(target);
   int m_warp = 1, n_warp = 1;
   constexpr int kMPerWarp = 16; // Rows processed by a single warp
@@ -314,7 +323,7 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int block_size,
  * @return true if WGMMA is supported for the current buffers, dtypes, and
  *         transpose/shape constraints; false otherwise.
  */
-bool Gemm::CheckWGMMA() const {
+bool GemmNode::CheckWGMMA() const {
   if (B.scope() != "shared.dyn" && B.scope() != "shared") {
     return false;
   }
@@ -379,7 +388,7 @@ static int GetArchInt(Target target) {
   return arch_int;
 }
 
-Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
   GemmInst gemm_inst = GetGemmInst(block_size, T.target);
   auto [warp_m, warp_n] = ComputeWarpPartition(block_size, gemm_inst, T.target);
@@ -440,7 +449,8 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
  * @param level Inference level (unused for side effects but retained for API).
  * @return LayoutMap mapping each of A, B, and C to their inferred layouts.
  */
-LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) const {
+LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
+                                InferLevel level) const {
   if (completed_)
     return {};
   LayoutMap results;

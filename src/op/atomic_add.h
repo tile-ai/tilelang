@@ -15,27 +15,23 @@ namespace tl {
 
 using namespace tir;
 
-class AtomicAdd : public TileOperator {
+class AtomicAddNode : public TileOperatorNode {
 public:
-  AtomicAdd(Array<PrimExpr> args, BufferMap vmap);
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
-  LayoutMap InferLayout(const LayoutInferArgs &T,
-                        InferLevel level) const override;
+  Array<PrimExpr> args_;
+
+  Buffer src, dst;
+  Array<Range> src_range, dst_range;
+  IntImm coalesced_width;
+
+  mutable ParallelOp par_op_;
+  static constexpr const char *_type_key = "tl.AtomicAdd";
+  TVM_DECLARE_FINAL_OBJECT_INFO(AtomicAddNode, TileOperatorNode);
+
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const;
+  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const;
 
   static const Op &Get();
-
-  AtomicAdd(const AtomicAdd &other)
-      : args_(other.args_), src(other.src), dst(other.dst),
-        src_range(other.src_range), dst_range(other.dst_range),
-        coalesced_width(other.coalesced_width) {
-    // No clone nullptr
-    if (other.par_op_)
-      par_op_ = std::unique_ptr<ParallelOp>(
-          static_cast<ParallelOp *>(other.par_op_->Clone().release()));
-  }
-  std::unique_ptr<TileOperator> Clone() const override {
-    return std::make_unique<AtomicAdd>(*this);
-  }
+  TileOperator Clone() const;
 
 protected:
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;
@@ -47,14 +43,13 @@ protected:
 
   PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
                          Array<PrimExpr> extents, int src_dst) const;
+};
 
-  Array<PrimExpr> args_;
-
-  Buffer src, dst;
-  Array<Range> src_range, dst_range;
-  IntImm coalesced_width;
-
-  mutable std::unique_ptr<ParallelOp> par_op_;
+class AtomicAdd : public TileOperator {
+public:
+  TVM_DEFINE_OBJECT_REF_METHODS(AtomicAdd, TileOperator, AtomicAddNode);
+  TVM_DLL AtomicAdd(Array<PrimExpr> args, BufferMap vmap);
+  static const Op &Get();
 };
 
 } // namespace tl

@@ -14,24 +14,16 @@ namespace tl {
 
 using namespace tir;
 
-class GemmSP : public TileOperator {
+class GemmSPNode : public TileOperatorNode {
 public:
-  GemmSP(Array<PrimExpr> args, BufferMap vmap);
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
-  LayoutMap InferLayout(const LayoutInferArgs &T,
-                        InferLevel level) const override;
-  static const Op &Get();
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const;
+  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const;
   enum class GemmWarpPolicy {
     kSquare = 0,
     kFullRow = 1,
     kFullCol = 2,
   } policy;
 
-  std::unique_ptr<TileOperator> Clone() const override {
-    return std::make_unique<GemmSP>(*this);
-  }
-
-private:
   std::pair<int, int>
   ComputeWarpPartition(int num_warps, Target target,
                        bool maybe_hopper_wgmma = true) const;
@@ -45,7 +37,18 @@ private:
   // only will be enabled under cdna mfma instructions
   int kPack = 1;
   int wg_wait = 0;
+
+  TileOperator Clone() const;
+
+private:
   mutable bool completed_ = false;
+};
+
+class GemmSP : public TileOperator {
+public:
+  TVM_DEFINE_OBJECT_REF_METHODS(GemmSP, TileOperator, GemmSPNode);
+  TVM_DLL GemmSP(Array<PrimExpr> args, BufferMap vmap);
+  static const Op &Get();
 };
 
 } // namespace tl

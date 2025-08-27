@@ -421,7 +421,7 @@ private:
       return Downcast<Evaluate>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
     auto tile_op = ParseOperator(GetRef<Stmt>(op), buffer_data_to_buffer_);
-    if (tile_op == nullptr)
+    if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     AddWorkspaceCallback callback = [this](int num_elem, DataType dtype) {
       auto workspace =
