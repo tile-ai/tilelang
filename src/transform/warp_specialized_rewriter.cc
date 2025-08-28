@@ -378,6 +378,7 @@ private:
       }
       auto then_case = StmtExprMutator::VisitStmt(op->then_case);
       maybe_thread_opt_ = do_shuffle_ && maybe_thread_opt_ && has_tma_op_;
+      has_tma_op_ = false;
       if (maybe_thread_opt_) {
         return IfThenElse(
             Call(DataType::Bool(), tl_shuffle_elect(), {thread_extent_}),
