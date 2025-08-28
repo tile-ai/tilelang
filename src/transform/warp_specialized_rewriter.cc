@@ -376,14 +376,24 @@ private:
           eq_op->b.as<VarNode>() == thread_var_.get()) {
         maybe_thread_opt_ = true;
       }
-      maybe_thread_opt_ = do_shuffle_ && maybe_thread_opt_;
+      auto then_case = StmtExprMutator::VisitStmt(op->then_case);
+      maybe_thread_opt_ = do_shuffle_ && maybe_thread_opt_ && has_tma_op_;
+      if (maybe_thread_opt_) {
+        return IfThenElse(
+            Call(DataType::Bool(), tl_shuffle_elect(), {thread_extent_}),
+            StmtExprMutator::VisitStmt(op->then_case), std::nullopt);
+      }
     }
-    if (maybe_thread_opt_)
-      return IfThenElse(
-          Call(DataType::Bool(), tl_shuffle_elect(), {thread_extent_}),
-          StmtExprMutator::VisitStmt(op->then_case), std::nullopt);
-    else
-      return StmtExprMutator::VisitStmt_(op);
+    return StmtExprMutator::VisitStmt_(op);
+  }
+
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(tl::tma_load()) ||
+        op->op.same_as(tl::tma_load_im2col()) ||
+        op->op.same_as(tl::tma_store())) {
+      has_tma_op_ = true;
+    }
+    return StmtExprMutator::VisitExpr_(op);
   }
 
   Var thread_var_;
@@ -391,6 +401,7 @@ private:
   PrimExpr thread_extent_;
   bool maybe_thread_opt_ = false;
   bool do_shuffle_;
+  bool has_tma_op_ = false;
 };
 
 Block MakeGroupBlock(const Stmt &stmt,
