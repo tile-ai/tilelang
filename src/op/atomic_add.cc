@@ -1,7 +1,7 @@
 /*!
  * \file tl/op/atomic_add.cc
  *
- * Define elment-wise operators.
+ * Define element-wise operators.
  */
 
 #include "atomic_add.h"
