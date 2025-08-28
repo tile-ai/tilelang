@@ -204,6 +204,9 @@ private:
   }
 
   PrimExpr VisitExpr_(const CallNode *node) final {
+    if (dynamic_) {
+      return StmtExprMutator::VisitExpr_(node);
+    }
     if (vector_size_ == 2 || vector_size_ == 4) {
       if (node->op == builtin::call_extern() && node->args.size() >= 2) {
         if (const auto *func_name = node->args[0].as<StringImmNode>()) {
