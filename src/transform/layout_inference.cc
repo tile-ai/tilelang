@@ -105,13 +105,14 @@ public:
            "required for layout inference.";
 
     // Run InferLayout
-    auto updates =
-        next->InferLayout(LayoutInferArgs{target_, thread_bounds, layout_map,
-                                          &analyzer_, buffer_oob},
-                          level);
-
+    std::cerr << "[RunInferStep] working on " << cur_infer_id << std::endl;
+    auto updates = next->InferLayout(
+        LayoutInferArgs{target_, thread_bounds, layout_map}, level);
     // Process the returned updates
     for (const auto &[buffer, layout] : updates) {
+      std::cerr << "    consider update " << buffer << " as "
+                << layout->DebugOutput() << std::endl;
+
       // Basic validity checks
       ICHECK(buffer.defined()) << "InferLayout returned an undefined buffer.";
       ICHECK(layout.defined()) << "InferLayout returned an undefined layout.";
@@ -140,6 +141,8 @@ public:
           if (ProveFragmentContains(src_layout, dst_layout, indices, indices,
                                     inner_analyzer)) {
             layout_map.Set(buffer, layout);
+            std::cerr << "    layout broadcast from "
+                      << src_layout->DebugOutput() << ", accepted" << std::endl;
             continue;
           }
         }
@@ -151,6 +154,7 @@ public:
       } else {
         // Otherwise, update map
         layout_map.Set(buffer, layout);
+        std::cerr << "    new layout accepted" << std::endl;
         if (!update_queue)
           continue;
 
@@ -209,6 +213,11 @@ public:
     ICHECK_EQ(buffer_oob_vec_.size(), infer_list_.size())
         << "Size mismatch: buffer_oob_vec_ and infer_list_ must match in "
            "length.";
+
+    std::cerr << "[InferLayout] all participating operators:" << std::endl;
+    for (int i = 0; i < infer_list_stmt_.size(); ++i) {
+      std::cerr << "    op " << i << ":" << infer_list_stmt_[i] << std::endl;
+    }
 
     // If needed, you can also check that annotated_layout_map_ is not empty, or
     // anything else relevant to your setup.
@@ -470,6 +479,13 @@ private:
 
   void InferInFreeMode(LayoutMap &layout_map,
                        const LayoutMap &strict_layout_map) {
+
+    std::cerr << "Enforced layout maps:" << std::endl;
+    for (auto &&[k, v] : layout_map) {
+      std::cerr << "    " << k << ": " << v->DebugOutput() << std::endl;
+    }
+    std::cerr << std::endl;
+
     // Group operators into connected components
     UnionFind<int> uf;
     for (int i = 0; i < infer_list_.size(); i++) {
@@ -505,11 +521,15 @@ private:
     std::vector<bool> in_queue(infer_list_.size(), false);
 
     for (auto &&[root, members] : components) {
+      std::cerr << "======================= processing component " << root
+                << std::endl;
       decltype(infer_list_) best_infer_list;
       LayoutMap best_layout_map;
       int64_t min_reg_num = INT64_MAX;
-
+      int min_reg_num_infer_root = -1;
       for (int attempt_infer_root : members) {
+        std::cerr << "----------------------- try root " << attempt_infer_root
+                  << std::endl;
         // backup infer_list_ in class member
         auto back_infer_list = BackupInferList();
         // create temporarily used layout_map, new handle so that it copies on
@@ -541,10 +561,14 @@ private:
         } catch (LayoutConflictException e) {
           // such an order fails, try others
           do_update = false;
+          std::cerr << "attempt failed due to LayoutConflictException "
+                    << e.what() << std::endl;
         } catch (NormalizeIterException e) {
           // such an order encounters iterators that is not normalizable, try
           // others e.g. i * 576 % 2048
           do_update = false;
+          std::cerr << "attempt failed due to NormalizeIterException "
+                    << e.what() << std::endl;
         }
 
         if (do_update) {
@@ -566,16 +590,19 @@ private:
             best_infer_list = std::move(infer_list_);
             best_layout_map = tmp_layout_map;
             min_reg_num = reg_num;
+            min_reg_num_infer_root = attempt_infer_root;
           }
         }
         // recover stateful infer_list_, head on next
         infer_list_ = std::move(back_infer_list);
       }
-      if (min_reg_num < INT64_MAX) {
-        // now apply the best plan for this component
-        infer_list_ = std::move(best_infer_list);
-        layout_map = best_layout_map;
-      }
+      ICHECK(min_reg_num < INT64_MAX)
+          << "no available layout found" << std::endl;
+      // now apply the best plan for this component
+      infer_list_ = std::move(best_infer_list);
+      layout_map = best_layout_map;
+      std::cerr << "[InferInFreeMode] Final selection is attempt_infer_root = "
+                << min_reg_num_infer_root << std::endl;
     }
   }
 };
@@ -598,7 +625,7 @@ private:
   LayoutInferencer(const LayoutInferenceResult &result,
                    bool skip_thread_partition, arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer), result_(result),
-        skip_thread_partition_(skip_thread_partition){};
+        skip_thread_partition_(skip_thread_partition) {};
 
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
@@ -695,7 +722,8 @@ private:
       });
 
       auto loop_layout = result_.for_map[root];
-      bool parallel_loop = !is_register_store && !skip_thread_partition_;
+      // FIXME: tell in-Parallel and out-of-Parallel `local`s apart
+      bool parallel_loop = !skip_thread_partition_;
 
       if (parallel_loop) {
         for_node =
