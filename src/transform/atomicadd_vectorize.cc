@@ -141,12 +141,15 @@ private:
 
 class AtomicAddVectorizeRewriter : public StmtExprMutator {
 public:
-  AtomicAddVectorizeRewriter(AtomicAddVectorizePlanResult plan,  Var thread_var, PrimExpr by_var, PrimExpr bx_var, Range thread_bounds, int stride_y, int stride_x)
+  AtomicAddVectorizeRewriter(AtomicAddVectorizePlanResult plan, Var thread_var,
+                             PrimExpr by_var, PrimExpr bx_var,
+                             Range thread_bounds, int stride_y, int stride_x)
       : vector_size_(plan.vector_size), condition_(plan.condition),
-        dynamic_(plan.dynamic), tx_var_(thread_var), by_var_(by_var), 
+        dynamic_(plan.dynamic), tx_var_(thread_var), by_var_(by_var),
         bx_var_(bx_var), stride_y_(stride_y), stride_x_(stride_x) {
-    const int64_t* tx_ext = as_const_int(thread_bounds->extent);
-    ICHECK(tx_ext) << "thread_bounds->extent must be a constant for vectorization.";
+    const int64_t *tx_ext = as_const_int(thread_bounds->extent);
+    ICHECK(tx_ext)
+        << "thread_bounds->extent must be a constant for vectorization.";
     extent_tx_ = static_cast<int>(*tx_ext);
   }
 
@@ -205,40 +208,66 @@ private:
       if (node->op == builtin::call_extern() && node->args.size() >= 2) {
         if (const auto *func_name = node->args[0].as<StringImmNode>()) {
           if (func_name->value == "AtomicAdd") {
-            // Matrix[by * stride_y + i / (stride_x / (tx_txtent * vector_size_)) + tx_var_ / (stride_x / vector_size_), 
-            //        bx * stride_x + (i % (stride_x / (tx_extent * vector_size_)) * (tx_extent * vector_size_) + (tx_var_ % (stride / vector_size_)) * vector_size_]
-            const CallNode* addr_call = node->args[1].as<CallNode>();
-            if (!addr_call || addr_call->op != builtin::address_of() || addr_call->args.size() != 1) {
+            // Matrix[by * stride_y + i / (stride_x / (tx_txtent *
+            // vector_size_)) + tx_var_ / (stride_x / vector_size_),
+            //        bx * stride_x + (i % (stride_x / (tx_extent *
+            //        vector_size_)) * (tx_extent * vector_size_) + (tx_var_ %
+            //        (stride / vector_size_)) * vector_size_]
+            const CallNode *addr_call = node->args[1].as<CallNode>();
+            if (!addr_call || addr_call->op != builtin::address_of() ||
+                addr_call->args.size() != 1) {
               return StmtExprMutator::VisitExpr_(node);
             }
-            const BufferLoadNode* old_dst_node = addr_call->args[0].as<BufferLoadNode>();
-            const BufferLoadNode* old_value_node = node->args[2].as<BufferLoadNode>();
+            const BufferLoadNode *old_dst_node =
+                addr_call->args[0].as<BufferLoadNode>();
+            const BufferLoadNode *old_value_node =
+                node->args[2].as<BufferLoadNode>();
             if (!old_dst_node || !old_value_node) {
               return StmtExprMutator::VisitExpr_(node);
             }
             Array<PrimExpr> dst_indices, value_indices;
             if ((extent_tx_ * vector_size_) > stride_x_) {
-              dst_indices.push_back(by_var_ * stride_y_ + iter_var_ * (extent_tx_ * vector_size_ / stride_x_) + truncdiv(tx_var_ , stride_x_ / vector_size_));
-              dst_indices.push_back(bx_var_ * stride_x_ + truncmod(tx_var_, stride_x_ / vector_size_) * vector_size_);
-              value_indices.push_back(iter_var_ * (extent_tx_ * vector_size_ / stride_x_) + truncdiv(tx_var_ * vector_size_, stride_x_));
-              value_indices.push_back(truncmod(tx_var_, stride_x_ / vector_size_) * vector_size_);
+              dst_indices.push_back(
+                  by_var_ * stride_y_ +
+                  iter_var_ * (extent_tx_ * vector_size_ / stride_x_) +
+                  truncdiv(tx_var_, stride_x_ / vector_size_));
+              dst_indices.push_back(
+                  bx_var_ * stride_x_ +
+                  truncmod(tx_var_, stride_x_ / vector_size_) * vector_size_);
+              value_indices.push_back(
+                  iter_var_ * (extent_tx_ * vector_size_ / stride_x_) +
+                  truncdiv(tx_var_ * vector_size_, stride_x_));
+              value_indices.push_back(
+                  truncmod(tx_var_, stride_x_ / vector_size_) * vector_size_);
             } else {
-              dst_indices.push_back(by_var_ * stride_y_ + truncdiv(iter_var_, stride_x_ / (extent_tx_ * vector_size_)) + truncdiv(tx_var_ , stride_x_ / vector_size_));
-              dst_indices.push_back(bx_var_ * stride_x_ + truncmod(iter_var_, stride_x_ / (extent_tx_ * vector_size_)) * (extent_tx_ * vector_size_) + truncmod(tx_var_, stride_x_ / vector_size_) * vector_size_);
-              value_indices.push_back(truncdiv(iter_var_, stride_x_ / (extent_tx_ * vector_size_)) + truncdiv(tx_var_ , stride_x_ / vector_size_));
-              value_indices.push_back(truncmod(iter_var_, stride_x_ / (extent_tx_ * vector_size_)) * (extent_tx_ * vector_size_) + truncmod(tx_var_, stride_x_ / vector_size_) * vector_size_);
+              dst_indices.push_back(
+                  by_var_ * stride_y_ +
+                  truncdiv(iter_var_, stride_x_ / (extent_tx_ * vector_size_)) +
+                  truncdiv(tx_var_, stride_x_ / vector_size_));
+              dst_indices.push_back(
+                  bx_var_ * stride_x_ +
+                  truncmod(iter_var_, stride_x_ / (extent_tx_ * vector_size_)) *
+                      (extent_tx_ * vector_size_) +
+                  truncmod(tx_var_, stride_x_ / vector_size_) * vector_size_);
+              value_indices.push_back(
+                  truncdiv(iter_var_, stride_x_ / (extent_tx_ * vector_size_)) +
+                  truncdiv(tx_var_, stride_x_ / vector_size_));
+              value_indices.push_back(
+                  truncmod(iter_var_, stride_x_ / (extent_tx_ * vector_size_)) *
+                      (extent_tx_ * vector_size_) +
+                  truncmod(tx_var_, stride_x_ / vector_size_) * vector_size_);
             }
 
             BufferLoad dst_node =
                 BufferLoad(old_dst_node->buffer, dst_indices,
-                          old_dst_node->predicate, old_dst_node->span);
+                           old_dst_node->predicate, old_dst_node->span);
             BufferLoad value_node =
-              BufferLoad(old_value_node->buffer, value_indices,
-                          old_value_node->predicate, old_value_node->span);
-            Call address_of_dst = Call(
-                DataType::Handle(), builtin::address_of(), {dst_node});
-            Call address_of_value = Call(
-                DataType::Handle(), builtin::address_of(), {value_node});
+                BufferLoad(old_value_node->buffer, value_indices,
+                           old_value_node->predicate, old_value_node->span);
+            Call address_of_dst =
+                Call(DataType::Handle(), builtin::address_of(), {dst_node});
+            Call address_of_value =
+                Call(DataType::Handle(), builtin::address_of(), {value_node});
             Array<PrimExpr> new_args;
             if (vector_size_ == 2) {
               new_args.push_back(StringImm("AtomicAddx2"));
@@ -310,20 +339,21 @@ For VectorizeAtomicAdd(const For &for_node, Var thread_var, Range thread_bounds,
         }
       }
     }
-    if (const MulNode* mul = obj.as<MulNode>()) {
-      const VarNode* var = nullptr;
-      const IntImmNode* imm = nullptr;
+    if (const MulNode *mul = obj.as<MulNode>()) {
+      const VarNode *var = nullptr;
+      const IntImmNode *imm = nullptr;
       PrimExpr var_expr;
       if ((var = mul->a.as<VarNode>()) && (imm = mul->b.as<IntImmNode>())) {
         var_expr = mul->a;
-      } else if ((var = mul->b.as<VarNode>()) && (imm = mul->a.as<IntImmNode>())) {
+      } else if ((var = mul->b.as<VarNode>()) &&
+                 (imm = mul->a.as<IntImmNode>())) {
         var_expr = mul->b;
       }
       if (var && imm) {
-        if (var->name_hint == "bx"){
+        if (var->name_hint == "bx") {
           stride_x = imm->value;
           bx_var = var_expr;
-        } else if (var->name_hint == "by"){
+        } else if (var->name_hint == "by") {
           stride_y = imm->value;
           by_var = var_expr;
         }
@@ -337,9 +367,11 @@ For VectorizeAtomicAdd(const For &for_node, Var thread_var, Range thread_bounds,
     res = planner.Plan(for_node, thread_var, thread_bounds, vectorize_hint);
     vectorize_hint = res.vector_size;
 
-    if (vectorize_hint == 1 || stride_x == -1 || stride_y == -1 || !bx_var.defined() || !by_var.defined())
+    if (vectorize_hint == 1 || stride_x == -1 || stride_y == -1 ||
+        !bx_var.defined() || !by_var.defined())
       return for_node;
-    auto rewriter = AtomicAddVectorizeRewriter(res, thread_var, by_var, bx_var, thread_bounds, stride_y, stride_x);
+    auto rewriter = AtomicAddVectorizeRewriter(
+        res, thread_var, by_var, bx_var, thread_bounds, stride_y, stride_x);
     return Downcast<For>(rewriter(for_node));
   } else {
     return for_node;
