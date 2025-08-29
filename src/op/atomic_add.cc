@@ -4,8 +4,8 @@
  * Define elment-wise operators.
  */
 
-#include "atomic_add.h"
-
+#include "./atomic_add.h"
+#include "./region.h"
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
@@ -34,7 +34,8 @@ static int GetArchInt(Target target) {
   return arch_int;
 }
 
-AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) : args_(args) {
+AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) {
+  ObjectPtr<AtomicAddNode> node = make_object<AtomicAddNode>();
   Array<Range> rgs[2];
   Buffer bf[2];
   for (int i = 0; i < 2; i++) {
@@ -42,17 +43,26 @@ AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) : args_(args) {
     auto call = expr.as<CallNode>();
     ICHECK(call);
     auto region = RegionOp(call->args, vmap);
-    rgs[i] = region.GetRanges();
-    bf[i] = region.GetBuffer();
+    rgs[i] = region->GetRanges();
+    bf[i] = region->GetBuffer();
   }
-  std::tie(this->src, this->dst) = std::tie(bf[0], bf[1]);
-  std::tie(this->src_range, this->dst_range) = std::tie(rgs[0], rgs[1]);
+  std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
+  std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
   if (args.size() >= 3) {
-    coalesced_width = Downcast<IntImm>(args[2]);
+    node->coalesced_width = Downcast<IntImm>(args[2]);
   }
+  data_ = std::move(node);
 }
 
-Array<IterVar> AtomicAdd::MakeIterVars() const {
+TileOperator AtomicAddNode::Clone() const {
+  auto op = make_object<AtomicAddNode>(*this);
+  if (par_op_.defined()) {
+    op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
+  }
+  return AtomicAdd(op);
+}
+
+Array<IterVar> AtomicAddNode::MakeIterVars() const {
   Array<IterVar> loop_vars;
   size_t idx = 0;
   for (size_t i = 0; i < src_range.size(); i++) {
@@ -68,8 +78,8 @@ Array<IterVar> AtomicAdd::MakeIterVars() const {
 
 // ivs: itervars returned by MakeIterVars()
 // src_dst: 0 for src_indices, 1 for dst_indices
-Array<PrimExpr> AtomicAdd::MakeIndices(const Array<IterVar> &ivs,
-                                       int src_dst) const {
+Array<PrimExpr> AtomicAddNode::MakeIndices(const Array<IterVar> &ivs,
+                                           int src_dst) const {
   Array<PrimExpr> indices;
   Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
   size_t idx = 0;
@@ -87,9 +97,10 @@ Array<PrimExpr> AtomicAdd::MakeIndices(const Array<IterVar> &ivs,
   return indices;
 }
 
-PrimExpr AtomicAdd::MakePredicate(arith::Analyzer *analyzer,
-                                  const Array<IterVar> &ivs,
-                                  Array<PrimExpr> extents, int src_dst) const {
+PrimExpr AtomicAddNode::MakePredicate(arith::Analyzer *analyzer,
+                                      const Array<IterVar> &ivs,
+                                      Array<PrimExpr> extents,
+                                      int src_dst) const {
   Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
   Array<PrimExpr> cond_list;
   ICHECK(extents.size() == ranges.size()) << extents << " " << ranges;
@@ -117,7 +128,7 @@ PrimExpr AtomicAdd::MakePredicate(arith::Analyzer *analyzer,
   }
 }
 
-For AtomicAdd::MakeSIMTLoop(arith::Analyzer *analyzer) const {
+For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.size() == 0;
   if (is_scalar) {
@@ -180,16 +191,16 @@ For AtomicAdd::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   return Downcast<For>(body);
 }
 
-Stmt AtomicAdd::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Target target = T.target;
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
-  auto par_op = std::make_unique<ParallelOp>(fused_loop);
+  auto par_op = ParallelOp(fused_loop);
 
   std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                     InferLevel::kFree};
   for (auto level : levels) {
-    par_op->InferLayout(
+    (par_op)->InferLayout(
         {T.target, T.thread_bounds, T.layout_map, T.buffer_remap}, level);
   }
   auto loop_layout = par_op->GetLoopLayout();
@@ -210,10 +221,11 @@ Stmt AtomicAdd::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return vectorized_thread_loop;
 }
 
-LayoutMap AtomicAdd::InferLayout(const LayoutInferArgs &T, InferLevel level) {
-  if (par_op_ == nullptr) {
+LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
+                                     InferLevel level) const {
+  if (!par_op_.defined()) {
     arith::Analyzer analyzer;
-    par_op_ = std::make_unique<ParallelOp>(MakeSIMTLoop(&analyzer));
+    par_op_ = ParallelOp(MakeSIMTLoop(&analyzer));
   }
   if (T.layout_map.count(src) && T.layout_map.count(dst)) {
     if (src.scope() == "local.fragment" && dst.scope() == "local.fragment") {
@@ -235,11 +247,6 @@ TIR_REGISTER_TL_OP(AtomicAdd, atomicadd)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
-
-// TVM_REGISTER_OP("tl.atomicadd")
-//     .set_num_inputs(2)
-//     .add_argument("ref", "Buffer", "The destination buffer")
-//     .add_argument("val", "Expr", "The value to be added atomically");
 
 } // namespace tl
 } // namespace tvm
