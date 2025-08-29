@@ -7,7 +7,7 @@
 #ifndef TVM_TL_OP_BUILTIN_H_
 #define TVM_TL_OP_BUILTIN_H_
 
-#include "op.h"
+#include "operator.h"
 #include <tvm/ir/transform.h>
 
 namespace tvm {

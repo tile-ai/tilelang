@@ -7,37 +7,21 @@
 #ifndef TVM_TL_OP_GEMM_H_
 #define TVM_TL_OP_GEMM_H_
 
-#include "op.h"
+#include "operator.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
 
-class Gemm : public Operator {
+enum class GemmWarpPolicy {
+  kSquare = 0,
+  kFullRow = 1,
+  kFullCol = 2,
+};
+
+class GemmNode : public TileOperatorNode {
 public:
-  Gemm(Array<PrimExpr> args, BufferMap vmap);
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) final;
-  static const Op &Get();
-  enum class GemmWarpPolicy {
-    kSquare = 0,
-    kFullRow = 1,
-    kFullCol = 2,
-  } policy;
-
-  std::unique_ptr<Operator> Clone() const final {
-    return std::make_unique<Gemm>(*this);
-  }
-
-private:
-  // Target GEMM instruction
-  enum class GemmInst { kMMA, kWGMMA, kUTCMMA, kMFMA };
-  GemmInst GetGemmInst(int block_size, Target target) const;
-
-  std::pair<int, int> ComputeWarpPartition(int num_warps, GemmInst gemm_inst,
-                                           Target target) const;
-
   bool CheckWGMMA() const;
   Array<PrimExpr> call_args;
   tir::Buffer A, B, C;
@@ -52,7 +36,33 @@ private:
   // only will be enabled under cdna mfma instructions
   int kPack = 1;
   int wg_wait = 0;
-  bool completed_ = false;
+  GemmWarpPolicy policy;
+
+  static constexpr const char *_type_key = "tl.Gemm";
+  TVM_DECLARE_FINAL_OBJECT_INFO(GemmNode, TileOperatorNode);
+
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
+
+  TileOperator Clone() const;
+
+private:
+  // Target GEMM instruction
+  enum class GemmInst { kMMA, kWGMMA, kUTCMMA, kMFMA };
+  GemmInst GetGemmInst(int block_size, Target target) const;
+
+  std::pair<int, int> ComputeWarpPartition(int num_warps, GemmInst gemm_inst,
+                                           Target target) const;
+
+  mutable bool completed_ = false;
+};
+
+class Gemm : public TileOperator {
+public:
+  TVM_DEFINE_OBJECT_REF_METHODS(Gemm, TileOperator, GemmNode);
+  TVM_DLL Gemm(Array<PrimExpr> args, BufferMap vmap);
+  static const Op &Get();
 };
 
 } // namespace tl

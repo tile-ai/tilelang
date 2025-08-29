@@ -23,6 +23,7 @@ namespace tl {
 using namespace tir;
 
 Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
+  ObjectPtr<FillNode> node = make_object<FillNode>();
 
   if (args[0]->IsInstance<BufferLoadNode>()) {
     auto buffer_load = Downcast<BufferLoad>(args[0]);
@@ -33,42 +34,49 @@ Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
         const auto *lanes = ramp->lanes.as<IntImmNode>();
         CHECK(lanes)
             << "Scalable vectors not supported in BufferRegion conversion";
-        region.push_back(Range::FromMinExtent(ramp->base, ramp->lanes));
+        node->region.push_back(Range::FromMinExtent(ramp->base, ramp->lanes));
       } else {
-        region.push_back(Range::FromMinExtent(index, 1));
+        node->region.push_back(Range::FromMinExtent(index, 1));
       }
     }
-    dst = buffer_load->buffer;
+    node->dst = buffer_load->buffer;
   } else {
-    dst = vmap[GetVarFromAccessPtr(args[0])];
-    for (int i = 0; i < dst->shape.size(); i++) {
-      region.push_back(Range(0, dst->shape[i]));
+    node->dst = vmap[GetVarFromAccessPtr(args[0])];
+    for (int i = 0; i < node->dst->shape.size(); i++) {
+      node->region.push_back(Range(0, node->dst->shape[i]));
     }
   }
 
-  if (args[1]->dtype != dst->dtype) {
-    value = Cast(dst->dtype, args[1]);
+  if (args[1]->dtype != node->dst->dtype) {
+    node->value = Cast(node->dst->dtype, args[1]);
   } else {
-    value = args[1];
+    node->value = args[1];
   }
 
-  ICHECK(region.size() == dst->shape.size())
-      << "region size = " << region.size() << " != " << dst->shape.size();
-  for (int i = 0; i < region.size(); i++) {
+  ICHECK(node->region.size() == node->dst->shape.size())
+      << "region size = " << node->region.size()
+      << " != " << node->dst->shape.size();
+  for (int i = 0; i < node->region.size(); i++) {
     // bound check if region is static
-    if (region[i]->min.as<IntImm>()) {
-      int64_t min = Downcast<IntImm>(region[i]->min)->value;
+    if (node->region[i]->min.as<IntImm>()) {
+      int64_t min = Downcast<IntImm>(node->region[i]->min)->value;
       ICHECK_GE(min, 0) << "region[" << i << "] = " << min << " < 0";
     }
-    if (region[i]->extent.as<IntImm>()) {
-      int64_t extent = Downcast<IntImm>(region[i]->extent)->value;
-      ICHECK_LE(extent, Downcast<IntImm>(dst->shape[i])->value)
-          << "region[" << i << "] = " << extent << " > " << dst->shape[i];
+    if (node->region[i]->extent.as<IntImm>()) {
+      int64_t extent = Downcast<IntImm>(node->region[i]->extent)->value;
+      ICHECK_LE(extent, Downcast<IntImm>(node->dst->shape[i])->value)
+          << "region[" << i << "] = " << extent << " > " << node->dst->shape[i];
     }
   }
+  data_ = std::move(node);
 }
 
-For Fill::MakeSIMTLoop(arith::Analyzer *analyzer) const {
+TileOperator FillNode::Clone() const {
+  auto op = make_object<FillNode>(*this);
+  return Fill(op);
+}
+
+For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   int ndim = dst->shape.size();
   Array<IterVar> loop_vars;
   Array<PrimExpr> dst_indices;
@@ -85,10 +93,9 @@ For Fill::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   return Downcast<For>(body);
 }
 
-Stmt Fill::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-
+Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (dst.scope() == "local.fragment") {
-    auto par_op = std::make_unique<ParallelOp>(MakeSIMTLoop(analyzer));
+    auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
     par_op->InferLayout({T.target, T.thread_bounds, T.layout_map},
                         InferLevel::kFree);
     par_op->InferLayout({T.target, T.thread_bounds, T.layout_map},
@@ -106,7 +113,7 @@ Stmt Fill::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     auto vectorized_thread_loop = VectorizeLoop(init_loop);
     return vectorized_thread_loop;
   } else if (dst.scope() == "shared.dyn" || dst.scope() == "shared") {
-    auto par_op = std::make_unique<ParallelOp>(MakeSIMTLoop(analyzer));
+    auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
     par_op->InferLayout({T.target, T.thread_bounds, T.layout_map},
                         InferLevel::kFree);
     auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,
@@ -120,6 +127,11 @@ Stmt Fill::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   } else {
     LOG(FATAL) << "Unsupported scope " << dst.scope();
   }
+}
+
+LayoutMap FillNode::InferLayout(const LayoutInferArgs &T,
+                                InferLevel level) const {
+  return {};
 }
 
 TIR_REGISTER_TL_OP(Fill, fill)

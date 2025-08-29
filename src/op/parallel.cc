@@ -154,9 +154,21 @@ void ParallelLoopNestVisitor::VisitExpr_(const BufferLoadNode *op) {
   StmtExprVisitor::VisitExpr_(op);
 }
 
-ParallelOp::ParallelOp(For root) : root_(root), V(this) { V.VisitStmt(root); }
+ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
+  V.VisitStmt(root);
+}
 
-bool ParallelOp::IsCommonAccessIndice(const Buffer &buffer) const {
+TileOperator ParallelOpNode::Clone() const {
+  auto op = make_object<ParallelOpNode>(*this);
+  return ParallelOp(op);
+}
+
+Stmt ParallelOpNode::Lower(const LowerArgs &T,
+                           arith::Analyzer *analyzer) const {
+  return root_;
+}
+
+bool ParallelOpNode::IsCommonAccessIndice(const Buffer &buffer) const {
   auto common_indice = loop_vars_.Map([](const auto &iv) { return iv->var; });
   return StructuralEqual()(indice_map_[buffer], common_indice);
 }
@@ -179,7 +191,8 @@ bool ParallelOp::IsCommonAccessIndice(const Buffer &buffer) const {
  *                Can generate new layouts based on vectorization and thread
  * bounds. Used when maximum performance optimization is desired.
  */
-LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
+LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
+                                      InferLevel level) const {
   if (loop_layout_.defined())
     return {};
   if (level == InferLevel::kStrict)
@@ -355,7 +368,7 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   return results;
 }
 
-Optional<PrimExpr> ParallelOp::GetPredicate(Var thread_var) const {
+Optional<PrimExpr> ParallelOpNode::GetPredicate(Var thread_var) const {
   if (predicate_.defined()) {
     return Substitute(predicate_.value(), {{InputPlaceholder(0), thread_var}});
   } else {
@@ -363,7 +376,7 @@ Optional<PrimExpr> ParallelOp::GetPredicate(Var thread_var) const {
   }
 }
 
-Fragment ParallelOp::CompleteBufferFragment(const Buffer &buffer) {
+Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
   ICHECK(loop_layout_.defined());
   if (IsCommonAccessIndice(buffer)) {
     return loop_layout_;

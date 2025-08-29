@@ -32,31 +32,39 @@ static std::vector<int> toPrimeFactors(int x) {
 }
 
 GemmSP::GemmSP(Array<PrimExpr> args, BufferMap vmap) {
-  A = vmap[GetVarFromAccessPtr(args[0])];
-  E = vmap[GetVarFromAccessPtr(args[1])];
-  B = vmap[GetVarFromAccessPtr(args[2])];
-  C = vmap[GetVarFromAccessPtr(args[3])];
-  trans_A = args[4].as<Bool>().value();
-  trans_B = args[5].as<Bool>().value();
-  M = args[6].as<IntImm>().value()->value;
-  N = args[7].as<IntImm>().value()->value;
-  K = args[8].as<IntImm>().value()->value;
-  policy = static_cast<GemmWarpPolicy>(args[9].as<IntImm>().value()->value);
-  clear_accum = args[10].as<Bool>().value();
+  ObjectPtr<GemmSPNode> node = make_object<GemmSPNode>();
+  node->A = vmap[GetVarFromAccessPtr(args[0])];
+  node->E = vmap[GetVarFromAccessPtr(args[1])];
+  node->B = vmap[GetVarFromAccessPtr(args[2])];
+  node->C = vmap[GetVarFromAccessPtr(args[3])];
+  node->trans_A = args[4].as<Bool>().value();
+  node->trans_B = args[5].as<Bool>().value();
+  node->M = args[6].as<IntImm>().value()->value;
+  node->N = args[7].as<IntImm>().value()->value;
+  node->K = args[8].as<IntImm>().value()->value;
+  node->policy = static_cast<GemmSPNode::GemmWarpPolicy>(
+      args[9].as<IntImm>().value()->value);
+  node->clear_accum = args[10].as<Bool>().value();
   if (args.size() > 11) {
-    kPack = args[11].as<IntImm>().value()->value;
-    if (kPack != 1 && kPack != 2) {
+    node->kPack = args[11].as<IntImm>().value()->value;
+    if (node->kPack != 1 && node->kPack != 2) {
       ICHECK(false) << "kPack must be 1 or 2";
     }
   }
   if (args.size() > 12) {
-    wg_wait = args[12].as<IntImm>().value()->value;
+    node->wg_wait = args[12].as<IntImm>().value()->value;
   }
+  data_ = std::move(node);
+}
+
+TileOperator GemmSPNode::Clone() const {
+  auto op = make_object<GemmSPNode>(*this);
+  return GemmSP(op);
 }
 
 std::pair<int, int>
-GemmSP::ComputeWarpPartition(int num_warps, Target target,
-                             bool maybe_hopper_wgmma) const {
+GemmSPNode::ComputeWarpPartition(int num_warps, Target target,
+                                 bool maybe_hopper_wgmma) const {
   int m_warp = 1, n_warp = 1;
   constexpr int kMPerWarp = 16; // Rows processed by a single warp
   constexpr int kNPerWarp = 8;  // Columns processed by a single warp
@@ -212,7 +220,7 @@ GemmSP::ComputeWarpPartition(int num_warps, Target target,
   return {m_warp, n_warp};
 }
 
-Stmt GemmSP::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   int warp_size = 32;
 
   auto block_size = *as_const_int(T.thread_bounds->extent);
@@ -256,7 +264,8 @@ Stmt GemmSP::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return Evaluate(new_call);
 }
 
-LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
+LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
+                                  InferLevel level) const {
   if (completed_)
     return {};
   LayoutMap results;
@@ -308,6 +317,7 @@ LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   completed_ = true;
   return results;
 }
+
 TIR_REGISTER_TL_OP(GemmSP, gemm_sp)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",

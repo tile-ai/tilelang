@@ -12,8 +12,7 @@
 #include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/builtin.h"
-#include "../op/gemm.h"
-#include "../op/op.h"
+#include "../op/operator.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "loop_partition.h"
@@ -474,7 +473,7 @@ private:
       return Downcast<Evaluate>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
     auto tile_op = ParseOperator(GetRef<Stmt>(op), buffer_data_to_buffer_);
-    if (tile_op == nullptr)
+    if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     AddWorkspaceCallback callback = [this](int num_elem, DataType dtype) {
       auto workspace =

@@ -15,6 +15,7 @@
 #include "../transform/common/loop_parallel_transform_utils.h"
 #include "../transform/loop_partition.h"
 #include "../transform/loop_vectorize.h"
+#include "region.h"
 
 #include "../target/cuda.h"
 #include "../target/utils.h"
@@ -111,7 +112,8 @@ template <typename T> static Array<T> ReverseArray(Array<T> array) {
  * operation. \param vmap BufferMap mapping original buffer names to new buffer
  * names.
  */
-Copy::Copy(Array<PrimExpr> args, BufferMap vmap) : args_(args) {
+Copy::Copy(Array<PrimExpr> args, BufferMap vmap) {
+  ObjectPtr<CopyNode> node = make_object<CopyNode>();
   Array<Range> rgs[2];
   Buffer bf[2];
   for (int i = 0; i < 2; i++) {
@@ -119,23 +121,32 @@ Copy::Copy(Array<PrimExpr> args, BufferMap vmap) : args_(args) {
     auto call = expr.as<CallNode>();
     ICHECK(call);
     auto region = RegionOp(call->args, vmap);
-    rgs[i] = region.GetRanges();
-    bf[i] = region.GetBuffer();
+    rgs[i] = region->GetRanges();
+    bf[i] = region->GetBuffer();
   }
-  std::tie(this->src, this->dst) = std::tie(bf[0], bf[1]);
-  std::tie(this->src_range, this->dst_range) = std::tie(rgs[0], rgs[1]);
+  std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
+  std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
   if (args.size() >= 3) {
     auto coalesced_width = Downcast<IntImm>(args[2]);
     if (coalesced_width->value > 0) {
-      this->coalesced_width = coalesced_width;
+      node->coalesced_width = coalesced_width;
     }
   }
   if (args.size() >= 4) {
-    this->disable_tma = Downcast<Bool>(args[3]);
+    node->disable_tma = Downcast<Bool>(args[3]);
   }
   if (args.size() >= 5) {
-    this->eviction_policy = args[4].as<IntImmNode>()->value;
+    node->eviction_policy = args[4].as<IntImmNode>()->value;
   }
+  data_ = std::move(node);
+}
+
+TileOperator CopyNode::Clone() const {
+  auto op = make_object<CopyNode>(*this);
+  if (par_op_.defined()) {
+    op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
+  }
+  return Copy(op);
 }
 
 /*!
@@ -144,7 +155,7 @@ Copy::Copy(Array<PrimExpr> args, BufferMap vmap) : args_(args) {
  * > 1. \return Array of IterVar representing the iterator variables for the
  * copy operation.
  */
-Array<IterVar> Copy::MakeIterVars() const {
+Array<IterVar> CopyNode::MakeIterVars() const {
   Array<IterVar> loop_vars;
   size_t idx = 0;
   for (size_t i = 0; i < src_range.size(); i++) {
@@ -167,8 +178,8 @@ Array<IterVar> Copy::MakeIterVars() const {
  * dst_indices. \return Array of PrimExpr representing the indices for the copy
  * operation.
  */
-Array<PrimExpr> Copy::MakeIndices(const Array<IterVar> &ivs,
-                                  int src_dst) const {
+Array<PrimExpr> CopyNode::MakeIndices(const Array<IterVar> &ivs,
+                                      int src_dst) const {
   Array<PrimExpr> indices;
   Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
   size_t idx = 0;
@@ -195,9 +206,9 @@ Array<PrimExpr> Copy::MakeIndices(const Array<IterVar> &ivs,
  * of the copy operation. \param src_dst 0 for src_indices, 1 for dst_indices.
  * \return PrimExpr representing the predicate for the copy operation.
  */
-PrimExpr Copy::MakePredicate(arith::Analyzer *analyzer,
-                             const Array<IterVar> &ivs, Array<PrimExpr> extents,
-                             int src_dst) const {
+PrimExpr CopyNode::MakePredicate(arith::Analyzer *analyzer,
+                                 const Array<IterVar> &ivs,
+                                 Array<PrimExpr> extents, int src_dst) const {
   Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
   Array<PrimExpr> cond_list;
   ICHECK(extents.size() == ranges.size()) << extents << " " << ranges;
@@ -233,7 +244,7 @@ PrimExpr Copy::MakePredicate(arith::Analyzer *analyzer,
  * simplification. \return For representing the SIMT loop for the copy
  * operation.
  */
-For Copy::MakeSIMTLoop(arith::Analyzer *analyzer) const {
+For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.size() == 0;
   if (is_scalar) {
@@ -289,7 +300,7 @@ For Copy::MakeSIMTLoop(arith::Analyzer *analyzer) const {
  * shared tensor. \return Layout representing the linear layout for the TMA
  * copy.
  */
-Layout Copy::ComputeLinearLayout(const Buffer &shared_tensor) const {
+Layout CopyNode::ComputeLinearLayout(const Buffer &shared_tensor) const {
   Array<PrimExpr> input_size = shared_tensor->shape;
   Array<PrimExpr> forward_vars;
   for (size_t i = 0; i < input_size.size(); i++) {
@@ -316,7 +327,8 @@ Layout Copy::ComputeLinearLayout(const Buffer &shared_tensor) const {
  * indicating the level of layout inference. \return LayoutMap containing the
  * inferred layout.
  */
-LayoutMap Copy::InferLayout(const LayoutInferArgs &T, InferLevel level) {
+LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
+                                InferLevel level) const {
   auto target = T.target;
   using namespace tvm::transform;
   PassContext pass_ctx = PassContext::Current();
@@ -340,17 +352,15 @@ LayoutMap Copy::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       return Map<Buffer, Layout>({{shared_tensor, linear_layout}});
     }
   }
-
   // for LDSM/STSM, the layout was deduced from register layout
   // so we can directly apply the layout of normal copy
   // Use parallel op to infer the layout
-  if (!par_op_) {
+  if (!par_op_.defined()) {
     arith::Analyzer analyzer;
-    par_op_ = std::make_unique<ParallelOp>(MakeSIMTLoop(&analyzer));
+    par_op_ = ParallelOp((MakeSIMTLoop(&analyzer)));
   }
   return par_op_->InferLayout(T, level);
 }
-
 /*!
  * \brief Check if the copy operation is a bulk load.
  * This function verifies if the copy operation can be implemented using CUDA's
@@ -359,7 +369,7 @@ LayoutMap Copy::InferLayout(const LayoutInferArgs &T, InferLevel level) {
  * same data type. \param target Target device. \return True if the copy
  * operation is a bulk load, false otherwise.
  */
-bool Copy::CheckBulkLoad(Target target) const {
+bool CopyNode::CheckBulkLoad(Target target) const {
   // 1. arch must have bulk copy support
   if (!TargetHasBulkCopy(target))
     return false;
@@ -387,7 +397,7 @@ bool Copy::CheckBulkLoad(Target target) const {
  * same data type. \param target Target device. \return True if the copy
  * operation is a bulk store, false otherwise.
  */
-bool Copy::CheckBulkStore(Target target) const {
+bool CopyNode::CheckBulkStore(Target target) const {
   // 1. arch must have bulk copy support
   if (!TargetHasBulkCopy(target))
     return false;
@@ -415,7 +425,7 @@ bool Copy::CheckBulkStore(Target target) const {
  * Target device. \return True if the copy operation is a LDSM copy, false
  * otherwise.
  */
-bool Copy::CheckLDSMCopy(Target target) const {
+bool CopyNode::CheckLDSMCopy(Target target) const {
   return TargetHasLdmatrix(target) &&
          (src.scope() == "shared.dyn" || src.scope() == "shared") &&
          dst.scope() == "local.fragment";
@@ -429,7 +439,7 @@ bool Copy::CheckLDSMCopy(Target target) const {
  * Target device. \return True if the copy operation is a STSM copy, false
  * otherwise.
  */
-bool Copy::CheckSTSMCopy(Target target) const {
+bool CopyNode::CheckSTSMCopy(Target target) const {
   return TargetHasStmatrix(target) && src.scope() == "local.fragment" &&
          (dst.scope() == "shared.dyn" || dst.scope() == "shared");
 }
@@ -442,7 +452,7 @@ bool Copy::CheckSTSMCopy(Target target) const {
  * copy if no specialized instruction is applicable. \param target Target
  * device. \return CopyInst representing the copy instruction type.
  */
-Copy::CopyInst Copy::GetCopyInst(Target target, bool disable_tma_lower) const {
+CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower) const {
   // disable_tma_lower is from pass_configs
   // when tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER is True,
   // we will not use tma for bulk load/store
@@ -471,7 +481,7 @@ Copy::CopyInst Copy::GetCopyInst(Target target, bool disable_tma_lower) const {
  * \param analyzer Arithmetic analyzer for simplification.
  * \return Stmt representing the PTX code for the copy operation.
  */
-Stmt Copy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Target target = T.target;
   using namespace tvm::transform;
   PassContext pass_ctx = PassContext::Current();
@@ -502,8 +512,8 @@ Stmt Copy::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
  * map. \param analyzer Arithmetic analyzer for simplification. \return Stmt
  * representing the normal copy code.
  */
-Stmt Copy::LowerNormalCopy(const LowerArgs &T,
-                           arith::Analyzer *analyzer) const {
+Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
+                               arith::Analyzer *analyzer) const {
   bool is_cpu_target = T.target->GetTargetDeviceType() == kDLCPU;
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
@@ -512,7 +522,7 @@ Stmt Copy::LowerNormalCopy(const LowerArgs &T,
       Downcast<For>(ParallelLoopTransformer::Substitute(fused_loop));
 
   For vectorized_thread_loop;
-  auto par_op = std::make_unique<ParallelOp>(transformed_loop);
+  auto par_op = ParallelOp(transformed_loop);
 
   if (is_cpu_target) {
     vectorized_thread_loop = VectorizeLoop(transformed_loop);
@@ -548,8 +558,8 @@ Stmt Copy::LowerNormalCopy(const LowerArgs &T,
  * \param copy_inst CopyInst representing the copy instruction type.
  * \return Stmt representing the LDSM/STSM copy code.
  */
-Stmt Copy::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
-                         CopyInst copy_inst) const {
+Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
+                             CopyInst copy_inst) const {
   ICHECK(copy_inst == CopyInst::kLDSM || copy_inst == CopyInst::kSTSM)
       << "Invalid copy inst " << static_cast<int>(copy_inst);
   bool is_ldmatrix = copy_inst == CopyInst::kLDSM;
@@ -741,8 +751,8 @@ Stmt Copy::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
  * copy_inst CopyInst representing the copy instruction type. \return Stmt
  * representing the bulk copy code.
  */
-Stmt Copy::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
-                         CopyInst copy_inst) const {
+Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
+                             CopyInst copy_inst) const {
   ICHECK(copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore)
       << "Invalid copy inst " << static_cast<int>(copy_inst);
   bool is_load = copy_inst == CopyInst::kBulkLoad;
@@ -1153,15 +1163,22 @@ Array<PrimExpr> TMADesc::EncodeCallArgs() const {
  * buffer names to new buffer names.
  */
 Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args, BufferMap vmap) {
-  src = vmap[GetVarFromAccessPtr(args[0])];
-  dst = vmap[GetVarFromAccessPtr(args[1])];
-  nhw_step = args[2];
-  c_step = args[3];
-  kernel = args[4].as<IntImm>().value()->value;
-  stride = args[5].as<IntImm>().value()->value;
-  dilation = args[6].as<IntImm>().value()->value;
-  padding = args[7].as<IntImm>().value()->value;
-  eviction_policy = args[8].as<IntImm>().value()->value;
+  ObjectPtr<Conv2DIm2ColOpNode> node = make_object<Conv2DIm2ColOpNode>();
+  node->src = vmap[GetVarFromAccessPtr(args[0])];
+  node->dst = vmap[GetVarFromAccessPtr(args[1])];
+  node->nhw_step = args[2];
+  node->c_step = args[3];
+  node->kernel = args[4].as<IntImm>().value()->value;
+  node->stride = args[5].as<IntImm>().value()->value;
+  node->dilation = args[6].as<IntImm>().value()->value;
+  node->padding = args[7].as<IntImm>().value()->value;
+  node->eviction_policy = args[8].as<IntImm>().value()->value;
+  data_ = std::move(node);
+}
+
+TileOperator Conv2DIm2ColOpNode::Clone() const {
+  auto op = make_object<Conv2DIm2ColOpNode>(*this);
+  return Conv2DIm2ColOp(op);
 }
 
 /*!
@@ -1174,8 +1191,8 @@ Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args, BufferMap vmap) {
  * \param analyzer Arithmetic analyzer for simplification.
  * \return Stmt representing the PTX code for the Conv2DIm2ColOp.
  */
-Stmt Conv2DIm2ColOp::Lower(const LowerArgs &T,
-                           arith::Analyzer *analyzer) const {
+Stmt Conv2DIm2ColOpNode::Lower(const LowerArgs &T,
+                               arith::Analyzer *analyzer) const {
   ICHECK(TargetIsHopper(T.target));
   ICHECK(src.scope() == "global" &&
          (dst.scope() == "shared.dyn" || dst.scope() == "shared"));
@@ -1342,6 +1359,11 @@ TIR_REGISTER_TL_OP(Copy, copy)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+LayoutMap Conv2DIm2ColOpNode::InferLayout(const LayoutInferArgs &T,
+                                          InferLevel level) const {
+  return {};
+}
 
 // Register the Conv2DIm2Col operation with TVM's TIR system
 // This operation performs im2col transformation for 2D convolutions using TMA
