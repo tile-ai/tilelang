@@ -12,6 +12,131 @@
 #include "../layout/layout.h"
 #include "operator.h"
 
+/**
+ * Exception representing a layout conflict detected during layout inference.
+ *
+ * Stores an explanatory message retrievable via what().
+ */
+
+/**
+ * Determine whether `small_frag` is guaranteed to be contained within `large_frag`
+ * under the given index mappings and using the provided arithmetic analyzer.
+ *
+ * @param small_frag The smaller fragment to test for containment.
+ * @param large_frag The larger fragment that may contain `small_frag`.
+ * @param small_frag_indices Index expressions mapping the small fragment into buffer space.
+ * @param large_frag_indices Index expressions mapping the large fragment into buffer space.
+ * @param analyzer_ Arithmetic analyzer used to simplify and prove index relations.
+ * @return true if containment can be proven; false otherwise.
+ */
+
+/**
+ * Visitor that traverses a parallel loop nest to collect buffer access and
+ * loop-structure information for a ParallelOpNode.
+ *
+ * The visitor records loop variables, buffer read/write accesses, and builds
+ * predicates as it encounters BufferLoad/BufferStore and For nodes.
+ */
+
+/**
+ * Represents a parallel for-loop operator in TileLang.
+ *
+ * Holds the root For loop, collects and exposes loop layout and access-index
+ * information, and provides layout inference and lowering to TIR.
+ *
+ * Public methods expose the inferred loop layout, root loop, buffer index
+ * mappings, and any per-thread predicate; Lower and InferLayout perform the
+ * operator's lowering and layout inference respectively.
+ */
+
+/**
+ * Create a ParallelOpNode from a root For loop.
+ *
+ * @param root The root For node representing the parallel loop nest.
+ */
+
+/**
+ * Lower this parallel operator into a TIR statement suitable for codegen.
+ *
+ * @param T Lowering arguments and context.
+ * @param analyzer Arithmetic analyzer for expression simplification during lowering.
+ * @return A TIR statement representing the lowered parallel loop.
+ */
+
+/**
+ * Infer the layout mapping for this parallel operator at the specified level.
+ *
+ * @param T Arguments and context for layout inference.
+ * @param level Inference granularity level.
+ * @return A LayoutMap describing inferred buffer/layout relationships for the operator.
+ */
+
+/**
+ * Copy-construct a ParallelOpNode, preserving inferred layout and predicate.
+ */
+
+/**
+ * Get the inferred loop layout fragment.
+ *
+ * @return The Fragment representing the loop's inferred layout (may be lazily computed).
+ */
+
+/**
+ * Get the root For loop of this operator.
+ *
+ * @return The root For AST node.
+ */
+
+/**
+ * Get the mapping from each buffer to the array of index expressions used to access it
+ * within the loop nest.
+ *
+ * @return A Map from Buffer to Array<PrimExpr> of access indices.
+ */
+
+/**
+ * Retrieve the predicate expression associated with a given thread variable, if any.
+ *
+ * @param thread_var The thread variable whose predicate is requested.
+ * @return An Optional<PrimExpr> containing the predicate when present.
+ */
+
+/**
+ * Create a deep copy of this operator as a TileOperator handle.
+ *
+ * @return A TileOperator that references a copy of this node.
+ */
+
+/**
+ * Visitor helper: complete the fragment layout for a buffer (internal).
+ *
+ * (Private helper — not part of the public API.)
+ */
+
+/**
+ * Helper to check whether a buffer's access indices are the common loop indices
+ * (internal).
+ *
+ * (Private helper — not part of the public API.)
+ */
+
+/**
+ * Add `expr` to the current predicate by logical AND; sets predicate if none exists.
+ *
+ * (Private helper — not part of the public API.)
+ */
+
+/**
+ * Thin handle type exposing ParallelOpNode as a TileOperator.
+ *
+ * Construct from a root For loop to create and own a ParallelOpNode instance.
+ */
+
+/**
+ * Construct a ParallelOp handle from a root For loop.
+ *
+ * @param root The root For node representing the parallel loop nest.
+ */
 namespace tvm {
 namespace tl {
 

@@ -63,6 +63,28 @@ public:
   BufferUseDefCollector(bool skip_thread_partition)
       : skip_thread_partition_(skip_thread_partition) {}
 
+  /**
+   * @brief Execute a single layout-inference step for the infer node at the given index.
+   *
+   * Runs InferLayout on the TileOperator at cur_infer_id with the provided InferLevel and
+   * thread bounds, applies returned buffer->layout updates into layout_map (respecting
+   * strict_layout_map constraints for fragment buffers), and optionally propagates
+   * changes to dependent infer nodes by enqueueing them into q and marking in_queue.
+   *
+   * The function mutates layout_map and, when update_queue is true, may modify q and
+   * in_queue. It performs internal sanity checks via ICHECK and will LOG(WARNING) for
+   * buffers that cannot be propagated; ICHECK failures abort execution.
+   *
+   * @param cur_infer_id Index of the infer operator in infer_list_ to run (must be within range).
+   * @param level Inference relaxation level to pass to the operator's InferLayout.
+   * @param update_queue If true, discovered layout changes will enqueue dependent infer nodes.
+   * @param layout_map Mutable map of inferred layouts that will be updated with returned layouts.
+   * @param strict_layout_map Read-only map of layouts produced in the strict phase; used to
+   *                        enforce containment checks for local.fragment buffers when relaxing.
+   * @param q BFS queue used to propagate dependent inference indices; new indices may be pushed.
+   * @param in_queue Parallel boolean vector tracking queued status; entries corresponding to
+   *                 enqueued indices will be set to true.
+   */
   void RunInferStep(int cur_infer_id, InferLevel level, bool update_queue,
                     LayoutMap &layout_map, const LayoutMap &strict_layout_map,
                     std::queue<int> &q, std::vector<bool> &in_queue) {
@@ -189,6 +211,29 @@ public:
     }
   };
 
+  /**
+   * @brief Run the multi-stage layout inference and return the collected results.
+   *
+   * Performs layout inference over the collected TileOperator entries in three
+   * phases: (1) strict per-operator inference, (2) common inference via a BFS
+   * propagation queue, and (3) a free-mode relaxation phase that explores
+   * alternative root orderings within connected components to reduce register
+   * footprint. After inference completes, verifies that all local.fragment buffers
+   * have inferred layouts and collects loop (For) -> Fragment layouts and any
+   * per-loop predicates discovered during inference.
+   *
+   * The method consumes/permutes internal inference state (notably moves entries
+   * out of infer_list_) and returns a LayoutInferenceResult containing:
+   * - layout_map: inferred Layout for each Buffer,
+   * - for_map: mapping from For nodes to their inferred Fragment layout,
+   * - predicate_map: optional loop predicates keyed by For nodes.
+   *
+   * The function performs internal consistency checks (ICHECK) on sizes and
+   * required definitions; violations will terminate via ICHECK failure.
+   *
+   * @return LayoutInferenceResult A tuple-like struct with the inferred
+   *         layout_map, for_map, and predicate_map.
+   */
   LayoutInferenceResult Run() {
     // Basic consistency check: infer_list_ and thread_var_vec_ should have the
     // same size
@@ -292,6 +337,21 @@ public:
   }
 
 private:
+  /**
+   * @brief Visits a Call expression to collect tile-operator-based inference inputs.
+   *
+   * Processes non-global function calls by parsing them into a TileOperator (via ParseOperator).
+   * If the parse succeeds, records:
+   * - buffers referenced by call arguments into the collector's use lists,
+   * - the call AST node into infer_list_stmt_,
+   * - the parsed TileOperator into infer_list_,
+   * - the current thread IterVar into thread_var_vec_,
+   * - the thread iteration bounds into thread_bounds_vec_ (uses analyzer const bounds when available; otherwise [0,1]).
+   *
+   * Calls to global functions (where op->op is a GlobalVar) are ignored.
+   *
+   * @param op The Call node being visited.
+   */
   void VisitExpr_(const CallNode *op) final {
     IRVisitorWithAnalyzer::VisitExpr_(op);
     // Do not analysis the call node to the global function.
@@ -344,6 +404,22 @@ private:
     use_list_[buffer].push_back(infer_idx);
   }
 
+  /**
+   * @brief Handles For nodes during IR traversal.
+   *
+   * When the loop is a parallel loop (ForKind::kParallel), records it as a ParallelOp:
+   * - constructs a ParallelOp for the loop and appends it to the internal infer lists
+   *   (infer_list_ and infer_list_stmt_),
+   * - registers all buffers referenced by the loop indices with use-list bookkeeping,
+   * - captures the current thread IterVar context and its compile-time extent (if available)
+   *   into thread_var_vec_ and thread_bounds_vec_ (falls back to range [0,1] when unknown).
+   *
+   * For non-parallel loops, continues recursive traversal into the loop body.
+   *
+   * Side effects:
+   * - Mutates infer_list_, infer_list_stmt_, use_list_ (via addToUseList), thread_var_vec_,
+   *   and thread_bounds_vec_.
+   */
   void VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kParallel) {
       auto infer = ParallelOp(GetRef<For>(op));
@@ -414,6 +490,15 @@ private:
   LayoutMap annotated_layout_map_;
   bool skip_thread_partition_{false};
 
+  /**
+   * @brief Create a deep copy of the current inference operator list.
+   *
+   * Returns a vector containing clones of each TileOperator in the collector's
+   * internal infer_list_. The returned list is independent of the original so
+   * subsequent modifications to either do not affect the other.
+   *
+   * @return std::vector<TileOperator> Cloned copy of infer_list_.
+   */
   std::vector<TileOperator> BackupInferList() {
     std::vector<TileOperator> back_infer_list;
     back_infer_list.reserve(infer_list_.size());
@@ -423,6 +508,46 @@ private:
     return back_infer_list;
   }
 
+  /**
+   * @brief Explore alternative inference orders within connected components to relax layouts.
+   *
+   * This function performs a "free-mode" exploration that attempts different root
+   * operators within each connected component of the operator-use graph in order
+   * to find a layout assignment with lower register (fragment) usage.
+   *
+   * Detailed behavior:
+   * - Builds connected components of infer_list_ by unioning operators that share
+   *   buffer uses (use_list_).
+   * - For each component, iterates each member operator as a candidate root:
+   *   - Backups the current infer_list_ and uses a temporary copy of layout_map.
+   *   - Runs RunInferStep and FinishInferQueue in InferLevel::kFree starting from
+   *     the candidate root and then (as a fallback) runs the remaining members
+   *     to try to cover the whole component.
+   *   - If inference succeeds, computes a coarse register usage metric by
+   *     summing the product of OutputShape dimensions for all Fragment layouts in
+   *     the temporary layout map.
+   *   - Tracks the candidate that yields the smallest register usage.
+   * - If a better plan is found for a component, replaces the global infer_list_
+   *   and updates layout_map with the best layout_map found.
+   *
+   * Side effects:
+   * - Mutates layout_map to the best-found free-mode layout assignment when a
+   *   better plan is discovered.
+   * - Mutates the member infer_list_ (backed up and restored during attempts;
+   *   finally set to the best plan if found).
+   *
+   * Notes:
+   * - LayoutConflictException and NormalizeIterException raised during attempts
+   *   are caught and treated as failed attempts; they do not propagate out of
+   *   this function.
+   * - The register-usage metric is a heuristic (sum of fragment output element
+   *   counts) used to prefer less-replicated layouts.
+   *
+   * @param layout_map[in,out] The current global layout map to be updated with a
+   *                           better free-mode result if found.
+   * @param strict_layout_map Read-only map of layouts inferred in strict mode,
+   *                          used to constrain free-mode inference.
+   */
   void InferInFreeMode(LayoutMap &layout_map,
                        const LayoutMap &strict_layout_map) {
     // Group operators into connected components
