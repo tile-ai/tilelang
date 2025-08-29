@@ -43,8 +43,9 @@ def assert_gemm_codegen(
     accum_dtype="float",
 ):
     func = matmul(M, N, K, block_M, block_N, block_K, dtype=dtype, accum_dtype=accum_dtype)
-
-    artifact = tilelang.lower(func, target="webgpu")
+    # Because the current pass context have been polluted by previous testing.
+    with tvm.transform.PassContext():
+        artifact = tilelang.lower(func, target="webgpu")
 
     src_code = artifact.kernel_source
 

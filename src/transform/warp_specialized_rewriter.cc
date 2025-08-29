@@ -322,10 +322,12 @@ private:
     auto call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
     if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
       auto mbar = makeGetBarrier(producer_barrier_idx_);
-      // 1D TMA has mbar at args[2]
-      if (auto arg0 = op->args[0].as<Call>();
-          call->op.same_as(tma_load()) && arg0 &&
-          !arg0.value()->op.same_as(create_tma_descriptor())) {
+      auto arg0 = call->args[0].as<Call>();
+      // Check if this is a 1D TMA load
+      auto is_1d_tma_load =
+          arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
+          call->op.same_as(tma_load());
+      if (is_1d_tma_load) {
         call.CopyOnWrite()->args.Set(2, mbar);
       } else {
         Call access_ptr = Downcast<Call>(call->args[2]);
@@ -374,14 +376,25 @@ private:
           eq_op->b.as<VarNode>() == thread_var_.get()) {
         maybe_thread_opt_ = true;
       }
-      maybe_thread_opt_ = do_shuffle_ && maybe_thread_opt_;
+      auto then_case = StmtExprMutator::VisitStmt(op->then_case);
+      maybe_thread_opt_ = do_shuffle_ && maybe_thread_opt_ && has_tma_op_;
+      has_tma_op_ = false;
+      if (maybe_thread_opt_) {
+        return IfThenElse(
+            Call(DataType::Bool(), tl_shuffle_elect(), {thread_extent_}),
+            StmtExprMutator::VisitStmt(op->then_case), std::nullopt);
+      }
     }
-    if (maybe_thread_opt_)
-      return IfThenElse(
-          Call(DataType::Bool(), tl_shuffle_elect(), {thread_extent_}),
-          StmtExprMutator::VisitStmt(op->then_case), std::nullopt);
-    else
-      return StmtExprMutator::VisitStmt_(op);
+    return StmtExprMutator::VisitStmt_(op);
+  }
+
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(tl::tma_load()) ||
+        op->op.same_as(tl::tma_load_im2col()) ||
+        op->op.same_as(tl::tma_store())) {
+      has_tma_op_ = true;
+    }
+    return StmtExprMutator::VisitExpr_(op);
   }
 
   Var thread_var_;
@@ -389,6 +402,7 @@ private:
   PrimExpr thread_extent_;
   bool maybe_thread_opt_ = false;
   bool do_shuffle_;
+  bool has_tma_op_ = false;
 };
 
 Block MakeGroupBlock(const Stmt &stmt,
