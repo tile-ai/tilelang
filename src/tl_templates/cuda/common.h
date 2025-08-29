@@ -151,24 +151,39 @@ template <typename T1, typename T2>
 TL_DEVICE void AtomicMax(T1 *address, T2 val,
                          int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
-  cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
-  aref.fetch_max(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
+  if constexpr (std::is_same_v<NT1, half> ||
+                std::is_same_v<NT1, __nv_bfloat16>) {
+    atomicMax(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
+  } else {
+    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
+    aref.fetch_max(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
+  }
 }
 
 template <typename T1, typename T2>
 TL_DEVICE void AtomicMin(T1 *address, T2 val,
                          int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
-  cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
-  aref.fetch_min(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
+  if constexpr (std::is_same_v<NT1, half> ||
+                std::is_same_v<NT1, __nv_bfloat16>) {
+    atomicMin(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
+  } else {
+    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
+    aref.fetch_min(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
+  }
 }
 
 template <typename T1, typename T2>
 TL_DEVICE void AtomicAdd(T1 *address, T2 val,
                          int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
-  cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
-  aref.fetch_add(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
+  if constexpr (std::is_same_v<NT1, half> ||
+                std::is_same_v<NT1, __nv_bfloat16>) {
+    atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
+  } else {
+    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
+    aref.fetch_add(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
+  }
 }
 
 // AtomicAdd Functions for FP16x2

@@ -34,7 +34,8 @@ public:
 
 class FinalizeReducerOp : public TileOperator {
 public:
-  TVM_DEFINE_OBJECT_REF_METHODS(FinalizeReducerOp, TileOperator, FinalizeReducerOpNode);
+  TVM_DEFINE_OBJECT_REF_METHODS(FinalizeReducerOp, TileOperator,
+                                FinalizeReducerOpNode);
   TVM_DLL FinalizeReducerOp(Array<PrimExpr> args, BufferMap vmap);
   static const Op &Get();
 };

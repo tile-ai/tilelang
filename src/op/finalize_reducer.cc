@@ -26,7 +26,7 @@ FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args, BufferMap vmap) {
 }
 
 Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
-                            arith::Analyzer *analyzer) const {
+                                  arith::Analyzer *analyzer) const {
   auto buffer = T.buffer_remap[reducer];
   auto opt_layout = T.layout_map.Get(reducer);
   ICHECK(opt_layout);
@@ -82,7 +82,7 @@ Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
 }
 
 LayoutMap FinalizeReducerOpNode::InferLayout(const LayoutInferArgs &T,
-                                            InferLevel level) const {
+                                             InferLevel level) const {
   LayoutMap layout_map;
   layout_map.Set(reducer, T.layout_map.Get(reducer).value());
   return layout_map;
