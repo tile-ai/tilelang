@@ -38,6 +38,7 @@ struct LowerArgs {
   AddWorkspaceCallback AddWorkspace;
   LayoutMap layout_map;
   Map<Buffer, Buffer> buffer_remap;
+  Array<Var> buffer_var_gemm;
 };
 
 struct LayoutInferArgs {
