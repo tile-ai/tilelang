@@ -244,7 +244,8 @@ void TileLangStorageAccessVisitor::VisitStmt_(const IfThenElseNode *op) {
   if (op->else_case) {
     scope_.push_back(std::vector<StmtEntry>());
     {
-      With<arith::ConstraintContext> constraint(&analyzer_, real_condition);
+      With<arith::ConstraintContext> constraint(
+          &analyzer_, analyzer_.rewrite_simplify(Not(real_condition)));
       this->VisitStmt(op->else_case.value());
     }
     auto v = Summarize(std::move(scope_.back()), nullptr);

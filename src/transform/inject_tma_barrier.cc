@@ -167,9 +167,6 @@ private:
           arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
           op->op.same_as(tma_load());
       visited_tma_load_ = true;
-      auto arg0 = op->args[0].as<Call>();
-      auto is_1d_tma = op->op.same_as(tma_load()) && arg0 &&
-                       !arg0.value()->op.same_as(create_tma_descriptor());
       Array<PrimExpr> new_args = op->args;
       new_args.Set(is_1d_tma_load ? 2 : 1,
                    Call(DataType::Handle(), get_mbarrier(),
