@@ -10,30 +10,36 @@
 #define TVM_TL_OP_FINALIZE_REDUCER_H_
 
 #include "../transform/layout_reducer.h"
-#include "op.h"
+#include "./operator.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
 
-class FinalizeReducer : public Operator {
+class FinalizeReducerOpNode : public TileOperatorNode {
 public:
-  FinalizeReducer(Array<PrimExpr> args, BufferMap vmap);
-  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const final;
+  tir::Buffer reducer;
+  ReducerOpType op;
+
+  static constexpr const char *_type_key = "tl.FinalizeReducerOp";
+  TVM_DECLARE_FINAL_OBJECT_INFO(FinalizeReducerOpNode, TileOperatorNode);
+
+  Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
   static const Op &Get();
-  std::unique_ptr<Operator> Clone() const final {
-    return std::make_unique<FinalizeReducer>(*this);
-  }
+  TileOperator Clone() const;
+};
 
-  FinalizeReducer(const FinalizeReducer &) = default;
-
-private:
-  tir::Buffer reducer_;
-  ReducerOpType op_;
+class FinalizeReducerOp : public TileOperator {
+public:
+  TVM_DEFINE_OBJECT_REF_METHODS(FinalizeReducerOp, TileOperator, FinalizeReducerOpNode);
+  TVM_DLL FinalizeReducerOp(Array<PrimExpr> args, BufferMap vmap);
+  static const Op &Get();
 };
 
 } // namespace tl
 } // namespace tvm
 
-#endif //  TVM_TL_OP_REDUCE_H_
+#endif //  TVM_TL_OP_FINALIZE_REDUCER_H_

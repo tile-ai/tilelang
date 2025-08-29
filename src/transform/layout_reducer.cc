@@ -163,7 +163,7 @@ private:
                                     reducer_info_map_.Get(var.value()).value());
         }
       }
-    } else if (op->op.same_as(FinalizeReducer::Get())) {
+    } else if (op->op.same_as(FinalizeReducerOp::Get())) {
       ICHECK(op->args.size() == 1);
       auto var = GetVarFromAccessPtr(op->args[0]);
       ICHECK(inside_reducer_range_.count(var) == 1)

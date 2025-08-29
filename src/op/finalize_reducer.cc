@@ -18,14 +18,17 @@ namespace tl {
 
 using namespace tir;
 
-FinalizeReducer::FinalizeReducer(Array<PrimExpr> args, BufferMap vmap)
-    : reducer_(vmap[GetVarFromAccessPtr(args[0])]),
-      op_((ReducerOpType)*as_const_int(args[1])) {}
+FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args, BufferMap vmap) {
+  auto node = make_object<FinalizeReducerOpNode>();
+  node->reducer = vmap[GetVarFromAccessPtr(args[0])];
+  node->op = (ReducerOpType)*as_const_int(args[1]);
+  data_ = std::move(node);
+}
 
-Stmt FinalizeReducer::Lower(const LowerArgs &T,
+Stmt FinalizeReducerOpNode::Lower(const LowerArgs &T,
                             arith::Analyzer *analyzer) const {
-  auto buffer = T.buffer_remap[reducer_];
-  auto opt_layout = T.layout_map.Get(reducer_);
+  auto buffer = T.buffer_remap[reducer];
+  auto opt_layout = T.layout_map.Get(reducer);
   ICHECK(opt_layout);
   ICHECK(opt_layout->as<Fragment>());
   auto layout = opt_layout->as<Fragment>().value();
@@ -45,7 +48,7 @@ Stmt FinalizeReducer::Lower(const LowerArgs &T,
     return Evaluate(0);
 
   std::array op_names{"tl::SumOp", "tl::MaxOp", "tl::MinOp"};
-  auto op_str = op_names[(int)op_];
+  auto op_str = op_names[(int)op];
 
   // adopted from ReduceOp
   int reducing_threads = extent;
@@ -78,7 +81,19 @@ Stmt FinalizeReducer::Lower(const LowerArgs &T,
   return body;
 }
 
-TIR_REGISTER_TL_OP(FinalizeReducer, finalize_reducer)
+LayoutMap FinalizeReducerOpNode::InferLayout(const LayoutInferArgs &T,
+                                            InferLevel level) const {
+  LayoutMap layout_map;
+  layout_map.Set(reducer, T.layout_map.Get(reducer).value());
+  return layout_map;
+}
+
+TileOperator FinalizeReducerOpNode::Clone() const {
+  auto node = make_object<FinalizeReducerOpNode>(*this);
+  return TileOperator(node);
+}
+
+TIR_REGISTER_TL_OP(FinalizeReducerOp, finalize_reducer)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
