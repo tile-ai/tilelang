@@ -56,6 +56,9 @@ AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) {
 
 TileOperator AtomicAddNode::Clone() const {
   auto op = make_object<AtomicAddNode>(*this);
+  if (par_op_.defined()) {
+    op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
+  }
   return AtomicAdd(op);
 }
 

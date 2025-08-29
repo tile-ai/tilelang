@@ -143,6 +143,9 @@ Copy::Copy(Array<PrimExpr> args, BufferMap vmap) {
 
 TileOperator CopyNode::Clone() const {
   auto op = make_object<CopyNode>(*this);
+  if (par_op_.defined()) {
+    op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
+  }
   return Copy(op);
 }
 
@@ -349,7 +352,6 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
       return Map<Buffer, Layout>({{shared_tensor, linear_layout}});
     }
   }
-
   // for LDSM/STSM, the layout was deduced from register layout
   // so we can directly apply the layout of normal copy
   // Use parallel op to infer the layout
@@ -359,7 +361,6 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
   }
   return par_op_->InferLayout(T, level);
 }
-
 /*!
  * \brief Check if the copy operation is a bulk load.
  * This function verifies if the copy operation can be implemented using CUDA's

@@ -101,7 +101,7 @@ Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 
   if (dst.scope() == "local.fragment") {
-    auto par_op = std::make_unique<ParallelOpNode>(MakeSIMTLoop(analyzer));
+    auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
     par_op->InferLayout({T.target, T.thread_bounds, T.layout_map},
                         InferLevel::kFree);
     par_op->InferLayout({T.target, T.thread_bounds, T.layout_map},
@@ -119,7 +119,7 @@ Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     auto vectorized_thread_loop = VectorizeLoop(init_loop);
     return vectorized_thread_loop;
   } else if (dst.scope() == "shared.dyn" || dst.scope() == "shared") {
-    auto par_op = std::make_unique<ParallelOpNode>(MakeSIMTLoop(analyzer));
+    auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
     par_op->InferLayout({T.target, T.thread_bounds, T.layout_map},
                         InferLevel::kFree);
     auto thread_loop = PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer,

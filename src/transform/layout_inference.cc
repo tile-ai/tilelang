@@ -101,6 +101,7 @@ public:
     // Run InferLayout
     auto updates = next->InferLayout(
         LayoutInferArgs{target_, thread_bounds, layout_map}, level);
+
     // Process the returned updates
     for (const auto &[buffer, layout] : updates) {
       // Basic validity checks
@@ -444,20 +445,25 @@ private:
       int root = uf.Find(i);
       components[root].push_back(i);
     }
+    // Create a map from root to buffers
     std::unordered_map<int, std::vector<Buffer>> components_buffers;
     for (const auto &[buffer, infer_indices] : use_list_) {
       int root = uf.Find(infer_indices[0]);
       components_buffers[root].push_back(buffer);
     }
+    // Keep components_buffers for debug purpose
+    (void)components_buffers;
 
     // For each component, try each op as root, and determine the least
     // replicated one
     std::queue<int> q;
     std::vector<bool> in_queue(infer_list_.size(), false);
+
     for (auto &&[root, members] : components) {
       decltype(infer_list_) best_infer_list;
       LayoutMap best_layout_map;
       int64_t min_reg_num = INT64_MAX;
+
       for (int attempt_infer_root : members) {
         // backup infer_list_ in class member
         auto back_infer_list = BackupInferList();
@@ -471,7 +477,6 @@ private:
                        tmp_layout_map, strict_layout_map, q, in_queue);
           FinishInferQueue(InferLevel::kFree, tmp_layout_map, strict_layout_map,
                            q, in_queue);
-
           // Silly workaround: we have no clue if single root will iterate over
           // the entire component, since the InferLayout implementations have
           // complicated conditioning inside and we know nothing about it.
