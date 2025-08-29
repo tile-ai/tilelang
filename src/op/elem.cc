@@ -94,12 +94,6 @@ For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 }
 
 Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  // get global func "tl.fill.lower"
-  if (const auto f = ffi::Function::GetGlobal("tl.fill.lower")) {
-    auto stmt = (*f)(dst, value);
-    return Downcast<Stmt>(stmt);
-  }
-
   if (dst.scope() == "local.fragment") {
     auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
     par_op->InferLayout({T.target, T.thread_bounds, T.layout_map},
