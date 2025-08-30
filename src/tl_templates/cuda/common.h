@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 #endif
 
+#include <cuda/atomic>
 #include <cutlass/fast_math.h>
 #include <cutlass/numeric_types.h>
 #include <math_constants.h>
@@ -42,7 +43,7 @@ using int4_t = int4;
   do {                                                                         \
     cudaError_t __err = cudaGetLastError();                                    \
     if (__err != cudaSuccess) {                                                \
-      snprintf(error_buf, ERROR_BUF_SIZE, "kernel_name: %s - %s",              \
+      snprintf(error_buf, ERROR_BUF_SIZE, kernel_name ": %s - %s",             \
                cudaGetErrorName(__err), cudaGetErrorString(__err));            \
       return -1;                                                               \
     }                                                                          \
@@ -118,47 +119,72 @@ TL_DEVICE unsigned int cast_smem_ptr_to_int(const void *const smem_ptr) {
   return smem_int;
 }
 
-template <typename T1, typename T2>
-TL_DEVICE void AtomicAdd(T1 *address, T2 val) {
-  atomicAdd(reinterpret_cast<T1 *>(address), static_cast<T1>(val));
-}
+template <typename T> struct normalize_atomic_type {
+  using type = T;
+};
 
-// // AtomicAdd Functions for FP32
-// TL_DEVICE void AtomicAdd(float *address, float val) {
-//   atomicAdd(reinterpret_cast<float *>(address), val);
-// }
+template <> struct normalize_atomic_type<half_t> {
+  using type = half;
+};
 
-// AtomicAdd Functions for FP16
-template <> TL_DEVICE void AtomicAdd(half_t *address, half_t val) {
-  // Use atomicCAS with built-in cuda_fp16 support
-  atomicAdd(reinterpret_cast<half *>(address), static_cast<half>(val));
-}
-
-// AtomicAdd Functions for FP16
-template <> TL_DEVICE void AtomicAdd(half_t *address, half_t *val) {
-  atomicAdd(reinterpret_cast<half *>(address), static_cast<half>(*val));
-}
-
-// AtomicAdd Functions for FP16
-template <> TL_DEVICE void AtomicAdd(half_t *address, float val) {
-  // Use atomicCAS with built-in cuda_fp16 support
-  atomicAdd(reinterpret_cast<half *>(address), __float2half(val));
-}
-
-// AtomicAdd Functions for BFLOAT16
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 750))
-// AtomicAdd Functions for BFLOAT16
-template <> TL_DEVICE void AtomicAdd(bfloat16_t *address, bfloat16_t *val) {
-  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address),
-            static_cast<__nv_bfloat16>(*val));
-}
-
-// AtomicAdd Functions for BFLOAT16
-template <> TL_DEVICE void AtomicAdd(bfloat16_t *address, float val) {
-  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address), __float2bfloat16(val));
-}
-
+template <> struct normalize_atomic_type<bfloat16_t> {
+  using type = __nv_bfloat16;
+};
 #endif
+
+template <typename T1, typename T2> TL_DEVICE T1 cuda_cast(T2 val) {
+  return T1(val);
+}
+
+template <> TL_DEVICE half cuda_cast<half, float>(float val) {
+  return __float2half(val);
+}
+
+#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 750))
+template <> TL_DEVICE __nv_bfloat16 cuda_cast<__nv_bfloat16, float>(float val) {
+  return __float2bfloat16(val);
+}
+#endif
+
+template <typename T1, typename T2>
+TL_DEVICE void AtomicMax(T1 *address, T2 val,
+                         int memory_order = int(cuda::memory_order_relaxed)) {
+  using NT1 = typename normalize_atomic_type<T1>::type;
+  if constexpr (std::is_same_v<NT1, half> ||
+                std::is_same_v<NT1, __nv_bfloat16>) {
+    atomicMax(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
+  } else {
+    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
+    aref.fetch_max(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
+  }
+}
+
+template <typename T1, typename T2>
+TL_DEVICE void AtomicMin(T1 *address, T2 val,
+                         int memory_order = int(cuda::memory_order_relaxed)) {
+  using NT1 = typename normalize_atomic_type<T1>::type;
+  if constexpr (std::is_same_v<NT1, half> ||
+                std::is_same_v<NT1, __nv_bfloat16>) {
+    atomicMin(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
+  } else {
+    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
+    aref.fetch_min(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
+  }
+}
+
+template <typename T1, typename T2>
+TL_DEVICE void AtomicAdd(T1 *address, T2 val,
+                         int memory_order = int(cuda::memory_order_relaxed)) {
+  using NT1 = typename normalize_atomic_type<T1>::type;
+  if constexpr (std::is_same_v<NT1, half> ||
+                std::is_same_v<NT1, __nv_bfloat16>) {
+    atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
+  } else {
+    cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
+    aref.fetch_add(cuda_cast<NT1>(val), cuda::memory_order(memory_order));
+  }
+}
 
 // AtomicAdd Functions for FP16x2
 TL_DEVICE void AtomicAddx2(half_t *address, half_t *val) {
@@ -167,12 +193,6 @@ TL_DEVICE void AtomicAddx2(half_t *address, half_t *val) {
 }
 
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 750))
-
-// AtomicAdd Functions for BFLOAT16
-template <> TL_DEVICE void AtomicAdd(bfloat16_t *address, bfloat16_t val) {
-  atomicAdd(reinterpret_cast<__nv_bfloat16 *>(address),
-            static_cast<__nv_bfloat16>(val));
-}
 
 // AtomicAdd Functions for BFLOAT16x2
 TL_DEVICE void AtomicAddx2(bfloat16_t *address, bfloat16_t *val) {
@@ -194,6 +214,18 @@ TL_DEVICE void AtomicAddx4(float *address, float *val) {
             static_cast<float4>(*reinterpret_cast<float4 *>(val)));
 }
 #endif
+
+template <typename T> TL_DEVICE T AtomicLoad(T *address, int memory_order) {
+  cuda::atomic_ref<T, cuda::thread_scope_device> aref(*address);
+  return aref.load(cuda::memory_order(memory_order));
+}
+
+template <typename T1, typename T2>
+TL_DEVICE void AtomicStore(T1 *address, T2 value, int memory_order) {
+  using NT1 = typename normalize_atomic_type<T1>::type;
+  cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
+  aref.store(cuda_cast<NT1>(value), cuda::memory_order(memory_order));
+}
 
 // DP4A
 template <typename InDatatype, typename OutDatatype>

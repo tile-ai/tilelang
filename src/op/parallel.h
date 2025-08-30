@@ -10,7 +10,8 @@
 #include <tvm/tir/stmt_functor.h>
 
 #include "../layout/layout.h"
-#include "operator.h"
+#include "../transform/layout_reducer.h"
+#include "./operator.h"
 
 namespace tvm {
 namespace tl {
@@ -112,6 +113,8 @@ private:
   Array<IterVar> loop_vars_;
   // Analyzer for simplifying and analyzing expressions, mutable for lazy use.
   mutable arith::Analyzer analyzer_;
+  // Mapping from buffer to reducer info.
+  Map<Var, ReducerInfo> reducer_info_map_;
 };
 
 class ParallelOp : public TileOperator {

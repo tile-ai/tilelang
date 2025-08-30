@@ -13,6 +13,7 @@
 
 #include "../layout/utils.h"
 #include "../op/parallel.h"
+#include "../target/utils.h"
 #include "../transform/loop_partition.h"
 #include "tir/transforms/ir_utils.h"
 
@@ -237,9 +238,8 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       int reducing_threads = (*extent) * (*scale);
       std::stringstream ss;
 
-      bool has_arch = T.target->attrs.count("arch") > 0;
       auto thread_offset = T.thread_bounds->min;
-      if (has_arch && Downcast<String>(T.target->attrs["arch"]) == "sm_90") {
+      if (TargetIsHopper(T.target)) {
         auto all_threads = T.thread_bounds->extent;
         ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
            << reducing_threads << ", " << (*scale) << ", " << thread_offset

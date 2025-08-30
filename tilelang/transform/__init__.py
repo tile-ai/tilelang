@@ -419,3 +419,9 @@ def LowerDeviceKernelLaunch():
     """LowerDeviceKernelLaunch
     """
     return _ffi_api.LowerDeviceKernelLaunch()  # type: ignore
+
+
+def LayoutReducer():
+    """LayoutReducer
+    """
+    return _ffi_api.LayoutReducer()  # type: ignore

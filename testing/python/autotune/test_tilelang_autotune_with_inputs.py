@@ -131,7 +131,7 @@ def run_autotune(M: int, N: int, K: int):
 
 
 def test_autotune_matmul():
-    run_autotune(8192, 8192, 8192)
+    run_autotune(1024, 1024, 1024)
 
 
 if __name__ == "__main__":

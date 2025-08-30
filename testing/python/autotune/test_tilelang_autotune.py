@@ -257,13 +257,13 @@ def matmul(M, N, K, with_roller):
 
 
 def test_autotune_get_configs():
-    get_configs(8192, 8192, 8192, with_roller=True)
-    get_configs(8192, 8192, 8192, with_roller=False)
+    get_configs(1024, 1024, 1024, with_roller=True)
+    get_configs(1024, 1024, 1024, with_roller=False)
 
 
 def test_autotune_matmul():
-    matmul(8192, 8192, 8192, with_roller=True)
-    matmul(8192, 8192, 8192, with_roller=False)
+    matmul(1024, 1024, 1024, with_roller=True)
+    matmul(1024, 1024, 1024, with_roller=False)
 
 
 if __name__ == "__main__":

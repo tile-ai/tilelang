@@ -21,6 +21,7 @@
 #include "common/loop_fusion_utils.h"
 #include "common/loop_parallel_transform_utils.h"
 #include "common/union_find.h"
+#include "layout_reducer.h"
 #include "loop_partition.h"
 #include "loop_vectorize.h"
 #include "runtime/thread_storage_scope.h"
@@ -570,6 +571,12 @@ private:
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
+    Map<Var, ReducerInfo> reducer_info;
+    if (op->annotations.count(attr::kReducerInfo))
+      reducer_info = op->annotations.Get(attr::kReducerInfo)
+                         ->as<Map<Var, ReducerInfo>>()
+                         .value();
+
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
     if (result_.for_map.count(GetRef<For>(op))) {
       auto root = GetRef<For>(op);
@@ -614,8 +621,17 @@ private:
           }
         }
       });
+      // Workaround: if reducer is presented, don't vectorize loop
+      // Best solution should be isolate reduction axis out of vectorization
+      bool has_reducer = false;
+      PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
+        if (!has_reducer)
+          if (const auto *store = obj.as<BufferStoreNode>()) {
+            has_reducer = reducer_info.count(store->buffer->data) != 0;
+          }
+      });
 
-      if (has_non_local) {
+      if (has_non_local && !has_reducer) {
         for_node = VectorizeLoop(for_node);
       }
 

@@ -767,8 +767,6 @@ class TilelangExtensionBuild(build_ext):
         if self.inplace:
             extdir = os.path.abspath('./tilelang/lib/')
 
-        logger.info(f"{extdir=}")
-
         # Prepare arguments for the CMake configuration step.
         # -DCMAKE_LIBRARY_OUTPUT_DIRECTORY sets where built libraries go
         # -DPYTHON_EXECUTABLE ensures that the correct Python is used

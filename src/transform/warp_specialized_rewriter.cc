@@ -649,6 +649,8 @@ public:
    */
   bool hasSimtCopy() const { return has_simt_copy_; }
 
+  bool onlyHasWgMMA() const { return only_has_wgmma_; }
+
 private:
   template <typename NodeType> Stmt FilterByRole(const NodeType *op) {
     Role role = marker_.GetRole(op);
