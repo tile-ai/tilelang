@@ -811,81 +811,6 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     shared_layout = T.layout_map[shared_tensor];
     shared_tensor = T.buffer_remap[shared_tensor];
   }
-  auto op = is_load ? tma_load() : tma_store();
-
-  // If both shared_layout and global tensor accessed region are contiguous, use
-  // TMA 1D instead of 2D
-  {
-    // How to check contiguous:
-    // 1. The underlying storage must be contiguous
-    // 2. The innermost dimension that access region does not fully cover should
-    //    also be the outermost non-unitary dimension, e.g. [1, 1, 2, N3, N4]
-    //    for tensor of shape [N0, N1, N2, N3, N4]
-    bool s_cont = !shared_layout.defined(); // can be improved
-    bool non_full_dim_encountered = false;
-    for (ssize_t i = shared_range.size() - 1; i >= 0; --i) {
-      auto &&r = shared_range[i];
-      if (!non_full_dim_encountered) {
-        if (!analyzer->CanProve(r->min == 0 &&
-                                r->extent == shared_tensor->shape[i]))
-          non_full_dim_encountered = true;
-      } else {
-        if (!analyzer->CanProve(r->extent == 1))
-          s_cont = false;
-      }
-    }
-    bool g_cont = global_tensor->strides.empty(); // can be improved
-    non_full_dim_encountered = false;
-    for (ssize_t i = global_range.size() - 1; i >= 0; --i) {
-      auto &&r = global_range[i];
-      if (!non_full_dim_encountered) {
-        if (!analyzer->CanProve(r->min == 0 &&
-                                r->extent == global_tensor->shape[i]))
-          non_full_dim_encountered = true;
-      } else {
-        if (!analyzer->CanProve(r->extent == 1))
-          g_cont = false;
-      }
-    }
-    // We also ensure there's no OOB.
-    PrimExpr shared_total_elements = 1;
-    for (size_t i = 0; i < shared_range.size(); ++i)
-      shared_total_elements *= shared_range[i]->extent;
-    PrimExpr global_total_elements = 1;
-    for (size_t i = 0; i < global_range.size(); ++i)
-      global_total_elements *= global_range[i]->extent;
-    bool s_g_equal =
-        analyzer->CanProveEqual(global_total_elements, shared_total_elements);
-    if (s_cont && g_cont && s_g_equal) {
-      shared_total_elements = analyzer->Simplify(shared_total_elements);
-      PrimExpr shared_addr =
-          shared_tensor.access_ptr(is_load ? 2 : 1, DataType::Handle(), 1,
-                                   offset, shared_total_elements);
-
-      PrimExpr global_offset = 0;
-      ICHECK(global_tensor->strides.empty());
-      for (size_t i = 0; i < global_tensor->shape.size(); ++i) {
-        global_offset *= global_tensor->shape[i];
-        global_offset += global_range[i]->min;
-      }
-      PrimExpr global_addr =
-          global_tensor.access_ptr(is_load ? 1 : 2, DataType::Handle(), 1,
-                                   global_offset, global_total_elements);
-
-      Stmt tma_copy;
-      if (is_load)
-        tma_copy = Evaluate(
-            Call(DataType::Handle(), op,
-                 {shared_addr, global_addr, 0,
-                  shared_total_elements * shared_tensor->dtype.bytes()}));
-      else
-        tma_copy = Evaluate(
-            Call(DataType::Handle(), op,
-                 {global_addr, shared_addr,
-                  shared_total_elements * shared_tensor->dtype.bytes()}));
-      return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
-    }
-  }
 
   // Add 1D TMA copy when the global and shared memory is contiguous
   {
@@ -1164,6 +1089,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   args.push_back(create_descriptor);
   if (is_load)
     args.push_back(0); // mbarrier id placeholder
+  auto op = is_load ? tma_load() : tma_store();
 
   Stmt tma_copy;
   PrimExpr total_elements = 1;
