@@ -144,7 +144,7 @@ template <> /**
              * representation so correct atomic intrinsics or `cuda::atomic_ref`
              * specializations can be selected.
              */
-            struct normalize_atomic_type<half_t> {
+struct normalize_atomic_type<half_t> {
   using type = half;
 };
 

@@ -686,7 +686,7 @@ private:
                           * @return Stmt The statement to place into the emitted
                           * IR (possibly transformed or an empty evaluate).
                           */
-                         Stmt FilterByRole(const NodeType *op) {
+  Stmt FilterByRole(const NodeType *op) {
     Role role = marker_.GetRole(op);
     if (mbarrier_only_) {
       if (role != Role::kProducer)
