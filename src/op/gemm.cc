@@ -19,6 +19,16 @@ namespace tl {
 
 using namespace tir;
 
+/**
+ * @brief Compute the prime factorization of an integer.
+ *
+ * Returns the prime factors of x in non-decreasing order by repeatedly dividing
+ * out the smallest possible factor.
+ *
+ * @param x Integer to factorize. If x <= 1, an empty vector is returned.
+ * @return std::vector<int> Prime factors of x (with multiplicity), in
+ * non-decreasing order.
+ */
 static std::vector<int> toPrimeFactors(int x) {
   int i = 2;
   std::vector<int> result;
@@ -33,6 +43,34 @@ static std::vector<int> toPrimeFactors(int x) {
   return result;
 }
 
+/**
+ * @brief Construct a Gemm operator from serialized TL arguments and a buffer
+ * map.
+ *
+ * This constructor deserializes operator parameters from `args` and resolves
+ * buffer references via `vmap`, populating an internal GemmNode with:
+ * - device pointers for A, B, C and their corresponding Buffer objects,
+ * - transpose flags for A and B,
+ * - matrix dimensions M, N, K,
+ * - warp allocation policy and clear_accum flag,
+ * - strides and memory offsets for A and B,
+ * - optional kPack (must be 1 or 2) and optional wg_wait.
+ *
+ * The populated GemmNode is stored into the wrapper's internal `data_`.
+ *
+ * @param args Positional serialized arguments produced by the TL frontend:
+ *   expected layout is:
+ *     [Aptr, Bptr, Cptr, trans_A (Bool), trans_B (Bool),
+ *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
+ *      stride_A (Int), stride_B (Int), offset_A (Int), offset_B (Int),
+ *      (optional) kPack (Int), (optional) wg_wait (Int)]
+ * @param vmap Mapping from access pointer vars to Buffer objects used to
+ *   resolve the Buffer corresponding to each pointer argument.
+ *
+ * @note If `kPack` is provided it must be 1 or 2; otherwise the constructor
+ *       fails with an ICHECK (runtime assertion). No other validation is
+ *       performed here.
+ */
 Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
   ObjectPtr<GemmNode> node = make_object<GemmNode>();
 
@@ -66,11 +104,39 @@ Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
   data_ = std::move(node);
 }
 
+/**
+ * @brief Create a copy of this GemmNode as a TileOperator.
+ *
+ * Constructs a new GemmNode by copying the current node state and returns it
+ * wrapped in a Gemm TileOperator.
+ *
+ * @return TileOperator A Gemm operator that owns a copy of this node.
+ */
 TileOperator GemmNode::Clone() const {
   auto op = make_object<GemmNode>(*this);
   return Gemm(op);
 }
 
+/**
+ * @brief Selects the GEMM implementation variant for a given block size and
+ * target.
+ *
+ * Determines which low-level GEMM instruction to use:
+ * - Returns kWGMMA when running on Hopper-class targets and the operator meets
+ *   WGMMA constraints (M >= 64, number of warps is a multiple of 4, and
+ *   CheckWGMMA() returns true).
+ * - Returns kMFMA for CDNA targets.
+ * - Returns kMMA for CUDA targets.
+ *
+ * @param block_size Number of threads in the CUDA/ROCm thread block used for
+ * the GEMM.
+ * @param target Target backend describing the hardware (used to detect
+ * architecture).
+ * @return GemmInst The chosen GEMM implementation enum value.
+ *
+ * @throws fatal error (ICHECK) If the target is not recognized/supported, this
+ * function triggers a runtime check failure.
+ */
 GemmNode::GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
   int warp_size = TargetGetWarpSize(target);
   int num_warps = block_size / warp_size;
@@ -375,6 +441,20 @@ bool GemmNode::CheckWGMMA() const {
   }
 }
 
+/**
+ * @brief Parse and return the numeric GPU architecture from a Target's "arch"
+ * attribute.
+ *
+ * Examines the target's "arch" string and, if it matches the pattern
+ * "sm_<num>", returns <num> as an int. If the attribute is present but does not
+ * match that pattern, returns 0.
+ *
+ * Preconditions: the target must have an "arch" attribute (this is checked via
+ * ICHECK).
+ *
+ * @return int The parsed architecture number (e.g., 80 for "sm_80"), or 0 if
+ * the arch string does not match "sm_<num>".
+ */
 static int GetArchInt(Target target) {
   int arch_int = 0;
   auto s = target->GetAttr<String>("arch");
@@ -388,6 +468,19 @@ static int GetArchInt(Target target) {
   return arch_int;
 }
 
+/**
+ * @brief Lower the GEMM operator to a TL TIR call expression.
+ *
+ * Constructs a tl::gemm call string parameterized by M, N, K, warp partition,
+ * transpose flags, accumulation clearing, target-specific stride/offset/kPack
+ * and optional workgroup wait value, then returns an Evaluate(call) node
+ * invoking tl::tl_gemm with the composed string and the A/B/C buffer handles.
+ *
+ * @param T Contains lowering context including thread bounds and target.
+ * @param analyzer Optional arithmetic analyzer used by lowering (may be
+ * nullptr).
+ * @return Stmt A TIR statement representing the evaluated TL GEMM call.
+ */
 Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
   GemmInst gemm_inst = GetGemmInst(block_size, T.target);
@@ -426,28 +519,23 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 }
 
 /**
- * @brief Infer memory/layout mappings for A, B, and C buffers for this GEMM op.
+ * @brief Infer and bind target-specific memory/layout mappings for A, B, and C.
  *
- * Generates and returns a LayoutMap that binds buffer A, B, and C to
- * target- and architecture-specific fragment or shared-memory layouts based
- * on the current target, thread bounds, warp partitioning, data types, and
- * transpose flags. This performs target dispatch (Volta, Ampere/Turing/SM120,
- * Hopper, CDNA), selects the appropriate fragment or shared layout creators,
- * and binds fragment layouts to the thread range when buffers are local
- * fragments.
+ * Infers per-buffer layouts (fragment or shared-memory layouts) for this GEMM
+ * operator according to the target architecture, thread bounds, warp
+ * partitioning, data types, and transpose flags, then binds fragment layouts
+ * to the thread range when required.
  *
  * Preconditions:
- * - C.scope() must be "local.fragment".
+ * - C.scope() == "local.fragment"
  *
- * Postconditions / side effects:
- * - Marks the operator's layout inference as completed (sets completed_ =
- * true).
+ * Side effects:
+ * - Marks layout inference as completed (sets completed_ = true).
  * - May abort via ICHECK on unsupported targets, invalid buffer scopes, or
  *   incompatible shape constraints.
  *
- * @param T Layout inference inputs (thread bounds and target).
- * @param level Inference level (unused for side effects but retained for API).
- * @return LayoutMap mapping each of A, B, and C to their inferred layouts.
+ * @param T Input layout-inference context (provides thread bounds and target).
+ * @return LayoutMap mapping A, B, and C to their inferred layouts.
  */
 LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
                                 InferLevel level) const {

@@ -17,6 +17,17 @@
 
 namespace tvm {
 namespace tl {
+/**
+ * @brief Decomposes a positive integer into its prime factors.
+ *
+ * Returns the prime factorization of `x` as a vector of prime factors in
+ * non-decreasing order. If `x <= 1` the returned vector is empty.
+ *
+ * @param x Integer to factorize (expected non-negative; behavior: returns empty
+ * for values <= 1).
+ * @return std::vector<int> Prime factors of `x` (with repetition), e.g. 12 ->
+ * {2, 2, 3}.
+ */
 static std::vector<int> toPrimeFactors(int x) {
   int i = 2;
   std::vector<int> result;
@@ -31,6 +42,27 @@ static std::vector<int> toPrimeFactors(int x) {
   return result;
 }
 
+/**
+ * @brief Construct a GemmSP operator node from TL call arguments and a buffer
+ * map.
+ *
+ * Parses the expected call argument tuple and fills an internal GemmSPNode:
+ * - Buffers: A (args[0]), E (args[1]), B (args[2]), C (args[3]) are looked up
+ * in vmap.
+ * - Booleans: trans_A (args[4]), trans_B (args[5]).
+ * - Dimensions: M (args[6]), N (args[7]), K (args[8]) as integers.
+ * - Warp policy: policy (args[9]) mapped to GemmWarpPolicy.
+ * - clear_accum: boolean flag (args[10]).
+ * - Optional kPack (args[11]): must be 1 or 2 (checked via ICHECK).
+ * - Optional wg_wait (args[12]): integer workgroup wait parameter.
+ *
+ * The populated GemmSPNode is stored in the instance's internal data_ pointer.
+ *
+ * @param args Positional TL call arguments in the above order.
+ * @param vmap BufferMap mapping access pointers (from args) to Buffer objects.
+ *
+ * @note An ICHECK failure is raised if a provided kPack is not 1 or 2.
+ */
 GemmSP::GemmSP(Array<PrimExpr> args, BufferMap vmap) {
   ObjectPtr<GemmSPNode> node = make_object<GemmSPNode>();
   node->A = vmap[GetVarFromAccessPtr(args[0])];
@@ -57,11 +89,41 @@ GemmSP::GemmSP(Array<PrimExpr> args, BufferMap vmap) {
   data_ = std::move(node);
 }
 
+/**
+ * @brief Create a deep copy of this GemmSPNode wrapped as a TileOperator.
+ *
+ * Returns a new TileOperator that owns a copy of this node. The cloned node
+ * duplicates all fields of the original; subsequent modifications to the
+ * clone do not affect the original node.
+ *
+ * @return TileOperator A TileOperator holding a cloned GemmSPNode.
+ */
 TileOperator GemmSPNode::Clone() const {
   auto op = make_object<GemmSPNode>(*this);
   return GemmSP(op);
 }
 
+/**
+ * @brief Compute a partition of warps across the M and N GEMM dimensions.
+ *
+ * Computes (m_warp, n_warp) such that m_warp * n_warp == num_warps and the
+ * warp counts respect element-per-warp granularity and the configured
+ * GemmWarpPolicy. On Hopper targets, when `maybe_hopper_wgmma` is true and
+ * the problem size permits, a warp-group (WGMMA)-aware partitioning is used
+ * (groups of 4 warps).
+ *
+ * @param num_warps Total number of warps available for the block.
+ * @param target Hardware target used to decide target-specific strategies
+ *               (e.g., Hopper WGMMA grouping).
+ * @param maybe_hopper_wgmma If true, allows using Hopper WGMMA-specific
+ *                          partitioning when the target and problem size
+ * permit.
+ * @return std::pair<int,int> A pair (m_warp, n_warp) giving the number of warp
+ *         partitions along M and N, respectively.
+ *
+ * @note The function uses ICHECK to enforce invariants (e.g., unknown policy or
+ *       invalid m_warp * n_warp), which will terminate on failure.
+ */
 std::pair<int, int>
 GemmSPNode::ComputeWarpPartition(int num_warps, Target target,
                                  bool maybe_hopper_wgmma) const {
@@ -220,6 +282,24 @@ GemmSPNode::ComputeWarpPartition(int num_warps, Target target,
   return {m_warp, n_warp};
 }
 
+/**
+ * @brief Lower this GemmSP node to a TL (tensile-like) intrinsic call.
+ *
+ * Constructs and returns an Evaluate statement containing a call to the
+ * TL gemm_sp intrinsic that encodes this GEMM's template parameters
+ * (M, N, K, warp partition, transposition flags, clear_accum, and optional
+ * Hopper/WGMMA and wg_wait modifiers) and the remapped buffer access pointers.
+ *
+ * The function validates that A, B, and E reside in shared (or shared.dyn)
+ * memory (ICHECK failures otherwise), computes the warp partition based on
+ * the launch configuration and target, and emits a single tl::tl_gemm_sp call
+ * with a string template describing the configuration.
+ *
+ * @param T Lowering context containing thread bounds, target, and optional
+ *          buffer remapping used to obtain the final buffer AccessPtr
+ *          arguments for the TL call.
+ * @return Stmt An Evaluate wrapping the constructed tl::tl_gemm_sp call.
+ */
 Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   int warp_size = 32;
 
@@ -264,6 +344,34 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   return Evaluate(new_call);
 }
 
+/**
+ * @brief Infers and returns the memory/layout mapping for the GemmSP operator.
+ *
+ * Infers thread-local fragment layout for C and shared-memory layouts for A and
+ * B based on the target (Hopper-only path), block/thread bounds in T,
+ * transposition flags, and matrix dimensions stored in the node. The function
+ * caches its work: if layout inference has already completed (completed_ ==
+ * true) it returns an empty LayoutMap.
+ *
+ * Precondition:
+ * - C.scope() must be "local.fragment".
+ *
+ * Behavior notes:
+ * - Only the Hopper target is supported; non-Hopper targets trigger a fatal
+ * check.
+ * - For Hopper, the function computes a warp partition from block size and may
+ *   enable WGMMA-specific fragment creation when conditions on M and block size
+ *   are met.
+ * - A and B must reside in "shared" or "shared.dyn"; otherwise the function
+ *   aborts with a check failure.
+ * - The method sets completed_ = true before returning to avoid re-entrance.
+ *
+ * @param T LayoutInferArgs containing thread bounds and the target (used to
+ *          select Hopper-specific layouts).
+ * @param level Currently unused inference detail level.
+ * @return LayoutMap mapping A, B, and C to their inferred layouts (or empty if
+ *         inference was already completed).
+ */
 LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
                                   InferLevel level) const {
   if (completed_)

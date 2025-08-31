@@ -464,6 +464,32 @@ private:
     return var;
   }
 
+  /**
+   * @brief Handle an Evaluate node, lowering a detected tile operator to TIR.
+   *
+   * This visit implementation detects whether the Evaluate node represents a
+   * tile operator invocation (via ParseOperator). If no tile operator is found
+   * or the call targets a global function, the node is delegated to the base
+   * visitor.
+   *
+   * When a tile operator is present, the method:
+   * - Builds a workspace-allocation callback that creates a dynamic shared
+   * buffer named "workspace" (storage scope "shared.dyn") and returns its write
+   *   access pointer.
+   * - Determines thread bounds for lowering from the analyzer's constant-int
+   *   information for thread_var_; if unavailable, a default range [0,1) is
+   * used.
+   * - Invokes tile_op->Lower(...) with LowerArgs containing target, thread
+   *   bounds, thread variable, the workspace callback, layout and buffer remap
+   *   maps, and the list of GEMM-involved buffer vars; the analyzer is passed
+   *   through for use during lowering.
+   *
+   * The lowered statement returned by the operator is then visited by the base
+   * IRMutatorWithAnalyzer and that result is returned.
+   *
+   * @return Stmt The (possibly transformed) statement after lowering or base
+   * visitor processing.
+   */
   Stmt VisitStmt_(const EvaluateNode *op) final {
     // LOG(INFO) << "evaluate node: " << op->value;
     const CallNode *call = op->value.as<CallNode>();

@@ -13,6 +13,7 @@
 
 #include "../layout/utils.h"
 #include "../op/parallel.h"
+#include "../target/utils.h"
 #include "../transform/loop_partition.h"
 #include "tir/transforms/ir_utils.h"
 
@@ -127,6 +128,42 @@ std::string ReduceOpNode::MakeCodegenReducer() const {
   }
 }
 
+/**
+ * @brief Lower the Reduce operator to a TIR statement.
+ *
+ * Lowers a ReduceOpNode operating on fragment-scoped buffers into a sequence of
+ * TIR statements implementing: optional initialization, thread-local reduction
+ * (unrolled inner loops), inter-thread reduction via a runtime AllReduce call
+ * (Hopper-specific `run_hopper` variant when TargetIsHopper(T.target) is true),
+ * and an optional accumulation or copy back to the destination buffer when a
+ * temporary clear buffer is used.
+ *
+ * Behavior notes:
+ * - Only supports src and dst in "local.fragment" scope; otherwise it checks
+ *   and aborts with "Reduce for shared memory not implemented.".
+ * - Supports both 1D reductions (scalar output) and reductions along a single
+ *   extra dimension; validates layout dimensionality consistency.
+ * - If `clear` is set (or for sum/abssum reductions), an initial value is
+ *   written to the clear buffer; for non-clearing sum/abssum a duplicate
+ *   temporary buffer is allocated and accumulated back into dst after
+ * reduction.
+ * - Performs iterator compression for local reduction loops using `analyzer`.
+ * - Detects parallel thread splitting from the normalized iterator sum and
+ *   emits a call to a templated `tl::AllReduce<...>::run` (or `run_hopper`)
+ *   via `builtin::call_extern`. For sufficiently large reducing thread counts
+ *   (>= 32) a workspace is allocated via T.AddWorkspace and passed to the
+ *   AllReduce call.
+ * - The final body is wrapped in parallel loops over the destination spatial
+ *   dimensions and partitioned by the lowering thread variable. If a temporary
+ *   clear buffer is used, it is allocated for the body.
+ *
+ * @param T Lowering context providing buffer and layout maps, thread bounds,
+ *          target information, thread variable, and workspace allocation
+ * helper.
+ * @param analyzer Analyzer used for iterator compression and arithmetic
+ * normalization.
+ * @return Stmt Lowered TIR statement implementing the reduction.
+ */
 Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   ICHECK(this->src.scope() == "local.fragment" &&
          this->dst.scope() == "local.fragment")
@@ -237,9 +274,8 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       int reducing_threads = (*extent) * (*scale);
       std::stringstream ss;
 
-      bool has_arch = T.target->attrs.count("arch") > 0;
       auto thread_offset = T.thread_bounds->min;
-      if (has_arch && Downcast<String>(T.target->attrs["arch"]) == "sm_90") {
+      if (TargetIsHopper(T.target)) {
         auto all_threads = T.thread_bounds->extent;
         ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
            << reducing_threads << ", " << (*scale) << ", " << thread_offset

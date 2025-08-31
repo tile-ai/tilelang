@@ -218,6 +218,30 @@ bool IsThreadInvariant(const PrimExpr &cond) {
   return false;
 }
 
+/**
+ * @brief Visit an IfThenElse statement and collect storage access summaries for
+ * its branches.
+ *
+ * Visits the if-then-else node's condition and both branches to summarize
+ * buffer reads, writes, and synchronization events under the condition's
+ * constraints. If the condition is not thread-invariant, increments an internal
+ * condition counter for the duration of processing.
+ *
+ * Behavior and side effects:
+ * - Evaluates the condition expression (using ExtractRealCondition) and applies
+ * it as a constraint while summarizing the then-branch.
+ * - For the else-branch (when present), applies the negated,
+ * analyzer-simplified condition
+ *   (analyzer_.rewrite_simplify(Not(real_condition))) as the constraint.
+ * - Accumulates summarized StmtEntry access information for the then/else
+ * branches and appends a combined StmtEntry for the IfThenElseNode into the
+ * current scope.
+ * - Temporarily toggles allow_append_ and clears curr_stmt_.access during
+ * condition evaluation and branch summarization.
+ * - Modifies internal state: scope_ (push/pop of temporary branch scopes),
+ * curr_stmt_.access, and condition_counter_ (incremented/decremented when the
+ * condition is not thread-invariant).
+ */
 void TileLangStorageAccessVisitor::VisitStmt_(const IfThenElseNode *op) {
   bool is_thread_invariant = IsThreadInvariant(op->condition);
   if (!is_thread_invariant) {
@@ -244,7 +268,8 @@ void TileLangStorageAccessVisitor::VisitStmt_(const IfThenElseNode *op) {
   if (op->else_case) {
     scope_.push_back(std::vector<StmtEntry>());
     {
-      With<arith::ConstraintContext> constraint(&analyzer_, real_condition);
+      With<arith::ConstraintContext> constraint(
+          &analyzer_, analyzer_.rewrite_simplify(Not(real_condition)));
       this->VisitStmt(op->else_case.value());
     }
     auto v = Summarize(std::move(scope_.back()), nullptr);

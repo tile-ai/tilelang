@@ -10,6 +10,79 @@
 #include "operator.h"
 #include "parallel.h"
 
+/**
+ * Lower this tile operator into a TIR statement for the given lowering context.
+ *
+ * @param T Lowering context containing mapped buffers and iteration
+ * information.
+ * @param analyzer Arithmetic analyzer used to simplify and reason about
+ * expressions.
+ * @return A TIR Stmt that implements the atomic-add tile operation for the
+ * provided context.
+ */
+/**
+ * Infer memory/layout mapping for tensors and buffers used by this operator.
+ *
+ * @param T Layout inference context providing buffer and shape information.
+ * @param level Inference aggressiveness level; higher levels may perform more
+ * speculative decisions.
+ * @return A LayoutMap describing inferred layouts for the operator's inputs and
+ * outputs.
+ */
+/**
+ * Get the Op registration that identifies this tile operator.
+ *
+ * @return A reference to the registered Op representing this operator.
+ */
+/**
+ * Create a deep copy of this tile operator node wrapped as a TileOperator.
+ *
+ * @return A TileOperator handle owning a cloned AtomicAddNode.
+ */
+/**
+ * Construct a SIMT-style For loop nest (thread/block mapping) appropriate for
+ * the operator.
+ *
+ * @param analyzer Arithmetic analyzer used to simplify loop bounds and
+ * predicates.
+ * @return A For loop node representing the SIMT-parallel loop structure.
+ */
+/**
+ * Create iteration variables used by this operator's loop nest.
+ *
+ * @return An array of IterVar objects describing the loop iteration axes.
+ */
+/**
+ * Produce index expressions for either source or destination buffer access
+ * based on iteration vars.
+ *
+ * @param ivs IterVars created by MakeIterVars().
+ * @param src_dst Selects which indices to produce: 0 for source indices, 1 for
+ * destination indices.
+ * @return An array of PrimExpr index expressions suitable for indexing the
+ * selected buffer.
+ */
+/**
+ * Build a predicate expression that guards out-of-bounds or conditional
+ * accesses for src or dst.
+ *
+ * @param analyzer Arithmetic analyzer used to simplify the predicate.
+ * @param ivs IterVars created by MakeIterVars().
+ * @param extents The loop extents corresponding to the itervars.
+ * @param src_dst Selects which side the predicate is for: 0 for source, 1 for
+ * destination.
+ * @return A PrimExpr boolean predicate that evaluates to true for valid
+ * iterations.
+ */
+/**
+ * Construct an AtomicAdd tile operator from operation arguments and a buffer
+ * mapping.
+ *
+ * @param args Operation arguments (e.g., values or indices) specific to the
+ * atomic-add semantics.
+ * @param vmap Mapping from buffer names to Buffer objects used by this
+ * operator.
+ */
 namespace tvm {
 namespace tl {
 
