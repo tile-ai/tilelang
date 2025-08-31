@@ -14,25 +14,30 @@
 #include <tvm/tir/buffer.h>
 
 /**
- * Tile operator representing a memory region (buffer + ranges) used by TL passes.
+ * Tile operator representing a memory region (buffer + ranges) used by TL
+ * passes.
  *
- * Encapsulates the target tir::Buffer, the region extents as an Array<Range>, and an access
- * mask that indicates permitted or intended accesses for lowering and layout inference.
+ * Encapsulates the target tir::Buffer, the region extents as an Array<Range>,
+ * and an access mask that indicates permitted or intended accesses for lowering
+ * and layout inference.
  */
 
 /**
  * Lower this RegionOp into a TIR statement representing the region access.
  *
- * @param T Lowering-time arguments (e.g., loop/build context and value mappings).
- * @param analyzer Arithmetic analyzer used to simplify and reason about expressions.
- * @return A tir::Stmt that implements the region access/mutation described by this operator.
+ * @param T Lowering-time arguments (e.g., loop/build context and value
+ * mappings).
+ * @param analyzer Arithmetic analyzer used to simplify and reason about
+ * expressions.
+ * @return A tir::Stmt that implements the region access/mutation described by
+ * this operator.
  */
 
 /**
  * Infer the layout mapping for this region operator.
  *
- * Produces a LayoutMap describing how loop/axis indices map to buffer axes for layout-aware
- * scheduling and subsequent operators.
+ * Produces a LayoutMap describing how loop/axis indices map to buffer axes for
+ * layout-aware scheduling and subsequent operators.
  *
  * @param T Layout inference arguments (e.g., input layouts and shapes).
  * @param level The inference detail level to use.
@@ -40,8 +45,8 @@
  */
 
 /**
- * Return true when this RegionOp represents the full buffer region (i.e., ranges cover the
- * entire buffer extent).
+ * Return true when this RegionOp represents the full buffer region (i.e.,
+ * ranges cover the entire buffer extent).
  */
 
 /**
@@ -53,9 +58,10 @@
 /**
  * Construct a RegionOp from argument expressions and a buffer map.
  *
- * @param args Positional expressions used to instantiate the operator (semantics depend on
- *             how RegionOp is invoked in TL pipelines).
- * @param vmap Mapping from Buffer to replacement Buffer or buffer metadata used during creation.
+ * @param args Positional expressions used to instantiate the operator
+ * (semantics depend on how RegionOp is invoked in TL pipelines).
+ * @param vmap Mapping from Buffer to replacement Buffer or buffer metadata used
+ * during creation.
  */
 
 /**

@@ -65,8 +65,8 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, BufferMap vmap) {
 /**
  * @brief Create a copy of this ReduceOpNode wrapped as a TileOperator.
  *
- * Returns a new TileOperator holding a freshly allocated ReduceOpNode constructed
- * as a copy of this node.
+ * Returns a new TileOperator holding a freshly allocated ReduceOpNode
+ * constructed as a copy of this node.
  *
  * @return TileOperator A tile operator that owns the cloned ReduceOpNode.
  */
@@ -90,19 +90,21 @@ TileOperator CumSumOpNode::Clone() const {
 }
 
 /**
- * @brief Create the initial accumulator value for the destination buffer based on reduction type.
+ * @brief Create the initial accumulator value for the destination buffer based
+ * on reduction type.
  *
- * Returns the PrimExpr representing the initial value stored in the destination accumulator
- * before any source elements are combined. The returned value depends on the destination
- * dtype and the node's reduction type:
+ * Returns the PrimExpr representing the initial value stored in the destination
+ * accumulator before any source elements are combined. The returned value
+ * depends on the destination dtype and the node's reduction type:
  * - kSum, kAbsSum: zero of the destination dtype.
- * - kMax: minimum representable value for signed integers, zero for unsigned integers,
- *   and -INFINITY for floating point.
- * - kMin: maximum representable value for signed integers, all-ones (max) for unsigned integers,
- *   and +INFINITY for floating point.
+ * - kMax: minimum representable value for signed integers, zero for unsigned
+ * integers, and -INFINITY for floating point.
+ * - kMin: maximum representable value for signed integers, all-ones (max) for
+ * unsigned integers, and +INFINITY for floating point.
  * - kAbsMax: zero of the destination dtype.
  *
- * The function will abort (ICHECK failure) if the reduction type is unrecognized.
+ * The function will abort (ICHECK failure) if the reduction type is
+ * unrecognized.
  *
  * @return PrimExpr initial value appropriate for `dst->dtype` and `type`.
  */
@@ -141,10 +143,11 @@ PrimExpr ReduceOpNode::MakeInitValue() const {
 }
 
 /**
- * @brief Combine two scalar expressions according to this node's reduction type.
+ * @brief Combine two scalar expressions according to this node's reduction
+ * type.
  *
- * Casts the right operand to the left operand's dtype if they differ, then returns
- * the reduction of `a` and `b` using the operator specified by `type`:
+ * Casts the right operand to the left operand's dtype if they differ, then
+ * returns the reduction of `a` and `b` using the operator specified by `type`:
  * - kSum: `a + b`
  * - kAbsSum: `a + max(b, -b)`
  * - kMax: `max(a, b)`
@@ -180,10 +183,11 @@ PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &a, const PrimExpr &b) const {
 }
 
 /**
- * @brief Map the reduction type to the codegen reducer name used by external ALL-Reduce/CUDA helpers.
+ * @brief Map the reduction type to the codegen reducer name used by external
+ * ALL-Reduce/CUDA helpers.
  *
- * Returns the string identifier of the code-generation reducer corresponding to this
- * ReduceOpNode's `type`. Mapping:
+ * Returns the string identifier of the code-generation reducer corresponding to
+ * this ReduceOpNode's `type`. Mapping:
  * - kSum, kAbsSum -> "tl::SumOp"
  * - kMax, kAbsMax -> "tl::MaxOp"
  * - kMin -> "tl::MinOp"
@@ -406,29 +410,36 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 }
 
 /**
- * @brief Infer a layout mapping for the destination buffer of a Reduce operator.
+ * @brief Infer a layout mapping for the destination buffer of a Reduce
+ * operator.
  *
- * When inference level is below `kStrict`, and both source and destination buffers
- * live in `local.fragment` with a known source fragment layout, this computes a
- * candidate destination Fragment layout that accounts for replication over the
- * reduction dimension and binds thread ranges from `T.thread_bounds`.
+ * When inference level is below `kStrict`, and both source and destination
+ * buffers live in `local.fragment` with a known source fragment layout, this
+ * computes a candidate destination Fragment layout that accounts for
+ * replication over the reduction dimension and binds thread ranges from
+ * `T.thread_bounds`.
  *
  * Behavior:
  * - Constructs a destination Fragment whose replicate extent equals
  *   src.shape[dim] * src_fragment.ReplicateExtent(), and whose threading is
  *   derived from the source fragment with the reduction dimension folded out.
- * - If no layout exists for `dst` in `T.layout_map`, returns a map {dst -> inferred}.
+ * - If no layout exists for `dst` in `T.layout_map`, returns a map {dst ->
+ * inferred}.
  * - If `dst` already has a layout, validates that the existing layout strictly
  *   contains the computed layout (shapes match and fragment containment holds).
- *   If compatible but the computed replicate extent is larger, returns the new layout.
- * - In all other cases (strict inference level, unsupported scopes, or no src layout),
- *   returns an empty map.
+ *   If compatible but the computed replicate extent is larger, returns the new
+ * layout.
+ * - In all other cases (strict inference level, unsupported scopes, or no src
+ * layout), returns an empty map.
  *
- * @param T Layout inference context containing `layout_map` and `thread_bounds`.
- * @param level Inference strictness; no inference is performed at or above `kStrict`.
- * @return LayoutMap A mapping for `dst` to an inferred Fragment layout, or empty.
- * @throws LayoutConflictException if an existing `dst` layout conflicts with the
- *         computed layout (not containable or incompatible replication extents).
+ * @param T Layout inference context containing `layout_map` and
+ * `thread_bounds`.
+ * @param level Inference strictness; no inference is performed at or above
+ * `kStrict`.
+ * @return LayoutMap A mapping for `dst` to an inferred Fragment layout, or
+ * empty.
+ * @throws LayoutConflictException if an existing `dst` layout conflicts with
+ * the computed layout (not containable or incompatible replication extents).
  */
 LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &T,
                                     InferLevel level) const {
@@ -514,7 +525,8 @@ TIR_REGISTER_TL_OP(ReduceOp, reduce)
  *  0: access pointer to source buffer (src),
  *  1: access pointer to destination buffer (dst),
  *  2: integer dimension to perform the cumulative sum along (dim),
- *  3: boolean flag indicating whether to compute the cumsum in reverse (reverse).
+ *  3: boolean flag indicating whether to compute the cumsum in reverse
+ * (reverse).
  *
  * The constructor resolves src and dst from the provided BufferMap and stores
  * the parsed dim and reverse values on the node. It verifies that args.size()
@@ -543,17 +555,24 @@ CumSumOp::CumSumOp(Array<PrimExpr> args, BufferMap vmap) {
 /**
  * @brief Lower the CumSum operator to TIR.
  *
- * Produces a TIR statement implementing cumulative sum depending on buffer scopes:
- * - For shared/shared.dyn scopes: emits an extern call to `tl::CumSum2D<threads, dim, reverse>::run`
- *   with arguments [function_name, src.access_ptr(1), dst.access_ptr(3), src.shape...]. The number
- *   of threads is taken from `T.thread_bounds->extent`. Returns an Evaluate(Call(...)) statement.
- * - For local.fragment scopes on both src and dst: fatal error (not implemented).
+ * Produces a TIR statement implementing cumulative sum depending on buffer
+ * scopes:
+ * - For shared/shared.dyn scopes: emits an extern call to
+ * `tl::CumSum2D<threads, dim, reverse>::run` with arguments [function_name,
+ * src.access_ptr(1), dst.access_ptr(3), src.shape...]. The number of threads is
+ * taken from `T.thread_bounds->extent`. Returns an Evaluate(Call(...))
+ * statement.
+ * - For local.fragment scopes on both src and dst: fatal error (not
+ * implemented).
  * - For any other scope combinations: fails with an assertion.
  *
- * The `analyzer` parameter is accepted for interface compatibility but is not used by this lowering.
+ * The `analyzer` parameter is accepted for interface compatibility but is not
+ * used by this lowering.
  *
- * @param T Lowering arguments (provides thread bounds and other lowering context).
- * @return Stmt A TIR statement representing the lowered cumulative-sum operation.
+ * @param T Lowering arguments (provides thread bounds and other lowering
+ * context).
+ * @return Stmt A TIR statement representing the lowered cumulative-sum
+ * operation.
  */
 Stmt CumSumOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (this->src.scope() == "local.fragment" &&

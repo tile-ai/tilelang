@@ -23,8 +23,10 @@ namespace tl {
  * Returns the prime factorization of `x` as a vector of prime factors in
  * non-decreasing order. If `x <= 1` the returned vector is empty.
  *
- * @param x Integer to factorize (expected non-negative; behavior: returns empty for values <= 1).
- * @return std::vector<int> Prime factors of `x` (with repetition), e.g. 12 -> {2, 2, 3}.
+ * @param x Integer to factorize (expected non-negative; behavior: returns empty
+ * for values <= 1).
+ * @return std::vector<int> Prime factors of `x` (with repetition), e.g. 12 ->
+ * {2, 2, 3}.
  */
 static std::vector<int> toPrimeFactors(int x) {
   int i = 2;
@@ -41,10 +43,12 @@ static std::vector<int> toPrimeFactors(int x) {
 }
 
 /**
- * @brief Construct a GemmSP operator node from TL call arguments and a buffer map.
+ * @brief Construct a GemmSP operator node from TL call arguments and a buffer
+ * map.
  *
  * Parses the expected call argument tuple and fills an internal GemmSPNode:
- * - Buffers: A (args[0]), E (args[1]), B (args[2]), C (args[3]) are looked up in vmap.
+ * - Buffers: A (args[0]), E (args[1]), B (args[2]), C (args[3]) are looked up
+ * in vmap.
  * - Booleans: trans_A (args[4]), trans_B (args[5]).
  * - Dimensions: M (args[6]), N (args[7]), K (args[8]) as integers.
  * - Warp policy: policy (args[9]) mapped to GemmWarpPolicy.
@@ -112,7 +116,8 @@ TileOperator GemmSPNode::Clone() const {
  * @param target Hardware target used to decide target-specific strategies
  *               (e.g., Hopper WGMMA grouping).
  * @param maybe_hopper_wgmma If true, allows using Hopper WGMMA-specific
- *                          partitioning when the target and problem size permit.
+ *                          partitioning when the target and problem size
+ * permit.
  * @return std::pair<int,int> A pair (m_warp, n_warp) giving the number of warp
  *         partitions along M and N, respectively.
  *
@@ -342,17 +347,18 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 /**
  * @brief Infers and returns the memory/layout mapping for the GemmSP operator.
  *
- * Infers thread-local fragment layout for C and shared-memory layouts for A and B
- * based on the target (Hopper-only path), block/thread bounds in T, transposition
- * flags, and matrix dimensions stored in the node. The function caches its work:
- * if layout inference has already completed (completed_ == true) it returns an
- * empty LayoutMap.
+ * Infers thread-local fragment layout for C and shared-memory layouts for A and
+ * B based on the target (Hopper-only path), block/thread bounds in T,
+ * transposition flags, and matrix dimensions stored in the node. The function
+ * caches its work: if layout inference has already completed (completed_ ==
+ * true) it returns an empty LayoutMap.
  *
  * Precondition:
  * - C.scope() must be "local.fragment".
  *
  * Behavior notes:
- * - Only the Hopper target is supported; non-Hopper targets trigger a fatal check.
+ * - Only the Hopper target is supported; non-Hopper targets trigger a fatal
+ * check.
  * - For Hopper, the function computes a warp partition from block size and may
  *   enable WGMMA-specific fragment creation when conditions on M and block size
  *   are met.

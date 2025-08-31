@@ -26,7 +26,8 @@ using namespace tir;
  * out the smallest possible factor.
  *
  * @param x Integer to factorize. If x <= 1, an empty vector is returned.
- * @return std::vector<int> Prime factors of x (with multiplicity), in non-decreasing order.
+ * @return std::vector<int> Prime factors of x (with multiplicity), in
+ * non-decreasing order.
  */
 static std::vector<int> toPrimeFactors(int x) {
   int i = 2;
@@ -43,7 +44,8 @@ static std::vector<int> toPrimeFactors(int x) {
 }
 
 /**
- * @brief Construct a Gemm operator from serialized TL arguments and a buffer map.
+ * @brief Construct a Gemm operator from serialized TL arguments and a buffer
+ * map.
  *
  * This constructor deserializes operator parameters from `args` and resolves
  * buffer references via `vmap`, populating an internal GemmNode with:
@@ -116,7 +118,8 @@ TileOperator GemmNode::Clone() const {
 }
 
 /**
- * @brief Selects the GEMM implementation variant for a given block size and target.
+ * @brief Selects the GEMM implementation variant for a given block size and
+ * target.
  *
  * Determines which low-level GEMM instruction to use:
  * - Returns kWGMMA when running on Hopper-class targets and the operator meets
@@ -125,12 +128,14 @@ TileOperator GemmNode::Clone() const {
  * - Returns kMFMA for CDNA targets.
  * - Returns kMMA for CUDA targets.
  *
- * @param block_size Number of threads in the CUDA/ROCm thread block used for the GEMM.
- * @param target Target backend describing the hardware (used to detect architecture).
+ * @param block_size Number of threads in the CUDA/ROCm thread block used for
+ * the GEMM.
+ * @param target Target backend describing the hardware (used to detect
+ * architecture).
  * @return GemmInst The chosen GEMM implementation enum value.
  *
- * @throws fatal error (ICHECK) If the target is not recognized/supported, this function
- *        triggers a runtime check failure.
+ * @throws fatal error (ICHECK) If the target is not recognized/supported, this
+ * function triggers a runtime check failure.
  */
 GemmNode::GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
   int warp_size = TargetGetWarpSize(target);
@@ -437,16 +442,18 @@ bool GemmNode::CheckWGMMA() const {
 }
 
 /**
- * @brief Parse and return the numeric GPU architecture from a Target's "arch" attribute.
+ * @brief Parse and return the numeric GPU architecture from a Target's "arch"
+ * attribute.
  *
- * Examines the target's "arch" string and, if it matches the pattern "sm_<num>",
- * returns <num> as an int. If the attribute is present but does not match that
- * pattern, returns 0.
+ * Examines the target's "arch" string and, if it matches the pattern
+ * "sm_<num>", returns <num> as an int. If the attribute is present but does not
+ * match that pattern, returns 0.
  *
- * Preconditions: the target must have an "arch" attribute (this is checked via ICHECK).
+ * Preconditions: the target must have an "arch" attribute (this is checked via
+ * ICHECK).
  *
- * @return int The parsed architecture number (e.g., 80 for "sm_80"), or 0 if the
- *         arch string does not match "sm_<num>".
+ * @return int The parsed architecture number (e.g., 80 for "sm_80"), or 0 if
+ * the arch string does not match "sm_<num>".
  */
 static int GetArchInt(Target target) {
   int arch_int = 0;
@@ -470,7 +477,8 @@ static int GetArchInt(Target target) {
  * invoking tl::tl_gemm with the composed string and the A/B/C buffer handles.
  *
  * @param T Contains lowering context including thread bounds and target.
- * @param analyzer Optional arithmetic analyzer used by lowering (may be nullptr).
+ * @param analyzer Optional arithmetic analyzer used by lowering (may be
+ * nullptr).
  * @return Stmt A TIR statement representing the evaluated TL GEMM call.
  */
 Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {

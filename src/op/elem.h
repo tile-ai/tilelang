@@ -13,12 +13,13 @@
 /**
  * Lower the Fill operator into TIR statements.
  *
- * Produces a TIR Stmt that implements element-wise filling of `dst` over `region`
- * with `value`, using information from `T`.
+ * Produces a TIR Stmt that implements element-wise filling of `dst` over
+ * `region` with `value`, using information from `T`.
  *
- * @param T Lowering inputs (buffers, shapes, and iteration info) used to generate the IR.
+ * @param T Lowering inputs (buffers, shapes, and iteration info) used to
+ * generate the IR.
  */
- 
+
 /**
  * Infer the memory layout mapping for the Fill operator.
  *
@@ -54,10 +55,10 @@
 /**
  * Construct a Fill operator from argument expressions and a buffer mapping.
  *
- * @param args Positional PrimExpr arguments passed to the operator (e.g., indices
- *             or shape expressions required by the operator's specification).
- * @param vmap Mapping from named buffer parameters to concrete tir::Buffer instances
- *             used by this operator instance.
+ * @param args Positional PrimExpr arguments passed to the operator (e.g.,
+ * indices or shape expressions required by the operator's specification).
+ * @param vmap Mapping from named buffer parameters to concrete tir::Buffer
+ * instances used by this operator instance.
  */
 
 /**

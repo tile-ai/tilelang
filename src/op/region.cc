@@ -15,18 +15,21 @@ using namespace tir;
  * @brief Construct a RegionOp from TL operator arguments.
  *
  * Parses the TL `region` operator call arguments to populate the RegionOpNode:
- * - Expects args[0] to be a `BufferLoad` whose `indices` are the per-dimension minima.
+ * - Expects args[0] to be a `BufferLoad` whose `indices` are the per-dimension
+ * minima.
  * - args[1] must be a constant integer used as the access mask.
  * - args[2 + i] provides the extent for dimension `i`.
  *
- * The constructor validates that the number of load indices equals `args.size() - 2`
- * and will abort via ICHECK on mismatch or if args[0] is not a `BufferLoad`.
+ * The constructor validates that the number of load indices equals `args.size()
+ * - 2` and will abort via ICHECK on mismatch or if args[0] is not a
+ * `BufferLoad`.
  *
  * Parameters:
  * - args: TL operator call arguments in the form
- *     [BufferLoad(min_i...), access_mask, extent_0, extent_1, ..., extent_{n-1}]
- *     where n = number of dimensions.
- * - vmap: BufferMap passed through by the caller (not documented here as a generic utility).
+ *     [BufferLoad(min_i...), access_mask, extent_0, extent_1, ...,
+ * extent_{n-1}] where n = number of dimensions.
+ * - vmap: BufferMap passed through by the caller (not documented here as a
+ * generic utility).
  */
 RegionOp::RegionOp(Array<PrimExpr> args, BufferMap vmap) {
   size_t n = args.size();
@@ -65,7 +68,8 @@ TileOperator RegionOpNode::Clone() const {
  * range extent is structurally equal to the corresponding buffer shape
  * dimension. Otherwise returns false.
  *
- * @return true if the region covers the full buffer in all dimensions; false otherwise.
+ * @return true if the region covers the full buffer in all dimensions; false
+ * otherwise.
  */
 bool RegionOpNode::IsFullRegion() const {
   for (size_t i = 0; i < ranges_.size(); i++) {

@@ -104,10 +104,10 @@ struct TMAIm2ColDesc {
  * STSM, or bulk TMA-based) for the given lowering context.
  *
  * \param T        Lowering arguments that provide buffer bindings and context.
- * \param analyzer Analyzer used for expression simplification and bounds checks.
- * \return         A TIR `Stmt` implementing the copy.
+ * \param analyzer Analyzer used for expression simplification and bounds
+ * checks. \return         A TIR `Stmt` implementing the copy.
  */
- 
+
 /*!
  * \brief Infer buffer layouts after applying this operator.
  *
@@ -166,7 +166,8 @@ struct TMAIm2ColDesc {
  */
 
 /*!
- * \brief Generate lowering for bulk (global-to-shared or shared-to-global) copy.
+ * \brief Generate lowering for bulk (global-to-shared or shared-to-global)
+ * copy.
  *
  * Implements TMA-based bulk load/store lowering when `copy_inst` indicates a
  * bulk path. The function encodes TMA descriptors and produces calls or
@@ -250,8 +251,8 @@ struct TMAIm2ColDesc {
  * \param analyzer Arithmetic analyzer used to simplify predicates.
  * \param ivs      Iterator variables.
  * \param extents  Extent expressions for the target buffer.
- * \param src_dst  0 = predicate for source indices, 1 = predicate for destination.
- * \return         A `PrimExpr` boolean predicate.
+ * \param src_dst  0 = predicate for source indices, 1 = predicate for
+ * destination. \return         A `PrimExpr` boolean predicate.
  */
 
 /*!
@@ -419,24 +420,24 @@ protected:
                          Array<PrimExpr> extents, int src_dst) const;
 
   /**
- * \brief Create a deep copy of this operator.
- *
- * Returns a TileOperator that is a copy of the current node, preserving all
- * configuration (buffers, parameters, and layout-related fields).
- * @return A TileOperator owning the cloned operator node.
- */
+   * \brief Create a deep copy of this operator.
+   *
+   * Returns a TileOperator that is a copy of the current node, preserving all
+   * configuration (buffers, parameters, and layout-related fields).
+   * @return A TileOperator owning the cloned operator node.
+   */
 
-/**
- * \brief Constructor.
- * \param args Expression arguments for the Conv2D im2col operator.
- * \param vmap Buffer variable mapping.
- */
+  /**
+   * \brief Constructor.
+   * \param args Expression arguments for the Conv2D im2col operator.
+   * \param vmap Buffer variable mapping.
+   */
 
-/**
- * \brief Get the TVM Op handle corresponding to this Conv2DIm2Col operator.
- * @return Reference to the singleton TVM Op representing this operator.
- */
-TileOperator Clone() const;
+  /**
+   * \brief Get the TVM Op handle corresponding to this Conv2DIm2Col operator.
+   * @return Reference to the singleton TVM Op representing this operator.
+   */
+  TileOperator Clone() const;
 };
 
 class Copy : public TileOperator {

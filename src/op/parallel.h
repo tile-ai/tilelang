@@ -19,14 +19,18 @@
  */
 
 /**
- * Determine whether `small_frag` is guaranteed to be contained within `large_frag`
- * under the given index mappings and using the provided arithmetic analyzer.
+ * Determine whether `small_frag` is guaranteed to be contained within
+ * `large_frag` under the given index mappings and using the provided arithmetic
+ * analyzer.
  *
  * @param small_frag The smaller fragment to test for containment.
  * @param large_frag The larger fragment that may contain `small_frag`.
- * @param small_frag_indices Index expressions mapping the small fragment into buffer space.
- * @param large_frag_indices Index expressions mapping the large fragment into buffer space.
- * @param analyzer_ Arithmetic analyzer used to simplify and prove index relations.
+ * @param small_frag_indices Index expressions mapping the small fragment into
+ * buffer space.
+ * @param large_frag_indices Index expressions mapping the large fragment into
+ * buffer space.
+ * @param analyzer_ Arithmetic analyzer used to simplify and prove index
+ * relations.
  * @return true if containment can be proven; false otherwise.
  */
 
@@ -59,7 +63,8 @@
  * Lower this parallel operator into a TIR statement suitable for codegen.
  *
  * @param T Lowering arguments and context.
- * @param analyzer Arithmetic analyzer for expression simplification during lowering.
+ * @param analyzer Arithmetic analyzer for expression simplification during
+ * lowering.
  * @return A TIR statement representing the lowered parallel loop.
  */
 
@@ -68,7 +73,8 @@
  *
  * @param T Arguments and context for layout inference.
  * @param level Inference granularity level.
- * @return A LayoutMap describing inferred buffer/layout relationships for the operator.
+ * @return A LayoutMap describing inferred buffer/layout relationships for the
+ * operator.
  */
 
 /**
@@ -78,7 +84,8 @@
 /**
  * Get the inferred loop layout fragment.
  *
- * @return The Fragment representing the loop's inferred layout (may be lazily computed).
+ * @return The Fragment representing the loop's inferred layout (may be lazily
+ * computed).
  */
 
 /**
@@ -88,14 +95,15 @@
  */
 
 /**
- * Get the mapping from each buffer to the array of index expressions used to access it
- * within the loop nest.
+ * Get the mapping from each buffer to the array of index expressions used to
+ * access it within the loop nest.
  *
  * @return A Map from Buffer to Array<PrimExpr> of access indices.
  */
 
 /**
- * Retrieve the predicate expression associated with a given thread variable, if any.
+ * Retrieve the predicate expression associated with a given thread variable, if
+ * any.
  *
  * @param thread_var The thread variable whose predicate is requested.
  * @return An Optional<PrimExpr> containing the predicate when present.
@@ -121,7 +129,8 @@
  */
 
 /**
- * Add `expr` to the current predicate by logical AND; sets predicate if none exists.
+ * Add `expr` to the current predicate by logical AND; sets predicate if none
+ * exists.
  *
  * (Private helper — not part of the public API.)
  */

@@ -11,10 +11,12 @@
 
 namespace tvm {
 /**
- * Lower the GemmSP operator into a TIR statement for the given lowering context.
+ * Lower the GemmSP operator into a TIR statement for the given lowering
+ * context.
  *
- * Produces the TIR Stmt that implements this operator using the provided lowering
- * arguments. The `analyzer` is used for arithmetic simplifications and may be null.
+ * Produces the TIR Stmt that implements this operator using the provided
+ * lowering arguments. The `analyzer` is used for arithmetic simplifications and
+ * may be null.
  *
  * @param T Lowering context and arguments.
  * @returns A TIR `Stmt` implementing the lowered operator.
@@ -38,7 +40,8 @@ namespace tvm {
  *
  * @param num_warps Total number of warps available for the tile.
  * @param target Target device/architecture used to guide partitioning choices.
- * @param maybe_hopper_wgmma Enable target-specific WG/MMA adjustments when true.
+ * @param maybe_hopper_wgmma Enable target-specific WG/MMA adjustments when
+ * true.
  * @returns Pair<int,int> of (warps_per_row, warps_per_col).
  */
 /**
@@ -51,8 +54,10 @@ namespace tvm {
 /**
  * Construct a GemmSP TileOperator from call arguments and a buffer map.
  *
- * @param args Array of PrimExpr specifying call-site arguments for the operator.
- * @param vmap Mapping from buffer names to tir::Buffer objects for operands/outputs.
+ * @param args Array of PrimExpr specifying call-site arguments for the
+ * operator.
+ * @param vmap Mapping from buffer names to tir::Buffer objects for
+ * operands/outputs.
  */
 /**
  * Return the singleton Op descriptor for the GemmSP operator.

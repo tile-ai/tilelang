@@ -25,35 +25,38 @@ using namespace tir;
 /**
  * @brief Construct a Fill operator node from call arguments and a buffer map.
  *
- * This constructor builds a FillNode describing an element-wise fill of a destination
- * buffer region with a scalar/vector value and stores it in `data_`.
+ * This constructor builds a FillNode describing an element-wise fill of a
+ * destination buffer region with a scalar/vector value and stores it in
+ * `data_`.
  *
  * Detailed behavior:
- * - If `args[0]` is a `BufferLoad`, the loaded buffer becomes the destination and
- *   the load indices are converted to per-dimension ranges:
- *   - `Ramp(base, lanes, stride)` is converted to `Range(base, lanes)`. Only stride == 1
- *     and constant `lanes` are supported.
+ * - If `args[0]` is a `BufferLoad`, the loaded buffer becomes the destination
+ * and the load indices are converted to per-dimension ranges:
+ *   - `Ramp(base, lanes, stride)` is converted to `Range(base, lanes)`. Only
+ * stride == 1 and constant `lanes` are supported.
  *   - Non-ramp indices become `Range(index, 1)`.
- * - Otherwise `args[0]` is treated as an access pointer; the destination buffer is
- *   resolved via `vmap[GetVarFromAccessPtr(args[0])]` and the region is the full
- *   buffer shape for each dimension.
- * - `args[1]` is used as the fill value; it is cast to the destination buffer's dtype
- *   if necessary.
+ * - Otherwise `args[0]` is treated as an access pointer; the destination buffer
+ * is resolved via `vmap[GetVarFromAccessPtr(args[0])]` and the region is the
+ * full buffer shape for each dimension.
+ * - `args[1]` is used as the fill value; it is cast to the destination buffer's
+ * dtype if necessary.
  * - Performs validation:
  *   - Region dimensionality must match destination rank.
- *   - For statically-known region mins and extents, checks that mins >= 0 and extents
- *     do not exceed the corresponding destination shape extents.
+ *   - For statically-known region mins and extents, checks that mins >= 0 and
+ * extents do not exceed the corresponding destination shape extents.
  *
  * Parameters:
- * @param args Call arguments: expected layout is [dst_access_or_bufferload, value].
+ * @param args Call arguments: expected layout is [dst_access_or_bufferload,
+ * value].
  *             - args[0]: destination access (BufferLoad or pointer expression).
  *             - args[1]: value to fill (scalar or vector).
- * @param vmap Mapping from buffer variables to Buffer objects; used to resolve the
- *             destination when args[0] is not a BufferLoad.
+ * @param vmap Mapping from buffer variables to Buffer objects; used to resolve
+ * the destination when args[0] is not a BufferLoad.
  *
  * Notes:
- * - The constructor enforces constraints (e.g., stride == 1 ramps, constant lanes)
- *   and will terminate (via CHECK/ICHECK) if inputs are unsupported or out of bounds.
+ * - The constructor enforces constraints (e.g., stride == 1 ramps, constant
+ * lanes) and will terminate (via CHECK/ICHECK) if inputs are unsupported or out
+ * of bounds.
  */
 Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
   ObjectPtr<FillNode> node = make_object<FillNode>();
@@ -107,7 +110,8 @@ Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
 /**
  * @brief Create a copy of this FillNode and return it as a TileOperator.
  *
- * Constructs a new FillNode by copying the current node and wraps the copy in a Fill TileOperator.
+ * Constructs a new FillNode by copying the current node and wraps the copy in a
+ * Fill TileOperator.
  *
  * @return TileOperator A TileOperator that owns the copied FillNode.
  */
@@ -117,12 +121,14 @@ TileOperator FillNode::Clone() const {
 }
 
 /**
- * @brief Build a SIMT-style nested parallel loop that fills the destination buffer.
+ * @brief Build a SIMT-style nested parallel loop that fills the destination
+ * buffer.
  *
- * Constructs per-dimension data-parallel loop iterators matching this node's region extents,
- * emits a BufferStore that writes the node's `value` into `dst` at the loop indices,
- * and nests the loops (innermost to outermost) as parallel `For` nodes. Returns the
- * outermost `For` loop representing the complete multi-dimensional fill kernel.
+ * Constructs per-dimension data-parallel loop iterators matching this node's
+ * region extents, emits a BufferStore that writes the node's `value` into `dst`
+ * at the loop indices, and nests the loops (innermost to outermost) as parallel
+ * `For` nodes. Returns the outermost `For` loop representing the complete
+ * multi-dimensional fill kernel.
  *
  * @return For Outermost parallel `For` loop of the generated nested SIMT loop.
  */
