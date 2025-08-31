@@ -109,7 +109,19 @@ TL_DEVICE uint32_t smem_ptr_to_uint(void const *const ptr) {
   return static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
 }
 
-// Helper to cast SMEM pointer to unsigned
+/**
+ * Convert a shared-memory pointer to a 32-bit unsigned integer address.
+ *
+ * Casts the given pointer (expected to reference shared memory) into a 32-bit
+ * unsigned integer using the device address-space conversion required for
+ * shared-memory pointers.
+ *
+ * @param smem_ptr Pointer into shared memory.
+ * @return 32-bit unsigned integer representation of the shared-memory address.
+ *
+ * @note The pointer must refer to shared memory; behavior is undefined for
+ *       pointers in other address spaces.
+ */
 TL_DEVICE unsigned int cast_smem_ptr_to_int(const void *const smem_ptr) {
   unsigned int smem_int;
   asm volatile("{ .reg .u64 smem_int; cvta.to.shared.u64 smem_int, %1; "
@@ -123,7 +135,14 @@ template <typename T> struct normalize_atomic_type {
   using type = T;
 };
 
-template <> struct normalize_atomic_type<half_t> {
+template <> /**
+ * Map the public half_t alias to the native `half` type for atomic operations.
+ *
+ * Used by the atomic utilities to normalize externally exposed typedefs (e.g., Cutlass
+ * half_t) to the compiler's native `half` representation so correct atomic intrinsics
+ * or `cuda::atomic_ref` specializations can be selected.
+ */
+struct normalize_atomic_type<half_t> {
   using type = half;
 };
 
@@ -221,7 +240,19 @@ template <typename T> TL_DEVICE T AtomicLoad(T *address, int memory_order) {
 }
 
 template <typename T1, typename T2>
-TL_DEVICE void AtomicStore(T1 *address, T2 value, int memory_order) {
+TL_DEVICE /**
+ * Atomically stores a value into the given address using the specified memory ordering.
+ *
+ * The value is converted to the normalized atomic storage type for T1 before being stored
+ * (for example, vectorized or reduced-width types such as FP16/BF16 are mapped to their
+ * underlying hardware representation). `memory_order` must be an `int` representation of
+ * a `cuda::memory_order` value (e.g., `int(cuda::memory_order_relaxed)`).
+ *
+ * @param address Pointer to the destination atomic object.
+ * @param value Value to store; will be cast to the atomic storage type.
+ * @param memory_order Memory ordering for the atomic store (as an `int`-cast `cuda::memory_order`).
+ */
+void AtomicStore(T1 *address, T2 value, int memory_order) {
   using NT1 = typename normalize_atomic_type<T1>::type;
   cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
   aref.store(cuda_cast<NT1>(value), cuda::memory_order(memory_order));
@@ -229,7 +260,19 @@ TL_DEVICE void AtomicStore(T1 *address, T2 value, int memory_order) {
 
 // DP4A
 template <typename InDatatype, typename OutDatatype>
-TL_DEVICE void DP4A(InDatatype *a, InDatatype *b, OutDatatype *c) {
+TL_DEVICE /**
+ * Compute a 4×8-bit dot-product-accumulate using the CUDA DP4A intrinsic.
+ *
+ * Reads 32-bit packed values from `a` and `b` (each containing four signed 8-bit lanes),
+ * applies the __dp4a operation (dot product of the four lane pairs added to an accumulator),
+ * and stores the 32-bit integer result through `c`.
+ *
+ * @param a Pointer to a 32-bit packed input containing four signed 8-bit elements.
+ * @param b Pointer to a 32-bit packed input containing four signed 8-bit elements.
+ * @param c Pointer to a 32-bit accumulator; its current value is used as the initial
+ *          accumulator and overwritten with the resulting int32 sum.
+ */
+void DP4A(InDatatype *a, InDatatype *b, OutDatatype *c) {
   const int a_int = *((int *)a);
   const int b_int = *((int *)b);
   const int c_int = *((int *)c);

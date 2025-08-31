@@ -155,16 +155,13 @@ def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -
 
 
 def cumsum(src: tir.Buffer, dst: Optional[tir.Buffer] = None, dim: int = 0, reverse: bool = False):
-    """Perform cumulative sum on input buffer, store the result to output buffer.
-
-    Args:
-        src (tir.Buffer): The input buffer
-        dst (tir.Buffer, optional): The output buffer. Defaults to None.
-        dim (int, optional): The dimension to perform cumulative sum on. Defaults to 0.
-        reverse (bool, optional): Whether to perform reverse cumulative sum. Defaults to False.
-
+    """
+    Compute the cumulative sum of `src` along `dim`, writing results to `dst`.
+    
+    Negative `dim` indices are normalized (Python-style). If `dst` is None, the operation is performed in-place into `src`. Raises ValueError when `dim` is out of bounds for `src.shape`. When `src.scope() == "local.fragment"`, this delegates to `cumsum_fragment`; otherwise it emits the `tl.cumsum` intrinsic.
+    
     Returns:
-        tir.Call: Handle to the cumulative sum operation
+        tir.Call: A handle to the emitted cumulative-sum operation.
     """
 
     shape = src.shape
@@ -188,13 +185,17 @@ def cumsum(src: tir.Buffer, dst: Optional[tir.Buffer] = None, dim: int = 0, reve
 
 
 def finalize_reducer(reducer: tir.Buffer):
-    """Finalize the reducer buffer.
-
-    Args:
-        reducer (tir.Buffer): The reducer buffer
-
+    """
+    Finalize a reducer buffer by emitting the `tl.finalize_reducer` intrinsic.
+    
+    This returns a TVM `tir.Call` handle that finalizes the given reducer using its writable pointer.
+    The call does not modify Python objects directly; it produces the low-level intrinsic call used by the IR.
+    
+    Parameters:
+        reducer (tir.Buffer): Reducer buffer whose writable pointer will be finalized.
+    
     Returns:
-        tir.Call: Handle to the finalize reducer operation
+        tir.Call: Handle to the finalize reducer intrinsic call.
     """
     return tir.call_intrin(
         "handle",

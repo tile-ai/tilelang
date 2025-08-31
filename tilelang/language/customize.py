@@ -18,15 +18,22 @@ _MEMORY_ORDER_ID_MAP = {
 
 
 def region(buffer: BufferLoad, access_type: str, *args: PrimExpr):
-    """Create a memory region descriptor for tile operations.
-
-    Args:
-        buffer (tir.BufferLoad): The buffer to create a region for
-        access_type (str): Type of access - 'r' for read, 'w' for write, 'rw' for read-write
-        *args (tir.PrimExpr): Extent expressions defining the region size
-
+    """
+    Create a tile memory-region descriptor for a BufferLoad.
+    
+    Maps access_type ('r', 'w', 'rw') to the numeric codes expected by the `tl.region` intrinsic
+    (1, 2, 3 respectively) and returns a tir.Call representing the region with the provided extents.
+    
+    Parameters:
+        buffer (tir.BufferLoad): The BufferLoad that identifies the underlying buffer and indices.
+        access_type (str): One of 'r', 'w', or 'rw' indicating read, write, or read-write access.
+        *args (tir.PrimExpr): Extent expressions for each region dimension.
+    
     Returns:
-        tir.Call: A region descriptor for tile operations
+        tir.Call: A call to the `tl.region` intrinsic describing the memory region.
+    
+    Raises:
+        KeyError: If access_type is not one of 'r', 'w', or 'rw'.
     """
     access_type = {"r": 1, "w": 2, "rw": 3}[access_type]
     return T.call_intrin("handle", op.Op.get("tl.region"), buffer, access_type, *args)
@@ -74,15 +81,20 @@ def buffer_load_to_tile_region(load: BufferLoad, access_type: str, extents: List
 
 def buffer_region_to_tile_region(buffer_region: BufferRegion, access_type: str,
                                  extents: List[PrimExpr]):
-    """Convert a buffer region to a tile region descriptor.
-
-    Args:
-        buffer_region (tir.BufferRegion): The buffer region to convert
-        access_type (str): Type of access - 'r' for read, 'w' for write, 'rw' for read-write
-
-    Returns:
-        tir.Call: A region descriptor for the specified buffer region
     """
+                                 Create a tl region descriptor for the given BufferRegion.
+                                 
+                                 Parameters:
+                                     buffer_region (tir.BufferRegion): Source buffer region whose `region` items provide mins and extents.
+                                     access_type (str): Access mode: "r", "w", or "rw".
+                                     extents (List[PrimExpr]): Requested extents; must have length <= the number of extents in buffer_region.region.
+                                 
+                                 Returns:
+                                     tir.Call: A tile-region descriptor (tl.region) covering the buffer_region.
+                                 
+                                 Raises:
+                                     AssertionError: If the number of extents in buffer_region.region is smaller than len(extents).
+                                 """
     mins = [x.min for x in buffer_region.region]
     region_extents = [x.extent for x in buffer_region.region]
     assert len(region_extents) >= len(
@@ -93,14 +105,19 @@ def buffer_region_to_tile_region(buffer_region: BufferRegion, access_type: str,
 
 
 def atomic_max(dst: Buffer, value: PrimExpr, memory_order: str | None = None) -> PrimExpr:
-    """Perform an atomic maximum operation.
-
-    Args:
-        dst (Buffer): Destination buffer where the atomic maximum will be performed
-        value (PrimExpr): Value to be atomically added
-
+    """
+    Perform an atomic maximum on the value stored at dst with an optional memory-order.
+    
+    If memory_order is None the runtime extern "AtomicMax" is called without an explicit memory-order id; otherwise the provided memory_order string is mapped to a numeric id using the module's memory-order map and passed to the extern.
+    
+    Parameters:
+        dst (Buffer): Destination buffer/address to apply the atomic max.
+        value (PrimExpr): Value to compare/store atomically.
+        memory_order (str | None): Optional memory-order name (e.g. "relaxed", "acquire", "seq_cst").
+            If provided, it is translated to the corresponding numeric memory-order id before the call.
+    
     Returns:
-        PrimExpr: Handle to the atomic maximum operation
+        PrimExpr: A handle/expression representing the issued atomic maximum operation.
     """
     if memory_order is None:
         return T.call_extern("handle", "AtomicMax", T.address_of(dst), value)
@@ -110,14 +127,18 @@ def atomic_max(dst: Buffer, value: PrimExpr, memory_order: str | None = None) ->
 
 
 def atomic_min(dst: Buffer, value: PrimExpr, memory_order: str | None = None) -> PrimExpr:
-    """Perform an atomic minimum operation.
-
-    Args:
-        dst (Buffer): Destination buffer where the atomic minimum will be performed
-        value (PrimExpr): Value to be atomically added
-
+    """
+    Atomically update the value at dst to the minimum of its current value and value.
+    
+    If memory_order is provided, it selects the memory-order semantic used by the underlying extern call;
+    allowed names are "relaxed", "consume", "acquire", "release", "acq_rel", and "seq_cst" (mapped internally
+    to integer IDs). If memory_order is None, the extern is invoked without an explicit memory-order argument.
+    
+    Parameters:
+        memory_order (str | None): Optional memory-order name controlling the atomic operation's ordering.
+    
     Returns:
-        PrimExpr: Handle to the atomic minimum operation
+        PrimExpr: A handle expression representing the atomic-min operation.
     """
     if memory_order is None:
         return T.call_extern("handle", "AtomicMin", T.address_of(dst), value)
@@ -127,17 +148,26 @@ def atomic_min(dst: Buffer, value: PrimExpr, memory_order: str | None = None) ->
 
 
 def atomic_add(dst: Buffer, value: PrimExpr, memory_order: str | None = None) -> PrimExpr:
-    """Perform an atomic addition operation.
-
-    Args:
-        dst (Buffer): Destination buffer where the atomic addition will be performed
-        value (PrimExpr): Value to be atomically added
-
+    """
+    Atomically add `value` into `dst`, returning a handle to the operation.
+    
+    Supports scalar/addressed extern atomic add when neither argument exposes extents, or tile-region-based atomic add for Buffer/BufferRegion/BufferLoad inputs. If both arguments are plain Buffers their shapes must be structurally equal. If at least one side exposes extents, extents are aligned (missing dimensions are treated as size 1); an assertion is raised if extents cannot be deduced. The optional `memory_order` (one of "relaxed","consume","acquire","release","acq_rel","seq_cst") is used only for the direct extern `AtomicAdd` path when no extents are available — otherwise the tile-region path ignores `memory_order`.
+    
     Returns:
-        PrimExpr: Handle to the atomic addition operation
+        PrimExpr: A handle representing the atomic addition operation.
     """
 
     def get_extent(data):
+        """
+        Return the inferred extent (shape) of a buffer-like object.
+        
+        If `data` is a Var bound to a let value, the let value is resolved before inspection.
+        Parameters:
+            data: A Var, Buffer, or BufferRegion to inspect.
+        
+        Returns:
+            The shape/extents as a list-like of PrimExpr (Buffer.shape or list of region item extents), or None if the extent cannot be determined.
+        """
         if isinstance(data, Var) and T.has_let_value(data):
             data = T.get_let_value(data)
         if isinstance(data, Buffer):
@@ -252,16 +282,11 @@ def reshape(src: Buffer, shape: List[PrimExpr]) -> Buffer:
 def view(src: Buffer,
          shape: Union[List[PrimExpr], None] = None,
          dtype: Union[str, None] = None) -> Buffer:
-    """Views the input buffer with optionally modified shape and dtype.
-    
-    Args:
-        src (Buffer): Input buffer to be viewed
-        shape (Union[List[PrimExpr], None], optional): New shape for the buffer. Defaults to None.
-        dtype (Union[str, None], optional): New dtype for the buffer. Defaults to None.
-
-    Returns:
-        Buffer: A new buffer view with the specified shape and dtype
     """
+         Return a Tensor view of the input buffer with an optional new shape and dtype.
+         
+         If `shape` is None the source buffer's shape is used; if `dtype` is None the source buffer's dtype is used. The returned buffer shares the same underlying data as `src` (no copy).
+         """
     if shape is None:
         shape = src.shape
     if dtype is None:
@@ -270,29 +295,34 @@ def view(src: Buffer,
 
 
 def atomic_load(src: Buffer, memory_order: str = "seq_cst") -> PrimExpr:
-    """Loads a value from the input buffer with specified memory_order.
-
-    Args:
-        src (Buffer): Input buffer to load from
-        memory_order (str, optional): Atomicity level for the load operation. Defaults to "seq_cst".
-
-    Returns:
-        PrimExpr: The loaded value from the buffer
+    """
+    Load a value from the given buffer using the specified atomic memory ordering.
+    
+    Performs an atomic load from `src` and returns a PrimExpr representing the loaded value.
+    memory_order selects the ordering and must be one of: "relaxed", "consume", "acquire",
+    "release", "acq_rel", or "seq_cst" (default).
+    Raises KeyError if an unknown memory_order is provided.
     """
     return T.call_extern(src.dtype, "AtomicLoad", T.address_of(src),
                          _MEMORY_ORDER_ID_MAP[memory_order])
 
 
 def atomic_store(dst: Buffer, src: PrimExpr, memory_order: str = "seq_cst") -> PrimExpr:
-    """Stores a value to the input buffer with specified memory_order.
-
-    Args:
-        dst (Buffer): Input buffer to store to
-        src (PrimExpr): Value to store
-        memory_order (str, optional): Atomicity level for the load operation. Defaults to "seq_cst".
-
+    """
+    Perform an atomic store of `src` into `dst` with the given memory ordering.
+    
+    Parameters:
+        dst (Buffer): Destination buffer to store into.
+        src (PrimExpr): Value to store.
+        memory_order (str, optional): Memory ordering name; one of "relaxed", "consume",
+            "acquire", "release", "acq_rel", or "seq_cst". Defaults to "seq_cst".
+            The name is mapped to an internal numeric ID used by the underlying runtime.
+    
     Returns:
-        PrimExpr: The handle of the store operation
+        PrimExpr: A handle representing the issued atomic store operation.
+    
+    Raises:
+        KeyError: If `memory_order` is not one of the supported names.
     """
     return T.call_extern("handle", "AtomicStore", T.address_of(dst), src,
                          _MEMORY_ORDER_ID_MAP[memory_order])

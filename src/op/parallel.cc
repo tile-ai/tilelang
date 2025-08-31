@@ -119,6 +119,14 @@ private:
   Map<Buffer, Layout> layout_map_;
 };
 
+/**
+ * @brief Handle a parallel For node during traversal, collecting loop metadata.
+ *
+ * Visits a parallel loop, asserts the loop is parallel, records a data-parallel
+ * IterVar for the loop, binds the loop variable range into the analyzer scope,
+ * and extracts any reducer information from the loop's annotations into the
+ * visitor's reducer_info_map_. Continues traversal into the loop body.
+ */
 void ParallelLoopNestVisitor::VisitStmt_(const ForNode *op) {
   ICHECK(op->kind == ForKind::kParallel);
   p->loop_vars_.push_back(
@@ -147,19 +155,6 @@ void ParallelLoopNestVisitor::VisitStmt_(const BufferStoreNode *op) {
   StmtExprVisitor::VisitStmt_(op);
 }
 
-/**
- * @brief Visit a BufferLoad node and record/validate index mapping for
- * fragment-local buffers.
- *
- * If the loaded buffer's scope is "local.fragment", this records the load
- * indices in the visitor's indice_map_ when seen for the first time. If an
- * entry already exists, the previously recorded indices are asserted
- * structurally equal to the current indices.
- *
- * This ensures all accesses to the same fragment-local buffer within the
- * parallel loop use a consistent index map. The function then continues
- * standard expression visitation.
- */
 void ParallelLoopNestVisitor::VisitExpr_(const BufferLoadNode *op) {
   if (op->buffer.scope() == "local.fragment") {
     if (p->indice_map_.find(op->buffer) != p->indice_map_.end()) {
@@ -173,91 +168,42 @@ void ParallelLoopNestVisitor::VisitExpr_(const BufferLoadNode *op) {
   StmtExprVisitor::VisitExpr_(op);
 }
 
-/**
- * @brief Construct a ParallelOpNode from a parallel loop nest root.
- *
- * Initializes the node with the given For loop as the root of the parallel
- * operator and immediately runs the internal ParallelLoopNestVisitor to collect
- * loop and buffer access information from the nested body.
- *
- * @param root The root For node representing the parallel loop nest to be
- * analyzed.
- */
 ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
   V.VisitStmt(root);
 }
 
-/**
- * @brief Create a copy of this ParallelOpNode wrapped as a TileOperator.
- *
- * Returns a new TileOperator that holds a deep copy of this ParallelOpNode.
- *
- * @return TileOperator A TileOperator owning a copy of this node.
- */
 TileOperator ParallelOpNode::Clone() const {
   auto op = make_object<ParallelOpNode>(*this);
   return ParallelOp(op);
 }
 
-/**
- * @brief No-op lowering: return the stored root statement unchanged.
- *
- * This implementation does not perform any transformation and returns the
- * operator's original root For statement as-is.
- *
- * @param T Lowering arguments (unused).
- * @return Stmt The original root statement held by this ParallelOpNode.
- */
 Stmt ParallelOpNode::Lower(const LowerArgs &T,
                            arith::Analyzer *analyzer) const {
   return root_;
 }
 
-/**
- * @brief Check whether a buffer is indexed by the loop's canonical (common)
- * iteration variables.
- *
- * Returns true if the recorded index mapping for `buffer` is structurally equal
- * to the sequence of loop iteration variables for this parallel op (i.e., the
- * buffer is accessed using the common access indices of the loop nest).
- *
- * @param buffer The buffer to check.
- * @return true if the buffer's index map equals the loop's iteration variables;
- * false otherwise.
- */
 bool ParallelOpNode::IsCommonAccessIndice(const Buffer &buffer) const {
   auto common_indice = loop_vars_.Map([](const auto &iv) { return iv->var; });
   return StructuralEqual()(indice_map_[buffer], common_indice);
 }
 
-/**
- * @brief Infer buffer layouts for a Parallel operator based on the chosen
- * inference level.
+/*! \brief Infer the layout for parallel operations based on different inference
+ * levels
  *
- * Attempts to compute a consistent LayoutMap for buffers accessed by a parallel
- * loop (root_) using explicit input layouts (T.layout_map), thread bounds
- * (T.thread_bounds), and optional buffer remapping/vectorization information in
- * T. Behavior depends on the supplied InferLevel:
- *  - kStrict: only accept pre-existing loop_layout_ (no inference).
- *  - kCommon: allow inference from explicit buffer fragments when available.
- *  - kFree: attempt more aggressive inference (derive loop partition from
- * read/write fragments, plan partitioning from vectorization/thread bounds, and
- * add predicates to constrain replication when necessary).
+ * The inference level controls how aggressively we try to infer and optimize
+ * layouts:
+ * - kStrict (2): Most conservative level. Only allows explicitly defined
+ * layouts. Returns empty layout map if loop_layout_ is not already defined.
+ *                Used when exact layout control is required.
  *
- * This method may mutate the node's internal state (sets loop_layout_ when
- * inferred and registers predicates via AddPredicate) and consults analyzer_
- * for symbolic proofs.
+ * - kCommon (1): Intermediate level between strict and free.
+ *                Allows common layout patterns while maintaining some
+ * constraints.
  *
- * @param T Container of auxiliary inputs used for inference (buffer_remap,
- * layout_map, and thread_bounds). The function uses T.layout_map for source
- * fragments and T.thread_bounds to bind thread-range information in inferred
- * fragments.
- * @param level Controls inference aggressiveness (kStrict, kCommon, kFree).
- * @return LayoutMap A map of buffers to inferred Fragment layouts for buffers
- * that did not already have layouts in T.layout_map. Returns an empty map when
- *         no inference was performed.
- * @throws LayoutConflictException If a computed loop partition conflicts with
- * an existing buffer fragment (incompatible thread mappings).
+ * - kFree (0):   Most permissive level. Allows maximum optimization freedom.
+ *                Will attempt layout inference even without source buffers.
+ *                Can generate new layouts based on vectorization and thread
+ * bounds. Used when maximum performance optimization is desired.
  */
 LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
                                       InferLevel level) const {
@@ -446,20 +392,6 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   return results;
 }
 
-/**
- * @brief Retrieve the loop's thread predicate with the thread variable
- * substituted.
- *
- * If a predicate is set for this ParallelOpNode, returns a copy of that
- * predicate where the placeholder input (InputPlaceholder(0)) is replaced by
- * the provided thread_var. If no predicate is defined, returns an empty
- * Optional.
- *
- * @param thread_var The thread loop variable to substitute for the predicate's
- * input placeholder.
- * @return Optional<PrimExpr> The substituted predicate expression, or
- * std::nullopt if none is defined.
- */
 Optional<PrimExpr> ParallelOpNode::GetPredicate(Var thread_var) const {
   if (predicate_.defined()) {
     return Substitute(predicate_.value(), {{InputPlaceholder(0), thread_var}});
@@ -468,32 +400,6 @@ Optional<PrimExpr> ParallelOpNode::GetPredicate(Var thread_var) const {
   }
 }
 
-/**
- * @brief Construct the complete fragment layout for a buffer within the
- * parallel loop.
- *
- * Given a buffer referenced inside the parallel loop, return a Fragment that
- * maps the buffer's logical indices to the loop's thread space and replication
- * extent.
- *
- * Detailed behavior:
- * - Precondition: a loop layout (loop_layout_) must be defined.
- * - If the buffer uses the common access indices of the loop, the loop's
- * fragment is returned directly.
- * - Otherwise, the function:
- *   - Computes the buffer's bijective index by appending the flattened
- * replication expression for unused iterators.
- *   - Inverts that bijection to obtain the replication extent of the buffer's
- * index space and combines it with the loop's replication extent to produce the
- *     destination replication extent.
- *   - Builds forward index placeholders for the buffer elements and maps them
- * through the inverted layout and the loop layout to derive the thread binding.
- *   - Returns a Fragment with the computed thread binding and combined
- * replication extent, with replicate variables condensed.
- *
- * @return Fragment The completed fragment describing thread binding and
- * replication extent for `buffer`.
- */
 Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
   ICHECK(loop_layout_.defined());
   if (IsCommonAccessIndice(buffer)) {

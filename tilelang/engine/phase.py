@@ -63,6 +63,26 @@ def should_enable_aggressive_merge(pass_ctx: Optional[PassContext] = None,
 
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
+    """
+    Bind target information and progressively legalize and lower frontend Tile IR into a form suitable for downstream optimization and codegen.
+    
+    This pass pipeline:
+    - Binds the provided target to the module.
+    - Legalizes frontend Tile IR into TVM-compatible constructs.
+    - Simplifies expressions.
+    - Configures reducer layouts and performs layout inference for fragments and shared memory.
+    - Lowers high-level tile operations and L2 persistent maps.
+    - Legalizes vectorized loops and inserts safety checks for memory accesses.
+    - Re-simplifies to remove redundancies introduced by safety checks.
+    - Attempts loop vectorization for dynamic-shaped loops.
+    
+    Parameters:
+        mod (IRModule): The input IR module containing frontend Tile IR.
+        target (Target): Target device information to bind into the module.
+    
+    Returns:
+        IRModule: The transformed module, ready for target-specific optimization passes.
+    """
     mod = tir.transform.BindTarget(target)(mod)
 
     # Legalize the frontend IR to make it compatible with TVM

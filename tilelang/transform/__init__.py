@@ -416,12 +416,25 @@ def LowerThreadAllreduce():
 
 
 def LowerDeviceKernelLaunch():
-    """LowerDeviceKernelLaunch
+    """
+    Create and return a transform pass that lowers device kernel launch constructs to target-specific IR.
+    
+    This pass transforms high-level device kernel launch and related intrinsics into lower-level
+    IR suitable for backend code generation and device-side lowering.
+    
+    Returns:
+        tvm.transform.Pass: The transform pass that performs device kernel launch lowering.
     """
     return _ffi_api.LowerDeviceKernelLaunch()  # type: ignore
 
 
 def LayoutReducer():
-    """LayoutReducer
+    """
+    Return a TVM transform pass that performs layout reduction/normalization.
+    
+    This wrapper delegates to the underlying FFI implementation and returns a pass object suitable for use in a PassContext or pass pipeline. The pass is intended to simplify or reduce tensor/layout-related representations during relay/tile transformations.
+    
+    Returns:
+        The transform pass object produced by the FFI backend.
     """
     return _ffi_api.LayoutReducer()  # type: ignore

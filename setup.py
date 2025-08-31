@@ -749,9 +749,20 @@ class TilelangExtensionBuild(build_ext):
 
     def build_cmake(self, ext):
         """
-        Build a single CMake-based extension.
-
-        :param ext: The extension (an instance of CMakeExtension).
+        Build a single CMake-based extension by generating a CMake config and invoking CMake/Ninja.
+        
+        Generates or updates a config.cmake in the build directory (based on the extension's sourcedir),
+        injecting LLVM/CUDA/ROCm and Python settings, then runs CMake to configure and build the target.
+        When running an in-place build the resulting library is placed under ./tilelang/lib; otherwise the
+        standard extension output directory is used.
+        
+        Parameters:
+            ext: The CMakeExtension to build; its `sourcedir` should contain the TVM/CMake `config.cmake`
+                 template under `3rdparty/tvm/cmake/`.
+        
+        Raises:
+            subprocess.CalledProcessError: If the CMake configuration or build commands fail.
+            OSError: If filesystem operations (read/write) fail.
         """
         # Only setup LLVM if it's enabled
         llvm_config_path = "OFF"

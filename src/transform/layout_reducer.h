@@ -10,6 +10,46 @@
 #include "../layout/layout.h"
 
 namespace tvm {
+/**
+ * Types of reduction operations supported by TL transforms.
+ *
+ * SUM   - arithmetic sum reduction.
+ * MAX   - elementwise maximum reduction.
+ * MIN   - elementwise minimum reduction.
+ */
+
+/**
+ * Representation semantics for a reducer.
+ *
+ * ALL  - reducer collapses all elements along the reduced axes.
+ * NONE - reducer does not collapse (used to represent a placeholder/no-op).
+ */
+
+/**
+ * Holds metadata describing a reducer used in layout transforms.
+ *
+ * Contains the reduction operation (`op`) and its representation semantics (`rep`).
+ */
+
+/**
+ * Construct a ReducerInfoNode from textual identifiers.
+ *
+ * @param op_str  String identifier for the reduction operation (e.g., "sum", "max", "min").
+ * @param rep_str String identifier for the representation semantics (e.g., "all", "none").
+ */
+
+/**
+ * Handle type for ReducerInfoNode (ObjectRef wrapper).
+ *
+ * Constructed from string identifiers for operation and representation.
+ *
+ * @param op_str  String identifier for the reduction operation (e.g., "sum", "max", "min").
+ * @param rep_str String identifier for the representation semantics (e.g., "all", "none").
+ */
+
+/**
+ * Attribute key used to attach ReducerInfo to IR nodes or other attribute maps.
+ */
 namespace tl {
 
 enum class ReducerOpType { SUM, MAX, MIN };
