@@ -650,32 +650,43 @@ public:
   bool hasSimtCopy() const { return has_simt_copy_; }
 
   /**
- * @brief Whether this emitter contains only warp-group MMA (WgMMA) operations.
- *
- * Returns true if the emitter detected exclusively WgMMA usage in the region it analyzed.
- *
- * @return bool true when only WgMMA-based code paths are present; false otherwise.
- */
-bool onlyHasWgMMA() const { return only_has_wgmma_; }
+   * @brief Whether this emitter contains only warp-group MMA (WgMMA)
+   * operations.
+   *
+   * Returns true if the emitter detected exclusively WgMMA usage in the region
+   * it analyzed.
+   *
+   * @return bool true when only WgMMA-based code paths are present; false
+   * otherwise.
+   */
+  bool onlyHasWgMMA() const { return only_has_wgmma_; }
 
 private:
-  template <typename NodeType> /**
-   * @brief Filter a statement by its producer/consumer role for emission.
-   *
-   * Returns one of:
-   * - the original statement (unchanged) when this emitter should emit it,
-   * - the result of visiting the statement (to descend into it) when mbarrier-only
-   *   mode requires full traversal for non-producer roles,
-   * - an empty evaluate (`Evaluate(0)`) when the statement should be omitted.
-   *
-   * The decision is based on the role of `op` as reported by `marker_`, the
-   * emitter mode (`is_emitting_producer_`), and the `mbarrier_only_` flag.
-   *
-   * @param op The statement node to filter; its role is queried via `marker_`.
-   * @return Stmt The statement to place into the emitted IR (possibly transformed
-   *              or an empty evaluate).
-   */
-  Stmt FilterByRole(const NodeType *op) {
+  template <
+      typename NodeType> /**
+                          * @brief Filter a statement by its producer/consumer
+                          * role for emission.
+                          *
+                          * Returns one of:
+                          * - the original statement (unchanged) when this
+                          * emitter should emit it,
+                          * - the result of visiting the statement (to descend
+                          * into it) when mbarrier-only mode requires full
+                          * traversal for non-producer roles,
+                          * - an empty evaluate (`Evaluate(0)`) when the
+                          * statement should be omitted.
+                          *
+                          * The decision is based on the role of `op` as
+                          * reported by `marker_`, the emitter mode
+                          * (`is_emitting_producer_`), and the `mbarrier_only_`
+                          * flag.
+                          *
+                          * @param op The statement node to filter; its role is
+                          * queried via `marker_`.
+                          * @return Stmt The statement to place into the emitted
+                          * IR (possibly transformed or an empty evaluate).
+                          */
+                         Stmt FilterByRole(const NodeType *op) {
     Role role = marker_.GetRole(op);
     if (mbarrier_only_) {
       if (role != Role::kProducer)

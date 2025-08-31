@@ -28,14 +28,17 @@ namespace tvm {
 /**
  * Holds metadata describing a reducer used in layout transforms.
  *
- * Contains the reduction operation (`op`) and its representation semantics (`rep`).
+ * Contains the reduction operation (`op`) and its representation semantics
+ * (`rep`).
  */
 
 /**
  * Construct a ReducerInfoNode from textual identifiers.
  *
- * @param op_str  String identifier for the reduction operation (e.g., "sum", "max", "min").
- * @param rep_str String identifier for the representation semantics (e.g., "all", "none").
+ * @param op_str  String identifier for the reduction operation (e.g., "sum",
+ * "max", "min").
+ * @param rep_str String identifier for the representation semantics (e.g.,
+ * "all", "none").
  */
 
 /**
@@ -43,8 +46,10 @@ namespace tvm {
  *
  * Constructed from string identifiers for operation and representation.
  *
- * @param op_str  String identifier for the reduction operation (e.g., "sum", "max", "min").
- * @param rep_str String identifier for the representation semantics (e.g., "all", "none").
+ * @param op_str  String identifier for the reduction operation (e.g., "sum",
+ * "max", "min").
+ * @param rep_str String identifier for the representation semantics (e.g.,
+ * "all", "none").
  */
 
 /**

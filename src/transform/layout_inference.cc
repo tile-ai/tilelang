@@ -560,13 +560,15 @@ private:
    * @brief Visit and mutate a Block node to attach inferred layout information.
    *
    * Converts the visited Block via the base visitor, asserts that every buffer
-   * allocated with scope "local.framgent" has an inferred layout in result_.layout_map,
-   * and attaches result_.layout_map to the Block's annotations under attr::kLayoutMap.
+   * allocated with scope "local.framgent" has an inferred layout in
+   * result_.layout_map, and attaches result_.layout_map to the Block's
+   * annotations under attr::kLayoutMap.
    *
-   * If any "local.framgent" buffer lacks an entry in result_.layout_map an ICHECK
-   * will fail with the offending buffer printed.
+   * If any "local.framgent" buffer lacks an entry in result_.layout_map an
+   * ICHECK will fail with the offending buffer printed.
    *
-   * @return Stmt The (possibly modified) Block statement with the layout-map annotation set.
+   * @return Stmt The (possibly modified) Block statement with the layout-map
+   * annotation set.
    */
   Stmt VisitStmt_(const BlockNode *op) final {
     Block block = Downcast<Block>(IRMutatorWithAnalyzer::VisitStmt_(op));
@@ -583,27 +585,30 @@ private:
   }
 
   /**
-   * @brief Visit and transform For nodes according to inferred layout information.
+   * @brief Visit and transform For nodes according to inferred layout
+   * information.
    *
-   * If the For node is present in result_.for_map, this method applies loop-level
-   * layout-driven transformations: it optionally partitions the loop across the
-   * thread index, vectorizes the loop body, and wraps the loop with a predicate
-   * if one was inferred for the loop root.
+   * If the For node is present in result_.for_map, this method applies
+   * loop-level layout-driven transformations: it optionally partitions the loop
+   * across the thread index, vectorizes the loop body, and wraps the loop with
+   * a predicate if one was inferred for the loop root.
    *
    * Detailed behavior:
-   * - Reads reducer information from the For node's attr::kReducerInfo annotation
-   *   (if present) to detect reduction targets.
+   * - Reads reducer information from the For node's attr::kReducerInfo
+   * annotation (if present) to detect reduction targets.
    * - Detects register-local buffer stores (buffers with scope "local") in the
    *   original loop body; if only register-local stores are present the loop is
-   *   treated as a register-local scenario and is not partitioned across threads.
-   * - Obtains the loop layout from result_.for_map[root] and, unless the loop is
-   *   register-local or skip_thread_partition_ is set, partitions the loop via
+   *   treated as a register-local scenario and is not partitioned across
+   * threads.
+   * - Obtains the loop layout from result_.for_map[root] and, unless the loop
+   * is register-local or skip_thread_partition_ is set, partitions the loop via
    *   PartitionLoop using thread_var_ and analyzer_.
    * - Scans the transformed loop body to determine whether it accesses any
    *   non-local buffers (scopes other than "local" or "local.fragment").
-   * - Scans the transformed loop body to detect reducers (based on reducer_info).
-   *   If a reducer is present the loop is NOT vectorized (reduction axes are
-   *   excluded from vectorization as a conservative workaround).
+   * - Scans the transformed loop body to detect reducers (based on
+   * reducer_info). If a reducer is present the loop is NOT vectorized
+   * (reduction axes are excluded from vectorization as a conservative
+   * workaround).
    * - If the loop has non-local accesses and no reducer, the loop is vectorized
    *   via VectorizeLoop.
    * - If a predicate exists in result_.predicate_map for the loop root and the
@@ -611,7 +616,8 @@ private:
    *   (possibly partitioned/vectorized) loop with that predicate; otherwise it
    *   returns the transformed For.
    *
-   * @return The possibly transformed For statement (or an IfThenElse wrapping it)
+   * @return The possibly transformed For statement (or an IfThenElse wrapping
+   * it)
    */
   Stmt VisitStmt_(const ForNode *op) final {
     Map<Var, ReducerInfo> reducer_info;

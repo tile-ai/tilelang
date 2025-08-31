@@ -145,7 +145,8 @@ std::string ReduceOpNode::MakeCodegenReducer() const {
  *   extra dimension; validates layout dimensionality consistency.
  * - If `clear` is set (or for sum/abssum reductions), an initial value is
  *   written to the clear buffer; for non-clearing sum/abssum a duplicate
- *   temporary buffer is allocated and accumulated back into dst after reduction.
+ *   temporary buffer is allocated and accumulated back into dst after
+ * reduction.
  * - Performs iterator compression for local reduction loops using `analyzer`.
  * - Detects parallel thread splitting from the normalized iterator sum and
  *   emits a call to a templated `tl::AllReduce<...>::run` (or `run_hopper`)
@@ -157,8 +158,10 @@ std::string ReduceOpNode::MakeCodegenReducer() const {
  *   clear buffer is used, it is allocated for the body.
  *
  * @param T Lowering context providing buffer and layout maps, thread bounds,
- *          target information, thread variable, and workspace allocation helper.
- * @param analyzer Analyzer used for iterator compression and arithmetic normalization.
+ *          target information, thread variable, and workspace allocation
+ * helper.
+ * @param analyzer Analyzer used for iterator compression and arithmetic
+ * normalization.
  * @return Stmt Lowered TIR statement implementing the reduction.
  */
 Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {

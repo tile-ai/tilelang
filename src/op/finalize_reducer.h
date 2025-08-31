@@ -22,21 +22,22 @@
  * - reducer: the tir::Buffer that holds the intermediate reduction values.
  * - op: the reducer operation to apply when finalizing values.
  */
- 
+
 /**
  * Lower this operator to a TIR statement.
  *
  * @param T Lowering arguments (buffers, indices, and other lowering context).
- * @param analyzer Arithmetic analyzer used to simplify expressions during lowering.
- * @return A tir::Stmt that implements the finalize-reducer semantics for the provided
- *         lowering context.
+ * @param analyzer Arithmetic analyzer used to simplify expressions during
+ * lowering.
+ * @return A tir::Stmt that implements the finalize-reducer semantics for the
+ * provided lowering context.
  */
 
 /**
  * Infer layout mapping for this operator.
  *
- * Determines how input and output buffer layouts relate for the finalize-reducer
- * operator at the given inference level.
+ * Determines how input and output buffer layouts relate for the
+ * finalize-reducer operator at the given inference level.
  *
  * @param T Layout inference arguments (including operand layouts and shapes).
  * @param level Inference precision level.
@@ -67,7 +68,8 @@
  * @param args Positional primitive expressions that parameterize the operator
  *             (e.g., shapes, axis indices). Documented where their meaning is
  *             not obvious from name or type in call sites.
- * @param vmap Mapping from operand names to tir::Buffer instances used by this operator.
+ * @param vmap Mapping from operand names to tir::Buffer instances used by this
+ * operator.
  */
 
 /**

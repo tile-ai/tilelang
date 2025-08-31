@@ -950,21 +950,25 @@ private:
     return entry;
   }
   /*!
-   * @brief Locate or create a storage entry from free lists to satisfy an AllocateNode.
+   * @brief Locate or create a storage entry from free lists to satisfy an
+   * AllocateNode.
    *
-   * Finds a reusable StorageEntry for the given AllocateNode (constant or symbolic size) using
-   * two-tiered strategies:
-   * - For constant-size allocations (>0): prefer a free entry that is >= required size; if none,
-   *   coalesce smaller free constant-size entries until the sum meets the request and return a new
-   *   StorageEntry representing the merged space. Very small constant allocations (<= 32 bits)
-   *   are not reused and will allocate a fresh entry.
-   * - For symbolic-size (unknown at compile time): pick and remove an arbitrary entry from the
-   *   symbolic free list.
+   * Finds a reusable StorageEntry for the given AllocateNode (constant or
+   * symbolic size) using two-tiered strategies:
+   * - For constant-size allocations (>0): prefer a free entry that is >=
+   * required size; if none, coalesce smaller free constant-size entries until
+   * the sum meets the request and return a new StorageEntry representing the
+   * merged space. Very small constant allocations (<= 32 bits) are not reused
+   * and will allocate a fresh entry.
+   * - For symbolic-size (unknown at compile time): pick and remove an arbitrary
+   * entry from the symbolic free list.
    *
-   * If no suitable free entry is found, a fresh StorageEntry is created via NewAlloc.
+   * If no suitable free entry is found, a fresh StorageEntry is created via
+   * NewAlloc.
    *
    * @param op Pointer to the AllocateNode to satisfy. Must be non-null.
-   * @return StorageEntry* A storage entry that will hold the allocation (may be newly created).
+   * @return StorageEntry* A storage entry that will hold the allocation (may be
+   * newly created).
    */
   StorageEntry *FindAlloc(const AllocateNode *op) {
     ICHECK(op != nullptr);

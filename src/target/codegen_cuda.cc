@@ -928,24 +928,24 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
  * @brief Emit CUDA/TensorLib-specific code for a call expression.
  *
  * This visitor handles CallNode intrinsics and builtins that require emitting
- * CUDA/TL-specific code (inline PTX/ASM sequences, TensorLanguage runtime calls,
- * WMMA/TMA helpers, barriers, cp.async primitives, index-map based stores,
- * reinterpret/packing helpers, and various mma/ldmatrix patterns). The function
- * writes the generated code to the provided output stream and falls back to the
- * C codegen for unrecognized calls.
+ * CUDA/TL-specific code (inline PTX/ASM sequences, TensorLanguage runtime
+ * calls, WMMA/TMA helpers, barriers, cp.async primitives, index-map based
+ * stores, reinterpret/packing helpers, and various mma/ldmatrix patterns). The
+ * function writes the generated code to the provided output stream and falls
+ * back to the C codegen for unrecognized calls.
  *
  * The method recognizes and emits code for (non-exhaustive): cp.async and its
- * commit/wait variants, tma_load/store and im2col variants, ptX ldmatrix/stmatrix
- * helpers, mbarrier APIs, cooperative grid sync, WMMA/legacy MMA intrinsics
- * (fill/load/store/mma/bmma/ptx_mma/ptx_mma_sp), low-level PTX asm helpers
- * (ldg32, cp_async bulk/init/arrive/wait barriers), reinterpret paths for
- * special small-float encodings (e.g., float4 e2m1fn), tl::tl_gemm and related
- * external calls, and other TL runtime calls.
+ * commit/wait variants, tma_load/store and im2col variants, ptX
+ * ldmatrix/stmatrix helpers, mbarrier APIs, cooperative grid sync, WMMA/legacy
+ * MMA intrinsics (fill/load/store/mma/bmma/ptx_mma/ptx_mma_sp), low-level PTX
+ * asm helpers (ldg32, cp_async bulk/init/arrive/wait barriers), reinterpret
+ * paths for special small-float encodings (e.g., float4 e2m1fn), tl::tl_gemm
+ * and related external calls, and other TL runtime calls.
  *
  * Side effects:
  * - Emits to `os` and the internal codegen output stream.
- * - May set internal feature flags (e.g., need_cooperative_groups_, need_mma_h_,
- *   need_cast_smem_ptr_to_int_, enable_sparse_gemm_).
+ * - May set internal feature flags (e.g., need_cooperative_groups_,
+ * need_mma_h_, need_cast_smem_ptr_to_int_, enable_sparse_gemm_).
  * - May open/close SSA scopes and mutate internal variable mappings.
  * - May call LOG(FATAL) / CHECK / ICHECK on invalid or unsupported argument
  *   patterns.

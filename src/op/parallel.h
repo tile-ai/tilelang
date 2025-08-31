@@ -24,11 +24,14 @@
  *
  * @param small_frag Fragment describing the smaller layout fragment.
  * @param large_frag Fragment describing the larger layout fragment.
- * @param small_frag_indices Index expressions that map accesses into `small_frag`.
- * @param large_frag_indices Index expressions that map accesses into `large_frag`.
- * @param analyzer_ Analyzer used for symbolic simplification and proving relations.
- * @return true if `small_frag` can be proven to be contained in `large_frag` given
- *         the index mappings and analyzer; false otherwise.
+ * @param small_frag_indices Index expressions that map accesses into
+ * `small_frag`.
+ * @param large_frag_indices Index expressions that map accesses into
+ * `large_frag`.
+ * @param analyzer_ Analyzer used for symbolic simplification and proving
+ * relations.
+ * @return true if `small_frag` can be proven to be contained in `large_frag`
+ * given the index mappings and analyzer; false otherwise.
  */
 
 /**
@@ -49,7 +52,8 @@
  * reductions, and loop transformations) to produce an equivalent tir::Stmt.
  *
  * @param T Lowering options and context.
- * @param analyzer Optional analyzer for symbolic simplification during lowering.
+ * @param analyzer Optional analyzer for symbolic simplification during
+ * lowering.
  * @return A tir::Stmt representing the lowered operator.
  */
 
@@ -65,11 +69,12 @@
  */
 
 /**
- * Return an optional predicate expression associated with the given thread variable.
+ * Return an optional predicate expression associated with the given thread
+ * variable.
  *
  * If the loop nest imposes a condition on `thread_var` (e.g., bounds checks or
- * tiling edge predicates), this returns the combined predicate; otherwise returns
- * an empty Optional.
+ * tiling edge predicates), this returns the combined predicate; otherwise
+ * returns an empty Optional.
  *
  * @param thread_var The thread variable for which to retrieve the predicate.
  * @return Optional containing the predicate expression if present.
@@ -84,7 +89,8 @@
 
 /**
  * Complete the layout fragment for `buffer` by filling in any missing
- * dimension or stride information derived from access patterns in the loop nest.
+ * dimension or stride information derived from access patterns in the loop
+ * nest.
  *
  * @param buffer The buffer whose fragment should be completed.
  * @return A Fragment representing the completed layout for `buffer`.
