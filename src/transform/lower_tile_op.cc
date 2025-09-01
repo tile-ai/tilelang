@@ -12,9 +12,9 @@
 #include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/builtin.h"
-#include "../op/operator.h"
 #include "../op/gemm.h"
 #include "../op/gemm_sp.h"
+#include "../op/operator.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "loop_partition.h"
