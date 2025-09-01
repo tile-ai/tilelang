@@ -346,15 +346,15 @@ public:
     src_ = src;
     result_ = true;
     if (stmt->IsInstance<AttrStmtNode>()) {
-      VisitStmt_(static_cast<const AttrStmtNode *>(stmt));
+      VisitStmt_(reinterpret_cast<const AttrStmtNode *>(stmt));
     } else if (stmt->IsInstance<ForNode>()) {
-      VisitStmt_(static_cast<const ForNode *>(stmt));
+      VisitStmt_(reinterpret_cast<const ForNode *>(stmt));
     } else if (stmt->IsInstance<IfThenElseNode>()) {
-      VisitStmt_(static_cast<const IfThenElseNode *>(stmt));
+      VisitStmt_(reinterpret_cast<const IfThenElseNode *>(stmt));
     } else if (stmt->IsInstance<WhileNode>()) {
-      VisitStmt_(static_cast<const WhileNode *>(stmt));
+      VisitStmt_(reinterpret_cast<const WhileNode *>(stmt));
     } else if (stmt->IsInstance<BufferStoreNode>()) {
-      VisitStmt_(static_cast<const BufferStoreNode *>(stmt));
+      VisitStmt_(reinterpret_cast<const BufferStoreNode *>(stmt));
     } else {
       return false;
     }
@@ -994,7 +994,7 @@ private:
       }
       // enter/exit new scope
       if (s.stmt->IsInstance<AttrStmtNode>()) {
-        const auto *op = static_cast<const AttrStmtNode *>(s.stmt);
+        const auto *op = reinterpret_cast<const AttrStmtNode *>(s.stmt);
         if (op->attr_key == tir::attr::thread_extent ||
             op->attr_key == tir::attr::virtual_thread ||
             tir::attr::IsPragmaKey(op->attr_key)) {
@@ -1003,7 +1003,7 @@ private:
           ICHECK(op->attr_key == tir::attr::extern_scope);
         }
       } else if (s.stmt->IsInstance<ForNode>()) {
-        const auto *op = static_cast<const ForNode *>(s.stmt);
+        const auto *op = reinterpret_cast<const ForNode *>(s.stmt);
         if (op->kind == ForKind::kParallel) {
           if (thread_scope_ == nullptr || thread_scope_ == op) {
             PlanNewScope(op);
@@ -1183,7 +1183,7 @@ private:
  *
  */
 struct BufferVarInfo {
-  enum DeclarationLocation {
+  enum DeclarationLocation : uint8_t {
     kPrimFuncParam = (1 << 0),
     kPrimFuncBufferMap = (1 << 1),
     kAllocateNode = (1 << 2),

@@ -31,15 +31,15 @@ struct AtomicAddVectorizePlanResult {
 
 class AtomicAddVectorizePlanner : public arith::IRVisitorWithAnalyzer {
 public:
+  int64_t max_vector_size = 1;
   AtomicAddVectorizePlanner() = default;
-  int max_vector_size = 1;
   AtomicAddVectorizePlanResult Plan(const For &node, Var thread_var,
                                     Range thread_bounds, int vectorize_hint) {
     this->max_vector_size = vectorize_hint;
     this->thread_var = std::move(thread_var);
     this->thread_bounds = std::move(thread_bounds);
     this->operator()(node);
-    return {vector_size_, dynamic_, condition_};
+    return {static_cast<int>(vector_size_), dynamic_, condition_};
   }
 
 private:
@@ -105,7 +105,7 @@ private:
       // If gcd_base is equal to the last dimension,
       // we should analyze the second-to-last dimension
       // in relation to the last dimension.
-      if (gcd_base < Downcast<IntImm>(last_dim)->value) {
+      if (gcd_base < static_cast<int>(Downcast<IntImm>(last_dim)->value)) {
         max_vector_size = gcd_base;
       }
 
@@ -113,7 +113,7 @@ private:
 
       PrimExpr elem_offset = 0;
       PrimExpr stride = 1;
-      for (int i = indices.size() - 1; i >= 0; --i) {
+      for (auto i = static_cast<int>(indices.size()) - 1; i >= 0; --i) {
         elem_offset = elem_offset + indices[i] * stride;
         stride = stride * buffer->shape[i];
       }
@@ -126,14 +126,14 @@ private:
       // dynamic shape load: get the vectorization condition
       dynamic_ = true;
       PrimExpr offset = buffer.OffsetOf(indices).back();
-      condition_ = (FloorMod(offset, vector_size_) == 0);
+      condition_ = (FloorMod(offset, IntImm(DataType::Int(32), vector_size_)) == 0);
     }
   }
 
   const ForNode *inner_for_{};
   Map<Var, Range> iter_map_;
   bool has_nonlocal_memory_access_ = false;
-  int vector_size_ = 4;
+  int64_t vector_size_ = 4;
   Var thread_var;
   Range thread_bounds;
   bool dynamic_ = false;

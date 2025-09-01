@@ -75,8 +75,6 @@ public:
       for (size_t i = 0; i < indices.size(); ++i) {
         auto index = indices[i];
         auto bound = analyzer_->const_int_bound(index);
-        int64_t upper_bound = bound->max_value + 1;
-        int64_t shape = Downcast<IntImm>(buffer->shape[i])->value;
 
         // Collect the variables that used in the index
         std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> used_vars;

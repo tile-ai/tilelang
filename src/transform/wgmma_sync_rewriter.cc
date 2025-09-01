@@ -218,7 +218,7 @@ private:
         gemm_count++;
       } else if (isGemmSync(new_seq[i])) {
         auto call = Downcast<Evaluate>(new_seq[i])->value.as<CallNode>();
-        auto sync_index = Downcast<IntImm>(call->args[1])->value;
+        auto sync_index = static_cast<int>(Downcast<IntImm>(call->args[1])->value);
         auto wait_count = gemm_count - sync_index - 1;
         if (sync_index > max_sync_index)
           max_sync_index = sync_index;

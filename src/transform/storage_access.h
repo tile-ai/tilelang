@@ -49,7 +49,7 @@ using runtime::StorageScope;
 class TileLangStorageAccessVisitor : public IRVisitorWithAnalyzer {
 public:
   /*! \brief Storage access type */
-  enum AccessType {
+  enum AccessType : uint8_t {
     kRead,
     kWrite,
     kSync,
@@ -88,7 +88,7 @@ public:
   /*! \brief Access pattern about a single statement */
   struct StmtEntry {
     /*! \brief The statement */
-    const Object *stmt{};;{};
+    const Object *stmt{};
     /*! \brief access patterns in the statement */
     std::vector<AccessEntry> access;
   };

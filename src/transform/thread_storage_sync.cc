@@ -613,7 +613,7 @@ private:
   Stmt VisitStmt_(const EvaluateNode *op) final {
     const CallNode *call = nullptr;
     if (op->value->IsInstance<CallNode>()) {
-      call = static_cast<const CallNode *>(op->value.get());
+      call = op->value.as<CallNode>();
       if (call->op.same_as(builtin::tvm_storage_sync())) {
         const auto &args = call->args;
         ICHECK(!args.empty());

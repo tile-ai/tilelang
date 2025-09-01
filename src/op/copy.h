@@ -21,7 +21,7 @@ using namespace tir;
 /*!
  * \brief Copy instruction type.
  */
-enum class CopyInst {
+enum class CopyInst : uint8_t {
   kNormal = 0,    // utilize ldg/stg or cpasync or any buffer copy
   kLDSM = 1,      // ldmatrix memory copy
   kSTSM = 2,      // stmatrix memory copy
@@ -105,13 +105,13 @@ public:
 
   mutable ParallelOp par_op_; // Optional associated parallelization operator
 
-  enum class EvictionPolicy {
+  enum class EvictionPolicy : uint8_t {
     kEvictNormal = 0,
     kEvictFirst = 1,
     kEvictLast = 2,
   };
 
-  int eviction_policy; // Policy for cache eviction
+  uint8_t eviction_policy; // Policy for cache eviction
   static constexpr const char *_type_key = "tl.Copy";
   TVM_DECLARE_FINAL_OBJECT_INFO(CopyNode, TileOperatorNode);
 

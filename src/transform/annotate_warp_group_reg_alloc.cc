@@ -33,8 +33,8 @@ private:
   void VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
       if (call->op.same_as(set_max_nreg())) {
-        int reg_hint = call->args[0].as<IntImmNode>()->value;
-        int is_inc = call->args[1].as<IntImmNode>()->value;
+        auto reg_hint = call->args[0].as<IntImmNode>()->value;
+        auto is_inc = call->args[1].as<IntImmNode>()->value;
         ICHECK(reg_hint <= 240 && reg_hint >= 24)
             << "Invalid reg hint: " << reg_hint;
         ICHECK(is_inc == 0 || is_inc == 1) << "Invalid is_inc: " << is_inc;
@@ -98,8 +98,8 @@ private:
       Optional<Stmt> consumer_body = if_then_else->else_case;
       ICHECK(consumer_body.defined()) << "Consumer body is undefined";
 
-      int dec_reg = nreg_[0].as<IntImmNode>()->value;
-      int inc_reg = nreg_[1].as<IntImmNode>()->value;
+      auto dec_reg = nreg_[0].as<IntImmNode>()->value;
+      auto inc_reg = nreg_[1].as<IntImmNode>()->value;
 
       auto inc_reg_stmt = Evaluate(0);
       auto dec_reg_stmt = Evaluate(0);
@@ -110,10 +110,12 @@ private:
       bool has_simt_copy = false; // Placeholder
 
       if (dec_reg >= 0 && inc_reg >= 0 && !has_simt_copy) {
+        auto inc_reg_num = IntImm(DataType::Int(32), inc_reg == 0 ? 240 : inc_reg);
+        auto dec_reg_num = IntImm(DataType::Int(32), dec_reg == 0 ? 24 : dec_reg);
         inc_reg_stmt = Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                                     {inc_reg == 0 ? 240 : inc_reg, 1}));
+                                     {inc_reg_num, 1}));
         dec_reg_stmt = Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                                     {dec_reg == 0 ? 24 : dec_reg, 0}));
+                                     {dec_reg_num, 0}));
       }
 
       // Inject register setting statements

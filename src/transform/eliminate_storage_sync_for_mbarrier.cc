@@ -37,7 +37,7 @@ public:
     if (op->attr_key == "thread_extent") {
       const VarNode *var = nullptr;
       if (op->node->IsInstance<VarNode>()) {
-        var = static_cast<const VarNode *>(op->node.get());
+        var = op->node.as<VarNode>();
         if (var->name_hint == "threadIdx.x") {
           thread_extent_ = op;
         }
@@ -49,7 +49,7 @@ public:
   Stmt VisitStmt_(const EvaluateNode *op) final {
     const CallNode *call = nullptr;
     if (op->value->IsInstance<CallNode>()) {
-      call = static_cast<const CallNode *>(op->value.get());
+      call = op->value.as<CallNode>();
       if (call->op.same_as(builtin::tvm_storage_sync())) {
         // Skip storage sync if we're in a region with mbarrier operations
         // and we're not in a for loop with mbarrier operations

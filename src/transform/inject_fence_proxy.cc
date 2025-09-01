@@ -36,7 +36,7 @@ namespace tl {
 
 using namespace tir;
 
-enum class Proxy { kGeneric, kAsync, kBoth };
+enum class Proxy : uint8_t { kGeneric, kAsync, kBoth };
 
 class ProxyMarker : public StmtVisitor {
 public:

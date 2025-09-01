@@ -192,7 +192,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const ForNode *op) {
         arith::IntSet::FromRange(Range::FromMinExtent(op->min, op->extent));
     for (AccessEntry &e : s.access) {
       if (e.buffer.defined()) {
-        ICHECK(e.touched.size());
+        ICHECK(!e.touched.empty());
         Array<arith::IntSet> new_touched;
         for (const auto &touched : e.touched) {
           new_touched.push_back(arith::EvalSet(touched, relax_map));
@@ -287,9 +287,11 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
       Array<Range> buffer_ranges;
       // from indices to buffer indices
       ICHECK(buffer->shape.size() == load->indices.size());
+      // Use buffer shape and indices to compute the buffer_ranges for each dimension.
       for (size_t i = 0; i < buffer->shape.size(); ++i) {
-        buffer_ranges.push_back(
-            Range::FromMinExtent(load->indices[i], buffer->shape[i]));
+        PrimExpr min = load->indices[i];
+        PrimExpr extent = make_const(buffer->shape[i].dtype(), 1);
+        buffer_ranges.push_back(Range::FromMinExtent(min, extent));
       }
       if (Enabled(buffer_var, scope)) {
         ICHECK(allow_append_);

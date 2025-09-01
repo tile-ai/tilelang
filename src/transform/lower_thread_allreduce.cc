@@ -176,7 +176,6 @@ public:
     }
 
     BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    op = load.get();
 
     if (auto opt = GetRemappedBuffer(load->buffer)) {
       load.CopyOnWrite()->buffer = opt.value();

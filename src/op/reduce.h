@@ -14,7 +14,7 @@ namespace tl {
 
 using namespace tir;
 
-enum class ReduceType {
+enum class ReduceType : uint8_t {
   kSum,
   kAbsSum,
   kMax,

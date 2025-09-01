@@ -86,7 +86,7 @@ public:
   Optional<PrimExpr> GetPredicate(Var thread_var) const;
 
   // Clone this operator.
-  TileOperator Clone() const;
+  TileOperator Clone() const override;
 
 private:
   // Complete the fragment layout for a given buffer.

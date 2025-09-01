@@ -485,7 +485,6 @@ private:
                                                   // non-vectorized loop
       return for_node;
     }
-    int vectorize_hint = res.vector_size;
     auto rewriter = VectorizeRewriterDynamic(res, disable_dynamic_tail_split_);
     return Downcast<For>(rewriter(for_node));
   }

@@ -19,7 +19,7 @@ namespace tl {
 
 using namespace tir;
 
-enum class Role { kConsumer, kProducer, kBoth };
+enum class Role : uint8_t { kConsumer, kProducer, kBoth };
 
 class WarpSpecializedRoleMarker_ : public StmtVisitor {
 public:

@@ -25,7 +25,7 @@ using AddWorkspaceCallback = std::function<PrimExpr(int, DataType)>;
 using LayoutMap = Map<Buffer, Layout>;
 using BufferMap = Map<Var, Buffer>;
 
-enum class InferLevel {
+enum class InferLevel : uint8_t {
   kFree = 0,
   kCommon = 1,
   kStrict = 2,

@@ -32,7 +32,7 @@ struct LoopInfo {
   PrimExpr min;
 };
 
-enum class Role { kConsumer, kProducer, kBoth };
+enum class Role : uint8_t { kConsumer, kProducer, kBoth };
 
 class ProducerBufferDetector : public StmtExprVisitor {
 public:

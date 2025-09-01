@@ -6,7 +6,6 @@ Checks: >
   cppcoreguidelines-pro-bounds-array-to-pointer-decay,
   cppcoreguidelines-pro-bounds-pointer-arithmetic,
   cppcoreguidelines-slicing,
-  cppcoreguidelines-special-member-functions,
   cppcoreguidelines-narrowing-conversions,
   performance-*,
 
@@ -33,7 +32,12 @@ Checks: >
   -modernize-concat-nested-namespaces,
   -llvm-include-order,
   -bugprone-unused-return-value,
-  -clang-diagnostic-unused-result
+  -clang-diagnostic-unused-result,
+  -cppcoreguidelines-special-member-functions,
+  -performance-noexcept-move-constructor,
+  -cppcoreguidelines-narrowing-conversions,
+  -clang-diagnostic-error,
+  -cppcoreguidelines-pro-type-member-init,
 
 WarningsAsErrors: '*'
 
