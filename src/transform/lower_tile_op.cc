@@ -12,6 +12,8 @@
 #include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/builtin.h"
+#include "../op/gemm.h"
+#include "../op/gemm_sp.h"
 #include "../op/operator.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
@@ -84,7 +86,7 @@ public:
 private:
   void VisitStmt_(const EvaluateNode *op) {
     auto call = Downcast<Call>(op->value);
-    if (call->op.same_as(Op::Get("tl.gemm"))) {
+    if (call->op.same_as(Gemm::Get())) {
       auto srcA_buffer_access_ptr = Downcast<Call>(call->args[0]);
       ICHECK(srcA_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
       auto srcA_buffer_var = Downcast<Var>(srcA_buffer_access_ptr->args[1]);
@@ -97,7 +99,7 @@ private:
       buffer_var_gemm_.push_back(srcA_buffer_var);
       buffer_var_gemm_.push_back(srcB_buffer_var);
       buffer_var_gemm_.push_back(dst_buffer_var);
-    } else if (call->op.same_as(Op::Get("tl.gemm_sp"))) {
+    } else if (call->op.same_as(GemmSP::Get())) {
       auto srcA_buffer_access_ptr = Downcast<Call>(call->args[0]);
       ICHECK(srcA_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
       auto srcA_buffer_var = Downcast<Var>(srcA_buffer_access_ptr->args[1]);

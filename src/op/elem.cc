@@ -186,7 +186,8 @@ Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     auto init_loop = MakeSIMTLoop(analyzer);
     auto vectorized_thread_loop = VectorizeLoop(init_loop);
     return vectorized_thread_loop;
-  } else if (dst.scope() == "shared.dyn" || dst.scope() == "shared") {
+  } else if (dst.scope() == "shared.dyn" || dst.scope() == "shared" ||
+             dst.scope() == "global") {
     auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
     par_op->InferLayout({T.target, T.thread_bounds, T.layout_map},
                         InferLevel::kFree);
