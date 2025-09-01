@@ -109,7 +109,7 @@ PrimFunc ClusterPlanning(PrimFunc f) { return ClusterPlanner::Substitute(f); }
 namespace transform {
 
 tvm::transform::Pass ClusterPlanning() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule& m, const PassContext& ctx) {
     return ClusterPlanning(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ClusterPlanning", {});

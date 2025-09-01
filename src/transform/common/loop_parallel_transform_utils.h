@@ -26,7 +26,7 @@ using arith::IRVisitorWithAnalyzer;
 
 class ParallelLoopTransformer : public IRMutatorWithAnalyzer {
 public:
-  static Stmt Substitute(Stmt stmt, bool skip_thread_partition = false) {
+  static Stmt Substitute(const Stmt& stmt, bool skip_thread_partition = false) {
     arith::Analyzer analyzer;
     ParallelLoopTransformer transformer(&analyzer);
     return transformer.VisitStmt(stmt);
@@ -86,7 +86,7 @@ public:
             used_vars.insert(GetRef<Var>(v));
           }
         });
-        if (used_vars.size() == 0) {
+        if (used_vars.empty()) {
           continue;
         }
 

@@ -7,6 +7,7 @@
 #include <tvm/tir/transform.h>
 
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "../op/builtin.h"
@@ -145,8 +146,8 @@ private:
 using namespace tir::transform;
 
 tvm::transform::Pass AnnotateWarpGroupRegAlloc() {
-  auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) -> PrimFunc {
-    return SetMaxNRegInjector::Inject(f);
+  auto pass_func = [](PrimFunc f, const IRModule& m, const PassContext& ctx) -> PrimFunc {
+    return SetMaxNRegInjector::Inject(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.AnnotateWarpGroupRegAlloc", {});
 }

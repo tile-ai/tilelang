@@ -96,7 +96,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const EvaluateNode *op) {
   curr_stmt_.stmt = op;
   IRVisitorWithAnalyzer::VisitStmt_(op);
   // push to the scope
-  if (curr_stmt_.access.size() != 0) {
+  if (!curr_stmt_.access.empty()) {
     scope_.back().push_back(curr_stmt_);
     curr_stmt_.access.clear();
   }
@@ -185,7 +185,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const ForNode *op) {
   s.stmt = op;
   s.access = Summarize(std::move(scope_.back()), op);
   scope_.pop_back();
-  if (s.access.size() != 0) {
+  if (!s.access.empty()) {
     // relax the touched set to contain all ranges in the loop.
     std::unordered_map<const VarNode *, arith::IntSet> relax_map;
     relax_map[op->loop_var.get()] =
@@ -334,7 +334,7 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
         auto linear_to_indices = [this](PrimExpr offset,
                                         const Array<PrimExpr> &shape) {
           Array<PrimExpr> indices;
-          PrimExpr remaining = offset;
+          PrimExpr remaining = std::move(offset);
           for (size_t i = 0; i < shape.size(); ++i) {
             PrimExpr stride = make_const(DataType::Int(32), 1);
             for (size_t j = i + 1; j < shape.size(); ++j) {
@@ -393,7 +393,7 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
 }
 
 Map<Var, Range>
-TileLangStorageAccessVisitor::ComputeThreadRange(Array<IterVar> threads) {
+TileLangStorageAccessVisitor::ComputeThreadRange(const Array<IterVar>& threads) {
   Map<Var, Range> thread_range;
   for (const auto &th : threads) {
     auto thread_tag = th->thread_tag;
@@ -411,7 +411,7 @@ TileLangStorageAccessVisitor::ComputeThreadRange(Array<IterVar> threads) {
   return thread_range;
 }
 
-StorageScope TileLangStorageAccessVisitor::GetScope(Var buffer_var) const {
+StorageScope TileLangStorageAccessVisitor::GetScope(const Var& buffer_var) const {
   if (buffer_var->type_annotation.as<PointerTypeNode>()) {
     return StorageScope::Create(GetPtrStorageScope(buffer_var));
   }

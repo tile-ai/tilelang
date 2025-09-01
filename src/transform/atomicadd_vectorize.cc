@@ -14,6 +14,7 @@
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
+#include <utility>
 
 namespace tvm {
 namespace tl {
@@ -35,8 +36,8 @@ public:
   AtomicAddVectorizePlanResult Plan(const For &node, Var thread_var,
                                     Range thread_bounds, int vectorize_hint) {
     this->max_vector_size = vectorize_hint;
-    this->thread_var = thread_var;
-    this->thread_bounds = thread_bounds;
+    this->thread_var = std::move(thread_var);
+    this->thread_bounds = std::move(thread_bounds);
     this->operator()(node);
     return {vector_size_, dynamic_, condition_};
   }
@@ -79,7 +80,7 @@ private:
     return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
   }
 
-  void UpdateVectorSize(const Array<PrimExpr> indices, const Buffer &buffer) {
+  void UpdateVectorSize(const Array<PrimExpr>& indices, const Buffer &buffer) {
     if (!inner_for_)
       return;
     auto extent_ptr = inner_for_->extent.as<IntImmNode>();
@@ -129,7 +130,7 @@ private:
     }
   }
 
-  const ForNode *inner_for_;
+  const ForNode *inner_for_{};
   Map<Var, Range> iter_map_;
   bool has_nonlocal_memory_access_ = false;
   int vector_size_ = 4;
@@ -141,7 +142,7 @@ private:
 
 class AtomicAddVectorizeRewriter : public StmtExprMutator {
 public:
-  AtomicAddVectorizeRewriter(AtomicAddVectorizePlanResult plan)
+  AtomicAddVectorizeRewriter(const AtomicAddVectorizePlanResult& plan)
       : vector_size_(plan.vector_size), condition_(plan.condition),
         dynamic_(plan.dynamic) {}
 
@@ -240,7 +241,7 @@ private:
     return StmtExprMutator::VisitExpr_(node);
   }
 
-  const ForNode *inner_for_;
+  const ForNode *inner_for_{};
   const int vector_size_;
   const PrimExpr condition_;
   const bool dynamic_;
@@ -290,7 +291,7 @@ For VectorizeAtomicAdd(const For &for_node, Var thread_var, Range thread_bounds,
     int vectorize_hint = vectorize_size_max;
     AtomicAddVectorizePlanResult res = {1, false, 0};
     AtomicAddVectorizePlanner planner;
-    res = planner.Plan(for_node, thread_var, thread_bounds, vectorize_hint);
+    res = planner.Plan(for_node, std::move(thread_var), std::move(thread_bounds), vectorize_hint);
     vectorize_hint = res.vector_size;
 
     if (vectorize_hint == 1)
