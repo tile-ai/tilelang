@@ -21,6 +21,7 @@
 #include "common/loop_fusion_utils.h"
 #include "common/loop_parallel_transform_utils.h"
 #include "common/union_find.h"
+#include "layout_reducer.h"
 #include "loop_partition.h"
 #include "loop_vectorize.h"
 #include "runtime/thread_storage_scope.h"
@@ -555,6 +556,20 @@ private:
       : arith::IRMutatorWithAnalyzer(analyzer), result_(result),
         skip_thread_partition_(skip_thread_partition){};
 
+  /**
+   * @brief Visit and mutate a Block node to attach inferred layout information.
+   *
+   * Converts the visited Block via the base visitor, asserts that every buffer
+   * allocated with scope "local.framgent" has an inferred layout in
+   * result_.layout_map, and attaches result_.layout_map to the Block's
+   * annotations under attr::kLayoutMap.
+   *
+   * If any "local.framgent" buffer lacks an entry in result_.layout_map an
+   * ICHECK will fail with the offending buffer printed.
+   *
+   * @return Stmt The (possibly modified) Block statement with the layout-map
+   * annotation set.
+   */
   Stmt VisitStmt_(const BlockNode *op) final {
     Block block = Downcast<Block>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
@@ -569,7 +584,48 @@ private:
     return block;
   }
 
+  /**
+   * @brief Visit and transform For nodes according to inferred layout
+   * information.
+   *
+   * If the For node is present in result_.for_map, this method applies
+   * loop-level layout-driven transformations: it optionally partitions the loop
+   * across the thread index, vectorizes the loop body, and wraps the loop with
+   * a predicate if one was inferred for the loop root.
+   *
+   * Detailed behavior:
+   * - Reads reducer information from the For node's attr::kReducerInfo
+   * annotation (if present) to detect reduction targets.
+   * - Detects register-local buffer stores (buffers with scope "local") in the
+   *   original loop body; if only register-local stores are present the loop is
+   *   treated as a register-local scenario and is not partitioned across
+   * threads.
+   * - Obtains the loop layout from result_.for_map[root] and, unless the loop
+   * is register-local or skip_thread_partition_ is set, partitions the loop via
+   *   PartitionLoop using thread_var_ and analyzer_.
+   * - Scans the transformed loop body to determine whether it accesses any
+   *   non-local buffers (scopes other than "local" or "local.fragment").
+   * - Scans the transformed loop body to detect reducers (based on
+   * reducer_info). If a reducer is present the loop is NOT vectorized
+   * (reduction axes are excluded from vectorization as a conservative
+   * workaround).
+   * - If the loop has non-local accesses and no reducer, the loop is vectorized
+   *   via VectorizeLoop.
+   * - If a predicate exists in result_.predicate_map for the loop root and the
+   *   loop was partitioned, the method returns an IfThenElse surrounding the
+   *   (possibly partitioned/vectorized) loop with that predicate; otherwise it
+   *   returns the transformed For.
+   *
+   * @return The possibly transformed For statement (or an IfThenElse wrapping
+   * it)
+   */
   Stmt VisitStmt_(const ForNode *op) final {
+    Map<Var, ReducerInfo> reducer_info;
+    if (op->annotations.count(attr::kReducerInfo))
+      reducer_info = op->annotations.Get(attr::kReducerInfo)
+                         ->as<Map<Var, ReducerInfo>>()
+                         .value();
+
     For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
     if (result_.for_map.count(GetRef<For>(op))) {
       auto root = GetRef<For>(op);
@@ -614,8 +670,17 @@ private:
           }
         }
       });
+      // Workaround: if reducer is presented, don't vectorize loop
+      // Best solution should be isolate reduction axis out of vectorization
+      bool has_reducer = false;
+      PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
+        if (!has_reducer)
+          if (const auto *store = obj.as<BufferStoreNode>()) {
+            has_reducer = reducer_info.count(store->buffer->data) != 0;
+          }
+      });
 
-      if (has_non_local) {
+      if (has_non_local && !has_reducer) {
         for_node = VectorizeLoop(for_node);
       }
 

@@ -10,8 +10,106 @@
 #include <tvm/tir/stmt_functor.h>
 
 #include "../layout/layout.h"
-#include "operator.h"
+#include "../transform/layout_reducer.h"
+#include "./operator.h"
 
+/**
+ * Exception indicating a layout conflict during layout inference or validation.
+ * The stored message is returned by what().
+ */
+
+/**
+ * Verify that `small_frag` is contained within `large_frag` under the provided
+ * index mappings and using symbolic reasoning via `analyzer_`.
+ *
+ * @param small_frag Fragment describing the smaller layout fragment.
+ * @param large_frag Fragment describing the larger layout fragment.
+ * @param small_frag_indices Index expressions that map accesses into
+ * `small_frag`.
+ * @param large_frag_indices Index expressions that map accesses into
+ * `large_frag`.
+ * @param analyzer_ Analyzer used for symbolic simplification and proving
+ * relations.
+ * @return true if `small_frag` can be proven to be contained in `large_frag`
+ * given the index mappings and analyzer; false otherwise.
+ */
+
+/**
+ * Visitor that traverses a parallel loop nest to collect loop structure,
+ * buffer access patterns, and to populate the associated ParallelOpNode.
+ */
+
+/**
+ * Construct a ParallelOpNode from a root For loop.
+ *
+ * @param root The TIR For node that is the root of the parallel loop nest.
+ */
+
+/**
+ * Lower this ParallelOpNode to a TIR statement.
+ *
+ * Performs lowering of the operator (including any necessary predicates,
+ * reductions, and loop transformations) to produce an equivalent tir::Stmt.
+ *
+ * @param T Lowering options and context.
+ * @param analyzer Optional analyzer for symbolic simplification during
+ * lowering.
+ * @return A tir::Stmt representing the lowered operator.
+ */
+
+/**
+ * Infer layouts for buffers used by this parallel operator.
+ *
+ * This performs layout inference at the requested level and returns a mapping
+ * from buffers to their inferred layout fragments.
+ *
+ * @param T Layout inference arguments and context.
+ * @param level Granularity level for inference.
+ * @return LayoutMap mapping buffers to inferred fragments.
+ */
+
+/**
+ * Return an optional predicate expression associated with the given thread
+ * variable.
+ *
+ * If the loop nest imposes a condition on `thread_var` (e.g., bounds checks or
+ * tiling edge predicates), this returns the combined predicate; otherwise
+ * returns an empty Optional.
+ *
+ * @param thread_var The thread variable for which to retrieve the predicate.
+ * @return Optional containing the predicate expression if present.
+ */
+
+/**
+ * Create and return a clone of this operator as a TileOperator (deep copy of
+ * operator state necessary for further transformations).
+ *
+ * @return A TileOperator referencing a cloned ParallelOpNode.
+ */
+
+/**
+ * Complete the layout fragment for `buffer` by filling in any missing
+ * dimension or stride information derived from access patterns in the loop
+ * nest.
+ *
+ * @param buffer The buffer whose fragment should be completed.
+ * @return A Fragment representing the completed layout for `buffer`.
+ */
+
+/**
+ * Determine whether `buffer` is accessed using only the loop-common indices
+ * (i.e., indices that correspond to the loop variables of this parallel nest).
+ *
+ * @param buffer The buffer to inspect.
+ * @return true if accesses use common loop indices; false otherwise.
+ */
+
+/**
+ * Conjoin `expr` into the operator's predicate (logical AND). If no predicate
+ * exists yet, `expr` becomes the predicate.
+ *
+ * @param expr Predicate expression to add.
+ */
 namespace tvm {
 namespace tl {
 
@@ -112,6 +210,8 @@ private:
   Array<IterVar> loop_vars_;
   // Analyzer for simplifying and analyzing expressions, mutable for lazy use.
   mutable arith::Analyzer analyzer_;
+  // Mapping from buffer to reducer info.
+  Map<Var, ReducerInfo> reducer_info_map_;
 };
 
 class ParallelOp : public TileOperator {
