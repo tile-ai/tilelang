@@ -14,6 +14,7 @@
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
+#include <utility>
 
 namespace tvm {
 namespace tl {
@@ -35,8 +36,8 @@ public:
   AtomicAddVectorizePlanResult Plan(const For &node, Var thread_var,
                                     Range thread_bounds, int vectorize_hint) {
     this->max_vector_size = vectorize_hint;
-    this->thread_var = thread_var;
-    this->thread_bounds = thread_bounds;
+    this->thread_var = std::move(thread_var);
+    this->thread_bounds = std::move(thread_bounds);
     this->operator()(node);
     return {vector_size_, dynamic_, condition_};
   }
@@ -79,7 +80,7 @@ private:
     return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
   }
 
-  void UpdateVectorSize(const Array<PrimExpr> indices, const Buffer &buffer) {
+  void UpdateVectorSize(const Array<PrimExpr> &indices, const Buffer &buffer) {
     if (!inner_for_)
       return;
     auto extent_ptr = inner_for_->extent.as<IntImmNode>();
@@ -141,12 +142,14 @@ private:
 
 class AtomicAddVectorizeRewriter : public StmtExprMutator {
 public:
-  AtomicAddVectorizeRewriter(AtomicAddVectorizePlanResult plan, Var thread_var,
-                             PrimExpr by_var, PrimExpr bx_var,
-                             Range thread_bounds, int stride_y, int stride_x)
+  AtomicAddVectorizeRewriter(const AtomicAddVectorizePlanResult &plan,
+                             Var thread_var, PrimExpr by_var, PrimExpr bx_var,
+                             const Range &thread_bounds, int stride_y,
+                             int stride_x)
       : vector_size_(plan.vector_size), condition_(plan.condition),
-        dynamic_(plan.dynamic), tx_var_(thread_var), by_var_(by_var),
-        bx_var_(bx_var), stride_y_(stride_y), stride_x_(stride_x) {
+        dynamic_(plan.dynamic), tx_var_(std::move(thread_var)),
+        by_var_(std::move(by_var)), bx_var_(std::move(bx_var)),
+        stride_y_(stride_y), stride_x_(stride_x) {
     const int64_t *tx_ext = as_const_int(thread_bounds->extent);
     ICHECK(tx_ext)
         << "thread_bounds->extent must be a constant for vectorization.";
@@ -324,8 +327,8 @@ static int GetVectorizeSizeMax(int compute_capability, DataType dtype) {
   return 1;
 }
 
-For VectorizeAtomicAdd(const For &for_node, Var thread_var, Range thread_bounds,
-                       int compute_capability) {
+For VectorizeAtomicAdd(const For &for_node, const Var &thread_var,
+                       const Range &thread_bounds, int compute_capability) {
 
   int vectorize_size_max = 1;
   int stride_x = -1, stride_y = -1;
