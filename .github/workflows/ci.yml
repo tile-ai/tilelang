@@ -47,6 +47,7 @@ jobs:
     - name: Run format check
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+        git submodule update --init --recursive
         mkdir -p build
         # run cmake to create the build directory with compile_commands.json
         cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_CUDA=ON; cd ..
