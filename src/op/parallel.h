@@ -192,7 +192,7 @@ private:
   // Check if the buffer is accessed with common indices (i.e., loop variables).
   bool IsCommonAccessIndice(const Buffer &buffer) const;
   // Add a predicate to the current predicate expression.
-  void AddPredicate(const PrimExpr &&expr) const {
+  void AddPredicate(const PrimExpr &expr) const {
     predicate_ = predicate_.defined() ? And(expr, predicate_.value()) : expr;
   }
   // Allow ParallelLoopNestVisitor to access private members.
@@ -218,7 +218,7 @@ class ParallelOp : public TileOperator {
 public:
   TVM_DEFINE_OBJECT_REF_METHODS(ParallelOp, TileOperator, ParallelOpNode);
 
-  ParallelOp(const For &&root) {
+  ParallelOp(const For &root) {
     auto op = make_object<ParallelOpNode>(root);
     data_ = std::move(op);
   }

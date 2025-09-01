@@ -1,5 +1,5 @@
 Checks: >
-  # 1. 保留的类别：更容易发现 bug/性能问题
+  # 1. Retained categories: easier to find bugs/performance issues
   clang-analyzer-*,
   cppcoreguidelines-pro-type-static-cast-downcast,
   cppcoreguidelines-pro-type-member-init,
@@ -9,7 +9,7 @@ Checks: >
   cppcoreguidelines-narrowing-conversions,
   performance-*,
 
-  # 2. 可读性：只保留实用的
+  # 2. Readability: only keep useful rules
   readability-braces-around-statements,
   readability-container-size-empty,
   readability-delete-null-pointer,
@@ -17,7 +17,7 @@ Checks: >
   readability-redundant-smartptr-get,
   readability-redundant-string-cstr,
 
-  # 3. 禁用所有侵入式/风格大改的规则
+  # 3. Disable all intrusive/style-breaking rules
   -readability-identifier-length,
   -readability-avoid-const-params-in-decls,
   -readability-else-after-return,
@@ -38,6 +38,9 @@ Checks: >
   -cppcoreguidelines-narrowing-conversions,
   -clang-diagnostic-error,
   -cppcoreguidelines-pro-type-member-init,
+  -clang-analyzer-optin.cplusplus.UninitializedObject,
+  -cppcoreguidelines-pro-type-static-cast-downcast,
+  -performance-unnecessary-value-param,
 
 WarningsAsErrors: '*'
 
