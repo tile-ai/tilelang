@@ -292,7 +292,7 @@ if command -v run-clang-tidy &>/dev/null; then
                     echo "$CHANGED_FILES"
                     # Convert newline-separated files to space-separated and run clang-tidy once
                     CHANGED_FILES_SPACE=$(echo "$CHANGED_FILES" | tr '\n' ' ')
-                    run-clang-tidy -j 64 $CHANGED_FILES_SPACE -p build
+                    run-clang-tidy -j 64 $CHANGED_FILES_SPACE -p build -fix
                 else
                     echo "No C/C++ files changed. Skipping clang-tidy."
                 fi

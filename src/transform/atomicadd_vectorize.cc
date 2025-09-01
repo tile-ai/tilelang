@@ -14,7 +14,6 @@
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
-#include <utility>
 
 namespace tvm {
 namespace tl {
@@ -31,15 +30,15 @@ struct AtomicAddVectorizePlanResult {
 
 class AtomicAddVectorizePlanner : public arith::IRVisitorWithAnalyzer {
 public:
-  int64_t max_vector_size = 1;
   AtomicAddVectorizePlanner() = default;
+  int max_vector_size = 1;
   AtomicAddVectorizePlanResult Plan(const For &node, Var thread_var,
                                     Range thread_bounds, int vectorize_hint) {
     this->max_vector_size = vectorize_hint;
-    this->thread_var = std::move(thread_var);
-    this->thread_bounds = std::move(thread_bounds);
+    this->thread_var = thread_var;
+    this->thread_bounds = thread_bounds;
     this->operator()(node);
-    return {static_cast<int>(vector_size_), dynamic_, condition_};
+    return {vector_size_, dynamic_, condition_};
   }
 
 private:
@@ -80,7 +79,7 @@ private:
     return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
   }
 
-  void UpdateVectorSize(const Array<PrimExpr> &indices, const Buffer &buffer) {
+  void UpdateVectorSize(const Array<PrimExpr> indices, const Buffer &buffer) {
     if (!inner_for_)
       return;
     auto extent_ptr = inner_for_->extent.as<IntImmNode>();
@@ -105,7 +104,7 @@ private:
       // If gcd_base is equal to the last dimension,
       // we should analyze the second-to-last dimension
       // in relation to the last dimension.
-      if (gcd_base < static_cast<int>(Downcast<IntImm>(last_dim)->value)) {
+      if (gcd_base < Downcast<IntImm>(last_dim)->value) {
         max_vector_size = gcd_base;
       }
 
@@ -113,7 +112,7 @@ private:
 
       PrimExpr elem_offset = 0;
       PrimExpr stride = 1;
-      for (auto i = static_cast<int>(indices.size()) - 1; i >= 0; --i) {
+      for (int i = indices.size() - 1; i >= 0; --i) {
         elem_offset = elem_offset + indices[i] * stride;
         stride = stride * buffer->shape[i];
       }
@@ -126,15 +125,14 @@ private:
       // dynamic shape load: get the vectorization condition
       dynamic_ = true;
       PrimExpr offset = buffer.OffsetOf(indices).back();
-      condition_ =
-          (FloorMod(offset, IntImm(DataType::Int(32), vector_size_)) == 0);
+      condition_ = (truncmod(offset, vector_size_) == 0);
     }
   }
 
-  const ForNode *inner_for_{};
+  const ForNode *inner_for_;
   Map<Var, Range> iter_map_;
   bool has_nonlocal_memory_access_ = false;
-  int64_t vector_size_ = 4;
+  int vector_size_ = 4;
   Var thread_var;
   Range thread_bounds;
   bool dynamic_ = false;
@@ -143,7 +141,9 @@ private:
 
 class AtomicAddVectorizeRewriter : public StmtExprMutator {
 public:
-  AtomicAddVectorizeRewriter(const AtomicAddVectorizePlanResult &plan)
+  AtomicAddVectorizeRewriter(AtomicAddVectorizePlanResult plan, Var thread_var,
+                             PrimExpr by_var, PrimExpr bx_var,
+                             Range thread_bounds, int stride_y, int stride_x)
       : vector_size_(plan.vector_size), condition_(plan.condition),
         dynamic_(plan.dynamic), tx_var_(thread_var), by_var_(by_var),
         bx_var_(bx_var), stride_y_(stride_y), stride_x_(stride_x) {
@@ -291,7 +291,7 @@ private:
     return StmtExprMutator::VisitExpr_(node);
   }
 
-  const ForNode *inner_for_{};
+  const ForNode *inner_for_;
   const int vector_size_;
   const PrimExpr condition_;
   const bool dynamic_;
@@ -367,8 +367,7 @@ For VectorizeAtomicAdd(const For &for_node, Var thread_var, Range thread_bounds,
     int vectorize_hint = vectorize_size_max;
     AtomicAddVectorizePlanResult res = {1, false, 0};
     AtomicAddVectorizePlanner planner;
-    res = planner.Plan(for_node, std::move(thread_var),
-                       std::move(thread_bounds), vectorize_hint);
+    res = planner.Plan(for_node, thread_var, thread_bounds, vectorize_hint);
     vectorize_hint = res.vector_size;
 
     if (vectorize_hint == 1 || stride_x == -1 || stride_y == -1 ||
