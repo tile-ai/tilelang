@@ -62,7 +62,7 @@ public:
 
 class ProducerUsedBufferFinder : public StmtExprVisitor {
 public:
-  auto FindProducerusedBuffer(const Stmt& stmt) {
+  auto FindProducerusedBuffer(const Stmt &stmt) {
     producer_buffers_.clear();
     std::unordered_set<const BufferNode *> last_producer_buffers_;
     for (;;) {
@@ -254,7 +254,7 @@ static PrimExpr makeGetBarrier(PrimExpr barrier_id) {
 }
 
 static Stmt makeArriveBarrier(PrimExpr barrier_id, int cta_id = -1,
-                              const PrimExpr& pred = 1) {
+                              const PrimExpr &pred = 1) {
   Array<PrimExpr> args = {makeGetBarrier(std::move(barrier_id))};
   if (cta_id != -1) {
     args.push_back(cta_id);
@@ -282,7 +282,7 @@ public:
 
   void Clear() { has_simt_copy = false; }
 
-  void Collect(const Stmt& stmt) { VisitStmt(stmt); }
+  void Collect(const Stmt &stmt) { VisitStmt(stmt); }
 
   bool HasSimtCopy() { return has_simt_copy; }
 
@@ -347,7 +347,8 @@ public:
   static Stmt Rewrite(Stmt stmt, Var thread_var, PrimExpr replaced,
                       PrimExpr thread_extent, bool do_shuffle = false) {
     auto rewriter =
-        ThreadIdxRewriter(std::move(thread_var), std::move(replaced), std::move(thread_extent), do_shuffle);
+        ThreadIdxRewriter(std::move(thread_var), std::move(replaced),
+                          std::move(thread_extent), do_shuffle);
     return rewriter(std::move(stmt));
   }
 
@@ -424,8 +425,9 @@ struct PipelineInfo {
   std::vector<OpInfo> op_infos;
 
   PipelineInfo() = default;
-  PipelineInfo(const Array<Array<Integer>>& group_info, const Array<Integer>& order_info,
-               const Array<Integer>& stage_info) {
+  PipelineInfo(const Array<Array<Integer>> &group_info,
+               const Array<Integer> &order_info,
+               const Array<Integer> &stage_info) {
     int n = static_cast<int>(group_info.size());
     ICHECK(n == static_cast<int>(order_info.size()));
     ICHECK(n == static_cast<int>(stage_info.size()));
@@ -443,7 +445,7 @@ struct PipelineInfo {
   }
 
   PipelineInfo(const PipelineInfo &other) {
-    for (const auto& op_info : other.op_infos) {
+    for (const auto &op_info : other.op_infos) {
       op_infos.push_back(op_info);
     }
   }
@@ -514,7 +516,8 @@ struct PipelineInfo {
 
 class GroupOpRewriter : public StmtExprMutator {
 public:
-  GroupOpRewriter(const PipelineInfo& pipeline_info) : pipeline_info_(pipeline_info) {}
+  GroupOpRewriter(const PipelineInfo &pipeline_info)
+      : pipeline_info_(pipeline_info) {}
 
 private:
   Stmt VisitStmt_(const ForNode *op) final {
@@ -548,7 +551,7 @@ private:
     }
     Array<Integer> order_anno;
     Array<Integer> stage_anno;
-    for (const auto& op_info : pipeline_info_.op_infos) {
+    for (const auto &op_info : pipeline_info_.op_infos) {
       order_anno.push_back(Integer(op_info.order));
       stage_anno.push_back(Integer(op_info.stage));
     }
@@ -590,7 +593,7 @@ public:
     in_if_scope_ = false;
   }
 
-  static bool HasWgMMA(const Stmt& stmt) {
+  static bool HasWgMMA(const Stmt &stmt) {
     auto collector = WgMMACollector();
     collector(stmt);
     return collector.has_wgmma_;
@@ -631,14 +634,14 @@ public:
    * @param only_has_wgmma If true, adjust emission and barrier-thread-count
    * logic for blocks that contain WgMMA operations.
    */
-  WSCodeEmitter(bool is_emitting_producer, const IterVar& thread_iv,
+  WSCodeEmitter(bool is_emitting_producer, const IterVar &thread_iv,
                 Map<Var, Buffer> buffer_data_to_buffer,
                 const WarpSpecializedRoleMarker &marker,
                 bool mbarrier_only = false, bool only_has_wgmma = false)
       : is_emitting_producer_(is_emitting_producer),
-        buffer_data_to_buffer_(std::move(buffer_data_to_buffer)), marker_(marker),
-        thread_var_(thread_iv->var), mbarrier_only_(mbarrier_only),
-        only_has_wgmma_(only_has_wgmma) {}
+        buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
+        marker_(marker), thread_var_(thread_iv->var),
+        mbarrier_only_(mbarrier_only), only_has_wgmma_(only_has_wgmma) {}
 
   /**
    * @brief Whether a SIMT-style bulk copy was detected.
@@ -723,7 +726,7 @@ private:
       return FilterByRole(op);
 
     auto seq_transformed =
-        op->seq.Map([&](const Stmt& stmt) { return VisitStmt(stmt); });
+        op->seq.Map([&](const Stmt &stmt) { return VisitStmt(stmt); });
 
     auto map = ExtractSyncPattern(op->seq);
 
@@ -933,8 +936,7 @@ private:
         for_node.CopyOnWrite()->annotations.erase("tl_pipeline_order");
         for_node.CopyOnWrite()->annotations.erase("tl_pipeline_stage");
       }
-      if (is_emitting_producer_ || !group_anno ||
-          group_info_array.empty()) {
+      if (is_emitting_producer_ || !group_anno || group_info_array.empty()) {
         loop_stack_.pop_back();
         return for_node;
       }
@@ -983,7 +985,7 @@ private:
   };
 
   std::vector<SyncPattern>
-  CreateBaseSyncPairs(const Array<Stmt>& seq_stmt,
+  CreateBaseSyncPairs(const Array<Stmt> &seq_stmt,
                       const std::vector<bool> &is_producer) {
     const int n = seq_stmt.size();
     std::vector<std::set<const BufferNode *>> reads, writes;
@@ -1098,7 +1100,7 @@ private:
     return sync_pattern_cleaned;
   }
 
-  SyncPatternMap ExtractSyncPattern(const Array<Stmt>& seq_stmt) {
+  SyncPatternMap ExtractSyncPattern(const Array<Stmt> &seq_stmt) {
     size_t num_stmts = seq_stmt.size();
     std::vector<bool> is_producer;
     is_producer.reserve(num_stmts);
@@ -1371,7 +1373,7 @@ private:
 class WarpSpecializedDetector : public IRVisitorWithAnalyzer {
 public:
   // return true means this aws will be disabled
-  static bool Detect(const Stmt& stmt, bool skip_thread_partition = false) {
+  static bool Detect(const Stmt &stmt, bool skip_thread_partition = false) {
     WarpSpecializedDetector detector;
     detector.VisitStmt(stmt);
     if (detector.has_warp_specialization_) {
@@ -1438,7 +1440,7 @@ private:
 using namespace tir::transform;
 
 tvm::transform::Pass WarpSpecialized() {
-  auto pass_func = [=](PrimFunc f, const IRModule& m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool disable_warp_specialized =
         ctx->GetConfig<Bool>(kDisableWarpSpecialized, Bool(false)).value();
     bool disable_shuffle_elect =

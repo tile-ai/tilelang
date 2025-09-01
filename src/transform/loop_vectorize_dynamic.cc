@@ -33,7 +33,8 @@ struct VectorizePlanResult {
   PrimExpr condition;
 };
 
-bool IndiceCanVectorizeDynamic(const PrimExpr& expr, Var var, const PrimExpr& iter_var_size,
+bool IndiceCanVectorizeDynamic(const PrimExpr &expr, Var var,
+                               const PrimExpr &iter_var_size,
                                int target_vectorized_size,
                                arith::Analyzer *analyzer) {
   ICHECK(target_vectorized_size >= 1);
@@ -137,7 +138,7 @@ private:
     // TODO: may perform some checks here
   }
 
-  void UpdateVectorSize(const Array<PrimExpr>& indices, const Buffer &buffer) {
+  void UpdateVectorSize(const Array<PrimExpr> &indices, const Buffer &buffer) {
     if (!inner_for_)
       return;
     auto extent_ptr = inner_for_->extent.as<IntImmNode>();
@@ -245,7 +246,7 @@ private:
 class VectorizedConditionExtracter : public StmtExprVisitor {
 public:
   VectorizedConditionExtracter() = default;
-  std::vector<PrimExpr> GetConditions(const Stmt& body) {
+  std::vector<PrimExpr> GetConditions(const Stmt &body) {
     this->VisitStmt(body);
     return conditions_;
   }
@@ -270,7 +271,7 @@ private:
 class NestedLoopChecker : public StmtExprVisitor {
 public:
   NestedLoopChecker() : loop_num_(0) {}
-  int GetNestLoopNum(const Stmt& body) {
+  int GetNestLoopNum(const Stmt &body) {
     this->VisitStmt(body);
     return loop_num_;
   }
@@ -344,7 +345,7 @@ private:
 
 class VectorizeRewriterDynamic : public StmtExprMutator {
 public:
-  VectorizeRewriterDynamic(const VectorizePlanResult& plan,
+  VectorizeRewriterDynamic(const VectorizePlanResult &plan,
                            bool disable_dynamic_tail_split)
       : vector_size_(plan.vector_size), condition_(plan.condition),
         dynamic_(plan.dynamic),
@@ -509,7 +510,7 @@ public:
 
 tvm::transform::Pass LoopVectorizeDynamic() {
   using namespace tir::transform;
-  auto pass_func = [=](PrimFunc f, const IRModule& m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool disable_dynamic_tail_split =
         ctx->GetConfig<Bool>(kDisableDynamicTailSplit, Bool(true)).value();
     int dynamic_alignment =

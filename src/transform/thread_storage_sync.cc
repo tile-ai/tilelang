@@ -742,7 +742,7 @@ private:
   std::unordered_map<ThreadBoundKey, size_t> thread_count_map_;
 };
 
-PrimFunc TileLangThreadSync(PrimFunc func, const std::string& storage_scope) {
+PrimFunc TileLangThreadSync(PrimFunc func, const std::string &storage_scope) {
   StorageScope sync_scope = StorageScope::Create(storage_scope);
   auto *n = func.CopyOnWrite();
   auto stmt = n->body;
@@ -765,8 +765,9 @@ using namespace tir::transform;
 
 namespace transform {
 
-tvm::transform::Pass ThreadSync(const String& storage_scope) {
-  auto pass_func = [storage_scope](PrimFunc f, const IRModule& m, const PassContext& ctx) {
+tvm::transform::Pass ThreadSync(const String &storage_scope) {
+  auto pass_func = [storage_scope](PrimFunc f, const IRModule &m,
+                                   const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
     return tl::TileLangThreadSync(std::move(f), storage_scope);
     ;

@@ -110,12 +110,14 @@ private:
       bool has_simt_copy = false; // Placeholder
 
       if (dec_reg >= 0 && inc_reg >= 0 && !has_simt_copy) {
-        auto inc_reg_num = IntImm(DataType::Int(32), inc_reg == 0 ? 240 : inc_reg);
-        auto dec_reg_num = IntImm(DataType::Int(32), dec_reg == 0 ? 24 : dec_reg);
-        inc_reg_stmt = Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                                     {inc_reg_num, 1}));
-        dec_reg_stmt = Evaluate(Call(DataType::Handle(), set_max_nreg(),
-                                     {dec_reg_num, 0}));
+        auto inc_reg_num =
+            IntImm(DataType::Int(32), inc_reg == 0 ? 240 : inc_reg);
+        auto dec_reg_num =
+            IntImm(DataType::Int(32), dec_reg == 0 ? 24 : dec_reg);
+        inc_reg_stmt = Evaluate(
+            Call(DataType::Handle(), set_max_nreg(), {inc_reg_num, 1}));
+        dec_reg_stmt = Evaluate(
+            Call(DataType::Handle(), set_max_nreg(), {dec_reg_num, 0}));
       }
 
       // Inject register setting statements
@@ -148,7 +150,8 @@ private:
 using namespace tir::transform;
 
 tvm::transform::Pass AnnotateWarpGroupRegAlloc() {
-  auto pass_func = [](PrimFunc f, const IRModule& m, const PassContext& ctx) -> PrimFunc {
+  auto pass_func = [](PrimFunc f, const IRModule &m,
+                      const PassContext &ctx) -> PrimFunc {
     return SetMaxNRegInjector::Inject(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.AnnotateWarpGroupRegAlloc", {});

@@ -11,8 +11,8 @@
 #include <tvm/ir/op.h>
 #include <tvm/target/target.h>
 #include <tvm/tir/buffer.h>
-#include <tvm/tir/stmt.h>
 #include <tvm/tir/op_attr_types.h>
+#include <tvm/tir/stmt.h>
 
 #include "../layout/layout.h"
 
@@ -51,32 +51,32 @@ struct LayoutInferArgs {
 class TileOperatorNode;
 class TileOperator;
 
-class TileOperatorNode: public Object {
- public:
+class TileOperatorNode : public Object {
+public:
   virtual Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const = 0;
 
-  virtual LayoutMap InferLayout(const LayoutInferArgs& T,
+  virtual LayoutMap InferLayout(const LayoutInferArgs &T,
                                 InferLevel level) const = 0;
 
   virtual TileOperator Clone() const = 0;
 
-  static constexpr const char* _type_key = "tl.TileOperator";
+  static constexpr const char *_type_key = "tl.TileOperator";
 
   TVM_DECLARE_BASE_OBJECT_INFO(TileOperatorNode, Object);
 };
 
 class TileOperator : public ObjectRef {
-  public:
-   TVM_DEFINE_OBJECT_REF_METHODS(TileOperator, ObjectRef, TileOperatorNode);
+public:
+  TVM_DEFINE_OBJECT_REF_METHODS(TileOperator, ObjectRef, TileOperatorNode);
 };
-
 
 Var GetVarFromAccessPtr(const PrimExpr &expr);
 
 TileOperator ParseOperator(Call call, BufferMap vmap);
 TileOperator ParseOperator(Stmt stmt, BufferMap vmap);
 
-using OpBuilderFunc = ffi::TypedFunction<TileOperator(Array<PrimExpr>, BufferMap)>;
+using OpBuilderFunc =
+    ffi::TypedFunction<TileOperator(Array<PrimExpr>, BufferMap)>;
 
 #define TIR_REGISTER_TL_OP(Entry, OpName)                                      \
   const Op &Entry::Get() {                                                     \
@@ -86,10 +86,9 @@ using OpBuilderFunc = ffi::TypedFunction<TileOperator(Array<PrimExpr>, BufferMap
   TVM_REGISTER_OP("tl." #OpName)                                               \
       .set_attr<TScriptPrinterName>("TScriptPrinterName", #OpName)             \
       .set_attr<OpBuilderFunc>("TLOpBuilder",                                  \
-                               [](Array<PrimExpr> args, BufferMap vmap) {            \
-                                 return Entry(args, vmap);                          \
+                               [](Array<PrimExpr> args, BufferMap vmap) {      \
+                                 return Entry(args, vmap);                     \
                                })
-
 
 } // namespace tl
 } // namespace tvm

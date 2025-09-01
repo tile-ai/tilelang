@@ -208,7 +208,8 @@ public:
   using ExprFunctor::VisitExpr;
   using StmtMutator::operator();
 
-  TLVectorizer(const Var& var, const PrimExpr& var_lanes) : var_(var), var_lanes_(var_lanes) {
+  TLVectorizer(const Var &var, const PrimExpr &var_lanes)
+      : var_(var), var_lanes_(var_lanes) {
     ramp_ = Ramp(IntImm(var->dtype, 0), IntImm(var->dtype, 1), var_lanes);
   }
 
@@ -228,11 +229,13 @@ public:
   }
 
   PrimExpr VisitExpr_(const AddNode *op) final {
-    return AddSubVec(op, [](PrimExpr a, PrimExpr b) { return std::move(a) + std::move(b); });
+    return AddSubVec(
+        op, [](PrimExpr a, PrimExpr b) { return std::move(a) + std::move(b); });
   }
 
   PrimExpr VisitExpr_(const SubNode *op) final {
-    return AddSubVec(op, [](PrimExpr a, PrimExpr b) { return std::move(a) - std::move(b); });
+    return AddSubVec(
+        op, [](PrimExpr a, PrimExpr b) { return std::move(a) - std::move(b); });
   }
 
   PrimExpr VisitExpr_(const MulNode *op) final {
@@ -827,7 +830,7 @@ Stmt SkipVectorize(Stmt stmt) { return VectorizeSkipper()(std::move(stmt)); }
 
 tvm::transform::Pass VectorizeLoop(bool enable_vectorize = true) {
   using namespace tir::transform;
-  auto pass_func = [=](PrimFunc f, const IRModule& m, const PassContext& ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
     if (enable_vectorize) {
       n->body = tvm::tl::LoopVectorizer()(std::move(n->body));

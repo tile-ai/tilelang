@@ -22,7 +22,7 @@ using arith::IRVisitorWithAnalyzer;
 
 class Eliminator : public IRMutatorWithAnalyzer {
 public:
-  static Stmt Substitute(const Stmt& stmt, bool skip_thread_partition = false) {
+  static Stmt Substitute(const Stmt &stmt, bool skip_thread_partition = false) {
     arith::Analyzer analyzer;
     Eliminator transformer(&analyzer);
     return transformer.VisitStmt(stmt);
@@ -107,7 +107,7 @@ using namespace tir::transform;
 namespace transform {
 
 tvm::transform::Pass EliminateStorageSyncForMBarrier() {
-  auto pass_func = [](PrimFunc f, const IRModule& m, const PassContext& ctx) {
+  auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
     n->body = Eliminator::Substitute(n->body);
     return f;

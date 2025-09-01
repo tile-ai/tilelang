@@ -59,7 +59,7 @@ private:
 
 // Rewrite the parallel loop into a common loop, which is mapped to threads
 For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
-                  const Fragment& loop_layout) {
+                  const Fragment &loop_layout) {
   ICHECK(loop_layout.defined());
   ICHECK(thread_var.defined());
   int old_loop_depth = loop_layout->InputDim();
@@ -125,7 +125,7 @@ class LoopPartitioner : public StmtExprVisitor {
 public:
   LoopPartitioner() = default;
 
-  Fragment Partition(const For& op, int num_thread, int vectorize_size) {
+  Fragment Partition(const For &op, int num_thread, int vectorize_size) {
     this->VisitStmt(op);
     int loop_size_full = 1;
     PrimExpr flattened = 0;
@@ -184,12 +184,14 @@ private:
   Array<IterVar> loop_vars_;
 };
 
-Fragment PlanLoopPartition(const For& op, size_t num_thread, int vectorize_size) {
+Fragment PlanLoopPartition(const For &op, size_t num_thread,
+                           int vectorize_size) {
   LoopPartitioner partitioner;
   return partitioner.Partition(op, num_thread, vectorize_size);
 }
 
-Fragment PlanLoopPartition(const For& op, int vectorize_size, const Range& thread_range) {
+Fragment PlanLoopPartition(const For &op, int vectorize_size,
+                           const Range &thread_range) {
   size_t num_thread = *as_const_int(thread_range->extent);
   LoopPartitioner partitioner;
   Fragment fragment = partitioner.Partition(op, num_thread, vectorize_size);

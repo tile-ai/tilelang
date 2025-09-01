@@ -356,7 +356,7 @@ namespace transform {
 
 tvm::transform::Pass LowerDeviceKernelLaunch() {
   auto pass_func = [](IRModule mod,
-                      const tir::transform::PassContext& ctx) -> IRModule {
+                      const tir::transform::PassContext &ctx) -> IRModule {
     auto mutator = [&mod]() {
       std::unordered_map<const GlobalVarNode *, KernelInfo> device_info_map;
       for (const auto &[gvar, base_func] : mod->functions) {

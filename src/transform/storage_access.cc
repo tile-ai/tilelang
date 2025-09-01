@@ -287,7 +287,8 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
       Array<Range> buffer_ranges;
       // from indices to buffer indices
       ICHECK(buffer->shape.size() == load->indices.size());
-      // Use buffer shape and indices to compute the buffer_ranges for each dimension.
+      // Use buffer shape and indices to compute the buffer_ranges for each
+      // dimension.
       for (size_t i = 0; i < buffer->shape.size(); ++i) {
         PrimExpr min = load->indices[i];
         PrimExpr extent = make_const(buffer->shape[i].dtype(), 1);
@@ -394,8 +395,8 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
   }
 }
 
-Map<Var, Range>
-TileLangStorageAccessVisitor::ComputeThreadRange(const Array<IterVar>& threads) {
+Map<Var, Range> TileLangStorageAccessVisitor::ComputeThreadRange(
+    const Array<IterVar> &threads) {
   Map<Var, Range> thread_range;
   for (const auto &th : threads) {
     auto thread_tag = th->thread_tag;
@@ -413,7 +414,8 @@ TileLangStorageAccessVisitor::ComputeThreadRange(const Array<IterVar>& threads) 
   return thread_range;
 }
 
-StorageScope TileLangStorageAccessVisitor::GetScope(const Var& buffer_var) const {
+StorageScope
+TileLangStorageAccessVisitor::GetScope(const Var &buffer_var) const {
   if (buffer_var->type_annotation.as<PointerTypeNode>()) {
     return StorageScope::Create(GetPtrStorageScope(buffer_var));
   }

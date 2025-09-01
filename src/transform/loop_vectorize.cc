@@ -110,7 +110,7 @@ private:
     // TODO: perform some checks here
   }
 
-  void UpdateVectorSize(const Array<PrimExpr>& indices, const Buffer &buffer) {
+  void UpdateVectorSize(const Array<PrimExpr> &indices, const Buffer &buffer) {
     if (!inner_for_)
       return;
     auto extent_ptr = inner_for_->extent.as<IntImmNode>();
@@ -180,7 +180,7 @@ private:
 
 class VectorizeRewriter : public StmtExprMutator {
 public:
-  VectorizeRewriter(const VectorizePlanResult& plan)
+  VectorizeRewriter(const VectorizePlanResult &plan)
       : vector_size_(plan.vector_size), condition_(plan.condition),
         dynamic_(plan.dynamic) {}
 
@@ -236,7 +236,8 @@ VectorizePlanResult GetVectorizePlanResult(const For &loop) {
   return {vector_size, dynamic, condition};
 }
 
-bool IndiceCanVectorize(const PrimExpr& expr, Var var, const PrimExpr& iter_var_size,
+bool IndiceCanVectorize(const PrimExpr &expr, Var var,
+                        const PrimExpr &iter_var_size,
                         int target_vectorized_size, arith::Analyzer *analyzer) {
   ICHECK(target_vectorized_size >= 1);
   if (target_vectorized_size == 1)

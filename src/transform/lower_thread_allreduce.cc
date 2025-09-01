@@ -50,15 +50,15 @@ class AllocateCollector : public StmtExprVisitor {
 
 private:
   bool IsDynamicSharedMemory(Var buffer_var) {
-    StorageScope storage_scope =
-        runtime::StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
+    StorageScope storage_scope = runtime::StorageScope::Create(
+        GetPtrStorageScope(std::move(buffer_var)));
     return storage_scope.rank == runtime::StorageRank::kShared &&
            storage_scope.tag == ".dyn";
   }
 
   bool IsStaticSharedMemory(Var buffer_var) {
-    StorageScope storage_scope =
-        runtime::StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
+    StorageScope storage_scope = runtime::StorageScope::Create(
+        GetPtrStorageScope(std::move(buffer_var)));
     return storage_scope.rank == runtime::StorageRank::kShared &&
            storage_scope.tag.empty();
   }
@@ -532,7 +532,7 @@ private:
 
     // Fix all local allocations as all statements are built.
     Stmt body = SeqStmt::Flatten(seq);
-    for (const Buffer& buf : new_alloc_bufs) {
+    for (const Buffer &buf : new_alloc_bufs) {
       body = DeclBuffer(buf, body);
       body = Allocate(buf->data, buf->dtype, buf->shape,
                       const_true(buf->dtype.lanes()), body);
@@ -542,12 +542,13 @@ private:
   }
 
   std::pair<std::vector<PrimExpr>, std::vector<Buffer>>
-  MakeWarpAllreduce(std::vector<PrimExpr> src_values,            //
-                    std::vector<DataType> dtypes,                //
-                    const CommReducerNode *combiner,             //
-                    const PrimExpr& reduce_index, int reduce_extent,    //
-                    const PrimExpr& group_index,                        //
-                    const PrimExpr& mask, const Optional<PrimExpr>& predicate, //
+  MakeWarpAllreduce(std::vector<PrimExpr> src_values,                //
+                    std::vector<DataType> dtypes,                    //
+                    const CommReducerNode *combiner,                 //
+                    const PrimExpr &reduce_index, int reduce_extent, //
+                    const PrimExpr &group_index,                     //
+                    const PrimExpr &mask,
+                    const Optional<PrimExpr> &predicate, //
                     std::vector<Stmt> *seq) {
     int n_buffers = src_values.size();
 
@@ -802,7 +803,7 @@ private:
     return ret;
   }
   // The local buffer index.
-  PrimExpr BufIndex(PrimExpr reduce_index, const PrimExpr& group_index,
+  PrimExpr BufIndex(PrimExpr reduce_index, const PrimExpr &group_index,
                     int reduce_extent) {
     if (!is_zero(group_index)) {
       return analyzer_.Simplify(group_index * reduce_extent + reduce_index);
@@ -817,8 +818,8 @@ private:
   }
 
   // Emit warp shuffle  calls.
-  PrimExpr WarpShuffle(const Op &op, const Optional<Buffer>& mask_buffer, const PrimExpr& val,
-                       PrimExpr delta_or_lane) {
+  PrimExpr WarpShuffle(const Op &op, const Optional<Buffer> &mask_buffer,
+                       const PrimExpr &val, PrimExpr delta_or_lane) {
     Array<PrimExpr> indices = {0};
     PrimExpr mask;
     if (mask_buffer.defined()) {
@@ -925,7 +926,7 @@ namespace transform {
 using namespace tir::transform;
 
 tvm::transform::Pass LowerThreadAllreduce() {
-  auto pass_func = [](PrimFunc f, const IRModule& m, const PassContext& ctx) {
+  auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     AllocateCollector collector;
     collector(f->body);
     bool is_dynamic = collector.dyn_shmem_allocs_.size() > 1;

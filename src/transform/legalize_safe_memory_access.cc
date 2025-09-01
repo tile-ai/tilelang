@@ -142,7 +142,8 @@ class SafeMemorysRewriter : public StmtExprMutator {
 public:
   explicit SafeMemorysRewriter(Map<Buffer, PrimExpr> annotated_padding_map,
                                arith::Analyzer *analyzer)
-      : annotated_padding_map_(std::move(annotated_padding_map)), analyzer_(analyzer) {}
+      : annotated_padding_map_(std::move(annotated_padding_map)),
+        analyzer_(analyzer) {}
 
 private:
   Stmt VisitStmt_(const BufferStoreNode *op) final {
@@ -343,7 +344,7 @@ private:
 tvm::transform::Pass LegalizeSafeMemoryAccess() {
   using namespace tir::transform;
   // Define the transformation function to be applied
-  auto pass_func = [=](PrimFunc f, const IRModule& m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool disable_safe_memory_legalize =
         ctx->GetConfig<Bool>(kDisableSafeMemoryLegalize, Bool(false)).value();
     if (disable_safe_memory_legalize) {

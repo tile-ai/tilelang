@@ -187,7 +187,7 @@ private:
 using namespace tir::transform;
 
 tvm::transform::Pass InjectFenceProxy() {
-  auto pass_func = [=](PrimFunc f, const IRModule& m, const PassContext& ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     f = TMAStoreSyncInjector::Substitute(f);
     return InjectFenceProxy::Substitute(f);
   };

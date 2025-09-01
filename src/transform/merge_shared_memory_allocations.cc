@@ -603,7 +603,7 @@ private:
     }
   }
 
-  PrimExpr GetBufferOffset(const Var& buffer_var, DataType dtype) {
+  PrimExpr GetBufferOffset(const Var &buffer_var, DataType dtype) {
     auto it = buffer_byte_offsets_.find(buffer_var.get());
     ICHECK(it != buffer_byte_offsets_.end())
         << "buffer_var = " << buffer_var->name_hint << ", dtype = " << dtype;
@@ -1108,8 +1108,8 @@ namespace transform {
 
 Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
                                   int align_bytes = 16) {
-  auto pass_func = [enable_aggressive_merge,
-                    align_bytes](PrimFunc f, const IRModule& m, PassContext ctx) {
+  auto pass_func = [enable_aggressive_merge, align_bytes](
+                       PrimFunc f, const IRModule &m, PassContext ctx) {
     bool merge_static_smem =
         ctx->GetConfig<Bool>("tir.merge_static_smem", Bool(false)).value();
     bool debug_merge_shared_memory_allocations =

@@ -81,7 +81,7 @@ private:
 tvm::transform::Pass LegalizeVectorizedLoop() {
   using namespace tir::transform;
   // Define the transformation function to be applied
-  auto pass_func = [=](PrimFunc f, const IRModule& m, const PassContext& ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return LoopVectorizedLegalizer::Substitute(std::move(f));
   };
   // Create and return a PrimFunc pass with the transformation function

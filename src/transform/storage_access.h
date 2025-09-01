@@ -144,13 +144,13 @@ protected:
    * \param threads The threads to compute the range for.
    * \return The thread range.
    */
-  Map<Var, Range> ComputeThreadRange(const Array<IterVar>& threads);
+  Map<Var, Range> ComputeThreadRange(const Array<IterVar> &threads);
 
   /*!
    * \brief Get the scope of the buffer array.
    * \return The scope of the final buffer array.
    */
-  StorageScope GetScope(const Var& buffer_var) const;
+  StorageScope GetScope(const Var &buffer_var) const;
   // access scope
   std::vector<std::vector<StmtEntry>> scope_;
 

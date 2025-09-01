@@ -177,7 +177,8 @@ public:
   using ExprFunctor::VisitExpr;
   using StmtMutator::operator();
 
-  Vectorizer(const Var& var, const PrimExpr& var_lanes) : var_(var), var_lanes_(var_lanes) {
+  Vectorizer(const Var &var, const PrimExpr &var_lanes)
+      : var_(var), var_lanes_(var_lanes) {
     ramp_ = Ramp(IntImm(var->dtype, 0), IntImm(var->dtype, 1), var_lanes);
   }
 
@@ -197,11 +198,13 @@ public:
   }
 
   PrimExpr VisitExpr_(const AddNode *op) final {
-    return AddSubVec(op, [](PrimExpr a, PrimExpr b) { return std::move(a) + std::move(b); });
+    return AddSubVec(
+        op, [](PrimExpr a, PrimExpr b) { return std::move(a) + std::move(b); });
   }
 
   PrimExpr VisitExpr_(const SubNode *op) final {
-    return AddSubVec(op, [](PrimExpr a, PrimExpr b) { return std::move(a) - std::move(b); });
+    return AddSubVec(
+        op, [](PrimExpr a, PrimExpr b) { return std::move(a) - std::move(b); });
   }
 
   PrimExpr VisitExpr_(const MulNode *op) final {

@@ -105,8 +105,8 @@ private:
     return AddressOffset(buffer_var, dtype, offset);
   }
 
-  PrimExpr MakeTaggedAccessPtr(DataType ptr_type, const Var& buffer_var,
-                               DataType dtype, const PrimExpr& offset,
+  PrimExpr MakeTaggedAccessPtr(DataType ptr_type, const Var &buffer_var,
+                               DataType dtype, const PrimExpr &offset,
                                const MemoryInfo &info) {
     if (ptr_type.is_handle()) {
       ICHECK(info->head_address.defined())
@@ -134,7 +134,7 @@ namespace transform {
 using namespace tir::transform;
 
 Pass LowerDeviceStorageAccessInfo() {
-  auto pass_func = [](PrimFunc f, const IRModule& m, const PassContext& ctx) {
+  auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
     n->body = StorageAccessInfoLower()(std::move(n->body));
     return f;

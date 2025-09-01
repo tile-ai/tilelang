@@ -80,7 +80,7 @@ private:
     return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
   }
 
-  void UpdateVectorSize(const Array<PrimExpr>& indices, const Buffer &buffer) {
+  void UpdateVectorSize(const Array<PrimExpr> &indices, const Buffer &buffer) {
     if (!inner_for_)
       return;
     auto extent_ptr = inner_for_->extent.as<IntImmNode>();
@@ -126,7 +126,8 @@ private:
       // dynamic shape load: get the vectorization condition
       dynamic_ = true;
       PrimExpr offset = buffer.OffsetOf(indices).back();
-      condition_ = (FloorMod(offset, IntImm(DataType::Int(32), vector_size_)) == 0);
+      condition_ =
+          (FloorMod(offset, IntImm(DataType::Int(32), vector_size_)) == 0);
     }
   }
 
@@ -142,7 +143,7 @@ private:
 
 class AtomicAddVectorizeRewriter : public StmtExprMutator {
 public:
-  AtomicAddVectorizeRewriter(const AtomicAddVectorizePlanResult& plan)
+  AtomicAddVectorizeRewriter(const AtomicAddVectorizePlanResult &plan)
       : vector_size_(plan.vector_size), condition_(plan.condition),
         dynamic_(plan.dynamic) {}
 
@@ -291,7 +292,8 @@ For VectorizeAtomicAdd(const For &for_node, Var thread_var, Range thread_bounds,
     int vectorize_hint = vectorize_size_max;
     AtomicAddVectorizePlanResult res = {1, false, 0};
     AtomicAddVectorizePlanner planner;
-    res = planner.Plan(for_node, std::move(thread_var), std::move(thread_bounds), vectorize_hint);
+    res = planner.Plan(for_node, std::move(thread_var),
+                       std::move(thread_bounds), vectorize_hint);
     vectorize_hint = res.vector_size;
 
     if (vectorize_hint == 1)

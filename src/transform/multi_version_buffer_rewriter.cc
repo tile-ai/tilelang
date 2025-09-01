@@ -137,8 +137,8 @@ public:
 private:
   MultiVersionBufferRewriter() = default;
 
-  Array<Buffer> GetVersionedBuffers(const Array<Stmt>& seq_stmt,
-                                    const Array<Buffer>& scoped_buffers) {
+  Array<Buffer> GetVersionedBuffers(const Array<Stmt> &seq_stmt,
+                                    const Array<Buffer> &scoped_buffers) {
     std::vector<Role> roles;
     Array<Array<BufferRegion>> reads, writes;
     auto marker = WarpSpecializedRoleMarker_(buffer_data_to_buffer_);
@@ -279,10 +279,12 @@ private:
   }
 
   PrimExpr RewriteBufferAccess(const Call &call,
-                               const std::vector<int>& arg_indices) {
+                               const std::vector<int> &arg_indices) {
     auto product = [](const Array<PrimExpr> &input) {
       return foldl(
-          [](PrimExpr a, PrimExpr b, Span span) { return mul(std::move(a), std::move(b), std::move(span)); },
+          [](PrimExpr a, PrimExpr b, Span span) {
+            return mul(std::move(a), std::move(b), std::move(span));
+          },
           make_const(DataType::Int(32), 1), input);
     };
     Array<PrimExpr> new_args = call->args;
@@ -318,7 +320,7 @@ private:
 using namespace tir::transform;
 
 tvm::transform::Pass MultiVersionBuffer() {
-  auto pass_func = [=](PrimFunc f, const IRModule& m, const PassContext& ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return MultiVersionBufferRewriter::Substitute(f);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MultiVersionBuffer", {});

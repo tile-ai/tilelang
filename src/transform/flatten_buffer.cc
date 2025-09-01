@@ -75,21 +75,23 @@ private:
 
     Array<Buffer> alloc_buffers = op->alloc_buffers;
     alloc_buffers.MutateByApply(
-        [this](const Buffer& buf) { return GetFlattenedBuffer(buf); });
+        [this](const Buffer &buf) { return GetFlattenedBuffer(buf); });
     if (!alloc_buffers.same_as(op->alloc_buffers)) {
       block.CopyOnWrite()->alloc_buffers = alloc_buffers;
     }
 
     Array<BufferRegion> reads = op->reads;
-    reads.MutateByApply(
-        [this](BufferRegion region) { return MutateBufferRegion(std::move(region)); });
+    reads.MutateByApply([this](BufferRegion region) {
+      return MutateBufferRegion(std::move(region));
+    });
     if (!reads.same_as(op->reads)) {
       block.CopyOnWrite()->reads = reads;
     }
 
     Array<BufferRegion> writes = op->writes;
-    writes.MutateByApply(
-        [this](BufferRegion region) { return MutateBufferRegion(std::move(region)); });
+    writes.MutateByApply([this](BufferRegion region) {
+      return MutateBufferRegion(std::move(region));
+    });
     if (!writes.same_as(op->writes)) {
       block.CopyOnWrite()->writes = writes;
     }
@@ -171,7 +173,7 @@ private:
     return VisitStmt(op->body);
   }
 
-  Buffer GetFlattenedBuffer(const Buffer& buf) {
+  Buffer GetFlattenedBuffer(const Buffer &buf) {
     auto it = buffer_remap_.find(buf);
     if (it != buffer_remap_.end()) {
       return it->second;
@@ -301,7 +303,7 @@ PrimFunc FlattenBufferRewriter(PrimFunc f) {
 
 using namespace tir::transform;
 tvm::transform::Pass FlattenBuffer() {
-  auto pass_func = [=](PrimFunc f, const IRModule& m, const PassContext& ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return FlattenBufferRewriter(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.FlattenBuffer", {});

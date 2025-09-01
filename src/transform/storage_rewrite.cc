@@ -96,15 +96,15 @@ static void LegalizeBufferLoadDType(BufferLoadNode *n) {
 class AllocateCollector : public StmtExprVisitor {
 private:
   bool IsDynamicSharedMemory(Var buffer_var) {
-    StorageScope storage_scope =
-        runtime::StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
+    StorageScope storage_scope = runtime::StorageScope::Create(
+        GetPtrStorageScope(std::move(buffer_var)));
     return storage_scope.rank == runtime::StorageRank::kShared &&
            storage_scope.tag == ".dyn";
   }
 
   bool IsStaticSharedMemory(Var buffer_var) {
-    StorageScope storage_scope =
-        runtime::StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
+    StorageScope storage_scope = runtime::StorageScope::Create(
+        GetPtrStorageScope(std::move(buffer_var)));
     return storage_scope.rank == runtime::StorageRank::kShared &&
            storage_scope.tag.empty();
   }
@@ -502,7 +502,7 @@ public:
     return node;
   }
 
-  Buffer RemapBuffer(const Buffer& buf, const Var& new_backing_array) {
+  Buffer RemapBuffer(const Buffer &buf, const Var &new_backing_array) {
     auto key = buf.get();
     auto it = buffer_remap_.find(key);
     if (it != buffer_remap_.end()) {
@@ -1368,7 +1368,7 @@ public:
     StmtExprVisitor::VisitStmt_(op);
   }
 
-  void HandleLetNode(const Var& let_var) {
+  void HandleLetNode(const Var &let_var) {
     if (let_var->dtype.is_handle()) {
       auto pointer_type = GetPointerType(let_var->type_annotation);
       if (pointer_type.has_value()) {
@@ -1398,7 +1398,7 @@ public:
    * some locations can be rewritten without others.
    */
   void
-  OnArrayDeclaration(const Var& buffer, DataType element_dtype, PrimExpr extent,
+  OnArrayDeclaration(const Var &buffer, DataType element_dtype, PrimExpr extent,
                      BufferVarInfo::DeclarationLocation declaration_location) {
     ICHECK(info_map_.find(buffer.get()) == info_map_.end())
         << "Array declaration of " << buffer->name_hint
@@ -1407,8 +1407,8 @@ public:
     if (element_dtype == DataType::Bool()) {
       element_dtype = DataType::Int(8).with_lanes(element_dtype.lanes());
     }
-    info_map_[buffer.get()] =
-        BufferVarInfo{buffer, element_dtype, std::move(extent), declaration_location};
+    info_map_[buffer.get()] = BufferVarInfo{
+        buffer, element_dtype, std::move(extent), declaration_location};
   }
 
   /* Update the type map for a buffer based on its usage
@@ -1911,7 +1911,7 @@ PrimFunc PointerValueTypeRewrite(
 using namespace tir::transform;
 namespace transform {
 Pass StorageRewrite() {
-  auto pass_func = [](PrimFunc f, const IRModule& m, PassContext ctx) {
+  auto pass_func = [](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool enable_reuse = true;
     bool reuse_require_exact_matched_dtype = false;
     bool merge_static_smem =
@@ -1958,7 +1958,7 @@ TVM_FFI_STATIC_INIT_BLOCK({
 });
 
 Pass PointerValueTypeRewrite() {
-  auto pass_func = [](PrimFunc f, const IRModule& m, const PassContext& ctx) {
+  auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return tl::PointerValueTypeRewrite(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.PointerValueTypeRewrite", {});

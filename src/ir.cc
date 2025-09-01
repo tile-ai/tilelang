@@ -33,7 +33,7 @@ static Var CreateEnvThread(String name, String thread_tag, DataType dtype) {
   return var;
 }
 
-static ForFrame MakeIterVarFrame(const std::string& name, const PrimExpr& dom) {
+static ForFrame MakeIterVarFrame(const std::string &name, const PrimExpr &dom) {
   using namespace tvm::tir;
   Var var = Var(name, dom->dtype);
   // Create a frame that represents a loop over the given domain.
@@ -49,8 +49,8 @@ static ForFrame MakeIterVarFrame(const std::string& name, const PrimExpr& dom) {
   return ForFrame(n);
 }
 
-ForFrame ParallelFor(const Array<PrimExpr>& extents,
-                     const Map<String, ObjectRef>& annotations) {
+ForFrame ParallelFor(const Array<PrimExpr> &extents,
+                     const Map<String, ObjectRef> &annotations) {
   using namespace tvm::tir;
   ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
   n->vars.reserve(extents.size());
@@ -60,26 +60,27 @@ ForFrame ParallelFor(const Array<PrimExpr>& extents,
     n->vars.push_back(Var("v", extent.dtype()));
     n->doms.push_back(Range(make_const(dtype, 0), extent));
   }
-  n->f_make_for_loop = [annotations](const Array<Var> &vars, const Array<Range> &doms,
+  n->f_make_for_loop = [annotations](const Array<Var> &vars,
+                                     const Array<Range> &doms,
                                      Stmt body) -> Stmt {
     ICHECK_EQ(vars.size(), doms.size());
     int n = vars.size();
     for (int i = n - 1; i >= 0; --i) {
       Range dom = doms[i];
       Var var = vars[i];
-      body =
-          For(var, dom->min, dom->extent, ForKind::kParallel, body,
-              /*thread_binding=*/std::nullopt, /*annotations=*/annotations);
+      body = For(var, dom->min, dom->extent, ForKind::kParallel, body,
+                 /*thread_binding=*/std::nullopt, /*annotations=*/annotations);
     }
     return body;
   };
   return ForFrame(n);
 }
 
-ForFrame PipelinedFor(PrimExpr start, const PrimExpr& stop, int num_stages,
-                      const Array<PrimExpr>& order, const Array<PrimExpr>& stages,
-                      const Array<Array<PrimExpr>>& sync,
-                      const Array<Array<PrimExpr>>& groups) {
+ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
+                      const Array<PrimExpr> &order,
+                      const Array<PrimExpr> &stages,
+                      const Array<Array<PrimExpr>> &sync,
+                      const Array<Array<PrimExpr>> &groups) {
   using namespace tvm::tir;
   ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
   DataType dtype = stop.dtype();
@@ -101,16 +102,15 @@ ForFrame PipelinedFor(PrimExpr start, const PrimExpr& stop, int num_stages,
       anno.Set("tl_pipeline_sync", sync);
     if (!groups.empty())
       anno.Set("tl_pipeline_group", groups);
-    body = For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kSerial,
-               body,
+    body = For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kSerial, body,
                /*thread_binding=*/std::nullopt, /*annotations=*/anno);
     return body;
   };
   return ForFrame(n);
 }
 
-ForFrame PersistentFor(const Array<PrimExpr>& domain, const PrimExpr& wave_size,
-                       const PrimExpr& index, PrimExpr group_size) {
+ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
+                       const PrimExpr &index, PrimExpr group_size) {
   using namespace tvm::tir;
   ICHECK(!domain.empty());
   ObjectPtr<ForFrameNode> n = make_object<ForFrameNode>();
@@ -222,9 +222,9 @@ public:
                                                     KernelLaunchFrameNode);
 };
 
-KernelLaunchFrame KernelLaunch(const Array<PrimExpr>& grid_size,
-                               const Optional<Array<PrimExpr>>& block_size_opt,
-                               const Map<String, ffi::Any>& attrs) {
+KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
+                               const Optional<Array<PrimExpr>> &block_size_opt,
+                               const Map<String, ffi::Any> &attrs) {
   ObjectPtr<KernelLaunchFrameNode> n = make_object<KernelLaunchFrameNode>();
 
   // If the kernel is a CPU kernel, we don't need to launch any threads.
@@ -335,14 +335,14 @@ public:
                                                     WarpSpecializeFrameNode);
 };
 
-WarpSpecializeFrame WarpSpecialize(const Array<IntImm>& warp_group_ids,
-                                   const PrimExpr& thread_idx,
+WarpSpecializeFrame WarpSpecialize(const Array<IntImm> &warp_group_ids,
+                                   const PrimExpr &thread_idx,
                                    int warp_group_size = 128) {
   ObjectPtr<WarpSpecializeFrameNode> n = make_object<WarpSpecializeFrameNode>();
   PrimExpr condition;
   std::vector<int> warp_groups;
   warp_groups.reserve(warp_group_ids.size());
-for (int i = 0; i < warp_group_ids.size(); i++) {
+  for (int i = 0; i < warp_group_ids.size(); i++) {
     warp_groups.push_back(Downcast<IntImm>(warp_group_ids[i])->value);
   }
   std::sort(warp_groups.begin(), warp_groups.end());

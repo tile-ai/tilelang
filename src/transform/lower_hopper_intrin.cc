@@ -26,7 +26,7 @@ public:
     LowerHopperIntrin substituter(disable_shuffle_elect);
     fptr->body = substituter.VisitStmt(f->body);
     Map<String, Array<PrimExpr>> init_desc_arg_map;
-    for (const auto& [call, var] : substituter.desc_map_) {
+    for (const auto &[call, var] : substituter.desc_map_) {
       // Should allocate 128 bytes for TensorMap on stack
       Call alloc_desc = Call(DataType::Handle(), builtin::tvm_stack_alloca(),
                              {StringImm("arg_value"), 16});
@@ -143,7 +143,7 @@ private:
 using namespace tir::transform;
 
 tvm::transform::Pass LowerHopperIntrin() {
-  auto pass_func = [=](PrimFunc f, const IRModule& m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool disable_shuffle_elect =
         ctx->GetConfig<Bool>(kDisableShuffleElect, Bool(false)).value();
     return LowerHopperIntrin::Substitute(f, disable_shuffle_elect);

@@ -57,7 +57,7 @@ public:
     loop_extents = 1;
   }
 
-  void Collect(const Stmt& stmt) { VisitStmt(stmt); }
+  void Collect(const Stmt &stmt) { VisitStmt(stmt); }
 
   PrimExpr BulkCopyBytes() { return bulk_copy_bytes; }
 
@@ -190,7 +190,7 @@ public:
   Map<PrimExpr, IntImm> barrier_id_to_range() { return barrier_id_to_range_; }
 
 private:
-  void UpdateBarrierRange(const PrimExpr& barrier_id, const IntImm& extent) {
+  void UpdateBarrierRange(const PrimExpr &barrier_id, const IntImm &extent) {
     if (barrier_id_to_range_.count(barrier_id)) {
       auto old_extent = barrier_id_to_range_[barrier_id];
       ICHECK_EQ(old_extent->value, extent->value)
@@ -209,7 +209,7 @@ private:
         pending_tma_ops_.push_back(GetRef<Call>(call));
       } else if (call->op.same_as(builtin::ptx_arrive_barrier())) {
         PrimExpr barrier_id = call->args[0];
-        for (const auto& tma_call : pending_tma_ops_) {
+        for (const auto &tma_call : pending_tma_ops_) {
           tma_op_to_barrier_id_.Set(tma_call, barrier_id);
         }
         auto const_int_bound = analyzer_.const_int_bound(thread_var_);
@@ -505,7 +505,7 @@ private:
 };
 
 tvm::transform::Pass InjectTmaBarrier() {
-  auto pass_func = [=](PrimFunc f, const IRModule& m, const PassContext& ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     // Check if function only uses threadIdx.x before proceeding
     if (!ThreadTagChecker::HasOnlyThreadIdxX(f)) {
       LOG(WARNING) << "InjectTmaBarrier will be disabled because the program "

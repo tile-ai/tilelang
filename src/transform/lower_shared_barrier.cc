@@ -45,7 +45,7 @@ private:
 
     Array<Buffer> barrier_buffers;
 
-    for (const auto& [data, buffer] : buffer_map_) {
+    for (const auto &[data, buffer] : buffer_map_) {
       const auto *ptr_type =
           buffer->data->type_annotation.as<PointerTypeNode>();
       auto storage_scope = ptr_type->storage_scope;
@@ -191,7 +191,7 @@ namespace transform {
 using namespace tir::transform;
 
 tvm::transform::Pass LowerSharedBarrier() {
-  auto pass_func = [=](PrimFunc f, const IRModule& m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool disable_shuffle_elect =
         ctx->GetConfig<Bool>(kDisableShuffleElect, Bool(false)).value();
     return tl::LowerSharedBarrier(std::move(f), disable_shuffle_elect);

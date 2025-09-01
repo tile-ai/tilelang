@@ -21,7 +21,7 @@ using namespace tir;
  * \param region2 The second region.
  * \return Whether region1 and region2 have intersections.
  */
-bool MayConflict(const Region& region1, const Region& region2) {
+bool MayConflict(const Region &region1, const Region &region2) {
   ICHECK(region1.size() == region2.size());
   for (size_t i = 0; i < region1.size(); i++) {
     Range dim1 = region1[i];
@@ -562,7 +562,7 @@ private:
 
 tvm::transform::Pass PipelinePlanning() {
   using namespace tir::transform;
-  auto pass_func = [=](PrimFunc f, const IRModule& m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool use_async_copy =
         ctx->GetConfig<Bool>("tir.use_async_copy", Bool(true)).value();
     PrimFuncNode *fptr = f.CopyOnWrite();

@@ -146,7 +146,7 @@ private:
   }
 
   static Stmt MakeLaunchThread(PrimExpr min, PrimExpr extent, Var var,
-                               const String& thread_tag, Stmt body) {
+                               const String &thread_tag, Stmt body) {
     IterVar iter_var(/*dom=*/Range::FromMinExtent(std::move(min), extent),
                      /*var=*/std::move(var),
                      /*iter_type=*/IterVarType::kThreadIndex,
@@ -225,7 +225,7 @@ PrimFunc TLLowerOpaqueBlock(PrimFunc f) {
 
 tir::transform::Pass LowerOpaqueBlock() {
   using namespace tir::transform;
-  auto pass_func = [=](PrimFunc f, const IRModule& m, const PassContext& ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return TLLowerOpaqueBlock(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerOpaqueBlock", {});

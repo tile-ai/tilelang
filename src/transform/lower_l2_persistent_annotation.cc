@@ -92,7 +92,7 @@ private:
 using namespace tir::transform;
 
 tvm::transform::Pass LowerL2Persistent() {
-  auto pass_func = [=](PrimFunc f, const IRModule& m, const PassContext& ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return LowerL2Persistent::Substitute(f);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerL2Persistent", {});

@@ -550,7 +550,7 @@ public:
   }
 
 private:
-  LayoutInferencer(const LayoutInferenceResult& result,
+  LayoutInferencer(const LayoutInferenceResult &result,
                    bool skip_thread_partition, arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer), result_(result),
         skip_thread_partition_(skip_thread_partition){};
@@ -648,7 +648,7 @@ private:
 
 tvm::transform::Pass LayoutInference() {
   using namespace tir::transform;
-  auto pass_func = [=](PrimFunc f, const IRModule& m, const PassContext& ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     f.CopyOnWrite()->body = ParallelLoopTransformer::Substitute(f->body);
     ThreadBindingCollector collector;
     collector(f->body);

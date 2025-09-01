@@ -66,8 +66,8 @@ private:
 
 tvm::transform::Pass AnnotateDeviceRegions() {
   using namespace tir::transform;
-  auto pass_func = [](PrimFunc func, const IRModule& mod,
-                      const tvm::transform::PassContext& ctx) -> PrimFunc {
+  auto pass_func = [](PrimFunc func, const IRModule &mod,
+                      const tvm::transform::PassContext &ctx) -> PrimFunc {
     auto opt_target = func->GetAttr<Target>(tvm::attr::kTarget);
     ICHECK(opt_target) << "AnnotateDeviceRegions: Require the target attribute";
     Target target = opt_target.value();

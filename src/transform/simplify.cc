@@ -217,9 +217,10 @@ TVM_REGISTER_PASS_CONFIG_OPTION("tl.Simplify", SimplifyConfig);
 
 class StmtSimplifier : public IRMutatorWithAnalyzer {
 public:
-  static PrimFunc Apply(PrimFunc func, Analyzer *analyzer,
-                        const Optional<SimplifyConfig>& config_opt = std::nullopt,
-                        bool simplify_arguments = false) {
+  static PrimFunc
+  Apply(PrimFunc func, Analyzer *analyzer,
+        const Optional<SimplifyConfig> &config_opt = std::nullopt,
+        bool simplify_arguments = false) {
     auto config = config_opt.value_or(AttrsWithDefaultValues<SimplifyConfig>());
     analyzer->rewrite_simplify.SetEnabledExtensions(
         config->GetEnabledExtensions());
@@ -276,8 +277,8 @@ private:
       std::optional<ControlFlowGraph> touch_pattern,
       std::unordered_set<const VarNode *> used_in_buffer_def)
       : IRMutatorWithAnalyzer(analyzer), config_(std::move(config)),
-        touch_pattern_(std::move(touch_pattern)), used_in_buffer_def_(std::move(used_in_buffer_def)) {
-  }
+        touch_pattern_(std::move(touch_pattern)),
+        used_in_buffer_def_(std::move(used_in_buffer_def)) {}
 
   using Parent = IRMutatorWithAnalyzer;
   using Parent::VisitExpr_;
@@ -478,10 +479,11 @@ private:
 using namespace tir::transform;
 
 tvm::transform::Pass Simplify(bool simplify_arguments = true) {
-  auto pass_func = [=](PrimFunc f, const IRModule& m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     arith::Analyzer analyzer;
     auto cfg = ctx->GetConfig<SimplifyConfig>("tl.Simplify");
-    return StmtSimplifier::Apply(std::move(f), &analyzer, cfg, simplify_arguments);
+    return StmtSimplifier::Apply(std::move(f), &analyzer, cfg,
+                                 simplify_arguments);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.Simplify", {});
 }

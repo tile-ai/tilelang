@@ -131,10 +131,12 @@ private:
   }
 
   PrimExpr RewriteBufferAccess(const Call &call,
-                               const std::vector<int>& arg_indices) {
+                               const std::vector<int> &arg_indices) {
     auto product = [](const Array<PrimExpr> &input) {
       return foldl(
-          [](PrimExpr a, PrimExpr b, Span span) { return mul(std::move(a), std::move(b), std::move(span)); },
+          [](PrimExpr a, PrimExpr b, Span span) {
+            return mul(std::move(a), std::move(b), std::move(span));
+          },
           make_const(DataType::Int(32), 1), input);
     };
     Array<PrimExpr> new_args = call->args;
@@ -364,7 +366,7 @@ private:
    * \param region2 The second region.
    * \return Whether region1 and region2 have intersections.
    */
-  bool MayConflict(const Region& region1, const Region& region2) {
+  bool MayConflict(const Region &region1, const Region &region2) {
     ICHECK(region1.size() == region2.size());
     for (size_t i = 0; i < region1.size(); i++) {
       Range dim1 = region1[i];
@@ -481,7 +483,9 @@ private:
     PrimExpr producer_head;
     std::vector<std::vector<int>> commit_groups;
     std::unordered_map<const BufferNode *, int> buffer_to_commit_group_;
-    bool writes(const Buffer& buf) const { return dst_buffers.count(buf.get()) > 0; }
+    bool writes(const Buffer &buf) const {
+      return dst_buffers.count(buf.get()) > 0;
+    }
   };
 
   // Per-stage states that are local to each of pipeline prologue, body, and
@@ -617,7 +621,7 @@ private:
    * \param unroll_loop Whether the loop should be unrolled.
    * \return The result loop.
    */
-  Stmt EmitImpl(const PrimExpr& start, const PrimExpr& end, bool unroll_loop,
+  Stmt EmitImpl(const PrimExpr &start, const PrimExpr &end, bool unroll_loop,
                 bool need_bound_check) {
     PrimExpr new_loop_var;
     PrimExpr extent = end - start;
@@ -983,7 +987,7 @@ private:
  */
 tir::transform::Pass InjectSoftwarePipeline() {
   using namespace tir::transform;
-  auto pass_func = [=](PrimFunc f, const IRModule& m, const PassContext& ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     auto *fptr = f.CopyOnWrite();
     fptr->body = software_pipeline::PipelineInjector::Inject(f);
     fptr->body = ConvertSSA(std::move(fptr->body));

@@ -82,7 +82,7 @@ private:
     Buffer dummy_tcode_buffer;
   };
 
-  ConvertedInfo ConvertForFFI(const PrimExpr& val) {
+  ConvertedInfo ConvertForFFI(const PrimExpr &val) {
     ConvertedInfo info;
 
     // convert val's data type to FFI data type, return type code
@@ -124,7 +124,7 @@ private:
     return info;
   }
 
-  Stmt WriteToOut(const PrimExpr& val) {
+  Stmt WriteToOut(const PrimExpr &val) {
     auto info = ConvertForFFI(val);
     Stmt store_val = BufferStore(info.dummy_val_buffer, info.expr, {0});
     Stmt store_tcode =
@@ -192,11 +192,12 @@ private:
 
 } // namespace
 
-inline Stmt MakeAssertEQ(PrimExpr lhs, PrimExpr rhs, const std::string& msg) {
-  return AssertStmt(std::move(lhs) == std::move(rhs), tvm::tir::StringImm(msg), Evaluate(0));
+inline Stmt MakeAssertEQ(PrimExpr lhs, PrimExpr rhs, const std::string &msg) {
+  return AssertStmt(std::move(lhs) == std::move(rhs), tvm::tir::StringImm(msg),
+                    Evaluate(0));
 }
 
-inline Stmt MakeAssertNotNull(PrimExpr ptr, const std::string& msg) {
+inline Stmt MakeAssertNotNull(PrimExpr ptr, const std::string &msg) {
   Call isnull(DataType::Bool(), builtin::isnullptr(), {std::move(ptr)});
   return AssertStmt(!isnull, tvm::tir::StringImm(msg), Evaluate(0));
 }
@@ -472,7 +473,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
 
 tvm::transform::Pass MakePackedAPI() {
   using tvm::transform::Pass;
-  auto pass_func = [](IRModule mod, const tvm::transform::PassContext& ctx) {
+  auto pass_func = [](IRModule mod, const tvm::transform::PassContext &ctx) {
     Map<GlobalVar, String> packed_func_methods;
     for (const auto &[gvar, base_func] : mod->functions) {
       if (auto opt = base_func.as<PrimFunc>()) {
