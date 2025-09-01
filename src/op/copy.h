@@ -96,8 +96,6 @@ struct TMAIm2ColDesc {
  */
 class CopyNode : public TileOperatorNode {
 public:
-  Array<PrimExpr> args_; // Copy parameters (indices, sizes, etc.)
-
   Buffer src, dst;                   // Source and destination buffers
   Array<Range> src_range, dst_range; // Ranges for each dimension in src and dst
   IntImm coalesced_width; // Width (in elements) for coalesced memory access
