@@ -325,16 +325,12 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     enable_fp6_ = true;
     if (t.lanes() <= 4) {
       os << GetFP6Type(t);
-    } else {
-      fail = true;
     }
     return;
   } else if (t.is_float4()) {
     enable_fp4_ = true;
     if (t.lanes() <= 4) {
       os << GetFP4Type(t);
-    } else {
-      fail = true;
     }
     return;
   } else if (t == DataType::Bool()) {
