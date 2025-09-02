@@ -60,11 +60,6 @@ jobs:
           exit 1
         fi
         rm -rf build
-    
-    - name: Commit and Push Changes
-      uses: stefanzweifel/git-auto-commit-action@v5
-      with:
-        commit_message: "lint"
 
   build-test-nvidia:
     runs-on: [self-hosted, nvidia]
