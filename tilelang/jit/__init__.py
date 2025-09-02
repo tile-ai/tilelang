@@ -20,6 +20,7 @@ from tvm.tir import PrimFunc
 from tvm.target import Target
 
 from tilelang.jit.kernel import JITKernel
+from tilelang.utils.target import determine_target
 from tilelang.cache import cached
 from os import path, makedirs
 from logging import getLogger
@@ -71,7 +72,7 @@ def compile(
         compile_flags = [compile_flags]
 
     # This path is not a performance critical path, so we can afford to convert the target.
-    target, target_host = Target(target), Target(target_host) if target_host else None
+    target = Target(determine_target(target))
 
     return cached(
         func=func,
