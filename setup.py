@@ -350,34 +350,6 @@ def update_submodules():
         raise RuntimeError("Failed to update submodules") from error
 
 
-def build_csrc(llvm_config_path):
-    """Configures and builds TVM."""
-
-    if not os.path.exists("build"):
-        os.makedirs("build")
-    os.chdir("build")
-    # Copy the config.cmake as a baseline
-    if not os.path.exists("config.cmake"):
-        shutil.copy("../3rdparty/tvm/cmake/config.cmake", "config.cmake")
-    # Set LLVM path and enable CUDA or ROCM in config.cmake
-    with open("config.cmake", "a") as config_file:
-        config_file.write(f"set(USE_LLVM {llvm_config_path})\n")
-        if USE_ROCM:
-            config_file.write(f"set(USE_ROCM {ROCM_HOME})\n")
-            config_file.write("set(USE_CUDA OFF)\n")
-        else:
-            config_file.write(f"set(USE_CUDA {CUDA_HOME})\n")
-            config_file.write("set(USE_ROCM OFF)\n")
-    # Run CMake and make
-    try:
-        cmake_path = get_cmake_path()
-        subprocess.check_call([cmake_path, ".."])
-        num_jobs = max(1, int(multiprocessing.cpu_count() * 0.75))
-        subprocess.check_call(["make", f"-j{num_jobs}"])
-    except subprocess.CalledProcessError as error:
-        raise RuntimeError("Failed to build TileLang C Source") from error
-
-
 def setup_llvm_for_tvm():
     """Downloads and extracts LLVM, then configures TVM to use it."""
     # Assume the download_and_extract_llvm function and its dependencies are defined elsewhere in this script
@@ -848,14 +820,18 @@ class TilelangExtensionBuild(build_ext):
 
         cmake_path = get_cmake_path()
         # Run CMake to configure the project with the given arguments.
-        if not os.path.exists(build_temp + "/build.ninja"):
+        if not os.path.exists(os.path.join(build_temp, "build.ninja")):
+            logger.info(
+                f"[CMake] Generating build.ninja: {cmake_path} {ext.sourcedir} {' '.join(cmake_args)}"
+            )
             subprocess.check_call([cmake_path, ext.sourcedir] + cmake_args, cwd=build_temp)
+        else:
+            logger.info(f"[CMake] build.ninja already exists in {build_temp}")
 
-        # Build the project in "Release" mode with all available CPU cores ("-j").
         num_jobs = max(1, int(multiprocessing.cpu_count() * 0.75))
-
-        while True:
-            continue
+        logger.info(
+            f"[Build] Using {num_jobs} jobs | cmake: {cmake_path} (exists: {os.path.exists(cmake_path)}) | build dir: {build_temp}"
+        )
 
         subprocess.check_call(
             [cmake_path, "--build", ".", "--config", "Release", "-j",
