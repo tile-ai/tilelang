@@ -2,10 +2,7 @@ import tilelang
 import tilelang.language as T
 import torch
 import itertools
-
-# tilelang.disable_cache()
-
-# torch.manual_seed(42)
+import argparse
 
 
 def get_configs():
@@ -71,21 +68,20 @@ def ref_program(logits, top_k):
 
 
 def main():
-    M = 320
-    N = 128
-    topk = 6
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--M", type=int, default=320, help="num_tokens")
+    parser.add_argument("--N", type=int, default=128, help="num_experts")
+    parser.add_argument("--topk", type=int, default=6, help="topk")
+    parser.add_argument("--blk_m", type=int, default=64, help="blk_m")
+    args = parser.parse_args()
+    M, N, topk, blk_m = args.M, args.N, args.topk, args.blk_m
 
-    logits = torch.rand(M, N).to("cuda")
+    logits = torch.rand((M, N), device="cuda", dtype=torch.float32)
 
-    kernel = tl_topk(M=M, N=N, topk=topk)
+    kernel = tl_topk(M=M, N=N, topk=topk, blk_m=blk_m)
     tl_gates, tl_indices = kernel(logits)
-    # print(tl_gates)
-
-    # print(kernel.get_kernel_source())
-    print(kernel.config)
 
     torch_gates, torch_indices = ref_program(logits, topk)
-    # print(torch_gates)
 
     # test accuracy
     torch.testing.assert_close(tl_gates, torch_gates)
