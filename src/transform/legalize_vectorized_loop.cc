@@ -73,7 +73,7 @@ private:
     // Change the loop kind from vectorized to serial
     for_node.CopyOnWrite()->kind = ForKind::kSerial;
     // Apply vectorization transformation to the loop
-    return VectorizeLoop(std::move(for_node));
+    return VectorizeLoop(for_node);
   }
 };
 
@@ -81,7 +81,7 @@ private:
 tvm::transform::Pass LegalizeVectorizedLoop() {
   using namespace tir::transform;
   // Define the transformation function to be applied
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return LoopVectorizedLegalizer::Substitute(std::move(f));
   };
   // Create and return a PrimFunc pass with the transformation function

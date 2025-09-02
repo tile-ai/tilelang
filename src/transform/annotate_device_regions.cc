@@ -31,6 +31,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <utility>
+
 namespace tvm {
 namespace tl {
 
@@ -39,7 +41,7 @@ using namespace tir;
 class DeviceRegionAnnotater : public StmtMutator {
 public:
   explicit DeviceRegionAnnotater(Target device_target)
-      : device_target_(device_target) {}
+      : device_target_(std::move(device_target)) {}
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tvm::attr::kTarget) {
@@ -64,8 +66,8 @@ private:
 
 tvm::transform::Pass AnnotateDeviceRegions() {
   using namespace tir::transform;
-  auto pass_func = [](PrimFunc func, IRModule mod,
-                      tvm::transform::PassContext ctx) -> PrimFunc {
+  auto pass_func = [](PrimFunc func, const IRModule &mod,
+                      const tvm::transform::PassContext &ctx) -> PrimFunc {
     auto opt_target = func->GetAttr<Target>(tvm::attr::kTarget);
     ICHECK(opt_target) << "AnnotateDeviceRegions: Require the target attribute";
     Target target = opt_target.value();

@@ -48,7 +48,7 @@ namespace {
 class ReturnRewriter : public StmtMutator {
 public:
   explicit ReturnRewriter(Var ret_var, Var ret_tcode)
-      : ret_var_(ret_var), ret_tcode_(ret_tcode) {}
+      : ret_var_(std::move(ret_var)), ret_tcode_(std::move(ret_tcode)) {}
 
   Stmt VisitStmt_(const ForNode *node) override {
     if (node->kind == ForKind::kParallel)
@@ -82,7 +82,7 @@ private:
     Buffer dummy_tcode_buffer;
   };
 
-  ConvertedInfo ConvertForFFI(PrimExpr val) {
+  ConvertedInfo ConvertForFFI(const PrimExpr &val) {
     ConvertedInfo info;
 
     // convert val's data type to FFI data type, return type code
@@ -124,7 +124,7 @@ private:
     return info;
   }
 
-  Stmt WriteToOut(PrimExpr val) {
+  Stmt WriteToOut(const PrimExpr &val) {
     auto info = ConvertForFFI(val);
     Stmt store_val = BufferStore(info.dummy_val_buffer, info.expr, {0});
     Stmt store_tcode =
@@ -142,8 +142,8 @@ private:
 };
 
 Stmt RewriteReturn(Stmt body, Var ret_var, Var ret_tcode) {
-  ReturnRewriter rewriter(ret_var, ret_tcode);
-  return rewriter(body);
+  ReturnRewriter rewriter(std::move(ret_var), std::move(ret_tcode));
+  return rewriter(std::move(body));
 }
 
 class SubroutineCallRewriter : public StmtExprMutator {
@@ -151,7 +151,7 @@ public:
   static Optional<Stmt> Apply(const Map<GlobalVar, String> &packed_func_methods,
                               Stmt stmt) {
     SubroutineCallRewriter rewriter(packed_func_methods);
-    stmt = rewriter.VisitStmt(std::move(stmt));
+    stmt = rewriter.VisitStmt(stmt);
     if (rewriter.made_change_) {
       return stmt;
     } else {
@@ -192,12 +192,13 @@ private:
 
 } // namespace
 
-inline Stmt MakeAssertEQ(PrimExpr lhs, PrimExpr rhs, std::string msg) {
-  return AssertStmt(lhs == rhs, tvm::tir::StringImm(msg), Evaluate(0));
+inline Stmt MakeAssertEQ(PrimExpr lhs, PrimExpr rhs, const std::string &msg) {
+  return AssertStmt(std::move(lhs) == std::move(rhs), tvm::tir::StringImm(msg),
+                    Evaluate(0));
 }
 
-inline Stmt MakeAssertNotNull(PrimExpr ptr, std::string msg) {
-  Call isnull(DataType::Bool(), builtin::isnullptr(), {ptr});
+inline Stmt MakeAssertNotNull(PrimExpr ptr, const std::string &msg) {
+  Call isnull(DataType::Bool(), builtin::isnullptr(), {std::move(ptr)});
   return AssertStmt(!isnull, tvm::tir::StringImm(msg), Evaluate(0));
 }
 
@@ -472,7 +473,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
 
 tvm::transform::Pass MakePackedAPI() {
   using tvm::transform::Pass;
-  auto pass_func = [](IRModule mod, tvm::transform::PassContext ctx) {
+  auto pass_func = [](IRModule mod, const tvm::transform::PassContext &ctx) {
     Map<GlobalVar, String> packed_func_methods;
     for (const auto &[gvar, base_func] : mod->functions) {
       if (auto opt = base_func.as<PrimFunc>()) {
@@ -504,7 +505,7 @@ tvm::transform::Pass MakePackedAPI() {
       }
     }
 
-    if (updates->functions.size()) {
+    if (!updates->functions.empty()) {
       mod.CopyOnWrite()->Update(updates);
     }
     return mod;

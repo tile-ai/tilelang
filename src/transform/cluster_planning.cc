@@ -66,8 +66,15 @@ public:
     }
 
     if (mem_reuse_max > 0) {
-      cluster_tag =
-          "clusterIdx" + String(cluster_tag.c_str() + strlen("blockIdx"));
+      std::string tag_str = cluster_tag; // Convert to std::string
+      if (tag_str.rfind("blockIdx", 0) == 0) {
+        // starts with "blockIdx"
+        tag_str = "clusterIdx" + tag_str.substr(strlen("blockIdx"));
+      } else {
+        // Unexpected format — maybe just prefix
+        tag_str = "clusterIdx" + tag_str;
+      }
+      cluster_tag = tvm::ffi::String(tag_str); // Convert back
       return WithAttr(f, cluster_tag, Integer(cluster_size_));
     } else {
       return f;
@@ -109,7 +116,7 @@ PrimFunc ClusterPlanning(PrimFunc f) { return ClusterPlanner::Substitute(f); }
 namespace transform {
 
 tvm::transform::Pass ClusterPlanning() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return ClusterPlanning(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ClusterPlanning", {});

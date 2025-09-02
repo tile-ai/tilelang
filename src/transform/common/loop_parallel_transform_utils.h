@@ -26,7 +26,7 @@ using arith::IRVisitorWithAnalyzer;
 
 class ParallelLoopTransformer : public IRMutatorWithAnalyzer {
 public:
-  static Stmt Substitute(Stmt stmt, bool skip_thread_partition = false) {
+  static Stmt Substitute(const Stmt &stmt, bool skip_thread_partition = false) {
     arith::Analyzer analyzer;
     ParallelLoopTransformer transformer(&analyzer);
     return transformer.VisitStmt(stmt);
@@ -75,8 +75,6 @@ public:
       for (size_t i = 0; i < indices.size(); ++i) {
         auto index = indices[i];
         auto bound = analyzer_->const_int_bound(index);
-        int64_t upper_bound = bound->max_value + 1;
-        int64_t shape = Downcast<IntImm>(buffer->shape[i])->value;
 
         // Collect the variables that used in the index
         std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> used_vars;
@@ -86,7 +84,7 @@ public:
             used_vars.insert(GetRef<Var>(v));
           }
         });
-        if (used_vars.size() == 0) {
+        if (used_vars.empty()) {
           continue;
         }
 

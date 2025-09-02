@@ -32,6 +32,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <utility>
+
 #include "../op/builtin.h"
 #include "./common/attr.h"
 #include "./common/collector.h"
@@ -55,7 +57,7 @@ public:
     loop_extents = 1;
   }
 
-  void Collect(Stmt stmt) { VisitStmt(stmt); }
+  void Collect(const Stmt &stmt) { VisitStmt(stmt); }
 
   PrimExpr BulkCopyBytes() { return bulk_copy_bytes; }
 
@@ -103,12 +105,12 @@ private:
                                 IterVarType::kDataPar);
 
   PrimExpr makeGetBarrier(PrimExpr barrier_id) {
-    return Call(DataType::Handle(), get_mbarrier(), {barrier_id});
+    return Call(DataType::Handle(), get_mbarrier(), {std::move(barrier_id)});
   }
 
   Stmt makeExpectTX(PrimExpr barrier_id, PrimExpr bytes) {
     auto call = Call(DataType::Handle(), mbarrier_expect_tx(),
-                     {makeGetBarrier(barrier_id), bytes});
+                     {makeGetBarrier(std::move(barrier_id)), std::move(bytes)});
     return Evaluate(call);
   }
 
@@ -188,7 +190,7 @@ public:
   Map<PrimExpr, IntImm> barrier_id_to_range() { return barrier_id_to_range_; }
 
 private:
-  void UpdateBarrierRange(PrimExpr barrier_id, IntImm extent) {
+  void UpdateBarrierRange(const PrimExpr &barrier_id, const IntImm &extent) {
     if (barrier_id_to_range_.count(barrier_id)) {
       auto old_extent = barrier_id_to_range_[barrier_id];
       ICHECK_EQ(old_extent->value, extent->value)
@@ -207,7 +209,7 @@ private:
         pending_tma_ops_.push_back(GetRef<Call>(call));
       } else if (call->op.same_as(builtin::ptx_arrive_barrier())) {
         PrimExpr barrier_id = call->args[0];
-        for (auto tma_call : pending_tma_ops_) {
+        for (const auto &tma_call : pending_tma_ops_) {
           tma_op_to_barrier_id_.Set(tma_call, barrier_id);
         }
         auto const_int_bound = analyzer_.const_int_bound(thread_var_);
@@ -326,7 +328,7 @@ public:
   std::vector<int> restore_barrier_ids_;
   int if_depth_{0};
   Map<ObjectRef, PrimExpr> tma_op_to_barrier_id_;
-  arith::Analyzer *analyzer_;
+  arith::Analyzer *analyzer_{};
   Map<Var, arith::IntSet> var_int_set_;
   std::vector<arith::IntSet> int_sets_;
 };
@@ -336,7 +338,7 @@ public:
   BarrierCreationRewriter(std::vector<int> restore_barrier_ids,
                           PrimExpr producer_thread_extent)
       : restore_barrier_ids_(std::move(restore_barrier_ids)),
-        producer_thread_extent_(producer_thread_extent) {}
+        producer_thread_extent_(std::move(producer_thread_extent)) {}
 
   PrimExpr VisitExpr_(const CallNode *op) {
     if (op->op.same_as(create_list_of_mbarrier())) {
@@ -370,8 +372,8 @@ public:
                      Map<PrimExpr, IntImm> barrier_id_to_range,
                      bool has_create_list_of_mbarrier)
       : IRMutatorWithAnalyzer(analyzer),
-        tma_op_to_barrier_id_(tma_op_to_barrier_id),
-        barrier_id_to_range_(barrier_id_to_range),
+        tma_op_to_barrier_id_(std::move(tma_op_to_barrier_id)),
+        barrier_id_to_range_(std::move(barrier_id_to_range)),
         has_create_list_of_mbarrier_(has_create_list_of_mbarrier) {}
 
   static PrimFunc Rewrite(PrimFunc f, arith::Analyzer *analyzer) {
@@ -405,7 +407,7 @@ public:
 private:
   Stmt VisitStmt_(const BlockNode *op) {
     auto block = GetRef<Block>(op);
-    if (!has_create_list_of_mbarrier_ && barrier_id_to_range_.size() > 0 &&
+    if (!has_create_list_of_mbarrier_ && !barrier_id_to_range_.empty() &&
         op->name_hint == MainBlockName) {
       ICHECK(false) << "Please declare create_list_of_mbarrier.";
     }
@@ -503,7 +505,7 @@ private:
 };
 
 tvm::transform::Pass InjectTmaBarrier() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     // Check if function only uses threadIdx.x before proceeding
     if (!ThreadTagChecker::HasOnlyThreadIdxX(f)) {
       LOG(WARNING) << "InjectTmaBarrier will be disabled because the program "

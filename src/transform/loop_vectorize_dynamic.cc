@@ -12,6 +12,7 @@
 #include <tvm/tir/stmt_functor.h>
 
 #include <numeric>
+#include <utility>
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
@@ -32,7 +33,8 @@ struct VectorizePlanResult {
   PrimExpr condition;
 };
 
-bool IndiceCanVectorizeDynamic(PrimExpr expr, Var var, PrimExpr iter_var_size,
+bool IndiceCanVectorizeDynamic(const PrimExpr &expr, Var var,
+                               const PrimExpr &iter_var_size,
                                int target_vectorized_size,
                                arith::Analyzer *analyzer) {
   ICHECK(target_vectorized_size >= 1);
@@ -136,7 +138,7 @@ private:
     // TODO: may perform some checks here
   }
 
-  void UpdateVectorSize(const Array<PrimExpr> indices, const Buffer &buffer) {
+  void UpdateVectorSize(const Array<PrimExpr> &indices, const Buffer &buffer) {
     if (!inner_for_)
       return;
     auto extent_ptr = inner_for_->extent.as<IntImmNode>();
@@ -198,7 +200,7 @@ private:
 
   int vector_size_;
 
-  const ForNode *inner_for_;
+  const ForNode *inner_for_{};
   Map<Var, Range> iter_map_;
   bool has_nonlocal_memory_access_ = false;
   // conditionally vectorize
@@ -210,8 +212,8 @@ class VectorizedBodyMutator : public StmtExprMutator {
 public:
   VectorizedBodyMutator(Var inner_var, int vector_size,
                         std::vector<PrimExpr> conditions)
-      : inner_var_(inner_var), vector_size_(vector_size),
-        conditions_(conditions) {}
+      : inner_var_(std::move(inner_var)), vector_size_(vector_size),
+        conditions_(std::move(conditions)) {}
 
 private:
   PrimExpr VisitExpr_(const CallNode *op) final {
@@ -244,7 +246,7 @@ private:
 class VectorizedConditionExtracter : public StmtExprVisitor {
 public:
   VectorizedConditionExtracter() = default;
-  std::vector<PrimExpr> GetConditions(Stmt body) {
+  std::vector<PrimExpr> GetConditions(const Stmt &body) {
     this->VisitStmt(body);
     return conditions_;
   }
@@ -269,7 +271,7 @@ private:
 class NestedLoopChecker : public StmtExprVisitor {
 public:
   NestedLoopChecker() : loop_num_(0) {}
-  int GetNestLoopNum(Stmt body) {
+  int GetNestLoopNum(const Stmt &body) {
     this->VisitStmt(body);
     return loop_num_;
   }
@@ -286,7 +288,7 @@ private:
 class VectorizedConditionMutator : public StmtExprMutator {
 public:
   VectorizedConditionMutator(Var inner_var, int extent)
-      : inner_var_(inner_var), vector_size_(extent) {}
+      : inner_var_(std::move(inner_var)), vector_size_(extent) {}
 
 private:
   PrimExpr VisitExpr_(const GENode *node) final {
@@ -343,7 +345,7 @@ private:
 
 class VectorizeRewriterDynamic : public StmtExprMutator {
 public:
-  VectorizeRewriterDynamic(VectorizePlanResult plan,
+  VectorizeRewriterDynamic(const VectorizePlanResult &plan,
                            bool disable_dynamic_tail_split)
       : vector_size_(plan.vector_size), condition_(plan.condition),
         dynamic_(plan.dynamic),
@@ -396,7 +398,7 @@ private:
 
     // Adaptively set vectorized variable to the min/max value of the extent
     PrimExpr condition_bound;
-    if (conditions.size() > 0) {
+    if (!conditions.empty()) {
       condition_bound = condition_mutator(conditions[0]);
       for (int i = 1; i < conditions.size(); ++i) {
         condition_bound = condition_bound && condition_mutator(conditions[i]);
@@ -413,7 +415,7 @@ private:
       For vectorize_for =
           For(inner_var, 0, vector_size_, ForKind::kVectorized, vectorize_body);
       For serial_for = For(inner_var, 0, vector_size_, ForKind::kSerial, body);
-      if (conditions.size() > 0) {
+      if (!conditions.empty()) {
         body = IfThenElse(condition_bound, vectorize_for, serial_for);
       } else {
         body = vectorize_for;
@@ -436,7 +438,7 @@ private:
     }
   }
 
-  const ForNode *inner_for_;
+  const ForNode *inner_for_{};
   int vector_size_;
   const PrimExpr condition_;
   const bool dynamic_;
@@ -484,7 +486,6 @@ private:
                                                   // non-vectorized loop
       return for_node;
     }
-    int vectorize_hint = res.vector_size;
     auto rewriter = VectorizeRewriterDynamic(res, disable_dynamic_tail_split_);
     return Downcast<For>(rewriter(for_node));
   }
@@ -509,7 +510,7 @@ public:
 
 tvm::transform::Pass LoopVectorizeDynamic() {
   using namespace tir::transform;
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool disable_dynamic_tail_split =
         ctx->GetConfig<Bool>(kDisableDynamicTailSplit, Bool(true)).value();
     int dynamic_alignment =

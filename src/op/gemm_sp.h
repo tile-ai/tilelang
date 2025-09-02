@@ -72,7 +72,7 @@ class GemmSPNode : public TileOperatorNode {
 public:
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const;
   LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const;
-  enum class GemmWarpPolicy {
+  enum class GemmWarpPolicy : uint8_t {
     kSquare = 0,
     kFullRow = 1,
     kFullCol = 2,

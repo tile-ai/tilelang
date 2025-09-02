@@ -92,7 +92,7 @@ public:
   int GetAccessMask() const { return access_mask_; }
   bool IsFullRegion() const;
 
-  TileOperator Clone() const;
+  TileOperator Clone() const override;
 };
 
 class RegionOp : public TileOperator {

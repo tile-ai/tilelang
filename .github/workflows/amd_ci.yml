@@ -48,6 +48,9 @@ jobs:
     - name: Run format check
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+        git submodule update --init --recursive
+        mkdir -p build
+        cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_ROCM=ON; cd ..
         if ! output=$(./format.sh 2>&1); then
           echo "------------------------------------"
           echo "message:"
@@ -56,6 +59,7 @@ jobs:
           echo "------------------------------------"
           exit 1
         fi
+        rm -rf build
     
     - name: Commit and Push Changes
       uses: stefanzweifel/git-auto-commit-action@v5

@@ -49,7 +49,7 @@ using runtime::StorageScope;
 class TileLangStorageAccessVisitor : public IRVisitorWithAnalyzer {
 public:
   /*! \brief Storage access type */
-  enum AccessType {
+  enum AccessType : uint8_t {
     kRead,
     kWrite,
     kSync,
@@ -88,7 +88,7 @@ public:
   /*! \brief Access pattern about a single statement */
   struct StmtEntry {
     /*! \brief The statement */
-    const Object *stmt;
+    const Object *stmt{};
     /*! \brief access patterns in the statement */
     std::vector<AccessEntry> access;
   };
@@ -144,13 +144,13 @@ protected:
    * \param threads The threads to compute the range for.
    * \return The thread range.
    */
-  Map<Var, Range> ComputeThreadRange(Array<IterVar> threads);
+  Map<Var, Range> ComputeThreadRange(const Array<IterVar> &threads);
 
   /*!
    * \brief Get the scope of the buffer array.
    * \return The scope of the final buffer array.
    */
-  StorageScope GetScope(Var buffer_var) const;
+  StorageScope GetScope(const Var &buffer_var) const;
   // access scope
   std::vector<std::vector<StmtEntry>> scope_;
 

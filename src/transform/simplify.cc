@@ -11,6 +11,8 @@
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
 
+#include <utility>
+
 #include "arith/ir_mutator_with_analyzer.h"
 #include "tir/analysis/control_flow_graph.h"
 #include "tir/analysis/var_use_def_analysis.h"
@@ -22,11 +24,11 @@ using namespace tir;
 using namespace arith;
 
 struct SimplifyConfigNode : public AttrsNodeReflAdapter<SimplifyConfigNode> {
-  bool transitively_prove_inequalities;
-  bool propagate_knowns_to_prove_conditional;
-  bool propagate_knowns_to_simplify_expressions;
-  bool convert_boolean_to_and_of_ors;
-  bool apply_constraints_to_boolean_branches;
+  bool transitively_prove_inequalities{};
+  bool propagate_knowns_to_prove_conditional{};
+  bool propagate_knowns_to_simplify_expressions{};
+  bool convert_boolean_to_and_of_ors{};
+  bool apply_constraints_to_boolean_branches{};
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -85,7 +87,7 @@ CollectUsedBuffers(const PrimFunc &func) {
     using StmtExprVisitor::VisitExpr_;
     using StmtExprVisitor::VisitStmt_;
 
-    Visitor(PrimFunc func) : func(func) {}
+    Visitor(PrimFunc func) : func(std::move(func)) {}
 
     void VisitExpr_(const CallNode *op) override {
       for (const auto &arg : op->args) {
@@ -215,9 +217,10 @@ TVM_REGISTER_PASS_CONFIG_OPTION("tl.Simplify", SimplifyConfig);
 
 class StmtSimplifier : public IRMutatorWithAnalyzer {
 public:
-  static PrimFunc Apply(PrimFunc func, Analyzer *analyzer,
-                        Optional<SimplifyConfig> config_opt = std::nullopt,
-                        bool simplify_arguments = false) {
+  static PrimFunc
+  Apply(PrimFunc func, Analyzer *analyzer,
+        const Optional<SimplifyConfig> &config_opt = std::nullopt,
+        bool simplify_arguments = false) {
     auto config = config_opt.value_or(AttrsWithDefaultValues<SimplifyConfig>());
     analyzer->rewrite_simplify.SetEnabledExtensions(
         config->GetEnabledExtensions());
@@ -273,9 +276,9 @@ private:
       Analyzer *analyzer, SimplifyConfig config,
       std::optional<ControlFlowGraph> touch_pattern,
       std::unordered_set<const VarNode *> used_in_buffer_def)
-      : IRMutatorWithAnalyzer(analyzer), config_(config),
-        touch_pattern_(touch_pattern), used_in_buffer_def_(used_in_buffer_def) {
-  }
+      : IRMutatorWithAnalyzer(analyzer), config_(std::move(config)),
+        touch_pattern_(std::move(touch_pattern)),
+        used_in_buffer_def_(std::move(used_in_buffer_def)) {}
 
   using Parent = IRMutatorWithAnalyzer;
   using Parent::VisitExpr_;
@@ -476,10 +479,11 @@ private:
 using namespace tir::transform;
 
 tvm::transform::Pass Simplify(bool simplify_arguments = true) {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     arith::Analyzer analyzer;
     auto cfg = ctx->GetConfig<SimplifyConfig>("tl.Simplify");
-    return StmtSimplifier::Apply(f, &analyzer, cfg, simplify_arguments);
+    return StmtSimplifier::Apply(std::move(f), &analyzer, cfg,
+                                 simplify_arguments);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.Simplify", {});
 }

@@ -33,6 +33,7 @@
 #include <tvm/tir/transform.h>
 
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "arith/scalable_expression.h"
@@ -127,7 +128,7 @@ inline PrimExpr BroadcastTo(PrimExpr e, int lanes, bool is_scalable) {
 class TLVecAllocAccess : public StmtExprMutator {
 public:
   TLVecAllocAccess(const VarNode *buf, Var var, PrimExpr var_lanes)
-      : buf_(buf), var_(var), var_lanes_(var_lanes) {}
+      : buf_(buf), var_(std::move(var)), var_lanes_(std::move(var_lanes)) {}
 
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     auto load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
@@ -207,7 +208,8 @@ public:
   using ExprFunctor::VisitExpr;
   using StmtMutator::operator();
 
-  TLVectorizer(Var var, PrimExpr var_lanes) : var_(var), var_lanes_(var_lanes) {
+  TLVectorizer(const Var &var, const PrimExpr &var_lanes)
+      : var_(var), var_lanes_(var_lanes) {
     ramp_ = Ramp(IntImm(var->dtype, 0), IntImm(var->dtype, 1), var_lanes);
   }
 
@@ -227,11 +229,13 @@ public:
   }
 
   PrimExpr VisitExpr_(const AddNode *op) final {
-    return AddSubVec(op, [](PrimExpr a, PrimExpr b) { return a + b; });
+    return AddSubVec(
+        op, [](PrimExpr a, PrimExpr b) { return std::move(a) + std::move(b); });
   }
 
   PrimExpr VisitExpr_(const SubNode *op) final {
-    return AddSubVec(op, [](PrimExpr a, PrimExpr b) { return a - b; });
+    return AddSubVec(
+        op, [](PrimExpr a, PrimExpr b) { return std::move(a) - std::move(b); });
   }
 
   PrimExpr VisitExpr_(const MulNode *op) final {
@@ -712,7 +716,7 @@ private:
   // mutate array, with given lane requirement
   // when finished, p_lane updates the lane requirement.
   Array<PrimExpr> MutateArray(Array<PrimExpr> arr, int *p_lanes) {
-    if (arr.size() == 0)
+    if (arr.empty())
       return arr;
     int &lanes = *p_lanes;
     bool changed = false;
@@ -826,7 +830,7 @@ Stmt SkipVectorize(Stmt stmt) { return VectorizeSkipper()(std::move(stmt)); }
 
 tvm::transform::Pass VectorizeLoop(bool enable_vectorize = true) {
   using namespace tir::transform;
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
     if (enable_vectorize) {
       n->body = tvm::tl::LoopVectorizer()(std::move(n->body));
