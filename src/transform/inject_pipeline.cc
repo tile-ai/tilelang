@@ -27,6 +27,7 @@
 #include <tvm/tir/transform.h>
 
 #include <unordered_set>
+#include <utility>
 
 #include "support/utils.h"
 #include "tir/schedule/utils.h"
@@ -104,7 +105,7 @@ public:
                        const Map<Buffer, Buffer> &buffer_remap,
                        For pipeline_loop, bool access_all_versions)
       : buffer_data_to_buffer_(buffer_data_to_buffer),
-        buffer_remap_(buffer_remap), pipeline_loop_(pipeline_loop),
+        buffer_remap_(buffer_remap), pipeline_loop_(std::move(pipeline_loop)),
         access_all_versions_(access_all_versions) {}
 
 private:
@@ -130,10 +131,12 @@ private:
   }
 
   PrimExpr RewriteBufferAccess(const Call &call,
-                               const std::vector<int> arg_indices) {
+                               const std::vector<int> &arg_indices) {
     auto product = [](const Array<PrimExpr> &input) {
       return foldl(
-          [](PrimExpr a, PrimExpr b, Span span) { return mul(a, b, span); },
+          [](PrimExpr a, PrimExpr b, Span span) {
+            return mul(std::move(a), std::move(b), std::move(span));
+          },
           make_const(DataType::Int(32), 1), input);
     };
     Array<PrimExpr> new_args = call->args;
@@ -363,7 +366,7 @@ private:
    * \param region2 The second region.
    * \return Whether region1 and region2 have intersections.
    */
-  bool MayConflict(Region region1, Region region2) {
+  bool MayConflict(const Region &region1, const Region &region2) {
     ICHECK(region1.size() == region2.size());
     for (size_t i = 0; i < region1.size(); i++) {
       Range dim1 = region1[i];
@@ -458,7 +461,7 @@ private:
   Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
     ObjectPtr<BufferNode> new_buffer = make_object<BufferNode>(*(buffer.get()));
     new_buffer->shape.insert(new_buffer->shape.begin(), PrimExpr(num_versions));
-    if (new_buffer->strides.size()) {
+    if (!new_buffer->strides.empty()) {
       ICHECK(new_buffer->strides.size() + 1 == new_buffer->shape.size());
       PrimExpr stride_0 = new_buffer->strides[0] * new_buffer->shape[1];
       new_buffer->strides.insert(new_buffer->strides.begin(), stride_0);
@@ -480,7 +483,9 @@ private:
     PrimExpr producer_head;
     std::vector<std::vector<int>> commit_groups;
     std::unordered_map<const BufferNode *, int> buffer_to_commit_group_;
-    bool writes(Buffer buf) const { return dst_buffers.count(buf.get()) > 0; }
+    bool writes(const Buffer &buf) const {
+      return dst_buffers.count(buf.get()) > 0;
+    }
   };
 
   // Per-stage states that are local to each of pipeline prologue, body, and
@@ -616,7 +621,7 @@ private:
    * \param unroll_loop Whether the loop should be unrolled.
    * \return The result loop.
    */
-  Stmt EmitImpl(PrimExpr start, PrimExpr end, bool unroll_loop,
+  Stmt EmitImpl(const PrimExpr &start, const PrimExpr &end, bool unroll_loop,
                 bool need_bound_check) {
     PrimExpr new_loop_var;
     PrimExpr extent = end - start;
@@ -719,7 +724,7 @@ private:
     }
 
     return BlockRealize({}, Bool(true),
-                        MakeBlock(std::move(new_loop), buffer_data_to_buffer_));
+                        MakeBlock(new_loop, buffer_data_to_buffer_));
   }
 
   arith::Analyzer analyzer_;
@@ -782,7 +787,7 @@ public:
 
 private:
   explicit PipelineInjector(Optional<String> global_symbol)
-      : global_symbol_(global_symbol) {}
+      : global_symbol_(std::move(global_symbol)) {}
 
   /*!
    * \brief Check the pipeline satisfies the following conditions:
@@ -982,7 +987,7 @@ private:
  */
 tir::transform::Pass InjectSoftwarePipeline() {
   using namespace tir::transform;
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     auto *fptr = f.CopyOnWrite();
     fptr->body = software_pipeline::PipelineInjector::Inject(f);
     fptr->body = ConvertSSA(std::move(fptr->body));

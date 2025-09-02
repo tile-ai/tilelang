@@ -330,3 +330,8 @@ TL_DEVICE void __sync_thread_partial() {
   asm volatile("bar.sync %0, %1;" : : "r"(barrier_id), "r"(thread_count));
 }
 } // namespace tl
+
+namespace cutlass {
+TL_DEVICE
+bfloat16_t fast_exp(bfloat16_t x) { return ::hexp(x); }
+} // namespace cutlass

@@ -82,7 +82,7 @@ namespace tl {
 
 using namespace tir;
 
-enum class GemmWarpPolicy {
+enum class GemmWarpPolicy : uint8_t {
   kSquare = 0,
   kFullRow = 1,
   kFullCol = 2,
@@ -117,7 +117,7 @@ public:
 
 private:
   // Target GEMM instruction
-  enum class GemmInst { kMMA, kWGMMA, kUTCMMA, kMFMA };
+  enum class GemmInst : uint8_t { kMMA, kWGMMA, kUTCMMA, kMFMA };
   GemmInst GetGemmInst(int block_size, Target target) const;
 
   std::pair<int, int> ComputeWarpPartition(int num_warps, GemmInst gemm_inst,

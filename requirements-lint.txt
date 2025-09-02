@@ -5,3 +5,4 @@ tomli==2.0.1
 ruff==0.6.5
 codespell==2.3.0
 clang-format==15.0.7
+clang-tidy==18.1.8

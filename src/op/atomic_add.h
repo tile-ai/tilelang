@@ -90,8 +90,6 @@ using namespace tir;
 
 class AtomicAddNode : public TileOperatorNode {
 public:
-  Array<PrimExpr> args_;
-
   Buffer src, dst;
   Array<Range> src_range, dst_range;
   IntImm coalesced_width;

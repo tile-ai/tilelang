@@ -14,8 +14,8 @@ namespace tl {
 
 using namespace tir;
 
-For VectorizeAtomicAdd(const For &for_node, Var thread_var, Range thread_bounds,
-                       int compute_capability);
+For VectorizeAtomicAdd(const For &for_node, const Var &thread_var,
+                       const Range &thread_bounds, int compute_capability);
 
 } // namespace tl
 } // namespace tvm

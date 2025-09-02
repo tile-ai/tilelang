@@ -12,6 +12,8 @@
 #include "../layout/layout.h"
 #include "../layout/utils.h"
 #include "../op/builtin.h"
+#include "../op/gemm.h"
+#include "../op/gemm_sp.h"
 #include "../op/operator.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
@@ -77,14 +79,14 @@ public:
 
   void Clear() { buffer_var_gemm_.clear(); }
 
-  void Collect(Stmt stmt) { VisitStmt(stmt); }
+  void Collect(const Stmt &stmt) { VisitStmt(stmt); }
 
   Array<Var> GetBufferVarGemm() { return buffer_var_gemm_; }
 
 private:
   void VisitStmt_(const EvaluateNode *op) {
     auto call = Downcast<Call>(op->value);
-    if (call->op.same_as(Op::Get("tl.gemm"))) {
+    if (call->op.same_as(Gemm::Get())) {
       auto srcA_buffer_access_ptr = Downcast<Call>(call->args[0]);
       ICHECK(srcA_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
       auto srcA_buffer_var = Downcast<Var>(srcA_buffer_access_ptr->args[1]);
@@ -97,7 +99,7 @@ private:
       buffer_var_gemm_.push_back(srcA_buffer_var);
       buffer_var_gemm_.push_back(srcB_buffer_var);
       buffer_var_gemm_.push_back(dst_buffer_var);
-    } else if (call->op.same_as(Op::Get("tl.gemm_sp"))) {
+    } else if (call->op.same_as(GemmSP::Get())) {
       auto srcA_buffer_access_ptr = Downcast<Call>(call->args[0]);
       ICHECK(srcA_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
       auto srcA_buffer_var = Downcast<Var>(srcA_buffer_access_ptr->args[1]);
@@ -131,7 +133,7 @@ public:
    * remapping. \param stmt The statement to rewrite. \param buffer_remap A map
    * from old buffers to new buffers. \return The rewritten statement.
    */
-  static Stmt Substitute(Stmt stmt, Map<Buffer, Buffer> buffer_remap) {
+  static Stmt Substitute(const Stmt &stmt, Map<Buffer, Buffer> buffer_remap) {
     arith::Analyzer analyzer;
     RemapBufferRewriter substituter(&analyzer);
     substituter.buffer_remap_ = std::move(buffer_remap);
@@ -277,7 +279,7 @@ private:
     return block;
   }
 
-  int CheckAndGetBufferRowSize(Buffer buffer) {
+  int CheckAndGetBufferRowSize(const Buffer &buffer) {
     CHECK(buffer->shape.size() >= 2)
         << "The dimension of Buffer \"" << buffer->name << "\" with shape "
         << buffer->shape << " should be at least 2";
@@ -287,9 +289,10 @@ private:
     return buffer_row_size;
   }
 
-  PrimExpr HandleAccessPtrAndOffset(PrimExpr access_ptr,
-                                    Optional<PrimExpr> offset = std::nullopt,
-                                    DataType dtype = DataType::Int(32)) {
+  PrimExpr
+  HandleAccessPtrAndOffset(const PrimExpr &access_ptr,
+                           const Optional<PrimExpr> &offset = std::nullopt,
+                           DataType dtype = DataType::Int(32)) {
     // The 2th arg of T.tvm_access_ptr call is offset, we set it to 0 and
     // accumulate it to smem_offset
     CHECK(access_ptr->IsInstance<CallNode>())
@@ -567,7 +570,7 @@ namespace transform {
 using namespace tir::transform;
 
 tvm::transform::Pass LowerTileOp() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return LowerTileOpPass::Substitute(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerTileOp", {});

@@ -26,6 +26,8 @@
 
 #include <tvm/tir/stmt_functor.h>
 
+#include <utility>
+
 namespace tvm {
 namespace tl {
 
@@ -57,7 +59,7 @@ private:
 
 // Rewrite the parallel loop into a common loop, which is mapped to threads
 For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
-                  Fragment loop_layout) {
+                  const Fragment &loop_layout) {
   ICHECK(loop_layout.defined());
   ICHECK(thread_var.defined());
   int old_loop_depth = loop_layout->InputDim();
@@ -72,7 +74,7 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   vars.push_back(thread_var);
   // create the substitute map, and the loop body
   Map<Var, PrimExpr> vmap;
-  Stmt body = op;
+  Stmt body = std::move(op);
   auto inv_loop = loop_layout->Inverse();
   auto indices = inv_loop->Forward(Array<PrimExpr>(vars.begin(), vars.end()));
   for (int i = 0; i < old_loop_depth; i++) {
@@ -123,7 +125,7 @@ class LoopPartitioner : public StmtExprVisitor {
 public:
   LoopPartitioner() = default;
 
-  Fragment Partition(For op, int num_thread, int vectorize_size) {
+  Fragment Partition(const For &op, int num_thread, int vectorize_size) {
     this->VisitStmt(op);
     int loop_size_full = 1;
     PrimExpr flattened = 0;
@@ -182,12 +184,14 @@ private:
   Array<IterVar> loop_vars_;
 };
 
-Fragment PlanLoopPartition(For op, size_t num_thread, int vectorize_size) {
+Fragment PlanLoopPartition(const For &op, size_t num_thread,
+                           int vectorize_size) {
   LoopPartitioner partitioner;
   return partitioner.Partition(op, num_thread, vectorize_size);
 }
 
-Fragment PlanLoopPartition(For op, int vectorize_size, Range thread_range) {
+Fragment PlanLoopPartition(const For &op, int vectorize_size,
+                           const Range &thread_range) {
   size_t num_thread = *as_const_int(thread_range->extent);
   LoopPartitioner partitioner;
   Fragment fragment = partitioner.Partition(op, num_thread, vectorize_size);
@@ -196,7 +200,7 @@ Fragment PlanLoopPartition(For op, int vectorize_size, Range thread_range) {
 
 For LoopPragmaUnroll(For stmt) {
   LoopPramaUnroller unroller;
-  For unrolled = Downcast<For>(unroller(stmt));
+  For unrolled = Downcast<For>(unroller(std::move(stmt)));
   return unrolled;
 }
 

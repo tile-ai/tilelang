@@ -18,7 +18,7 @@ public:
   ConfigIndexBitwidthRewriter(int index_bitwidth)
       : _index_bitwidth_(index_bitwidth) {}
 
-  Stmt operator()(Stmt s) { return VisitStmt(s); }
+  Stmt operator()(const Stmt &s) { return VisitStmt(s); }
 
 protected:
   using Parent::VisitExpr_;
@@ -73,7 +73,7 @@ protected:
 class IndexLegalizer : public IRMutatorWithAnalyzer {
 
 public:
-  static Stmt Rewrite(Stmt stmt) {
+  static Stmt Rewrite(const Stmt &stmt) {
     Analyzer ana;
     auto pass = IndexLegalizer(&ana);
     return pass.VisitStmt(stmt);
@@ -158,7 +158,7 @@ private:
 
 tvm::transform::Pass ConfigIndexBitwidth() {
   using namespace tir::transform;
-  auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
     // Get pass config `tl.config_index_bitwidth`
     tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
@@ -166,11 +166,10 @@ tvm::transform::Pass ConfigIndexBitwidth() {
         ctxt->GetConfig(kConfigIndexBitwidth, Optional<Integer>());
     if (opt_config_index_bitwidth.defined()) {
       int config_index_bitwidth = opt_config_index_bitwidth.value()->value;
-      n->body = ConfigIndexBitwidthRewriter(config_index_bitwidth)(
-          std::move(n->body));
+      n->body = ConfigIndexBitwidthRewriter(config_index_bitwidth)(n->body);
     }
     // Legalize out-of-bound indices to be int64
-    n->body = IndexLegalizer::Rewrite(std::move(n->body));
+    n->body = IndexLegalizer::Rewrite(n->body);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.ConfigIndexBitwidth", {});

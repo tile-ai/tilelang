@@ -30,6 +30,7 @@
 #include <tvm/tir/transform.h>
 
 #include <unordered_set>
+#include <utility>
 
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
@@ -49,17 +50,17 @@ class AllocateCollector : public StmtExprVisitor {
 
 private:
   bool IsDynamicSharedMemory(Var buffer_var) {
-    StorageScope storage_scope =
-        runtime::StorageScope::Create(GetPtrStorageScope(buffer_var));
+    StorageScope storage_scope = runtime::StorageScope::Create(
+        GetPtrStorageScope(std::move(buffer_var)));
     return storage_scope.rank == runtime::StorageRank::kShared &&
            storage_scope.tag == ".dyn";
   }
 
   bool IsStaticSharedMemory(Var buffer_var) {
-    StorageScope storage_scope =
-        runtime::StorageScope::Create(GetPtrStorageScope(buffer_var));
+    StorageScope storage_scope = runtime::StorageScope::Create(
+        GetPtrStorageScope(std::move(buffer_var)));
     return storage_scope.rank == runtime::StorageRank::kShared &&
-           storage_scope.tag == "";
+           storage_scope.tag.empty();
   }
 
 public:
@@ -175,7 +176,6 @@ public:
     }
 
     BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    op = load.get();
 
     if (auto opt = GetRemappedBuffer(load->buffer)) {
       load.CopyOnWrite()->buffer = opt.value();
@@ -197,7 +197,7 @@ private:
   struct ThreadEntry {
     runtime::ThreadScope scope;
     IterVar iv;
-    int extent;
+    int extent{};
     // comparator
     bool operator<(const ThreadEntry &other) const {
       return scope.dim_index < other.scope.dim_index;
@@ -532,7 +532,7 @@ private:
 
     // Fix all local allocations as all statements are built.
     Stmt body = SeqStmt::Flatten(seq);
-    for (Buffer buf : new_alloc_bufs) {
+    for (const Buffer &buf : new_alloc_bufs) {
       body = DeclBuffer(buf, body);
       body = Allocate(buf->data, buf->dtype, buf->shape,
                       const_true(buf->dtype.lanes()), body);
@@ -542,12 +542,13 @@ private:
   }
 
   std::pair<std::vector<PrimExpr>, std::vector<Buffer>>
-  MakeWarpAllreduce(std::vector<PrimExpr> src_values,            //
-                    std::vector<DataType> dtypes,                //
-                    const CommReducerNode *combiner,             //
-                    PrimExpr reduce_index, int reduce_extent,    //
-                    PrimExpr group_index,                        //
-                    PrimExpr mask, Optional<PrimExpr> predicate, //
+  MakeWarpAllreduce(std::vector<PrimExpr> src_values,                //
+                    std::vector<DataType> dtypes,                    //
+                    const CommReducerNode *combiner,                 //
+                    const PrimExpr &reduce_index, int reduce_extent, //
+                    const PrimExpr &group_index,                     //
+                    const PrimExpr &mask,
+                    const Optional<PrimExpr> &predicate, //
                     std::vector<Stmt> *seq) {
     int n_buffers = src_values.size();
 
@@ -785,7 +786,7 @@ private:
                          int *out_total_extent) {
     int &total_extent = *out_total_extent;
     total_extent = 1;
-    if (tvec.size() == 0) {
+    if (tvec.empty()) {
       return make_zero(DataType::Int(32));
     }
 
@@ -802,7 +803,7 @@ private:
     return ret;
   }
   // The local buffer index.
-  PrimExpr BufIndex(PrimExpr reduce_index, PrimExpr group_index,
+  PrimExpr BufIndex(PrimExpr reduce_index, const PrimExpr &group_index,
                     int reduce_extent) {
     if (!is_zero(group_index)) {
       return analyzer_.Simplify(group_index * reduce_extent + reduce_index);
@@ -817,8 +818,8 @@ private:
   }
 
   // Emit warp shuffle  calls.
-  PrimExpr WarpShuffle(const Op &op, Optional<Buffer> mask_buffer, PrimExpr val,
-                       PrimExpr delta_or_lane) {
+  PrimExpr WarpShuffle(const Op &op, const Optional<Buffer> &mask_buffer,
+                       const PrimExpr &val, PrimExpr delta_or_lane) {
     Array<PrimExpr> indices = {0};
     PrimExpr mask;
     if (mask_buffer.defined()) {
@@ -827,7 +828,7 @@ private:
       mask = IntImm(DataType::Int(32), 0);
     }
     PrimExpr width = IntImm(DataType::Int(32), warp_size_);
-    Array<PrimExpr> args{mask, val, delta_or_lane, width, width};
+    Array<PrimExpr> args{mask, val, std::move(delta_or_lane), width, width};
     return Call(val.dtype(), op, args);
   }
 
@@ -904,7 +905,7 @@ private:
   // The maximum number of threads of the device. "-1" denotes unknown.
   int max_num_threads_{-1};
   // A boolean indicating if the target supports warp-level masking.
-  bool need_warp_shuffle_mask_;
+  bool need_warp_shuffle_mask_{};
 
   // surrounding scope of thread extent.
   std::vector<const AttrStmtNode *> thread_extents_;
@@ -925,7 +926,7 @@ namespace transform {
 using namespace tir::transform;
 
 tvm::transform::Pass LowerThreadAllreduce() {
-  auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     AllocateCollector collector;
     collector(f->body);
     bool is_dynamic = collector.dyn_shmem_allocs_.size() > 1;
