@@ -202,7 +202,7 @@ def get_cplus_compiler():
                 return cc_path
     return None
 
-
+@functools.lru_cache(maxsize=None)
 def get_cython_compiler() -> Optional[str]:
     """Return the path to the Cython compiler.
 
@@ -236,6 +236,16 @@ def get_cython_compiler() -> Optional[str]:
             if os.path.isfile(cython_path) and os.access(cython_path, os.X_OK):
                 return cython_path
     return None
+
+@functools.lru_cache(maxsize=None)
+def get_cmake_path() -> str:
+    """Return the path to the CMake compiler.
+    """
+    # found which cmake is used
+    cmake_path = shutil.which("cmake")
+    if not os.path.exists(cmake_path):
+        raise Exception("CMake is not installed, please install it first.")
+    return cmake_path
 
 
 def get_system_info():
@@ -358,7 +368,8 @@ def build_csrc(llvm_config_path):
             config_file.write("set(USE_ROCM OFF)\n")
     # Run CMake and make
     try:
-        subprocess.check_call(["cmake", ".."])
+        cmake_path = get_cmake_path()
+        subprocess.check_call([cmake_path, ".."])
         num_jobs = max(1, int(multiprocessing.cpu_count() * 0.75))
         subprocess.check_call(["make", f"-j{num_jobs}"])
     except subprocess.CalledProcessError as error:
@@ -627,7 +638,10 @@ class TilelangExtensionBuild(build_ext):
     def run(self):
         # Check if CMake is installed and accessible by attempting to run 'cmake --version'.
         try:
-            subprocess.check_output(["cmake", "--version"])
+            cmake_path = get_cmake_path()
+            if not cmake_path:
+                raise Exception("CMake is not installed, please install it first.")
+            subprocess.check_output([cmake_path, "--version"])
         except OSError as error:
             # If CMake is not found, raise an error.
             raise RuntimeError(
@@ -830,15 +844,23 @@ class TilelangExtensionBuild(build_ext):
         else:
             print(f"[Config] No changes: {dst_config}")
 
+        cmake_path = get_cmake_path()
         # Run CMake to configure the project with the given arguments.
         if not os.path.exists(build_temp + "/build.ninja"):
-            subprocess.check_call(["cmake", ext.sourcedir] + cmake_args, cwd=build_temp)
+            subprocess.check_call([cmake_path, ext.sourcedir] + cmake_args, cwd=build_temp)
 
         # Build the project in "Release" mode with all available CPU cores ("-j").
         num_jobs = max(1, int(multiprocessing.cpu_count() * 0.75))
-        subprocess.check_call(["cmake", "--build", ".", "--config", "Release", "-j",
+        logger.info(f"Building with {num_jobs} jobs")
+        logger.info(f"cmake path: {cmake_path}, available: {os.path.exists(cmake_path)}, build temp: {build_temp}")
+
+        while True:
+            continue
+
+        subprocess.check_call([cmake_path, "--build", ".", "--config", "Release", "-j",
                                str(num_jobs)],
                               cwd=build_temp)
+        logger.info(f"Build complete")
 
 
 setup(
