@@ -34,7 +34,7 @@ def compile(
     out_idx: Union[List[int], int, None] = None,
     execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
     target: Union[str, Target] = "auto",
-    target_host: Union[str, Target] = None,
+    target_host: Union[str, Target, None] = None,
     verbose: bool = False,
     pass_configs: Optional[Dict[str, Any]] = None,
     compile_flags: Optional[Union[List[str], str]] = None,
@@ -69,6 +69,10 @@ def compile(
     assert isinstance(func, PrimFunc), f"target function must be a PrimFunc but got {type(func)}"
     if isinstance(compile_flags, str):
         compile_flags = [compile_flags]
+
+    # This path is not a performance critical path, so we can afford to convert the target.
+    target, target_host = Target(target), Target(target_host) if target_host else None
+
     return cached(
         func=func,
         out_idx=out_idx,
