@@ -202,6 +202,7 @@ def get_cplus_compiler():
                 return cc_path
     return None
 
+
 @functools.lru_cache(maxsize=None)
 def get_cython_compiler() -> Optional[str]:
     """Return the path to the Cython compiler.
@@ -236,6 +237,7 @@ def get_cython_compiler() -> Optional[str]:
             if os.path.isfile(cython_path) and os.access(cython_path, os.X_OK):
                 return cython_path
     return None
+
 
 @functools.lru_cache(maxsize=None)
 def get_cmake_path() -> str:
@@ -851,16 +853,14 @@ class TilelangExtensionBuild(build_ext):
 
         # Build the project in "Release" mode with all available CPU cores ("-j").
         num_jobs = max(1, int(multiprocessing.cpu_count() * 0.75))
-        logger.info(f"Building with {num_jobs} jobs")
-        logger.info(f"cmake path: {cmake_path}, available: {os.path.exists(cmake_path)}, build temp: {build_temp}")
 
         while True:
             continue
 
-        subprocess.check_call([cmake_path, "--build", ".", "--config", "Release", "-j",
-                               str(num_jobs)],
-                              cwd=build_temp)
-        logger.info(f"Build complete")
+        subprocess.check_call(
+            [cmake_path, "--build", ".", "--config", "Release", "-j",
+             str(num_jobs)],
+            cwd=build_temp)
 
 
 setup(
