@@ -1,5 +1,6 @@
 from tilelang import tvm as tvm
-from tvm.ir import Node, Scriptable
+from tvm.ir.base import Node
+from tvm.runtime import Scriptable
 import tvm.ffi
 
 
