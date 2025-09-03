@@ -75,7 +75,7 @@
          case 32:
            return name + 'f';
          case 16:
-           return 'h' + name;
+           return std::string("h") + name;
          default:
            return "";
        }
@@ -113,9 +113,10 @@
    }
  };
  
- static PrimExpr DispatchHIPWarpActiveMask(const PrimExpr& e) {
-   const CallNode* call = e.as<CallNode>();
-   return Call(call->dtype, Op::Get("tir.hip.__activemask"), call->args);
+static PrimExpr DispatchHIPWarpActiveMask(const PrimExpr& e) {
+  const CallNode* call = e.as<CallNode>();
+  ICHECK(call != nullptr);
+  return Call(call->dtype, Op::Get("tir.hip.__activemask"), {});
  }
  
  template <typename T>
