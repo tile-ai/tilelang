@@ -36,16 +36,17 @@ public:
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<ReduceOpNode>()
-    .def_ro("src", &ReduceOpNode::src)
-    .def_ro("dst", &ReduceOpNode::dst)
-    .def_ro("dim", &ReduceOpNode::dim)
-    // TODO(lei): legalize type into a object node
-    // .def_ro("type", &ReduceOpNode::type)
-    .def_ro("clear", &ReduceOpNode::clear);
+        .def_ro("src", &ReduceOpNode::src)
+        .def_ro("dst", &ReduceOpNode::dst)
+        .def_ro("dim", &ReduceOpNode::dim)
+        // TODO(lei): legalize type into a object node
+        // .def_ro("type", &ReduceOpNode::type)
+        .def_ro("clear", &ReduceOpNode::clear);
   }
 
   bool SEqualReduce(const ReduceOpNode *other, SEqualReducer equal) const {
-    return equal(src, other->src) && equal(dst, other->dst) && equal(dim, other->dim) && equal(clear, other->clear);
+    return equal(src, other->src) && equal(dst, other->dst) &&
+           equal(dim, other->dim) && equal(clear, other->clear);
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {

@@ -255,7 +255,7 @@ PrimExpr AtomicAddNode::MakePredicate(arith::Analyzer *analyzer,
  */
 For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
-  bool is_scalar = loop_vars.size() == 0;
+  bool is_scalar = loop_vars.empty();
   if (is_scalar) {
     return For(Var("i"), 0, 1, ForKind::kSerial,
                BufferStore(dst, BufferLoad(src, {0}), {0}));
@@ -425,9 +425,7 @@ TIR_REGISTER_TL_OP(AtomicAdd, atomicadd)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TVM_FFI_STATIC_INIT_BLOCK({
-  AtomicAddNode::RegisterReflection();
-});
+TVM_FFI_STATIC_INIT_BLOCK({ AtomicAddNode::RegisterReflection(); });
 
 } // namespace tl
 } // namespace tvm

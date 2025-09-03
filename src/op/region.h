@@ -97,13 +97,14 @@ public:
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<RegionOpNode>()
-      .def_ro("buffer", &RegionOpNode::buffer_)
-      .def_ro("ranges", &RegionOpNode::ranges_)
-      .def_ro("access_mask", &RegionOpNode::access_mask_);
+        .def_ro("buffer", &RegionOpNode::buffer_)
+        .def_ro("ranges", &RegionOpNode::ranges_)
+        .def_ro("access_mask", &RegionOpNode::access_mask_);
   }
 
   bool SEqualReduce(const RegionOpNode *other, SEqualReducer equal) const {
-    return equal(buffer_, other->buffer_) && equal(ranges_, other->ranges_) && equal(access_mask_, other->access_mask_);
+    return equal(buffer_, other->buffer_) && equal(ranges_, other->ranges_) &&
+           equal(access_mask_, other->access_mask_);
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {

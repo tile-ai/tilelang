@@ -96,23 +96,28 @@ public:
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<GemmSPNode>()
-    // TODO(lei): legalize policy into a object node
-      .def_ro("A", &GemmSPNode::A)
-      .def_ro("B", &GemmSPNode::B)
-      .def_ro("C", &GemmSPNode::C)
-      .def_ro("E", &GemmSPNode::E)
-      .def_ro("trans_A", &GemmSPNode::trans_A)
-      .def_ro("trans_B", &GemmSPNode::trans_B)
-      .def_ro("M", &GemmSPNode::M)
-      .def_ro("N", &GemmSPNode::N)
-      .def_ro("K", &GemmSPNode::K)
-      .def_ro("clear_accum", &GemmSPNode::clear_accum)
-      .def_ro("kPack", &GemmSPNode::kPack)
-      .def_ro("wg_wait", &GemmSPNode::wg_wait);
+        // TODO(lei): legalize policy into a object node
+        .def_ro("A", &GemmSPNode::A)
+        .def_ro("B", &GemmSPNode::B)
+        .def_ro("C", &GemmSPNode::C)
+        .def_ro("E", &GemmSPNode::E)
+        .def_ro("trans_A", &GemmSPNode::trans_A)
+        .def_ro("trans_B", &GemmSPNode::trans_B)
+        .def_ro("M", &GemmSPNode::M)
+        .def_ro("N", &GemmSPNode::N)
+        .def_ro("K", &GemmSPNode::K)
+        .def_ro("clear_accum", &GemmSPNode::clear_accum)
+        .def_ro("kPack", &GemmSPNode::kPack)
+        .def_ro("wg_wait", &GemmSPNode::wg_wait);
   }
 
   bool SEqualReduce(const GemmSPNode *other, SEqualReducer equal) const {
-    return equal(A, other->A) && equal(B, other->B) && equal(C, other->C) && equal(E, other->E) && equal(trans_A, other->trans_A) && equal(trans_B, other->trans_B) && equal(M, other->M) && equal(N, other->N) && equal(K, other->K) && equal(clear_accum, other->clear_accum) && equal(kPack, other->kPack) && equal(wg_wait, other->wg_wait);
+    return equal(A, other->A) && equal(B, other->B) && equal(C, other->C) &&
+           equal(E, other->E) && equal(trans_A, other->trans_A) &&
+           equal(trans_B, other->trans_B) && equal(M, other->M) &&
+           equal(N, other->N) && equal(K, other->K) &&
+           equal(clear_accum, other->clear_accum) &&
+           equal(kPack, other->kPack) && equal(wg_wait, other->wg_wait);
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {
@@ -131,7 +136,7 @@ public:
     hash_reduce(kPack);
     hash_reduce(wg_wait);
   }
-  
+
 private:
   mutable bool completed_ = false;
 };

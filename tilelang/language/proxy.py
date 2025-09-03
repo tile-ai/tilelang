@@ -158,7 +158,11 @@ class TensorProxy(BaseTensorProxy):
         if isinstance(shape, (int, PrimExpr)):
             shape = (shape,)
         return super().__call__(
-            shape, dtype=dtype, strides=TensorProxy._construct_strides(shape), data=data, scope=scope)
+            shape,
+            dtype=dtype,
+            strides=TensorProxy._construct_strides(shape),
+            data=data,
+            scope=scope)
 
 
 class StridedTensorProxy(BaseTensorProxy):

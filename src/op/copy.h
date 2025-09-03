@@ -114,21 +114,24 @@ public:
   uint8_t eviction_policy; // Policy for cache eviction
   static constexpr const char *_type_key = "tl.Copy";
   TVM_DECLARE_FINAL_OBJECT_INFO(CopyNode, TileOperatorNode);
-  
+
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<CopyNode>()
-      .def_ro("src", &CopyNode::src)
-      .def_ro("dst", &CopyNode::dst)
-      .def_ro("src_range", &CopyNode::src_range)
-      .def_ro("dst_range", &CopyNode::dst_range)
-      .def_ro("coalesced_width", &CopyNode::coalesced_width);
+        .def_ro("src", &CopyNode::src)
+        .def_ro("dst", &CopyNode::dst)
+        .def_ro("src_range", &CopyNode::src_range)
+        .def_ro("dst_range", &CopyNode::dst_range)
+        .def_ro("coalesced_width", &CopyNode::coalesced_width);
   }
-  
+
   bool SEqualReduce(const CopyNode *other, SEqualReducer equal) const {
-    return equal(src, other->src) && equal(dst, other->dst) && equal(src_range, other->src_range) && equal(dst_range, other->dst_range) && equal(coalesced_width, other->coalesced_width);
+    return equal(src, other->src) && equal(dst, other->dst) &&
+           equal(src_range, other->src_range) &&
+           equal(dst_range, other->dst_range) &&
+           equal(coalesced_width, other->coalesced_width);
   }
-  
+
   void SHashReduce(SHashReducer hash_reduce) const {
     hash_reduce(src);
     hash_reduce(dst);
@@ -293,19 +296,23 @@ public:
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<Conv2DIm2ColOpNode>()
-      .def_ro("src", &Conv2DIm2ColOpNode::src)
-      .def_ro("dst", &Conv2DIm2ColOpNode::dst)
-      .def_ro("stride", &Conv2DIm2ColOpNode::stride)
-      .def_ro("padding", &Conv2DIm2ColOpNode::padding)
-      .def_ro("dilation", &Conv2DIm2ColOpNode::dilation)
-      .def_ro("kernel", &Conv2DIm2ColOpNode::kernel)
-      .def_ro("eviction_policy", &Conv2DIm2ColOpNode::eviction_policy);
+        .def_ro("src", &Conv2DIm2ColOpNode::src)
+        .def_ro("dst", &Conv2DIm2ColOpNode::dst)
+        .def_ro("stride", &Conv2DIm2ColOpNode::stride)
+        .def_ro("padding", &Conv2DIm2ColOpNode::padding)
+        .def_ro("dilation", &Conv2DIm2ColOpNode::dilation)
+        .def_ro("kernel", &Conv2DIm2ColOpNode::kernel)
+        .def_ro("eviction_policy", &Conv2DIm2ColOpNode::eviction_policy);
   }
-  
-  bool SEqualReduce(const Conv2DIm2ColOpNode *other, SEqualReducer equal) const {
-    return equal(src, other->src) && equal(dst, other->dst) && equal(stride, other->stride) && equal(padding, other->padding) && equal(dilation, other->dilation) && equal(kernel, other->kernel) && equal(eviction_policy, other->eviction_policy);
+
+  bool SEqualReduce(const Conv2DIm2ColOpNode *other,
+                    SEqualReducer equal) const {
+    return equal(src, other->src) && equal(dst, other->dst) &&
+           equal(stride, other->stride) && equal(padding, other->padding) &&
+           equal(dilation, other->dilation) && equal(kernel, other->kernel) &&
+           equal(eviction_policy, other->eviction_policy);
   }
-  
+
   void SHashReduce(SHashReducer hash_reduce) const {
     hash_reduce(src);
     hash_reduce(dst);

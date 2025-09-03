@@ -107,15 +107,18 @@ public:
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<AtomicAddNode>()
-      .def_ro("src", &AtomicAddNode::src)
-      .def_ro("dst", &AtomicAddNode::dst)
-      .def_ro("src_range", &AtomicAddNode::src_range)
-      .def_ro("dst_range", &AtomicAddNode::dst_range)
-      .def_ro("coalesced_width", &AtomicAddNode::coalesced_width);
+        .def_ro("src", &AtomicAddNode::src)
+        .def_ro("dst", &AtomicAddNode::dst)
+        .def_ro("src_range", &AtomicAddNode::src_range)
+        .def_ro("dst_range", &AtomicAddNode::dst_range)
+        .def_ro("coalesced_width", &AtomicAddNode::coalesced_width);
   }
 
   bool SEqualReduce(const AtomicAddNode *other, SEqualReducer equal) const {
-    return equal(src, other->src) && equal(dst, other->dst) && equal(src_range, other->src_range) && equal(dst_range, other->dst_range) && equal(coalesced_width, other->coalesced_width);
+    return equal(src, other->src) && equal(dst, other->dst) &&
+           equal(src_range, other->src_range) &&
+           equal(dst_range, other->dst_range) &&
+           equal(coalesced_width, other->coalesced_width);
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {
@@ -128,6 +131,7 @@ public:
 
   static constexpr bool _type_has_method_sequal_reduce = true;
   static constexpr bool _type_has_method_shash_reduce = true;
+
 protected:
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;
   Array<IterVar> MakeIterVars() const;

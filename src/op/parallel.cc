@@ -378,9 +378,9 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
                                  indice_map_[buffer], analyzer_)) {
         std::ostringstream oss;
         oss << "Layout infer conflict between " << buffer << " and "
-            << source_buffer << " in T.Parallel loop:" << std::endl
-            << "    loop " << loop_layout_->DebugOutput() << std::endl
-            << "    fragment " << fragment->DebugOutput() << std::endl;
+            << source_buffer << " in T.Parallel loop:" << '\n'
+            << "    loop " << loop_layout_->DebugOutput() << '\n'
+            << "    fragment " << fragment->DebugOutput() << '\n';
         throw LayoutConflictException(oss.str());
       }
     } else {
@@ -427,9 +427,7 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
       ->CondenseReplicateVar();
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
-  ParallelOpNode::RegisterReflection();
-});
+TVM_FFI_STATIC_INIT_BLOCK({ ParallelOpNode::RegisterReflection(); });
 
 } // namespace tl
 } // namespace tvm

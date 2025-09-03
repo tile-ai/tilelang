@@ -168,11 +168,6 @@ For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
  * @return Stmt The lowered TIR statement implementing the fill.
  */
 Stmt FillNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  if (const auto f = ffi::Function::GetGlobal("tl.fill.lower")) {
-    LOG(INFO) << "Using tl.fill.lower";
-    auto stmt = (*f)(this, dst);
-    return Downcast<Stmt>(stmt);
-  }
   if (dst.scope() == "local.fragment") {
     auto par_op = ParallelOp(MakeSIMTLoop(analyzer));
     par_op->InferLayout({T.target, T.thread_bounds, T.layout_map},

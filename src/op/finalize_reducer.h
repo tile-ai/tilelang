@@ -12,7 +12,6 @@
 #include "../transform/layout_reducer.h"
 #include "./operator.h"
 
-
 /**
  * Get the Op singleton for the public FinalizeReducerOp handle.
  *
@@ -34,11 +33,12 @@ public:
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<FinalizeReducerOpNode>()
-      .def_ro("reducer", &FinalizeReducerOpNode::reducer)
-      .def_ro("op", &FinalizeReducerOpNode::op);
+        .def_ro("reducer", &FinalizeReducerOpNode::reducer)
+        .def_ro("op", &FinalizeReducerOpNode::op);
   }
 
-  bool SEqualReduce(const FinalizeReducerOpNode *other, SEqualReducer equal) const {
+  bool SEqualReduce(const FinalizeReducerOpNode *other,
+                    SEqualReducer equal) const {
     return equal(reducer, other->reducer) && equal(op, other->op);
   }
 

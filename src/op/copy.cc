@@ -297,7 +297,7 @@ PrimExpr CopyNode::MakePredicate(arith::Analyzer *analyzer,
  */
 For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
-  bool is_scalar = loop_vars.size() == 0;
+  bool is_scalar = loop_vars.empty();
   if (is_scalar) {
     return For(Var("i"), 0, 1, ForKind::kSerial,
                BufferStore(dst, BufferLoad(src, {0}), {0}));

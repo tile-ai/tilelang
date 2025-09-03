@@ -72,13 +72,15 @@ public:
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<ParallelOpNode>()
-    .def_ro("root", &ParallelOpNode::root_)
-    .def_ro("loop_layout", &ParallelOpNode::loop_layout_)
-    .def_ro("predicate", &ParallelOpNode::predicate_);
+        .def_ro("root", &ParallelOpNode::root_)
+        .def_ro("loop_layout", &ParallelOpNode::loop_layout_)
+        .def_ro("predicate", &ParallelOpNode::predicate_);
   }
 
   bool SEqualReduce(const ParallelOpNode *other, SEqualReducer equal) const {
-    return equal(root_, other->root_) && equal(loop_layout_, other->loop_layout_) && equal(predicate_, other->predicate_);
+    return equal(root_, other->root_) &&
+           equal(loop_layout_, other->loop_layout_) &&
+           equal(predicate_, other->predicate_);
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {
