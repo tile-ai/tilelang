@@ -1,11 +1,6 @@
 /*!
- * \file tl/op/elem.h
- * \brief Define element-wise and copy-related operators for TVM TensorIR
- * Lowering.
- *
- * This header declares the Copy operator and related operator descriptors
- * such as TMADesc and TMAIm2ColDesc, as well as a Conv2DIm2Col special
- * operator.
+ * \file tl/op/copy.h
+ * \brief Copy operations and Tensor Memory Access (TMA) descriptors
  */
 
 #ifndef TVM_TL_OP_COPY_H_
@@ -18,42 +13,30 @@ namespace tvm {
 namespace tl {
 using namespace tir;
 
-/*!
- * \brief Copy instruction type.
- */
+/// Copy instruction types for different memory access patterns
 enum class CopyInst : uint8_t {
-  kNormal = 0,    // utilize ldg/stg or cpasync or any buffer copy
-  kLDSM = 1,      // ldmatrix memory copy
-  kSTSM = 2,      // stmatrix memory copy
-  kBulkLoad = 3,  // utilize tma load
-  kBulkStore = 4, // utilize tma store
+  kNormal = 0,    ///< Standard memory copy (ldg/stg/cpasync)
+  kLDSM = 1,      ///< Load matrix instruction
+  kSTSM = 2,      ///< Store matrix instruction  
+  kBulkLoad = 3,  ///< Tensor Memory Access load
+  kBulkStore = 4, ///< Tensor Memory Access store
 };
 
-/*!
- * \brief Descriptor for Tensor Memory Access (TMA) copy operations.
- *
- * Contains meta-information required to perform global-to-shared memory copy
- * using Tensor Memory Accelerator (TMA) hardware instructions. It is mainly
- * used to describe the shape, strides, and data layout for both source and
- * shared memory buffers.
- */
+/// Descriptor for Tensor Memory Access (TMA) copy operations
 struct TMADesc {
-  size_t rank;                  // Tensor rank (number of dimensions)
-  int data_type;                // Data type identifier (numeric code)
-  Array<PrimExpr> global_shape; // Shape of the source tensor in global memory
-  Array<PrimExpr>
-      global_stride;           // Strides of the source tensor in global memory
-  Array<PrimExpr> smem_box;    // Block shape in shared memory
-  Array<PrimExpr> smem_stride; // Strides in shared memory layout
-  PrimExpr global_addr;        // Base address in global memory
-  int swizzle;                 // Swizzle parameter for memory layout transform
-  int interleave;              // Interleave parameter for optimization
-  int oob_fill;                // Out-of-bound fill policy
-  int l2_promotion;            // Whether to promote data to L2 cache
+  size_t rank;                    ///< Tensor rank (number of dimensions)
+  int data_type;                  ///< Data type identifier
+  Array<PrimExpr> global_shape;   ///< Shape in global memory
+  Array<PrimExpr> global_stride;  ///< Strides in global memory
+  Array<PrimExpr> smem_box;       ///< Block shape in shared memory
+  Array<PrimExpr> smem_stride;    ///< Strides in shared memory
+  PrimExpr global_addr;           ///< Base address in global memory
+  int swizzle;                    ///< Memory layout swizzle parameter
+  int interleave;                 ///< Memory interleave parameter
+  int oob_fill;                   ///< Out-of-bound fill policy
+  int l2_promotion;               ///< L2 cache promotion flag
 
-  /*!
-   * \brief Encode descriptor fields into an argument array for runtime calls.
-   */
+  /// Encode descriptor fields into runtime call arguments
   Array<PrimExpr> EncodeCallArgs() const;
 };
 

@@ -1,7 +1,6 @@
 /*!
  * \file tl/op/gemm.cc
- *
- * Define gemm operator.
+ * \brief Implementation of General Matrix Multiplication (GEMM) operators
  */
 
 #include "gemm.h"

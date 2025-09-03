@@ -130,6 +130,7 @@ private:
   std::string MakeCodegenReducer() const;
 };
 
+/// Wrapper class for reduction operations
 class ReduceOp : public TileOperator {
 public:
   TVM_DEFINE_OBJECT_REF_METHODS(ReduceOp, TileOperator, ReduceOpNode);
@@ -137,11 +138,12 @@ public:
   static const Op &Get();
 };
 
+/// Node class for cumulative sum operations
 class CumSumOpNode : public TileOperatorNode {
 public:
-  tir::Buffer src, dst;
-  int dim;
-  bool reverse;
+  tir::Buffer src, dst;  ///< Source and destination buffers
+  int dim;               ///< Dimension along which to compute cumulative sum
+  bool reverse;          ///< Whether to compute in reverse order
   static constexpr const char *_type_key = "tl.CumSumOp";
   TVM_DECLARE_FINAL_OBJECT_INFO(CumSumOpNode, TileOperatorNode);
 
@@ -152,6 +154,7 @@ public:
   TileOperator Clone() const;
 };
 
+/// Wrapper class for cumulative sum operations
 class CumSumOp : public TileOperator {
 public:
   TVM_DEFINE_OBJECT_REF_METHODS(CumSumOp, TileOperator, CumSumOpNode);

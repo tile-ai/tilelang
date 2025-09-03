@@ -1,7 +1,6 @@
 /*!
  * \file tl/op/reduce.cc
- *
- * Define reduce operator.
+ * \brief Implementation of reduction operators
  */
 
 #include "reduce.h"
@@ -395,13 +394,11 @@ TIR_REGISTER_TL_OP(ReduceOp, reduce)
                                Integer(CallEffectKind::kOpaque));
 
 CumSumOp::CumSumOp(Array<PrimExpr> args, BufferMap vmap) {
-  /*
-    CumSum arguments:
-      src: input buffer
-      dst: output buffer
-      dim: dimension to cumsum
-      reverse: whether to cumsum in reverse order
-   */
+  /// CumSum constructor arguments:
+  /// - src: input buffer
+  /// - dst: output buffer  
+  /// - dim: dimension to cumsum
+  /// - reverse: whether to cumsum in reverse order
   CHECK_EQ(args.size(), 4);
   ObjectPtr<CumSumOpNode> node = make_object<CumSumOpNode>();
   node->src = vmap[GetVarFromAccessPtr(args[0])];
