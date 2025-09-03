@@ -110,7 +110,7 @@ private:
     // TODO: perform some checks here
   }
 
-  void UpdateVectorSize(const Array<PrimExpr> indices, const Buffer &buffer) {
+  void UpdateVectorSize(const Array<PrimExpr> &indices, const Buffer &buffer) {
     if (!inner_for_)
       return;
     auto extent_ptr = inner_for_->extent.as<IntImmNode>();
@@ -139,7 +139,7 @@ private:
 
       // Generate strides if not existed
       auto strides = buffer->strides;
-      if (buffer->strides.size() == 0) {
+      if (buffer->strides.empty()) {
         PrimExpr stride = 1;
         for (int i = indices.size() - 1; i >= 0; --i) {
           strides.push_back(stride);
@@ -169,7 +169,7 @@ private:
 
   const int vector_load_bits_max_ = 128;
 
-  const ForNode *inner_for_;
+  const ForNode *inner_for_{};
   Map<Var, Range> iter_map_;
   bool has_nonlocal_memory_access_ = false;
   int vector_size_ = 128;
@@ -180,7 +180,7 @@ private:
 
 class VectorizeRewriter : public StmtExprMutator {
 public:
-  VectorizeRewriter(VectorizePlanResult plan)
+  VectorizeRewriter(const VectorizePlanResult &plan)
       : vector_size_(plan.vector_size), condition_(plan.condition),
         dynamic_(plan.dynamic) {}
 
@@ -220,7 +220,7 @@ private:
     }
   }
 
-  const ForNode *inner_for_;
+  const ForNode *inner_for_{};
   const int vector_size_;
   const PrimExpr condition_;
   const bool dynamic_;
@@ -236,7 +236,8 @@ VectorizePlanResult GetVectorizePlanResult(const For &loop) {
   return {vector_size, dynamic, condition};
 }
 
-bool IndiceCanVectorize(PrimExpr expr, Var var, PrimExpr iter_var_size,
+bool IndiceCanVectorize(const PrimExpr &expr, Var var,
+                        const PrimExpr &iter_var_size,
                         int target_vectorized_size, arith::Analyzer *analyzer) {
   ICHECK(target_vectorized_size >= 1);
   if (target_vectorized_size == 1)

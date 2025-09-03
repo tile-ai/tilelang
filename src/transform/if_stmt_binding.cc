@@ -38,8 +38,8 @@ private:
     ICHECK(then_case.defined()) << "then_case must be defined";
     ICHECK(!else_case.defined()) << "else_case must be undefined";
 
-    auto bind_if_stmt = [](Optional<Stmt> body,
-                           const PrimExpr condition) -> Stmt {
+    auto bind_if_stmt = [](const Optional<Stmt> &body,
+                           const PrimExpr &condition) -> Stmt {
       if (body.defined()) {
         auto stmt = body.value();
         if (auto seq_stmt = stmt.as<SeqStmtNode>()) {
@@ -75,7 +75,7 @@ private:
 
 using namespace tir::transform;
 tvm::transform::Pass IfStmtBinding() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return IfStmtBindingRewriter::Substitute(f);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.IfStmtBinding", {});

@@ -189,4 +189,4 @@ def test_sync_let_stmt():
 
 
 if __name__ == "__main__":
-    tilelang.disable_cache()
+    tilelang.testing.main()

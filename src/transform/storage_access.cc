@@ -96,7 +96,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const EvaluateNode *op) {
   curr_stmt_.stmt = op;
   IRVisitorWithAnalyzer::VisitStmt_(op);
   // push to the scope
-  if (curr_stmt_.access.size() != 0) {
+  if (!curr_stmt_.access.empty()) {
     scope_.back().push_back(curr_stmt_);
     curr_stmt_.access.clear();
   }
@@ -185,14 +185,14 @@ void TileLangStorageAccessVisitor::VisitStmt_(const ForNode *op) {
   s.stmt = op;
   s.access = Summarize(std::move(scope_.back()), op);
   scope_.pop_back();
-  if (s.access.size() != 0) {
+  if (!s.access.empty()) {
     // relax the touched set to contain all ranges in the loop.
     std::unordered_map<const VarNode *, arith::IntSet> relax_map;
     relax_map[op->loop_var.get()] =
         arith::IntSet::FromRange(Range::FromMinExtent(op->min, op->extent));
     for (AccessEntry &e : s.access) {
       if (e.buffer.defined()) {
-        ICHECK(e.touched.size());
+        ICHECK(!e.touched.empty());
         Array<arith::IntSet> new_touched;
         for (const auto &touched : e.touched) {
           new_touched.push_back(arith::EvalSet(touched, relax_map));
@@ -218,6 +218,30 @@ bool IsThreadInvariant(const PrimExpr &cond) {
   return false;
 }
 
+/**
+ * @brief Visit an IfThenElse statement and collect storage access summaries for
+ * its branches.
+ *
+ * Visits the if-then-else node's condition and both branches to summarize
+ * buffer reads, writes, and synchronization events under the condition's
+ * constraints. If the condition is not thread-invariant, increments an internal
+ * condition counter for the duration of processing.
+ *
+ * Behavior and side effects:
+ * - Evaluates the condition expression (using ExtractRealCondition) and applies
+ * it as a constraint while summarizing the then-branch.
+ * - For the else-branch (when present), applies the negated,
+ * analyzer-simplified condition
+ *   (analyzer_.rewrite_simplify(Not(real_condition))) as the constraint.
+ * - Accumulates summarized StmtEntry access information for the then/else
+ * branches and appends a combined StmtEntry for the IfThenElseNode into the
+ * current scope.
+ * - Temporarily toggles allow_append_ and clears curr_stmt_.access during
+ * condition evaluation and branch summarization.
+ * - Modifies internal state: scope_ (push/pop of temporary branch scopes),
+ * curr_stmt_.access, and condition_counter_ (incremented/decremented when the
+ * condition is not thread-invariant).
+ */
 void TileLangStorageAccessVisitor::VisitStmt_(const IfThenElseNode *op) {
   bool is_thread_invariant = IsThreadInvariant(op->condition);
   if (!is_thread_invariant) {
@@ -244,7 +268,8 @@ void TileLangStorageAccessVisitor::VisitStmt_(const IfThenElseNode *op) {
   if (op->else_case) {
     scope_.push_back(std::vector<StmtEntry>());
     {
-      With<arith::ConstraintContext> constraint(&analyzer_, real_condition);
+      With<arith::ConstraintContext> constraint(
+          &analyzer_, analyzer_.rewrite_simplify(Not(real_condition)));
       this->VisitStmt(op->else_case.value());
     }
     auto v = Summarize(std::move(scope_.back()), nullptr);
@@ -287,9 +312,12 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
       Array<Range> buffer_ranges;
       // from indices to buffer indices
       ICHECK(buffer->shape.size() == load->indices.size());
+      // Use buffer shape and indices to compute the buffer_ranges for each
+      // dimension.
       for (size_t i = 0; i < buffer->shape.size(); ++i) {
-        buffer_ranges.push_back(
-            Range::FromMinExtent(load->indices[i], buffer->shape[i]));
+        PrimExpr min = load->indices[i];
+        PrimExpr extent = make_const(buffer->shape[i].dtype(), 1);
+        buffer_ranges.push_back(Range::FromMinExtent(min, extent));
       }
       if (Enabled(buffer_var, scope)) {
         ICHECK(allow_append_);
@@ -334,7 +362,7 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
         auto linear_to_indices = [this](PrimExpr offset,
                                         const Array<PrimExpr> &shape) {
           Array<PrimExpr> indices;
-          PrimExpr remaining = offset;
+          PrimExpr remaining = std::move(offset);
           for (size_t i = 0; i < shape.size(); ++i) {
             PrimExpr stride = make_const(DataType::Int(32), 1);
             for (size_t j = i + 1; j < shape.size(); ++j) {
@@ -392,8 +420,8 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
   }
 }
 
-Map<Var, Range>
-TileLangStorageAccessVisitor::ComputeThreadRange(Array<IterVar> threads) {
+Map<Var, Range> TileLangStorageAccessVisitor::ComputeThreadRange(
+    const Array<IterVar> &threads) {
   Map<Var, Range> thread_range;
   for (const auto &th : threads) {
     auto thread_tag = th->thread_tag;
@@ -411,7 +439,8 @@ TileLangStorageAccessVisitor::ComputeThreadRange(Array<IterVar> threads) {
   return thread_range;
 }
 
-StorageScope TileLangStorageAccessVisitor::GetScope(Var buffer_var) const {
+StorageScope
+TileLangStorageAccessVisitor::GetScope(const Var &buffer_var) const {
   if (buffer_var->type_annotation.as<PointerTypeNode>()) {
     return StorageScope::Create(GetPtrStorageScope(buffer_var));
   }

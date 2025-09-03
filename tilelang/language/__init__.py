@@ -54,9 +54,12 @@ from .reduce import (
     reduce_abssum,  # noqa: F401
     reduce_absmax,  # noqa: F401
     cumsum,  # noqa: F401
+    finalize_reducer,  # noqa: F401
 )
 from .print import print  # noqa: F401
 from .customize import (
+    atomic_max,  # noqa: F401
+    atomic_min,  # noqa: F401
     atomic_add,  # noqa: F401
     atomic_addx2,  # noqa: F401
     atomic_addx4,  # noqa: F401
@@ -64,6 +67,8 @@ from .customize import (
     clamp,  # noqa: F401
     reshape,  # noqa: F401
     view,  # noqa: F401
+    atomic_load,  # noqa: F401
+    atomic_store,  # noqa: F401
 )
 from .logical import any_of, all_of  # noqa: F401
 from .builtin import *  # noqa: F401

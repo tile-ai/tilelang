@@ -35,11 +35,13 @@ namespace tl {
 using namespace tir;
 
 For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
-                  Fragment loop_layout);
+                  const Fragment &loop_layout);
 
-Fragment PlanLoopPartition(For op, size_t num_thread, int vectorize_size);
+Fragment PlanLoopPartition(const For &op, size_t num_thread,
+                           int vectorize_size);
 
-Fragment PlanLoopPartition(For op, int vectorize_size, Range thread_range);
+Fragment PlanLoopPartition(const For &op, int vectorize_size,
+                           const Range &thread_range);
 
 For LoopPragmaUnroll(For stmt);
 

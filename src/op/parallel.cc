@@ -119,11 +119,25 @@ private:
   Map<Buffer, Layout> layout_map_;
 };
 
+/**
+ * @brief Handle a parallel For node during traversal, collecting loop metadata.
+ *
+ * Visits a parallel loop, asserts the loop is parallel, records a data-parallel
+ * IterVar for the loop, binds the loop variable range into the analyzer scope,
+ * and extracts any reducer information from the loop's annotations into the
+ * visitor's reducer_info_map_. Continues traversal into the loop body.
+ */
 void ParallelLoopNestVisitor::VisitStmt_(const ForNode *op) {
   ICHECK(op->kind == ForKind::kParallel);
   p->loop_vars_.push_back(
       IterVar(Range(op->min, op->extent), op->loop_var, IterVarType::kDataPar));
   p->analyzer_.Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
+  auto reducer_info_map =
+      op->annotations.Get(attr::kReducerInfo)->as<Map<Var, ReducerInfo>>();
+  if (reducer_info_map) {
+    for (auto &&[buffer, info] : reducer_info_map.value())
+      p->reducer_info_map_.Set(buffer, info);
+  }
   StmtExprVisitor::VisitStmt_(op);
 }
 
@@ -154,9 +168,21 @@ void ParallelLoopNestVisitor::VisitExpr_(const BufferLoadNode *op) {
   StmtExprVisitor::VisitExpr_(op);
 }
 
-ParallelOp::ParallelOp(For root) : root_(root), V(this) { V.VisitStmt(root); }
+ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
+  V.VisitStmt(root);
+}
 
-bool ParallelOp::IsCommonAccessIndice(const Buffer &buffer) const {
+TileOperator ParallelOpNode::Clone() const {
+  auto op = make_object<ParallelOpNode>(*this);
+  return ParallelOp(op);
+}
+
+Stmt ParallelOpNode::Lower(const LowerArgs &T,
+                           arith::Analyzer *analyzer) const {
+  return root_;
+}
+
+bool ParallelOpNode::IsCommonAccessIndice(const Buffer &buffer) const {
   auto common_indice = loop_vars_.Map([](const auto &iv) { return iv->var; });
   return StructuralEqual()(indice_map_[buffer], common_indice);
 }
@@ -179,7 +205,8 @@ bool ParallelOp::IsCommonAccessIndice(const Buffer &buffer) const {
  *                Can generate new layouts based on vectorization and thread
  * bounds. Used when maximum performance optimization is desired.
  */
-LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
+LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
+                                      InferLevel level) const {
   if (loop_layout_.defined())
     return {};
   if (level == InferLevel::kStrict)
@@ -189,6 +216,11 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   Buffer source_buffer, read_source_buffer;
   for (const auto &[buffer, indices] : indice_map_) {
     if (T.layout_map.count(buffer)) {
+      // skip reducers with rep=ALL
+      if (auto info = reducer_info_map_.Get(buffer->data);
+          info && info.value()->rep == ReducerRepType::ALL)
+        continue;
+
       auto frag = T.layout_map[buffer].as<Fragment>().value();
       if (buffer_is_write_.count(buffer)) {
         source_buffer = buffer;
@@ -285,6 +317,16 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
           IfBufferRemapLoopGenerator::run(root_, T.buffer_remap, T.layout_map);
       int vector_size = GetVectorizeSize(maybe_remapped_root_);
 
+      PrimExpr loop_total_size = 1;
+      for (Stmt l = root_; l.as<For>().has_value();
+           l = l.as<For>().value()->body)
+        loop_total_size = loop_total_size * l.as<For>().value()->extent;
+      while (!analyzer_.CanProve(
+                 floormod(loop_total_size,
+                          T.thread_bounds->extent * vector_size) == 0) &&
+             vector_size > 1)
+        vector_size /= 2;
+
       // Check if coalesced_width is defined
       if (auto coalesced_width =
               root_->annotations.Get(tl::attr::coalesced_width)) {
@@ -330,11 +372,6 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   for (const auto &[buffer, _] : indice_map_) {
     if (T.layout_map.count(buffer)) {
       auto fragment = T.layout_map[buffer].as<Fragment>().value();
-      // TODO: Add thread checks for replicated cases
-      // need to wildcard match the rhs with lhs
-      if (!is_one(loop_layout_->ReplicateExtent()) ||
-          !is_one(fragment->ReplicateExtent()))
-        continue;
       auto vars =
           loop_vars_.Map([](const IterVar &iv) { return PrimExpr(iv->var); });
       if (!ProveFragmentContains(loop_layout_, fragment, vars,
@@ -355,7 +392,7 @@ LayoutMap ParallelOp::InferLayout(const LayoutInferArgs &T, InferLevel level) {
   return results;
 }
 
-Optional<PrimExpr> ParallelOp::GetPredicate(Var thread_var) const {
+Optional<PrimExpr> ParallelOpNode::GetPredicate(Var thread_var) const {
   if (predicate_.defined()) {
     return Substitute(predicate_.value(), {{InputPlaceholder(0), thread_var}});
   } else {
@@ -363,7 +400,7 @@ Optional<PrimExpr> ParallelOp::GetPredicate(Var thread_var) const {
   }
 }
 
-Fragment ParallelOp::CompleteBufferFragment(const Buffer &buffer) {
+Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
   ICHECK(loop_layout_.defined());
   if (IsCommonAccessIndice(buffer)) {
     return loop_layout_;

@@ -10,6 +10,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <utility>
+
 #include "../op/builtin.h"
 
 namespace tvm {
@@ -17,12 +19,12 @@ namespace tl {
 
 using namespace tir;
 
-enum class Role { kConsumer, kProducer, kBoth };
+enum class Role : uint8_t { kConsumer, kProducer, kBoth };
 
 class WarpSpecializedRoleMarker_ : public StmtVisitor {
 public:
   WarpSpecializedRoleMarker_(Map<Var, Buffer> buffer_data_to_buffer)
-      : buffer_data_to_buffer_(buffer_data_to_buffer) {}
+      : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)) {}
 
   Role GetRole(const StmtNode *stmt) const {
     auto it = map_.find(stmt);
@@ -135,8 +137,8 @@ public:
 private:
   MultiVersionBufferRewriter() = default;
 
-  Array<Buffer> GetVersionedBuffers(Array<Stmt> seq_stmt,
-                                    Array<Buffer> scoped_buffers) {
+  Array<Buffer> GetVersionedBuffers(const Array<Stmt> &seq_stmt,
+                                    const Array<Buffer> &scoped_buffers) {
     std::vector<Role> roles;
     Array<Array<BufferRegion>> reads, writes;
     auto marker = WarpSpecializedRoleMarker_(buffer_data_to_buffer_);
@@ -145,8 +147,8 @@ private:
       Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
                   /*name_hint=*/"", /*body*/ stmt);
       auto access = GetBlockAccessRegion(block, buffer_data_to_buffer_);
-      reads.push_back(std::move(access[0]));
-      writes.push_back(std::move(access[1]));
+      reads.push_back(access[0]);
+      writes.push_back(access[1]);
       roles.push_back(marker.GetRole(stmt));
     }
 
@@ -173,7 +175,7 @@ private:
   static Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
     ObjectPtr<BufferNode> new_buffer = make_object<BufferNode>(*(buffer.get()));
     new_buffer->shape.insert(new_buffer->shape.begin(), PrimExpr(num_versions));
-    if (new_buffer->strides.size()) {
+    if (!new_buffer->strides.empty()) {
       ICHECK(new_buffer->strides.size() + 1 == new_buffer->shape.size());
       PrimExpr stride_0 = new_buffer->strides[0] * new_buffer->shape[1];
       new_buffer->strides.insert(new_buffer->strides.begin(), stride_0);
@@ -277,10 +279,12 @@ private:
   }
 
   PrimExpr RewriteBufferAccess(const Call &call,
-                               const std::vector<int> arg_indices) {
+                               const std::vector<int> &arg_indices) {
     auto product = [](const Array<PrimExpr> &input) {
       return foldl(
-          [](PrimExpr a, PrimExpr b, Span span) { return mul(a, b, span); },
+          [](PrimExpr a, PrimExpr b, Span span) {
+            return mul(std::move(a), std::move(b), std::move(span));
+          },
           make_const(DataType::Int(32), 1), input);
     };
     Array<PrimExpr> new_args = call->args;
@@ -316,7 +320,7 @@ private:
 using namespace tir::transform;
 
 tvm::transform::Pass MultiVersionBuffer() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return MultiVersionBufferRewriter::Substitute(f);
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MultiVersionBuffer", {});

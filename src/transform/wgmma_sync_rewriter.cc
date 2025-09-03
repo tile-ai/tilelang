@@ -10,6 +10,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <utility>
+
 #include "../op/builtin.h"
 
 namespace tvm {
@@ -17,7 +19,7 @@ namespace tl {
 
 using namespace tir;
 
-bool isGemm(Stmt stmt) {
+bool isGemm(const Stmt &stmt) {
   bool is_gemm = false;
   if (stmt.as<EvaluateNode>()) {
     auto call = Downcast<Evaluate>(stmt)->value.as<CallNode>();
@@ -33,7 +35,7 @@ bool isGemm(Stmt stmt) {
   return is_gemm;
 }
 
-bool isGemmSync(Stmt stmt) {
+bool isGemmSync(const Stmt &stmt) {
   bool is_gemm_sync = false;
   if (stmt.as<EvaluateNode>()) {
     auto call = Downcast<Evaluate>(stmt)->value.as<CallNode>();
@@ -49,7 +51,7 @@ bool isGemmSync(Stmt stmt) {
   return is_gemm_sync;
 }
 
-bool isArriveBarrier(Stmt stmt) {
+bool isArriveBarrier(const Stmt &stmt) {
   bool is_arrive_barrier = false;
   if (stmt.as<EvaluateNode>()) {
     auto call = Downcast<Evaluate>(stmt)->value.as<CallNode>();
@@ -216,7 +218,8 @@ private:
         gemm_count++;
       } else if (isGemmSync(new_seq[i])) {
         auto call = Downcast<Evaluate>(new_seq[i])->value.as<CallNode>();
-        auto sync_index = Downcast<IntImm>(call->args[1])->value;
+        auto sync_index =
+            static_cast<int>(Downcast<IntImm>(call->args[1])->value);
         auto wait_count = gemm_count - sync_index - 1;
         if (sync_index > max_sync_index)
           max_sync_index = sync_index;
@@ -257,8 +260,8 @@ private:
 using namespace tir::transform;
 
 tvm::transform::Pass RewriteWgmmaSync() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    return WgmmaSyncRewriter::Substitute(f);
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
+    return WgmmaSyncRewriter::Substitute(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.RewriteWgmmaSync", {});
 }

@@ -53,7 +53,7 @@ public:
 
   Stmt InjectPTX(const BufferLoadNode *load, const BufferStoreNode *store,
                  bool predicated = false,
-                 PrimExpr predicate_value = PrimExpr()) {
+                 const PrimExpr &predicate_value = PrimExpr()) {
     if (load->buffer.scope() == "global") {
       ICHECK(load->indices.size() == 1 && store->indices.size() == 1);
       ICHECK(load->indices[0]->dtype.lanes() ==
@@ -224,7 +224,7 @@ private:
 using namespace tir::transform;
 
 tvm::transform::Pass InjectPTXAsyncCopy() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
     n->body = PTXAsyncCopyInjector()(n->body);
     return f;

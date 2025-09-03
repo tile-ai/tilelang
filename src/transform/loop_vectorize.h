@@ -37,7 +37,8 @@ int GetVectorizeSize(const For &loop);
 
 For VectorizeLoop(const For &loop, int vectorize_hint = -1);
 
-bool IndiceCanVectorize(PrimExpr expr, Var var, PrimExpr iter_var_size,
+bool IndiceCanVectorize(const PrimExpr &expr, Var var,
+                        const PrimExpr &iter_var_size,
                         int target_vectorized_size, arith::Analyzer *analyzer);
 
 } // namespace tl

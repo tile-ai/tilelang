@@ -68,7 +68,7 @@ class CompileArgs:
             "execution_backend":
                 self.execution_backend,
             "target":
-                self.target,
+                str(self.target),
             "target_host":
                 str(self.target_host) if self.target_host else None,
             "verbose":
