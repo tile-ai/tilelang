@@ -121,12 +121,13 @@
  
  template <typename T>
  static PrimExpr DispatchHIPShuffle(const PrimExpr& e) {
+   // NOLINTBEGIN(clang-analyzer-cplusplus.InnerPointer)
    const CallNode* call = e.as<CallNode>();
    ICHECK(call != nullptr);
    ICHECK_EQ(call->args.size(), 5);  // mask, value, warp_id, width, warp_size
    Array<PrimExpr> hip_args{{call->args[0], call->args[1], call->args[2], call->args[3]}};
-   // NOLINTNEXTLINE(clang-analyzer-cplusplus.InnerPointer)
    return Call(call->dtype, T()(call->dtype, Downcast<Op>(call->op)), hip_args);
+   // NOLINTEND(clang-analyzer-cplusplus.InnerPointer)
  }
  
  TVM_REGISTER_OP("tir.clz")
