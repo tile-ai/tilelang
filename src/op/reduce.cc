@@ -76,7 +76,8 @@ PrimExpr ReduceOpNode::MakeInitValue() const {
 }
 
 PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &lhs,
-                                  const PrimExpr &rhs) const {
+                                  const PrimExpr &b) const {
+  PrimExpr rhs = b;
   if (lhs->dtype != rhs->dtype) {
     rhs = Cast(lhs->dtype, rhs);
   }
