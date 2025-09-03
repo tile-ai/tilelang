@@ -17,24 +17,24 @@ using namespace tir;
 enum class CopyInst : uint8_t {
   kNormal = 0,    ///< Standard memory copy (ldg/stg/cpasync)
   kLDSM = 1,      ///< Load matrix instruction
-  kSTSM = 2,      ///< Store matrix instruction  
+  kSTSM = 2,      ///< Store matrix instruction
   kBulkLoad = 3,  ///< Tensor Memory Access load
   kBulkStore = 4, ///< Tensor Memory Access store
 };
 
 /// Descriptor for Tensor Memory Access (TMA) copy operations
 struct TMADesc {
-  size_t rank;                    ///< Tensor rank (number of dimensions)
-  int data_type;                  ///< Data type identifier
-  Array<PrimExpr> global_shape;   ///< Shape in global memory
-  Array<PrimExpr> global_stride;  ///< Strides in global memory
-  Array<PrimExpr> smem_box;       ///< Block shape in shared memory
-  Array<PrimExpr> smem_stride;    ///< Strides in shared memory
-  PrimExpr global_addr;           ///< Base address in global memory
-  int swizzle;                    ///< Memory layout swizzle parameter
-  int interleave;                 ///< Memory interleave parameter
-  int oob_fill;                   ///< Out-of-bound fill policy
-  int l2_promotion;               ///< L2 cache promotion flag
+  size_t rank;                   ///< Tensor rank (number of dimensions)
+  int data_type;                 ///< Data type identifier
+  Array<PrimExpr> global_shape;  ///< Shape in global memory
+  Array<PrimExpr> global_stride; ///< Strides in global memory
+  Array<PrimExpr> smem_box;      ///< Block shape in shared memory
+  Array<PrimExpr> smem_stride;   ///< Strides in shared memory
+  PrimExpr global_addr;          ///< Base address in global memory
+  int swizzle;                   ///< Memory layout swizzle parameter
+  int interleave;                ///< Memory interleave parameter
+  int oob_fill;                  ///< Out-of-bound fill policy
+  int l2_promotion;              ///< L2 cache promotion flag
 
   /// Encode descriptor fields into runtime call arguments
   Array<PrimExpr> EncodeCallArgs() const;

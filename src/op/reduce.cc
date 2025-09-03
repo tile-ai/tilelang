@@ -396,7 +396,7 @@ TIR_REGISTER_TL_OP(ReduceOp, reduce)
 CumSumOp::CumSumOp(Array<PrimExpr> args, BufferMap vmap) {
   /// CumSum constructor arguments:
   /// - src: input buffer
-  /// - dst: output buffer  
+  /// - dst: output buffer
   /// - dim: dimension to cumsum
   /// - reverse: whether to cumsum in reverse order
   CHECK_EQ(args.size(), 4);

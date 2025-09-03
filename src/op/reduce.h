@@ -16,17 +16,17 @@ using namespace tir;
 
 /// Supported reduction operation types
 enum class ReduceTypeEnum : uint8_t {
-  kSum,     ///< Sum reduction
-  kAbsSum,  ///< Absolute sum reduction  
-  kMax,     ///< Maximum value reduction
-  kMin,     ///< Minimum value reduction
-  kAbsMax,  ///< Maximum absolute value reduction
+  kSum,    ///< Sum reduction
+  kAbsSum, ///< Absolute sum reduction
+  kMax,    ///< Maximum value reduction
+  kMin,    ///< Minimum value reduction
+  kAbsMax, ///< Maximum absolute value reduction
 };
 
 /// Node class representing a reduction type
 class ReduceTypeNode : public Object {
 public:
-  int type{-1};  ///< Internal type identifier
+  int type{-1}; ///< Internal type identifier
   static constexpr const char *_type_key = "tl.ReduceType";
   TVM_DECLARE_FINAL_OBJECT_INFO(ReduceTypeNode, Object);
 
@@ -78,10 +78,10 @@ public:
 /// Node class for reduction operations
 class ReduceOpNode : public TileOperatorNode {
 public:
-  tir::Buffer src, dst;  ///< Source and destination buffers
-  int dim;               ///< Dimension to reduce along
-  ReduceType type;       ///< Type of reduction operation
-  bool clear;            ///< Whether to clear destination before reduction
+  tir::Buffer src, dst; ///< Source and destination buffers
+  int dim;              ///< Dimension to reduce along
+  ReduceType type;      ///< Type of reduction operation
+  bool clear;           ///< Whether to clear destination before reduction
 
   static constexpr const char *_type_key = "tl.ReduceOp";
   TVM_DECLARE_FINAL_OBJECT_INFO(ReduceOpNode, TileOperatorNode);
@@ -124,7 +124,7 @@ public:
 private:
   /// Generate initial value for reduction
   PrimExpr MakeInitValue() const;
-  /// Generate reduction expression  
+  /// Generate reduction expression
   PrimExpr MakeReduce(const PrimExpr &a, const PrimExpr &b) const;
   /// Generate codegen reducer string
   std::string MakeCodegenReducer() const;
@@ -141,9 +141,9 @@ public:
 /// Node class for cumulative sum operations
 class CumSumOpNode : public TileOperatorNode {
 public:
-  tir::Buffer src, dst;  ///< Source and destination buffers
-  int dim;               ///< Dimension along which to compute cumulative sum
-  bool reverse;          ///< Whether to compute in reverse order
+  tir::Buffer src, dst; ///< Source and destination buffers
+  int dim;              ///< Dimension along which to compute cumulative sum
+  bool reverse;         ///< Whether to compute in reverse order
   static constexpr const char *_type_key = "tl.CumSumOp";
   TVM_DECLARE_FINAL_OBJECT_INFO(CumSumOpNode, TileOperatorNode);
 

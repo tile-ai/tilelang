@@ -17,11 +17,12 @@ using namespace tir;
 /// Node class for atomic addition operations
 class AtomicAddNode : public TileOperatorNode {
 public:
-  Buffer src, dst;                        ///< Source and destination buffers
-  Array<Range> src_range, dst_range;      ///< Access ranges for source and destination
-  IntImm coalesced_width;                 ///< Width for memory coalescing optimization
+  Buffer src, dst; ///< Source and destination buffers
+  Array<Range> src_range,
+      dst_range;          ///< Access ranges for source and destination
+  IntImm coalesced_width; ///< Width for memory coalescing optimization
 
-  mutable ParallelOp par_op_;             ///< Associated parallel operation
+  mutable ParallelOp par_op_; ///< Associated parallel operation
   static constexpr const char *_type_key = "tl.AtomicAdd";
   TVM_DECLARE_FINAL_OBJECT_INFO(AtomicAddNode, TileOperatorNode);
 

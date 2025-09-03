@@ -17,9 +17,9 @@ using namespace tir;
 /// Node class for fill operations
 class FillNode : public TileOperatorNode {
 public:
-  tir::Buffer dst;       ///< Destination buffer to fill
-  PrimExpr value;        ///< Value to fill with
-  Array<Range> region;   ///< Region to fill within the buffer
+  tir::Buffer dst;     ///< Destination buffer to fill
+  PrimExpr value;      ///< Value to fill with
+  Array<Range> region; ///< Region to fill within the buffer
   static constexpr const char *_type_key = "tl.Fill";
   TVM_DECLARE_FINAL_OBJECT_INFO(FillNode, TileOperatorNode);
 
@@ -30,13 +30,14 @@ public:
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<FillNode>()
-      .def_ro("dst", &FillNode::dst)
-      .def_ro("value", &FillNode::value)
-      .def_ro("region", &FillNode::region);
+        .def_ro("dst", &FillNode::dst)
+        .def_ro("value", &FillNode::value)
+        .def_ro("region", &FillNode::region);
   }
 
   bool SEqualReduce(const FillNode *other, SEqualReducer equal) const {
-    return equal(dst, other->dst) && equal(value, other->value) && equal(region, other->region);
+    return equal(dst, other->dst) && equal(value, other->value) &&
+           equal(region, other->region);
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {
@@ -48,7 +49,6 @@ public:
   static constexpr bool _type_has_method_shash_reduce = true;
 
   TileOperator Clone() const;
-
 
 private:
   /// Create SIMT-style parallel loop for filling
