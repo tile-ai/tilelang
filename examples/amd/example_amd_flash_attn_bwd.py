@@ -172,10 +172,6 @@ def flashattn_bwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
             dv = T.alloc_fragment([block_M, dim_v], accum_dtype)
             dk = T.alloc_fragment([block_M, dim_qk], accum_dtype)
             dq = T.alloc_fragment([block_N, dim_qk], accum_dtype)
-            dv_shared = T.alloc_shared([block_N, dim_v], dtype)
-            dk_shared = T.alloc_shared([block_N, dim_qk], dtype)
-
-
 
             T.copy(K[bz, by * block_M:(by + 1) * block_M, bx // groups, :], K_shared)
             T.copy(V[bz, by * block_M:(by + 1) * block_M, bx // groups, :], V_shared)
