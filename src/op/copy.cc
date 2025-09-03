@@ -1559,5 +1559,9 @@ TIR_REGISTER_TL_OP(Conv2DIm2ColOp, c2d_im2col)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TVM_FFI_STATIC_INIT_BLOCK({
+  CopyNode::RegisterReflection();
+  Conv2DIm2ColOpNode::RegisterReflection();
+});
 } // namespace tl
 } // namespace tvm

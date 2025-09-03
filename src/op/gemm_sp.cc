@@ -431,5 +431,9 @@ TIR_REGISTER_TL_OP(GemmSP, gemm_sp)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TVM_FFI_STATIC_INIT_BLOCK({
+  GemmSPNode::RegisterReflection();
+});
+
 } // namespace tl
 } // namespace tvm

@@ -427,5 +427,9 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
       ->CondenseReplicateVar();
 }
 
+TVM_FFI_STATIC_INIT_BLOCK({
+  ParallelOpNode::RegisterReflection();
+});
+
 } // namespace tl
 } // namespace tvm

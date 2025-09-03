@@ -10,62 +10,7 @@
 #include "operator.h"
 
 namespace tvm {
-/**
- * Check whether the target and configuration allow using WGMMA (wavefront-group
- * MMA) for this GEMM.
- *
- * @returns true if WGMMA can be used for the current node configuration and
- * target; false otherwise.
- */
-/**
- * Lower this GEMM operator to a TVM Stmt for the given lowering context.
- *
- * @param T Lowering arguments and context (tile mappings, target, etc.).
- * @param analyzer Arithmetic analyzer used for symbolic simplification and
- * bounds reasoning.
- * @returns A lowered Stmt implementing the GEMM.
- */
-/**
- * Infer memory/layout mapping for GEMM inputs/outputs at the given inference
- * level.
- *
- * @param T Layout inference inputs (buffers, shapes, constraints).
- * @param level Inference level that controls how aggressive/specific the
- * inferred layouts should be.
- * @returns A LayoutMap describing how logical tensor axes map to storage/layout
- * axes.
- */
-/**
- * Create a deep/shallow copy of this TileOperator node as a TileOperator
- * reference.
- *
- * @returns A TileOperator reference that represents a clone of this GemmNode.
- */
-/**
- * Determine the specific GEMM instruction variant to use for the given block
- * size and target.
- *
- * @param block_size The tile/block size (in elements or threads) used to select
- * instruction variant.
- * @param target The compilation target describing architecture and instruction
- * set.
- * @returns The GemmInst enum value representing the chosen GEMM instruction
- * family.
- */
-/**
- * Compute how to partition work across warps for the given number of warps and
- * GEMM instruction.
- *
- * The returned pair is (warp_rows, warp_cols), describing the per-warp tiling
- * in row and column dimensions respectively.
- *
- * @param num_warps Total number of warps available for the block.
- * @param gemm_inst The GEMM instruction variant selected for the target.
- * @param target The compilation target which may constrain or influence
- * partitioning.
- * @returns A pair<int,int> = (warp_rows, warp_cols) describing the warp
- * partition.
- */
+
 /**
  * Construct a Gemm operator handle from call arguments and a buffer mapping.
  *
@@ -91,7 +36,6 @@ enum class GemmWarpPolicy : uint8_t {
 class GemmNode : public TileOperatorNode {
 public:
   bool CheckWGMMA() const;
-  Array<PrimExpr> call_args;
   tir::Buffer A, B, C;
   // pointer to the A, B, C
   PrimExpr Aptr, Bptr, Cptr;
@@ -108,6 +52,59 @@ public:
 
   static constexpr const char *_type_key = "tl.Gemm";
   TVM_DECLARE_FINAL_OBJECT_INFO(GemmNode, TileOperatorNode);
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<GemmNode>()
+    // TODO(lei): legalize policy into a object node
+      .def_ro("A", &GemmNode::A)
+      .def_ro("B", &GemmNode::B)
+      .def_ro("C", &GemmNode::C)
+      .def_ro("Aptr", &GemmNode::Aptr)
+      .def_ro("Bptr", &GemmNode::Bptr)
+      .def_ro("Cptr", &GemmNode::Cptr)
+      .def_ro("trans_A", &GemmNode::trans_A)
+      .def_ro("trans_B", &GemmNode::trans_B)
+      .def_ro("M", &GemmNode::M)
+      .def_ro("N", &GemmNode::N)
+      .def_ro("K", &GemmNode::K)
+      .def_ro("stride_A", &GemmNode::stride_A)
+      .def_ro("stride_B", &GemmNode::stride_B)
+      .def_ro("offset_A", &GemmNode::offset_A)
+      .def_ro("offset_B", &GemmNode::offset_B)
+      .def_ro("clear_accum", &GemmNode::clear_accum)
+      .def_ro("kPack", &GemmNode::kPack)
+      .def_ro("wg_wait", &GemmNode::wg_wait);
+  }
+
+  bool SEqualReduce(const GemmNode *other, SEqualReducer equal) const {
+    return equal(A, other->A) && equal(B, other->B) && equal(C, other->C) && equal(Aptr, other->Aptr) && equal(Bptr, other->Bptr) && equal(Cptr, other->Cptr) && equal(trans_A, other->trans_A) && equal(trans_B, other->trans_B) && equal(M, other->M) && equal(N, other->N) && equal(K, other->K) && equal(stride_A, other->stride_A) && equal(stride_B, other->stride_B) && equal(offset_A, other->offset_B) && equal(offset_B, other->offset_B) && equal(clear_accum, other->clear_accum) && equal(kPack, other->kPack) && equal(wg_wait, other->wg_wait);
+  }
+
+  void SHashReduce(SHashReducer hash_reduce) const {
+    // TODO(lei): legalize policy into a object node
+    // hash_reduce(policy);`
+    hash_reduce(A);
+    hash_reduce(B);
+    hash_reduce(C);
+    hash_reduce(Aptr);
+    hash_reduce(Bptr);
+    hash_reduce(Cptr);
+    hash_reduce(trans_A);
+    hash_reduce(trans_B);
+    hash_reduce(M);
+    hash_reduce(N);
+    hash_reduce(K);
+    hash_reduce(stride_A);
+    hash_reduce(stride_B);
+    hash_reduce(offset_A);
+    hash_reduce(offset_B);
+    hash_reduce(clear_accum);
+    hash_reduce(kPack);
+    hash_reduce(wg_wait);
+  }
+  static constexpr bool _type_has_method_sequal_reduce = true;
+  static constexpr bool _type_has_method_shash_reduce = true;
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &T,

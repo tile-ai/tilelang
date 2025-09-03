@@ -425,5 +425,9 @@ TIR_REGISTER_TL_OP(AtomicAdd, atomicadd)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TVM_FFI_STATIC_INIT_BLOCK({
+  AtomicAddNode::RegisterReflection();
+});
+
 } // namespace tl
 } // namespace tvm

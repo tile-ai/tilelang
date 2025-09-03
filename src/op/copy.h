@@ -88,215 +88,6 @@ struct TMAIm2ColDesc {
 };
 
 /*!
- * \brief Copy operator for transferring data between buffers.
- *
- * Performs element- or block-wise copies between `src` and `dst` buffers for
- * TensorIR lowering. The operator supports thread-level parallelization,
- * shared-memory layouts, and hardware-accelerated paths (TMA/LDSM/STMATRIX)
- * when available. Public fields describe the copy ranges and tuning knobs
- * (coalesced width, eviction policy, disable_tma).
- */
-
-/*!
- * \brief Lower the copy operator to a TIR statement.
- *
- * Produces a TIR statement implementing the configured copy (normal, LDSM,
- * STSM, or bulk TMA-based) for the given lowering context.
- *
- * \param T        Lowering arguments that provide buffer bindings and context.
- * \param analyzer Analyzer used for expression simplification and bounds
- * checks. \return         A TIR `Stmt` implementing the copy.
- */
-
-/*!
- * \brief Infer buffer layouts after applying this operator.
- *
- * Computes resulting layouts (shape/stride mappings) for buffers affected by
- * this copy operation.
- *
- * \param T     Arguments for layout inference (buffer maps, shapes).
- * \param level Granularity of inference to perform.
- * \return      A LayoutMap describing inferred layouts.
- */
-
-/*!
- * \brief Check if bulk global->shared copy is supported on the target.
- *
- * Returns true if the target supports bulk (TMA) loads from global memory.
- *
- * \param target Target to query.
- */
-
-/*!
- * \brief Check if bulk shared->global store is supported on the target.
- *
- * Returns true if the target supports bulk (TMA) stores to global memory.
- *
- * \param target Target to query.
- */
-
-/*!
- * \brief Check if LDSM (LDMATRIX) memory-copy is supported on the target.
- *
- * \param target Target to query.
- */
-
-/*!
- * \brief Check if STSM (STMATRIX) memory-copy is supported on the target.
- *
- * \param target Target to query.
- */
-
-/*!
- * \brief Select the copy instruction type to use.
- *
- * Chooses between kNormal, kLDSM, kSTSM, kBulkLoad, and kBulkStore based on
- * the target capabilities and whether TMA lowering is disabled.
- *
- * \param target            Target to query.
- * \param disable_tma_lower When true, force non-TMA copy paths.
- * \return                  The selected CopyInst value.
- */
-
-/*!
- * \brief Clone this copy operator.
- *
- * Returns a TileOperator reference that is a shallow clone of this operator
- * object suitable for further modifications in pass pipelines.
- */
-
-/*!
- * \brief Generate lowering for bulk (global-to-shared or shared-to-global)
- * copy.
- *
- * Implements TMA-based bulk load/store lowering when `copy_inst` indicates a
- * bulk path. The function encodes TMA descriptors and produces calls or
- * loops required by the selected bulk mechanism.
- *
- * \param T         Lowering context.
- * \param analyzer  Analyzer for simplification.
- * \param copy_inst Copy instruction type indicating bulk load/store.
- * \return          A TIR `Stmt` implementing the bulk copy.
- */
-
-/*!
- * \brief Generate lowering for LDS matrix-copy paths (LDMATRIX/STMATRIX).
- *
- * Emits the lowering for LDS-based matrix-copy instructions when the chosen
- * `copy_inst` is an LDSM or STSM variant.
- *
- * \param T         Lowering context.
- * \param analyzer  Analyzer for simplification.
- * \param copy_inst Copy instruction type indicating an LDS matrix path.
- * \return          A TIR `Stmt` implementing the matrix-copy.
- */
-
-/*!
- * \brief Generate lowering for the normal (non-bulk, scalar/vec) copy path.
- *
- * Emits element-wise or vectorized loads/stores using the computed iteration
- * space and predicates to ensure in-bounds accesses.
- *
- * \param T        Lowering context.
- * \param analyzer Analyzer for simplification.
- * \return         A TIR `Stmt` implementing the normal copy.
- */
-
-/*!
- * \brief Generate a SIMT-style thread-level loop for the copy.
- *
- * Produces a `For` loop that distributes copy work across SIMD/warp lanes or
- * CUDA threads according to the operator's iteration strategy.
- *
- * \param analyzer Analyzer for simplification.
- * \return         A `For` loop representing the thread-level iteration.
- */
-
-/*!
- * \brief Compute a linear shared-memory layout suitable for TMA copies.
- *
- * Returns a `Layout` that maps the shared-memory `shared_tensor` into a
- * linearized representation required by bulk/TMA transfers.
- *
- * \param shared_tensor Buffer representing the shared-memory tensor.
- * \return              A `Layout` describing the linearized shared layout.
- */
-
-/*!
- * \brief Create iterator variables for multi-dimensional copy loops.
- *
- * The returned `IterVar` array enumerates the loop indices used to traverse
- * the copy extents in each tensor dimension.
- *
- * \return Array of iterator variables.
- */
-
-/*!
- * \brief Calculate source or destination indices from iteration variables.
- *
- * Converts the iterator variables (from MakeIterVars) into concrete index
- * expressions for either the source image or the destination tensor.
- *
- * \param ivs     Iterator variables returned by MakeIterVars().
- * \param src_dst 0 to produce source indices, 1 to produce destination indices.
- * \return        Array of `PrimExpr` index expressions.
- */
-
-/*!
- * \brief Construct the boundary predicate ensuring in-bounds accesses.
- *
- * Builds a boolean expression that guards loads/stores so they only occur
- * when indices lie within the provided `extents`.
- *
- * \param analyzer Arithmetic analyzer used to simplify predicates.
- * \param ivs      Iterator variables.
- * \param extents  Extent expressions for the target buffer.
- * \param src_dst  0 = predicate for source indices, 1 = predicate for
- * destination. \return         A `PrimExpr` boolean predicate.
- */
-
-/*!
- * \brief Constructor.
- *
- * \param args Expression arguments for the copy (indices, sizes, etc.).
- * \param vmap Buffer variable mapping for source and destination.
- */
-
-/*!
- * \brief Get the TVM Op handle corresponding to this Copy op.
- */
-
-/*!
- * \brief Special operator for Conv2D im2col transformation.
- *
- * Converts an input feature map into an im2col matrix layout used for GEMM-
- * based convolution lowering. Public fields configure kernel geometry,
- * stride/padding/dilation, and cache eviction behavior.
- */
-
-/*!
- * \brief Lower to TIR statement.
- *
- * Emits TIR that performs the im2col extraction from `src` into `dst`
- * according to kernel, stride, padding, and dilation parameters.
- *
- * \param T        Lowering context with buffer bindings.
- * \param analyzer Analyzer for expression simplification and bounds reasoning.
- * \return         A TIR `Stmt` performing the im2col transform.
- */
-
-/*!
- * \brief Infer layout for this operator.
- *
- * Produces the layout mapping for the destination im2col matrix given the
- * source layout and convolution parameters.
- *
- * \param T     Layout inference arguments.
- * \param level Inference granularity level.
- * \return      A LayoutMap with inferred layouts for affected buffers.
- */
-
-/*!
  * \brief Get TVM Op handle for Conv2DIm2Col.
  */
 
@@ -323,6 +114,30 @@ public:
   uint8_t eviction_policy; // Policy for cache eviction
   static constexpr const char *_type_key = "tl.Copy";
   TVM_DECLARE_FINAL_OBJECT_INFO(CopyNode, TileOperatorNode);
+  
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<CopyNode>()
+      .def_ro("src", &CopyNode::src)
+      .def_ro("dst", &CopyNode::dst)
+      .def_ro("src_range", &CopyNode::src_range)
+      .def_ro("dst_range", &CopyNode::dst_range)
+      .def_ro("coalesced_width", &CopyNode::coalesced_width);
+  }
+  
+  bool SEqualReduce(const CopyNode *other, SEqualReducer equal) const {
+    return equal(src, other->src) && equal(dst, other->dst) && equal(src_range, other->src_range) && equal(dst_range, other->dst_range) && equal(coalesced_width, other->coalesced_width);
+  }
+  
+  void SHashReduce(SHashReducer hash_reduce) const {
+    hash_reduce(src);
+    hash_reduce(dst);
+    hash_reduce(src_range);
+    hash_reduce(dst_range);
+    hash_reduce(coalesced_width);
+  }
+  static constexpr bool _type_has_method_sequal_reduce = true;
+  static constexpr bool _type_has_method_shash_reduce = true;
 
   /*!
    * \brief Lower the copy operator to a TIR statement.
@@ -474,6 +289,34 @@ public:
 
   static constexpr const char *_type_key = "tl.Conv2DIm2Col";
   TVM_DECLARE_FINAL_OBJECT_INFO(Conv2DIm2ColOpNode, TileOperatorNode);
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<Conv2DIm2ColOpNode>()
+      .def_ro("src", &Conv2DIm2ColOpNode::src)
+      .def_ro("dst", &Conv2DIm2ColOpNode::dst)
+      .def_ro("stride", &Conv2DIm2ColOpNode::stride)
+      .def_ro("padding", &Conv2DIm2ColOpNode::padding)
+      .def_ro("dilation", &Conv2DIm2ColOpNode::dilation)
+      .def_ro("kernel", &Conv2DIm2ColOpNode::kernel)
+      .def_ro("eviction_policy", &Conv2DIm2ColOpNode::eviction_policy);
+  }
+  
+  bool SEqualReduce(const Conv2DIm2ColOpNode *other, SEqualReducer equal) const {
+    return equal(src, other->src) && equal(dst, other->dst) && equal(stride, other->stride) && equal(padding, other->padding) && equal(dilation, other->dilation) && equal(kernel, other->kernel) && equal(eviction_policy, other->eviction_policy);
+  }
+  
+  void SHashReduce(SHashReducer hash_reduce) const {
+    hash_reduce(src);
+    hash_reduce(dst);
+    hash_reduce(stride);
+    hash_reduce(padding);
+    hash_reduce(dilation);
+    hash_reduce(kernel);
+    hash_reduce(eviction_policy);
+  }
+  static constexpr bool _type_has_method_sequal_reduce = true;
+  static constexpr bool _type_has_method_shash_reduce = true;
 
   /*!
    * \brief Lower to TIR statement.

@@ -12,7 +12,7 @@
 #include <tvm/tir/transform.h>
 
 #include "../layout/layout.h"
-#include "../op/elem.h"
+#include "../op/fill.h"
 #include "../op/finalize_reducer.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "layout_reducer.h"

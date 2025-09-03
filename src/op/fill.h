@@ -84,7 +84,28 @@ public:
   LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const;
   static const Op &Get();
 
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<FillNode>()
+      .def_ro("dst", &FillNode::dst)
+      .def_ro("value", &FillNode::value)
+      .def_ro("region", &FillNode::region);
+  }
+
+  bool SEqualReduce(const FillNode *other, SEqualReducer equal) const {
+    return equal(dst, other->dst) && equal(value, other->value) && equal(region, other->region);
+  }
+
+  void SHashReduce(SHashReducer hash_reduce) const {
+    hash_reduce(dst);
+    hash_reduce(value);
+    hash_reduce(region);
+  }
+  static constexpr bool _type_has_method_sequal_reduce = true;
+  static constexpr bool _type_has_method_shash_reduce = true;
+
   TileOperator Clone() const;
+
 
 private:
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;
