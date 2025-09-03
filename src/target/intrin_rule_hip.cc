@@ -1,6 +1,6 @@
 /*!
- * \file intrin_rule_cuda.cc
- * \brief CUDA intrinsic rules.
+ * \file intrin_rule_hip.cc
+ * \brief HIP intrinsic rules.
  */
  #include <tvm/tir/builtin.h>
  #include <tvm/tir/op_attr_types.h>
@@ -125,6 +125,7 @@
    ICHECK(call != nullptr);
    ICHECK_EQ(call->args.size(), 5);  // mask, value, warp_id, width, warp_size
    Array<PrimExpr> hip_args{{call->args[0], call->args[1], call->args[2], call->args[3]}};
+   // NOLINTNEXTLINE(clang-analyzer-cplusplus.InnerPointer)
    return Call(call->dtype, T()(call->dtype, Downcast<Op>(call->op)), hip_args);
  }
  
