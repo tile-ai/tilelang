@@ -1197,7 +1197,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     int swizzle;
     int max_dim;
   };
-  static const SwizzleCheck swizzle_checks[] = {
+  static const std::vector<SwizzleCheck> swizzle_checks = {
       {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B), 32},
       {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B), 64},
       {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B), 128},
