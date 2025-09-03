@@ -124,6 +124,8 @@ tilelang_file_glob(GLOB TILE_LANG_SRCS
   src/target/rt_mod_cpp.cc
   # webgpu doesn't have system dependency
   src/target/codegen_webgpu.cc
+  # intrin_rule doesn't have system dependency
+  src/target/intrin_rule*.cc
 )
 
 # Include CUDA source files if CUDA is enabled
