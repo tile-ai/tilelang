@@ -202,7 +202,6 @@ private:
         ICHECK(thread_var_.defined());
         ICHECK(analyzer_->const_int_bound.IsBound(thread_var_->var));
         auto const_int_bound = analyzer_->const_int_bound(thread_var_);
-        auto dtype = thread_var_->var.dtype();
         int thread_min = const_int_bound->min_value;
         int thread_extent =
             const_int_bound->max_value - const_int_bound->min_value + 1;

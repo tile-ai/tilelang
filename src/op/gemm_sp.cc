@@ -240,18 +240,12 @@ GemmSPNode::ComputeWarpPartition(int num_warps, Target target,
     // First calculate the maximum possible warps for each dimension
     int max_m_warps =
         this->M / kMPerWarp; // Each warp needs at least 16 elements in M
-    int max_n_warps =
-        this->N / kNPerWarp; // Each warp needs at least 8 elements in N
 
     // Calculate the ideal ratio of M/N warps based on the matrix dimensions
     float ideal_ratio = 1.0f;
     if (this->N > 0) {
       ideal_ratio = static_cast<float>(this->M) / this->N;
     }
-
-    // Start with a balanced initial guess
-    m_warp = 1;
-    n_warp = 1;
 
     // Try to find the best balanced partition
     int best_m = 1;
@@ -397,8 +391,6 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
       int dim_A = A->shape.size();
       const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
-      const int64_t continuity =
-          trans_A ? 4 * mat_continuous / warp_m : mat_continuous;
       results.Set(A, makeGemmABLayoutHopper(mat_stride, mat_continuous,
                                             mat_continuous, A->dtype.bits(),
                                             trans_A ? 1 : 2));

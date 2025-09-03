@@ -317,18 +317,12 @@ std::pair<int, int> GemmNode::ComputeWarpPartition(int block_size,
     // First calculate the maximum possible warps for each dimension
     int max_m_warps =
         this->M / kMPerWarp; // Each warp needs at least 16 elements in M
-    int max_n_warps =
-        this->N / kNPerWarp; // Each warp needs at least 8 elements in N
 
     // Calculate the ideal ratio of M/N warps based on the matrix dimensions
     float ideal_ratio = 1.0f;
     if (this->N > 0) {
       ideal_ratio = static_cast<float>(this->M) / this->N;
     }
-
-    // Start with a balanced initial guess
-    m_warp = 1;
-    n_warp = 1;
 
     // Try to find the best balanced partition
     int best_m = 1;
@@ -459,9 +453,9 @@ static int GetArchInt(Target target) {
   int arch_int = 0;
   auto s = target->GetAttr<String>("arch");
   ICHECK(s.defined());
-  const char *arch_str = s.value().c_str();
-  if (arch_str[0] == 's' && arch_str[1] == 'm' && arch_str[2] == '_') {
-    arch_int = atoi(&arch_str[3]);
+  std::string arch = s.value();
+  if (arch.rfind("sm_", 0) == 0) {
+    arch_int = std::stoi(arch.substr(3));
   } else {
     arch_int = 0;
   }
