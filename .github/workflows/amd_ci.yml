@@ -41,7 +41,6 @@ jobs:
           python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
-          pip install flash_attn==2.5.8 --no-user --no-build-isolation
           touch "$MARKER"
         fi
 
@@ -96,6 +95,7 @@ jobs:
           source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
           python -m pip install --upgrade pip --no-user
           if [[ -f requirements-rocm.txt ]]; then
+            pip uninstall torch torchvision torchaudio
             pip install --pre torch torchvision torchaudio --index-url ${{ env.PYTORCH_INDEX_URL }}
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-rocm.txt
           fi
