@@ -5,6 +5,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <utility>
+
 #include "../target/utils.h"
 #include "tvm/ir/expr.h"
 
@@ -19,7 +21,7 @@ using namespace tir;
  * \param region2 The second region.
  * \return Whether region1 and region2 have intersections.
  */
-bool MayConflict(Region region1, Region region2) {
+bool MayConflict(const Region &region1, const Region &region2) {
   ICHECK(region1.size() == region2.size());
   for (size_t i = 0; i < region1.size(); i++) {
     Range dim1 = region1[i];
@@ -42,7 +44,7 @@ bool MayConflict(Region region1, Region region2) {
 class BufferRegionCollector : public StmtExprVisitor {
 public:
   BufferRegionCollector(Map<Var, Buffer> buffer_data_to_buffer)
-      : buffer_data_to_buffer_(buffer_data_to_buffer) {}
+      : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)) {}
 
   Array<BufferRegion> GetReads() const { return reads_; }
 
@@ -182,7 +184,7 @@ private:
    */
   struct PipelineStageInfo {
     Array<BufferRegion> reads, writes;
-    int original_stmt_index;
+    int original_stmt_index{};
     int order = -1, stage = -1;
     bool copy_stage = false;
     bool producer_for_copy = false;
@@ -200,7 +202,7 @@ private:
 
   PipelineStageInfo MakePipelineStageInfo(Stmt stmt, int idx) {
     Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
-                /*body*/ stmt);
+                /*body*/ std::move(stmt));
     Array<Array<BufferRegion>> access =
         GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
     auto collector = BufferRegionCollector(buffer_data_to_buffer_);
@@ -555,12 +557,12 @@ private:
 
   Map<Var, Buffer> buffer_data_to_buffer_;
   Target target_;
-  bool use_async_copy_;
+  bool use_async_copy_{};
 };
 
 tvm::transform::Pass PipelinePlanning() {
   using namespace tir::transform;
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool use_async_copy =
         ctx->GetConfig<Bool>("tir.use_async_copy", Bool(true)).value();
     PrimFuncNode *fptr = f.CopyOnWrite();

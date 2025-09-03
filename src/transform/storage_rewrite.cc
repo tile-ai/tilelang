@@ -36,6 +36,7 @@
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "arith/int_operator.h"
 #include "runtime/thread_storage_scope.h"
@@ -95,17 +96,17 @@ static void LegalizeBufferLoadDType(BufferLoadNode *n) {
 class AllocateCollector : public StmtExprVisitor {
 private:
   bool IsDynamicSharedMemory(Var buffer_var) {
-    StorageScope storage_scope =
-        runtime::StorageScope::Create(GetPtrStorageScope(buffer_var));
+    StorageScope storage_scope = runtime::StorageScope::Create(
+        GetPtrStorageScope(std::move(buffer_var)));
     return storage_scope.rank == runtime::StorageRank::kShared &&
            storage_scope.tag == ".dyn";
   }
 
   bool IsStaticSharedMemory(Var buffer_var) {
-    StorageScope storage_scope =
-        runtime::StorageScope::Create(GetPtrStorageScope(buffer_var));
+    StorageScope storage_scope = runtime::StorageScope::Create(
+        GetPtrStorageScope(std::move(buffer_var)));
     return storage_scope.rank == runtime::StorageRank::kShared &&
-           storage_scope.tag == "";
+           storage_scope.tag.empty();
   }
 
 public:
@@ -143,7 +144,7 @@ public:
   /*! \brief record the touch hist of statement. */
   struct StmtEntry {
     // The statement
-    const Object *stmt;
+    const Object *stmt{};
     // The index in the linear_seq_ to point to end of the nested scope.
     // This is only set to non-zero if stmt is a nested scope.
     // if offset > 0, means this is the begin, the end entry is current_index +
@@ -198,11 +199,11 @@ public:
           << it->second.num_physical_dimensions
           << " physical dimensions, but is accessed as having "
           << op->buffer->axis_separators.size() + 1 << " physical dimensions"
-          << std::endl;
+          << '\n';
     }
     StmtEntry e = scope_.back();
     scope_.pop_back();
-    if (e.touched.size() != 0) {
+    if (!e.touched.empty()) {
       e.stmt = op;
       linear_seq_.push_back(e);
     }
@@ -227,7 +228,7 @@ public:
           << it->second.num_physical_dimensions
           << " physical dimensions, but is accessed as having "
           << op->buffer->axis_separators.size() + 1 << " physical dimensions"
-          << std::endl;
+          << '\n';
     }
   }
 
@@ -237,7 +238,7 @@ public:
     StmtExprVisitor::VisitStmt_(op);
     StmtEntry e = scope_.back();
     scope_.pop_back();
-    if (e.touched.size() != 0) {
+    if (!e.touched.empty()) {
       e.stmt = op;
       linear_seq_.push_back(e);
     }
@@ -345,15 +346,15 @@ public:
     src_ = src;
     result_ = true;
     if (stmt->IsInstance<AttrStmtNode>()) {
-      VisitStmt_(static_cast<const AttrStmtNode *>(stmt));
+      VisitStmt_(reinterpret_cast<const AttrStmtNode *>(stmt));
     } else if (stmt->IsInstance<ForNode>()) {
-      VisitStmt_(static_cast<const ForNode *>(stmt));
+      VisitStmt_(reinterpret_cast<const ForNode *>(stmt));
     } else if (stmt->IsInstance<IfThenElseNode>()) {
-      VisitStmt_(static_cast<const IfThenElseNode *>(stmt));
+      VisitStmt_(reinterpret_cast<const IfThenElseNode *>(stmt));
     } else if (stmt->IsInstance<WhileNode>()) {
-      VisitStmt_(static_cast<const WhileNode *>(stmt));
+      VisitStmt_(reinterpret_cast<const WhileNode *>(stmt));
     } else if (stmt->IsInstance<BufferStoreNode>()) {
-      VisitStmt_(static_cast<const BufferStoreNode *>(stmt));
+      VisitStmt_(reinterpret_cast<const BufferStoreNode *>(stmt));
     } else {
       return false;
     }
@@ -442,9 +443,9 @@ private:
   // result of the check
   bool result_{true};
   // destination memory
-  const VarNode *dst_;
+  const VarNode *dst_{};
   // source variable
-  const VarNode *src_;
+  const VarNode *src_{};
   // counter of load,
   // it is not safe to inplace when there is nested load like A[B[i]]
   int mem_nest_{0};
@@ -501,7 +502,7 @@ public:
     return node;
   }
 
-  Buffer RemapBuffer(Buffer buf, Var new_backing_array) {
+  Buffer RemapBuffer(const Buffer &buf, const Var &new_backing_array) {
     auto key = buf.get();
     auto it = buffer_remap_.find(key);
     if (it != buffer_remap_.end()) {
@@ -641,7 +642,7 @@ private:
     // The physical dimensionality of the allocations.  Since
     // StorageRewrite is applied after StorageFlatten/FlattenBuffer,
     // this is size of `AllocateNode::extents`.  If moved
-    size_t ndim;
+    size_t ndim{};
     // Allocs that shares this entry.
     std::vector<const AllocateNode *> allocs;
     // The children of this entry, not including itself.
@@ -671,7 +672,7 @@ private:
   // Checks whether the storage_scope is especially tagged for a specific
   // memory. Special memory is all combined into a single allocation.
   bool IsSpecialTaggedMemory(const StorageScope &scope) {
-    return scope.tag.length() != 0 && scope.tag != ".dyn" &&
+    return !scope.tag.empty() && scope.tag != ".dyn" &&
            scope.tag != ".barrier" && scope.tag != ".workspace" &&
            scope.tag != ".vtcm";
   }
@@ -729,7 +730,7 @@ private:
         // already merged
         if (e->bits_offset != 0)
           continue;
-        if (e->merged_children.size() != 0) {
+        if (!e->merged_children.empty()) {
           NewAllocTagMerged(e);
           continue;
         }
@@ -993,7 +994,7 @@ private:
       }
       // enter/exit new scope
       if (s.stmt->IsInstance<AttrStmtNode>()) {
-        const auto *op = static_cast<const AttrStmtNode *>(s.stmt);
+        const auto *op = reinterpret_cast<const AttrStmtNode *>(s.stmt);
         if (op->attr_key == tir::attr::thread_extent ||
             op->attr_key == tir::attr::virtual_thread ||
             tir::attr::IsPragmaKey(op->attr_key)) {
@@ -1002,7 +1003,7 @@ private:
           ICHECK(op->attr_key == tir::attr::extern_scope);
         }
       } else if (s.stmt->IsInstance<ForNode>()) {
-        const auto *op = static_cast<const ForNode *>(s.stmt);
+        const auto *op = reinterpret_cast<const ForNode *>(s.stmt);
         if (op->kind == ForKind::kParallel) {
           if (thread_scope_ == nullptr || thread_scope_ == op) {
             PlanNewScope(op);
@@ -1062,7 +1063,7 @@ private:
     // disable reuse of small arrays, they will be lowered to registers in LLVM
     // This rules only apply if we are using non special memory
     bool is_small_array =
-        (scope.tag.length() == 0) &&
+        (scope.tag.empty()) &&
         (scope.rank >= StorageRank::kWarp || op->dtype.is_handle() ||
          (is_known_size && const_nbits <= 32));
 
@@ -1134,7 +1135,7 @@ private:
 
     // disable reuse of small arrays, they will be lowered to registers in LLVM
     // This rules only apply if we are using non special memory
-    if (e->scope.tag.length() == 0) {
+    if (e->scope.tag.empty()) {
       // Disable sharing of local memory.
       if (e->scope.rank >= StorageRank::kWarp ||
           e->allocs[0]->dtype.is_handle())
@@ -1182,7 +1183,7 @@ private:
  *
  */
 struct BufferVarInfo {
-  enum DeclarationLocation {
+  enum DeclarationLocation : uint8_t {
     kPrimFuncParam = (1 << 0),
     kPrimFuncBufferMap = (1 << 1),
     kAllocateNode = (1 << 2),
@@ -1293,7 +1294,7 @@ public:
       Var buffer_var = buffer->data;
       DataType dtype = buffer->dtype;
       PrimExpr extent =
-          buffer->shape.size() ? buffer->shape[buffer->shape.size() - 1] : 0;
+          !buffer->shape.empty() ? buffer->shape[buffer->shape.size() - 1] : 0;
       OnArrayDeclaration(buffer_var, dtype, extent,
                          BufferVarInfo::kPrimFuncParam);
     }
@@ -1350,7 +1351,7 @@ public:
   void VisitStmt_(const AllocateConstNode *op) final {
     const Array<PrimExpr> &extents = op->extents;
     PrimExpr extent =
-        extents.size() ? extents[extents.size() - 1] : NullValue<PrimExpr>();
+        !extents.empty() ? extents[extents.size() - 1] : NullValue<PrimExpr>();
     OnArrayDeclaration(op->buffer_var, op->dtype, extent,
                        BufferVarInfo::kAllocateConstNode);
 
@@ -1367,7 +1368,7 @@ public:
     StmtExprVisitor::VisitStmt_(op);
   }
 
-  void HandleLetNode(Var let_var) {
+  void HandleLetNode(const Var &let_var) {
     if (let_var->dtype.is_handle()) {
       auto pointer_type = GetPointerType(let_var->type_annotation);
       if (pointer_type.has_value()) {
@@ -1397,7 +1398,7 @@ public:
    * some locations can be rewritten without others.
    */
   void
-  OnArrayDeclaration(Var buffer, DataType element_dtype, PrimExpr extent,
+  OnArrayDeclaration(const Var &buffer, DataType element_dtype, PrimExpr extent,
                      BufferVarInfo::DeclarationLocation declaration_location) {
     ICHECK(info_map_.find(buffer.get()) == info_map_.end())
         << "Array declaration of " << buffer->name_hint
@@ -1406,8 +1407,8 @@ public:
     if (element_dtype == DataType::Bool()) {
       element_dtype = DataType::Int(8).with_lanes(element_dtype.lanes());
     }
-    info_map_[buffer.get()] =
-        BufferVarInfo{buffer, element_dtype, extent, declaration_location};
+    info_map_[buffer.get()] = BufferVarInfo{
+        buffer, element_dtype, std::move(extent), declaration_location};
   }
 
   /* Update the type map for a buffer based on its usage
@@ -1452,7 +1453,7 @@ public:
       ICHECK(indices[i].dtype().is_scalar())
           << "Only the last index of a buffer access may be a vector type.";
     }
-    int index_lanes = indices.size() ? indices.back().dtype().lanes() : 1;
+    int index_lanes = !indices.empty() ? indices.back().dtype().lanes() : 1;
 
     DataType access_dtype = value_dtype;
 
@@ -1488,7 +1489,7 @@ public:
     // divisible by the number of number of lanes, and the predicate
     // does not apply any masking, then this array access could be
     // vectorized.
-    if (indices.size()) {
+    if (!indices.empty()) {
       const RampNode *ramp_index = indices[indices.size() - 1].as<RampNode>();
       if (ramp_index && is_one(ramp_index->stride)) {
         if (ramp_index->lanes->IsInstance<IntImmNode>()) {
@@ -1502,7 +1503,7 @@ public:
       }
     }
 
-    if (detect_scalar_read_patterns_ && is_buffer_load && indices.size()) {
+    if (detect_scalar_read_patterns_ && is_buffer_load && !indices.empty()) {
       const PrimExpr last_dim_index = indices[indices.size() - 1];
       if (last_dim_index.dtype().lanes() == 1) {
         arith::ModularSet me = analyzer_.modular_set(last_dim_index);
@@ -1910,7 +1911,7 @@ PrimFunc PointerValueTypeRewrite(
 using namespace tir::transform;
 namespace transform {
 Pass StorageRewrite() {
-  auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool enable_reuse = true;
     bool reuse_require_exact_matched_dtype = false;
     bool merge_static_smem =
@@ -1957,7 +1958,7 @@ TVM_FFI_STATIC_INIT_BLOCK({
 });
 
 Pass PointerValueTypeRewrite() {
-  auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return tl::PointerValueTypeRewrite(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.PointerValueTypeRewrite", {});

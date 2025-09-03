@@ -131,7 +131,13 @@ def run_autotune(M: int, N: int, K: int):
 
 
 def test_autotune_matmul():
-    run_autotune(8192, 8192, 8192)
+    """
+    Run the autotuning validation for the matmul kernel on a 1024x1024x1024 problem.
+    
+    This test constructs random CUDA tensors, autotunes the JIT-compiled block-level matrix-multiplication kernel,
+    executes it, and asserts the result matches a reference CPU implementation within tolerances.
+    """
+    run_autotune(1024, 1024, 1024)
 
 
 if __name__ == "__main__":

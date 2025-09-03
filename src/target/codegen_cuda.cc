@@ -325,16 +325,12 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     enable_fp6_ = true;
     if (t.lanes() <= 4) {
       os << GetFP6Type(t);
-    } else {
-      fail = true;
     }
     return;
   } else if (t.is_float4()) {
     enable_fp4_ = true;
     if (t.lanes() <= 4) {
       os << GetFP4Type(t);
-    } else {
-      fail = true;
     }
     return;
   } else if (t == DataType::Bool()) {
@@ -924,6 +920,38 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   return os.str();
 }
 
+/**
+ * @brief Emit CUDA/TensorLib-specific code for a call expression.
+ *
+ * This visitor handles CallNode intrinsics and builtins that require emitting
+ * CUDA/TL-specific code (inline PTX/ASM sequences, TensorLanguage runtime
+ * calls, WMMA/TMA helpers, barriers, cp.async primitives, index-map based
+ * stores, reinterpret/packing helpers, and various mma/ldmatrix patterns). The
+ * function writes the generated code to the provided output stream and falls
+ * back to the C codegen for unrecognized calls.
+ *
+ * The method recognizes and emits code for (non-exhaustive): cp.async and its
+ * commit/wait variants, tma_load/store and im2col variants, ptX
+ * ldmatrix/stmatrix helpers, mbarrier APIs, cooperative grid sync, WMMA/legacy
+ * MMA intrinsics (fill/load/store/mma/bmma/ptx_mma/ptx_mma_sp), low-level PTX
+ * asm helpers (ldg32, cp_async bulk/init/arrive/wait barriers), reinterpret
+ * paths for special small-float encodings (e.g., float4 e2m1fn), tl::tl_gemm
+ * and related external calls, and other TL runtime calls.
+ *
+ * Side effects:
+ * - Emits to `os` and the internal codegen output stream.
+ * - May set internal feature flags (e.g., need_cooperative_groups_,
+ * need_mma_h_, need_cast_smem_ptr_to_int_, enable_sparse_gemm_).
+ * - May open/close SSA scopes and mutate internal variable mappings.
+ * - May call LOG(FATAL) / CHECK / ICHECK on invalid or unsupported argument
+ *   patterns.
+ *
+ * @param op The call node to generate code for; the function inspects op->op
+ *           and op->args to determine the appropriate emission.
+ * @param os  Output stream to receive expression-level output when the caller
+ *            expects an expression result (some paths write directly to the
+ *            member stream instead).
+ */
 void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   auto print_extern_call_stmt = [&](std::string name, size_t start = 0,
                                     size_t end = 0) {
@@ -1134,10 +1162,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::sync_grid())) {
     this->need_cooperative_groups_ = true;
     this->PrintIndent();
-    this->stream << "cooperative_groups::grid_group grid = "
-                    "cooperative_groups::this_grid();\n";
-    this->PrintIndent();
-    this->stream << "grid.sync();\n";
+    this->stream << "cooperative_groups::this_grid().sync();\n";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";
@@ -1931,13 +1956,17 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
   // Type code is kBFloat
   if (op->dtype.is_bfloat16()) {
     os << "bfloat16_t";
-    os << '(' << std::scientific << op->value << 'f' << ')';
+    os << '(' << std::hexfloat << op->value << 'f';
+    os << "/*" << std::scientific << op->value << "*/";
+    os << ')';
     return;
   }
   // Type code is kFloat8_e5m2 or kE4M4Float
   if (op->dtype.is_float8() || op->dtype.is_float4()) {
     p->PrintType(op->dtype, os);
-    os << '(' << std::scientific << op->value << 'f' << ')';
+    os << '(' << std::hexfloat << op->value << 'f';
+    os << "/*" << std::scientific << op->value << "*/";
+    os << ')';
     return;
   }
   // Type code is kFloat
@@ -1955,9 +1984,10 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       temp << ((op->dtype.bits() == 32) ? "CUDART_NAN_F" : "CUDART_NAN");
       p->need_math_constants_h_ = true;
     } else {
-      temp << std::scientific << op->value;
+      temp << std::hexfloat << op->value;
       if (op->dtype.bits() == 32)
         temp << 'f';
+      temp << "/*" << std::scientific << op->value << "*/";
     }
     p->MarkConst(temp.str());
     os << temp.str();

@@ -7,10 +7,18 @@
 #ifndef TVM_TL_OP_BUILTIN_H_
 #define TVM_TL_OP_BUILTIN_H_
 
-#include "op.h"
+#include "operator.h"
 #include <tvm/ir/transform.h>
 
 namespace tvm {
+/*!
+ * \brief Create the TVM intrinsic that initializes a PTX fence barrier.
+ *
+ * Initializes a PTX fence-style barrier used to coordinate asynchronous memory
+ * operations (for example, TMA/TMA_STORE). Returns the Op representing this
+ * intrinsic for use in TIR lowering and code generation.
+ *
+ */
 namespace tl {
 
 namespace attr {
@@ -128,6 +136,14 @@ TVM_DLL const Op &tma_load_im2col();
  *
  */
 TVM_DLL const Op &tma_store();
+
+/*!
+ * \brief tvm intrinsics for barrier initialization fence
+ *
+ * ptx_fence_barrier_init()
+ *
+ */
+const Op &ptx_fence_barrier_init();
 
 /*!
  * \brief tvm intrinsics for mbarrier wait with parity bit

@@ -45,7 +45,7 @@ class FragmentAccessDetector : public StmtExprVisitor {
 public:
   FragmentAccessDetector() = default;
 
-  void Collect(Stmt stmt) { VisitStmt(stmt); }
+  void Collect(const Stmt &stmt) { VisitStmt(stmt); }
 
   bool HasFragmentAccess() { return has_fragment_access_; }
 
@@ -91,7 +91,7 @@ private:
  */
 class ParallelLoopFuser : public IRMutatorWithAnalyzer {
 public:
-  static Stmt Fuse(Stmt stmt) {
+  static Stmt Fuse(const Stmt &stmt) {
     arith::Analyzer analyzer;
     ParallelLoopFuser substituter(&analyzer);
     return substituter.VisitStmt(stmt);

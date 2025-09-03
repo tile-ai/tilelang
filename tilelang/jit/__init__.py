@@ -20,6 +20,7 @@ from tvm.tir import PrimFunc
 from tvm.target import Target
 
 from tilelang.jit.kernel import JITKernel
+from tilelang.utils.target import determine_target
 from tilelang.cache import cached
 from os import path, makedirs
 from logging import getLogger
@@ -34,7 +35,7 @@ def compile(
     out_idx: Union[List[int], int, None] = None,
     execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
     target: Union[str, Target] = "auto",
-    target_host: Union[str, Target] = None,
+    target_host: Union[str, Target, None] = None,
     verbose: bool = False,
     pass_configs: Optional[Dict[str, Any]] = None,
     compile_flags: Optional[Union[List[str], str]] = None,
@@ -69,6 +70,10 @@ def compile(
     assert isinstance(func, PrimFunc), f"target function must be a PrimFunc but got {type(func)}"
     if isinstance(compile_flags, str):
         compile_flags = [compile_flags]
+
+    # This path is not a performance critical path, so we can afford to convert the target.
+    target = Target(determine_target(target))
+
     return cached(
         func=func,
         out_idx=out_idx,

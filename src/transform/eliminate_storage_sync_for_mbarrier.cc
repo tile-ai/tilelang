@@ -22,7 +22,7 @@ using arith::IRVisitorWithAnalyzer;
 
 class Eliminator : public IRMutatorWithAnalyzer {
 public:
-  static Stmt Substitute(Stmt stmt, bool skip_thread_partition = false) {
+  static Stmt Substitute(const Stmt &stmt, bool skip_thread_partition = false) {
     arith::Analyzer analyzer;
     Eliminator transformer(&analyzer);
     return transformer.VisitStmt(stmt);
@@ -37,7 +37,7 @@ public:
     if (op->attr_key == "thread_extent") {
       const VarNode *var = nullptr;
       if (op->node->IsInstance<VarNode>()) {
-        var = static_cast<const VarNode *>(op->node.get());
+        var = op->node.as<VarNode>();
         if (var->name_hint == "threadIdx.x") {
           thread_extent_ = op;
         }
@@ -49,7 +49,7 @@ public:
   Stmt VisitStmt_(const EvaluateNode *op) final {
     const CallNode *call = nullptr;
     if (op->value->IsInstance<CallNode>()) {
-      call = static_cast<const CallNode *>(op->value.get());
+      call = op->value.as<CallNode>();
       if (call->op.same_as(builtin::tvm_storage_sync())) {
         // Skip storage sync if we're in a region with mbarrier operations
         // and we're not in a for loop with mbarrier operations
@@ -107,9 +107,9 @@ using namespace tir::transform;
 namespace transform {
 
 tvm::transform::Pass EliminateStorageSyncForMBarrier() {
-  auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
-    n->body = Eliminator::Substitute(std::move(n->body));
+    n->body = Eliminator::Substitute(n->body);
     return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.EliminateStorageSyncForMBarrier",

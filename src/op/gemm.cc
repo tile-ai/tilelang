@@ -19,6 +19,16 @@ namespace tl {
 
 using namespace tir;
 
+/**
+ * @brief Compute the prime factorization of an integer.
+ *
+ * Returns the prime factors of x in non-decreasing order by repeatedly dividing
+ * out the smallest possible factor.
+ *
+ * @param x Integer to factorize. If x <= 1, an empty vector is returned.
+ * @return std::vector<int> Prime factors of x (with multiplicity), in
+ * non-decreasing order.
+ */
 static std::vector<int> toPrimeFactors(int x) {
   int i = 2;
   std::vector<int> result;
@@ -33,36 +43,101 @@ static std::vector<int> toPrimeFactors(int x) {
   return result;
 }
 
+/**
+ * @brief Construct a Gemm operator from serialized TL arguments and a buffer
+ * map.
+ *
+ * This constructor deserializes operator parameters from `args` and resolves
+ * buffer references via `vmap`, populating an internal GemmNode with:
+ * - device pointers for A, B, C and their corresponding Buffer objects,
+ * - transpose flags for A and B,
+ * - matrix dimensions M, N, K,
+ * - warp allocation policy and clear_accum flag,
+ * - strides and memory offsets for A and B,
+ * - optional kPack (must be 1 or 2) and optional wg_wait.
+ *
+ * The populated GemmNode is stored into the wrapper's internal `data_`.
+ *
+ * @param args Positional serialized arguments produced by the TL frontend:
+ *   expected layout is:
+ *     [Aptr, Bptr, Cptr, trans_A (Bool), trans_B (Bool),
+ *      M (Int), N (Int), K (Int), policy (Int), clear_accum (Bool),
+ *      stride_A (Int), stride_B (Int), offset_A (Int), offset_B (Int),
+ *      (optional) kPack (Int), (optional) wg_wait (Int)]
+ * @param vmap Mapping from access pointer vars to Buffer objects used to
+ *   resolve the Buffer corresponding to each pointer argument.
+ *
+ * @note If `kPack` is provided it must be 1 or 2; otherwise the constructor
+ *       fails with an ICHECK (runtime assertion). No other validation is
+ *       performed here.
+ */
 Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
-  Aptr = args[0];
-  Bptr = args[1];
-  Cptr = args[2];
-  A = vmap[GetVarFromAccessPtr(Aptr)];
-  B = vmap[GetVarFromAccessPtr(Bptr)];
-  C = vmap[GetVarFromAccessPtr(Cptr)];
-  trans_A = args[3].as<Bool>().value();
-  trans_B = args[4].as<Bool>().value();
-  M = args[5].as<IntImm>().value()->value;
-  N = args[6].as<IntImm>().value()->value;
-  K = args[7].as<IntImm>().value()->value;
-  policy = static_cast<GemmWarpPolicy>(args[8].as<IntImm>().value()->value);
-  clear_accum = args[9].as<Bool>().value();
-  stride_A = args[10].as<IntImm>().value()->value;
-  stride_B = args[11].as<IntImm>().value()->value;
-  offset_A = args[12].as<IntImm>().value()->value;
-  offset_B = args[13].as<IntImm>().value()->value;
+  ObjectPtr<GemmNode> node = make_object<GemmNode>();
+
+  node->Aptr = args[0];
+  node->Bptr = args[1];
+  node->Cptr = args[2];
+  node->A = vmap[GetVarFromAccessPtr(node->Aptr)];
+  node->B = vmap[GetVarFromAccessPtr(node->Bptr)];
+  node->C = vmap[GetVarFromAccessPtr(node->Cptr)];
+  node->trans_A = args[3].as<Bool>().value();
+  node->trans_B = args[4].as<Bool>().value();
+  node->M = args[5].as<IntImm>().value()->value;
+  node->N = args[6].as<IntImm>().value()->value;
+  node->K = args[7].as<IntImm>().value()->value;
+  node->policy =
+      static_cast<GemmWarpPolicy>(args[8].as<IntImm>().value()->value);
+  node->clear_accum = args[9].as<Bool>().value();
+  node->stride_A = args[10].as<IntImm>().value()->value;
+  node->stride_B = args[11].as<IntImm>().value()->value;
+  node->offset_A = args[12].as<IntImm>().value()->value;
+  node->offset_B = args[13].as<IntImm>().value()->value;
   if (args.size() > 14) {
-    kPack = args[14].as<IntImm>().value()->value;
-    if (kPack != 1 && kPack != 2) {
+    node->kPack = args[14].as<IntImm>().value()->value;
+    if (node->kPack != 1 && node->kPack != 2) {
       ICHECK(false) << "kPack must be 1 or 2";
     }
   }
   if (args.size() > 15) {
-    wg_wait = args[15].as<IntImm>().value()->value;
+    node->wg_wait = args[15].as<IntImm>().value()->value;
   }
+  data_ = std::move(node);
 }
 
-Gemm::GemmInst Gemm::GetGemmInst(int block_size, Target target) const {
+/**
+ * @brief Create a copy of this GemmNode as a TileOperator.
+ *
+ * Constructs a new GemmNode by copying the current node state and returns it
+ * wrapped in a Gemm TileOperator.
+ *
+ * @return TileOperator A Gemm operator that owns a copy of this node.
+ */
+TileOperator GemmNode::Clone() const {
+  auto op = make_object<GemmNode>(*this);
+  return Gemm(op);
+}
+
+/**
+ * @brief Selects the GEMM implementation variant for a given block size and
+ * target.
+ *
+ * Determines which low-level GEMM instruction to use:
+ * - Returns kWGMMA when running on Hopper-class targets and the operator meets
+ *   WGMMA constraints (M >= 64, number of warps is a multiple of 4, and
+ *   CheckWGMMA() returns true).
+ * - Returns kMFMA for CDNA targets.
+ * - Returns kMMA for CUDA targets.
+ *
+ * @param block_size Number of threads in the CUDA/ROCm thread block used for
+ * the GEMM.
+ * @param target Target backend describing the hardware (used to detect
+ * architecture).
+ * @return GemmInst The chosen GEMM implementation enum value.
+ *
+ * @throws fatal error (ICHECK) If the target is not recognized/supported, this
+ * function triggers a runtime check failure.
+ */
+GemmNode::GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
   int warp_size = TargetGetWarpSize(target);
   int num_warps = block_size / warp_size;
   bool allow_wgmma = TargetIsHopper(target) && (this->M >= 64) &&
@@ -87,10 +162,13 @@ Gemm::GemmInst Gemm::GetGemmInst(int block_size, Target target) const {
  * per-warp tile sizes) and adapts the partition according to the configured
  * GemmWarpPolicy (FullRow, FullCol, Square).
  *
- * @param block_size Total number of threads in the block (used to derive num_warps).
+ * @param block_size Total number of threads in the block (used to derive
+ * num_warps).
  * @param gemm_inst The chosen GEMM implementation (e.g., kWGMMA, kMFMA, kMMA).
- * @param target Target device information (used for warp size and target-specific rules).
- * @return std::pair<int, int> {m_warp, n_warp} where m_warp * n_warp == num_warps.
+ * @param target Target device information (used for warp size and
+ * target-specific rules).
+ * @return std::pair<int, int> {m_warp, n_warp} where m_warp * n_warp ==
+ * num_warps.
  *
  * Constraints and behavior:
  * - Each warp is assumed to cover 16 rows (M) and 8 columns (N). The function
@@ -100,7 +178,8 @@ Gemm::GemmInst Gemm::GetGemmInst(int block_size, Target target) const {
  *   - num_warps must be a multiple of 4 (warp-groups of 4).
  *   - m_warp is always a multiple of 4.
  *   - The warp partition respects the GemmWarpPolicy:
- *     - FullRow: maximize warps on M (in multiples of 4) while keeping divisibility.
+ *     - FullRow: maximize warps on M (in multiples of 4) while keeping
+ * divisibility.
  *     - FullCol: maximize warps on N, but if N is not evenly divisible, move
  *       whole warp-groups to M to achieve feasibility.
  *     - Square: choose a multiple-of-4 m_warp that best balances per-warp work
@@ -118,9 +197,9 @@ Gemm::GemmInst Gemm::GetGemmInst(int block_size, Target target) const {
  *   divisibility or policy conditions are not met (e.g., M/N tile divisibility,
  *   invalid policy, or WGMMA-specific warp-group requirements).
  */
-std::pair<int, int> Gemm::ComputeWarpPartition(int block_size,
-                                               GemmInst gemm_inst,
-                                               Target target) const {
+std::pair<int, int> GemmNode::ComputeWarpPartition(int block_size,
+                                                   GemmInst gemm_inst,
+                                                   Target target) const {
   int num_warps = block_size / TargetGetWarpSize(target);
   int m_warp = 1, n_warp = 1;
   constexpr int kMPerWarp = 16; // Rows processed by a single warp
@@ -296,19 +375,21 @@ std::pair<int, int> Gemm::ComputeWarpPartition(int block_size,
  * Supported combinations and constraints:
  * - C=float16:
  *   - A=float16, B=float16: K % 16 == 0
- *   - Various float8 mixes (e4m3/e5m2): require (!trans_A && trans_B) and K % 32 == 0
+ *   - Various float8 mixes (e4m3/e5m2): require (!trans_A && trans_B) and K %
+ * 32 == 0
  * - C=float32:
  *   - A=float16, B=float16: K % 16 == 0
  *   - A=bfloat16, B=bfloat16: K % 16 == 0
  *   - A=float32, B=float32: require (!trans_A && trans_B) and K % 8 == 0
  *   - Various float8 mixes: require (!trans_A && trans_B) and K % 32 == 0
  * - C=int32:
- *   - 8-bit integer combinations (Int8/UInt8): require (!trans_A && trans_B) and K % 32 == 0
+ *   - 8-bit integer combinations (Int8/UInt8): require (!trans_A && trans_B)
+ * and K % 32 == 0
  *
  * @return true if WGMMA is supported for the current buffers, dtypes, and
  *         transpose/shape constraints; false otherwise.
  */
-bool Gemm::CheckWGMMA() const {
+bool GemmNode::CheckWGMMA() const {
   if (B.scope() != "shared.dyn" && B.scope() != "shared") {
     return false;
   }
@@ -360,6 +441,20 @@ bool Gemm::CheckWGMMA() const {
   }
 }
 
+/**
+ * @brief Parse and return the numeric GPU architecture from a Target's "arch"
+ * attribute.
+ *
+ * Examines the target's "arch" string and, if it matches the pattern
+ * "sm_<num>", returns <num> as an int. If the attribute is present but does not
+ * match that pattern, returns 0.
+ *
+ * Preconditions: the target must have an "arch" attribute (this is checked via
+ * ICHECK).
+ *
+ * @return int The parsed architecture number (e.g., 80 for "sm_80"), or 0 if
+ * the arch string does not match "sm_<num>".
+ */
 static int GetArchInt(Target target) {
   int arch_int = 0;
   auto s = target->GetAttr<String>("arch");
@@ -373,7 +468,20 @@ static int GetArchInt(Target target) {
   return arch_int;
 }
 
-Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+/**
+ * @brief Lower the GEMM operator to a TL TIR call expression.
+ *
+ * Constructs a tl::gemm call string parameterized by M, N, K, warp partition,
+ * transpose flags, accumulation clearing, target-specific stride/offset/kPack
+ * and optional workgroup wait value, then returns an Evaluate(call) node
+ * invoking tl::tl_gemm with the composed string and the A/B/C buffer handles.
+ *
+ * @param T Contains lowering context including thread bounds and target.
+ * @param analyzer Optional arithmetic analyzer used by lowering (may be
+ * nullptr).
+ * @return Stmt A TIR statement representing the evaluated TL GEMM call.
+ */
+Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
   GemmInst gemm_inst = GetGemmInst(block_size, T.target);
   auto [warp_m, warp_n] = ComputeWarpPartition(block_size, gemm_inst, T.target);
@@ -411,29 +519,26 @@ Stmt Gemm::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 }
 
 /**
- * @brief Infer memory/layout mappings for A, B, and C buffers for this GEMM op.
+ * @brief Infer and bind target-specific memory/layout mappings for A, B, and C.
  *
- * Generates and returns a LayoutMap that binds buffer A, B, and C to
- * target- and architecture-specific fragment or shared-memory layouts based
- * on the current target, thread bounds, warp partitioning, data types, and
- * transpose flags. This performs target dispatch (Volta, Ampere/Turing/SM120,
- * Hopper, CDNA), selects the appropriate fragment or shared layout creators,
- * and binds fragment layouts to the thread range when buffers are local
- * fragments.
+ * Infers per-buffer layouts (fragment or shared-memory layouts) for this GEMM
+ * operator according to the target architecture, thread bounds, warp
+ * partitioning, data types, and transpose flags, then binds fragment layouts
+ * to the thread range when required.
  *
  * Preconditions:
- * - C.scope() must be "local.fragment".
+ * - C.scope() == "local.fragment"
  *
- * Postconditions / side effects:
- * - Marks the operator's layout inference as completed (sets completed_ = true).
+ * Side effects:
+ * - Marks layout inference as completed (sets completed_ = true).
  * - May abort via ICHECK on unsupported targets, invalid buffer scopes, or
  *   incompatible shape constraints.
  *
- * @param T Layout inference inputs (thread bounds and target).
- * @param level Inference level (unused for side effects but retained for API).
- * @return LayoutMap mapping each of A, B, and C to their inferred layouts.
+ * @param T Input layout-inference context (provides thread bounds and target).
+ * @return LayoutMap mapping A, B, and C to their inferred layouts.
  */
-LayoutMap Gemm::InferLayout(const LayoutInferArgs &T, InferLevel level) {
+LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
+                                InferLevel level) const {
   if (completed_)
     return {};
   LayoutMap results;

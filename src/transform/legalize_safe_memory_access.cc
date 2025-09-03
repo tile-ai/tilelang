@@ -10,6 +10,8 @@
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
 
+#include <utility>
+
 #include "../op/builtin.h"
 #include "../op/parallel.h"
 #include "arith/ir_mutator_with_analyzer.h"
@@ -140,7 +142,8 @@ class SafeMemorysRewriter : public StmtExprMutator {
 public:
   explicit SafeMemorysRewriter(Map<Buffer, PrimExpr> annotated_padding_map,
                                arith::Analyzer *analyzer)
-      : annotated_padding_map_(annotated_padding_map), analyzer_(analyzer) {}
+      : annotated_padding_map_(std::move(annotated_padding_map)),
+        analyzer_(analyzer) {}
 
 private:
   Stmt VisitStmt_(const BufferStoreNode *op) final {
@@ -153,7 +156,7 @@ private:
 
     // Skip boundary check if the store value is an IfThenElse
     if (const IfThenElseNode *if_node = store->value.as<IfThenElseNode>()) {
-      if (conditions.size() > 0) {
+      if (!conditions.empty()) {
         LOG(WARNING)
             << "Skipping boundary check for store with IfThenElse value: "
             << store->value
@@ -165,7 +168,7 @@ private:
       return store;
     }
 
-    if (conditions.size() == 0) {
+    if (conditions.empty()) {
       return store;
     }
 
@@ -215,7 +218,7 @@ private:
         checker(call);
         Array<PrimExpr> conditions = checker.GetConditions();
 
-        if (conditions.size() == 0) {
+        if (conditions.empty()) {
           return evaluate;
         }
 
@@ -330,7 +333,7 @@ private:
   static bool HasInnerLoop(const Stmt &stmt) {
     LeafForFinder finder;
     finder(stmt);
-    return finder.leaf_for_nodes.size() > 0;
+    return !finder.leaf_for_nodes.empty();
   }
 
   Map<Var, Buffer> buffer_data_to_buffer_;
@@ -341,7 +344,7 @@ private:
 tvm::transform::Pass LegalizeSafeMemoryAccess() {
   using namespace tir::transform;
   // Define the transformation function to be applied
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
     bool disable_safe_memory_legalize =
         ctx->GetConfig<Bool>(kDisableSafeMemoryLegalize, Bool(false)).value();
     if (disable_safe_memory_legalize) {

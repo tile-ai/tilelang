@@ -33,6 +33,7 @@
 
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "../op/builtin.h"
 #include "../target/utils.h"
@@ -51,16 +52,16 @@ using runtime::StorageScope;
 
 static bool IsDynamicSharedMemory(Var buffer_var) {
   StorageScope storage_scope =
-      runtime::StorageScope::Create(GetPtrStorageScope(buffer_var));
+      runtime::StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
   return storage_scope.rank == runtime::StorageRank::kShared &&
          storage_scope.tag == ".dyn";
 }
 
 static bool IsStaticSharedMemory(Var buffer_var) {
   StorageScope storage_scope =
-      runtime::StorageScope::Create(GetPtrStorageScope(buffer_var));
+      runtime::StorageScope::Create(GetPtrStorageScope(std::move(buffer_var)));
   return storage_scope.rank == runtime::StorageRank::kShared &&
-         storage_scope.tag == "";
+         storage_scope.tag.empty();
 }
 
 /*!
@@ -106,7 +107,7 @@ public:
   /*! \brief record the touch list of statement. */
   struct StmtEntry {
     // The statement
-    const Object *stmt;
+    const Object *stmt{};
     // The index in the linear_seq_ to point to end of the nested scope.
     // This is only set to non-zero if stmt is a nested scope.
     // if offset > 0, means this is the begin, the end entry is current_index +
@@ -167,7 +168,7 @@ public:
 
     StmtEntry e = scope_.back();
     scope_.pop_back();
-    if (e.touched.size() != 0) {
+    if (!e.touched.empty()) {
       e.stmt = op;
       UpdateStmtAttr(op, scope_level_);
       linear_seq_.push_back(e);
@@ -180,7 +181,7 @@ public:
     StmtExprVisitor::VisitStmt_(op);
     StmtEntry e = scope_.back();
     scope_.pop_back();
-    if (e.touched.size() != 0) {
+    if (!e.touched.empty()) {
       e.stmt = op;
       UpdateStmtAttr(op, scope_level_);
       linear_seq_.push_back(e);
@@ -602,7 +603,7 @@ private:
     }
   }
 
-  PrimExpr GetBufferOffset(Var buffer_var, DataType dtype) {
+  PrimExpr GetBufferOffset(const Var &buffer_var, DataType dtype) {
     auto it = buffer_byte_offsets_.find(buffer_var.get());
     ICHECK(it != buffer_byte_offsets_.end())
         << "buffer_var = " << buffer_var->name_hint << ", dtype = " << dtype;
@@ -750,8 +751,8 @@ private:
     std::vector<StmtEntry> gen_kill_seq;
     for (const auto &stmt_entry : seq) {
       // if has gen and kill, add to gen_kill_seq
-      if (event_map_[stmt_entry.stmt].gen.size() > 0 ||
-          event_map_[stmt_entry.stmt].kill.size() > 0) {
+      if (!event_map_[stmt_entry.stmt].gen.empty() ||
+          !event_map_[stmt_entry.stmt].kill.empty()) {
         gen_kill_seq.push_back(stmt_entry);
       }
     }
@@ -950,9 +951,25 @@ private:
     return entry;
   }
   /*!
-   * \brief find the storage entry in the free list for the allocate
-   * \param op the allocate node
-   * \return the storage entry
+   * @brief Locate or create a storage entry from free lists to satisfy an
+   * AllocateNode.
+   *
+   * Finds a reusable StorageEntry for the given AllocateNode (constant or
+   * symbolic size) using two-tiered strategies:
+   * - For constant-size allocations (>0): prefer a free entry that is >=
+   * required size; if none, coalesce smaller free constant-size entries until
+   * the sum meets the request and return a new StorageEntry representing the
+   * merged space. Very small constant allocations (<= 32 bits) are not reused
+   * and will allocate a fresh entry.
+   * - For symbolic-size (unknown at compile time): pick and remove an arbitrary
+   * entry from the symbolic free list.
+   *
+   * If no suitable free entry is found, a fresh StorageEntry is created via
+   * NewAlloc.
+   *
+   * @param op Pointer to the AllocateNode to satisfy. Must be non-null.
+   * @return StorageEntry* A storage entry that will hold the allocation (may be
+   * newly created).
    */
   StorageEntry *FindAlloc(const AllocateNode *op) {
     ICHECK(op != nullptr);
@@ -962,6 +979,7 @@ private:
     uint64_t op_elem_bits = op->dtype.bits() * op->dtype.lanes();
     uint64_t const_nbits =
         static_cast<uint64_t>(op->ConstantAllocationSize() * op_elem_bits);
+
     // disable reuse of small arrays, they will be lowered to registers in LLVM
     // This rules only apply if we are using non special memory
     if (const_nbits > 0 && const_nbits <= 32) {
@@ -1107,8 +1125,8 @@ namespace transform {
 
 Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
                                   int align_bytes = 16) {
-  auto pass_func = [enable_aggressive_merge,
-                    align_bytes](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [enable_aggressive_merge, align_bytes](
+                       PrimFunc f, const IRModule &m, PassContext ctx) {
     bool merge_static_smem =
         ctx->GetConfig<Bool>("tir.merge_static_smem", Bool(false)).value();
     bool debug_merge_shared_memory_allocations =

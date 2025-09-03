@@ -24,7 +24,7 @@ struct ThreadBoundKey {
 // Number of threads syncing using the barrier must be a multiple of warp-size
 // ID 0 should not be used for safety, as other driver APIs (i.e. __syncthreads)
 // may use it and conflict with other uses.
-enum class ReservedNamedBarriers {
+enum class ReservedNamedBarriers : uint8_t {
   kSyncThreads = 0,
   kReduce_0 = 1,
   kReduce_1 = 2,
