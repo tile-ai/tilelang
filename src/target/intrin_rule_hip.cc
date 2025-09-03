@@ -113,10 +113,10 @@
    }
  };
  
-static PrimExpr DispatchHIPWarpActiveMask(const PrimExpr& e) {
-  const CallNode* call = e.as<CallNode>();
-  ICHECK(call != nullptr);
-  return Call(call->dtype, Op::Get("tir.hip.__activemask"), {});
+ static PrimExpr DispatchHIPWarpActiveMask(const PrimExpr& e) {
+   const CallNode* call = e.as<CallNode>();
+   ICHECK(call != nullptr);
+   return Call(call->dtype, Op::Get("tir.hip.__activemask"), {});
  }
  
  template <typename T>
@@ -128,8 +128,9 @@ static PrimExpr DispatchHIPWarpActiveMask(const PrimExpr& e) {
    return Call(call->dtype, T()(call->dtype, Downcast<Op>(call->op)), hip_args);
  }
  
- TVM_REGISTER_OP("tir.clz").set_attr<FLowerIntrinsic>(
-     "hip.FLowerIntrinsic", DispatchPureExtern<HIPMath, /*dtype_from_arg=*/true>);
+ TVM_REGISTER_OP("tir.clz")
+     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
+                                DispatchPureExtern<HIPMath, /*dtype_from_arg=*/true>);
  
  TVM_REGISTER_OP("tir.floor")
      .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", DispatchPureExtern<HIPMath>);
@@ -149,8 +150,8 @@ static PrimExpr DispatchHIPWarpActiveMask(const PrimExpr& e) {
  TVM_REGISTER_OP("tir.nearbyint")
      .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", DispatchPureExtern<HIPMath>);
  
- TVM_REGISTER_OP("tir.exp").set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                                                      DispatchPureExtern<HIPFastMath>);
+ TVM_REGISTER_OP("tir.exp")
+     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", DispatchPureExtern<HIPFastMath>);
  
  TVM_REGISTER_OP("tir.exp2")
      .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", DispatchPureExtern<HIPMath>);
@@ -161,8 +162,8 @@ static PrimExpr DispatchHIPWarpActiveMask(const PrimExpr& e) {
  TVM_REGISTER_OP("tir.erf").set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
                                                       DispatchPureExtern<HIPMath>);
  
- TVM_REGISTER_OP("tir.log").set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                                                      DispatchPureExtern<HIPFastMath>);
+ TVM_REGISTER_OP("tir.log")
+     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", DispatchPureExtern<HIPFastMath>);
  
  TVM_REGISTER_OP("tir.log2")
      .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", DispatchPureExtern<HIPFastMath>);
@@ -170,17 +171,17 @@ static PrimExpr DispatchHIPWarpActiveMask(const PrimExpr& e) {
  TVM_REGISTER_OP("tir.log10")
      .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", DispatchPureExtern<HIPFastMath>);
  
- TVM_REGISTER_OP("tir.tan").set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                                                      DispatchPureExtern<HIPFastMathTan>);
+ TVM_REGISTER_OP("tir.tan")
+     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", DispatchPureExtern<HIPFastMathTan>);
  
- TVM_REGISTER_OP("tir.cos").set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                                                      DispatchPureExtern<HIPFastMath>);
+ TVM_REGISTER_OP("tir.cos")
+     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", DispatchPureExtern<HIPFastMath>);
  
  TVM_REGISTER_OP("tir.cosh")
      .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", DispatchPureExtern<HIPMath>);
  
- TVM_REGISTER_OP("tir.sin").set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                                                      DispatchPureExtern<HIPFastMath>);
+ TVM_REGISTER_OP("tir.sin")
+     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", DispatchPureExtern<HIPFastMath>);
  
  TVM_REGISTER_OP("tir.sinh")
      .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", DispatchPureExtern<HIPMath>);
