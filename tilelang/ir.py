@@ -24,6 +24,11 @@ class Conv2DIm2ColOp(Node, Scriptable):
     ...
 
 
+@tvm.ffi.register_object("tl.GemmWarpPolicy")
+class GemmWarpPolicy(Node, Scriptable):
+    ...
+
+
 @tvm.ffi.register_object("tl.Gemm")
 class Gemm(Node, Scriptable):
     ...
