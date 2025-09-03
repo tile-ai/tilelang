@@ -60,11 +60,11 @@ public:
     auto node = make_object<ReduceTypeNode>();
     if (type == "sum") {
       node->type = int(ReduceTypeEnum::kSum);
-    } else if (type == "abs_sum") {
+    } else if (type == "abssum") {
       node->type = int(ReduceTypeEnum::kAbsSum);
     } else if (type == "max") {
       node->type = int(ReduceTypeEnum::kMax);
-    } else if (type == "abs_max") {
+    } else if (type == "absmax") {
       node->type = int(ReduceTypeEnum::kAbsMax);
     } else if (type == "min") {
       node->type = int(ReduceTypeEnum::kMin);
