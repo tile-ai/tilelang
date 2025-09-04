@@ -1,7 +1,6 @@
 /*!
  * \file tl/op/gemm.cc
- *
- * Define gemm operator.
+ * \brief Implementation of General Matrix Multiplication (GEMM) operators
  */
 
 #include "gemm.h"
@@ -85,8 +84,7 @@ Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
   node->M = args[5].as<IntImm>().value()->value;
   node->N = args[6].as<IntImm>().value()->value;
   node->K = args[7].as<IntImm>().value()->value;
-  node->policy =
-      static_cast<GemmWarpPolicy>(args[8].as<IntImm>().value()->value);
+  node->policy = GemmWarpPolicy(args[8].as<IntImm>().value()->value);
   node->clear_accum = args[9].as<Bool>().value();
   node->stride_A = args[10].as<IntImm>().value()->value;
   node->stride_B = args[11].as<IntImm>().value()->value;
@@ -117,26 +115,6 @@ TileOperator GemmNode::Clone() const {
   return Gemm(op);
 }
 
-/**
- * @brief Selects the GEMM implementation variant for a given block size and
- * target.
- *
- * Determines which low-level GEMM instruction to use:
- * - Returns kWGMMA when running on Hopper-class targets and the operator meets
- *   WGMMA constraints (M >= 64, number of warps is a multiple of 4, and
- *   CheckWGMMA() returns true).
- * - Returns kMFMA for CDNA targets.
- * - Returns kMMA for CUDA targets.
- *
- * @param block_size Number of threads in the CUDA/ROCm thread block used for
- * the GEMM.
- * @param target Target backend describing the hardware (used to detect
- * architecture).
- * @return GemmInst The chosen GEMM implementation enum value.
- *
- * @throws fatal error (ICHECK) If the target is not recognized/supported, this
- * function triggers a runtime check failure.
- */
 GemmNode::GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
   int warp_size = TargetGetWarpSize(target);
   int num_warps = block_size / warp_size;
@@ -153,63 +131,20 @@ GemmNode::GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
   }
 }
 
-/**
- * @brief Compute how warps are partitioned between the M and N GEMM dimensions.
- *
- * Determines the number of warps assigned to the M (rows) and N (columns)
- * dimensions for a block given the selected GEMM implementation and target.
- * The function enforces constraints required by the implementations (e.g.,
- * per-warp tile sizes) and adapts the partition according to the configured
- * GemmWarpPolicy (FullRow, FullCol, Square).
- *
- * @param block_size Total number of threads in the block (used to derive
- * num_warps).
- * @param gemm_inst The chosen GEMM implementation (e.g., kWGMMA, kMFMA, kMMA).
- * @param target Target device information (used for warp size and
- * target-specific rules).
- * @return std::pair<int, int> {m_warp, n_warp} where m_warp * n_warp ==
- * num_warps.
- *
- * Constraints and behavior:
- * - Each warp is assumed to cover 16 rows (M) and 8 columns (N). The function
- *   checks that M % 16 == 0 and N % 8 == 0.
- * - num_warps is computed as block_size / warp_size(target).
- * - For WGMMA (kWGMMA):
- *   - num_warps must be a multiple of 4 (warp-groups of 4).
- *   - m_warp is always a multiple of 4.
- *   - The warp partition respects the GemmWarpPolicy:
- *     - FullRow: maximize warps on M (in multiples of 4) while keeping
- * divisibility.
- *     - FullCol: maximize warps on N, but if N is not evenly divisible, move
- *       whole warp-groups to M to achieve feasibility.
- *     - Square: choose a multiple-of-4 m_warp that best balances per-warp work
- *       between M and N.
- * - For non-WGMMA implementations:
- *   - FullRow: favor allocating warps to M first; if M cannot use all warps,
- *     remaining warps are placed on N.
- *   - FullCol: favor allocating warps to N first; if N cannot use all warps,
- *     remaining warps are placed on M.
- *   - Square: search for the m/n split that best balances per-warp work given
- *     integer warp counts and the per-warp tile sizes.
- *
- * Error handling:
- * - The function performs internal checks (ICHECK) and will fail if required
- *   divisibility or policy conditions are not met (e.g., M/N tile divisibility,
- *   invalid policy, or WGMMA-specific warp-group requirements).
- */
-std::pair<int, int> GemmNode::ComputeWarpPartition(int block_size,
-                                                   GemmInst gemm_inst,
-                                                   Target target) const {
+std::pair<int, int>
+GemmWarpPolicyNode::ComputeWarpPartition(int M, int N, int block_size,
+                                         Target target, bool use_wgmma) const {
   int num_warps = block_size / TargetGetWarpSize(target);
   int m_warp = 1, n_warp = 1;
   constexpr int kMPerWarp = 16; // Rows processed by a single warp
   constexpr int kNPerWarp = 8;  // Columns processed by a single warp
 
-  ICHECK(this->M % kMPerWarp == 0)
-      << "M must be divisible by " << kMPerWarp << ", but got " << this->M;
-  ICHECK(this->N % kNPerWarp == 0)
-      << "N must be divisible by " << kNPerWarp << ", but got " << this->N;
-  if (gemm_inst == GemmInst::kWGMMA) {
+  ICHECK(M % kMPerWarp == 0)
+      << "M must be divisible by " << kMPerWarp << ", but got " << M;
+  ICHECK(N % kNPerWarp == 0)
+      << "N must be divisible by " << kNPerWarp << ", but got " << N;
+
+  if (use_wgmma) {
     ICHECK(num_warps % 4 == 0) << "Warp-Group MMA requires 128×k threads.";
 
     constexpr int kGroup = 4; // Number of warps in a warp-group
@@ -217,22 +152,22 @@ std::pair<int, int> GemmNode::ComputeWarpPartition(int block_size,
     m_warp = kGroup; // Initially, only one warp-group on M dimension
     n_warp = num_warps / m_warp; // Rest all on N dimension
 
-    if (this->policy == GemmWarpPolicy::kFullRow) {
+    if (this->isFullRow()) {
       // Try to put as many warp-groups as possible on M dimension
       // (decreasing multiples of 4, ensuring divisibility by M)
       for (int cand = num_warps; cand >= kGroup; cand -= kGroup) {
-        if (this->M % (cand * kMPerWarp) == 0) {
+        if (M % (cand * kMPerWarp) == 0) {
           m_warp = cand;
           n_warp = num_warps / m_warp;
           break;
         }
       }
-    } else if (this->policy == GemmWarpPolicy::kFullCol) {
+    } else if (this->isFullCol()) {
       // Try to use warps on N dimension; if N is not divisible, split excess
       // groups to M
-      int cand_n = n_warp;                       // Initially assume all on N
-      if (this->N % (cand_n * kNPerWarp) != 0) { // N direction division fails
-        int max_n = this->N / kNPerWarp;
+      int cand_n = n_warp;                 // Initially assume all on N
+      if (N % (cand_n * kNPerWarp) != 0) { // N direction division fails
+        int max_n = N / kNPerWarp;
         // Find a feasible n_warp from max possible downwards, ensuring
         // num_warps/n_warp is multiple of 4
         for (int n = std::min(cand_n, max_n); n >= 1; --n) {
@@ -243,12 +178,12 @@ std::pair<int, int> GemmNode::ComputeWarpPartition(int block_size,
           }
         }
       }
-    } else if (this->policy == GemmWarpPolicy::kSquare) {
+    } else if (this->isSquare()) {
       // Exhaustive search, but m must be multiple of 4
-      int max_m = this->M / kMPerWarp;
-      int max_n = this->N / kNPerWarp;
+      int max_m = M / kMPerWarp;
+      int max_n = N / kNPerWarp;
 
-      float ideal = this->N > 0 ? static_cast<float>(this->M) / this->N : 1.f;
+      float ideal = N > 0 ? static_cast<float>(M) / N : 1.f;
 
       float best_score = std::numeric_limits<float>::max();
       int best_m = kGroup, best_n = n_warp;
@@ -260,8 +195,8 @@ std::pair<int, int> GemmNode::ComputeWarpPartition(int block_size,
         if (n > max_n)
           continue;
 
-        float m_per_warp = static_cast<float>(this->M) / (m * kMPerWarp);
-        float n_per_warp = static_cast<float>(this->N) / (n * kNPerWarp);
+        float m_per_warp = static_cast<float>(M) / (m * kMPerWarp);
+        float n_per_warp = static_cast<float>(N) / (n * kNPerWarp);
         float score = std::abs(m_per_warp / n_per_warp - ideal);
 
         if (score < best_score) {
@@ -278,57 +213,56 @@ std::pair<int, int> GemmNode::ComputeWarpPartition(int block_size,
 
     ICHECK(m_warp * n_warp == num_warps)
         << "m_warp * n_warp must equal num_warps";
+
+    // Store the computed values in the object's member variables
+    this->m_warp = m_warp;
+    this->n_warp = n_warp;
+
     return {m_warp, n_warp};
   }
 
-  if (this->policy == GemmWarpPolicy::kFullRow) {
+  if (this->isFullRow()) {
     // Try to partition M first
     m_warp = num_warps;
     n_warp = 1;
 
     // If M cannot be evenly divided by m_warp*16, try to split remaining warps
     // to N
-    if (this->M % (m_warp * kMPerWarp) != 0) {
+    if (M % (m_warp * kMPerWarp) != 0) {
       // Calculate how many warps we can use for M
-      int max_m_warps = this->M / kMPerWarp;
+      int max_m_warps = M / kMPerWarp;
       m_warp = max_m_warps;
       // Use remaining warps for N
       n_warp = num_warps / m_warp;
       if (n_warp == 0)
         n_warp = 1;
     }
-  } else if (this->policy == GemmWarpPolicy::kFullCol) {
+  } else if (this->isFullCol()) {
     // Try to partition N first
     m_warp = 1;
     n_warp = num_warps;
 
     // If N cannot be evenly divided by n_warp*8, try to split remaining warps
     // to M
-    if (this->N % (n_warp * kNPerWarp) != 0) {
+    if (N % (n_warp * kNPerWarp) != 0) {
       // Calculate how many warps we can use for N
-      int max_n_warps = this->N / kNPerWarp;
+      int max_n_warps = N / kNPerWarp;
       n_warp = max_n_warps;
       // Use remaining warps for M
       m_warp = num_warps / n_warp;
       if (m_warp == 0)
         m_warp = 1;
     }
-  } else if (this->policy == GemmWarpPolicy::kSquare) {
+  } else if (this->isSquare()) {
     // First calculate the maximum possible warps for each dimension
     int max_m_warps =
-        this->M / kMPerWarp; // Each warp needs at least 16 elements in M
-    int max_n_warps =
-        this->N / kNPerWarp; // Each warp needs at least 8 elements in N
+        M / kMPerWarp; // Each warp needs at least 16 elements in M
 
     // Calculate the ideal ratio of M/N warps based on the matrix dimensions
     float ideal_ratio = 1.0f;
-    if (this->N > 0) {
-      ideal_ratio = static_cast<float>(this->M) / this->N;
+    if (N > 0) {
+      ideal_ratio = static_cast<float>(M) / N;
     }
-
-    // Start with a balanced initial guess
-    m_warp = 1;
-    n_warp = 1;
 
     // Try to find the best balanced partition
     int best_m = 1;
@@ -340,8 +274,8 @@ std::pair<int, int> GemmNode::ComputeWarpPartition(int block_size,
       int n = num_warps / m;
 
       // Calculate how balanced this partition is
-      float m_per_warp = static_cast<float>(this->M) / (m * kMPerWarp);
-      float n_per_warp = static_cast<float>(this->N) / (n * kNPerWarp);
+      float m_per_warp = static_cast<float>(M) / (m * kMPerWarp);
+      float n_per_warp = static_cast<float>(N) / (n * kNPerWarp);
       float balance = std::abs(m_per_warp / n_per_warp - ideal_ratio);
 
       if (balance < best_balance) {
@@ -356,6 +290,11 @@ std::pair<int, int> GemmNode::ComputeWarpPartition(int block_size,
   } else {
     ICHECK(0) << "Unknown GemmWarpPolicy";
   }
+
+  // Store the computed values in the object's member variables
+  this->m_warp = m_warp;
+  this->n_warp = n_warp;
+
   return {m_warp, n_warp};
 }
 
@@ -459,9 +398,9 @@ static int GetArchInt(Target target) {
   int arch_int = 0;
   auto s = target->GetAttr<String>("arch");
   ICHECK(s.defined());
-  const char *arch_str = s.value().c_str();
-  if (arch_str[0] == 's' && arch_str[1] == 'm' && arch_str[2] == '_') {
-    arch_int = atoi(&arch_str[3]);
+  std::string arch = s.value();
+  if (arch.rfind("sm_", 0) == 0) {
+    arch_int = std::stoi(arch.substr(3));
   } else {
     arch_int = 0;
   }
@@ -484,7 +423,8 @@ static int GetArchInt(Target target) {
 Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
   GemmInst gemm_inst = GetGemmInst(block_size, T.target);
-  auto [warp_m, warp_n] = ComputeWarpPartition(block_size, gemm_inst, T.target);
+  auto [warp_m, warp_n] = policy->ComputeWarpPartition(
+      M, N, block_size, T.target, gemm_inst == GemmInst::kWGMMA);
 
   std::stringstream ss;
   std::string op_name = "tl::gemm_ss";
@@ -546,7 +486,8 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
   auto thread_range = T.thread_bounds;
   auto block_size = *as_const_int(thread_range->extent);
   GemmInst gemm_inst = GetGemmInst(block_size, T.target);
-  auto [warp_m, warp_n] = ComputeWarpPartition(block_size, gemm_inst, T.target);
+  auto [warp_m, warp_n] = policy->ComputeWarpPartition(
+      M, N, block_size, T.target, gemm_inst == GemmInst::kWGMMA);
 
   if (TargetIsVolta(T.target)) {
     auto fragment =

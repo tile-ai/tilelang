@@ -297,7 +297,7 @@ PrimExpr CopyNode::MakePredicate(arith::Analyzer *analyzer,
  */
 For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
-  bool is_scalar = loop_vars.size() == 0;
+  bool is_scalar = loop_vars.empty();
   if (is_scalar) {
     return For(Var("i"), 0, 1, ForKind::kSerial,
                BufferStore(dst, BufferLoad(src, {0}), {0}));
@@ -1197,7 +1197,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     int swizzle;
     int max_dim;
   };
-  static const SwizzleCheck swizzle_checks[] = {
+  static const std::vector<SwizzleCheck> swizzle_checks = {
       {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_32B), 32},
       {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_64B), 64},
       {static_cast<int>(CU_TENSOR_MAP_SWIZZLE_128B), 128},
@@ -1559,5 +1559,9 @@ TIR_REGISTER_TL_OP(Conv2DIm2ColOp, c2d_im2col)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TVM_FFI_STATIC_INIT_BLOCK({
+  CopyNode::RegisterReflection();
+  Conv2DIm2ColOpNode::RegisterReflection();
+});
 } // namespace tl
 } // namespace tvm

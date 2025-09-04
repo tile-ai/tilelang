@@ -111,11 +111,11 @@ jobs:
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd examples
         unset PYTHONPATH
-        python -m pytest -n 4 **/test*.py -v -r fE
+        python -m pytest -n 4 **/test*.py -v -r fE --durations=0
 
     - name: Run tests
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd testing/python
         unset PYTHONPATH
-        python -m pytest -n 4 -v -r fE
+        python -m pytest -n 4 -v -r fE --durations=0

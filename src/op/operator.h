@@ -48,7 +48,6 @@ struct LayoutInferArgs {
   Map<Buffer, Buffer> buffer_remap;
 };
 
-class TileOperatorNode;
 class TileOperator;
 
 class TileOperatorNode : public Object {

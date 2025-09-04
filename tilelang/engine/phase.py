@@ -94,6 +94,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
     # Lower high-level tile operations to low-level operations
+    print("LowerTileOp")
+    print(mod.script())
     mod = tilelang.transform.LowerTileOp()(mod)
     # Lower l2 persistent map
     mod = tilelang.transform.LowerL2Persistent()(mod)

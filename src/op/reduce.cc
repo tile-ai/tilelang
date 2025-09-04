@@ -1,7 +1,6 @@
 /*!
  * \file tl/op/reduce.cc
- *
- * Define reduce operator.
+ * \brief Implementation of reduction operators
  */
 
 #include "reduce.h"
@@ -28,18 +27,7 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, BufferMap vmap) {
   node->dst = vmap[GetVarFromAccessPtr(args[1])];
   std::string reduce_type = args[2].as<StringImm>().value()->value;
   node->dim = args[3].as<IntImm>().value()->value;
-  if (reduce_type == "sum")
-    node->type = ReduceType::kSum;
-  else if (reduce_type == "abssum")
-    node->type = ReduceType::kAbsSum;
-  else if (reduce_type == "absmax")
-    node->type = ReduceType::kAbsMax;
-  else if (reduce_type == "max")
-    node->type = ReduceType::kMax;
-  else if (reduce_type == "min")
-    node->type = ReduceType::kMin;
-  else
-    ICHECK(0) << "Unknown reduce type: " << reduce_type;
+  node->type = ReduceType(reduce_type);
   node->clear = args[4].as<Bool>().value();
   data_ = std::move(node);
 }
@@ -60,12 +48,11 @@ PrimExpr ReduceOpNode::MakeInitValue() const {
   bool is_uint = dst_dtype.is_uint();
   auto bits = dst_dtype.bits();
 
-  switch (type) {
-  case ReduceType::kSum:
+  if (type->isSum()) {
     return make_zero(dst->dtype);
-  case ReduceType::kAbsSum:
+  } else if (type->isAbsSum()) {
     return make_zero(dst->dtype);
-  case ReduceType::kMax:
+  } else if (type->isMax()) {
     if (is_int) {
       return make_const(dst->dtype, -(1 << (bits - 1)));
     } else if (is_uint) {
@@ -73,7 +60,7 @@ PrimExpr ReduceOpNode::MakeInitValue() const {
     } else {
       return make_const(dst->dtype, -INFINITY);
     }
-  case ReduceType::kMin:
+  } else if (type->isMin()) {
     if (is_int) {
       return make_const(dst->dtype, (1 << (bits - 1)) - 1);
     } else if (is_uint) {
@@ -81,49 +68,47 @@ PrimExpr ReduceOpNode::MakeInitValue() const {
     } else {
       return make_const(dst->dtype, INFINITY);
     }
-  case ReduceType::kAbsMax:
+  } else if (type->isAbsMax()) {
     return make_const(dst->dtype, 0);
-  default:
-    ICHECK(0);
+  } else {
+    LOG(FATAL) << "Unsupported reduce type: " << type->type;
   }
 }
 
-PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &a, const PrimExpr &b) const {
-  PrimExpr lhs = a, rhs = b;
+PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &lhs,
+                                  const PrimExpr &b) const {
+  PrimExpr rhs = b;
   if (lhs->dtype != rhs->dtype) {
     rhs = Cast(lhs->dtype, rhs);
   }
-  switch (type) {
-  case ReduceType::kSum:
+  if (type->isSum()) {
     return lhs + rhs;
-  case ReduceType::kAbsSum:
+  } else if (type->isAbsSum()) {
     return lhs + Max(rhs, -rhs);
-  case ReduceType::kMax:
+  } else if (type->isMax()) {
     return Max(lhs, rhs);
-  case ReduceType::kMin:
+  } else if (type->isMin()) {
     return Min(lhs, rhs);
-  case ReduceType::kAbsMax:
+  } else if (type->isAbsMax()) {
     return Max(Max(lhs, rhs), -Min(lhs, rhs));
-  default:
-    ICHECK(0);
-    return PrimExpr(0);
+  } else {
+    LOG(FATAL) << "Unsupported reduce type: " << type->type;
   }
 }
 
 std::string ReduceOpNode::MakeCodegenReducer() const {
-  switch (type) {
-  case ReduceType::kSum:
+  if (type->isSum()) {
     return "tl::SumOp";
-  case ReduceType::kAbsSum:
+  } else if (type->isAbsSum()) {
     return "tl::SumOp";
-  case ReduceType::kMax:
+  } else if (type->isMax()) {
     return "tl::MaxOp";
-  case ReduceType::kMin:
+  } else if (type->isMin()) {
     return "tl::MinOp";
-  case ReduceType::kAbsMax:
+  } else if (type->isAbsMax()) {
     return "tl::MaxOp";
-  default:
-    ICHECK(0);
+  } else {
+    LOG(FATAL) << "Unsupported reduce type: " << type->type;
     return "";
   }
 }
@@ -206,17 +191,17 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   bool require_init = this->clear;
   // sum op must be cleared
-  if (this->type == ReduceType::kSum) {
+  if (this->type->isSum()) {
     require_init = true;
-  } else if (this->type == ReduceType::kAbsSum) {
+  } else if (this->type->isAbsSum()) {
     require_init = true;
   }
 
   Buffer clear_buffer = dst_buffer;
   bool need_duplicate = false;
-  if (this->type == ReduceType::kSum && !this->clear) {
+  if (this->type->isSum() && !this->clear) {
     need_duplicate = true;
-  } else if (this->type == ReduceType::kAbsSum && !this->clear) {
+  } else if (this->type->isAbsSum() && !this->clear) {
     need_duplicate = true;
   }
 
@@ -303,18 +288,18 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   // copy clear_buffer to dst_buffer
   if (need_duplicate) {
     // if is reduce sum, we should add a copy from clear_buffer to dst_buffer
-    if (this->type == ReduceType::kSum) {
+    if (this->type->isSum()) {
       stmts.push_back(BufferStore(dst_buffer,
                                   Add(BufferLoad(dst_buffer, dst_indices),
                                       BufferLoad(clear_buffer, dst_indices)),
                                   dst_indices));
-    } else if (this->type == ReduceType::kAbsSum) {
+    } else if (this->type->isAbsSum()) {
       stmts.push_back(BufferStore(dst_buffer,
                                   Add(BufferLoad(dst_buffer, dst_indices),
                                       BufferLoad(clear_buffer, dst_indices)),
                                   dst_indices));
     } else {
-      ICHECK(false) << "Unsupported reduce type: " << (int)this->type;
+      ICHECK(false) << "Unsupported reduce type: " << this->type->type;
     }
   }
   // make the outer spatial loop
@@ -410,13 +395,11 @@ TIR_REGISTER_TL_OP(ReduceOp, reduce)
                                Integer(CallEffectKind::kOpaque));
 
 CumSumOp::CumSumOp(Array<PrimExpr> args, BufferMap vmap) {
-  /*
-    CumSum arguments:
-      src: input buffer
-      dst: output buffer
-      dim: dimension to cumsum
-      reverse: whether to cumsum in reverse order
-   */
+  /// CumSum constructor arguments:
+  /// - src: input buffer
+  /// - dst: output buffer
+  /// - dim: dimension to cumsum
+  /// - reverse: whether to cumsum in reverse order
   CHECK_EQ(args.size(), 4);
   ObjectPtr<CumSumOpNode> node = make_object<CumSumOpNode>();
   node->src = vmap[GetVarFromAccessPtr(args[0])];

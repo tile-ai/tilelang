@@ -37,9 +37,9 @@ static int GetArchInt(Target target) {
   int arch_int = 0;
   auto s = target->GetAttr<String>("arch");
   ICHECK(s.defined());
-  const char *arch_str = s.value().c_str();
-  if (arch_str[0] == 's' && arch_str[1] == 'm' && arch_str[2] == '_') {
-    arch_int = atoi(&arch_str[3]);
+  std::string arch = s.value();
+  if (arch.rfind("sm_", 0) == 0) {
+    arch_int = std::stoi(arch.substr(3));
   } else {
     arch_int = 0;
   }
@@ -255,7 +255,7 @@ PrimExpr AtomicAddNode::MakePredicate(arith::Analyzer *analyzer,
  */
 For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
-  bool is_scalar = loop_vars.size() == 0;
+  bool is_scalar = loop_vars.empty();
   if (is_scalar) {
     return For(Var("i"), 0, 1, ForKind::kSerial,
                BufferStore(dst, BufferLoad(src, {0}), {0}));
@@ -424,6 +424,8 @@ TIR_REGISTER_TL_OP(AtomicAdd, atomicadd)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+TVM_FFI_STATIC_INIT_BLOCK({ AtomicAddNode::RegisterReflection(); });
 
 } // namespace tl
 } // namespace tvm

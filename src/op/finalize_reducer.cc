@@ -160,5 +160,7 @@ TIR_REGISTER_TL_OP(FinalizeReducerOp, finalize_reducer)
     .set_num_inputs(1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+TVM_FFI_STATIC_INIT_BLOCK({ FinalizeReducerOpNode::RegisterReflection(); });
 } // namespace tl
 } // namespace tvm

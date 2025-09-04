@@ -14,97 +14,6 @@
 #include "./operator.h"
 
 /**
- * Exception indicating a layout conflict during layout inference or validation.
- * The stored message is returned by what().
- */
-
-/**
- * Verify that `small_frag` is contained within `large_frag` under the provided
- * index mappings and using symbolic reasoning via `analyzer_`.
- *
- * @param small_frag Fragment describing the smaller layout fragment.
- * @param large_frag Fragment describing the larger layout fragment.
- * @param small_frag_indices Index expressions that map accesses into
- * `small_frag`.
- * @param large_frag_indices Index expressions that map accesses into
- * `large_frag`.
- * @param analyzer_ Analyzer used for symbolic simplification and proving
- * relations.
- * @return true if `small_frag` can be proven to be contained in `large_frag`
- * given the index mappings and analyzer; false otherwise.
- */
-
-/**
- * Visitor that traverses a parallel loop nest to collect loop structure,
- * buffer access patterns, and to populate the associated ParallelOpNode.
- */
-
-/**
- * Construct a ParallelOpNode from a root For loop.
- *
- * @param root The TIR For node that is the root of the parallel loop nest.
- */
-
-/**
- * Lower this ParallelOpNode to a TIR statement.
- *
- * Performs lowering of the operator (including any necessary predicates,
- * reductions, and loop transformations) to produce an equivalent tir::Stmt.
- *
- * @param T Lowering options and context.
- * @param analyzer Optional analyzer for symbolic simplification during
- * lowering.
- * @return A tir::Stmt representing the lowered operator.
- */
-
-/**
- * Infer layouts for buffers used by this parallel operator.
- *
- * This performs layout inference at the requested level and returns a mapping
- * from buffers to their inferred layout fragments.
- *
- * @param T Layout inference arguments and context.
- * @param level Granularity level for inference.
- * @return LayoutMap mapping buffers to inferred fragments.
- */
-
-/**
- * Return an optional predicate expression associated with the given thread
- * variable.
- *
- * If the loop nest imposes a condition on `thread_var` (e.g., bounds checks or
- * tiling edge predicates), this returns the combined predicate; otherwise
- * returns an empty Optional.
- *
- * @param thread_var The thread variable for which to retrieve the predicate.
- * @return Optional containing the predicate expression if present.
- */
-
-/**
- * Create and return a clone of this operator as a TileOperator (deep copy of
- * operator state necessary for further transformations).
- *
- * @return A TileOperator referencing a cloned ParallelOpNode.
- */
-
-/**
- * Complete the layout fragment for `buffer` by filling in any missing
- * dimension or stride information derived from access patterns in the loop
- * nest.
- *
- * @param buffer The buffer whose fragment should be completed.
- * @return A Fragment representing the completed layout for `buffer`.
- */
-
-/**
- * Determine whether `buffer` is accessed using only the loop-common indices
- * (i.e., indices that correspond to the loop variables of this parallel nest).
- *
- * @param buffer The buffer to inspect.
- * @return true if accesses use common loop indices; false otherwise.
- */
-
-/**
  * Conjoin `expr` into the operator's predicate (logical AND). If no predicate
  * exists yet, `expr` becomes the predicate.
  *
@@ -148,6 +57,8 @@ private:
 // predicates.
 class ParallelOpNode : public TileOperatorNode {
 public:
+  // The root For loop node.
+  For root_;
   // The inferred layout for the loop, mutable to allow lazy inference.
   mutable Fragment loop_layout_;
   // The predicate expression for the loop, if any, mutable for lazy
@@ -157,6 +68,28 @@ public:
   // Type key for TVM object system.
   static constexpr const char *_type_key = "tl.ParallelOp";
   TVM_DECLARE_FINAL_OBJECT_INFO(ParallelOpNode, TileOperatorNode);
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<ParallelOpNode>()
+        .def_ro("root", &ParallelOpNode::root_)
+        .def_ro("loop_layout", &ParallelOpNode::loop_layout_)
+        .def_ro("predicate", &ParallelOpNode::predicate_);
+  }
+
+  bool SEqualReduce(const ParallelOpNode *other, SEqualReducer equal) const {
+    return equal(root_, other->root_) &&
+           equal(loop_layout_, other->loop_layout_) &&
+           equal(predicate_, other->predicate_);
+  }
+
+  void SHashReduce(SHashReducer hash_reduce) const {
+    hash_reduce(root_);
+    hash_reduce(loop_layout_);
+    hash_reduce(predicate_);
+  }
+  static constexpr bool _type_has_method_sequal_reduce = true;
+  static constexpr bool _type_has_method_shash_reduce = true;
 
   // Construct from a root For loop.
   ParallelOpNode(For root);
@@ -198,8 +131,6 @@ private:
   // Allow ParallelLoopNestVisitor to access private members.
   friend class ParallelLoopNestVisitor;
 
-  // The root For loop node.
-  For root_;
   // Visitor for collecting loop nest information.
   ParallelLoopNestVisitor V;
   // Mapping from buffer to their access indices in the loop.
