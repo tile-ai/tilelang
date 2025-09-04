@@ -41,7 +41,6 @@ jobs:
           python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
-          pip install flash_attn==2.5.8 --no-user --no-build-isolation
           touch "$MARKER"
         fi
 
@@ -116,4 +115,4 @@ jobs:
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd testing/python/amd
         unset PYTHONPATH
-        python -m pytest -v test_tilelang_test_amd.py
+        python -m pytest -v test_tilelang_test_amd.py --durations=0
