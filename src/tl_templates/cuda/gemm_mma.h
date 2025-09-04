@@ -9,6 +9,7 @@
 
 #include "common.h"
 #include "cuda_fp8.h"
+#include "intrin.h"
 
 namespace cute {
 
