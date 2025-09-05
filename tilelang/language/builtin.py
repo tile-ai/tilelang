@@ -3,6 +3,7 @@
 from tilelang import tvm as tvm
 from tilelang.language import ptx_arrive_barrier, evaluate
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
+from tilelang.utils.target import check_hip_availability
 from tvm import tir
 from typing import Union, Any
 from tvm.tir import PrimExpr, Var, Call
@@ -295,7 +296,7 @@ def shfl_xor(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr,
     Returns:
         tir.Call: A handle to the shuffle operation
     """
-    return tir.call_extern(value.dtype, "__shfl_xor_sync", 0xffffffff, value, offset)
+    return tir.call_extern(value.dtype, "__shfl_xor", value, offset) if check_hip_availability() else tir.call_extern(value.dtype, "__shfl_xor_sync", 0xffffffff, value, offset)
 
 
 def shfl_down(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
@@ -305,7 +306,7 @@ def shfl_down(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr
         value: Optional[int, PrimExpr]
             The value to shuffle
     """
-    return tir.call_extern(value.dtype, "__shfl_down_sync", 0xffffffff, value, offset)
+    return tir.call_extern(value.dtype, "__shfl_down", value, offset) if check_hip_availability() else tir.call_extern(value.dtype, "__shfl_down_sync", 0xffffffff, value, offset)
 
 
 def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
@@ -315,7 +316,7 @@ def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, 
         value: Optional[int, PrimExpr]
             The value to shuffle
     """
-    return tir.call_extern(value.dtype, "__shfl_up_sync", 0xffffffff, value, offset)
+    return tir.call_extern(value.dtype, "__shfl_up", value, offset) if check_hip_availability() else tir.call_extern(value.dtype, "__shfl_up_sync", 0xffffffff, value, offset)
 
 
 def sync_threads():
