@@ -360,8 +360,9 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                     InferLevel::kFree};
   for (auto level : levels) {
-    (par_op)->InferLayout(
-        {T.target, T.thread_bounds, T.layout_map, analyzer, false, T.buffer_remap}, level);
+    (par_op)->InferLayout({T.target, T.thread_bounds, T.layout_map, analyzer,
+                           false, T.buffer_remap},
+                          level);
   }
   auto loop_layout = par_op->GetLoopLayout();
   Var thread_var = T.thread_var;

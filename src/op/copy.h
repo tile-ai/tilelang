@@ -141,7 +141,8 @@ public:
    * \param T     Arguments for layout inference.
    * \param level Level of inference (basic or detailed).
    */
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
 
   /*!
    * \brief Check if bulk copy is supported.
@@ -156,22 +157,23 @@ public:
   /*!
    * \brief Check if bulk copy 1d load is supported.
    */
-  bool CheckBulkLoad1D(Target target, const LayoutMap &layout_map, arith::Analyzer *analyzer) const;
+  bool CheckBulkLoad1D(Target target, const LayoutMap &layout_map,
+                       arith::Analyzer *analyzer) const;
 
   /*!
    * \brief Check if bulk copy 1d store is supported.
    */
-  bool CheckBulkStore1D(Target target, const LayoutMap &layout_map, arith::Analyzer *analyzer) const;
+  bool CheckBulkStore1D(Target target, const LayoutMap &layout_map,
+                        arith::Analyzer *analyzer) const;
 
   /*!
    * \brief Check if bulk copy 1d is supported.
    */
-  bool CheckBulkCopy1D(const Buffer &global_tensor,
-                               const Buffer &shared_tensor,
-                               const Array<Range> &global_range,
-                               const Array<Range> &shared_range,
-                               const LayoutMap &layout_map,
-                               arith::Analyzer *analyzer) const;
+  bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
+                       const Array<Range> &global_range,
+                       const Array<Range> &shared_range,
+                       const LayoutMap &layout_map,
+                       arith::Analyzer *analyzer) const;
 
   /*!
    * \brief Check if lds memory copy is supported.
@@ -187,8 +189,7 @@ public:
    * \brief Get the copy instruction type.
    */
   CopyInst GetCopyInst(Target target, bool disable_tma_lower,
-                       const LayoutMap &layout_map, 
-                       arith::Analyzer *analyzer,
+                       const LayoutMap &layout_map, arith::Analyzer *analyzer,
                        bool buffer_oob) const;
 
 protected:
@@ -346,7 +347,8 @@ public:
   /*!
    * \brief Infer layout for this operator.
    */
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const override;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
 
   /*!
    * \brief Get TVM Op handle.

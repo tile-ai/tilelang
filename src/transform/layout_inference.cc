@@ -14,9 +14,9 @@
 #include <queue>
 
 #include "../layout/utils.h"
+#include "../op/copy.h"
 #include "../op/parallel.h"
 #include "../op/region.h"
-#include "../op/copy.h"
 
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
@@ -105,8 +105,10 @@ public:
            "required for layout inference.";
 
     // Run InferLayout
-    auto updates = next->InferLayout(
-        LayoutInferArgs{target_, thread_bounds, layout_map, &analyzer_, buffer_oob}, level);
+    auto updates =
+        next->InferLayout(LayoutInferArgs{target_, thread_bounds, layout_map,
+                                          &analyzer_, buffer_oob},
+                          level);
 
     // Process the returned updates
     for (const auto &[buffer, layout] : updates) {
@@ -329,7 +331,7 @@ private:
       }
 
       // Compute buffer oob for each buffer in the op
-      if (const auto* copy = p.as<CopyNode>()) {
+      if (const auto *copy = p.as<CopyNode>()) {
         auto src_tensor = copy->src;
         auto dst_tensor = copy->dst;
         auto src_range = copy->src_range;
@@ -338,14 +340,16 @@ private:
         bool dst_oob = false;
         for (size_t i = 0; i < src_range.size(); i++) {
           if (!analyzer_.CanProve(src_range[i]->min + src_range[i]->extent <=
-                           src_tensor->shape[i], arith::ProofStrength::kSymbolicBound)) {
+                                      src_tensor->shape[i],
+                                  arith::ProofStrength::kSymbolicBound)) {
             src_oob = true;
             break;
           }
         }
         for (size_t i = 0; i < dst_range.size(); i++) {
           if (!analyzer_.CanProve(dst_range[i]->min + dst_range[i]->extent <=
-                           dst_tensor->shape[i], arith::ProofStrength::kSymbolicBound)) {
+                                      dst_tensor->shape[i],
+                                  arith::ProofStrength::kSymbolicBound)) {
             dst_oob = true;
             break;
           }
@@ -354,8 +358,6 @@ private:
       } else {
         buffer_oob_vec_.push_back(false);
       }
-
-
 
       // Add the tile operator to infer_list_
       infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
