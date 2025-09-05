@@ -7,6 +7,7 @@
 #include "tvm/tir/stmt.h"
 #include "tvm/tir/stmt_functor.h"
 #include "tvm/tir/transform.h"
+#include <sstream>
 
 namespace tvm::tl {
 using namespace tir;
@@ -24,38 +25,52 @@ public:
 
 private:
   struct AssertCreator {
+    struct Item {
+      PrimExpr expr;
+      std::vector<Buffer> buffers;
+    };
     tvm::StructuralHash sh;
     tvm::StructuralEqual se;
-    std::unordered_map<size_t, std::vector<tvm::PrimExpr>> buckets;
-    std::vector<PrimExpr> exprs;
-    void addExpr(PrimExpr e) {
+    // grouped by expr, since the amount of varidic shape symbols is usualy much
+    // smaller than buffer
+    std::vector<Item> items;
+    // hash => index in items
+    std::unordered_map<size_t, std::vector<size_t>> buckets;
+    void addExpr(PrimExpr e, Buffer buffer) {
       size_t h = sh(e);
       auto bucket = buckets[h];
-      auto it = std::find_if(bucket.begin(), bucket.end(),
-                             [&](auto y) { return se(e, y, true); });
+      auto it = std::find_if(bucket.begin(), bucket.end(), [&](size_t y) {
+        return se(e, items[y].expr, true);
+      });
       if (it == bucket.end()) {
-        exprs.push_back(e);
-        buckets[h].push_back(e);
+        items.push_back({e, {buffer}});
+      } else {
+        items[*it].buffers.push_back(buffer);
       }
     }
     void addBuffer(Buffer buf) {
       for (auto shape : buf->shape) {
         if (shape->IsInstance<IntImmNode>())
           continue;
-        addExpr(shape);
+        addExpr(shape, buf);
       }
     }
     Stmt build(Stmt body) {
-      if (exprs.empty())
-        return body;
-      PrimExpr red = GT(exprs[0], 0);
-      for (size_t i = 1; i < exprs.size(); ++i) {
-        red = And(GT(exprs[i], 0), red);
+      auto analyzer = arith::Analyzer{};
+      for (const auto &e : items) {
+        auto simplified = analyzer.Simplify(GT(e.expr, 0));
+        std::stringstream ss;
+        ss << "Buffer shape should be greater than 0: shape " << e.expr
+           << " from ";
+        for (size_t i = 0; i < e.buffers.size(); i++) {
+          if (i)
+            ss << ", ";
+          ss << e.buffers[i]->name;
+        }
+        body = AttrStmt(simplified, tir::attr::tilelang_assume,
+                        StringImm(ss.str()), body);
       }
-      auto simplified = arith::Analyzer{}.Simplify(red, 10);
-      auto msg = StringImm(
-          "Invalid Buffer Shape: buffer shape should be greater than 0");
-      return AssertStmt(simplified, msg, body);
+      return body;
     }
   };
   Stmt VisitStmt_(const DeclBufferNode *op) final {
