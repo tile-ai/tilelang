@@ -450,7 +450,8 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
  * @return true if the copy can be implemented as a Bulk Load (TMA); false
  * otherwise.
  */
-bool CopyNode::CheckBulkLoad(Target target, arith::Analyzer *analyzer, bool check_last_dim) const {
+bool CopyNode::CheckBulkLoad(Target target, arith::Analyzer *analyzer,
+                             bool check_last_dim) const {
   // 1. arch must have bulk copy support
   if (!TargetHasBulkCopy(target))
     return false;
@@ -462,7 +463,8 @@ bool CopyNode::CheckBulkLoad(Target target, arith::Analyzer *analyzer, bool chec
   // last dim of src * dtype.bits() must be a multiple of 16
   // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html#group__CUDA__TENSOR__MEMORY_1ga7c7d2aaac9e49294304e755e6f341d7
   // now we check src (gmem) as tma box dim is deduced from src
-  if (check_last_dim && analyzer->CanProve(
+  if (check_last_dim &&
+      analyzer->CanProve(
           FloorMod(src_range[src_range.size() - 1]->extent * src->dtype.bytes(),
                    16) != 0,
           arith::ProofStrength::kSymbolicBound)) {
@@ -566,7 +568,8 @@ bool CopyNode::CheckBulkStore1D(Target target, const LayoutMap &layout_map,
  * @param target Target device/architecture to check for bulk-copy support.
  * @return true if all conditions for a BulkStore are met; false otherwise.
  */
-bool CopyNode::CheckBulkStore(Target target, arith::Analyzer *analyzer, bool check_last_dim) const {
+bool CopyNode::CheckBulkStore(Target target, arith::Analyzer *analyzer,
+                              bool check_last_dim) const {
   // 1. arch must have bulk copy support
   if (!TargetHasBulkCopy(target))
     return false;
@@ -578,7 +581,8 @@ bool CopyNode::CheckBulkStore(Target target, arith::Analyzer *analyzer, bool che
   // last dim of dst * dtype.bits() must be a multiple of 16
   // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html#group__CUDA__TENSOR__MEMORY_1ga7c7d2aaac9e49294304e755e6f341d7
   // now we check dst (gmem) as tma box dim is deduced from dst
-  if (check_last_dim && analyzer->CanProve(
+  if (check_last_dim &&
+      analyzer->CanProve(
           FloorMod(dst_range[dst_range.size() - 1]->extent * dst->dtype.bytes(),
                    16) != 0,
           arith::ProofStrength::kSymbolicBound)) {
