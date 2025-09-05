@@ -16,6 +16,8 @@
 #include "../layout/utils.h"
 #include "../op/parallel.h"
 #include "../op/region.h"
+#include "../op/copy.h"
+
 #include "arith/ir_mutator_with_analyzer.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "common/loop_fusion_utils.h"
@@ -64,6 +66,8 @@ public:
   BufferUseDefCollector(bool skip_thread_partition)
       : skip_thread_partition_(skip_thread_partition) {}
 
+  using arith::IRVisitorWithAnalyzer::IRVisitorWithAnalyzer;
+
   void RunInferStep(int cur_infer_id, InferLevel level, bool update_queue,
                     LayoutMap &layout_map, const LayoutMap &strict_layout_map,
                     std::queue<int> &q, std::vector<bool> &in_queue) {
@@ -80,6 +84,7 @@ public:
     auto &next = infer_list_[cur_infer_id];
     auto iter_var = thread_var_vec_[cur_infer_id];
     auto thread_bounds = thread_bounds_vec_[cur_infer_id];
+    auto buffer_oob = buffer_oob_vec_[cur_infer_id];
     // Double-check that 'next' is valid
     ICHECK(next.defined()) << "infer_list_[" << cur_infer_id
                            << "] is null inside run_infer_step.";
@@ -101,7 +106,7 @@ public:
 
     // Run InferLayout
     auto updates = next->InferLayout(
-        LayoutInferArgs{target_, thread_bounds, layout_map}, level);
+        LayoutInferArgs{target_, thread_bounds, layout_map, &analyzer_, buffer_oob}, level);
 
     // Process the returned updates
     for (const auto &[buffer, layout] : updates) {
@@ -198,6 +203,9 @@ public:
            "length.";
     ICHECK_EQ(thread_bounds_vec_.size(), infer_list_.size())
         << "Size mismatch: thread_bounds_vec_ and infer_list_ must match in "
+           "length.";
+    ICHECK_EQ(buffer_oob_vec_.size(), infer_list_.size())
+        << "Size mismatch: buffer_oob_vec_ and infer_list_ must match in "
            "length.";
 
     // If needed, you can also check that annotated_layout_map_ is not empty, or
@@ -306,8 +314,7 @@ private:
           addToUseList(buffer.value());
         }
       }
-      infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
-      infer_list_.push_back(std::move(p));
+      // Compute thread_var_ and thread_bounds_
       thread_var_vec_.push_back(thread_var_);
       if (analyzer_.const_int_bound.IsBound(thread_var_->var)) {
         auto const_int_bound = analyzer_.const_int_bound(thread_var_);
@@ -320,6 +327,39 @@ private:
       } else {
         thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
       }
+
+      // Compute buffer oob for each buffer in the op
+      if (const auto* copy = p.as<CopyNode>()) {
+        auto src_tensor = copy->src;
+        auto dst_tensor = copy->dst;
+        auto src_range = copy->src_range;
+        auto dst_range = copy->dst_range;
+        bool src_oob = false;
+        bool dst_oob = false;
+        for (size_t i = 0; i < src_range.size(); i++) {
+          if (!analyzer_.CanProve(src_range[i]->min + src_range[i]->extent <=
+                           src_tensor->shape[i], arith::ProofStrength::kSymbolicBound)) {
+            src_oob = true;
+            break;
+          }
+        }
+        for (size_t i = 0; i < dst_range.size(); i++) {
+          if (!analyzer_.CanProve(dst_range[i]->min + dst_range[i]->extent <=
+                           dst_tensor->shape[i], arith::ProofStrength::kSymbolicBound)) {
+            dst_oob = true;
+            break;
+          }
+        }
+        buffer_oob_vec_.push_back(src_oob || dst_oob);
+      } else {
+        buffer_oob_vec_.push_back(false);
+      }
+
+
+
+      // Add the tile operator to infer_list_
+      infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
+      infer_list_.push_back(std::move(p));
     }
   }
 
@@ -365,6 +405,7 @@ private:
       } else {
         thread_bounds_vec_.push_back(Range::FromMinExtent(0, 1));
       }
+      buffer_oob_vec_.push_back(false);
     } else {
       IRVisitorWithAnalyzer::VisitStmt(op->body);
     }
@@ -411,6 +452,7 @@ private:
                                 IterVarType::kDataPar);
   std::vector<IterVar> thread_var_vec_;
   std::vector<Range> thread_bounds_vec_;
+  std::vector<bool> buffer_oob_vec_;
   Target target_;
   LayoutMap annotated_layout_map_;
   bool skip_thread_partition_{false};
@@ -555,6 +597,8 @@ private:
                    bool skip_thread_partition, arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer), result_(result),
         skip_thread_partition_(skip_thread_partition){};
+
+  using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
   /**
    * @brief Visit and mutate a Block node to attach inferred layout information.

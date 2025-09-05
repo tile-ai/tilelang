@@ -45,6 +45,8 @@ struct LayoutInferArgs {
   Target target;
   Range thread_bounds;
   LayoutMap layout_map;
+  arith::Analyzer *analyzer;
+  bool buffer_oob = false;
   Map<Buffer, Buffer> buffer_remap;
 };
 

@@ -196,7 +196,7 @@ Array<IterVar> CopyNode::MakeIterVars() const {
 }
 
 /*!
- * \brief Create indices for the copy operation.
+ * \brief Create s for the copy operation.
  * This function generates the actual index expressions for accessing source or
  * destination buffers. For dimensions with extent=1, it uses the range minimum;
  * for others, it adds the iteration variable. \param ivs Array of IterVar
@@ -402,7 +402,9 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
   PassContext pass_ctx = PassContext::Current();
   bool disable_tma_lower =
       pass_ctx->GetConfig<bool>(kDisableTMALower, false).value();
-  auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma);
+
+  auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma,
+                               T.layout_map, T.analyzer, T.buffer_oob);
   if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore) {
     // if can apply swizzling, we skip layout inference
     // for bulk load/store, we can directly apply the layout of normal copy
@@ -466,6 +468,77 @@ bool CopyNode::CheckBulkLoad(Target target) const {
     return false;
   }
   return true;
+}
+
+bool CopyNode::CheckBulkCopy1D(const Buffer &global_tensor,
+                               const Buffer &shared_tensor,
+                               const Array<Range> &global_range,
+                               const Array<Range> &shared_range,
+                               const LayoutMap &layout_map,
+                               arith::Analyzer *analyzer) const {
+
+  // Step 1: check shared is contiguous
+  bool shared_is_contiguous = true;
+  if (layout_map.count(dst)) {
+    shared_is_contiguous = false;
+  }
+  // Step 2: check global is contiguous
+  bool global_is_contiguous = true;
+  bool global_not_full_dim_encounter = false;
+  for (int i = global_range.size() - 1; i >= 0; i--) {
+    if (!global_not_full_dim_encounter) {
+      if (!analyzer->CanProve(global_range[i]->extent ==
+                                      global_tensor->shape[i] &&
+                                  global_range[i]->min == 0,
+                              arith::ProofStrength::kSymbolicBound)) {
+        global_not_full_dim_encounter = true;
+      }
+    } else {
+      if (!analyzer->CanProve(global_range[i]->extent == 1,
+                              arith::ProofStrength::kSymbolicBound)) {
+        global_is_contiguous = false;
+        break;
+      }
+    }
+  }
+
+  // Step 3: check element match and no OOB
+  PrimExpr shared_elements = 1;
+  for (size_t i = 0; i < shared_range.size(); i++) {
+    shared_elements *= shared_range[i]->extent;
+  }
+  PrimExpr global_elements = 1;
+  for (size_t i = 0; i < global_range.size(); i++) {
+    global_elements *= global_range[i]->extent;
+  }
+  bool element_match =
+      analyzer->CanProveEqual(shared_elements, global_elements);
+
+  return (shared_is_contiguous && global_is_contiguous && element_match);
+}
+
+bool CopyNode::CheckBulkLoad1D(Target target, const LayoutMap &layout_map,
+                               arith::Analyzer *analyzer) const {
+  if (!CheckBulkLoad(target))
+    return false;
+  auto global_tensor = src;
+  auto shared_tensor = dst;
+  auto global_range = src_range;
+  auto shared_range = dst_range;
+  return CheckBulkCopy1D(global_tensor, shared_tensor, global_range,
+                         shared_range, layout_map, analyzer);
+}
+
+bool CopyNode::CheckBulkStore1D(Target target, const LayoutMap &layout_map,
+                                arith::Analyzer *analyzer) const {
+  if (!CheckBulkStore(target))
+    return false;
+  auto shared_tensor = src;
+  auto global_tensor = dst;
+  auto shared_range = src_range;
+  auto global_range = dst_range;
+  return CheckBulkCopy1D(global_tensor, shared_tensor, global_range,
+                         shared_range, layout_map, analyzer);
 }
 
 /**
@@ -545,11 +618,22 @@ bool CopyNode::CheckSTSMCopy(Target target) const {
  * load/store instructions.
  * @return CopyInst The chosen copy instruction enum value.
  */
-CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower) const {
+CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
+                               const LayoutMap &layout_map,
+                               arith::Analyzer *analyzer,
+                               bool buffer_oob = false) const {
   // disable_tma_lower is from pass_configs
   // when tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER is True,
   // we will not use tma for bulk load/store
-  if (!disable_tma_lower && CheckBulkLoad(target)) {
+
+  // 1d tma access can not support out of bound access
+  if (!disable_tma_lower && !buffer_oob &&
+      CheckBulkLoad1D(target, layout_map, analyzer)) {
+    return CopyInst::kBulkLoad1D;
+  } else if (!disable_tma_lower && !buffer_oob &&
+             CheckBulkStore1D(target, layout_map, analyzer)) {
+    return CopyInst::kBulkStore1D;
+  } else if (!disable_tma_lower && CheckBulkLoad(target)) {
     return CopyInst::kBulkLoad;
   } else if (!disable_tma_lower && CheckBulkStore(target)) {
     return CopyInst::kBulkStore;
@@ -580,10 +664,17 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   PassContext pass_ctx = PassContext::Current();
   bool disable_tma_lower =
       pass_ctx->GetConfig<bool>(kDisableTMALower, false).value();
-  auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma);
-  if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore) {
+  auto copy_inst =
+      GetCopyInst(target, disable_tma_lower, T.layout_map, analyzer);
+  if (copy_inst == CopyInst::kBulkLoad1D ||
+      copy_inst == CopyInst::kBulkStore1D) {
+    auto bulk_copy = LowerBulkCopy1D(T, analyzer, copy_inst);
+    ICHECK(bulk_copy.defined()) << "Failed to lower bulk load 1d";
+    return bulk_copy;
+  } else if (copy_inst == CopyInst::kBulkLoad ||
+             copy_inst == CopyInst::kBulkStore) {
     auto bulk_copy = LowerBulkCopy(T, analyzer, copy_inst);
-    ICHECK(bulk_copy.defined()) << "Failed to lower bulk copy";
+    ICHECK(bulk_copy.defined()) << "Failed to lower bulk load/store";
     return bulk_copy;
   } else if (copy_inst == CopyInst::kLDSM || copy_inst == CopyInst::kSTSM) {
     auto ldsm_copy = LowerLDSMCopy(T, analyzer, copy_inst);
@@ -633,7 +724,8 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
                                       InferLevel::kFree};
     for (auto level : levels) {
       par_op->InferLayout(
-          {T.target, T.thread_bounds, T.layout_map, T.buffer_remap}, level);
+          {T.target, T.thread_bounds, T.layout_map, analyzer, false, T.buffer_remap},
+          level);
     }
     auto loop_layout = par_op->GetLoopLayout();
     auto thread_var = T.thread_var;
@@ -901,15 +993,15 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   // linear layout must be computed before remapping
   auto linear_layout = ComputeLinearLayout(shared_tensor);
 
-  Array<PrimExpr> indices;
+  Array<PrimExpr> shared_indices;
   for (auto r : shared_range)
-    indices.push_back(r->min);
-  std::vector<PrimExpr> strides;
-  PrimExpr stride = 1;
+    shared_indices.push_back(r->min);
+  std::vector<PrimExpr> shared_strides;
+  PrimExpr shared_stride = 1;
   for (size_t i = 0; i < shared_tensor->shape.size(); i++) {
     auto s = shared_tensor->shape[shared_tensor->shape.size() - i - 1];
-    strides.insert(strides.begin(), stride);
-    stride *= s;
+    shared_strides.insert(shared_strides.begin(), shared_stride);
+    shared_stride *= s;
   }
 
   Array<PrimExpr> global_indices;
@@ -924,119 +1016,16 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     global_stride *= s;
   }
 
-  ICHECK(strides.size() == indices.size())
-      << "strides.size() != indices.size()" << strides.size() << " "
-      << indices.size();
-  PrimExpr offset = 0;
-  for (size_t i = 0; i < indices.size(); i++) {
-    offset += indices[i] * strides[i];
+  ICHECK(shared_strides.size() == shared_indices.size())
+      << "shared_strides.size() != shared_indices.size()"
+      << shared_strides.size() << " " << shared_indices.size();
+  PrimExpr shared_offset = 0;
+  for (size_t i = 0; i < shared_indices.size(); i++) {
+    shared_offset += shared_indices[i] * shared_strides[i];
   }
   PrimExpr global_offset = 0;
   for (size_t i = 0; i < global_indices.size(); i++) {
     global_offset += global_indices[i] * global_strides[i];
-  }
-  auto shared_tensor_before_remap = shared_tensor;
-  Layout shared_layout;
-  if (T.layout_map.count(shared_tensor)) {
-    shared_layout = T.layout_map[shared_tensor];
-    shared_tensor = T.buffer_remap[shared_tensor];
-  }
-
-  // Add 1D TMA copy when the global and shared memory is contiguous
-  {
-    // Check if shared_tensor->name is present in T.buffer_var_gemm
-    // (Array<PrimExpr>) to avoid use 1D TMA copy for swizzled layout
-    bool shared_is_contiguous = true;
-    for (const auto &v : T.buffer_var_gemm) {
-      if (v->name_hint == shared_tensor->name) {
-        shared_is_contiguous = false;
-        break;
-      }
-    }
-    bool shared_not_full_dim_encounter = false;
-    for (ssize_t i = shared_range.size() - 1; i >= 0; --i) {
-      if (!shared_not_full_dim_encounter) {
-        if (!analyzer->CanProve(shared_range[i]->extent ==
-                                    shared_tensor_before_remap->shape[i] &&
-                                shared_range[i]->min == 0)) {
-          shared_not_full_dim_encounter = true;
-        }
-      } else {
-        if (!analyzer->CanProve(shared_range[i]->extent == 1)) {
-          shared_is_contiguous = false;
-          break;
-        }
-      }
-    }
-    // Currently we check the empty stride of global tensor
-    bool global_is_contiguous = !global_tensor->strides.empty();
-    bool global_not_full_dim_encounter = false;
-    for (ssize_t i = global_range.size() - 1; i >= 0; --i) {
-      if (!global_not_full_dim_encounter) {
-        if (!analyzer->CanProve(global_range[i]->extent ==
-                                    global_tensor->shape[i] &&
-                                global_range[i]->min == 0)) {
-          global_not_full_dim_encounter = true;
-        }
-      } else {
-        if (!analyzer->CanProve(global_range[i]->extent == 1)) {
-          global_is_contiguous = false;
-          break;
-        }
-      }
-    }
-    // Ensure there is element match and no OOB
-    PrimExpr shared_elements = 1;
-    for (size_t i = 0; i < shared_range.size(); i++) {
-      shared_elements *= shared_range[i]->extent;
-    }
-    PrimExpr global_elements = 1;
-    for (size_t i = 0; i < global_range.size(); i++) {
-      global_elements *= global_range[i]->extent;
-    }
-    bool element_match =
-        analyzer->CanProveEqual(shared_elements, global_elements);
-    bool no_oob = true;
-    for (size_t i = 0; i < shared_range.size(); i++) {
-      if (!analyzer->CanProve(shared_range[i]->min + shared_range[i]->extent <=
-                              shared_tensor_before_remap->shape[i])) {
-        no_oob = false;
-        break;
-      }
-    }
-    for (size_t i = 0; i < global_range.size(); i++) {
-      if (!analyzer->CanProve(global_range[i]->min + global_range[i]->extent <=
-                              global_tensor->shape[i])) {
-        no_oob = false;
-        break;
-      }
-    }
-    // Add 1D TMA copy only for load
-    if (shared_is_contiguous && global_is_contiguous && element_match &&
-        no_oob && is_load) {
-      PrimExpr elements = analyzer->Simplify(shared_elements);
-      PrimExpr shared_addr = shared_tensor_before_remap.access_ptr(
-          is_load ? 2 : 1, DataType::Handle(), 1, offset, elements);
-      PrimExpr global_addr = global_tensor.access_ptr(
-          is_load ? 1 : 2, DataType::Handle(), 1, global_offset, elements);
-      Stmt tma_copy;
-      if (is_load) {
-        // the zero is a placeholder for mbarrier id
-        tma_copy =
-            Evaluate(Call(DataType::Handle(), tma_load(),
-                          {shared_addr, global_addr, 0,
-                           elements * shared_tensor_before_remap->dtype.bytes(),
-                           this->eviction_policy}));
-      } else {
-        tma_copy =
-            Evaluate(Call(DataType::Handle(), tma_store(),
-                          {global_addr, shared_addr,
-                           elements * shared_tensor_before_remap->dtype.bytes(),
-                           this->eviction_policy}));
-      }
-      tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
-      return tma_copy;
-    }
   }
 
   TMADesc desc;
@@ -1129,6 +1118,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   // conflicts Different swizzle patterns (32B, 64B, 128B) offer different
   // trade-offs between access efficiency and memory usage
   desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
+  auto shared_layout = T.layout_map.at(shared_tensor);
   if (!shared_layout.defined()) {
     desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
   } else if (StructuralEqual()(shared_layout, linear_layout)) {
@@ -1232,7 +1222,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
 
     PrimExpr shared_addr = shared_tensor.access_ptr(
         is_load ? 2 : 1, DataType::Handle(), 1,
-        offset + total_elements * loop_var, total_elements);
+        shared_offset + total_elements * loop_var, total_elements);
     args.push_back(shared_addr);
     global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
     for (auto coord : global_coords)
@@ -1242,7 +1232,7 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
                    Evaluate(Call(DataType::Handle(), op, args)));
   } else {
     PrimExpr shared_addr = shared_tensor.access_ptr(
-        is_load ? 2 : 1, DataType::Handle(), 1, offset, total_elements);
+        is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, total_elements);
     args.push_back(shared_addr);
     for (auto coord : global_coords)
       args.push_back(coord);
@@ -1254,6 +1244,80 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   return tma_copy;
 }
 
+Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
+                               CopyInst copy_inst) const {
+  ICHECK(copy_inst == CopyInst::kBulkLoad1D ||
+         copy_inst == CopyInst::kBulkStore1D);
+
+  // Add 1D TMA copy when the global and shared memory is contiguous
+  // Check if shared_tensor->name is present in T.buffer_var_gemm
+  // (Array<PrimExpr>) to avoid use 1D TMA copy for swizzled layout
+  bool is_load = copy_inst == CopyInst::kBulkLoad1D;
+  auto shared_range = is_load ? dst_range : src_range;
+  auto global_range = is_load ? src_range : dst_range;
+  auto shared_tensor = is_load ? dst : src;
+  auto global_tensor = is_load ? src : dst;
+
+  PrimExpr shared_elements = 1;
+  for (size_t i = 0; i < shared_range.size(); i++) {
+    shared_elements *= shared_range[i]->extent;
+  }
+
+  std::vector<PrimExpr> shared_strides;
+  PrimExpr shared_stride = 1;
+  for (size_t i = 0; i < shared_tensor->shape.size(); i++) {
+    auto s = shared_tensor->shape[shared_tensor->shape.size() - i - 1];
+    shared_strides.insert(shared_strides.begin(), shared_stride);
+    shared_stride *= s;
+  }
+
+  Array<PrimExpr> shared_indices;
+  for (auto r : shared_range)
+    shared_indices.push_back(r->min);
+
+  Array<PrimExpr> global_indices;
+  for (auto r : global_range) {
+    global_indices.push_back(r->min);
+  }
+  std::vector<PrimExpr> global_strides;
+  PrimExpr global_stride = 1;
+  for (size_t i = 0; i < global_tensor->shape.size(); i++) {
+    auto s = global_tensor->shape[global_tensor->shape.size() - i - 1];
+    global_strides.insert(global_strides.begin(), global_stride);
+    global_stride *= s;
+  }
+
+  PrimExpr global_offset = 0;
+  for (size_t i = 0; i < global_indices.size(); i++) {
+    global_offset += global_indices[i] * global_strides[i];
+  }
+
+  PrimExpr shared_offset = 0;
+  for (size_t i = 0; i < shared_indices.size(); i++) {
+    shared_offset += shared_indices[i] * shared_strides[i];
+  }
+
+  PrimExpr elements = analyzer->Simplify(shared_elements);
+  PrimExpr shared_addr = shared_tensor.access_ptr(
+      is_load ? 2 : 1, DataType::Handle(), 1, shared_offset, elements);
+  PrimExpr global_addr = global_tensor.access_ptr(
+      is_load ? 1 : 2, DataType::Handle(), 1, global_offset, elements);
+  Stmt tma_copy;
+  if (is_load) {
+    // the zero is a placeholder for mbarrier ids
+    tma_copy = Evaluate(
+        Call(DataType::Handle(), tma_load(),
+             {shared_addr, global_addr, 0,
+              elements * shared_tensor->dtype.bytes(), this->eviction_policy}));
+  } else {
+    tma_copy = Evaluate(
+        Call(DataType::Handle(), tma_store(),
+             {global_addr, shared_addr, elements * shared_tensor->dtype.bytes(),
+              this->eviction_policy}));
+  }
+  tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
+  return tma_copy;
+}
 /*!
  * \brief Encode the TMA descriptor into an array of PrimExpr.
  * This function serializes the TMA descriptor fields into a format suitable for
