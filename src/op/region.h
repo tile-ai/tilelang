@@ -93,6 +93,28 @@ public:
   bool IsFullRegion() const;
 
   TileOperator Clone() const override;
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<RegionOpNode>()
+        .def_ro("buffer", &RegionOpNode::buffer_)
+        .def_ro("ranges", &RegionOpNode::ranges_)
+        .def_ro("access_mask", &RegionOpNode::access_mask_);
+  }
+
+  bool SEqualReduce(const RegionOpNode *other, SEqualReducer equal) const {
+    return equal(buffer_, other->buffer_) && equal(ranges_, other->ranges_) &&
+           equal(access_mask_, other->access_mask_);
+  }
+
+  void SHashReduce(SHashReducer hash_reduce) const {
+    hash_reduce(buffer_);
+    hash_reduce(ranges_);
+    hash_reduce(access_mask_);
+  }
+
+  static constexpr bool _type_has_method_sequal_reduce = true;
+  static constexpr bool _type_has_method_shash_reduce = true;
 };
 
 class RegionOp : public TileOperator {

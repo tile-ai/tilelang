@@ -153,11 +153,16 @@ class TensorProxy(BaseTensorProxy):
     def __call__(self,
                  shape: Union[Tuple[Any], PrimExpr, int],
                  dtype: str = "float32",
-                 data=None) -> tir.Buffer:
+                 data=None,
+                 scope=None) -> tir.Buffer:
         if isinstance(shape, (int, PrimExpr)):
             shape = (shape,)
         return super().__call__(
-            shape, dtype=dtype, strides=TensorProxy._construct_strides(shape), data=data)
+            shape,
+            dtype=dtype,
+            strides=TensorProxy._construct_strides(shape),
+            data=data,
+            scope=scope)
 
 
 class StridedTensorProxy(BaseTensorProxy):
@@ -169,13 +174,14 @@ class StridedTensorProxy(BaseTensorProxy):
     def __call__(self,
                  shape: Tuple[Any],
                  strides: Tuple[Any],
-                 dtype: str = "float32") -> tir.Buffer:
+                 dtype: str = "float32",
+                 scope=None) -> tir.Buffer:
         if len(shape) != len(strides):
             raise ValueError("Invalid shape/strides' dimensions")
         if not bool(strides[-1] == 1):
             # TODO(chenggang): shall we support non-contiguous even for the last dimension?
             raise ValueError("The stride of the last dimension must be 1 (contiguous)")
-        return super().__call__(shape, dtype=dtype, strides=strides)
+        return super().__call__(shape, dtype=dtype, strides=strides, scope=scope)
 
 
 class FragmentBufferProxy(BaseTensorProxy):

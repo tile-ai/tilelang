@@ -28,6 +28,7 @@ from pathlib import Path
 from tilelang import env
 from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.capture import get_autotune_inputs
+from tilelang.utils.target import determine_target
 from tilelang.jit.param import _P, _RProg
 from tilelang.version import __version__
 
@@ -150,7 +151,7 @@ class AutoTuner:
         """
         self.compile_args = CompileArgs(
             out_idx=out_idx,
-            target=target,
+            target=Target(determine_target(target)),
             execution_backend=execution_backend,
             target_host=target_host,
             verbose=verbose,

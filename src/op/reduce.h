@@ -1,7 +1,6 @@
 /*!
  * \file tl/op/reduce.h
- * \brief Define reduce operator.
- *
+ * \brief Reduction operators for tensor computations
  */
 
 #ifndef TVM_TL_OP_REDUCE_H_
@@ -10,180 +9,128 @@
 #include "operator.h"
 
 namespace tvm {
-/**
- * Tile operator node that performs a reduction (sum, max, min, etc.) along a
- * single tensor dimension.
- *
- * Represents a per-instance reduce operator with explicit source/destination
- * buffers, target dimension, reduction type, and a flag controlling whether the
- * destination is cleared before reduction.
- */
 
-/**
- * Lower this ReduceOpNode into a Tir Stmt suitable for code generation.
- *
- * Produces the TIR statement(s) that implement the configured reduction.
- *
- * @return A TIR `Stmt` implementing the reduce operation.
- */
-
-/**
- * Infer input/output layouts for this reduce operator.
- *
- * Returns a LayoutMap describing how input and output buffer layouts relate
- * for the configured reduction dimension.
- *
- * @param level Inference detail level that may affect how aggressively layouts
- * are inferred.
- * @return A LayoutMap mapping operator arguments to inferred layouts.
- */
-
-/**
- * Retrieve the global operator descriptor for the reduce operator.
- *
- * @return A reference to the Op descriptor corresponding to this operator type.
- */
-
-/**
- * Create a copy of this reduce operator as a TileOperator handle.
- *
- * The returned TileOperator preserves the node's configuration (buffers, dim,
- * type, clear).
- *
- * @return A TileOperator wrapping a cloned ReduceOpNode.
- */
-
-/**
- * Construct the initial value used by the reduction (e.g., 0 for sum, -inf for
- * max).
- *
- * @return A PrimExpr representing the reduction's identity/init value.
- */
-
-/**
- * Combine two partial values according to the configured reduction.
- *
- * Implements the binary reducer (for example, `a + b` for sum or `max(a, b)`
- * for max).
- *
- * @return A PrimExpr representing the reduced result of `a` and `b`.
- */
-
-/**
- * Generate a string snippet suitable for code generation of the reducer
- * expression.
- *
- * The returned code fragment should implement the binary reduction operation in
- * the target backend's code string form.
- *
- * @return A std::string containing the codegen expression for the reducer.
- */
-
-/**
- * Reference wrapper for ReduceOpNode as a TileOperator.
- *
- * Construct a ReduceOp from explicit arguments and a buffer map.
- */
-
-/**
- * Construct a ReduceOp TileOperator from operator arguments and a buffer
- * mapping.
- *
- * @param args Operator arguments (typically shapes, axes, or other prim exprs).
- * @param vmap Mapping from argument names to tir::Buffer instances used by the
- * operator.
- */
-
-/**
- * Tile operator node that computes a cumulative sum along a single tensor
- * dimension.
- *
- * Contains source/destination buffers, the target dimension, and a flag to
- * compute the cumulative sum in reverse order.
- */
-
-/**
- * Lower this CumSumOpNode into a Tir Stmt suitable for code generation.
- *
- * Produces the TIR statement(s) that implement the configured cumulative-sum.
- *
- * @return A TIR `Stmt` implementing the cum-sum operation.
- */
-
-/**
- * Infer input/output layouts for this cumulative-sum operator.
- *
- * Returns a LayoutMap describing how input and output buffer layouts relate
- * for the configured cumulative-sum dimension.
- *
- * @param level Inference detail level that may affect how aggressively layouts
- * are inferred.
- * @return A LayoutMap mapping operator arguments to inferred layouts.
- */
-
-/**
- * Retrieve the global operator descriptor for the cumulative-sum operator.
- *
- * @return A reference to the Op descriptor corresponding to this operator type.
- */
-
-/**
- * Create a copy of this cum-sum operator as a TileOperator handle.
- *
- * The returned TileOperator preserves the node's configuration (buffers, dim,
- * reverse).
- *
- * @return A TileOperator wrapping a cloned CumSumOpNode.
- */
-
-/**
- * Reference wrapper for CumSumOpNode as a TileOperator.
- *
- * Construct a CumSumOp from explicit arguments and a buffer map.
- */
-
-/**
- * Construct a CumSumOp TileOperator from operator arguments and a buffer
- * mapping.
- *
- * @param args Operator arguments (typically shapes, axes, or other prim exprs).
- * @param vmap Mapping from argument names to tir::Buffer instances used by the
- * operator.
- */
 namespace tl {
 
 using namespace tir;
 
-enum class ReduceType : uint8_t {
-  kSum,
-  kAbsSum,
-  kMax,
-  kMin,
-  kAbsMax,
+/// Supported reduction operation types
+enum class ReduceTypeEnum : uint8_t {
+  kSum,    ///< Sum reduction
+  kAbsSum, ///< Absolute sum reduction
+  kMax,    ///< Maximum value reduction
+  kMin,    ///< Minimum value reduction
+  kAbsMax, ///< Maximum absolute value reduction
 };
 
+/// Node class representing a reduction type
+class ReduceTypeNode : public Object {
+public:
+  int type{-1}; ///< Internal type identifier
+  static constexpr const char *_type_key = "tl.ReduceType";
+  TVM_DECLARE_FINAL_OBJECT_INFO(ReduceTypeNode, Object);
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<ReduceTypeNode>().def_ro("type", &ReduceTypeNode::type);
+  }
+
+  bool SEqualReduce(const ReduceTypeNode *other, SEqualReducer equal) const {
+    return equal(type, other->type);
+  }
+
+  void SHashReduce(SHashReducer hash_reduce) const { hash_reduce(type); }
+
+  static constexpr bool _type_has_method_sequal_reduce = true;
+  static constexpr bool _type_has_method_shash_reduce = true;
+
+  /// Type checking methods
+  bool isSum() const { return type == int(ReduceTypeEnum::kSum); }
+  bool isAbsSum() const { return type == int(ReduceTypeEnum::kAbsSum); }
+  bool isMax() const { return type == int(ReduceTypeEnum::kMax); }
+  bool isMin() const { return type == int(ReduceTypeEnum::kMin); }
+  bool isAbsMax() const { return type == int(ReduceTypeEnum::kAbsMax); }
+};
+
+/// Wrapper class for reduction type with string-based construction
+class ReduceType : public ObjectRef {
+public:
+  TVM_DEFINE_OBJECT_REF_METHODS(ReduceType, ObjectRef, ReduceTypeNode);
+  TVM_DLL ReduceType(std::string type) {
+    auto node = make_object<ReduceTypeNode>();
+    if (type == "sum") {
+      node->type = int(ReduceTypeEnum::kSum);
+    } else if (type == "abssum") {
+      node->type = int(ReduceTypeEnum::kAbsSum);
+    } else if (type == "max") {
+      node->type = int(ReduceTypeEnum::kMax);
+    } else if (type == "absmax") {
+      node->type = int(ReduceTypeEnum::kAbsMax);
+    } else if (type == "min") {
+      node->type = int(ReduceTypeEnum::kMin);
+    } else {
+      LOG(FATAL) << "Invalid reduce type: " << type;
+    }
+    data_ = std::move(node);
+  }
+};
+
+/// Node class for reduction operations
 class ReduceOpNode : public TileOperatorNode {
 public:
-  tir::Buffer src, dst;
-  int dim;
-  ReduceType type;
-  bool clear;
+  tir::Buffer src, dst; ///< Source and destination buffers
+  int dim;              ///< Dimension to reduce along
+  ReduceType type;      ///< Type of reduction operation
+  bool clear;           ///< Whether to clear destination before reduction
 
   static constexpr const char *_type_key = "tl.ReduceOp";
   TVM_DECLARE_FINAL_OBJECT_INFO(ReduceOpNode, TileOperatorNode);
 
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<ReduceOpNode>()
+        .def_ro("src", &ReduceOpNode::src)
+        .def_ro("dst", &ReduceOpNode::dst)
+        .def_ro("dim", &ReduceOpNode::dim)
+        .def_ro("type", &ReduceOpNode::type)
+        .def_ro("clear", &ReduceOpNode::clear);
+  }
+
+  bool SEqualReduce(const ReduceOpNode *other, SEqualReducer equal) const {
+    return equal(src, other->src) && equal(dst, other->dst) &&
+           equal(dim, other->dim) && equal(type, other->type) &&
+           equal(clear, other->clear);
+  }
+
+  void SHashReduce(SHashReducer hash_reduce) const {
+    hash_reduce(src);
+    hash_reduce(dst);
+    hash_reduce(dim);
+    hash_reduce(type);
+    hash_reduce(clear);
+  }
+
+  static constexpr bool _type_has_method_sequal_reduce = true;
+  static constexpr bool _type_has_method_shash_reduce = true;
+
+  /// Lower the operator to TIR statements
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
+  /// Infer memory layout for buffers
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
   static const Op &Get();
   TileOperator Clone() const;
 
 private:
+  /// Generate initial value for reduction
   PrimExpr MakeInitValue() const;
+  /// Generate reduction expression
   PrimExpr MakeReduce(const PrimExpr &a, const PrimExpr &b) const;
+  /// Generate codegen reducer string
   std::string MakeCodegenReducer() const;
 };
 
+/// Wrapper class for reduction operations
 class ReduceOp : public TileOperator {
 public:
   TVM_DEFINE_OBJECT_REF_METHODS(ReduceOp, TileOperator, ReduceOpNode);
@@ -191,11 +138,12 @@ public:
   static const Op &Get();
 };
 
+/// Node class for cumulative sum operations
 class CumSumOpNode : public TileOperatorNode {
 public:
-  tir::Buffer src, dst;
-  int dim;
-  bool reverse;
+  tir::Buffer src, dst; ///< Source and destination buffers
+  int dim;              ///< Dimension along which to compute cumulative sum
+  bool reverse;         ///< Whether to compute in reverse order
   static constexpr const char *_type_key = "tl.CumSumOp";
   TVM_DECLARE_FINAL_OBJECT_INFO(CumSumOpNode, TileOperatorNode);
 
@@ -206,6 +154,7 @@ public:
   TileOperator Clone() const;
 };
 
+/// Wrapper class for cumulative sum operations
 class CumSumOp : public TileOperator {
 public:
   TVM_DEFINE_OBJECT_REF_METHODS(CumSumOp, TileOperator, CumSumOpNode);

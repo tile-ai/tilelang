@@ -12,7 +12,7 @@
 #include <tvm/tir/transform.h>
 
 #include "../layout/layout.h"
-#include "../op/elem.h"
+#include "../op/fill.h"
 #include "../op/finalize_reducer.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "layout_reducer.h"
@@ -132,7 +132,7 @@ private:
                           .value_or(Map<Var, Layout>());
     for (auto &&[k, v] : new_layout_map_)
       layout_map.Set(k, v);
-    if (layout_map.size())
+    if (!layout_map.empty())
       p_result->annotations.Set(attr::kLayoutMap, layout_map);
     new_layout_map_.clear();
     return result;
@@ -178,7 +178,7 @@ private:
   Stmt VisitStmt_(const ForNode *op) final {
     // only annotate the outermost loop
     bool should_annotate = false;
-    if (inside_reducer_range_.size() > 0 && !already_annotated_) {
+    if (!inside_reducer_range_.empty() && !already_annotated_) {
       should_annotate = true;
       already_annotated_ = true;
     }
@@ -202,7 +202,6 @@ private:
         ICHECK(thread_var_.defined());
         ICHECK(analyzer_->const_int_bound.IsBound(thread_var_->var));
         auto const_int_bound = analyzer_->const_int_bound(thread_var_);
-        auto dtype = thread_var_->var.dtype();
         int thread_min = const_int_bound->min_value;
         int thread_extent =
             const_int_bound->max_value - const_int_bound->min_value + 1;
@@ -274,7 +273,7 @@ private:
     auto op_ref = IRMutatorWithAnalyzer::VisitExpr_(op_).as<Call>().value();
     auto op = op_ref.CopyOnWrite();
     if (op->op.same_as(Fill::Get())) {
-      ICHECK(op->args.size() > 0);
+      ICHECK(!op->args.empty());
       if (auto arg0_call = op->args[0].as<Call>();
           arg0_call &&
           arg0_call.value()->op.same_as(builtin::tvm_access_ptr())) {

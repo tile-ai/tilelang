@@ -104,3 +104,5 @@ from .engine import lower, register_cuda_postproc, register_hip_postproc  # noqa
 from .version import __version__  # noqa: F401
 
 from .math import *  # noqa: F403
+
+from . import ir  # noqa: F401

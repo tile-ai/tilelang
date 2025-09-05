@@ -325,16 +325,12 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     enable_fp6_ = true;
     if (t.lanes() <= 4) {
       os << GetFP6Type(t);
-    } else {
-      fail = true;
     }
     return;
   } else if (t.is_float4()) {
     enable_fp4_ = true;
     if (t.lanes() <= 4) {
       os << GetFP4Type(t);
-    } else {
-      fail = true;
     }
     return;
   } else if (t == DataType::Bool()) {
@@ -1960,13 +1956,17 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
   // Type code is kBFloat
   if (op->dtype.is_bfloat16()) {
     os << "bfloat16_t";
-    os << '(' << std::scientific << op->value << 'f' << ')';
+    os << '(' << std::hexfloat << op->value << 'f';
+    os << "/*" << std::scientific << op->value << "*/";
+    os << ')';
     return;
   }
   // Type code is kFloat8_e5m2 or kE4M4Float
   if (op->dtype.is_float8() || op->dtype.is_float4()) {
     p->PrintType(op->dtype, os);
-    os << '(' << std::scientific << op->value << 'f' << ')';
+    os << '(' << std::hexfloat << op->value << 'f';
+    os << "/*" << std::scientific << op->value << "*/";
+    os << ')';
     return;
   }
   // Type code is kFloat
@@ -1984,9 +1984,10 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       temp << ((op->dtype.bits() == 32) ? "CUDART_NAN_F" : "CUDART_NAN");
       p->need_math_constants_h_ = true;
     } else {
-      temp << std::scientific << op->value;
+      temp << std::hexfloat << op->value;
       if (op->dtype.bits() == 32)
         temp << 'f';
+      temp << "/*" << std::scientific << op->value << "*/";
     }
     p->MarkConst(temp.str());
     os << temp.str();

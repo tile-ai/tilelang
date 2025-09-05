@@ -1,10 +1,10 @@
 /*!
- * \file tl/op/elem.cc
+ * \file tl/op/fill.cc
  *
  * Define elment-wise operators.
  */
 
-#include "elem.h"
+#include "fill.h"
 
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
@@ -224,6 +224,10 @@ TIR_REGISTER_TL_OP(Fill, fill)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+TVM_FFI_STATIC_INIT_BLOCK({
+  FillNode::RegisterReflection();
+});
 
 } // namespace tl
 } // namespace tvm

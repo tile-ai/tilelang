@@ -13,66 +13,6 @@
 #include "./operator.h"
 
 /**
- * FinalizeReducer operator node for Tile IR.
- *
- * Represents a TL-level operator that finalizes a reducer buffer into a
- * result using a specified reducer operation.
- *
- * Public members:
- * - reducer: the tir::Buffer that holds the intermediate reduction values.
- * - op: the reducer operation to apply when finalizing values.
- */
-
-/**
- * Lower this operator to a TIR statement.
- *
- * @param T Lowering arguments (buffers, indices, and other lowering context).
- * @param analyzer Arithmetic analyzer used to simplify expressions during
- * lowering.
- * @return A tir::Stmt that implements the finalize-reducer semantics for the
- * provided lowering context.
- */
-
-/**
- * Infer layout mapping for this operator.
- *
- * Determines how input and output buffer layouts relate for the
- * finalize-reducer operator at the given inference level.
- *
- * @param T Layout inference arguments (including operand layouts and shapes).
- * @param level Inference precision level.
- * @return A LayoutMap describing the inferred layouts.
- */
-
-/**
- * Get the singleton Op object representing this operator.
- *
- * @return A reference to the Op describing FinalizeReducer.
- */
-
-/**
- * Create a deep copy of this operator node as a TileOperator.
- *
- * @return A TileOperator handle that is an independent clone of this node.
- */
-
-/**
- * Public wrapper for FinalizeReducerOpNode.
- *
- * Provides the reference semantics and construction API used by callers.
- */
-
-/**
- * Construct a FinalizeReducerOp from TL-level arguments.
- *
- * @param args Positional primitive expressions that parameterize the operator
- *             (e.g., shapes, axis indices). Documented where their meaning is
- *             not obvious from name or type in call sites.
- * @param vmap Mapping from operand names to tir::Buffer instances used by this
- * operator.
- */
-
-/**
  * Get the Op singleton for the public FinalizeReducerOp handle.
  *
  * @return A reference to the Op describing FinalizeReducer.
@@ -89,6 +29,25 @@ public:
 
   static constexpr const char *_type_key = "tl.FinalizeReducerOp";
   TVM_DECLARE_FINAL_OBJECT_INFO(FinalizeReducerOpNode, TileOperatorNode);
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<FinalizeReducerOpNode>()
+        .def_ro("reducer", &FinalizeReducerOpNode::reducer)
+        .def_ro("op", &FinalizeReducerOpNode::op);
+  }
+
+  bool SEqualReduce(const FinalizeReducerOpNode *other,
+                    SEqualReducer equal) const {
+    return equal(reducer, other->reducer) && equal(op, other->op);
+  }
+
+  void SHashReduce(SHashReducer hash_reduce) const {
+    hash_reduce(reducer);
+    hash_reduce(op);
+  }
+  static constexpr bool _type_has_method_sequal_reduce = true;
+  static constexpr bool _type_has_method_shash_reduce = true;
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &T,

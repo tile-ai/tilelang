@@ -243,4 +243,5 @@ if __name__ == "__main__":
     print(f"Best TFlops: {total_flops / best_latency * 1e-9:.3f}")
     print(f"Best config: {best_config}")
 
-    print(f"Reference TFlops: {total_flops / ref_latency * 1e-9:.3f}")
+    if ref_latency is not None:
+        print(f"Reference TFlops: {total_flops / ref_latency * 1e-9:.3f}")
