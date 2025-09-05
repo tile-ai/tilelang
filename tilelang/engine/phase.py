@@ -4,7 +4,6 @@ import tilelang
 from tilelang.transform import PassContext
 from tilelang.contrib.nvcc import have_tma
 from typing import Optional
-from pathlib import Path
 
 
 def allow_warp_specialized(pass_ctx: Optional[PassContext] = None,
@@ -62,10 +61,6 @@ def should_enable_aggressive_merge(pass_ctx: Optional[PassContext] = None,
     return enable_aggressive_merge
 
 
-debug_path = Path('debug')
-debug_path.mkdir(exist_ok=True)
-
-
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
     """
@@ -100,10 +95,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LayoutReducer()(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
-    debug_path.joinpath('LowerTileOp.0.py').write_text(mod.script(show_meta=True))
     # Lower high-level tile operations to low-level operations
     mod = tilelang.transform.LowerTileOp()(mod)
-    debug_path.joinpath('LowerTileOp.1.py').write_text(mod.script(show_meta=True))
     # Lower l2 persistent map
     mod = tilelang.transform.LowerL2Persistent()(mod)
     # Legalize vectorized loops to ensure they are valid
@@ -142,9 +135,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.LowerOpaqueBlock()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
         mod = tilelang.transform.RewriteWgmmaSync()(mod)
-        debug_path.joinpath('InjectFenceProxy.0.py').write_text(mod.script(show_meta=True))
         mod = tilelang.transform.InjectFenceProxy()(mod)
-        debug_path.joinpath('InjectFenceProxy.1.py').write_text(mod.script(show_meta=True))
     else:
         mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tir.transform.PlanAndUpdateBufferAllocationLocation()(mod)
@@ -208,6 +199,5 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
 
     # Transform threadblock to persistent threadblock
     mod = tilelang.transform.PersistThreadblock()(mod)
-    debug_path.joinpath('PersistThreadblock.1.py').write_text(mod.script(show_meta=True))
 
     return mod
