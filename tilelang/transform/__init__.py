@@ -78,6 +78,7 @@ def FrontendLegalize():
     """
     return _ffi_api.FrontendLegalize()  # type: ignore
 
+
 def InjectAssumes():
     """Inject Assumes
     
