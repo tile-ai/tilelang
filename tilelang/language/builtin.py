@@ -8,6 +8,8 @@ from tvm import tir
 from typing import Union, Any
 from tvm.tir import PrimExpr, Var, Call
 
+_IS_HIP_AVAILABLE = check_hip_availability()
+
 
 def create_list_of_mbarrier(*args: Any) -> Call:
     """
@@ -296,7 +298,10 @@ def shfl_xor(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr,
     Returns:
         tir.Call: A handle to the shuffle operation
     """
-    return tir.call_extern(value.dtype, "__shfl_xor", value, offset) if check_hip_availability() else tir.call_extern(value.dtype, "__shfl_xor_sync", 0xffffffff, value, offset)
+    if _IS_HIP_AVAILABLE:
+        return tir.call_extern(value.dtype, "__shfl_xor", value, offset)
+    else:
+        return tir.call_extern(value.dtype, "__shfl_xor_sync", 0xffffffff, value, offset)
 
 
 def shfl_down(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
@@ -306,7 +311,10 @@ def shfl_down(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr
         value: Optional[int, PrimExpr]
             The value to shuffle
     """
-    return tir.call_extern(value.dtype, "__shfl_down", value, offset) if check_hip_availability() else tir.call_extern(value.dtype, "__shfl_down_sync", 0xffffffff, value, offset)
+    if _IS_HIP_AVAILABLE:
+        return tir.call_extern(value.dtype, "__shfl_down", value, offset)
+    else:
+        return tir.call_extern(value.dtype, "__shfl_down_sync", 0xffffffff, value, offset)
 
 
 def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
@@ -316,7 +324,10 @@ def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, 
         value: Optional[int, PrimExpr]
             The value to shuffle
     """
-    return tir.call_extern(value.dtype, "__shfl_up", value, offset) if check_hip_availability() else tir.call_extern(value.dtype, "__shfl_up_sync", 0xffffffff, value, offset)
+    if _IS_HIP_AVAILABLE:
+        return tir.call_extern(value.dtype, "__shfl_up", value, offset)
+    else:
+        return tir.call_extern(value.dtype, "__shfl_up_sync", 0xffffffff, value, offset)
 
 
 def sync_threads():
