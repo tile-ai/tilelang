@@ -450,7 +450,7 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
  * @return true if the copy can be implemented as a Bulk Load (TMA); false
  * otherwise.
  */
-bool CopyNode::CheckBulkLoad(Target target) const {
+bool CopyNode::CheckBulkLoad(Target target, arith::Analyzer *analyzer) const {
   // 1. arch must have bulk copy support
   if (!TargetHasBulkCopy(target))
     return false;
@@ -459,7 +459,20 @@ bool CopyNode::CheckBulkLoad(Target target) const {
       (dst.scope() != "shared.dyn" && dst.scope() != "shared"))
     return false;
   // 3. check shape.
-  // TODO(lei): validate if we can utilize tma under this shape.
+  // last dim of src * dtype.bits() must be a multiple of 16
+  // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html#group__CUDA__TENSOR__MEMORY_1ga7c7d2aaac9e49294304e755e6f341d7
+  // now we check src (gmem) as tma box dim is deduced from src
+  if (analyzer->CanProve(
+          FloorMod(src_range[src_range.size() - 1]->extent * src->dtype.bytes(),
+                   16) != 0,
+          arith::ProofStrength::kSymbolicBound)) {
+    LOG(WARNING)
+        << "src range must have last dim multiple of 16 for tma bulk load "
+        << src->name << " range " << src_range[src_range.size() - 1]->extent
+        << " * " << src->dtype.bytes() << " % 16 != 0";
+    return false;
+  }
+
   // 4. src and dst must have the same dtype
   if (src->dtype != dst->dtype) {
     LOG(WARNING) << "src and dst must have the same dtype for tma load "
@@ -519,7 +532,7 @@ bool CopyNode::CheckBulkCopy1D(const Buffer &global_tensor,
 
 bool CopyNode::CheckBulkLoad1D(Target target, const LayoutMap &layout_map,
                                arith::Analyzer *analyzer) const {
-  if (!CheckBulkLoad(target))
+  if (!CheckBulkLoad(target, analyzer))
     return false;
   auto global_tensor = src;
   auto shared_tensor = dst;
@@ -531,7 +544,7 @@ bool CopyNode::CheckBulkLoad1D(Target target, const LayoutMap &layout_map,
 
 bool CopyNode::CheckBulkStore1D(Target target, const LayoutMap &layout_map,
                                 arith::Analyzer *analyzer) const {
-  if (!CheckBulkStore(target))
+  if (!CheckBulkStore(target, analyzer))
     return false;
   auto shared_tensor = src;
   auto global_tensor = dst;
@@ -553,7 +566,7 @@ bool CopyNode::CheckBulkStore1D(Target target, const LayoutMap &layout_map,
  * @param target Target device/architecture to check for bulk-copy support.
  * @return true if all conditions for a BulkStore are met; false otherwise.
  */
-bool CopyNode::CheckBulkStore(Target target) const {
+bool CopyNode::CheckBulkStore(Target target, arith::Analyzer *analyzer) const {
   // 1. arch must have bulk copy support
   if (!TargetHasBulkCopy(target))
     return false;
@@ -562,7 +575,19 @@ bool CopyNode::CheckBulkStore(Target target) const {
       dst.scope() != "global")
     return false;
   // 3. check shape.
-  // TODO(lei): validate if we can utilize tma under this shape.
+  // last dim of dst * dtype.bits() must be a multiple of 16
+  // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TENSOR__MEMORY.html#group__CUDA__TENSOR__MEMORY_1ga7c7d2aaac9e49294304e755e6f341d7
+  // now we check dst (gmem) as tma box dim is deduced from dst
+  if (analyzer->CanProve(
+          FloorMod(dst_range[dst_range.size() - 1]->extent * dst->dtype.bytes(),
+                   16) != 0,
+          arith::ProofStrength::kSymbolicBound)) {
+    LOG(WARNING)
+        << "dst range must have last dim multiple of 16 for tma bulk store "
+        << dst->name << " range " << dst_range[dst_range.size() - 1]->extent
+        << " * " << dst->dtype.bytes() << " % 16 != 0";
+    return false;
+  }
   // 4. src and dst must have the same dtype
   if (src->dtype != dst->dtype) {
     LOG(WARNING) << "src and dst must have the same dtype for tma store "
@@ -633,9 +658,9 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
   } else if (!disable_tma_lower && !buffer_oob &&
              CheckBulkStore1D(target, layout_map, analyzer)) {
     return CopyInst::kBulkStore1D;
-  } else if (!disable_tma_lower && CheckBulkLoad(target)) {
+  } else if (!disable_tma_lower && CheckBulkLoad(target, analyzer)) {
     return CopyInst::kBulkLoad;
-  } else if (!disable_tma_lower && CheckBulkStore(target)) {
+  } else if (!disable_tma_lower && CheckBulkStore(target, analyzer)) {
     return CopyInst::kBulkStore;
   } else if (CheckLDSMCopy(target)) {
     return CopyInst::kLDSM;
@@ -1104,6 +1129,8 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
         << shared_tensor->name << "[" << s_range_idx
         << "] = " << s_range->extent;
   }
+  // TODO(lei): find a much smarter way to deduce smem box dim
+  // instead of using global_range
   desc.smem_box =
       ReverseArray(global_range.Map([](Range r) { return r->extent; }));
 
@@ -1118,7 +1145,14 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
   // conflicts Different swizzle patterns (32B, 64B, 128B) offer different
   // trade-offs between access efficiency and memory usage
   desc.interleave = static_cast<int>(CU_TENSOR_MAP_INTERLEAVE_NONE);
-  auto shared_layout = T.layout_map.at(shared_tensor);
+  Layout shared_layout;
+  if (T.layout_map.count(shared_tensor)) {
+    shared_layout = T.layout_map.at(shared_tensor);
+    ICHECK(T.buffer_remap.count(shared_tensor))
+        << "shared_tensor: " << shared_tensor->name
+        << " not found in buffer_remap";
+    shared_tensor = T.buffer_remap.at(shared_tensor);
+  }
   if (!shared_layout.defined()) {
     desc.swizzle = static_cast<int>(CU_TENSOR_MAP_SWIZZLE_NONE);
   } else if (StructuralEqual()(shared_layout, linear_layout)) {
