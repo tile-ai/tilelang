@@ -147,12 +147,12 @@ public:
   /*!
    * \brief Check if bulk copy is supported.
    */
-  bool CheckBulkLoad(Target target, arith::Analyzer *analyzer) const;
+  bool CheckBulkLoad(Target target, arith::Analyzer *analyzer, bool check_last_dim = true) const;
 
   /*!
    * \brief Check if bulk store is supported.
    */
-  bool CheckBulkStore(Target target, arith::Analyzer *analyzer) const;
+  bool CheckBulkStore(Target target, arith::Analyzer *analyzer, bool check_last_dim = true) const;
 
   /*!
    * \brief Check if bulk copy 1d load is supported.
