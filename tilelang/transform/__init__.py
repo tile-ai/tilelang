@@ -78,6 +78,16 @@ def FrontendLegalize():
     """
     return _ffi_api.FrontendLegalize()  # type: ignore
 
+def InjectAssumes():
+    """Inject Assumes
+    
+    Returns:
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.InjectAssumes()
+
 
 def LowerHopperIntrin():
     """LowerHopperIntrin
