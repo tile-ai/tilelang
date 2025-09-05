@@ -479,7 +479,7 @@ bool CopyNode::CheckBulkCopy1D(const Buffer &global_tensor,
 
   // Step 1: check shared is contiguous
   bool shared_is_contiguous = true;
-  if (layout_map.count(dst)) {
+  if (layout_map.count(shared_tensor)) {
     shared_is_contiguous = false;
   }
   // Step 2: check global is contiguous
