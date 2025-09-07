@@ -30,14 +30,14 @@ def ref_program(Q, K, V, is_causal, groups=1):
 
 def get_configs():
     """Generates configurations for the autotuner, tailored for FA-2 style parallelism."""
-    block_M = [32, 64, 128, 256]
-    block_N = [32, 64, 128, 256]
+    block_M = [32, 64, 128, 256, 512]
+    block_N = [32, 64, 128, 256, 512]
     threads = [128, 256, 512]
     num_split_q = [64, 128, 256]
-    num_stages = [0]
+    num_stages = [0, 1, 2, 3]
     enable_rasterization = [True]
     k_pack = [2]
-    panel_size = [7, 8]
+    panel_size = [7, 8, 9, 10]
     qk_coalesced_width = [8]
     v_coalesced_width = [4]
 
@@ -60,18 +60,6 @@ def get_configs():
             "qk_coalesced_width": qkw,
             "v_coalesced_width": vw,
         })
-    valid_configs.append({
-        'block_M': 64,
-        'block_N': 64,
-        'num_split_q': 64,
-        'threads': 256,
-        'num_stages': 1,
-        'enable_rasterization': True,
-        'k_pack': 2,
-        'panel_size': 64,
-        'qk_coalesced_width': 8,
-        'v_coalesced_width': 8,
-    })
     return valid_configs
 
 
