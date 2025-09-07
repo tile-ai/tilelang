@@ -7,15 +7,14 @@
 #ifndef TVM_TL_OP_GEMM_PY_H_
 #define TVM_TL_OP_GEMM_PY_H_
 
+#include "gemm.h"
 #include "operator.h"
-#include "gemm_py.h"
 
 namespace tvm {
 
 namespace tl {
 
 using namespace tir;
-
 
 class GemmPyNode : public TileOperatorNode {
 public:

@@ -85,8 +85,8 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     """
     mod = tir.transform.BindTarget(target)(mod)
 
-    # Legalize the frontend IR to make it compatible with TVM
-    mod = tilelang.transform.FrontendLegalize()(mod)
+    # Inline let expressions and statements
+    mod = tilelang.transform.LetInline()(mod)
     # Inject assumes to speedup tvm prover
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions

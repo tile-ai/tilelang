@@ -188,10 +188,12 @@ class TensorCoreIntrinEmitter(object):
         ):
             stride = A_shared_buf.shape[-1]
             tx, _, warp_m = self.extract_thread_binding(thread_binding)
+            trans = self.a_transposed
+
             for i in T.serial(warp_rows):
                 T.ptx_ldmatrix(
                     a_dtype,
-                    T.bool(False),
+                    T.bool(trans),
                     4,
                     ".b16",
                     A_local_buf.data,
@@ -230,22 +232,25 @@ class TensorCoreIntrinEmitter(object):
         ):
             stride = B_shared_buf.shape[-1]
             tx, warp_n, _ = self.extract_thread_binding(thread_binding)
+            trans = not self.b_transposed
 
             for j in T.serial(warp_cols):
                 # Assign B_shared_elem
-                ri, rj = (
+                wi, wk = (
                     warp_n * warp_col_tiles + j * micro_size_y,
                     rk * chunk + ki * micro_size_k,
                 )
+                B_shared_buf_elem = B_shared_buf[wi, wk] if self.b_transposed else B_shared_buf[wk,
+                                                                                                wi]
 
                 T.ptx_ldmatrix(
                     b_dtype,
-                    T.bool(False),  # TODO(lei): should be optimized
+                    T.bool(trans),
                     4,
                     ".b16",
                     B_local_buf.data,
                     j * local_size_b,
-                    T.address_of(B_shared_buf[ri, rj]),
+                    T.address_of(B_shared_buf_elem),
                     get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed),
                 )
 
@@ -289,7 +294,7 @@ class TensorCoreIntrinEmitter(object):
                     b_local_stride + j * local_size_b,
                     C_local_buf.data,
                     i * warp_cols * local_size_out + j * local_size_out,
-                    T.bool(False),
+                    T.bool(False),  # saturate
                 )
 
                 T.ptx_mma(
@@ -306,7 +311,7 @@ class TensorCoreIntrinEmitter(object):
                     b_local_stride + j * local_size_b + lift(local_size_b) // 2,
                     C_local_buf.data,
                     i * warp_cols * local_size_out + j * local_size_out + lift(local_size_out) // 2,
-                    T.bool(False),
+                    T.bool(False),  # saturate
                 )
 
         return _warp_mma(A_local_buf, B_local_buf, C_local_buf)

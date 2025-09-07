@@ -1,10 +1,7 @@
 from tilelang import tvm as tvm
 from tvm import tir
 from tilelang.utils.target import (
-    target_is_cuda,
-    target_is_hip,
-)
-from tilelang import _ffi_api
+    target_is_cuda,)
 from tilelang.intrinsics.mma_macro_generator import (
     TensorCoreIntrinEmitter,)
 from tilelang.layout import make_swizzled_layout
@@ -14,6 +11,7 @@ from tvm.ir.base import Node
 from tvm.runtime import Scriptable
 import tvm.ffi
 from tilelang.ir import GemmWarpPolicy
+from tilelang.transform.simplify import _Simplify
 
 
 @tvm.ffi.register_func("tl.gemm_py.infer_layout")
@@ -21,18 +19,20 @@ def gemm_py_infer_layout(gemm_py, target, thread_bounds):
     thread_nums = thread_bounds.extent
     return gemm_py.infer_layout(target, thread_nums)
 
+
 @tvm.ffi.register_func("tl.gemm_py.lower")
 def gemm_py_lower(gemm_py, target, thread_bounds, thread_var):
     thread_nums = thread_bounds.extent
     stmt = gemm_py.lower(target, thread_nums, thread_var)
     return stmt
 
+
 @tvm.ffi.register_object("tl.GemmPy")
 class GemmPy(Node, Scriptable):
     A: tir.Buffer
     B: tir.Buffer
     C: tir.Buffer
-    
+
     APtr: tir.PrimExpr
     BPtr: tir.PrimExpr
     CPtr: tir.PrimExpr
@@ -52,23 +52,23 @@ class GemmPy(Node, Scriptable):
     k_pack: int
     wg_wait: int
     policy: GemmWarpPolicy
-    
 
     def infer_layout(self, target: Target, thread_nums: int):
         if target_is_cuda(target):
             # TODO(lei): Support more cuda architectures, now mma only
             # Now only implement ssr layout
-            m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, False)
-            warp_row_tiles = m_warp * 16
-            warp_col_tiles = n_warp * 16
+            m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target,
+                                                                False)
+            warp_row_tiles = int(self.M // m_warp)
+            warp_col_tiles = int(self.N // n_warp)
             mma_emitter = TensorCoreIntrinEmitter(
                 a_dtype=self.in_dtype,
                 b_dtype=self.in_dtype,
                 accum_dtype=self.accum_dtype,
                 a_transposed=self.trans_A,
                 b_transposed=self.trans_B,
-                block_row_warps=self.M,
-                block_col_warps=self.N,
+                block_row_warps=m_warp,
+                block_col_warps=n_warp,
                 warp_row_tiles=warp_row_tiles,
                 warp_col_tiles=warp_col_tiles,
                 chunk=self.chunk,
@@ -81,23 +81,23 @@ class GemmPy(Node, Scriptable):
             return layout_map
         else:
             raise ValueError(f"Unsupported target: {target}")
-    
 
     def lower(self, target: Target, thread_nums: int, thread_var: tir.Var):
         if target_is_cuda(target):
             # TODO(lei): Support more cuda architectures, now mma only
             # Now only implement ssr layout
-            m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, False)
-            warp_row_tiles = m_warp * 16
-            warp_col_tiles = n_warp * 16
+            m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target,
+                                                                False)
+            warp_row_tiles = int(self.M // m_warp)
+            warp_col_tiles = int(self.N // n_warp)
             mma_emitter = TensorCoreIntrinEmitter(
                 a_dtype=self.in_dtype,
                 b_dtype=self.in_dtype,
                 accum_dtype=self.accum_dtype,
                 a_transposed=self.trans_A,
                 b_transposed=self.trans_B,
-                block_row_warps=self.M,
-                block_col_warps=self.N,
+                block_row_warps=m_warp,
+                block_col_warps=n_warp,
                 warp_row_tiles=warp_row_tiles,
                 warp_col_tiles=warp_col_tiles,
                 chunk=self.chunk,
@@ -125,7 +125,6 @@ class GemmPy(Node, Scriptable):
                 A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
                 B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
 
-
                 for ki in T.serial(0, (block_K // micro_size_k)):
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
@@ -143,10 +142,12 @@ class GemmPy(Node, Scriptable):
 
                     # Perform Matrix Multiplication
                     mma_emitter.mma(A_local, B_local, C_local)
-            return _gemm_ssr.body
+
+            # Simplify to optimize the index computing
+            # Must inline let statements to simplify the analysis
+            return _Simplify(_gemm_ssr, inline_let=True).body
         else:
             raise ValueError(f"Unsupported target: {target}")
-    
 
     @property
     def in_dtype(self) -> str:
@@ -156,7 +157,7 @@ class GemmPy(Node, Scriptable):
     @property
     def accum_dtype(self) -> str:
         return self.C.dtype
-    
+
     @property
     def chunk(self) -> int:
         return self.A.shape[-2] if self.trans_A else self.A.shape[-1]

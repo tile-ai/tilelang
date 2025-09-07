@@ -1,1 +1,1 @@
-from .gemm import GemmPy
+from .gemm import GemmPy  # noqa: F401

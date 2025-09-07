@@ -44,7 +44,7 @@ def matmul(
                     T.copy(B[bx * block_N, k * block_K], B_shared)
                 else:
                     T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm(A_shared, B_shared, C_local, trans_A, trans_B)
+                T.gemm_v2(A_shared, B_shared, C_local, trans_A, trans_B)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
@@ -88,6 +88,7 @@ def run_gemm(
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         })
+    print(kernel.get_kernel_source())
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -157,7 +158,7 @@ def matmul_rs(
                     T.copy(B[bx * block_N, k * block_K], B_shared)
                 else:
                     T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm(A_frag, B_shared, C_local, trans_A, trans_B)
+                T.gemm_v2(A_frag, B_shared, C_local, trans_A, trans_B)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
@@ -224,4 +225,9 @@ def test_gemm_rs():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    tilelang.disable_cache()
+    # run_gemm(512, 1024, 768, False, True, "float16", "float16", "float16", 128, 128, 32, 0)
+    # print("gemm fp16 nt ss done")
+    run_gemm(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 128, 32, 0)
+    print("gemm fp16 nn ss done")
