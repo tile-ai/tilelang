@@ -19,30 +19,6 @@ namespace tl {
 using namespace tir;
 
 /**
- * @brief Compute the prime factorization of an integer.
- *
- * Returns the prime factors of x in non-decreasing order by repeatedly dividing
- * out the smallest possible factor.
- *
- * @param x Integer to factorize. If x <= 1, an empty vector is returned.
- * @return std::vector<int> Prime factors of x (with multiplicity), in
- * non-decreasing order.
- */
-static std::vector<int> toPrimeFactors(int x) {
-  int i = 2;
-  std::vector<int> result;
-  while (x > 1) {
-    if (x % i == 0) {
-      x /= i;
-      result.push_back(i);
-    } else {
-      i++;
-    }
-  }
-  return result;
-}
-
-/**
  * @brief Construct a Gemm operator from serialized TL arguments and a buffer
  * map.
  *
@@ -631,6 +607,22 @@ TIR_REGISTER_TL_OP(Gemm, gemm)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+TVM_REGISTER_OP("tl.GemmWarpPolicy")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "GemmWarpPolicy");
+
+TVM_FFI_STATIC_INIT_BLOCK({
+  GemmNode::RegisterReflection();
+  GemmWarpPolicyNode::RegisterReflection();
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.GemmWarpPolicyComputeWarpPartition",
+                        [](GemmWarpPolicy policy, int M, int N, int block_size,
+                           Target target, bool is_wgmma) {
+                          policy->ComputeWarpPartition(M, N, block_size, target,
+                                                       is_wgmma);
+                          return;
+                        });
+});
 
 } // namespace tl
 } // namespace tvm

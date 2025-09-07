@@ -106,3 +106,5 @@ from .version import __version__  # noqa: F401
 from .math import *  # noqa: F403
 
 from . import ir  # noqa: F401
+
+from . import tileop  # noqa: F401

@@ -2,7 +2,7 @@ import tilelang.language as T
 from typing import Union, Tuple, Optional, Literal, Callable
 from tilelang.common import TransformKind
 from tvm import DataType
-from tvm.tir import PrimExpr, IndexMap, Buffer
+from tvm.tir import PrimExpr, IndexMap, Buffer, Var
 from tvm.runtime import convert
 from .utils import (
     mma_store_index_map,
@@ -50,6 +50,7 @@ class TensorCoreIntrinEmitter(object):
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
         is_m_first: Optional[bool] = False,
+        thread_var: Optional[Var] = None,
     ):
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
@@ -74,6 +75,7 @@ class TensorCoreIntrinEmitter(object):
         self.reduce_k = reduce_k
         self.threads = self.WARP_SIZE * (block_row_warps * block_col_warps) * reduce_k
         self.num_elems_per_byte = num_elems_per_byte
+        self.thread_var = thread_var
 
         if self.warp_rows == 0 or self.warp_cols == 0:
             raise ValueError(
@@ -111,6 +113,14 @@ class TensorCoreIntrinEmitter(object):
     def _initialize_is_m_first(self, is_m_first: Optional[bool] = False):
         if is_m_first is not None:
             self.is_m_first = is_m_first
+
+    def get_thread_binding(self):
+        if self.thread_var is None:
+            current_frame = T.KernelLaunchFrame.Current()
+            assert current_frame is not None, "Must be called in a T.Kernel Frame"
+            return current_frame.get_thread_binding()
+        else:
+            return self.thread_var
 
     def get_store_index_map(self, inverse: bool = False) -> IndexMap:
         warp_size, local_size_c = self.WARP_SIZE, self.local_size_out
@@ -166,8 +176,7 @@ class TensorCoreIntrinEmitter(object):
         a_dtype = self.a_dtype
         a_transposed = self.a_transposed
 
-        current_frame = T.KernelLaunchFrame.Current()
-        thread_binding = current_frame.get_thread_binding()
+        thread_binding = self.get_thread_binding()
 
         @T.macro
         def _warp_ldmatrix_a(
@@ -209,8 +218,7 @@ class TensorCoreIntrinEmitter(object):
         local_size_b = self.local_size_b
         b_dtype = self.b_dtype
         b_transposed = self.b_transposed
-        current_frame = T.KernelLaunchFrame.Current()
-        thread_binding = current_frame.get_thread_binding()
+        thread_binding = self.get_thread_binding()
 
         @T.macro
         def _warp_ldmatrix_b(
@@ -229,7 +237,6 @@ class TensorCoreIntrinEmitter(object):
                     warp_n * warp_col_tiles + j * micro_size_y,
                     rk * chunk + ki * micro_size_k,
                 )
-                B_shared_elem = B_shared_buf[ri, rj]
 
                 T.ptx_ldmatrix(
                     b_dtype,
@@ -238,7 +245,7 @@ class TensorCoreIntrinEmitter(object):
                     ".b16",
                     B_local_buf.data,
                     j * local_size_b,
-                    T.address_of(B_shared_elem),
+                    T.address_of(B_shared_buf[ri, rj]),
                     get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed),
                 )
 
@@ -318,8 +325,7 @@ class TensorCoreIntrinEmitter(object):
         C_buf_dims = len(C_buf.shape)
         assert C_buf_dims in {2, 4}, "C_buf should be 2D or 4D"
 
-        current_frame = T.KernelLaunchFrame.Current()
-        thread_binding = current_frame.get_thread_binding()
+        thread_binding = self.get_thread_binding()
 
         # STS
         # MMA Store must be in simulated instead of TVM Intrins
@@ -632,8 +638,7 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         a_transposed = self.a_transposed
         transform_kind_a = self.transform_kind_a
 
-        current_frame = T.KernelLaunchFrame.Current()
-        thread_binding = current_frame.get_thread_binding()
+        thread_binding = self.get_thread_binding()
 
         @T.macro
         def _warp_ldmatrix_a(
@@ -740,8 +745,7 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         b_transposed = self.b_transposed
         num_elems_per_byte = self.num_elems_per_byte
 
-        current_frame = T.KernelLaunchFrame.Current()
-        thread_binding = current_frame.get_thread_binding()
+        thread_binding = self.get_thread_binding()
 
         @T.macro
         def _warp_ldmatrix_b(
