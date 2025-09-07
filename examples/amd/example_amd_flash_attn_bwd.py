@@ -194,6 +194,7 @@ def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
 def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups,
     block_M: int, block_N: int, num_stages: int, threads: int):
     sm_scale = (1.0 / dim)**0.5
+    scale = (1.0 / dim)**0.5 * 1.44269504 # log2(e)
     head_kv = heads // groups
     dtype = "float16"
     accum_dtype = "float"
@@ -208,52 +209,90 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups,
                        dK: T.Tensor([batch, seq_len, head_kv, dim], dtype), 
                        dV: T.Tensor([batch, seq_len, head_kv, dim], dtype)):
         with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=threads) as (bx, by, bz):
+            # Shared memory buffers
             K_shared = T.alloc_shared([block_M, dim], dtype)
             V_shared = T.alloc_shared([block_M, dim], dtype)
             q_shared = T.alloc_shared([block_N, dim], dtype)
             do_shared = T.alloc_shared([block_N, dim], dtype)
             lse_shared = T.alloc_shared([block_N], accum_dtype)
             delta_shared = T.alloc_shared([block_N], accum_dtype)
+            ds_shared = T.alloc_shared([block_M, block_N], dtype)
+            dv_shared = T.alloc_shared([block_M, dim], dtype)
+            dk_shared = T.alloc_shared([block_M, dim], dtype)
+
+            # Register fragments
             p_cast = T.alloc_fragment([block_M, block_N], dtype)
             qkT = T.alloc_fragment([block_M, block_N], accum_dtype)
-            P_acc = T.alloc_fragment([block_M, block_N], accum_dtype)
             dP = T.alloc_fragment([block_M, block_N], accum_dtype)
-            dS_cast_for_dk = T.alloc_fragment([block_M, block_N], dtype)
-            dS_cast_for_dq = T.alloc_fragment([block_M, block_N], dtype)
+            dS_acc = T.alloc_fragment([block_M, block_N], accum_dtype)
             dv = T.alloc_fragment([block_M, dim], accum_dtype)
             dk = T.alloc_fragment([block_M, dim], accum_dtype)
             dq = T.alloc_fragment([block_N, dim], accum_dtype)
-            
-            T.copy(K[bz, by * block_M:(by+1)*block_M, bx//groups, :], K_shared)
-            T.copy(V[bz, by * block_M:(by+1)*block_M, bx//groups, :], V_shared)
-            T.clear(dv); T.clear(dk)
-            loop_st = T.floordiv(by*block_M, block_N) if is_causal else 0
+
+            T.copy(K[bz, by * block_M:(by + 1) * block_M, bx // groups, :], K_shared)
+            T.copy(V[bz, by * block_M:(by + 1) * block_M, bx // groups, :], V_shared)
+            T.clear(dv)
+            T.clear(dk)
+
+            loop_st = T.floordiv(by * block_M, block_N) if is_causal else 0
             loop_ed = T.ceildiv(seq_len, block_N)
+
             for k in T.Pipelined(loop_st, loop_ed, num_stages=num_stages):
-                T.copy(Q[bz, k*block_N:(k+1)*block_N, bx, :], q_shared)
+                T.copy(Q[bz, k * block_N:(k + 1) * block_N, bx, :], q_shared)
+                
                 T.clear(qkT)
-                T.gemm(q_shared, K_shared, qkT, transpose_B=True, policy=GemmWarpPolicy.FullRow)
-                T.copy(qkT, P_acc)
-                T.copy(lse[bz, bx, k*block_N:(k+1)*block_N], lse_shared)
-                for i,j in T.Parallel(block_M, block_N): P_acc[i,j] = T.exp(P_acc[i,j]*sm_scale - lse_shared[j])
+                T.gemm(K_shared, q_shared, qkT, transpose_B=True, policy=GemmWarpPolicy.FullRow)
+
+                T.copy(lse[bz, bx, k * block_N:(k + 1) * block_N], lse_shared)
+                
+                # We need a separate fragment for P because qkT will be reused for dP
+                P_acc = T.alloc_fragment([block_M, block_N], accum_dtype)
+                for i, j in T.Parallel(block_M, block_N):
+                    P_acc[i, j] = T.exp2(qkT[i, j] * scale - lse_shared[j])
+
                 if is_causal:
-                    for i,j in T.Parallel(block_M, block_N): P_acc[i,j] = T.if_then_else(by*block_M+i >= k*block_N+j, P_acc[i,j], 0)
+                    for i, j in T.Parallel(block_M, block_N):
+                        P_acc[i, j] = T.if_then_else(by * block_M + i >= k * block_N + j, P_acc[i, j], 0)
+                
                 T.copy(P_acc, p_cast)
-                T.copy(dO[bz, k*block_N:(k+1)*block_N, bx, :], do_shared)
-                T.copy(Delta[bz, bx, k*block_N:(k+1)*block_N], delta_shared)
-                T.gemm(p_cast, do_shared, dv, transpose_A=True, policy=GemmWarpPolicy.FullRow)
+                
+                T.copy(dO[bz, k * block_N:(k + 1) * block_N, bx, :], do_shared)
+                T.gemm(p_cast, do_shared, dv, policy=GemmWarpPolicy.FullRow)
+                
                 T.clear(dP)
-                T.gemm(do_shared, V_shared, dP, transpose_B=True, policy=GemmWarpPolicy.FullRow)
-                for i,j in T.Parallel(block_M, block_N): P_acc[i,j] = P_acc[i,j] * (dP[i,j] - delta_shared[j]) * sm_scale
-                T.copy(P_acc, dS_cast_for_dk); T.copy(P_acc, dS_cast_for_dq)
-                T.gemm(dS_cast_for_dk, q_shared, dk, transpose_A=True, policy=GemmWarpPolicy.FullRow)
+                T.gemm(V_shared, do_shared, dP, transpose_B=True, policy=GemmWarpPolicy.FullRow)
+
+                T.copy(Delta[bz, bx, k * block_N:(k + 1) * block_N], delta_shared)
+                
+                for i, j in T.Parallel(block_M, block_N):
+                    dS_acc[i, j] = p_cast[i, j] * (dP[i, j] - delta_shared[j]) * sm_scale
+                
+                # --- START OF FIX: Use Shared Memory to Reset Layout ---
+                # 1. "Wash" the layout by copying dS to shared memory.
+                T.copy(dS_acc, ds_shared)
+                
+                # 2. Use the "clean" shared memory as input for the transposed GEMM to calculate dQ.
+                #    The compiler can now handle the transpose efficiently from the simple shared memory layout.
                 T.clear(dq)
-                T.gemm(dS_cast_for_dq, K_shared, dq, policy=GemmWarpPolicy.FullRow)
+                T.gemm(ds_shared, K_shared, dq, transpose_A=True, policy=GemmWarpPolicy.FullRow)
+
+                # 3. For dK, we still need a fragment. We can load it back from shared memory.
+                #    This ensures its layout is fresh and not tied to the dS_acc calculation.
+                ds_cast_for_dk = T.alloc_fragment([block_M, block_N], dtype)
+                T.copy(ds_shared, ds_cast_for_dk)
+                T.gemm(ds_cast_for_dk, q_shared, dk, policy=GemmWarpPolicy.FullRow)
+                # --- END OF FIX ---x j
+
+                # 直接写入dQ，避免使用atomic_add
+                # 注意：这假设每个Q块只被一个线程块处理
                 for i, j in T.Parallel(block_N, dim):
-                    if k*block_N+i < seq_len: T.atomic_add(dQ[bz, k*block_N+i, bx, j], dq[i,j])
-            
-            T.atomic_add(dV[bz, by*block_M:(by+1)*block_M, bx//groups, :], dv)
-            T.atomic_add(dK[bz, by*block_M:(by+1)*block_M, bx//groups, :], dk)
+                    if k * block_N + i < seq_len:
+                        dQ[bz, k * block_N + i, bx, j] = dq[i, j]
+
+            T.copy(dv, dv_shared)
+            T.copy(dk, dk_shared)
+            T.copy(dv_shared, dV[bz, by * block_M:(by + 1) * block_M, bx // groups, :])
+            T.copy(dk_shared, dK[bz, by * block_M:(by + 1) * block_M, bx // groups, :])
     return flash_bwd_main
 
 
@@ -287,7 +326,10 @@ def main(batch: int = 1, heads: int = 8, seq_len: int = 4096, dim: int = 128, is
         return
     print(f"Autotuning finished. Best Backward Configuration: {bwd_kernel.config}")
     
-    dQ_tl, dK_tl, dV_tl = bwd_kernel(q, k, v, dO, lse_tl, delta_tl)
+    dQ_tl = torch.empty_like(q)
+    dK_tl = torch.empty_like(k)
+    dV_tl = torch.empty_like(v)
+    bwd_kernel(q, k, v, dO, lse_tl, delta_tl, dQ_tl, dK_tl, dV_tl)
 
     q_ref = q.clone().detach().requires_grad_()
     k_ref = k.clone().detach().requires_grad_()
