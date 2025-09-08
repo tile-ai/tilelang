@@ -189,8 +189,12 @@ class TensorCoreIntrinEmitter(object):
             stride = A_shared_buf.shape[-1]
             tx, _, warp_m = self.extract_thread_binding(thread_binding)
             trans = self.a_transposed
-
+            
             for i in T.serial(warp_rows):
+                # Assign A_shared_buf_elem
+                wi, wk = warp_m * warp_row_tiles + i * micro_size_x, rk * chunk + ki * micro_size_k
+                A_shared_buf_elem = A_shared_buf[wk, wi] if a_transposed else A_shared_buf[wi, wk]
+
                 T.ptx_ldmatrix(
                     a_dtype,
                     T.bool(trans),
@@ -198,10 +202,7 @@ class TensorCoreIntrinEmitter(object):
                     ".b16",
                     A_local_buf.data,
                     i * local_size_a,
-                    T.address_of(A_shared_buf[
-                        warp_m * warp_row_tiles + i * micro_size_x,
-                        rk * chunk + ki * micro_size_k,
-                    ]),
+                    T.address_of(A_shared_buf_elem),
                     get_ldmatrix_offset("A", tx, 0, stride, a_dtype, a_transposed),
                 )
 
@@ -232,7 +233,7 @@ class TensorCoreIntrinEmitter(object):
         ):
             stride = B_shared_buf.shape[-1]
             tx, warp_n, _ = self.extract_thread_binding(thread_binding)
-            trans = not self.b_transposed
+            trans = not b_transposed
 
             for j in T.serial(warp_cols):
                 # Assign B_shared_elem
@@ -240,8 +241,7 @@ class TensorCoreIntrinEmitter(object):
                     warp_n * warp_col_tiles + j * micro_size_y,
                     rk * chunk + ki * micro_size_k,
                 )
-                B_shared_buf_elem = B_shared_buf[wi, wk] if self.b_transposed else B_shared_buf[wk,
-                                                                                                wi]
+                B_shared_buf_elem = B_shared_buf[wi, wk] if b_transposed else B_shared_buf[wk, wi]
 
                 T.ptx_ldmatrix(
                     b_dtype,
@@ -470,9 +470,6 @@ class TensorCoreIntrinEmitter(object):
         block_fragment = warp_fragment.repeat([warp_s, chunk // micro_size_r],
                                               repeat_on_thread=False,
                                               lower_dim_first=False)
-        print(f"base_fragment: {base_fragment}")
-        print(f"warp_fragment: {warp_fragment}")
-        print(f"block_fragment: {block_fragment}")
         return block_fragment
 
     def make_mma_store_layout(self, local_buf: Buffer) -> T.Fragment:

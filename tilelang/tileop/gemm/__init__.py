@@ -12,7 +12,7 @@ from tvm.runtime import Scriptable
 import tvm.ffi
 from tilelang.ir import GemmWarpPolicy
 from tilelang.transform.simplify import _Simplify
-
+from tilelang.utils.language import is_shared, is_fragment
 
 @tvm.ffi.register_func("tl.gemm_py.infer_layout")
 def gemm_py_infer_layout(gemm_py, target, thread_bounds):
@@ -73,12 +73,25 @@ class GemmPy(Node, Scriptable):
                 warp_col_tiles=warp_col_tiles,
                 chunk=self.chunk,
             )
-            layout_map = {
-                self.A: make_swizzled_layout(self.A),
-                self.B: make_swizzled_layout(self.B),
-                self.C: mma_emitter.make_mma_store_layout(self.C),
-            }
-            return layout_map
+            if self.is_gemm_ss():
+                return {
+                    self.A: make_swizzled_layout(self.A),
+                    self.B: make_swizzled_layout(self.B),
+                    self.C: mma_emitter.make_mma_store_layout(self.C),
+                }
+            elif self.is_gemm_sr():
+                raise NotImplementedError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+            elif self.is_gemm_rs():
+                return {
+                    # make mma load layout or ldmatrix layout?
+                    self.A: mma_emitter.make_mma_load_layout(self.A, matrix="A"),
+                    self.C: mma_emitter.make_mma_store_layout(self.C), 
+                    self.B: make_swizzled_layout(self.B),
+                }
+            elif self.is_gemm_rr():
+                raise NotImplementedError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+            else:
+                raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
         else:
             raise ValueError(f"Unsupported target: {target}")
 
@@ -115,37 +128,70 @@ class GemmPy(Node, Scriptable):
             B_shared = self.B
             C_local = self.C
 
-            @T.prim_func
-            def _gemm_ssr() -> None:
-                """
-                The inner macro that loads data from shared buffers A_shared and
-                B_shared into local fragments, then issues Tensor Core mma ops,
-                accumulating into C_local.
-                """
-                A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
-                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+            if self.is_gemm_ss():
+                @T.prim_func
+                def _gemm_ssr() -> None:
+                    """
+                    The inner macro that loads data from shared buffers A_shared and
+                    B_shared into local fragments, then issues Tensor Core mma ops,
+                    accumulating into C_local.
+                    """
+                    A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
+                    B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
 
-                for ki in T.serial(0, (block_K // micro_size_k)):
-                    # Load A into fragment
-                    mma_emitter.ldmatrix_a(
-                        A_local,
-                        A_shared,
-                        ki,
-                    )
+                    for ki in T.serial(0, (block_K // micro_size_k)):
+                        # Load A into fragment
+                        mma_emitter.ldmatrix_a(
+                            A_local,
+                            A_shared,
+                            ki,
+                        )
 
-                    # Load B into fragment
-                    mma_emitter.ldmatrix_b(
-                        B_local,
-                        B_shared,
-                        ki,
-                    )
+                        # Load B into fragment
+                        mma_emitter.ldmatrix_b(
+                            B_local,
+                            B_shared,
+                            ki,
+                        )
 
-                    # Perform Matrix Multiplication
-                    mma_emitter.mma(A_local, B_local, C_local)
+                        # Perform Matrix Multiplication
+                        mma_emitter.mma(A_local, B_local, C_local, ki)
 
-            # Simplify to optimize the index computing
-            # Must inline let statements to simplify the analysis
-            return _Simplify(_gemm_ssr, inline_let=True).body
+                # Simplify to optimize the index computing
+                # Must inline let statements to simplify the analysis
+                return _Simplify(_gemm_ssr, inline_let=True).body
+            elif self.is_gemm_sr():
+                raise NotImplementedError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+            elif self.is_gemm_rs():
+                A_local = self.A
+                @T.prim_func
+                def _gemm_rsr() -> None:
+                    """
+                    The inner macro that loads data from shared buffers A_shared and
+                    B_shared into local fragments, then issues Tensor Core mma ops,
+                    accumulating into C_local.
+                    """
+                    B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
+
+                    for ki in T.serial(0, (block_K // micro_size_k)):
+       
+                        # Load B into fragment
+                        mma_emitter.ldmatrix_b(
+                            B_local,
+                            B_shared,
+                            ki,
+                        )
+
+                        # Perform Matrix Multiplication
+                        mma_emitter.mma(A_local, B_local, C_local, ki)
+
+                # Simplify to optimize the index computing
+                # Must inline let statements to simplify the analysis
+                return _Simplify(_gemm_rsr, inline_let=True).body
+            elif self.is_gemm_rr():
+                raise NotImplementedError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+            else:
+                raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
         else:
             raise ValueError(f"Unsupported target: {target}")
 
@@ -161,3 +207,15 @@ class GemmPy(Node, Scriptable):
     @property
     def chunk(self) -> int:
         return self.A.shape[-2] if self.trans_A else self.A.shape[-1]
+
+    def is_gemm_ss(self) -> bool:
+        return is_shared(self.A) and is_shared(self.B)
+
+    def is_gemm_sr(self) -> bool:
+        return is_shared(self.A) and is_fragment(self.B)
+    
+    def is_gemm_rs(self) -> bool:
+        return is_fragment(self.A) and is_shared(self.B)
+    
+    def is_gemm_rr(self) -> bool:
+        return is_fragment(self.A) and is_fragment(self.B)
