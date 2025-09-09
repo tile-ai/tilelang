@@ -10,17 +10,18 @@ class AddWrapperForSingleStoreMutator(PyStmtExprMutator):
         self.inside_pfor = 0
 
     def visit_for_(self, op: For):
-        pfor = op.kind == ForKind.PARALLEL
+        pfor = op.kind == ForKind.PARALLEL or 'num_stages' in op.annotations
         self.inside_pfor += pfor
-        res = super().visit_for_(op)
+        super().visit_for_(op)
         self.inside_pfor -= pfor
-        return res
+        return op
 
     def visit_buffer_store_(self, op: BufferStore):
         if not self.inside_pfor:
             return For(Var("_", "int"), 0, 1, ForKind.PARALLEL, op)
         else:
-            return super().visit_buffer_store_(op)
+            super().visit_buffer_store_(op)
+            return op
 
 
 def AddWrapperForSingleBufStore():
