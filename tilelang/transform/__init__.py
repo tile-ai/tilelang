@@ -6,6 +6,7 @@ from .simplify import Simplify, simplify_prim_func  # noqa: F401
 from .pass_config import PassConfigKey  # noqa: F401
 from tilelang import tvm as tvm  # noqa: F401
 from tvm.ir.transform import PassContext  # noqa: F401
+from . import add_bufstore_wrapper
 
 
 def get_pass_context():
@@ -77,6 +78,9 @@ def FrontendLegalize():
         The result pass
     """
     return _ffi_api.FrontendLegalize()  # type: ignore
+
+
+AddWrapperForSingleBufStore = add_bufstore_wrapper.AddWrapperForSingleBufStore
 
 
 def InjectAssumes():
