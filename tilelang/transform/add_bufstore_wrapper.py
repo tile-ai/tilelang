@@ -1,4 +1,3 @@
-import tvm
 from tvm.tir import PyStmtExprMutator, BufferStore, For, ForKind, Var, PrimFunc
 from tvm.tir.functor import mutator
 from tvm.tir.transform import prim_func_pass
@@ -6,6 +5,7 @@ from tvm.tir.transform import prim_func_pass
 
 @mutator
 class AddWrapperForSingleStoreMutator(PyStmtExprMutator):
+
     def __init__(self):
         self.inside_pfor = 0
 
@@ -24,8 +24,10 @@ class AddWrapperForSingleStoreMutator(PyStmtExprMutator):
 
 
 def AddWrapperForSingleBufStore():
+
     def pass_fn(func: PrimFunc, mod, ctx):
         mut = AddWrapperForSingleStoreMutator()
         new_body = mut.visit_stmt(func.body)
         return func.with_body(new_body)
+
     return prim_func_pass(pass_fn, opt_level=0)
