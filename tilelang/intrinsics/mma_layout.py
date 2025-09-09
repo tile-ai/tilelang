@@ -47,18 +47,26 @@ def mma_store_32x8_to_shared_16x16_layout(thread_id, local_id):
 
 # sr represents spatial + reduction layout
 # the first axis is spatial while the second axis is reduction
-def shared_16x16_to_mma_32x8_layout_sr(i, j):
+# mma.sync matrix A layout, if wanna trans, please apply map_indices
+def shared_16x16_to_mma_a_32x8_layout(i, j):
     thread_id = 4 * (i % 8) + (j % 8) // 2
     return thread_id, 4 * (j // 8) + (i // 8) * 2 + (j % 2)
 
+def shared_16x16_to_mma_a_32x8_layout_trans(i, j):
+    return shared_16x16_to_mma_a_32x8_layout(j, i)
 
-def shared_16x16_to_mma_32x8_layout_rs(i, j):
-    thread_id = 4 * (j % 8) + (i % 8) // 2
-    return thread_id, 4 * (i // 8) + (j // 8) * 2 + (i % 2)
+# mma.sync matrix B layout, if wanna trans, please apply map_indices
+def shared_16x16_to_mma_b_32x8_layout(i, j):
+    thread_id = 4 * (i % 8) + (j % 8) // 2
+    return thread_id, 4 * (i // 8) + (j // 8) * 2 + (j % 2)
 
+def shared_16x16_to_mma_b_32x8_layout_trans(i, j):
+    return shared_16x16_to_mma_b_32x8_layout(j, i)
 
-shared_16x16_to_mma_32x8_layout = shared_16x16_to_mma_32x8_layout_sr
-shared_16x16_to_mma_32x8_layout_trans = shared_16x16_to_mma_32x8_layout_rs
+shared_16x16_to_mma_32x8_layout_sr_a = shared_16x16_to_mma_a_32x8_layout
+shared_16x16_to_mma_32x8_layout_sr_b = shared_16x16_to_mma_b_32x8_layout
+shared_16x16_to_mma_32x8_layout_rs_a = shared_16x16_to_mma_a_32x8_layout_trans
+shared_16x16_to_mma_32x8_layout_rs_b = shared_16x16_to_mma_b_32x8_layout_trans
 
 
 def shared_16x32_to_mma_32x16_layout(i, j):

@@ -205,16 +205,14 @@ Fragment makeGemmFragmentB(const int block_m, const int block_n,
   ICHECK(block_k % 16 == 0);
   if (transposed) {
     auto base_layout = makeGemmFragment8x8()->Repeat({1, 2}, false, false);
-    auto warp_layout = base_layout->Replicate(block_m / warp_m)
-                           ->Repeat({block_n / warp_n, 1}, true, false);
+    auto warp_layout = base_layout->Repeat({block_n / warp_n, 1}, true, false)->Replicate(block_m / warp_m);
     auto block_layout =
         warp_layout->Repeat({warp_n / 8, block_k / 16}, false, false);
     return block_layout;
   } else {
     auto base_layout =
         makeGemmFragment8x8Transposed()->Repeat({2, 1}, false, false);
-    auto warp_layout = base_layout->Replicate(block_m / warp_m)
-                           ->Repeat({1, block_n / warp_n}, true);
+    auto warp_layout = base_layout->Repeat({1, block_n / warp_n}, true)->Replicate(block_m / warp_m);
     auto block_layout =
         warp_layout->Repeat({block_k / 16, warp_n / 8}, false, true);
     return block_layout;

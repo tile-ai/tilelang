@@ -397,41 +397,54 @@ class TensorCoreIntrinEmitter(object):
         """
         from tilelang.utils import is_fragment
         from tilelang.intrinsics.mma_layout import (
-            shared_16x16_to_mma_32x8_layout_sr,
-            shared_16x16_to_mma_32x8_layout_rs,
+            shared_16x16_to_mma_32x8_layout_sr_a,
+            shared_16x16_to_mma_32x8_layout_sr_b,
             shared_16x32_to_mma_32x16_layout,
             shared_32x16_to_mma_32x16_layout,
         )
         assert matrix in ["A", "B"], "matrix should be either A or B"
-        dtype = self.a_dtype if matrix == "A" else self.b_dtype
+        matrix_is_a : bool = matrix == "A"
+        matrix_is_b : bool = matrix == "B"
+        dtype = self.a_dtype if matrix_is_a else self.b_dtype
         dtype_bits = DataType(dtype).bits
-        transposed = self.a_transposed
-        assert transposed is False, "transposed is not supported yet"
+        transposed = self.a_transposed if matrix_is_a else self.b_transposed
+
         # s represents spatial axis
         # r represents reduction axis
         # sr represents the two dims are spatial + reduction
         # rs represents the two dims are reduction + spatial
-        transform_func_sr: Callable = None
-        transform_func_rs: Callable = None
+        # sr also can represent a non-transposed basic layout
+        # then rs also can represent a transposed basic layout
+        transform_func_sr_a: Callable = None
+        transform_func_sr_b: Callable = None
         if dtype_bits == 16:
-            transform_func_sr = shared_16x16_to_mma_32x8_layout_sr
-            transform_func_rs = shared_16x16_to_mma_32x8_layout_rs
+            transform_func_sr_a = shared_16x16_to_mma_32x8_layout_sr_a
+            transform_func_sr_b = shared_16x16_to_mma_32x8_layout_sr_b
         elif dtype_bits == 8:
-            transform_func_sr = shared_16x32_to_mma_32x16_layout
-            transform_func_rs = shared_32x16_to_mma_32x16_layout
+            transform_func_sr_a = shared_16x32_to_mma_32x16_layout
+            transform_func_sr_b = shared_32x16_to_mma_32x16_layout
         else:
             raise ValueError(f"Unsupported dtype {dtype}")
+
         is_sr_conditions = [False]
-        is_sr_conditions.append(matrix == "A" and not transposed)
-        is_sr_conditions.append(matrix == "B" and transposed)
+        is_sr_conditions.append(matrix_is_a and not transposed)
+        is_sr_conditions.append(matrix_is_b and transposed)
         is_sr_axis_order = any(is_sr_conditions)
 
-        transform_func: Callable = transform_func_sr if is_sr_axis_order else transform_func_rs
+        # the layout of mma.sync is row.col.
+        # so the b matrix expected a transposed basic layout
+        transform_func: Callable = None
+        if matrix_is_a:
+            transform_func = transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(j, i)
+        elif matrix_is_b:
+            transform_func = transform_func_sr_b if is_sr_axis_order else lambda i, j: transform_func_sr_b(j, i)
+        else:
+            raise ValueError(f"Unsupported matrix {matrix}")
 
         assert is_fragment(local_buf), "local_buf must be a fragment, but got {}".format(
             local_buf.scope())
 
-        if matrix == "A":
+        if matrix_is_a:
             micro_size_s, micro_size_r = self.micro_size_x, self.micro_size_k
         else:
             micro_size_r, micro_size_s = self.micro_size_k, self.micro_size_y
@@ -440,10 +453,7 @@ class TensorCoreIntrinEmitter(object):
             self.block_row_warps,
             self.block_col_warps,
         )
-        warp_rows, warp_cols = self.warp_rows, self.warp_cols
-        warp_s = warp_rows if matrix == "A" else warp_cols
-        chunk = self.chunk
-        transform_func = transform_func
+
         inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype="int32")
 
         def forward_thread(i: int, j: int) -> int:
@@ -465,11 +475,44 @@ class TensorCoreIntrinEmitter(object):
             forward_thread_fn=forward_thread,
             forward_index_fn=forward_index,
         )
-        warp_fragment = base_fragment.repeat([block_row_warps, 1],
-                                             repeat_on_thread=True).replicate(block_col_warps)
-        block_fragment = warp_fragment.repeat([warp_s, chunk // micro_size_r],
-                                              repeat_on_thread=False,
-                                              lower_dim_first=False)
+        
+        warp_rows, warp_cols = self.warp_rows, self.warp_cols
+        chunk = self.chunk
+
+        warp_s = warp_rows if matrix_is_a else warp_cols
+        warp_r = chunk // micro_size_r
+        block_s = block_row_warps if matrix_is_a else block_col_warps
+        replicate = block_col_warps if matrix_is_a else block_row_warps
+
+        if is_sr_axis_order:
+            warp_fragment = base_fragment.repeat([warp_s, warp_r],
+                                                repeat_on_thread=False,
+                                                lower_dim_first=False)
+            if matrix_is_a:
+                block_fragment = warp_fragment.repeat([block_s, 1],
+                                                    repeat_on_thread=True,
+                                                    lower_dim_first=True).replicate(replicate)
+            elif matrix_is_b:
+                block_fragment = warp_fragment.replicate(replicate).repeat([block_s, 1],
+                                                    repeat_on_thread=True,
+                                                    lower_dim_first=True)
+            else:
+                raise ValueError(f"Unsupported matrix type {matrix}")
+        else:
+            warp_fragment = base_fragment.repeat([warp_r, warp_s],
+                                                repeat_on_thread=False,
+                                                lower_dim_first=True)
+            if matrix_is_a:
+                block_fragment = warp_fragment.repeat([1, block_s],
+                                                    repeat_on_thread=True,
+                                                    lower_dim_first=True).replicate(replicate)
+            elif matrix_is_b:
+                block_fragment = warp_fragment.replicate(replicate).repeat([1, block_s],
+                                                    repeat_on_thread=True,
+                                                    lower_dim_first=True)
+            else:
+                raise ValueError(f"Unsupported matrix type {matrix}")
+
         return block_fragment
 
     def make_mma_store_layout(self, local_buf: Buffer) -> T.Fragment:

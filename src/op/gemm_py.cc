@@ -12,6 +12,7 @@
 #include <tvm/tir/transform.h>
 
 #include "../target/utils.h"
+#include "tvm/ffi/string.h"
 
 namespace tvm {
 namespace tl {
@@ -224,9 +225,18 @@ Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       M, N, block_size, T.target, gemm_inst == GemmInst::kWGMMA);
 
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.lower")) {
-    auto stmt = Downcast<Stmt>(
+    auto prim_func = Downcast<PrimFunc>(
         (*f)(GetRef<GemmPy>(this), T.target, T.thread_bounds, T.thread_var));
-    return stmt;
+    BlockRealize block_realize = Downcast<BlockRealize>(prim_func->body);
+    ICHECK(prim_func->attrs.defined());
+    auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
+    ICHECK(global_symbol.defined());
+    auto block = block_realize->block;
+    {
+      BlockNode* n = block.CopyOnWrite();
+      n->name_hint = global_symbol.value();
+    }
+    return BlockRealize(block_realize->iter_values, block_realize->predicate, block);
   } else {
     LOG(FATAL) << "No lower function found for gemm_py";
   }

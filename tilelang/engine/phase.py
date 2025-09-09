@@ -140,7 +140,11 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tir.transform.PlanAndUpdateBufferAllocationLocation()(mod)
         mod = tilelang.transform.PipelinePlanning()(mod)
+        print("after pipeline planning")
+        print(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
+        print("after inject software pipeline")
+        print(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
         if allow_fence_proxy(target=target):
             # in hopper device, wgmma is an async proxy
