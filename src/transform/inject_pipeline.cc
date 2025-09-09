@@ -248,7 +248,6 @@ public:
         buffer_remap_.Set(buffer, RewriteAllocBuffer(buffer, num_versions));
       }
     }
-
     ordered_stmts_.resize(pipeline_info_.size());
     for (const auto &[block, anno] : pipeline_info_) {
       ordered_stmts_.Set(anno.order, block);
@@ -676,11 +675,6 @@ private:
       new_block = Downcast<Block>(Substitute(
           new_block, {{pipeline_loop_->loop_var, normalized_access_index}}));
 
-      Array<Array<BufferRegion>> access = GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
-      BlockNode* n = new_block.CopyOnWrite();
-      n->reads = access[0];
-      n->writes = access[1];
-
       if (pipeline_info_[block].async) {
         auto &local_state = async_states_local[stage];
         local_state.producer_head = normalized_access_index;
@@ -956,6 +950,11 @@ private:
     }
 
     Block block = Downcast<Block>(StmtExprMutator::VisitStmt_(op));
+
+    Array<Array<BufferRegion>> access = GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
+    BlockNode* n = block.CopyOnWrite();
+    n->reads = access[0];
+    n->writes = access[1];
 
     for (const auto &buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.erase(buffer->data);

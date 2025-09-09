@@ -90,7 +90,6 @@ def run_gemm_ss(
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         })
-    print(kernel.get_kernel_source())
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -209,7 +208,6 @@ def run_gemm_rs(
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         })
-    print(kernel.get_kernel_source())
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -280,10 +278,7 @@ def matmul_sr(
                 else:
                     T.copy(B[k * block_K, bx * block_N], B_shared)
                 T.copy(B_shared, B_frag)
-                # for i, j in T.Parallel(block_N, block_K):
-                #     B_frag[i, j] = B_shared[j, i]
-                # T.gemm_v2(A_shared, B_frag, C_local, trans_A, trans_B)
-                T.gemm(A_shared, B_frag, C_local, trans_A, trans_B)
+                T.gemm_v2(A_shared, B_frag, C_local, trans_A, trans_B)
             T.copy(C_local, C[by * block_M, bx * block_N])
 
     return main
@@ -327,7 +322,6 @@ def run_gemm_sr(
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         })
-    print(kernel.get_kernel_source())
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -448,7 +442,6 @@ def run_gemm_rr(
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         })
-    print(kernel.get_kernel_source())
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -478,9 +471,13 @@ if __name__ == "__main__":
     # tilelang.testing.main()
     tilelang.disable_cache()
     # test_gemm_ss()
-    run_gemm_sr(128, 128, 128, False, False, "float16", "float16", "float16", 128, 128, 32, 2)
+    # test_gemm_sr()
+    # test_gemm_rs()
+    # test_gemm_rr()
+    
+    # run_gemm_sr(128, 128, 128, False, False, "float16", "float16", "float16", 128, 128, 32, 2)
     # tilelang.testing.set_random_seed(42)
-    # run_gemm_ss(128, 128, 128, False, True, "float16", "float16", "float16", 128, 128, 32, 1)
+    run_gemm_ss(128, 128, 128, False, True, "float16", "float16", "float16", 128, 128, 32, 1)
     # print("gemm fp16 nt ss done")
     # exit()
     

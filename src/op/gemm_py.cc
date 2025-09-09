@@ -227,16 +227,25 @@ Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.lower")) {
     auto prim_func = Downcast<PrimFunc>(
         (*f)(GetRef<GemmPy>(this), T.target, T.thread_bounds, T.thread_var));
-    BlockRealize block_realize = Downcast<BlockRealize>(prim_func->body);
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.defined());
-    auto block = block_realize->block;
-    {
-      BlockNode* n = block.CopyOnWrite();
-      n->name_hint = global_symbol.value();
+    if (prim_func->body.as<BlockRealizeNode>()) {
+      BlockRealize block_realize = Downcast<BlockRealize>(prim_func->body);
+      auto block = block_realize->block;
+      {
+        BlockNode* n = block.CopyOnWrite();
+        n->name_hint = global_symbol.value();
+      }
+      return BlockRealize(block_realize->iter_values, block_realize->predicate, block);
     }
-    return BlockRealize(block_realize->iter_values, block_realize->predicate, block);
+    // warp with block realize node
+    return BlockRealize(
+      /*iter_values=*/Array<PrimExpr>(),
+      /*predicate=*/const_true(),
+      /*block=*/
+      Block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+            /*name_hint=*/global_symbol.value(), prim_func->body)); 
   } else {
     LOG(FATAL) << "No lower function found for gemm_py";
   }
