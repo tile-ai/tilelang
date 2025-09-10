@@ -8,6 +8,18 @@ namespace tl {
 // Trait to determine the MFMA instruction to use based on data type
 template <typename T> struct MfmaTraits;
 
+// Specialization for int8
+template <> struct MfmaTraits<int8_t> {
+  template <typename AccType>
+  static TL_DEVICE void mfma_op(const int8_t *b, const int8_t *a, AccType *c) {
+    int64_t *b_packed = reinterpret_cast<int64_t *>(const_cast<int8_t *>(b));
+    int64_t *a_packed = reinterpret_cast<int64_t *>(const_cast<int8_t *>(a));
+
+    *c = __builtin_amdgcn_mfma_i32_16x16x32_i8(*b_packed, *a_packed, *c, 0, 0,
+                                               0);
+  }
+};
+
 // Specialization for half/float16
 template <> struct MfmaTraits<half> {
   template <typename AccType>
