@@ -90,7 +90,6 @@ def run_gemm_ss(
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         })
 
-    print(kernel.get_kernel_source())
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 
     def ref_program(A, B):
