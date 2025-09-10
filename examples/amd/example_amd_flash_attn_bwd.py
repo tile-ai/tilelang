@@ -418,11 +418,14 @@ def main(batch: int = 1,
     
     print(f"Test configuration: batch={batch}, heads={heads}, seq_len={seq_len}, dim={dim}, is_causal={is_causal}, groups={groups}")
     
-    # Calculate FLOPs
-    flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
-    total_flops = 2 * flops_per_matmul  # QK^T and PV matrix multiplications
-    if is_causal:
-        total_flops *= 0.5  # Causal attention only needs to compute half the attention weights
+    # Calculate FLOPs for complete forward + backward pass
+    # Forward pass: Q@K^T + P@V (2 GEMMs)
+    # Backward pass: V^T@dO + P^T@dO + dS@K/dS^T@Q (3 additional GEMMs)
+    # Total: 5 GEMMs, each with cost 2*B*H*S*S*D
+    flops_per_gemm = 2.0 * batch * heads * seq_len * seq_len * dim
+    total_flops = 5 * flops_per_gemm  # Complete forward + backward pass
+    # if is_causal:
+    #     total_flops *= 0.5  # Causal attention only needs to compute half the attention weights
     
     print(f"Total FLOPs: {total_flops / 1e12:.2f} TFlops")
     
@@ -481,7 +484,7 @@ def main(batch: int = 1,
     k_ref = k.clone().detach().requires_grad_()
     v_ref = v.clone().detach().requires_grad_()
     
-    o_ref = ref_program(q_ref, k_ref, v_ref, is_causal, groups)
+    o_ref, _ = ref_program(q_ref, k_ref, v_ref, is_causal, groups)
     o_ref.backward(dO)
     
     # Verify backward pass correctness
@@ -513,18 +516,46 @@ def main(batch: int = 1,
     # Performance benchmarking
     print("\n=== Performance Benchmarking ===")
     
-    # Test reference implementation performance
-    ref_latency = benchmark_function(ref_program_processed, q, k, v, warmup=10, repeat=100)
-    print(f"Reference (PyTorch): {ref_latency:.2f} ms | {total_flops / ref_latency * 1e-9:.2f} TFlops")
-    
-    # Test Tile-lang implementation performance
-    def run_fwd_kernel():
-        fwd_kernel(q, k, v)
+    # Test reference implementation performance (complete forward + backward)
+    def run_reference_fwd_bwd():
+        q_ref_bench = q.clone().detach().requires_grad_()
+        k_ref_bench = k.clone().detach().requires_grad_()
+        v_ref_bench = v.clone().detach().requires_grad_()
+        
+        # Forward pass
+        o_ref_bench, _ = ref_program(q_ref_bench, k_ref_bench, v_ref_bench, is_causal, groups)
+        
+        # Backward pass
+        o_ref_bench.backward(dO)
+        
         if torch.cuda.is_available():
             torch.cuda.synchronize()
     
-    tile_latency = benchmark_function(run_fwd_kernel, warmup=10, repeat=100)
-    print(f"Fast Flash Attention V2 (Tile-lang): {tile_latency:.2f} ms | {total_flops / tile_latency * 1e-9:.2f} TFlops")
+    ref_latency = benchmark_function(run_reference_fwd_bwd, warmup=10, repeat=100)
+    print(f"Reference PyTorch Forward+Backward: {ref_latency:.2f} ms | {total_flops / ref_latency * 1e-9:.2f} TFlops")
+    
+    # Test Tile-lang complete forward + backward implementation performance
+    def run_complete_fwd_bwd():
+        # Forward pass
+        o_tl_bench, lse_tl_bench = fwd_kernel(q, k, v)
+        
+        # Backward pass preprocessing
+        delta_tl_bench = bwd_prep(o_tl_bench, dO)
+        
+        # Complete backward pass
+        dQ_bench = torch.zeros_like(q, dtype=torch.float32)
+        dK_bench = torch.zeros_like(k, dtype=torch.float32)
+        dV_bench = torch.zeros_like(v, dtype=torch.float32)
+        bwd_kernel(q, k, v, dO, lse_tl_bench, delta_tl_bench, dQ_bench, dK_bench, dV_bench)
+        
+        # Post-process dQ
+        post_kernel(dQ_bench)
+        
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+    
+    tile_latency = benchmark_function(run_complete_fwd_bwd, warmup=10, repeat=100)
+    print(f"Complete Flash Attention V2 Forward+Backward (Tile-lang): {tile_latency:.2f} ms | {total_flops / tile_latency * 1e-9:.2f} TFlops")
     
     # Calculate speedup
     speedup = ref_latency / tile_latency
