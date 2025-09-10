@@ -31,10 +31,10 @@ def ref_program(Q, K, V, is_causal, groups=1):
 
 
 def get_fwd_configs():
-    block_M = [64, 128]
-    block_N = [32, 64]
-    threads = [128, 256]
-    num_stages = [0, 1]
+    block_M = [32, 64, 128, 256]
+    block_N = [16, 32, 64, 128]
+    threads = [64, 128, 256, 512]
+    num_stages = [0, 1, 2]
     configs = []
     for m, n, stages, t in itertools.product(block_M, block_N, num_stages, threads):
         configs.append({
@@ -132,9 +132,13 @@ def flashattn_fwd(
                     else:
                         acc_s[i, j] = T.exp(acc_s[i, j] - scores_max[i])
                 
-                T.copy(acc_s, acc_s_cast)
-                T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+                # First reduce_sum, then copy and gemm
                 T.reduce_sum(acc_s, scores_sum, dim=1)
+                
+                # Cast acc_s to dtype for the gemm operation
+                T.copy(acc_s, acc_s_cast)
+                    
+                T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
                 
                 # Update logsum
                 for i in T.Parallel(block_M):
@@ -167,12 +171,12 @@ def flashattn_fwd(
 
 def get_bwd_configs():
     """
-    使用排列组合生成反向传播的自动调优配置，不进行过滤
+    使用排列组合生成反向传播的自动调优配置，扩大搜索范围
     """
     block_M = [16, 32, 64, 128, 256]
     block_N = [16, 32, 64, 128, 256]
-    threads = [64, 128, 256, 512]
-    num_stages = [0, 1]
+    threads = [64, 128, 256, 512, 1024]
+    num_stages = [0, 1, 2]
     
     configs = []
     for m, n, stages, t in itertools.product(block_M, block_N, num_stages, threads):
@@ -477,7 +481,7 @@ def main(batch: int = 1,
     k_ref = k.clone().detach().requires_grad_()
     v_ref = v.clone().detach().requires_grad_()
     
-    o_ref, lse_ref = ref_program(q_ref, k_ref, v_ref, is_causal, groups)
+    o_ref = ref_program(q_ref, k_ref, v_ref, is_causal, groups)
     o_ref.backward(dO)
     
     # Verify backward pass correctness
