@@ -113,9 +113,11 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
             else:
                 return torch.randint(low=-2, high=3, size=shape, device=device, dtype=dtype)
         elif supply_type == TensorSupplyType.Uniform:
-            return torch.empty(*shape, device=device, dtype=dtype).uniform_(-1.0, 1.0)
+            return torch.empty(
+                *shape, device=device, dtype=torch.float32).uniform_(-1.0, 1.0).to(dtype)
         elif supply_type == TensorSupplyType.Normal:
-            return torch.empty(*shape, device=device, dtype=dtype).normal_(-1.0, 1.0)
+            return torch.empty(
+                *shape, device=device, dtype=torch.float32).normal_(-1.0, 1.0).to(dtype)
         elif supply_type == TensorSupplyType.Randn:
             return torch.randn(*shape, device=device).to(dtype)
         elif supply_type == TensorSupplyType.Zero:

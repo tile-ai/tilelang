@@ -951,8 +951,9 @@ private:
 
     Block block = Downcast<Block>(StmtExprMutator::VisitStmt_(op));
 
-    Array<Array<BufferRegion>> access = GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
-    BlockNode* n = block.CopyOnWrite();
+    Array<Array<BufferRegion>> access =
+        GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
+    BlockNode *n = block.CopyOnWrite();
     n->reads = access[0];
     n->writes = access[1];
 

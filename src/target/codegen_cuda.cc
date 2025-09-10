@@ -1331,16 +1331,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << "}\n";
     } else {
       std::string smem_elem_offset = this->PrintExpr(op->args[6]);
-      // need_cast_smem_ptr_to_int_ = true;
-      // this->stream << PrintLoadMatrixAssembly(trans, num, type, local_ptr,
-      //                                         local_elem_offset, smem_ptr,
-      //                                         smem_elem_offset);
       std::string func_name = "tl::ptx_ldmatrix_x" + std::to_string(num);
       if (trans == 1)
         func_name += "_trans";
-      // this->stream << func_name << "(" << local_ptr "" << ", " << smem_ptr << ");\n";
       this->PrintIndent();
-      this->stream << func_name << "(" << smem_ptr << " + " << smem_elem_offset<< ", " << local_ptr << " + " << local_elem_offset << ");\n";
+      this->stream << func_name << "(" << smem_ptr << " + " << smem_elem_offset
+                   << ", " << local_ptr << " + " << local_elem_offset << ");\n";
     }
   } else if (op->op.same_as(builtin::mma_store())) {
     int m = Downcast<Integer>(op->args[0])->value;

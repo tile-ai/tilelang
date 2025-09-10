@@ -402,7 +402,6 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
   PassContext pass_ctx = PassContext::Current();
   bool disable_tma_lower =
       pass_ctx->GetConfig<bool>(kDisableTMALower, false).value();
-
   auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma,
                                T.layout_map, T.analyzer, T.buffer_oob);
   if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore) {

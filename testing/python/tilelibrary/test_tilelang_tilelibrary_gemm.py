@@ -1,4 +1,3 @@
-from asyncio import threads
 from tilelang import tvm as tvm
 import tilelang.testing
 
@@ -90,7 +89,9 @@ def run_gemm_ss(
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         })
-    profiler = kernel.get_profiler()
+
+    print(kernel.get_kernel_source())
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 
     def ref_program(A, B):
         import torch
@@ -109,11 +110,21 @@ def run_gemm_ss(
 def test_gemm_ss():
     # More test case can be found in kernel/test_tilelang_kernel_gemm.py
     # GEMM tests for float16
-    run_gemm_ss(512, 1024, 768, False, True, "float16", "float16", "float16", 128, 128, 32, 0)
-    run_gemm_ss(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 128, 32, 0)
-    run_gemm_ss(512, 1024, 768, True, False, "float16", "float16", "float16", 128, 128, 32, 0)
-    run_gemm_ss(512, 1024, 768, True, True, "float16", "float16", "float16", 128, 128, 32, 0)
-    
+    run_gemm_ss(512, 1024, 768, False, True, "float16", "float16", "float16", 128, 128, 32, 2)
+    run_gemm_ss(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 128, 32, 2)
+    run_gemm_ss(512, 1024, 768, True, False, "float16", "float16", "float16", 128, 128, 32, 2)
+    run_gemm_ss(512, 1024, 768, True, True, "float16", "float16", "float16", 128, 128, 32, 2)
+    # n8 test
+    run_gemm_ss(128, 8, 32, False, True, "float16", "float16", "float16", 128, 8, 32, 0, 128)
+
+    # int8 test
+    run_gemm_ss(128, 128, 128, False, True, "int8", "int8", "int32", 128, 128, 32, 2)
+    run_gemm_ss(128, 128, 128, False, False, "int8", "int8", "int32", 128, 128, 32, 2)
+    run_gemm_ss(128, 128, 128, True, False, "int8", "int8", "int32", 128, 128, 32, 2)
+    run_gemm_ss(128, 128, 128, True, True, "int8", "int8", "int32", 128, 128, 32, 2)
+
+    # float8 tests
+    run_gemm_ss(128, 128, 128, True, True, "float8_e5m2", "float8_e5m2", "float32", 128, 128, 32, 2)
 
 
 def matmul_rs(
@@ -208,7 +219,7 @@ def run_gemm_rs(
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         })
-    profiler = kernel.get_profiler()
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 
     def ref_program(A, B):
         import torch
@@ -226,8 +237,22 @@ def run_gemm_rs(
 
 def test_gemm_rs():
     # GEMM tests for float16
-    run_gemm_rs(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 0)
-    run_gemm_rs(512, 1024, 768, False, True, "float16", "float16", "float16", 128, 256, 32, 0)
+    run_gemm_rs(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_gemm_rs(512, 1024, 768, False, True, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_gemm_rs(512, 1024, 768, True, False, "float16", "float16", "float16", 128, 256, 32, 2)
+    run_gemm_rs(512, 1024, 768, True, True, "float16", "float16", "float16", 128, 256, 32, 2)
+
+    # n8 tests
+    run_gemm_rs(128, 8, 32, False, True, "float16", "float16", "float16", 128, 8, 32, 0, 128)
+
+    # int8 tests
+    run_gemm_rs(128, 128, 128, False, True, "int8", "int8", "int32", 128, 128, 32, 2)
+    run_gemm_rs(128, 128, 128, False, False, "int8", "int8", "int32", 128, 128, 32, 2)
+    run_gemm_rs(128, 128, 128, True, False, "int8", "int8", "int32", 128, 128, 32, 2)
+    run_gemm_rs(128, 128, 128, True, True, "int8", "int8", "int32", 128, 128, 32, 2)
+
+    # float8 tests
+    run_gemm_rs(128, 128, 128, True, True, "float8_e5m2", "float8_e5m2", "float32", 128, 128, 32, 2)
 
 
 def matmul_sr(
@@ -322,7 +347,7 @@ def run_gemm_sr(
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         })
-    profiler = kernel.get_profiler()
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 
     def ref_program(A, B):
         import torch
@@ -344,6 +369,18 @@ def test_gemm_sr():
     run_gemm_sr(512, 1024, 768, False, True, "float16", "float16", "float16", 128, 256, 32, 2)
     run_gemm_sr(512, 1024, 768, True, False, "float16", "float16", "float16", 128, 256, 32, 2)
     run_gemm_sr(512, 1024, 768, True, True, "float16", "float16", "float16", 128, 256, 32, 2)
+
+    # n8 tests
+    run_gemm_sr(128, 8, 32, False, True, "float16", "float16", "float16", 128, 8, 32, 0, 128)
+
+    # int8 tests
+    run_gemm_sr(128, 128, 32, False, True, "int8", "int8", "int32", 128, 128, 32, 2)
+    run_gemm_sr(128, 128, 32, False, False, "int8", "int8", "int32", 128, 128, 32, 2)
+    run_gemm_sr(128, 128, 32, True, False, "int8", "int8", "int32", 128, 128, 32, 2)
+    run_gemm_sr(128, 128, 32, True, True, "int8", "int8", "int32", 128, 128, 32, 2)
+
+    # float8 tests
+    run_gemm_sr(128, 128, 128, True, True, "float8_e5m2", "float8_e5m2", "float32", 128, 128, 32, 2)
 
 
 def matmul_rr(
@@ -442,7 +479,7 @@ def run_gemm_rr(
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         })
-    profiler = kernel.get_profiler()
+    profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 
     def ref_program(A, B):
         import torch
@@ -465,40 +502,20 @@ def test_gemm_rr():
     run_gemm_rr(512, 1024, 768, True, False, "float16", "float16", "float16", 128, 256, 32, 2)
     run_gemm_rr(512, 1024, 768, True, True, "float16", "float16", "float16", 128, 256, 32, 2)
     run_gemm_rr(512, 1024, 768, False, True, "bfloat16", "bfloat16", "float", 128, 256, 32, 2)
+    # n8 tests
+    run_gemm_rr(128, 8, 128, False, True, "float16", "float16", "float16", 128, 8, 32, 2)
+    run_gemm_rr(128, 8, 128, False, True, "int8", "int8", "int32", 128, 8, 32, 2)
+
+    # int8 tests
+    run_gemm_rr(128, 128, 128, False, True, "int8", "int8", "int32", 128, 128, 32, 2)
+    run_gemm_rr(128, 128, 128, False, False, "int8", "int8", "int32", 128, 128, 32, 2)
+    run_gemm_rr(128, 128, 128, True, False, "int8", "int8", "int32", 128, 128, 32, 2)
+    run_gemm_rr(128, 128, 128, True, True, "int8", "int8", "int32", 128, 128, 32, 2)
+
+    # float8 tests
+    run_gemm_rr(128, 128, 128, True, True, "float8_e5m2", "float8_e5m2", "float32", 128, 128, 32, 2)
 
 
 if __name__ == "__main__":
     # tilelang.testing.main()
-    tilelang.disable_cache()
-    # test_gemm_ss()
-    # test_gemm_sr()
-    # test_gemm_rs()
-    # test_gemm_rr()
-    
-    # run_gemm_sr(128, 128, 128, False, False, "float16", "float16", "float16", 128, 128, 32, 2)
-    # tilelang.testing.set_random_seed(42)
-    run_gemm_ss(128, 128, 128, False, True, "float16", "float16", "float16", 128, 128, 32, 1)
-    # print("gemm fp16 nt ss done")
-    # exit()
-    
-    # run_gemm_rs(128, 128, 32, False, True, "float16", "float16", "float16", 128, 128, 32, 0)
-    # print("gemm fp16 nt rs done")
-    # run_gemm_rs(128, 128, 32, False, False, "float16", "float16", "float16", 128, 128, 32, 0)
-    # print("gemm fp16 nn rs done")
-    # run_gemm_rs(128, 128, 32, True, False, "float16", "float16", "float16", 128, 128, 32, 0)
-    # print("gemm fp16 tn rs done")
-    # run_gemm_rs(128, 128, 32, True, True, "float16", "float16", "float16", 128, 128, 32, 0)
-    # print("gemm fp16 tt rs done")
-
-    # run_gemm_rs(16, 16, 16, True, False, "float16", "float16", "float16", 16, 16, 16, 0, 32)
-
-    # run_gemm_rr(128, 128, 32, False, False, "bfloat16", "bfloat16", "float", 128, 128, 32, 0)
-    # print("gemm bf16 nn rr done")
-    # run_gemm_rr(128, 128, 32, False, True, "bfloat16", "bfloat16", "float", 128, 128, 32, 0)
-    # print("gemm bf16 nt rr done")
-    # run_gemm_rr(128, 128, 32, True, False, "bfloat16", "bfloat16", "float", 128, 128, 32, 0)
-    # print("gemm bf16 tn rr done")
-    # run_gemm_rr(128, 128, 32, True, True, "bfloat16", "bfloat16", "float", 128, 128, 32, 0)
-    # print("gemm bf16 tt rr done")
-    
-    
+    run_gemm_rr(128, 128, 128, True, True, "float8_e5m2", "float8_e5m2", "float32", 128, 128, 32, 2)

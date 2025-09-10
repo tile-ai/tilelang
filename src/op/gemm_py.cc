@@ -234,18 +234,19 @@ Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       BlockRealize block_realize = Downcast<BlockRealize>(prim_func->body);
       auto block = block_realize->block;
       {
-        BlockNode* n = block.CopyOnWrite();
+        BlockNode *n = block.CopyOnWrite();
         n->name_hint = global_symbol.value();
       }
-      return BlockRealize(block_realize->iter_values, block_realize->predicate, block);
+      return BlockRealize(block_realize->iter_values, block_realize->predicate,
+                          block);
     }
     // warp with block realize node
     return BlockRealize(
-      /*iter_values=*/Array<PrimExpr>(),
-      /*predicate=*/const_true(),
-      /*block=*/
-      Block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
-            /*name_hint=*/global_symbol.value(), prim_func->body)); 
+        /*iter_values=*/Array<PrimExpr>(),
+        /*predicate=*/const_true(),
+        /*block=*/
+        Block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
+              /*name_hint=*/global_symbol.value(), prim_func->body));
   } else {
     LOG(FATAL) << "No lower function found for gemm_py";
   }

@@ -244,7 +244,6 @@ GemmWarpPolicyNode::ComputeWarpPartition(int M, int N, int block_size,
     int best_m = 1;
     int best_n = 1;
     float best_balance = std::numeric_limits<float>::max();
-
     // Try all possible combinations that satisfy the constraints
     for (int m = 1; m <= max_m_warps && m <= num_warps; m++) {
       int n = num_warps / m;
@@ -252,6 +251,13 @@ GemmWarpPolicyNode::ComputeWarpPartition(int M, int N, int block_size,
       // Calculate how balanced this partition is
       float m_per_warp = static_cast<float>(M) / (m * kMPerWarp);
       float n_per_warp = static_cast<float>(N) / (n * kNPerWarp);
+      // m_per_warp and n_per_warp must be greater than 1
+      if (m_per_warp < 1 || n_per_warp < 1)
+        continue;
+      // m * n must equal num_warps
+      if (m * n != num_warps)
+        continue;
+
       float balance = std::abs(m_per_warp / n_per_warp - ideal_ratio);
 
       if (balance < best_balance) {
@@ -266,7 +272,6 @@ GemmWarpPolicyNode::ComputeWarpPartition(int M, int N, int block_size,
   } else {
     ICHECK(0) << "Unknown GemmWarpPolicy";
   }
-
   // Store the computed values in the object's member variables
   this->m_warp = m_warp;
   this->n_warp = n_warp;
