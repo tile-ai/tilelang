@@ -14,8 +14,8 @@
 #include <vector>
 
 #include "../op/builtin.h"
-#include "arith/pattern_match.h"
 #include "./ptx.h"
+#include "arith/pattern_match.h"
 
 namespace tvm {
 namespace codegen {

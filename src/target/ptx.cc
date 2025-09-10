@@ -69,12 +69,13 @@ enum class DataType : int {
   kBit64 = 22
 };
 
-static const char* dtype_str[] = {".s4",  ".u4",   ".s8",    ".u8",  ".s16",  ".u16",
-                                  ".s32", ".u32",  ".s64",   ".u64", ".e4m3", ".e5m2",
-                                  ".f16", ".bf16", ".f16x2", ".f32", ".tf32", ".f64",
-                                  ".b1",  ".b8",   ".b16",   ".b32", ".b64"};
-static const uint32_t num_bits[] = {4,  4,  8,  8,  16, 16, 32, 32, 64, 64, 8, 8,
-                                    16, 16, 32, 32, 32, 64, 1,  8,  16, 32, 64};
+static const char *dtype_str[] = {
+    ".s4",   ".u4",  ".s8",   ".u8",   ".s16", ".u16",  ".s32",   ".u32",
+    ".s64",  ".u64", ".e4m3", ".e5m2", ".f16", ".bf16", ".f16x2", ".f32",
+    ".tf32", ".f64", ".b1",   ".b8",   ".b16", ".b32",  ".b64"};
+static const uint32_t num_bits[] = {4,  4,  8, 8, 16, 16, 32, 32,
+                                    64, 64, 8, 8, 16, 16, 32, 32,
+                                    32, 64, 1, 8, 16, 32, 64};
 
 /*!
  * \brief Create PTX data type from string.
@@ -134,22 +135,27 @@ inline DataType DTypeFromString(const std::string str) {
 /*!
  * \brief Get the string representation of given PTX data type.
  */
-inline std::string DTypeToString(DataType dtype) { return dtype_str[static_cast<int>(dtype)]; }
+inline std::string DTypeToString(DataType dtype) {
+  return dtype_str[static_cast<int>(dtype)];
+}
 
 /*!
  * \brief Get the number of bits of given PTX data type.
  */
-inline uint32_t DTypeBits(DataType dtype) { return num_bits[static_cast<int>(dtype)]; }
+inline uint32_t DTypeBits(DataType dtype) {
+  return num_bits[static_cast<int>(dtype)];
+}
 
 /*!
  * \brief Extract the value m, n, k from string m*n*k*
  */
-inline std::tuple<int, int, int> ParseMMAShape(const std::string& str) {
-  size_t pos_m = str.find("m"), pos_n = str.find("n"), pos_k = str.find("k");
+inline std::tuple<int, int, int> ParseMMAShape(const std::string &str) {
+  size_t pos_m = str.find('m'), pos_n = str.find('n'), pos_k = str.find('k');
   CHECK(pos_m != str.npos && pos_n != str.npos && pos_k != str.npos)
       << "Cannot parse MMA shape " << str;
   int m = std::stoi(str.substr(pos_m + 1, pos_n - pos_m - 1)),
-      n = std::stoi(str.substr(pos_n + 1, pos_k - pos_n - 1)), k = std::stoi(str.substr(pos_k + 1));
+      n = std::stoi(str.substr(pos_n + 1, pos_k - pos_n - 1)),
+      k = std::stoi(str.substr(pos_k + 1));
   return std::make_tuple(m, n, k);
 }
 
@@ -161,7 +167,7 @@ enum class LayoutType : int { kRowMajor = 0, kColumnMajor = 1 };
 /*!
  * \brief Parse layout type
  */
-LayoutType LayoutTypeFromString(const std::string& str) {
+LayoutType LayoutTypeFromString(const std::string &str) {
   if (str == "row") {
     return LayoutType::kRowMajor;
   } else if (str == "col") {
@@ -171,7 +177,7 @@ LayoutType LayoutTypeFromString(const std::string& str) {
   }
 }
 
-static const char* layout_type_str[] = {"row", "col"};
+static const char *layout_type_str[] = {"row", "col"};
 
 /*!
  * \brief Convert layout type to string.
@@ -184,15 +190,18 @@ inline std::string LayoutTypeToString(LayoutType layout) {
  * \brief MMA Configurations, used to determine validity.
  */
 struct MMAConfig {
-  explicit MMAConfig(int m, int n, int k, DataType dtype_mul, bool use_bit_op, bool sparse)
-      : m(m), n(n), k(k), dtype_mul(dtype_mul), use_bit_op(use_bit_op), sparse(sparse) {}
+  explicit MMAConfig(int m, int n, int k, DataType dtype_mul, bool use_bit_op,
+                     bool sparse)
+      : m(m), n(n), k(k), dtype_mul(dtype_mul), use_bit_op(use_bit_op),
+        sparse(sparse) {}
   int m, n, k;
   DataType dtype_mul;
   bool use_bit_op;
   bool sparse;
-  inline bool operator==(const MMAConfig& other) {
-    return m == other.m && n == other.n && k == other.k && dtype_mul == other.dtype_mul &&
-           use_bit_op == other.use_bit_op && sparse == other.sparse;
+  inline bool operator==(const MMAConfig &other) {
+    return m == other.m && n == other.n && k == other.k &&
+           dtype_mul == other.dtype_mul && use_bit_op == other.use_bit_op &&
+           sparse == other.sparse;
   }
 };
 
@@ -248,77 +257,86 @@ const MMAConfig valid_mma_configs[] = {
 };
 
 /*!
- * \brief Check whether the multiplicand data type and accumulator data type is valid for MMA
- * computation.
- * \param dtype_a The data type of multiplicand a.
+ * \brief Check whether the multiplicand data type and accumulator data type is
+ * valid for MMA computation. \param dtype_a The data type of multiplicand a.
  * \param dtype_b The data type of multiplicand b.
  * \param dtype_c The data type of accumulator c.
  * \note Reference:
  * https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-data-types
  */
-void CheckMMADTypeCompatible(DataType dtype_a, DataType dtype_b, DataType dtype_c) {
-  std::string ab_not_match_err_str = "The multiplicands' data type " + DTypeToString(dtype_a) +
+void CheckMMADTypeCompatible(DataType dtype_a, DataType dtype_b,
+                             DataType dtype_c) {
+  std::string ab_not_match_err_str = "The multiplicands' data type " +
+                                     DTypeToString(dtype_a) +
                                      DTypeToString(dtype_b) + " do not match.";
   // check a and b
   switch (dtype_a) {
-    case DataType::kBit1:
-    case DataType::kFloat16:
-    case DataType::kBFloat16:
-    case DataType::kFloat32:
-    case DataType::kTensorFloat32:
-    case DataType::kFloat64:
-      CHECK(dtype_a == dtype_b) << ab_not_match_err_str;
-      break;
-    case DataType::kInt4:
-    case DataType::kUInt4:
-      CHECK(dtype_b == DataType::kInt4 || dtype_b == DataType::kUInt4) << ab_not_match_err_str;
-      break;
-    case DataType::kInt8:
-    case DataType::kUInt8:
-      CHECK(dtype_b == DataType::kInt8 || dtype_b == DataType::kUInt8) << ab_not_match_err_str;
-      break;
-    case DataType::kFloat8_e4m3:
-    case DataType::kFloat8_e5m2:
-      CHECK(dtype_b == DataType::kFloat8_e4m3 || dtype_b == DataType::kFloat8_e5m2)
-          << ab_not_match_err_str;
-      break;
-    default:
-      CHECK(false) << "Invalid multiplicand data types: " << DTypeToString(dtype_a)
-                   << DTypeToString(dtype_b);
+  case DataType::kBit1:
+  case DataType::kFloat16:
+  case DataType::kBFloat16:
+  case DataType::kFloat32:
+  case DataType::kTensorFloat32:
+  case DataType::kFloat64:
+    CHECK(dtype_a == dtype_b) << ab_not_match_err_str;
+    break;
+  case DataType::kInt4:
+  case DataType::kUInt4:
+    CHECK(dtype_b == DataType::kInt4 || dtype_b == DataType::kUInt4)
+        << ab_not_match_err_str;
+    break;
+  case DataType::kInt8:
+  case DataType::kUInt8:
+    CHECK(dtype_b == DataType::kInt8 || dtype_b == DataType::kUInt8)
+        << ab_not_match_err_str;
+    break;
+  case DataType::kFloat8_e4m3:
+  case DataType::kFloat8_e5m2:
+    CHECK(dtype_b == DataType::kFloat8_e4m3 ||
+          dtype_b == DataType::kFloat8_e5m2)
+        << ab_not_match_err_str;
+    break;
+  default:
+    CHECK(false) << "Invalid multiplicand data types: "
+                 << DTypeToString(dtype_a) << DTypeToString(dtype_b);
   }
   // check a,b and c
   switch (dtype_a) {
-    case DataType::kBit1:
-    case DataType::kInt4:
-    case DataType::kUInt4:
-    case DataType::kInt8:
-    case DataType::kUInt8:
-      CHECK(dtype_c == DataType::kInt32)
-          << "For multiplicand data type " << DTypeToString(dtype_a) << DTypeToString(dtype_b)
-          << ", accumulator data type should be s32.";
-      break;
-    case DataType::kFloat16:
-      CHECK(dtype_c == DataType::kFloat16 || dtype_c == DataType::kFloat32)
-          << "For multiplicand data type f16, accumulator data type should be f16/f32.";
-      break;
-    case DataType::kBFloat16:
-    case DataType::kFloat32:
-    case DataType::kTensorFloat32:
-      CHECK(dtype_c == DataType::kFloat32)
-          << "For multiplicand data type bf16/tf32, accumulator data type can only be f32.";
-      break;
-    case DataType::kFloat64:
-      CHECK(dtype_c == DataType::kFloat64)
-          << "For multiplicand data type f64, accumulator data type can only be f64.";
-      break;
-    case DataType::kFloat8_e4m3:
-    case DataType::kFloat8_e5m2:
-      CHECK(dtype_c == DataType::kFloat32)
-          << "For multiplicand data type e4m3/e5m2, accumulator data type can only be f32.";
-      break;
-    default:
-      CHECK(false) << "Invalid multiplicand/accumulator data types: " << DTypeToString(dtype_a)
-                   << DTypeToString(dtype_b) << DTypeToString(dtype_c) << ".";
+  case DataType::kBit1:
+  case DataType::kInt4:
+  case DataType::kUInt4:
+  case DataType::kInt8:
+  case DataType::kUInt8:
+    CHECK(dtype_c == DataType::kInt32)
+        << "For multiplicand data type " << DTypeToString(dtype_a)
+        << DTypeToString(dtype_b) << ", accumulator data type should be s32.";
+    break;
+  case DataType::kFloat16:
+    CHECK(dtype_c == DataType::kFloat16 || dtype_c == DataType::kFloat32)
+        << "For multiplicand data type f16, accumulator data type should be "
+           "f16/f32.";
+    break;
+  case DataType::kBFloat16:
+  case DataType::kFloat32:
+  case DataType::kTensorFloat32:
+    CHECK(dtype_c == DataType::kFloat32)
+        << "For multiplicand data type bf16/tf32, accumulator data type can "
+           "only be f32.";
+    break;
+  case DataType::kFloat64:
+    CHECK(dtype_c == DataType::kFloat64)
+        << "For multiplicand data type f64, accumulator data type can only be "
+           "f64.";
+    break;
+  case DataType::kFloat8_e4m3:
+  case DataType::kFloat8_e5m2:
+    CHECK(dtype_c == DataType::kFloat32)
+        << "For multiplicand data type e4m3/e5m2, accumulator data type can "
+           "only be f32.";
+    break;
+  default:
+    CHECK(false) << "Invalid multiplicand/accumulator data types: "
+                 << DTypeToString(dtype_a) << DTypeToString(dtype_b)
+                 << DTypeToString(dtype_c) << ".";
   }
 }
 
@@ -332,37 +350,41 @@ void CheckMMADTypeCompatible(DataType dtype_a, DataType dtype_b, DataType dtype_
  * \param dtype_a The data type of multiplicand A.
  * \param dtype_b The data type of multiplicand B.
  * \param dtype_c The data type of accumulator C.
- * \param bit_op The bit operator for 1-bit MMA computation, can be "xor"/"and" or ""(if it's not
- * 1-bit MMA).
- * \param sparse Whether it's Sparse MMA or not.
+ * \param bit_op The bit operator for 1-bit MMA computation, can be "xor"/"and"
+ * or ""(if it's not 1-bit MMA). \param sparse Whether it's Sparse MMA or not.
  * \param saturate Whether saturate output or not.
  */
-void CheckMMAConfigValidity(int m, int n, int k, LayoutType layout_a, LayoutType layout_b,
-                            DataType dtype_a, DataType dtype_b, DataType dtype_c,
-                            const std::string& bit_op, bool sparse, bool saturate) {
-  CHECK(bit_op == "xor" || bit_op == "and" || bit_op == "")
+void CheckMMAConfigValidity(int m, int n, int k, LayoutType layout_a,
+                            LayoutType layout_b, DataType dtype_a,
+                            DataType dtype_b, DataType dtype_c,
+                            const std::string &bit_op, bool sparse,
+                            bool saturate) {
+  CHECK(bit_op == "xor" || bit_op == "and" || bit_op.empty())
       << "Unrecognized 1-bit operation " << bit_op << " , can only be xor/and.";
   bool use_bit_op = !bit_op.empty();
   if (use_bit_op) {
-    CHECK(dtype_a == DataType::kBit1) << "Bit operator is only compatible with 1-bit multiplicand.";
+    CHECK(dtype_a == DataType::kBit1)
+        << "Bit operator is only compatible with 1-bit multiplicand.";
   }
   CheckMMADTypeCompatible(dtype_a, dtype_b, dtype_c);
   if (saturate) {
-    CHECK(dtype_a == DataType::kInt4 || dtype_a == DataType::kUInt4 || dtype_a == DataType::kInt8 ||
-          dtype_a == DataType::kUInt8)
-        << "Output saturation only applicable to multiplicand type s4/u4/s8/u8.";
+    CHECK(dtype_a == DataType::kInt4 || dtype_a == DataType::kUInt4 ||
+          dtype_a == DataType::kInt8 || dtype_a == DataType::kUInt8)
+        << "Output saturation only applicable to multiplicand type "
+           "s4/u4/s8/u8.";
   }
 
   if (!(m == 8 && n == 8 && k == 4 && dtype_a == ptx::DataType::kFloat16)) {
     // Only MMA on m8n8k4 for fp16 supports customized layouts.
-    CHECK(layout_a == LayoutType::kRowMajor && layout_b == LayoutType::kColumnMajor)
+    CHECK(layout_a == LayoutType::kRowMajor &&
+          layout_b == LayoutType::kColumnMajor)
         << "Invalid layout combination " << LayoutTypeToString(layout_a) << ","
         << LayoutTypeToString(layout_b) << ".";
   }
 
   MMAConfig config(m, n, k, dtype_a, use_bit_op, sparse);
   bool match = false;
-  for (const MMAConfig& valid_config : valid_mma_configs) {
+  for (const MMAConfig &valid_config : valid_mma_configs) {
     if (config == valid_config) {
       match = true;
       break;
@@ -375,7 +397,7 @@ void CheckMMAConfigValidity(int m, int n, int k, LayoutType layout_a, LayoutType
  * \brief Fragment attributes
  */
 class FragAttrs {
- public:
+public:
   explicit FragAttrs(char reg_type, uint32_t size, std::string ptr_type)
       : reg_type(reg_type), size(size), ptr_type(ptr_type) {}
   /*! \brief PTX register type */
@@ -391,43 +413,44 @@ class FragAttrs {
  */
 inline FragAttrs GetFragAttrs(DataType dtype) {
   switch (dtype) {
-    case DataType::kBit1:
-    case DataType::kInt4:
-    case DataType::kUInt4:
-    case DataType::kInt8:
-    case DataType::kUInt8:
-    case DataType::kFloat8_e4m3:
-    case DataType::kFloat8_e5m2:
-    case DataType::kBit16:
-    case DataType::kFloat16:  // .f16x2 register
-    case DataType::kBFloat16:
-    case DataType::kTensorFloat32:
-      return FragAttrs('r', 32, "(unsigned *)");
-    case DataType::kInt32:
-      return FragAttrs('r', 32, "(int *)");
-    case DataType::kFloat32:
-      return FragAttrs('f', 32, "(float *)");
-    case DataType::kFloat64:
-      return FragAttrs('d', 64, "(double *)");
-    default:
-      ICHECK(false) << DTypeToString(dtype) << " is not matrix data type in MMA.";
-      return FragAttrs('\0', 0, "");
+  case DataType::kBit1:
+  case DataType::kInt4:
+  case DataType::kUInt4:
+  case DataType::kInt8:
+  case DataType::kUInt8:
+  case DataType::kFloat8_e4m3:
+  case DataType::kFloat8_e5m2:
+  case DataType::kBit16:
+  case DataType::kFloat16: // .f16x2 register
+  case DataType::kBFloat16:
+  case DataType::kTensorFloat32:
+    return FragAttrs('r', 32, "(unsigned *)");
+  case DataType::kInt32:
+    return FragAttrs('r', 32, "(int *)");
+  case DataType::kFloat32:
+    return FragAttrs('f', 32, "(float *)");
+  case DataType::kFloat64:
+    return FragAttrs('d', 64, "(double *)");
+  default:
+    ICHECK(false) << DTypeToString(dtype) << " is not matrix data type in MMA.";
+    return FragAttrs('\0', 0, "");
   }
 }
 
-};  // namespace ptx
+}; // namespace ptx
 
 /*!
  * \brief Replace patterns with replacement strings.
  * \note should use std::format instead when codebase is ported to C++20.
  */
 class Replacer {
- public:
-  void register_rule(const std::string& pattern, const std::string& replacement) {
+public:
+  void register_rule(const std::string &pattern,
+                     const std::string &replacement) {
     _rules.emplace_back(pattern, replacement);
   }
   std::string rewrite(std::string str) {
-    for (auto&& rule : _rules) {
+    for (auto &&rule : _rules) {
       auto [pattern, replacement] = rule;
       size_t len = pattern.size();
       size_t new_len = replacement.size();
@@ -441,14 +464,15 @@ class Replacer {
   }
   void empty_rules() { _rules.clear(); }
 
- private:
+private:
   std::vector<std::pair<std::string, std::string>> _rules;
 };
 
 /*!
  * \brief Get the number of MMA computations for given shape and datatype.
  */
-inline uint32_t GetNumMMAComputations(int m, int n, int k, ptx::DataType dtype) {
+inline uint32_t GetNumMMAComputations(int m, int n, int k,
+                                      ptx::DataType dtype) {
   if (m == 8 && n == 8 && k == 4 && dtype == ptx::DataType::kFloat16) {
     // MMA for m8n8k4 on fp16 would launch 4 MMA computations instead of one.
     return 4;
@@ -458,30 +482,29 @@ inline uint32_t GetNumMMAComputations(int m, int n, int k, ptx::DataType dtype) 
 }
 
 /*!
- * \brief Return template string, input operands string and output operands string.
- * \param m The M in mMnNkK of MMA instructions.
- * \param n The N in mMnNkK of MMA instructions.
- * \param k The K in mMnNkK of MMA instructions.
+ * \brief Return template string, input operands string and output operands
+ * string. \param m The M in mMnNkK of MMA instructions. \param n The N in
+ * mMnNkK of MMA instructions. \param k The K in mMnNkK of MMA instructions.
  * \param dtype_a The data type of multiplicand a.
  * \param dtype_b The data type of multiplicand b.
  * \param dtype_c The data type of accumulator c.
  * \param sparse Whether it's Sparse MMA or not.
  */
-inline std::tuple<std::string, std::string, std::string> GetMMAOperands(int m, int n, int k,
-                                                                        ptx::DataType dtype_a,
-                                                                        ptx::DataType dtype_b,
-                                                                        ptx::DataType dtype_c,
-                                                                        bool sparse) {
+inline std::tuple<std::string, std::string, std::string>
+GetMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
+               ptx::DataType dtype_b, ptx::DataType dtype_c, bool sparse) {
   std::stringstream templates, inputs, outputs;
   const ptx::FragAttrs frag_attr_a = ptx::GetFragAttrs(dtype_a),
                        frag_attr_b = ptx::GetFragAttrs(dtype_b),
                        frag_attr_c = ptx::GetFragAttrs(dtype_c);
   constexpr uint32_t warp_size = 32;
   const uint32_t threads = warp_size / GetNumMMAComputations(m, n, k, dtype_a);
-  const int num_operands_a =
-                (m * k) * ptx::DTypeBits(dtype_a) / frag_attr_a.size / threads / (sparse ? 2 : 1),
-            num_operands_b = (k * n) * ptx::DTypeBits(dtype_b) / frag_attr_b.size / threads,
-            num_operands_c = (m * n) * ptx::DTypeBits(dtype_c) / frag_attr_c.size / threads;
+  const int num_operands_a = (m * k) * ptx::DTypeBits(dtype_a) /
+                             frag_attr_a.size / threads / (sparse ? 2 : 1),
+            num_operands_b =
+                (k * n) * ptx::DTypeBits(dtype_b) / frag_attr_b.size / threads,
+            num_operands_c =
+                (m * n) * ptx::DTypeBits(dtype_c) / frag_attr_c.size / threads;
 
   // generate templates;
   int arg_counter = 0;
@@ -516,16 +539,16 @@ inline std::tuple<std::string, std::string, std::string> GetMMAOperands(int m, i
     if (i != 0) {
       inputs << ", ";
     }
-    inputs << "\"" << frag_attr_a.reg_type << "\"((" << frag_attr_a.ptr_type << "(A))[" << i
-           << "])";
+    inputs << "\"" << frag_attr_a.reg_type << "\"((" << frag_attr_a.ptr_type
+           << "(A))[" << i << "])";
   }
   for (int i = 0; i < num_operands_b; ++i) {
-    inputs << ", \"" << frag_attr_b.reg_type << "\"((" << frag_attr_b.ptr_type << "(B))[" << i
-           << "])";
+    inputs << ", \"" << frag_attr_b.reg_type << "\"((" << frag_attr_b.ptr_type
+           << "(B))[" << i << "])";
   }
   for (int i = 0; i < num_operands_c; ++i) {
-    inputs << ", \"" << frag_attr_c.reg_type << "\"((" << frag_attr_c.ptr_type << "(C))[" << i
-           << "])";
+    inputs << ", \"" << frag_attr_c.reg_type << "\"((" << frag_attr_c.ptr_type
+           << "(C))[" << i << "])";
   }
   // input of metadata for sparse mma.
   if (sparse) {
@@ -537,22 +560,25 @@ inline std::tuple<std::string, std::string, std::string> GetMMAOperands(int m, i
     if (i != 0) {
       outputs << ",";
     }
-    outputs << " \"=" << frag_attr_c.reg_type << "\"((" << frag_attr_c.ptr_type << "(D))[" << i
-            << "])";
+    outputs << " \"=" << frag_attr_c.reg_type << "\"((" << frag_attr_c.ptr_type
+            << "(D))[" << i << "])";
   }
   return std::make_tuple(templates.str(), inputs.str(), outputs.str());
 }
 
-std::string PrintMMAAssembly(const std::string& shape, const std::string& A_layout,
-                             const std::string& B_layout, const std::string& A_dtype,
-                             const std::string& B_dtype, const std::string& C_dtype,
-                             const std::string& a_ptr, const std::string& a_elem_offset,
-                             const std::string& b_ptr, const std::string& b_elem_offset,
-                             const std::string& c_ptr, const std::string& c_elem_offset,
-                             const std::string& metadata, const std::string& metadata_offset,
-                             const std::string& sparsity_selector, const std::string& bit_op,
-                             bool sparse, bool saturate) {
-  ptx::DataType dtype_a = ptx::DTypeFromString(A_dtype), dtype_b = ptx::DTypeFromString(B_dtype),
+std::string
+PrintMMAAssembly(const std::string &shape, const std::string &A_layout,
+                 const std::string &B_layout, const std::string &A_dtype,
+                 const std::string &B_dtype, const std::string &C_dtype,
+                 const std::string &a_ptr, const std::string &a_elem_offset,
+                 const std::string &b_ptr, const std::string &b_elem_offset,
+                 const std::string &c_ptr, const std::string &c_elem_offset,
+                 const std::string &metadata,
+                 const std::string &metadata_offset,
+                 const std::string &sparsity_selector,
+                 const std::string &bit_op, bool sparse, bool saturate) {
+  ptx::DataType dtype_a = ptx::DTypeFromString(A_dtype),
+                dtype_b = ptx::DTypeFromString(B_dtype),
                 dtype_c = ptx::DTypeFromString(C_dtype);
   if (dtype_a == ptx::DataType::kFloat32) {
     dtype_a = ptx::DataType::kTensorFloat32;
@@ -563,8 +589,8 @@ std::string PrintMMAAssembly(const std::string& shape, const std::string& A_layo
   ptx::LayoutType layout_a = ptx::LayoutTypeFromString(A_layout),
                   layout_b = ptx::LayoutTypeFromString(B_layout);
   auto [m, n, k] = ptx::ParseMMAShape(shape);
-  CheckMMAConfigValidity(m, n, k, layout_a, layout_b, dtype_a, dtype_b, dtype_c, bit_op, sparse,
-                         saturate);
+  CheckMMAConfigValidity(m, n, k, layout_a, layout_b, dtype_a, dtype_b, dtype_c,
+                         bit_op, sparse, saturate);
   std::string asm_code = R"(
   {
     __asm__ __volatile__(
@@ -588,7 +614,8 @@ std::string PrintMMAAssembly(const std::string& shape, const std::string& A_layo
   replacer.register_rule("{.btype}", ptx::DTypeToString(dtype_b));
   replacer.register_rule("{.ctype}", ptx::DTypeToString(dtype_c));
   replacer.register_rule("{.dtype}", ptx::DTypeToString(dtype_c));
-  replacer.register_rule("{.bitop}", bit_op.empty() ? "" : "." + bit_op + ".popc");
+  replacer.register_rule("{.bitop}",
+                         bit_op.empty() ? "" : "." + bit_op + ".popc");
   replacer.register_rule("{templates}", templates_str);
   replacer.register_rule("{outputs}", outputs_str);
   replacer.register_rule("{inputs}", inputs_str);
@@ -604,8 +631,9 @@ std::string PrintMMAAssembly(const std::string& shape, const std::string& A_layo
   return asm_code;
 }
 
-inline std::tuple<std::string, std::string> GetLoadMatrixOperands(
-    int num, const std::string& local_ptr, const std::string& local_elem_offset) {
+inline std::tuple<std::string, std::string>
+GetLoadMatrixOperands(int num, const std::string &local_ptr,
+                      const std::string &local_elem_offset) {
   std::stringstream templates, outputs;
   int arg_counter = 0;
   // generate templates
@@ -620,20 +648,23 @@ inline std::tuple<std::string, std::string> GetLoadMatrixOperands(
     if (i != 0) {
       outputs << ", ";
     }
-    outputs << "\"=r\"((" << ptr_type << "(" << local_ptr << " + " << local_elem_offset << "))["
-            << i << "])";
+    outputs << "\"=r\"((" << ptr_type << "(" << local_ptr << " + "
+            << local_elem_offset << "))[" << i << "])";
   }
   return std::make_tuple(templates.str(), outputs.str());
 }
 
-std::string PrintLoadMatrixAssembly(bool trans, int num, const std::string& type,
-                                    const std::string& local_ptr,
-                                    const std::string& local_elem_offset,
-                                    const std::string& smem_ptr,
-                                    const std::string& smem_elem_offset) {
-  CHECK(num == 1 || num == 2 || num == 4) << "ldmatrix only accept loading 1/2/4 matrices.";
+std::string PrintLoadMatrixAssembly(bool trans, int num,
+                                    const std::string &type,
+                                    const std::string &local_ptr,
+                                    const std::string &local_elem_offset,
+                                    const std::string &smem_ptr,
+                                    const std::string &smem_elem_offset) {
+  CHECK(num == 1 || num == 2 || num == 4)
+      << "ldmatrix only accept loading 1/2/4 matrices.";
   ptx::DataType data_type = ptx::DTypeFromString(type);
-  CHECK(data_type == ptx::DataType::kBit16) << "ldmatrix only accept matrix with type .b16.";
+  CHECK(data_type == ptx::DataType::kBit16)
+      << "ldmatrix only accept matrix with type .b16.";
   std::string asm_code = R"(
   {
     unsigned int addr = cast_smem_ptr_to_int({smem_addr});
@@ -645,7 +676,8 @@ std::string PrintLoadMatrixAssembly(bool trans, int num, const std::string& type
     );
   }
 )";
-  auto [templates_str, outputs_str] = GetLoadMatrixOperands(num, local_ptr, local_elem_offset);
+  auto [templates_str, outputs_str] =
+      GetLoadMatrixOperands(num, local_ptr, local_elem_offset);
 
   Replacer replacer;
   replacer.register_rule("{.shape}", ".m8n8");
@@ -660,10 +692,11 @@ std::string PrintLoadMatrixAssembly(bool trans, int num, const std::string& type
   return asm_code;
 }
 
-std::string PrintCpAsyncAssembly(const std::string& shared_ptr,
-                                 const std::string& shared_elem_offset,
-                                 const std::string& global_ptr,
-                                 const std::string& global_elem_offset, const std::string& bytes) {
+std::string PrintCpAsyncAssembly(const std::string &shared_ptr,
+                                 const std::string &shared_elem_offset,
+                                 const std::string &global_ptr,
+                                 const std::string &global_elem_offset,
+                                 const std::string &bytes) {
   std::string asm_code = R"(
   {
     unsigned int addr = cast_smem_ptr_to_int({smem_addr});
@@ -678,22 +711,22 @@ std::string PrintCpAsyncAssembly(const std::string& shared_ptr,
   }
 )";
   Replacer replacer;
-  replacer.register_rule("{smem_addr}", shared_ptr + " + " + shared_elem_offset);
-  replacer.register_rule("{global_ptr}", global_ptr + " + " + global_elem_offset);
+  replacer.register_rule("{smem_addr}",
+                         shared_ptr + " + " + shared_elem_offset);
+  replacer.register_rule("{global_ptr}",
+                         global_ptr + " + " + global_elem_offset);
   replacer.register_rule("{bytes}", bytes);
   replacer.register_rule("{cg_or_ca}", bytes == "16" ? "cg" : "ca");
   asm_code = replacer.rewrite(asm_code);
   return asm_code;
 }
 
-std::string PrintPredicatedCpAsyncAssembly(const std::string& shared_ptr,
-                                           const std::string& shared_elem_offset,
-                                           const std::string& global_ptr,
-                                           const std::string& global_elem_offset,
-                                           const std::string& bytes,
-                                           const std::string& predicate_value) {
-  CHECK(bytes == "16" || bytes == "12" || bytes == "8" || bytes == "4" || bytes == "2" ||
-        bytes == "1")
+std::string PrintPredicatedCpAsyncAssembly(
+    const std::string &shared_ptr, const std::string &shared_elem_offset,
+    const std::string &global_ptr, const std::string &global_elem_offset,
+    const std::string &bytes, const std::string &predicate_value) {
+  CHECK(bytes == "16" || bytes == "12" || bytes == "8" || bytes == "4" ||
+        bytes == "2" || bytes == "1")
       << "Only support 16, 12, 8, 4, 2, 1 bytes for predicated cp.async";
   std::string predicated_asm_code = R"(
   {
@@ -712,14 +745,16 @@ std::string PrintPredicatedCpAsyncAssembly(const std::string& shared_ptr,
     );
   }
 )";
-  auto [store_shared, nopreg] = [](const std::string& bytes) {
+  auto [store_shared, nopreg] = [](const std::string &bytes) {
     if (bytes == "16")
       return std::make_tuple("st.shared.v4.u32 [%1], {%4, %5, %6, %7}",
                              "\"r\"(0), \"r\"(0), \"r\"(0),\"r\"(0)");
     else if (bytes == "12")
-      return std::make_tuple("st.shared.v3.u32 [%1], {%4, %5, %6}", "\"r\"(0), \"r\"(0), \"r\"(0)");
+      return std::make_tuple("st.shared.v3.u32 [%1], {%4, %5, %6}",
+                             "\"r\"(0), \"r\"(0), \"r\"(0)");
     else if (bytes == "8")
-      return std::make_tuple("st.shared.v2.u32 [%1], {%4, %5}", "\"r\"(0), \"r\"(0)");
+      return std::make_tuple("st.shared.v2.u32 [%1], {%4, %5}",
+                             "\"r\"(0), \"r\"(0)");
     else if (bytes == "4")
       return std::make_tuple("st.shared.u32 [%1], {%4}", "\"r\"(0)");
     else if (bytes == "2")
@@ -731,8 +766,10 @@ std::string PrintPredicatedCpAsyncAssembly(const std::string& shared_ptr,
   }(bytes);
 
   Replacer replacer;
-  replacer.register_rule("{smem_addr}", shared_ptr + " + " + shared_elem_offset);
-  replacer.register_rule("{global_ptr}", global_ptr + " + " + global_elem_offset);
+  replacer.register_rule("{smem_addr}",
+                         shared_ptr + " + " + shared_elem_offset);
+  replacer.register_rule("{global_ptr}",
+                         global_ptr + " + " + global_elem_offset);
   replacer.register_rule("{bytes}", bytes);
   replacer.register_rule("{cg_or_ca}", bytes == "16" ? "cg" : "ca");
   replacer.register_rule("{store_shared}", store_shared);
@@ -742,11 +779,12 @@ std::string PrintPredicatedCpAsyncAssembly(const std::string& shared_ptr,
   return predicated_asm_code;
 }
 
-std::string PrintCpAsyncBulkAsm(const std::string& shared_ptr,
-                                const std::string& shared_elem_offset,
-                                const std::string& global_ptr,
-                                const std::string& global_elem_offset, const std::string& bytes,
-                                const std::string& barrier) {
+std::string PrintCpAsyncBulkAsm(const std::string &shared_ptr,
+                                const std::string &shared_elem_offset,
+                                const std::string &global_ptr,
+                                const std::string &global_elem_offset,
+                                const std::string &bytes,
+                                const std::string &barrier) {
   std::string asm_code = R"(
   {
     unsigned int smem_addr_int = cast_smem_ptr_to_int({smem_addr});
@@ -760,15 +798,17 @@ std::string PrintCpAsyncBulkAsm(const std::string& shared_ptr,
 )";
 
   Replacer replacer;
-  replacer.register_rule("{smem_addr}", shared_ptr + " + " + shared_elem_offset);
-  replacer.register_rule("{global_ptr}", global_ptr + " + " + global_elem_offset);
+  replacer.register_rule("{smem_addr}",
+                         shared_ptr + " + " + shared_elem_offset);
+  replacer.register_rule("{global_ptr}",
+                         global_ptr + " + " + global_elem_offset);
   replacer.register_rule("{bytes}", bytes);
   replacer.register_rule("{barrier}", "&" + barrier);
   asm_code = replacer.rewrite(asm_code);
   return asm_code;
 }
 
-std::string PrintCpAsyncBarrierAsm(const std::string& barrier) {
+std::string PrintCpAsyncBarrierAsm(const std::string &barrier) {
   std::string predicated_asm_code = R"(
   {
     unsigned int barrier_addr_int = cast_smem_ptr_to_int({barrier});
@@ -785,8 +825,8 @@ std::string PrintCpAsyncBarrierAsm(const std::string& barrier) {
   return predicated_asm_code;
 }
 
-std::string PrintInitBarrierThreadCountAsm(const std::string& barrier,
-                                           const std::string& thread_count) {
+std::string PrintInitBarrierThreadCountAsm(const std::string &barrier,
+                                           const std::string &thread_count) {
   std::string predicated_asm_code = R"(
   {
     unsigned int barrier_addr_int = cast_smem_ptr_to_int({barrier});
@@ -805,7 +845,7 @@ std::string PrintInitBarrierThreadCountAsm(const std::string& barrier,
   return predicated_asm_code;
 }
 
-std::string PrintArriveBarrierAsm(const std::string& barrier) {
+std::string PrintArriveBarrierAsm(const std::string &barrier) {
   std::string predicated_asm_code = R"(
   {
     unsigned int barrier_addr_int = cast_smem_ptr_to_int({barrier});
@@ -822,8 +862,8 @@ std::string PrintArriveBarrierAsm(const std::string& barrier) {
   return predicated_asm_code;
 }
 
-std::string PrintArriveBarrierExpectTxAsm(const std::string& barrier,
-                                          const std::string& byte_count) {
+std::string PrintArriveBarrierExpectTxAsm(const std::string &barrier,
+                                          const std::string &byte_count) {
   std::string predicated_asm_code = R"(
   {
     unsigned int barrier_addr_int = cast_smem_ptr_to_int({barrier});
@@ -842,7 +882,7 @@ std::string PrintArriveBarrierExpectTxAsm(const std::string& barrier,
   return predicated_asm_code;
 }
 
-std::string PrintWaitBarrierAsm(const std::string& barrier) {
+std::string PrintWaitBarrierAsm(const std::string &barrier) {
   std::string predicated_asm_code = R"(
   {
     unsigned int barrier_addr_int = cast_smem_ptr_to_int({barrier});
@@ -860,5 +900,5 @@ std::string PrintWaitBarrierAsm(const std::string& barrier) {
   return predicated_asm_code;
 }
 
-}  // namespace codegen
-}  // namespace tvm::tl
+} // namespace codegen
+} // namespace tvm::tl

@@ -8,6 +8,7 @@ def ldmatrix_32x4_to_shared_16x8_layout_a(thread_id, local_id):
     col = (thread_id // 16) * 4 + local_id % 4
     return row, col
 
+
 def ldmatrix_32x4_to_shared_16x8_layout_b(thread_id, local_id):
     row = (thread_id // 16) * 8 + (thread_id % 8)
     col = ((thread_id % 16) // 8) * 4 + local_id % 4
@@ -24,7 +25,6 @@ def ldmatrix_trans_32x8_to_shared_16x16_layout(thread_id, local_id):
     row = 8 * (thread_id // 16) + (thread_id % 8)
     col = 8 * ((thread_id % 16) // 8) + local_id % 8
     return row, col
-
 
 
 def ldmatrix_32x16_to_shared_16x32_layout_a(thread_id, local_id):
@@ -52,21 +52,26 @@ def shared_16x8_to_mma_a_32x4_layout(i, j):
     thread_id = 4 * (i % 8) + (j % 4)
     return thread_id, 2 * (j // 4) + (i // 8)
 
+
 def shared_16x8_to_mma_a_32x4_layout_trans(i, j):
     return shared_16x8_to_mma_a_32x4_layout(j, i)
+
 
 # mma.sync matrix B layout, if wanna trans, please apply map_indices
 def shared_16x8_to_mma_b_32x4_layout(i, j):
     thread_id = 4 * (i % 8) + (j % 4)
     return thread_id, 2 * (i // 8) + (j // 4)
 
+
 def shared_16x8_to_mma_b_32x4_layout_trans(i, j):
     return shared_16x8_to_mma_b_32x4_layout(j, i)
+
 
 shared_16x8_to_mma_32x4_layout_sr_a = shared_16x8_to_mma_a_32x4_layout
 shared_16x8_to_mma_32x4_layout_sr_b = shared_16x8_to_mma_b_32x4_layout
 shared_16x8_to_mma_32x4_layout_rs_a = shared_16x8_to_mma_a_32x4_layout_trans
 shared_16x8_to_mma_32x4_layout_rs_b = shared_16x8_to_mma_b_32x4_layout_trans
+
 
 def shared_16x16_to_mma_a_32x8_layout(i, j):
     thread_id = 4 * (i % 8) + (j % 8) // 2

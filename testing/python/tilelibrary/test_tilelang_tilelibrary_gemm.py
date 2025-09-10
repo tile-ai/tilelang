@@ -132,6 +132,7 @@ def test_gemm_ss():
     run_gemm_ss(128, 128, 128, True, False, "float", "float", "float32", 128, 128, 32, 2)
     run_gemm_ss(128, 128, 128, True, True, "float", "float", "float32", 128, 128, 32, 2)
 
+
 def matmul_rs(
     M,
     N,
@@ -264,6 +265,7 @@ def test_gemm_rs():
     run_gemm_rs(128, 128, 128, False, True, "float", "float", "float32", 128, 128, 32, 2)
     run_gemm_rs(128, 128, 128, True, False, "float", "float", "float32", 128, 128, 32, 2)
     run_gemm_rs(128, 128, 128, True, True, "float", "float", "float32", 128, 128, 32, 2)
+
 
 def matmul_sr(
     M,
@@ -537,22 +539,6 @@ def test_gemm_rr():
     run_gemm_rr(128, 128, 128, True, False, "float", "float", "float32", 128, 128, 32, 2)
     run_gemm_rr(128, 128, 128, True, True, "float", "float", "float32", 128, 128, 32, 2)
 
+
 if __name__ == "__main__":
-    # tilelang.testing.main()
-    # run_gemm_ss(128, 128, 128, False, True, "float16", "float16", "float32", 128, 128, 32, 0)
-    # tilelang.disable_cache()
-
-    run_gemm_sr(128, 128, 128, False, False, "float", "float", "float32", 128, 128, 32, 0)
-    run_gemm_sr(128, 128, 128, False, True, "float", "float", "float32", 128, 128, 32, 0)
-    run_gemm_sr(128, 128, 128, True, False, "float", "float", "float32", 128, 128, 32, 0)
-    run_gemm_sr(128, 128, 128, True, True, "float", "float", "float32", 128, 128, 32, 0)
-
-    run_gemm_rs(128, 128, 128, False, False, "float", "float", "float32", 128, 128, 32, 0)
-    run_gemm_rs(128, 128, 128, False, True, "float", "float", "float32", 128, 128, 32, 0)
-    run_gemm_rs(128, 128, 128, True, False, "float", "float", "float32", 128, 128, 32, 0)
-    run_gemm_rs(128, 128, 128, True, True, "float", "float", "float32", 128, 128, 32, 0)
-
-    run_gemm_rr(128, 128, 128, False, False, "float", "float", "float32", 128, 128, 32, 0)
-    run_gemm_rr(128, 128, 128, False, True, "float", "float", "float32", 128, 128, 32, 0)
-    run_gemm_rr(128, 128, 128, True, False, "float", "float", "float32", 128, 128, 32, 0)
-    run_gemm_rr(128, 128, 128, True, True, "float", "float", "float32", 128, 128, 32, 0)
+    tilelang.testing.main()

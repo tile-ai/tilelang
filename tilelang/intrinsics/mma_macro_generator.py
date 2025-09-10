@@ -211,7 +211,10 @@ class TensorCoreIntrinEmitter(object):
         a_transposed = self.a_transposed
         # ldmatrix cannot be used for int8 + trans case.
         ldmatrix_available = not (DataType(a_dtype).bits != 16 and a_transposed)
-        mma_load_layout = lambda i, j: (i, j)
+
+        def mma_load_layout(i, j):
+            return i, j
+
         if not ldmatrix_available:
             if DataType(a_dtype).bits == 8:
                 mma_load_layout = mma_load_a_32x16_to_shared_16x32_layout
@@ -274,7 +277,10 @@ class TensorCoreIntrinEmitter(object):
         replicate_b = (self.n_dim == 16)
         # ldmatrix cannot be used for int8 + trans case.
         ldmatrix_available = not (DataType(b_dtype).bits != 16 and not b_transposed)
-        mma_load_layout = lambda i, j: (i, j)
+
+        def mma_load_layout(i, j):
+            return i, j
+
         if not ldmatrix_available:
             if DataType(b_dtype).bits == 8:
                 mma_load_layout = mma_load_b_32x16_to_shared_16x32_layout
