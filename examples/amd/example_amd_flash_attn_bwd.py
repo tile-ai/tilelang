@@ -106,7 +106,7 @@ def flashattn_fwd(
                 # Compute QK^T
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 
-                # Apply scaling factor
+                # Apply scaling factor (为exp2计算准备)
                 for i, j in T.Parallel(block_M, block_N):
                     acc_s[i, j] = acc_s[i, j] * scale
                 
@@ -226,7 +226,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups,
             Q: T.Tensor(q_shape, dtype), K: T.Tensor(kv_shape, dtype), V: T.Tensor(kv_shape, dtype),
             dO: T.Tensor(q_shape, dtype), lse: T.Tensor([batch, heads, seq_len], accum_dtype),
             Delta: T.Tensor([batch, heads, seq_len], accum_dtype),
-            dQ: T.Tensor(q_shape, accum_dtype), dK: T.Tensor(kv_shape, dtype), dV: T.Tensor(kv_shape, dtype)):
+            dQ: T.Tensor(q_shape, accum_dtype), dK: T.Tensor(kv_shape, accum_dtype), dV: T.Tensor(kv_shape, accum_dtype)):
         with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=threads) as (bx, by, bz):
             K_shared = T.alloc_shared([block_M, dim], dtype)
             V_shared = T.alloc_shared([block_M, dim], dtype)
@@ -261,40 +261,35 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups,
                 T.copy(Q[bz, k * block_N:(k + 1) * block_N, bx, :], q_shared)
                 T.clear(qkT)
                 
-                # Compute QK^T
+                # Compute QK^T (不在这里应用scaling)
                 T.gemm(K_shared, q_shared, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
-                
-                # Apply scaling factor
-                for i, j in T.Parallel(block_M, block_N):
-                    qkT[i, j] = qkT[i, j] * sm_scale
                 
                 T.copy(lse[bz, bx, k * block_N:(k + 1) * block_N], lse_shared)
                 
-                # Compute softmax weights
+                # Compute softmax weights (保持与前向传播一致)
                 for i, j in T.Parallel(block_M, block_N):
-                    P_acc[i, j] = T.exp(qkT[i, j] - lse_shared[j])
+                    P_acc[i, j] = T.exp(qkT[i, j] * sm_scale - lse_shared[j])
                 
-                # Apply causal mask
+                # Apply causal mask (使用正确的条件逻辑)
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
-                        if by * block_M + i < k * block_N + j:
-                            P_acc[i, j] = 0.0
+                        P_acc[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, P_acc[i, j], 0.0)
                 
                 T.copy(dO[bz, k * block_N:(k + 1) * block_N, bx, :], do_shared)
                 T.clear(dP)
                 
-                # Compute dP = V^T dO
+                # 按照标准实现的确切顺序：先计算dsT = V^T * dO
                 T.gemm(V_shared, do_shared, dP, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 
-                # Compute dV += P^T dO
+                # 然后计算dV += P^T * dO
                 T.copy(P_acc, p_cast)
                 T.gemm(p_cast, do_shared, dv, policy=T.GemmWarpPolicy.FullRow)
                 
                 T.copy(Delta[bz, bx, k * block_N:(k + 1) * block_N], delta_shared)
                 
-                # Compute dS = P * (dP - Delta)
+                # 计算dsT_cast = P * (dsT - Delta) * sm_scale (对应标准实现)
                 for i, j in T.Parallel(block_M, block_N):
-                    p_cast[i, j] = p_cast[i, j] * (dP[i, j] - delta_shared[j]) * sm_scale
+                    p_cast[i, j] = P_acc[i, j] * (dP[i, j] - delta_shared[j]) * sm_scale
                 
                 # Compute dK += dS Q
                 T.gemm(p_cast, q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
@@ -309,9 +304,10 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups,
                     if k * block_N + i < seq_len:
                         T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
 
-            # Write dK and dV
-            T.copy(dv, dV[bz, by * block_M:(by + 1) * block_M, bx // groups, :])
-            T.copy(dk, dK[bz, by * block_M:(by + 1) * block_M, bx // groups, :])
+            # Write dK and dV using fp32 atomic_add (按照标准实现，不加seq_len检查)
+            for i, j in T.Parallel(block_M, dim):
+                T.atomic_add(dV[bz, by * block_M + i, bx // groups, j], dv[i, j])
+                T.atomic_add(dK[bz, by * block_M + i, bx // groups, j], dk[i, j])
     return flash_bwd_kernel
 
 
@@ -466,8 +462,8 @@ def main(batch: int = 1,
     
     # Initialize gradient accumulators
     dQ_accum = torch.zeros_like(q, dtype=torch.float32)
-    dK_tl = torch.empty_like(k)
-    dV_tl = torch.empty_like(v)
+    dK_tl = torch.zeros_like(k, dtype=torch.float32)  # 使用fp32提高atomic操作精度
+    dV_tl = torch.zeros_like(v, dtype=torch.float32)  # 使用fp32提高atomic操作精度
     
     # Run backward pass
     bwd_kernel(q, k, v, dO, lse_tl, delta_tl, dQ_accum, dK_tl, dV_tl)
@@ -495,7 +491,7 @@ def main(batch: int = 1,
         print("dQ mismatch detected.")
     
     dk_close, dk_max_diff, dk_mean_diff = debug_tensor_comparison(
-        dK_tl, k_ref.grad, "dK", rtol=0.05, atol=0.05
+        dK_tl.to(torch.float16), k_ref.grad, "dK", rtol=0.05, atol=0.05
     )
     if dk_close:
         print("dK is correct.")
@@ -503,7 +499,7 @@ def main(batch: int = 1,
         print("dK mismatch detected.")
     
     dv_close, dv_max_diff, dv_mean_diff = debug_tensor_comparison(
-        dV_tl, v_ref.grad, "dV", rtol=0.05, atol=0.05
+        dV_tl.to(torch.float16), v_ref.grad, "dV", rtol=0.05, atol=0.05
     )
     if dv_close:
         print("dV is correct.")
