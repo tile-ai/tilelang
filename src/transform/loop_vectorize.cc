@@ -221,8 +221,7 @@ bool CanProveIndependent(const PrimExpr &expr, Var var,
 
 bool IndiceCanVectorize(const PrimExpr &expr, Var var,
                         const PrimExpr &iter_var_size,
-                        int target_vectorized_size,
-                        arith::Analyzer *analyzer) {
+                        int target_vectorized_size, arith::Analyzer *analyzer) {
   ICHECK(target_vectorized_size >= 1);
   if (target_vectorized_size == 1)
     return true;
@@ -246,11 +245,11 @@ bool IndiceCanVectorize(const PrimExpr &expr, Var var,
   auto ph_v = target_vectorized_size;
   auto group = target_vectorized_size / ph_v;
   // Check if access_pos is contingentous: ap === v0 // group (mod ph_v)
-  auto is_contingous = analyzer->CanProveEqual(FloorMod(access_pos, ph_v),
-                                                FloorDiv(v0, group));
+  auto is_contingous =
+      analyzer->CanProveEqual(FloorMod(access_pos, ph_v), FloorDiv(v0, group));
   // Check if access is aligned
-  auto is_aligned = analyzer->CanProveEqual(
-      FloorMod(Substitute(expr, {{var, 0}}), ph_v), 0);
+  auto is_aligned =
+      analyzer->CanProveEqual(FloorMod(Substitute(expr, {{var, 0}}), ph_v), 0);
   if (is_contingous && is_aligned) {
     return true;
   }
