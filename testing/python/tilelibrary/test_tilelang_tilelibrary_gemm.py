@@ -31,8 +31,8 @@ def matmul(
             C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-            A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope="shared")
-            B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope="shared")
+            A_shared = T.alloc_shared(A_shared_shape, in_dtype)
+            B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
@@ -162,8 +162,8 @@ def matmul_rs(
             C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-            A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope="shared")
-            B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope="shared")
+            A_shared = T.alloc_shared(A_shared_shape, in_dtype)
+            B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             A_frag = T.alloc_fragment(A_frag_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.clear(C_local)
@@ -296,8 +296,8 @@ def matmul_sr(
             C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-            A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope="shared")
-            B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope="shared")
+            A_shared = T.alloc_shared(A_shared_shape, in_dtype)
+            B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             B_frag = T.alloc_fragment(B_frag_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.clear(C_local)
@@ -431,8 +431,8 @@ def matmul_rr(
             C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-            A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope="shared")
-            B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope="shared")
+            A_shared = T.alloc_shared(A_shared_shape, in_dtype)
+            B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             A_frag = T.alloc_fragment(A_frag_shape, in_dtype)
             B_frag = T.alloc_fragment(B_frag_shape, in_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
