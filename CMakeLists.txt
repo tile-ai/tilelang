@@ -132,6 +132,7 @@ tilelang_file_glob(GLOB TILE_LANG_SRCS
 if(USE_CUDA)
   tilelang_file_glob(GLOB TILE_LANG_CUDA_SRCS
     src/runtime/*.cc
+    src/target/ptx.cc
     src/target/codegen_cuda.cc
     src/target/rt_mod_cuda.cc
   )

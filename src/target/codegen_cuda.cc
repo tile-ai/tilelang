@@ -15,10 +15,11 @@
 
 #include "../op/builtin.h"
 #include "arith/pattern_match.h"
-#include "target/source/ptx.h"
+#include "./ptx.h"
 
 namespace tvm {
 namespace codegen {
+using namespace tvm::tl::codegen;
 
 static std::string GetFP8Type(DataType type) {
   std::stringstream stream;

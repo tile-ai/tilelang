@@ -10,10 +10,14 @@ from .utils import (
 )
 from tilelang.utils import is_fragment
 from tilelang.intrinsics.mma_layout import (
+    shared_16x8_to_mma_32x4_layout_sr_a,
+    shared_16x8_to_mma_32x4_layout_sr_b,
     shared_16x16_to_mma_32x8_layout_sr_a,
     shared_16x16_to_mma_32x8_layout_sr_b,
     shared_16x32_to_mma_32x16_layout_sr_a,
     shared_16x32_to_mma_32x16_layout_sr_b,
+    mma_load_a_32x4_to_shared_16x8_layout,
+    mma_load_b_32x4_to_shared_16x8_layout,
     mma_load_a_32x16_to_shared_16x32_layout,
     mma_load_b_32x16_to_shared_16x32_layout,
 )
@@ -105,9 +109,14 @@ class TensorCoreIntrinEmitter(object):
         self.accum_dtype_abbrv = self.dtype_abbrv[accum_dtype]
 
     def _initialize_mma_prefix(self, k_dim: int = 16):
-        if k_dim == 16:
+        if k_dim == 8:
+            # typically used for tfloat32
+            self.mma_prefix = "m16n8k8"
+        elif k_dim == 16:
+            # typically used for float16/bfloat16
             self.mma_prefix = "m16n8k16"
         elif k_dim == 32:
+            # typically used for int8/fp8
             self.mma_prefix = "m16n8k32"
         else:
             raise ValueError("Unsupported k_dim")
@@ -201,7 +210,15 @@ class TensorCoreIntrinEmitter(object):
         a_dtype = self.a_dtype
         a_transposed = self.a_transposed
         # ldmatrix cannot be used for int8 + trans case.
-        ldmatrix_available = not (DataType(a_dtype).bits == 8 and a_transposed)
+        ldmatrix_available = not (DataType(a_dtype).bits != 16 and a_transposed)
+        mma_load_layout = lambda i, j: (i, j)
+        if not ldmatrix_available:
+            if DataType(a_dtype).bits == 8:
+                mma_load_layout = mma_load_a_32x16_to_shared_16x32_layout
+            elif DataType(a_dtype).bits == 32:
+                mma_load_layout = mma_load_a_32x4_to_shared_16x8_layout
+            else:
+                raise ValueError(f"Unsupported dtype: {a_dtype}")
 
         thread_binding = self.get_thread_binding()
 
@@ -235,7 +252,7 @@ class TensorCoreIntrinEmitter(object):
                     )
                 else:
                     for j in T.serial(local_size_a):
-                        mi, mk = mma_load_a_32x16_to_shared_16x32_layout(tx, j)
+                        mi, mk = mma_load_layout(tx, j)
                         A_local_buf[i * local_size_a + j] = A_shared_buf[wk + mk, wi + mi]
 
         return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
@@ -256,7 +273,15 @@ class TensorCoreIntrinEmitter(object):
         thread_binding = self.get_thread_binding()
         replicate_b = (self.n_dim == 16)
         # ldmatrix cannot be used for int8 + trans case.
-        ldmatrix_available = not (DataType(b_dtype).bits == 8 and not b_transposed)
+        ldmatrix_available = not (DataType(b_dtype).bits != 16 and not b_transposed)
+        mma_load_layout = lambda i, j: (i, j)
+        if not ldmatrix_available:
+            if DataType(b_dtype).bits == 8:
+                mma_load_layout = mma_load_b_32x16_to_shared_16x32_layout
+            elif DataType(b_dtype).bits == 32:
+                mma_load_layout = mma_load_b_32x4_to_shared_16x8_layout
+            else:
+                raise ValueError(f"Unsupported dtype: {b_dtype}")
 
         @T.macro
         def _warp_ldmatrix_b(
@@ -296,7 +321,7 @@ class TensorCoreIntrinEmitter(object):
                     # load 16x32 data from shared buffer to local buffer
                     # must be transposed.
                     for j in T.serial(local_size_b):
-                        mi, mk = mma_load_b_32x16_to_shared_16x32_layout(tx, j)
+                        mi, mk = mma_load_layout(tx, j)
                         B_local_buf[i * local_size_b + j] = B_shared_buf[wk + mk, wi + mi]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
@@ -458,7 +483,11 @@ class TensorCoreIntrinEmitter(object):
         # then rs also can represent a transposed basic layout
         transform_func_sr_a: Callable = None
         transform_func_sr_b: Callable = None
-        if dtype_bits == 16:
+        if dtype_bits == 32:
+            ...
+            transform_func_sr_a = shared_16x8_to_mma_32x4_layout_sr_a
+            transform_func_sr_b = shared_16x8_to_mma_32x4_layout_sr_b
+        elif dtype_bits == 16:
             transform_func_sr_a = shared_16x16_to_mma_32x8_layout_sr_a
             transform_func_sr_b = shared_16x16_to_mma_32x8_layout_sr_b
         elif dtype_bits == 8:
