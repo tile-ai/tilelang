@@ -60,10 +60,9 @@ def compress_sm90(A: torch.Tensor, block_k: int,
 def compress_sm80(A: torch.Tensor, transposed: bool) -> tuple[torch.Tensor, torch.Tensor]:
     try:
         from torch.sparse import to_sparse_semi_structured, SparseSemiStructuredTensor
-    except ImportError:
-        raise ImportError(
-            "SparseSemiStructuredTensor is not available in this version of PyTorch. "
-            "Please install a compatible version.")
+    except ImportError as err:
+        raise ImportError("SparseSemiStructuredTensor is not available in this version of PyTorch. "
+                          "Please install a compatible version.") from err
 
     orig_val = SparseSemiStructuredTensor._FORCE_CUTLASS
     SparseSemiStructuredTensor._FORCE_CUTLASS = True
@@ -76,7 +75,11 @@ def compress_sm80(A: torch.Tensor, transposed: bool) -> tuple[torch.Tensor, torc
 
     return compressed.packed, compressed.meta
 
-def compress(A: torch.Tensor, transposed: bool, arch: Optional[str]=None, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
+
+def compress(A: torch.Tensor,
+             transposed: bool,
+             arch: Optional[str] = None,
+             **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compress a tensor using the appropriate method based on the CUDA architecture.
     """

@@ -145,7 +145,8 @@ def make_metadata_layout(buffer: tvm.tir.Buffer,
 
     if compute_version >= (9, 0):
         if backend == 'cutlass':
-            return _make_metadata_layout_sm90_cutlass(buffer=buffer, mma_dtype=mma_dtype, **extra_args)
+            return _make_metadata_layout_sm90_cutlass(
+                buffer=buffer, mma_dtype=mma_dtype, **extra_args)
         else:
             raise NotImplementedError(f"Arch {arch}, Unsupported backend: {backend}")
     elif compute_version >= (8, 0):

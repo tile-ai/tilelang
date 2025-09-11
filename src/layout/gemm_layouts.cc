@@ -118,8 +118,8 @@ Fragment makeGemmFragmentC(const int block_m, const int block_n,
 }
 
 Fragment makeGemmSparseFragmentC(const int block_m, const int block_n,
-                           const int warp_m, const int warp_n,
-                           const int element_size) {
+                                 const int warp_m, const int warp_n,
+                                 const int element_size) {
   if (element_size == 64) {
     ICHECK(false) << "Not supported";
   }
@@ -131,8 +131,10 @@ Fragment makeGemmSparseFragmentC(const int block_m, const int block_n,
   // NOTE: This func wasn't implemented by following the CUTLASS 2 iterator
   // but by inspecting the output, it appears that we first need to
   // repeat the warp layout while avoiding duplicate thread mappings.
-  auto warp_layout = base_layout->Repeat({warp_m / 16, warp_n / 8}, false, false);
-  auto block_layout = warp_layout->Repeat({block_m / warp_m, block_n / warp_n}, true, false);
+  auto warp_layout =
+      base_layout->Repeat({warp_m / 16, warp_n / 8}, false, false);
+  auto block_layout =
+      warp_layout->Repeat({block_m / warp_m, block_n / warp_n}, true, false);
   return block_layout;
 }
 
@@ -559,9 +561,12 @@ Layout makeGemmVoltaABLayout(int stride, int continuous, bool is_a,
   return makeGemmABLayoutPadded(stride, continuous, 16);
 }
 
-// ref: https://github.com/nvidia/cutlass/blob/ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e/include/cutlass/layout/tensor_op_multiplicand_sm75.h#L54
-// Althought the four settings (T or NT) used distinct layouts in CUTLASS, they appeared to result in the same mem layout
-Layout makeTensorOpMultiplicand(int mat_stride, int mat_continuous, int elementsize, int crosswise) {
+// ref:
+// https://github.com/nvidia/cutlass/blob/ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e/include/cutlass/layout/tensor_op_multiplicand_sm75.h#L54
+// Althought the four settings (T or NT) used distinct layouts in CUTLASS, they
+// appeared to result in the same mem layout
+Layout makeTensorOpMultiplicand(int mat_stride, int mat_continuous,
+                                int elementsize, int crosswise) {
   /// This layout is optimized for 128b accesses
   static int const kAccessSize = 128;
   int kCrosswise = crosswise;
@@ -573,10 +578,10 @@ Layout makeTensorOpMultiplicand(int mat_stride, int mat_continuous, int elements
   /// line - 128B.  For 128bit access size, it equals to 8 accesses.
   int kTileShapeContiguous = 128 / (kAccessSize / 8);
 
-  int kFactor =
-      kTileShapeContiguous * kElementsPerAccess / kCrosswise;
+  int kFactor = kTileShapeContiguous * kElementsPerAccess / kCrosswise;
 
-  ICHECK(kFactor > 0) << "kCrosswise should be no large than one shared memory cache line.";
+  ICHECK(kFactor > 0)
+      << "kCrosswise should be no large than one shared memory cache line.";
 
   /// The strided dimension needs to be at least (WarpSize(32) /
   /// kTileShapeContiguous) for a warp to access.  To ensure conflict free
@@ -584,7 +589,7 @@ Layout makeTensorOpMultiplicand(int mat_stride, int mat_continuous, int elements
   /// See comments below
   /// Fundamental tile shape in units of vectors to guarantee bank conflict free
   /// shared memory load/store.
-  /// For kFactor = 1, TileShape = <8, 8> 
+  /// For kFactor = 1, TileShape = <8, 8>
   /// For kFactor > 1, TileShape = <8, 4>
   int kTileShapeStride =
       ((kTileShapeContiguous / kFactor) > (32 / kTileShapeContiguous))
@@ -601,57 +606,60 @@ Layout makeTensorOpMultiplicand(int mat_stride, int mat_continuous, int elements
   PrimExpr vec_contiguous_idx = FloorDiv(j, kElementsPerAccess);
   PrimExpr vec_strided_idx = FloorDiv(i, kFactor);
 
-    // Compute the fundamental tile being accessed
-    PrimExpr tile_contiguous_idx =
-        FloorDiv(vec_contiguous_idx, FloorDiv(kTileShapeContiguous, kFactor));
+  // Compute the fundamental tile being accessed
+  PrimExpr tile_contiguous_idx =
+      FloorDiv(vec_contiguous_idx, FloorDiv(kTileShapeContiguous, kFactor));
 
-    PrimExpr tile_contiguous_residual =
-        FloorMod(vec_contiguous_idx, FloorDiv(kTileShapeContiguous, kFactor)) +
-        (FloorMod(i, kFactor) * FloorDiv(kTileShapeContiguous, kFactor));
-    PrimExpr tile_strided_residual = FloorMod(vec_strided_idx, kTileShapeStride);
+  PrimExpr tile_contiguous_residual =
+      FloorMod(vec_contiguous_idx, FloorDiv(kTileShapeContiguous, kFactor)) +
+      (FloorMod(i, kFactor) * FloorDiv(kTileShapeContiguous, kFactor));
+  PrimExpr tile_strided_residual = FloorMod(vec_strided_idx, kTileShapeStride);
 
-    // Compute the 'partition' within the fundamental tile
-    PrimExpr partition_contiguous_idx =
-        FloorDiv(tile_contiguous_residual, kPartitionShapeContiguous);
-    PrimExpr partition_strided_idx =
-        FloorDiv(tile_strided_residual, kPartitionShapeStride);
+  // Compute the 'partition' within the fundamental tile
+  PrimExpr partition_contiguous_idx =
+      FloorDiv(tile_contiguous_residual, kPartitionShapeContiguous);
+  PrimExpr partition_strided_idx =
+      FloorDiv(tile_strided_residual, kPartitionShapeStride);
 
-    PrimExpr partition_contiguous_residual =
-        FloorMod(tile_contiguous_residual, kPartitionShapeContiguous);
-    PrimExpr partition_strided_residual =
-        FloorMod(tile_strided_residual, kPartitionShapeStride);
+  PrimExpr partition_contiguous_residual =
+      FloorMod(tile_contiguous_residual, kPartitionShapeContiguous);
+  PrimExpr partition_strided_residual =
+      FloorMod(tile_strided_residual, kPartitionShapeStride);
 
-    //
-    // Then swizzle
-    //
+  //
+  // Then swizzle
+  //
 
-    PrimExpr permuted_vec_contiguous_within_partition =
-        xor4x4(partition_contiguous_residual, FloorMod(partition_strided_residual, 4));
+  PrimExpr permuted_vec_contiguous_within_partition = xor4x4(
+      partition_contiguous_residual, FloorMod(partition_strided_residual, 4));
 
-    PrimExpr permuted_partition_contiguous_within_tile =
-        xor2x2(partition_contiguous_idx, FloorMod(partition_strided_idx, 2));
+  PrimExpr permuted_partition_contiguous_within_tile =
+      xor2x2(partition_contiguous_idx, FloorMod(partition_strided_idx, 2));
 
-    //
-    // Compute final element location
-    //
+  //
+  // Compute final element location
+  //
 
-    PrimExpr element_contiguous = (tile_contiguous_idx * kTileShapeContiguous +
-                              permuted_partition_contiguous_within_tile *
-                                  kPartitionShapeContiguous +
-                              permuted_vec_contiguous_within_partition) *
-                                 kElementsPerAccess +
-                             FloorMod(j, kElementsPerAccess);
+  PrimExpr element_contiguous =
+      (tile_contiguous_idx * kTileShapeContiguous +
+       permuted_partition_contiguous_within_tile * kPartitionShapeContiguous +
+       permuted_vec_contiguous_within_partition) *
+          kElementsPerAccess +
+      FloorMod(j, kElementsPerAccess);
 
-    PrimExpr element_strided = vec_strided_idx;
+  PrimExpr element_strided = vec_strided_idx;
 
-    const int stride = mat_continuous;
+  const int stride = mat_continuous;
 
-    return Layout(Array{i, j}, {element_contiguous + element_strided * stride * kFactor});
+  return Layout(Array{i, j},
+                {element_contiguous + element_strided * stride * kFactor});
 }
 
-Layout makeGemmSparseAmpereABLayout(int mat_stride, int mat_continuous, int elementsize) {
+Layout makeGemmSparseAmpereABLayout(int mat_stride, int mat_continuous,
+                                    int elementsize) {
   int kCrosswise = std::min(mat_continuous, (1024 / elementsize));
-  return makeTensorOpMultiplicand(mat_stride, mat_continuous, elementsize, kCrosswise);
+  return makeTensorOpMultiplicand(mat_stride, mat_continuous, elementsize,
+                                  kCrosswise);
 }
 
 /*!

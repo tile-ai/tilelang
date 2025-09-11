@@ -10,18 +10,14 @@ from tilelang.contrib import nvcc
 
 import torch
 
-# arch = nvcc.get_target_compute_version()
-arch = "8.0"
-
+arch = nvcc.get_target_compute_version()
 
 SPARSITY_MAP = {
     torch.float16: (2, 4),
 }
 
-ARCH_INFO = {
-    "8.0": (16, "int16"),
-    "9.0": (4, "uint8")
-}
+ARCH_INFO = {"8.0": (16, "int16"), "9.0": (4, "uint8")}
+
 
 def generate_sparse_tensor_float32(M: int, K: int, dtype: torch.dtype, device='cpu', trans_A=False):
     elem, group = SPARSITY_MAP[dtype]
@@ -55,10 +51,10 @@ def generate_sparse_tensor_float32(M: int, K: int, dtype: torch.dtype, device='c
     return full_tensor * mask
 
 
-
 @tilelang.jit(out_idx=[-1])
 def matmul_sp_fp16(M, N, K, block_M, block_N, block_K, accum_dtype="float"):
     e_factor, e_dtype = ARCH_INFO[arch]
+
     @T.prim_func
     def gemm_sp_fp16(
             A_sparse: T.Tensor((M, K // 2), 'float16'),

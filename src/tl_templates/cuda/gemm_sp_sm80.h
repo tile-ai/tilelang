@@ -1,58 +1,44 @@
 #include <cutlass/gemm/threadblock/default_mma_core_sparse_sm80.h>
 #include <stdio.h>
 
-
 namespace tl {
 
 static int const kSparse = 2;
-template <typename T, typename Shape>
-struct ShapeCheck {
-    static constexpr bool value = false;
+template <typename T, typename Shape> struct ShapeCheck {
+  static constexpr bool value = false;
 };
 
-template <typename Shape>
-struct ShapeCheck<cutlass::half_t, Shape> {
-    static constexpr bool value =
-        (Shape::kM % 32 == 0) &&
-        (Shape::kN % 32 == 0) &&
-        (Shape::kK % 32 == 0);
+template <typename Shape> struct ShapeCheck<cutlass::half_t, Shape> {
+  static constexpr bool value =
+      (Shape::kM % 32 == 0) && (Shape::kN % 32 == 0) && (Shape::kK % 32 == 0);
 };
 
-template <typename Shape>
-struct ShapeCheck<cutlass::bfloat16_t, Shape> {
-    static constexpr bool value = ShapeCheck<cutlass::half_t, Shape>::value;  // Same as half
+template <typename Shape> struct ShapeCheck<cutlass::bfloat16_t, Shape> {
+  static constexpr bool value =
+      ShapeCheck<cutlass::half_t, Shape>::value; // Same as half
 };
 
-template <typename Shape>
-struct ShapeCheck<int8_t, Shape> {
-    static constexpr bool value =
-        (Shape::kM % 16 == 0) &&
-        (Shape::kN % 16 == 0) &&
-        (Shape::kK % 64 == 0);
+template <typename Shape> struct ShapeCheck<int8_t, Shape> {
+  static constexpr bool value =
+      (Shape::kM % 16 == 0) && (Shape::kN % 16 == 0) && (Shape::kK % 64 == 0);
 };
 
-template <typename Shape>
-struct ShapeCheck<uint8_t, Shape> {
-    static constexpr bool value =
-        (Shape::kM % 16 == 0) &&
-        (Shape::kN % 16 == 0) &&
-        (Shape::kK % 64 == 0);
+template <typename Shape> struct ShapeCheck<uint8_t, Shape> {
+  static constexpr bool value =
+      (Shape::kM % 16 == 0) && (Shape::kN % 16 == 0) && (Shape::kK % 64 == 0);
 };
 
-
-template <typename T>
-struct DispatchInstructionShape {
-  static_assert(!std::is_same_v<T, T>, "Unsupported type for DispatchInstructionShape");
+template <typename T> struct DispatchInstructionShape {
+  static_assert(!std::is_same_v<T, T>,
+                "Unsupported type for DispatchInstructionShape");
 };
 
-template<>
-struct DispatchInstructionShape<cutlass::half_t> {
+template <> struct DispatchInstructionShape<cutlass::half_t> {
   using Shape = cutlass::gemm::GemmShape<16, 8, 32>;
   using Operator = cutlass::arch::OpMultiplyAdd;
 };
 
-template<>
-struct DispatchInstructionShape<cutlass::bfloat16_t> {
+template <> struct DispatchInstructionShape<cutlass::bfloat16_t> {
   using Shape = cutlass::gemm::GemmShape<16, 8, 32>;
   using Operator = cutlass::arch::OpMultiplyAdd;
 };
@@ -64,14 +50,12 @@ struct DispatchInstructionShape<cutlass::bfloat16_t> {
 //   using Operator = cutlass::arch::OpMultiplyAdd;
 // };
 
-template<>
-struct DispatchInstructionShape<int8_t> {
+template <> struct DispatchInstructionShape<int8_t> {
   using Shape = cutlass::gemm::GemmShape<16, 8, 64>;
   using Operator = cutlass::arch::OpMultiplyAddSaturate;
 };
 
-template<>
-struct DispatchInstructionShape<uint8_t> {
+template <> struct DispatchInstructionShape<uint8_t> {
   using Shape = cutlass::gemm::GemmShape<16, 8, 64>;
   using Operator = cutlass::arch::OpMultiplyAddSaturate;
 };
@@ -88,13 +72,16 @@ struct DispatchSharedMemoryLayoutA;
 
 template <typename T, int M, int K>
 struct DispatchSharedMemoryLayoutA<T, false, M, K> {
-  using SmemLayoutA = cutlass::layout::RowMajorTensorOpMultiplicandCrosswise<cutlass::sizeof_bits<T>::value, K / kSparse>;
+  using SmemLayoutA = cutlass::layout::RowMajorTensorOpMultiplicandCrosswise<
+      cutlass::sizeof_bits<T>::value, K / kSparse>;
 };
 
 template <typename T, int M, int K>
 struct DispatchSharedMemoryLayoutA<T, true, M, K> {
-  static int const Crosswise_A = cutlass::platform::min(int(128 / sizeof(T)), M);
-  using SmemLayoutA = cutlass::layout::ColumnMajorTensorOpMultiplicandCongruous<cutlass::sizeof_bits<T>::value, Crosswise_A>;
+  static int const Crosswise_A =
+      cutlass::platform::min(int(128 / sizeof(T)), M);
+  using SmemLayoutA = cutlass::layout::ColumnMajorTensorOpMultiplicandCongruous<
+      cutlass::sizeof_bits<T>::value, Crosswise_A>;
 };
 
 template <typename T, bool transpose, int N, int K>
@@ -102,43 +89,41 @@ struct DispatchSharedMemoryLayoutB;
 
 template <typename T, int N, int K>
 struct DispatchSharedMemoryLayoutB<T, false, N, K> {
-  static_assert(cutlass::sizeof_bits<T>::value != 8, "int8, uint8, float8 only support column major layout for matrix B");
-  static int const Crosswise_B = cutlass::platform::min(int(128 / sizeof(T)), N);
-  using SmemLayoutB = cutlass::layout::RowMajorTensorOpMultiplicandCongruous<cutlass::sizeof_bits<T>::value, Crosswise_B>;
+  static_assert(
+      cutlass::sizeof_bits<T>::value != 8,
+      "int8, uint8, float8 only support column major layout for matrix B");
+  static int const Crosswise_B =
+      cutlass::platform::min(int(128 / sizeof(T)), N);
+  using SmemLayoutB = cutlass::layout::RowMajorTensorOpMultiplicandCongruous<
+      cutlass::sizeof_bits<T>::value, Crosswise_B>;
 };
 
 template <typename T, int N, int K>
 struct DispatchSharedMemoryLayoutB<T, true, N, K> {
-  static int const kCrosswiseB =
-      (K > (1024 / cutlass::sizeof_bits<T>::value))
-          ? (1024 / cutlass::sizeof_bits<T>::value)
-          : K;
+  static int const kCrosswiseB = (K > (1024 / cutlass::sizeof_bits<T>::value))
+                                     ? (1024 / cutlass::sizeof_bits<T>::value)
+                                     : K;
   using SmemLayoutB = cutlass::layout::ColumnMajorTensorOpMultiplicandCrosswise<
       cutlass::sizeof_bits<T>::value, kCrosswiseB>;
 };
 
-template <typename T>
-struct DispatchType {
+template <typename T> struct DispatchType {
   static_assert(std::is_same<T, void>::value, "Unsupported dtype");
 };
 
-template <>
-struct DispatchType<cutlass::half_t> {
+template <> struct DispatchType<cutlass::half_t> {
   using Type = cutlass::half_t;
 };
 
-template <>
-struct DispatchType<cutlass::bfloat16_t> {
+template <> struct DispatchType<cutlass::bfloat16_t> {
   using Type = cutlass::bfloat16_t;
 };
 
-template <>
-struct DispatchType<unsigned char> {
+template <> struct DispatchType<unsigned char> {
   using Type = uint8_t;
 };
 
-template <>
-struct DispatchType<signed char> {
+template <> struct DispatchType<signed char> {
   using Type = int8_t;
 };
 
@@ -153,8 +138,10 @@ public:
   using ElementB = typename DispatchType<B_type_raw>::Type;
   using ElementC = C_type_raw;
 
-  static_assert(std::is_same_v<ElementA, ElementB>, "A and B are not the same type");
-  static_assert(ShapeCheck<ElementA, Shape>::value, "Invalid shape for ElementA");
+  static_assert(std::is_same_v<ElementA, ElementB>,
+                "A and B are not the same type");
+  static_assert(ShapeCheck<ElementA, Shape>::value,
+                "Invalid shape for ElementA");
 
   using LayoutA =
       typename std::conditional_t<trans_A, cutlass::layout::ColumnMajor,
@@ -164,15 +151,22 @@ public:
                                   cutlass::layout::RowMajor>;
   using LayoutC = cutlass::layout::RowMajor;
   using ThreadblockShape = Shape;
-  using SmemLayoutA = typename DispatchSharedMemoryLayoutA<ElementA, trans_A, ThreadblockShape::kM, ThreadblockShape::kK>::SmemLayoutA;
-  using SmemLayoutB = typename DispatchSharedMemoryLayoutB<ElementB, trans_B, ThreadblockShape::kN, ThreadblockShape::kK>::SmemLayoutB;
+  using SmemLayoutA =
+      typename DispatchSharedMemoryLayoutA<ElementA, trans_A,
+                                           ThreadblockShape::kM,
+                                           ThreadblockShape::kK>::SmemLayoutA;
+  using SmemLayoutB =
+      typename DispatchSharedMemoryLayoutB<ElementB, trans_B,
+                                           ThreadblockShape::kN,
+                                           ThreadblockShape::kK>::SmemLayoutB;
 
   using WarpShape =
       GemmShape<ThreadblockShape::kM / num_warp_m,
                 ThreadblockShape::kN / num_warp_n, ThreadblockShape::kK>;
   using InstructionShape = typename DispatchInstructionShape<ElementA>::Shape;
   using Operator = typename DispatchInstructionShape<ElementA>::Operator;
-  static_assert(WarpShape::kK % InstructionShape::kK == 0, "K dimension must be divisible by instruction shape K.");
+  static_assert(WarpShape::kK % InstructionShape::kK == 0,
+                "K dimension must be divisible by instruction shape K.");
 
   // instruction/warp config
   using Policy = cutlass::gemm::warp::MmaTensorOpPolicy<
@@ -180,10 +174,11 @@ public:
                                cutlass::layout::RowMajor, ElementB,
                                cutlass::layout::ColumnMajor, ElementC,
                                cutlass::layout::RowMajor, Operator>,
-      cutlass::MatrixShape<1, 1> >;
-  using MmaWarp = cutlass::gemm::warp::SparseMmaTensorOp<
-      WarpShape, ElementA, SmemLayoutA, ElementB, SmemLayoutB, ElementC, LayoutC,
-      Policy>;
+      cutlass::MatrixShape<1, 1>>;
+  using MmaWarp =
+      cutlass::gemm::warp::SparseMmaTensorOp<WarpShape, ElementA, SmemLayoutA,
+                                             ElementB, SmemLayoutB, ElementC,
+                                             LayoutC, Policy>;
   static_assert(kSparse == MmaWarp::kSparse, "not 2:4 structured sparse");
 
   using SmemLayoutE = typename MmaWarp::LayoutE;
@@ -210,7 +205,9 @@ public:
 
   using ShapeA = cutlass::MatrixShape<Shape::kM, Shape::kK / kSparse>;
   using ShapeB = cutlass::MatrixShape<Shape::kK, Shape::kN>;
-  using ShapeE = cutlass::MatrixShape<Shape::kM * 2, Shape::kK / kSparse / kElementsPerElementE / 2>;
+  using ShapeE =
+      cutlass::MatrixShape<Shape::kM * 2,
+                           Shape::kK / kSparse / kElementsPerElementE / 2>;
 
   static int constexpr kKgroups = WarpShape::kK / InstructionShape::kK;
 
@@ -222,9 +219,15 @@ public:
     FragmentA frag_a;
     FragmentB frag_b;
     FragmentE frag_e;
-    const TensorRefA ref_A((ElementA *)pA, MmaWarp::LayoutA::packed({ShapeA::kRow, ShapeA::kColumn}));
-    const TensorRefE ref_E((ElementE *)pE, MmaWarp::LayoutE::packed({ShapeE::kRow, ShapeE::kColumn}));
-    const TensorRefB ref_B((ElementB *)pB, MmaWarp::LayoutB::packed({ShapeB::kRow, ShapeB::kColumn}));
+    const TensorRefA ref_A(
+        (ElementA *)pA,
+        MmaWarp::LayoutA::packed({ShapeA::kRow, ShapeA::kColumn}));
+    const TensorRefE ref_E(
+        (ElementE *)pE,
+        MmaWarp::LayoutE::packed({ShapeE::kRow, ShapeE::kColumn}));
+    const TensorRefB ref_B(
+        (ElementB *)pB,
+        MmaWarp::LayoutB::packed({ShapeB::kRow, ShapeB::kColumn}));
     IteratorA iter_A(ref_A, lane_id);
     IteratorE iter_E(ref_E, lane_id);
     IteratorB iter_B(ref_B, lane_id);

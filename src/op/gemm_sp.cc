@@ -213,11 +213,13 @@ GemmSP::ComputeWarpPartition(int num_warps, Target target,
   // Special handling for gemm_sp when the tiling size is not a multiple
   // This should be consistent with shape check in gemm_sp_sm80.h
   ICHECK(A->dtype.bits() == B->dtype.bits())
-      << "A and B must have the same dtype, but received "
-      << A->dtype << " and " << B->dtype;
+      << "A and B must have the same dtype, but received " << A->dtype
+      << " and " << B->dtype;
   int m_atom_size = A->dtype.bits() == 16 ? 32 : 16;
   int n_atom_size = A->dtype.bits() == 16 ? 32 : 16;
-  static const char *err_msg = "Cannot arrange the warp shape to be a multiple of atom size, please reduce num threads or increase tiling size";
+  static const char *err_msg =
+      "Cannot arrange the warp shape to be a multiple of atom size, please "
+      "reduce num threads or increase tiling size";
   if (TargetIsAmpere(target)) {
     int warp_shape_m = this->M / m_warp;
     int warp_shape_n = this->N / n_warp;
@@ -237,7 +239,8 @@ GemmSP::ComputeWarpPartition(int num_warps, Target target,
       ICHECK(warp_shape_m % m_atom_size == 0) << err_msg;
     }
     ICHECK(m_warp * n_warp == num_warps)
-        << "m_warp * n_warp must equal num_warps, please report an issue when encounter this";
+        << "m_warp * n_warp must equal num_warps, please report an issue when "
+           "encounter this";
   }
 
   return {m_warp, n_warp};
@@ -346,8 +349,8 @@ LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       int dim_A = A->shape.size();
       const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
-      results.Set(A,
-                  makeGemmSparseAmpereABLayout(mat_stride, mat_continuous, A->dtype.bits()));
+      results.Set(A, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
+                                                  A->dtype.bits()));
     } else if (A.scope() == "local.fragment") {
       // auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
       //                                   A->dtype.bits(), trans_A);
@@ -360,7 +363,8 @@ LayoutMap GemmSP::InferLayout(const LayoutInferArgs &T, InferLevel level) {
       int dim_B = B->shape.size();
       const int64_t mat_stride = *as_const_int(B->shape[dim_B - 2]);
       const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
-      results.Set(B, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous, B->dtype.bits()));
+      results.Set(B, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
+                                                  B->dtype.bits()));
     } else if (B.scope() == "local.fragment") {
       // auto fragment =
       //     makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
