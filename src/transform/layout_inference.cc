@@ -110,7 +110,7 @@ public:
         LayoutInferArgs{target_, thread_bounds, layout_map}, level);
     // Process the returned updates
     for (const auto &[buffer, layout] : updates) {
-      LOG(INFO) << "    consider update " << buffer << " as "
+      DLOG(INFO) << "    consider update " << buffer << " as "
                 << layout->DebugOutput() << std::endl;
 
       // Basic validity checks
@@ -141,7 +141,7 @@ public:
           if (ProveFragmentContains(src_layout, dst_layout, indices, indices,
                                     inner_analyzer)) {
             layout_map.Set(buffer, layout);
-            LOG(INFO) << "    layout broadcast from "
+            DLOG(INFO) << "    layout broadcast from "
                       << src_layout->DebugOutput() << ", accepted" << std::endl;
             continue;
           }
@@ -154,7 +154,7 @@ public:
       } else {
         // Otherwise, update map
         layout_map.Set(buffer, layout);
-        LOG(INFO) << "    new layout accepted" << std::endl;
+        DLOG(INFO) << "    new layout accepted" << std::endl;
         if (!update_queue)
           continue;
 
@@ -480,11 +480,11 @@ private:
   void InferInFreeMode(LayoutMap &layout_map,
                        const LayoutMap &strict_layout_map) {
 
-    LOG(INFO) << "Enforced layout maps:" << std::endl;
+    DLOG(INFO) << "Enforced layout maps:" << std::endl;
     for (auto &&[k, v] : layout_map) {
-      LOG(INFO) << "    " << k << ": " << v->DebugOutput() << std::endl;
+      DLOG(INFO) << "    " << k << ": " << v->DebugOutput() << std::endl;
     }
-    LOG(INFO) << std::endl;
+    DLOG(INFO) << std::endl;
 
     // Group operators into connected components
     UnionFind<int> uf;
@@ -521,14 +521,14 @@ private:
     std::vector<bool> in_queue(infer_list_.size(), false);
 
     for (auto &&[root, members] : components) {
-      LOG(INFO) << "======================= processing component " << root
+      DLOG(INFO) << "======================= processing component " << root
                 << std::endl;
       decltype(infer_list_) best_infer_list;
       LayoutMap best_layout_map;
       int64_t min_reg_num = INT64_MAX;
       int min_reg_num_infer_root = -1;
       for (int attempt_infer_root : members) {
-        LOG(INFO) << "----------------------- try root " << attempt_infer_root
+        DLOG(INFO) << "----------------------- try root " << attempt_infer_root
                   << std::endl;
         // backup infer_list_ in class member
         auto back_infer_list = BackupInferList();
@@ -561,13 +561,13 @@ private:
         } catch (LayoutConflictException e) {
           // such an order fails, try others
           do_update = false;
-          LOG(INFO) << "attempt failed due to LayoutConflictException "
+          DLOG(INFO) << "attempt failed due to LayoutConflictException "
                     << e.what() << std::endl;
         } catch (NormalizeIterException e) {
           // such an order encounters iterators that is not normalizable, try
           // others e.g. i * 576 % 2048
           do_update = false;
-          LOG(INFO) << "attempt failed due to NormalizeIterException "
+          DLOG(INFO) << "attempt failed due to NormalizeIterException "
                     << e.what() << std::endl;
         }
 
@@ -601,7 +601,7 @@ private:
       // now apply the best plan for this component
       infer_list_ = std::move(best_infer_list);
       layout_map = best_layout_map;
-      LOG(INFO) << "[InferInFreeMode] Final selection is attempt_infer_root = "
+      DLOG(INFO) << "[InferInFreeMode] Final selection is attempt_infer_root = "
                 << min_reg_num_infer_root << std::endl;
     }
   }

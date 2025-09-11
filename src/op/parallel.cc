@@ -248,7 +248,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   }
   auto compute_loop_layout_from_buffer = [&](const Buffer &buffer) {
     Fragment src_layout = T.layout_map[buffer].as<Fragment>().value();
-    LOG(INFO) << "[compute_loop_layout_from_buffer] infer from buffer `"
+    DLOG(INFO) << "[compute_loop_layout_from_buffer] infer from buffer `"
               << buffer << "` of layout " << src_layout->DebugOutput()
               << std::endl;
     Fragment result;
@@ -273,7 +273,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
       result = Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter)
                    ->BindThreadRange(T.thread_bounds);
     }
-    LOG(INFO) << "[compute_loop_layout_from_buffer] ... and get "
+    DLOG(INFO) << "[compute_loop_layout_from_buffer] ... and get "
               << result->DebugOutput() << std::endl;
     return result;
   };
@@ -338,21 +338,21 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
           IfBufferRemapLoopGenerator::run(root_, T.buffer_remap, T.layout_map);
       int vector_size = GetVectorizeSize(maybe_remapped_root_);
 
-      LOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size
+      DLOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size
                 << std::endl;
 
       PrimExpr loop_total_size = 1;
       for (Stmt l = root_; l.as<For>().has_value();
            l = l.as<For>().value()->body)
         loop_total_size = loop_total_size * l.as<For>().value()->extent;
-      LOG(INFO) << "[PlanLoopPartition] loop_total_size = " << loop_total_size
+      DLOG(INFO) << "[PlanLoopPartition] loop_total_size = " << loop_total_size
                 << std::endl;
       while (!analyzer_.CanProve(
                  floormod(loop_total_size,
                           T.thread_bounds->extent * vector_size) == 0) &&
              vector_size > 1)
         vector_size /= 2;
-      LOG(INFO) << "[PlanLoopPartition] after adjust: vector_size = "
+      DLOG(INFO) << "[PlanLoopPartition] after adjust: vector_size = "
                 << vector_size << std::endl;
 
       // Check if coalesced_width is defined
@@ -370,11 +370,11 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
           LOG(FATAL) << "coalesced_width should be an IntImmNode.";
         }
       }
-      LOG(INFO) << "[PlanLoopPartition] root_ = " << root_
+      DLOG(INFO) << "[PlanLoopPartition] root_ = " << root_
                 << " ############# vector_size = " << vector_size
                 << ", thread_bounds = " << T.thread_bounds << std::endl;
       loop_layout_ = PlanLoopPartition(root_, vector_size, T.thread_bounds);
-      LOG(INFO) << "[PlanLoopPartition] loop_layout_ = "
+      DLOG(INFO) << "[PlanLoopPartition] loop_layout_ = "
                 << loop_layout_->DebugOutput() << std::endl;
     }
   } else {
