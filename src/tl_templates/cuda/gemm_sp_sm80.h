@@ -14,32 +14,29 @@ template <typename Shape>
 struct ShapeCheck<cutlass::half_t, Shape> {
     static constexpr bool value =
         (Shape::kM % 32 == 0) &&
-        (Shape::kN % 16 == 0) &&
-        (Shape::kK % 64 == 0);
+        (Shape::kN % 32 == 0) &&
+        (Shape::kK % 32 == 0);
 };
 
 template <typename Shape>
 struct ShapeCheck<cutlass::bfloat16_t, Shape> {
-    static constexpr bool value =
-        (Shape::kM % 32 == 0) &&
-        (Shape::kN % 16 == 0) &&
-        (Shape::kK % 64 == 0);
+    static constexpr bool value = ShapeCheck<cutlass::half_t, Shape>::value;  // Same as half
 };
 
 template <typename Shape>
 struct ShapeCheck<int8_t, Shape> {
     static constexpr bool value =
         (Shape::kM % 16 == 0) &&
-        (Shape::kN % 8 == 0) &&
-        (Shape::kK % 128 == 0);
+        (Shape::kN % 16 == 0) &&
+        (Shape::kK % 64 == 0);
 };
 
 template <typename Shape>
 struct ShapeCheck<uint8_t, Shape> {
     static constexpr bool value =
         (Shape::kM % 16 == 0) &&
-        (Shape::kN % 8 == 0) &&
-        (Shape::kK % 128 == 0);
+        (Shape::kN % 16 == 0) &&
+        (Shape::kK % 64 == 0);
 };
 
 
@@ -187,6 +184,7 @@ public:
   using MmaWarp = cutlass::gemm::warp::SparseMmaTensorOp<
       WarpShape, ElementA, SmemLayoutA, ElementB, SmemLayoutB, ElementC, LayoutC,
       Policy>;
+  static_assert(kSparse == MmaWarp::kSparse, "not 2:4 structured sparse");
 
   using SmemLayoutE = typename MmaWarp::LayoutE;
   static_assert(std::is_same_v<SmemLayoutE, cutlass::layout::ColumnMajor>,

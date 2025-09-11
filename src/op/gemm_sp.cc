@@ -210,33 +210,31 @@ GemmSP::ComputeWarpPartition(int num_warps, Target target,
     ICHECK(0) << "Unknown GemmWarpPolicy";
   }
 
-  // Special handling for gemm_sp when the tiling size is not a multiple of (tm, tn).
-  // due to ldsm constraint on matrix and metadata
-  // In this case, we skip previous checks and fall back to either
-  // GemmWarpPolicy::kFullRow or GemmWarpPolicy::kFullColumn,
-  // 16-bit type: 32 * 16; 8-bit type: 16 * 8
+  // Special handling for gemm_sp when the tiling size is not a multiple
+  // This should be consistent with shape check in gemm_sp_sm80.h
   ICHECK(A->dtype.bits() == B->dtype.bits())
       << "A and B must have the same dtype, but received "
       << A->dtype << " and " << B->dtype;
   int m_atom_size = A->dtype.bits() == 16 ? 32 : 16;
-  int n_atom_size = A->dtype.bits() == 16 ? 16 : 8;
+  int n_atom_size = A->dtype.bits() == 16 ? 32 : 16;
+  static const char *err_msg = "Cannot arrange the warp shape to be a multiple of atom size, please reduce num threads or increase tiling size";
   if (TargetIsAmpere(target)) {
     int warp_shape_m = this->M / m_warp;
     int warp_shape_n = this->N / n_warp;
     if (warp_shape_m % m_atom_size) { // GemmWarpPolicy::kFullRow
       m_warp = this->M / m_atom_size;
       warp_shape_m = m_atom_size;
-      ICHECK(m_warp > 0) << "Cannot arrange the warp shape to be a multiple of atom size, please reduce num threads or increase tiling size";
+      ICHECK(m_warp > 0) << err_msg;
       n_warp = num_warps / m_warp;
       warp_shape_n = this->N / n_warp;
-      ICHECK(warp_shape_n % n_atom_size == 0) << "Cannot arrange the warp shape to be a multiple of atom size, please reduce num threads or increase tiling size";
+      ICHECK(warp_shape_n % n_atom_size == 0) << err_msg;
     } else if (warp_shape_n % n_atom_size != 0) { // GemmWarpPolicy::kFullColumn
       n_warp = this->N / n_atom_size;
       warp_shape_n = n_atom_size;
-      ICHECK(n_warp > 0) << "Cannot arrange the warp shape to be a multiple of atom size, please reduce num threads or increase tiling size";
+      ICHECK(n_warp > 0) << err_msg;
       m_warp = num_warps / n_warp;
       warp_shape_m = this->M / m_warp;
-      ICHECK(warp_shape_m % m_atom_size == 0) << "Cannot arrange the warp shape to be a multiple of atom size, please reduce num threads or increase tiling size";
+      ICHECK(warp_shape_m % m_atom_size == 0) << err_msg;
     }
     ICHECK(m_warp * n_warp == num_warps)
         << "m_warp * n_warp must equal num_warps, please report an issue when encounter this";

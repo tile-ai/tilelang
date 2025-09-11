@@ -106,7 +106,7 @@ def matmul_sp_sm80(
     trans_A,
     trans_B,
 ):
-    is_8_bit = in_dtype in ["int8", "float8_e4m3"]
+    is_8_bit = "8" in in_dtype
     E_factor = 32 if is_8_bit else 16
     A_sparse_shape = (M, K // 2) if not trans_A else (K // 2, M)
     B_shape = (K, N) if not trans_B else (N, K)
@@ -357,30 +357,30 @@ def test_gemm_sp_sm90():
 
     run_gemm_sp_sm90(512, 1024, 768, "float8_e4m3", "float16", "float16", 64, 64, 64, 2, 128, False,
                 True)
-
     run_gemm_sp_sm90(512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 2, 128, False, True)
 
-@tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(8, 0)
-def test_gemm_sp():
-    # test different layout
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float16", "float32", 64, 64, 64, 0, 128, False, True)
-    # not working
-    # run_gemm_sp_sm80(512, 1024, 768, "float16", "float16", "float32", 64, 64, 64, 0, 128, True, False)
-    # run_gemm_sp_sm80(512, 1024, 768, "float16", "float16", "float32", 64, 64, 64, 0, 128, True, True)
-
-    # test different tile size
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 32, 32, 64, 0, 32)
+# @tilelang.testing.requires_cuda
+# @tilelang.testing.requires_cuda_compute_version(8, 0)
+def test_gemm_sp_sm80():
+    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 32, 32, 32, 0, 32)
     run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 32)
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 32, 64, 64, 0, 64)
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 32, 64, 0, 64)
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float16", "float32", 64, 64, 64, 0, 128)
+    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128)
 
-    # test different pipeline
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 32, 32, 64, 1, 32)
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 32, 32, 64, 2, 32)
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 32, 32, 64, 3, 32)
+    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 32, 32, 64, 0, 32, False, True)
+    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 32, False, True)
+    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, False, True)
 
+    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 1, 128)
+    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 2, 128)
+    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 3, 128)
+
+    run_gemm_sp_sm80(512, 1024, 768, "int8", "int32", "int32", 32, 32, 64, 0, 32, False, True)
+    run_gemm_sp_sm80(512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 0, 32, False, True)
+    run_gemm_sp_sm80(512, 1024, 768, "int8", "int32", "int32", 128, 128, 128, 0, 128, False, True)
+
+    run_gemm_sp_sm80(512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 1, 128, False, True)
+    run_gemm_sp_sm80(512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 2, 128, False, True)
+    run_gemm_sp_sm80(512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 3, 128, False, True)
 
 if __name__ == "__main__":
     tilelang.testing.main()
