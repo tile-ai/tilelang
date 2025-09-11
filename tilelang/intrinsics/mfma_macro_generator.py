@@ -53,6 +53,7 @@ class MatrixCoreIntrinEmitter(object):
         num_elems_per_byte: int = 1,
         k_pack: Optional[int] = None,
         is_m_first: Optional[bool] = False,
+        b_preshuffle: Optional[bool] = False,
     ):
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
@@ -72,6 +73,7 @@ class MatrixCoreIntrinEmitter(object):
         self._initialize_micro_size(self.M_DIM, self.N_DIM, self.k_dim)
         self._initialize_k_pack(k_pack)
         self._initialize_is_m_first(is_m_first)
+        self._initialize_b_preshuffle(b_preshuffle)
 
         self.warp_rows = warp_row_tiles // self.micro_size_x
         self.warp_cols = warp_col_tiles // self.micro_size_y
@@ -140,6 +142,10 @@ class MatrixCoreIntrinEmitter(object):
     def _initialize_is_m_first(self, is_m_first: Optional[bool] = False):
         if is_m_first is not None:
             self.is_m_first = is_m_first
+
+    def _initialize_b_preshuffle(self, b_preshuffle: Optional[bool] = False):
+        if b_preshuffle is not None:
+            self.b_preshuffle = b_preshuffle
 
     def get_ldmatrix_index_map(self, is_b=False):
         from .mfma_layout import (
@@ -288,26 +294,51 @@ class MatrixCoreIntrinEmitter(object):
         ):
             tx, warp_n, _ = self.extract_thread_binding(thread_binding)
 
-            if is_transposed:
-                for j in T.serial(warp_cols):
-                    for local_id in T.vectorized(k_pack * local_size_b):
-                        row, col = T.meta_var(reverse_index_map(tx, local_id))
-                        l, r = (
-                            warp_n * warp_col_tiles + j * micro_size_y,
-                            rk * chunk + ki * (k_pack * micro_size_k),
-                        )
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[l + row,
-                                                                                         r + col]
+            # 4 dim
+            if self.b_preshuffle:
+                if is_transposed:
+                    for j in T.serial(warp_cols):
+                        for local_id in T.vectorized(k_pack * local_size_b):
+                            row, col = T.meta_var(reverse_index_map(tx, local_id))
+                            l, r = (
+                                warp_n * warp_cols + j,
+                                rk * (chunk // micro_size_k) + ki,
+                            )
+                            B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[l, r,
+                                                                                             row,
+                                                                                             col]
+                else:
+                    for j in T.serial(warp_cols):
+                        for local_id in T.vectorized(k_pack * local_size_b):
+                            row, col = T.meta_var(reverse_index_map(tx, local_id))
+                            l, r = (
+                                rk * (chunk // micro_size_k) + ki,
+                                warp_n * warp_cols + j,
+                            )
+                            B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[l, r,
+                                                                                             row,
+                                                                                             col]
             else:
-                for j in T.serial(warp_cols):
-                    for local_id in T.vectorized(k_pack * local_size_b):
-                        row, col = T.meta_var(reverse_index_map(tx, local_id))
-                        l, r = (
-                            rk * chunk + ki * (k_pack * micro_size_k),
-                            warp_n * warp_col_tiles + j * micro_size_y,
-                        )
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[l + row,
-                                                                                         r + col]
+                if is_transposed:
+                    for j in T.serial(warp_cols):
+                        for local_id in T.vectorized(k_pack * local_size_b):
+                            row, col = T.meta_var(reverse_index_map(tx, local_id))
+                            l, r = (
+                                warp_n * warp_col_tiles + j * micro_size_y,
+                                rk * chunk + ki * (k_pack * micro_size_k),
+                            )
+                            B_local_buf[j * k_pack * local_size_b +
+                                        local_id] = B_shared_buf[l + row, r + col]
+                else:
+                    for j in T.serial(warp_cols):
+                        for local_id in T.vectorized(k_pack * local_size_b):
+                            row, col = T.meta_var(reverse_index_map(tx, local_id))
+                            l, r = (
+                                rk * chunk + ki * (k_pack * micro_size_k),
+                                warp_n * warp_col_tiles + j * micro_size_y,
+                            )
+                            B_local_buf[j * k_pack * local_size_b +
+                                        local_id] = B_shared_buf[l + row, r + col]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
