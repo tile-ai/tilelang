@@ -65,11 +65,12 @@ def matmul_sp_sm90(
             T.annotate_layout({
                 E:
                     make_metadata_layout(
-                        E, mma_dtype="float16", backend="cutlass", block_k=block_K),
+                        E, mma_dtype="float16", arch="9.0", backend="cutlass", block_k=block_K),
                 E_shared:
                     make_metadata_layout(
                         E_shared,
                         mma_dtype="float16",
+                        arch="9.0",
                         backend="cutlass",
                         block_k=block_K),
             })
@@ -130,12 +131,13 @@ def matmul_sp_sm80(
             T.annotate_layout({
                 E:
                     make_metadata_layout(
-                        E, mma_dtype="float16", backend="cutlass"),
+                        E, mma_dtype="float16", backend="cutlass", arch="8.0"),
                 E_shared:
                     make_metadata_layout(
                         E_shared,
                         mma_dtype="float16",
-                        backend="cutlass"),
+                        backend="cutlass",
+                        arch="8.0"),
             })
             T.clear(C_frag)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
