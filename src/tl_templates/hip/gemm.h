@@ -51,6 +51,19 @@ template <> struct MfmaTraits<bfloat16_t> {
   }
 };
 
+#if defined(HIP_FP8_ENABLED)
+// Specialization for fp8_e4_t
+template <> struct MfmaTraits<fp8_e4_t> {
+  template <typename AccType>
+  static TL_DEVICE void mfma_op(const fp8_e4_t *b, const fp8_e4_t *a,
+                                AccType *c) {
+    int64_t a_val = *reinterpret_cast<const int64_t *>(a);
+    int64_t b_val = *reinterpret_cast<const int64_t *>(b);
+    *c = __builtin_amdgcn_mfma_f32_16x16x32_fp8_fp8(b_val, a_val, *c, 0, 0, 0);
+  }
+};
+#endif
+
 // ref to bitblas/tl/mfma_macro_generator.py::kPack
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool TransposeA,
           bool TransposeB, bool clear_accum, int kPack, typename A_type,
@@ -61,7 +74,8 @@ public:
 
   static constexpr int micro_size_x = 16;
   static constexpr int micro_size_y = 16;
-  static constexpr int micro_size_k = 16;
+  static constexpr int micro_size_k = 32 / sizeof(A_type);
+  static constexpr int vec_size = 8 / sizeof(A_type);
 
   // This part comes from the Codegen
   static constexpr int M_Tile = M;
@@ -88,12 +102,12 @@ public:
   TL_DEVICE static constexpr auto reverse_index_map(int thread_id,
                                                     int local_id) {
     return std::make_pair(thread_id % 16,
-                          (thread_id / 16) * (4 * kPack) + local_id);
+                          (thread_id / 16) * (vec_size * kPack) + local_id);
   }
 
   TL_DEVICE static constexpr auto reverse_index_map_transposed(int thread_id,
                                                                int local_id) {
-    return std::make_pair((thread_id / 16) * (4 * kPack) + local_id,
+    return std::make_pair((thread_id / 16) * (vec_size * kPack) + local_id,
                           thread_id % 16);
   }
 
@@ -108,7 +122,7 @@ public:
     const int numBanks = 32;
     const int bankBitWidth = 32;
     const int SIMDWidth = 16;
-    const int vecSize = 4 * kPack;
+    const int vecSize = vec_size * kPack;
     const int innerDimLength = continuous;
     const int typeWidthInBit = dtype_bits;
 
@@ -134,19 +148,9 @@ public:
   template <int continuous = 32, int element_size = 2>
   TL_DEVICE static constexpr auto make_swizzle_layout(const int row,
                                                       const int col) {
-    constexpr auto vector_size = BANK_SIZE_BYTES / (element_size * 8);
-
-    if (continuous % (vector_size * 4) == 0) {
-      auto [n_row, n_col] =
-          make_mfma_swizzle_layout<continuous, element_size>(row, col);
-      return n_row * continuous + n_col;
-    } else {
-      auto [n_row, n_col] = make_layout_padded(row, col);
-      int padded = continuous;
-      if ((element_size * 8 * continuous) % 256 == 0)
-        padded += BANK_SIZE_BYTES / (element_size * 8);
-      return n_row * padded + n_col;
-    }
+    auto [n_row, n_col] =
+        make_mfma_swizzle_layout<continuous, element_size>(row, col);
+    return n_row * continuous + n_col;
   }
 
   static TL_DEVICE void body(A_type *A_shared, B_type *B_shared,
@@ -213,11 +217,11 @@ public:
         for (int i = 0; i < warp_rows; ++i) {
           for (int j = 0; j < warp_cols; ++j) {
             auto acc_ptr = ((float32x4 *)C_local) + ((i * warp_cols) + j);
-            auto b_ptr = ((B_type *)B_local) + (j * kPack + kp) * 4;
-            auto a_ptr = ((A_type *)A_local) + (i * kPack + kp) * 4;
+            auto b_ptr = ((B_type *)B_local) + (j * kPack + kp) * vec_size;
+            auto a_ptr = ((A_type *)A_local) + (i * kPack + kp) * vec_size;
 
-            // Use the trait to select the correct MFMA instruction, either fp16
-            // or bf16 currently
+            // Use the trait to select the correct MFMA instruction, either fp8,
+            // fp16 or bf16 currently
             MfmaTraits<A_type>::mfma_op(b_ptr, a_ptr, acc_ptr);
           }
         }
@@ -254,12 +258,12 @@ public:
         for (int local_id = 0; local_id < kPack * local_size_b; local_id++) {
           if constexpr (TransposeB) {
             auto [row, col] = reverse_index_map(lane_id, local_id);
-            B_local[j * local_size_b + local_id] =
+            B_local[j * kPack * local_size_b + local_id] =
                 B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
                     l + row, r + col)];
           } else {
             auto [row, col] = reverse_index_map_transposed(lane_id, local_id);
-            B_local[j * local_size_b + local_id] =
+            B_local[j * kPack * local_size_b + local_id] =
                 B_shared[make_swizzle_layout<last_dim_b, sizeof(B_type)>(
                     r + row, l + col)];
           }
@@ -271,12 +275,12 @@ public:
         for (int i = 0; i < warp_rows; ++i) {
           for (int j = 0; j < warp_cols; ++j) {
             auto acc_ptr = ((float32x4 *)C_local) + ((i * warp_cols) + j);
-            auto b_ptr = ((B_type *)B_local) + (j * kPack + kp) * 4;
+            auto b_ptr = ((B_type *)B_local) + (j * kPack + kp) * vec_size;
             auto a_ptr = ((A_type *)A_local) +
-                         (ki * warp_rows * kPack + i * kPack + kp) * 4;
+                         (ki * warp_rows * kPack + i * kPack + kp) * vec_size;
 
-            // Use the trait to select the correct MFMA instruction, either fp16
-            // or bf16 currently
+            // Use the trait to select the correct MFMA instruction, either fp8,
+            // fp16 or bf16 currently
             MfmaTraits<A_type>::mfma_op(b_ptr, a_ptr, acc_ptr);
           }
         }

@@ -582,7 +582,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       results.Set(A, shared_layout);
     } else if (A.scope() == "local.fragment") {
       auto fragment = makeGemmFragmentACDNA(M, N, K, M / warp_m, N / warp_n,
-                                            A->dtype.bits(), trans_A);
+                                            A->dtype.bits(), kPack, trans_A);
       results.Set(A, fragment->BindThreadRange(thread_range));
     } else {
       ICHECK(0);
@@ -594,10 +594,6 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
           *as_const_int(B->shape[dim_B - 1]), B->dtype.bits(), kPack);
 
       results.Set(B, shared_layout);
-    } else if (B.scope() == "local.fragment") {
-      auto fragment =
-          makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
-      results.Set(B, fragment->BindThreadRange(thread_range));
     } else {
       ICHECK(0);
     }
