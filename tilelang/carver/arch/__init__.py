@@ -2,6 +2,7 @@ from .arch_base import TileDevice
 from .cuda import CUDA
 from .cpu import CPU
 from .cdna import CDNA
+from .metal import METAL
 from typing import Union
 from tvm.target import Target
 import torch
@@ -17,6 +18,8 @@ def get_arch(target: Union[str, Target] = "cuda") -> TileDevice:
         return CPU(target)
     elif target.kind.name == "hip":
         return CDNA(target)
+    elif target.kind.name == "metal":
+        return METAL(target)
     else:
         raise ValueError(f"Unsupported target: {target.kind.name}")
 
@@ -43,3 +46,4 @@ from .cuda import (
     has_mma_support,  # noqa: F401
 )
 from .cdna import is_cdna_arch  # noqa: F401
+from .metal import is_metal_arch  # noqa: F401

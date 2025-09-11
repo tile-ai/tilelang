@@ -1,5 +1,6 @@
 from typing import Any, Callable, Dict, List, Literal, Optional, Union
 
+from tilelang.jit.adapter.utils import is_metal_target
 from tvm.target import Target
 from tvm.tir import PrimFunc
 
@@ -8,7 +9,7 @@ from tilelang import tvm
 from tilelang import env
 from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter,
-                                  NVRTCKernelAdapter, TorchDLPackKernelAdapter)
+                                  NVRTCKernelAdapter, TorchDLPackKernelAdapter, MetalKernelAdapter)
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import AVALIABLE_TARGETS, determine_target
 import logging
@@ -266,7 +267,10 @@ class JITKernel(object):
                 compile_flags=compile_flags,
             )
         elif execution_backend == "nvrtc":
-            adapter = NVRTCKernelAdapter(
+            rtc_adapter = NVRTCKernelAdapter
+            if is_metal_target(target):
+                rtc_adapter = MetalKernelAdapter
+            adapter = rtc_adapter(
                 params=artifact.params,
                 result_idx=out_idx,
                 target=target,

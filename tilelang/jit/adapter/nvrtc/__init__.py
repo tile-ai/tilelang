@@ -1,1 +1,1 @@
-from .adapter import NVRTCKernelAdapter  # noqa: F401
+from .adapter import NVRTCKernelAdapter, MetalKernelAdapter  # noqa: F401
