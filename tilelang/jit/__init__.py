@@ -261,7 +261,7 @@ def jit(  # This is the new public interface
         Compilation target for TVM (e.g., "cuda", "llvm"). Defaults to "auto".
     target_host : Union[str, Target], optional
         Target host for cross-compilation. Defaults to None.
-    execution_backend : Literal["dlpack", "ctypes", "cython"], optional
+    execution_backend : Literal["dlpack", "ctypes", "cython", "nvrtc"], optional
         Backend for kernel execution and argument passing. Defaults to "cython".
     verbose : bool, optional
         Enables verbose logging during compilation. Defaults to False.

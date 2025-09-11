@@ -186,8 +186,8 @@ class KernelCache:
             verbose=verbose,
             pass_configs=pass_configs,
         )
-        if execution_backend == "dlpack":
-            self.logger.warning("DLPack backend does not support cache saving to disk.")
+        if execution_backend in ("dlpack", "nvrtc"):
+            self.logger.warning("DLPack and NVRTC backend does not support cache saving to disk.")
         else:
             with self._lock:
                 if env.is_cache_enabled():

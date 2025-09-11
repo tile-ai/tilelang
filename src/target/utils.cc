@@ -118,6 +118,10 @@ int TargetGetWarpSize(Target target) {
   return res;
 }
 
+bool TargetIsMetal(Target target) {
+  return true;
+}
+
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
@@ -146,7 +150,9 @@ TVM_FFI_STATIC_INIT_BLOCK({
       .def("tl.TargetHasBulkCopy",
            [](Target target) { return TargetHasBulkCopy(target); })
       .def("tl.TargetGetWarpSize",
-           [](Target target) { return TargetGetWarpSize(target); });
+           [](Target target) { return TargetGetWarpSize(target); })
+      .def("tl.TargetIsMetal",
+           [](Target target) { return TargetIsMetal(target); });
 });
 
 } // namespace tl
