@@ -35,6 +35,8 @@
 #include "arith/int_operator.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "common/loop_vectorization_utils.h"
+#include "tvm/tir/analysis.h"
+#include "tvm/tir/var.h"
 
 namespace tvm {
 namespace tl {
@@ -195,21 +197,11 @@ int GetVectorizeSize(const For &loop) { return VectorizePlanner().Plan(loop); }
 bool CanProveIndependent(const PrimExpr &expr, Var var,
                          arith::Analyzer *analyzer) {
   // 1. if var doesn't exist, it is independent
-  struct FindVarVisitor : ExprVisitor {
-    Var target;
-    bool found = false;
-    FindVarVisitor(Var target) : target(std::move(target)) {}
-    void run(const PrimExpr &expr) { this->VisitExpr(expr); }
-    void VisitExpr_(const VarNode *node) final {
-      if (node == target.get()) {
-        found = true;
-      }
-    }
-  };
-  FindVarVisitor visitor(var);
-  visitor.run(expr);
-  if (!visitor.found)
+  bool used_var = UsesVar(
+      expr, [&](const VarNode *v) { return GetRef<Var>(v).same_as(var); });
+  if (!used_var) {
     return true;
+  }
   // 2. if \forall v_1, v_2, f(v_1) == f(v_2), f is independent with v
   Var var_1("_t", var.dtype());
   auto expr_1 = Substitute(expr, {{var, var_1}});
@@ -228,7 +220,12 @@ bool IndiceCanVectorize(const PrimExpr &expr, Var var,
 
   // Extent must be divisible
   if (!analyzer->CanProveEqual(FloorMod(iter_var_size, target_vectorized_size),
-                               0)) {
+                               0))
+    return false;
+
+  // The base offset must be divisible
+  if (!analyzer->CanProveEqual(
+          FloorMod(Substitute(expr, {{var, 0}}), target_vectorized_size), 0)) {
     return false;
   }
 
@@ -237,24 +234,24 @@ bool IndiceCanVectorize(const PrimExpr &expr, Var var,
   analyzer->Bind(v0, Range(0, target_vectorized_size));
   analyzer->Bind(v1, Range(0, analyzer->Simplify(FloorDiv(
                                   iter_var_size, target_vectorized_size))));
-  PrimExpr access_pos = analyzer->Simplify(
+  PrimExpr expr_transformed = analyzer->Simplify(
       Substitute(expr, {{var, v0 + v1 * target_vectorized_size}}));
-  // for (int ph_v = target_vectorized_size; ph_v > 1; ph_v /= 2) {
-  // ph_v: physical load/store vectorized size
-  // TODO: allow a more generalized vectorize: B[i] = A[i // 2]
-  auto ph_v = target_vectorized_size;
-  auto group = target_vectorized_size / ph_v;
-  // Check if access_pos is contingentous: ap === v0 // group (mod ph_v)
-  auto is_contingous =
-      analyzer->CanProveEqual(FloorMod(access_pos, ph_v), FloorDiv(v0, group));
-  // Check if access is aligned
-  auto is_aligned =
-      analyzer->CanProveEqual(FloorMod(Substitute(expr, {{var, 0}}), ph_v), 0);
-  if (is_contingous && is_aligned) {
-    return true;
+  Vectorizer vectorizer(v0, IntImm(v0->dtype, target_vectorized_size));
+  PrimExpr expr_vectorized = vectorizer.VisitExpr(expr_transformed);
+
+  // This simplify is necessary for thread region specified
+  // optimizations.
+  expr_vectorized = analyzer->Simplify(expr_vectorized);
+  auto ramp_node = expr_vectorized.as<RampNode>();
+  if (!ramp_node) {
+    // Broadcast value
+    if (expr_vectorized.dtype().lanes() == 1)
+      return true;
+    else
+      return false;
+  } else {
+    return is_one(ramp_node->stride);
   }
-  // }
-  return false;
 }
 
 For VectorizeLoop(const For &loop, int vectorize_hint) {
