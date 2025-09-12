@@ -761,6 +761,7 @@ class TilelangExtensionBuild(build_ext):
                             cc = get_cplus_compiler()
                             # fixme: aarch64 darwin needs something like `-Lxxx -lpython3.12`
                             command = f"{cc} -shared -pthread -fPIC -fwrapv -O2 -Wall -fno-strict-aliasing -I{python_include_path} {source_path} -o {temp_path}"
+                            # logger.info(command)
                             os.system(command)
 
                             # rename the temp file to the library file
