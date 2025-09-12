@@ -42,23 +42,37 @@ def assert_gemm(
     block_K,
     dtype="float32",
     accum_dtype="float",
+    atol=1e-8,
 ):
     jit_kernel = matmul(M, N, K, block_M, block_N, block_K, dtype=dtype, accum_dtype=accum_dtype)
 
     torch_dtype = getattr(torch, dtype)
-    a = torch.randn(M, N, dtype=torch_dtype, device='mps')
-    b = torch.randn(N, K, dtype=torch_dtype, device='mps')
+    a, b = None, None
+    if 'int' in dtype:
+        a = torch.randint(100, (M, N), dtype=torch_dtype, device='mps')
+        b = torch.randint(100, (N, K), dtype=torch_dtype, device='mps')
+    else:
+        a = torch.randn(M, N, dtype=torch_dtype, device='mps')
+        b = torch.randn(N, K, dtype=torch_dtype, device='mps')
     c = torch.zeros(K, M, dtype=torch_dtype, device='mps')
 
     jit_kernel(a, b, c)
 
-    assert torch.allclose(a @ b, c)
+    assert torch.allclose(a @ b, c, atol=atol)
 
     assert jit_kernel.kernel_source is not None
 
 
-def test_gemm_codegen():
+def test_gemm_float32():
     assert_gemm(1024, 1024, 1024, 16, 16, 16)
+
+
+def test_gemm_float16():
+    assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype='float16', atol=1)
+
+
+def test_gemm_int32():
+    assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype='int32', atol=1)
 
 
 if __name__ == "__main__":
