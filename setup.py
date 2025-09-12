@@ -35,9 +35,12 @@ logger = logging.getLogger(__name__)
 
 def _read_bool_env(name: str, default: bool = False) -> bool:
     if env := os.environ.get(name):
-        return env.lower() in ['on', '1', 'true']
-    else:
-        return default
+        env = env.lower()
+        if env in ['on', '1', 'true']:
+            return True
+        elif env in ['', 'off', '0', 'false']:
+            return False
+    return default
 
 
 # Environment variables False/True
