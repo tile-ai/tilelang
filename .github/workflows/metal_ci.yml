@@ -48,7 +48,7 @@ jobs:
         fi
 
   build-test-metal:
-    runs-on: [macos-26]
+    runs-on: [macos-latest]
     needs: format-check
     permissions:
       contents: read
