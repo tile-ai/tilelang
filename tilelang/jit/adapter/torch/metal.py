@@ -1,11 +1,8 @@
-
-import logging
 from functools import lru_cache
-from typing import Any, Callable, Optional, Union
+from typing import Callable, Optional, Union
 
 import torch
 from tvm import tir
-from tvm.target import Target
 
 from tilelang import tvm as tvm
 
@@ -14,18 +11,19 @@ from ..base import BaseKernelAdapter
 
 class MetalKernelAdapter(BaseKernelAdapter):
 
-    def __init__(self,
-                #  params: List[KernelParam],
-                #  result_idx: List[int],
-                #  target: Union[str, Target],
-                 func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-                #  host_mod: Optional[tvm.IRModule] = None,
-                 device_mod: Optional[tvm.IRModule] = None,
-                 kernel_global_source: Optional[str] = None,
-                 verbose: bool = False,
-                #  pass_configs: Optional[Dict[str, Any]] = None,
-                #  compile_flags: Optional[List[str]] = None
-            ):
+    def __init__(
+        self,
+        #  params: List[KernelParam],
+        #  result_idx: List[int],
+        #  target: Union[str, Target],
+        func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+        #  host_mod: Optional[tvm.IRModule] = None,
+        device_mod: Optional[tvm.IRModule] = None,
+        kernel_global_source: Optional[str] = None,
+        verbose: bool = False,
+        #  pass_configs: Optional[Dict[str, Any]] = None,
+        #  compile_flags: Optional[List[str]] = None
+    ):
         self.kernel_global_source = kernel_global_source
         self.kernel_name = func_or_mod.__name__ + '_kernel'
         self.verbose = verbose
@@ -43,7 +41,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
                     self.grid_info["xyz".index(tag[-1])] = extent
             break
         else:
-            assert False, 'no kernel'
+            raise AssertionError(f'no kernel with name {func_or_mod.__name__}')
 
         self._post_init()
 

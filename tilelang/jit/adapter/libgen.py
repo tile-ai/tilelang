@@ -15,7 +15,7 @@ from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_arch, get_target
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
 
-from .utils import is_cpu_target, is_cuda_target, is_hip_target, is_metal_target
+from .utils import is_cpu_target, is_cuda_target, is_hip_target
 
 logger = logging.getLogger(__name__)
 
@@ -127,11 +127,6 @@ class LibraryGenerator(object):
             command += [
                 "-I" + TILELANG_TEMPLATE_PATH,
             ]
-        elif is_metal_target(target):
-            # this won't get used,
-            # currently metal backend is compiled via `torch.mps.compile_shader`
-            # command = [get_metal_compiler(), "-std=c++17", "-fPIC", "-shared", src.name]
-            command = []
         else:
             raise ValueError(f"Unsupported target: {target}")
 
