@@ -102,8 +102,6 @@ GemmNode::GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
     return GemmInst::kMFMA;
   } else if (TargetIsCuda(target)) {
     return GemmInst::kMMA;
-  } else if (TargetIsMetal(target)) {
-    return GemmInst::kMETAL;
   } else {
     ICHECK(0) << "Unsupported target for gemm: " << target->str();
   }

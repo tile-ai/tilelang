@@ -187,7 +187,7 @@ class KernelCache:
             pass_configs=pass_configs,
         )
         if execution_backend in ("dlpack", "torch"):
-            self.logger.warning("DLPack and torch backend does not support cache saving to disk.")
+            self.logger.warning("DLPack or torch backend does not support cache saving to disk.")
         else:
             with self._lock:
                 if env.is_cache_enabled():

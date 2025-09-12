@@ -28,8 +28,6 @@ bool TargetHasStmatrix(Target target);
 bool TargetHasBulkCopy(Target target);
 int TargetGetWarpSize(Target target);
 
-bool TargetIsMetal(Target target);
-
 } // namespace tl
 } // namespace tvm
 
