@@ -11,7 +11,7 @@
 # You are encouraged to run this locally before pushing changes for review.
 
 # Cause the script to exit if a single command fails
-set -ex
+set -eo pipefail
 
 # this stops git rev-parse from failing if we run this from the .git directory
 builtin cd "$(dirname "${BASH_SOURCE:-$0}")"

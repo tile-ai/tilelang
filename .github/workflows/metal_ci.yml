@@ -17,7 +17,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        submodules: recursive
+        depth: 0
 
     - name: Install python via uv
       uses: astral-sh/setup-uv@v6
@@ -30,10 +30,10 @@ jobs:
 
     - name: Run format check
       run: |
-        source .venv/bin/activate
+        git submodule update --init --checkout --recursive --recommend-shallow
         mkdir -p build
         cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_METAL=ON; cd ..
-        if ! output=$(bash ./format.sh 2>&1); then
+        if ! output=$(./format.sh 2>&1); then
           echo "------------------------------------"
           echo "message:"
           echo "$output"
