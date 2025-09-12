@@ -2,7 +2,7 @@
 # pylint: disable=invalid-name, unsupported-binary-operation
 
 from . import _ffi_api
-from .simplify import Simplify, simplify_prim_func  # noqa: F401
+from .simplify import Simplify, simplify_prim_func, LetInline  # noqa: F401
 from .pass_config import PassConfigKey  # noqa: F401
 from tilelang import tvm as tvm  # noqa: F401
 from tvm.ir.transform import PassContext  # noqa: F401
@@ -66,17 +66,6 @@ def InjectSoftwarePipeline():
         The result pass
     """
     return _ffi_api.InjectSoftwarePipeline()  # type: ignore
-
-
-def FrontendLegalize():
-    """FrontendLegalize
-
-    Returns
-    -------
-    fpass : tvm.transform.Pass
-        The result pass
-    """
-    return _ffi_api.FrontendLegalize()  # type: ignore
 
 
 def InjectAssumes():

@@ -59,21 +59,39 @@ From https://github.com/RadeonOpenCompute/amd_matrix_instruction_calculator
 ./matrix_calculator.py --architecture cdna1 --instruction v_mfma_f32_16x16x16f16
 --detail-instruction
 */
-Fragment makeGemmFragmentAB16x16CDNA() {
+Fragment makeGemmFragmentAB16x16CDNA(const int k_pack) {
   IterVar i = make_itervar("i", 16);
-  IterVar j = make_itervar("j", 16);
+  IterVar j = make_itervar("j", 16 * k_pack);
   IterVar rep = make_itervar("rep", 1);
-  PrimExpr forward_thread = 16 * FloorDiv(j->var, 4) + i;
-  PrimExpr index = FloorMod(j->var, 4);
+  PrimExpr forward_thread = 16 * FloorDiv(j->var, 4 * k_pack) + i;
+  PrimExpr index = FloorMod(j->var, 4 * k_pack);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
-Fragment makeGemmFragmentAB16x16CDNATransposed() {
-  IterVar i = make_itervar("i", 16);
+Fragment makeGemmFragmentAB16x16CDNATransposed(const int k_pack) {
+  IterVar i = make_itervar("i", 16 * k_pack);
   IterVar j = make_itervar("j", 16);
   IterVar rep = make_itervar("rep", 1);
-  PrimExpr forward_thread = 16 * FloorDiv(i->var, 4) + j;
-  PrimExpr index = FloorMod(i->var, 4);
+  PrimExpr forward_thread = 16 * FloorDiv(i->var, 4 * k_pack) + j;
+  PrimExpr index = FloorMod(i->var, 4 * k_pack);
+  return Fragment({i, j}, {index}, forward_thread, rep);
+}
+
+Fragment makeGemmFragmentAB16x32CDNA(const int k_pack) {
+  IterVar i = make_itervar("i", 16);
+  IterVar j = make_itervar("j", 32 * k_pack);
+  IterVar rep = make_itervar("rep", 1);
+  PrimExpr forward_thread = 16 * FloorDiv(j->var, 8 * k_pack) + i;
+  PrimExpr index = FloorMod(j->var, 8 * k_pack);
+  return Fragment({i, j}, {index}, forward_thread, rep);
+}
+
+Fragment makeGemmFragmentAB16x32CDNATransposed(const int k_pack) {
+  IterVar i = make_itervar("i", 32 * k_pack);
+  IterVar j = make_itervar("j", 16);
+  IterVar rep = make_itervar("rep", 1);
+  PrimExpr forward_thread = 16 * FloorDiv(i->var, 8 * k_pack) + j;
+  PrimExpr index = FloorMod(i->var, 8 * k_pack);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
@@ -224,27 +242,34 @@ Fragment makeGemmFragmentB(const int block_m, const int block_n,
 Fragment makeGemmFragmentACDNA(const int block_m, const int block_n,
                                const int block_k, const int warp_m,
                                const int warp_n, const int element_size,
-                               bool transposed) {
+                               const int k_pack, bool transposed) {
   // assume not transposed
   ICHECK(block_m % warp_m == 0);
   ICHECK(block_n % warp_n == 0);
   ICHECK(warp_m % 16 == 0);
-  ICHECK(block_k % 16 == 0);
+  const int mfma_k = k_pack * (element_size == 16 ? 16 : 32);
+  ICHECK(block_k % mfma_k == 0);
   ICHECK(element_size == 8 || element_size == 16)
       << "element bitwidth=" << element_size;
   if (transposed) {
     auto base_layout =
-        makeGemmFragmentAB16x16CDNATransposed()->Repeat({1, 1}, false, false);
+        element_size == 16
+            ? makeGemmFragmentAB16x16CDNATransposed(k_pack)->Repeat(
+                  {1, 1}, false, false)
+            : makeGemmFragmentAB16x32CDNATransposed(k_pack)->Repeat(
+                  {1, 1}, false, false);
     auto warp_layout =
-        base_layout->Repeat({block_k / 16, warp_m / 16}, false, true);
+        base_layout->Repeat({block_k / mfma_k, warp_m / 16}, false, true);
     auto block_layout = warp_layout->Repeat({1, block_m / warp_m}, true, true)
                             ->Replicate(block_n / warp_n);
     return block_layout;
   } else {
     auto base_layout =
-        makeGemmFragmentAB16x16CDNA()->Repeat({1, 1}, false, false);
+        element_size == 16
+            ? makeGemmFragmentAB16x16CDNA(k_pack)->Repeat({1, 1}, false, false)
+            : makeGemmFragmentAB16x32CDNA(k_pack)->Repeat({1, 1}, false, false);
     auto warp_layout =
-        base_layout->Repeat({warp_m / 16, block_k / 16}, false, false);
+        base_layout->Repeat({warp_m / 16, block_k / mfma_k}, false, false);
     auto block_layout = warp_layout->Repeat({block_m / warp_m, 1}, true, true)
                             ->Replicate(block_n / warp_n);
     return block_layout;
@@ -397,7 +422,7 @@ Layout makeMatrixCoreSwizzleLayout(int stride, int continuous, int element_size,
   const int numBanks = 32;
   const int bankBitWidth = 32;
   const int SIMDWidth = 16;
-  const int vecSize = 4 * kPack;
+  const int vecSize = (64 / element_size) * kPack;
   const int innerDimLength = continuous;
   const int typeWidthInBit = element_size;
 
@@ -616,12 +641,7 @@ Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
 
 Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,
                             int kPack) {
-  int vector_size = 128 / element_size;
-  if (continuous % (vector_size * 4) == 0)
-    return makeMatrixCoreSwizzleLayout(stride, continuous, element_size, kPack);
-  else {
-    return makeGemmABLayoutPadded(stride, continuous, element_size);
-  }
+  return makeMatrixCoreSwizzleLayout(stride, continuous, element_size, kPack);
 }
 } // namespace tl
 } // namespace tvm
