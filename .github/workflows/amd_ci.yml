@@ -8,7 +8,6 @@ env:
 
 jobs:
   format-check:
-    if: false
     runs-on: [self-hosted, amd, gpu]
 
     permissions:
@@ -62,7 +61,6 @@ jobs:
         rm -rf build
 
   build-test-amd:
-    if: false
     runs-on: [self-hosted, amd, gpu]
     needs: format-check
     permissions:
