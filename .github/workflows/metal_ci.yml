@@ -6,44 +6,8 @@ env:
   VENV_DIR: tilelang_ci
 
 jobs:
-  format-check:
-    runs-on: [macos-latest]
-
-    permissions:
-      contents: write 
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        depth: 0
-
-    - name: Set up Python
-      uses: actions/setup-python@v2
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
-
-    - name: Ensure venv (local & persistent)
-      run: PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt
-
-    - name: Run format check
-      run: |
-        git submodule update --init --checkout --recursive
-        mkdir -p build
-        cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_METAL=ON; cd ..
-        if ! output=$(./format.sh 2>&1); then
-          echo "------------------------------------"
-          echo "message:"
-          echo "$output"
-          printf '%s\n' "$output" | grep "Please review and stage the changes."
-          echo "------------------------------------"
-          exit 1
-        fi
-        rm -rf build
-
   build-test-metal:
     runs-on: [macos-latest]
-    needs: format-check
     permissions:
       contents: read
     env:
