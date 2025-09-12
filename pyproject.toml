@@ -42,6 +42,7 @@ select = [
     "SIM",
     # isort
     # "I",
+    "W",
 ]
 ignore = [
     # Module level import not at top of file
@@ -59,3 +60,5 @@ ignore = [
     # No such file or directory
     "E902",
 ]
+[tool.ruff.lint.per-file-ignores]
+"3rdparty/**/*" = ["ALL"]
