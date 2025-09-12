@@ -55,7 +55,9 @@ std::pair<int, int> GemmSPWarpPolicyNode::ComputeWarpPartition(int M, int N,
     }
     ICHECK(m_warp * n_warp == num_warps)
         << "m_warp * n_warp must equal num_warps, please report an issue when "
-           "encounter this";
+           "encounter this"
+        << ", m_warp: " << m_warp << ", n_warp: " << n_warp << ", num_warps"
+        << num_warps;
     this->m_warp = m_warp;
     this->n_warp = n_warp;
   }
@@ -257,9 +259,8 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
       ICHECK(false) << "WGMMA only support B in shared.";
     }
   } else if (TargetIsAmpere(T.target)) {
-    const int warp_size = 32;
     auto [warp_m, warp_n] = policy->ComputeWarpPartition(
-        M, N, block_size / warp_size, T.target, false, A->dtype.bits());
+        M, N, block_size, T.target, false, A->dtype.bits());
     auto fragment =
         makeGemmSparseFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
     results.Set(C, fragment->BindThreadRange(thread_range));
