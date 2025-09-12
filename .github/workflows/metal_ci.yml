@@ -46,7 +46,7 @@ jobs:
     - name: Run format check
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        git submodule update --init --recursive
+        git submodule update --init --recursive --recommend-shallow
         mkdir -p build
         cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_METAL=ON; cd ..
         if ! output=$(./format.sh 2>&1); then
@@ -93,7 +93,6 @@ jobs:
           python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
-          pip install . --no-user
           touch "$MARKER"
         fi
 
