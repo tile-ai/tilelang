@@ -31,7 +31,7 @@ skip = [
 [tool.ruff.lint]
 select = [
     # pycodestyle
-    "E",
+    "E", "W",
     # Pyflakes
     "F",
     # pyupgrade
@@ -42,7 +42,6 @@ select = [
     "SIM",
     # isort
     # "I",
-    "W",
 ]
 ignore = [
     # Module level import not at top of file
