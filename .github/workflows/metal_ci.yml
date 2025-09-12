@@ -30,7 +30,7 @@ jobs:
 
     - name: Run format check
       run: |
-        git submodule update --init --checkout --recursive --recommend-shallow
+        git submodule update --init --checkout --recursive
         mkdir -p build
         cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_METAL=ON; cd ..
         if ! output=$(./format.sh 2>&1); then
