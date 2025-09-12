@@ -697,6 +697,17 @@ class TilelangExtensionBuild(build_ext):
         cache_dir = Path(cython_warpper_dir) / ".cycache" / py_version
         os.makedirs(cache_dir, exist_ok=True)
 
+        if MAYBE_METAL:
+            # fixme: on metal, cython extension needs to be compiled with libpython,
+            # i.e. add -lpython3.12 in the cython compile command.
+            # This needs investigation, but metal doesn't work with cython backend,
+            # so it should be fine for a long time.
+            # We could even make metal version compatible with different python version
+            # since there's no python/torch abi dependency.
+
+            # We still need to create `cache_dir` so we return here.
+            return
+
         with open(cython_wrapper_path, "r") as f:
             cython_wrapper_code = f.read()
             source_path = cache_dir / "cython_wrapper.cpp"
@@ -876,18 +887,6 @@ class TilelangExtensionBuild(build_ext):
             cwd=build_temp)
 
 
-ext_modules = [
-    CMakeExtension("TileLangCXX", sourcedir="."),
-]
-if not MAYBE_METAL:
-    # fixme: on metal, cython extension needs to be compiled with libpython,
-    # i.e. add -lpython3.12 in the cython compile command.
-    # This needs investigation, but metal doesn't work with cython backend,
-    # so it should be fine for a long time.
-    # We could even make metal version compatible with different python version
-    # since there's no python/torch abi dependency.
-    ext_modules.append(CythonExtension("TileLangCython", sourcedir="."))
-
 setup(
     name=PACKAGE_NAME,
     version=(get_tilelang_version(with_cuda=False, with_system_info=False)
@@ -916,7 +915,10 @@ setup(
     install_requires=get_requirements(),
     package_data=package_data,
     include_package_data=False,
-    ext_modules=ext_modules,
+    ext_modules=[
+        CMakeExtension("TileLangCXX", sourcedir="."),
+        CythonExtension("TileLangCython", sourcedir="."),
+    ],
     cmdclass={
         "build_py": TileLangBuilPydCommand,
         "sdist": TileLangSdistCommand,
