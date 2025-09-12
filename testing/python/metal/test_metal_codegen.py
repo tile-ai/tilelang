@@ -1,6 +1,7 @@
 import tilelang
+from tilelang import tvm as tvm
+import tilelang.testing
 import tilelang.language as T
-
 import torch
 
 
@@ -32,34 +33,34 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float32", accum_dtype="flo
     return gemm
 
 
-def solve(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, M: int, N: int, K: int):
-    BLOCK_SIZE = 32
-    jit_kernel = matmul(M, N, K, BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE)
+def assert_gemm(
+    M,
+    N,
+    K,
+    block_M,
+    block_N,
+    block_K,
+    dtype="float32",
+    accum_dtype="float",
+):
+    jit_kernel = matmul(M, N, K, block_M, block_N, block_K, dtype=dtype, accum_dtype=accum_dtype)
+
+    torch_dtype = getattr(torch, dtype)
+    a = torch.randn(M, N, dtype=torch_dtype, device='mps')
+    b = torch.randn(N, K, dtype=torch_dtype, device='mps')
+    c = torch.zeros(K, M, dtype=torch_dtype, device='mps')
 
     jit_kernel(a, b, c)
 
-    print(jit_kernel.get_kernel_source())
+    assert torch.allclose(a @ b, c)
+
+    assert jit_kernel.kernel_source is not None
 
 
-import torch
+def test_gemm_codegen():
+    assert_gemm(1024, 1024, 1024, 16, 16, 16)
 
-tile_add = solve
 
-sizes = [64 * 2**p for p in range(0, 5)]
-y1 = []
-y2 = []
-y3 = []
-
-device = 'mps'
-
-for size in sizes:
-    a = torch.randn(size, size, dtype=torch.float32, device=device)
-    b = torch.randn(size, size, dtype=torch.float32, device=device)
-    c = torch.zeros(size, size, dtype=torch.float32, device=device)
-
-    tile_add(a, b, c, size, size, size)
-
-    # currently breaks when size > 1024
-    assert torch.allclose(c, a @ b), f'size={size}, a={a}, b={b}, c={c}'
-
-print('pass')
+if __name__ == "__main__":
+    if torch.mps.is_available():
+        tilelang.testing.main()
