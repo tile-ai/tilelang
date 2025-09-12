@@ -86,7 +86,6 @@ jobs:
 
     - name: Run metal test
       run: |
-        uv pip install dist/*
         cd testing/python
         unset PYTHONPATH
         python -m pytest -k metal -v -r fE --durations=0 --timeout=3600
