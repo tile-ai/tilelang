@@ -2,9 +2,8 @@ name: CI Test on Metal
 on: [pull_request]
 
 env:
-  UV_PYTHON: '3.12'
+  PYTHON_VERSION: '3.12'
   VENV_DIR: tilelang_ci
-  UV_NO_BUILD_ISOLATION: '1'
 
 jobs:
   format-check:
@@ -19,14 +18,13 @@ jobs:
       with:
         depth: 0
 
-    - name: Install python via uv
-      uses: astral-sh/setup-uv@v6
+    - name: Set up Python
+      uses: actions/setup-python@v2
       with:
-        enable-cache: true
-        activate-environment: true
+        python-version: ${{ env.PYTHON_VERSION }}
 
     - name: Ensure venv (local & persistent)
-      run: uv pip install -r requirements-test.txt
+      run: PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt
 
     - name: Run format check
       run: |
