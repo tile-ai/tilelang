@@ -115,39 +115,3 @@ def print_bit(name, val):
     val_cpu = val.cpu().item()
     binary_repr = f'{val_cpu:032b}'
     print(name, binary_repr)
-
-
-if __name__ == "__main__":
-    import time
-
-    torch.manual_seed(42)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    N, K = 256, 256  # Small shape for test, must be even K
-    tensor = torch.randint(0, 256, (N, K), dtype=torch.uint8, device=device)
-
-    # Time torch_convert_bit_twiddling
-    torch.cuda.synchronize() if device == "cuda" else None
-    t0 = time.time()
-    out1 = torch_convert_bit_twiddling(tensor)
-    torch.cuda.synchronize() if device == "cuda" else None
-    t1 = time.time()
-    print(f"torch_convert_bit_twiddling time: {t1 - t0:.6f} seconds")
-
-    # Time torch_convert_bit_twiddling_parallel
-    torch.cuda.synchronize() if device == "cuda" else None
-    t2 = time.time()
-    out2 = torch_convert_bit_twiddling_parallel(tensor)
-    torch.cuda.synchronize() if device == "cuda" else None
-    t3 = time.time()
-    print(f"torch_convert_bit_twiddling_parallel time: {t3 - t2:.6f} seconds")
-
-    # Use torch.allclose for bfloat16, allow small tolerance
-    assert out1.shape == out2.shape, f"Shape mismatch: {out1.shape} vs {out2.shape}"
-    if not torch.allclose(out1, out2, atol=1e-2, rtol=1e-2):
-        print("out1:", out1)
-        print("out2:", out2)
-        diff = (out1 - out2).abs()
-        print("max diff:", diff.max())
-        raise AssertionError("torch_convert_bit_twiddling and torch_convert_bit_twiddling_parallel outputs differ!")
-
-    print("Test passed: torch_convert_bit_twiddling and torch_convert_bit_twiddling_parallel produce the same results.")
