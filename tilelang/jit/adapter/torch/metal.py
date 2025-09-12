@@ -1,4 +1,4 @@
-from functools import lru_cache
+from functools import wraps
 from typing import Callable, Optional, Union
 
 import torch
@@ -45,16 +45,23 @@ class MetalKernelAdapter(BaseKernelAdapter):
 
         self._post_init()
 
-    @lru_cache(maxsize=1)
+    _kernel = None
+
     def _convert_torch_func(self) -> Callable:
 
-        def launcher(*args):
+        if self._kernel is None:
 
-            k = getattr(torch.mps.compile_shader(self.kernel_global_source), self.kernel_name)
-            return k(
-                *args,
-                threads=[x * y for (x, y) in zip(self.block_info, self.grid_info)],
-                group_size=self.block_info,
-            )
+            _kernel = getattr(torch.mps.compile_shader(self.kernel_global_source), self.kernel_name)
 
-        return launcher
+            @wraps(_kernel)
+            def launcher(*args: torch.Tensor):
+
+                return _kernel(
+                    *args,
+                    threads=[x * y for (x, y) in zip(self.block_info, self.grid_info)],
+                    group_size=self.block_info,
+                )
+
+            self._kernel = launcher
+
+        return self._kernel
