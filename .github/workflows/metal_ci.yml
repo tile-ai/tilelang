@@ -48,7 +48,7 @@ jobs:
         fi
 
   build-test-metal:
-    runs-on: [macos-latest]
+    runs-on: [macos-26]
     needs: format-check
     permissions:
       contents: read
@@ -82,7 +82,7 @@ jobs:
     - name: Build wheel
       run: |
         source .venv/bin/activate
-        uv pip install build wheel
+        uv pip install build wheel ninja cmake
         python -mbuild -w --no-isolation
 
     - name: Run metal test
