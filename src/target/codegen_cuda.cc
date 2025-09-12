@@ -1066,6 +1066,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
   } else if (op->op.same_as(builtin::ptx_cp_async_barrier())) {
     print_extern_call_stmt("tl::mbarrier_cp_async_arrive");
+  } else if (op->op.same_as(tl::ptx_cp_async_barrier_noinc())) {
+    print_extern_call_stmt("tl::mbarrier_cp_async_arrive_noinc");
   } else if (op->op.same_as(tl::mbarrier_expect_tx())) {
     ICHECK_EQ(op->args.size(), 2);
     this->PrintIndent();
