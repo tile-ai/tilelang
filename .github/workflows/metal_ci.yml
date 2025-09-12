@@ -82,8 +82,7 @@ jobs:
     - name: Build wheel
       run: |
         source .venv/bin/activate
-        uv pip install build wheel ninja cmake
-        python -mbuild -w --no-isolation
+        uv pip install -v --no-build-isolation .
 
     - name: Run metal test
       run: |
