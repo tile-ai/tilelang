@@ -4,7 +4,7 @@ import tilelang.language as T
 import torch
 
 
-@tilelang.jit(execution_backend="nvrtc")
+@tilelang.jit(execution_backend='torch')
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float32", accum_dtype="float"):
 
     @T.prim_func
@@ -37,6 +37,8 @@ def solve(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor, M: int, N: int, K: 
     jit_kernel = matmul(M, N, K, BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE)
 
     jit_kernel(a, b, c)
+
+    print(jit_kernel.get_kernel_source())
 
 
 import torch

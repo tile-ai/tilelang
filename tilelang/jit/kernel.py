@@ -104,6 +104,7 @@ class JITKernel(object):
             "ctypes",
             "cython",
             "nvrtc",
+            "torch",
         ], f"Invalid execution backend. {execution_backend}"
         if execution_backend == "cython":
             from tilelang.contrib.cc import get_cplus_compiler
@@ -267,10 +268,7 @@ class JITKernel(object):
                 compile_flags=compile_flags,
             )
         elif execution_backend == "nvrtc":
-            rtc_adapter = NVRTCKernelAdapter
-            if is_metal_target(target):
-                rtc_adapter = MetalKernelAdapter
-            adapter = rtc_adapter(
+            adapter = NVRTCKernelAdapter(
                 params=artifact.params,
                 result_idx=out_idx,
                 target=target,
@@ -281,6 +279,20 @@ class JITKernel(object):
                 verbose=verbose,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
+            )
+        elif execution_backend == "torch":
+            assert is_metal_target(target)
+            adapter = MetalKernelAdapter(
+                # params=artifact.params,
+                # result_idx=out_idx,
+                # target=target,
+                func_or_mod=tilelang_func,
+                # host_mod=artifact.host_mod,
+                device_mod=artifact.device_mod,
+                kernel_global_source=artifact.kernel_source,
+                verbose=verbose,
+                # pass_configs=pass_configs,
+                # compile_flags=compile_flags,
             )
         else:
             # Handle invalid backend.
