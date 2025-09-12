@@ -37,6 +37,10 @@ int GetVectorizeSize(const For &loop);
 
 For VectorizeLoop(const For &loop, int vectorize_hint = -1);
 
+// Can prove expr is independent with var, i.e. the value of expr doesn't change
+// when var changes
+bool CanProveIndependent(const PrimExpr &expr, Var var,
+                         arith::Analyzer *analyzer);
 bool IndiceCanVectorize(const PrimExpr &expr, Var var,
                         const PrimExpr &iter_var_size,
                         int target_vectorized_size, arith::Analyzer *analyzer);
