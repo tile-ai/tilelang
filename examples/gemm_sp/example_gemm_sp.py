@@ -141,7 +141,7 @@ def main():
 
     ref_c = a @ b
 
-    assert c.isnan().any() == False, "Reference result contains NaNs, please report an issue"
+    assert not c.isnan().any(), "Reference result contains NaNs, please report an issue"
     torch.testing.assert_close(c, ref_c.to(c.dtype), rtol=1e-2, atol=1e-2)
     print(f"Precision check passed. diff: {(c - ref_c).abs().mean()}")
 

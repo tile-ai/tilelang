@@ -160,9 +160,9 @@ public:
                                            ThreadblockShape::kN,
                                            ThreadblockShape::kK>::SmemLayoutB;
 
-  using WarpShape =
-      GemmShape<ThreadblockShape::kM / num_warp_m,
-                ThreadblockShape::kN / num_warp_n, ThreadblockShape::kK>;
+  using WarpShape = cutlass::gemm::GemmShape<ThreadblockShape::kM / num_warp_m,
+                                             ThreadblockShape::kN / num_warp_n,
+                                             ThreadblockShape::kK>;
   using InstructionShape = typename DispatchInstructionShape<ElementA>::Shape;
   using Operator = typename DispatchInstructionShape<ElementA>::Operator;
   static_assert(WarpShape::kK % InstructionShape::kK == 0,
@@ -254,8 +254,9 @@ template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum = false, typename A_type,
           typename B_type, typename C_type, typename E_type>
 TL_DEVICE void gemm_sp_ss(A_type *pA, B_type *pB, C_type *accum, E_type *pE) {
-  using MMA = GemmTensorOp<GemmShape<M, N, K>, num_warp_m, num_warp_n, trans_A,
-                           trans_B, clear_accum, A_type, B_type, C_type>;
+  using MMA =
+      GemmTensorOp<cutlass::gemm::GemmShape<M, N, K>, num_warp_m, num_warp_n,
+                   trans_A, trans_B, clear_accum, A_type, B_type, C_type>;
   using FragmentC = typename MMA::FragmentC;
 
   int warp_id = threadIdx.x / 32;
