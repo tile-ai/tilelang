@@ -171,7 +171,9 @@ def get_rocm_version():
     return Version("5.0.0")
 
 
-def get_tilelang_version(with_cuda=USE_CUDA, with_system_info=not MAYBE_METAL, with_commit_id=False) -> str:
+def get_tilelang_version(with_cuda=USE_CUDA,
+                         with_system_info=not MAYBE_METAL,
+                         with_commit_id=False) -> str:
     version = find_version(get_path(".", "VERSION"))
     local_version_parts = []
     if with_system_info:
