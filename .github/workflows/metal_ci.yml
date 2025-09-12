@@ -7,8 +7,7 @@ env:
 
 jobs:
   format-check:
-    if: false
-    runs-on: [self-hosted, nvidia]
+    runs-on: [macos-latest]
 
     permissions:
       contents: write 
@@ -51,7 +50,7 @@ jobs:
         git submodule update --init --recursive
         mkdir -p build
         # run cmake to create the build directory with compile_commands.json
-        cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_CUDA=ON; cd ..
+        cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_METAL=ON; cd ..
         if ! output=$(./format.sh 2>&1); then
           echo "------------------------------------"
           echo "message:"
@@ -62,62 +61,41 @@ jobs:
         fi
         rm -rf build
 
-  build-test-nvidia:
-    if: false
-    runs-on: [self-hosted, nvidia]
+  build-test-metal:
+    runs-on: [macos-latest]
     needs: format-check
     permissions:
       contents: read
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0
-        repository: ${{ github.event.pull_request.head.repo.full_name }}
-        ref: ${{ github.event.pull_request.head.ref }}
+        submodules: recursive
 
-    - name: Set up Python
-      uses: actions/setup-python@v2
+    - name: ccache
+      uses: hendrikmuhs/ccache-action@v1.2
       with:
+        create-symlink: true
+        key: ${{ github.job }}-${{ matrix.os }}
+
+    - name: Install python via uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
+        activate-environment: true
         python-version: ${{ env.PYTHON_VERSION }}
 
     - name: Ensure venv (local & persistent)
-      run: |
-        set -e
-        REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
-        MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
-
-        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
-          echo "venv exists and hash matches – reuse it"
-        else
-          echo "venv stale or missing – recreating"
-          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
-          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
-          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-          python -m pip install --upgrade pip --no-user
-          [[ -f requirements-test.txt ]] && \
-            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
-          # flash attention usually requires no isolation build
-          pip install flash_attn==2.5.8 --no-user --no-build-isolation
-          pip install . --no-user
-          touch "$MARKER"
-        fi
+      run: uv pip install -r requirements-test.txt -r requirements-build.txt
 
     - name: Install project (wheel form)
-      run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        pip install . --no-user -v
+      run: uv pip install -v .
 
-    - name: Run examples
+    - name: Run metal test
       run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        cd examples
-        unset PYTHONPATH
-        python -m pytest -n 4 **/test*.py -v -r fE --durations=0
-
-    - name: Run tests
-      run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd testing/python
         unset PYTHONPATH
-        python -m pytest -n 4 -v -r fE --durations=0 --timeout=3600
+        python -m pytest -k metal -v -r fE --durations=0 --timeout=3600
