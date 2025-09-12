@@ -16,6 +16,39 @@ namespace tl {
 
 using namespace tir;
 
+class GemmSPWarpPolicyNode : public GemmWarpPolicyNode {
+public:
+  std::pair<int, int> ComputeWarpPartition(int M, int N, int block_size,
+                                           Target target, bool use_wgmma,
+                                           int bits) const;
+};
+
+class GemmSPWarpPolicy : public ObjectRef {
+public:
+  TVM_DEFINE_OBJECT_REF_METHODS(GemmSPWarpPolicy, ObjectRef,
+                                GemmSPWarpPolicyNode);
+
+  explicit GemmSPWarpPolicy(GemmWarpPolicyType policy_type) {
+    auto node = make_object<GemmSPWarpPolicyNode>();
+    node->policy_type = (int)policy_type;
+    data_ = std::move(node);
+  }
+
+  explicit GemmSPWarpPolicy(int policy_type) {
+    auto node = make_object<GemmSPWarpPolicyNode>();
+    node->policy_type = policy_type;
+    data_ = std::move(node);
+  }
+
+  explicit GemmSPWarpPolicy(int m_warp, int n_warp) {
+    auto node = make_object<GemmSPWarpPolicyNode>();
+    node->m_warp = m_warp;
+    node->n_warp = n_warp;
+    node->policy_type = (int)GemmWarpPolicyType::kFree;
+    data_ = std::move(node);
+  }
+};
+
 class GemmSPNode : public TileOperatorNode {
 public:
   tir::Buffer A, B, C, E;
@@ -27,7 +60,7 @@ public:
   int kPack = 1;
   int wg_wait = 0;
 
-  mutable GemmWarpPolicy policy;
+  mutable GemmSPWarpPolicy policy;
 
   static constexpr const char *_type_key = "tl.GemmSP";
   TVM_DECLARE_FINAL_OBJECT_INFO(GemmSPNode, TileOperatorNode);

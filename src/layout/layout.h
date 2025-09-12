@@ -137,6 +137,9 @@ Fragment makeGemmFragment8x8Transposed();
 Fragment makeGemmFragmentC(const int block_m, const int block_n,
                            const int warp_m, const int warp_n,
                            const int element_size);
+Fragment makeGemmSparseFragmentC(const int block_m, const int block_n,
+                                 const int warp_m, const int warp_n,
+                                 const int element_size);
 Fragment makeGemmFragmentCCDNA(const int block_m, const int block_n,
                                const int warp_m, const int warp_n,
                                const int element_size);
@@ -174,6 +177,11 @@ Fragment makeGemmVoltaFragmentA(const int block_m, const int block_n,
                                 const int warp_n);
 Layout makeGemmVoltaABLayout(int stride, int continuous, bool is_a,
                              int kfactor);
+
+Layout makeTensorOpMultiplicand(int mat_stride, int mat_continuous,
+                                int elementsize, int crosswise);
+Layout makeGemmSparseAmpereABLayout(int mat_stride, int mat_continuous,
+                                    int elementsize);
 
 Layout makeFullBankSwizzleLayout(int stride, int continuous, int element_size);
 Layout makeHalfBankSwizzleLayout(int stride, int continuous, int element_size);
