@@ -17,30 +17,6 @@
 
 namespace tvm {
 namespace tl {
-/**
- * @brief Decomposes a positive integer into its prime factors.
- *
- * Returns the prime factorization of `x` as a vector of prime factors in
- * non-decreasing order. If `x <= 1` the returned vector is empty.
- *
- * @param x Integer to factorize (expected non-negative; behavior: returns empty
- * for values <= 1).
- * @return std::vector<int> Prime factors of `x` (with repetition), e.g. 12 ->
- * {2, 2, 3}.
- */
-static std::vector<int> toPrimeFactors(int x) {
-  int i = 2;
-  std::vector<int> result;
-  while (x > 1) {
-    if (x % i == 0) {
-      x /= i;
-      result.push_back(i);
-    } else {
-      i++;
-    }
-  }
-  return result;
-}
 
 /**
  * @brief Construct a GemmSP operator node from TL call arguments and a buffer

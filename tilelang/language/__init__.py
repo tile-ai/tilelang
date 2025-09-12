@@ -41,9 +41,10 @@ from .allocate import (
     alloc_shared,  # noqa: F401
     alloc_fragment,  # noqa: F401
     alloc_barrier,  # noqa: F401
+    alloc_reducer,  # noqa: F401
 )
 from .copy import copy, c2d_im2col  # noqa: F401
-from .gemm import GemmWarpPolicy, gemm  # noqa: F401
+from .gemm import GemmWarpPolicy, gemm, gemm_v2  # noqa: F401
 from .experimental.gemm_sp import gemm_sp  # noqa: F401
 from .fill import fill, clear  # noqa: F401
 from .reduce import (

@@ -880,7 +880,7 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << "]" << ((i < 3) ? ", " : ")");
     }
   } else if (op->op.same_as(tl::tvm_mfma())) {
-    // arg 0: prefix: {otype}_16x16x16{itype}
+    // arg 0: prefix: {otype}_{intrM}x{intrN}x{intrK}_{itype}
     // arg 1: A layout: row/col
     // arg 2: B layout: row/col
     // arg 3: A precision: float16, float32, ...
@@ -914,6 +914,7 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"int8", "char"},
         {"int32", "int"},
         {"int8x4", "int32_t"},
+        {"int8x8", "int64_t"},
         {"int32x4", "int32x4"},
         {"float16", "half"},
         {"float32", "float"},
@@ -925,17 +926,17 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
         {"float8_e4m3fnuzx8", "long"},
         {"float32x16", "float32x16"}};
     std::string call_mfma_code = R"({
-    *((({C_dytpe}*){c_ref}) + {c_bias}) = {mfma_buildin}(*((({A_dytpe}*){a_ref}) + {a_bias}),
-                  *((({B_dytpe}*){b_ref}) + {b_bias}),
-                  *((({C_dytpe}*){c_ref}) + {c_bias}), 0, 0, 0);
+    *((({C_dtype}*){c_ref}) + {c_bias}) = {mfma_buildin}(*((({A_dtype}*){a_ref}) + {a_bias}),
+                  *((({B_dtype}*){b_ref}) + {b_bias}),
+                  *((({C_dtype}*){c_ref}) + {c_bias}), 0, 0, 0);
   })";
     std::string mfma_buildin = "__builtin_amdgcn_mfma_" + prefix;
     Replacer replacer;
 
     replacer.register_rule("{mfma_buildin}", mfma_buildin);
-    replacer.register_rule("{A_dytpe}", dtype_map[A_dtype]);
-    replacer.register_rule("{B_dytpe}", dtype_map[B_dtype]);
-    replacer.register_rule("{C_dytpe}", dtype_map[C_dtype]);
+    replacer.register_rule("{A_dtype}", dtype_map[A_dtype]);
+    replacer.register_rule("{B_dtype}", dtype_map[B_dtype]);
+    replacer.register_rule("{C_dtype}", dtype_map[C_dtype]);
     replacer.register_rule("{a_ref}", a_ref);
     replacer.register_rule("{a_bias}", a_bias);
     replacer.register_rule("{b_ref}", b_ref);

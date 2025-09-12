@@ -14,11 +14,12 @@
 #include <vector>
 
 #include "../op/builtin.h"
+#include "./ptx.h"
 #include "arith/pattern_match.h"
-#include "target/source/ptx.h"
 
 namespace tvm {
 namespace codegen {
+using namespace tvm::tl::codegen;
 
 static std::string GetFP8Type(DataType type) {
   std::stringstream stream;
@@ -1259,7 +1260,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string asm_code = PrintMMAAssembly(
         shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref, a_bias,
         b_ref, b_bias, c_ref, c_bias, "", "", "", bit_op, false, saturate);
-
+    this->PrintIndent();
     this->stream << asm_code;
   } else if (op->op.same_as(builtin::ptx_mma_sp())) {
     // arg 0: shape: mXnXkX
@@ -1295,6 +1296,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string metadata_offset = this->PrintExpr(op->args[13]);
     std::string sparse_selector = this->PrintExpr(op->args[14]);
     bool saturate = Downcast<Bool>(op->args[15])->value;
+    this->PrintIndent();
     std::string asm_code = PrintMMAAssembly(
         shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref, a_offset,
         b_ref, b_offset, c_ref, c_offset, metadata, metadata_offset,
@@ -1330,10 +1332,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << "}\n";
     } else {
       std::string smem_elem_offset = this->PrintExpr(op->args[6]);
-      need_cast_smem_ptr_to_int_ = true;
-      this->stream << PrintLoadMatrixAssembly(trans, num, type, local_ptr,
-                                              local_elem_offset, smem_ptr,
-                                              smem_elem_offset);
+      std::string func_name = "tl::ptx_ldmatrix_x" + std::to_string(num);
+      if (trans == 1)
+        func_name += "_trans";
+      this->PrintIndent();
+      this->stream << func_name << "(" << smem_ptr << " + " << smem_elem_offset
+                   << ", " << local_ptr << " + " << local_elem_offset << ");\n";
     }
   } else if (op->op.same_as(builtin::mma_store())) {
     int m = Downcast<Integer>(op->args[0])->value;
