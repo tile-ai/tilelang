@@ -611,10 +611,10 @@ class CMakeExtension(Extension):
     :param sourcedir: Directory containing the top-level CMakeLists.txt.
     """
 
-    def __init__(self, name, sourcedir=""):
+    def __init__(self, name, sourcedir="", **kwargs):
         # We pass an empty 'sources' list because
         # the actual build is handled by CMake, not setuptools.
-        super().__init__(name=name, sources=[])
+        super().__init__(name=name, sources=[], **kwargs)
 
         # Convert the source directory to an absolute path
         # so that CMake can correctly locate the CMakeLists.txt.
@@ -748,6 +748,7 @@ class TilelangExtensionBuild(build_ext):
                             os.system(f"{cython} {cython_wrapper_path} --cplus -o {source_path}")
                             python_include_path = sysconfig.get_path("include")
                             cc = get_cplus_compiler()
+                            # fixme: aarch64 darwin needs something like `-Lxxx -lpython3.12`
                             command = f"{cc} -shared -pthread -fPIC -fwrapv -O2 -Wall -fno-strict-aliasing -I{python_include_path} {source_path} -o {temp_path}"
                             os.system(command)
 
@@ -875,6 +876,18 @@ class TilelangExtensionBuild(build_ext):
             cwd=build_temp)
 
 
+ext_modules = [
+    CMakeExtension("TileLangCXX", sourcedir="."),
+]
+if not MAYBE_METAL:
+    # fixme: on metal, cython extension needs to be compiled with libpython,
+    # i.e. add -lpython3.12 in the cython compile command.
+    # This needs investigation, but metal doesn't work with cython backend,
+    # so it should be fine for a long time.
+    # We could even make metal version compatible with different python version
+    # since there's no python/torch abi dependency.
+    ext_modules.append(CythonExtension("TileLangCython", sourcedir="."))
+
 setup(
     name=PACKAGE_NAME,
     version=(get_tilelang_version(with_cuda=False, with_system_info=False)
@@ -903,10 +916,7 @@ setup(
     install_requires=get_requirements(),
     package_data=package_data,
     include_package_data=False,
-    ext_modules=[
-        CMakeExtension("TileLangCXX", sourcedir="."),
-        CythonExtension("TileLangCython", sourcedir="."),
-    ],
+    ext_modules=ext_modules,
     cmdclass={
         "build_py": TileLangBuilPydCommand,
         "sdist": TileLangSdistCommand,
