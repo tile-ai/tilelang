@@ -22,13 +22,9 @@ jobs:
       uses: astral-sh/setup-uv@v6
       with:
         enable-cache: true
+        ignore-nothing-to-cache: true
         activate-environment: true
         python-version: ${{ env.PYTHON_VERSION }}
-
-    # - name: Set up Python
-    #   uses: actions/setup-python@v2
-    #   with:
-    #     python-version: ${{ env.PYTHON_VERSION }}
 
     - name: Ensure venv (local & persistent)
       run: |
@@ -37,7 +33,7 @@ jobs:
 
     - name: Run format check
       run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+        set -ex
         git submodule update --init --recursive
         mkdir -p build
         # run cmake to create the build directory with compile_commands.json
@@ -50,7 +46,6 @@ jobs:
           echo "------------------------------------"
           exit 1
         fi
-        rm -rf build
 
   build-test-metal:
     runs-on: [macos-latest]
@@ -77,6 +72,7 @@ jobs:
       uses: astral-sh/setup-uv@v6
       with:
         enable-cache: true
+        ignore-nothing-to-cache: true
         activate-environment: true
         python-version: ${{ env.PYTHON_VERSION }}
 
