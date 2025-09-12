@@ -1,4 +1,3 @@
-
 from tvm.target import Target
 from .arch_base import TileDevice
 
@@ -8,6 +7,7 @@ def is_metal_arch(arch: TileDevice) -> bool:
 
 
 class METAL(TileDevice):
+
     def __init__(self, target: Target | str):
         if isinstance(target, str):
             target = Target(target)
