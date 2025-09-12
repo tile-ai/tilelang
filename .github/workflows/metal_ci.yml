@@ -83,7 +83,7 @@ jobs:
       run: |
         source .venv/bin/activate
         uv pip install build wheel
-        uv run python -mbuild -w
+        python -mbuild -w
 
     - name: Run metal test
       run: |
