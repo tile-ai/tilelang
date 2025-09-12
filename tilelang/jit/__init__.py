@@ -16,6 +16,7 @@ from typing import (
     Optional,
 )
 from tilelang import tvm as tvm
+from tilelang.jit.adapter.utils import is_metal_target
 from tvm.tir import PrimFunc
 from tvm.target import Target
 
@@ -73,6 +74,9 @@ def compile(
 
     # This path is not a performance critical path, so we can afford to convert the target.
     target = Target(determine_target(target))
+
+    if is_metal_target(target):
+        assert execution_backend == 'torch', 'Currently metal target only support `tl.jit(execution_backend="torch")`'
 
     return cached(
         func=func,

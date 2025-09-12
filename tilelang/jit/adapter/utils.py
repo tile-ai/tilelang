@@ -61,7 +61,7 @@ def is_cpu_target(target: Target) -> bool:
 
 
 def is_metal_target(target: Target) -> bool:
-    return target.kind.name in ["metal"]
+    return target.kind.name == "metal"
 
 
 def get_annotated_mod(

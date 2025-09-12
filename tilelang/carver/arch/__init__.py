@@ -46,4 +46,3 @@ from .cuda import (
     has_mma_support,  # noqa: F401
 )
 from .cdna import is_cdna_arch  # noqa: F401
-from .metal import is_metal_arch  # noqa: F401
