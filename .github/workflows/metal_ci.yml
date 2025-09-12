@@ -4,8 +4,6 @@ on: [pull_request]
 env:
   UV_PYTHON: '3.12'
   VENV_DIR: tilelang_ci
-  CMAKE_C_COMPILER_LAUNCHER: ccache
-  CMAKE_CXX_COMPILER_LAUNCHER: ccache
   UV_NO_BUILD_ISOLATION: '1'
 
 jobs:
@@ -21,12 +19,6 @@ jobs:
       with:
         submodules: recursive
 
-    - name: ccache
-      uses: hendrikmuhs/ccache-action@v1.2
-      with:
-        create-symlink: true
-        key: ${{ github.job }}-${{ matrix.os }}
-
     - name: Install python via uv
       uses: astral-sh/setup-uv@v6
       with:
@@ -38,6 +30,7 @@ jobs:
 
     - name: Run format check
       run: |
+        source .venv/bin/activate
         mkdir -p build
         cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_METAL=ON; cd ..
         if ! output=$(./format.sh 2>&1); then
@@ -55,6 +48,9 @@ jobs:
     needs: format-check
     permissions:
       contents: read
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
