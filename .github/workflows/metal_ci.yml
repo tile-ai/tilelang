@@ -1,4 +1,4 @@
-name: CI Test on AMD
+name: CI Test on Metal
 on: [pull_request]
 
 env:
