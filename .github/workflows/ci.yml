@@ -7,7 +7,7 @@ env:
 
 jobs:
   format-check:
-    runs-on: [self-hosted, nvidia]
+    runs-on: [ubuntu-latest]
 
     permissions:
       contents: write 
@@ -119,3 +119,42 @@ jobs:
         cd testing/python
         unset PYTHONPATH
         python -m pytest -n 4 -v -r fE --durations=0 --timeout=3600
+
+  build-test-metal:
+    runs-on: [macos-latest]
+    needs: format-check
+    permissions:
+      contents: read
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        create-symlink: true
+        key: ${{ github.job }}-${{ matrix.os }}
+
+    - name: Install python via uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
+        activate-environment: true
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Ensure venv (local & persistent)
+      run: uv pip install -r requirements-test.txt -r requirements-build.txt
+
+    - name: Install project (wheel form)
+      run: uv pip install -v .
+
+    - name: Run metal test
+      run: |
+        cd testing/python
+        unset PYTHONPATH
+        python -m pytest -k metal -v -r fE --durations=0 --timeout=3600
