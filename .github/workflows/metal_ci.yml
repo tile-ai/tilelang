@@ -1,4 +1,4 @@
-name: CI
+name: CI Test on Metal
 on: [pull_request]
 
 env:
@@ -40,7 +40,6 @@ jobs:
           python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
-          pip install flash_attn==2.5.8 --no-user --no-build-isolation
           touch "$MARKER"
         fi
 
