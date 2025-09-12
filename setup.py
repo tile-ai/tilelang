@@ -805,7 +805,7 @@ class TilelangExtensionBuild(build_ext):
             "-G",
             "Ninja",
         ]
-        if not USE_ROCM:
+        if USE_CUDA and not USE_ROCM:
             cmake_args.append(f"-DCMAKE_CUDA_COMPILER={os.path.join(CUDA_HOME, 'bin', 'nvcc')}")
 
         # Create the temporary build directory (if it doesn't exist).
@@ -829,6 +829,7 @@ class TilelangExtensionBuild(build_ext):
         if USE_METAL:
             content_lines += [
                 "set(USE_METAL ON)",
+                "set(USE_ROCM OFF)",
             ]
         elif USE_ROCM:
             content_lines += [
