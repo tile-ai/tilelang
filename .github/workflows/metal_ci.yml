@@ -18,10 +18,17 @@ jobs:
       with:
         fetch-depth: 0
 
-    - name: Set up Python
-      uses: actions/setup-python@v2
+    - name: Install python via uv
+      uses: astral-sh/setup-uv@v6
       with:
+        enable-cache: true
+        activate-environment: true
         python-version: ${{ env.PYTHON_VERSION }}
+
+    # - name: Set up Python
+    #   uses: actions/setup-python@v2
+    #   with:
+    #     python-version: ${{ env.PYTHON_VERSION }}
 
     - name: Ensure venv (local & persistent)
       run: |
@@ -72,6 +79,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
+        fetch-depth: 1
         submodules: recursive
 
     - name: ccache
@@ -91,7 +99,9 @@ jobs:
       run: uv pip install -r requirements-test.txt -r requirements-build.txt
 
     - name: Install project (wheel form)
-      run: uv pip install -v .
+      run: |
+        source .venv/bin/activate
+        uv pip install -v .
 
     - name: Run metal test
       run: |
