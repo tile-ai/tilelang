@@ -17,6 +17,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
+        submodules: recursive
 
     - name: Install python via uv
       uses: astral-sh/setup-uv@v6
@@ -34,7 +35,6 @@ jobs:
     - name: Run format check
       run: |
         set -ex
-        git submodule update --init --recursive
         mkdir -p build
         # run cmake to create the build directory with compile_commands.json
         cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_METAL=ON; cd ..
@@ -79,13 +79,15 @@ jobs:
     - name: Ensure venv (local & persistent)
       run: uv pip install -r requirements-test.txt -r requirements-build.txt
 
-    - name: Install project (wheel form)
+    - name: Build wheel
       run: |
         source .venv/bin/activate
-        uv pip install -v . --no-build-isolation
+        uv pip install build wheel
+        uv run python -mbuild -w
 
     - name: Run metal test
       run: |
+        uv pip install dist/*
         cd testing/python
         unset PYTHONPATH
         python -m pytest -k metal -v -r fE --durations=0 --timeout=3600
