@@ -178,6 +178,14 @@ TVM_DLL const Op &ptx_ldmatrix();
 TVM_DLL const Op &ptx_stmatrix();
 
 /*!
+ * \brief tvm intrinsic for ptx async copy barrier using
+ * cp.async.mbarrier.arrive.noinc
+ *
+ *  This op is used to represent a ptx async copy barrier operation in tilelang.
+ */
+TVM_DLL const Op &ptx_cp_async_barrier_noinc();
+
+/*!
  * \brief Pack two b16 value into a b32 value
  *
  * int32 pack_b16(b16_value, b16_value)

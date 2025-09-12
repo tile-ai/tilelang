@@ -2,16 +2,10 @@
  * \file annotate_warp_group_reg_alloc.cc
  * \brief Annotate warp group reg alloc for warp specialization
  */
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
 
+#include "warp_specialized_rewriter.h"
 #include <unordered_set>
-#include <utility>
 #include <vector>
-
-#include "../op/builtin.h"
-#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -57,6 +51,11 @@ private:
 class SetMaxNRegInjector : public StmtExprMutator {
 public:
   static PrimFunc Inject(PrimFunc f) {
+    bool warp_specialized = WarpSpecializedDetector::Detect(f->body);
+    if (warp_specialized) {
+      // Should handle set_max_nreg when using hand-written warp specialized
+      return f;
+    }
     auto T = SetMaxNRegInjector();
     T.nreg_ = SetMaxNRegCollector::Collect(f);
     f.CopyOnWrite()->body = T(f->body);

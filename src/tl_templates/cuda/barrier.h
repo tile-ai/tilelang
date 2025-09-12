@@ -113,6 +113,22 @@ TL_DEVICE void mbarrier_cp_async_arrive(BarrierType &smem_mbar) {
                : "r"(smem_int_mbar));
 }
 
+template <typename BarrierType = uint64_t>
+TL_DEVICE void mbarrier_cp_async_arrive_noinc(BarrierType &smem_mbar) {
+  uint32_t smem_int_mbar;
+  if constexpr (std::is_pointer_v<BarrierType>) {
+    smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(smem_mbar));
+  } else {
+    smem_int_mbar = smem_ptr_to_uint(reinterpret_cast<uint64_t *>(&smem_mbar));
+  }
+  asm volatile("{\n\t"
+               "cp.async.mbarrier.arrive.noinc.shared::cta.b64 [%0];\n\t"
+               "}"
+               :
+               : "r"(smem_int_mbar));
+  cutlass::arch::synclog_emit_cpasync_barrier_arrive(__LINE__, smem_int_mbar);
+}
+
 TL_DEVICE void fence_proxy_async() {
   asm volatile("fence.proxy.async.shared::cta;" : :);
 }
