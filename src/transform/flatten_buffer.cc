@@ -30,6 +30,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <utility>
+
 namespace tvm {
 namespace tl {
 
@@ -60,43 +62,6 @@ private:
   using IRMutatorWithAnalyzer::VisitStmt;
   using IRMutatorWithAnalyzer::VisitStmt_;
 
-  class Int64Promoter : public tir::IndexDataTypeRewriter {
-  public:
-    using Parent = IndexDataTypeRewriter;
-
-    PrimExpr VisitExpr_(const VarNode *op) final {
-      if (op->dtype.is_int() && op->dtype.bits() < 64) {
-        return cast(DataType::Int(64), GetRef<Var>(op));
-      }
-      return GetRef<PrimExpr>(op);
-    }
-
-    PrimExpr VisitExpr_(const IntImmNode *op) final {
-      if (op->dtype.is_int() && op->dtype.bits() < 64) {
-        return IntImm(DataType::Int(64), op->value);
-      }
-      return GetRef<PrimExpr>(op);
-    }
-
-    PrimExpr VisitExpr_(const CastNode *op) final {
-      if (op->dtype.is_int() && op->dtype.bits() < 64) {
-        return cast(DataType::Int(64), op->value);
-      }
-      return GetRef<PrimExpr>(op);
-    }
-
-    Stmt VisitStmt_(const BufferStoreNode *op) final {
-      // Force indices to be int64
-      auto node = Downcast<BufferStore>(Parent::VisitStmt_(op));
-      return std::move(node);
-    }
-
-    PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-      auto node = Downcast<BufferLoad>(Parent::VisitExpr_(op));
-      return std::move(node);
-    }
-  };
-
   explicit BufferFlattener(arith::Analyzer *ana) : IRMutatorWithAnalyzer(ana) {}
 
   Stmt VisitStmt_(const BlockNode *op) final {
@@ -110,21 +75,23 @@ private:
 
     Array<Buffer> alloc_buffers = op->alloc_buffers;
     alloc_buffers.MutateByApply(
-        [this](Buffer buf) { return GetFlattenedBuffer(buf); });
+        [this](const Buffer &buf) { return GetFlattenedBuffer(buf); });
     if (!alloc_buffers.same_as(op->alloc_buffers)) {
       block.CopyOnWrite()->alloc_buffers = alloc_buffers;
     }
 
     Array<BufferRegion> reads = op->reads;
-    reads.MutateByApply(
-        [this](BufferRegion region) { return MutateBufferRegion(region); });
+    reads.MutateByApply([this](BufferRegion region) {
+      return MutateBufferRegion(std::move(region));
+    });
     if (!reads.same_as(op->reads)) {
       block.CopyOnWrite()->reads = reads;
     }
 
     Array<BufferRegion> writes = op->writes;
-    writes.MutateByApply(
-        [this](BufferRegion region) { return MutateBufferRegion(region); });
+    writes.MutateByApply([this](BufferRegion region) {
+      return MutateBufferRegion(std::move(region));
+    });
     if (!writes.same_as(op->writes)) {
       block.CopyOnWrite()->writes = writes;
     }
@@ -206,7 +173,7 @@ private:
     return VisitStmt(op->body);
   }
 
-  Buffer GetFlattenedBuffer(Buffer buf) {
+  Buffer GetFlattenedBuffer(const Buffer &buf) {
     auto it = buffer_remap_.find(buf);
     if (it != buffer_remap_.end()) {
       return it->second;
@@ -277,29 +244,7 @@ private:
   Array<PrimExpr> GetSimplifiedElemOffset(const Buffer &buffer,
                                           const Array<PrimExpr> &indices) {
     auto flattened_indices = buffer->ElemOffset(indices);
-    Array<PrimExpr> safe_indices;
-    for (auto index : flattened_indices) {
-      auto int_bound = analyzer_->const_int_bound(index);
-      DataType dtype = index->dtype;
-      if (dtype.is_int() && dtype.bits() < 64) {
-        int64_t max_value = int_bound->max_value;
-        int64_t min_value = int_bound->min_value;
-        const int64_t type_max = (1LL << (dtype.bits() - 1));
-        const int64_t type_min = -(1LL << (dtype.bits() - 1));
-
-        if (max_value >= (type_max - 1) || min_value < type_min) {
-          Int64Promoter promoter;
-          for (auto &index : flattened_indices) {
-            safe_indices.push_back(promoter(index));
-          }
-        } else {
-          safe_indices.push_back(index);
-        }
-      } else {
-        safe_indices.push_back(index);
-      }
-    }
-    return this->IterMapSimplifyWithContext(safe_indices, false);
+    return this->IterMapSimplifyWithContext(flattened_indices, false);
   }
 
   template <typename Node> Node VisitBufferAccess(Node node) {
@@ -353,12 +298,12 @@ private:
 };
 
 PrimFunc FlattenBufferRewriter(PrimFunc f) {
-  return BufferFlattener::Flatten(f);
+  return BufferFlattener::Flatten(std::move(f));
 }
 
 using namespace tir::transform;
 tvm::transform::Pass FlattenBuffer() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return FlattenBufferRewriter(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.FlattenBuffer", {});

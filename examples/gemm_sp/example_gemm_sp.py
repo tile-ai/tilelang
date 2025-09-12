@@ -39,19 +39,19 @@ default_config = {  # take best config from autotune script
     },
     "h20": {
         'float': {
-            'block_M': 64,
+            'block_M': 128,
             'block_N': 64,
             'block_K': 128,
-            'num_stages': 2,
+            'num_stages': 3,
             'thread_num': 128,
             'policy': T.GemmWarpPolicy.Square,
             'enable_rasterization': True
         },
         'float16': {
-            'block_M': 64,
+            'block_M': 128,
             'block_N': 64,
             'block_K': 128,
-            'num_stages': 2,
+            'num_stages': 3,
             'thread_num': 128,
             'policy': T.GemmWarpPolicy.Square,
             'enable_rasterization': True
@@ -88,6 +88,7 @@ def matmul_sp_fp16(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, 
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
             T.clear(C_local)
+            T.disable_warp_group_reg_alloc()
             T.use_swizzle(panel_size=10, enable=enable_rasterization)
             T.annotate_layout({
                 E:

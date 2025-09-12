@@ -18,6 +18,11 @@ builtin cd "$(dirname "${BASH_SOURCE:-$0}")"
 ROOT="$(git rev-parse --show-toplevel)"
 builtin cd "$ROOT" || exit 1
 
+# If yapf/ruff/codespell is not installed, install according to the requirements
+if ! (yapf --version &>/dev/null && ruff --version &>/dev/null && codespell --version &>/dev/null); then
+    pip install -r requirements-lint.txt
+fi
+
 YAPF_VERSION=$(yapf --version | awk '{print $2}')
 RUFF_VERSION=$(ruff --version | awk '{print $2}')
 CODESPELL_VERSION=$(codespell --version)
@@ -26,7 +31,7 @@ CODESPELL_VERSION=$(codespell --version)
 tool_version_check() {
     if [[ $2 != $3 ]]; then
         echo "Wrong $1 version installed: $3 is required, not $2."
-        exit 1
+        pip install -r requirements-lint.txt
     fi
 }
 
@@ -243,6 +248,73 @@ else
     echo "clang-format not found. Skipping C/C++ formatting."
 fi
 echo 'tile-lang clang-format: Done'
+
+echo 'tile-lang clang-tidy: Check Start'
+# If clang-tidy is available, run it; otherwise, skip
+if command -v run-clang-tidy &>/dev/null; then
+    # Check if clang-tidy is available
+    if ! command -v clang-tidy &>/dev/null; then
+        echo "clang-tidy not found. Skipping clang-tidy checks."
+    else
+        # Get clang-tidy version
+        CLANG_TIDY_VERSION=$(clang-tidy --version | head -n1 | awk '{print $4}')
+        echo "Using clang-tidy version: $CLANG_TIDY_VERSION"
+
+        # Check if build directory exists
+        if [ ! -d "build" ]; then
+            echo "Build directory not found. Skipping clang-tidy checks."
+        else
+            # Run clang-tidy on specified files
+            clang_tidy_files() {
+                run-clang-tidy -j 64 "$@" -p build
+            }
+
+            # Run clang-tidy on all C/C++ source files
+            clang_tidy_all() {
+                run-clang-tidy -j 64 src/*.cc -p build
+            }
+
+            # Run clang-tidy on changed C/C++ files relative to main
+            clang_tidy_changed() {
+                if git show-ref --verify --quiet refs/remotes/origin/main; then
+                    BASE_BRANCH="origin/main"
+                else
+                    BASE_BRANCH="main"
+                fi
+
+                MERGEBASE="$(git merge-base $BASE_BRANCH HEAD)"
+
+                # Get changed C/C++ files
+                CHANGED_FILES=$(git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' 2>/dev/null || true)
+                
+                if [ -n "$CHANGED_FILES" ]; then
+                    echo "Running clang-tidy on changed files:"
+                    echo "$CHANGED_FILES"
+                    # Convert newline-separated files to space-separated and run clang-tidy once
+                    CHANGED_FILES_SPACE=$(echo "$CHANGED_FILES" | tr '\n' ' ')
+                    run-clang-tidy -j 64 $CHANGED_FILES_SPACE -p build -fix
+                else
+                    echo "No C/C++ files changed. Skipping clang-tidy."
+                fi
+            }
+
+            if [[ "$1" == '--files' ]]; then
+               # If --files is given, run clang-tidy only on the provided files
+               clang_tidy_files "${@:2}"
+            elif [[ "$1" == '--all' ]]; then
+               # If --all is given, run clang-tidy on all source files
+               clang_tidy_all
+            else
+               # Otherwise, run clang-tidy only on changed C/C++ files
+               clang_tidy_changed
+            fi
+        fi
+    fi
+else
+    echo "run-clang-tidy not found. Skipping clang-tidy checks."
+    echo "To install clang-tidy tools, you may need to install clang-tidy and run-clang-tidy."
+fi
+echo 'tile-lang clang-tidy: Done'
 
 # Check if there are any uncommitted changes after all formatting steps.
 # If there are, ask the user to review and stage them.

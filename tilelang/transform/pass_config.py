@@ -43,6 +43,9 @@ class PassConfigKey(str, Enum):
     TL_ENABLE_AGGRESSIVE_SHARED_MEMORY_MERGE = "tl.enable_aggressive_shared_memory_merge"
     """Enable aggressive merge of shared memory allocations. Default: False"""
 
+    TL_DISABLE_SHUFFLE_ELECT = "tl.disable_shuffle_elect"
+    """Disable shuffle election optimization. Default: False"""
+
     # TIR related configs
     TIR_ENABLE_EQUIV_TERMS_IN_CSE = "tir.enable_equiv_terms_in_cse_tir"
     """Enable equivalent terms in TIR Common Subexpression Elimination. Default: True"""

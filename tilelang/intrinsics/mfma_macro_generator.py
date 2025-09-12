@@ -81,7 +81,7 @@ class MatrixCoreIntrinEmitter(object):
 
     def _initialize_k_dim(self, a_dtype="float16"):
         if isinstance(a_dtype, str):
-            if a_dtype in ["float8_e4m3fnuz"]:
+            if a_dtype in ["float8_e4m3fnuz", "int8"]:
                 self.k_dim = 32
                 return
             a_dtype = DataType(a_dtype)
@@ -123,6 +123,8 @@ class MatrixCoreIntrinEmitter(object):
 
         if in_dtype_abbrv == "fp8":
             self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_fp8_fp8"
+        elif in_dtype_abbrv == "i8":
+            self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_i8"
         else:
             self.mfma_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}{in_dtype_abbrv}"
 

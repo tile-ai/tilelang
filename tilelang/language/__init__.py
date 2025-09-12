@@ -17,6 +17,7 @@ from .proxy import (
     make_tensor,  # noqa: F401
     Buffer,  # noqa: F401
     Tensor,  # noqa: F401
+    StridedTensor,  # noqa: F401
     FragmentBuffer,  # noqa: F401
     SharedBuffer,  # noqa: F401
     LocalBuffer,  # noqa: F401
@@ -40,9 +41,10 @@ from .allocate import (
     alloc_shared,  # noqa: F401
     alloc_fragment,  # noqa: F401
     alloc_barrier,  # noqa: F401
+    alloc_reducer,  # noqa: F401
 )
 from .copy import copy, c2d_im2col  # noqa: F401
-from .gemm import GemmWarpPolicy, gemm  # noqa: F401
+from .gemm import GemmWarpPolicy, gemm, gemm_v2  # noqa: F401
 from .experimental.gemm_sp import gemm_sp  # noqa: F401
 from .fill import fill, clear  # noqa: F401
 from .reduce import (
@@ -53,9 +55,12 @@ from .reduce import (
     reduce_abssum,  # noqa: F401
     reduce_absmax,  # noqa: F401
     cumsum,  # noqa: F401
+    finalize_reducer,  # noqa: F401
 )
 from .print import print  # noqa: F401
 from .customize import (
+    atomic_max,  # noqa: F401
+    atomic_min,  # noqa: F401
     atomic_add,  # noqa: F401
     atomic_addx2,  # noqa: F401
     atomic_addx4,  # noqa: F401
@@ -63,14 +68,26 @@ from .customize import (
     clamp,  # noqa: F401
     reshape,  # noqa: F401
     view,  # noqa: F401
+    atomic_load,  # noqa: F401
+    atomic_store,  # noqa: F401
 )
 from .logical import any_of, all_of  # noqa: F401
 from .builtin import *  # noqa: F401
 
-from .memscope import *  # noqa: F401
+from .utils import index_to_coordinates  # noqa: F401
 
 
 def symbolic(name: str, dtype: str = "int32"):
+    """
+    Create a TIR symbolic variable.
+    
+    Parameters:
+        name (str): Identifier for the variable in generated TIR.
+        dtype (str): Data type string for the variable (e.g., "int32"). Defaults to "int32".
+    
+    Returns:
+        tir.Var: A TIR variable with the given name and dtype for use in TIR/TensorIR kernels.
+    """
     return tir.Var(name, dtype)
 
 

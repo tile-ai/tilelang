@@ -64,9 +64,10 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
                                                bx * block_N + t % (block_N // vec_load_b) *
                                                (block_N // vec_load_b) + vec], T.float16(0))
 
-    mod = tvm.tir.transform.BindTarget(auto_target)(Before)
-    mod = tl.transform.LowerTileOp()(mod)
-    mod = tvm.tir.transform.Simplify()(mod)
+    with tvm.transform.PassContext():
+        mod = tvm.tir.transform.BindTarget(auto_target)(Before)
+        mod = tl.transform.LowerTileOp()(mod)
+        mod = tvm.tir.transform.Simplify()(mod)
     ref_mod = tvm.tir.transform.BindTarget(auto_target)(After)
     ref_mod = tvm.tir.transform.Simplify()(ref_mod)
     # Note(tzj): The structures are equal except the argument in "T.reads" function.

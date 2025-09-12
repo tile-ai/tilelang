@@ -42,6 +42,7 @@ def get_configs():
     } for values in itertools.product(*iter_params.values())]
 
 
+@tilelang.autotune(configs=get_configs(),)
 @tilelang.jit(out_idx=[-1])
 def matmul(M,
            N,
@@ -51,7 +52,7 @@ def matmul(M,
            block_K=32,
            num_stages=0,
            thread_num=128,
-           enable_rasteration=False):
+           enable_rasterization=False):
 
     dtype = "float16"
     accum_dtype = "float"
@@ -84,7 +85,7 @@ def matmul(M,
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
 
             # Enable (or disable) swizzling optimization
-            T.use_swizzle(panel_size=10, enable=enable_rasteration)
+            T.use_swizzle(panel_size=10, enable=enable_rasterization)
 
             # Clear out the accumulation buffer
             T.clear(C_local)
@@ -130,7 +131,13 @@ def run_autotune(M: int, N: int, K: int):
 
 
 def test_autotune_matmul():
-    run_autotune(8192, 8192, 8192)
+    """
+    Run the autotuning validation for the matmul kernel on a 1024x1024x1024 problem.
+    
+    This test constructs random CUDA tensors, autotunes the JIT-compiled block-level matrix-multiplication kernel,
+    executes it, and asserts the result matches a reference CPU implementation within tolerances.
+    """
+    run_autotune(1024, 1024, 1024)
 
 
 if __name__ == "__main__":

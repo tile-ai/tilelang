@@ -7,7 +7,7 @@ env:
 
 jobs:
   format-check:
-    runs-on: self-hosted
+    runs-on: [self-hosted, nvidia]
 
     permissions:
       contents: write 
@@ -26,7 +26,7 @@ jobs:
     - name: Ensure venv (local & persistent)
       run: |
         set -e
-        REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
+        REQS_HASH=$(sha256sum requirements-test.txt 2>/dev/null | awk '{print $1}' || echo "no_requirements")
         MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
 
         if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
@@ -40,12 +40,17 @@ jobs:
           python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
+          pip install flash_attn==2.5.8 --no-user --no-build-isolation
           touch "$MARKER"
         fi
 
     - name: Run format check
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+        git submodule update --init --recursive
+        mkdir -p build
+        # run cmake to create the build directory with compile_commands.json
+        cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_CUDA=ON; cd ..
         if ! output=$(./format.sh 2>&1); then
           echo "------------------------------------"
           echo "message:"
@@ -54,14 +59,10 @@ jobs:
           echo "------------------------------------"
           exit 1
         fi
-    
-    - name: Commit and Push Changes
-      uses: stefanzweifel/git-auto-commit-action@v5
-      with:
-        commit_message: "lint"
+        rm -rf build
 
-  build-test:
-    runs-on: self-hosted
+  build-test-nvidia:
+    runs-on: [self-hosted, nvidia]
     needs: format-check
     permissions:
       contents: read
@@ -94,6 +95,8 @@ jobs:
           python -m pip install --upgrade pip --no-user
           [[ -f requirements-test.txt ]] && \
             PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
+          # flash attention usually requires no isolation build
+          pip install flash_attn==2.5.8 --no-user --no-build-isolation
           pip install . --no-user
           touch "$MARKER"
         fi
@@ -101,18 +104,18 @@ jobs:
     - name: Install project (wheel form)
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        pip install . --no-user
+        pip install . --no-user -v
 
     - name: Run examples
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd examples
         unset PYTHONPATH
-        python -m pytest -n 8 **/test*.py
+        python -m pytest -n 4 **/test*.py -v -r fE --durations=0
 
     - name: Run tests
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd testing/python
         unset PYTHONPATH
-        python -m pytest -n 8
+        python -m pytest -n 4 -v -r fE --durations=0 --timeout=3600

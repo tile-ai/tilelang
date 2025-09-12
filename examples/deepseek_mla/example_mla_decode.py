@@ -8,8 +8,9 @@ import argparse
 
 
 @tilelang.jit(out_idx=[6])
-def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split):
-    scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
+def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split,
+              softmax_scale):
+    scale = float(softmax_scale * 1.44269504)  # log2(e)
     dtype = "float16"
     accum_dtype = "float"
     kv_group_num = heads // kv_head_num
@@ -288,10 +289,12 @@ def main(
     pv_flops = 2 * batch * heads * kv_ctx * dim
     total_flops = qk_flops + pv_flops
     BLOCK_N = 64
-    BLOCK_H = 64
+    BLOCK_H = min(64, heads // kv_heads)
     num_split = 1
+    softmax_scale = (dim + pe_dim)**-0.5
 
-    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split)
+    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split,
+                       softmax_scale)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     profiler.assert_allclose(ref_program, rtol=1e-4, atol=1e-4)
     latency = profiler.do_bench(warmup=500)

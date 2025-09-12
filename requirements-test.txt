@@ -12,6 +12,8 @@ dtlib
 numpy>=1.23.5
 pytest>=6.2.4
 pytest_xdist>=2.2.1
+pytest-durations
+pytest-timeout
 packaging>=21.0
 PyYAML
 tqdm>=4.62.3
@@ -21,13 +23,9 @@ cloudpickle
 ml_dtypes
 psutil
 torch
-thefuzz
 tabulate
 wheel
 setuptools
 einops
-attrs
-decorator
-flash-attn<=2.2.0
 scipy
 tornado

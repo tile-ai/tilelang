@@ -281,10 +281,9 @@ class TensorCorePolicy(DefaultPolicy):
 
         factors = factorize(np.prod(space) // warps)
 
-        def _score(node, thread):  # small is better
+        def _score(node, warp_tile):  # small is better
             score = 0
-            block_tile = [int(np.ceil(tile[i] / thread[i])) for i in range(ndim)]
-            shape = node.propagate_inputs_on_reduction(block_tile)
+            shape = node.propagate_inputs_on_reduction(warp_tile)
             input_buffers = node.block_analyzer.get_input_buffers(node.reduction_block)
             for i, _ in enumerate(input_buffers):
                 score += np.prod(shape[i]) / self.arch.bandwidth[1]

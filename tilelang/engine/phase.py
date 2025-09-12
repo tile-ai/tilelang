@@ -63,12 +63,36 @@ def should_enable_aggressive_merge(pass_ctx: Optional[PassContext] = None,
 
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
+    """
+    Bind target information and progressively legalize and lower frontend Tile IR into a form suitable for downstream optimization and codegen.
+    
+    This pass pipeline:
+    - Binds the provided target to the module.
+    - Legalizes frontend Tile IR into TVM-compatible constructs.
+    - Simplifies expressions.
+    - Configures reducer layouts and performs layout inference for fragments and shared memory.
+    - Lowers high-level tile operations and L2 persistent maps.
+    - Legalizes vectorized loops and inserts safety checks for memory accesses.
+    - Re-simplifies to remove redundancies introduced by safety checks.
+    - Attempts loop vectorization for dynamic-shaped loops.
+    
+    Parameters:
+        mod (IRModule): The input IR module containing frontend Tile IR.
+        target (Target): Target device information to bind into the module.
+    
+    Returns:
+        IRModule: The transformed module, ready for target-specific optimization passes.
+    """
     mod = tir.transform.BindTarget(target)(mod)
 
-    # Legalize the frontend IR to make it compatible with TVM
-    mod = tilelang.transform.FrontendLegalize()(mod)
+    # Inline let expressions and statements
+    mod = tilelang.transform.LetInline()(mod)
+    # Inject assumes to speedup tvm prover
+    mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
     mod = tir.transform.Simplify()(mod)
+    # Set layouts for reducers
+    mod = tilelang.transform.LayoutReducer()(mod)
     # Infer memory layouts for fragments and shared memory
     mod = tilelang.transform.LayoutInference()(mod)
     # Lower high-level tile operations to low-level operations
@@ -79,7 +103,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
     # Add safety checks for memory accesses
     mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
-    # Align dynamic shared memory allocations
     # Simplify again to clean up any duplicated conditions
     # that may have been introduced by safety checks
     # use an enhanced pass to simplify the dynamic symbolics
@@ -102,6 +125,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.MultiVersionBuffer()(mod)
         mod = tilelang.transform.WarpSpecialized()(mod)
         mod = tilelang.transform.InjectTmaBarrier()(mod)
+        mod = tilelang.transform.AnnotateWarpGroupRegAlloc()(mod)
         # if tma is not enabled, we can also do pipeline planning
         # to get better performance with async copy
         mod = tilelang.transform.PipelinePlanning()(mod)
@@ -118,17 +142,17 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.PipelinePlanning()(mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
-
         if allow_fence_proxy(target=target):
             # in hopper device, wgmma is an async proxy
             # so we need to inject a fence proxy before it
             mod = tilelang.transform.InjectFenceProxy()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
-    mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
+    # ConfigIndexBitwidth must be applied after FlattenBuffer
+    # as it will flatten index computing
+    mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tir.transform.Simplify()(mod)
-
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
     mod = tir.transform.UnrollLoop()(mod)
@@ -149,12 +173,10 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # We can find a way better to create var instead
     # of putting the LowerThreadAllreduce before
     # the Legalization.
-    mod = tilelang.transform.ThreadPartialSync("shared.dyn")(mod)
     mod = tir.transform.InferFragment()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
 
     mod = tilelang.transform.LowerHopperIntrin()(mod)
-
     # Global Barrier Synchronization must be applied before
     # SplitHostDevice pass, as the global barrier
     if allow_global_thread_synchronization():
@@ -164,12 +186,8 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
     # because the merged allocation site is at the beginning of each device function
     enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
-    # Hopper Swizzling requires dynamic shared memory address to be aligned to 1024 bytes
-    # For other devices, we align to 16 bytes
-    smem_align_bytes = 1024 if have_tma(target) else 16
-    # Workaround, wait for a element wise synchronization pass
     mod = tilelang.transform.MergeSharedMemoryAllocations(
-        enable_aggressive_merge=enable_aggressive_merge, align_bytes=smem_align_bytes)(
+        enable_aggressive_merge=enable_aggressive_merge)(
             mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)

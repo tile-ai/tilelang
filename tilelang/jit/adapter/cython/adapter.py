@@ -1,13 +1,24 @@
 """The profiler and convert to torch utils"""
 
-from ..base import BaseKernelAdapter
 import ctypes
+import fcntl
+import hashlib
+import logging
+import site
+import sys
+import sysconfig
+import torch
+import os
+from pathlib import Path
+
 from typing import List, Optional, Union, Callable, Dict, Tuple, Any
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tilelang.engine.param import KernelParam
 from tvm import tir
 from tvm.relax import TensorType
+
+from tilelang.jit.adapter.base import BaseKernelAdapter
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.utils import is_cuda_target, is_hip_target, is_cpu_target
@@ -15,15 +26,6 @@ from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.utils.tensor import map_torch_type
 from tilelang.contrib.cc import get_cplus_compiler
-import torch
-import sys
-import sysconfig
-import hashlib
-import os
-import fcntl
-from pathlib import Path
-import logging
-import site
 
 logger = logging.getLogger(__name__)
 
@@ -116,15 +118,15 @@ with open(cython_wrapper_path, "r") as f:
         with open(md5_path, "r") as f:
             cached_hash = f.read().strip()
             if cached_hash == code_hash:
-                logger.debug("Cython jit adapter is up to date, no need to compile...")
+                logger.debug("Cython JIT adapter is up to date, no need to compile...")
                 need_compile = False
             else:
-                logger.info("Cython jit adapter is out of date, need to recompile...")
+                logger.info("Cython JIT adapter is out of date, need to recompile...")
     else:
-        logger.info("No cached version found for cython jit adapter, need to compile...")
+        logger.info("No cached version found for Cython JIT adapter, need to compile...")
 
     if need_compile:
-        logger.info("Waiting for lock to compile cython jit adapter...")
+        logger.info("Waiting for lock to compile Cython JIT adapter...")
         with open(lock_file, 'w') as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
@@ -138,7 +140,7 @@ with open(cython_wrapper_path, "r") as f:
                             need_compile = False
 
                 if need_compile:
-                    logger.info("Compiling cython jit adapter...")
+                    logger.info("Compiling Cython JIT adapter...")
                     temp_path = cache_dir / f"temp_{code_hash}.so"
 
                     with open(md5_path, "w") as f:
@@ -159,7 +161,7 @@ with open(cython_wrapper_path, "r") as f:
             except Exception as e:
                 if 'temp_path' in locals() and temp_path.exists():
                     temp_path.unlink()
-                raise Exception(f"Failed to compile cython jit adapter: {e}") from e
+                raise Exception(f"Failed to compile Cython JIT adapter: {e}") from e
             finally:
                 if lock_file.exists():
                     lock_file.unlink()
@@ -195,11 +197,14 @@ class CythonKernelAdapter(BaseKernelAdapter):
     ptr_map: Optional[Dict[int, str]] = None
     # Maps buffer variables to their corresponding dtypes
     buffer_dtype_map: Optional[Dict[tir.Var, Tuple[int, torch.dtype]]] = None
-    # Maps buffer variables to their corresponding static shapes
-    # {
-    #     "A": [(0, 16), (1, 16)] -> represents A.shape = (16, 16)
+    # Maps buffer variables to their corresponding static shapes and strides,
+    # e.g., {
+    #     "A": [(0, 16), (1, 16)] -> represents A.shape/strides = (16, 16)
     # }
     static_shape_map: Optional[Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]]] = None
+    static_strides_map: Optional[Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]]] = None
+    # Contains contiguous buffers
+    static_contiguous_list: Optional[List[tir.Var]] = None
     # Maps buffer variables to their corresponding devices
     buffer_device_map: Optional[Dict[tir.Var, Tuple[int, torch.device]]] = None
     # Pass configs for the compiler
@@ -239,8 +244,12 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.dynamic_symbolic_map = self._process_dynamic_symbolic()
         self.buffer_dtype_map = self._process_buffer_dtype()
         self.ptr_map = self._process_ptr_map()
-        self.static_shape_map = self._process_static_shape()
         self.buffer_device_map = self._process_buffer_device()
+
+        static_buffer_infos = self._process_static_buffer_infos()
+        self.static_shape_map = static_buffer_infos[0]
+        self.static_strides_map = static_buffer_infos[1]
+        self.static_contiguous_list = static_buffer_infos[2]
 
         self.verbose = verbose
         self.wrapper = TLWrapper(self.target)
@@ -269,6 +278,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
         self.cython_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
         self.cython_wrapper.set_static_shape_map(self.static_shape_map)
+        self.cython_wrapper.set_static_strides_map(self.static_strides_map)
+        self.cython_wrapper.set_static_contiguous_list(self.static_contiguous_list)
         self.cython_wrapper.set_buffer_device_map(self.buffer_device_map)
         self.cython_wrapper.set_ptr_map(self.ptr_map)
         self._post_init()
@@ -301,9 +312,13 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
         adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
         adapter.buffer_dtype_map = adapter._process_buffer_dtype()
-        adapter.static_shape_map = adapter._process_static_shape()
         adapter.ptr_map = adapter._process_ptr_map()
         adapter.buffer_device_map = adapter._process_buffer_device()
+
+        static_buffer_infos = adapter._process_static_buffer_infos()
+        adapter.static_shape_map = static_buffer_infos[0]
+        adapter.static_strides_map = static_buffer_infos[1]
+        adapter.static_contiguous_list = static_buffer_infos[2]
 
         adapter.verbose = verbose
         adapter.lib_generator = LibraryGenerator(adapter.target, verbose=verbose)
@@ -322,17 +337,20 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_buffer_dtype_map(adapter.buffer_dtype_map)
         adapter.cython_wrapper.set_static_shape_map(adapter.static_shape_map)
+        adapter.cython_wrapper.set_static_strides_map(adapter.static_strides_map)
+        adapter.cython_wrapper.set_static_contiguous_list(adapter.static_contiguous_list)
         adapter.cython_wrapper.set_buffer_device_map(adapter.buffer_device_map)
         adapter.cython_wrapper.set_ptr_map(adapter.ptr_map)
 
         adapter._post_init()
         return adapter
 
-    def _process_dynamic_symbolic(self) -> Dict[tir.Var, Tuple[int, int]]:
+    def _process_dynamic_symbolic(self) -> Dict[tir.Var, Tuple[int, int, int]]:
         """Extract information about dynamic shapes from the TIR function.
         
-        Maps symbolic variables to their corresponding (buffer_index, shape_dimension)
+        Maps symbolic variables to their corresponding (id, buffer_index, dimension)
         for runtime shape resolution.
+        id represents shape or stride, 0 represents shape, 1 represents stride
         """
         func = self.prim_func
         params = func.params
@@ -344,7 +362,14 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 for j, shape in enumerate(buffer.shape):
                     if (isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map) and
                         (shape not in params)):
-                        dynamic_symbolic_map[shape] = (i, j)
+                        dynamic_symbolic_map[shape] = (0, i, j)
+        for i, param in enumerate(params):
+            if param in buffer_map:
+                buffer = buffer_map[param]
+                for j, stride in enumerate(buffer.strides):
+                    if (isinstance(stride, tir.Var) and (stride not in dynamic_symbolic_map) and
+                        (stride not in params)):
+                        dynamic_symbolic_map[stride] = (1, i, j)
         return dynamic_symbolic_map
 
     def _process_buffer_dtype(self) -> Dict[tir.Var, Tuple[int, torch.dtype]]:
@@ -377,7 +402,10 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 ptr_map[i] = param.name
         return ptr_map
 
-    def _process_static_shape(self) -> Dict[tir.Var, List[Tuple[int, int]]]:
+    def _process_static_buffer_infos(self) -> \
+            Tuple[Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]],
+                  Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]],
+                  List[Tuple[tir.Var]]]:
         """Extract information about static shapes from the TIR function.
         
         Maps buffer variables to their corresponding static shapes.
@@ -386,17 +414,27 @@ class CythonKernelAdapter(BaseKernelAdapter):
         params = func.params
         buffer_map = func.buffer_map
         static_shape_map = {}
+        static_strides_map = {}
+        static_contiguous_list = list()
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
-                name = buffer.name
-                shape = buffer.shape
-                static_shape = []
-                for j, s in enumerate(shape):
+                static_shape, static_strides = [], []
+                for j, s in enumerate(buffer.shape):
                     if isinstance(s, tir.IntImm):
                         static_shape.append((j, s.value))
-                static_shape_map[name] = (i, static_shape)
-        return static_shape_map
+                for j, s in enumerate(buffer.strides):
+                    if isinstance(s, tir.IntImm):
+                        static_strides.append((j, s.value))
+                is_contiguous, prod = True, 1
+                for dim, stride in reversed(list(zip(buffer.shape, buffer.strides))):
+                    is_contiguous &= bool(stride == prod)
+                    prod *= dim
+                static_shape_map[buffer.name] = (i, static_shape)
+                static_strides_map[buffer.name] = (i, static_strides)
+                if is_contiguous:
+                    static_contiguous_list.append((i, buffer.name))
+        return static_shape_map, static_strides_map, static_contiguous_list
 
     def _process_buffer_device(self) -> Dict[tir.Var, Tuple[int, torch.device]]:
         """Extract information about buffer devices from the TIR function.
@@ -473,7 +511,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
     @property
     def is_dynamic(self):
         """Indicates whether the kernel handles dynamic shapes."""
-        return (self.dynamic_symbolic_map is not None and len(self.dynamic_symbolic_map) > 0)
+        return self.dynamic_symbolic_map is not None and len(self.dynamic_symbolic_map) > 0
 
     def get_kernel_source(self, kernel_only: bool = False):
         """Returns the source code of the compiled kernel."""

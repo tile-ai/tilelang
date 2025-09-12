@@ -10,6 +10,15 @@
 // Template declaration for device-side debug printing (variable only)
 template <typename T> __device__ void debug_print_var(const char *msg, T var);
 
+// Overload for pointer type (supports any cv-qualified T*)
+template <typename T> __device__ void debug_print_var(const char *msg, T *var) {
+  printf(
+      "msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=pointer "
+      "value=%p\n",
+      msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+      threadIdx.z, var);
+}
+
 // Specialization for signed char type
 template <>
 __device__ void debug_print_var<signed char>(const char *msg, signed char var) {
@@ -118,7 +127,7 @@ debug_print_buffer_value<signed char>(const char *msg, const char *buf_name,
          threadIdx.z, buf_name, index, var);
 }
 
-// Specialization for unsiged char type
+// Specialization for unsigned char type
 template <>
 __device__ void
 debug_print_buffer_value<unsigned char>(const char *msg, const char *buf_name,

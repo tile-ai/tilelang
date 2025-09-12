@@ -14,7 +14,7 @@ from tvm.target import Target
 from tvm.tir import PrimFunc
 
 from tilelang.engine.param import KernelParam
-from tilelang.env import TILELANG_CACHE_DIR, TILELANG_TMP_DIR, is_cache_enabled
+from tilelang import env
 from tilelang.jit import JITKernel
 from tilelang.version import __version__
 
@@ -61,8 +61,8 @@ class KernelCache:
 
     @staticmethod
     def _create_dirs():
-        os.makedirs(TILELANG_CACHE_DIR, exist_ok=True)
-        os.makedirs(TILELANG_TMP_DIR, exist_ok=True)
+        os.makedirs(env.TILELANG_CACHE_DIR, exist_ok=True)
+        os.makedirs(env.TILELANG_TMP_DIR, exist_ok=True)
 
     def _generate_key(
         self,
@@ -132,7 +132,7 @@ class KernelCache:
         Returns:
             JITKernel: The compiled kernel, either freshly compiled or from cache
         """
-        if not is_cache_enabled():
+        if not env.is_cache_enabled():
             return JITKernel(
                 func,
                 out_idx=out_idx,
@@ -190,7 +190,7 @@ class KernelCache:
             self.logger.warning("DLPack backend does not support cache saving to disk.")
         else:
             with self._lock:
-                if is_cache_enabled():
+                if env.is_cache_enabled():
                     self._save_kernel_to_disk(key, kernel, func, verbose)
 
         # Store in memory cache after compilation
@@ -215,7 +215,7 @@ class KernelCache:
         Returns:
             str: Absolute path to the cache directory for this kernel.
         """
-        return os.path.join(TILELANG_CACHE_DIR, key)
+        return os.path.join(env.TILELANG_CACHE_DIR, key)
 
     @staticmethod
     def _load_binary(path: str):
@@ -226,7 +226,7 @@ class KernelCache:
     @staticmethod
     def _safe_write_file(path: str, mode: str, operation: Callable):
         # Random a temporary file within the same FS as the cache directory
-        temp_path = os.path.join(TILELANG_TMP_DIR, f"{os.getpid()}_{uuid.uuid4()}")
+        temp_path = os.path.join(env.TILELANG_TMP_DIR, f"{os.getpid()}_{uuid.uuid4()}")
         with open(temp_path, mode) as temp_file:
             operation(temp_file)
 
@@ -396,7 +396,7 @@ class KernelCache:
         """
         try:
             # Delete the entire cache directory
-            shutil.rmtree(TILELANG_CACHE_DIR)
+            shutil.rmtree(env.TILELANG_CACHE_DIR)
 
             # Re-create the cache directory
             KernelCache._create_dirs()

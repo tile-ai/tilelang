@@ -25,7 +25,7 @@ public:
   explicit TileLangAlignDynamicSharedMemoryAllocations(int align_bytes)
       : align_bytes_(align_bytes) {}
 
-  static Stmt Substitute(int align_bytes, Stmt stmt) {
+  static Stmt Substitute(int align_bytes, const Stmt &stmt) {
     TileLangAlignDynamicSharedMemoryAllocations smem_rewriter(align_bytes);
     return smem_rewriter.VisitStmt(stmt);
   }
@@ -138,7 +138,8 @@ private:
 
 tvm::transform::Pass AlignDynamicSharedMemoryAllocations(int align_bytes) {
   using namespace tir::transform;
-  auto pass_func = [align_bytes](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [align_bytes](PrimFunc f, const IRModule &m,
+                                 const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
     n->body = TileLangAlignDynamicSharedMemoryAllocations::Substitute(
         align_bytes, n->body);

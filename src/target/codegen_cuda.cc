@@ -14,12 +14,12 @@
 #include <vector>
 
 #include "../op/builtin.h"
-#include "../op/bulk_copy.h"
+#include "./ptx.h"
 #include "arith/pattern_match.h"
-#include "target/source/ptx.h"
 
 namespace tvm {
 namespace codegen {
+using namespace tvm::tl::codegen;
 
 static std::string GetFP8Type(DataType type) {
   std::stringstream stream;
@@ -192,6 +192,9 @@ std::string CodeGenTileLangCUDA::Finish() {
   decl_stream << "#include <tl_templates/cuda/ldsm.h>\n";
   decl_stream << "#include <tl_templates/cuda/threadblock_swizzle.h>\n";
   decl_stream << "#include <tl_templates/cuda/debug.h>\n";
+  decl_stream << "#ifdef ENABLE_BF16\n";
+  decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
+  decl_stream << "#endif\n";
 
   if (need_global_barrier_) {
     decl_stream << "__device__ unsigned " << vid_global_barrier_state_
@@ -323,16 +326,12 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     enable_fp6_ = true;
     if (t.lanes() <= 4) {
       os << GetFP6Type(t);
-    } else {
-      fail = true;
     }
     return;
   } else if (t.is_float4()) {
     enable_fp4_ = true;
     if (t.lanes() <= 4) {
       os << GetFP4Type(t);
-    } else {
-      fail = true;
     }
     return;
   } else if (t == DataType::Bool()) {
@@ -692,7 +691,7 @@ void CodeGenTileLangCUDA::PrintStorageScope(const std::string &scope,
   ICHECK_NE(scope, "global")
       << "Cannot allocate global memory when targeting CUDA. You must pass "
          "all global arrays as input instead";
-  if (scope == "shared") {
+  if (scope == "shared" || scope == "shared.barrier") {
     os << "__shared__ ";
   } else if (scope == "shared.dyn") {
     os << "extern __shared__ __align__(1024) ";
@@ -734,17 +733,66 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   this->PrintIndent();
   this->PrintType(target_ty, stream);
   stream << ' ' << sret << ";\n";
-  {
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
-    for (int i = 0, lanes = from_ty.lanes(); i < lanes; ++i) {
-      std::ostringstream val;
-      val << "(";
-      PrintType(target_ty.element_of(), val);
-      val << ")(";
-      PrintVecElemLoad(src, from_ty, i, val);
-      val << ")";
-      PrintVecElemStore(sret, target_ty, i, val.str());
+  std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+
+  // Handle bfloat16 special cases with supported ops
+  bool used_bf16_op = false;
+  if (from_ty.is_bfloat16() || target_ty.is_bfloat16()) {
+    std::ostringstream func_name;
+    if (from_ty.is_bfloat16())
+      func_name << "bf16";
+    else if (from_ty.is_float())
+      func_name << "float";
+    if (from_ty.lanes() > 1)
+      func_name << from_ty.lanes();
+    func_name << "2";
+    if (target_ty.is_bfloat16())
+      func_name << "bf16";
+    else if (target_ty.is_float())
+      func_name << "float";
+    else if (target_ty == DataType::Int(16))
+      func_name << "int16";
+    if (target_ty.lanes() > 1)
+      func_name << target_ty.lanes();
+
+    auto fname = func_name.str();
+    if (bf16_supported_ops_.count(fname)) {
+      used_bf16_op = true;
+      stream << "#ifdef ENABLE_BF16\n";
+      PrintIndent();
+      stream << "reinterpret_cast<";
+      if (target_ty.is_bfloat16())
+        stream << "__nv_bfloat16";
+      else
+        PrintType(target_ty.element_of(), stream);
+      if (target_ty.lanes() > 1)
+        stream << target_ty.lanes();
+      stream << " &>(" << sret << ") = fastertransformer::" << fname
+             << "(reinterpret_cast<";
+      if (from_ty.is_bfloat16())
+        stream << "__nv_bfloat16";
+      else
+        PrintType(from_ty.element_of(), stream);
+      if (from_ty.lanes() > 1)
+        stream << from_ty.lanes();
+      stream << " const &>(" << src << "));\n";
+      stream << "#else\n";
     }
+  }
+
+  // Fallback: elementwise cast
+  for (int i = 0, lanes = from_ty.lanes(); i < lanes; ++i) {
+    std::ostringstream val;
+    val << "(";
+    PrintType(target_ty.element_of(), val);
+    val << ")(";
+    PrintVecElemLoad(src, from_ty, i, val);
+    val << ")";
+    PrintVecElemStore(sret, target_ty, i, val.str());
+  }
+
+  if (used_bf16_op) {
+    stream << "#endif\n";
   }
   os << sret;
 }
@@ -873,14 +921,47 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   return os.str();
 }
 
+/**
+ * @brief Emit CUDA/TensorLib-specific code for a call expression.
+ *
+ * This visitor handles CallNode intrinsics and builtins that require emitting
+ * CUDA/TL-specific code (inline PTX/ASM sequences, TensorLanguage runtime
+ * calls, WMMA/TMA helpers, barriers, cp.async primitives, index-map based
+ * stores, reinterpret/packing helpers, and various mma/ldmatrix patterns). The
+ * function writes the generated code to the provided output stream and falls
+ * back to the C codegen for unrecognized calls.
+ *
+ * The method recognizes and emits code for (non-exhaustive): cp.async and its
+ * commit/wait variants, tma_load/store and im2col variants, ptX
+ * ldmatrix/stmatrix helpers, mbarrier APIs, cooperative grid sync, WMMA/legacy
+ * MMA intrinsics (fill/load/store/mma/bmma/ptx_mma/ptx_mma_sp), low-level PTX
+ * asm helpers (ldg32, cp_async bulk/init/arrive/wait barriers), reinterpret
+ * paths for special small-float encodings (e.g., float4 e2m1fn), tl::tl_gemm
+ * and related external calls, and other TL runtime calls.
+ *
+ * Side effects:
+ * - Emits to `os` and the internal codegen output stream.
+ * - May set internal feature flags (e.g., need_cooperative_groups_,
+ * need_mma_h_, need_cast_smem_ptr_to_int_, enable_sparse_gemm_).
+ * - May open/close SSA scopes and mutate internal variable mappings.
+ * - May call LOG(FATAL) / CHECK / ICHECK on invalid or unsupported argument
+ *   patterns.
+ *
+ * @param op The call node to generate code for; the function inspects op->op
+ *           and op->args to determine the appropriate emission.
+ * @param os  Output stream to receive expression-level output when the caller
+ *            expects an expression result (some paths write directly to the
+ *            member stream instead).
+ */
 void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
-  auto print_extern_call_stmt = [&](std::string name, size_t offset = 0) {
+  auto print_extern_call_stmt = [&](std::string name, size_t start = 0,
+                                    size_t end = 0) {
     // Cache context into a private ss, otherwise the let node may generate
     // within the function call arguments.
     std::ostringstream ss;
 
-    for (size_t i = offset; i < op->args.size(); i++) {
-      if (i > offset)
+    for (size_t i = start; i < op->args.size() - end; i++) {
+      if (i > start)
         ss << ", ";
       ss << this->PrintExpr(op->args[i]);
     }
@@ -889,6 +970,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->stream << name << "(";
     this->stream << ss.str();
     this->stream << ");\n";
+  };
+  auto print_mbarrier_obj = [&](PrimExpr barrier_id) {
+    std::ostringstream ss;
+    if (barrier_id.as<IntImmNode>()) {
+      // incase the barrier_id is an integer, we need to print the barrier_id as
+      // an integer
+      ss << mbarrier_name_ << "[" << barrier_id << "]";
+    } else {
+      // otherwise may be a T.get_mbarrier() call or BufferLoad Node
+      // we need to print the barrier_id as a string
+      ss << this->PrintExpr(barrier_id);
+    }
+    return ss.str();
   };
   if (op->op.same_as(builtin::ptx_cp_async())) {
     std::string dst = this->PrintExpr(op->args[0]);
@@ -918,39 +1012,91 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(builtin::create_barriers())) {
     this->PrintIndent();
     int barrier_count = Downcast<IntImm>(op->args[0])->value;
-    std::string barrier_name = "_mbarrier";
-    this->stream << "__shared__ uint64_t " << barrier_name << "["
+    auto mbarrier_storage_name = mbarrier_name_ + "_mem";
+    this->stream << "__shared__ uint64_t " << mbarrier_storage_name << "["
                  << barrier_count << "];\n";
+    this->PrintIndent();
+    this->stream << "auto " << mbarrier_name_ << " = reinterpret_cast<"
+                 << mbarrier_dtype_ << "*>(" << mbarrier_storage_name << ");\n";
   } else if (op->op.same_as(tl::get_mbarrier())) {
-    std::string barrier_name = "_mbarrier";
+    ICHECK_EQ(op->args.size(), 1);
     std::string barrier_id = this->PrintExpr(op->args[0]);
-    os << barrier_name + "[" + barrier_id + "]";
+    os << mbarrier_name_ + "[" + barrier_id + "]";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
-    print_extern_call_stmt("tl::mbarrier_arrive");
+    if (op->args.size() == 1) {
+      this->PrintIndent();
+      auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+      this->stream << mbarrier_obj << ".arrive();\n";
+    } else if (op->args.size() == 3) {
+      this->PrintIndent();
+      auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+      auto cta_id = this->PrintExpr(op->args[1]);
+      auto pred = this->PrintExpr(op->args[2]);
+      this->stream << mbarrier_obj << ".arrive(" << cta_id << ", " << pred
+                   << ");\n";
+    } else {
+      LOG(FATAL) << "Invalid parameter  for tl::arrive_barrier "
+                 << op->args.size();
+    }
   } else if (op->op.same_as(builtin::ptx_init_barrier_thread_count())) {
-    print_extern_call_stmt("tl::mbarrier_init");
+    ICHECK_EQ(op->args.size(), 2);
+    this->PrintIndent();
+    auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+    auto arrive_count = this->PrintExpr(op->args[1]);
+    this->stream << mbarrier_obj << ".init(" << arrive_count << ");\n";
   } else if (op->op.same_as(builtin::ptx_arrive_barrier_expect_tx())) {
-    print_extern_call_stmt("tl::mbarrier_arrive_expect_tx");
+    if (op->args.size() == 2) {
+      this->PrintIndent();
+      auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+      auto transaction_bytes = this->PrintExpr(op->args[1]);
+      this->stream << mbarrier_obj << ".arrive_and_expect_tx("
+                   << transaction_bytes << ");\n";
+    } else if (op->args.size() == 4) {
+      this->PrintIndent();
+      auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+      auto transaction_bytes = this->PrintExpr(op->args[1]);
+      auto cta_id = this->PrintExpr(op->args[2]);
+      auto pred = this->PrintExpr(op->args[3]);
+      this->stream << mbarrier_obj << ".arrive_and_expect_tx("
+                   << transaction_bytes << ", " << cta_id << ", " << pred
+                   << ");\n";
+    } else {
+      LOG(FATAL) << "Invalid parameter  for tl::arrive_barrier_expect_tx "
+                 << op->args.size();
+    }
   } else if (op->op.same_as(builtin::ptx_cp_async_barrier())) {
     print_extern_call_stmt("tl::mbarrier_cp_async_arrive");
   } else if (op->op.same_as(tl::mbarrier_expect_tx())) {
-    print_extern_call_stmt("tl::mbarrier_expect_tx");
+    ICHECK_EQ(op->args.size(), 2);
+    this->PrintIndent();
+    auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+    auto transaction_bytes = this->PrintExpr(op->args[1]);
+    this->stream << mbarrier_obj << ".expect_transaction(" << transaction_bytes
+                 << ");\n";
   } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
-    print_extern_call_stmt("tl::mbarrier_wait");
-  } else if (op->op.same_as(tl::sync_thread_partial())) {
-    print_extern_call_stmt("tl::syncthreads_partial");
+    ICHECK_EQ(op->args.size(), 2);
+    this->PrintIndent();
+    auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
+    auto phase = this->PrintExpr(op->args[1]);
+    this->stream << mbarrier_obj << ".wait(" << phase << ");\n";
+  } else if (op->op.same_as(tl::no_set_max_nreg())) {
+    return;
   } else if (op->op.same_as(tl::tma_load())) {
     std::ostringstream ss;
     ICHECK_GE(op->args.size(), 2);
-    ss << "tl::tma_load(";
+    auto eviction_policy =
+        this->eviction_policy_names_
+            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+    // Simplify the code by using the default eviction policy
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << "tl::tma_load<tl::CacheHintSm90::" << eviction_policy << ">(";
+    } else {
+      ss << "tl::tma_load(";
+    }
     auto desc = op->args[0];
     ss << this->PrintExpr(desc) << ", ";
-    if (const IntImmNode *imm = op->args[1].as<IntImmNode>()) {
-      ss << "_mbarrier[" << imm->value << "], ";
-    } else {
-      ss << this->PrintExpr(op->args[1]) << ", ";
-    }
-    for (size_t i = 2; i < op->args.size(); i++) {
+    ss << print_mbarrier_obj(op->args[1]) << ", ";
+    for (size_t i = 2; i < op->args.size() - 1; i++) {
       if (i > 2)
         ss << ", ";
       ss << this->PrintExpr(op->args[i]);
@@ -959,17 +1105,35 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << ss.str();
   } else if (op->op.same_as(tl::tma_load_im2col())) {
-    print_extern_call_stmt("tl::tma_load_im2col");
+    std::stringstream ss;
+    auto eviction_policy =
+        this->eviction_policy_names_
+            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << "tl::tma_load_im2col<tl::CacheHintSm90::" << eviction_policy << ">";
+    } else {
+      ss << "tl::tma_load_im2col";
+    }
+    print_extern_call_stmt(ss.str(), 0, 1);
   } else if (op->op.same_as(tl::tma_store())) {
-    print_extern_call_stmt("tl::tma_store");
-  } else if (op->op.same_as(tl::ptx_ldmatirx())) {
+    std::stringstream ss;
+    auto eviction_policy =
+        this->eviction_policy_names_
+            [op->args[op->args.size() - 1].as<IntImmNode>()->value];
+    if (eviction_policy != "EVICT_NORMAL") {
+      ss << "tl::tma_store<tl::CacheHintSm90::" << eviction_policy << ">";
+    } else {
+      ss << "tl::tma_store";
+    }
+    print_extern_call_stmt(ss.str(), 0, 1);
+  } else if (op->op.same_as(tl::ptx_ldmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
     std::string func_name = "tl::ptx_ldmatrix_x" + std::to_string(num);
     if (trans == 1)
       func_name += "_trans";
     print_extern_call_stmt(func_name, 2);
-  } else if (op->op.same_as(tl::ptx_stmatirx())) {
+  } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = Downcast<IntImm>(op->args[0])->value;
     int num = Downcast<IntImm>(op->args[1])->value;
     std::string func_name = "tl::ptx_stmatrix_x" + std::to_string(num);
@@ -999,10 +1163,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::sync_grid())) {
     this->need_cooperative_groups_ = true;
     this->PrintIndent();
-    this->stream << "cooperative_groups::grid_group grid = "
-                    "cooperative_groups::this_grid();\n";
-    this->PrintIndent();
-    this->stream << "grid.sync();\n";
+    this->stream << "cooperative_groups::this_grid().sync();\n";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";
@@ -1099,7 +1260,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string asm_code = PrintMMAAssembly(
         shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref, a_bias,
         b_ref, b_bias, c_ref, c_bias, "", "", "", bit_op, false, saturate);
-
+    this->PrintIndent();
     this->stream << asm_code;
   } else if (op->op.same_as(builtin::ptx_mma_sp())) {
     // arg 0: shape: mXnXkX
@@ -1135,6 +1296,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string metadata_offset = this->PrintExpr(op->args[13]);
     std::string sparse_selector = this->PrintExpr(op->args[14]);
     bool saturate = Downcast<Bool>(op->args[15])->value;
+    this->PrintIndent();
     std::string asm_code = PrintMMAAssembly(
         shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref, a_offset,
         b_ref, b_offset, c_ref, c_offset, metadata, metadata_offset,
@@ -1170,10 +1332,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << "}\n";
     } else {
       std::string smem_elem_offset = this->PrintExpr(op->args[6]);
-      need_cast_smem_ptr_to_int_ = true;
-      this->stream << PrintLoadMatrixAssembly(trans, num, type, local_ptr,
-                                              local_elem_offset, smem_ptr,
-                                              smem_elem_offset);
+      std::string func_name = "tl::ptx_ldmatrix_x" + std::to_string(num);
+      if (trans == 1)
+        func_name += "_trans";
+      this->PrintIndent();
+      this->stream << func_name << "(" << smem_ptr << " + " << smem_elem_offset
+                   << ", " << local_ptr << " + " << local_elem_offset << ");\n";
     }
   } else if (op->op.same_as(builtin::mma_store())) {
     int m = Downcast<Integer>(op->args[0])->value;
@@ -1289,13 +1453,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     int n = Downcast<IntImm>(op->args[0])->value;
     this->stream << "__asm__ __volatile__(\"cp.async.wait_group " << n
                  << ";\");\n\n";
-  } else if (op->op.same_as(builtin::ptx_cp_async_barrier())) {
-    need_cast_smem_ptr_to_int_ = true;
-    int barrier_id = Downcast<IntImm>(op->args[0])->value;
-    CHECK(barrier_id < barrier_count_);
-    std::string barrier =
-        barrier_name_ + "[" + std::to_string(barrier_id) + "]";
-    this->stream << PrintCpAsyncBarrierAsm(barrier);
   } else if (op->op.same_as(builtin::ptx_init_barrier_thread_count())) {
     need_cast_smem_ptr_to_int_ = true;
     int barrier_id = Downcast<IntImm>(op->args[0])->value;
@@ -1326,22 +1483,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string barrier =
         barrier_name_ + "[" + std::to_string(barrier_id) + "]";
     this->stream << PrintWaitBarrierAsm(barrier);
-  } else if (op->op.same_as(builtin::create_barriers())) {
-    CHECK_EQ(barrier_count_, -1);
-    int barrier_count = Downcast<IntImm>(op->args[0])->value;
-    // pad barrier alignment to avoid runtime alignment errors
-    CHECK_EQ(barrier_alignment_bytes_ % sizeof(uint64_t), 0);
-    int barrier_alignment_count = barrier_alignment_bytes_ / sizeof(uint64_t);
-    if (barrier_count % barrier_alignment_count != 0) {
-      barrier_count = ((barrier_count / barrier_alignment_count) + 1) *
-                      barrier_alignment_count;
-    }
-    barrier_count_ = barrier_count;
-    this->stream << "__shared__ __align__(" << barrier_alignment_bytes_
-                 << ") uint64_t " << barrier_name_ << "[" << barrier_count
-                 << "];\n";
-    this->stream << "for (int i = 0; i < " << barrier_count << "; ++i) { "
-                 << barrier_name_ << "[i] = 0; }\n";
   } else if (op->op.same_as(builtin::ptx_ldg32())) {
     /*
     asm volatile (
@@ -1467,6 +1608,24 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     EndScope(ssa_scope);
   } else if (op->op.same_as(builtin::thread_return())) {
     os << "return";
+  } else if (op->op.same_as(tl::tl_gemm())) {
+    ICHECK(op->args.size() == 4) << "tl_gemm expects 4 arguments <op_instance, "
+                                    "A_ptr, B_ptr, C_ptr>, but got "
+                                 << op->args.size();
+    auto op_instance = Downcast<StringImm>(op->args[0]);
+    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
+                          op->args, true, os);
+  } else if (op->op.same_as(tl::tl_gemm_sp())) {
+    ICHECK(op->args.size() == 5)
+        << "tl_gemm_sp expects 5 arguments <op_instance, A_ptr, B_ptr, C_ptr, "
+           "E_ptr>, but got "
+        << op->args.size();
+    auto op_instance = Downcast<StringImm>(op->args[0]);
+    enable_sparse_gemm_ = true;
+    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
+                          op->args, true, os);
+  } else if (op->op.same_as(tl::tl_shuffle_elect())) {
+    os << "tl::tl_shuffle_elect<" << PrintExpr(op->args[0]) << ">()";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
@@ -1555,6 +1714,12 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
     }
     if (scope == "shared") {
       stream << ' ' << vid << '[' << constant_size << "];\n";
+    } else if (scope == "shared.barrier") {
+      auto v_id_mem = vid + "_mem";
+      stream << ' ' << v_id_mem << "[" << constant_size << "];\n";
+      PrintIndent();
+      stream << "auto " << vid << " = reinterpret_cast<" << mbarrier_dtype_
+             << "*>(" << v_id_mem << ");\n";
     } else if (scope == "local") {
       stream << ' ' << vid << '[' << constant_size << "];\n";
     } else if (scope == "local.var") {
@@ -1582,14 +1747,6 @@ void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
     stream << "  " << vid_global_barrier_expect_ << " = 0;\n";
     PrintIndent();
     stream << "}\n";
-  } else if (call && call->op.same_as(builtin::call_extern())) {
-    ICHECK(call->args.size() >= 1)
-        << "call_extern must have at least 1 argument";
-    std::string func_name = call->args[0].as<StringImmNode>()->value;
-    if (func_name.find("tl::gemm_sp") == 0) {
-      enable_sparse_gemm_ = true;
-    }
-    CodeGenC::VisitStmt_(op);
   } else {
     CodeGenC::VisitStmt_(op);
   }
@@ -1609,6 +1766,76 @@ void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {
       os << ", ";
   }
   os << "))";
+}
+
+void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
+                                     std::ostream &os) { // NOLINT(*)
+  ICHECK_EQ(op->indices.size(), 1)
+      << "Load from non-flat memory not supported.";
+  ICHECK(!op->predicate.defined())
+      << "Predicated buffer load is not supported.";
+
+  DataType value_dtype = op->dtype;
+  PrimExpr index = op->indices[0];
+  Var buffer_var = op->buffer->data;
+  DataType element_dtype = op->buffer->dtype;
+
+  int lanes = op->dtype.lanes();
+  // delcare type.
+  if (value_dtype.lanes() == element_dtype.lanes()) {
+    std::string ref = GetBufferRef(op->dtype, op->buffer.get(), index);
+    HandleVolatileLoads(ref, op, os);
+  } else {
+    bool can_vector_load = false;
+    arith::PVar<PrimExpr> base;
+    if (arith::ramp(base, 1, op->dtype.lanes()).Match(index)) {
+      const RampNode *ramp = index.as<RampNode>();
+      ICHECK(ramp);
+      can_vector_load = true;
+      // arith::ModularSet me = arith::Analyzer().modular_set(ramp->base);
+      // The condition: {k * coeff + base} divisible by the alignment for any k
+      // if (me->coeff % op->dtype.lanes() == 0 && me->base % op->dtype.lanes()
+      // == 0) {
+      //   can_vector_load = true;
+      // }
+    }
+
+    if (value_dtype.is_float4_e2m1fn() && lanes != 1) {
+      // A float4_e2m1fn element has 4 bits, which is an incomplete byte.
+      // So we cannot vector load it.
+      can_vector_load = false;
+    }
+    if (can_vector_load) {
+      std::string ref = GetVecLoad(op->dtype, op->buffer.get(), base.Eval());
+      HandleVolatileLoads(ref, op, os);
+    } else {
+      std::ostringstream svalue_expr;
+      std::string sindex = SSAGetID(PrintExpr(index), index.dtype());
+      std::string vid = GetVarID(buffer_var.get());
+      DataType elem_type = op->dtype.element_of();
+      for (int i = 0; i < lanes; ++i) {
+        std::ostringstream value_temp;
+        if (!HandleTypeMatch(buffer_var.get(), elem_type)) {
+          value_temp << "((";
+          if (buffer_var.get()->dtype.is_handle()) {
+            auto it = alloc_storage_scope_.find(buffer_var.get());
+            if (it != alloc_storage_scope_.end()) {
+              PrintStorageScope(it->second, value_temp);
+            }
+          }
+          PrintType(elem_type, value_temp);
+          value_temp << "*)" << vid << ')';
+        } else {
+          value_temp << vid;
+        }
+        value_temp << '[';
+        PrintVecElemLoad(sindex, index.dtype(), i, value_temp);
+        value_temp << ']';
+        PrintVecElemLoadExpr(op->dtype, i, value_temp.str(), svalue_expr);
+      }
+      os << svalue_expr.str();
+    }
+  }
 }
 
 void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
@@ -1733,13 +1960,17 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
   // Type code is kBFloat
   if (op->dtype.is_bfloat16()) {
     os << "bfloat16_t";
-    os << '(' << std::scientific << op->value << 'f' << ')';
+    os << '(' << std::hexfloat << op->value << 'f';
+    os << "/*" << std::scientific << op->value << "*/";
+    os << ')';
     return;
   }
   // Type code is kFloat8_e5m2 or kE4M4Float
   if (op->dtype.is_float8() || op->dtype.is_float4()) {
     p->PrintType(op->dtype, os);
-    os << '(' << std::scientific << op->value << 'f' << ')';
+    os << '(' << std::hexfloat << op->value << 'f';
+    os << "/*" << std::scientific << op->value << "*/";
+    os << ')';
     return;
   }
   // Type code is kFloat
@@ -1757,9 +1988,10 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       temp << ((op->dtype.bits() == 32) ? "CUDART_NAN_F" : "CUDART_NAN");
       p->need_math_constants_h_ = true;
     } else {
-      temp << std::scientific << op->value;
+      temp << std::hexfloat << op->value;
       if (op->dtype.bits() == 32)
         temp << 'f';
+      temp << "/*" << std::scientific << op->value << "*/";
     }
     p->MarkConst(temp.str());
     os << temp.str();

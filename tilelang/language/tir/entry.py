@@ -1,14 +1,14 @@
+import inspect
 from typing import Callable, Optional, Union
 
-from tvm.tir.function import PrimFunc
 import tvm.script.parser.tir.entry as _tir_entry
-import inspect
+from tvm.tir.function import PrimFunc
 from tvm.script.parser._core import parse, scan_macro, utils
 
 
 def prim_func(func: Optional[Callable] = None,
               private: bool = False,
-              check_well_formed=False) -> Union[PrimFunc, Callable]:
+              check_well_formed: bool = False) -> Union[PrimFunc, Callable]:
     """The parsing method for tir prim func, by using `@prim_func` as decorator.
 
     Parameters
@@ -40,8 +40,11 @@ def prim_func(func: Optional[Callable] = None,
     def decorator_wrapper(func):
         if not inspect.isfunction(func):
             raise TypeError(f"Expect a function, but got: {func}")
+        nonlocal outer_stack
         if utils.is_defined_in_class(outer_stack, func):
+            outer_stack = None
             return func
+        outer_stack = None
         f = parse(func, utils.inspect_function_capture(func), check_well_formed=check_well_formed)
         setattr(f, "__name__", func.__name__)  # noqa: B010
         return f

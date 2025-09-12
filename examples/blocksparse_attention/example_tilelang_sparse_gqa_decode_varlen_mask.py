@@ -419,6 +419,8 @@ def main(batch=8,
     out = model(Q, K, V, block_mask, cache_seqlens)
     debug("output", ref, out, atol=1e-3, rtol=1e-3)
 
+    import flash_attn  # noqa: F401
+
     ## latency reference
     for _ in range(10):
         ref = ref_program_fa(Q, K, V, block_mask, cache_seqlens, max_cache_seqlen, num_blocks,

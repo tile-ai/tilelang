@@ -25,6 +25,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include <utility>
+
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -144,8 +146,8 @@ private:
   }
 
   static Stmt MakeLaunchThread(PrimExpr min, PrimExpr extent, Var var,
-                               String thread_tag, Stmt body) {
-    IterVar iter_var(/*dom=*/Range::FromMinExtent(min, extent),
+                               const String &thread_tag, Stmt body) {
+    IterVar iter_var(/*dom=*/Range::FromMinExtent(std::move(min), extent),
                      /*var=*/std::move(var),
                      /*iter_type=*/IterVarType::kThreadIndex,
                      /*thread_tag=*/thread_tag);
@@ -223,7 +225,7 @@ PrimFunc TLLowerOpaqueBlock(PrimFunc f) {
 
 tir::transform::Pass LowerOpaqueBlock() {
   using namespace tir::transform;
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     return TLLowerOpaqueBlock(std::move(f));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerOpaqueBlock", {});

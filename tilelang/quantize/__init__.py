@@ -14,3 +14,4 @@ from .utils import (
 )
 
 from .lop3 import get_lop3_intrin_group  # noqa: F401
+from .mxfp import get_mxfp_intrin_group  # noqa: F401

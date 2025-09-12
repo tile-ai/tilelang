@@ -4,8 +4,6 @@ from tilelang import tvm as tvm
 import tilelang.language as T
 import torch
 
-tilelang.disable_cache()
-
 
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
     num_stages = 0

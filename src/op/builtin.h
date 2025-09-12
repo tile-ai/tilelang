@@ -7,14 +7,24 @@
 #ifndef TVM_TL_OP_BUILTIN_H_
 #define TVM_TL_OP_BUILTIN_H_
 
-#include "op.h"
+#include "operator.h"
 #include <tvm/ir/transform.h>
 
 namespace tvm {
+/*!
+ * \brief Create the TVM intrinsic that initializes a PTX fence barrier.
+ *
+ * Initializes a PTX fence-style barrier used to coordinate asynchronous memory
+ * operations (for example, TMA/TMA_STORE). Returns the Op representing this
+ * intrinsic for use in TIR lowering and code generation.
+ *
+ */
 namespace tl {
 
 namespace attr {
 static constexpr const char *kPaddingMap = "padding_map";
+static constexpr const char *kWarpSpecializationScope =
+    "kWarpSpecializationScope";
 } // namespace attr
 
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
@@ -32,7 +42,7 @@ static constexpr const char *kPtxasRegisterUsageLevel =
     "tl.ptxas_register_usage_level";
 static constexpr const char *kEnablePTXASVerboseOutput =
     "tl.enable_ptxas_verbose_output";
-
+static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 /*!
  * \brief Whether to disable dynamic tail split
  *
@@ -55,6 +65,14 @@ static constexpr const char *kDisableDynamicTailSplit =
 static constexpr const char *kDynamicAlignment = "tl.dynamic_alignment";
 
 /*!
+ * \brief Get the type of the CUDA tensor map
+ *
+ * DataType cuTensorMapType()
+ *
+ */
+DataType cuTensorMapType();
+
+/*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load
  *
  * CuTensorMap* create_tma_descriptor(data_type, rank, global_addr,
@@ -62,7 +80,7 @@ static constexpr const char *kDynamicAlignment = "tl.dynamic_alignment";
  * swizzle, l2_promotion, oob_fill)
  *
  */
-const Op &create_tma_descriptor();
+TVM_DLL const Op &create_tma_descriptor();
 
 /*!
  * \brief tvm intrinsics for TMADescriptor creation for image to column load
@@ -73,7 +91,7 @@ const Op &create_tma_descriptor();
  * l2_promotion, oob_fill)
  *
  */
-const Op &create_tma_im2col_descriptor();
+TVM_DLL const Op &create_tma_im2col_descriptor();
 
 /*!
  * \brief Create a list of mbarrier with num_threads
@@ -81,7 +99,7 @@ const Op &create_tma_im2col_descriptor();
  * create_list_of_mbarrier(num_threads0, num_threads1, ...)
  *
  */
-const Op &create_list_of_mbarrier();
+TVM_DLL const Op &create_list_of_mbarrier();
 
 /*!
  * \brief Get the mbarrier with barrier_id
@@ -89,7 +107,7 @@ const Op &create_list_of_mbarrier();
  * int64_t* GetMBarrier(barrier_id)
  *
  */
-const Op &get_mbarrier();
+TVM_DLL const Op &get_mbarrier();
 
 /*!
  * \brief tvm intrinsics for loading data from global tensor descriptor to
@@ -98,7 +116,7 @@ const Op &get_mbarrier();
  * tma_load(descriptor, mbarrier, smem_data, coord_0, coord_1, ...)
  *
  */
-const Op &tma_load();
+TVM_DLL const Op &tma_load();
 
 /*!
  * \brief tvm intrinsics for loading image from global tensor to columns in
@@ -108,7 +126,7 @@ const Op &tma_load();
  * image_offset, ...)
  *
  */
-const Op &tma_load_im2col();
+TVM_DLL const Op &tma_load_im2col();
 
 /*!
  * \brief tvm intrinsics for storing data from shared memory to global tensor
@@ -117,7 +135,15 @@ const Op &tma_load_im2col();
  * tma_store(descriptor, smem_data, coord_0, coord_1, ...)
  *
  */
-const Op &tma_store();
+TVM_DLL const Op &tma_store();
+
+/*!
+ * \brief tvm intrinsics for barrier initialization fence
+ *
+ * ptx_fence_barrier_init()
+ *
+ */
+const Op &ptx_fence_barrier_init();
 
 /*!
  * \brief tvm intrinsics for mbarrier wait with parity bit
@@ -125,7 +151,7 @@ const Op &tma_store();
  * mbarrier_wait_parity(mbarrier, parity)
  *
  */
-const Op &mbarrier_wait_parity();
+TVM_DLL const Op &mbarrier_wait_parity();
 
 /*!
  * \brief tvm intrinsics for mbarrier expect tx
@@ -133,23 +159,23 @@ const Op &mbarrier_wait_parity();
  * mbarrier_expect_tx(mbarrier, transaction_bytes)
  *
  */
-const Op &mbarrier_expect_tx();
+TVM_DLL const Op &mbarrier_expect_tx();
 
 /*!
  * \brief tvm intrinsics for ldmatrix
  *
- * ptx_ldmatirx(transposed, num, shared_addr, local_addr)
+ * ptx_ldmatrix(transposed, num, shared_addr, local_addr)
  *
  */
-const Op &ptx_ldmatirx();
+TVM_DLL const Op &ptx_ldmatrix();
 
 /*!
  * \brief tvm intrinsics for stmatrix
  *
- * ptx_ldmatirx(transposed, num, shared_addr, int32_values...)
+ * ptx_ldmatrix(transposed, num, shared_addr, int32_values...)
  *
  */
-const Op &ptx_stmatirx();
+TVM_DLL const Op &ptx_stmatrix();
 
 /*!
  * \brief Pack two b16 value into a b32 value
@@ -157,15 +183,7 @@ const Op &ptx_stmatirx();
  * int32 pack_b16(b16_value, b16_value)
  *
  */
-const Op &pack_b16();
-
-/*!
- * \brief Similar to __syncthreads(), but can be used to sync partial threads
- *
- * sync_thread_partial(num_partial_threads or mbarrier)
- *
- */
-const Op &sync_thread_partial();
+TVM_DLL const Op &pack_b16();
 
 /*!
  * \brief Issue a shared memory fence for async operations
@@ -173,7 +191,7 @@ const Op &sync_thread_partial();
  * FenceProxyAsync()
  *
  */
-const Op &fence_proxy_async();
+TVM_DLL const Op &fence_proxy_async();
 
 /*!
  * \brief Indicate arrival of warp issuing TMA_STORE
@@ -181,7 +199,7 @@ const Op &fence_proxy_async();
  * tma_store_arrive()
  *
  */
-const Op &tma_store_arrive();
+TVM_DLL const Op &tma_store_arrive();
 
 /*!
  * \brief Wait for TMA_STORE to finish
@@ -189,7 +207,7 @@ const Op &tma_store_arrive();
  * tma_store_wait()
  *
  */
-const Op &tma_store_wait();
+TVM_DLL const Op &tma_store_wait();
 
 /*!
  * \brief Set reg hint for warp-specialized branched
@@ -197,7 +215,7 @@ const Op &tma_store_wait();
  * SetMaxNRegInc(num_reg, is_inc)
  *
  */
-const Op &set_max_nreg();
+TVM_DLL const Op &set_max_nreg();
 
 /*!
  * \brief No set reg hint for warp-specialized branched
@@ -205,7 +223,7 @@ const Op &set_max_nreg();
  * no_set_max_nreg()
  *
  */
-const Op &no_set_max_nreg();
+TVM_DLL const Op &no_set_max_nreg();
 
 /*!
  * \brief Wait the previous wgmma to finish
@@ -213,7 +231,7 @@ const Op &no_set_max_nreg();
  * wait_wgmma(num_mma)
  *
  */
-const Op &wait_wgmma();
+TVM_DLL const Op &wait_wgmma();
 
 /*!
  * \brief Synchronize all threads in a grid
@@ -221,7 +239,7 @@ const Op &wait_wgmma();
  * sync_grid()
  *
  */
-const Op &sync_grid();
+TVM_DLL const Op &sync_grid();
 
 /*!
  * \brief tvm intrinsic for loop continue
@@ -229,7 +247,7 @@ const Op &sync_grid();
  * loop_break()
  *
  */
-const Op &loop_break();
+TVM_DLL const Op &loop_break();
 
 /*!
  * \brief tvm intrinsic for amd matrix core mfma instructions.
@@ -278,6 +296,28 @@ TVM_DLL const Op &tvm_rdna_wmma();
  * src_offset, Var dst_stride);
  */
 TVM_DLL const Op &tvm_rdna_wmma_store();
+
+/*!
+ * \brief tilelang intrinsic for general matrix multiplication (GEMM).
+ *
+ *  This op is used to represent a generic GEMM operation in tilelang.
+ */
+TVM_DLL const Op &tl_gemm();
+
+/*!
+ * \brief tilelang intrinsic for sparse matrix multiplication (GEMM with
+ * sparsity).
+ *
+ *  This op is used to represent a sparse GEMM operation in tilelang.
+ */
+TVM_DLL const Op &tl_gemm_sp();
+
+/*!
+ * \brief tilelang intrinsic for shuffle elect.
+ *
+ *  This op is used to represent a shuffle elect operation in tilelang.
+ */
+TVM_DLL const Op &tl_shuffle_elect();
 
 } // namespace tl
 } // namespace tvm

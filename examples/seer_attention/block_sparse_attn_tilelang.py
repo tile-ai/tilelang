@@ -178,7 +178,6 @@ def test_topk_sparse_attention():
     # Run tilelang kernel
     kernel = blocksparse_flashattn(
         BATCH, N_HEADS, SEQ_LEN, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
-    print(kernel.get_kernel_source())
     tilelang_output = kernel(q, k, v, block_mask.to(torch.int8))
 
     # Compute reference

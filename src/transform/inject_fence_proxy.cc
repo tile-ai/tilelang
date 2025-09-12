@@ -36,7 +36,7 @@ namespace tl {
 
 using namespace tir;
 
-enum class Proxy { kGeneric, kAsync, kBoth };
+enum class Proxy : uint8_t { kGeneric, kAsync, kBoth };
 
 class ProxyMarker : public StmtVisitor {
 public:
@@ -57,8 +57,8 @@ public:
   void VisitStmt_(const EvaluateNode *op) final {
     Proxy proxy = Proxy::kAsync;
     if (auto call = op->value.as<CallNode>()) {
-      if (call->op.same_as(ptx_ldmatirx()) ||
-          call->op.same_as(ptx_stmatirx())) {
+      if (call->op.same_as(ptx_ldmatrix()) ||
+          call->op.same_as(ptx_stmatrix())) {
         proxy = Proxy::kGeneric;
       }
     }
@@ -155,7 +155,7 @@ private:
   }
 
   Stmt VisitStmt_(const SeqStmtNode *op) final {
-    ICHECK(op->seq.size() > 0);
+    ICHECK(!op->seq.empty());
     Array<Stmt> new_body;
     Proxy cur_proxy, prev_proxy;
     auto fence_stmt =
@@ -172,7 +172,7 @@ private:
         prev_proxy = cur_proxy;
       }
     }
-    ICHECK(new_body.size() > 0);
+    ICHECK(!new_body.empty());
     return new_body.size() == 1 ? new_body[0] : SeqStmt(std::move(new_body));
   }
 
@@ -187,7 +187,7 @@ private:
 using namespace tir::transform;
 
 tvm::transform::Pass InjectFenceProxy() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
+  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     f = TMAStoreSyncInjector::Substitute(f);
     return InjectFenceProxy::Substitute(f);
   };

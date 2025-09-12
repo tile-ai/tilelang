@@ -3,9 +3,12 @@
 from tilelang import tvm as tvm
 from tilelang.language import ptx_arrive_barrier, evaluate
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
+from tilelang.utils.target import check_hip_availability
 from tvm import tir
 from typing import Union, Any
 from tvm.tir import PrimExpr, Var, Call
+
+_IS_HIP_AVAILABLE = check_hip_availability()
 
 
 def create_list_of_mbarrier(*args: Any) -> Call:
@@ -142,10 +145,28 @@ def dec_max_nreg(reg_count: int):
     return set_max_nreg(reg_count, 0)
 
 
+def annotate_producer_reg_dealloc(reg_count: int = 24):
+    """Annotate the producer reg dealloc.
+    """
+    return dec_max_nreg(reg_count)
+
+
+def annotate_consumer_reg_alloc(reg_count: int = 240):
+    """Annotate the consumer reg alloc.
+    """
+    return inc_max_nreg(reg_count)
+
+
 def no_set_max_nreg():
     """Disable the maximum register limit setting.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.no_set_max_nreg"))
+
+
+def disable_warp_group_reg_alloc():
+    """Disable the warp group reg alloc.
+    """
+    return no_set_max_nreg()
 
 
 def mbarrier_wait_parity(mbarrier: Union[int, PrimExpr, tir.Call], parity: Union[int, Var]):
@@ -277,7 +298,10 @@ def shfl_xor(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr,
     Returns:
         tir.Call: A handle to the shuffle operation
     """
-    return tir.call_extern(value.dtype, "__shfl_xor_sync", 0xffffffff, value, offset)
+    if _IS_HIP_AVAILABLE:
+        return tir.call_extern(value.dtype, "__shfl_xor", value, offset)
+    else:
+        return tir.call_extern(value.dtype, "__shfl_xor_sync", 0xffffffff, value, offset)
 
 
 def shfl_down(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
@@ -287,7 +311,10 @@ def shfl_down(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr
         value: Optional[int, PrimExpr]
             The value to shuffle
     """
-    return tir.call_extern(value.dtype, "__shfl_down_sync", 0xffffffff, value, offset)
+    if _IS_HIP_AVAILABLE:
+        return tir.call_extern(value.dtype, "__shfl_down", value, offset)
+    else:
+        return tir.call_extern(value.dtype, "__shfl_down_sync", 0xffffffff, value, offset)
 
 
 def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
@@ -297,26 +324,16 @@ def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, 
         value: Optional[int, PrimExpr]
             The value to shuffle
     """
-    return tir.call_extern(value.dtype, "__shfl_up_sync", 0xffffffff, value, offset)
+    if _IS_HIP_AVAILABLE:
+        return tir.call_extern(value.dtype, "__shfl_up", value, offset)
+    else:
+        return tir.call_extern(value.dtype, "__shfl_up_sync", 0xffffffff, value, offset)
 
 
 def sync_threads():
     """Synchronize all threads in a warp.
     """
     return tir.op.tvm_storage_sync("shared")
-
-
-def sync_thread_partial(barrier_id: Union[int, PrimExpr, tir.Call]):
-    """Synchronize threads within a warp.
-
-    Args:
-        barrier_id: Optional[int, PrimExpr]
-            The memory barrier to synchronize
-
-    Returns:
-        tir.Call: A handle to the synchronization operation
-    """
-    return tir.call_intrin("handle", tir.op.Op.get("tl.sync_thread_partial"), barrier_id)
 
 
 def sync_global():

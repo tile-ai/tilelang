@@ -1,5 +1,4 @@
 import argparse
-import torch
 import itertools
 import tilelang as tl
 import tilelang.language as T
@@ -8,18 +7,46 @@ from tilelang.carver.template import MatmulTemplate
 from tilelang.carver.arch import CUDA
 from tilelang.carver.arch import CDNA
 from tilelang.carver.roller.rasterization import NoRasterization
+import torch
 
 
 def ref_program(A, B):
+    """
+    Compute the matrix product of A and the transpose of B.
+    
+    A and B are expected to be 2-D tensors where A has shape (M, K) and B has shape (N, K). The result is a tensor with shape (M, N) equal to A @ B.T, using the inputs' dtypes.
+    """
     return A @ B.T
 
 
 def get_configs(M, N, K, with_roller=False, topk=20):
+    """
+    Generate a list of kernel tuning configuration dictionaries for a tiled matrix-multiply.
+    
+    When with_roller is True this queries the MatmulTemplate roller to produce up to `topk` recommended
+    configurations (device-specific TensorCore-friendly tilings). Each returned dict contains:
+      - block_M, block_N, block_K: tile sizes
+      - num_stages: pipeline staging (0 means no explicit staging)
+      - thread_num: total threads used for the block
+      - enable_rasteration: whether a rasterization/swizzle layout was recommended (note spelling)
+    
+    When with_roller is False this returns the Cartesian product of a fixed set of candidate
+    parameters; the returned dicts use the backward-compatible key name "enable_rasteration" for that flag.
+    
+    Parameters:
+        M, N, K (int): GEMM dimensions used to generate valid tile sizes.
+        with_roller (bool): If True, use MatmulTemplate's roller to generate device-aware hints;
+            otherwise use a predefined candidate grid.
+        topk (int): Maximum number of roller hints to request when with_roller is True.
+    
+    Returns:
+        List[dict]: A list of configuration dictionaries as described above.
+    
+    Raises:
+        ValueError: if with_roller is True but the roller returns no hints.
+    """
     if with_roller:
-        if torch.version.hip is not None:
-            arch=CDNA("hip")
-        else:
-            arch = CUDA("cuda")
+        arch = CUDA("cuda") if torch.version.hip is None else CDNA("hip")
         carve_template = MatmulTemplate(
             M=M,
             N=N,

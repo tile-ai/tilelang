@@ -1,5 +1,4 @@
 import torch
-import torch.backends
 import tilelang
 from tilelang import tvm as tvm
 import tilelang.testing
@@ -14,7 +13,6 @@ from tilelang.intrinsics.mma_macro_generator import (
 from tilelang.transform import simplify_prim_func
 
 tilelang.testing.set_random_seed(42)
-tilelang.disable_cache()
 
 
 # @simplify_prim_func

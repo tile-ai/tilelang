@@ -11,7 +11,7 @@ from tvm.target import Target
 
 from tilelang import tvm as tvm
 from tilelang.transform import PassConfigKey
-from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_compute_version
+from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_arch, get_target_compute_version
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
 
@@ -67,9 +67,7 @@ class LibraryGenerator(object):
         if is_cuda_target(target):
             from tilelang.env import CUTLASS_INCLUDE_DIR
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
-            compute_version = "".join(get_target_compute_version(target).split("."))
-            if compute_version == "90":
-                compute_version = "90a"
+            target_arch = get_target_arch(get_target_compute_version(target))
             libpath = src.name.replace(".cu", ".so")
 
             disable_fast_math = self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH, False)
@@ -91,7 +89,7 @@ class LibraryGenerator(object):
                 src.name,
                 "-lcuda",
                 "-gencode",
-                f"arch=compute_{compute_version},code=sm_{compute_version}",
+                f"arch=compute_{target_arch},code=sm_{target_arch}",
             ]
             if not disable_fast_math:
                 command += ["--use_fast_math"]
@@ -183,10 +181,10 @@ class PyLibraryGenerator(LibraryGenerator):
     culib = None
     pymodule = None
 
-    def __init__(self, target: Target):
+    def __init__(self, target: Target, verbose: bool = False):
         if not is_nvrtc_available:
             raise ImportError(NVRTC_UNAVAILABLE_WARNING)
-        super().__init__(target)
+        super().__init__(target, verbose)
 
     @staticmethod
     def import_from_file(module_name, file_path):
