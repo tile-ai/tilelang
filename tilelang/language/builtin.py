@@ -331,13 +331,13 @@ def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, 
 
 
 def sync_threads():
-    """Synchronize all threads in a warp.
+    """Synchronize all threads in a block.
     """
     return tir.op.tvm_storage_sync("shared")
 
 
 def sync_global():
-    """Synchronize all threads in a block.
+    """Synchronize all threads in the entire grid.
     """
     tx, ty, tz = get_thread_bindings()
     ex, ey, ez = get_block_extents()
