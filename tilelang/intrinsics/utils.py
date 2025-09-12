@@ -91,14 +91,14 @@ def get_mma_micro_size(dtype: Literal["float16", "int8"]):
     # Basic Tensor Core Matrix Multiply operation Unit
     """
     Return the MMA (Tensor Core) micro-tile dimensions for a given data type.
-    
+
     This function returns the micro tile sizes (x, y, k) used by MMA/Tensor Core operations.
     - x: tile width in the output/result dimension
     - y: tile height in the output/result dimension
     - k: tile depth in the reduction/K dimension
-    
+
     Accepted dtype strings include "float16", "int8" and some FP8 identifiers ("float8_e4m3", "float8_e5m2"). For FP8 and int8 types the reduction depth (`k`) is 32; for float16 it is 16.
-    
+
     Returns:
         tuple[int, int, int]: (micro_size_x, micro_size_y, micro_size_k)
     """

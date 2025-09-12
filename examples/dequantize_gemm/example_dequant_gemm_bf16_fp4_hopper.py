@@ -10,15 +10,15 @@ from utils import torch_convert_bit_twiddling, torch_convert
 def get_configs():
     """
     Return a list of tuning configuration dictionaries for the autotuned matmul kernel.
-    
+
     Each dictionary is a single combination (Cartesian product) of the following parameters:
     - block_M: tile size for M dimension (one of 64, 128, 256)
     - block_N: tile size for N dimension (one of 64, 128, 256)
-    - block_K: tile size for K dimension 
+    - block_K: tile size for K dimension
     - num_stages: pipeline stages for K-loop (0 or 2)
     - threads: number of threads to launch (128, 256, or 512)
     - split: K-splitting factor (1 or 2)
-    
+
     Returns:
         list[dict]: List of configuration dicts usable by the autotuner, where each dict maps
         the parameter name to its chosen value.
@@ -62,30 +62,30 @@ def matmul(M,
            split=1):
     """
            Builds a parameterized TileLang/TIR matrix-multiplication kernel that dequantizes 4-bit FP inputs to BF16 on-the-fly and computes C = A @ B^T.
-           
+
            This function returns a tiled, autotunable prim_func implementing a block-wise GEMM with shared-memory buffering and a pipelined K-loop. The kernel accepts:
            - A: dense input of shape (M, K) with dtype `in_dtype`.
            - B: packed quantized input of shape (N, QK) where QK = K / (8 / num_bits) stored as `uint8`.
            - C: output of shape (M, N) with dtype `out_dtype`.
-           
+
            The generated kernel supports two dequantization paths:
            - fast_dequant (fast_dequant=True): calls an external mxfp dequantization intrinsic (twiddling-based) loaded from a C source returned by get_mxfp_intrin_group.
            - simple dequant (fast_dequant=False): performs a pure-TIR FP4 -> BF16 conversion per element.
-           
+
            Important behavior and requirements:
            - num_bits (default 4) is the bit-width of the quantized elements; storage_dtype is uint8 and num_elems_per_byte = 8 // num_bits.
            - QK = K // num_elems_per_byte and Block_QK = block_K // num_elems_per_byte determine B and shared-buffer shapes.
            - Asserts that K % (block_K * split) == 0; K must be divisible by block_K * split for the tiling to be valid.
            - When fast_dequant is True, a valid mxfp intrinsic group (C source and function name) must be available via tilelang.quantize.get_mxfp_intrin_group.
            - The kernel launches a 2D grid over ceildiv(N, block_N) and ceildiv(M, block_M) and uses `threads` threads per block with `num_stages` pipeline stages.
-           
+
            Parameters that alter kernel layout/behavior (brief):
            - block_M, block_N, block_K: tile sizes for M, N, and K dimensions.
            - num_stages: number of software pipeline stages for the K-loop.
            - threads: number of threads used per kernel block.
            - split: extra K-splitting factor; K must be divisible by block_K * split.
            - source_format, num_bits: describe the quantized data layout passed to the mxfp intrinsics.
-           
+
            Returns:
                A TileLang/TIR prim_func (the compiled `main`) implementing the described dequantize-then-GEMM kernel.
            """
@@ -124,12 +124,12 @@ def matmul(M,
     def get_fast_dequant_twiddling_func(in_dtype="fp4", out_dtype="bfloat16"):
         """
         Create a TileLang macro that performs fast, twiddling-based dequantization from packed FP4 to BF16 using an external runtime plugin.
-        
+
         This function validates the requested input/output datatypes and returns a TileLang `@T.macro` named `fast_dequant_bf16_fp4_twiddling` which:
         - Loads compressed FP4 bytes from a shared buffer into per-thread local registers (vectorized loads).
         - Invokes an external dequantization routine (via `T.call_extern`) to expand the packed FP4 values into BF16 in registers.
         - Writes the dequantized BF16 values back to a shared dequantized buffer for use by the kernel.
-        
+
         Notes and preconditions:
         - Asserts that `in_dtype == "fp4"` and `out_dtype == "bfloat16"`.
         - The generated macro depends on several surrounding-scope symbols (e.g., `import_source`, `func_name`, `block_K`, `Block_QK`, `threads`, `num_elems_per_byte`, `storage_dtype`, and `out_dtype`) and expects them to be defined consistently in the enclosing kernel.
@@ -149,17 +149,17 @@ def matmul(M,
             # import fast_dequantize plugin
             """
             Fast dequantization kernel routine that converts packed FP4 values in shared memory to BF16 and writes the results back into a shared dequantized buffer.
-            
+
             This function is intended to run inside a tiled GPU kernel: each thread loads a small packed segment from the quantized shared buffer `B_shared` into a per-thread local register buffer, calls an external dequantization routine (provided by the runtime plugin imported from `import_source` and identified by `func_name`) to expand the packed values to BF16 in a per-thread local output buffer, and stores the expanded values into `B_dequantize_shared`. It performs vectorized per-thread loads and stores and is sized according to the surrounding kernel's tiling and threading parameters.
-            
+
             Parameters:
                 B_shared: Shared-memory buffer containing packed quantized values (packed FP4 layout).
                 B_dequantize_shared: Shared-memory buffer to receive dequantized BF16 values (written in-place by this routine).
-            
+
             Side effects:
                 - Imports the external dequantization plugin via `import_source` and invokes `func_name`.
                 - Writes dequantized BF16 results into `B_dequantize_shared`.
-            
+
             Notes:
                 - This routine expects the surrounding kernel to define and provide the tiling/threading constants (e.g., thread count, local buffer sizes, block dimensions) and the runtime plugin identifiers (`import_source`, `func_name`).
                 - No value is returned; results are produced by mutation of `B_dequantize_shared`.
@@ -197,18 +197,18 @@ def matmul(M,
     def get_simple_dequant_func(in_dtype="fp4", out_dtype="bfloat16"):
         """
         Create a simple TIR dequantization macro that converts packed 4-bit FP (FP4) stored in uint8 into bfloat16.
-        
+
         The returned macro (named `simple_dequant_bf16_fp4`) expects B_shared and B_dequantize_shared buffers (shapes and a few loop/constant names like
         `B_shared_shape`, `B_dequantize_shared_shape`, `storage_dtype`, `out_dtype`, `num_bits`, `num_elems_per_byte`, `block_N`, and `block_K`) to be available in the surrounding TIR scope. It:
         - Unpacks 4-bit FP values from the packed uint8 representation in B_shared.
         - Converts each 4-bit value to a bfloat16 element using an internal helper `_tir_u8_to_f4_to_bf16`.
         - Writes the dequantized bfloat16 block into B_dequantize_shared.
-        
+
         Constraints:
         - Supports only in_dtype="fp4" and out_dtype="bfloat16".
         - The helper assumes nbit == 4 and produces bfloat16 values.
         - The macro uses a fixed test-scale of 0 (no per-element scaling) as written.
-        
+
         Returns:
             A TIR macro function performing the described in-place block dequantization from packed uint8 FP4 to bfloat16.
         """
@@ -219,22 +219,22 @@ def matmul(M,
                                   scale: tir.PrimExpr, dtype: str):
             """
                 Convert a 4-bit FP4 value packed in a uint8 byte into a bfloat16 value.
-                
+
                 This helper extracts the 4-bit field located at the bit position `pos` within the
                 byte `val`, interprets it as an FP4 (sign, exponent, mantissa) value, applies an
                 exponent `scale` offset to align it with bfloat16 exponent bias, clamps the
                 resulting exponent to 8 bits, and returns the assembled bfloat16 bit pattern.
-                
+
                 Parameters:
                     nbit (int): Number of bits in the packed element; must be 4.
                     val (tir.PrimExpr): A uint8 value containing packed FP4 elements.
                     pos (tir.PrimExpr): Index (0-based) of which FP4 nibble inside `val` to extract.
                     scale (tir.PrimExpr): Exponent offset applied when converting FP4 exponent to bfloat16.
                     dtype (str): Target dtype string; must be "bfloat16".
-                
+
                 Returns:
                     tir.PrimExpr: A bfloat16-typed PrimExpr containing the converted value.
-                
+
                 Notes:
                     - The function asserts `nbit == 4`, `dtype == "bfloat16"`, and that `val.dtype` is "uint8".
                     - The conversion uses a fixed mapping from FP4 exponent/mantissa layout into bfloat16
@@ -262,16 +262,16 @@ def matmul(M,
         def simple_dequant_bf16_fp4(B_shared, B_dequantize_shared):
             """
             Dequantize a packed FP4 uint8 shared buffer into BF16 and store the result into a shared dequantized buffer.
-            
+
             This helper:
             - Loads B_shared into a local fragment, converts each packed FP4 element to BF16 using `_tir_u8_to_f4_to_bf16`, and writes the dequantized values into B_dequantize_shared.
             - Iterates in parallel over the logical block columns (block_N) and block_K, unpacking elements from bytes using `num_elems_per_byte`.
             - Uses a fixed scale of 0 in the conversion (placeholder for testing); `num_bits` and `num_elems_per_byte` are expected to be available from the enclosing scope.
-            
+
             Parameters:
                 B_shared: shared-memory buffer containing packed FP4 data (uint8-packed).
                 B_dequantize_shared: shared-memory buffer to receive BF16 dequantized values.
-            
+
             Side effects:
                 Writes dequantized BF16 values into B_dequantize_shared. No return value.
             """
@@ -298,7 +298,7 @@ def matmul(M,
     ):
         """
             Kernel entry for the tiled, pipelined matmul used by the generated prim_func.
-            
+
             This function implements a block-wise GEMM over a 2D grid (grid dims: ceildiv(N, block_N) x ceildiv(M, block_M)) with a thread block of `threads`. For each output block it:
             - Allocates shared buffers for A, the packed/quantized B, and a dequantized B tile.
             - Allocates a fragment accumulator (C_local) and a shared output tile (C_shared) with a swizzled layout.
@@ -307,16 +307,16 @@ def matmul(M,
               - Dequantizes B into B_dequantize_shared using either the fast (twiddling/external) or the simple (pure-TIR) dequantization routine.
               - Performs a GEMM accumulating into C_local with B transposed.
             - Stores the accumulated block from C_local back to the global output C via C_shared.
-            
+
             Parameters:
             - A: input tile of shape (M, K) with dtype `in_dtype`.
             - B: packed/quantized input of shape (N, QK) with storage dtype `storage_dtype` (quantized FP4 packing).
             - C: output tensor of shape (M, N) with dtype `out_dtype`.
-            
+
             Side effects:
             - Writes the computed output block into the global tensor `C`.
             - Uses and updates shared memory buffers and per-thread accumulators.
-            
+
             No value is returned.
         """
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
@@ -352,14 +352,14 @@ def matmul(M,
 def ref_program_twiddling(A, qB):
     """
     Compute reference BF16 matrix multiply using bit-twiddled FP4 quantized B.
-    
+
     Converts qB (a bit-twiddled, packed FP4 representation of matrix B) back to floating,
     performs C = A @ B^T in full precision, and returns the result converted to bfloat16.
-    
+
     Parameters:
         A (torch.Tensor): Left operand with shape (M, K). Treated as floating-point (converted to torch.float for compute).
         qB (torch.Tensor): Bit-twiddled, packed FP4 representation of B (quantized). Shape corresponds to B's packed layout.
-    
+
     Returns:
         torch.Tensor: Result matrix C with shape (M, N) in bfloat16.
     """
@@ -373,13 +373,13 @@ def ref_program_twiddling(A, qB):
 def ref_program_simple(A, qB):
     """
     Compute a reference BF16 matrix multiply using a simple (non-twiddled) dequantization of qB.
-    
+
     Converts the quantized tensor `qB` to full-precision values via `torch_convert`, computes C = A @ B^T in float32, and casts the result to bfloat16 before returning.
-    
+
     Parameters:
         A (torch.Tensor): Left input matrix with shape (M, K).
         qB (torch.Tensor): Quantized representation of the right matrix; expected to be compatible with `torch_convert` and represent a matrix whose transpose will be multiplied by A.
-    
+
     Returns:
         torch.Tensor: Resulting matrix C in bfloat16 with shape (M, N).
     """
@@ -393,16 +393,16 @@ def ref_program_simple(A, qB):
 def main(m=256, n=256, k=256, fast_dequant=True, tune=False):
     """
     Run and benchmark the tiled, optionally autotuned FP4->BF16 GEMM kernel and validate results against a PyTorch reference.
-    
+
     This function builds a matmul kernel (either with autotuning or fixed tiling), obtains a profiler, validates numerical correctness against the appropriate reference implementation (bit-twiddled fast dequantization or simple dequantization), and runs a benchmark that prints measured latency (ms) and effective TFLOPs.
-    
+
     Parameters:
         m (int): Number of rows of A and output C (default 256).
         n (int): Number of columns of B and output C (default 256).
         k (int): Inner dimension (columns of A, rows of B) (default 256).
         fast_dequant (bool): If True use the fast twiddling dequantization path and validate against the twiddling reference; otherwise use the simple dequant path (default True).
         tune (bool): If True build the kernel with autotuning configurations; if False use a fixed tiling and threading configuration for reproducible benchmarking (default False).
-    
+
     Side effects:
         - Prints latency and TFLOPs to stdout.
         - Raises an assertion via the profiler if the kernel's outputs do not match the chosen reference within the tolerances (rtol=0.01, atol=0.01).

@@ -29,7 +29,7 @@ def create_list_of_mbarrier(*args: Any) -> Call:
     ------
     TypeError
         If the input is not a list or variadic arguments.
-    
+
     Examples
     --------
     >>> create_list_of_mbarrier([128, 128])

@@ -65,7 +65,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
     """
     Bind target information and progressively legalize and lower frontend Tile IR into a form suitable for downstream optimization and codegen.
-    
+
     This pass pipeline:
     - Binds the provided target to the module.
     - Legalizes frontend Tile IR into TVM-compatible constructs.
@@ -75,11 +75,11 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     - Legalizes vectorized loops and inserts safety checks for memory accesses.
     - Re-simplifies to remove redundancies introduced by safety checks.
     - Attempts loop vectorization for dynamic-shaped loops.
-    
+
     Parameters:
         mod (IRModule): The input IR module containing frontend Tile IR.
         target (Target): Target device information to bind into the module.
-    
+
     Returns:
         IRModule: The transformed module, ready for target-specific optimization passes.
     """

@@ -12,8 +12,8 @@ from tvm.tir import PrimFunc  # Import PrimFunc for handling tensor IR functions
 @dataclass
 class BaseTemplate(ABC):
     """
-    Base class template for hardware-aware configurations. 
-    This serves as an abstract base class (ABC) that defines the structure 
+    Base class template for hardware-aware configurations.
+    This serves as an abstract base class (ABC) that defines the structure
     for subclasses implementing hardware-specific optimizations.
     """
 
@@ -30,9 +30,9 @@ class BaseTemplate(ABC):
     def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> List[Hint]:
         """
         Abstract method that must be implemented by subclasses.
-        It should return a list of hardware-aware configurations (hints) 
+        It should return a list of hardware-aware configurations (hints)
         based on the specified architecture.
-        
+
         Args:
             arch (TileDevice, optional): The target architecture. Defaults to None.
             topk (int, optional): Number of top configurations to return. Defaults to 10.
@@ -104,7 +104,7 @@ class BaseTemplate(ABC):
         """
         Placeholder method that should be implemented by subclasses.
         This method is responsible for initializing the function.
-        
+
         Raises:
             NotImplementedError: If not implemented in the subclass.
         """

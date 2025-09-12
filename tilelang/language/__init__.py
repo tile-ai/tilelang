@@ -80,11 +80,11 @@ from .utils import index_to_coordinates  # noqa: F401
 def symbolic(name: str, dtype: str = "int32"):
     """
     Create a TIR symbolic variable.
-    
+
     Parameters:
         name (str): Identifier for the variable in generated TIR.
         dtype (str): Data type string for the variable (e.g., "int32"). Defaults to "int32".
-    
+
     Returns:
         tir.Var: A TIR variable with the given name and dtype for use in TIR/TensorIR kernels.
     """
@@ -108,7 +108,7 @@ def annotate_layout(layout_map: Dict):
 
     Returns:
         block_attr: a block attribute
-    
+
     Example:
         @T.prim_func
         def main(
@@ -149,7 +149,7 @@ def annotate_padding(padding_map: Dict):
 
     Returns:
         block_attr: a block attribute
-    
+
     Example:
         @T.prim_func
         def main(

@@ -70,7 +70,7 @@ class BufferProxy:
 
 class BaseTensorProxy:
     """Base proxy class for tensor types with configurable defaults.
-    
+
     This class serves as a foundation for different tensor proxy types, providing
     customizable default values for scope, alignment, and offset factors. It implements
     the core functionality for creating TIR buffers with specific memory configurations.
@@ -137,7 +137,7 @@ class BaseTensorProxy:
 
 class TensorProxy(BaseTensorProxy):
     """Main tensor proxy class for global scope buffers.
-    
+
     This class implements the default tensor proxy with global memory scope,
     the tensor should be by default contiguous.
     """
@@ -186,7 +186,7 @@ class StridedTensorProxy(BaseTensorProxy):
 
 class FragmentBufferProxy(BaseTensorProxy):
     """Proxy class for fragment memory buffers.
-    
+
     This class represents tensor proxies specifically for local fragment memory,
     typically used in GPU tensor core operations.
     """
@@ -195,7 +195,7 @@ class FragmentBufferProxy(BaseTensorProxy):
 
 class SharedBufferProxy(BaseTensorProxy):
     """Proxy class for shared memory buffers.
-    
+
     This class represents tensor proxies for dynamic shared memory,
     commonly used in GPU shared memory operations.
     """
@@ -204,7 +204,7 @@ class SharedBufferProxy(BaseTensorProxy):
 
 class LocalBufferProxy(BaseTensorProxy):
     """Proxy class for local memory buffers.
-    
+
     This class represents tensor proxies for local memory scope,
     typically used for temporary computations in GPU kernels.
     """

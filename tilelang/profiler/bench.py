@@ -16,13 +16,13 @@ def do_bench(
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
 ) -> Union[float, List[float]]:
     """Benchmarks the runtime of a PyTorch function.
-    
+
     This function handles:
     - L2 cache flushing between runs for consistent timing
     - Automatic warmup and repeat count calculation
     - Optional gradient clearing for backward passes
     - Multiple measurement modes (mean, median, min, max)
-    
+
     Args:
         fn: Function to benchmark
         warmup: Target warmup time in milliseconds
@@ -33,7 +33,7 @@ def do_bench(
         quantiles: Optional performance percentiles to compute
         fast_flush: Whether to use faster L2 cache flushing
         return_mode: How to aggregate timing results ("mean", "median", "min", "max")
-        
+
     Returns:
         float: Aggregated runtime in milliseconds
     """

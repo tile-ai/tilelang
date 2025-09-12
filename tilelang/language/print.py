@@ -14,10 +14,10 @@ from tilelang.language.utils import index_to_coordinates
 def print_var(var: tir.PrimExpr, msg: str = "") -> tir.PrimExpr:
     """
     Prints the value of a TIR primitive expression (PrimExpr) for debugging purposes.
-    
+
     Parameters:
         var (tir.PrimExpr): The variable or expression to be printed.
-        
+
     Returns:
         tir.PrimExpr: The TIR expression for the debug print operation.
     """
@@ -30,11 +30,11 @@ def print_var_with_condition(condition: tir.PrimExpr,
                              msg: str = "") -> tir.PrimExpr:
     """
     Conditionally prints a TIR primitive expression (PrimExpr) if a given condition is True.
-    
+
     Parameters:
         condition (tir.PrimExpr): A TIR expression representing the condition to check.
         var (tir.PrimExpr): The variable or expression to be printed.
-        
+
     Returns:
         tir.PrimExpr: The TIR expression for the debug print operation, if the condition is True.
     """
@@ -67,12 +67,12 @@ def print_shared_buffer_with_condition(condition: tir.PrimExpr,
                                        msg: str = "") -> tir.PrimExpr:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
-    
+
     Parameters:
         condition (tir.PrimExpr): A TIR expression representing the condition to check.
         buffer (tir.Buffer): The buffer whose values need to be printed.
         elems (int): The number of elements in the buffer to print.
-        
+
     Returns:
         tir.PrimExpr: The TIR expression for the debug print operation.
     """
@@ -91,12 +91,12 @@ def print_fragment_buffer_with_condition(condition: tir.PrimExpr,
                                          msg: str = "") -> tir.PrimExpr:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
-    
+
     Parameters:
         condition (tir.PrimExpr): A TIR expression representing the condition to check.
         buffer (tir.Buffer): The buffer whose values need to be printed.
         elems (int): The number of elements in the buffer to print.
-        
+
     Returns:
         tir.PrimExpr: The TIR expression for the debug print operation.
     """
@@ -116,12 +116,12 @@ def print_local_buffer_with_condition(condition: tir.PrimExpr,
                                       msg: str = "") -> tir.PrimExpr:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
-    
+
     Parameters:
         condition (tir.PrimExpr): A TIR expression representing the condition to check.
         buffer (tir.Buffer): The buffer whose values need to be printed.
         elems (int): The number of elements in the buffer to print.
-        
+
     Returns:
         tir.PrimExpr: The TIR expression for the debug print operation.
     """
@@ -136,20 +136,20 @@ def print_local_buffer_with_condition(condition: tir.PrimExpr,
 def print(obj: Any, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> tir.PrimExpr:
     """
     A generic print function that handles both TIR buffers and primitive expressions.
-    
+
     - If the input is a TIR buffer, it prints its values, but only on the first thread (tx=0, ty=0, tz=0).
     - If the input is a TIR primitive expression, it prints its value directly.
-    
+
     Parameters:
         obj (Any): The object to print. It can be either a tir.Buffer or tir.PrimExpr.
         msg (str): An optional message to include in the print statement.
         warp_group_id (int): The warp group id to print.
         warp_id (int): The warp id to print.
         print thread will be warp_group_id * warp_group_size + warp_id.
-        
+
     Returns:
         tir.PrimExpr: The TIR expression for the debug print operation.
-        
+
     Raises:
         ValueError: If the input object type is unsupported.
     """
