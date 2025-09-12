@@ -42,19 +42,19 @@ def torch_convert_bit_twiddling(tensor):
     res0 = val_concat_expanded & mask
     res1 = (val_concat_expanded << 3) & mask
     res2 = (val_concat_expanded << 6) & mask
-    res3 = ((val_concat_expanded << 1) & mask1) | ((val_concat_expanded >> 3) & mask2) | ((val_concat_expanded >> 7) & mask3)
+    res3 = ((val_concat_expanded << 1) & mask1) | ((val_concat_expanded >> 3) & mask2) | (
+        (val_concat_expanded >> 7) & mask3)
 
     # Select the correct result based on position
-    bf16 = torch.where(
-        pos == 0, res0, torch.where(pos == 1, res1, torch.where(pos == 2, res2, res3))
-    )
+    bf16 = torch.where(pos == 0, res0, torch.where(pos == 1, res1,
+                                                   torch.where(pos == 2, res2, res3)))
 
     # Convert to uint16 for .view(torch.bfloat16)
     bf16_uint16 = (bf16 & 0xFFFF).to(torch.uint16)
     bf16_bf16 = bf16_uint16.view(torch.bfloat16)
-    
+
     # Avoid integer overflow by using a float32 multiplier for the exponent scaling
-    bf16_new = bf16_bf16 * (2.0 ** 126)
+    bf16_new = bf16_bf16 * (2.0**126)
 
     return bf16_new
 
