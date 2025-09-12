@@ -2,8 +2,11 @@ name: CI Test on Metal
 on: [pull_request]
 
 env:
-  PYTHON_VERSION: '3.12'
+  UV_PYTHON: '3.12'
   VENV_DIR: tilelang_ci
+  CMAKE_C_COMPILER_LAUNCHER: ccache
+  CMAKE_CXX_COMPILER_LAUNCHER: ccache
+  UV_NO_BUILD_ISOLATION: '1'
 
 jobs:
   format-check:
@@ -16,37 +19,25 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0
+        submodules: recursive
 
-    - name: Set up Python
-      uses: actions/setup-python@v2
+    - name: ccache
+      uses: hendrikmuhs/ccache-action@v1.2
       with:
-        python-version: ${{ env.PYTHON_VERSION }}
+        create-symlink: true
+        key: ${{ github.job }}-${{ matrix.os }}
+
+    - name: Install python via uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
+        activate-environment: true
 
     - name: Ensure venv (local & persistent)
-      run: |
-        set -e
-        REQS_HASH=$(sha256sum requirements-test.txt 2>/dev/null | awk '{print $1}' || echo "no_requirements")
-        MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
-
-        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
-          echo "venv exists and hash matches – reuse it"
-        else
-          echo "venv stale or missing – recreating"
-          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
-          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
-          # shellcheck source=/dev/null
-          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-          python -m pip install --upgrade pip --no-user
-          [[ -f requirements-test.txt ]] && \
-            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
-          touch "$MARKER"
-        fi
+      run: uv pip install -r requirements-test.txt
 
     - name: Run format check
       run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        git submodule update --init --recursive --recommend-shallow
         mkdir -p build
         cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_METAL=ON; cd ..
         if ! output=$(./format.sh 2>&1); then
@@ -68,42 +59,28 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0
-        repository: ${{ github.event.pull_request.head.repo.full_name }}
-        ref: ${{ github.event.pull_request.head.ref }}
+        submodules: recursive
 
-    - name: Set up Python
-      uses: actions/setup-python@v2
+    - name: ccache
+      uses: hendrikmuhs/ccache-action@v1.2
       with:
-        python-version: ${{ env.PYTHON_VERSION }}
+        create-symlink: true
+        key: ${{ github.job }}-${{ matrix.os }}
+
+    - name: Install python via uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
+        activate-environment: true
 
     - name: Ensure venv (local & persistent)
-      run: |
-        set -e
-        REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
-        MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
-
-        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
-          echo "venv exists and hash matches – reuse it"
-        else
-          echo "venv stale or missing – recreating"
-          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
-          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
-          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-          python -m pip install --upgrade pip --no-user
-          [[ -f requirements-test.txt ]] && \
-            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
-          touch "$MARKER"
-        fi
+      run: uv pip install -r requirements-test.txt -r requirements-build.txt
 
     - name: Install project (wheel form)
-      run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        pip install . --no-user -v
+      run: uv pip install -v .
 
     - name: Run metal test
       run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd testing/python
         unset PYTHONPATH
         python -m pytest -k metal -v -r fE --durations=0 --timeout=3600
