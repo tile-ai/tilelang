@@ -30,3 +30,9 @@ class CDNA(TileDevice):
         self.transaction_size: List[int] = [32, 128]  # in bytes
 
         self.bandwidth: List[int] = [1300, 14000]
+
+
+__all__ = [
+    'is_cdna_arch',
+    'CDNA',
+]

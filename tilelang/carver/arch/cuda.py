@@ -145,3 +145,15 @@ class CUDA(TileDevice):
 
     def __repr__(self):
         return f"CUDA({self.target})"
+
+
+__all__ = [
+    'is_cuda_arch',
+    'is_volta_arch',
+    'is_ampere_arch',
+    'is_ada_arch',
+    'is_hopper_arch',
+    'is_tensorcore_supported_precision',
+    'has_mma_support',
+    "CUDA",
+]

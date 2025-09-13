@@ -1,7 +1,8 @@
 from .arch_base import TileDevice
-from .cuda import CUDA
-from .cpu import CPU
-from .cdna import CDNA
+from .cuda import *
+from .cpu import *
+from .cdna import *
+from .metal import *
 from typing import Union
 from tvm.target import Target
 import torch
@@ -17,6 +18,8 @@ def get_arch(target: Union[str, Target] = "cuda") -> TileDevice:
         return CPU(target)
     elif target.kind.name == "hip":
         return CDNA(target)
+    elif target.kind.name == "metal":
+        return METAL(target)
     else:
         raise ValueError(f"Unsupported target: {target.kind.name}")
 
@@ -28,18 +31,25 @@ def auto_infer_current_arch() -> TileDevice:
         return get_arch("hip")
     if torch.cuda.is_available():
         return get_arch("cuda")
+    elif torch.mps.is_available():
+        return get_arch("metal")
     else:
         return get_arch("llvm")
 
 
-from .cpu import is_cpu_arch  # noqa: F401
-from .cuda import (
-    is_cuda_arch,  # noqa: F401
-    is_volta_arch,  # noqa: F401
-    is_ampere_arch,  # noqa: F401
-    is_ada_arch,  # noqa: F401
-    is_hopper_arch,  # noqa: F401
-    is_tensorcore_supported_precision,  # noqa: F401
-    has_mma_support,  # noqa: F401
-)
-from .cdna import is_cdna_arch  # noqa: F401
+__all__ = [
+    'is_cpu_arch',
+    'is_cuda_arch',
+    'is_volta_arch',
+    'is_ampere_arch',
+    'is_ada_arch',
+    'is_hopper_arch',
+    'is_tensorcore_supported_precision',
+    'has_mma_support',
+    'is_cdna_arch',
+    'is_metal_arch',
+    'CUDA',
+    'CDNA',
+    'METAL',
+    'CPU',
+]
