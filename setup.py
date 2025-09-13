@@ -48,6 +48,11 @@ PYPI_BUILD = _read_bool_env('PYPI_BUILD')
 PACKAGE_NAME = "tilelang"
 ROOT_DIR = os.path.dirname(__file__)
 
+CYCACHE = Path(os.path.join(ROOT_DIR, "tilelang", "jit", "adapter", "cython", ".cycache"))
+if not CYCACHE.exists():
+    # tvm may needs this, we won't always build cython backend so mkdir here.
+    CYCACHE.mkdir(exist_ok=True)
+
 IS_LINUX = platform.system() == 'Linux'
 MAYBE_METAL = platform.mac_ver()[2] == 'arm64'
 
@@ -697,17 +702,6 @@ class TilelangExtensionBuild(build_ext):
         cache_dir = Path(cython_warpper_dir) / ".cycache" / py_version
         os.makedirs(cache_dir, exist_ok=True)
 
-        if MAYBE_METAL:
-            # fixme: on metal, cython extension needs to be compiled with libpython,
-            # i.e. add -lpython3.12 in the cython compile command.
-            # This needs investigation, but metal doesn't work with cython backend,
-            # so it should be fine for a long time.
-            # We could even make metal version compatible with different python version
-            # since there's no python/torch abi dependency.
-
-            # We still need to create `cache_dir` so we return here.
-            return
-
         with open(cython_wrapper_path, "r") as f:
             cython_wrapper_code = f.read()
             source_path = cache_dir / "cython_wrapper.cpp"
@@ -759,9 +753,10 @@ class TilelangExtensionBuild(build_ext):
                             os.system(f"{cython} {cython_wrapper_path} --cplus -o {source_path}")
                             python_include_path = sysconfig.get_path("include")
                             cc = get_cplus_compiler()
-                            # fixme: aarch64 darwin needs something like `-Lxxx -lpython3.12`
+                            if MAYBE_METAL:
+                                cc += ' -Wl,-undefined,dynamic_lookup'
                             command = f"{cc} -shared -pthread -fPIC -fwrapv -O2 -Wall -fno-strict-aliasing -I{python_include_path} {source_path} -o {temp_path}"
-                            # logger.info(command)
+                            logger.info(command)
                             os.system(command)
 
                             # rename the temp file to the library file
@@ -887,6 +882,12 @@ class TilelangExtensionBuild(build_ext):
              str(num_jobs)],
             cwd=build_temp)
 
+
+ext_modules = [
+    CMakeExtension("TileLangCXX", sourcedir="."),
+]
+if not MAYBE_METAL:
+    ext_modules.append(CythonExtension("TileLangCython", sourcedir="."))
 
 setup(
     name=PACKAGE_NAME,
