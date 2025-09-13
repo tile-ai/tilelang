@@ -49,12 +49,12 @@ def assert_gemm(
     torch_dtype = getattr(torch, dtype)
     a, b = None, None
     if 'int' in dtype:
-        a = torch.randint(100, (M, N), dtype=torch_dtype, device='mps')
-        b = torch.randint(100, (N, K), dtype=torch_dtype, device='mps')
+        a = torch.randint(100, (M, K), dtype=torch_dtype, device='mps')
+        b = torch.randint(100, (K, N), dtype=torch_dtype, device='mps')
     else:
-        a = torch.randn(M, N, dtype=torch_dtype, device='mps')
-        b = torch.randn(N, K, dtype=torch_dtype, device='mps')
-    c = torch.zeros(K, M, dtype=torch_dtype, device='mps')
+        a = torch.randn(M, K, dtype=torch_dtype, device='mps')
+        b = torch.randn(K, N, dtype=torch_dtype, device='mps')
+    c = torch.zeros(M, N, dtype=torch_dtype, device='mps')
 
     jit_kernel(a, b, c)
 
