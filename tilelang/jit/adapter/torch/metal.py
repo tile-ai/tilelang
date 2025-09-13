@@ -7,14 +7,15 @@ from tvm import tir
 from tilelang import tvm as tvm
 
 from ..base import BaseKernelAdapter
+from tilelang.engine.param import KernelParam
 
 
 class MetalKernelAdapter(BaseKernelAdapter):
 
     def __init__(
         self,
-        #  params: List[KernelParam],
-        #  result_idx: List[int],
+        params: list[KernelParam],
+        result_idx: list[int],
         #  target: Union[str, Target],
         func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
         #  host_mod: Optional[tvm.IRModule] = None,
@@ -43,7 +44,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
         else:
             raise AssertionError(f'no kernel with name {func_or_mod.__name__}')
 
-        self._post_init()
+        super().__init__(func_or_mod, result_idx=result_idx, params=params)
 
     _kernel = None
 

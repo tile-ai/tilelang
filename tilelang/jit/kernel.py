@@ -283,8 +283,8 @@ class JITKernel(object):
         elif execution_backend == "torch":
             assert is_metal_target(target)
             adapter = MetalKernelAdapter(
-                # params=artifact.params,
-                # result_idx=out_idx,
+                params=artifact.params,
+                result_idx=out_idx,
                 # target=target,
                 func_or_mod=tilelang_func,
                 # host_mod=artifact.host_mod,
