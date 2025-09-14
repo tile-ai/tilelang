@@ -4,13 +4,16 @@ from tilelang.quantize import _tir_u8_to_f4_to_bf16
 from tilelang import tvm as tvm
 from tvm import DataType
 import torch
-from utils import torch_convert_bit_twiddling
+from utils import torch_convert_bit_twiddling, assert_similar
+
+tilelang.disable_cache()
+torch.manual_seed(0)
 
 
 @tilelang.jit(
     out_idx=-1, pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    })
+    },debug_root_path="/home/tzj/workspace/tilelang/examples/dequantize_gemm/debug")
 def matmul(M,
            N,
            K,
@@ -299,11 +302,6 @@ def matmul(M,
                 else:
                     get_simple_dequant_func()(B_shared, B_dequantize_shared, Scale_shared, k)
 
-                # ? Why removing 3 lines below will result in incorrect results?
-                # if expert_id[0] == 0 and bx == 0 and by == 0 and k == 0:
-                #     for i in T.Parallel(block_K//num_elems_per_byte):
-                #         T.print(B_shared[0, i])
-
                 T.gemm(A_shared, B_dequantize_shared, C_local, transpose_B=True)
 
             for i, j in T.Parallel(block_M, block_N):
@@ -343,12 +341,12 @@ def ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, bloc
 
         # Dequantize the expert weights
         B = torch_convert_bit_twiddling(qB[expert_id])  # shape: (N, K)
-        B *= 2**(Scale[expert_id][:, (torch.arange(B.shape[1], device=B.device) // scale_size)])
+        B *= 2**(Scale[expert_id][:, (torch.arange(B.shape[1], device=B.device) // scale_size)].to(torch.bfloat16))
 
         # Compute the output for this token-expert pair
         # token_embedding @ B.T + bias
-        output = torch.matmul(token_embedding.to(torch.float), B.T.to(
-            torch.float)) + Bias[expert_id]
+        output = torch.matmul(token_embedding.to(torch.bfloat16), B.T.to(
+            torch.bfloat16)) + Bias[expert_id]
         output = output.to(torch.__getattribute__(dtypeC))
 
         # Apply the topk weight
@@ -365,9 +363,9 @@ def ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, bloc
 def get_data(m, n, k, qk, scale_size, topk, E, block_M):
     A = torch.empty(m, k, dtype=torch.bfloat16, device='cuda').uniform_(-1, 1)
     qB = torch.randint(
-        0, 3, (E, n, qk), dtype=torch.uint8,
+        0, 256, (E, n, qk), dtype=torch.uint8,
         device='cuda')  #  Quantized weight tensor for E experts.
-    Scale = torch.randint(0, 3, (E, n, k // scale_size), dtype=torch.uint8, device='cuda')
+    Scale = torch.randint(0, 8, (E, n, k // scale_size), dtype=torch.uint8, device='cuda')
     Bias = torch.empty(E, n, dtype=torch.bfloat16, device='cuda').uniform_(-1, 1)
 
     weights = torch.empty(m, E, dtype=torch.bfloat16, device='cuda').uniform_(-1, 1)
@@ -377,6 +375,7 @@ def get_data(m, n, k, qk, scale_size, topk, E, block_M):
     # For each of m tokens, topk unique experts are chosen. Shape: (m * topk,).
     topk_weights, tokens_experts = torch.topk(weights, topk, dim=-1)
     tokens_experts = tokens_experts.reshape(m * topk)
+    topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     topk_weights = topk_weights.reshape(m * topk)
 
     sorted_expert_vals, sorted_indices = torch.sort(tokens_experts, stable=True)
@@ -464,7 +463,11 @@ def main(m=256,
         A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, block_M=block_M)
     print(f'{ref_output=}')
 
-    print(f'{(output-ref_output).abs().max()=}')
+    diff = (output - ref_output).abs()
+    max_val = diff.max()
+    max_idx = diff.argmax()
+    print(f"max abs diff: {max_val}, at index: {max_idx}")
+    assert_similar(output, ref_output, name="output", eps=1e-5)
 
     # print("All checks pass.")
     # latency = tilelang.profiler.do_bench(lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=500)
