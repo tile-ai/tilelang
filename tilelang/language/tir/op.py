@@ -1060,6 +1060,7 @@ def ptx_mma_sp(
         saturate,
     )
 
+
 def ptx_wgmma(
     dtype,
     wgmma_prefix,
@@ -1112,6 +1113,7 @@ def ptx_wgmma(
         b_lbo,
         b_sbo,
     )
+
 
 def mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """TVM intrinsic for storing the result of PTX MMA into a destination pointer

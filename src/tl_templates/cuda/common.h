@@ -5,9 +5,9 @@
 #endif
 
 #include <cuda/atomic>
+#include <cute/arch/util.hpp>
 #include <cutlass/fast_math.h>
 #include <cutlass/numeric_types.h>
-#include <cute/arch/util.hpp>
 #include <math_constants.h>
 
 using cutlass::bfloat16_t;

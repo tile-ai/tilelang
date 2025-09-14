@@ -17,8 +17,11 @@ def make_swizzled_layout(buffer: tvm.tir.Buffer, k_major: bool = True, allow_pad
         allow_pad,
     )
 
+
 # for WGMMA Intrinsics
-def make_wgmma_swizzled_layout(buffer: tvm.tir.Buffer, continuity: int = None, k_major: bool = True):
+def make_wgmma_swizzled_layout(buffer: tvm.tir.Buffer,
+                               continuity: int = None,
+                               k_major: bool = True):
     assert len(buffer.shape) == 2
     if continuity is None:
         continuity = int(buffer.shape[1])
@@ -29,6 +32,7 @@ def make_wgmma_swizzled_layout(buffer: tvm.tir.Buffer, continuity: int = None, k
         int(tvm.DataType(buffer.dtype).bits),
         k_major,
     )
+
 
 # swizzle 128B
 # args: buffer or (stride, continuous, element_size)
@@ -54,6 +58,7 @@ def make_full_bank_swizzled_layout(*args):
         element_size,
     )
 
+
 # swizzle 64B
 # args: buffer or (stride, continuous, element_size)
 def make_half_bank_swizzled_layout(*args):
@@ -77,6 +82,7 @@ def make_half_bank_swizzled_layout(*args):
         continuous,
         element_size,
     )
+
 
 # swizzle 32B
 # args: buffer or (stride, continuous, element_size)

@@ -1,12 +1,6 @@
 from enum import IntEnum
 from tilelang import tvm as tvm
 from tvm import tir
-from tilelang.utils.target import (
-    target_is_ampere,
-    target_is_turing,
-    target_is_hopper,
-    target_is_cdna,
-)
 from tvm.target import Target
 from tvm.ir.base import Node
 from tvm.runtime import Scriptable
@@ -15,6 +9,7 @@ from tilelang.ir import GemmWarpPolicy
 from .gemm_mma import GemmMMA
 from .gemm_wgmma import GemmWGMMA
 from tilelang import _ffi_api
+
 
 @tvm.ffi.register_func("tl.gemm_py.infer_layout")
 def gemm_py_infer_layout(gemm_py, target, thread_bounds):
@@ -28,19 +23,20 @@ def gemm_py_lower(gemm_py, layout_map, target, thread_bounds, thread_var):
     stmt = gemm_py.lower(layout_map, target, thread_nums, thread_var)
     return stmt
 
+
 # TODO(lei): support Volta and WMMA?
 # same definition with src/op/gemm_py.h
 class GemmInst(IntEnum):
     MMA = 0
     WGMMMA = 1
     MFMA = 2
-    
+
     def is_mma(self) -> bool:
         return self == GemmInst.MMA
-    
+
     def is_wgmma(self) -> bool:
         return self == GemmInst.WGMMMA
-    
+
     def is_mfma(self) -> bool:
         return self == GemmInst.MFMA
 
@@ -100,7 +96,7 @@ class GemmPy(Node, Scriptable):
             GemmInst: The selected GEMM instruction type
         """
         return GemmInst(_ffi_api.GemmPyGemmInst(self, int(thread_nums), target))
-    
+
     def _get_implementation_class(self, gemm_inst: GemmInst):
         """Get the appropriate implementation class for the given GEMM instruction.
         

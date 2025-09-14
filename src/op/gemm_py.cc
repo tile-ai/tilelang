@@ -106,7 +106,8 @@ GemmPyNode::GemmInst GemmPyNode::GetGemmInst(int block_size,
     return GemmInst::kMMA;
   } else {
     ICHECK(0) << "Unsupported target for gemm: " << target->str();
-    return GemmInst::kMMA; // This line will never be reached due to ICHECK, but satisfies compiler
+    return GemmInst::kMMA; // This line will never be reached due to ICHECK, but
+                           // satisfies compiler
   }
 }
 
@@ -226,8 +227,9 @@ Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       M, N, block_size, T.target, gemm_inst == GemmInst::kWGMMA);
 
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.lower")) {
-    auto prim_func = Downcast<PrimFunc>(
-        (*f)(GetRef<GemmPy>(this), T.layout_map, T.target, T.thread_bounds, T.thread_var));
+    auto prim_func =
+        Downcast<PrimFunc>((*f)(GetRef<GemmPy>(this), T.layout_map, T.target,
+                                T.thread_bounds, T.thread_var));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
     ICHECK(global_symbol.defined());
@@ -250,7 +252,8 @@ Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
               /*name_hint=*/global_symbol.value(), prim_func->body));
   } else {
     LOG(FATAL) << "No lower function found for gemm_py";
-    return Stmt(); // This line will never be reached due to LOG(FATAL), but satisfies compiler
+    return Stmt(); // This line will never be reached due to LOG(FATAL), but
+                   // satisfies compiler
   }
 }
 
@@ -280,10 +283,10 @@ TVM_FFI_STATIC_INIT_BLOCK({ GemmPyNode::RegisterReflection(); });
 
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef()
-      .def("tl.GemmPyGemmInst",  [](GemmPy gemm_py, int block_size, Target target) {
-        return gemm_py->GetGemmInst(block_size, target);
-      });
+  refl::GlobalDef().def("tl.GemmPyGemmInst",
+                        [](GemmPy gemm_py, int block_size, Target target) {
+                          return gemm_py->GetGemmInst(block_size, target);
+                        });
 });
 
 } // namespace tl

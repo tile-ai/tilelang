@@ -164,16 +164,14 @@ TVM_DLL const Op &mbarrier_expect_tx();
 /*!
  * \brief tvm intrinsic for ptx tensor core wgmma instructions.
  *
- *  void ptx_wgmma(StringImm accum_dtype, StringImm wgmma_prefix, bool trans_a, bool trans_b,
- *               StringImm a_dtype_abbrv, StringImm b_dtype_abbrv, StringImm accum_dtype_abbrv,
- *               Var A_data, Var A_offset, Var B_data, Var B_offset, Var C_data,
- *               Var C_offset,
- *               StringImm a_swizzle_mode, StringImm a_lbo, StringImm a_sbo,
- *               StringImm b_swizzle_mode, StringImm b_lbo, StringImm b_sbo,
- *               bool scale_out, bool scale_in_a, bool scale_in_b,
- *               bool trans_a, bool trans_b);
+ *  void ptx_wgmma(StringImm accum_dtype, StringImm wgmma_prefix, bool trans_a,
+ * bool trans_b, StringImm a_dtype_abbrv, StringImm b_dtype_abbrv, StringImm
+ * accum_dtype_abbrv, Var A_data, Var A_offset, Var B_data, Var B_offset, Var
+ * C_data, Var C_offset, StringImm a_swizzle_mode, StringImm a_lbo, StringImm
+ * a_sbo, StringImm b_swizzle_mode, StringImm b_lbo, StringImm b_sbo, bool
+ * scale_out, bool scale_in_a, bool scale_in_b, bool trans_a, bool trans_b);
  */
-TVM_DLL const Op& ptx_wgmma();
+TVM_DLL const Op &ptx_wgmma();
 
 /*!
  * \brief tvm intrinsics for ldmatrix

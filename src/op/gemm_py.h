@@ -110,7 +110,6 @@ public:
   GemmInst GetGemmInst(int block_size, Target target) const;
 
 private:
-
   mutable bool completed_ = false;
 };
 

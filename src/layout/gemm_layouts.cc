@@ -562,10 +562,10 @@ Layout makeGemmVoltaABLayout(int stride, int continuous, bool is_a,
  * selection, particularly for fp64 and int8 types. It often relates to how the
  * K dimension of the GEMM (M x K * K x N) is handled or tiled.
  *                - For fp64 (element_size == 64):
- *                  - k_inner == false often implies K is in the "outer" loop (e.g.,
- * KxN matrix).
- *                  - k_inner == true often implies K is in the "inner" loop (e.g.,
- * NxK matrix).
+ *                  - k_inner == false often implies K is in the "outer" loop
+ * (e.g., KxN matrix).
+ *                  - k_inner == true often implies K is in the "inner" loop
+ * (e.g., NxK matrix).
  *                - For int8 (element_size == 8):
  *                  - k_inner == false uses a padded layout.
  * \return A Layout object representing the chosen memory layout.

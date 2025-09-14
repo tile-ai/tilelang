@@ -1340,11 +1340,9 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     bool a_is_shared = true;
     this->PrintIndent();
     std::string asm_code = PrintWGMMAAssembly(
-        shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref,
-        a_offset, b_ref, b_offset, c_ref, c_offset,
-        scale_out, scale_in_a, scale_in_b,
-        a_is_shared,
-        a_swizzle_mode, a_lbo, a_sbo, b_swizzle_mode, b_lbo, b_sbo,
+        shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref, a_offset,
+        b_ref, b_offset, c_ref, c_offset, scale_out, scale_in_a, scale_in_b,
+        a_is_shared, a_swizzle_mode, a_lbo, a_sbo, b_swizzle_mode, b_lbo, b_sbo,
         "", "", "", false);
     this->stream << asm_code;
   } else if (op->op.same_as(builtin::ptx_ldmatrix())) {

@@ -1,14 +1,9 @@
 import tilelang.language as T
 from enum import IntEnum
-from typing import Union, Tuple, Optional, Literal, Callable
+from typing import Optional
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
-from tvm.tir import PrimExpr, IndexMap, Buffer, Var
-from tilelang.common import TransformKind
-from .utils import (
-    mma_store_index_map,
-    get_ldmatrix_offset,
-)
+from tvm.tir import PrimExpr, Buffer, Var
 from tilelang.utils import is_fragment
 from tilelang.layout import (
     Layout,
@@ -17,7 +12,9 @@ from tilelang.layout import (
     make_quarter_bank_swizzled_layout,
 )
 from tvm.runtime import convert
+
 lift = convert
+
 
 class SwizzleMode(IntEnum):
     # SWIZZLE_NONE = 0, SWIZZLE_32B = 3, SWIZZLE_64B = 2, SWIZZLE_128B = 1
@@ -25,19 +22,19 @@ class SwizzleMode(IntEnum):
     SWIZZLE_128B = 1
     SWIZZLE_64B = 2
     SWIZZLE_32B = 3
-    
+
     def is_none(self) -> bool:
         return self == SwizzleMode.NONE
-    
+
     def is_swizzle_32b(self) -> bool:
         return self == SwizzleMode.SWIZZLE_32B
-    
+
     def is_swizzle_64b(self) -> bool:
         return self == SwizzleMode.SWIZZLE_64B
-    
+
     def is_swizzle_128b(self) -> bool:
         return self == SwizzleMode.SWIZZLE_128B
-    
+
     def swizzle_byte_size(self) -> int:
         if self.is_swizzle_32b():
             return 32 // 8
@@ -58,6 +55,7 @@ class SwizzleMode(IntEnum):
         else:
             return 1
 
+
 # derive from MMAIntrinEmitter as some layouts are the same
 class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     """
@@ -66,7 +64,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
     # should be rewritten to support dynamic k_dim
     wgmma_prefix: str
-    
+
     a_shared_layout: Layout = None
     b_shared_layout: Layout = None
 
@@ -87,22 +85,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         is_m_first: Optional[bool] = False,
         thread_var: Optional[Var] = None,
     ):
-        super().__init__(
-            a_dtype, 
-            b_dtype, 
-            accum_dtype, 
-            a_transposed, 
-            b_transposed, 
-            block_row_warps, 
-            block_col_warps, 
-            warp_row_tiles, 
-            warp_col_tiles, 
-            chunk, 
-            reduce_k, 
-            num_elems_per_byte, 
-            is_m_first, 
-            thread_var
-        )
+        super().__init__(a_dtype, b_dtype, accum_dtype, a_transposed, b_transposed, block_row_warps,
+                         block_col_warps, warp_row_tiles, warp_col_tiles, chunk, reduce_k,
+                         num_elems_per_byte, is_m_first, thread_var)
         self._initialize_wgmma_prefix(self.n_dim)
 
     def _assign_a_shared_layout(self, layout: Layout):
@@ -139,10 +124,10 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             self.n_dim = 8
             self.micro_size_y = 8
             self.warp_cols = warp_col_tiles // 8
-        
+
         self.micro_size_x = m_dim
         self.micro_size_k = k_dim
-        
+
     def _determinate_swizzle_mode(self, buffer: Buffer, layout: Layout) -> SwizzleMode:
         if layout is None:
             return SwizzleMode.NONE
@@ -154,51 +139,49 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             return SwizzleMode.SWIZZLE_128B
         else:
             raise ValueError(f"Unsupported swizzle mode: {layout}")
-        
+
     def wgmma(self,
-        A_buf: Buffer,
-        B_buf: Buffer,
-        C_local_buf: Buffer,
-        k_inner: Optional[PrimExpr] = 0,
-        clear_accum: PrimExpr = False):
-        warp_rows = self.warp_rows
-        warp_cols = self.warp_cols
-        local_size_a = self.local_size_a
-        local_size_b = self.local_size_b
+              A_buf: Buffer,
+              B_buf: Buffer,
+              C_local_buf: Buffer,
+              k_inner: Optional[PrimExpr] = 0,
+              clear_accum: PrimExpr = False):
         local_size_out = self.local_size_out
         a_dtype_abbrv = self.a_dtype_abbrv
         b_dtype_abbrv = self.b_dtype_abbrv
         accum_dtype = self.accum_dtype
         accum_dtype_abbrv = self.accum_dtype_abbrv
         m_dim = self.block_row_warps * self.warp_row_tiles
+        warp_cols = self.warp_cols
         k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
         wgmma_prefix = self.wgmma_prefix
-        replicate_b = (self.n_dim == 16)        
         scale_out = not clear_accum
         scale_in_a = 1
         scale_in_b = 1
 
-        # M, K -> 
+        # M, K ->
         k_dim_offset = k_inner * self.micro_size_k
 
         a_is_k_major = not self.a_transposed
         b_is_k_major = self.b_transposed
-        
+
         print(f"a_shared_layout: {self.a_shared_layout}")
         print(f"b_shared_layout: {self.b_shared_layout}")
 
         a_swizzle_mode = self._determinate_swizzle_mode(A_buf, self.a_shared_layout)
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
-        
+
         elems_in_bytes = DataType(self.a_dtype).bits // 8
 
         # by default, we utilize non-swizzle layout offset
-        a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim * elems_in_bytes)
-        a_stride_byte_offset = (8 * k_dim * elems_in_bytes) if a_is_k_major else (8 * 8 * elems_in_bytes) 
+        a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim *
+                                                                               elems_in_bytes)
+        a_stride_byte_offset = (8 * k_dim * elems_in_bytes) if a_is_k_major else (8 * 8 *
+                                                                                  elems_in_bytes)
 
         if not a_swizzle_mode.is_none():
             # swizzle mode doesn't require LBO/SBO to be 1
-            # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset 
+            # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
             if a_is_k_major:
                 a_leading_byte_offset = 16
             else:
@@ -208,11 +191,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 a_leading_byte_offset = a_swizzle_mode.swizzle_atom_size()
                 a_stride_byte_offset = 8 * 64 * elems_in_bytes
 
-        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim * elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (8 * 8 * elems_in_bytes)
+        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim *
+                                                                               elems_in_bytes)
+        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (8 * 8 *
+                                                                                  elems_in_bytes)
         if not b_swizzle_mode.is_none():
-            # swizzle mode doesn't require LBO/SBO to be 1 
-            # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset 
+            # swizzle mode doesn't require LBO/SBO to be 1
+            # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
             if b_is_k_major:
                 b_leading_byte_offset = 16
             else:
@@ -221,25 +206,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 # SBO represents the distance between two atoms along the K dimension
                 b_leading_byte_offset = b_swizzle_mode.swizzle_atom_size()
                 b_stride_byte_offset = 8 * n_dim * elems_in_bytes
-        print(f"m_dim: {m_dim}, k_dim: {k_dim}, n_dim: {n_dim}, local_size_out: {local_size_out}")
-        print(f"a_is_k_major: {a_is_k_major}, b_is_k_major: {b_is_k_major}")
-        print(f"a_swizzle_mode: {a_swizzle_mode}, b_swizzle_mode: {b_swizzle_mode}")
-        print(f"a_leading_byte_offset: {a_leading_byte_offset}, a_stride_byte_offset: {a_stride_byte_offset}")
-        print(f"b_leading_byte_offset: {b_leading_byte_offset}, b_stride_byte_offset: {b_stride_byte_offset}")
-        print(f"k_inner: {k_inner}")
 
         @T.macro
-        def _warp_mma(A_buf, B_buf, C_local_buf):            
+        def _warp_mma(A_buf, B_buf, C_local_buf):
             for i in T.serial(m_dim // 64):
-                # A_offset = i * 64 * A_buf.shape[-1] + k_dim_offset if a_is_k_major else k_dim_offset * A_buf.shape[-1] + i * 64 * self.micro_size_k
-                # MN Major: KxM -> 32x128 -> each block processed micro_size_kx64 elements
-                # stride_offset is 8 * m_dim * elems_in_bytes, so k should mutilple the 
-                # 8 * 128 * elems in bytes = 1024 * 2 = 2048
-                # m_dim: 128, k_dim: 32
-                # atom_size = 8
-                A_offset = i * 64 * A_buf.shape[-1] + k_dim_offset if a_is_k_major else k_inner * 16 * 64 + i * 64 * k_dim
+                A_offset = i * 64 * A_buf.shape[
+                    -1] + k_dim_offset if a_is_k_major else k_inner * self.micro_size_k * 64 + i * 64 * k_dim
                 B_offset = k_dim_offset if b_is_k_major else k_dim_offset * B_buf.shape[-1]
-                C_offset = i * warp_cols * local_size_out # 4 warps as an unit
+                C_offset = i * warp_cols * local_size_out  # 4 warps as an unit
                 T.ptx_wgmma(
                     accum_dtype,
                     wgmma_prefix,
@@ -267,7 +241,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         return _warp_mma(A_buf, B_buf, C_local_buf)
 
-
     def make_mma_store_layout(self, local_buf: Buffer) -> T.Fragment:
         """
         Create a layout function for storing MMA results into a fragment buffer.
@@ -290,17 +263,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         AssertionError
             If `local_buf` is not detected to be a fragment buffer.
         """
-        from tilelang.utils import is_fragment
-
-        shape = local_buf.shape
         inverse_mma_store_layout = self.get_store_index_map(inverse=True)
         assert is_fragment(local_buf), "local_buf must be a fragment"
         micro_size_x, micro_size_y = self.micro_size_x, self.micro_size_y
-        local_size_out = self.local_size_out
         block_row_warps, block_col_warps = self.block_row_warps, self.block_col_warps
         warp_rows, warp_cols = self.warp_rows, self.warp_cols
-        warp_size = self.WARP_SIZE
-        is_m_first = self.is_m_first
 
         def forward_thread(i: int, j: int) -> int:
             """

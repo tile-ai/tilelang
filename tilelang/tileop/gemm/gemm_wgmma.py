@@ -8,7 +8,6 @@ from tvm.target import Target
 from tvm import tir
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
-from tilelang.utils import is_fragment
 
 
 class GemmWGMMA(GemmBase):
@@ -38,21 +37,34 @@ class GemmWGMMA(GemmBase):
             b_continuity = self.N if b_is_k_major else 4 * self.K // n_warp
             return {
                 # WGMMA does not support padding
-                self.A: make_wgmma_swizzled_layout(self.A, continuity = a_continuity, k_major = a_is_k_major),
-                self.B: make_wgmma_swizzled_layout(self.B, continuity = b_continuity, k_major = b_is_k_major),
-                self.C: mma_emitter.make_mma_store_layout(self.C),
+                self.A:
+                    make_wgmma_swizzled_layout(
+                        self.A, continuity=a_continuity, k_major=a_is_k_major),
+                self.B:
+                    make_wgmma_swizzled_layout(
+                        self.B, continuity=b_continuity, k_major=b_is_k_major),
+                self.C:
+                    mma_emitter.make_mma_store_layout(self.C),
             }
         elif self.is_gemm_sr():
             return {
-                self.A: make_wgmma_swizzled_layout(self.A, continuity = a_continuity, k_major = a_is_k_major),
-                self.B: mma_emitter.make_mma_load_layout(self.B, matrix="B"),
-                self.C: mma_emitter.make_mma_store_layout(self.C),
+                self.A:
+                    make_wgmma_swizzled_layout(
+                        self.A, continuity=a_continuity, k_major=a_is_k_major),
+                self.B:
+                    mma_emitter.make_mma_load_layout(self.B, matrix="B"),
+                self.C:
+                    mma_emitter.make_mma_store_layout(self.C),
             }
         elif self.is_gemm_rs():
             return {
-                self.A: mma_emitter.make_mma_load_layout(self.A, matrix="A"),
-                self.B: make_wgmma_swizzled_layout(self.B, continuity = b_continuity, k_major = b_is_k_major),
-                self.C: mma_emitter.make_mma_store_layout(self.C),
+                self.A:
+                    mma_emitter.make_mma_load_layout(self.A, matrix="A"),
+                self.B:
+                    make_wgmma_swizzled_layout(
+                        self.B, continuity=b_continuity, k_major=b_is_k_major),
+                self.C:
+                    mma_emitter.make_mma_store_layout(self.C),
             }
         elif self.is_gemm_rr():
             return {
@@ -83,7 +95,7 @@ class GemmWGMMA(GemmBase):
             chunk=self.chunk,
             thread_var=thread_var,
         )
-        
+
         if self.A in layout_map:
             mma_emitter._assign_a_shared_layout(layout_map[self.A])
         if self.B in layout_map:

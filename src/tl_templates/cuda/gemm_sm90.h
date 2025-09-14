@@ -4,9 +4,9 @@
 #include "gemm_mma.h"
 #include "intrin.h"
 
+#include <cute/arch/mma_sm90_desc.hpp>
 #include <cutlass/arch/barrier.h>
 #include <cutlass/cutlass.h>
-#include <cute/arch/mma_sm90_desc.hpp>
 #include <cutlass/gemm/collective/collective_builder.hpp>
 
 namespace cute {
