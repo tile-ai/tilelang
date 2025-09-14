@@ -105,10 +105,11 @@ public:
 
   TileOperator Clone() const;
 
-private:
   // Target GEMM instruction
   enum class GemmInst : uint8_t { kMMA, kWGMMA, kUTCMMA, kMFMA };
   GemmInst GetGemmInst(int block_size, Target target) const;
+
+private:
 
   mutable bool completed_ = false;
 };

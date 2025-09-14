@@ -6,6 +6,7 @@
 
 #include <cutlass/arch/barrier.h>
 #include <cutlass/cutlass.h>
+#include <cute/arch/mma_sm90_desc.hpp>
 #include <cutlass/gemm/collective/collective_builder.hpp>
 
 namespace cute {
@@ -229,6 +230,8 @@ public:
  */
 
 namespace tl {
+
+using GmmaDescriptor = cute::GmmaDescriptor;
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum = false, int lda = 0, int ldb = 0,

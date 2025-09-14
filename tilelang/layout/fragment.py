@@ -204,13 +204,10 @@ class Fragment(Layout):
         str
             A string showing the thread dimension and the index dimension.
         """
-        return f"Fragment<thread={self.thread}, index={self.index}>"
+        return f"Fragment<{self.get_input_shape()}->{self.get_output_shape()}, thread={self.thread}, index={self.index}>"
 
-
-def make_swizzled_layout(buffer: tvm.tir.Buffer):
-    assert len(buffer.shape) == 2
-    return _ffi_api.make_swizzled_layout(
-        int(buffer.shape[0]),
-        int(buffer.shape[1]),
-        int(tvm.DataType(buffer.dtype).bits),
-    )
+    def is_equal(self, other: "Fragment") -> bool:
+        """
+        Check if the current fragment is equal to another fragment.
+        """
+        return _ffi_api.Fragment_is_equal(self, other)

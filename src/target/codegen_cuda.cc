@@ -1302,6 +1302,51 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         b_ref, b_offset, c_ref, c_offset, metadata, metadata_offset,
         sparse_selector, "", true, saturate);
     this->stream << asm_code;
+  } else if (op->op.same_as(tl::ptx_wgmma())) {
+    // arg 0: dtype
+    // arg 1: shape
+    // arg 2: A_layout
+    // arg 3: B_layout
+    // arg 4: A_dtype
+    // arg 5: B_dtype
+    // arg 6: C_dtype
+    // arg 7: multiplicand_a
+    // arg 8: multiplicand_b
+    // arg 9: accumulator
+    // arg 10: saturate
+    ICHECK_EQ(op->args.size(), 21U) << "ptx_wgmma args is " << op->args;
+    std::string shape = Downcast<StringImm>(op->args[0])->value;
+    bool A_layout = Downcast<Bool>(op->args[1])->value;
+    bool B_layout = Downcast<Bool>(op->args[2])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
+    std::string a_ref = this->PrintExpr(op->args[6]);
+    std::string a_offset = this->PrintExpr(op->args[7]);
+    std::string b_ref = this->PrintExpr(op->args[8]);
+    std::string b_offset = this->PrintExpr(op->args[9]);
+    std::string c_ref = this->PrintExpr(op->args[10]);
+    std::string c_offset = this->PrintExpr(op->args[11]);
+    bool scale_out = Downcast<Bool>(op->args[12])->value;
+    bool scale_in_a = Downcast<Bool>(op->args[13])->value;
+    bool scale_in_b = Downcast<Bool>(op->args[14])->value;
+    int a_swizzle_mode = Downcast<IntImm>(op->args[15])->value;
+    int a_lbo = Downcast<IntImm>(op->args[16])->value;
+    int a_sbo = Downcast<IntImm>(op->args[17])->value;
+    int b_swizzle_mode = Downcast<IntImm>(op->args[18])->value;
+    int b_lbo = Downcast<IntImm>(op->args[19])->value;
+    int b_sbo = Downcast<IntImm>(op->args[20])->value;
+
+    bool a_is_shared = true;
+    this->PrintIndent();
+    std::string asm_code = PrintWGMMAAssembly(
+        shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref,
+        a_offset, b_ref, b_offset, c_ref, c_offset,
+        scale_out, scale_in_a, scale_in_b,
+        a_is_shared,
+        a_swizzle_mode, a_lbo, a_sbo, b_swizzle_mode, b_lbo, b_sbo,
+        "", "", "", false);
+    this->stream << asm_code;
   } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
     // arg 0: whether the matrix is loaded in column major format or not.
     // arg 1: number of matrices to load.

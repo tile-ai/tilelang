@@ -138,8 +138,8 @@ Fragment makeGemmFragmentCHopper(const int block_m, const int block_n,
                                  const int warp_m, const int warp_n,
                                  const int element_size) {
   ICHECK(block_m % warp_m == 0);
-  // ICHECK(block_n == warp_n);
   ICHECK(warp_m % 16 == 0) << "warp_m=" << warp_m;
+
   auto warp_layout = makeGemmFragment8x8()->Repeat({2, warp_n / 8}, false,
                                                    false); // 16 x N (1 warp)
   auto block_layout = warp_layout->Repeat({block_m / warp_m, block_n / warp_n},
@@ -530,8 +530,8 @@ Layout MakeGemmVoltaBLayoutCongruous(int stride, int continuous) {
 }
 
 Layout makeGemmVoltaABLayout(int stride, int continuous, bool is_a,
-                             int kfactor) {
-  if (kfactor == 2)
+                             bool k_inner) {
+  if (k_inner)
     return MakeGemmVoltaABLayoutCrosswise(stride, continuous);
   if (is_a && continuous % 64 == 0)
     return MakeGemmVoltaALayoutCongruous(stride, continuous);
@@ -558,29 +558,29 @@ Layout makeGemmVoltaABLayout(int stride, int continuous, bool is_a,
  * select specific swizzling strategies. It might be the same as mat_continuous
  *                   or different based on tiling or hardware details.
  * \param element_size The size of each element in the matrix, in bits (e.g., 8,
- * 16, 32, 64). \param kfactor An integer factor that influences layout
+ * 16, 32, 64). \param k_inner Whether the K dimension is in the inner loop.
  * selection, particularly for fp64 and int8 types. It often relates to how the
  * K dimension of the GEMM (M x K * K x N) is handled or tiled.
  *                - For fp64 (element_size == 64):
- *                  - kfactor == 1 often implies K is in the "outer" loop (e.g.,
+ *                  - k_inner == false often implies K is in the "outer" loop (e.g.,
  * KxN matrix).
- *                  - kfactor == 2 often implies K is in the "inner" loop (e.g.,
+ *                  - k_inner == true often implies K is in the "inner" loop (e.g.,
  * NxK matrix).
  *                - For int8 (element_size == 8):
- *                  - kfactor == 1 uses a padded layout.
+ *                  - k_inner == false uses a padded layout.
  * \return A Layout object representing the chosen memory layout.
  */
 Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
-                        int element_size, int kfactor) {
+                        int element_size, bool k_inner) {
   if (element_size == 64) {
-    if (kfactor == 1 && continuity % 16 == 0) // float64 KxN
+    if (!k_inner && continuity % 16 == 0) // float64 KxN
       return makeGemmABLayoutF64_Kouter(mat_stride, mat_continuous);
-    if (kfactor == 2 && continuity % 16 == 0) // float64 NxK
+    if (k_inner && continuity % 16 == 0) // float64 NxK
       return makeGemmABLayoutF64_Kinner(mat_stride, mat_continuous);
     return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   }
   int vector_size = 128 / element_size;
-  if (kfactor == 1 && element_size == 8) // int8 KxN
+  if (!k_inner && element_size == 8) // int8 KxN
     return makeGemmABLayoutPadded(mat_stride, mat_continuous, element_size);
   else if (mat_continuous % (vector_size * 8) == 0)
     return makeFullBankSwizzleLayout(mat_stride, mat_continuous, element_size);
@@ -592,17 +592,17 @@ Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
 }
 
 Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
-                              int continuity, int element_size, int kfactor) {
+                              int continuity, int element_size, bool k_inner) {
   if (element_size == 64) {
-    if (kfactor == 1 && continuity % 16 == 0) // float64 KxN
+    if (!k_inner && continuity % 16 == 0) // float64 KxN
       return makeGemmABLayoutF64_Kouter(mat_stride, mat_continuous);
-    if (kfactor == 2 && continuity % 16 == 0) // float64 NxK
+    if (k_inner && continuity % 16 == 0) // float64 NxK
       return makeGemmABLayoutF64_Kinner(mat_stride, mat_continuous);
     return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
                                         element_size);
   }
   int vector_size = 128 / element_size;
-  if (kfactor == 1 && element_size == 8) // int8 KxN
+  if (!k_inner && element_size == 8) // int8 KxN
     return makeQuarterBankSwizzleLayout(mat_stride, mat_continuous,
                                         element_size);
   else if (mat_continuous % (vector_size * 8) == 0)

@@ -1892,6 +1892,7 @@ call_llvm_pure_intrin = _dtype_forward(_tir_op.call_llvm_pure_intrin)
 call_pure_extern = _dtype_forward(_tir_op.call_pure_extern)
 ptx_mma = _dtype_forward(_tir_op.ptx_mma)
 ptx_mma_sp = _dtype_forward(_tir_op.ptx_mma_sp)
+ptx_wgmma = _dtype_forward(_tir_op.ptx_wgmma)
 ptx_ldmatrix = _dtype_forward(_tir_op.ptx_ldmatrix)
 ptx_cp_async = _dtype_forward(_tir_op.ptx_cp_async)
 ptx_cp_async_bulk = _dtype_forward(_tir_op.ptx_cp_async_bulk)
@@ -2141,6 +2142,7 @@ __all__ = [
     "tvm_warp_activemask",
     "ptx_mma",
     "ptx_mma_sp",
+    "ptx_wgmma",
     "ptx_ldmatrix",
     "ptx_cp_async",
     "ptx_cp_async_bulk",

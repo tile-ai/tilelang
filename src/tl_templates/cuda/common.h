@@ -7,11 +7,14 @@
 #include <cuda/atomic>
 #include <cutlass/fast_math.h>
 #include <cutlass/numeric_types.h>
+#include <cute/arch/util.hpp>
 #include <math_constants.h>
 
 using cutlass::bfloat16_t;
 using cutlass::half_t;
 using cutlass::tfloat32_t;
+
+using cute::cast_smem_ptr_to_uint;
 
 using int4_t = int4;
 

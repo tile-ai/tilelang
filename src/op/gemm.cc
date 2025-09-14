@@ -42,7 +42,7 @@ using namespace tir;
  * @param vmap Mapping from access pointer vars to Buffer objects used to
  *   resolve the Buffer corresponding to each pointer argument.
  *
- * @note If `kPack` is provided it must be 1 or 2; otherwise the constructor
+ * @note If `kPack` is provided it must be 1; otherwise the constructor
  *       fails with an ICHECK (runtime assertion). No other validation is
  *       performed here.
  */
@@ -478,7 +478,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       int dim_A = A->shape.size();
       results.Set(A, makeGemmVoltaABLayout(*as_const_int(A->shape[dim_A - 2]),
                                            *as_const_int(A->shape[dim_A - 1]),
-                                           true, trans_A ? 1 : 2));
+                                           true, !trans_A));
     } else if (A.scope() == "local.fragment") {
       ICHECK(trans_A == false);
       auto fragment = makeGemmVoltaFragmentA(M, N, K, M / warp_m, N / warp_n);
@@ -491,7 +491,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     int dim_B = B->shape.size();
     results.Set(B, makeGemmVoltaABLayout(*as_const_int(B->shape[dim_B - 2]),
                                          *as_const_int(B->shape[dim_B - 1]),
-                                         false, trans_B ? 2 : 1));
+                                         false, trans_B));
   } else if (TargetIsAmpere(T.target) || TargetIsTuring(T.target) ||
              TargetIsSM120(T.target)) {
     auto fragment =
@@ -504,7 +504,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
       results.Set(A,
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   A->dtype.bits(), trans_A ? 1 : 2));
+                                   A->dtype.bits(), !trans_A));
     } else if (A.scope() == "local.fragment") {
       auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
                                         A->dtype.bits(), trans_A);
@@ -518,7 +518,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
       results.Set(B,
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   B->dtype.bits(), trans_B ? 2 : 1));
+                                   B->dtype.bits(), trans_B));
     } else if (B.scope() == "local.fragment") {
       auto fragment =
           makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
@@ -542,9 +542,9 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       auto ABLayout =
           gemm_inst == GemmInst::kWGMMA
               ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                       A->dtype.bits(), trans_A ? 1 : 2)
+                                       A->dtype.bits(), !trans_A)
               : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                 A->dtype.bits(), trans_A ? 1 : 2);
+                                 A->dtype.bits(), !trans_A);
       results.Set(A, ABLayout);
     } else {
       auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
@@ -560,9 +560,9 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       auto ABLayout =
           gemm_inst == GemmInst::kWGMMA
               ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                       B->dtype.bits(), trans_B ? 2 : 1)
+                                       B->dtype.bits(), trans_B)
               : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                 B->dtype.bits(), trans_B ? 2 : 1);
+                                 B->dtype.bits(), trans_B);
       results.Set(B, ABLayout);
     } else {
       auto fragment =

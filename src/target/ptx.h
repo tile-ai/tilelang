@@ -66,6 +66,32 @@ PrintMMAAssembly(const std::string &shape, const std::string &A_layout,
                  const std::string &bit_op, bool sparse, bool saturate);
 
 /*!
+ * \brief Print WGMMA assembly string given parameters.
+ * \param shape The shape string mMnNkK
+ * \param A_layout The layout of multiplicand A, can be either "row" or "col".
+ * \param B_layout The layout of multiplicand B, can be either "row" or "col".
+ * \param A_dtype The data type of multiplicand A.
+ * \param B_dtype The data type of multiplicand B.
+ * \param C_dtype The data type of multiplicand C.
+ */
+std::string PrintWGMMAAssembly(const std::string &shape, const bool &A_layout,
+                               const bool &B_layout, const std::string &A_dtype,
+                               const std::string &B_dtype, const std::string &C_dtype,
+                               const std::string &a_ptr,
+                               const std::string &a_offset,
+                               const std::string &b_ptr,
+                               const std::string &b_offset,
+                               const std::string &c_ptr,
+                               const std::string &c_offset,
+                               const bool& scale_out, const bool& scale_in_a, const bool& scale_in_b,
+                               const bool& a_is_shared,
+                               const int &a_swizzle_mode, const int &a_lbo,
+                               const int &a_sbo, const int &b_swizzle_mode,
+                               const int &b_lbo, const int &b_sbo,
+                               const std::string &metadata, const std::string &metadata_offset,
+                               const std::string &sparsity_selector, bool sparse);
+
+/*!
  * \brief Print ldmatrix assembly string given parameters.
  * \param trans: whether the matrix is loaded in column major format or not.
  * \param num: number of matrices to load.

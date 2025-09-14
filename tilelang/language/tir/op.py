@@ -1060,6 +1060,58 @@ def ptx_mma_sp(
         saturate,
     )
 
+def ptx_wgmma(
+    dtype,
+    wgmma_prefix,
+    trans_a,
+    trans_b,
+    a_dtype_abbrv,
+    b_dtype_abbrv,
+    accum_dtype_abbrv,
+    A_data,
+    A_offset,
+    B_data,
+    B_offset,
+    C_data,
+    C_offset,
+    scale_out,
+    scale_in_a,
+    scale_in_b,
+    a_swizzle_mode,
+    a_lbo,
+    a_sbo,
+    b_swizzle_mode,
+    b_lbo,
+    b_sbo,
+):
+    """TVM intrinsic for ptx tensor core wmma instructions
+    https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions-for-wmma
+    """
+    return call_intrin(
+        dtype,
+        _tvm_op.Op.get("tl.ptx_wgmma"),
+        wgmma_prefix,
+        trans_a,
+        trans_b,
+        a_dtype_abbrv,
+        b_dtype_abbrv,
+        accum_dtype_abbrv,
+        A_data,
+        A_offset,
+        B_data,
+        B_offset,
+        C_data,
+        C_offset,
+        scale_out,
+        scale_in_a,
+        scale_in_b,
+        a_swizzle_mode,
+        a_lbo,
+        a_sbo,
+        b_swizzle_mode,
+        b_lbo,
+        b_sbo,
+    )
 
 def mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """TVM intrinsic for storing the result of PTX MMA into a destination pointer

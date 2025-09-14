@@ -80,6 +80,11 @@ TIR_DEFINE_TL_BUILTIN(mbarrier_expect_tx)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
+TIR_DEFINE_TL_BUILTIN(ptx_wgmma)
+    .set_num_inputs(20)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
 TIR_DEFINE_TL_BUILTIN(ptx_ldmatrix)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
