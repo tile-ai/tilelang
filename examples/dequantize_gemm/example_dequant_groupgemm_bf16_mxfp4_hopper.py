@@ -13,7 +13,7 @@ torch.manual_seed(0)
 @tilelang.jit(
     out_idx=-1, pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    },debug_root_path="/home/tzj/workspace/tilelang/examples/dequantize_gemm/debug")
+    })
 def matmul(M,
            N,
            K,
@@ -341,7 +341,9 @@ def ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, bloc
 
         # Dequantize the expert weights
         B = torch_convert_bit_twiddling(qB[expert_id])  # shape: (N, K)
-        B *= 2**(Scale[expert_id][:, (torch.arange(B.shape[1], device=B.device) // scale_size)].to(torch.bfloat16))
+        B *= 2**(
+            Scale[expert_id][:, (torch.arange(B.shape[1], device=B.device) // scale_size)].to(
+                torch.bfloat16))
 
         # Compute the output for this token-expert pair
         # token_embedding @ B.T + bias
