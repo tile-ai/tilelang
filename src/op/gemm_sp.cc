@@ -40,14 +40,12 @@ std::pair<int, int> GemmSPWarpPolicyNode::ComputeWarpPartition(int M, int N,
     int warp_shape_n = N / n_warp;
     if (warp_shape_m % m_atom_size) { // GemmWarpPolicy::kFullRow
       m_warp = M / m_atom_size;
-      warp_shape_m = m_atom_size;
       ICHECK(m_warp > 0) << err_msg;
       n_warp = num_warps / m_warp;
       warp_shape_n = N / n_warp;
       ICHECK(warp_shape_n % n_atom_size == 0) << err_msg;
     } else if (warp_shape_n % n_atom_size != 0) { // GemmWarpPolicy::kFullColumn
       n_warp = N / n_atom_size;
-      warp_shape_n = n_atom_size;
       ICHECK(n_warp > 0) << err_msg;
       m_warp = num_warps / n_warp;
       warp_shape_m = M / m_warp;

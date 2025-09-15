@@ -672,7 +672,7 @@ Layout makeTensorOpMultiplicand(int mat_stride, int mat_continuous,
           kElementsPerAccess +
       FloorMod(j, kElementsPerAccess);
 
-  PrimExpr element_strided = vec_strided_idx;
+  const PrimExpr &element_strided = vec_strided_idx;
 
   const int stride = mat_continuous;
 
