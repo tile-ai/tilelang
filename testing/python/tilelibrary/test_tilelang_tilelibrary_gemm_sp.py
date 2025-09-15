@@ -365,7 +365,8 @@ def test_gemm_sp_sm90():
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(8, 0)
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+@tilelang.testing.requires_cuda_compute_version_le(8, 9)
 def test_gemm_sp_sm80():
     run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 32, 32, 32, 0, 32)
     run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 32)
