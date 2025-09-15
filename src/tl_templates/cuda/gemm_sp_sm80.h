@@ -121,9 +121,13 @@ template <> struct DispatchType<cutlass::bfloat16_t> {
   using Type = cutlass::bfloat16_t;
 };
 
-template <> struct DispatchType<unsigned char> { using Type = uint8_t; };
+template <> struct DispatchType<unsigned char> {
+  using Type = uint8_t;
+};
 
-template <> struct DispatchType<signed char> { using Type = int8_t; };
+template <> struct DispatchType<signed char> {
+  using Type = int8_t;
+};
 
 template <typename Shape, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, typename A_type_raw,

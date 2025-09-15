@@ -513,7 +513,9 @@ using std::true_type;
 template <typename T> struct is_float : std::is_floating_point<T> {};
 #else
 /// Conditional type.
-template <bool, typename T, typename> struct conditional { typedef T type; };
+template <bool, typename T, typename> struct conditional {
+  typedef T type;
+};
 template <typename T, typename F> struct conditional<false, T, F> {
   typedef F type;
 };
@@ -534,7 +536,9 @@ template <> struct is_float<long double> : true_type {};
 #endif
 
 /// Type traits for floating-point bits.
-template <typename T> struct bits { typedef unsigned char type; };
+template <typename T> struct bits {
+  typedef unsigned char type;
+};
 template <typename T> struct bits<const T> : bits<T> {};
 template <typename T> struct bits<volatile T> : bits<T> {};
 template <typename T> struct bits<const volatile T> : bits<T> {};
@@ -550,10 +554,14 @@ typedef std::uint_fast32_t uint32;
 typedef std::int_fast32_t int32;
 
 /// Unsigned integer of (at least) 32 bits width.
-template <> struct bits<float> { typedef std::uint_least32_t type; };
+template <> struct bits<float> {
+  typedef std::uint_least32_t type;
+};
 
 /// Unsigned integer of (at least) 64 bits width.
-template <> struct bits<double> { typedef std::uint_least64_t type; };
+template <> struct bits<double> {
+  typedef std::uint_least64_t type;
+};
 #else
 /// Unsigned integer of (at least) 16 bits width.
 typedef unsigned short uint16;
@@ -578,7 +586,9 @@ struct bits<double>
                   unsigned long, unsigned long long> {};
 #else
 /// Unsigned integer of (at least) 64 bits width.
-template <> struct bits<double> { typedef unsigned long type; };
+template <> struct bits<double> {
+  typedef unsigned long type;
+};
 #endif
 #endif
 

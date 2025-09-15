@@ -136,7 +136,9 @@ TL_DEVICE unsigned int cast_smem_ptr_to_int(const void *const smem_ptr) {
   return smem_int;
 }
 
-template <typename T> struct normalize_atomic_type { using type = T; };
+template <typename T> struct normalize_atomic_type {
+  using type = T;
+};
 
 template <> /**
              * Map the public half_t alias to the native `half` type for atomic
