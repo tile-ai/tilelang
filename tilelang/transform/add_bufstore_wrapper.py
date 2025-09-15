@@ -11,9 +11,11 @@ def AddWrapperForSingleBufStore():
 
         def get_used_var(op):
             used_var = set()
+
             def visit_fn(x):
                 if isinstance(x, Var):
                     used_var.add(x)
+
             post_order_visit(op, visit_fn)
             return used_var
 
