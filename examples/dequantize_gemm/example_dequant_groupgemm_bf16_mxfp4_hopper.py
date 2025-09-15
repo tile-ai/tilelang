@@ -193,7 +193,6 @@ def matmul(M,
                     B_dequantize_shared[index // block_K,
                                         index % block_K] = B_dequantize_local_thread[v]
 
-
         return fast_dequant_bf16_fp4_twiddling
 
     def get_simple_dequant_func(in_dtype="fp4", out_dtype="bfloat16"):
@@ -260,8 +259,7 @@ def matmul(M,
             if threads == 512:
                 T.disable_warp_group_reg_alloc()
 
-            T.copy(sorted_token_ids[by * block_M:(by + 1) * block_M],
-                   sorted_token_ids_shared)
+            T.copy(sorted_token_ids[by * block_M:(by + 1) * block_M], sorted_token_ids_shared)
             expert_id[0] = expert_ids[by]
 
             # Get the topk weights of each token in the current block
@@ -287,7 +285,8 @@ def matmul(M,
                     if sorted_token_ids_shared[i] != -1:
                         A_shared[i, j] = A[sorted_token_ids_shared[i] // topk, k * block_K + j]
                 if fast_dequant:
-                    get_fast_dequant_twiddling_func()(B_shared, B_dequantize_shared, Scale_shared, k)
+                    get_fast_dequant_twiddling_func()(B_shared, B_dequantize_shared, Scale_shared,
+                                                      k)
                 else:
                     get_simple_dequant_func()(B_shared, B_dequantize_shared, Scale_shared, k)
 
@@ -300,7 +299,7 @@ def matmul(M,
             for i, j in T.Parallel(block_M, block_N):
                 if sorted_token_ids_shared[i] != -1:
                     C[sorted_token_ids_shared[i] // topk, sorted_token_ids_shared[i] % topk,
-                        bx * block_N + j] = C_shared[i, j]
+                      bx * block_N + j] = C_shared[i, j]
 
     return main
 
@@ -397,20 +396,13 @@ def get_data(m, n, k, qk, scale_size, topk, E, block_M):
     return A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, padding_M
 
 
-def main(m=256,
-         n=256,
-         k=256,
-         scale_size=32,
-         fast_dequant=True,
-         with_bias=False,
-         topk=4,
-         E=32):
+def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False, topk=4, E=32):
     # Tunable parameters
     block_M, block_N, block_K = 128, 128, 256
     num_stages = 2
     threads = 512
     split = 1
-    
+
     total_flops = 2 * m * n * k
     num_bits = 4
     num_elems_per_byte = 8 // num_bits
@@ -453,7 +445,8 @@ def main(m=256,
         A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, block_M=block_M)
 
     print("All checks pass. ✅")
-    latency = tilelang.profiler.do_bench(lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=500)
+    latency = tilelang.profiler.do_bench(
+        lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=500)
     print("Tile-lang: {:.2f} ms".format(latency))
     print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 
@@ -463,7 +456,7 @@ def main(m=256,
     print(f"max abs diff: {max_val} at index: {max_idx}")
     assert_similar(output, ref_output, name="output", eps=1e-5)
 
-   
+
 if __name__ == "__main__":
     M, N, K = 1024, 2944, 3072  # From gpt-oss-20b
     scale_size = 32
