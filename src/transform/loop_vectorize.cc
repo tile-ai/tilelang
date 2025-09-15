@@ -24,19 +24,14 @@
 
 #include "loop_vectorize.h"
 
-#include <tvm/arith/iter_affine_map.h>
-#include <tvm/tir/builtin.h>
-#include <tvm/tir/stmt_functor.h>
-
-#include <numeric>
-
-#include "../layout/layout.h"
-#include "../layout/utils.h"
 #include "arith/int_operator.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "common/loop_vectorization_utils.h"
 #include "tvm/tir/analysis.h"
 #include "tvm/tir/var.h"
+#include <tvm/arith/iter_affine_map.h>
+#include <tvm/tir/builtin.h>
+#include <tvm/tir/stmt_functor.h>
 
 namespace tvm {
 namespace tl {
@@ -61,6 +56,14 @@ public:
 private:
   void VisitStmt_(const ForNode *node) final {
     inner_for_ = node;
+    auto extent_ptr = as_const_int(node->extent);
+    // Here I disable dynamic shape completely, 
+    //   In order to do it, the Planner should accept an analyzer with arithmetic info outside to prove the dividiblity of vector size
+    if(!extent_ptr) {
+      vector_size_ = 1;
+      return;
+    }
+    vector_size_ = arith::ZeroAwareGCD(vector_size_, *extent_ptr);
     arith::IRVisitorWithAnalyzer::VisitStmt_(node);
   }
 
@@ -109,10 +112,6 @@ private:
   void UpdateVectorSize(const Array<PrimExpr> &indices, const Buffer &buffer) {
     if (!inner_for_)
       return;
-    auto extent_ptr = inner_for_->extent.as<IntImmNode>();
-    if (!extent_ptr)
-      return;
-
     // 1. Compute raw element offset
     auto strides = buffer->strides;
     if (buffer->strides.empty()) {
@@ -134,9 +133,8 @@ private:
     }
 
     // 3. Tight vectorize bound
-    int max_vector_size = vector_load_bits_max_ / buffer->dtype.bits();
-    max_vector_size = arith::ZeroAwareGCD(max_vector_size, extent_ptr->value);
-    vector_size_ = arith::ZeroAwareGCD(max_vector_size, vector_size_);
+    vector_size_ = arith::ZeroAwareGCD(vector_size_, vector_load_bits_max_ /
+                                                         buffer->dtype.bits());
 
     // 4. Try to vectorize buffer load
     while (!IndiceCanVectorize(elem_offset, inner_for_->loop_var,
