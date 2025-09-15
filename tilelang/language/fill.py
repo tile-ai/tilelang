@@ -8,11 +8,11 @@ from tilelang.utils.language import get_buffer_region_from_load
 
 def fill(buffer: Union[tir.Buffer, tir.BufferRegion], value: tir.PrimExpr):
     """Fill a buffer or buffer region with a specified value.
-    
+
     Args:
         buffer: Either a TVM buffer or buffer region to be filled
         value: The value to fill the buffer with
-    
+
     Returns:
         A TVM intrinsic call that performs the fill operation
     """
@@ -23,13 +23,13 @@ def fill(buffer: Union[tir.Buffer, tir.BufferRegion], value: tir.PrimExpr):
 
 def clear(buffer: Union[tir.Buffer, tir.Var]):
     """Clear a buffer by filling it with zeros.
-    
+
     Args:
         buffer: Either a TVM buffer or a variable that contains a buffer region
-    
+
     Returns:
         A fill operation that sets the buffer contents to zero
-        
+
     Raises:
         ValueError: If the buffer variable contains an invalid buffer region
     """

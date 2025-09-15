@@ -78,7 +78,7 @@ __device__ __inline__ dim3 rasterization2DColumn(const int panel_width) {
     const auto bx = (panelIdx & 1) ? gridDim.x -(baseBlockIdx - panelIdx * panel_width * gridDim.x) /strideLd - 1 : (baseBlockIdx - panelIdx * panel_width *gridDim.x) / strideLd;
     const auto by = (baseBlockIdx - panelIdx * panel_width *gridDim.x) % strideLd + panelIdx * panel_width;
     const auto bz = blockIdx.z;
-    
+
     dim3 blockIdx(bx, by, bz);
     return blockIdx;
 }

@@ -9,10 +9,10 @@ from tilelang.utils.language import get_buffer_elems
 
 def any_of(buffer: Union[T.Tensor, BufferRegion]):
     """Check if any element in the buffer is true.
-    
+
     Args:
         buffer: Either a TVM buffer or buffer region to be checked
-    
+
     Returns:
         A TVM intrinsic call that performs the any operation
     """
@@ -44,10 +44,10 @@ def any_of(buffer: Union[T.Tensor, BufferRegion]):
 
 def all_of(buffer: Union[T.Tensor, BufferRegion]):
     """Check if all elements in the buffer are true.
-    
+
     Args:
         buffer: Either a TVM buffer or buffer region to be checked
-    
+
     Returns:
         A TVM intrinsic call that performs the any operation
     """

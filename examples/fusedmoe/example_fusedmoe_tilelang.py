@@ -478,13 +478,13 @@ class MoE(nn.Module):
 def custom_kernel(data: Tuple[torch.Tensor, Dict, Dict]) -> torch.Tensor:
     """
     DeepSeek-style Mixture of Experts using Tilelang.
-    
+
     Args:
         data: Tuple of (input: torch.Tensor, weights: Dict[str, torch.Tensor], config: Dict)
             - input: Input tensor of shape [batch_size, seq_len, hidden_size]
             - weights: Dictionary containing model weights
             - config: Dictionary containing model configuration parameters
-            
+
     Returns:
         Tuple containing:
             - output: Processed tensor [batch_size, seq_len, d_model]

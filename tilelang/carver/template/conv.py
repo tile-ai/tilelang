@@ -62,8 +62,8 @@ class ConvTemplate(BaseTemplate):
         """
         Defines and initializes the convolution computation.
 
-        This method sets up placeholders for input matrices, computes 
-        the convolution using TVM's compute API, 
+        This method sets up placeholders for input matrices, computes
+        the convolution using TVM's compute API,
         and optionally applies bias and type casting.
 
         Raises:

@@ -12,7 +12,7 @@ class GEMVTemplate(BaseTemplate):
     """
     A template for Generalized Matrix-Vector Multiplication (GEMV).
 
-    This template defines the computation for a matrix-vector multiplication 
+    This template defines the computation for a matrix-vector multiplication
     with configurable parameters such as transposition, data types, and bias addition.
     """
 
@@ -43,8 +43,8 @@ class GEMVTemplate(BaseTemplate):
         """
         Defines and initializes the GEMV computation function.
 
-        This method sets up placeholders for input matrices, computes 
-        the matrix-vector multiplication using TVM's compute API, 
+        This method sets up placeholders for input matrices, computes
+        the matrix-vector multiplication using TVM's compute API,
         and optionally applies bias and type casting.
         """
         M: int = 1  # Fixed M value, representing a single batch dimension
