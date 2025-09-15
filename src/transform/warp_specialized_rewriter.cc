@@ -889,14 +889,8 @@ private:
   Stmt VisitStmt_(const BufferStoreNode *op) final { return FilterByRole(op); }
   Stmt VisitStmt_(const LetStmtNode *op) final { return FilterByRole(op); }
   Stmt VisitStmt_(const AssertStmtNode *op) final { return FilterByRole(op); }
-  Stmt VisitStmt_(const BlockNode *op) final {
-    ICHECK(0);
-    return Stmt();
-  }
-  Stmt VisitStmt_(const BlockRealizeNode *op) final {
-    ICHECK(0);
-    return Stmt();
-  }
+  Stmt VisitStmt_(const BlockNode *op) final { return FilterByRole(op); }
+  Stmt VisitStmt_(const BlockRealizeNode *op) final { return FilterByRole(op); }
 
   struct SyncPattern {
     int release_idx, acquire_idx;
