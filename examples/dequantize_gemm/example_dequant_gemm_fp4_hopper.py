@@ -239,10 +239,7 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
 
     if tune:
 
-        @autotune(
-            configs=get_configs(),
-            warmup=10,
-            rep=10)
+        @autotune(configs=get_configs(), warmup=10, rep=10)
         @tilelang.jit(out_idx=[2])
         def kernel(block_M=None,
                    block_N=None,

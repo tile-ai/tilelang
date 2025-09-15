@@ -6,6 +6,7 @@ import itertools
 import torch
 import argparse
 
+
 def _tir_u8_to_i4_to_i8(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, dtype: str):
     """
     使用左移右移方法将打包在uint8中的4位有符号整数(INT4)转换为8位有符号整数(INT8)
@@ -13,20 +14,21 @@ def _tir_u8_to_i4_to_i8(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, dtype: 
     assert nbit == 4
     assert dtype == "int8"
     assert val.dtype == "uint8"
-    
+
     # 创建4位掩码
     mask = tir.const((1 << nbit) - 1, "uint8")
-    
+
     # 从uint8中提取4位数据
     i4 = (val >> (pos.astype("uint8") * tir.const(nbit, "uint8"))) & mask
-    
+
     # 方法3: 使用左移和算术右移
     # 1. 先将4位数据左移4位，放到int8的高4位
     # 2. 然后算术右移4位，自动进行符号扩展
     i8_shifted = tir.reinterpret("int8", i4 << tir.const(4, "uint8"))
     i8 = i8_shifted >> tir.const(4, "int8")  # 注意这里使用int8类型的右移（算术右移）
-    
+
     return i8
+
 
 def get_configs():
     iter_params = dict(
@@ -38,7 +40,9 @@ def get_configs():
     )
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
 
+
 # test_convert_int4_to_int8()
+
 
 @tilelang.jit(out_idx=[1])
 def _convert_test(N, K, block_N, block_K, in_dtype, num_bits=4, threads=128):
@@ -50,8 +54,8 @@ def _convert_test(N, K, block_N, block_K, in_dtype, num_bits=4, threads=128):
 
     @T.prim_func
     def main(
-        B: T.Tensor(B_shape, storage_dtype),
-        C: T.Tensor((N, K), in_dtype),
+            B: T.Tensor(B_shape, storage_dtype),
+            C: T.Tensor((N, K), in_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), threads=threads) as (bx):
             B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
@@ -69,10 +73,12 @@ def _convert_test(N, K, block_N, block_K, in_dtype, num_bits=4, threads=128):
                         dtype=in_dtype,
                     )
                 T.copy(B_dequantize_local, C[bx * block_N, k * block_K])
-    
+
     return main
 
+
 def torch_convert(tensor):
+
     def _convert(val, pos):
         assert val.dtype == torch.uint8
         val = val.view(torch.int8)
@@ -81,7 +87,7 @@ def torch_convert(tensor):
         i4 = ((i4_shifted << 4) >> 4)
 
         return i4.view(torch.int8)
-    
+
     N = tensor.shape[0]
     K = tensor.shape[1]
     new_tensor = torch.empty(N, K * 2, dtype=torch.int8, device=tensor.device)
@@ -166,38 +172,40 @@ def matmul_int8xint4(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune
                     T.gemm(B_dequantize_prev_local, A_shared, Ct_local, transpose_B=True)
                 T.copy(Ct_local, Ct_shared)
                 T.copy(Ct_shared, Ct[bx * block_N:(bx + 1) * block_N,
-                                        by * block_M:(by + 1) * block_M])
+                                     by * block_M:(by + 1) * block_M])
 
         return main
-    
+
     if tune:
+
         @autotune(configs=get_configs(), warmup=10, rep=10)
         @tilelang.jit(out_idx=[2])
-        def kernel(block_M=None,
-                block_N=None,
-                block_K=None,
-                num_stages=None,
-                threads=None):
+        def kernel(block_M=None, block_N=None, block_K=None, num_stages=None, threads=None):
             return kernel_func(block_M, block_N, block_K, num_stages, threads).prim_func
-    
+
         return kernel()
-    
+
     else:
+
         def kernel(block_M, block_N, block_K, num_stages, threads):
             return kernel_func(block_M, block_N, block_K, num_stages, threads)
+
         return kernel
+
 
 def main(m=128, n=256, k=256, tune=False):
     total_flops = 2 * m * n * k
     if (not tune):
-        kernel = matmul_int8xint4(m, n, k, "int8", "int32", "int32", num_bits=4, tune=tune)(block_M=32, block_N=32, block_K=128, num_stages=1, threads=128)
+        kernel = matmul_int8xint4(
+            m, n, k, "int8", "int32", "int32", num_bits=4, tune=tune)(
+                block_M=32, block_N=32, block_K=128, num_stages=1, threads=128)
         profiler = kernel.get_profiler()
         profiler.assert_allclose(ref_program, rtol=1e-2, atol=1e-2)
         print("All checks pass.")
 
         latency = profiler.do_bench(warmup=50)
         print(f"Tilelang: {latency} ms")
-    
+
     else:
         best_result = matmul_int8xint4(m, n, k, "int8", "int32", "int32", num_bits=4, tune=tune)
         best_latency = best_result.latency
@@ -205,6 +213,7 @@ def main(m=128, n=256, k=256, tune=False):
         print(f"Bset latency: {best_latency}")
         print(f"Best config: {best_config}")
         print(f"Best tflops: {total_flops / best_latency * 1e-9}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
