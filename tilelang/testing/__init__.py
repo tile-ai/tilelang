@@ -43,7 +43,7 @@ def requires_cuda_compute_version(major_version, minor_version=0, mode="ge"):
     minor_version: int
 
         The minor version of the (major,minor) version tuple.
-    
+
     mode: str
 
         The mode of the comparison.

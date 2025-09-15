@@ -20,7 +20,7 @@ from tilelang.profiler.bench import do_bench
 @dataclass
 class Profiler:
     """A profiler class for benchmarking and validating kernel implementations.
-    
+
     Attributes:
         params: List of kernel parameters defining the input/output specifications
         result_idx: Indices indicating which parameters are output tensors
@@ -82,7 +82,7 @@ class Profiler:
         max_mismatched_ratio=0.01,
     ):
         """Validates kernel output against a reference implementation.
-        
+
         Args:
             reference_program: Reference implementation to compare against
             input_tensors: Optional pre-generated input tensors
@@ -151,7 +151,7 @@ class Profiler:
         manual_check_prog: Callable = None,
     ):
         """Validates kernel output against a reference implementation.
-        
+
         Args:
             reference_program: Reference implementation to compare against
             input_tensors: Optional pre-generated input tensors
@@ -177,7 +177,7 @@ class Profiler:
 
     def assert_consistent(self, repeat=10):
         """Checks for kernel consistency across multiple runs.
-        
+
         Args:
             repeat: Number of times to repeat the consistency check
         """
@@ -202,11 +202,11 @@ class Profiler:
 
     def determine_profiler(self, func: Optional[Callable] = None):
         """Determines which profiler backend to use based on function type.
-        
+
         Args:
             func: Function to be profiled
             profiler: Explicitly specified profiler type or "auto" for automatic detection
-        
+
         Returns:
             str: The determined profiler type ("torch" or "tvm")
         """
@@ -225,7 +225,7 @@ class Profiler:
         input_tensors: List[torch.Tensor] = None,
     ) -> float:
         """Benchmarks the execution time of a given function.
-        
+
         Args:
             func: Function to benchmark (uses adapter if None)
             warmup: Warmup time in milliseconds
@@ -234,7 +234,7 @@ class Profiler:
             n_repeat: Number of timing iterations
             profiler: Which profiling backend to use
             input_tensors: Optional pre-generated input tensors
-            
+
         Returns:
             float: Average execution time in milliseconds
         """

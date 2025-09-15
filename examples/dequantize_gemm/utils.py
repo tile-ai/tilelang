@@ -4,15 +4,15 @@ import torch
 def torch_convert_bit_twiddling(tensor):
     """
     Convert a 2-D uint8 tensor into a bfloat16 tensor by decoding pairs of input bytes with a bit-twiddling scheme.
-    
+
     This function expects `tensor` to be a 2-D torch.Tensor of dtype `torch.uint8`. Each output element is produced by combining two input bytes and extracting a bf16-like 16-bit pattern according to one of four positional bit layouts (pos 0..3). The result is scaled by 2**126 to adjust the exponent bias and returned as dtype `torch.bfloat16`.
-    
+
     Parameters:
         tensor (torch.Tensor): 2-D input tensor with dtype `torch.uint8`. Shape (N, K).
-    
+
     Returns:
         torch.Tensor: New tensor of dtype `torch.bfloat16` with shape (N, K*2), where each input column pair produces two bf16 output columns.
-    
+
     Raises:
         AssertionError: If any byte inputs used for a conversion are not dtype `torch.uint8`.
     """
@@ -53,14 +53,14 @@ def torch_convert_bit_twiddling(tensor):
 def torch_convert(tensor, scale_size=None, Scale=None):
     """
     Decode a 2D uint8 tensor into a 2D bfloat16 tensor by expanding each byte into two bf16 values using a 4-bit (nibble) encoding.
-    
+
     Each input byte holds two 4-bit encoded values (low and high nibble). For each nibble this function derives sign/scale bits, a 3-bit exponent fragment and a 1-bit mantissa fragment, assembles a 16-bit bf16 pattern, and returns the resulting tensor with shape (N, K*2) and dtype torch.bfloat16 on the same device as the input.
-    
+
     Parameters:
         tensor (torch.Tensor): 2D tensor of dtype torch.uint8 and shape (N, K). Each byte contains two encoded 4-bit entries that become two bf16 values.
         scale_size (int, optional): If provided, controls how elements of the optional Scale tensor are indexed. When supplied, per-output-element scaling is applied to the exponent using Scale.
         Scale (torch.Tensor, optional): A 2D tensor used to supply per-element integer scale adjustments to the exponent. If scale_size is provided, the scale used for output element (i, j) is Scale[i][j // scale_size].
-    
+
     Returns:
         torch.Tensor: A new tensor of shape (N, K*2) and dtype torch.bfloat16 containing the decoded bf16 values.
     """
@@ -96,9 +96,9 @@ def torch_convert(tensor, scale_size=None, Scale=None):
 def print_bit(name, val):
     """
     Print the 32-bit binary representation of a CPU scalar extracted from a PyTorch tensor.
-    
+
     Converts `val` to CPU, reads its Python scalar with `.item()`, formats it as a 32-bit binary string, and prints it prefixed by `name`.
-    
+
     Parameters:
         name (str): Label printed before the binary representation.
         val (torch.Tensor): A scalar PyTorch tensor (numeric) whose 32-bit binary representation will be shown.
