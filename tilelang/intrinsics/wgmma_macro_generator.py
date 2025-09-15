@@ -144,7 +144,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
               A_buf: Buffer,
               B_buf: Buffer,
               C_local_buf: Buffer,
-              k_inner: Optional[PrimExpr] = 0,
               clear_accum: PrimExpr = False):
         local_size_out = self.local_size_out
         a_dtype_abbrv = self.a_dtype_abbrv
@@ -159,14 +158,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         scale_in_a = 1
         scale_in_b = 1
 
-        # M, K ->
-        k_dim_offset = k_inner * self.micro_size_k
-
         a_is_k_major = not self.a_transposed
         b_is_k_major = self.b_transposed
-
-        print(f"a_shared_layout: {self.a_shared_layout}")
-        print(f"b_shared_layout: {self.b_shared_layout}")
 
         a_swizzle_mode = self._determinate_swizzle_mode(A_buf, self.a_shared_layout)
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
@@ -209,35 +202,43 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         @T.macro
         def _warp_mma(A_buf, B_buf, C_local_buf):
-            for i in T.serial(m_dim // 64):
-                A_offset = i * 64 * A_buf.shape[
-                    -1] + k_dim_offset if a_is_k_major else k_inner * self.micro_size_k * 64 + i * 64 * k_dim
-                B_offset = k_dim_offset if b_is_k_major else k_dim_offset * B_buf.shape[-1]
-                C_offset = i * warp_cols * local_size_out  # 4 warps as an unit
-                T.ptx_wgmma(
-                    accum_dtype,
-                    wgmma_prefix,
-                    self.a_transposed,
-                    not self.b_transposed,
-                    a_dtype_abbrv,
-                    b_dtype_abbrv,
-                    accum_dtype_abbrv,
-                    A_buf.data,
-                    A_offset,
-                    B_buf.data,
-                    B_offset,
-                    C_local_buf.data,
-                    C_offset,
-                    scale_out,
-                    scale_in_a,
-                    scale_in_b,
-                    a_swizzle_mode,
-                    int(a_leading_byte_offset >> 4),
-                    int(a_stride_byte_offset >> 4),
-                    b_swizzle_mode,
-                    int(b_leading_byte_offset >> 4),
-                    int(b_stride_byte_offset >> 4),
-                )
+            desc_a = T.alloc_descriptor()
+            desc_b = T.alloc_descriptor()
+            T.initialize_descriptor(desc_a, A_buf.access_ptr("w"), a_swizzle_mode, int(a_leading_byte_offset >> 4), int(a_stride_byte_offset >> 4))
+            T.initialize_descriptor(desc_b, B_buf.access_ptr("w"), b_swizzle_mode, int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+            for ki in T.serial(0, (k_dim // self.micro_size_k)):
+                for i in T.serial(m_dim // 64):
+                    k_dim_offset = ki * self.micro_size_k
+                    A_offset = i * 64 * A_buf.shape[
+                        -1] + k_dim_offset if a_is_k_major else ki * self.micro_size_k * 64 + i * 64 * k_dim
+                    B_offset = k_dim_offset if b_is_k_major else k_dim_offset * B_buf.shape[-1]
+                    C_offset = i * warp_cols * local_size_out  # 4 warps as an unit
+                    T.ptx_wgmma(
+                        accum_dtype,
+                        wgmma_prefix,
+                        self.a_transposed,
+                        not self.b_transposed,
+                        a_dtype_abbrv,
+                        b_dtype_abbrv,
+                        accum_dtype_abbrv,
+                        desc_a.data,
+                        (A_offset * elems_in_bytes) >> 4,
+                        desc_b.data,
+                        (B_offset * elems_in_bytes) >> 4,
+                        C_local_buf.data,
+                        C_offset,
+                        scale_out,
+                        scale_in_a,
+                        scale_in_b,
+                        a_swizzle_mode,
+                        int(a_leading_byte_offset >> 4),
+                        int(a_stride_byte_offset >> 4),
+                        b_swizzle_mode,
+                        int(b_leading_byte_offset >> 4),
+                        int(b_stride_byte_offset >> 4),
+                    )
+
+                        
 
         return _warp_mma(A_buf, B_buf, C_local_buf)
 

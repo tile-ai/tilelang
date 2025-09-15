@@ -1042,8 +1042,7 @@ GetMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
   return std::make_tuple(templates.str(), inputs.str(), outputs.str());
 }
 
-inline std::tuple<std::string, std::string, std::string, std::string,
-                  std::string, std::string>
+inline std::tuple<std::string, std::string, std::string, std::string>
 GetWGMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
                  ptx::DataType dtype_b, ptx::DataType dtype_c, bool sparse) {
   bool a_is_shared = true;
@@ -1106,7 +1105,7 @@ GetWGMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
 
   // generate inputs
   if (a_is_shared) {
-    inputs << "\"l\"(uint64_t(desc_a))";
+    inputs << "\"l\"(uint64_t((desc_a) + (A_offset)))";
   } else {
     for (int i = 0; i < num_operands_a; ++i) {
       if (i != 0) {
@@ -1116,7 +1115,7 @@ GetWGMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
              << "((A)))[" << i << "])";
     }
   }
-  inputs << ", \"l\"(uint64_t(desc_b))";
+  inputs << ", \"l\"(uint64_t((desc_b) + (B_offset)))";
 
   // input of metadata for sparse mma.
   if (sparse) {
@@ -1143,33 +1142,8 @@ GetWGMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
             << "((D)))[" << i << "])";
   }
 
-  // generate descriptor code
-  std::stringstream descriptor_code_a, descriptor_code_b;
-  descriptor_code_a << "tl::GmmaDescriptor desc_a;\n";
-  descriptor_code_a << "  desc_a.bitfield.start_address_ = "
-                       "(cast_smem_ptr_to_uint((A))) >> 4;\n";
-  descriptor_code_a
-      << "  desc_a.bitfield.layout_type_ = uint8_t((swizzle_mode_a));\n";
-  descriptor_code_a << "  desc_a.bitfield.base_offset_ = uint8_t(0);\n";
-  descriptor_code_a << "  desc_a.bitfield.leading_byte_offset_ = "
-                       "uint32_t((leading_byte_offset_a));\n";
-  descriptor_code_a << "  desc_a.bitfield.stride_byte_offset_ = "
-                       "uint32_t((stride_byte_offset_a));\n";
-
-  descriptor_code_b << "tl::GmmaDescriptor desc_b;\n";
-  descriptor_code_b << "  desc_b.bitfield.start_address_ = "
-                       "(cast_smem_ptr_to_uint((B))) >> 4;\n";
-  descriptor_code_b
-      << "  desc_b.bitfield.layout_type_ = uint8_t((swizzle_mode_b));\n";
-  descriptor_code_b << "  desc_b.bitfield.base_offset_ = uint8_t(0);\n";
-  descriptor_code_b << "  desc_b.bitfield.leading_byte_offset_ = "
-                       "uint32_t((leading_byte_offset_b));\n";
-  descriptor_code_b << "  desc_b.bitfield.stride_byte_offset_ = "
-                       "uint32_t((stride_byte_offset_b));\n";
-
   return std::make_tuple(templates.str(), inputs.str(), outputs.str(),
-                         predicate.str(), descriptor_code_a.str(),
-                         descriptor_code_b.str());
+                         predicate.str());
 }
 
 std::string
@@ -1240,9 +1214,8 @@ PrintMMAAssembly(const std::string &shape, const std::string &A_layout,
 std::string PrintWGMMAAssembly(
     const std::string &shape, const bool &A_layout, const bool &B_layout,
     const std::string &A_dtype, const std::string &B_dtype,
-    const std::string &C_dtype, const std::string &a_ptr,
-    const std::string &a_offset, const std::string &b_ptr,
-    const std::string &b_offset, const std::string &c_ptr,
+    const std::string &C_dtype, const std::string &a_desc, const std::string &A_offset, const std::string &b_desc, const std::string &B_offset,
+    const std::string &c_ptr,
     const std::string &c_offset, const bool &scale_out, const bool &scale_in_a,
     const bool &scale_in_b, const bool &a_is_shared, const int &a_swizzle_mode,
     const int &a_lbo, const int &a_sbo, const int &b_swizzle_mode,
@@ -1266,8 +1239,6 @@ std::string PrintWGMMAAssembly(
                            dtype_c, sparse);
   std::string asm_code = R"(
   {
-    {descriptor_code_a}
-    {descriptor_code_b}
     __asm__ __volatile__(
       "{.reg .pred p;\n"
       "setp.ne.b32 p, {predicate}, 0;\n"
@@ -1277,8 +1248,7 @@ std::string PrintWGMMAAssembly(
       : {inputs});
   }
 )";
-  auto [templates_str, inputs_str, outputs_str, predicate_str,
-        descriptor_code_a, descriptor_code_b] =
+  auto [templates_str, inputs_str, outputs_str, predicate_str] =
       GetWGMMAOperands(m, n, k, dtype_a, dtype_b, dtype_c, sparse);
 
   // replace patterns
@@ -1288,16 +1258,16 @@ std::string PrintWGMMAAssembly(
   replacer.register_rule("{.atype}", ptx::DTypeToString(dtype_a));
   replacer.register_rule("{.btype}", ptx::DTypeToString(dtype_b));
   replacer.register_rule("{.dtype}", ptx::DTypeToString(dtype_c));
-  replacer.register_rule("{descriptor_code_a}", descriptor_code_a);
-  replacer.register_rule("{descriptor_code_b}", descriptor_code_b);
   replacer.register_rule("{templates}", templates_str);
   replacer.register_rule("{outputs}", outputs_str);
   replacer.register_rule("{inputs}", inputs_str);
   replacer.register_rule("{predicate}", predicate_str);
   asm_code = replacer.rewrite(asm_code);
   replacer.empty_rules();
-  replacer.register_rule("(A)", a_ptr + " + " + a_offset);
-  replacer.register_rule("(B)", b_ptr + " + " + b_offset);
+  replacer.register_rule("(desc_a)", a_desc);
+  replacer.register_rule("(desc_b)", b_desc);
+  replacer.register_rule("(A_offset)", A_offset);
+  replacer.register_rule("(B_offset)", B_offset);
   replacer.register_rule("(C)", c_ptr + " + " + c_offset);
   replacer.register_rule("(D)", c_ptr + " + " + c_offset);
   replacer.register_rule("(E)", metadata + " + " + metadata_offset);

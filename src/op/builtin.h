@@ -166,7 +166,7 @@ TVM_DLL const Op &mbarrier_expect_tx();
  *
  *  void ptx_wgmma(StringImm accum_dtype, StringImm wgmma_prefix, bool trans_a,
  * bool trans_b, StringImm a_dtype_abbrv, StringImm b_dtype_abbrv, StringImm
- * accum_dtype_abbrv, Var A_data, Var A_offset, Var B_data, Var B_offset, Var
+ * accum_dtype_abbrv, Var A_descriptor, PrimExpr A_offset, Var B_descriptor, Var B_offset, Var
  * C_data, Var C_offset, StringImm a_swizzle_mode, StringImm a_lbo, StringImm
  * a_sbo, StringImm b_swizzle_mode, StringImm b_lbo, StringImm b_sbo, bool
  * scale_out, bool scale_in_a, bool scale_in_b, bool trans_a, bool trans_b);
@@ -330,6 +330,20 @@ TVM_DLL const Op &tl_gemm_sp();
  *  This op is used to represent a shuffle elect operation in tilelang.
  */
 TVM_DLL const Op &tl_shuffle_elect();
+
+/*!
+ * \brief tilelang intrinsic for initializing a descriptor buffer for wgmma/utcmma.
+ *
+ *  This op is used to represent a descriptor initialization operation in tilelang.
+ */
+TVM_DLL const Op &initialize_descriptor();
+
+/*!
+ * \brief tilelang intrinsic for setting the start address of a descriptor buffer for wgmma/utcmma.
+ *
+ *  This op is used to represent a descriptor start address setting operation in tilelang.
+ */
+TVM_DLL const Op &increase_descriptor_offset();
 
 } // namespace tl
 } // namespace tvm

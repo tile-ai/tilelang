@@ -122,9 +122,8 @@ class GemmWGMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                for ki in T.serial(0, (block_K // micro_size_k)):
-                    # Perform Matrix Multiplication
-                    mma_emitter.wgmma(A_shared, B_shared, C_local, ki, clear_accum)
+                # Perform Matrix Multiplication
+                mma_emitter.wgmma(A_shared, B_shared, C_local, clear_accum)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
