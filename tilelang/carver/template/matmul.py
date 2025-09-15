@@ -56,8 +56,8 @@ class MatmulTemplate(BaseTemplate):
         """
         Defines and initializes the matrix multiplication computation.
 
-        This method sets up placeholders for input matrices, computes 
-        the matrix multiplication using TVM's compute API, 
+        This method sets up placeholders for input matrices, computes
+        the matrix multiplication using TVM's compute API,
         and optionally applies bias and type casting.
 
         Raises:

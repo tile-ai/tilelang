@@ -5,6 +5,8 @@ import tvm
 from tilelang import _ffi_api
 
 
+# Use a stable swizzled layout to ensure consistent memory access patterns.
+# Swizzling should be enabled or disabled based on whether TMA (Tensor Memory Access) is applied.
 def make_swizzled_layout(buffer: tvm.tir.Buffer):
     assert len(buffer.shape) == 2
     return _ffi_api.make_swizzled_layout(

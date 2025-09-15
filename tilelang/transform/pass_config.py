@@ -22,7 +22,7 @@ class PassConfigKey(str, Enum):
     """Disable fast math optimization. Default: False"""
 
     TL_PTXAS_REGISTER_USAGE_LEVEL = "tl.ptxas_register_usage_level"
-    """The PTXAS register usage level in [0, 10], which controls the 
+    """The PTXAS register usage level in [0, 10], which controls the
     aggressiveness of optimizations that affect register usage. Default: None"""
 
     TL_ENABLE_PTXAS_VERBOSE_OUTPUT = "tl.enable_ptxas_verbose_output"

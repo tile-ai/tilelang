@@ -19,30 +19,6 @@ namespace tl {
 using namespace tir;
 
 /**
- * @brief Compute the prime factorization of an integer.
- *
- * Returns the prime factors of x in non-decreasing order by repeatedly dividing
- * out the smallest possible factor.
- *
- * @param x Integer to factorize. If x <= 1, an empty vector is returned.
- * @return std::vector<int> Prime factors of x (with multiplicity), in
- * non-decreasing order.
- */
-static std::vector<int> toPrimeFactors(int x) {
-  int i = 2;
-  std::vector<int> result;
-  while (x > 1) {
-    if (x % i == 0) {
-      x /= i;
-      result.push_back(i);
-    } else {
-      i++;
-    }
-  }
-  return result;
-}
-
-/**
  * @brief Construct a Gemm operator from serialized TL arguments and a buffer
  * map.
  *
@@ -268,7 +244,6 @@ GemmWarpPolicyNode::ComputeWarpPartition(int M, int N, int block_size,
     int best_m = 1;
     int best_n = 1;
     float best_balance = std::numeric_limits<float>::max();
-
     // Try all possible combinations that satisfy the constraints
     for (int m = 1; m <= max_m_warps && m <= num_warps; m++) {
       int n = num_warps / m;
@@ -276,6 +251,13 @@ GemmWarpPolicyNode::ComputeWarpPartition(int M, int N, int block_size,
       // Calculate how balanced this partition is
       float m_per_warp = static_cast<float>(M) / (m * kMPerWarp);
       float n_per_warp = static_cast<float>(N) / (n * kNPerWarp);
+      // m_per_warp and n_per_warp must be greater than 1
+      if (m_per_warp < 1 || n_per_warp < 1)
+        continue;
+      // m * n must equal num_warps
+      if (m * n != num_warps)
+        continue;
+
       float balance = std::abs(m_per_warp / n_per_warp - ideal_ratio);
 
       if (balance < best_balance) {
@@ -290,7 +272,6 @@ GemmWarpPolicyNode::ComputeWarpPartition(int M, int N, int block_size,
   } else {
     ICHECK(0) << "Unknown GemmWarpPolicy";
   }
-
   // Store the computed values in the object's member variables
   this->m_warp = m_warp;
   this->n_warp = n_warp;
@@ -601,7 +582,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       results.Set(A, shared_layout);
     } else if (A.scope() == "local.fragment") {
       auto fragment = makeGemmFragmentACDNA(M, N, K, M / warp_m, N / warp_n,
-                                            A->dtype.bits(), trans_A);
+                                            A->dtype.bits(), kPack, trans_A);
       results.Set(A, fragment->BindThreadRange(thread_range));
     } else {
       ICHECK(0);
@@ -613,10 +594,6 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
           *as_const_int(B->shape[dim_B - 1]), B->dtype.bits(), kPack);
 
       results.Set(B, shared_layout);
-    } else if (B.scope() == "local.fragment") {
-      auto fragment =
-          makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
-      results.Set(B, fragment->BindThreadRange(thread_range));
     } else {
       ICHECK(0);
     }
@@ -631,6 +608,22 @@ TIR_REGISTER_TL_OP(Gemm, gemm)
     .set_num_inputs(5)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+TVM_REGISTER_OP("tl.GemmWarpPolicy")
+    .set_attr<TScriptPrinterName>("TScriptPrinterName", "GemmWarpPolicy");
+
+TVM_FFI_STATIC_INIT_BLOCK({
+  GemmNode::RegisterReflection();
+  GemmWarpPolicyNode::RegisterReflection();
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("tl.GemmWarpPolicyComputeWarpPartition",
+                        [](GemmWarpPolicy policy, int M, int N, int block_size,
+                           Target target, bool is_wgmma) {
+                          policy->ComputeWarpPartition(M, N, block_size, target,
+                                                       is_wgmma);
+                          return;
+                        });
+});
 
 } // namespace tl
 } // namespace tvm

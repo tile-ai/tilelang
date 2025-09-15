@@ -16,7 +16,7 @@ from tilelang.utils.language import retrieve_func_from_module
 
 class CtypesKernelAdapter(BaseKernelAdapter):
     """Adapter class that converts TVM/TIR functions to callable CUDA kernels using ctypes.
-    
+
     This adapter handles:
     1. Converting TIR functions to compiled CUDA libraries
     2. Managing dynamic shapes in tensor operations
@@ -52,7 +52,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
                  pass_configs: Optional[Dict[str, Any]] = None,
                  compile_flags: Optional[List[str]] = None):
         """Initialize the adapter with the given TIR function or module.
-        
+
         Args:
             params: List of tensor types for inputs/outputs
             result_idx: Indices of output tensors
@@ -157,7 +157,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
     def _process_dynamic_symbolic(self) -> Dict[tir.Var, Tuple[int, int, int]]:
         """Extract information about dynamic shapes from the TIR function.
-        
+
         Maps symbolic variables to their corresponding (id, buffer_index, dimension)
         for runtime shape resolution.
         id represents shape or stride, 0 represents shape, 1 represents stride
@@ -184,7 +184,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
 
     def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):
         """Low-level function to call the compiled CUDA kernel.
-        
+
         Converts PyTorch tensor pointers to C void pointers for ctypes interface.
         """
         ctypes_args = [
@@ -197,17 +197,17 @@ class CtypesKernelAdapter(BaseKernelAdapter):
                                         *ins: List[torch.Tensor],
                                         stream: Optional[int] = None):
         """High-level wrapper for kernel execution.
-        
+
         Handles:
         1. Input validation
         2. Output tensor allocation
         3. Dynamic shape resolution
         4. CUDA stream management
-        
+
         Args:
             ins: Input PyTorch tensors
             stream: Optional CUDA stream for asynchronous execution
-        
+
         Returns:
             Single tensor or list of tensors containing the kernel results
         """

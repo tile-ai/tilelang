@@ -94,8 +94,8 @@ def reduce_sum(buffer: tir.Buffer, out: tir.Buffer, dim: int = -1, clear: bool =
         clear (bool, optional): If True, output buffer will be cleared before reduction.
                               If False, results will be accumulated on existing values.
                               Defaults to True.
-    Note: When clear=True, reduce_sum will not compute directly on the output buffer. This is because 
-          during warp reduction, the same value would be accumulated multiple times (number of threads 
+    Note: When clear=True, reduce_sum will not compute directly on the output buffer. This is because
+          during warp reduction, the same value would be accumulated multiple times (number of threads
           in the warp). Therefore, the implementation with clear=True follows these steps:
         1. create a temp buffer with same shape and dtype as out
         2. copy out to temp buffer
@@ -157,9 +157,9 @@ def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -
 def cumsum(src: tir.Buffer, dst: Optional[tir.Buffer] = None, dim: int = 0, reverse: bool = False):
     """
     Compute the cumulative sum of `src` along `dim`, writing results to `dst`.
-    
+
     Negative `dim` indices are normalized (Python-style). If `dst` is None, the operation is performed in-place into `src`. Raises ValueError when `dim` is out of bounds for `src.shape`. When `src.scope() == "local.fragment"`, this delegates to `cumsum_fragment`; otherwise it emits the `tl.cumsum` intrinsic.
-    
+
     Returns:
         tir.Call: A handle to the emitted cumulative-sum operation.
     """
@@ -187,13 +187,13 @@ def cumsum(src: tir.Buffer, dst: Optional[tir.Buffer] = None, dim: int = 0, reve
 def finalize_reducer(reducer: tir.Buffer):
     """
     Finalize a reducer buffer by emitting the `tl.finalize_reducer` intrinsic.
-    
+
     This returns a TVM `tir.Call` handle that finalizes the given reducer using its writable pointer.
     The call does not modify Python objects directly; it produces the low-level intrinsic call used by the IR.
-    
+
     Parameters:
         reducer (tir.Buffer): Reducer buffer whose writable pointer will be finalized.
-    
+
     Returns:
         tir.Call: Handle to the finalize reducer intrinsic call.
     """

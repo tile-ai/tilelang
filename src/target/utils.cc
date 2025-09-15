@@ -18,11 +18,11 @@ bool TargetIsRocm(Target target) {
 int GetArchInt(Target target) {
   auto s = target->GetAttr<String>("arch");
   ICHECK(s.defined());
-  const char *arch_str = s.value().c_str();
-  ICHECK_EQ(arch_str[0], 's');
-  ICHECK_EQ(arch_str[1], 'm');
-  ICHECK_EQ(arch_str[2], '_');
-  return atoi(&arch_str[3]);
+  const std::string arch_str = s.value();
+  ICHECK(arch_str.size() >= 3);
+  ICHECK_EQ(arch_str.compare(0, 3, "sm_"), 0)
+      << "arch string must start with sm_";
+  return std::stoi(arch_str.substr(3));
 }
 
 bool TargetIsVolta(Target target) {
@@ -117,6 +117,37 @@ int TargetGetWarpSize(Target target) {
     res = 64;
   return res;
 }
+
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef()
+      .def("tl.TargetIsCuda",
+           [](Target target) { return TargetIsCuda(target); })
+      .def("tl.TargetIsRocm",
+           [](Target target) { return TargetIsRocm(target); })
+      .def("tl.TargetIsVolta",
+           [](Target target) { return TargetIsVolta(target); })
+      .def("tl.TargetIsTuring",
+           [](Target target) { return TargetIsTuring(target); })
+      .def("tl.TargetIsAmpere",
+           [](Target target) { return TargetIsAmpere(target); })
+      .def("tl.TargetIsHopper",
+           [](Target target) { return TargetIsHopper(target); })
+      .def("tl.TargetIsSM120",
+           [](Target target) { return TargetIsSM120(target); })
+      .def("tl.TargetIsCDNA",
+           [](Target target) { return TargetIsCDNA(target); })
+      .def("tl.TargetHasAsyncCopy",
+           [](Target target) { return TargetHasAsyncCopy(target); })
+      .def("tl.TargetHasLdmatrix",
+           [](Target target) { return TargetHasLdmatrix(target); })
+      .def("tl.TargetHasStmatrix",
+           [](Target target) { return TargetHasStmatrix(target); })
+      .def("tl.TargetHasBulkCopy",
+           [](Target target) { return TargetHasBulkCopy(target); })
+      .def("tl.TargetGetWarpSize",
+           [](Target target) { return TargetGetWarpSize(target); });
+});
 
 } // namespace tl
 } // namespace tvm

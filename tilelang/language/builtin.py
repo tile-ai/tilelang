@@ -29,7 +29,7 @@ def create_list_of_mbarrier(*args: Any) -> Call:
     ------
     TypeError
         If the input is not a list or variadic arguments.
-    
+
     Examples
     --------
     >>> create_list_of_mbarrier([128, 128])
@@ -350,3 +350,9 @@ def sync_grid():
     """Synchronize all threads in a grid.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"))
+
+
+def cp_async_barrier_noinc(barrier_id: Union[int, PrimExpr, tir.Call]):
+    """Perform a ptx async copy barrier using cp.async.mbarrier.arrive.noinc.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier_id)

@@ -31,10 +31,10 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale
                           dtype: str):
     """
         Convert a packed 4-bit field stored in a uint8 into a bfloat16 value using an exponent scale.
-        
+
         This function expects a storage field of width `nbit == 4` packed into the 8-bit input `val` and returns
         a bfloat16 constructed from the unpacked sign, a scaled exponent, and the 1-bit mantissa.
-        
+
         Behavior:
         - Validates `nbit == 4`, `dtype == "bfloat16"`, and `val.dtype == "uint8"` (AssertionError if violated).
         - Extracts the 4-bit field at position `pos` (fields are packed consecutively in `val`).
@@ -43,14 +43,14 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale
         and clamps the result to the 8-bit exponent range (0..255).
         - Assembles a 16-bit bfloat16 bit pattern from (sign, biased-and-scaled-exponent, mantissa) and
         returns it reinterpreted as `bfloat16`.
-        
+
         Parameters:
         - nbit: must be 4 (width of the packed field).
         - val: uint8 expression containing packed fields.
         - pos: index of the field within `val` (0-based); used to compute the bit shift.
         - scale: exponent-scale to add to the converted exponent (treated as an unsigned integer expression).
         - dtype: must be "bfloat16".
-        
+
         Returns:
         - A tir.PrimExpr of dtype "bfloat16" representing the decoded and scaled value.
         """
@@ -75,16 +75,16 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale
 def _tir_f32x2_to_bf16x2_to_u32(v0: tir.PrimExpr, v1: tir.PrimExpr, round_to_even: bool = True):
     """
     Convert two float32 values to bfloat16 and pack them into a single uint32.
-    
+
     The two inputs v0 and v1 (float32 PrimExpr) are reinterpreted as uint32 bit patterns, optionally rounded to nearest-even
     by adding a rounding bias, then truncated to their upper 16 bits (bfloat16 representation). The two 16-bit results are
     packed into a uint32 with v0 in the lower 16 bits and v1 in the upper 16 bits.
-    
+
     Parameters:
         v0 (tir.PrimExpr): First float32 value to convert and pack.
         v1 (tir.PrimExpr): Second float32 value to convert and pack.
         round_to_even (bool): If True, apply round-to-nearest-even bias before truncation (default True).
-    
+
     Returns:
         tir.PrimExpr: A uint32 PrimExpr containing the packed bfloat16 representations (v0 low 16 bits, v1 high 16 bits).
     """
