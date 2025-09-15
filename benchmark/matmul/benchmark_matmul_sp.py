@@ -288,6 +288,8 @@ if __name__ == "__main__":
     print(f"Best config: {best_config}")
 
     if args.bench_torch_sparse is not None:
-        print(f"Torch sparse ({args.bench_torch_sparse}) TFlops: {total_flops / torch_sparse_latency * 1e-9:.3f}")
+        print(
+            f"Torch sparse ({args.bench_torch_sparse}) TFlops: {total_flops / torch_sparse_latency * 1e-9:.3f}"
+        )
 
     print(f"Reference Dense TFlops: {total_flops / ref_latency * 1e-9:.3f}")

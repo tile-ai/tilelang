@@ -1,7 +1,7 @@
 """Wrapping Layouts."""
 # pylint: disable=invalid-name, unsupported-binary-operation
 
-from tilelang.autotuner.capture import Optional
+from typing import Optional
 import tvm
 import tilelang.language as T
 import warnings
@@ -116,7 +116,7 @@ def _make_metadata_layout_sm8x_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str):
     #      https://github.com/nvidia/cutlass/blob/ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e/include/cutlass/layout/matrix.h#L405
     #      https://github.com/nvidia/cutlass/blob/ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e/include/cutlass/gemm/warp/mma_sparse_tensor_op.h#L172
 
-    if mma_dtype in ["float16, bfloat16"] and buffer.dtype not in ["uint16", "int16"]:
+    if mma_dtype in ["float16", "bfloat16"] and buffer.dtype not in ["uint16", "int16"]:
         raise ValueError(f"metadata should be 16 bit, got {buffer.dtype}")
 
     if mma_dtype in ["float8", "int8", "uint8"] and buffer.dtype not in ["uint32", "int32"]:

@@ -28,6 +28,8 @@ template <typename Shape> struct ShapeCheck<uint8_t, Shape> {
       (Shape::kM % 16 == 0) && (Shape::kN % 16 == 0) && (Shape::kK % 64 == 0);
 };
 
+// ref:
+// https://github.com/NVIDIA/cutlass/blob/main/include/cutlass/gemm/threadblock/default_mma_core_sparse_sm80.h
 template <typename T> struct DispatchInstructionShape {
   static_assert(!std::is_same_v<T, T>,
                 "Unsupported type for DispatchInstructionShape");
@@ -119,13 +121,9 @@ template <> struct DispatchType<cutlass::bfloat16_t> {
   using Type = cutlass::bfloat16_t;
 };
 
-template <> struct DispatchType<unsigned char> {
-  using Type = uint8_t;
-};
+template <> struct DispatchType<unsigned char> { using Type = uint8_t; };
 
-template <> struct DispatchType<signed char> {
-  using Type = int8_t;
-};
+template <> struct DispatchType<signed char> { using Type = int8_t; };
 
 template <typename Shape, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, typename A_type_raw,
