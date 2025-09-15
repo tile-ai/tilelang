@@ -41,12 +41,12 @@ def matmul_sp(
             T.annotate_layout({
                 E:
                     make_metadata_layout(
-                        E, mma_dtype="float16", arch="sm90", backend="cutlass", block_k=block_K),
+                        E, mma_dtype="float16", arch="9.0", backend="cutlass", block_k=block_K),
                 E_shared:
                     make_metadata_layout(
                         E_shared,
                         mma_dtype="float16",
-                        arch="sm90",
+                        arch="9.0",
                         backend="cutlass",
                         block_k=block_K),
             })

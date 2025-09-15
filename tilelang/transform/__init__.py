@@ -6,6 +6,7 @@ from .simplify import Simplify, simplify_prim_func, LetInline  # noqa: F401
 from .pass_config import PassConfigKey  # noqa: F401
 from tilelang import tvm as tvm  # noqa: F401
 from tvm.ir.transform import PassContext  # noqa: F401
+from .add_bufstore_wrapper import AddWrapperForSingleBufStore  # noqa: F401
 
 
 def get_pass_context():
