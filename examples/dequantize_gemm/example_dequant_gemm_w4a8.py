@@ -8,25 +8,16 @@ import argparse
 
 
 def _tir_u8_to_i4_to_i8(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, dtype: str):
-    """
-    使用左移右移方法将打包在uint8中的4位有符号整数(INT4)转换为8位有符号整数(INT8)
-    """
     assert nbit == 4
     assert dtype == "int8"
     assert val.dtype == "uint8"
 
-    # 创建4位掩码
     mask = tir.const((1 << nbit) - 1, "uint8")
 
-    # 从uint8中提取4位数据
     i4 = (val >> (pos.astype("uint8") * tir.const(nbit, "uint8"))) & mask
 
-    # 方法3: 使用左移和算术右移
-    # 1. 先将4位数据左移4位，放到int8的高4位
-    # 2. 然后算术右移4位，自动进行符号扩展
     i8_shifted = tir.reinterpret("int8", i4 << tir.const(4, "uint8"))
-    i8 = i8_shifted >> tir.const(4, "int8")  # 注意这里使用int8类型的右移（算术右移）
-
+    i8 = i8_shifted >> tir.const(4, "int8")
     return i8
 
 
@@ -39,9 +30,6 @@ def get_configs():
         threads=[128, 256, 512],
     )
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
-
-
-# test_convert_int4_to_int8()
 
 
 @tilelang.jit(out_idx=[1])
@@ -97,20 +85,6 @@ def torch_convert(tensor):
     return new_tensor
 
 
-def test_int4_int8_convert_close():
-    N, K = 256, 256
-    block_N, block_K = 64, 64
-    tl_convert_kernel = _convert_test(N, K, block_N, block_K, "int8")
-    B = torch.randint(0, 16, (N, K // 2), dtype=torch.uint8, device="cuda").to(torch.uint8)
-    tl_out = tl_convert_kernel(B)
-    ref_out = torch_convert(B)
-
-    print(tl_out)
-    print(ref_out)
-    assert torch.allclose(tl_out, ref_out, rtol=0.01, atol=0.01), (tl_out, ref_out)
-    print("pass")
-
-
 def ref_program(A, qB):
     dtypeC = "int32"
     B = torch_convert(qB)
@@ -123,8 +97,6 @@ def matmul_int8xint4(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune
 
     @tilelang.jit(out_idx=[2])
     def kernel_func(block_M, block_N, block_K, num_stages, threads):
-        # K是解包后的K
-        # 因此解包前是K // 2
         num_elems_per_byte = 8 // num_bits
         storage_dtype = "uint8"
         A_shape = (M, K)
@@ -224,5 +196,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     M, N, K = args.m, args.n, args.k
-    # main(M, N, K, args.tune)
-    main(M, N, K, True)
+    main(M, N, K, args.tune)
+    # main(M, N, K, True)
