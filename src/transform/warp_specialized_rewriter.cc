@@ -1283,8 +1283,11 @@ tvm::transform::Pass WarpSpecialized() {
     if (!warp_specialized) {
       return WarpSpecializedRewriter::Substitute(f, disable_warp_specialized,
                                                  disable_shuffle_elect);
+    } else {
+      ObjectRef node = String("default");
+      f.CopyOnWrite()->body = AttrStmt(node, attr::kCustomWarpSpecialization, 1, f->body);
+      return f;
     }
-    return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.WarpSpecialized", {});
 }
