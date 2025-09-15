@@ -206,7 +206,6 @@ def matmul(M,
             B_local = T.alloc_fragment(B_shared_shape, storage_dtype)
             B_dequantize_local = T.alloc_fragment(B_dequantize_shared_shape, out_dtype)
 
-            bx = T.get_block_binding(0)  # noqa: F841
             T.copy(B_shared, B_local)
             for i, j in T.Parallel(block_N, block_K):
                 B_dequantize_local[i, j] = _tir_u8_to_f4_to_bf16(
@@ -244,7 +243,7 @@ def matmul(M,
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
             topk_weights_shared = T.alloc_shared((block_M), out_dtype)
-            sorted_token_ids_shared = T.alloc_shared((block_M), "int32")  # todo: frag?
+            sorted_token_ids_shared = T.alloc_shared((block_M), "int32")
             expert_id = T.alloc_local((1), "int32")  # the expert id for the current block
             # To use 1D TMA, the last dim of Scale_shared must have stride=1
             # May use much more shared memory than necessary
