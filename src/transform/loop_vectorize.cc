@@ -57,9 +57,10 @@ private:
   void VisitStmt_(const ForNode *node) final {
     inner_for_ = node;
     auto extent_ptr = as_const_int(node->extent);
-    // Here I disable dynamic shape completely, 
-    //   In order to do it, the Planner should accept an analyzer with arithmetic info outside to prove the dividiblity of vector size
-    if(!extent_ptr) {
+    // Here I disable dynamic shape completely,
+    //   In order to do it, the Planner should accept an analyzer with
+    //   arithmetic info outside to prove the dividiblity of vector size
+    if (!extent_ptr) {
       vector_size_ = 1;
       return;
     }
