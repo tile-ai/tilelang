@@ -204,8 +204,10 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         def _warp_mma(A_buf, B_buf, C_local_buf):
             desc_a = T.alloc_descriptor()
             desc_b = T.alloc_descriptor()
-            T.initialize_descriptor(desc_a, A_buf.access_ptr("w"), a_swizzle_mode, int(a_leading_byte_offset >> 4), int(a_stride_byte_offset >> 4))
-            T.initialize_descriptor(desc_b, B_buf.access_ptr("w"), b_swizzle_mode, int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+            T.initialize_descriptor(desc_a, A_buf.access_ptr("w"), a_swizzle_mode,
+                                    int(a_leading_byte_offset >> 4), int(a_stride_byte_offset >> 4))
+            T.initialize_descriptor(desc_b, B_buf.access_ptr("w"), b_swizzle_mode,
+                                    int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
             for ki in T.serial(0, (k_dim // self.micro_size_k)):
                 for i in T.serial(m_dim // 64):
                     k_dim_offset = ki * self.micro_size_k
@@ -237,8 +239,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                         int(b_leading_byte_offset >> 4),
                         int(b_stride_byte_offset >> 4),
                     )
-
-                        
 
         return _warp_mma(A_buf, B_buf, C_local_buf)
 

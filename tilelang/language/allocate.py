@@ -125,6 +125,7 @@ def alloc_reducer(shape, dtype, op="sum", replication=None):
 
     return reducer
 
+
 def alloc_descriptor(dtype="uint64", scope="local.descriptor"):
     """Allocate a descriptor buffer for wgmma and utcmma.
 

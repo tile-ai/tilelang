@@ -1340,8 +1340,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     bool a_is_shared = true;
     this->PrintIndent();
     std::string asm_code = PrintWGMMAAssembly(
-        shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_desc, A_offset, b_desc, B_offset,
-        c_ref, c_offset, scale_out, scale_in_a, scale_in_b,
+        shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_desc, A_offset,
+        b_desc, B_offset, c_ref, c_offset, scale_out, scale_in_a, scale_in_b,
         a_is_shared, a_swizzle_mode, a_lbo, a_sbo, b_swizzle_mode, b_lbo, b_sbo,
         "", "", "", false);
     this->stream << asm_code;
@@ -1669,19 +1669,27 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                           op->args, true, os);
   } else if (op->op.same_as(tl::tl_shuffle_elect())) {
     os << "tl::tl_shuffle_elect<" << PrintExpr(op->args[0]) << ">()";
-  } else if (op->op.same_as(tl::initialize_descriptor())){
-    ICHECK(op->args.size() == 5) << "tl_initialize_descriptor expects 5 arguments but got " << op->args.size();
+  } else if (op->op.same_as(tl::initialize_descriptor())) {
+    ICHECK(op->args.size() == 5)
+        << "tl_initialize_descriptor expects 5 arguments but got "
+        << op->args.size();
     auto descriptor = op->args[0];
     auto start_address = op->args[1];
     auto layout_type = op->args[2];
     auto leading_byte_offset = op->args[3];
     auto stride_byte_offset = op->args[4];
-    os << "tl::initialize_descriptor<" << PrintExpr(layout_type) << ", " << PrintExpr(leading_byte_offset) << ", " << PrintExpr(stride_byte_offset) << ">(" << PrintExpr(descriptor) << ", " << PrintExpr(start_address) << ")";
-  } else if (op->op.same_as(tl::increase_descriptor_offset())){
-    ICHECK(op->args.size() == 2) << "tl_increase_descriptor_offset expects 2 arguments but got " << op->args.size();
+    os << "tl::initialize_descriptor<" << PrintExpr(layout_type) << ", "
+       << PrintExpr(leading_byte_offset) << ", "
+       << PrintExpr(stride_byte_offset) << ">(" << PrintExpr(descriptor) << ", "
+       << PrintExpr(start_address) << ")";
+  } else if (op->op.same_as(tl::increase_descriptor_offset())) {
+    ICHECK(op->args.size() == 2)
+        << "tl_increase_descriptor_offset expects 2 arguments but got "
+        << op->args.size();
     auto descriptor = op->args[0];
     auto offset = op->args[1];
-    os << "tl::increase_descriptor_offset<int>(" << PrintExpr(descriptor) << ", " << PrintExpr(offset) << ")";
+    os << "tl::increase_descriptor_offset<int>(" << PrintExpr(descriptor)
+       << ", " << PrintExpr(offset) << ")";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }

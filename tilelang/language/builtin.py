@@ -351,13 +351,12 @@ def sync_grid():
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"))
 
-def initialize_descriptor(
-    descriptor: Buffer,
-    start_address: PrimExpr,
-    layout_type_: int = 0, 
-    leading_byte_offset:int = 0, 
-    stride_byte_offset:int = 0
-)->PrimExpr:
+
+def initialize_descriptor(descriptor: Buffer,
+                          start_address: PrimExpr,
+                          layout_type_: int = 0,
+                          leading_byte_offset: int = 0,
+                          stride_byte_offset: int = 0) -> PrimExpr:
     """
     Initialize a memory descriptor with the given parameters.
 
@@ -371,17 +370,21 @@ def initialize_descriptor(
     Returns:
         PrimExpr: A handle representing the initialized descriptor.
     """
-    
+
     if not isinstance(descriptor, (BufferLoad, Buffer)):
         raise TypeError("Descriptor must be a tvm.tir.Buffer or tvm.tir.BufferLoad.")
 
     if isinstance(descriptor, Buffer) and len(descriptor.shape) != 1 or descriptor.shape[0] != 1:
         raise ValueError("Descriptor must be a 1D buffer of size 1.")
-    
-    descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(descriptor, [0])
 
-    return evaluate(tir.call_intrin("handle", tir.op.Op.get("tl.initialize_descriptor"), descriptor, start_address, layout_type_,
-                         int(leading_byte_offset), int(stride_byte_offset)))
+    descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(
+        descriptor, [0])
+
+    return evaluate(
+        tir.call_intrin("handle", tir.op.Op.get("tl.initialize_descriptor"), descriptor,
+                        start_address, layout_type_, int(leading_byte_offset),
+                        int(stride_byte_offset)))
+
 
 def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimExpr:
     """
@@ -399,7 +402,10 @@ def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimEx
 
     if isinstance(descriptor, Buffer) and len(descriptor.shape) != 1 or descriptor.shape[0] != 1:
         raise ValueError("Descriptor must be a 1D buffer of size 1.")
-    
-    descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(descriptor, [0])
 
-    return evaluate(tir.call_intrin("handle", tir.op.Op.get("tl.increase_descriptor_offset"), descriptor, offset))
+    descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(
+        descriptor, [0])
+
+    return evaluate(
+        tir.call_intrin("handle", tir.op.Op.get("tl.increase_descriptor_offset"), descriptor,
+                        offset))
