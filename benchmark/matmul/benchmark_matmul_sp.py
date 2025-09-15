@@ -250,6 +250,13 @@ if __name__ == "__main__":
         default="float",
         choices=["float", "float16"],
         help="Accumulation datatype")
+    parser.add_argument(
+        "--bench_torch_sparse",
+        type=str,
+        choices=['cutlass', 'cusparselt'],
+        default=None,
+        help="Whether to benchmark against torch sparse implementation, note that at current time only sm80 is supported"
+    )
     args = parser.parse_args()
 
     if args.disable_cache:
@@ -268,9 +275,19 @@ if __name__ == "__main__":
     B = torch.randn(K, N, dtype=torch.float16, device="cuda")
     ref_latency = do_bench(lambda: A @ B)
 
+    if args.bench_torch_sparse is not None:
+        from torch.sparse import to_sparse_semi_structured, SparseSemiStructuredTensor
+        if args.bench_torch_sparse == 'cutlass':
+            SparseSemiStructuredTensor._FORCE_CUTLASS = True
+        A_sp = to_sparse_semi_structured(A, transposed=False)
+        torch_sparse_latency = do_bench(lambda: A_sp @ B)
+
     # Print out the benchmark results
     print(f"Best latency (s): {best_latency}")
     print(f"Best TFlops: {total_flops / best_latency * 1e-9:.3f}")
     print(f"Best config: {best_config}")
 
-    print(f"Reference TFlops: {total_flops / ref_latency * 1e-9:.3f}")
+    if args.bench_torch_sparse is not None:
+        print(f"Torch sparse ({args.bench_torch_sparse}) TFlops: {total_flops / torch_sparse_latency * 1e-9:.3f}")
+
+    print(f"Reference Dense TFlops: {total_flops / ref_latency * 1e-9:.3f}")
