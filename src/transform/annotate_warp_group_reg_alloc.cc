@@ -64,7 +64,7 @@ public:
   static PrimFunc Inject(PrimFunc f) {
     auto T = SetMaxNRegInjector();
     T.nreg_ = SetMaxNRegCollector::Collect(f);
-    if (T.nreg_.size() == 0) {
+    if (T.nreg_.empty()) {
       return f;
     }
     f.CopyOnWrite()->body = T(f->body);
