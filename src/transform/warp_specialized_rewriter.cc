@@ -1285,7 +1285,8 @@ tvm::transform::Pass WarpSpecialized() {
                                                  disable_shuffle_elect);
     } else {
       ObjectRef node = String("default");
-      f.CopyOnWrite()->body = AttrStmt(node, attr::kCustomWarpSpecialization, 1, f->body);
+      f.CopyOnWrite()->body =
+          AttrStmt(node, attr::kCustomWarpSpecialization, 1, f->body);
       return f;
     }
   };
