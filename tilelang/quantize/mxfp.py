@@ -17,7 +17,7 @@ __device__ void decode_fp4_to_bf16_twiddling(T1 *B_local, T2 *B_local_decode, co
       "and.b32 %0, %13, 0b10000001110000001000000111000000;"
       "mul.bf16x2 %0, %0, %12;"
       "shl.b32 %1, %13, 3;"
-      "and.b32 %1, %1, 0b10000001110000001000000111000000;"          
+      "and.b32 %1, %1, 0b10000001110000001000000111000000;"
       "mul.bf16x2 %1, %1, %12;"
       "shl.b32 %2, %13, 6;"
       "and.b32 %2, %2, 0b10000001110000001000000111000000;"
@@ -41,7 +41,7 @@ __device__ void decode_fp4_to_bf16_twiddling(T1 *B_local, T2 *B_local_decode, co
       // Pay attention to the big-endianness issue
       B_local_decode[(i << 3) + j] = reinterpret_cast<T2*>(&B_dequantize_local_vec[j])[1];
       B_local_decode[(i << 3) + j + 4] = reinterpret_cast<T2*>(&B_dequantize_local_vec[j])[0];
-    }    
+    }
   }
   // Check if the synchronization is needed
 }
@@ -57,25 +57,25 @@ def get_mxfp_intrin_group(
 ) -> Dict[str, str]:
     """
     Return metadata for an MXFP decoding intrinsic: function name and C source string.
-    
+
     Validates the requested output dtype, source format, and storage dtype, then constructs
     a lookup key of the form `fp{source_bit}_to_{f16|bf16}` (appending `_twiddling` when
     use_twiddling is True) to select the corresponding C source snippet and a matching
     function name `decode_fp{source_bit}_to_{f16|bf16}` (also optionally suffixed with
     `_twiddling`).
-    
+
     Parameters:
         out_dtype: Target floating-point type for decoded values; either "float16" or "bfloat16".
         source_format: Integer source representation; "int" or "uint".
         source_bit: Bit width of the packed source format (e.g., 4).
         storage_dtype: Underlying storage integer dtype (one of "int32", "int8", "uint8").
         use_twiddling: When True, select the twiddling variant of the decoding intrinsic.
-    
+
     Returns:
         A dict with:
           - "func_name": the generated C function name string for the requested decode intrinsic.
           - "c_source": the C source string for that intrinsic.
-    
+
     Raises:
         AssertionError: if out_dtype, source_format, or storage_dtype are not supported.
         KeyError: if the constructed key does not match any available C source implementation.

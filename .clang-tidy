@@ -41,6 +41,7 @@ Checks: >
   -clang-analyzer-optin.cplusplus.UninitializedObject,
   -cppcoreguidelines-pro-type-static-cast-downcast,
   -performance-unnecessary-value-param,
+  -performance-enum-size,
 
 WarningsAsErrors: '*'
 

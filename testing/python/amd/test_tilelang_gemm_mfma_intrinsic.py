@@ -41,7 +41,9 @@ def tl_matmul(
     block_col_warps = 2
     warp_row_tiles = 32
     warp_col_tiles = 32
-    chunk = 32
+
+    chunk = 32 * k_pack
+
     shared_scope = "shared"
     cache_write_shared = False
 
@@ -193,6 +195,7 @@ def assert_tl_matmul_correctness(M,
     C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, out_dtype))
 
     kernel(A, B, C)
+    print(kernel.get_kernel_source())
 
     profiler = kernel.get_profiler()
 
@@ -227,6 +230,9 @@ def test_assert_tl_matmul():
     assert_tl_matmul_correctness(128, 128, 128, "float16", "float16")
     assert_tl_matmul_correctness(128, 256, 256, "float16", "float32")
     assert_tl_matmul_correctness(128, 256, 256, "float16", "float32", k_pack=2)
+    assert_tl_matmul_correctness(128, 128, 128, "int8", "int32", accum_dtype="int32")
+    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", accum_dtype="int32")
+    assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", accum_dtype="int32", k_pack=2)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Library information. This is a standalone file that can be used to get various info. 
+"""Library information. This is a standalone file that can be used to get various info.
 Modified from: https://github.com/mlc-ai/mlc-llm/blob/main/python/mlc_llm/libinfo.py
 """
 

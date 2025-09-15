@@ -11,21 +11,21 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale
                           dtype: str):
     """
         Convert a 4-bit field packed in a uint8 into a bfloat16 value, applying an exponent scale.
-        
+
         This helper extracts a 4-bit nibble from `val` at byte-nibble position `pos`, interprets its
         bits as a sign/exponent/mantissa in the 4-bit custom FP4 layout, adjusts the exponent by
         `scale` (clamped to an 8-bit range), and assembles the corresponding bfloat16 representation.
-        
+
         Parameters:
             nbit (int): Number of bits in the packed field (must be 4).
             val (tir.PrimExpr): Packed input value of dtype `uint8` containing one or more 4-bit fields.
             pos (tir.PrimExpr): Index of the nibble within `val` (used to shift/extract the 4-bit field).
             scale (tir.PrimExpr): Per-element exponent adjustment added to the extracted exponent (uint-like).
             dtype (str): Destination dtype string (must be "bfloat16").
-        
+
         Returns:
             tir.PrimExpr: The resulting value reinterpreted as `bfloat16`.
-        
+
         Notes:
         - Preconditions are enforced via assertions: nbit == 4, dtype == "bfloat16", and val.dtype == "uint8".
         - The function clamps the adjusted exponent to the 8-bit range before assembling the bfloat16 bit pattern.
@@ -52,7 +52,7 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale
 def get_configs():
     """
     Generate a list of hyperparameter configuration dictionaries for tuning.
-    
+
     Each configuration is a dict with keys: 'block_M', 'block_N', 'block_K',
     'num_stages', 'threads', and 'split'. The function returns the Cartesian
     product of the parameter value lists:
@@ -60,7 +60,7 @@ def get_configs():
     - num_stages: pipeline stages (0, 2)
     - threads: thread counts (128, 256, 512)
     - split: K-splitting factor (1, 2)
-    
+
     Returns:
         List[dict]: A list of configuration dictionaries covering all combinations.
     """
@@ -99,7 +99,7 @@ def matmul(M,
            split=1):
     """
         Construct and return a tiled matrix-multiply TIR kernel that multiplies A (shape MxK) by a quantized B (shape Nx(QK)) and writes an MxN output in out_dtype.
-        
+
         The generated kernel accepts:
         - A: dense matrix with element type `in_dtype`.
         - B: packed quantized matrix stored as uint8 with `num_bits` bits per element (QK = K / (8/num_bits)).
@@ -107,7 +107,7 @@ def matmul(M,
         The kernel dequantizes B to a working floating format (out_dtype/accum_dtype) using one of two paths:
         - fast_dequant (True): uses an external, hardware/implementation-specific intrinsic group (twiddling) for batch dequantization.
         - fast_dequant (False): uses a simple elementwise dequantization helper.
-        
+
         Parameters:
         M, N, K (int): matrix dimensions (A is MxK, result is MxN). K must be divisible by (block_K * split).
         in_dtype (str): element type of A (e.g., "fp4" in this file).
@@ -129,7 +129,7 @@ def matmul(M,
         - dequantizes B via the chosen path into a shared dequantized tile,
         - performs a tiled GEMM accumulating into local fragments,
         - writes the final MxN block to the global output tensor.
-        
+
         Notes:
         - The function queries an intrinsic group to obtain a fast dequantization implementation when fast_dequant is enabled; that intrinsic must supply a valid C source and function name.
         - The kernel layout uses swizzled shared-memory layouts for A, B, and the shared C tile.
@@ -167,13 +167,13 @@ def matmul(M,
     def get_fast_dequant_twiddling_func(in_dtype="fp4", out_dtype="bfloat16"):
         """
         Return a TileLang macro that performs fast dequantization of twiddled FP4-packed data into BF16.
-        
+
         The returned macro has signature (B_shared, B_dequantize_shared, Scale, k) and:
         - Loads packed FP4 elements from B_shared into per-thread local registers.
         - Calls an external fast dequantization intrinsic (provided via `import_source` / `func_name` in the outer scope) to expand packed FP4 -> BF16 values.
         - Applies a per-block scale factor derived from the Scale tensor (using exponentiation by powers of two).
         - Writes the scaled BF16 results into B_dequantize_shared.
-        
+
         Notes:
         - This factory only supports in_dtype="fp4" and out_dtype="bfloat16".
         - The macro depends on several names from the enclosing scope (e.g., import_source, func_name, DataType, num_elems_per_byte, storage_dtype, block_N, block_K, threads, scale_size); those must be defined and consistent with the kernel that will use the macro.
@@ -194,21 +194,21 @@ def matmul(M,
             Fast dequantization kernel: convert packed 4-bit quantized values in B_shared to bfloat16
             in B_dequantize_shared using an external intrinsic optimized for twiddled (bit-packed) FP4,
             applying per-block scale factors from Scale.
-            
+
             This routine is a tiled, thread-parallel helper that:
             - Imports and calls an external dequantization function (via `import_source`/`func_name`)
               to expand compressed uint8-packed FP4 values into BF16 fragments in-thread.
             - Loads the corresponding per-block scale entry, interprets it as an exponent bias
               (applies 2^(Scale - 127)), and multiplies the dequantized BF16 fragment by that factor.
             - Writes the scaled BF16 results back into the shared B_dequantize_shared buffer in-place.
-            
+
             Parameters:
             - B_shared: read-only shared buffer containing compressed FP4 data (packed uint8 layout).
             - B_dequantize_shared: shared output buffer that is overwritten with BF16 dequantized values.
             - Scale: per-block scale tensor; entries are interpreted such that the multiplicative scale
               = 2^(Scale - 127).
             - k: block index along the K dimension used to select the appropriate Scale entries.
-            
+
             Side effects:
             - Mutates B_dequantize_shared in shared memory.
             - Calls an external intrinsic function (must be provided by the environment via `import_source`
@@ -260,9 +260,9 @@ def matmul(M,
     def get_simple_dequant_func(in_dtype="fp4", out_dtype="bfloat16"):
         """
         Create a simple (scalar) dequantization macro that converts 4-bit packed inputs to bfloat16.
-        
+
         Returns a T.macro that, given shared-storage buffers B_shared, B_dequantize_shared, a Scale tensor, and block index k, unpacks 4-bit values from B_shared, converts each nibble to a bfloat16 value using _tir_u8_to_f4_to_bf16, applies the per-element exponential Scale, and writes the dequantized BF16 block into B_dequantize_shared.
-        
+
         Notes:
         - Only supports in_dtype="fp4" and out_dtype="bfloat16".
         - The macro expects B_shared and B_dequantize_shared to have the shapes established in the enclosing scope (B_shared_shape, B_dequantize_shared_shape) and performs block-local copying into allocated fragments before elementwise conversion.
@@ -275,18 +275,18 @@ def matmul(M,
         def simple_dequant_bf16_fp4(B_shared, B_dequantize_shared, Scale, k):
             """
             Dequantizes a packed 4-bit (FP4) block from B_shared into BF16 values in B_dequantize_shared using per-element scale exponents.
-            
+
             Per-element behavior:
             - Reads packed 4-bit entries from B_shared (uint8 storage, multiple nibbles per byte).
             - Uses Scale to obtain an exponent term (stored as uint8) and reconstructs BF16 values via _tir_u8_to_f4_to_bf16.
             - Writes the dequantized BF16 block into B_dequantize_shared.
-            
+
             Parameters:
             - B_shared: shared-memory buffer holding packed 4-bit values (uint8-packed layout).
             - B_dequantize_shared: shared-memory buffer to receive dequantized BF16 results.
             - Scale: per-element exponent buffer; used to compute the scale factor for each dequantized element.
             - k: current block index along the K dimension (used to select the appropriate slice of Scale).
-            
+
             Side effects:
             - Mutates B_dequantize_shared by storing the dequantized BF16 fragment.
             """
@@ -320,9 +320,9 @@ def matmul(M,
     ):
         """
             Tiled, pipelined kernel entry that multiplies A with a quantized B (with per-block Scale) producing C.
-            
+
             This prim-level kernel implements a blocked, multi-threaded matmul: it loads tiles of A and the packed/quantized B into shared memory, dequantizes B (either via the fast intrinsic twiddling path or the simple per-element path), performs a block GEMM (with B transposed), and writes the accumulated block results into the output tensor C. The kernel allocates shared buffers for A, B, and the dequantized B, and a local fragment for accumulation; it runs over K in pipelined stages and expects the provided shapes and dtypes to match the tiling parameters used to build the function.
-            
+
             Parameters are self-descriptive in the signature; notable behaviors:
             - B is stored in a compact uint8-packed layout (num_bits per element) and is dequantized using Scale before GEMM.
             - The selected dequantization path is controlled by the outer-scope flag `fast_dequant`.
@@ -376,14 +376,14 @@ def matmul(M,
 def ref_program_twiddling(A, qB, Scale, Bias=None):
     """
     Compute A @ B^T where B is reconstructed from bit-twiddled 4-bit quantized data and per-block scales, returning bfloat16 results.
-    
+
     Converts the quantized matrix `qB` to floating-point via `torch_convert_bit_twiddling`, applies a per-element scale factor of 2^(Scale - 127) (where Scale indexes are grouped by 32 columns of B), computes the matrix product A · B^T in float, and casts the result to bfloat16.
-    
+
     Parameters:
         A (torch.Tensor): Left operand with shape (M, K), used in floating precision.
         qB (torch.Tensor): Quantized representation of B (packed 4-bit values) compatible with torch_convert_bit_twiddling.
         Scale (torch.Tensor): Per-column-group scale values; Scale indices correspond to groups of 32 columns in B.
-    
+
     Returns:
         torch.Tensor: Resulting matrix C with shape (M, N) in bfloat16.
     """
@@ -400,9 +400,9 @@ def ref_program_twiddling(A, qB, Scale, Bias=None):
 def ref_program_twiddling_with_bias(A, qB, Scale, Bias):
     """
     Compute A @ B^T where B is reconstructed from bit-twiddled 4-bit quantized data and per-block scales, returning bfloat16 results.
-    
+
     Converts the quantized matrix `qB` to floating-point via `torch_convert_bit_twiddling`, applies a per-element scale factor of 2^(Scale - 127) (where Scale indexes are grouped by 32 columns of B), computes the matrix product A · B^T in float, and casts the result to bfloat16.
-    
+
     Parameters:
         A (torch.Tensor): Left operand with shape (M, K), used in floating precision.
         qB (torch.Tensor): Quantized representation of B (packed 4-bit values) compatible with torch_convert_bit_twiddling.
@@ -425,17 +425,17 @@ def ref_program_twiddling_with_bias(A, qB, Scale, Bias):
 def ref_program_simple(A, qB, Scale, Bias=None):
     """
     Compute a BF16 matrix product A · B^T from a quantized B with simple (non-twiddling) dequantization.
-    
+
     Converts the quantized tensor `qB` to floating B via `torch_convert`, applies a per-element scale factor computed as 2^(Scale[i][j//32] - 127) (Scale supplies exponent offsets in 32-column groups), then computes C = A · B^T and returns the result converted to bfloat16.
-    
+
     Parameters:
     - A: 2D tensor representing the left operand (will be cast to float32 for the matmul).
     - qB: Quantized representation of B accepted by `torch_convert`.
     - Scale: 2D tensor of exponent offsets; Scale[i][g] is applied to columns j where g == j // 32.
-    
+
     Returns:
     - 2D bfloat16 tensor C containing the matrix product A · B^T.
-    
+
     No in-place modification is performed on inputs (a local floating copy of B is scaled).
     """
     dtypeC = "bfloat16"
@@ -451,9 +451,9 @@ def ref_program_simple(A, qB, Scale, Bias=None):
 def ref_program_simple_with_bias(A, qB, Scale, Bias):
     """
     Compute a BF16 matrix product A · B^T from a quantized B with simple (non-twiddling) dequantization.
-    
+
     Converts the quantized tensor `qB` to floating B via `torch_convert`, applies a per-element scale factor computed as 2^(Scale[i][j//32] - 127) (Scale supplies exponent offsets in 32-column groups), then computes C = A · B^T and returns the result converted to bfloat16.
-    
+
     Parameters:
 
     Returns:
@@ -465,7 +465,7 @@ def ref_program_simple_with_bias(A, qB, Scale, Bias):
 
     Returns:
     - 2D bfloat16 tensor C containing the matrix product A · B^T.
-    
+
     No in-place modification is performed on inputs (a local floating copy of B is scaled).
     """
     dtypeC = "bfloat16"
@@ -481,9 +481,9 @@ def ref_program_simple_with_bias(A, qB, Scale, Bias):
 def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False, tune=False):
     """
     Run and validate the tiled quantized matmul kernel, then benchmark its latency and report TFLOPS.
-    
+
     Builds a matmul kernel for the given matrix sizes and quantization scale size. If `tune` is True the kernel is obtained via the autotuning path; otherwise a fixed-parameter kernel is used. Validates numerical correctness against the appropriate reference implementation (bit-twiddling reference when `fast_dequant` is True, plain reference otherwise) with rtol/atol=0.01, prints a confirmation, then runs a benchmark (500 warmup iterations) and prints the measured latency (ms) and achieved TFLOPS.
-    
+
     Parameters:
         m (int): Number of rows of A / output rows. Default 256.
         n (int): Number of columns of B / output columns. Default 256.
@@ -491,7 +491,7 @@ def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False,
         scale_size (int): Size of the per-block scale vector used for dequantization. Default 32.
         fast_dequant (bool): If True validate against the twiddling (fast dequant) reference and exercise the fast dequant path; otherwise use the simple dequant reference. Default True.
         tune (bool): If True obtain a tuned/autotuned kernel; otherwise use a fixed-parameter kernel. Default False.
-    
+
     Returns:
         None
     """

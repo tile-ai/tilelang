@@ -34,11 +34,11 @@ namespace tl {
 
 using namespace tir;
 
-class FrontendLegalizer : public arith::IRMutatorWithAnalyzer {
+class LetInliner : public arith::IRMutatorWithAnalyzer {
 public:
   static PrimFunc Substitute(PrimFunc f) {
     arith::Analyzer analyzer;
-    FrontendLegalizer substituter(&analyzer);
+    LetInliner substituter(&analyzer);
     PrimFuncNode *fptr = f.CopyOnWrite();
     fptr->body = substituter.VisitStmt(f->body);
     return f;
@@ -82,16 +82,16 @@ private:
 
 using namespace tir::transform;
 
-Pass FrontendLegalize() {
+Pass LetInline() {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return FrontendLegalizer::Substitute(std::move(f));
+    return LetInliner::Substitute(std::move(f));
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.FrontendLegalize", {});
+  return CreatePrimFuncPass(pass_func, 0, "tl.LetInline", {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.FrontendLegalize", FrontendLegalize);
+  refl::GlobalDef().def("tl.transform.LetInline", LetInline);
 });
 
 } // namespace tl

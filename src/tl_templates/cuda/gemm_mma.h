@@ -11,7 +11,7 @@
 #include "cuda_fp8.h"
 #include "intrin.h"
 
-namespace cute {
+namespace cute::tl_mma {
 
 template <typename A_type, typename B_type, typename C_type, int num_warp_m,
           int num_warp_n, int N>
@@ -19,73 +19,93 @@ struct DispatchInstruction;
 
 using _X = Underscore;
 
-#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 800))
+} // namespace cute::tl_mma
+
+#define TL_DISPATCH_MMA(A_type, B_type, C_type, MMA_instr)                     \
+  namespace cute::tl_mma {                                                     \
+  template <int num_warp_m, int num_warp_n, int N>                             \
+  struct DispatchInstruction<A_type, B_type, C_type, num_warp_m, num_warp_n,   \
+                             N> {                                              \
+    using MMA = MMA_Atom<MMA_instr>;                                           \
+    using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;         \
+  };                                                                           \
+  }
+#define TL_DISPATCH_MMA_TEMPLATE(A_type, B_type, C_type, MMA_instr)            \
+  namespace cute::tl_mma {                                                     \
+  template <int num_warp_m, int num_warp_n, int N>                             \
+  struct DispatchInstruction<A_type, B_type, C_type, num_warp_m, num_warp_n,   \
+                             N> {                                              \
+    using MMA = MMA_Atom<MMA_instr<A_type, B_type, C_type>>;                   \
+    using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;         \
+  };                                                                           \
+  }
+
+#ifdef __CUDA_ARCH_LIST__
 #if __CUDA_ARCH_LIST__ >= 1200
-template <int num_warp_m, int num_warp_n, int N>
-struct DispatchInstruction<fp8_e4_t, fp8_e4_t, float, num_warp_m, num_warp_n,
-                           N> {
-  using MMA = MMA_Atom<SM120_16x8x32_TN<fp8_e4_t, fp8_e4_t, float>>;
-  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;
-};
-template <int num_warp_m, int num_warp_n, int N>
-struct DispatchInstruction<fp8_e5_t, fp8_e5_t, float, num_warp_m, num_warp_n,
-                           N> {
-  using MMA = MMA_Atom<SM120_16x8x32_TN<fp8_e5_t, fp8_e5_t, float>>;
-  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;
-};
+#include "cuda_fp8.h"
+#include <cute/arch/mma_sm120.hpp>
+#include <cute/arch/mma_sm80.hpp>
+TL_DISPATCH_MMA_TEMPLATE(fp8_e4_t, fp8_e4_t, float, SM120_16x8x32_TN)
+TL_DISPATCH_MMA_TEMPLATE(fp8_e5_t, fp8_e5_t, float, SM120_16x8x32_TN)
+TL_DISPATCH_MMA(half_t, half_t, half_t, SM80_16x8x16_F16F16F16F16_TN)
+TL_DISPATCH_MMA(half_t, half_t, float, SM80_16x8x16_F32F16F16F32_TN)
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, SM80_16x8x16_F32BF16BF16F32_TN)
+TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, SM80_16x8x8_F32TF32TF32F32_TN)
+TL_DISPATCH_MMA(int8_t, int8_t, int, SM80_16x8x32_S32S8S8S32_TN)
+TL_DISPATCH_MMA(double, double, double, SM80_8x8x4_F64F64F64F64_TN)
+#elif __CUDA_ARCH_LIST__ >= 1000
+#include "cuda_fp8.h"
+#include <cute/arch/mma_sm100.hpp>
+#include <cute/arch/mma_sm80.hpp>
+#include <cute/arch/mma_sm89.hpp>
+TL_DISPATCH_MMA(fp8_e4_t, fp8_e4_t, float, SM89_16x8x32_F32E4M3E4M3F32_TN)
+TL_DISPATCH_MMA(fp8_e5_t, fp8_e5_t, float, SM89_16x8x32_F32E5M2E5M2F32_TN)
+TL_DISPATCH_MMA(half_t, half_t, half_t, SM80_16x8x16_F16F16F16F16_TN)
+TL_DISPATCH_MMA(half_t, half_t, float, SM80_16x8x16_F32F16F16F32_TN)
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, SM80_16x8x16_F32BF16BF16F32_TN)
+TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, SM80_16x8x8_F32TF32TF32F32_TN)
+TL_DISPATCH_MMA(int8_t, int8_t, int, SM80_16x8x32_S32S8S8S32_TN)
+TL_DISPATCH_MMA(double, double, double, SM80_8x8x4_F64F64F64F64_TN)
+#elif __CUDA_ARCH_LIST__ >= 900
+#include "cuda_fp8.h"
+#include <cute/arch/mma_sm80.hpp>
+#include <cute/arch/mma_sm89.hpp>
+TL_DISPATCH_MMA(fp8_e4_t, fp8_e4_t, float, SM89_16x8x32_F32E4M3E4M3F32_TN)
+TL_DISPATCH_MMA(fp8_e5_t, fp8_e5_t, float, SM89_16x8x32_F32E5M2E5M2F32_TN)
+TL_DISPATCH_MMA(half_t, half_t, half_t, SM80_16x8x16_F16F16F16F16_TN)
+TL_DISPATCH_MMA(half_t, half_t, float, SM80_16x8x16_F32F16F16F32_TN)
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, SM80_16x8x16_F32BF16BF16F32_TN)
+TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, SM80_16x8x8_F32TF32TF32F32_TN)
+TL_DISPATCH_MMA(int8_t, int8_t, int, SM80_16x8x32_S32S8S8S32_TN)
+TL_DISPATCH_MMA(double, double, double, SM80_8x8x4_F64F64F64F64_TN)
 #elif __CUDA_ARCH_LIST__ >= 890
-template <int num_warp_m, int num_warp_n, int N>
-struct DispatchInstruction<fp8_e4_t, fp8_e4_t, float, num_warp_m, num_warp_n,
-                           N> {
-  using MMA = MMA_Atom<SM89_16x8x32_F32E4M3E4M3F32_TN>;
-  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;
-};
-template <int num_warp_m, int num_warp_n, int N>
-struct DispatchInstruction<fp8_e5_t, fp8_e5_t, float, num_warp_m, num_warp_n,
-                           N> {
-  using MMA = MMA_Atom<SM89_16x8x32_F32E5M2E5M2F32_TN>;
-  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;
-};
+#include "cuda_fp8.h"
+#include <cute/arch/mma_sm80.hpp>
+#include <cute/arch/mma_sm89.hpp>
+TL_DISPATCH_MMA(fp8_e4_t, fp8_e4_t, float, SM89_16x8x32_F32E4M3E4M3F32_TN)
+TL_DISPATCH_MMA(fp8_e5_t, fp8_e5_t, float, SM89_16x8x32_F32E5M2E5M2F32_TN)
+TL_DISPATCH_MMA(half_t, half_t, half_t, SM80_16x8x16_F16F16F16F16_TN)
+TL_DISPATCH_MMA(half_t, half_t, float, SM80_16x8x16_F32F16F16F32_TN)
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, SM80_16x8x16_F32BF16BF16F32_TN)
+TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, SM80_16x8x8_F32TF32TF32F32_TN)
+TL_DISPATCH_MMA(int8_t, int8_t, int, SM80_16x8x32_S32S8S8S32_TN)
+TL_DISPATCH_MMA(double, double, double, SM80_8x8x4_F64F64F64F64_TN)
+#elif __CUDA_ARCH_LIST__ >= 800
+#include <cute/arch/mma_sm80.hpp>
+TL_DISPATCH_MMA(half_t, half_t, half_t, SM80_16x8x16_F16F16F16F16_TN)
+TL_DISPATCH_MMA(half_t, half_t, float, SM80_16x8x16_F32F16F16F32_TN)
+TL_DISPATCH_MMA(bfloat16_t, bfloat16_t, float, SM80_16x8x16_F32BF16BF16F32_TN)
+TL_DISPATCH_MMA(tfloat32_t, tfloat32_t, float, SM80_16x8x8_F32TF32TF32F32_TN)
+TL_DISPATCH_MMA(int8_t, int8_t, int, SM80_16x8x32_S32S8S8S32_TN)
+TL_DISPATCH_MMA(double, double, double, SM80_8x8x4_F64F64F64F64_TN)
+#elif __CUDA_ARCH_LIST__ >= 750
+TL_DISPATCH_MMA(half_t, half_t, float, SM75_16x8x8_F32F16F16F32_TN)
 #endif
-template <int num_warp_m, int num_warp_n, int N>
-struct DispatchInstruction<half_t, half_t, half_t, num_warp_m, num_warp_n, N> {
-  using MMA = MMA_Atom<SM80_16x8x16_F16F16F16F16_TN>;
-  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;
-};
-template <int num_warp_m, int num_warp_n, int N>
-struct DispatchInstruction<half_t, half_t, float, num_warp_m, num_warp_n, N> {
-  using MMA = MMA_Atom<SM80_16x8x16_F32F16F16F32_TN>;
-  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;
-};
-template <int num_warp_m, int num_warp_n, int N>
-struct DispatchInstruction<bfloat16_t, bfloat16_t, float, num_warp_m,
-                           num_warp_n, N> {
-  using MMA = MMA_Atom<SM80_16x8x16_F32BF16BF16F32_TN>;
-  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;
-};
-template <int num_warp_m, int num_warp_n, int N>
-struct DispatchInstruction<tfloat32_t, tfloat32_t, float, num_warp_m,
-                           num_warp_n, N> {
-  using MMA = MMA_Atom<SM80_16x8x8_F32TF32TF32F32_TN>;
-  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;
-};
-template <int num_warp_m, int num_warp_n, int N>
-struct DispatchInstruction<int8_t, int8_t, int, num_warp_m, num_warp_n, N> {
-  using MMA = MMA_Atom<SM80_16x8x32_S32S8S8S32_TN>;
-  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _X>;
-};
-template <int num_warp_m, int num_warp_n, int N>
-struct DispatchInstruction<double, double, double, num_warp_m, num_warp_n, N> {
-  using MMA = MMA_Atom<SM80_8x8x4_F64F64F64F64_TN>;
-  using MMA_Group = Tile<Int<num_warp_m * 16>, Int<num_warp_n * 16>, _X>;
-};
-#elif (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 750))
-template <int num_warp_m, int num_warp_n, int N>
-struct DispatchInstruction<half_t, half_t, float, num_warp_m, num_warp_n, N> {
-  using MMA = MMA_Atom<SM75_16x8x8_F32F16F16F32_TN>;
-  using MMA_Group = Tile<_X, Int<std::min(num_warp_n * 16, N)>, _16>;
-};
 #endif
+#undef TL_DISPATCH_MMA
+#undef TL_DISPATCH_MMA_TEMPLATE
+
+namespace cute::tl_mma {
 
 template <int N, int num_warp_n, bool transpose> struct SelectCopy {
   static constexpr int remainder = (N / num_warp_n) % 16;
@@ -334,13 +354,13 @@ public:
         make_tensor(make_rmem_ptr(reinterpret_cast<C_type *>(pC)),
                     partition_shape_C(tiled_mma, Shape<Int<M>, Int<N>>{}));
 
-    if constexpr (clear_accum) {
-      clear(acc);
-    }
     // when layout is KxN and n_warp is 1, there seem to be a bug, use this as a
     // workaround
     auto tCrA_view = make_tensor(tCrA.data(), remove_swizzle(tCrA.layout()));
     auto tCrB_view = make_tensor(tCrB.data(), remove_swizzle(tCrB.layout()));
+    if constexpr (clear_accum) {
+      clear(acc);
+    }
     CUTE_UNROLL
     for (int k = 0; k < size<2>(tCrA); ++k) {
       copy(tiled_copy_A, tCsA(_, _, k), tCrA_copy_view(_, _, k));
@@ -371,10 +391,10 @@ public:
     Tensor tCrA =
         make_tensor(make_rmem_ptr(reinterpret_cast<A_type *>(pA)),
                     partition_shape_A(tiled_mma, Shape<Int<M>, Int<K>>{}));
+    auto tCrB_view = make_tensor(tCrB.data(), remove_swizzle(tCrB.layout()));
     if constexpr (clear_accum) {
       clear(acc);
     }
-    auto tCrB_view = make_tensor(tCrB.data(), remove_swizzle(tCrB.layout()));
     copy(tiled_copy_B, tCsB(_, _, 0), tCrB_copy_view(_, _, 0));
     CUTE_UNROLL
     for (int k = 0; k < size<2>(tCrA); ++k) {
@@ -407,10 +427,10 @@ public:
     Tensor tCrB =
         make_tensor(make_rmem_ptr(reinterpret_cast<B_type *>(pB)),
                     partition_shape_B(tiled_mma, Shape<Int<N>, Int<K>>{}));
+    auto tCrA_view = make_tensor(tCrA.data(), remove_swizzle(tCrA.layout()));
     if constexpr (clear_accum) {
       clear(acc);
     }
-    auto tCrA_view = make_tensor(tCrA.data(), remove_swizzle(tCrA.layout()));
     copy(tiled_copy_A, tCsA(_, _, 0), tCrA_copy_view(_, _, 0));
     CUTE_UNROLL
     for (int k = 0; k < size<2>(tCrA); ++k) {
@@ -422,15 +442,16 @@ public:
   }
 };
 
-} // namespace cute
+} // namespace cute::tl_mma
 
-namespace tl {
+namespace tl::tl_mma {
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
           int offset_b, typename A_type, typename B_type, typename C_type>
 CUTLASS_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
-  using MMA = cute::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
+  using MMA =
+      cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
                                  trans_B, clear_accum, lda, ldb, offset_a,
                                  offset_b, A_type, B_type, C_type>;
   MMA::body(pA, pB, accum);
@@ -440,7 +461,8 @@ template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
           int offset_b, typename A_type, typename B_type, typename C_type>
 CUTLASS_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
-  using MMA = cute::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
+  using MMA =
+      cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
                                  trans_B, clear_accum, lda, ldb, offset_a,
                                  offset_b, A_type, B_type, C_type>;
   MMA::body_rs(pA, pB, accum);
@@ -450,10 +472,11 @@ template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
           int offset_b, typename A_type, typename B_type, typename C_type>
 CUTLASS_DEVICE void gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
-  using MMA = cute::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
+  using MMA =
+      cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
                                  trans_B, clear_accum, lda, ldb, offset_a,
                                  offset_b, A_type, B_type, C_type>;
   MMA::body_sr(pA, pB, accum);
 }
 
-} // namespace tl
+} // namespace tl::tl_mma

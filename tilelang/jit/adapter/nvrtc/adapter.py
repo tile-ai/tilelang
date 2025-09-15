@@ -152,7 +152,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
 
     def _process_dynamic_symbolic(self):
         """Extract information about dynamic shapes from the TIR function.
-        
+
         Maps symbolic variables to their corresponding (buffer_index, shape_dimension)
         for runtime shape resolution.
         """
@@ -179,17 +179,17 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                                         *ins: List[torch.Tensor],
                                         stream: Optional[int] = None):
         """High-level wrapper for kernel execution.
-        
+
         Handles:
         1. Input validation
         2. Output tensor allocation
         3. Dynamic shape resolution
         4. CUDA stream management
-        
+
         Args:
             ins: Input PyTorch tensors
             stream: Optional CUDA stream for asynchronous execution
-        
+
         Returns:
             Single tensor or list of tensors containing the kernel results
         """

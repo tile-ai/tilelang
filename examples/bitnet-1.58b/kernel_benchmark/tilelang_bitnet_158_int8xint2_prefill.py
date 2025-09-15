@@ -84,12 +84,12 @@ def bitnet_158_int8xint2_prefill(
 ):
     """
     Create a TVM GPU prim_func implementing a block-tiled matrix multiply that multiplies dense A by compressed/interleaved low‑precision B (2-bit packed into int8 storage), decoding B to int8 on-chip and accumulating into C.
-    
+
     The returned prim_func expects:
     - A: shape (M, K) with dtype `in_dtype` ("float16" or "int8").
     - B: compressed storage with shape (N, K/4) and int8 storage layout (packing 4 2-bit elements per byte).
     - C: output buffer shape (M, N) with dtype `out_dtype` ("float16", "float32", or "int32").
-    
+
     Details:
     - Builds a tiled, pipelined kernel using shared memory and warp-level MMA intrinsics (INT4TensorCoreIntrinEmitter). B is loaded from compressed storage, decoded to int8 in threads (via decode_i2u_to_i8s / decode_i2s_to_i8s), and dequantized into a shared buffer used by the MMA emitter.
     - Tiling parameters:
@@ -99,7 +99,7 @@ def bitnet_158_int8xint2_prefill(
       - micro sizes are fixed (16x16x16, except micro_k=32 when accum_dtype == "int32").
     - Uses 2-stage pipelining by default to overlap loads and compute and applies a swizzle layout to improve L2 behavior.
     - Assertions: raises AssertionError if in_dtype or out_dtype are not among supported values.
-    
+
     Parameters:
         M, N, K (int): Global matrix dimensions.
         in_dtype (str): Input and decoded B element dtype; "float16" or "int8".
@@ -111,7 +111,7 @@ def bitnet_158_int8xint2_prefill(
         warp_row_tiles (int): Tiles per warp in row dimension.
         warp_col_tiles (int): Tiles per warp in column dimension.
         chunk (int): K-length per block (block_K).
-    
+
     Returns:
         T.prim_func: A TVM prim_func implementing the described GPU kernel suitable for compilation and execution.
     """
@@ -187,18 +187,18 @@ def bitnet_158_int8xint2_prefill(
     ):
         """
             GPU kernel entry that performs a blocked, pipelined matrix multiplication A @ B.T writing into C.
-            
+
             This kernel:
             - Loads tiles of A and a compressed/interleaved representation of B from global memory into shared memory.
             - Decodes B's packed low-precision format (storage_dtype, e.g., 2-bit packed) into element values of `in_dtype` in shared memory via an external decode routine.
             - Uses Warp/MMA tiled fragments and an INT4/INT2-capable MMA emitter to compute accumulation across K in a pipelined fashion with configurable stages.
             - Writes accumulated tile results from shared memory back to global C with the expected block/micro-tile indexing.
-            
+
             Parameters:
                 A: Input matrix buffer of shape A_shape and element type `in_dtype`. Represents the MxK activations.
                 B: Compressed/interleaved weight buffer of shape B_shape and storage type `storage_dtype`. Must contain B in the packed low-precision layout expected by the decode routine used by this kernel.
                 C: Output buffer of shape (M, N) and type `out_dtype`; receives the resulting matrix (accumulated values are produced in `accum_dtype` and stored into C).
-            
+
             Side effects:
                 Writes results into C. Calls external device decode functions to expand B from its packed representation into shared memory before computation.
         """
