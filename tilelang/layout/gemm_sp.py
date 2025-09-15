@@ -21,7 +21,7 @@ def decompose_col_major(index_1d: int, basis: List[int]) -> List[int]:
 
 def _make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, block_k: int):
     """Make a layout of metadata that is compatible with cutlass sm90 compression kernel. Note that layout atom is the same for smem and gmem.
-    
+
     Args:
         buffer: metadata buffer shape, for sm90 it should be a 8-bit type
         mma_dtype: dtype of mma operand A, different dtypes result in different layout atom
@@ -107,7 +107,7 @@ def _make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, b
 
 def _make_metadata_layout_sm8x_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str):
     """Make a layout of metadata that is compatible with cutlass sm8x compression kernel. Note that layout atom is the same for smem and gmem.
-    
+
     Args:
         buffer: metadata buffer shape, for sm80 it should be a 16bit type
     """
