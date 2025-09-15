@@ -6,14 +6,8 @@ from tvm import DataType
 import torch
 from utils import torch_convert_bit_twiddling, assert_similar
 
-tilelang.disable_cache()
-torch.manual_seed(0)
 
-
-@tilelang.jit(
-    out_idx=-1, pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    })
+@tilelang.jit(out_idx=-1)
 def matmul(M,
            N,
            K,
@@ -162,7 +156,6 @@ def matmul(M,
             T.import_source(import_source)
 
             tx = T.get_thread_binding()
-            bx = T.get_block_binding(0)  # noqa: F841
 
             B_local_thread = T.alloc_local((local_compress_size,), storage_dtype)
             B_dequantize_local_thread = T.alloc_local((local_size,), out_dtype)
@@ -200,7 +193,6 @@ def matmul(M,
                     B_dequantize_shared[index // block_K,
                                         index % block_K] = B_dequantize_local_thread[v]
 
-            T.sync_threads()
 
         return fast_dequant_bf16_fp4_twiddling
 
@@ -268,9 +260,8 @@ def matmul(M,
             if threads == 512:
                 T.disable_warp_group_reg_alloc()
 
-            # todo: handle idx=-1 case (use if)
             T.copy(sorted_token_ids[by * block_M:(by + 1) * block_M],
-                   sorted_token_ids_shared)  #! May contains -1 for padding
+                   sorted_token_ids_shared)
             expert_id[0] = expert_ids[by]
 
             # Get the topk weights of each token in the current block
@@ -292,13 +283,11 @@ def matmul(M,
             for k in T.Pipelined(K // block_K, num_stages=num_stages):
                 # Get the real index of the tokens to be processed
                 T.copy(B[expert_id[0], bx * block_N, k * block_K // num_elems_per_byte], B_shared)
-                for i in T.Parallel(block_M):
-                    for j in T.Parallel(block_K):
-                        if sorted_token_ids_shared[i] != -1:
-                            A_shared[i, j] = A[sorted_token_ids_shared[i] // topk, k * block_K + j]
+                for i, j in T.Parallel(block_M, block_K):
+                    if sorted_token_ids_shared[i] != -1:
+                        A_shared[i, j] = A[sorted_token_ids_shared[i] // topk, k * block_K + j]
                 if fast_dequant:
-                    get_fast_dequant_twiddling_func()(B_shared, B_dequantize_shared, Scale_shared,
-                                                      k)
+                    get_fast_dequant_twiddling_func()(B_shared, B_dequantize_shared, Scale_shared, k)
                 else:
                     get_simple_dequant_func()(B_shared, B_dequantize_shared, Scale_shared, k)
 
@@ -308,11 +297,10 @@ def matmul(M,
                 C_local[i, j] = C_local[i, j] * topk_weights_shared[i]
 
             T.copy(C_local, C_shared)
-            for i in T.Parallel(block_M):
-                for j in T.Parallel(block_N):
-                    if sorted_token_ids_shared[i] != -1:
-                        C[sorted_token_ids_shared[i] // topk, sorted_token_ids_shared[i] % topk,
-                          bx * block_N + j] = C_shared[i, j]
+            for i, j in T.Parallel(block_M, block_N):
+                if sorted_token_ids_shared[i] != -1:
+                    C[sorted_token_ids_shared[i] // topk, sorted_token_ids_shared[i] % topk,
+                        bx * block_N + j] = C_shared[i, j]
 
     return main
 
@@ -347,8 +335,7 @@ def ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, bloc
 
         # Compute the output for this token-expert pair
         # token_embedding @ B.T + bias
-        output = torch.matmul(token_embedding.to(torch.bfloat16), B.T.to(
-            torch.bfloat16)) + Bias[expert_id]
+        output = torch.matmul(token_embedding, B.T) + Bias[expert_id]
         output = output.to(torch.__getattribute__(dtypeC))
 
         # Apply the topk weight
@@ -356,7 +343,6 @@ def ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, bloc
         output = output * weight
 
         # Store the result
-        # print(f'{token_id // topk=}, {topk_idx=}, {expert_id=}')
         C[token_id // topk, topk_idx] = output
 
     return C
@@ -372,9 +358,9 @@ def get_data(m, n, k, qk, scale_size, topk, E, block_M):
 
     weights = torch.empty(m, E, dtype=torch.bfloat16, device='cuda').uniform_(-1, 1)
     # topk_weights: Router weights for the top-k experts for each token.
-    # Shape: (m, topk).
+    # Shape: (m, topk)
     # tokens_experts: A flattened tensor of expert assignments for each token.
-    # For each of m tokens, topk unique experts are chosen. Shape: (m * topk,).
+    # For each of m tokens, topk unique experts are chosen. Shape: (m * topk,)
     topk_weights, tokens_experts = torch.topk(weights, topk, dim=-1)
     tokens_experts = tokens_experts.reshape(m * topk)
     topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
@@ -392,13 +378,12 @@ def get_data(m, n, k, qk, scale_size, topk, E, block_M):
         pad_len = ((cnt + block_M - 1) // block_M) * block_M - cnt
         if pad_len > 0:
             # -1 for padding (`M` instead in vLLM moe_align_block_size())
-            # Also note that in vLLM expert idx starts from 1
             group_token_ids = torch.cat([
                 group_token_ids,
                 torch.full((pad_len,), -1, dtype=group_token_ids.dtype, device='cuda')
             ])
         padded_token_ids.append(group_token_ids)
-        expert_ids.extend([eid])
+        expert_ids.extend([eid] * ((cnt + block_M - 1) // block_M))
         start = end
     # sorted_token_ids: The final flattened and padded tensor of token indices.
     sorted_token_ids = torch.cat(padded_token_ids, dim=0).to(torch.int32)  # (padding_M,)
@@ -418,11 +403,15 @@ def main(m=256,
          scale_size=32,
          fast_dequant=True,
          with_bias=False,
-         tune=False,
          topk=4,
          E=32):
-    total_flops = 2 * m * n * k  # noqa: F841
-    block_M = 128
+    # Tunable parameters
+    block_M, block_N, block_K = 128, 128, 256
+    num_stages = 2
+    threads = 512
+    split = 1
+    
+    total_flops = 2 * m * n * k
     num_bits = 4
     num_elems_per_byte = 8 // num_bits
     qk = k // num_elems_per_byte
@@ -442,11 +431,11 @@ def main(m=256,
         num_bits=num_bits,
         scale_size=scale_size,
         block_M=block_M,
-        block_N=128,
-        block_K=128,
-        num_stages=0,
-        threads=256,
-        split=1,
+        block_N=block_N,
+        block_K=block_K,
+        num_stages=num_stages,
+        threads=threads,
+        split=split,
         fast_dequant=fast_dequant,
         with_bias=with_bias)
 
@@ -459,26 +448,25 @@ def main(m=256,
         sorted_token_ids,
         expert_ids,
     )
-    print(f'{output=}')
 
     ref_output = ref_moe(
         A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, block_M=block_M)
-    print(f'{ref_output=}')
+
+    print("All checks pass. ✅")
+    latency = tilelang.profiler.do_bench(lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=500)
+    print("Tile-lang: {:.2f} ms".format(latency))
+    print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 
     diff = (output - ref_output).abs()
     max_val = diff.max()
     max_idx = diff.argmax()
-    print(f"max abs diff: {max_val}, at index: {max_idx}")
+    print(f"max abs diff: {max_val} at index: {max_idx}")
     assert_similar(output, ref_output, name="output", eps=1e-5)
 
-    # print("All checks pass.")
-    # latency = tilelang.profiler.do_bench(lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=500)
-    # print("Tile-lang: {:.2f} ms".format(latency))
-
-
+   
 if __name__ == "__main__":
-    M, N, K = 256, 256, 256
+    M, N, K = 1024, 2944, 3072  # From gpt-oss-20b
     scale_size = 32
-    topk = 8
+    topk = 4
     E = 32
     main(M, N, K, scale_size, fast_dequant=True, with_bias=True, topk=topk, E=E)

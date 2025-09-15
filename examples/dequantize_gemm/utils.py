@@ -147,10 +147,9 @@ def assert_similar(x, y, eps=1e-8, name="tensor", data="", raise_assert=True):
     x = x.masked_fill(~x_mask, 0)
     y = y.masked_fill(~y_mask, 0)
     sim = calc_sim(x, y, name)
-    diff = 1. - sim
+    diff = (1. - sim).item()
+    print(f'{diff=}')
     if not (0 <= diff <= eps):
-        print_red_warning(f'{name} Error: {diff}')
+        print_red_warning(f'{name} Error: {diff=}')
         if raise_assert:
             raise AssertionError
-    else:
-        print(f"{name} {data} passed")
