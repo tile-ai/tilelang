@@ -333,8 +333,9 @@ def matmul(M,
 
             T.copy(C_local, C_shared)
             for i, j in T.Parallel(block_M, block_N):
-                C[sorted_token_ids_shared[i] // topk, sorted_token_ids_shared[i] % topk,
-                  bx * block_N + j] = C_shared[i, j]
+                if sorted_token_ids_shared[i] != -1:
+                    C[sorted_token_ids_shared[i] // topk, sorted_token_ids_shared[i] % topk,
+                      bx * block_N + j] = C_shared[i, j]
 
     return main
 
@@ -435,10 +436,10 @@ def get_data(m, n, k, qk, scale_size, topk, E, block_M):
 
 def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False, topk=4, E=32):
     # Tunable parameters
-    block_M, block_N, block_K = 128, 256, 128
-    num_stages = 1
-    threads = 512
-    split = 1
+    block_M, block_N, block_K = 128, 256, 128  # noqa: F841
+    num_stages = 1  # noqa: F841
+    threads = 512  # noqa: F841
+    split = 1  # noqa: F841
 
     total_flops = 2 * m * n * k * topk
     num_bits = 4
@@ -459,12 +460,6 @@ def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False,
             "bfloat16",
             "bfloat16",
             "float32",
-            block_M=block_M,
-            block_N=block_N,
-            block_K=block_K,
-            num_stages=num_stages,
-            threads=threads,
-            split=split,
             num_bits=num_bits,
             scale_size=scale_size,
             fast_dequant=fast_dequant,
