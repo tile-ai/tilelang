@@ -38,7 +38,7 @@ def get_configs():
 
 
 @tilelang.autotune(configs=get_configs())
-@tilelang.jit(out_idx=[-1], debug_root_path='/home/wt/tilelang/debug')
+@tilelang.jit(out_idx=[-1])
 def matmul(M,
            N,
            K,
