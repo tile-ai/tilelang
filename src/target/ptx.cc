@@ -1052,8 +1052,7 @@ GetMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
 
 inline std::tuple<std::string, std::string, std::string, std::string>
 GetWGMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
-                 ptx::DataType dtype_b, ptx::DataType dtype_c, bool sparse) {
-  bool a_is_shared = true;
+                 ptx::DataType dtype_b, ptx::DataType dtype_c, bool sparse, bool a_is_shared) {
   std::stringstream templates, inputs, outputs, predicate;
   const ptx::FragAttrs frag_attr_a = ptx::GetFragAttrs(dtype_a),
                        frag_attr_b = ptx::GetFragAttrs(dtype_b),
@@ -1106,9 +1105,11 @@ GetWGMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
               << "%" << arg_counter++;
   }
   if (support_ldmatrix_transposed) {
+   if (a_is_shared) {
     // trans_a
     templates << ", "
               << "%" << arg_counter++;
+   }
     // trans_b
     templates << ", "
               << "%" << arg_counter++;
@@ -1145,8 +1146,10 @@ GetWGMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
     inputs << ", \"n\"(int32_t((scale_in_b)))";
   }
   if (support_ldmatrix_transposed) {
-    // trans_a
-    inputs << ", \"n\"(int32_t((trans_a)))";
+    if (a_is_shared) {
+      // trans_a
+      inputs << ", \"n\"(int32_t((trans_a)))";
+    }
     // trans_b
     inputs << ", \"n\"(int32_t((trans_b)))";
   }
@@ -1235,9 +1238,7 @@ std::string PrintWGMMAAssembly(
     const std::string &A_offset, const std::string &b_desc,
     const std::string &B_offset, const std::string &c_ptr,
     const std::string &c_offset, const bool &scale_out, const bool &scale_in_a,
-    const bool &scale_in_b, const bool &a_is_shared, const int &a_swizzle_mode,
-    const int &a_lbo, const int &a_sbo, const int &b_swizzle_mode,
-    const int &b_lbo, const int &b_sbo, const std::string &metadata,
+    const bool &scale_in_b, const bool &a_is_shared, const std::string &metadata,
     const std::string &metadata_offset, const std::string &sparsity_selector,
     bool sparse) {
   ptx::DataType dtype_a = ptx::DTypeFromString(A_dtype),
@@ -1267,7 +1268,7 @@ std::string PrintWGMMAAssembly(
   }
 )";
   auto [templates_str, inputs_str, outputs_str, predicate_str] =
-      GetWGMMAOperands(m, n, k, dtype_a, dtype_b, dtype_c, sparse);
+      GetWGMMAOperands(m, n, k, dtype_a, dtype_b, dtype_c, sparse, a_is_shared);
 
   // replace patterns
   Replacer replacer;
@@ -1282,9 +1283,13 @@ std::string PrintWGMMAAssembly(
   replacer.register_rule("{predicate}", predicate_str);
   asm_code = replacer.rewrite(asm_code);
   replacer.empty_rules();
-  replacer.register_rule("(desc_a)", a_desc);
+  if (a_is_shared) {
+    replacer.register_rule("(desc_a)", a_desc);
+    replacer.register_rule("(A_offset)", A_offset);
+  } else {
+    replacer.register_rule("(A)", a_desc + " + " + A_offset);
+  }
   replacer.register_rule("(desc_b)", b_desc);
-  replacer.register_rule("(A_offset)", A_offset);
   replacer.register_rule("(B_offset)", B_offset);
   replacer.register_rule("(C)", c_ptr + " + " + c_offset);
   replacer.register_rule("(D)", c_ptr + " + " + c_offset);
@@ -1295,12 +1300,6 @@ std::string PrintWGMMAAssembly(
   replacer.register_rule("(scale_in_b)", scale_in_b ? "1" : "-1");
   replacer.register_rule("(trans_a)", A_layout ? "1" : "0");
   replacer.register_rule("(trans_b)", B_layout ? "1" : "0");
-  replacer.register_rule("(swizzle_mode_a)", std::to_string(a_swizzle_mode));
-  replacer.register_rule("(leading_byte_offset_a)", std::to_string(a_lbo));
-  replacer.register_rule("(stride_byte_offset_a)", std::to_string(a_sbo));
-  replacer.register_rule("(swizzle_mode_b)", std::to_string(b_swizzle_mode));
-  replacer.register_rule("(leading_byte_offset_b)", std::to_string(b_lbo));
-  replacer.register_rule("(stride_byte_offset_b)", std::to_string(b_sbo));
   asm_code = replacer.rewrite(asm_code);
   return asm_code;
 }

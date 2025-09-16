@@ -1,9 +1,9 @@
 import tilelang.language as T
 from enum import IntEnum
-from typing import Optional
+from typing import Optional, Callable
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
-from tvm.tir import PrimExpr, Buffer, Var
+from tvm.tir import PrimExpr, Buffer, Var, IndexMap
 from tilelang.utils import is_fragment
 from tilelang.layout import (
     Layout,
@@ -12,6 +12,18 @@ from tilelang.layout import (
     make_quarter_bank_swizzled_layout,
 )
 from tvm.runtime import convert
+from tilelang.intrinsics.mma_layout import (
+    shared_16x8_to_mma_32x4_layout_sr_a,
+    shared_16x8_to_mma_32x4_layout_sr_b,
+    shared_16x16_to_mma_32x8_layout_sr_a,
+    shared_16x16_to_mma_32x8_layout_sr_b,
+    shared_16x32_to_mma_32x16_layout_sr_a,
+    shared_16x32_to_mma_32x16_layout_sr_b,
+    mma_load_a_32x4_to_shared_16x8_layout,
+    mma_load_b_32x4_to_shared_16x8_layout,
+    mma_load_a_32x16_to_shared_16x32_layout,
+    mma_load_b_32x16_to_shared_16x32_layout,
+)
 
 lift = convert
 
@@ -144,6 +156,10 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
               B_buf: Buffer,
               C_local_buf: Buffer,
               clear_accum: PrimExpr = False):
+
+        if is_fragment(A_buf):
+            return self.wgmma_rs(A_buf, B_buf, C_local_buf, clear_accum)
+
         local_size_out = self.local_size_out
         a_dtype_abbrv = self.a_dtype_abbrv
         b_dtype_abbrv = self.b_dtype_abbrv
@@ -217,7 +233,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                         -1] + k_dim_offset if a_is_k_major else ki * micro_size_k * 64 + i * 64 * k_dim
                     B_offset = k_dim_offset if b_is_k_major else k_dim_offset * B_buf.shape[-1]
                     C_offset = i * warp_cols * local_size_out  # 4 warps as an unit
-                    T.ptx_wgmma(
+                    T.ptx_wgmma_ss(
                         accum_dtype,
                         wgmma_prefix,
                         self.a_transposed,
@@ -233,16 +249,203 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                         C_offset,
                         scale_out,
                         scale_in_a,
-                        scale_in_b,
-                        a_swizzle_mode,
-                        int(a_leading_byte_offset >> 4),
-                        int(a_stride_byte_offset >> 4),
-                        b_swizzle_mode,
-                        int(b_leading_byte_offset >> 4),
-                        int(b_stride_byte_offset >> 4),
+                        scale_in_b
                     )
 
         return _warp_mma(A_buf, B_buf, C_local_buf)
+
+    def wgmma_rs(self,
+                 A_buf: Buffer,
+                 B_buf: Buffer,
+                 C_local_buf: Buffer,
+                 clear_accum: PrimExpr = False):
+        local_size_a = self.local_size_a
+        local_size_out = self.local_size_out
+        a_dtype_abbrv = self.a_dtype_abbrv
+        b_dtype_abbrv = self.b_dtype_abbrv
+        accum_dtype = self.accum_dtype
+        accum_dtype_abbrv = self.accum_dtype_abbrv
+        m_dim = self.block_row_warps * self.warp_row_tiles
+        warp_rows, warp_cols = self.warp_rows, self.warp_cols
+        micro_size_k = self.micro_size_k
+        k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
+        wgmma_prefix = self.wgmma_prefix
+        scale_out = not clear_accum
+        scale_in_a = 1
+        scale_in_b = 1
+
+        assert k_dim >= micro_size_k, f"k_dim must be greater than or equal to {micro_size_k}, got k_dim: {k_dim}"
+
+        elems_in_bytes = DataType(self.a_dtype).bits // 8
+
+        a_is_k_major = not self.a_transposed
+        b_is_k_major = self.b_transposed
+
+        b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
+
+
+        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim *
+                                                                               elems_in_bytes)
+        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (8 * 8 *
+                                                                                  elems_in_bytes)
+        if not b_swizzle_mode.is_none():
+            # swizzle mode doesn't require LBO/SBO to be 1
+            # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
+            if b_is_k_major:
+                b_leading_byte_offset = 16
+            else:
+                # MN Major
+                # LBO represents the distance between two atoms along the N dimension
+                # SBO represents the distance between two atoms along the K dimension
+                b_leading_byte_offset = b_swizzle_mode.swizzle_atom_size()
+                b_stride_byte_offset = 8 * n_dim * elems_in_bytes
+
+        @T.macro
+        def _warp_mma(A_buf, B_buf, C_local_buf):
+            desc_b = T.alloc_descriptor()
+            T.initialize_descriptor(desc_b, B_buf.access_ptr("w"), b_swizzle_mode,
+                                    int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+            for ki in T.serial(0, (k_dim // micro_size_k)):
+                for i in T.serial(m_dim // 64):
+                    k_dim_offset = ki * micro_size_k
+                    A_offset = ki * warp_rows * local_size_a + i * local_size_a
+                    B_offset = k_dim_offset if b_is_k_major else k_dim_offset * B_buf.shape[-1]
+                    C_offset = i * warp_cols * local_size_out  # 4 warps as an unit
+                    T.ptx_wgmma_rs(
+                        accum_dtype,
+                        wgmma_prefix,
+                        self.a_transposed,
+                        not self.b_transposed,
+                        a_dtype_abbrv,
+                        b_dtype_abbrv,
+                        accum_dtype_abbrv,
+                        A_buf.data,
+                        A_offset,
+                        desc_b.data,
+                        (B_offset * elems_in_bytes) >> 4,
+                        C_local_buf.data,
+                        C_offset,
+                        scale_out,
+                        scale_in_a,
+                        scale_in_b,
+                    )
+        return _warp_mma(A_buf, B_buf, C_local_buf)
+
+
+    def make_mma_load_layout(self,
+                             local_buf: Buffer,
+                             matrix: str = "A") -> T.Fragment:
+        """
+        Create a layout function for storing MMA results into a fragment buffer.
+        This layout is used in conjunction with `inverse_mma_store_layout` to
+        map fragment indices to threads and local indices.
+
+        Parameters
+        ----------
+        local_buf : tir.Buffer
+            The local buffer representing a fragment of a matrix.
+
+        Returns
+        -------
+        T.Fragment
+            A fragment object that describes how threads and indices
+            in `local_buf` are laid out.
+
+        Raises
+        ------
+        AssertionError
+            If `local_buf` is not detected to be a fragment buffer.
+        """
+        from tilelang.utils import is_fragment
+        assert matrix in ["A" ], "matrix should be A for WGMMA"
+        dtype = self.a_dtype
+        dtype_bits = DataType(dtype).bits
+        transposed = self.a_transposed
+
+        # s represents spatial axis
+        # r represents reduction axis
+        # sr represents the two dims are spatial + reduction
+        # rs represents the two dims are reduction + spatial
+        # sr also can represent a non-transposed basic layout
+        # then rs also can represent a transposed basic layout
+        transform_func_sr_a: Callable = None
+        if dtype_bits == 32:
+            transform_func_sr_a = shared_16x8_to_mma_32x4_layout_sr_a
+        elif dtype_bits == 16:
+            transform_func_sr_a = shared_16x16_to_mma_32x8_layout_sr_a
+        elif dtype_bits == 8:
+            transform_func_sr_a = shared_16x32_to_mma_32x16_layout_sr_a
+        else:
+            raise ValueError(f"Unsupported dtype {dtype}")
+
+        is_sr_conditions = [False]
+        is_sr_conditions.append(not transposed)
+        is_sr_axis_order = any(is_sr_conditions)
+
+        # the layout of mma.sync is row.col.
+        # so the b matrix expected a transposed basic layout
+        transform_func: Callable = None
+        transform_func = transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(
+            j, i)
+            
+
+        assert is_fragment(local_buf), "local_buf must be a fragment, but got {}".format(
+            local_buf.scope())
+
+        micro_size_s, micro_size_r = self.micro_size_x, self.micro_size_k
+
+        block_row_warps, block_col_warps = (
+            self.block_row_warps,
+            self.block_col_warps,
+        )
+
+        inverse_mma_load_layout = IndexMap.from_func(transform_func, index_dtype="int32")
+
+        def forward_thread(i: int, j: int) -> int:
+            """
+            Given the row index `i` and column index `j` in the fragment,
+            """
+            lane_id, _ = inverse_mma_load_layout.map_indices([i, j])
+            return lane_id
+
+        def forward_index(i: int, j: int) -> int:
+            """
+            Given the row index `i` and column index `j` in the fragment,
+            """
+            _, local_id = inverse_mma_load_layout.map_indices([i, j])
+            return local_id
+
+        base_fragment = T.Fragment(
+            [micro_size_s, micro_size_r] if is_sr_axis_order else [micro_size_r, micro_size_s],
+            forward_thread_fn=forward_thread,
+            forward_index_fn=forward_index,
+        )
+
+        warp_rows, warp_cols = self.warp_rows, self.warp_cols
+        chunk = self.chunk
+
+        warp_s = warp_rows
+        warp_r = chunk // micro_size_r
+        block_s = block_row_warps
+        replicate = block_col_warps
+        
+        if is_sr_axis_order:
+            warp_fragment = base_fragment.repeat([block_s, 1],
+                                                repeat_on_thread=True,
+                                                lower_dim_first=False).replicate(replicate)
+            block_fragment = warp_fragment.repeat([warp_s, warp_r],
+                                                repeat_on_thread=False,
+                                                lower_dim_first=False)
+        else:
+            # rs condition, transposed_a matrix
+            warp_fragment = base_fragment.repeat([1, block_s],
+                                                repeat_on_thread=True,
+                                                lower_dim_first=False).replicate(replicate)
+            block_fragment = warp_fragment.repeat([warp_r, warp_s],
+                                                repeat_on_thread=False,
+                                                lower_dim_first=True)
+
+        return block_fragment
 
     def make_mma_store_layout(self, local_buf: Buffer) -> T.Fragment:
         """

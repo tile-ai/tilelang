@@ -1061,7 +1061,7 @@ def ptx_mma_sp(
     )
 
 
-def ptx_wgmma(
+def ptx_wgmma_ss(
     dtype,
     wgmma_prefix,
     trans_a,
@@ -1078,19 +1078,13 @@ def ptx_wgmma(
     scale_out,
     scale_in_a,
     scale_in_b,
-    a_swizzle_mode,
-    a_lbo,
-    a_sbo,
-    b_swizzle_mode,
-    b_lbo,
-    b_sbo,
 ):
     """TVM intrinsic for ptx tensor core wmma instructions
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions-for-wmma
     """
     return call_intrin(
         dtype,
-        _tvm_op.Op.get("tl.ptx_wgmma"),
+        _tvm_op.Op.get("tl.ptx_wgmma_ss"),
         wgmma_prefix,
         trans_a,
         trans_b,
@@ -1106,12 +1100,45 @@ def ptx_wgmma(
         scale_out,
         scale_in_a,
         scale_in_b,
-        a_swizzle_mode,
-        a_lbo,
-        a_sbo,
-        b_swizzle_mode,
-        b_lbo,
-        b_sbo,
+    )
+
+def ptx_wgmma_rs(
+    dtype,
+    wgmma_prefix,
+    trans_a,
+    trans_b,
+    a_dtype_abbrv,
+    b_dtype_abbrv,
+    accum_dtype_abbrv,
+    A_buf,
+    A_offset,
+    B_desc,
+    B_offset,
+    C_data,
+    C_offset,
+    scale_out,
+    scale_in_a,
+    scale_in_b,
+):
+
+    return call_intrin(
+        dtype,
+        _tvm_op.Op.get("tl.ptx_wgmma_rs"),
+        wgmma_prefix,
+        trans_a,
+        trans_b,
+        a_dtype_abbrv,
+        b_dtype_abbrv,
+        accum_dtype_abbrv,
+        A_buf,
+        A_offset,
+        B_desc,
+        B_offset,
+        C_data,
+        C_offset,
+        scale_out,
+        scale_in_a,
+        scale_in_b,
     )
 
 

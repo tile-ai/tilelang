@@ -46,17 +46,8 @@ class GemmWGMMA(GemmBase):
                 self.C:
                     mma_emitter.make_mma_store_layout(self.C),
             }
-        elif self.is_gemm_sr():
-            return {
-                self.A:
-                    make_wgmma_swizzled_layout(
-                        self.A, continuity=a_continuity, k_major=a_is_k_major),
-                self.B:
-                    mma_emitter.make_mma_load_layout(self.B, matrix="B"),
-                self.C:
-                    mma_emitter.make_mma_store_layout(self.C),
-            }
         elif self.is_gemm_rs():
+            b_continuity = self.N if b_is_k_major else 4 * self.K // n_warp
             return {
                 self.A:
                     mma_emitter.make_mma_load_layout(self.A, matrix="A"),
@@ -66,15 +57,9 @@ class GemmWGMMA(GemmBase):
                 self.C:
                     mma_emitter.make_mma_store_layout(self.C),
             }
-        elif self.is_gemm_rr():
-            return {
-                self.A: mma_emitter.make_mma_load_layout(self.A, matrix="A"),
-                self.B: mma_emitter.make_mma_load_layout(self.B, matrix="B"),
-                self.C: mma_emitter.make_mma_store_layout(self.C),
-            }
         else:
             raise ValueError(
-                f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+                f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
 
     def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target,
@@ -128,35 +113,6 @@ class GemmWGMMA(GemmBase):
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_ssr, inline_let=True)
-        elif self.is_gemm_sr():
-            B_local = self.B
-
-            @T.prim_func
-            def _gemm_srr() -> None:
-                """
-                The inner macro that loads data from shared buffers A_shared and
-                B_shared into local fragments, then issues Tensor Core mma ops,
-                accumulating into C_local.
-                """
-                A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
-
-                for ki in T.serial(0, (block_K // micro_size_k)):
-
-                    # Load A into fragment
-                    mma_emitter.ldmatrix_a(
-                        A_local,
-                        A_shared,
-                        ki,
-                    )
-
-                    # Perform Matrix Multiplication
-                    mma_emitter.mma(A_local, B_local, C_local, ki)
-
-            # Simplify to optimize the index computing
-            # Must inline let statements to simplify the analysis
-            # alloc_buffers body
-            # insert into parent block
-            return _Simplify(_gemm_srr, inline_let=True)
         elif self.is_gemm_rs():
             A_local = self.A
 
@@ -167,45 +123,13 @@ class GemmWGMMA(GemmBase):
                 B_shared into local fragments, then issues Tensor Core mma ops,
                 accumulating into C_local.
                 """
-                B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
-
-                for ki in T.serial(0, (block_K // micro_size_k)):
-
-                    # Load B into fragment
-                    mma_emitter.ldmatrix_b(
-                        B_local,
-                        B_shared,
-                        ki,
-                    )
-
-                    # Perform Matrix Multiplication
-                    mma_emitter.mma(A_local, B_local, C_local, ki)
+                mma_emitter.wgmma(A_local, B_shared, C_local, clear_accum)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis
             return _Simplify(_gemm_rsr, inline_let=True)
-        elif self.is_gemm_rr():
-            A_local = self.A
-            B_local = self.B
-
-            @T.prim_func
-            def _gemm_rsr() -> None:
-                """
-                The inner macro that loads data from shared buffers A_shared and
-                B_shared into local fragments, then issues Tensor Core mma ops,
-                accumulating into C_local.
-                """
-
-                for ki in T.serial(0, (block_K // micro_size_k)):
-                    # Perform Matrix Multiplication
-                    mma_emitter.mma(A_local, B_local, C_local, ki)
-
-            # Simplify to optimize the index computing
-            # Must inline let statements to simplify the analysis
-            return _Simplify(_gemm_rsr, inline_let=True)
-        else:
-            raise ValueError(
-                f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+        raise ValueError(
+            f"Unsupported gemm combination for wgmma, A: {self.A.scope()}, B: {self.B.scope()}")
 
     def is_gemm_ss(self) -> bool:
         return is_shared(self.A) and is_shared(self.B)
