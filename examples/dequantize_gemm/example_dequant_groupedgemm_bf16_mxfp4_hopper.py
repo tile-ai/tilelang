@@ -11,7 +11,7 @@ from tilelang.autotuner import set_autotune_inputs
 def get_configs():
     """
     Generate a list of hyperparameter configuration dictionaries for tuning.
-    
+
     Each configuration is a dict with keys: 'block_M', 'block_N', 'block_K',
     'num_stages', 'threads', and 'split'. The function returns the Cartesian
     product of the parameter value lists:
@@ -19,7 +19,7 @@ def get_configs():
     - num_stages: pipeline stages
     - threads: thread counts
     - split: K-splitting factor
-    
+
     Returns:
         List[dict]: A list of configuration dictionaries covering all combinations.
     """
@@ -309,17 +309,20 @@ def matmul(M,
                 C_local[i, j] = Bias_shared[j]
 
             tx = T.get_thread_binding()
-            
+
             for k in T.Pipelined(K // block_K, num_stages=num_stages):
                 for copy_i in T.serial(block_M * block_K // threads // 16):
                     base = copy_i * threads * 16 + tx * 16
                     if sorted_token_ids_shared[base // block_K] != -1:
                         for copy_j in T.vectorized(16):
-                            A_shared[base // block_K, base % block_K + copy_j] = A[sorted_token_ids_shared[base // block_K] // topk, k * block_K + base % block_K + copy_j]
+                            A_shared[base // block_K, base % block_K +
+                                     copy_j] = A[sorted_token_ids_shared[base // block_K] // topk,
+                                                 k * block_K + base % block_K + copy_j]
 
                 T.copy(B[expert_id[0], bx * block_N, k * block_K // num_elems_per_byte], B_shared)
                 if fast_dequant:
-                    get_fast_dequant_twiddling_func()(B_shared, B_dequantize_shared, Scale_shared, k)
+                    get_fast_dequant_twiddling_func()(B_shared, B_dequantize_shared, Scale_shared,
+                                                      k)
                 else:
                     get_simple_dequant_func()(B_shared, B_dequantize_shared, Scale_shared, k)
 
@@ -331,7 +334,7 @@ def matmul(M,
             T.copy(C_local, C_shared)
             for i, j in T.Parallel(block_M, block_N):
                 C[sorted_token_ids_shared[i] // topk, sorted_token_ids_shared[i] % topk,
-                bx * block_N + j] = C_shared[i, j]
+                  bx * block_N + j] = C_shared[i, j]
 
     return main
 
@@ -366,7 +369,8 @@ def ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, bloc
 
         # Compute the output for this token-expert pair
         # token_embedding @ B.T + bias
-        output = torch.matmul(token_embedding.to(torch.bfloat16), B.T.to(torch.bfloat16)) + Bias[expert_id]
+        output = torch.matmul(token_embedding.to(torch.bfloat16), B.T.to(
+            torch.bfloat16)) + Bias[expert_id]
         output = output.to(torch.__getattribute__(dtypeC))
 
         # Apply the topk weight
@@ -491,7 +495,9 @@ def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False,
     max_val = diff.max()
     max_idx = diff.argmax()
     print(f"max abs diff: {max_val} at index: {max_idx}")
-    assert_similar(output, ref_output, name="output", eps=1e-5)  # We care about the similarity rather than abs. difference
+    assert_similar(
+        output, ref_output, name="output",
+        eps=1e-5)  # We care about the similarity rather than abs. difference
     print("All checks pass. ✅")
 
 
