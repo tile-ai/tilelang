@@ -4,13 +4,20 @@ import logging
 import torch
 from triton.testing import do_bench
 
+import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
 from tilelang import jit
+from tilelang.contrib import nvcc
 from tilelang.layout import make_metadata_layout
+
 # Configure logger
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
+arch = nvcc.get_target_compute_version()
+
+ARCH_INFO = {"8.0": (16, "int16"), "8.9": (16, "int16"), "9.0": (8, "uint8")}
 
 
 def ref_program(A, B):
@@ -79,11 +86,11 @@ def get_configs(M, N, K):
     return configs
 
 
-def matmul_sp(M, N, K):
+def matmul_sp(M, N, K, accum_dtype):
     """
     Create an autotuned matrix multiplication kernel for matrices of shape:
       - A: (M, K)
-      - B: (N, K)
+      - B: (K, N)
       - C: (M, N)
 
     Parameters
@@ -155,14 +162,14 @@ def matmul_sp(M, N, K):
         # Use half-precision for input data to reduce memory bandwidth,
         # accumulate in float for better numerical accuracy
         dtype = "float16"
-        accum_dtype = "float"
+        e_factor, e_dtype = ARCH_INFO[arch]
 
         @T.prim_func
         def main(
                 A_sparse: T.Tensor((M, K // 2), dtype),
-                E: T.Tensor((M, K // 8), 'uint8'),
-                B: T.Tensor((N, K), dtype),
-                C: T.Tensor((M, N), dtype),
+                E: T.Tensor((M, K // e_factor), e_dtype),
+                B: T.Tensor((K, N), dtype),
+                C: T.Tensor((M, N), accum_dtype),
         ):
             """
             The compiled TVM function for block-level matrix multiplication.
@@ -182,13 +189,13 @@ def matmul_sp(M, N, K):
                 # Allocate shared memory for A sub-block of shape (block_M, block_K)
                 A_shared = T.alloc_shared((block_M, block_K // 2), dtype)
                 # Allocate shared memory for B sub-block of shape (block_N, block_K)
-                B_shared = T.alloc_shared((block_N, block_K), dtype)
+                B_shared = T.alloc_shared((block_K, block_N), dtype)
                 # Allocate shared memory for E sub-block of shape (block_M, block_K // E_factor)
-                E_shared = T.alloc_shared((block_M, block_K // 8), 'uint8')
+                E_shared = T.alloc_shared((block_M, block_K // e_factor), e_dtype)
                 # Allocate a local fragment for intermediate accumulation
                 C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
                 # Allocate a shared memory for C sub-block of shape (block_M, block_N)
-                C_shared = T.alloc_shared((block_M, block_N), dtype)
+                C_shared = T.alloc_shared((block_M, block_N), accum_dtype)
 
                 # Clear out the accumulation buffer
                 T.clear(C_local)
@@ -198,32 +205,27 @@ def matmul_sp(M, N, K):
                 T.annotate_layout({
                     E:
                         make_metadata_layout(
-                            E, mma_dtype="float16", arch="sm90", backend="cutlass",
-                            block_k=block_K),
+                            E, mma_dtype="float16", backend="cutlass", block_k=block_K),
                     E_shared:
                         make_metadata_layout(
-                            E_shared,
-                            mma_dtype="float16",
-                            arch="sm90",
-                            backend="cutlass",
-                            block_k=block_K),
+                            E_shared, mma_dtype="float16", backend="cutlass", block_k=block_K),
                 })
                 # Loop over sub-blocks in K dimension, pipelined by num_stages
                 for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                     # Load a sub-block of A from global memory into A_shared
-                    T.copy(A_sparse[by * block_M, k * block_K], A_shared)
+                    T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
                     # Load a sub-block of E from global memory into E_shared
-                    T.copy(E[by * block_M, k * block_K // 8], E_shared)
+                    T.copy(E[by * block_M, k * block_K // e_factor], E_shared)
                     # Load a sub-block of B from global memory into B_shared
-                    T.copy(B[bx * block_N, k * block_K], B_shared)
+                    T.copy(B[k * block_K, bx * block_N], B_shared)
                     # Perform a partial matrix multiplication:
-                    #   C_local += A_shared @ B_shared^T
+                    #   C_local += A_shared @ B_shared
                     T.gemm_sp(
                         A_shared,
                         E_shared,
                         B_shared,
                         C_local,
-                        transpose_B=True,
+                        transpose_B=False,
                         policy=policy,
                     )
                 # Write back the results from C_local to the global memory C
@@ -241,7 +243,24 @@ if __name__ == "__main__":
     parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
     parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
     parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
+    parser.add_argument("--disable_cache", action="store_true")
+    parser.add_argument(
+        "--accum_dtype",
+        type=str,
+        default="float",
+        choices=["float", "float16"],
+        help="Accumulation datatype")
+    parser.add_argument(
+        "--bench_torch_sparse",
+        type=str,
+        choices=['cutlass', 'cusparselt'],
+        default=None,
+        help="Whether to benchmark against torch sparse implementation, note that at current time only sm80 is supported"
+    )
     args = parser.parse_args()
+
+    if args.disable_cache:
+        tilelang.disable_cache()
 
     M, N, K = args.m, args.n, args.k
 
@@ -249,16 +268,28 @@ if __name__ == "__main__":
     total_flops = 2 * M * N * K
 
     # matmul(...) returns (best_latency, best_config, ref_latency)
-    best_result = matmul_sp(M, N, K)
+    best_result = matmul_sp(M, N, K, args.accum_dtype)
     best_latency = best_result.latency
     best_config = best_result.config
     A = torch.randn(M, K, dtype=torch.float16, device="cuda")
-    B = torch.randn(N, K, dtype=torch.float16, device="cuda")
-    ref_latency = do_bench(lambda: A @ B.T)
+    B = torch.randn(K, N, dtype=torch.float16, device="cuda")
+    ref_latency = do_bench(lambda: A @ B)
+
+    if args.bench_torch_sparse is not None:
+        from torch.sparse import to_sparse_semi_structured, SparseSemiStructuredTensor
+        if args.bench_torch_sparse == 'cutlass':
+            SparseSemiStructuredTensor._FORCE_CUTLASS = True
+        A_sp = to_sparse_semi_structured(A, transposed=False)
+        torch_sparse_latency = do_bench(lambda: A_sp @ B)
 
     # Print out the benchmark results
     print(f"Best latency (s): {best_latency}")
     print(f"Best TFlops: {total_flops / best_latency * 1e-9:.3f}")
     print(f"Best config: {best_config}")
 
-    print(f"Reference TFlops: {total_flops / ref_latency * 1e-9:.3f}")
+    if args.bench_torch_sparse is not None:
+        print(
+            f"Torch sparse ({args.bench_torch_sparse}) TFlops: {total_flops / torch_sparse_latency * 1e-9:.3f}"
+        )
+
+    print(f"Reference Dense TFlops: {total_flops / ref_latency * 1e-9:.3f}")

@@ -18,6 +18,50 @@
 namespace tvm {
 namespace tl {
 
+std::pair<int, int> GemmSPWarpPolicyNode::ComputeWarpPartition(int M, int N,
+                                                               int block_size,
+                                                               Target target,
+                                                               bool use_wgmma,
+                                                               int bits) const {
+  int num_warps = block_size / TargetGetWarpSize(target);
+
+  auto [m_warp, n_warp] = GemmWarpPolicyNode::ComputeWarpPartition(
+      M, N, block_size, target, use_wgmma);
+
+  // Special handling for gemm_sp when the tiling size is not a multiple
+  // This should be consistent with shape check in gemm_sp_sm80.h
+  int m_atom_size = bits == 16 ? 32 : 16;
+  int n_atom_size = bits == 16 ? 32 : 16;
+  static const char *err_msg =
+      "Cannot arrange the warp shape to be a multiple of atom size, please "
+      "reduce num threads or increase tiling size";
+  if (TargetIsAmpere(target)) {
+    int warp_shape_m = M / m_warp;
+    int warp_shape_n = N / n_warp;
+    if (warp_shape_m % m_atom_size) { // GemmWarpPolicy::kFullRow
+      m_warp = M / m_atom_size;
+      ICHECK(m_warp > 0) << err_msg;
+      n_warp = num_warps / m_warp;
+      warp_shape_n = N / n_warp;
+      ICHECK(warp_shape_n % n_atom_size == 0) << err_msg;
+    } else if (warp_shape_n % n_atom_size != 0) { // GemmWarpPolicy::kFullColumn
+      n_warp = N / n_atom_size;
+      ICHECK(n_warp > 0) << err_msg;
+      m_warp = num_warps / n_warp;
+      warp_shape_m = M / m_warp;
+      ICHECK(warp_shape_m % m_atom_size == 0) << err_msg;
+    }
+    ICHECK(m_warp * n_warp == num_warps)
+        << "m_warp * n_warp must equal num_warps, please report an issue when "
+           "encounter this"
+        << ", m_warp: " << m_warp << ", n_warp: " << n_warp << ", num_warps"
+        << num_warps;
+    this->m_warp = m_warp;
+    this->n_warp = n_warp;
+  }
+  return {m_warp, n_warp};
+}
+
 /**
  * @brief Construct a GemmSP operator node from TL call arguments and a buffer
  * map.
@@ -50,7 +94,7 @@ GemmSP::GemmSP(Array<PrimExpr> args, BufferMap vmap) {
   node->M = args[6].as<IntImm>().value()->value;
   node->N = args[7].as<IntImm>().value()->value;
   node->K = args[8].as<IntImm>().value()->value;
-  node->policy = GemmWarpPolicy(args[9].as<IntImm>().value()->value);
+  node->policy = GemmSPWarpPolicy(args[9].as<IntImm>().value()->value);
   node->clear_accum = args[10].as<Bool>().value();
   if (args.size() > 11) {
     node->kPack = args[11].as<IntImm>().value()->value;
@@ -103,8 +147,8 @@ Stmt GemmSPNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   bool maybe_wgmma = TargetIsHopper(T.target) && (this->M >= 64) &&
                      (block_size / warp_size % 4 == 0);
 
-  auto [warp_m, warp_n] =
-      policy->ComputeWarpPartition(M, N, block_size, T.target, maybe_wgmma);
+  auto [warp_m, warp_n] = policy->ComputeWarpPartition(
+      M, N, block_size, T.target, maybe_wgmma, A->dtype.bits());
 
   std::stringstream ss;
   std::string op_name = "tl::gemm_sp_ss";
@@ -181,8 +225,8 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
     constexpr int wgmma_m = 16 * 4;
     bool maybe_wgmma =
         (this->M >= wgmma_m) && (block_size / warp_size % 4 == 0);
-    auto [warp_m, warp_n] =
-        policy->ComputeWarpPartition(M, N, block_size, T.target, maybe_wgmma);
+    auto [warp_m, warp_n] = policy->ComputeWarpPartition(
+        M, N, block_size, T.target, maybe_wgmma, A->dtype.bits());
     auto fragment =
         maybe_wgmma
             ? makeGemmFragmentCHopper(M, N, M / warp_m, N / warp_n,
@@ -212,9 +256,43 @@ LayoutMap GemmSPNode::InferLayout(const LayoutInferArgs &T,
     } else {
       ICHECK(false) << "WGMMA only support B in shared.";
     }
+  } else if (TargetIsAmpere(T.target)) {
+    auto [warp_m, warp_n] = policy->ComputeWarpPartition(
+        M, N, block_size, T.target, false, A->dtype.bits());
+    auto fragment =
+        makeGemmSparseFragmentC(M, N, M / warp_m, N / warp_n, C->dtype.bits());
+    results.Set(C, fragment->BindThreadRange(thread_range));
+
+    if (A.scope() == "shared" || A.scope() == "shared.dyn") {
+      int dim_A = A->shape.size();
+      const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
+      const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
+      results.Set(A, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
+                                                  A->dtype.bits()));
+    } else if (A.scope() == "local.fragment") {
+      // auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
+      //                                   A->dtype.bits(), trans_A);
+      // results.Set(A, fragment->BindThreadRange(thread_range));
+      ICHECK(false) << "Not Implemented";
+    } else {
+      ICHECK(0);
+    }
+    if (B.scope() == "shared" || B.scope() == "shared.dyn") {
+      int dim_B = B->shape.size();
+      const int64_t mat_stride = *as_const_int(B->shape[dim_B - 2]);
+      const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
+      results.Set(B, makeGemmSparseAmpereABLayout(mat_stride, mat_continuous,
+                                                  B->dtype.bits()));
+    } else if (B.scope() == "local.fragment") {
+      // auto fragment =
+      //     makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
+      // results.Set(B, fragment->BindThreadRange(thread_range));
+      ICHECK(false) << "Not Implemented";
+    } else {
+      ICHECK(0);
+    }
   } else {
-    ICHECK(0) << "Not supported " << T.target->str()
-              << " Currently only Hopper are supported";
+    ICHECK(0) << "Architecture is not supported: " << T.target->str();
   }
   completed_ = true;
   return results;
