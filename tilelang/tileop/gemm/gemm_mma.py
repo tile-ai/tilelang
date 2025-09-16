@@ -87,6 +87,8 @@ class GemmMMA(GemmBase):
         B_shared = self.B
         C_local = self.C
 
+        assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
+
         if self.is_gemm_ss():
 
             @T.prim_func

@@ -102,7 +102,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         inst_m, inst_n = 64, self.block_col_warps * self.warp_col_tiles
         # 256 bits per instruction
         inst_k = 256 // DataType(self.a_dtype).bits
-        assert inst_k * n_dim == 256, f"Failed to initialize wgmma prefix, dtype: {self.a_dtype}, n_dim: {n_dim}, inst_k: {inst_k}"
         self.wgmma_prefix = f"m{inst_m}n{inst_n}k{inst_k}"
 
     def _initialize_micro_size(self, m_dim: int = 16, k_dim: int = 16):
@@ -152,11 +151,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         accum_dtype_abbrv = self.accum_dtype_abbrv
         m_dim = self.block_row_warps * self.warp_row_tiles
         warp_cols = self.warp_cols
+        micro_size_k = self.micro_size_k
         k_dim, n_dim = self.chunk, self.block_col_warps * self.warp_col_tiles
         wgmma_prefix = self.wgmma_prefix
         scale_out = not clear_accum
         scale_in_a = 1
         scale_in_b = 1
+
+        assert k_dim >= micro_size_k, f"k_dim must be greater than or equal to {micro_size_k}, got k_dim: {k_dim}"
 
         a_is_k_major = not self.a_transposed
         b_is_k_major = self.b_transposed
@@ -208,11 +210,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                                     int(a_leading_byte_offset >> 4), int(a_stride_byte_offset >> 4))
             T.initialize_descriptor(desc_b, B_buf.access_ptr("w"), b_swizzle_mode,
                                     int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
-            for ki in T.serial(0, (k_dim // self.micro_size_k)):
+            for ki in T.serial(0, (k_dim // micro_size_k)):
                 for i in T.serial(m_dim // 64):
-                    k_dim_offset = ki * self.micro_size_k
+                    k_dim_offset = ki * micro_size_k
                     A_offset = i * 64 * A_buf.shape[
-                        -1] + k_dim_offset if a_is_k_major else ki * self.micro_size_k * 64 + i * 64 * k_dim
+                        -1] + k_dim_offset if a_is_k_major else ki * micro_size_k * 64 + i * 64 * k_dim
                     B_offset = k_dim_offset if b_is_k_major else k_dim_offset * B_buf.shape[-1]
                     C_offset = i * warp_cols * local_size_out  # 4 warps as an unit
                     T.ptx_wgmma(

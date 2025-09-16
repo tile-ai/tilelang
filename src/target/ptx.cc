@@ -146,6 +146,14 @@ inline uint32_t DTypeBits(DataType dtype) {
   return num_bits[static_cast<int>(dtype)];
 }
 
+inline bool DTypeIsInteger(DataType dtype) {
+  return dtype == DataType::kInt4 || dtype == DataType::kInt8 ||
+         dtype == DataType::kInt16 || dtype == DataType::kInt32 ||
+         dtype == DataType::kInt64 || dtype == DataType::kUInt4 ||
+         dtype == DataType::kUInt8 || dtype == DataType::kUInt16 ||
+         dtype == DataType::kUInt32 || dtype == DataType::kUInt64;
+}
+
 /*!
  * \brief Extract the value m, n, k from string m*n*k*
  */
@@ -1057,6 +1065,10 @@ GetWGMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
                              frag_attr_a.size / threads / (sparse ? 2 : 1),
             num_operands_c =
                 (m * n) * ptx::DTypeBits(dtype_c) / frag_attr_c.size / threads;
+  const bool support_ldmatrix_transposed =
+      ptx::DTypeBits(dtype_a) == 16 && ptx::DTypeBits(dtype_b) == 16;
+  const bool support_scale_input =
+      !ptx::DTypeIsInteger(dtype_a) || !ptx::DTypeIsInteger(dtype_b);
 
   // generate templates;
   int arg_counter = 0;
@@ -1086,18 +1098,21 @@ GetWGMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
             << "p";
 
   // scale_in_a
-  templates << ", "
-            << "%" << arg_counter++;
-  // scale_in_b
-  templates << ", "
-            << "%" << arg_counter++;
-  // trans_a
-  templates << ", "
-            << "%" << arg_counter++;
-  // trans_b
-  templates << ", "
-            << "%" << arg_counter++;
-
+  if (support_scale_input) {
+    templates << ", "
+              << "%" << arg_counter++;
+    // scale_in_b
+    templates << ", "
+              << "%" << arg_counter++;
+  }
+  if (support_ldmatrix_transposed) {
+    // trans_a
+    templates << ", "
+              << "%" << arg_counter++;
+    // trans_b
+    templates << ", "
+              << "%" << arg_counter++;
+  }
   // templates of metadata and sparse selector for sparse mma.
   if (sparse) {
     LOG(FATAL) << "Sparse WGMMA is not supported yet.";
@@ -1122,17 +1137,19 @@ GetWGMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
     inputs << ", \"r\"(((unsigned *)((E)))[0])";
   }
 
-  // predicate
   inputs << ", \"r\"(int32_t((scale_out)))";
   // scale_in_a
-  inputs << ", \"n\"(int32_t((scale_in_a)))";
-  // scale_in_b
-  inputs << ", \"n\"(int32_t((scale_in_b)))";
-  // trans_a
-  inputs << ", \"n\"(int32_t((trans_a)))";
-  // trans_b
-  inputs << ", \"n\"(int32_t((trans_b)))";
-
+  if (support_scale_input) {
+    inputs << ", \"n\"(int32_t((scale_in_a)))";
+    // scale_in_b
+    inputs << ", \"n\"(int32_t((scale_in_b)))";
+  }
+  if (support_ldmatrix_transposed) {
+    // trans_a
+    inputs << ", \"n\"(int32_t((trans_a)))";
+    // trans_b
+    inputs << ", \"n\"(int32_t((trans_b)))";
+  }
   // generate outputs
   for (int i = 0; i < num_operands_c; ++i) {
     if (i != 0) {
