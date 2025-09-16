@@ -1,6 +1,8 @@
 import os
 import torch
 import warnings
+from typing import Optional
+from tilelang.contrib import nvcc
 from torch.utils.cpp_extension import load, _import_module_from_library
 from tilelang import env
 
@@ -52,3 +54,41 @@ def compress_sm90(A: torch.Tensor, block_k: int,
     compress_lib = _get_cached_lib()
 
     return compress_lib.compress_sm90(A, block_k, transposed)
+
+
+def compress_sm80(A: torch.Tensor, transposed: bool) -> tuple[torch.Tensor, torch.Tensor]:
+    try:
+        from torch.sparse import to_sparse_semi_structured, SparseSemiStructuredTensor
+    except ImportError as err:
+        raise ImportError("SparseSemiStructuredTensor is not available in this version of PyTorch. "
+                          "Please install a compatible version.") from err
+    orig_val = SparseSemiStructuredTensor._FORCE_CUTLASS
+    try:
+        SparseSemiStructuredTensor._FORCE_CUTLASS = True
+        if transposed is not False:
+            raise NotImplementedError("transposed flag is deprecated by pytorch")
+        compressed = to_sparse_semi_structured(A)
+        return compressed.packed, compressed.meta
+    finally:
+        SparseSemiStructuredTensor._FORCE_CUTLASS = orig_val
+
+
+def compress(A: torch.Tensor,
+             transposed: bool,
+             arch: Optional[str] = None,
+             **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compress a tensor using the appropriate method based on the CUDA architecture.
+    """
+    if arch is None:
+        arch = nvcc.get_target_compute_version()
+
+    compute_version = nvcc.parse_compute_version(arch)
+
+    if compute_version >= (9, 0):
+        return compress_sm90(A, transposed=transposed, **kwargs)
+    elif compute_version >= (8, 0):
+        return compress_sm80(A, transposed=transposed)
+    else:
+        raise ValueError(f"Unsupported CUDA compute version: {compute_version}. "
+                         "Supported versions are sm_80 and sm_90.")

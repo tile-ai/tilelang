@@ -147,7 +147,7 @@ std::tuple<torch::Tensor, torch::Tensor> compress_impl(torch::Tensor A) {
       case torch::kChar:                                                                                   \
         return DISPATCH_BLOCK_K(int8_t, block_k, 2, A, TRANSPOSED);                                        \
       case torch::kByte:                                                                                   \
-        return DISPATCH_BLOCK_K(uint8_t, block_k, 2, A, TRANSPOSED);                                        \
+        return DISPATCH_BLOCK_K(uint8_t, block_k, 2, A, TRANSPOSED);                                       \
       default:                                                                                             \
         TORCH_CHECK(false, "Unsupported dtype");                                                           \
     }                                                                                                      \

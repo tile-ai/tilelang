@@ -17,6 +17,9 @@ public:
   static Array<IntImm> Collect(const PrimFunc &f) {
     SetMaxNRegCollector collector;
     collector(f->body);
+    if (collector.warp_specialized_) {
+      return Array<IntImm>({});
+    }
     return collector.has_no_set_max_nreg_
                ? Array<IntImm>({IntImm(DataType::Int(32), -1),
                                 IntImm(DataType::Int(32), -1)})
@@ -43,21 +46,27 @@ private:
     StmtExprVisitor::VisitStmt_(op);
   }
 
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == attr::kCustomWarpSpecialization) {
+      warp_specialized_ = true;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
   Array<IntImm> nreg_{IntImm(DataType::Int(32), 0),
                       IntImm(DataType::Int(32), 0)};
   bool has_no_set_max_nreg_ = false;
+  bool warp_specialized_ = false;
 };
 
 class SetMaxNRegInjector : public StmtExprMutator {
 public:
   static PrimFunc Inject(PrimFunc f) {
-    bool warp_specialized = WarpSpecializedDetector::Detect(f->body);
-    if (warp_specialized) {
-      // Should handle set_max_nreg when using hand-written warp specialized
-      return f;
-    }
     auto T = SetMaxNRegInjector();
     T.nreg_ = SetMaxNRegCollector::Collect(f);
+    if (T.nreg_.empty()) {
+      return f;
+    }
     f.CopyOnWrite()->body = T(f->body);
     return f;
   }
