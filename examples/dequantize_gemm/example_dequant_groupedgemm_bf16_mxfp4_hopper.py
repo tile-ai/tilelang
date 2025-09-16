@@ -25,7 +25,7 @@ def get_configs():
     """
     import itertools
     iter_params = dict(
-        block_M=[128],  # must align with data pre-processing
+        block_M=[128],
         block_N=[64, 128, 256],
         block_K=[128],
         num_stages=[0, 1, 2],
@@ -38,7 +38,7 @@ def get_configs():
 
 
 @tilelang.autotune(configs=get_configs())
-@tilelang.jit(out_idx=[-1])
+@tilelang.jit(out_idx=[-1], debug_root_path='/home/wt/tilelang/debug')
 def matmul(M,
            N,
            K,
@@ -311,6 +311,7 @@ def matmul(M,
             tx = T.get_thread_binding()
 
             for k in T.Pipelined(K // block_K, num_stages=num_stages):
+                # Each thread copies 4 bytes, local size is 16
                 for copy_i in T.serial(block_M * block_K // threads // 16):
                     base = copy_i * threads * 16 + tx * 16
                     if sorted_token_ids_shared[base // block_K] != -1:
@@ -332,10 +333,14 @@ def matmul(M,
                 C_local[i, j] = C_local[i, j] * topk_weights_shared[i]
 
             T.copy(C_local, C_shared)
-            for i, j in T.Parallel(block_M, block_N):
-                if sorted_token_ids_shared[i] != -1:
-                    C[sorted_token_ids_shared[i] // topk, sorted_token_ids_shared[i] % topk,
-                      bx * block_N + j] = C_shared[i, j]
+            for copy_i in T.serial(block_M * block_N // threads // 16):
+                base = copy_i * threads * 16 + tx * 16
+                if sorted_token_ids_shared[base // block_N] != -1:
+                    for copy_j in T.vectorized(16):
+                        C[sorted_token_ids_shared[base // block_N] // topk,
+                          sorted_token_ids_shared[base // block_N] % topk, bx * block_N +
+                          base % block_N + copy_j] = C_shared[base // block_N,
+                                                              base % block_N + copy_j]
 
     return main
 
@@ -349,7 +354,7 @@ def ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, bloc
     assert scale_size == 32  # MXFP4
 
     # Initialize output tensor
-    C = torch.empty((M, topk, N), dtype=getattr(torch, dtypeC), device='cuda')
+    C = torch.ones((M, topk, N), dtype=getattr(torch, dtypeC), device='cuda')
 
     # Iterate over sorted_token_ids
     for idx in range(len(sorted_token_ids)):  # padding_M
@@ -465,6 +470,7 @@ def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False,
             fast_dequant=fast_dequant,
             with_bias=with_bias,
         )
+        print(f'Best config: {kernel.config}')
 
     output = kernel(
         A,
@@ -479,10 +485,11 @@ def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False,
     print('Tilelang kernel run finished.')
 
     ref_output = ref_moe(
-        A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, block_M=block_M)
+        A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids,
+        block_M=block_M)  # Maybe a little bit slow...
 
     latency = tilelang.profiler.do_bench(
-        lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=500)
+        lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=100)
     print("Tilelang: {:.2f} ms".format(latency))
     print("Tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 
@@ -497,7 +504,7 @@ def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False,
 
 
 if __name__ == "__main__":
-    M, N, K = 16384, 2880, 2944  # From gpt-oss-20b
+    M, N, K = 16384, 5760, 2944  # From gpt-oss-20b MoE's first gemm
     scale_size = 32
     topk = 4  # experts activated for each token
     E = 32  # number of experts
