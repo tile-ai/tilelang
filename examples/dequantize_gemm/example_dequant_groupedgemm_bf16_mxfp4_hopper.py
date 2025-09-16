@@ -106,13 +106,12 @@ def matmul(M,
     def get_fast_dequant_twiddling_func(in_dtype="fp4", out_dtype="bfloat16"):
         """
         Return a TileLang macro that performs fast dequantization of twiddled FP4-packed data into BF16.
-        
         The returned macro has signature (B_shared, B_dequantize_shared, Scale, k) and:
         - Loads packed FP4 elements from B_shared into per-thread local registers.
         - Calls an external fast dequantization intrinsic (provided via `import_source` / `func_name` in the outer scope) to expand packed FP4 -> BF16 values.
         - Applies a per-block scale factor derived from the Scale tensor (using exponentiation by powers of two).
         - Writes the scaled BF16 results into B_dequantize_shared.
-        
+
         Notes:
         - This factory only supports in_dtype="fp4" and out_dtype="bfloat16".
         - The macro depends on several names from the enclosing scope (e.g., import_source, func_name, DataType, num_elems_per_byte, storage_dtype, block_N, block_K, threads, scale_size); those must be defined and consistent with the kernel that will use the macro.
@@ -133,21 +132,21 @@ def matmul(M,
             Fast dequantization kernel: convert packed 4-bit quantized values in B_shared to bfloat16
             in B_dequantize_shared using an external intrinsic optimized for twiddled (bit-packed) FP4,
             applying per-block scale factors from Scale.
-            
+
             This routine is a tiled, thread-parallel helper that:
             - Imports and calls an external dequantization function (via `import_source`/`func_name`)
               to expand compressed uint8-packed FP4 values into BF16 fragments in-thread.
             - Loads the corresponding per-block scale entry, interprets it as an exponent bias
               (applies 2^(Scale - 127)), and multiplies the dequantized BF16 fragment by that factor.
             - Writes the scaled BF16 results back into the shared B_dequantize_shared buffer in-place.
-            
+
             Parameters:
             - B_shared: read-only shared buffer containing compressed FP4 data (packed uint8 layout).
             - B_dequantize_shared: shared output buffer that is overwritten with BF16 dequantized values.
             - Scale_shared: per-block scale tensor; entries are interpreted such that the multiplicative scale
               = 2^(Scale - 127).
             - k: block index along the K dimension used to select the appropriate Scale entries.
-            
+
             Side effects:
             - Mutates B_dequantize_shared in shared memory.
             - Calls an external intrinsic function (must be provided by the environment via `import_source`
@@ -397,9 +396,9 @@ def get_data(m, n, k, qk, scale_size, topk, E, block_M):
 
 def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False, topk=4, E=32):
     # Tunable parameters
-    block_M, block_N, block_K = 128, 128, 256
-    num_stages = 2
-    threads = 512
+    block_M, block_N, block_K = 64, 64, 32
+    num_stages = 0
+    threads = 256
     split = 1
 
     total_flops = 2 * m * n * k
@@ -440,12 +439,14 @@ def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False,
         expert_ids,
     )
 
+    print('Tilelang kernel run finished.')
+
     ref_output = ref_moe(
         A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, block_M=block_M)
 
     print("All checks pass. ✅")
     latency = tilelang.profiler.do_bench(
-        lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=500)
+        lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=50)
     print("Tile-lang: {:.2f} ms".format(latency))
     print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 
@@ -457,7 +458,7 @@ def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False,
 
 
 if __name__ == "__main__":
-    M, N, K = 1024, 2944, 3072  # From gpt-oss-20b
+    M, N, K = 16384, 5760, 2880  # From gpt-oss-20b
     scale_size = 32
     topk = 4
     E = 32
