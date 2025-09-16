@@ -1,10 +1,12 @@
 """Wrapping Layouts."""
 # pylint: disable=invalid-name, unsupported-binary-operation
 
+from typing import Optional
 import tvm
 import tilelang.language as T
 import warnings
 
+from tilelang.contrib import nvcc
 from typing import List
 from math import prod
 
@@ -17,7 +19,15 @@ def decompose_col_major(index_1d: int, basis: List[int]) -> List[int]:
     return res
 
 
-def __make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, block_k: int):
+def _make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, block_k: int):
+    """Make a layout of metadata that is compatible with cutlass sm90 compression kernel. Note that layout atom is the same for smem and gmem.
+
+    Args:
+        buffer: metadata buffer shape, for sm90 it should be a 8-bit type
+        mma_dtype: dtype of mma operand A, different dtypes result in different layout atom
+        block_k: tiling size along K dim, different block_ks results in different layout atom.
+    """
+
     if block_k > 128:
         block_k = 128
         # Ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
@@ -95,14 +105,53 @@ def __make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, 
     return T.Layout(shape, transform)
 
 
+def _make_metadata_layout_sm8x_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str):
+    """Make a layout of metadata that is compatible with cutlass sm8x compression kernel. Note that layout atom is the same for smem and gmem.
+
+    Args:
+        buffer: metadata buffer shape, for sm80 it should be a 16bit type
+    """
+
+    # ref: https://github.com/nvidia/cutlass/blob/ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e/include/cutlass/gemm/threadblock/default_mma_core_sparse_sm80.h#L651
+    #      https://github.com/nvidia/cutlass/blob/ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e/include/cutlass/layout/matrix.h#L405
+    #      https://github.com/nvidia/cutlass/blob/ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e/include/cutlass/gemm/warp/mma_sparse_tensor_op.h#L172
+
+    if mma_dtype in ["float16", "bfloat16"] and buffer.dtype not in ["uint16", "int16"]:
+        raise ValueError(f"metadata should be 16 bit, got {buffer.dtype}")
+
+    if mma_dtype in ["float8", "int8", "uint8"] and buffer.dtype not in ["uint32", "int32"]:
+        raise ValueError(f"metadata should be 32 bit, got {buffer.dtype}")
+
+    kInterleaved = 2
+    stride = buffer.shape[0] * kInterleaved
+
+    def ColumnMajorInterleaved(i: int, j: int) -> int:
+        column_major = j // kInterleaved
+        column_minor = j % kInterleaved
+        return column_major * stride + i * kInterleaved + column_minor
+
+    return T.Layout(buffer.shape, ColumnMajorInterleaved)
+
+
 def make_metadata_layout(buffer: tvm.tir.Buffer,
                          mma_dtype: str = "float16",
-                         arch: str = "sm90",
                          backend: str = 'cutlass',
+                         arch: Optional[str] = None,
                          **extra_args):
-    if arch == "sm90":
+    if arch is None:
+        arch = nvcc.get_target_compute_version()
+
+    compute_version = nvcc.parse_compute_version(arch)
+
+    if compute_version >= (9, 0):
         if backend == 'cutlass':
-            return __make_metadata_layout_sm90_cutlass(buffer, mma_dtype, **extra_args)
+            return _make_metadata_layout_sm90_cutlass(
+                buffer=buffer, mma_dtype=mma_dtype, **extra_args)
+        else:
+            raise NotImplementedError(f"Arch {arch}, Unsupported backend: {backend}")
+    elif compute_version >= (8, 0):
+        if backend == 'cutlass':
+            return _make_metadata_layout_sm8x_cutlass(buffer=buffer, mma_dtype=mma_dtype)
         else:
             raise NotImplementedError(f"Arch {arch}, Unsupported backend: {backend}")
     else:

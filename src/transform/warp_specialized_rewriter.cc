@@ -889,14 +889,8 @@ private:
   Stmt VisitStmt_(const BufferStoreNode *op) final { return FilterByRole(op); }
   Stmt VisitStmt_(const LetStmtNode *op) final { return FilterByRole(op); }
   Stmt VisitStmt_(const AssertStmtNode *op) final { return FilterByRole(op); }
-  Stmt VisitStmt_(const BlockNode *op) final {
-    ICHECK(0);
-    return Stmt();
-  }
-  Stmt VisitStmt_(const BlockRealizeNode *op) final {
-    ICHECK(0);
-    return Stmt();
-  }
+  Stmt VisitStmt_(const BlockNode *op) final { return FilterByRole(op); }
+  Stmt VisitStmt_(const BlockRealizeNode *op) final { return FilterByRole(op); }
 
   struct SyncPattern {
     int release_idx, acquire_idx;
@@ -1283,8 +1277,12 @@ tvm::transform::Pass WarpSpecialized() {
     if (!warp_specialized) {
       return WarpSpecializedRewriter::Substitute(f, disable_warp_specialized,
                                                  disable_shuffle_elect);
+    } else {
+      ObjectRef node = String("default");
+      f.CopyOnWrite()->body =
+          AttrStmt(node, attr::kCustomWarpSpecialization, 1, f->body);
+      return f;
     }
-    return f;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.WarpSpecialized", {});
 }

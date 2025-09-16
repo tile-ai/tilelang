@@ -77,7 +77,7 @@ private:
     // record workgroup size
     if (op->attr_key == tir::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
-      if (iv->thread_tag.length() != 0) {
+      if (!iv->thread_tag.empty()) {
         runtime::ThreadScope ts = runtime::ThreadScope::Create(iv->thread_tag);
         if (ts.rank == 1) {
           ICHECK_GE(ts.dim_index, 0)
@@ -724,7 +724,7 @@ public:
       return stream.str();
     } else {
       std::ostringstream os;
-      for (auto kv : smap_) {
+      for (const auto &kv : smap_) {
         os << kv.second;
       }
       return os.str();
