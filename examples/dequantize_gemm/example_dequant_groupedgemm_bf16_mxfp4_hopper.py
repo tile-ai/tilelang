@@ -5,9 +5,40 @@ from tilelang import tvm as tvm
 from tvm import DataType
 import torch
 from utils import torch_convert_bit_twiddling, assert_similar
+from tilelang.autotuner import set_autotune_inputs
 
 
-@tilelang.jit(out_idx=-1)
+def get_configs():
+    """
+    Generate a list of hyperparameter configuration dictionaries for tuning.
+    
+    Each configuration is a dict with keys: 'block_M', 'block_N', 'block_K',
+    'num_stages', 'threads', and 'split'. The function returns the Cartesian
+    product of the parameter value lists:
+    - block_M, block_N, block_K: tiling sizes
+    - num_stages: pipeline stages
+    - threads: thread counts
+    - split: K-splitting factor
+    
+    Returns:
+        List[dict]: A list of configuration dictionaries covering all combinations.
+    """
+    import itertools
+    iter_params = dict(
+        block_M=[128],  # must align with data pre-processing
+        block_N=[64, 128, 256],
+        block_K=[128],
+        num_stages=[0, 1, 2],
+        threads=[128, 256, 512],
+        split=[1],
+    )
+    return [{
+        k: v for k, v in zip(iter_params, values)
+    } for values in itertools.product(*iter_params.values())]
+
+
+@tilelang.autotune(configs=get_configs())
+@tilelang.jit(out_idx=[-1])
 def matmul(M,
            N,
            K,
@@ -22,8 +53,8 @@ def matmul(M,
            scale_size=32,
            fast_dequant=True,
            with_bias=False,
-           block_M=256,
-           block_N=128,
+           block_M=128,
+           block_N=256,
            block_K=128,
            num_stages=2,
            threads=256,
@@ -50,7 +81,7 @@ def matmul(M,
         topk (int): number of experts selected per token.
         E (int): number of experts.
         padding_M (int): padded number of tokens after grouping and block alignment.
-        in_dtype (str): element type of A (e.g., "fp4").
+        in_dtype (str): element type of A (e.g., "bfloat16").
         out_dtype (str): output tensor element type (e.g., "bfloat16").
         accum_dtype (str): accumulation type used for the inner GEMM.
         source_format (str, optional): format string passed to intrinsic selector (default "uint").
@@ -253,6 +284,7 @@ def matmul(M,
                 B_shared: tilelang.layout.make_swizzled_layout(B_shared),
                 C_shared: tilelang.layout.make_swizzled_layout(C_shared),
             })
+            T.use_swizzle(10)
 
             if threads == 512:
                 T.disable_warp_group_reg_alloc()
@@ -276,15 +308,18 @@ def matmul(M,
             for i, j in T.Parallel(block_M, block_N):
                 C_local[i, j] = Bias_shared[j]
 
+            tx = T.get_thread_binding()
+            
             for k in T.Pipelined(K // block_K, num_stages=num_stages):
-                # Get the real index of the tokens to be processed
+                for copy_i in T.serial(block_M * block_K // threads // 16):
+                    base = copy_i * threads * 16 + tx * 16
+                    if sorted_token_ids_shared[base // block_K] != -1:
+                        for copy_j in T.vectorized(16):
+                            A_shared[base // block_K, base % block_K + copy_j] = A[sorted_token_ids_shared[base // block_K] // topk, k * block_K + base % block_K + copy_j]
+
                 T.copy(B[expert_id[0], bx * block_N, k * block_K // num_elems_per_byte], B_shared)
-                for i, j in T.Parallel(block_M, block_K):
-                    if sorted_token_ids_shared[i] != -1:
-                        A_shared[i, j] = A[sorted_token_ids_shared[i] // topk, k * block_K + j]
                 if fast_dequant:
-                    get_fast_dequant_twiddling_func()(B_shared, B_dequantize_shared, Scale_shared,
-                                                      k)
+                    get_fast_dequant_twiddling_func()(B_shared, B_dequantize_shared, Scale_shared, k)
                 else:
                     get_simple_dequant_func()(B_shared, B_dequantize_shared, Scale_shared, k)
 
@@ -295,9 +330,8 @@ def matmul(M,
 
             T.copy(C_local, C_shared)
             for i, j in T.Parallel(block_M, block_N):
-                if sorted_token_ids_shared[i] != -1:
-                    C[sorted_token_ids_shared[i] // topk, sorted_token_ids_shared[i] % topk,
-                      bx * block_N + j] = C_shared[i, j]
+                C[sorted_token_ids_shared[i] // topk, sorted_token_ids_shared[i] % topk,
+                bx * block_N + j] = C_shared[i, j]
 
     return main
 
@@ -311,7 +345,7 @@ def ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, bloc
     assert scale_size == 32  # MXFP4
 
     # Initialize output tensor
-    C = torch.ones((M, topk, N), dtype=getattr(torch, dtypeC), device='cuda')
+    C = torch.empty((M, topk, N), dtype=getattr(torch, dtypeC), device='cuda')
 
     # Iterate over sorted_token_ids
     for idx in range(len(sorted_token_ids)):  # padding_M
@@ -332,7 +366,7 @@ def ref_moe(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, bloc
 
         # Compute the output for this token-expert pair
         # token_embedding @ B.T + bias
-        output = torch.matmul(token_embedding, B.T) + Bias[expert_id]
+        output = torch.matmul(token_embedding.to(torch.bfloat16), B.T.to(torch.bfloat16)) + Bias[expert_id]
         output = output.to(torch.__getattribute__(dtypeC))
 
         # Apply the topk weight
@@ -382,6 +416,7 @@ def get_data(m, n, k, qk, scale_size, topk, E, block_M):
         padded_token_ids.append(group_token_ids)
         expert_ids.extend([eid] * ((cnt + block_M - 1) // block_M))
         start = end
+
     # sorted_token_ids: The final flattened and padded tensor of token indices.
     sorted_token_ids = torch.cat(padded_token_ids, dim=0).to(torch.int32)  # (padding_M,)
     # expert_ids: The final tensor of expert IDs corresponding to `sorted_token_ids`.
@@ -396,38 +431,41 @@ def get_data(m, n, k, qk, scale_size, topk, E, block_M):
 
 def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False, topk=4, E=32):
     # Tunable parameters
-    block_M, block_N, block_K = 64, 64, 32
-    num_stages = 0
-    threads = 256
+    block_M, block_N, block_K = 128, 256, 128
+    num_stages = 1
+    threads = 512
     split = 1
 
-    total_flops = 2 * m * n * k
+    total_flops = 2 * m * n * k * topk
     num_bits = 4
     num_elems_per_byte = 8 // num_bits
     qk = k // num_elems_per_byte
     A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, padding_M = get_data(
         m, n, k, qk, scale_size, topk, E, block_M)
 
-    kernel = matmul(
-        m,
-        n,
-        k,
-        topk,
-        E,
-        padding_M,
-        "bfloat16",
-        "bfloat16",
-        "float32",
-        num_bits=num_bits,
-        scale_size=scale_size,
-        block_M=block_M,
-        block_N=block_N,
-        block_K=block_K,
-        num_stages=num_stages,
-        threads=threads,
-        split=split,
-        fast_dequant=fast_dequant,
-        with_bias=with_bias)
+    with set_autotune_inputs([A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids]):
+        # Autotune with inputs manually composed
+        kernel = matmul(
+            m,
+            n,
+            k,
+            topk,
+            E,
+            padding_M,
+            "bfloat16",
+            "bfloat16",
+            "float32",
+            block_M=block_M,
+            block_N=block_N,
+            block_K=block_K,
+            num_stages=num_stages,
+            threads=threads,
+            split=split,
+            num_bits=num_bits,
+            scale_size=scale_size,
+            fast_dequant=fast_dequant,
+            with_bias=with_bias,
+        )
 
     output = kernel(
         A,
@@ -444,22 +482,22 @@ def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False,
     ref_output = ref_moe(
         A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, block_M=block_M)
 
-    print("All checks pass. ✅")
     latency = tilelang.profiler.do_bench(
-        lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=50)
-    print("Tile-lang: {:.2f} ms".format(latency))
-    print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=500)
+    print("Tilelang: {:.2f} ms".format(latency))
+    print("Tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
 
     diff = (output - ref_output).abs()
     max_val = diff.max()
     max_idx = diff.argmax()
     print(f"max abs diff: {max_val} at index: {max_idx}")
-    assert_similar(output, ref_output, name="output", eps=1e-5)
+    assert_similar(output, ref_output, name="output", eps=1e-5)  # We care about the similarity rather than abs. difference
+    print("All checks pass. ✅")
 
 
 if __name__ == "__main__":
-    M, N, K = 16384, 5760, 2880  # From gpt-oss-20b
+    M, N, K = 16384, 2880, 2944  # From gpt-oss-20b
     scale_size = 32
-    topk = 4
-    E = 32
+    topk = 4  # experts activated for each token
+    E = 32  # number of experts
     main(M, N, K, scale_size, fast_dequant=True, with_bias=True, topk=topk, E=E)
