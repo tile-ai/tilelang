@@ -12,18 +12,9 @@ from tilelang.layout import (
     make_quarter_bank_swizzled_layout,
 )
 from tvm.runtime import convert
-from tilelang.intrinsics.mma_layout import (
-    shared_16x8_to_mma_32x4_layout_sr_a,
-    shared_16x8_to_mma_32x4_layout_sr_b,
-    shared_16x16_to_mma_32x8_layout_sr_a,
-    shared_16x16_to_mma_32x8_layout_sr_b,
-    shared_16x32_to_mma_32x16_layout_sr_a,
-    shared_16x32_to_mma_32x16_layout_sr_b,
-    mma_load_a_32x4_to_shared_16x8_layout,
-    mma_load_b_32x4_to_shared_16x8_layout,
-    mma_load_a_32x16_to_shared_16x32_layout,
-    mma_load_b_32x16_to_shared_16x32_layout,
-)
+from tilelang.intrinsics.mma_layout import (shared_16x8_to_mma_32x4_layout_sr_a,
+                                            shared_16x16_to_mma_32x8_layout_sr_a,
+                                            shared_16x32_to_mma_32x16_layout_sr_a)
 
 lift = convert
 
@@ -233,24 +224,11 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                         -1] + k_dim_offset if a_is_k_major else ki * micro_size_k * 64 + i * 64 * k_dim
                     B_offset = k_dim_offset if b_is_k_major else k_dim_offset * B_buf.shape[-1]
                     C_offset = i * warp_cols * local_size_out  # 4 warps as an unit
-                    T.ptx_wgmma_ss(
-                        accum_dtype,
-                        wgmma_prefix,
-                        self.a_transposed,
-                        not self.b_transposed,
-                        a_dtype_abbrv,
-                        b_dtype_abbrv,
-                        accum_dtype_abbrv,
-                        desc_a.data,
-                        (A_offset * elems_in_bytes) >> 4,
-                        desc_b.data,
-                        (B_offset * elems_in_bytes) >> 4,
-                        C_local_buf.data,
-                        C_offset,
-                        scale_out,
-                        scale_in_a,
-                        scale_in_b
-                    )
+                    T.ptx_wgmma_ss(accum_dtype, wgmma_prefix, self.a_transposed,
+                                   not self.b_transposed, a_dtype_abbrv, b_dtype_abbrv,
+                                   accum_dtype_abbrv, desc_a.data, (A_offset * elems_in_bytes) >> 4,
+                                   desc_b.data, (B_offset * elems_in_bytes) >> 4, C_local_buf.data,
+                                   C_offset, scale_out, scale_in_a, scale_in_b)
 
         return _warp_mma(A_buf, B_buf, C_local_buf)
 
@@ -278,11 +256,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         elems_in_bytes = DataType(self.a_dtype).bits // 8
 
-        a_is_k_major = not self.a_transposed
         b_is_k_major = self.b_transposed
 
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
-
 
         b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim *
                                                                                elems_in_bytes)
@@ -329,12 +305,10 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                         scale_in_a,
                         scale_in_b,
                     )
+
         return _warp_mma(A_buf, B_buf, C_local_buf)
 
-
-    def make_mma_load_layout(self,
-                             local_buf: Buffer,
-                             matrix: str = "A") -> T.Fragment:
+    def make_mma_load_layout(self, local_buf: Buffer, matrix: str = "A") -> T.Fragment:
         """
         Create a layout function for storing MMA results into a fragment buffer.
         This layout is used in conjunction with `inverse_mma_store_layout` to
@@ -357,7 +331,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             If `local_buf` is not detected to be a fragment buffer.
         """
         from tilelang.utils import is_fragment
-        assert matrix in ["A" ], "matrix should be A for WGMMA"
+        assert matrix in ["A"], "matrix should be A for WGMMA"
         dtype = self.a_dtype
         dtype_bits = DataType(dtype).bits
         transposed = self.a_transposed
@@ -387,7 +361,6 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         transform_func: Callable = None
         transform_func = transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(
             j, i)
-            
 
         assert is_fragment(local_buf), "local_buf must be a fragment, but got {}".format(
             local_buf.scope())
@@ -421,29 +394,29 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             forward_index_fn=forward_index,
         )
 
-        warp_rows, warp_cols = self.warp_rows, self.warp_cols
+        warp_rows = self.warp_rows
         chunk = self.chunk
 
         warp_s = warp_rows
         warp_r = chunk // micro_size_r
         block_s = block_row_warps
         replicate = block_col_warps
-        
+
         if is_sr_axis_order:
             warp_fragment = base_fragment.repeat([block_s, 1],
-                                                repeat_on_thread=True,
-                                                lower_dim_first=False).replicate(replicate)
+                                                 repeat_on_thread=True,
+                                                 lower_dim_first=False).replicate(replicate)
             block_fragment = warp_fragment.repeat([warp_s, warp_r],
-                                                repeat_on_thread=False,
-                                                lower_dim_first=False)
+                                                  repeat_on_thread=False,
+                                                  lower_dim_first=False)
         else:
             # rs condition, transposed_a matrix
             warp_fragment = base_fragment.repeat([1, block_s],
-                                                repeat_on_thread=True,
-                                                lower_dim_first=False).replicate(replicate)
+                                                 repeat_on_thread=True,
+                                                 lower_dim_first=False).replicate(replicate)
             block_fragment = warp_fragment.repeat([warp_r, warp_s],
-                                                repeat_on_thread=False,
-                                                lower_dim_first=True)
+                                                  repeat_on_thread=False,
+                                                  lower_dim_first=True)
 
         return block_fragment
 

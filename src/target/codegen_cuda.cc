@@ -1331,7 +1331,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     bool scale_in_a = Downcast<Bool>(op->args[13])->value;
     bool scale_in_b = Downcast<Bool>(op->args[14])->value;
 
-
     const bool a_is_shared = true;
     this->PrintIndent();
     std::string asm_code = PrintWGMMAAssembly(
@@ -1368,14 +1367,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     bool scale_in_a = Downcast<Bool>(op->args[13])->value;
     bool scale_in_b = Downcast<Bool>(op->args[14])->value;
 
-
     const bool a_is_shared = false;
     this->PrintIndent();
     std::string asm_code = PrintWGMMAAssembly(
         shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref, A_offset,
         b_desc, B_offset, c_ref, c_offset, scale_out, scale_in_a, scale_in_b,
-        a_is_shared,
-        "", "", "", false);
+        a_is_shared, "", "", "", false);
     this->stream << asm_code;
   } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
     // arg 0: whether the matrix is loaded in column major format or not.

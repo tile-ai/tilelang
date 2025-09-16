@@ -81,9 +81,9 @@ std::string PrintWGMMAAssembly(
     const std::string &A_offset, const std::string &b_desc,
     const std::string &B_offset, const std::string &c_ptr,
     const std::string &c_offset, const bool &scale_out, const bool &scale_in_a,
-    const bool &scale_in_b, const bool &a_is_shared, const std::string &metadata,
-    const std::string &metadata_offset, const std::string &sparsity_selector,
-    bool sparse);
+    const bool &scale_in_b, const bool &a_is_shared,
+    const std::string &metadata, const std::string &metadata_offset,
+    const std::string &sparsity_selector, bool sparse);
 
 /*!
  * \brief Print ldmatrix assembly string given parameters.

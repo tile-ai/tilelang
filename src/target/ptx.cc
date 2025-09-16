@@ -1052,7 +1052,8 @@ GetMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
 
 inline std::tuple<std::string, std::string, std::string, std::string>
 GetWGMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
-                 ptx::DataType dtype_b, ptx::DataType dtype_c, bool sparse, bool a_is_shared) {
+                 ptx::DataType dtype_b, ptx::DataType dtype_c, bool sparse,
+                 bool a_is_shared) {
   std::stringstream templates, inputs, outputs, predicate;
   const ptx::FragAttrs frag_attr_a = ptx::GetFragAttrs(dtype_a),
                        frag_attr_b = ptx::GetFragAttrs(dtype_b),
@@ -1105,11 +1106,11 @@ GetWGMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
               << "%" << arg_counter++;
   }
   if (support_ldmatrix_transposed) {
-   if (a_is_shared) {
-    // trans_a
-    templates << ", "
-              << "%" << arg_counter++;
-   }
+    if (a_is_shared) {
+      // trans_a
+      templates << ", "
+                << "%" << arg_counter++;
+    }
     // trans_b
     templates << ", "
               << "%" << arg_counter++;
@@ -1238,9 +1239,9 @@ std::string PrintWGMMAAssembly(
     const std::string &A_offset, const std::string &b_desc,
     const std::string &B_offset, const std::string &c_ptr,
     const std::string &c_offset, const bool &scale_out, const bool &scale_in_a,
-    const bool &scale_in_b, const bool &a_is_shared, const std::string &metadata,
-    const std::string &metadata_offset, const std::string &sparsity_selector,
-    bool sparse) {
+    const bool &scale_in_b, const bool &a_is_shared,
+    const std::string &metadata, const std::string &metadata_offset,
+    const std::string &sparsity_selector, bool sparse) {
   ptx::DataType dtype_a = ptx::DTypeFromString(A_dtype),
                 dtype_b = ptx::DTypeFromString(B_dtype),
                 dtype_c = ptx::DTypeFromString(C_dtype);

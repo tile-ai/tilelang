@@ -1102,6 +1102,7 @@ def ptx_wgmma_ss(
         scale_in_b,
     )
 
+
 def ptx_wgmma_rs(
     dtype,
     wgmma_prefix,

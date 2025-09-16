@@ -86,13 +86,6 @@ class GemmWGMMA(GemmBase):
         if self.B in layout_map:
             mma_emitter._assign_b_shared_layout(layout_map[self.B])
 
-        in_dtype = self.in_dtype
-        warp_rows = mma_emitter.warp_rows
-        warp_cols = mma_emitter.warp_cols
-        local_size_a = mma_emitter.local_size_a
-        local_size_b = mma_emitter.local_size_b
-        block_K = mma_emitter.chunk
-        micro_size_k = mma_emitter.micro_size_k
         A_shared = self.A
         B_shared = self.B
         C_local = self.C
