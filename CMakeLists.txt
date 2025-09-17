@@ -5,6 +5,7 @@ cmake_minimum_required(VERSION 3.18)
 project(TILE_LANG C CXX)
 
 option(TILE_LANG_STATIC_STDCPP "Statically link libstdc++ for TileLang libraries" ON)
+option(TILE_LANG_INSTALL_STATIC_LIB "Install the static library" ON)
 
 if(TILE_LANG_STATIC_STDCPP)
   message(STATUS "Enabling static linking of C++ standard library")
