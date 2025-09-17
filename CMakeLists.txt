@@ -4,6 +4,8 @@
 cmake_minimum_required(VERSION 3.18)
 project(TILE_LANG C CXX)
 
+option(TILE_LANG_STATIC_STDCPP "Statically link libstdc++ for TileLang libraries" ON)
+
 # Set default build type to Release if not provided
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type")
@@ -59,6 +61,18 @@ include(CheckCXXCompilerFlag)
 # Enable static runtime build if required
 if(TILE_LANG_INSTALL_STATIC_LIB)
   set(BUILD_STATIC_RUNTIME ON)
+endif()
+
+if(TILE_LANG_STATIC_STDCPP)
+  message(STATUS "Enabling static linking of C++ standard library")
+  # Set compile flags for static linking of the C++ standard library
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -static-libstdc++")
+  # For some compilers, additional flags may be required
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libstdc++")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -static-libstdc++")
+    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -static-libstdc++")
+  endif()
 endif()
 
 # Enforce CUDA standard
