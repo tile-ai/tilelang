@@ -1,5 +1,5 @@
 # runtime requirements
-Cython
+Cython>=3.0.0
 numpy>=1.23.5
 tqdm>=4.62.3
 typing_extensions>=4.10.0
