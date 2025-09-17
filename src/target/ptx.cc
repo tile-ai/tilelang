@@ -35,39 +35,10 @@ namespace codegen {
 // PTX related data structures and functions.
 namespace ptx {
 
-/*!
- * \brief PTX data type.
- * \note
- * PTX fundamental data types:
- * https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#fundamental-types
- * PTX matrix data types:
- * https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-data-types
- */
-enum class DataType : int {
-  kInt4 = 0,
-  kUInt4 = 1,
-  kInt8 = 2,
-  kUInt8 = 3,
-  kInt16 = 4,
-  kUInt16 = 5,
-  kInt32 = 6,
-  kUInt32 = 7,
-  kInt64 = 8,
-  kUInt64 = 9,
-  kFloat8_e4m3 = 10,
-  kFloat8_e5m2 = 11,
-  kFloat16 = 12,
-  kBFloat16 = 13,
-  kFloat16x2 = 14,
-  kFloat32 = 15,
-  kTensorFloat32 = 16,
-  kFloat64 = 17,
-  kBit1 = 18,
-  kBit8 = 19,
-  kBit16 = 20,
-  kBit32 = 21,
-  kBit64 = 22
-};
+static const char *enum_to_str[] = {
+    "kInt4",   "kUInt4",  "kInt8",   "kUInt8",   "kInt16", "kUInt16",  "kInt32",   "kUInt32",
+    "kInt64",  "kUInt64", "kFloat8_e4m3", "kFloat8_e5m2", "kFloat16", "kBFloat16", "kFloat16x2", "kFloat32",
+    "kTensorFloat32", "kFloat64", "kBit1",   "kBit8",   "kBit16", "kBit32",  "kBit64"};
 
 static const char *dtype_str[] = {
     ".s4",   ".u4",  ".s8",   ".u8",   ".s16", ".u16",  ".s32",   ".u32",
@@ -80,7 +51,7 @@ static const uint32_t num_bits[] = {4,  4,  8, 8, 16, 16, 32, 32,
 /*!
  * \brief Create PTX data type from string.
  */
-inline DataType DTypeFromString(const std::string str) {
+DataType DTypeFromString(const std::string str) {
   if (str == "int4" || str == ".s4") {
     return DataType::kInt4;
   } else if (str == "uint4" || str == ".u4") {
@@ -132,6 +103,15 @@ inline DataType DTypeFromString(const std::string str) {
   }
 }
 
+
+std::string DTypeEnumToString(const ptx::DataType &dtype) {
+    return "tl::DataType::" + std::string(enum_to_str[static_cast<int>(dtype)]);
+}
+
+std::string DTypeEnumToString(const std::string &dtype) {
+    return "tl::DataType::" + std::string(enum_to_str[static_cast<int>(DTypeFromString(dtype))]);
+}
+
 /*!
  * \brief Get the string representation of given PTX data type.
  */
@@ -157,7 +137,7 @@ inline bool DTypeIsInteger(DataType dtype) {
 /*!
  * \brief Extract the value m, n, k from string m*n*k*
  */
-inline std::tuple<int, int, int> ParseMMAShape(const std::string &str) {
+std::tuple<int, int, int> ParseMMAShape(const std::string &str) {
   size_t pos_m = str.find('m'), pos_n = str.find('n'), pos_k = str.find('k');
   CHECK(pos_m != str.npos && pos_n != str.npos && pos_k != str.npos)
       << "Cannot parse MMA shape " << str;
@@ -924,35 +904,6 @@ inline FragAttrs GetFragAttrs(DataType dtype) {
 }; // namespace ptx
 
 /*!
- * \brief Replace patterns with replacement strings.
- * \note should use std::format instead when codebase is ported to C++20.
- */
-class Replacer {
-public:
-  void register_rule(const std::string &pattern,
-                     const std::string &replacement) {
-    _rules.emplace_back(pattern, replacement);
-  }
-  std::string rewrite(std::string str) {
-    for (auto &&rule : _rules) {
-      auto [pattern, replacement] = rule;
-      size_t len = pattern.size();
-      size_t new_len = replacement.size();
-      size_t pos = str.find(pattern);
-      while (pos != std::string::npos) {
-        str = str.replace(pos, len, replacement);
-        pos = str.find(pattern, pos + new_len);
-      }
-    }
-    return str;
-  }
-  void empty_rules() { _rules.clear(); }
-
-private:
-  std::vector<std::pair<std::string, std::string>> _rules;
-};
-
-/*!
  * \brief Get the number of MMA computations for given shape and datatype.
  */
 inline uint32_t GetNumMMAComputations(int m, int n, int k,
@@ -1233,7 +1184,7 @@ PrintMMAAssembly(const std::string &shape, const std::string &A_layout,
 }
 
 std::string PrintWGMMAAssembly(
-    const std::string &shape, const bool &A_layout, const bool &B_layout,
+    const std::string &shape, const bool &a_is_k_major, const bool &b_is_k_major,
     const std::string &A_dtype, const std::string &B_dtype,
     const std::string &C_dtype, const std::string &a_desc,
     const std::string &A_offset, const std::string &b_desc,
@@ -1252,8 +1203,8 @@ std::string PrintWGMMAAssembly(
     dtype_b = ptx::DataType::kTensorFloat32;
   }
 
-  ptx::LayoutType layout_a = ptx::LayoutTypeFromBool(A_layout),
-                  layout_b = ptx::LayoutTypeFromBool(B_layout);
+  ptx::LayoutType layout_a = ptx::LayoutTypeFromBool(!a_is_k_major),
+                  layout_b = ptx::LayoutTypeFromBool(b_is_k_major);
   auto [m, n, k] = ptx::ParseMMAShape(shape);
   CheckWGMMAConfigValidity(m, n, k, layout_a, layout_b, dtype_a, dtype_b,
                            dtype_c, sparse);
@@ -1299,8 +1250,8 @@ std::string PrintWGMMAAssembly(
   replacer.register_rule("(scale_out)", scale_out ? "1" : "0");
   replacer.register_rule("(scale_in_a)", scale_in_a ? "1" : "-1");
   replacer.register_rule("(scale_in_b)", scale_in_b ? "1" : "-1");
-  replacer.register_rule("(trans_a)", A_layout ? "1" : "0");
-  replacer.register_rule("(trans_b)", B_layout ? "1" : "0");
+  replacer.register_rule("(trans_a)", a_is_k_major ? "0" : "1");
+  replacer.register_rule("(trans_b)", b_is_k_major ? "0" : "1");
   asm_code = replacer.rewrite(asm_code);
   return asm_code;
 }

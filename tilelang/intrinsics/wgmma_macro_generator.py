@@ -224,8 +224,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                         -1] + k_dim_offset if a_is_k_major else ki * micro_size_k * 64 + i * 64 * k_dim
                     B_offset = k_dim_offset if b_is_k_major else k_dim_offset * B_buf.shape[-1]
                     C_offset = i * warp_cols * local_size_out  # 4 warps as an unit
-                    T.ptx_wgmma_ss(accum_dtype, wgmma_prefix, self.a_transposed,
-                                   not self.b_transposed, a_dtype_abbrv, b_dtype_abbrv,
+                    T.ptx_wgmma_ss(accum_dtype, wgmma_prefix, a_is_k_major,
+                                   b_is_k_major, a_dtype_abbrv, b_dtype_abbrv,
                                    accum_dtype_abbrv, desc_a.data, (A_offset * elems_in_bytes) >> 4,
                                    desc_b.data, (B_offset * elems_in_bytes) >> 4, C_local_buf.data,
                                    C_offset, scale_out, scale_in_a, scale_in_b)

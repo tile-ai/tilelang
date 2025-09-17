@@ -53,6 +53,7 @@ using int4_t = int4;
     }                                                                          \
   } while (0)
 
+
 // abs function for bfloat_t and half_t since there is no implicit conversion
 // method
 TL_PATCH TL_DEVICE half_t __habs(const half_t x) {
@@ -303,7 +304,39 @@ TL_DEVICE /**
 }
 
 namespace tl {
-// using GmmaDescriptor = cute::GmmaDescriptor;
+/*!
+ * \brief PTX data type.
+ * \note
+ * PTX fundamental data types:
+ * https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#fundamental-types
+ * PTX matrix data types:
+ * https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-data-types
+ */
+enum class DataType : int {
+  kInt4 = 0,
+  kUInt4 = 1,
+  kInt8 = 2,
+  kUInt8 = 3,
+  kInt16 = 4,
+  kUInt16 = 5,
+  kInt32 = 6,
+  kUInt32 = 7,
+  kInt64 = 8,
+  kUInt64 = 9,
+  kFloat8_e4m3 = 10,
+  kFloat8_e5m2 = 11,
+  kFloat16 = 12,
+  kBFloat16 = 13,
+  kFloat16x2 = 14,
+  kFloat32 = 15,
+  kTensorFloat32 = 16,
+  kFloat64 = 17,
+  kBit1 = 18,
+  kBit8 = 19,
+  kBit16 = 20,
+  kBit32 = 21,
+  kBit64 = 22
+};
 
 union GmmaDescriptor {
   CUTE_HOST_DEVICE constexpr GmmaDescriptor() noexcept : desc_(0) {}
