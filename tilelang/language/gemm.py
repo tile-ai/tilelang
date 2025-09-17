@@ -74,7 +74,8 @@ def gemm(
                 shape.append(r.extent)
             return shape
         else:
-            raise ValueError(f"Unsupport retrieve_shape argument type: {type(object)} for buffer {object}")
+            raise ValueError(
+                f"Unsupported retrieve_shape argument type: {type(object)} for buffer {object}")
 
     def retrieve_stride(object: Union[tir.Buffer, tir.BufferRegion]) -> List[int]:
         if isinstance(object, tir.Buffer):
@@ -94,7 +95,6 @@ def gemm(
             return strides
         elif isinstance(object, tir.BufferLoad):
             buffer = object.buffer
-            region = get_buffer_region_from_load(object).region
             strides = []
             stride = 1
             for s in reversed(buffer.shape):
@@ -102,7 +102,8 @@ def gemm(
                 stride *= s
             return strides
         else:
-            raise ValueError(f"Unsupport retrieve_stride argument type: {type(object)} for buffer {object}")
+            raise ValueError(
+                f"Unsupported retrieve_stride argument type: {type(object)} for buffer {object}")
 
     A_shape = retrieve_shape(A)
     B_shape = retrieve_shape(B)
@@ -166,7 +167,8 @@ def gemm(
                 offset += indices[i] * strides[i]
             return buffer.access_ptr(access_mask=access_type, offset=offset)
         else:
-            raise ValueError(f"Unsupport retrieve_ptr argument type: {type(object)} for buffer {object}")
+            raise ValueError(
+                f"Unsupported retrieve_ptr argument type: {type(object)} for buffer {object}")
 
     def retrieve_offset(object: Union[tir.Buffer, tir.BufferRegion]) -> tir.PrimExpr:
         """Retrieve the offset of the buffer or buffer region."""
@@ -179,14 +181,14 @@ def gemm(
                 indices.append(r.min)
             return indices
         elif isinstance(object, tir.BufferLoad):
-            buffer = object.buffer
             region = get_buffer_region_from_load(object).region
             indices = []
             for r in region:
                 indices.append(r.min)
             return indices
         else:
-            raise ValueError(f"Unsupport retrieve_offset argument type: {type(object)} for buffer {object}")
+            raise ValueError(
+                f"Unsupported retrieve_offset argument type: {type(object)} for buffer {object}")
 
     A_offset = retrieve_offset(A)
     B_offset = retrieve_offset(B)
@@ -288,7 +290,8 @@ def gemm_v2(
                 shape.append(r.extent)
             return shape
         else:
-            raise ValueError(f"Unsupport retrieve_shape argument type: {type(object)} for buffer {object}")
+            raise ValueError(
+                f"Unsupported retrieve_shape argument type: {type(object)} for buffer {object}")
 
     def retrieve_stride(object: Union[tir.Buffer, tir.BufferRegion]) -> List[int]:
         if isinstance(object, tir.Buffer):
@@ -308,7 +311,6 @@ def gemm_v2(
             return strides
         elif isinstance(object, tir.BufferLoad):
             buffer = object.buffer
-            region = get_buffer_region_from_load(object).region
             strides = []
             stride = 1
             for s in reversed(buffer.shape):
@@ -316,7 +318,8 @@ def gemm_v2(
                 stride *= s
             return strides
         else:
-            raise ValueError(f"Unsupport retrieve_stride argument type: {type(object)} for buffer {object}")
+            raise ValueError(
+                f"Unsupported retrieve_stride argument type: {type(object)} for buffer {object}")
 
     A_shape = retrieve_shape(A)
     B_shape = retrieve_shape(B)
@@ -380,7 +383,8 @@ def gemm_v2(
                 offset += indices[i] * strides[i]
             return buffer.access_ptr(access_mask=access_type, offset=offset)
         else:
-            raise ValueError(f"Unsupport retrieve_ptr argument type: {type(object)} for buffer {object}")
+            raise ValueError(
+                f"Unsupported retrieve_ptr argument type: {type(object)} for buffer {object}")
 
     def retrieve_offset(object: Union[tir.Buffer, tir.BufferRegion]) -> tir.PrimExpr:
         """Retrieve the offset of the buffer or buffer region."""
@@ -393,14 +397,14 @@ def gemm_v2(
                 indices.append(r.min)
             return indices
         elif isinstance(object, tir.BufferLoad):
-            buffer = object.buffer
             region = get_buffer_region_from_load(object).region
             indices = []
             for r in region:
                 indices.append(r.min)
             return indices
         else:
-            raise ValueError(f"Unsupport retrieve_offset argument type: {type(object)} for buffer {object}")
+            raise ValueError(
+                f"Unsupported retrieve_offset argument type: {type(object)} for buffer {object}")
 
     A_offset = retrieve_offset(A)
     B_offset = retrieve_offset(B)
