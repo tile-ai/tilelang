@@ -6,6 +6,12 @@ project(TILE_LANG C CXX)
 
 option(TILE_LANG_STATIC_STDCPP "Statically link libstdc++ for TileLang libraries" ON)
 
+if(TILE_LANG_STATIC_STDCPP)
+  message(STATUS "Enabling static linking of C++ standard library")
+  # Note: We'll apply static linking flags selectively to avoid Python extension conflicts
+  # The flags will be applied per-target below rather than globally
+endif()
+
 # Set default build type to Release if not provided
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type")
@@ -61,18 +67,6 @@ include(CheckCXXCompilerFlag)
 # Enable static runtime build if required
 if(TILE_LANG_INSTALL_STATIC_LIB)
   set(BUILD_STATIC_RUNTIME ON)
-endif()
-
-if(TILE_LANG_STATIC_STDCPP)
-  message(STATUS "Enabling static linking of C++ standard library")
-  # Set compile flags for static linking of the C++ standard library
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -static-libstdc++")
-  # For some compilers, additional flags may be required
-  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libstdc++")
-    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -static-libstdc++")
-    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -static-libstdc++")
-  endif()
 endif()
 
 # Enforce CUDA standard
@@ -231,6 +225,11 @@ target_link_libraries(tilelang PUBLIC tvm_runtime)
 add_library(tilelang_static STATIC $<TARGET_OBJECTS:tilelang_objs>)
 add_dependencies(tilelang_static tvm_runtime)
 set_target_properties(tilelang_static PROPERTIES OUTPUT_NAME tilelang)
+
+# Apply static linking flags only to static library to avoid Python extension conflicts
+if(TILE_LANG_STATIC_STDCPP AND CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+  target_link_options(tilelang_static PRIVATE -static-libstdc++ -static-libgcc)
+endif()
 
 # Debug build type-specific definitions
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
