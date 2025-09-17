@@ -8,6 +8,7 @@ from tvm import tir
 from tvm.tir import Var, PrimExpr
 from tvm.script.ir_builder.tir import buffer, handle, match_buffer
 from tilelang.utils import deprecated
+from tilelang.utils.tensor import torch_dtype_to_str
 
 
 class BufferProxy:
@@ -28,6 +29,13 @@ class BufferProxy:
         buffer_type="",
         axis_separators=None,
     ) -> tir.Buffer:
+        # If dtype is a torch.dtype, convert to short string
+        try:
+            import torch  # type: ignore
+            if isinstance(dtype, torch.dtype):  # type: ignore[attr-defined]
+                dtype = torch_dtype_to_str(dtype)
+        except Exception:
+            pass
         return buffer(
             shape,
             dtype=dtype,
@@ -65,6 +73,12 @@ class BufferProxy:
         Returns:
             A buffer created from the given parameters
         """
+        try:
+            import torch  # type: ignore
+            if isinstance(dtype, torch.dtype):  # type: ignore[attr-defined]
+                dtype = torch_dtype_to_str(dtype)
+        except Exception:
+            pass
         return match_buffer(pointer_var, shape, dtype=dtype, strides=strides)
 
 
@@ -96,6 +110,13 @@ class BaseTensorProxy:
         scope = scope or self.default_scope
         align = align or self.default_align
         offset_factor = offset_factor or self.default_offset_factor
+        # Convert torch.dtype to string if needed
+        try:
+            import torch  # type: ignore
+            if isinstance(dtype, torch.dtype):  # type: ignore[attr-defined]
+                dtype = torch_dtype_to_str(dtype)
+        except Exception:
+            pass
 
         return buffer(
             shape,
@@ -132,6 +153,12 @@ class BaseTensorProxy:
         Returns:
             A buffer created from the given parameters
         """
+        try:
+            import torch  # type: ignore
+            if isinstance(dtype, torch.dtype):  # type: ignore[attr-defined]
+                dtype = torch_dtype_to_str(dtype)
+        except Exception:
+            pass
         return match_buffer(pointer_var, shape, dtype=dtype, strides=strides)
 
 
@@ -302,4 +329,10 @@ def make_tensor(ptr: Var,
                 shape: tuple[PrimExpr, ...],
                 dtype: str = "float32",
                 strides: tuple[PrimExpr, ...] = None) -> tir.Buffer:
+    try:
+        import torch  # type: ignore
+        if isinstance(dtype, torch.dtype):  # type: ignore[attr-defined]
+            dtype = torch_dtype_to_str(dtype)
+    except Exception:
+        pass
     return Tensor.from_ptr(ptr, shape, dtype, strides)

@@ -38,6 +38,13 @@ def map_torch_type(intype: str) -> torch.dtype:
         return getattr(torch, intype)
 
 
+def torch_dtype_to_str(dt) -> str:
+ 
+    if isinstance(dt, torch.dtype):
+        return str(dt).split('.')[-1]
+    return str(dt)
+    
+
 def adapt_torch2tvm(arg):
     float8_dtype_map = {
         torch.float8_e4m3fn: "float8_e4m3",
@@ -154,8 +161,7 @@ def _compare_attributes(
 
     def raise_mismatch_error(attribute_name: str, actual_value, expected_value):
         raise AssertionError(
-            f"The values for attribute '{attribute_name}' do not match: {actual_value} != {expected_value}."
-        )
+            f"The values for attribute '{attribute_name}' do not match: {actual_value} != {expected_value}.")
 
     if actual.shape != expected.shape:
         raise_mismatch_error("shape", actual.shape, expected.shape)
