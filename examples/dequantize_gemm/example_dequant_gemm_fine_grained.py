@@ -23,7 +23,7 @@ def matmul(
     threads,
     num_bits=4,
 ):
-    from bitblas.quantization import _tir_packed_to_unsigned_convert
+    from tilelang.quantize import _tir_packed_to_unsigned_convert
     num_elems_per_byte = 8 // num_bits
     storage_dtype = "int8"
     storage_nbit = int("".join(c for c in storage_dtype if c.isdigit()))

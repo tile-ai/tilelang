@@ -32,7 +32,8 @@ def get_git_commit_id() -> Union[str, None]:
                                        cwd=os.path.dirname(os.path.abspath(__file__)),
                                        stderr=subprocess.DEVNULL,
                                        encoding='utf-8').strip()
-    except subprocess.SubprocessError:
+    # FileNotFoundError is raised when git is not installed
+    except (subprocess.SubprocessError, FileNotFoundError):
         return None
 
 

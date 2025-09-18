@@ -110,11 +110,11 @@ def test_fp4_fp16_convert_close():
 
 
 def get_configs():
-    block_M = [128]
-    block_N = [128, 256]
-    block_K = [128]
-    num_stages = [2]
-    threads = [256]
+    block_M = [64, 128]
+    block_N = [64, 128]
+    block_K = [128, 256]
+    num_stages = [1, 2]
+    threads = [128, 256]
     splits = [1]
     _configs = list(itertools.product(block_M, block_N, block_K, num_stages, threads, splits))
 
@@ -239,11 +239,7 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
 
     if tune:
 
-        @autotune(
-            configs=get_configs(),
-            keys=["block_M", "block_N", "block_K", "num_stages", "threads", "split"],
-            warmup=10,
-            rep=10)
+        @autotune(configs=get_configs(), warmup=10, rep=10)
         @tilelang.jit(out_idx=[2])
         def kernel(block_M=None,
                    block_N=None,
@@ -251,7 +247,7 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
                    num_stages=None,
                    threads=None,
                    split=None):
-            return kernel_func(block_M, block_N, block_K, num_stages, threads, split)
+            return kernel_func(block_M, block_N, block_K, num_stages, threads, split).prim_func
 
         return kernel()
     else:

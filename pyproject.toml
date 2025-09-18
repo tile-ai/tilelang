@@ -4,13 +4,9 @@ requires = [
     "cmake>=3.26",
     "packaging",
     "setuptools>=61",
-    "torch",
     "wheel",
-    "tox",
-    "auditwheel",
     "patchelf",
-    "ninja",
-    "Cython",
+    "Cython>=3.0.0",
 ]
 build-backend = "setuptools.build_meta"
 

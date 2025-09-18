@@ -6,7 +6,10 @@ import tilelang.language as T
 import argparse
 
 
-@tilelang.jit(out_idx=[3, 4])
+@tilelang.jit(
+    out_idx=[3, 4], pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    })
 def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     shape = [batch, seq_len, heads, dim]
@@ -76,7 +79,10 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
     return flash_fwd
 
 
-@tilelang.jit(out_idx=[2])
+@tilelang.jit(
+    out_idx=[2], pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    })
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
     dtype = "float16"
     accum_dtype = "float"
@@ -112,7 +118,10 @@ def make_dq_layout(dQ):
                     lambda b, l, h, d: [b, l // 8, h, d // 8, (d % 2), 4 * (l % 8) + (d % 8) // 2])
 
 
-@tilelang.jit(out_idx=[1])
+@tilelang.jit(
+    out_idx=[1], pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    })
 def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
     dtype = "float16"
     accum_dtype = "float"
@@ -134,7 +143,9 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
     return flash_bwd_post
 
 
-@tilelang.jit
+@tilelang.jit(pass_configs={
+    tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+})
 def flashattn_bwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
     sm_scale = (1.0 / dim)**0.5
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)

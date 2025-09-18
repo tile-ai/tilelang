@@ -389,9 +389,7 @@ def ref_program_twiddling(A, qB, Scale, Bias=None):
     """
     dtypeC = "bfloat16"
     B = torch_convert_bit_twiddling(qB)
-    for i in range(B.shape[0]):
-        for j in range(B.shape[1]):
-            B[i][j] = B[i][j] * (2**(Scale[i][j // 32]))
+    B *= 2**(Scale[:, (torch.arange(B.shape[1], device=B.device) // 32)])
     C = torch.matmul(A.to(torch.float), B.T.to(torch.float))
     C = C.to(torch.__getattribute__(dtypeC))
     return C
@@ -414,9 +412,7 @@ def ref_program_twiddling_with_bias(A, qB, Scale, Bias):
     """
     dtypeC = "bfloat16"
     B = torch_convert_bit_twiddling(qB)
-    for i in range(B.shape[0]):
-        for j in range(B.shape[1]):
-            B[i][j] = B[i][j] * (2**(Scale[i][j // 32]))
+    B *= 2**(Scale[:, (torch.arange(B.shape[1], device=B.device) // 32)])
     C = torch.matmul(A.to(torch.float), B.T.to(torch.float)) + Bias
     C = C.to(torch.__getattribute__(dtypeC))
     return C
@@ -440,9 +436,7 @@ def ref_program_simple(A, qB, Scale, Bias=None):
     """
     dtypeC = "bfloat16"
     B = torch_convert(qB)
-    for i in range(B.shape[0]):
-        for j in range(B.shape[1]):
-            B[i][j] = B[i][j] * (2**(Scale[i][j // 32]))
+    B *= 2**(Scale[:, (torch.arange(B.shape[1], device=B.device) // 32)])
     C = torch.matmul(A.to(torch.float), B.T.to(torch.float))
     C = C.to(torch.__getattribute__(dtypeC))
     return C
@@ -470,9 +464,7 @@ def ref_program_simple_with_bias(A, qB, Scale, Bias):
     """
     dtypeC = "bfloat16"
     B = torch_convert(qB)
-    for i in range(B.shape[0]):
-        for j in range(B.shape[1]):
-            B[i][j] = B[i][j] * (2**(Scale[i][j // 32]))
+    B *= 2**(Scale[:, (torch.arange(B.shape[1], device=B.device) // 32)])
     C = torch.matmul(A.to(torch.float), B.T.to(torch.float)) + Bias
     C = C.to(torch.__getattribute__(dtypeC))
     return C

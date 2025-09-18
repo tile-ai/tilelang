@@ -19,7 +19,15 @@ class PassConfigKey(str, Enum):
     """Disable warp specialization optimization. Default: False"""
 
     TL_DISABLE_FAST_MATH = "tl.disable_fast_math"
-    """Disable fast math optimization. Default: False"""
+    """Disable fast math optimization. Default: True
+    will be deprecated in the 0.1.7 release
+    """
+
+    TL_ENABLE_FAST_MATH = "tl.enable_fast_math"
+    """
+        Enable fast math optimization. Default: False
+        if enabled, --use_fast_math will be passed to nvcc
+    """
 
     TL_PTXAS_REGISTER_USAGE_LEVEL = "tl.ptxas_register_usage_level"
     """The PTXAS register usage level in [0, 10], which controls the
