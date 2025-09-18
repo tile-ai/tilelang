@@ -645,7 +645,7 @@ private:
         if (call->op.same_as(tl::tl_gemm()) ||
             call->op.same_as(tl::tl_gemm_sp())) {
           DLOG(INFO) << "PostOrderVisit CallNode tl_gemm and tl_gemm_sp: "
-                    << call->op;
+                     << call->op;
         }
       }
     });

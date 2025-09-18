@@ -42,6 +42,7 @@ Checks: >
   -cppcoreguidelines-pro-type-static-cast-downcast,
   -performance-unnecessary-value-param,
   -performance-enum-size,
+  -clang-analyzer-deadcode.DeadStores,
 
 WarningsAsErrors: '*'
 

@@ -105,13 +105,15 @@ public:
            "required for layout inference.";
 
     // Run InferLayout
-    std::cerr << "[RunInferStep] working on " << cur_infer_id << std::endl;
-    auto updates = next->InferLayout(
-        LayoutInferArgs{target_, thread_bounds, layout_map}, level);
+    DLOG(INFO) << "[RunInferStep] working on " << cur_infer_id << '\n';
+    auto updates =
+        next->InferLayout(LayoutInferArgs{target_, thread_bounds, layout_map,
+                                          &analyzer_, buffer_oob},
+                          level);
     // Process the returned updates
     for (const auto &[buffer, layout] : updates) {
       DLOG(INFO) << "    consider update " << buffer << " as "
-                << layout->DebugOutput() << std::endl;
+                 << layout->DebugOutput() << '\n';
 
       // Basic validity checks
       ICHECK(buffer.defined()) << "InferLayout returned an undefined buffer.";
@@ -142,7 +144,7 @@ public:
                                     inner_analyzer)) {
             layout_map.Set(buffer, layout);
             DLOG(INFO) << "    layout broadcast from "
-                      << src_layout->DebugOutput() << ", accepted" << std::endl;
+                       << src_layout->DebugOutput() << ", accepted" << '\n';
             continue;
           }
         }
@@ -154,7 +156,7 @@ public:
       } else {
         // Otherwise, update map
         layout_map.Set(buffer, layout);
-        DLOG(INFO) << "    new layout accepted" << std::endl;
+        DLOG(INFO) << "    new layout accepted" << '\n';
         if (!update_queue)
           continue;
 
@@ -214,9 +216,9 @@ public:
         << "Size mismatch: buffer_oob_vec_ and infer_list_ must match in "
            "length.";
 
-    std::cerr << "[InferLayout] all participating operators:" << std::endl;
+    DLOG(INFO) << "[InferLayout] all participating operators:" << '\n';
     for (int i = 0; i < infer_list_stmt_.size(); ++i) {
-      std::cerr << "    op " << i << ":" << infer_list_stmt_[i] << std::endl;
+      DLOG(INFO) << "    op " << i << ":" << infer_list_stmt_[i] << '\n';
     }
 
     // If needed, you can also check that annotated_layout_map_ is not empty, or
@@ -480,11 +482,11 @@ private:
   void InferInFreeMode(LayoutMap &layout_map,
                        const LayoutMap &strict_layout_map) {
 
-    DLOG(INFO) << "Enforced layout maps:" << std::endl;
+    DLOG(INFO) << "Enforced layout maps:" << '\n';
     for (auto &&[k, v] : layout_map) {
-      DLOG(INFO) << "    " << k << ": " << v->DebugOutput() << std::endl;
+      DLOG(INFO) << "    " << k << ": " << v->DebugOutput() << '\n';
     }
-    DLOG(INFO) << std::endl;
+    DLOG(INFO) << '\n';
 
     // Group operators into connected components
     UnionFind<int> uf;
@@ -522,59 +524,52 @@ private:
 
     for (auto &&[root, members] : components) {
       DLOG(INFO) << "======================= processing component " << root
-                << std::endl;
+                 << '\n';
       decltype(infer_list_) best_infer_list;
       LayoutMap best_layout_map;
       int64_t min_reg_num = INT64_MAX;
       int min_reg_num_infer_root = -1;
+
+      // Try each member as the root of inference for this component
       for (int attempt_infer_root : members) {
         DLOG(INFO) << "----------------------- try root " << attempt_infer_root
-                  << std::endl;
-        // backup infer_list_ in class member
+                   << '\n';
+        // Backup the current infer_list_ state
         auto back_infer_list = BackupInferList();
-        // create temporarily used layout_map, new handle so that it copies on
-        // write
+        // Copy the current layout_map for temporary use
         LayoutMap tmp_layout_map = layout_map;
-        // infer from attempt_infer_root in free mode
         bool do_update = true;
         try {
+          // Run inference starting from attempt_infer_root
           RunInferStep(attempt_infer_root, InferLevel::kFree, true,
                        tmp_layout_map, strict_layout_map, q, in_queue);
           FinishInferQueue(InferLevel::kFree, tmp_layout_map, strict_layout_map,
                            q, in_queue);
-          // Silly workaround: we have no clue if single root will iterate over
-          // the entire component, since the InferLayout implementations have
-          // complicated conditioning inside and we know nothing about it.
-          // This would constantly result in incomplete layouts for buffers in
-          // this component. Instead of trying all combinations of root
-          // selection order, we simply go through all other loops in order
-          // after the first search from attempt_infer_root.
+
+          // After the first search, run inference for all other members in
+          // order
           for (int other_infer_root : members) {
             if (other_infer_root != attempt_infer_root) {
               RunInferStep(other_infer_root, InferLevel::kFree, true,
                            tmp_layout_map, strict_layout_map, q, in_queue);
-              // must also be kFree here to avoid conflicts.
               FinishInferQueue(InferLevel::kFree, tmp_layout_map,
                                strict_layout_map, q, in_queue);
             }
           }
-        } catch (LayoutConflictException e) {
-          // such an order fails, try others
+        } catch (const LayoutConflictException &e) {
           do_update = false;
           DLOG(INFO) << "attempt failed due to LayoutConflictException "
-                    << e.what() << std::endl;
-        } catch (NormalizeIterException e) {
-          // such an order encounters iterators that is not normalizable, try
-          // others e.g. i * 576 % 2048
+                     << e.what() << '\n';
+        } catch (const NormalizeIterException &e) {
           do_update = false;
           DLOG(INFO) << "attempt failed due to NormalizeIterException "
-                    << e.what() << std::endl;
+                     << e.what() << '\n';
         }
 
         if (do_update) {
-          // compute total register number
+          // Compute the total register number for this layout
           int64_t reg_num = 0;
-          for (auto &&[buffer, layout] : tmp_layout_map) {
+          for (const auto &[buffer, layout] : tmp_layout_map) {
             if (auto frag = layout.as<Fragment>()) {
               int64_t frag_reg_num = 1;
               for (auto i : frag.value()->OutputShape()) {
@@ -585,24 +580,24 @@ private:
               reg_num += frag_reg_num;
             }
           }
-          // if it's any better, update the best_* storage
+          // Update the best plan if this one uses fewer registers
           if (reg_num < min_reg_num) {
-            best_infer_list = std::move(infer_list_);
+            best_infer_list =
+                BackupInferList(); // Use backup to avoid moving out infer_list_
             best_layout_map = tmp_layout_map;
             min_reg_num = reg_num;
             min_reg_num_infer_root = attempt_infer_root;
           }
         }
-        // recover stateful infer_list_, head on next
+        // Restore infer_list_ state for the next attempt
         infer_list_ = std::move(back_infer_list);
       }
-      ICHECK(min_reg_num < INT64_MAX)
-          << "no available layout found" << std::endl;
-      // now apply the best plan for this component
+      ICHECK(min_reg_num < INT64_MAX) << "no available layout found" << '\n';
+      // Apply the best plan for this component
       infer_list_ = std::move(best_infer_list);
       layout_map = best_layout_map;
       DLOG(INFO) << "[InferInFreeMode] Final selection is attempt_infer_root = "
-                << min_reg_num_infer_root << std::endl;
+                 << min_reg_num_infer_root << '\n';
     }
   }
 };
@@ -625,7 +620,7 @@ private:
   LayoutInferencer(const LayoutInferenceResult &result,
                    bool skip_thread_partition, arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer), result_(result),
-        skip_thread_partition_(skip_thread_partition) {};
+        skip_thread_partition_(skip_thread_partition){};
 
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 

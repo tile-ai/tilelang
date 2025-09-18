@@ -91,7 +91,7 @@ TileOperator GemmNode::Clone() const {
   return Gemm(op);
 }
 
-GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
+GemmNode::GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
   tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
 
   int warp_size = TargetGetWarpSize(target);
