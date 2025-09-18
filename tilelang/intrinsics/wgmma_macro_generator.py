@@ -40,11 +40,11 @@ class SwizzleMode(IntEnum):
 
     def swizzle_byte_size(self) -> int:
         if self.is_swizzle_32b():
-            return 32 // 8
+            return 32
         elif self.is_swizzle_64b():
-            return 64 // 8
+            return 64
         elif self.is_swizzle_128b():
-            return 128 // 8
+            return 128
         else:
             return 1
 
@@ -203,12 +203,35 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             if b_is_k_major:
                 b_leading_byte_offset = 16
             else:
-                # MN Major
+                # MN Major, K * N
                 # LBO represents the distance between two atoms along the N dimension
                 # SBO represents the distance between two atoms along the K dimension
-                b_leading_byte_offset = b_swizzle_mode.swizzle_atom_size()
-                b_stride_byte_offset = 8 * n_dim * elems_in_bytes
+                b_n_axis_atoms = n_dim // (b_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
+                if b_n_axis_atoms <= 1:
+                    b_leading_byte_offset = 0
+                else:
+                    b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
 
+                if b_n_axis_atoms <= 1:
+                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim
+                else:
+                    b_stride_byte_offset = 8 * elems_in_bytes * (b_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
+
+                
+        print(f"a_leading_byte_offset: {a_leading_byte_offset >> 4}")
+        print(f"a_stride_byte_offset: {a_stride_byte_offset >> 4}")
+
+        print(f"b_swizzle_atom_size: {b_swizzle_mode.swizzle_atom_size()}")
+        print(f"b_swizzle_byte_size: {b_swizzle_mode.swizzle_byte_size()}")
+        print(f"m_dim: {m_dim}")
+        print(f"n_dim: {n_dim}")
+        print(f"k_dim: {k_dim}")
+        print(f"micro_size_k: {micro_size_k}")
+        print(f"a_leading_byte_offset: {a_leading_byte_offset}")
+        print(f"a_stride_byte_offset: {a_stride_byte_offset}")
+        print(f"b_leading_byte_offset: {b_leading_byte_offset}")
+        print(f"b_stride_byte_offset: {b_stride_byte_offset}")
+        # exit()
         @T.macro
         def _warp_mma(A_buf, B_buf, C_local_buf):
             desc_a = T.alloc_descriptor()
@@ -222,7 +245,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                     k_dim_offset = ki * micro_size_k
                     A_offset = i * 64 * A_buf.shape[
                         -1] + k_dim_offset if a_is_k_major else ki * micro_size_k * 64 + i * 64 * k_dim
-                    B_offset = k_dim_offset if b_is_k_major else k_dim_offset * B_buf.shape[-1]
+                    B_offset = k_dim_offset if b_is_k_major else k_dim_offset * (b_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
                     C_offset = i * warp_cols * local_size_out  # 4 warps as an unit
                     T.ptx_wgmma_ss(accum_dtype, wgmma_prefix, a_is_k_major,
                                    b_is_k_major, a_dtype_abbrv, b_dtype_abbrv,
@@ -273,8 +296,16 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 # MN Major
                 # LBO represents the distance between two atoms along the N dimension
                 # SBO represents the distance between two atoms along the K dimension
-                b_leading_byte_offset = b_swizzle_mode.swizzle_atom_size()
-                b_stride_byte_offset = 8 * n_dim * elems_in_bytes
+                b_n_axis_atoms = n_dim // (b_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
+                if b_n_axis_atoms <= 1:
+                    b_leading_byte_offset = 0
+                else:
+                    b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
+
+                if b_n_axis_atoms <= 1:
+                    b_stride_byte_offset = 8 * elems_in_bytes * n_dim
+                else:
+                    b_stride_byte_offset = 8 * elems_in_bytes * (b_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
 
         @T.macro
         def _warp_mma(A_buf, B_buf, C_local_buf):

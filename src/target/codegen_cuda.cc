@@ -1358,7 +1358,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(C)", c_ref + " + " + c_offset);
     replacer.register_rule("(scale_out)", scale_out ? "true" : "false");
     wgmma_asm_code = replacer.rewrite(wgmma_asm_code);
-    LOG(INFO) << "wgmma_asm_code: " << wgmma_asm_code;
     this->stream << wgmma_asm_code;
   } else if (op->op.same_as(tl::ptx_wgmma_rs())) {
     // arg 0: dtype
