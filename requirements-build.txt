@@ -1,5 +1,5 @@
 # Should be mirrored in pyproject.toml
-Cython
+Cython>=3.0.0
 build
 cmake>=3.26
 packaging
@@ -9,3 +9,4 @@ wheel
 tox
 auditwheel
 patchelf
+ninja

@@ -4,6 +4,15 @@
 cmake_minimum_required(VERSION 3.18)
 project(TILE_LANG C CXX)
 
+option(TILE_LANG_STATIC_STDCPP "Statically link libstdc++ for TileLang libraries" ON)
+option(TILE_LANG_INSTALL_STATIC_LIB "Install the static library" ON)
+
+if(TILE_LANG_STATIC_STDCPP)
+  message(STATUS "Enabling static linking of C++ standard library")
+  # Note: We'll apply static linking flags selectively to avoid Python extension conflicts
+  # The flags will be applied per-target below rather than globally
+endif()
+
 # Set default build type to Release if not provided
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type")
@@ -217,6 +226,11 @@ target_link_libraries(tilelang PUBLIC tvm_runtime)
 add_library(tilelang_static STATIC $<TARGET_OBJECTS:tilelang_objs>)
 add_dependencies(tilelang_static tvm_runtime)
 set_target_properties(tilelang_static PROPERTIES OUTPUT_NAME tilelang)
+
+# Apply static linking flags only to static library to avoid Python extension conflicts
+if(TILE_LANG_STATIC_STDCPP AND CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+  target_link_options(tilelang_static PRIVATE -static-libstdc++ -static-libgcc)
+endif()
 
 # Debug build type-specific definitions
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
