@@ -83,7 +83,7 @@ def fast_flashattn(
     qk_coalesced_width: int,
     v_coalesced_width: int,
 ):
-    scale = (1.0 / dim)**0.5 * 1.44269504
+    scale = (1.0 / dim)**0.5
     head_kv = heads // groups
     q_shape = [batch, seq_len, heads, dim]
     kv_shape = [batch, seq_len, head_kv, dim]
@@ -173,7 +173,7 @@ def fast_flashattn(
                     T.reduce_max(acc_s, m_i, dim=1, clear=False)
 
                     for i in T.Parallel(block_M):
-                        sf = T.exp2(m_prev[i] * scale - m_i[i] * scale)
+                        sf = T.exp(m_prev[i] * scale - m_i[i] * scale)
                         l_i[i] *= sf
                         scale_factor[i] = sf
 
@@ -181,7 +181,7 @@ def fast_flashattn(
                         acc_o[i, j] *= scale_factor[i]
 
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.exp2(acc_s[i, j] * scale - m_i[i] * scale)
+                        acc_s[i, j] = T.exp(acc_s[i, j] * scale - m_i[i] * scale)
 
                     T.reduce_sum(acc_s, row_sum, dim=1)
                     for i in T.Parallel(block_M):
