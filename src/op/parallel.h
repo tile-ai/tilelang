@@ -128,7 +128,8 @@ private:
   void AddPredicate(const PrimExpr &expr) const {
     predicate_ = predicate_.defined() ? And(expr, predicate_.value()) : expr;
   }
-
+  
+  // Allow ParallelLoopNestVisitor to access private members.
   friend class ParallelLoopNestVisitor;
 
   // Visitor for collecting loop nest information.
