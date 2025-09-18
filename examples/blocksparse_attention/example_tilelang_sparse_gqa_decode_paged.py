@@ -20,7 +20,10 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
     accum_dtype = "float"
     kv_group_num = heads // heads_kv
 
-    @tilelang.jit(out_idx=[-1])
+    @tilelang.jit(
+        out_idx=[-1], pass_configs={
+            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+        })
     def kernel_func(block_N, block_H, page_block_size, num_split, num_stages, threads, num_pages,
                     max_num_blocks_per_seq, max_selected_blocks):
         shape_q = [batch, heads, dim]
