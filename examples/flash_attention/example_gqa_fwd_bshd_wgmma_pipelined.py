@@ -23,7 +23,8 @@ def get_configs():
     warmup=10,
     rep=10,
 )
-@tilelang.jit(out_idx=[3], pass_configs={
+@tilelang.jit(
+    out_idx=[3], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
 def flashattn(

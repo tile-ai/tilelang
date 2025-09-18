@@ -22,7 +22,7 @@ class PassConfigKey(str, Enum):
     """Disable fast math optimization. Default: True
     will be deprecated in the 0.1.7 release
     """
-    
+
     TL_ENABLE_FAST_MATH = "tl.enable_fast_math"
     """
         Enable fast math optimization. Default: False

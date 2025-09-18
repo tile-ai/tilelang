@@ -71,8 +71,11 @@ class LibraryGenerator(object):
             libpath = src.name.replace(".cu", ".so")
 
             if self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH):
-                logger.warning("TL_DISABLE_FAST_MATH is deprecated in the 0.1.7 release, please use TL_ENABLE_FAST_MATH instead")
-                enable_fast_math = not self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH, True)
+                logger.warning(
+                    "TL_DISABLE_FAST_MATH is deprecated in the 0.1.7 release, please use TL_ENABLE_FAST_MATH instead"
+                )
+                enable_fast_math = not self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH,
+                                                             True)
             else:
                 enable_fast_math = self.pass_configs.get(PassConfigKey.TL_ENABLE_FAST_MATH, False)
 

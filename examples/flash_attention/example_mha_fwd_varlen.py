@@ -218,7 +218,8 @@ def attention_ref(
     return output.to(dtype=dtype_og), attention.to(dtype=dtype_og)
 
 
-@tilelang.jit(out_idx=[6], pass_configs={
+@tilelang.jit(
+    out_idx=[6], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
 def flashattn(batch_size,
