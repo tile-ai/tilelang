@@ -70,7 +70,12 @@ class LibraryGenerator(object):
             target_arch = get_target_arch(get_target_compute_version(target))
             libpath = src.name.replace(".cu", ".so")
 
-            disable_fast_math = self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH, False)
+            if self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH):
+                logger.warning("TL_DISABLE_FAST_MATH is deprecated in the 0.1.7 release, please use TL_ENABLE_FAST_MATH instead")
+                enable_fast_math = not self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH, True)
+            else:
+                enable_fast_math = self.pass_configs.get(PassConfigKey.TL_ENABLE_FAST_MATH, False)
+
             ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL,
                                                       None)
             verbose_ptxas_output = self.pass_configs.get(
@@ -91,7 +96,7 @@ class LibraryGenerator(object):
                 "-gencode",
                 f"arch=compute_{target_arch},code=sm_{target_arch}",
             ]
-            if not disable_fast_math:
+            if enable_fast_math:
                 command += ["--use_fast_math"]
             if ptxas_usage_level is not None:
                 command += [f"--ptxas-options=--register-usage-level={ptxas_usage_level}"]
