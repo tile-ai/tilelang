@@ -37,8 +37,8 @@ def group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m):
                         y_local.shape,
                         forward_thread_fn=lambda i, j: (i // (blk_m // 4)) * 32 + j % 32),
             })
-            
-            T.clear(row_offset)
+
+            row_offset[0] = 0
             for i in T.serial(bg):
                 row_offset[0] += batch_sizes[i]
 

@@ -1,3 +1,4 @@
+#!/usr/bin/bash
 # Usage:
 #    # Do work and commit your work.
 
