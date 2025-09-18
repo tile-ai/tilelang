@@ -56,6 +56,7 @@ def tl_matmul(
     A_shared_shape = (block_K, block_M) if a_transposed else (block_M, block_K)
     B_shared_shape = (block_N, block_K) if b_transposed else (block_K, block_N)
     C_shared_shape = (
+        block_M // micro_size_x,
         block_N // micro_size_y,
         micro_size_x,
         micro_size_y,
