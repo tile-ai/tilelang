@@ -45,7 +45,6 @@ static constexpr const char *kPtxasRegisterUsageLevel =
 static constexpr const char *kEnablePTXASVerboseOutput =
     "tl.enable_ptxas_verbose_output";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
-static constexpr const char *kDisableUTCMMA = "tl.disable_utcmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 /*!
  * \brief Whether to disable dynamic tail split
