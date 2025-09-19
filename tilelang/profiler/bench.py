@@ -57,7 +57,8 @@ def do_bench(
         cache.zero_()
         fn()
     end_event.record()
-    torch.mps.synchronize()
+    start_event.synchronize()
+    end_event.synchronize()
     estimate_ms = start_event.elapsed_time(end_event) / 5
 
     # compute number of warmup and repeat
@@ -87,6 +88,7 @@ def do_bench(
         fn()
         end_event[i].record()
     # Record clocks
+    [(s.synchronize(), e.synchronize()) for s, e in zip(start_event, end_event)]
     torch.mps.synchronize()
     times = torch.tensor(
         [s.elapsed_time(e) for s, e in zip(start_event, end_event)],

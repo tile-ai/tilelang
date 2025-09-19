@@ -4,16 +4,9 @@ import tilelang.testing
 import tilelang.language as T
 import torch
 
-from tilelang.profiler.bench import do_bench
-
 
 def get_configs():
-    # return [
-    #     {'block_M': 16, 'block_N': 16, 'block_K': 16,}
-    # ]
-
-    bs = [16, 32, 64, 128, 256]
-    bs = [16, 32]
+    bs = [8, 16, 32]
     r = [{}]
     for k in "MNK":
         r = [{f"block_{k}": b, **i} for i in r for b in bs]
@@ -51,7 +44,8 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float32", accum_dtype="flo
     return gemm
 
 
-TESTS = [(1024, 1024, 1024)]
+SS = [2048, 4096]
+TESTS = [(a, b, c) for a in SS for b in SS for c in SS]
 
 
 def benchmark(f, n, *args, **kwargs):
@@ -59,24 +53,32 @@ def benchmark(f, n, *args, **kwargs):
     f(*args, **kwargs)
 
     torch.mps.synchronize()
-    start = torch.mps.Event(enable_timing=True)
-    end = torch.mps.Event(enable_timing=True)
-    start.record()
+    with torch.mps.profiler.profile(mode="interval,event", wait_until_completed=True):
+        start = torch.mps.Event(enable_timing=True)
+        end = torch.mps.Event(enable_timing=True)
+        start.record()
 
-    for _ in range(n):
-        f(*args, **kwargs)
+        for _ in range(n):
+            f(*args, **kwargs)
 
-    end.record()
-    # end.synchronize()
+        end.record()
 
-    return start.elapsed_time(end) / 1000
+        start.synchronize()
+        end.synchronize()
+
+        return start.elapsed_time(end) / 1000
 
 
 if __name__ == "__main__":
+    results = {}
     for test in TESTS:
         m, n, k = test
 
+        size_key = f"{m}_{n}_{k}"
         for dtype in ("float32", "float16"):
+            conf_key = f"{size_key},{dtype}"
+            r = []
+
             torch_dtype = getattr(torch, dtype)
 
             a = torch.randn(m, k, device="mps", dtype=torch_dtype)
@@ -85,7 +87,7 @@ if __name__ == "__main__":
 
             torch_add = lambda: torch.matmul(a, b, out=c)
             torch_add()
-            print(benchmark(torch_add, n=100))
+            r.append(benchmark(torch_add, n=100))
 
             jit_kernel = matmul(m, n, k, dtype=dtype, accum_dtype="float")
 
@@ -96,4 +98,21 @@ if __name__ == "__main__":
             torch_add = lambda: torch.matmul(a, b, out=c)
             torch_add()
 
-            print(benchmark(tl_add, n=100))
+            r.append(benchmark(tl_add, n=100))
+
+            results[conf_key] = r[0], r[1]
+
+    try:
+        from tabulate import tabulate
+
+        print(
+            tabulate(
+                [
+                    (key, result_torch, result_tl)
+                    for (key, (result_torch, result_tl)) in results.items()
+                ],
+                headers=["config", "torch", "tilelang"],
+            )
+        )
+    except ImportError:
+        print(results)
