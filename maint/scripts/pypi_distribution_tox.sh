@@ -1,4 +1,4 @@
-multi_python_version=("3.9" "3.10" "3.11" "3.12")
+multi_python_version=("3.8" "3.9" "3.10" "3.11" "3.12")
 for python_version in "${multi_python_version[@]}"; do
     echo "Installing Python ${python_version}..."
     apt-get install -y python${python_version}
@@ -16,7 +16,7 @@ fi
 
 # Build wheels for different Python versions
 echo "Building wheels for multiple Python versions..."
-tox -e py39-pypi,py310-pypi,py311-pypi,py312-pypi
+tox -e py38-pypi,py39-pypi,py310-pypi,py311-pypi,py312-pypi
 
 if [ $? -ne 0 ]; then
     echo "Error: Failed to build the wheels."
