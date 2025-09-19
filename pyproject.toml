@@ -1,7 +1,6 @@
 [build-system]
 requires = [
     "build",
-    "cmake>=3.26",
     "packaging",
     "setuptools>=61",
     "wheel",
