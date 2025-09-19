@@ -674,7 +674,7 @@ private:
   bool IsSpecialTaggedMemory(const StorageScope &scope) {
     return !scope.tag.empty() && scope.tag != ".dyn" &&
            scope.tag != ".barrier" && scope.tag != ".workspace" &&
-           scope.tag != ".vtcm";
+           scope.tag != ".vtcm" && scope.tag != ".var";
   }
 
   // Allocate entry of node.
