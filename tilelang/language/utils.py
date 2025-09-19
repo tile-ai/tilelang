@@ -1,8 +1,9 @@
 from tilelang import tvm as tvm
+from typing import List
 from tvm.tir import PrimExpr
 
 
-def index_to_coordinates(index, shape) -> list[PrimExpr]:
+def index_to_coordinates(index, shape) -> List[PrimExpr]:
     """
     Convert a flat (linear) index into multi-dimensional coordinates for a given shape.
 
@@ -13,7 +14,7 @@ def index_to_coordinates(index, shape) -> list[PrimExpr]:
         shape (Sequence[int]): The extents of each dimension (length >= 1).
 
     Returns:
-        list[PrimExpr]: Coordinates for each dimension in the same order as `shape`.
+        List[PrimExpr]: Coordinates for each dimension in the same order as `shape`.
     """
     coordinates = []
     dims = len(shape)
