@@ -128,6 +128,7 @@ private:
   void AddPredicate(const PrimExpr &expr) const {
     predicate_ = predicate_.defined() ? And(expr, predicate_.value()) : expr;
   }
+
   // Allow ParallelLoopNestVisitor to access private members.
   friend class ParallelLoopNestVisitor;
 
@@ -139,6 +140,8 @@ private:
   std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_is_write_;
   // The loop variables for the parallel loop nest.
   Array<IterVar> loop_vars_;
+  // The inner_vars_
+  Map<Var, IterVar> inner_vars_;
   // Analyzer for simplifying and analyzing expressions, mutable for lazy use.
   mutable arith::Analyzer analyzer_;
   // Mapping from buffer to reducer info.

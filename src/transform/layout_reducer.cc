@@ -178,7 +178,8 @@ private:
   Stmt VisitStmt_(const ForNode *op) final {
     // only annotate the outermost loop
     bool should_annotate = false;
-    if (!inside_reducer_range_.empty() && !already_annotated_) {
+    if (!inside_reducer_range_.empty() && !already_annotated_ &&
+        op->kind == ForKind::kParallel) {
       should_annotate = true;
       already_annotated_ = true;
     }

@@ -29,7 +29,7 @@ def group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m):
             y_s_local = T.alloc_fragment((blk_m,), accum_dtype)
             y_q_local = T.alloc_fragment((blk_m, group_size), accum_dtype)
             y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), "float8_e4m3")
-            row_offset = T.alloc_local((1,), "int32")
+            row_offset = T.alloc_fragment((1,), "int32")
 
             T.annotate_layout({
                 y_local:
