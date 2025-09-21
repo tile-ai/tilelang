@@ -1,7 +1,7 @@
 import os
 import torch
 import warnings
-from typing import Optional
+from typing import Optional, Tuple
 from tilelang.contrib import nvcc
 from torch.utils.cpp_extension import load, _import_module_from_library
 from tilelang import env
@@ -44,7 +44,7 @@ def _get_cached_lib():
 
 
 def compress_sm90(A: torch.Tensor, block_k: int,
-                  transposed: bool) -> tuple[torch.Tensor, torch.Tensor]:
+                  transposed: bool) -> Tuple[torch.Tensor, torch.Tensor]:
     if block_k > 128:
         block_k = 128
         # Ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
@@ -56,7 +56,7 @@ def compress_sm90(A: torch.Tensor, block_k: int,
     return compress_lib.compress_sm90(A, block_k, transposed)
 
 
-def compress_sm80(A: torch.Tensor, transposed: bool) -> tuple[torch.Tensor, torch.Tensor]:
+def compress_sm80(A: torch.Tensor, transposed: bool) -> Tuple[torch.Tensor, torch.Tensor]:
     try:
         from torch.sparse import to_sparse_semi_structured, SparseSemiStructuredTensor
     except ImportError as err:
@@ -76,7 +76,7 @@ def compress_sm80(A: torch.Tensor, transposed: bool) -> tuple[torch.Tensor, torc
 def compress(A: torch.Tensor,
              transposed: bool,
              arch: Optional[str] = None,
-             **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
+             **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compress a tensor using the appropriate method based on the CUDA architecture.
     """
