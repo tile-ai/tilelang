@@ -234,6 +234,10 @@ def test_assert_tl_matmul():
     assert_tl_matmul_correctness(128, 128, 128, "int8", "int32", accum_dtype="int32")
     assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", accum_dtype="int32")
     assert_tl_matmul_correctness(128, 256, 256, "int8", "int32", accum_dtype="int32", k_pack=2)
+    assert_tl_matmul_correctness(
+        128, 256, 256, "int8", "int32", b_transposed=False, accum_dtype="int32")
+    assert_tl_matmul_correctness(
+        128, 256, 256, "int8", "int32", b_transposed=False, accum_dtype="int32", k_pack=2)
 
 
 if __name__ == "__main__":
