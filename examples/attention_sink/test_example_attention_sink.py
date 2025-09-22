@@ -1,27 +1,30 @@
 import tilelang.testing
 
-import example_mha_sink_fwd_bshd
-import example_mha_sink_fwd_bshd_wgmma_pipelined
+import example_mha_sink_fwd_bhsd
+import example_mha_sink_fwd_bhsd_wgmma_pipelined
 
-
-@tilelang.testing.requires_cuda
-def test_example_mha_sink_fwd_bshd_full_attn():
-    example_mha_sink_fwd_bshd.main()
 
 
 @tilelang.testing.requires_cuda
-def test_example_mha_sink_fwd_bshd_sliding_window():
-    example_mha_sink_fwd_bshd.main(window_size=128)
+def test_example_mha_sink_fwd_bhsd_full_attn():
+    example_mha_sink_fwd_bhsd.main()
 
 
 @tilelang.testing.requires_cuda
-def test_example_mha_sink_fwd_bshd_wgmma_pipelined_full_attn():
-    example_mha_sink_fwd_bshd_wgmma_pipelined.main()
+def test_example_mha_sink_fwd_bhsd_sliding_window():
+    example_mha_sink_fwd_bhsd.main(window_size=128)
 
 
 @tilelang.testing.requires_cuda
-def test_example_mha_sink_fwd_bshd_wgmma_pipelined_sliding_window():
-    example_mha_sink_fwd_bshd_wgmma_pipelined.main(window_size=128)
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_example_mha_sink_fwd_bhsd_wgmma_pipelined_full_attn():
+    example_mha_sink_fwd_bhsd_wgmma_pipelined.main()
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_example_mha_sink_fwd_bhsd_wgmma_pipelined_sliding_window():
+    example_mha_sink_fwd_bhsd_wgmma_pipelined.main(window_size=128)
 
 
 if __name__ == "__main__":

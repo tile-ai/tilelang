@@ -1,5 +1,5 @@
-# Modified from tilelang/examples/flash_attention/example_mha_fwd_bshd_wgmma_pipelined.py
-# Optimized for Hopper architecture
+# Modified from tilelang/examples/flash_attention/example_mha_fwd_bhsd_wgmma_pipelined.py
+# Optimized for Hopper architecture, with a benchmark to compare with offical Triton impl
 
 import torch
 import tilelang
@@ -8,6 +8,9 @@ from tilelang.profiler import do_bench
 import tilelang.language as T
 import itertools
 import argparse
+import triton
+import triton.language as tl
+from triton.tools.tensor_descriptor import TensorDescriptor
 
 
 def get_configs():
@@ -20,29 +23,29 @@ def get_configs():
     out_idx=[3], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
-# Add compile_flag "-DENABLE_BF16" if using bfloat16 instead
-def flashattn(
-        batch,
-        heads,
-        seq_len,
-        dim,
-        window_size=None,  # None for full attention
-        block_M=128,
-        block_N=128,
-        num_stages=2,
-        threads=256):
+def flashattn(batch,
+              heads,
+              seq_q,
+              seq_kv,
+              dim,
+              window_size=None,  # None for full attention
+              block_M=128,
+              block_N=128,
+              num_stages=2,
+              threads=256):
 
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
 
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
-    shape = [batch, seq_len, heads, dim]
+    q_shape = [batch, heads, seq_q, dim]
+    kv_shape = [batch, heads, seq_kv, dim]
     dtype = "float16"
     accum_dtype = "float"
 
     @T.macro
     def MMA0(
-        K: T.Tensor(shape, dtype),
+        K: T.Tensor(kv_shape, dtype),
         Q_shared: T.SharedBuffer([block_M, dim], dtype),
         K_shared: T.SharedBuffer([block_N, dim], dtype),
         acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
@@ -51,20 +54,20 @@ def flashattn(
         by: T.int32,
         bz: T.int32,
     ):
-        T.copy(K[bz, k * block_N:(k + 1) * block_N, by, :], K_shared)
+        past_len = seq_kv - seq_q  # FIXME: fix cases where seq_q < seq_kv
+        T.copy(K[bz, by, k * block_N:(k + 1) * block_N, :], K_shared)
         for i, j in T.Parallel(block_M, block_N):
+            q_idx = bx * block_M + i + past_len
+            k_idx = k * block_N + j
             if window_size is not None:
-                acc_s[i, j] = T.if_then_else(
-                    bx * block_M + i >= k * block_N + j and
-                    bx * block_M + i < k * block_N + j + window_size, 0, -T.infinity(acc_s.dtype))
+                acc_s[i, j] = T.if_then_else(q_idx >= k_idx and q_idx < k_idx + window_size, 0, -T.infinity(acc_s.dtype))
             else:
-                acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0,
-                                             -T.infinity(acc_s.dtype))
+                acc_s[i, j] = T.if_then_else(q_idx >= k_idx, 0, -T.infinity(acc_s.dtype))
         T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
     @T.macro
     def MMA1(
-        V: T.Tensor(shape, dtype),
+        V: T.Tensor(kv_shape, dtype),
         V_shared: T.SharedBuffer([block_M, dim], dtype),
         acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
         acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
@@ -72,31 +75,34 @@ def flashattn(
         by: T.int32,
         bz: T.int32,
     ):
-        T.copy(V[bz, k * block_N:(k + 1) * block_N, by, :], V_shared)
+        T.copy(V[bz, by, k * block_N:(k + 1) * block_N, :], V_shared)
         T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
     @T.macro
-    def Softmax(acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
-                acc_s_cast: T.FragmentBuffer([block_M, block_N],
-                                             dtype), scores_max: T.FragmentBuffer([block_M],
-                                                                                  accum_dtype),
-                scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
-                scores_scale: T.FragmentBuffer([block_M], accum_dtype),
-                scores_sum: T.FragmentBuffer([block_M],
-                                             accum_dtype), logsum: T.FragmentBuffer([block_M],
-                                                                                    accum_dtype)):
+    def Softmax(
+            acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
+            acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
+            scores_max: T.FragmentBuffer([block_M], accum_dtype),
+            scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
+            scores_scale: T.FragmentBuffer([block_M], accum_dtype),
+            scores_sum: T.FragmentBuffer([block_M], accum_dtype),
+            logsum: T.FragmentBuffer([block_M], accum_dtype),
+    ):
         T.copy(scores_max, scores_max_prev)
         T.fill(scores_max, -T.infinity(accum_dtype))
         T.reduce_max(acc_s, scores_max, dim=1, clear=False)
         # To do causal softmax, we need to set the scores_max to 0 if it is -inf
-        # This process is called Check_inf in FlashAttention3 code.
+        # This process is called Check_inf in FlashAttention3 code, and it only need to be done
+        # in the first ceil_div(kBlockM, kBlockN) steps.
+        # To do causal softmax, we need to set the scores_max to 0 if it is -inf
+        # This process is called Check_inf in FlashAttention3 code, and it only need to be done
         # NOTE(wt): check_inf is necessary for sliding window attention.
-
         for i in T.Parallel(block_M):
             if window_size is not None:
                 scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0,
                                                scores_max[i])
             scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
+
         for i, j in T.Parallel(block_M, block_N):
             # Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
             # max * log_2(e)) This allows the compiler to use the ffma
@@ -117,13 +123,13 @@ def flashattn(
 
     @T.prim_func
     def main(
-            Q: T.Tensor(shape, dtype),
-            K: T.Tensor(shape, dtype),
-            V: T.Tensor(shape, dtype),
-            Output: T.Tensor(shape, dtype),
+            Q: T.Tensor(q_shape, dtype),
+            K: T.Tensor(kv_shape, dtype),
+            V: T.Tensor(kv_shape, dtype),
+            Output: T.Tensor(q_shape, dtype),
             Sinks: T.Tensor([heads], dtype),
     ):
-        with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
+        with T.Kernel(T.ceildiv(seq_q, block_M), heads, batch, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
             K_shared = T.alloc_shared([block_N, dim], dtype)
             V_shared = T.alloc_shared([block_N, dim], dtype)
@@ -138,21 +144,21 @@ def flashattn(
             logsum = T.alloc_fragment([block_M], accum_dtype)
             sinks = T.alloc_fragment([heads], dtype)
 
-            T.copy(Q[bz, bx * block_M:(bx + 1) * block_M, by, :], Q_shared)
+            T.copy(Q[bz, by, bx * block_M:(bx + 1) * block_M, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
             for i in T.Parallel(block_M):
-                sinks[i] = Sinks[by]
+                sinks[i] = Sinks[i]
 
-            end = T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N))
+            end = T.min(T.ceildiv(seq_kv, block_N), T.ceildiv((bx + 1) * block_M, block_N))
             start = 0
             if window_size is not None:
-                start = T.max(0, (bx * block_M - window_size) // block_N)
+                start = T.max(0, (bx * block_M - window_size) //
+                              block_N)  # The only change for sliding window
 
             for k in T.Pipelined(
-                    start,
-                    end,
+                    start, end,
                     num_stages=num_stages,
                     order=[-1, 0, 3, 1, -1, 2],
                     stage=[-1, 0, 0, 1, -1, 1],
@@ -168,18 +174,23 @@ def flashattn(
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] /= logsum[i]
             T.copy(acc_o, O_shared)
-            T.copy(O_shared, Output[bz, bx * block_M:(bx + 1) * block_M, by, :])
+            T.copy(O_shared, Output[bz, by, bx * block_M:(bx + 1) * block_M, :])
 
     return main
 
 
-# Modified from https://github.com/openai/gpt-oss/blob/main/gpt_oss/triton/attention.py
+# Following functions are adapted and optimized from
+# https://github.com/openai/gpt-oss/blob/main/gpt_oss/triton/attention.py
 def ref_program(query: torch.Tensor,
                 key: torch.Tensor,
                 value: torch.Tensor,
                 sinks: torch.Tensor,
-                sliding_window: int | None = None) -> torch.Tensor:
-    query = query.unsqueeze(3)  # align with the original function'sinterface
+                sliding_window: int | None = None,
+                start_q: int = 0) -> torch.Tensor:
+
+    query = query.transpose(1, 2).contiguous().unsqueeze(3)  # align with the original function'sinterface
+    key = key.transpose(1, 2).contiguous()
+    value = value.transpose(1, 2).contiguous()
 
     batch_size, num_queries, num_key_value_heads, num_key_value_groups, head_dim = query.shape
     batch_size, num_keys, num_key_value_heads, head_dim = key.shape
@@ -191,7 +202,7 @@ def ref_program(query: torch.Tensor,
     value = value.unsqueeze(3)
 
     pos_keys = torch.arange(num_keys, device=query.device)
-    pos_queries = torch.arange(num_queries, device=query.device)
+    pos_queries = torch.arange(num_queries, device=query.device) + start_q
     mask = pos_keys[None, :] > pos_queries[:, None]
     mask = mask.float().masked_fill(mask, float("-inf"))
 
@@ -213,13 +224,124 @@ def ref_program(query: torch.Tensor,
 
     output = output.reshape(batch_size, num_queries, num_key_value_heads * num_key_value_groups,
                             head_dim).to(torch.float16)
-    return output
+    return output.transpose(1, 2).contiguous()
 
 
-def gen_inputs(B, S, H, D) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    query = torch.randn([B, S, H, D], dtype=torch.float16, device='cuda')
-    key = torch.randn([B, S, H, D], dtype=torch.float16, device='cuda')
-    value = torch.randn([B, S, H, D], dtype=torch.float16, device='cuda')
+@triton.jit
+def triton_kernel(
+    Q,
+    K,
+    V,
+    Sinks,
+    sm_scale,
+    Out,
+    Z,
+    H,
+    N_Q_CTX,
+    N_KV_CTX,
+    HEAD_DIM: tl.constexpr,  #
+    BLOCK_M: tl.constexpr,  #
+    BLOCK_N: tl.constexpr,  #
+    BANDWIDTH: tl.constexpr,  # 
+    start_q: tl.constexpr,
+):
+    tl.static_assert(BLOCK_N <= HEAD_DIM)
+    start_m = tl.program_id(0)
+    off_hz = tl.program_id(1)
+    off_z = off_hz // H
+    off_h = off_hz % H
+
+    # load attention sinks
+    if Sinks is not None:
+        sink = tl.load(Sinks + off_h).to(tl.float32)
+    else:
+        sink = 0
+
+    # initialize offsets
+    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = tl.arange(0, BLOCK_N)
+    # initialize pointer to m and l
+    m_i = tl.zeros([BLOCK_M], dtype=tl.float32) + sink
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
+    # load scales
+    qk_scale = sm_scale
+    q = Q.load([off_z, off_h, start_m * BLOCK_M, 0]).reshape([BLOCK_M, HEAD_DIM])
+
+    if BANDWIDTH:
+        lo, hi = tl.maximum(start_q, start_q + start_m * BLOCK_M - BANDWIDTH), start_q + (start_m + 1) * BLOCK_M
+    else:
+        lo, hi = start_q, start_q + (start_m + 1) * BLOCK_M
+
+    for start_n in range(lo, hi, BLOCK_N):
+        start_n = tl.multiple_of(start_n, BLOCK_N)
+
+        mask = (start_n + offs_n)[None, :] > (start_q + offs_m)[:, None]
+
+        if BANDWIDTH:
+            too_old = (start_n + offs_n[None, :]) < (start_q + offs_m[:, None] - BANDWIDTH + 1)
+            mask = mask | too_old
+
+        k = K.load([off_z, off_h, start_n, 0]).reshape([BLOCK_N, HEAD_DIM]).T
+        qk = tl.dot(q, k, allow_tf32=False)
+
+        qk = qk * qk_scale + tl.where(mask, -1.0e6, 0.0)
+        m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        qk -= m_ij[:, None]
+
+        p = tl.math.exp(qk)
+        alpha = tl.math.exp(m_i - m_ij)
+        l_ij = tl.sum(p, 1)
+        acc = acc * alpha[:, None]
+
+        v = V.load([off_z, off_h, start_n, 0]).reshape([BLOCK_N, HEAD_DIM])
+        # v = v.to(tl.float32)
+        p = p.to(v.dtype)  # We perform fp16 gemm to utilize tensor core
+        acc = tl.dot(p, v, acc, allow_tf32=False)
+
+        l_i = l_i * alpha + l_ij
+        m_i = m_ij
+
+    sink = tl.math.exp(sink - m_i)
+    z = l_i + sink
+    acc = acc / z[:, None]
+    # m_i += tl.math.log(l_i)
+    # m_ptrs = M + off_hz * N_Q_CTX + offs_m
+    # tl.store(m_ptrs, m_i)
+    acc = acc.to(Out.dtype)[None, None, :, :]
+    Out.store([off_z, off_h, start_m * BLOCK_M, 0], acc)
+
+
+def triton_program(Q, K, V, Sinks, window_size: int | None = None) -> torch.Tensor:
+    bs, n_heads, n_ctx, head_dim = Q.shape
+    BLOCK_M = 64
+    BLOCK_N = 64
+    o = torch.empty_like(Q)
+    grid = (triton.cdiv(n_ctx, BLOCK_M), bs * n_heads, 1)
+    triton_kernel[grid](
+        TensorDescriptor.from_tensor(Q, [1, 1, BLOCK_M, head_dim]),
+        TensorDescriptor.from_tensor(K, [1, 1, BLOCK_N, head_dim]),
+        TensorDescriptor.from_tensor(V, [1, 1, BLOCK_N, head_dim]),
+        Sinks,
+        1.0 / head_dim**0.5,
+        TensorDescriptor.from_tensor(o, [1, 1, BLOCK_M, head_dim]),
+        bs,
+        n_heads,
+        N_Q_CTX=n_ctx,
+        N_KV_CTX=n_ctx,
+        HEAD_DIM=head_dim,
+        BANDWIDTH=window_size,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        start_q=0
+    )
+    return o
+
+
+def gen_inputs(B, H, S, D) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    query = torch.randn([B, H, S, D], dtype=torch.float16, device='cuda')
+    key = torch.randn([B, H, S, D], dtype=torch.float16, device='cuda')
+    value = torch.randn([B, H, S, D], dtype=torch.float16, device='cuda')
     sinks = torch.zeros([H], dtype=torch.float16, device='cuda')
     return query, key, value, sinks
 
@@ -256,22 +378,23 @@ def main(batch: int = 8,
             batch,
             heads,
             seq_len,
+            seq_len,
             dim,
             window_size,
-            block_M=128,
-            block_N=128,
-            num_stages=2,
-            threads=256)
+            block_M=block_M,
+            block_N=block_N,
+            num_stages=num_stages,
+            threads=threads)
 
-        Q, K, V, sinks = gen_inputs(batch, seq_len, heads, dim)
+        Q, K, V, sinks = gen_inputs(batch, heads, seq_len, dim)
 
         torch.testing.assert_close(
             kernel(Q, K, V, sinks), ref_program(Q, K, V, sinks, window_size), rtol=1e-2, atol=1e-2)
         print("All checks pass.✅")
 
-        latency = do_bench(lambda: ref_program(Q, K, V, sinks, window_size), warmup=500)
-        print("Ref: {:.2f} ms".format(latency))
-        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        latency = do_bench(lambda: triton_program(Q, K, V, sinks, window_size), warmup=500)
+        print("Triton: {:.2f} ms".format(latency))
+        print("Triton: {:.2f} TFlops".format(total_flops / latency * 1e-9))
         latency = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500)
         print("Tilelang: {:.2f} ms".format(latency))
         print("Tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
