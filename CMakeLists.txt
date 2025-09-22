@@ -7,9 +7,6 @@ project(TILE_LANG C CXX)
 option(TILE_LANG_STATIC_STDCPP "Statically link libstdc++ for TileLang libraries" ON)
 option(TILE_LANG_INSTALL_STATIC_LIB "Install the static library" ON)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -static-libgcc -static-libstdc++")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -static-libgcc -static-libstdc++")
-
 if(TILE_LANG_STATIC_STDCPP)
   message(STATUS "Enabling static linking of C++ standard library")
   # Note: We'll apply static linking flags selectively to avoid Python extension conflicts
