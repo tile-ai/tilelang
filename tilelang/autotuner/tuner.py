@@ -104,6 +104,7 @@ class AutoTuner:
     profile_args = ProfileArgs()
 
     _kernel_parameters: Optional[Tuple[str, ...]] = None
+    _function_parameters: Optional[Dict[str, Any]] = None
     _lock = threading.Lock()  # For thread safety
     _memory_cache = {}  # In-memory cache dictionary
     cache_dir: Path = Path(env.TILELANG_CACHE_DIR) / "autotuner"
@@ -222,9 +223,10 @@ class AutoTuner:
 
         return self
 
-    def set_kernel_parameters(self, parameters: Tuple[str, ...]):
+    def set_kernel_parameters(self, k_parameters: Tuple[str, ...], f_parameters: Dict[str, Any]):
         # for cache key generation
-        self._kernel_parameters = parameters
+        self._kernel_parameters = k_parameters
+        self._function_parameters = f_parameters
 
     def generate_cache_key(self, parameters: Dict[str, Any]) -> Optional[AutotuneResult]:
         """Generate a cache key for the auto-tuning process.
@@ -417,8 +419,15 @@ class AutoTuner:
             key_args_tuple, key_kwargs_tuple = self._kernel_parameters
             tunable_arguments = [key for key, _ in top_config.items()]
 
+            def check_tunable_argument_value(key, parameters, key_args_tuple) -> bool:
+                params_list = list(parameters.keys())
+                assert key in params_list, f"Tunable argument {key} not found in function parameters"
+                return params_list.index(key) < len(key_args_tuple)
+
             # Check if all tunable arguments have been tuned by comparing config keys with key_kwargs_tuple
-            if any(key in top_config for key, _ in key_kwargs_tuple):
+            if any(key in top_config for key, _ in key_kwargs_tuple) or any(
+                    check_tunable_argument_value(key, self._function_parameters, key_args_tuple)
+                    for key in tunable_arguments):
                 logger.warning(
                     f"Tunable parameters {tunable_arguments} already provided during auto-tuning. Skipping compilation and using direct JIT"
                 )
@@ -676,7 +685,7 @@ class _AutoTunerImplementation:
                     )
 
                 autotuner.jit_compile = jit_compile
-                autotuner.set_kernel_parameters(key)
+                autotuner.set_kernel_parameters(key, inspect.signature(fn).parameters)
 
                 autotuner.run = partial(autotuner.run, warmup, rep, timeout)
 
