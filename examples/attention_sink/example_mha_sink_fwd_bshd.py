@@ -23,10 +23,15 @@ def flashattn(batch,
               heads,
               seq_len,
               dim,
+              window_size=None,  # None for full attention
               block_M=64,
               block_N=64,
               num_stages=1,
               threads=128):
+
+    if window_size is not None:
+        assert window_size % block_N == 0, "window_size must be divisible by block_N"
+
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     shape = [batch, seq_len, heads, dim]
     dtype = "float16"
@@ -45,10 +50,9 @@ def flashattn(batch,
     ):
         T.copy(K[bz, k * block_N:(k + 1) * block_N, by, :], K_shared)
         for i, j in T.Parallel(block_M, block_N):
+            # Given window_size is divisible by block_N, we can use the same mask for all cases
             acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0,
                                             -T.infinity(acc_s.dtype))
-        else:
-            T.clear(acc_s)
         T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
     @T.macro
@@ -132,17 +136,20 @@ def flashattn(batch,
             for i in T.Parallel(block_M):
                 sinks[i] = Sinks[by]
 
-            loop_range = T.min(T.ceildiv(seq_len, block_N), T.ceildiv(
+            end = T.min(T.ceildiv(seq_len, block_N), T.ceildiv(
                     (bx + 1) * block_M, block_N))
+            start = 0
+            if window_size is not None:
+                start = T.max(0, (bx * block_M - window_size)//block_N)   # The only change for sliding window
 
-            for k in T.Pipelined(loop_range, num_stages=num_stages):
+            for k in T.Pipelined(start, end, num_stages=num_stages):
                 MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
                 Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum,
                         logsum)
                 Rescale(acc_o, scores_scale)
                 MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
             for i in T.Parallel(block_M):
-                logsum[i] += T.exp2(sinks[i] * 1.44269504 - scores_max[i] * scale)
+                logsum[i] += T.exp2(sinks[i] * 1.44269504 - scores_max[i] * scale)   # The only change for attention sink
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] /= logsum[i]
             T.copy(acc_o, O_shared)
@@ -159,7 +166,7 @@ def ref_program(
     sinks: torch.Tensor,
     sliding_window: int | None = None
 ) -> torch.Tensor:
-    query = query.unsqueeze(3)  # align with the original function's interface
+    query = query.unsqueeze(3)  # align with the original function'sinterface
 
     batch_size, num_queries, num_key_value_heads, num_key_value_groups, head_dim = query.shape
     batch_size, num_keys, num_key_value_heads, head_dim = key.shape
@@ -209,25 +216,36 @@ def main(
     seq_len: int = 4096,
     dim: int = 128,
     window_size: int | None = None,
+    tune: bool = False
 ):
     if window_size is not None:
         print('Using sliding window attention.')
         assert window_size <= seq_len
-        flops_per_matmul = 2.0 * batch * heads * window_size * seq_len * dim  # a rough estimation
+        flops_per_matmul = 2.0 * batch * heads * min(window_size, seq_len//2) * seq_len * dim  # just a rough estimation
     else:
         print('Using full attention.')
         flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim * 0.5
     total_flops = 2 * flops_per_matmul
 
-    kernel = flashattn(
-        batch,
-        heads,
-        seq_len,
-        dim,
-        block_M=128,
-        block_N=128,
-        num_stages=1,
-        threads=128)
+    if tune:
+        kernel = flashattn(
+            batch,
+            heads,
+            seq_len,
+            dim,
+            window_size)
+        print(f'Best config: {kernel.config}')
+    else:
+        kernel = flashattn(
+            batch,
+            heads,
+            seq_len,
+            dim,
+            window_size,
+            block_M=64,
+            block_N=64,
+            num_stages=1,
+            threads=128)
 
     Q, K, V, sinks = gen_inputs(batch, seq_len, heads, dim)
 
@@ -248,5 +266,7 @@ if __name__ == "__main__":
     parser.add_argument('--heads', type=int, default=32, help='heads')
     parser.add_argument('--seq_len', type=int, default=4096, help='sequence length')
     parser.add_argument('--dim', type=int, default=128, help='dim')
+    parser.add_argument('--window_size', type=int, default=None, help='window size (default: None, which means full attention)')
+    parser.add_argument('--tune', action='store_true', help='tune')
     args = parser.parse_args()
-    main(args.batch, args.heads, args.seq_len, args.dim)
+    main(args.batch, args.heads, args.seq_len, args.dim, args.window_size, args.tune)
