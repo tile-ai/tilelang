@@ -312,8 +312,17 @@ if __name__ == "__main__":
     if enable_autotune:
         kernel = flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim)
     else:
-        kernel = flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H,
-                                num_split, threads=threads)
+        kernel = flashmla_decode(
+            batch,
+            heads,
+            kv_heads,
+            kv_ctx,
+            dim,
+            pe_dim,
+            BLOCK_N,
+            BLOCK_H,
+            num_split,
+            threads=threads)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     input_tensors = profiler._get_inputs()
     tilelang_output = kernel(*input_tensors)
