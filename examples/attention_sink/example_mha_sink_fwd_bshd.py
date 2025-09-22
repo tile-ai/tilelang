@@ -19,15 +19,16 @@ def get_configs():
     out_idx=[3], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
-def flashattn(batch,
-              heads,
-              seq_len,
-              dim,
-              window_size=None,  # None for full attention
-              block_M=64,
-              block_N=64,
-              num_stages=1,
-              threads=128):
+def flashattn(
+        batch,
+        heads,
+        seq_len,
+        dim,
+        window_size=None,  # None for full attention
+        block_M=64,
+        block_N=64,
+        num_stages=1,
+        threads=128):
 
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
@@ -52,7 +53,7 @@ def flashattn(batch,
         for i, j in T.Parallel(block_M, block_N):
             # Given window_size is divisible by block_N, we can use the same mask for all cases
             acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0,
-                                            -T.infinity(acc_s.dtype))
+                                         -T.infinity(acc_s.dtype))
         T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
     @T.macro
@@ -69,15 +70,15 @@ def flashattn(batch,
         T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
     @T.macro
-    def Softmax(
-            acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
-            acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
-            scores_max: T.FragmentBuffer([block_M], accum_dtype),
-            scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
-            scores_scale: T.FragmentBuffer([block_M], accum_dtype),
-            scores_sum: T.FragmentBuffer([block_M], accum_dtype),
-            logsum: T.FragmentBuffer([block_M], accum_dtype)
-    ):
+    def Softmax(acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
+                acc_s_cast: T.FragmentBuffer([block_M, block_N],
+                                             dtype), scores_max: T.FragmentBuffer([block_M],
+                                                                                  accum_dtype),
+                scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
+                scores_scale: T.FragmentBuffer([block_M], accum_dtype),
+                scores_sum: T.FragmentBuffer([block_M],
+                                             accum_dtype), logsum: T.FragmentBuffer([block_M],
+                                                                                    accum_dtype)):
         T.copy(scores_max, scores_max_prev)
         T.fill(scores_max, -T.infinity(accum_dtype))
         T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -136,11 +137,11 @@ def flashattn(batch,
             for i in T.Parallel(block_M):
                 sinks[i] = Sinks[by]
 
-            end = T.min(T.ceildiv(seq_len, block_N), T.ceildiv(
-                    (bx + 1) * block_M, block_N))
+            end = T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N))
             start = 0
             if window_size is not None:
-                start = T.max(0, (bx * block_M - window_size)//block_N)   # The only change for sliding window
+                start = T.max(0, (bx * block_M - window_size) //
+                              block_N)  # The only change for sliding window
 
             for k in T.Pipelined(start, end, num_stages=num_stages):
                 MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
@@ -149,7 +150,8 @@ def flashattn(batch,
                 Rescale(acc_o, scores_scale)
                 MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
             for i in T.Parallel(block_M):
-                logsum[i] += T.exp2(sinks[i] * 1.44269504 - scores_max[i] * scale)   # The only change for attention sink
+                logsum[i] += T.exp2(sinks[i] * 1.44269504 -
+                                    scores_max[i] * scale)  # The only change for attention sink
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] /= logsum[i]
             T.copy(acc_o, O_shared)
@@ -159,19 +161,17 @@ def flashattn(batch,
 
 
 # Modified from https://github.com/openai/gpt-oss/blob/main/gpt_oss/triton/attention.py
-def ref_program(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    sinks: torch.Tensor,
-    sliding_window: int | None = None
-) -> torch.Tensor:
+def ref_program(query: torch.Tensor,
+                key: torch.Tensor,
+                value: torch.Tensor,
+                sinks: torch.Tensor,
+                sliding_window: int | None = None) -> torch.Tensor:
     query = query.unsqueeze(3)  # align with the original function'sinterface
 
     batch_size, num_queries, num_key_value_heads, num_key_value_groups, head_dim = query.shape
     batch_size, num_keys, num_key_value_heads, head_dim = key.shape
 
-    sm_scale: float = 1.0 / head_dim**0.5 
+    sm_scale: float = 1.0 / head_dim**0.5
 
     sinks = sinks.view(1, num_key_value_heads, num_key_value_groups, 1, 1).float()
     key = key.unsqueeze(3)
@@ -198,7 +198,8 @@ def ref_program(
 
     output = torch.einsum("bhmqk,bkhmd->bqhmd", scores, value.float())
 
-    output = output.reshape(batch_size, num_queries, num_key_value_heads * num_key_value_groups, head_dim).to(torch.float16)
+    output = output.reshape(batch_size, num_queries, num_key_value_heads * num_key_value_groups,
+                            head_dim).to(torch.float16)
     return output
 
 
@@ -210,30 +211,24 @@ def gen_inputs(B, S, H, D) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, to
     return query, key, value, sinks
 
 
-def main(
-    batch: int = 8,
-    heads: int = 32,
-    seq_len: int = 4096,
-    dim: int = 128,
-    window_size: int | None = None,
-    tune: bool = False
-):
+def main(batch: int = 8,
+         heads: int = 32,
+         seq_len: int = 4096,
+         dim: int = 128,
+         window_size: int | None = None,
+         tune: bool = False):
     if window_size is not None:
         print('Using sliding window attention.')
         assert window_size <= seq_len
-        flops_per_matmul = 2.0 * batch * heads * min(window_size, seq_len//2) * seq_len * dim  # just a rough estimation
+        flops_per_matmul = 2.0 * batch * heads * min(
+            window_size, seq_len // 2) * seq_len * dim  # just a rough estimation
     else:
         print('Using full attention.')
         flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim * 0.5
     total_flops = 2 * flops_per_matmul
 
     if tune:
-        kernel = flashattn(
-            batch,
-            heads,
-            seq_len,
-            dim,
-            window_size)
+        kernel = flashattn(batch, heads, seq_len, dim, window_size)
         print(f'Best config: {kernel.config}')
     else:
         kernel = flashattn(
@@ -249,7 +244,8 @@ def main(
 
     Q, K, V, sinks = gen_inputs(batch, seq_len, heads, dim)
 
-    torch.testing.assert_close(kernel(Q, K, V, sinks), ref_program(Q, K, V, sinks), rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(
+        kernel(Q, K, V, sinks), ref_program(Q, K, V, sinks), rtol=1e-2, atol=1e-2)
     print("All checks pass.✅")
 
     latency = do_bench(lambda: ref_program(Q, K, V, sinks), warmup=500)
@@ -266,7 +262,11 @@ if __name__ == "__main__":
     parser.add_argument('--heads', type=int, default=32, help='heads')
     parser.add_argument('--seq_len', type=int, default=4096, help='sequence length')
     parser.add_argument('--dim', type=int, default=128, help='dim')
-    parser.add_argument('--window_size', type=int, default=None, help='window size (default: None, which means full attention)')
+    parser.add_argument(
+        '--window_size',
+        type=int,
+        default=None,
+        help='window size (default: None, which means full attention)')
     parser.add_argument('--tune', action='store_true', help='tune')
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_len, args.dim, args.window_size, args.tune)
