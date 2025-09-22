@@ -1,5 +1,5 @@
 # Modified from tilelang/examples/flash_attention/example_mha_fwd_bhsd_wgmma_pipelined.py
-# Optimized for Hopper architecture, with a benchmark to compare with offical Triton impl
+# Optimized for Hopper architecture, with a benchmark to compare with official Triton impl
 
 import torch
 import tilelang
@@ -23,16 +23,17 @@ def get_configs():
     out_idx=[3], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
-def flashattn(batch,
-              heads,
-              seq_q,
-              seq_kv,
-              dim,
-              window_size=None,  # None for full attention
-              block_M=128,
-              block_N=128,
-              num_stages=2,
-              threads=256):
+def flashattn(
+        batch,
+        heads,
+        seq_q,
+        seq_kv,
+        dim,
+        window_size=None,  # None for full attention
+        block_M=128,
+        block_N=128,
+        num_stages=2,
+        threads=256):
 
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
@@ -60,7 +61,8 @@ def flashattn(batch,
             q_idx = bx * block_M + i + past_len
             k_idx = k * block_N + j
             if window_size is not None:
-                acc_s[i, j] = T.if_then_else(q_idx >= k_idx and q_idx < k_idx + window_size, 0, -T.infinity(acc_s.dtype))
+                acc_s[i, j] = T.if_then_else(q_idx >= k_idx and q_idx < k_idx + window_size, 0,
+                                             -T.infinity(acc_s.dtype))
             else:
                 acc_s[i, j] = T.if_then_else(q_idx >= k_idx, 0, -T.infinity(acc_s.dtype))
         T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -158,7 +160,8 @@ def flashattn(batch,
                               block_N)  # The only change for sliding window
 
             for k in T.Pipelined(
-                    start, end,
+                    start,
+                    end,
                     num_stages=num_stages,
                     order=[-1, 0, 3, 1, -1, 2],
                     stage=[-1, 0, 0, 1, -1, 1],
@@ -188,7 +191,8 @@ def ref_program(query: torch.Tensor,
                 sliding_window: int | None = None,
                 start_q: int = 0) -> torch.Tensor:
 
-    query = query.transpose(1, 2).contiguous().unsqueeze(3)  # align with the original function'sinterface
+    query = query.transpose(1, 2).contiguous().unsqueeze(
+        3)  # align with the original function'sinterface
     key = key.transpose(1, 2).contiguous()
     value = value.transpose(1, 2).contiguous()
 
@@ -239,10 +243,10 @@ def triton_kernel(
     H,
     N_Q_CTX,
     N_KV_CTX,
-    HEAD_DIM: tl.constexpr,  #
-    BLOCK_M: tl.constexpr,  #
-    BLOCK_N: tl.constexpr,  #
-    BANDWIDTH: tl.constexpr,  # 
+    HEAD_DIM: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BANDWIDTH: tl.constexpr,
     start_q: tl.constexpr,
 ):
     tl.static_assert(BLOCK_N <= HEAD_DIM)
@@ -252,7 +256,7 @@ def triton_kernel(
     off_h = off_hz % H
 
     # load attention sinks
-    if Sinks is not None:
+    if Sinks is not None:  # noqa: SIM108
         sink = tl.load(Sinks + off_h).to(tl.float32)
     else:
         sink = 0
@@ -269,7 +273,8 @@ def triton_kernel(
     q = Q.load([off_z, off_h, start_m * BLOCK_M, 0]).reshape([BLOCK_M, HEAD_DIM])
 
     if BANDWIDTH:
-        lo, hi = tl.maximum(start_q, start_q + start_m * BLOCK_M - BANDWIDTH), start_q + (start_m + 1) * BLOCK_M
+        lo, hi = tl.maximum(start_q, start_q + start_m * BLOCK_M -
+                            BANDWIDTH), start_q + (start_m + 1) * BLOCK_M
     else:
         lo, hi = start_q, start_q + (start_m + 1) * BLOCK_M
 
@@ -333,8 +338,7 @@ def triton_program(Q, K, V, Sinks, window_size: int | None = None) -> torch.Tens
         BANDWIDTH=window_size,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
-        start_q=0
-    )
+        start_q=0)
     return o
 
 

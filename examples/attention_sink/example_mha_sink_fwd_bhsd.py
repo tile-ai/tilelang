@@ -19,15 +19,16 @@ def get_configs():
     out_idx=[3], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
-def flashattn(batch,
-              heads,
-              seq_len,
-              dim,
-              window_size=None,  # None for full attention
-              block_M=64,
-              block_N=64,
-              num_stages=1,
-              threads=128):
+def flashattn(
+        batch,
+        heads,
+        seq_len,
+        dim,
+        window_size=None,  # None for full attention
+        block_M=64,
+        block_N=64,
+        num_stages=1,
+        threads=128):
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
 
@@ -53,7 +54,8 @@ def flashattn(batch,
             q_idx = bx * block_M + i
             k_idx = k * block_N + j
             if window_size is not None:
-                acc_s[i, j] = T.if_then_else(q_idx >= k_idx and q_idx < k_idx + window_size, 0, -T.infinity(acc_s.dtype))
+                acc_s[i, j] = T.if_then_else(q_idx >= k_idx and q_idx < k_idx + window_size, 0,
+                                             -T.infinity(acc_s.dtype))
             else:
                 acc_s[i, j] = T.if_then_else(q_idx >= k_idx, 0, -T.infinity(acc_s.dtype))
         T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -133,7 +135,7 @@ def flashattn(batch,
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
             sinks = T.alloc_fragment([block_M], dtype)
-            
+
             T.copy(Q[bz, by, bx * block_M:(bx + 1) * block_M, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
@@ -144,8 +146,7 @@ def flashattn(batch,
             end = T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N))
             start = 0
             if window_size is not None:
-                start = T.max(0, (bx * block_M - window_size) //
-                              block_N)
+                start = T.max(0, (bx * block_M - window_size) // block_N)
 
             for k in T.Pipelined(start, end, num_stages=num_stages):
                 MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
@@ -172,7 +173,8 @@ def ref_program(query: torch.Tensor,
                 sliding_window: int | None = None,
                 start_q: int = 0) -> torch.Tensor:
 
-    query = query.transpose(1, 2).contiguous().unsqueeze(3)  # align with the original function's interface
+    query = query.transpose(1, 2).contiguous().unsqueeze(
+        3)  # align with the original function's interface
     key = key.transpose(1, 2).contiguous()
     value = value.transpose(1, 2).contiguous()
 
