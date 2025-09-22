@@ -1,4 +1,5 @@
-# Modified from tilelang/examples/flash_attention/example_mha_fwd_bshd.py
+# Modified from tilelang/examples/flash_attention/example_mha_fwd_bshd_wgmma_pipelined.py
+# Optimized for Hopper architecture
 
 import torch
 import tilelang
@@ -10,7 +11,7 @@ import argparse
 
 
 def get_configs():
-    iter_params = dict(block_M=[64], block_N=[64], num_stages=[0, 1, 2], threads=[128, 256])
+    iter_params = dict(block_M=[128], block_N=[128], num_stages=[0, 1, 2], threads=[128, 256])
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
 
 
@@ -19,16 +20,17 @@ def get_configs():
     out_idx=[3], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
+# Add compile_flag "-DENABLE_BF16" if using bfloat16 instead
 def flashattn(
         batch,
         heads,
         seq_len,
         dim,
         window_size=None,  # None for full attention
-        block_M=64,
-        block_N=64,
-        num_stages=1,
-        threads=128):
+        block_M=128,
+        block_N=128,
+        num_stages=2,
+        threads=256):
 
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
@@ -89,11 +91,11 @@ def flashattn(
         # To do causal softmax, we need to set the scores_max to 0 if it is -inf
         # This process is called Check_inf in FlashAttention3 code.
         # NOTE(wt): check_inf is necessary for sliding window attention.
-        if window_size is not None:
-            for i in T.Parallel(block_M):
+
+        for i in T.Parallel(block_M):
+            if window_size is not None:
                 scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0,
                                                scores_max[i])
-        for i in T.Parallel(block_M):
             scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
         for i, j in T.Parallel(block_M, block_N):
             # Instead of computing exp(x - max), we compute exp2(x * log_2(e) -
@@ -146,10 +148,15 @@ def flashattn(
             end = T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N))
             start = 0
             if window_size is not None:
-                start = T.max(0, (bx * block_M - window_size) //
-                              block_N)  # The only change for sliding window
+                start = T.max(0, (bx * block_M - window_size) // block_N)
 
-            for k in T.Pipelined(start, end, num_stages=num_stages):
+            for k in T.Pipelined(
+                    start,
+                    end,
+                    num_stages=num_stages,
+                    order=[-1, 0, 3, 1, -1, 2],
+                    stage=[-1, 0, 0, 1, -1, 1],
+                    group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]]):
                 MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
                 Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum,
                         logsum)
@@ -239,16 +246,22 @@ def main(batch: int = 8,
         print(f"Best TFlops: {total_flops / kernel.latency * 1e-9}")
         print(f"Best config: {kernel.config}")
     else:
+        block_M = 128
+        block_N = 128
+        num_stages = 2
+        threads = 256
+        print(f"{block_M=}, {block_N=}, {num_stages=}, {threads=}")
+
         kernel = flashattn(
             batch,
             heads,
             seq_len,
             dim,
             window_size,
-            block_M=64,
-            block_N=64,
-            num_stages=1,
-            threads=128)
+            block_M=128,
+            block_N=128,
+            num_stages=2,
+            threads=256)
 
         Q, K, V, sinks = gen_inputs(batch, seq_len, heads, dim)
 
