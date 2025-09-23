@@ -3,8 +3,34 @@
 
 #define HIP_FP8_ENABLED 1
 
-using fp8_e4_t = __hip_fp8_e4m3_fnuz;
-using fp8_e4_2_t = __hip_fp8x2_e4m3_fnuz;
+#ifndef TILELANG_FP8_E4M3_VARIANT
+  #if defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__)
+    #define TILELANG_FP8_E4M3_VARIANT FNUZ
+  #else
+    #define TILELANG_FP8_E4M3_VARIANT FN
+  #endif
+#endif
+
+#if (TILELANG_FP8_E4M3_VARIANT == FN)
+  #if defined(__clang__) && defined(__HIPSCC__)
+    #if !__is_identifier(__hip_fp8_e4m3_fn)
+      #define TILELANG_HAVE_FP8_E4M3_FN 1
+    #endif
+  #endif
+#endif
+
+#if defined(TILELANG_HAVE_FP8_E4M3_FN)
+  using fp8_e4_t            = __hip_fp8_e4m3_fn;
+  using fp8_e4_2_t          = __hip_fp8x2_e4m3_fn;
+  using fp8_e4_4_t          = __hip_fp8x4_e4m3_fn;
+  using fp8_e4_4_storage_t  = __hip_fp8x4_e4m3_fn;
+#else
+  // FNUZ path (MI300X and universal fallback)
+  using fp8_e4_t            = __hip_fp8_e4m3_fnuz;
+  using fp8_e4_2_t          = __hip_fp8x2_e4m3_fnuz;
+  using fp8_e4_4_t          = __hip_fp8x4_e4m3_fnuz;
+  using fp8_e4_4_storage_t  = __hip_fp8x4_e4m3_fnuz;
+#endif
 
 // Additional FP8 types for compatibility
 using fp8_e5_t = __hip_fp8_e5m2_fnuz;
@@ -16,7 +42,8 @@ using fp8_e5_2_t = __hip_fp8x2_e5m2_fnuz;
 // Simple wrapper that provides member access for generated code
 struct fp8_e4_4_t {
   union {
-    __hip_fp8x4_e4m3_fnuz data;
+    // __hip_fp8x4_e4m3_fnuz data;
+    fp8_e4_4_storage_t data;
     struct {
       fp8_e4_t x, y, z, w;
     };
@@ -26,16 +53,16 @@ struct fp8_e4_4_t {
   __device__ fp8_e4_4_t() = default;
 
   // Constructor from __hip_fp8x4_e4m3_fnuz
-  __device__ fp8_e4_4_t(const __hip_fp8x4_e4m3_fnuz &val) : data(val) {}
+  __device__ fp8_e4_4_t(const fp8_e4_4_storage_t &val) : data(val) {}
 
   // Constructor from float4
   __device__ fp8_e4_4_t(const float4 &val) : data(val) {}
 
   // Conversion operator to __hip_fp8x4_e4m3_fnuz
-  __device__ operator __hip_fp8x4_e4m3_fnuz() const { return data; }
+  __device__ operator fp8_e4_4_storage_t() const { return data; }
 
   // Assignment operator
-  __device__ fp8_e4_4_t &operator=(const __hip_fp8x4_e4m3_fnuz &val) {
+  __device__ fp8_e4_4_t &operator=(const fp8_e4_4_storage_t &val) {
     data = val;
     return *this;
   }
