@@ -151,7 +151,7 @@ public:
            equal(N, other->N) && equal(K, other->K) &&
            equal(stride_A, other->stride_A) &&
            equal(stride_B, other->stride_B) &&
-           equal(offset_A, other->offset_B) &&
+           equal(offset_A, other->offset_A) &&
            equal(offset_B, other->offset_B) &&
            equal(clear_accum, other->clear_accum) &&
            equal(kPack, other->kPack) && equal(wg_wait, other->wg_wait) &&
