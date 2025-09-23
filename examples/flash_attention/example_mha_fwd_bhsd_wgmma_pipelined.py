@@ -137,8 +137,10 @@ def flashattn(batch,
             T.fill(scores_max, -T.infinity(accum_dtype))
 
             loop_range = (
-                T.min(T.ceildiv(seq_kv, block_N), T.ceildiv(
-                    (bx + 1) * block_M+past_len, block_N)) if is_causal else T.ceildiv(seq_kv, block_N))
+                T.min(
+                    T.ceildiv(seq_kv, block_N), T.ceildiv(
+                        (bx + 1) * block_M +
+                        past_len, block_N)) if is_causal else T.ceildiv(seq_kv, block_N))
 
             for k in T.Pipelined(
                     loop_range,
