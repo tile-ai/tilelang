@@ -1,0 +1,91 @@
+name: CI Test on Metal
+on: [pull_request]
+
+env:
+  PYTHON_VERSION: '3.12'
+  VENV_DIR: tilelang_ci
+
+jobs:
+  format-check:
+    runs-on: [macos-latest]
+
+    permissions:
+      contents: write 
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        submodules: recursive
+
+    - name: Install python via uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
+        ignore-nothing-to-cache: true
+        activate-environment: true
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Ensure venv (local & persistent)
+      run: |
+        [[ -f requirements-test.txt ]] && \
+          uv pip install -r requirements-test.txt --no-build-isolation
+
+    - name: Run format check
+      run: |
+        set -ex
+        mkdir -p build
+        # run cmake to create the build directory with compile_commands.json
+        cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_METAL=ON; cd ..
+        if ! output=$(./format.sh 2>&1); then
+          echo "------------------------------------"
+          echo "message:"
+          echo "$output"
+          printf '%s\n' "$output"
+          echo "------------------------------------"
+          exit 1
+        fi
+
+  build-test-metal:
+    runs-on: [macos-latest]
+    needs: format-check
+    permissions:
+      contents: read
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+        submodules: recursive
+
+    - name: ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        create-symlink: true
+        key: ${{ github.job }}-${{ matrix.os }}
+
+    - name: Install python via uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
+        ignore-nothing-to-cache: true
+        activate-environment: true
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Ensure venv (local & persistent)
+      run: uv pip install -r requirements-test.txt -r requirements-build.txt
+
+    - name: Build wheel
+      run: |
+        source .venv/bin/activate
+        uv pip install -v --no-build-isolation .
+
+    - name: Run metal test
+      run: |
+        cd testing/python
+        unset PYTHONPATH
+        python -m pytest -k metal -v -r fE --durations=0 --timeout=3600
