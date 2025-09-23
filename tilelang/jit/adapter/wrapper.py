@@ -32,7 +32,7 @@ PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY = """
 """
 
 PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY_HIP = """
-    if ({1} > 65536) {{
+    if ({1} > 163840) {{
         snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed dynamic shared memory size for {0} to %d", {1});
         return -1;
     }}
