@@ -1,4 +1,4 @@
-# Modified from tilelang/examples/flash_attention/example_mha_fwd_bhsd_wgmma_pipelined.py
+# Modified from tilelang/examples/flash_attention/example_gqa_fwd_bshd_wgmma_pipelined.py
 # Optimized for Hopper architecture, with a benchmark to compare with official Triton impl
 
 import torch
@@ -18,29 +18,36 @@ def get_configs():
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
 
 
-@autotune(configs=get_configs(), warmup=500, rep=100)
+@autotune(
+    configs=get_configs(),
+    warmup=500,
+    rep=100,
+)
 @tilelang.jit(
     out_idx=[3], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
 def flashattn(
-        batch,
-        heads,
-        seq_q,
-        seq_kv,
-        dim,
-        window_size=None,  # None for full attention
-        block_M=128,
-        block_N=128,
-        num_stages=2,
-        threads=256):
+    batch,
+    heads,
+    seq_q,
+    seq_kv,
+    dim,
+    groups=1,
+    window_size=None,  # None for full attention
+    block_M=128,
+    block_N=128,
+    num_stages=2,
+    threads=256,
+):
 
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
 
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
+    head_kv = heads // groups
     q_shape = [batch, heads, seq_q, dim]
-    kv_shape = [batch, heads, seq_kv, dim]
+    kv_shape = [batch, head_kv, seq_kv, dim]
     dtype = "float16"
     accum_dtype = "float"
 
@@ -58,7 +65,7 @@ def flashattn(
         by: T.int32,
         bz: T.int32,
     ):
-        T.copy(K[bz, by, k * block_N:(k + 1) * block_N, :], K_shared)
+        T.copy(K[bz, by // groups, k * block_N:(k + 1) * block_N, :], K_shared)
         for i, j in T.Parallel(block_M, block_N):
             q_idx = bx * block_M + i + past_len
             k_idx = k * block_N + j
@@ -79,7 +86,7 @@ def flashattn(
         by: T.int32,
         bz: T.int32,
     ):
-        T.copy(V[bz, by, k * block_N:(k + 1) * block_N, :], V_shared)
+        T.copy(V[bz, by // groups, k * block_N:(k + 1) * block_N, :], V_shared)
         T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
     @T.macro
@@ -189,15 +196,14 @@ def ref_program(query: torch.Tensor,
                 sinks: torch.Tensor,
                 sliding_window: int | None = None) -> torch.Tensor:
 
-    query = query.transpose(1, 2).contiguous().unsqueeze(
-        3)  # align with the original function'sinterface
     key = key.transpose(1, 2).contiguous()
     value = value.transpose(1, 2).contiguous()
-
-    batch_size, num_queries, num_key_value_heads, num_key_value_groups, head_dim = query.shape
     batch_size, num_keys, num_key_value_heads, head_dim = key.shape
-    start_q = num_keys - num_queries
+    query = query.transpose(1, 2).contiguous()
+    query = query.view(batch_size, query.shape[1], num_key_value_heads, -1, head_dim)
+    batch_size, num_queries, num_key_value_heads, num_key_value_groups, head_dim = query.shape
 
+    start_q = num_keys - num_queries
     sm_scale: float = 1.0 / head_dim**0.5
 
     sinks = sinks.view(1, num_key_value_heads, num_key_value_groups, 1, 1).float()
@@ -343,21 +349,25 @@ def triton_program(Q, K, V, Sinks, window_size: int | None = None) -> torch.Tens
     return o
 
 
-def gen_inputs(B, H, Sq, Skv, D) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def gen_inputs(B, H, Sq, Skv, D,
+               groups) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     query = torch.randn([B, H, Sq, D], dtype=torch.float16, device='cuda')
-    key = torch.randn([B, H, Skv, D], dtype=torch.float16, device='cuda')
-    value = torch.randn([B, H, Skv, D], dtype=torch.float16, device='cuda')
+    key = torch.randn([B, H // groups, Skv, D], dtype=torch.float16, device='cuda')
+    value = torch.randn([B, H // groups, Skv, D], dtype=torch.float16, device='cuda')
     sinks = torch.randn([H], dtype=torch.float16, device='cuda')
     return query, key, value, sinks
 
 
-def main(batch: int = 8,
-         heads: int = 32,
-         seq_q: int = 4096,
-         seq_kv: int = 4096,
-         dim: int = 128,
-         window_size: int | None = None,
-         tune: bool = False):
+def main(
+    batch: int = 1,
+    heads: int = 64,
+    seq_q: int = 4096,
+    seq_kv: int = 4096,
+    dim: int = 128,
+    groups: int = 8,
+    window_size: int | None = None,
+    tune: bool = False,
+):
     if window_size is not None:
         print('Using sliding window attention.')
         assert window_size <= seq_q
@@ -369,7 +379,7 @@ def main(batch: int = 8,
     total_flops = 2 * flops_per_matmul
 
     if tune:
-        kernel = flashattn(batch, heads, seq_q, seq_kv, dim, window_size)
+        kernel = flashattn(batch, heads, seq_q, seq_kv, dim, groups, window_size)
         print(f"Best latency: {kernel.latency}")
         print(f"Best TFlops: {total_flops / kernel.latency * 1e-9}")
         print(f"Best config: {kernel.config}")
@@ -386,21 +396,30 @@ def main(batch: int = 8,
             seq_q,
             seq_kv,
             dim,
+            groups,
             window_size,
             block_M=block_M,
             block_N=block_N,
             num_stages=num_stages,
             threads=threads)
 
-        Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim)
+        Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim, groups)
 
         torch.testing.assert_close(
             kernel(Q, K, V, sinks), ref_program(Q, K, V, sinks, window_size), rtol=1e-2, atol=1e-2)
         print("All checks pass.✅")
 
+        # Benchmark torch ref
+        latency = do_bench(lambda: ref_program(Q, K, V, sinks, window_size), warmup=500)
+        print("Torch Ref: {:.2f} ms".format(latency))
+        print("Torch Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+
+        # Benchmark triton
         latency = do_bench(lambda: triton_program(Q, K, V, sinks, window_size), warmup=500)
         print("Triton: {:.2f} ms".format(latency))
         print("Triton: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+
+        # Benchmark tilelang
         latency = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500)
         print("Tilelang: {:.2f} ms".format(latency))
         print("Tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
@@ -408,16 +427,18 @@ def main(batch: int = 8,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=8, help='batch size')
-    parser.add_argument('--heads', type=int, default=32, help='heads')
+    parser.add_argument('--batch', type=int, default=1, help='batch size')
+    parser.add_argument('--heads', type=int, default=64, help='heads')
     parser.add_argument('--seq_q', type=int, default=4096, help='sequence length of query')
     parser.add_argument('--seq_kv', type=int, default=4096, help='sequence length of key/value')
     parser.add_argument('--dim', type=int, default=128, help='dim')
+    parser.add_argument('--groups', type=int, default=8, help='groups')
     parser.add_argument(
         '--window_size',
         type=int,
         default=None,
         help='window size (default: None, which means full attention)')
-    parser.add_argument('--tune', action='store_true', help='tune')
+    parser.add_argument('--tune', action='store_true', help='tune configs')
     args = parser.parse_args()
-    main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.window_size, args.tune)
+    main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.groups, args.window_size,
+         args.tune)

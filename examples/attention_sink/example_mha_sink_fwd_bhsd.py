@@ -147,7 +147,8 @@ def flashattn(
             for i in T.Parallel(block_M):
                 sinks[i] = Sinks[by]
 
-            end = T.min(T.ceildiv(seq_kv, block_N), T.ceildiv((bx + 1) * block_M+past_len, block_N))
+            end = T.min(
+                T.ceildiv(seq_kv, block_N), T.ceildiv((bx + 1) * block_M + past_len, block_N))
             start = 0
             if window_size is not None:
                 start = T.max(0, (bx * block_M + past_len - window_size) // block_N)
