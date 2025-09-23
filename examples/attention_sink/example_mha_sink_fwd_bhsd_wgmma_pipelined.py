@@ -44,6 +44,9 @@ def flashattn(
     dtype = "float16"
     accum_dtype = "float"
 
+    past_len = seq_kv - seq_q
+    assert past_len >= 0, "seq_kv must be greater than or equal to seq_q"
+
     @T.macro
     def MMA0(
         K: T.Tensor(kv_shape, dtype),
@@ -55,7 +58,6 @@ def flashattn(
         by: T.int32,
         bz: T.int32,
     ):
-        past_len = seq_kv - seq_q  # FIXME: fix cases where seq_q < seq_kv
         T.copy(K[bz, by, k * block_N:(k + 1) * block_N, :], K_shared)
         for i, j in T.Parallel(block_M, block_N):
             q_idx = bx * block_M + i + past_len
@@ -93,9 +95,6 @@ def flashattn(
         T.copy(scores_max, scores_max_prev)
         T.fill(scores_max, -T.infinity(accum_dtype))
         T.reduce_max(acc_s, scores_max, dim=1, clear=False)
-        # To do causal softmax, we need to set the scores_max to 0 if it is -inf
-        # This process is called Check_inf in FlashAttention3 code, and it only need to be done
-        # in the first ceil_div(kBlockM, kBlockN) steps.
         # To do causal softmax, we need to set the scores_max to 0 if it is -inf
         # This process is called Check_inf in FlashAttention3 code, and it only need to be done
         # NOTE(wt): check_inf is necessary for sliding window attention.
@@ -151,13 +150,12 @@ def flashattn(
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
             for i in T.Parallel(block_M):
-                sinks[i] = Sinks[i]
+                sinks[i] = Sinks[by]
 
-            end = T.min(T.ceildiv(seq_kv, block_N), T.ceildiv((bx + 1) * block_M, block_N))
+            end = T.min(T.ceildiv(seq_kv, block_N), T.ceildiv((bx + 1) * block_M+past_len, block_N))
             start = 0
             if window_size is not None:
-                start = T.max(0, (bx * block_M - window_size) //
-                              block_N)  # The only change for sliding window
+                start = T.max(0, (bx * block_M+ past_len - window_size) // block_N)
 
             for k in T.Pipelined(
                     start,
@@ -188,8 +186,7 @@ def ref_program(query: torch.Tensor,
                 key: torch.Tensor,
                 value: torch.Tensor,
                 sinks: torch.Tensor,
-                sliding_window: int | None = None,
-                start_q: int = 0) -> torch.Tensor:
+                sliding_window: int | None = None) -> torch.Tensor:
 
     query = query.transpose(1, 2).contiguous().unsqueeze(
         3)  # align with the original function'sinterface
@@ -198,6 +195,7 @@ def ref_program(query: torch.Tensor,
 
     batch_size, num_queries, num_key_value_heads, num_key_value_groups, head_dim = query.shape
     batch_size, num_keys, num_key_value_heads, head_dim = key.shape
+    start_q = num_keys - num_queries
 
     sm_scale: float = 1.0 / head_dim**0.5
 
@@ -318,11 +316,13 @@ def triton_kernel(
 
 
 def triton_program(Q, K, V, Sinks, window_size: int | None = None) -> torch.Tensor:
-    bs, n_heads, n_ctx, head_dim = Q.shape
+    bs, n_heads, seq_q, head_dim = Q.shape
+    seq_kv = K.shape[2]
     BLOCK_M = 64
     BLOCK_N = 64
+
     o = torch.empty_like(Q)
-    grid = (triton.cdiv(n_ctx, BLOCK_M), bs * n_heads, 1)
+    grid = (triton.cdiv(seq_q, BLOCK_M), bs * n_heads, 1)
     triton_kernel[grid](
         TensorDescriptor.from_tensor(Q, [1, 1, BLOCK_M, head_dim]),
         TensorDescriptor.from_tensor(K, [1, 1, BLOCK_N, head_dim]),
@@ -332,42 +332,43 @@ def triton_program(Q, K, V, Sinks, window_size: int | None = None) -> torch.Tens
         TensorDescriptor.from_tensor(o, [1, 1, BLOCK_M, head_dim]),
         bs,
         n_heads,
-        N_Q_CTX=n_ctx,
-        N_KV_CTX=n_ctx,
+        N_Q_CTX=seq_q,
+        N_KV_CTX=seq_kv,
         HEAD_DIM=head_dim,
         BANDWIDTH=window_size,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
-        start_q=0)
+        start_q=seq_kv-seq_q)
     return o
 
 
-def gen_inputs(B, H, S, D) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    query = torch.randn([B, H, S, D], dtype=torch.float16, device='cuda')
-    key = torch.randn([B, H, S, D], dtype=torch.float16, device='cuda')
-    value = torch.randn([B, H, S, D], dtype=torch.float16, device='cuda')
+def gen_inputs(B, H, Sq, Skv, D) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    query = torch.randn([B, H, Sq, D], dtype=torch.float16, device='cuda')
+    key = torch.randn([B, H, Skv, D], dtype=torch.float16, device='cuda')
+    value = torch.randn([B, H, Skv, D], dtype=torch.float16, device='cuda')
     sinks = torch.zeros([H], dtype=torch.float16, device='cuda')
     return query, key, value, sinks
 
 
 def main(batch: int = 8,
          heads: int = 32,
-         seq_len: int = 4096,
+         seq_q: int = 4096,
+         seq_kv: int = 4096,
          dim: int = 128,
          window_size: int | None = None,
          tune: bool = False):
     if window_size is not None:
         print('Using sliding window attention.')
-        assert window_size <= seq_len
+        assert window_size <= seq_q
         flops_per_matmul = 2.0 * batch * heads * min(
-            window_size, seq_len // 2) * seq_len * dim  # just a rough estimation
+            window_size, seq_kv // 2) * seq_q * dim  # just a rough estimation
     else:
         print('Using full attention.')
-        flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim * 0.5
+        flops_per_matmul = 2.0 * batch * heads * seq_q * seq_kv * dim * 0.5
     total_flops = 2 * flops_per_matmul
 
     if tune:
-        kernel = flashattn(batch, heads, seq_len, seq_len, dim, window_size)
+        kernel = flashattn(batch, heads, seq_q, seq_kv, dim, window_size)
         print(f"Best latency: {kernel.latency}")
         print(f"Best TFlops: {total_flops / kernel.latency * 1e-9}")
         print(f"Best config: {kernel.config}")
@@ -381,8 +382,8 @@ def main(batch: int = 8,
         kernel = flashattn(
             batch,
             heads,
-            seq_len,
-            seq_len,
+            seq_q,
+            seq_kv,
             dim,
             window_size,
             block_M=block_M,
@@ -390,7 +391,7 @@ def main(batch: int = 8,
             num_stages=num_stages,
             threads=threads)
 
-        Q, K, V, sinks = gen_inputs(batch, heads, seq_len, dim)
+        Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim)
 
         torch.testing.assert_close(
             kernel(Q, K, V, sinks), ref_program(Q, K, V, sinks, window_size), rtol=1e-2, atol=1e-2)
@@ -408,7 +409,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=8, help='batch size')
     parser.add_argument('--heads', type=int, default=32, help='heads')
-    parser.add_argument('--seq_len', type=int, default=4096, help='sequence length')
+    parser.add_argument('--seq_q', type=int, default=4096, help='sequence length of query')
+    parser.add_argument('--seq_kv', type=int, default=4096, help='sequence length of key/value')
     parser.add_argument('--dim', type=int, default=128, help='dim')
     parser.add_argument(
         '--window_size',
@@ -417,4 +419,4 @@ if __name__ == "__main__":
         help='window size (default: None, which means full attention)')
     parser.add_argument('--tune', action='store_true', help='tune')
     args = parser.parse_args()
-    main(args.batch, args.heads, args.seq_len, args.dim, args.window_size, args.tune)
+    main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.window_size, args.tune)
