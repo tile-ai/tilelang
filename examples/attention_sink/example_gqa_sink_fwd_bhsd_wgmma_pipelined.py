@@ -293,7 +293,7 @@ def triton_kernel(
             too_old = (start_n + offs_n[None, :]) < (start_q + offs_m[:, None] - BANDWIDTH + 1)
             mask = mask | too_old
 
-        k = K.load([off_z, off_h//groups, start_n, 0]).reshape([BLOCK_N, HEAD_DIM]).T
+        k = K.load([off_z, off_h // groups, start_n, 0]).reshape([BLOCK_N, HEAD_DIM]).T
         qk = tl.dot(q, k, allow_tf32=False)
 
         qk = qk * qk_scale + tl.where(mask, -1.0e6, 0.0)
@@ -305,7 +305,7 @@ def triton_kernel(
         l_ij = tl.sum(p, 1)
         acc = acc * alpha[:, None]
 
-        v = V.load([off_z, off_h//groups, start_n, 0]).reshape([BLOCK_N, HEAD_DIM])
+        v = V.load([off_z, off_h // groups, start_n, 0]).reshape([BLOCK_N, HEAD_DIM])
         # v = v.to(tl.float32)
         p = p.to(v.dtype)  # We perform fp16 gemm to utilize tensor core
         acc = tl.dot(p, v, acc, allow_tf32=False)
@@ -328,7 +328,7 @@ def triton_program(Q, K, V, Sinks, window_size: int | None = None) -> torch.Tens
     _, n_heads_kv, seq_kv, _ = K.shape
     BLOCK_M = 64
     BLOCK_N = 64
-    groups =  n_heads // n_heads_kv
+    groups = n_heads // n_heads_kv
 
     o = torch.empty_like(Q)
     grid = (triton.cdiv(seq_q, BLOCK_M), bs * n_heads, 1)
@@ -413,7 +413,10 @@ def main(
         print("All checks passed.✅")
 
         if torch.allclose(
-            triton_program(Q, K, V, sinks, window_size), ref_program(Q, K, V, sinks, window_size), rtol=1e-2, atol=1e-2):
+                triton_program(Q, K, V, sinks, window_size),
+                ref_program(Q, K, V, sinks, window_size),
+                rtol=1e-2,
+                atol=1e-2):
             print("Checks for triton passed.✅")
         else:
             print("Checks for triton failed.❌")

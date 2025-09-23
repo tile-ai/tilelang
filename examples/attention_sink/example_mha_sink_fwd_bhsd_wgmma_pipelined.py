@@ -399,7 +399,10 @@ def main(batch: int = 8,
         print("All checks passed.✅")
 
         if torch.allclose(
-            triton_program(Q, K, V, sinks, window_size), ref_program(Q, K, V, sinks, window_size), rtol=1e-2, atol=1e-2):
+                triton_program(Q, K, V, sinks, window_size),
+                ref_program(Q, K, V, sinks, window_size),
+                rtol=1e-2,
+                atol=1e-2):
             print("Checks for triton passed.✅")
         else:
             print("Checks for triton failed.❌")
