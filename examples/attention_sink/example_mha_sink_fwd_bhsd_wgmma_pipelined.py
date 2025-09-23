@@ -367,7 +367,7 @@ def main(batch: int = 8,
     total_flops = 2 * flops_per_matmul
 
     if tune:
-        kernel = flashattn(batch, heads, seq_len, dim, window_size)
+        kernel = flashattn(batch, heads, seq_len, seq_len, dim, window_size)
         print(f"Best latency: {kernel.latency}")
         print(f"Best TFlops: {total_flops / kernel.latency * 1e-9}")
         print(f"Best config: {kernel.config}")
