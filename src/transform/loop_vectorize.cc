@@ -32,6 +32,8 @@
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
+#include "../op/builtin.h"
+#include "../target/utils.h"
 #include "arith/int_operator.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "common/loop_vectorization_utils.h"
@@ -47,14 +49,51 @@ struct VectorizePlanResult {
   PrimExpr condition;
 };
 
-class VectorizePlanner : public arith::IRVisitorWithAnalyzer {
+class VectorizeFindGlobalAccess : public arith::IRVisitorWithAnalyzer {
 public:
-  VectorizePlanner() = default;
+  VectorizeFindGlobalAccess() = default;
 
-  int Plan(const For &node) {
-    this->operator()(node);
-    return vector_size_;
+  bool HasGlobalAccess(const Stmt &stmt) {
+    this->operator()(stmt);
+    return has_global_access_;
   }
+
+private:
+  bool has_global_access_ = false;
+
+  void VisitStmt_(const BufferStoreNode *node) final {
+    if (node->buffer.scope() == "global")
+      has_global_access_ = true;
+    return arith::IRVisitorWithAnalyzer::VisitStmt_(node);
+  }
+
+  void VisitExpr_(const BufferLoadNode *node) final {
+    if (node->buffer.scope() == "global")
+      has_global_access_ = true;
+    return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
+  }
+};
+
+class VectorizePlanner : public arith::IRVisitorWithAnalyzer {
+  public:
+    VectorizePlanner() = default;
+  
+    int Plan(const For &node) {
+      tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
+      Optional<Bool> opt_disable_vectorize_256 =
+          ctxt->GetConfig(kDisableVectorize256, Optional<Bool>());
+      bool disable_vectorize_256 =
+          opt_disable_vectorize_256.value_or(Bool(false));
+      if (tvm::tl::TargetIsSm100(Target::Current(false)) &&
+          !disable_vectorize_256 &&
+          VectorizeFindGlobalAccess().HasGlobalAccess(node)) {
+        vector_load_bits_max_ = vector_size_ = 256;
+      } else {
+        vector_load_bits_max_ = vector_size_ = 128;
+      }
+      this->operator()(node);
+      return vector_size_;
+    }
 
   bool GetDynamic() { return dynamic_; }
 
@@ -110,7 +149,14 @@ private:
     // TODO: perform some checks here
   }
 
-  void UpdateVectorSize(const Array<PrimExpr> &indices, const Buffer &buffer) {
+  void VisitExpr_(const CastNode *node) final {
+    vector_size_ = arith::ZeroAwareGCD(
+        vector_load_bits_max_ / node->dtype.bits(), vector_size_);
+    return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
+  }
+
+
+  void UpdateVectorSize(const Array<PrimExpr> indices, const Buffer &buffer) {
     if (!inner_for_)
       return;
     auto extent_ptr = inner_for_->extent.as<IntImmNode>();
@@ -167,12 +213,12 @@ private:
     }
   }
 
-  const int vector_load_bits_max_ = 128;
+  int vector_load_bits_max_;
 
   const ForNode *inner_for_{};
   Map<Var, Range> iter_map_;
   bool has_nonlocal_memory_access_ = false;
-  int vector_size_ = 128;
+  int vector_size_;
   // conditionally vectorize
   bool dynamic_ = false;
   PrimExpr condition_;

@@ -166,6 +166,8 @@ Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
                         int element_size, int kfactor);
 Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
                               int continuity, int element_size, int kfactor);
+Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
+                             int element_size, int kfactor);
 Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,
                             int kfactor);
 

@@ -22,6 +22,8 @@ enum class GemmWarpPolicyType : uint8_t {
   kFree = 3,
 };
 
+// Target GEMM instruction
+enum class GemmInst : uint8_t { kMMA, kWGMMA, kUTCMMA, kMFMA };
 class GemmWarpPolicyNode : public Object {
 public:
   mutable int m_warp{0};
@@ -55,7 +57,7 @@ public:
   static constexpr bool _type_has_method_shash_reduce = true;
 
   std::pair<int, int> ComputeWarpPartition(int M, int N, int block_size,
-                                           Target target, bool use_wgmma) const;
+                                          Target target, GemmInst gemm_inst) const;
 
   bool isSquare() const {
     return policy_type == int(GemmWarpPolicyType::kSquare);
@@ -109,6 +111,9 @@ public:
   // only will be enabled under cdna mfma instructions
   int kPack = 1;
   int wg_wait = 0;
+  PrimExpr mbarptr;
+  std::optional<tir::Buffer> mbar; // mbar is optional, only used for UTCMMA
+  Array<PrimExpr> C_coords;
   mutable GemmWarpPolicy policy;
 
   static constexpr const char *_type_key = "tl.Gemm";
