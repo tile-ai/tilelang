@@ -249,6 +249,7 @@ def triton_kernel(
     N_Q_CTX,
     N_KV_CTX,
     HEAD_DIM: tl.constexpr,
+    groups: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BANDWIDTH: tl.constexpr,
@@ -278,10 +279,10 @@ def triton_kernel(
     q = Q.load([off_z, off_h, start_m * BLOCK_M, 0]).reshape([BLOCK_M, HEAD_DIM])
 
     if BANDWIDTH:
-        lo, hi = tl.maximum(start_q, start_q + start_m * BLOCK_M -
+        lo, hi = tl.maximum(0, start_q + start_m * BLOCK_M -
                             BANDWIDTH), start_q + (start_m + 1) * BLOCK_M
     else:
-        lo, hi = start_q, start_q + (start_m + 1) * BLOCK_M
+        lo, hi = 0, start_q + (start_m + 1) * BLOCK_M
 
     for start_n in range(lo, hi, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
@@ -292,7 +293,7 @@ def triton_kernel(
             too_old = (start_n + offs_n[None, :]) < (start_q + offs_m[:, None] - BANDWIDTH + 1)
             mask = mask | too_old
 
-        k = K.load([off_z, off_h, start_n, 0]).reshape([BLOCK_N, HEAD_DIM]).T
+        k = K.load([off_z, off_h//groups, start_n, 0]).reshape([BLOCK_N, HEAD_DIM]).T
         qk = tl.dot(q, k, allow_tf32=False)
 
         qk = qk * qk_scale + tl.where(mask, -1.0e6, 0.0)
@@ -304,7 +305,7 @@ def triton_kernel(
         l_ij = tl.sum(p, 1)
         acc = acc * alpha[:, None]
 
-        v = V.load([off_z, off_h, start_n, 0]).reshape([BLOCK_N, HEAD_DIM])
+        v = V.load([off_z, off_h//groups, start_n, 0]).reshape([BLOCK_N, HEAD_DIM])
         # v = v.to(tl.float32)
         p = p.to(v.dtype)  # We perform fp16 gemm to utilize tensor core
         acc = tl.dot(p, v, acc, allow_tf32=False)
@@ -324,9 +325,10 @@ def triton_kernel(
 
 def triton_program(Q, K, V, Sinks, window_size: int | None = None) -> torch.Tensor:
     bs, n_heads, seq_q, head_dim = Q.shape
-    seq_kv = K.shape[2]
+    _, n_heads_kv, seq_kv, _ = K.shape
     BLOCK_M = 64
     BLOCK_N = 64
+    groups =  n_heads // n_heads_kv
 
     o = torch.empty_like(Q)
     grid = (triton.cdiv(seq_q, BLOCK_M), bs * n_heads, 1)
@@ -342,6 +344,7 @@ def triton_program(Q, K, V, Sinks, window_size: int | None = None) -> torch.Tens
         N_Q_CTX=seq_q,
         N_KV_CTX=seq_kv,
         HEAD_DIM=head_dim,
+        groups=groups,
         BANDWIDTH=window_size,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
@@ -407,12 +410,13 @@ def main(
 
         torch.testing.assert_close(
             kernel(Q, K, V, sinks), ref_program(Q, K, V, sinks, window_size), rtol=1e-2, atol=1e-2)
-        print("All checks pass.✅")
+        print("All checks passed.✅")
 
-        # Benchmark torch ref
-        latency = do_bench(lambda: ref_program(Q, K, V, sinks, window_size), warmup=500)
-        print("Torch Ref: {:.2f} ms".format(latency))
-        print("Torch Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        if torch.allclose(
+            triton_program(Q, K, V, sinks, window_size), ref_program(Q, K, V, sinks, window_size), rtol=1e-2, atol=1e-2):
+            print("Checks for triton passed.✅")
+        else:
+            print("Checks for triton failed.❌")
 
         # Benchmark triton
         latency = do_bench(lambda: triton_program(Q, K, V, sinks, window_size), warmup=500)

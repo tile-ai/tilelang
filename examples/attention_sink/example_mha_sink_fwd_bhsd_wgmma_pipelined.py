@@ -272,10 +272,10 @@ def triton_kernel(
     q = Q.load([off_z, off_h, start_m * BLOCK_M, 0]).reshape([BLOCK_M, HEAD_DIM])
 
     if BANDWIDTH:
-        lo, hi = tl.maximum(start_q, start_q + start_m * BLOCK_M -
+        lo, hi = tl.maximum(0, start_q + start_m * BLOCK_M -
                             BANDWIDTH), start_q + (start_m + 1) * BLOCK_M
     else:
-        lo, hi = start_q, start_q + (start_m + 1) * BLOCK_M
+        lo, hi = 0, start_q + (start_m + 1) * BLOCK_M
 
     for start_n in range(lo, hi, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
@@ -396,7 +396,13 @@ def main(batch: int = 8,
 
         torch.testing.assert_close(
             kernel(Q, K, V, sinks), ref_program(Q, K, V, sinks, window_size), rtol=1e-2, atol=1e-2)
-        print("All checks pass.✅")
+        print("All checks passed.✅")
+
+        if torch.allclose(
+            triton_program(Q, K, V, sinks, window_size), ref_program(Q, K, V, sinks, window_size), rtol=1e-2, atol=1e-2):
+            print("Checks for triton passed.✅")
+        else:
+            print("Checks for triton failed.❌")
 
         latency = do_bench(lambda: triton_program(Q, K, V, sinks, window_size), warmup=500)
         print("Triton: {:.2f} ms".format(latency))

@@ -274,8 +274,8 @@ def main(batch: int = 8,
         print("All checks passed.✅")
 
         latency = do_bench(lambda: ref_program(Q, K, V, sinks, window_size), warmup=500)
-        print("Triton: {:.2f} ms".format(latency))
-        print("Triton: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print("Ref: {:.2f} ms".format(latency))
+        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
         latency = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500)
         print("Tilelang: {:.2f} ms".format(latency))
         print("Tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
