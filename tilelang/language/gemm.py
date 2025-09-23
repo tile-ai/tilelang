@@ -3,9 +3,8 @@
 from tilelang.primitives.gemm.base import GemmWarpPolicy
 import tilelang.language as T
 from tvm import tir
-from typing import Union, List
+from typing import Union, List, Optional
 from tilelang.utils.language import get_buffer_region_from_load
-
 
 def gemm(
     A: Union[tir.Buffer, tir.Var],
@@ -17,6 +16,7 @@ def gemm(
     clear_accum: bool = False,
     k_pack: int = 1,
     wg_wait: int = 0,
+    mbar: Optional[tir.Buffer] = None,
 ):
     """Perform a General Matrix Multiplication (GEMM) operation.
 
@@ -33,6 +33,9 @@ def gemm(
         clear_accum (bool, optional): Whether to clear accumulator before computation. Defaults to False.
         k_pack (int, optional): Number of k dimensions packed into a single warp. Defaults to 1.
         wg_wait (int, optional): Warp group wait count. Defaults to 0.
+            On hopper it is equivalent to `wgmma.wait_group.sync.aligned <wg_wait>` if wg_wait is not -1
+            On sm100 (datacenter blackwell), `wg_wait` can only be 0 or -1. `mbarrier_wait(UTCMMA barrier)` will be appended if wg_wait is 0.
+        mbar (tir.Buffer, optional): mbarrier for UTCMMA synchronization
 
     Returns:
         tir.Call: A handle to the GEMM operation
@@ -57,6 +60,7 @@ def gemm(
     A = legalize_arguments(A)
     B = legalize_arguments(B)
     C = legalize_arguments(C)
+    mbar = legalize_arguments(mbar) if mbar is not None else None
 
     def retrieve_shape(object: Union[tir.Buffer, tir.BufferRegion]) -> List[int]:
         if isinstance(object, tir.Buffer):
@@ -67,15 +71,8 @@ def gemm(
             for r in region:
                 shape.append(r.extent)
             return shape
-        elif isinstance(object, tir.BufferLoad):
-            region = get_buffer_region_from_load(object).region
-            shape = []
-            for r in region:
-                shape.append(r.extent)
-            return shape
         else:
-            raise ValueError(
-                f"Unsupported retrieve_shape argument type: {type(object)} for buffer {object}")
+            raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
 
     def retrieve_stride(object: Union[tir.Buffer, tir.BufferRegion]) -> List[int]:
         if isinstance(object, tir.Buffer):
@@ -93,17 +90,8 @@ def gemm(
                 strides.insert(0, stride)
                 stride *= s
             return strides
-        elif isinstance(object, tir.BufferLoad):
-            buffer = object.buffer
-            strides = []
-            stride = 1
-            for s in reversed(buffer.shape):
-                strides.insert(0, stride)
-                stride *= s
-            return strides
         else:
-            raise ValueError(
-                f"Unsupported retrieve_stride argument type: {type(object)} for buffer {object}")
+            raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
 
     A_shape = retrieve_shape(A)
     B_shape = retrieve_shape(B)
@@ -151,24 +139,8 @@ def gemm(
             for i in range(len(indices) - 2):
                 offset += indices[i] * strides[i]
             return buffer.access_ptr(access_mask=access_type, offset=offset)
-        elif isinstance(object, tir.BufferLoad):
-            buffer = object.buffer
-            region = get_buffer_region_from_load(object).region
-            indices = []
-            for r in region:
-                indices.append(r.min)
-            strides = []
-            stride = 1
-            for s in reversed(buffer.shape):
-                strides.insert(0, stride)
-                stride *= s
-            offset = 0
-            for i in range(len(indices) - 2):
-                offset += indices[i] * strides[i]
-            return buffer.access_ptr(access_mask=access_type, offset=offset)
         else:
-            raise ValueError(
-                f"Unsupported retrieve_ptr argument type: {type(object)} for buffer {object}")
+            raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
 
     def retrieve_offset(object: Union[tir.Buffer, tir.BufferRegion]) -> tir.PrimExpr:
         """Retrieve the offset of the buffer or buffer region."""
@@ -180,15 +152,8 @@ def gemm(
             for r in region:
                 indices.append(r.min)
             return indices
-        elif isinstance(object, tir.BufferLoad):
-            region = get_buffer_region_from_load(object).region
-            indices = []
-            for r in region:
-                indices.append(r.min)
-            return indices
         else:
-            raise ValueError(
-                f"Unsupported retrieve_offset argument type: {type(object)} for buffer {object}")
+            raise ValueError(f"Unsupported argument type: {type(object)} for buffer {object}")
 
     A_offset = retrieve_offset(A)
     B_offset = retrieve_offset(B)
@@ -200,26 +165,12 @@ def gemm(
     Aptr = retrieve_ptr(A, "r")
     Bptr = retrieve_ptr(B, "r")
     Cptr = retrieve_ptr(C, "rw")
-    return tir.call_intrin(
-        "handle",
-        tir.op.Op.get("tl.gemm"),
-        Aptr,
-        Bptr,
-        Cptr,
-        transpose_A,
-        transpose_B,
-        M,
-        N,
-        K,
-        policy,
-        clear_accum,
-        stride_a,
-        stride_b,
-        offset_a,
-        offset_b,
-        k_pack,
-        wg_wait,
-    )
+    mbarptr = retrieve_ptr(mbar, "rw") if mbar is not None else tir.const(0, "uint32")
+    C_coords = [r.min for r in C.region] if isinstance(C, tir.BufferRegion) else [0, 0]
+    return tir.call_intrin("handle", tir.op.Op.get("tl.gemm"), Aptr, Bptr, Cptr, transpose_A,
+                           transpose_B, M, N, K, policy, clear_accum, stride_a, stride_b, offset_a,
+                           offset_b, k_pack, wg_wait, mbarptr, C_coords[0], C_coords[1])
+
 
 
 # experimental currently, for fast compilation
