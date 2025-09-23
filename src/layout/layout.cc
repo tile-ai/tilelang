@@ -116,21 +116,21 @@ Array<PrimExpr> LayoutNode::Forward(const Array<PrimExpr> &vars) const {
   if (vars.empty())
     return forward_index_;
   ICHECK_GE(vars.size(), InputDim());
-  
+
   // Take the last InputDim() elements for transformation
   Array<PrimExpr> transform_vars;
   for (size_t i = vars.size() - InputDim(); i < vars.size(); i++) {
     transform_vars.push_back(vars[i]);
   }
-  
+
   Map<Var, PrimExpr> vmap;
   for (size_t i = 0; i < InputDim(); i++) {
     vmap.Set(InputPlaceholder(i), transform_vars[i]);
   }
-  
+
   Array<PrimExpr> transformed = forward_index_.Map(
       [&](const PrimExpr &e) { return Substitute(e, vmap); });
-  
+
   // Concatenate with the remaining elements from vars
   Array<PrimExpr> result;
   for (size_t i = 0; i < vars.size() - InputDim(); i++) {
@@ -139,7 +139,7 @@ Array<PrimExpr> LayoutNode::Forward(const Array<PrimExpr> &vars) const {
   for (const auto &expr : transformed) {
     result.push_back(expr);
   }
-  
+
   return result;
 }
 
