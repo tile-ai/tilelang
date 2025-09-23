@@ -864,9 +864,9 @@ TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.GemmWarpPolicyComputeWarpPartition",
                         [](GemmWarpPolicy policy, int M, int N, int block_size,
-                           Target target, bool is_wgmma) {
+                           Target target, GemmInst gemm_inst) {
                           policy->ComputeWarpPartition(M, N, block_size, target,
-                                                       is_wgmma);
+                                                       gemm_inst);
                           return;
                         });
 });

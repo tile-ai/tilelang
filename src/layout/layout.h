@@ -131,6 +131,7 @@ public:
 
 Var InputPlaceholder(size_t idx);
 Var ReplicationPlaceholder();
+IterVar make_itervar(std::string name, PrimExpr dom);
 
 Fragment makeGemmFragment8x8();
 Fragment makeGemmFragment8x8Transposed();
