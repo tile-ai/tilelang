@@ -18,6 +18,8 @@ using int4_t = int4;
 #define hexp cutlass::fast_exp
 #define hlog cutlass::fast_log
 #define hsqrt cutlass::fast_sqrt
+#define hsin cutlass::fast_sin
+#define hcos cutlass::fast_cos
 #define htanh cutlass::fast_tanh
 #define hpow powf
 
