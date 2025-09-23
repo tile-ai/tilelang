@@ -57,7 +57,8 @@ public:
   static constexpr bool _type_has_method_shash_reduce = true;
 
   std::pair<int, int> ComputeWarpPartition(int M, int N, int block_size,
-                                          Target target, GemmInst gemm_inst) const;
+                                           Target target,
+                                           GemmInst gemm_inst) const;
 
   bool isSquare() const {
     return policy_type == int(GemmWarpPolicyType::kSquare);
@@ -189,7 +190,6 @@ public:
   TileOperator Clone() const;
 
 private:
-
   GemmInst GetGemmInst(int block_size, Target target) const;
 
   mutable bool completed_ = false;

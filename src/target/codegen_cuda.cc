@@ -627,64 +627,64 @@ void CodeGenTileLangCUDA::PrintVecElemLoad(const std::string &vec, DataType t,
 }
 
 void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
-  int i, const std::string &value) {
-this->PrintIndent();
-static const char access[] = {'x', 'y', 'z', 'w'};
-ICHECK(i >= 0 && i < 256 / t.bits());
-if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
-if (t.lanes() == 2 || t.lanes() == 3) {
-stream << vec << '.' << access[i % t.lanes()] << "="
-<< "(" << value << ");\n";
-} else if (t.lanes() <= 16) {
-std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
-stream << ac << "=";
-// Do not read the first undef lane.
-if (i != 0) {
-stream << ac << " & ~(0x000000ff << " << i % 4 * 8 << ") |";
-}
-stream << "(" << value << " << " << i % 4 * 8 << ");\n";
-} else {
-ICHECK(t.lanes() == 32);
-std::string ac = vec + "." + access[i / 8];
-stream << ac << "=";
-// Do not read the first undef lane.
-if (i != 0) {
-stream << ac << " & ~(0x000000ff << " << i % 8 * 8 << ") |";
-}
-stream << "(" << value << " << " << i % 8 * 8 << ");\n";
-}
-} else if (t.is_float16()) {
-if (t.lanes() <= 8) {
-stream << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
-<< access[i % 2] << " = " << value << ";\n";
-} else {
-stream << "(((half2*)(&(" << vec << "." << access[i / 4] << "))) + "
-<< (i / 2 % 2) << ")->" << access[i % 2] << " = " << value
-<< ";\n";
-}
-} else if (t.is_bfloat16()) {
-if (t.lanes() <= 8) {
-stream << "((nv_bfloat162*)(&(" << vec << "." << access[i / 2] << ")))->"
-<< access[i % 2] << " = " << value << ";\n";
-} else {
-stream << "(((nv_bfloat162*)(&(" << vec << "." << access[i / 4]
-<< "))) + " << (i / 2 % 2) << ")->" << access[i % 2] << " = "
-<< value << ";\n";
-}
-} else if (t.is_float8()) {
-stream << vec;
-// fp8_e5_32_t
-if (t.lanes() >= 32)
-stream << "." << access[i / 16];
-// fp8_e5_16_t
-if (t.lanes() >= 16)
-stream << "." << access[(i % 16) / 8];
-// fp8_e5_8_t
-if (t.lanes() >= 8)
-stream << "." << access[(i % 8) / 4];
-// fp8_e5_4_t or fp8_e5_2_t
-stream << "." << access[i % 4] << " = " << value << ";\n";
-} else if (t.lanes() > 4 && t.lanes() <= 8) {
+                                            int i, const std::string &value) {
+  this->PrintIndent();
+  static const char access[] = {'x', 'y', 'z', 'w'};
+  ICHECK(i >= 0 && i < 256 / t.bits());
+  if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
+    if (t.lanes() == 2 || t.lanes() == 3) {
+      stream << vec << '.' << access[i % t.lanes()] << "="
+             << "(" << value << ");\n";
+    } else if (t.lanes() <= 16) {
+      std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
+      stream << ac << "=";
+      // Do not read the first undef lane.
+      if (i != 0) {
+        stream << ac << " & ~(0x000000ff << " << i % 4 * 8 << ") |";
+      }
+      stream << "(" << value << " << " << i % 4 * 8 << ");\n";
+    } else {
+      ICHECK(t.lanes() == 32);
+      std::string ac = vec + "." + access[i / 8];
+      stream << ac << "=";
+      // Do not read the first undef lane.
+      if (i != 0) {
+        stream << ac << " & ~(0x000000ff << " << i % 8 * 8 << ") |";
+      }
+      stream << "(" << value << " << " << i % 8 * 8 << ");\n";
+    }
+  } else if (t.is_float16()) {
+    if (t.lanes() <= 8) {
+      stream << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
+             << access[i % 2] << " = " << value << ";\n";
+    } else {
+      stream << "(((half2*)(&(" << vec << "." << access[i / 4] << "))) + "
+             << (i / 2 % 2) << ")->" << access[i % 2] << " = " << value
+             << ";\n";
+    }
+  } else if (t.is_bfloat16()) {
+    if (t.lanes() <= 8) {
+      stream << "((nv_bfloat162*)(&(" << vec << "." << access[i / 2] << ")))->"
+             << access[i % 2] << " = " << value << ";\n";
+    } else {
+      stream << "(((nv_bfloat162*)(&(" << vec << "." << access[i / 4]
+             << "))) + " << (i / 2 % 2) << ")->" << access[i % 2] << " = "
+             << value << ";\n";
+    }
+  } else if (t.is_float8()) {
+    stream << vec;
+    // fp8_e5_32_t
+    if (t.lanes() >= 32)
+      stream << "." << access[i / 16];
+    // fp8_e5_16_t
+    if (t.lanes() >= 16)
+      stream << "." << access[(i % 16) / 8];
+    // fp8_e5_8_t
+    if (t.lanes() >= 8)
+      stream << "." << access[(i % 8) / 4];
+    // fp8_e5_4_t or fp8_e5_2_t
+    stream << "." << access[i % 4] << " = " << value << ";\n";
+  } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
       if (t.is_int()) {
@@ -1978,83 +1978,83 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
 }
 
 void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
-  std::ostream &os) { // NOLINT(*)
-int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
-if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 8) {
-if (lanes == 4) {
-// make_int8x4
-const int64_t *p = as_const_int(op->value);
-ICHECK(p);
-int64_t v = *p & 0xFF;
-v = (v << 24) | (v << 16) | (v << 8) | v;
-if (op->dtype.is_uint()) {
-os << "(uint)" << v;
-} else {
-os << "(int)" << v;
-}
-return;
-} else if (lanes == 32) {
-// make_int8x32
-const int64_t *p = as_const_int(op->value);
-ICHECK(p);
-int64_t v = *p & 0xFF;
-v = (v << 24) | (v << 16) | (v << 8) | v;
-if (op->dtype.is_uint()) {
-os << "make_ulonglong4(" << v << ", " << v << ", " << v << ", " << v
-<< ")";
-} else {
-os << "make_longlong4(" << v << ", " << v << ", " << v << ", " << v
-<< ")";
-}
-return;
-}
-}
-
-if (op->dtype.is_float16()) {
-  std::string v = PrintExpr(op->value);
-  os << "make_";
-  PrintType(op->dtype, os);
-  os << '(';
-  if (lanes <= 8) {
-    for (int i = 0; i < lanes / 2; ++i) {
-      if (i != 0)
-        os << ", ";
-      os << "__pack_half2(" << v << ", " << v << ")";
-    }
-  } else {
-    for (int i = 0; i < lanes / 4; ++i) {
-      if (i != 0)
-        os << ", ";
-      os << "tl::pack_float16x4(" << v << ", " << v << ", " << v << ", " << v
-         << ")";
+                                     std::ostream &os) { // NOLINT(*)
+  int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
+  if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 8) {
+    if (lanes == 4) {
+      // make_int8x4
+      const int64_t *p = as_const_int(op->value);
+      ICHECK(p);
+      int64_t v = *p & 0xFF;
+      v = (v << 24) | (v << 16) | (v << 8) | v;
+      if (op->dtype.is_uint()) {
+        os << "(uint)" << v;
+      } else {
+        os << "(int)" << v;
+      }
+      return;
+    } else if (lanes == 32) {
+      // make_int8x32
+      const int64_t *p = as_const_int(op->value);
+      ICHECK(p);
+      int64_t v = *p & 0xFF;
+      v = (v << 24) | (v << 16) | (v << 8) | v;
+      if (op->dtype.is_uint()) {
+        os << "make_ulonglong4(" << v << ", " << v << ", " << v << ", " << v
+           << ")";
+      } else {
+        os << "make_longlong4(" << v << ", " << v << ", " << v << ", " << v
+           << ")";
+      }
+      return;
     }
   }
-  os << ')';
-  return;
-}
 
-if (op->dtype.is_bfloat16()) {
-  std::string v = PrintExpr(op->value);
-  os << "make_";
-  PrintType(op->dtype, os);
-  os << '(';
-  if (lanes <= 8) {
-    for (int i = 0; i < lanes / 2; ++i) {
-      if (i != 0)
-        os << ", ";
-      os << "__pack_nv_bfloat162(" << v << ", " << v << ")";
+  if (op->dtype.is_float16()) {
+    std::string v = PrintExpr(op->value);
+    os << "make_";
+    PrintType(op->dtype, os);
+    os << '(';
+    if (lanes <= 8) {
+      for (int i = 0; i < lanes / 2; ++i) {
+        if (i != 0)
+          os << ", ";
+        os << "__pack_half2(" << v << ", " << v << ")";
+      }
+    } else {
+      for (int i = 0; i < lanes / 4; ++i) {
+        if (i != 0)
+          os << ", ";
+        os << "tl::pack_float16x4(" << v << ", " << v << ", " << v << ", " << v
+           << ")";
+      }
     }
-  } else {
-    for (int i = 0; i < lanes / 4; ++i) {
-      if (i != 0)
-        os << ", ";
-      os << "tl::pack_bfloat16x4(" << v << ", " << v << ", " << v << ", " << v
-         << ")";
-    }
+    os << ')';
+    return;
   }
-  os << ')';
-  return;
-}
+
+  if (op->dtype.is_bfloat16()) {
+    std::string v = PrintExpr(op->value);
+    os << "make_";
+    PrintType(op->dtype, os);
+    os << '(';
+    if (lanes <= 8) {
+      for (int i = 0; i < lanes / 2; ++i) {
+        if (i != 0)
+          os << ", ";
+        os << "__pack_nv_bfloat162(" << v << ", " << v << ")";
+      }
+    } else {
+      for (int i = 0; i < lanes / 4; ++i) {
+        if (i != 0)
+          os << ", ";
+        os << "tl::pack_bfloat16x4(" << v << ", " << v << ", " << v << ", " << v
+           << ")";
+      }
+    }
+    os << ')';
+    return;
+  }
 
   if (op->dtype.is_float() && op->dtype.bits() == 32 &&
       op->dtype.lanes() == 8) {

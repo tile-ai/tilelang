@@ -223,12 +223,12 @@ Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   GemmInst gemm_inst = GetGemmInst(block_size, T.target);
 
   tvm::tl::GemmInst warp_inst =
-    (gemm_inst == GemmInst::kWGMMA) ? tvm::tl::GemmInst::kWGMMA :
-    (gemm_inst == GemmInst::kMFMA)  ? tvm::tl::GemmInst::kMFMA
-                                    : tvm::tl::GemmInst::kMMA;
+      (gemm_inst == GemmInst::kWGMMA)  ? tvm::tl::GemmInst::kWGMMA
+      : (gemm_inst == GemmInst::kMFMA) ? tvm::tl::GemmInst::kMFMA
+                                       : tvm::tl::GemmInst::kMMA;
 
-  auto [warp_m, warp_n] = policy->ComputeWarpPartition(
-      M, N, block_size, T.target, warp_inst);
+  auto [warp_m, warp_n] =
+      policy->ComputeWarpPartition(M, N, block_size, T.target, warp_inst);
 
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.lower")) {
     auto prim_func = Downcast<PrimFunc>(

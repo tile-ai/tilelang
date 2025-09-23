@@ -171,15 +171,15 @@ TVM_DLL const Op &mbarrier_expect_tx();
  * ptx_init_tensor_memory(tmem_buffer, num_cols)
  *
  */
- const Op &ptx_init_tensor_memory();
+const Op &ptx_init_tensor_memory();
 
- /*!
-  * \brief tvm intrinsics for deallocating tensor memory
-  *
-  * tmem_deallocate(tmem_buffer)
-  *
-  */
- const Op &ptx_deallocate_tensor_memory(); 
+/*!
+ * \brief tvm intrinsics for deallocating tensor memory
+ *
+ * tmem_deallocate(tmem_buffer)
+ *
+ */
+const Op &ptx_deallocate_tensor_memory();
 
 /*!
  * \brief tvm intrinsics for ldmatrix

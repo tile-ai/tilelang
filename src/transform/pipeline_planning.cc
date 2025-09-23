@@ -5,8 +5,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include <utility>
 #include "../op/builtin.h"
+#include <utility>
 
 #include "../target/utils.h"
 #include "tvm/ir/expr.h"

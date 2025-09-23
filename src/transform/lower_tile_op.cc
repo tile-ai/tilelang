@@ -71,37 +71,37 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
   return Buffer(new_var, buffer->dtype, output_shape, {}, buffer->elem_offset,
                 buffer->name, buffer->data_alignment, buffer->offset_factor,
                 buffer->buffer_type);
-              }
+}
 
-              // The function `makeBufferWithLayout` creates a new Buffer object based on the
-              // given buffer and layout. It handles remapping of buffer variables, adjusts
-              // the storage scope if needed (e.g., from "local.fragment" to "local"), and
-              // computes the output shape according to the layout. For shared memory buffers,
-              // it also handles replication if the buffer's extent is larger than the
-              // layout's extent.
-              class LayoutRemapRewriter : public arith::IRMutatorWithAnalyzer {
-              public:
-                static Stmt Substitute(Stmt stmt, Map<Buffer, Layout> layout_remap) {
-                  arith::Analyzer analyzer;
-                  LayoutRemapRewriter substituter(&analyzer);
-                  substituter.layout_remap_ = std::move(layout_remap);
-                  return substituter.VisitStmt(stmt);
-                }
-              
-              private:
-                using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
-              
-                Stmt VisitStmt_(const BlockNode *op) final {
-                  auto block = Downcast<Block>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
-                  if (op->annotations.count(attr::kLayoutMap)) {
-                    block.CopyOnWrite()->annotations.Set(attr::kLayoutMap, layout_remap_);
-                  }
-                  return block;
-                }
-              
-                Map<Buffer, Layout> layout_remap_;
-              };
-              class BufferGemmCollector : public StmtExprVisitor {
+// The function `makeBufferWithLayout` creates a new Buffer object based on the
+// given buffer and layout. It handles remapping of buffer variables, adjusts
+// the storage scope if needed (e.g., from "local.fragment" to "local"), and
+// computes the output shape according to the layout. For shared memory buffers,
+// it also handles replication if the buffer's extent is larger than the
+// layout's extent.
+class LayoutRemapRewriter : public arith::IRMutatorWithAnalyzer {
+public:
+  static Stmt Substitute(Stmt stmt, Map<Buffer, Layout> layout_remap) {
+    arith::Analyzer analyzer;
+    LayoutRemapRewriter substituter(&analyzer);
+    substituter.layout_remap_ = std::move(layout_remap);
+    return substituter.VisitStmt(stmt);
+  }
+
+private:
+  using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
+
+  Stmt VisitStmt_(const BlockNode *op) final {
+    auto block = Downcast<Block>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
+    if (op->annotations.count(attr::kLayoutMap)) {
+      block.CopyOnWrite()->annotations.Set(attr::kLayoutMap, layout_remap_);
+    }
+    return block;
+  }
+
+  Map<Buffer, Layout> layout_remap_;
+};
+class BufferGemmCollector : public StmtExprVisitor {
 public:
   BufferGemmCollector() { Clear(); }
 

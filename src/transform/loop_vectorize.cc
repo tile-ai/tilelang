@@ -75,25 +75,25 @@ private:
 };
 
 class VectorizePlanner : public arith::IRVisitorWithAnalyzer {
-  public:
-    VectorizePlanner() = default;
-  
-    int Plan(const For &node) {
-      tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
-      Optional<Bool> opt_disable_vectorize_256 =
-          ctxt->GetConfig(kDisableVectorize256, Optional<Bool>());
-      bool disable_vectorize_256 =
-          opt_disable_vectorize_256.value_or(Bool(false));
-      if (tvm::tl::TargetIsSm100(Target::Current(false)) &&
-          !disable_vectorize_256 &&
-          VectorizeFindGlobalAccess().HasGlobalAccess(node)) {
-        vector_load_bits_max_ = vector_size_ = 256;
-      } else {
-        vector_load_bits_max_ = vector_size_ = 128;
-      }
-      this->operator()(node);
-      return vector_size_;
+public:
+  VectorizePlanner() = default;
+
+  int Plan(const For &node) {
+    tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
+    Optional<Bool> opt_disable_vectorize_256 =
+        ctxt->GetConfig(kDisableVectorize256, Optional<Bool>());
+    bool disable_vectorize_256 =
+        opt_disable_vectorize_256.value_or(Bool(false));
+    if (tvm::tl::TargetIsSm100(Target::Current(false)) &&
+        !disable_vectorize_256 &&
+        VectorizeFindGlobalAccess().HasGlobalAccess(node)) {
+      vector_load_bits_max_ = vector_size_ = 256;
+    } else {
+      vector_load_bits_max_ = vector_size_ = 128;
     }
+    this->operator()(node);
+    return vector_size_;
+  }
 
   bool GetDynamic() { return dynamic_; }
 
@@ -154,7 +154,6 @@ private:
         vector_load_bits_max_ / node->dtype.bits(), vector_size_);
     return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
   }
-
 
   void UpdateVectorSize(const Array<PrimExpr> indices, const Buffer &buffer) {
     if (!inner_for_)
