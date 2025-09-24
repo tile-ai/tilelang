@@ -63,14 +63,17 @@ def assert_gemm(
     assert jit_kernel.kernel_source is not None
 
 
+@tilelang.testing.requires_metal
 def test_gemm_float32():
     assert_gemm(1024, 1024, 1024, 16, 16, 16)
 
 
+@tilelang.testing.requires_metal
 def test_gemm_float16():
     assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype='float16', atol=1)
 
 
+@tilelang.testing.requires_metal
 def test_gemm_int32():
     assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype='int32', atol=1)
 
