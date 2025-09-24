@@ -1,13 +1,9 @@
-# Copyright (c) Tile-AI Corporation.
-# Licensed under the MIT License.
 """The language interface for tl programs."""
 
 import tilelang.language as T
-from tvm import ir
-from tvm.tir import PrimExpr, Buffer, BufferLoad, BufferRegion, Var, op
-from typing import List, Union, Optional
-from .atomic import atomic_max, atomic_min, atomic_add, atomic_addx2, atomic_addx4, atomic_load, atomic_store
-
+from tvm.tir import PrimExpr, Buffer, BufferLoad, BufferRegion, op
+from typing import List, Union
+from .atomic import atomic_max, atomic_min, atomic_add, atomic_addx2, atomic_addx4, atomic_load, atomic_store  # noqa: F401
 
 
 def region(buffer: BufferLoad, access_type: str, *args: PrimExpr):
@@ -97,16 +93,6 @@ def buffer_region_to_tile_region(buffer_region: BufferRegion, access_type: str,
     return region(T.BufferLoad(buffer_region.buffer, mins), access_type, *region_extents)
 
 
-
-
-
-
-
-
-
-
-
-
 def dp4a(A: Buffer, B: Buffer, C: Buffer) -> PrimExpr:
     """Perform a 4-element dot product with accumulation (DP4A).
 
@@ -163,7 +149,3 @@ def view(src: Buffer,
     if dtype is None:
         dtype = src.dtype
     return T.Tensor(shape, dtype, src.data)
-
-
-
-

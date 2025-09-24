@@ -59,10 +59,12 @@ TL_DEVICE T1 AtomicMaxRet(T1 *address, T2 val,
   using NT1 = typename normalize_atomic_type<T1>::type;
   if constexpr (std::is_same_v<NT1, half> ||
                 std::is_same_v<NT1, __nv_bfloat16>) {
-    return static_cast<T1>(atomicMax(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val)));
+    return static_cast<T1>(
+        atomicMax(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val)));
   } else {
     cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
-    return static_cast<T1>(aref.fetch_max(cuda_cast<NT1>(val), cuda::memory_order(memory_order)));
+    return static_cast<T1>(
+        aref.fetch_max(cuda_cast<NT1>(val), cuda::memory_order(memory_order)));
   }
 }
 
@@ -85,10 +87,12 @@ TL_DEVICE T1 AtomicMinRet(T1 *address, T2 val,
   using NT1 = typename normalize_atomic_type<T1>::type;
   if constexpr (std::is_same_v<NT1, half> ||
                 std::is_same_v<NT1, __nv_bfloat16>) {
-    return static_cast<T1>(atomicMin(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val)));
+    return static_cast<T1>(
+        atomicMin(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val)));
   } else {
     cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
-    return static_cast<T1>(aref.fetch_min(cuda_cast<NT1>(val), cuda::memory_order(memory_order)));
+    return static_cast<T1>(
+        aref.fetch_min(cuda_cast<NT1>(val), cuda::memory_order(memory_order)));
   }
 }
 
@@ -111,10 +115,12 @@ TL_DEVICE T1 AtomicAddRet(T1 *address, T2 val,
   using NT1 = typename normalize_atomic_type<T1>::type;
   if constexpr (std::is_same_v<NT1, half> ||
                 std::is_same_v<NT1, __nv_bfloat16>) {
-    return static_cast<T1>(atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val)));
+    return static_cast<T1>(
+        atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val)));
   } else {
     cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
-    return static_cast<T1>(aref.fetch_add(cuda_cast<NT1>(val), cuda::memory_order(memory_order)));
+    return static_cast<T1>(
+        aref.fetch_add(cuda_cast<NT1>(val), cuda::memory_order(memory_order)));
   }
 }
 

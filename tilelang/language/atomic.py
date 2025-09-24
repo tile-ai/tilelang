@@ -4,8 +4,8 @@
 
 import tilelang.language as T
 from tvm import ir
-from tvm.tir import PrimExpr, Buffer, BufferLoad, BufferRegion, Var, op
-from typing import List, Union, Optional
+from tvm.tir import PrimExpr, Buffer, BufferRegion, Var, op
+from typing import Optional
 
 _MEMORY_ORDER_ID_MAP = {
     "relaxed": 0,
@@ -17,7 +17,10 @@ _MEMORY_ORDER_ID_MAP = {
 }
 
 
-def atomic_max(dst: Buffer, value: PrimExpr, memory_order: Optional[str] = None, return_prev: bool = False) -> PrimExpr:
+def atomic_max(dst: Buffer,
+               value: PrimExpr,
+               memory_order: Optional[str] = None,
+               return_prev: bool = False) -> PrimExpr:
     """
     Perform an atomic maximum on the value stored at dst with an optional memory-order.
 
@@ -61,7 +64,10 @@ def atomic_max(dst: Buffer, value: PrimExpr, memory_order: Optional[str] = None,
                              _MEMORY_ORDER_ID_MAP[memory_order])
 
 
-def atomic_min(dst: Buffer, value: PrimExpr, memory_order: Optional[str] = None, return_prev: bool = False) -> PrimExpr:
+def atomic_min(dst: Buffer,
+               value: PrimExpr,
+               memory_order: Optional[str] = None,
+               return_prev: bool = False) -> PrimExpr:
     """
     Atomically update the value at dst to the minimum of its current value and value.
 
@@ -107,7 +113,10 @@ def atomic_min(dst: Buffer, value: PrimExpr, memory_order: Optional[str] = None,
                              _MEMORY_ORDER_ID_MAP[memory_order])
 
 
-def atomic_add(dst: Buffer, value: PrimExpr, memory_order: Optional[str] = None, return_prev: bool = False) -> PrimExpr:
+def atomic_add(dst: Buffer,
+               value: PrimExpr,
+               memory_order: Optional[str] = None,
+               return_prev: bool = False) -> PrimExpr:
     """
     Atomically add `value` into `dst`, returning a handle to the operation.
 
@@ -210,7 +219,8 @@ def atomic_add(dst: Buffer, value: PrimExpr, memory_order: Optional[str] = None,
     # Note: tile-region-based atomic operations don't support return_prev yet
     # This would need to be implemented in the tile runtime
     if return_prev:
-        raise NotImplementedError("return_prev is not supported for tile-region-based atomic operations")
+        raise NotImplementedError(
+            "return_prev is not supported for tile-region-based atomic operations")
 
     return T.call_intrin("handle", op.Op.get("tl.atomicadd"), value, dst)
 
@@ -249,19 +259,7 @@ def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> Pri
         >>>             atomic_addx2(global_grads[i, j:j+2], grads[i, j:j+2])
     """
     func_name = "AtomicAddx2Ret" if return_prev else "AtomicAddx2"
-    return_type = "handle"  # For vector operations, we need to determine the appropriate return type
-
-    if return_prev:
-        # For return types, we need to infer the vector type based on dst.dtype
-        if "half" in str(dst.dtype).lower():
-            return_type = "half2"
-        elif "bfloat16" in str(dst.dtype).lower():
-            return_type = "__nv_bfloat162"
-        elif "float" in str(dst.dtype).lower():
-            return_type = "float2"
-        else:
-            return_type = "handle"  # Fallback
-
+    return_type = dst.dtype if return_prev else "handle"
     return T.call_extern(return_type, func_name, T.address_of(dst), T.address_of(value))
 
 
@@ -299,15 +297,7 @@ def atomic_addx4(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> Pri
         >>> atomic_addx4(rgba_dst, rgba_add)  # Atomic blend of all 4 channels
     """
     func_name = "AtomicAddx4Ret" if return_prev else "AtomicAddx4"
-    return_type = "handle"
-
-    if return_prev:
-        # For float4 operations
-        if "float" in str(dst.dtype).lower():
-            return_type = "float4"
-        else:
-            return_type = "handle"  # Fallback
-
+    return_type = "float4" if "float" in str(dst.dtype).lower() else "handle"
     return T.call_extern(return_type, func_name, T.address_of(dst), T.address_of(value))
 
 

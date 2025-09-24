@@ -4,10 +4,10 @@
 #include <cuda_runtime.h>
 #endif
 
+#include "atomic.h"
 #include <cutlass/fast_math.h>
 #include <cutlass/numeric_types.h>
 #include <math_constants.h>
-#include "atomic.h"
 
 using cutlass::bfloat16_t;
 using cutlass::half_t;
@@ -137,7 +137,6 @@ TL_DEVICE unsigned int cast_smem_ptr_to_int(const void *const smem_ptr) {
                : "l"(smem_ptr));
   return smem_int;
 }
-
 
 // DP4A
 template <typename InDatatype, typename OutDatatype>
