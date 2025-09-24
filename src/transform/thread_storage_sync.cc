@@ -32,12 +32,12 @@
 #include <unordered_set>
 #include <utility>
 
+#include "../op/builtin.h"
 #include "./common/thread_sync_types.h"
 #include "./storage_access.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/transforms/ir_utils.h"
-#include "../op/builtin.h"
 
 namespace tvm {
 namespace tl {
@@ -771,9 +771,8 @@ tvm::transform::Pass ThreadSync(const String &storage_scope) {
                                    const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
     // Check if thread storage sync is disabled
-    bool disable_syncthreads = ctx->GetConfig(kDisableThreadStorageSync, Bool(false))
-                                   .value()
-                                   ->value;
+    bool disable_syncthreads =
+        ctx->GetConfig(kDisableThreadStorageSync, Bool(false)).value()->value;
     if (disable_syncthreads) {
       return f;
     }
