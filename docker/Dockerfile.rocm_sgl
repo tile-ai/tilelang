@@ -1,3 +1,5 @@
+# docker build command => docker build --build-arg USERNAME=<username> --build-arg TOKEN=<token> -f Dockerfile.rocm_sgl -t <tag> .
+
 # FROM rocm/pytorch:rocm6.3.2_ubuntu22.04_py3.10_pytorch_release_2.4.0
 #FROM rocm/sgl-dev:v0.5.3rc0-rocm700-mi30x-20250922 # This works
 FROM rocm/sgl-dev:v0.5.3rc0-rocm700-mi35x-20250922
@@ -8,6 +10,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV LIBGL_ALWAYS_INDIRECT=1
 # Optional locale setting
 RUN echo "LC_ALL=en_US.UTF-8" >> /etc/environment
+
+ARG USERNAME=""
+ARG TOKEN=""
 
 # System dependencies (no conda, no venv)
 # Note: libgtest-dev/libgmock-dev ship sources only; we build their libs below.
@@ -36,7 +41,7 @@ RUN python3 -m pip install --upgrade pip setuptools wheel cmake ninja \
 
 # Clone and install tilelang (leave all submodules as-is except CK)
 # Run the installer explicitly with bash so 'source' works.
-RUN git clone https://github.com/hubertlu-tw/tilelang.git --recursive -b sgl_build tilelang \
+RUN git clone https://${USERNAME}:${TOKEN}@github.com/hubertlu-tw/tilelang.git --recursive -b sgl_build tilelang \
  && cd tilelang \
  && git submodule update --init --recursive \
  # Tell Git NOT to touch CK on future `git submodule update`
@@ -52,4 +57,3 @@ RUN git clone https://github.com/hubertlu-tw/tilelang.git --recursive -b sgl_bui
 SHELL ["/bin/bash", "-l", "-c"]
 
 CMD ["bash"]
-
