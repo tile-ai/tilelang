@@ -22,13 +22,11 @@
 #if defined(TILELANG_HAVE_FP8_E4M3_FN)
   using fp8_e4_t            = __hip_fp8_e4m3_fn;
   using fp8_e4_2_t          = __hip_fp8x2_e4m3_fn;
-  using fp8_e4_4_t          = __hip_fp8x4_e4m3_fn;
   using fp8_e4_4_storage_t  = __hip_fp8x4_e4m3_fn;
 #else
   // FNUZ path (MI300X and universal fallback)
   using fp8_e4_t            = __hip_fp8_e4m3_fnuz;
   using fp8_e4_2_t          = __hip_fp8x2_e4m3_fnuz;
-  using fp8_e4_4_t          = __hip_fp8x4_e4m3_fnuz;
   using fp8_e4_4_storage_t  = __hip_fp8x4_e4m3_fnuz;
 #endif
 
