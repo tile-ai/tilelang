@@ -305,7 +305,6 @@ private:
     for (const auto &buffer : workspaces_)
       block_ptr->alloc_buffers.push_back(buffer);
     workspaces_.clear();
-    block_ptr->annotations.erase(attr::kLayoutMap);
     return block;
   }
 
