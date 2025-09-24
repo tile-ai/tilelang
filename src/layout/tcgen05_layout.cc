@@ -1,6 +1,3 @@
-// Copyright (c) Tile-AI Corporation.
-// Licensed under the MIT License.
-
 /*!
  * \file layout/tcgen05_layout.cc
  * \brief Define Layout used in tcgen05.ld/st.

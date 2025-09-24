@@ -1,5 +1,3 @@
-// Copyright (c) Tile-AI Corporation.
-// Licensed under the MIT License.
 /*!
  *  \file lower_shared_tmem.cc
  *  \brief Convert shared.tmem buffers to plain shared + ptx init, and do

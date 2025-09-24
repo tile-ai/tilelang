@@ -1,5 +1,3 @@
-# Copyright (c) Tile-AI Corporation.
-# Licensed under the MIT License.
 """The language interface for tl programs."""
 
 import tilelang.language as T
