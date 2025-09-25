@@ -3,7 +3,10 @@ import tilelang.testing
 import example_mha_sink_fwd_bhsd
 import example_mha_sink_fwd_bhsd_wgmma_pipelined
 import example_gqa_sink_fwd_bhsd_wgmma_pipelined
+import example_mha_sink_bwd_bhsd
 
+
+# fwd
 
 @tilelang.testing.requires_cuda
 def test_example_mha_sink_fwd_bhsd_full_attn():
@@ -37,6 +40,13 @@ def test_example_gqa_sink_fwd_bhsd_wgmma_pipelined_full_attn():
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_example_gqa_sink_fwd_bhsd_wgmma_pipelined_sliding_window():
     example_gqa_sink_fwd_bhsd_wgmma_pipelined.main(window_size=128)
+
+
+# bwd
+
+@tilelang.testing.requires_cuda
+def test_example_mha_sink_bwd_bhsd():
+    example_mha_sink_bwd_bhsd.main()
 
 
 if __name__ == "__main__":
