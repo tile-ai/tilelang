@@ -79,8 +79,7 @@ struct TensorMapArgs {
        << "globalDim      " << ArrayToStr(globalDim, tensorRank) << '\n'
        << "globalStrides  " << ArrayToStr(globalStride, tensorRank) << '\n'
        << "boxDim         " << ArrayToStr(boxDim, tensorRank) << '\n'
-       << "elementStrides " << ArrayToStr(elementStrides, tensorRank)
-       << '\n'
+       << "elementStrides " << ArrayToStr(elementStrides, tensorRank) << '\n'
        << "interleave     " << interleave << '\n'
        << "swizzle        " << swizzle << '\n'
        << "l2Promotion    " << l2Promotion << '\n'
@@ -92,20 +91,19 @@ struct TensorMapArgs {
 // set device api
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def_packed(
-      "tvm_tensormap_create_tiled", [](PackedArgs args, Any *ret) {
-        TensorMapArgs T = TensorMapArgs::Extract(args);
-        CUresult result = cuTensorMapEncodeTiled(
-            T.map, T.type, T.tensorRank, T.globalAddress, T.globalDim,
-            T.globalStride + 1, T.boxDim, T.elementStrides, T.interleave,
-            T.swizzle, T.l2Promotion, T.oobFill);
-        if (result != CUDA_SUCCESS) {
-          LOG_FATAL << "Failed to initialize the TMA descriptor " << result
-                    << '\n'
-                    << T.ToDebugString();
-        }
-        *ret = static_cast<int>(result);
-      });
+  refl::GlobalDef().def_packed("tvm_tensormap_create_tiled", [](PackedArgs args,
+                                                                Any *ret) {
+    TensorMapArgs T = TensorMapArgs::Extract(args);
+    CUresult result = cuTensorMapEncodeTiled(
+        T.map, T.type, T.tensorRank, T.globalAddress, T.globalDim,
+        T.globalStride + 1, T.boxDim, T.elementStrides, T.interleave, T.swizzle,
+        T.l2Promotion, T.oobFill);
+    if (result != CUDA_SUCCESS) {
+      LOG_FATAL << "Failed to initialize the TMA descriptor " << result << '\n'
+                << T.ToDebugString();
+    }
+    *ret = static_cast<int>(result);
+  });
 });
 
 struct TensorMapIm2ColArgs {
@@ -173,8 +171,7 @@ struct TensorMapIm2ColArgs {
        << ArrayToStr(pixelBoxLowerCorner, tensorRank - 2) << '\n'
        << "pixelBoxUpperCorner  "
        << ArrayToStr(pixelBoxUpperCorner, tensorRank - 2) << '\n'
-       << "elementStrides " << ArrayToStr(elementStrides, tensorRank)
-       << '\n'
+       << "elementStrides " << ArrayToStr(elementStrides, tensorRank) << '\n'
        << "interleave     " << interleave << '\n'
        << "swizzle        " << swizzle << '\n'
        << "l2Promotion    " << l2Promotion << '\n'
