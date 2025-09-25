@@ -17,6 +17,7 @@ def __log(x):
     x = tir.convert(x)
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log"), x)
 
+
 def __log2(x):
     """Calculate log2(x) with fast math
 
@@ -33,6 +34,7 @@ def __log2(x):
     x = tir.convert(x)
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log2"), x)
 
+
 def __log10(x):
     """Calculate log10(x) with fast math
 
@@ -48,6 +50,7 @@ def __log10(x):
     """
     x = tir.convert(x)
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__log10"), x)
+
 
 def __tan(x):
     """Calculate tan(x) with fast math
@@ -99,6 +102,7 @@ def __sin(x):
     x = tir.convert(x)
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__sin"), x)
 
+
 def __exp10(x):
     """Calculate 10**x with fast math
 
@@ -114,6 +118,7 @@ def __exp10(x):
     """
     x = tir.convert(x)
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__exp10"), x)
+
 
 def __exp(x):
     """Calculate 2**x with fast math
@@ -131,6 +136,7 @@ def __exp(x):
     x = tir.convert(x)
     return tir.call_intrin(x.dtype, tir.op.Op.get("tl.__exp"), x)
 
+
 __all__ = [
     "__log",  # noqa: F401
     "__log2",  # noqa: F401
@@ -139,5 +145,5 @@ __all__ = [
     "__cos",  # noqa: F401
     "__sin",  # noqa: F401
     "__exp10",  # noqa: F401
-    "__exp",  # noqa: F401 
+    "__exp",  # noqa: F401
 ]

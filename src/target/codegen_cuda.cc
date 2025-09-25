@@ -25,21 +25,21 @@ struct CUDAMath {
   std::string operator()(DataType t, std::string name) const {
     if (t.is_float()) {
       switch (t.bits()) {
-        case 64:
-          return name;
-        case 32:
-          return name + 'f';
-        case 16: {
-          if (name == "fabs") {
-            return "__habs";
-          } else if (name == "round") {
-            return "hrint";
-          } else {
-            return "h" + name;
-          }
+      case 64:
+        return name;
+      case 32:
+        return name + 'f';
+      case 16: {
+        if (name == "fabs") {
+          return "__habs";
+        } else if (name == "round") {
+          return "hrint";
+        } else {
+          return "h" + name;
         }
-        default:
-          return "";
+      }
+      default:
+        return "";
       }
     } else if (t.is_bfloat16()) {
       if (name == "fabs") {
@@ -51,18 +51,17 @@ struct CUDAMath {
       }
     } else if (t.is_int() || t.is_uint()) {
       switch (t.bits()) {
-        case 32:
-          return "__" + name;
-        case 64:
-          return "__" + name + "ll";
-        default:
-          return "";
+      case 32:
+        return "__" + name;
+      case 64:
+        return "__" + name + "ll";
+      default:
+        return "";
       }
     }
     return "";
   }
 };
-
 
 struct CUDAFastMath : public CUDAMath {
   std::string operator()(DataType t, std::string name) const {

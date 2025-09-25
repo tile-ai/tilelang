@@ -75,7 +75,6 @@ static constexpr const char *kDynamicAlignment = "tl.dynamic_alignment";
  */
 DataType cuTensorMapType();
 
-
 // fast math related op
 TVM_DLL const Op &__exp();
 TVM_DLL const Op &__exp10();
