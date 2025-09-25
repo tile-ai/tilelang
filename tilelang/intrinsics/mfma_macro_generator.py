@@ -293,52 +293,27 @@ class MatrixCoreIntrinEmitter(object):
             rk=0,
         ):
             tx, warp_n, _ = self.extract_thread_binding(thread_binding)
+            if is_transposed:
+                for j in T.serial(warp_cols):
+                    for local_id in T.vectorized(k_pack * local_size_b):
+                        row, col = T.meta_var(reverse_index_map(tx, local_id))
+                        l, r = (
+                            warp_n * warp_col_tiles + j * micro_size_y,
+                            rk * chunk + ki * (k_pack * micro_size_k),
+                        )
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[l + row,
+                                                                                         r + col]
 
-            # 4 dim
-            if self.b_preshuffle:
-                if is_transposed:
-                    for j in T.serial(warp_cols):
-                        for local_id in T.vectorized(k_pack * local_size_b):
-                            row, col = T.meta_var(reverse_index_map(tx, local_id))
-                            l, r = (
-                                warp_n * warp_cols + j,
-                                rk * (chunk // micro_size_k) + ki,
-                            )
-                            B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[l, r,
-                                                                                             row,
-                                                                                             col]
-                else:
-                    for j in T.serial(warp_cols):
-                        for local_id in T.vectorized(k_pack * local_size_b):
-                            row, col = T.meta_var(reverse_index_map(tx, local_id))
-                            l, r = (
-                                rk * (chunk // micro_size_k) + ki,
-                                warp_n * warp_cols + j,
-                            )
-                            B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[l, r,
-                                                                                             row,
-                                                                                             col]
             else:
-                if is_transposed:
-                    for j in T.serial(warp_cols):
-                        for local_id in T.vectorized(k_pack * local_size_b):
-                            row, col = T.meta_var(reverse_index_map(tx, local_id))
-                            l, r = (
-                                warp_n * warp_col_tiles + j * micro_size_y,
-                                rk * chunk + ki * (k_pack * micro_size_k),
-                            )
-                            B_local_buf[j * k_pack * local_size_b +
-                                        local_id] = B_shared_buf[l + row, r + col]
-                else:
-                    for j in T.serial(warp_cols):
-                        for local_id in T.vectorized(k_pack * local_size_b):
-                            row, col = T.meta_var(reverse_index_map(tx, local_id))
-                            l, r = (
-                                rk * chunk + ki * (k_pack * micro_size_k),
-                                warp_n * warp_col_tiles + j * micro_size_y,
-                            )
-                            B_local_buf[j * k_pack * local_size_b +
-                                        local_id] = B_shared_buf[l + row, r + col]
+                for j in T.serial(warp_cols):
+                    for local_id in T.vectorized(k_pack * local_size_b):
+                        row, col = T.meta_var(reverse_index_map(tx, local_id))
+                        l, r = (
+                            rk * chunk + ki * (k_pack * micro_size_k),
+                            warp_n * warp_col_tiles + j * micro_size_y,
+                        )
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[l + row,
+                                                                                         r + col]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
@@ -425,3 +400,210 @@ class MatrixCoreIntrinEmitter(object):
         return _warp_stmatrix_global(C_local_buf, C_buf,
                                      thread_binding) if is_global else _warp_stmatrix_shared(
                                          C_local_buf, C_buf, thread_binding)
+
+
+class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
+
+    def __init__(
+        self,
+        a_dtype: str = "float16",
+        b_dtype: str = "float16",
+        accum_dtype: str = "float16",
+        a_transposed: bool = False,
+        b_transposed: bool = False,
+        block_row_warps: int = 2,
+        block_col_warps: int = 2,
+        warp_row_tiles: int = 8,
+        warp_col_tiles: int = 8,
+        chunk: int = 16,
+        reduce_k: int = 1,
+        num_elems_per_byte: int = 1,
+        k_pack: Optional[int] = None,
+        is_m_first: Optional[bool] = False,
+        a_preshuffle: Optional[bool] = False,
+        b_preshuffle: Optional[bool] = False,
+    ):
+
+        self.a_dtype = a_dtype
+        self.b_dtype = b_dtype
+        self.accum_dtype = accum_dtype
+        self.a_transposed = a_transposed
+        self.b_transposed = b_transposed
+        # Hint Information
+        self.block_row_warps = block_row_warps
+        self.block_col_warps = block_col_warps
+        self.warp_row_tiles = warp_row_tiles
+        self.warp_col_tiles = warp_col_tiles
+        self.chunk = chunk
+        self._initialize_k_dim(a_dtype)
+        self._initialize_abbrev(a_dtype, b_dtype, accum_dtype)
+        self._initialize_local_size(self.M_DIM, self.N_DIM, self.k_dim, self.WARP_SIZE)
+        self._initialize_mfma_prefix(self.k_dim)
+        self._initialize_micro_size(self.M_DIM, self.N_DIM, self.k_dim)
+        self._initialize_k_pack(k_pack)
+        self._initialize_is_m_first(is_m_first)
+        self._initialize_preshuffle(a_preshuffle, b_preshuffle)
+
+        self.warp_rows = warp_row_tiles // self.micro_size_x
+        self.warp_cols = warp_col_tiles // self.micro_size_y
+        self.reduce_k = reduce_k
+        self.threads = (self.WARP_SIZE * (block_row_warps * block_col_warps) * reduce_k)
+        self.num_elems_per_byte = num_elems_per_byte
+
+    def _initialize_preshuffle(self, a_preshuffle: bool, b_preshuffle: bool):
+        if a_preshuffle is not None:
+            self.a_preshuffle = a_preshuffle
+        if b_preshuffle is not None:
+            self.b_preshuffle = b_preshuffle
+
+    def ldmatrix_a(self, A_local_buf, A_buf, ki, rk=0, pid_m=None, pid_n=None):
+        warp_rows = self.warp_rows
+        chunk = self.chunk
+        micro_size_k = self.micro_size_k
+        local_size_a = self.local_size_a
+        k_pack = self.k_pack
+        is_transposed = self.a_transposed
+        current_frame = T.KernelLaunchFrame.Current()
+        thread_binding = current_frame.get_thread_binding()
+        _, reverse_index_map = self.get_ldmatrix_index_map(is_b=False)
+        is_global = pid_m is not None and pid_n is not None
+
+        # no preshuffle, use the default implementation
+        if self.a_preshuffle is False:
+            return super().ldmatrix_a(A_local_buf, A_buf, ki, rk)
+
+        def _warp_ldmatrix_a_global(
+            A_local_buf,
+            A_buf,
+            ki,
+            thread_binding,
+            rk=0,
+        ):
+            tx, _, warp_m = self.extract_thread_binding(thread_binding)
+            if is_transposed:
+                for i in T.serial(warp_rows):
+                    for local_id in T.vectorized(k_pack * local_size_a):
+                        row, col = T.meta_var(reverse_index_map(tx, local_id))
+                        l, r = (
+                            rk * (chunk // micro_size_k) + ki,
+                            (pid_m * self.block_row_warps + warp_m) * warp_rows + i,
+                        )
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[l, r, row, col]
+            else:
+                for i in T.serial(warp_rows):
+                    for local_id in T.vectorized(k_pack * local_size_a):
+                        row, col = T.meta_var(reverse_index_map(tx, local_id))
+                        l, r = (
+                            (pid_m * self.block_row_warps + warp_m) * warp_rows + i,
+                            rk * (chunk // micro_size_k) + ki,
+                        )
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_buf[l, r, row, col]
+
+        @T.macro
+        def _warp_ldmatrix_a_shared(
+            A_local_buf,
+            A_shared_buf,
+            ki,
+            thread_binding,
+            rk=0,
+        ):
+            tx, _, warp_m = self.extract_thread_binding(thread_binding)
+            if is_transposed:
+                for i in T.serial(warp_rows):
+                    for local_id in T.vectorized(k_pack * local_size_a):
+                        row, col = T.meta_var(reverse_index_map(tx, local_id))
+                        l, r = (
+                            rk * (chunk // micro_size_k) + ki,
+                            warp_m * warp_rows + i,
+                        )
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_shared_buf[l, r, row,
+                                                                                         col]
+            else:
+                print(self.a_preshuffle)
+                for i in T.serial(warp_rows):
+                    for local_id in T.vectorized(k_pack * local_size_a):
+                        row, col = T.meta_var(reverse_index_map(tx, local_id))
+                        l, r = (warp_m * warp_rows + i, rk * (chunk // micro_size_k) + ki)
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_shared_buf[l, r, row,
+                                                                                         col]
+
+        return _warp_ldmatrix_a_global(A_local_buf, A_buf, ki, thread_binding,
+                                       rk) if is_global else _warp_ldmatrix_a_shared(
+                                           A_local_buf, A_buf, ki, thread_binding, rk)
+
+    def ldmatrix_b(self, B_local_buf, B_buf, ki, rk=0, pid_m=None, pid_n=None):
+        warp_cols = self.warp_cols
+        chunk = self.chunk
+        micro_size_k = self.micro_size_k
+        local_size_b = self.local_size_b
+        k_pack = self.k_pack
+        is_transposed = self.b_transposed
+        current_frame = T.KernelLaunchFrame.Current()
+        thread_binding = current_frame.get_thread_binding()
+        _, reverse_index_map = self.get_ldmatrix_index_map(is_b=True)
+        is_global = pid_m is not None and pid_n is not None
+
+        if self.b_preshuffle is False:
+            return super().ldmatrix_b(B_local_buf, B_buf, ki, rk, pid_m, pid_n)
+
+        @T.macro
+        def _warp_ldmatrix_b_global(
+            B_local_buf,
+            B_buf,
+            ki,
+            thread_binding,
+            rk=0,
+        ):
+            tx, warp_n, _ = self.extract_thread_binding(thread_binding)
+            if is_transposed:
+                for j in T.serial(warp_cols):
+                    for local_id in T.vectorized(k_pack * local_size_b):
+                        row, col = T.meta_var(reverse_index_map(tx, local_id))
+                        l, r = (
+                            (pid_n * self.block_col_warps + warp_n) * warp_cols + j,
+                            rk * (chunk // micro_size_k) + ki,
+                        )
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[l, r, row, col]
+            else:
+                for j in T.serial(warp_cols):
+                    for local_id in T.vectorized(k_pack * local_size_b):
+                        row, col = T.meta_var(reverse_index_map(tx, local_id))
+                        l, r = (
+                            rk * (chunk // micro_size_k) + ki,
+                            (pid_n * self.block_col_warps + warp_n) * warp_cols + j,
+                        )
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_buf[l, r, row, col]
+
+        @T.macro
+        def _warp_ldmatrix_b_shared(
+            B_local_buf,
+            B_shared_buf,
+            ki,
+            thread_binding,
+            rk=0,
+        ):
+            tx, warp_n, _ = self.extract_thread_binding(thread_binding)
+            if is_transposed:
+                for j in T.serial(warp_cols):
+                    for local_id in T.vectorized(k_pack * local_size_b):
+                        row, col = T.meta_var(reverse_index_map(tx, local_id))
+                        l, r = (
+                            warp_n * warp_cols + j,
+                            rk * (chunk // micro_size_k) + ki,
+                        )
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[l, r, row,
+                                                                                         col]
+            else:
+                for j in T.serial(warp_cols):
+                    for local_id in T.vectorized(k_pack * local_size_b):
+                        row, col = T.meta_var(reverse_index_map(tx, local_id))
+                        l, r = (
+                            rk * (chunk // micro_size_k) + ki,
+                            warp_n * warp_cols + j,
+                        )
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[l, r, row,
+                                                                                         col]
+
+        return _warp_ldmatrix_b_global(B_local_buf, B_buf, ki, thread_binding,
+                                       rk) if is_global else _warp_ldmatrix_b_shared(
+                                           B_local_buf, B_buf, ki, thread_binding, rk)

@@ -150,7 +150,7 @@ def flashattn(
             scores_scale = T.alloc_fragment([block_M], accum_dtype)
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
-            sinks = T.alloc_fragment([heads], dtype)
+            sinks = T.alloc_fragment([block_M], dtype)
 
             T.copy(Q[bz, by, bx * block_M:(bx + 1) * block_M, :], Q_shared)
             T.fill(acc_o, 0)
@@ -366,9 +366,9 @@ def gen_inputs(B, H, Sq, Skv, D,
 
 def main(
     batch: int = 1,
-    heads: int = 64,
-    seq_q: int = 4096,
-    seq_kv: int = 4096,
+    heads: int = 32,
+    seq_q: int = 256,
+    seq_kv: int = 256,
     dim: int = 128,
     groups: int = 8,
     window_size: int | None = None,
