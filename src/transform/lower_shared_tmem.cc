@@ -48,7 +48,7 @@ private:
 
     Array<Buffer> tmem_buffers;
 
-    for (auto [data, buffer] : buffer_map_) {
+    for (const auto& [data, buffer] : buffer_map_) {
       const auto *ptr_type =
           buffer->data->type_annotation.as<PointerTypeNode>();
       auto storage_scope = ptr_type->storage_scope;
@@ -58,7 +58,7 @@ private:
       }
     }
 
-    if (tmem_buffers.size() == 0) {
+    if (tmem_buffers.empty()) {
       return StmtExprMutator::VisitStmt_(op);
     }
 

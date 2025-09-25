@@ -72,19 +72,19 @@ struct TensorMapArgs {
 
   std::string ToDebugString() {
     std::stringstream ss;
-    ss << "TMA Desc Addr:   " << map << std::endl
-       << "format         " << type << std::endl
-       << "dim            " << tensorRank << std::endl
-       << "gmem_address   " << globalAddress << std::endl
-       << "globalDim      " << ArrayToStr(globalDim, tensorRank) << std::endl
-       << "globalStrides  " << ArrayToStr(globalStride, tensorRank) << std::endl
-       << "boxDim         " << ArrayToStr(boxDim, tensorRank) << std::endl
+    ss << "TMA Desc Addr:   " << map << '\n'
+       << "format         " << type << '\n'
+       << "dim            " << tensorRank << '\n'
+       << "gmem_address   " << globalAddress << '\n'
+       << "globalDim      " << ArrayToStr(globalDim, tensorRank) << '\n'
+       << "globalStrides  " << ArrayToStr(globalStride, tensorRank) << '\n'
+       << "boxDim         " << ArrayToStr(boxDim, tensorRank) << '\n'
        << "elementStrides " << ArrayToStr(elementStrides, tensorRank)
-       << std::endl
-       << "interleave     " << interleave << std::endl
-       << "swizzle        " << swizzle << std::endl
-       << "l2Promotion    " << l2Promotion << std::endl
-       << "oobFill        " << oobFill << std::endl;
+       << '\n'
+       << "interleave     " << interleave << '\n'
+       << "swizzle        " << swizzle << '\n'
+       << "l2Promotion    " << l2Promotion << '\n'
+       << "oobFill        " << oobFill << '\n';
     return ss.str();
   }
 };
@@ -101,7 +101,7 @@ TVM_FFI_STATIC_INIT_BLOCK({
             T.swizzle, T.l2Promotion, T.oobFill);
         if (result != CUDA_SUCCESS) {
           LOG_FATAL << "Failed to initialize the TMA descriptor " << result
-                    << std::endl
+                    << '\n'
                     << T.ToDebugString();
         }
         *ret = static_cast<int>(result);
@@ -161,24 +161,24 @@ struct TensorMapIm2ColArgs {
 
   std::string ToDebugString() {
     std::stringstream ss;
-    ss << "TMA Desc Addr:   " << map << std::endl
-       << "format         " << type << std::endl
-       << "dim            " << tensorRank << std::endl
-       << "gmem_address   " << globalAddress << std::endl
-       << "globalDim      " << ArrayToStr(globalDim, tensorRank) << std::endl
-       << "globalStrides  " << ArrayToStr(globalStride, tensorRank) << std::endl
-       << "smem_box_pixel " << smem_box_pixel << std::endl
-       << "smem_box_channel " << smem_box_channel << std::endl
+    ss << "TMA Desc Addr:   " << map << '\n'
+       << "format         " << type << '\n'
+       << "dim            " << tensorRank << '\n'
+       << "gmem_address   " << globalAddress << '\n'
+       << "globalDim      " << ArrayToStr(globalDim, tensorRank) << '\n'
+       << "globalStrides  " << ArrayToStr(globalStride, tensorRank) << '\n'
+       << "smem_box_pixel " << smem_box_pixel << '\n'
+       << "smem_box_channel " << smem_box_channel << '\n'
        << "pixelBoxLowerCorner  "
-       << ArrayToStr(pixelBoxLowerCorner, tensorRank - 2) << std::endl
+       << ArrayToStr(pixelBoxLowerCorner, tensorRank - 2) << '\n'
        << "pixelBoxUpperCorner  "
-       << ArrayToStr(pixelBoxUpperCorner, tensorRank - 2) << std::endl
+       << ArrayToStr(pixelBoxUpperCorner, tensorRank - 2) << '\n'
        << "elementStrides " << ArrayToStr(elementStrides, tensorRank)
-       << std::endl
-       << "interleave     " << interleave << std::endl
-       << "swizzle        " << swizzle << std::endl
-       << "l2Promotion    " << l2Promotion << std::endl
-       << "oobFill        " << oobFill << std::endl;
+       << '\n'
+       << "interleave     " << interleave << '\n'
+       << "swizzle        " << swizzle << '\n'
+       << "l2Promotion    " << l2Promotion << '\n'
+       << "oobFill        " << oobFill << '\n';
     return ss.str();
   }
 };
@@ -195,7 +195,7 @@ TVM_FFI_STATIC_INIT_BLOCK({
             T.interleave, T.swizzle, T.l2Promotion, T.oobFill);
         if (result != CUDA_SUCCESS) {
           LOG_FATAL << "Failed to initialize the TMA descriptor " << result
-                    << std::endl
+                    << '\n'
                     << T.ToDebugString();
         }
         *ret = static_cast<int>(result);
