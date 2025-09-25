@@ -79,8 +79,6 @@ def run_single_arg_mathop_test(mathop_name,
         out_idx=[1],
         target="cuda",
         pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
         })
 
@@ -124,8 +122,6 @@ def run_two_arg_mathop_test(mathop_name,
         out_idx=[2],
         target="cuda",
         pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
         })
 
@@ -135,8 +131,6 @@ def run_two_arg_mathop_test(mathop_name,
         out_idx=[2],
         target="cuda",
         pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         })
 
@@ -232,8 +226,6 @@ def run_fastmath_mathop_test(mathop_name,
         out_idx=[1],
         target="cuda",
         pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         })
 
