@@ -32,11 +32,11 @@ private:
   Stmt VisitStmt_(const BlockNode *op) final {
     Block block = GetRef<Block>(op);
     Array<Buffer> alloc_buffers = op->alloc_buffers;
-
-    ICHECK(op->annotations.count(attr::kLayoutMap));
-    auto layout_map = op->annotations.Get(attr::kLayoutMap);
-    ICHECK(layout_map) << "layout map is not defined";
-    layout_map_ = layout_map->as<Map<Buffer, Layout>>().value();
+    if (op->annotations.count(attr::kLayoutMap)) {
+      auto layout_map = op->annotations.Get(attr::kLayoutMap);
+      ICHECK(layout_map) << "layout map is not defined";
+      layout_map_ = layout_map->as<Map<Buffer, Layout>>().value();
+    }
 
     // Record the mapping from buffer data var to buffer for later lookup
     for (auto buffer : alloc_buffers) {
@@ -197,6 +197,7 @@ private:
   PrimExpr GetTmemOffset(const Buffer &buffer, const Array<PrimExpr> &indices) {
     ICHECK(buffer->shape.size() == 2);
     ICHECK(indices.size() == 2);
+    ICHECK(layout_map_.defined());
     ICHECK(layout_map_.count(buffer))
         << "The layout of tmem buffer " << buffer->name
         << " is not defined in the layout map";
