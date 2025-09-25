@@ -1,11 +1,11 @@
-# Adapted from tilelang/examples/flash_attention/example_mha_sink_bwd_bhsd.py
+# Adapted from tilelang/examples/flash_attention/example_mha_bwd_bhsd.py
 
 import torch
 import tilelang
-from tilelang.autotuner import autotune
+from tilelang.autotuner import autotune  # noqa: F401
 from tilelang.profiler import do_bench
 import tilelang.language as T
-import itertools
+import itertools  # noqa: F401
 import argparse
 
 
@@ -14,15 +14,15 @@ import argparse
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
 def flashattn_fwd(
-    batch, 
-    heads, 
-    seq_len, 
-    dim,
-    window_size=None,  # None for full attention, 
-    block_M=128, 
-    block_N=128,
-    num_stages=2,
-    threads=128):
+        batch,
+        heads,
+        seq_len,
+        dim,
+        window_size=None,  # None for full attention,
+        block_M=128,
+        block_N=128,
+        num_stages=2,
+        threads=128):
 
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
@@ -66,22 +66,21 @@ def flashattn_fwd(
             # T.copy(Q_shared, Q_local)
             # for i, j in T.Parallel(block_M, dim):
             #     Q_local[i, j] *= scale
-            end = T.min(
-                T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N))
+            end = T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N))
             start = T.alloc_local([1], 'int32')
             if window_size is not None:
                 start[0] = T.max(0, (bx * block_M - window_size) // block_N)
             else:
                 start[0] = 0
-                
+
             for k in T.Pipelined(start[0], end, num_stages=num_stages):
                 T.copy(K[bz, by, k * block_N:(k + 1) * block_N, :], K_shared)
                 for i, j in T.Parallel(block_M, block_N):
                     q_idx = bx * block_M + i
                     k_idx = k * block_N + j
                     if window_size is not None:
-                        acc_s[i, j] = T.if_then_else(q_idx >= k_idx and q_idx < k_idx + window_size, 0,
-                                             -T.infinity(acc_s.dtype))
+                        acc_s[i, j] = T.if_then_else(q_idx >= k_idx and q_idx < k_idx + window_size,
+                                                     0, -T.infinity(acc_s.dtype))
                     else:
                         acc_s[i, j] = T.if_then_else(q_idx >= k_idx, 0, -T.infinity(acc_s.dtype))
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -95,7 +94,7 @@ def flashattn_fwd(
                 for i in T.Parallel(block_M):
                     if window_size is not None:
                         scores_max[i] = T.if_then_else(scores_max[i] == -T.infinity(accum_dtype), 0,
-                                                    scores_max[i])
+                                                       scores_max[i])
                     scores_scale[i] = T.exp2(scores_max_prev[i] * scale - scores_max[i] * scale)
 
                 for i, j in T.Parallel(block_M, dim):
@@ -110,7 +109,7 @@ def flashattn_fwd(
                 T.reduce_sum(acc_s, scores_sum, dim=1)
                 for i in T.Parallel(block_M):
                     logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
-                    
+
             for i in T.Parallel(block_M):
                 logsum[i] += T.exp2(sinks[i] * 1.44269504 -
                                     scores_max[i] * scale)  # The only change for attention sink
@@ -159,9 +158,8 @@ def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
 
 def make_dq_layout(dQ):
     # atomicAdd can not be vectorized, so we need to reorder dq to match the 8x8 gemm fragment
-    return T.Layout(
-        dQ.shape,
-        lambda b, h, l, d: [b, h, l // 8, d // 8, (d % 2), 4 * (l % 8) + (d % 8) // 2])
+    return T.Layout(dQ.shape,
+                    lambda b, h, l, d: [b, h, l // 8, d // 8, (d % 2), 4 * (l % 8) + (d % 8) // 2])
 
 
 @tilelang.jit(
@@ -193,16 +191,15 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
 })
 def flashattn_bwd(
-    batch, 
-    heads, 
-    seq_len, 
-    dim, 
-    window_size=None,  # None for full attention, 
-    block_M=128, 
-    block_N=128,
-    num_stages=2,
-    threads=128
-):
+        batch,
+        heads,
+        seq_len,
+        dim,
+        window_size=None,  # None for full attention,
+        block_M=128,
+        block_N=128,
+        num_stages=2,
+        threads=128):
     sm_scale = (1.0 / dim)**0.5
     scale = sm_scale * 1.44269504  # log2(e)
     shape = [batch, heads, seq_len, dim]
@@ -267,8 +264,7 @@ def flashattn_bwd(
                 for i, j in T.Parallel(block_M, block_N):
                     qkT[i, j] = T.exp2(qkT[i, j] * scale - lse_shared[j])
                 for i, j in T.Parallel(block_M, block_N):
-                    qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j],
-                                                0)
+                    qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j], 0)
                 T.copy(dO[bz, bx, k * block_N:(k + 1) * block_N, :], dst=do)
                 T.clear(dsT)
                 T.gemm(V_shared, do, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -300,13 +296,13 @@ def flashattn_bwd_dsink(batch, heads, seq_len, block=128):
     dtype = "float16"
     accum_dtype = "float"
     shape = [batch, heads, seq_len]
-    
+
     @T.prim_func
     def flash_bwd_dsink(
-        Sinks: T.Tensor([heads], dtype),  # type: ignore
-        Delta: T.Tensor(shape, accum_dtype),  # type: ignore
-        lse: T.Tensor(shape, accum_dtype),  # type: ignore
-        dsinks: T.Tensor(shape, dtype),  # type: ignore
+            Sinks: T.Tensor([heads], dtype),  # type: ignore
+            Delta: T.Tensor(shape, accum_dtype),  # type: ignore
+            lse: T.Tensor(shape, accum_dtype),  # type: ignore
+            dsinks: T.Tensor(shape, dtype),  # type: ignore
     ):
         with T.Kernel(heads, T.ceildiv(seq_len, block), batch, threads=128) as (bx, by, bz):
             sink = T.alloc_local([1], dtype)
@@ -323,7 +319,8 @@ def flashattn_bwd_dsink(batch, heads, seq_len, block=128):
             T.copy(lse_shared, lse_fragment)
             T.copy(delta_shared, delta_fragment)
             for i in T.Parallel(block):
-                dsink_fragment[i] = -T.exp2(sink[0] * 1.44269504 - lse_fragment[i]) * delta_fragment[i]
+                dsink_fragment[i] = -T.exp2(sink[0] * 1.44269504 -
+                                            lse_fragment[i]) * delta_fragment[i]
             T.copy(dsink_fragment, dst=dsink_shared)
             T.copy(dsink_shared, dsinks[bz, bx, by * block:(by + 1) * block])
 
@@ -425,13 +422,11 @@ def ref_program(query: torch.Tensor,
     return output.transpose(1, 2).contiguous()
 
 
-def main(
-    BATCH: int = 1,
-    H: int = 1,
-    N_CTX: int = 512,
-    D_HEAD: int = 64,
-    window_size: int | None = None
-):
+def main(BATCH: int = 1,
+         H: int = 1,
+         N_CTX: int = 512,
+         D_HEAD: int = 64,
+         window_size: int | None = None):
     if window_size is not None:
         print('Using sliding window attention.')
         assert window_size <= N_CTX
@@ -449,7 +444,7 @@ def main(
     V = torch.empty_like(Q).normal_().requires_grad_()
     sinks = torch.randn(H, dtype=torch.float16, device=Q.device).requires_grad_()
     dO = torch.randn_like(Q)
-    
+
     O = attention(Q, K, V, sinks, window_size)
     O.backward(dO, retain_graph=True)
     dQ, Q.grad = Q.grad.clone(), None
@@ -473,7 +468,7 @@ def main(
 
     print("All checks passed for tilelang kernels.✅")
 
-    # Only benchmark backward here 
+    # Only benchmark backward here
     def torch_bwd():
         O_ref.backward(dO, retain_graph=True)
 
