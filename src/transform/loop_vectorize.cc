@@ -23,7 +23,8 @@
  */
 
 #include "loop_vectorize.h"
-
+#include "../op/builtin.h"
+#include "../target/utils.h"
 #include "arith/int_operator.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "common/loop_vectorization_utils.h"
