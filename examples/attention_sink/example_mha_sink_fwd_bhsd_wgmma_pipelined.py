@@ -355,7 +355,7 @@ def gen_inputs(B, H, Sq, Skv, D) -> tuple[torch.Tensor, torch.Tensor, torch.Tens
 
 
 def main(batch: int = 1,
-         heads: int = 1,
+         heads: int = 32,
          seq_q: int = 256,
          seq_kv: int = 256,
          dim: int = 128,
