@@ -352,6 +352,12 @@ def sync_grid():
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"))
 
 
+def loop_break():
+    """Break out of the innermost loop.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.loop_break"))
+
+
 def cp_async_barrier_noinc(barrier_id: Union[int, PrimExpr, tir.Call]):
     """Perform a ptx async copy barrier using cp.async.mbarrier.arrive.noinc.
     """
