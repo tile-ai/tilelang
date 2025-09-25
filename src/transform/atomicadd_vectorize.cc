@@ -219,13 +219,8 @@ private:
             //        bx * stride_x + (i % (stride_x / (tx_extent *
             //        vector_size_)) * (tx_extent * vector_size_) + (tx_var_ %
             //        (stride / vector_size_)) * vector_size_]
-            const CallNode *addr_call = node->args[1].as<CallNode>();
-            if (!addr_call || addr_call->op != builtin::address_of() ||
-                addr_call->args.size() != 1) {
-              return StmtExprMutator::VisitExpr_(node);
-            }
             const BufferLoadNode *old_dst_node =
-                addr_call->args[0].as<BufferLoadNode>();
+                node->args[1].as<BufferLoadNode>();
             const BufferLoadNode *old_value_node =
                 node->args[2].as<BufferLoadNode>();
             if (!old_dst_node || !old_value_node) {

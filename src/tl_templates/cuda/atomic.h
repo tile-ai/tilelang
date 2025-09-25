@@ -41,9 +41,10 @@ template <> TL_DEVICE __nv_bfloat16 cuda_cast<__nv_bfloat16, float>(float val) {
 #endif
 
 template <typename T1, typename T2>
-TL_DEVICE void AtomicMax(T1 *address, T2 val,
+TL_DEVICE void AtomicMax(T1 &ref, T2 val,
                          int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
+  T1 *address = &ref;
   if constexpr (std::is_same_v<NT1, half> ||
                 std::is_same_v<NT1, __nv_bfloat16>) {
     atomicMax(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
@@ -54,9 +55,10 @@ TL_DEVICE void AtomicMax(T1 *address, T2 val,
 }
 
 template <typename T1, typename T2>
-TL_DEVICE T1 AtomicMaxRet(T1 *address, T2 val,
+TL_DEVICE T1 AtomicMaxRet(T1 &ref, T2 val,
                           int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
+  T1 *address = &ref;
   if constexpr (std::is_same_v<NT1, half> ||
                 std::is_same_v<NT1, __nv_bfloat16>) {
     return static_cast<T1>(
@@ -69,9 +71,10 @@ TL_DEVICE T1 AtomicMaxRet(T1 *address, T2 val,
 }
 
 template <typename T1, typename T2>
-TL_DEVICE void AtomicMin(T1 *address, T2 val,
+TL_DEVICE void AtomicMin(T1 &ref, T2 val,
                          int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
+  T1 *address = &ref;
   if constexpr (std::is_same_v<NT1, half> ||
                 std::is_same_v<NT1, __nv_bfloat16>) {
     atomicMin(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
@@ -82,9 +85,10 @@ TL_DEVICE void AtomicMin(T1 *address, T2 val,
 }
 
 template <typename T1, typename T2>
-TL_DEVICE T1 AtomicMinRet(T1 *address, T2 val,
+TL_DEVICE T1 AtomicMinRet(T1 &ref, T2 val,
                           int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
+  T1 *address = &ref;
   if constexpr (std::is_same_v<NT1, half> ||
                 std::is_same_v<NT1, __nv_bfloat16>) {
     return static_cast<T1>(
@@ -97,9 +101,10 @@ TL_DEVICE T1 AtomicMinRet(T1 *address, T2 val,
 }
 
 template <typename T1, typename T2>
-TL_DEVICE void AtomicAdd(T1 *address, T2 val,
+TL_DEVICE void AtomicAdd(T1 &ref, T2 val,
                          int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
+  T1 *address = &ref;
   if constexpr (std::is_same_v<NT1, half> ||
                 std::is_same_v<NT1, __nv_bfloat16>) {
     atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
@@ -110,9 +115,10 @@ TL_DEVICE void AtomicAdd(T1 *address, T2 val,
 }
 
 template <typename T1, typename T2>
-TL_DEVICE T1 AtomicAddRet(T1 *address, T2 val,
+TL_DEVICE T1 AtomicAddRet(T1 &ref, T2 val,
                           int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
+  T1 *address = &ref;
   if constexpr (std::is_same_v<NT1, half> ||
                 std::is_same_v<NT1, __nv_bfloat16>) {
     return static_cast<T1>(
@@ -124,60 +130,60 @@ TL_DEVICE T1 AtomicAddRet(T1 *address, T2 val,
   }
 }
 
-TL_DEVICE void AtomicAddx2(half_t *address, half_t *val) {
-  atomicAdd(reinterpret_cast<half2 *>(address),
+TL_DEVICE void AtomicAddx2(half_t *ref, half_t *val) {
+  atomicAdd(reinterpret_cast<half2 *>(ref),
             static_cast<half2>(*reinterpret_cast<half2 *>(val)));
 }
 
-TL_DEVICE half2 AtomicAddx2Ret(half_t *address, half_t *val) {
-  return atomicAdd(reinterpret_cast<half2 *>(address),
+TL_DEVICE half2 AtomicAddx2Ret(half_t *ref, half_t *val) {
+  return atomicAdd(reinterpret_cast<half2 *>(ref),
                    static_cast<half2>(*reinterpret_cast<half2 *>(val)));
 }
 
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 750))
-TL_DEVICE void AtomicAddx2(bfloat16_t *address, bfloat16_t *val) {
+TL_DEVICE void AtomicAddx2(bfloat16_t *ref, bfloat16_t *val) {
   atomicAdd(
-      reinterpret_cast<__nv_bfloat162 *>(address),
+      reinterpret_cast<__nv_bfloat162 *>(ref),
       static_cast<__nv_bfloat162>(*reinterpret_cast<__nv_bfloat162 *>(val)));
 }
 
-TL_DEVICE __nv_bfloat162 AtomicAddx2Ret(bfloat16_t *address, bfloat16_t *val) {
+TL_DEVICE __nv_bfloat162 AtomicAddx2Ret(bfloat16_t *ref, bfloat16_t *val) {
   return atomicAdd(
-      reinterpret_cast<__nv_bfloat162 *>(address),
+      reinterpret_cast<__nv_bfloat162 *>(ref),
       static_cast<__nv_bfloat162>(*reinterpret_cast<__nv_bfloat162 *>(val)));
 }
 #endif
 
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 900))
-TL_DEVICE void AtomicAddx2(float *address, float *val) {
-  atomicAdd(reinterpret_cast<float2 *>(address),
+TL_DEVICE void AtomicAddx2(float *ref, float *val) {
+  atomicAdd(reinterpret_cast<float2 *>(ref),
             static_cast<float2>(*reinterpret_cast<float2 *>(val)));
 }
 
-TL_DEVICE float2 AtomicAddx2Ret(float *address, float *val) {
-  return atomicAdd(reinterpret_cast<float2 *>(address),
+TL_DEVICE float2 AtomicAddx2Ret(float *ref, float *val) {
+  return atomicAdd(reinterpret_cast<float2 *>(ref),
                    static_cast<float2>(*reinterpret_cast<float2 *>(val)));
 }
 
-TL_DEVICE void AtomicAddx4(float *address, float *val) {
-  atomicAdd(reinterpret_cast<float4 *>(address),
+TL_DEVICE void AtomicAddx4(float *ref, float *val) {
+  atomicAdd(reinterpret_cast<float4 *>(ref),
             static_cast<float4>(*reinterpret_cast<float4 *>(val)));
 }
 
-TL_DEVICE float4 AtomicAddx4Ret(float *address, float *val) {
-  return atomicAdd(reinterpret_cast<float4 *>(address),
+TL_DEVICE float4 AtomicAddx4Ret(float *ref, float *val) {
+  return atomicAdd(reinterpret_cast<float4 *>(ref),
                    static_cast<float4>(*reinterpret_cast<float4 *>(val)));
 }
 #endif
 
-template <typename T> TL_DEVICE T AtomicLoad(T *address, int memory_order) {
-  cuda::atomic_ref<T, cuda::thread_scope_device> aref(*address);
+template <typename T> TL_DEVICE T AtomicLoad(T &ref, int memory_order) {
+  cuda::atomic_ref<T, cuda::thread_scope_device> aref(ref);
   return aref.load(cuda::memory_order(memory_order));
 }
 
 template <typename T1, typename T2>
-TL_DEVICE void AtomicStore(T1 *address, T2 value, int memory_order) {
+TL_DEVICE void AtomicStore(T1 &ref, T2 value, int memory_order) {
   using NT1 = typename normalize_atomic_type<T1>::type;
-  cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
+  cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(ref);
   aref.store(cuda_cast<NT1>(value), cuda::memory_order(memory_order));
 }
