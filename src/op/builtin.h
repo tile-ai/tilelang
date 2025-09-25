@@ -75,6 +75,17 @@ static constexpr const char *kDynamicAlignment = "tl.dynamic_alignment";
  */
 DataType cuTensorMapType();
 
+
+// fast math related op
+TVM_DLL const Op &__exp();
+TVM_DLL const Op &__exp10();
+TVM_DLL const Op &__log();
+TVM_DLL const Op &__log2();
+TVM_DLL const Op &__log10();
+TVM_DLL const Op &__tan();
+TVM_DLL const Op &__cos();
+TVM_DLL const Op &__sin();
+
 /*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load
  *
