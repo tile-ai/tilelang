@@ -149,3 +149,12 @@ def view(src: Buffer,
     if dtype is None:
         dtype = src.dtype
     return T.Tensor(shape, dtype, src.data)
+
+
+def loop_break():
+    """Break out of the current loop.
+
+    Returns:
+        tir.Call: A call to the `tl.loop_break` intrinsic.
+    """
+    return T.call_intrin("handle", op.Op.get("tl.loop_break"))
