@@ -76,6 +76,7 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
                                                t // (block_N // vec_load_b),
                                                bx * block_N + t % (block_N // vec_load_b) *
                                                (block_N // vec_load_b) + vec], T.float16(0))
+
     with tvm.target.Target(auto_target):
         mod = tvm.tir.transform.BindTarget(auto_target)(Before)
         mod = tl.transform.LayoutInference()(mod)

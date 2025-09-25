@@ -81,6 +81,7 @@ def gemm(
         else:
             raise ValueError(
                 f"Unsupported retrieve_shape argument type: {type(object)} for buffer {object}")
+
     def retrieve_stride(object: Union[tir.Buffer, tir.BufferRegion]) -> List[int]:
         if isinstance(object, tir.Buffer):
             strides = []
