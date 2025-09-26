@@ -366,9 +366,9 @@ def gen_inputs(B, H, Sq, Skv, D,
 
 def main(
     batch: int = 1,
-    heads: int = 64,
-    seq_q: int = 4096,
-    seq_kv: int = 4096,
+    heads: int = 32,
+    seq_q: int = 256,
+    seq_kv: int = 256,
     dim: int = 128,
     groups: int = 8,
     window_size: int | None = None,
