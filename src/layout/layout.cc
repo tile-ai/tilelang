@@ -82,7 +82,7 @@ void LayoutNode::RegisterReflection() {
 }
 
 void LayoutNode::UpdateAnalyzer(arith::Analyzer *analyzer) const {
-  for (const auto &[var, dom] : LayoutNode::getVarMap()) {
+  for (const auto &[var, dom] : getVarMap()) {
     analyzer->Bind(var, dom);
   }
 }

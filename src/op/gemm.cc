@@ -180,7 +180,8 @@ bool GemmNode::AllowWGMMA(int block_size, Target target) const {
 
   int warp_size = TargetGetWarpSize(target);
   int num_warps = block_size / warp_size;
-  return!ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false) && TargetIsHopper(target) && (this->M >= 64) && (num_warps % 4 == 0) &&
+  return !ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false) &&
+         TargetIsHopper(target) && (this->M >= 64) && (num_warps % 4 == 0) &&
          CheckWGMMA();
 }
 
