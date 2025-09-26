@@ -767,7 +767,6 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       int dim_A = A->shape.size();
       const int64_t mat_stride = *as_const_int(A->shape[dim_A - 2]);
       const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
-      const int64_t continuity = mat_continuous;
       results.Set(A, makeGemmABLayoutSm100(mat_stride, mat_continuous,
                                            mat_continuous, A->dtype.bits(),
                                            trans_A ? 1 : 2));

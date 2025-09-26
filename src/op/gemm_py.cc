@@ -92,8 +92,7 @@ TileOperator GemmPyNode::Clone() const {
   return GemmPy(op);
 }
 
-GemmPyNode::GemmInst GemmPyNode::GetGemmInst(int block_size,
-                                             Target target) const {
+GemmInst GemmPyNode::GetGemmInst(int block_size, Target target) const {
   int warp_size = TargetGetWarpSize(target);
   int num_warps = block_size / warp_size;
   bool allow_wgmma = TargetIsHopper(target) && (this->M >= 64) &&

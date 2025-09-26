@@ -88,7 +88,6 @@ private:
     Array<Var> new_data_vars;
     for (auto buffer : tmem_buffers) {
       auto data = buffer->data;
-      auto ptr_type = data->type_annotation.as<PointerTypeNode>();
       auto new_data =
           Var(data->name_hint, PointerType(PrimType(tmem_dtype_), "shared"));
       var_remap_.Set(data, new_data);

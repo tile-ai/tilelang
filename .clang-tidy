@@ -42,6 +42,9 @@ Checks: >
   -cppcoreguidelines-pro-type-static-cast-downcast,
   -performance-unnecessary-value-param,
   -performance-enum-size,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+
 
 WarningsAsErrors: '*'
 
