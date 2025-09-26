@@ -319,6 +319,33 @@ static int GetVectorizeSizeMax(int compute_capability, DataType dtype) {
 For VectorizeAtomicAdd(const For &for_node, const Var &thread_var,
                        const Range &thread_bounds, int compute_capability) {
 
+  auto ParseIndex = [](const PrimExpr &idx, PrimExpr &var_out,
+                       int &stride_out) -> bool {
+    int mul_count = 0, legal_mul_count = 0;
+    stride_out = -1;
+    var_out = PrimExpr();
+    PostOrderVisit(idx, [&](const ObjectRef &obj) {
+      if (const MulNode *mul = obj.as<MulNode>()) {
+        mul_count++;
+        const VarNode *var = nullptr;
+        const IntImmNode *imm = nullptr;
+        if ((var = mul->a.as<VarNode>()) && (imm = mul->b.as<IntImmNode>())) {
+          var_out = mul->a;
+          stride_out = imm->value;
+          legal_mul_count++;
+        } else if ((var = mul->b.as<VarNode>()) &&
+                   (imm = mul->a.as<IntImmNode>())) {
+          var_out = mul->b;
+          stride_out = imm->value;
+          legal_mul_count++;
+        }
+      }
+    });
+    if (mul_count == 1 && legal_mul_count == 1)
+      return true;
+    return false;
+  };
+
   int vectorize_size_max = 1;
   int stride_x = -1, stride_y = -1;
   PrimExpr bx_var, by_var;
@@ -327,33 +354,22 @@ For VectorizeAtomicAdd(const For &for_node, const Var &thread_var,
     if (const auto *call = obj.as<CallNode>()) {
       if (call->op == builtin::call_extern() && call->args.size() >= 2) {
         const auto *func_name = call->args[0].as<StringImmNode>();
-        if (func_name->value == "AtomicAdd") {
-          DataType dtype = call->args[1].as<BufferLoadNode>()->dtype;
+        if (func_name && func_name->value == "AtomicAdd") {
+          const auto *bufload = call->args[1].as<BufferLoadNode>();
+          if (!bufload || bufload->indices.size() != 2)
+            return;
+
+          DataType dtype = bufload->dtype;
           vectorize_size_max = GetVectorizeSizeMax(compute_capability, dtype);
-        }
-      }
-    }
-    if (const MulNode *mul = obj.as<MulNode>()) {
-      const VarNode *var = nullptr;
-      const IntImmNode *imm = nullptr;
-      PrimExpr var_expr;
-      if ((var = mul->a.as<VarNode>()) && (imm = mul->b.as<IntImmNode>())) {
-        var_expr = mul->a;
-      } else if ((var = mul->b.as<VarNode>()) &&
-                 (imm = mul->a.as<IntImmNode>())) {
-        var_expr = mul->b;
-      }
-      if (var && imm) {
-        if (var->name_hint == "bx") {
-          stride_x = imm->value;
-          bx_var = var_expr;
-        } else if (var->name_hint == "by") {
-          stride_y = imm->value;
-          by_var = var_expr;
+          if (!ParseIndex(bufload->indices[0], by_var, stride_y))
+            return;
+          if (!ParseIndex(bufload->indices[1], bx_var, stride_x))
+            return;
         }
       }
     }
   });
+
   if (vectorize_size_max != 1) {
     int vectorize_hint = vectorize_size_max;
     AtomicAddVectorizePlanResult res = {1, false, 0};
