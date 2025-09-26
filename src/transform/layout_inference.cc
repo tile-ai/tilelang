@@ -704,21 +704,25 @@ private:
       // Here, A_local is a register-local buffer held independently by each
       // thread, so explicit thread binding is not required.
       //
-      // We use PostOrderVisit to detect whether the buffer store targets a
-      // "local" buffer, which indicates register usage and justifies skipping
+      // We use PostOrderVisit to detect whether the loop only manuplates
+      // "local" buffers, which indicates register usage and justifies skipping
       // thread binding.
-      bool is_register_store = false;
+      bool local_register_only = true;
       PostOrderVisit(root, [&](const ObjectRef &obj) {
         if (const auto *store = obj.as<BufferStoreNode>()) {
-          if (store->buffer.scope() == "local") {
-            is_register_store = true;
+          if (store->buffer.scope() != "local") {
+            local_register_only = false;
+          }
+        } else if (const auto *load = obj.as<BufferLoadNode>()) {
+          if (load->buffer.scope() != "local") {
+            local_register_only = false;
           }
         }
       });
 
       auto loop_layout = result_.for_map[root];
       // FIXME: tell in-Parallel and out-of-Parallel `local`s apart
-      bool parallel_loop = !skip_thread_partition_;
+      bool parallel_loop = !skip_thread_partition_ && !local_register_only;
 
       if (parallel_loop) {
         for_node =

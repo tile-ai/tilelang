@@ -98,7 +98,8 @@ GemmNode::GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
   int num_warps = block_size / warp_size;
   bool allow_wgmma =
       !ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false) &&
-      TargetIsHopper(target) && (this->M >= 64) && (num_warps % 4 == 0);
+      TargetIsHopper(target) && (this->M >= 64) && (num_warps % 4 == 0) &&
+      CheckWGMMA();
   if (allow_wgmma) {
     return GemmInst::kWGMMA;
   } else if (TargetIsCDNA(target)) {
