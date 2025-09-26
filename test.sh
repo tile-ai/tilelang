@@ -1,3 +1,0 @@
-python test_metal_perf.py
-
-PYTORCH_MPS_PREFER_METAL=1 python test_metal_perf.py
