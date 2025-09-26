@@ -252,9 +252,15 @@ def flashattn_bwd(
             T.copy(V[bz, bx, by * block_M:(by + 1) * block_M, :], V_shared)
             T.clear(dv)
             T.clear(dk)
+
+
             loop_st = T.floordiv(by * block_M, block_N)
-            loop_ed = T.ceildiv(seq_len, block_N)
-            for k in T.Pipelined(loop_st, loop_ed, num_stages=num_stages):
+            loop_ed = T.alloc_local([1], 'int32')
+            if window_size is not None:
+                loop_ed[0] = T.min(T.ceildiv((by+1) * block_M + window_size, block_N), T.ceildiv(seq_len, block_N))
+            else:
+                loop_ed[0] = T.ceildiv(seq_len, block_N)
+            for k in T.Pipelined(loop_st, loop_ed[0], num_stages=num_stages):
                 T.copy(Q[bz, bx, k * block_N:(k + 1) * block_N, :], q)
                 T.clear(qkT)
                 T.gemm(K_shared, q, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -262,7 +268,12 @@ def flashattn_bwd(
                 for i, j in T.Parallel(block_M, block_N):
                     qkT[i, j] = T.exp2(qkT[i, j] * scale - lse_shared[j])
                 for i, j in T.Parallel(block_M, block_N):
-                    qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j], 0)
+                    if window_size is not None:
+                        qkT[i, j] = T.if_then_else(
+                            by * block_M + i <= k * block_N + j and by * block_M + i > k * block_N + j - window_size,
+                            qkT[i, j], 0)
+                    else:
+                        qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j], 0)
                 T.copy(dO[bz, bx, k * block_N:(k + 1) * block_N, :], dst=do)
                 T.clear(dsT)
                 T.gemm(V_shared, do, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -417,7 +428,7 @@ def ref_program(query: torch.Tensor,
 def main(BATCH: int = 1,
          H: int = 1,
          N_CTX: int = 512,
-         D_HEAD: int = 64,
+         D_HEAD: int = 128,
          window_size: int | None = None):
     if window_size is not None:
         print('Using sliding window attention.')
