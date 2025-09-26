@@ -438,11 +438,11 @@ def main(
         print("Triton: {:.2f} TFlops".format(total_flops / latency_triton * 1e-9))
 
         # Benchmark tilelang
-        latency = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500)
-        print("Tilelang: {:.2f} ms".format(latency))
-        print("Tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        latency_tilelang = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500)
+        print("Tilelang: {:.2f} ms".format(latency_tilelang))
+        print("Tilelang: {:.2f} TFlops".format(total_flops / latency_tilelang * 1e-9))
 
-        print("Speedup: {:.2f}x".format(latency_triton / latency))
+        print("Speedup: {:.2f}x".format(latency_triton / latency_tilelang))
 
 
 if __name__ == "__main__":
