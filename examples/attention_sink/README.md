@@ -14,7 +14,7 @@ $$
 dsink_h=-\sum_{b}\sum_{q}P_{b, h, q}Delta_{b, h, q}
 $$
 
-where $P_{b, h, q}$ is the propotion of $sink_h$ in the softmax in the $b$-th block, $h$-th head and $q$-th query(row).
+where $P_{b, h, q}$ is the proportion of $sink_h$ in the softmax in the $b$-th block, $h$-th head and $q$-th query(row).
 
 ## Benchmark of forward process
 
