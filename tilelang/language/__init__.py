@@ -26,6 +26,7 @@ from .parallel import Parallel  # noqa: F401
 from .pipeline import Pipelined  # noqa: F401
 from .persistent import Persistent  # noqa: F401
 from .frame import has_let_value, get_let_value  # noqa: F401
+from .math_intrinsics import *  # noqa: F401
 from .kernel import (
     Kernel,  # noqa: F401
     KernelLaunchFrame,  # noqa: F401
@@ -70,6 +71,7 @@ from .customize import (
     view,  # noqa: F401
     atomic_load,  # noqa: F401
     atomic_store,  # noqa: F401
+    loop_break,  # noqa: F401
 )
 from .logical import any_of, all_of  # noqa: F401
 from .builtin import *  # noqa: F401

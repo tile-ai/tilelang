@@ -146,7 +146,7 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
 @tilelang.jit(pass_configs={
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
 })
-def flashattn_bwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
+def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
     sm_scale = (1.0 / dim)**0.5
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     shape = [batch, seq_len, heads, dim]
@@ -184,8 +184,8 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
             dv = T.alloc_fragment([block_M, dim], accum_dtype)
             dk = T.alloc_fragment([block_M, dim], accum_dtype)
             dq = T.alloc_fragment([block_N, dim], accum_dtype)
-            dv_shared = T.alloc_shared([block_N, dim], dtype)
-            dk_shared = T.alloc_shared([block_N, dim], dtype)
+            dv_shared = T.alloc_shared([block_M, dim], dtype)
+            dk_shared = T.alloc_shared([block_M, dim], dtype)
 
             T.annotate_layout({
                 dQ: make_dq_layout(dQ),
@@ -198,7 +198,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
             T.copy(V[bz, by * block_M:(by + 1) * block_M, bx, :], V_shared)
             T.clear(dv)
             T.clear(dk)
-            loop_st = T.floordiv(by * block_M, block_N) if is_casual else 0
+            loop_st = T.floordiv(by * block_M, block_N) if is_causal else 0
             loop_ed = T.ceildiv(seq_len, block_N)
             for k in T.Pipelined(loop_st, loop_ed, num_stages=2):
                 T.copy(Q[bz, k * block_N:(k + 1) * block_N, bx, :], q)
@@ -219,7 +219,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_casual, block_M, block_N):
                 T.copy(lse[bz, bx, k * block_N:(k + 1) * block_N], lse_shared)
                 for i, j in T.Parallel(block_M, block_N):
                     qkT[i, j] = T.exp2(qkT[i, j] * scale - lse_shared[j])
-                if is_casual:
+                if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
                         qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j],
                                                    0)

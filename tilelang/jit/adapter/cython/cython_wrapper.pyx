@@ -197,12 +197,14 @@ cdef class CythonKernelWrapper:
                 tensor = inputs[ins_idx]
                 ins_idx += 1
             # TODO(chenggang): remove this check or rewrite by ourselves?
+            '''
             if isinstance(tensor, torch.Tensor) and tensor._base is not None and not tensor.is_contiguous():
                 base_tensor = tensor._base.as_strided(tensor._base.shape, tensor.stride())
                 if torch._debug_has_internal_overlap(base_tensor):
                     raise ValueError(f"Cannot use an overlapping tensor"
                                      f"(shape={tensor.shape}, strides={tensor.stride()}, "
                                      f"overlap={torch._debug_has_internal_overlap(base_tensor)}) as the kernel input")
+            '''
             tensor_list.append(tensor)
 
         # Convert tensor pointers to C void pointers for kernel call

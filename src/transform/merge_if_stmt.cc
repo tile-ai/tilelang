@@ -39,7 +39,7 @@ private:
       if (const IfThenElseNode *if_node = new_stmt.as<IfThenElseNode>()) {
         if (!if_node->else_case.defined()) {
           if (current_condition.defined() &&
-              StructuralEqual()(current_condition, if_node->condition)) {
+              ExprDeepEqual()(current_condition, if_node->condition)) {
             current_if_bodies.push_back(if_node->then_case);
             continue;
           } else {
