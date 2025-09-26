@@ -1,11 +1,10 @@
 # Adapted from tilelang/examples/flash_attention/example_mha_bwd_bhsd.py
+# Tiling sizes are based on Ampere heuristics
 
 import torch
 import tilelang
-from tilelang.autotuner import autotune  # noqa: F401
 from tilelang.profiler import do_bench
 import tilelang.language as T
-import itertools  # noqa: F401
 import argparse
 
 
@@ -19,9 +18,9 @@ def flashattn_fwd(
         seq_len,
         dim,
         window_size=None,  # None for full attention,
-        block_M=128,
-        block_N=128,
-        num_stages=2,
+        block_M=64,
+        block_N=64,
+        num_stages=1,
         threads=128):
 
     if window_size is not None:
@@ -196,9 +195,9 @@ def flashattn_bwd(
         seq_len,
         dim,
         window_size=None,  # None for full attention,
-        block_M=128,
-        block_N=128,
-        num_stages=2,
+        block_M=64,
+        block_N=64,
+        num_stages=1,
         threads=128):
     sm_scale = (1.0 / dim)**0.5
     scale = sm_scale * 1.44269504  # log2(e)
@@ -206,7 +205,6 @@ def flashattn_bwd(
     dtype = "float16"
     accum_dtype = "float"
 
-    assert window_size is None, "window_size is not supported for backward pass"
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_M"
 
@@ -306,23 +304,17 @@ def flashattn_bwd_dsink(batch, heads, seq_len, block=128):
     ):
         with T.Kernel(heads, T.ceildiv(seq_len, block), batch, threads=128) as (bx, by, bz):
             sink = T.alloc_local([1], dtype)
-            lse_shared = T.alloc_shared([block], accum_dtype)
-            delta_shared = T.alloc_shared([block], accum_dtype)
             lse_fragment = T.alloc_fragment([block], accum_dtype)
             delta_fragment = T.alloc_fragment([block], accum_dtype)
             dsink_fragment = T.alloc_fragment([block], dtype)
-            dsink_shared = T.alloc_shared([block], dtype)
 
             sink[0] = Sinks[bx]
-            T.copy(lse[bz, bx, by * block:(by + 1) * block], lse_shared)
-            T.copy(Delta[bz, bx, by * block:(by + 1) * block], delta_shared)
-            T.copy(lse_shared, lse_fragment)
-            T.copy(delta_shared, delta_fragment)
+            T.copy(lse[bz, bx, by * block:(by + 1) * block], lse_fragment)
+            T.copy(Delta[bz, bx, by * block:(by + 1) * block], delta_fragment)
             for i in T.Parallel(block):
-                dsink_fragment[i] = -T.exp2(sink[0] * 1.44269504 -
+                dsink_fragment[i] = -T.exp2(Sinks[bx] * 1.44269504 -
                                             lse_fragment[i]) * delta_fragment[i]
-            T.copy(dsink_fragment, dst=dsink_shared)
-            T.copy(dsink_shared, dsinks[bz, bx, by * block:(by + 1) * block])
+            T.copy(dsink_fragment, dsinks[bz, bx, by * block:(by + 1) * block])
 
     return flash_bwd_dsink
 
@@ -485,10 +477,10 @@ def main(BATCH: int = 1,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=8, help='Batch size')
+    parser.add_argument('--batch', type=int, default=1, help='Batch size')
     parser.add_argument('--h', type=int, default=32, help='Number of heads')
     parser.add_argument('--n_ctx', type=int, default=1024, help='Context size')
-    parser.add_argument('--d_head', type=int, default=64, help='Head dimension')
+    parser.add_argument('--d_head', type=int, default=128, help='Head dimension')
     parser.add_argument(
         '--window_size',
         type=int,
