@@ -211,7 +211,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None):  # None
     block_M, block_N, num_stages, threads = get_bwd_configs()
 
     if window_size is not None:
-        assert window_size % block_N == 0, "window_size must be divisible by block_M"
+        assert window_size % block_N == 0, "window_size must be divisible by block_N"
 
     @T.prim_func
     def flash_bwd(

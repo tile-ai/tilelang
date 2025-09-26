@@ -216,7 +216,7 @@ def flashattn_bwd(
     accum_dtype = "float"
 
     if window_size is not None:
-        assert window_size % block_N == 0, "window_size must be divisible by block_M"
+        assert window_size % block_N == 0, "window_size must be divisible by block_N"
 
     @T.prim_func
     def flash_bwd(
