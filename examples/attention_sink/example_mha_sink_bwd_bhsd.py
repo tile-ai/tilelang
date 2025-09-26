@@ -374,7 +374,6 @@ class _attention(torch.autograd.Function):
         dq = torch.zeros(shape, dtype=torch.float32, device=q.device)  # acc for atomicAdd
         dk = torch.empty(shape, dtype=torch.float16, device=q.device)
         dv = torch.empty(shape, dtype=torch.float16, device=q.device)
-        dsinks = torch.empty([BATCH, H], dtype=torch.float32, device=q.device)
         kernel(q, k, v, do, lse, delta, dq, dk, dv)
         dq = kernel_post(dq)
 
@@ -395,7 +394,7 @@ def ref_program(query: torch.Tensor,
                 sliding_window: int | None = None) -> torch.Tensor:
 
     query = query.transpose(1, 2).contiguous().unsqueeze(
-        3)  # align with the original function'sinterface
+        3)  # align with the original function's interface
     key = key.transpose(1, 2).contiguous()
     value = value.transpose(1, 2).contiguous()
 

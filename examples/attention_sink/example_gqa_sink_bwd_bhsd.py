@@ -368,7 +368,6 @@ class _attention(torch.autograd.Function):
         dq = torch.zeros(q_shape, dtype=torch.float32, device=q.device)  # acc for atomicAdd
         dk = torch.zeros(kv_shape, dtype=torch.float16, device=q.device)
         dv = torch.zeros(kv_shape, dtype=torch.float16, device=q.device)
-        dsinks = torch.empty([BATCH, H], dtype=torch.float32, device=q.device)
         kernel(q, k, v, do, lse, delta, dq, dk, dv)
         dq = kernel_post(dq)
 
