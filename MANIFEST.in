@@ -1,2 +1,10 @@
-include tvm/libtvm.so
-include tvm/libtvm_runtime.so
+include VERSION
+include CMakeLists.txt
+include requirements.txt
+include requirements-test.txt
+include requirements-dev.txt
+include tilelang/jit/adapter/cython/cython_wrapper.pyx
+recursive-include src *
+recursive-include 3rdparty *
+recursive-exclude 3rdparty/clang* * 
+recursive-exclude 3rdparty/llvm* *
