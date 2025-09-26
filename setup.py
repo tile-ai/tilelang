@@ -44,7 +44,7 @@ USE_ROCM = os.environ.get("USE_ROCM", "False").lower() == "true"
 # Build with Debug mode
 DEBUG_MODE = os.environ.get("DEBUG_MODE", "False").lower() == "true"
 # Include commit ID in wheel filename and package metadata
-WITH_COMMITID = os.environ.get("WITH_COMMITID", "False").lower() == "true"
+WITH_COMMITID = os.environ.get("WITH_COMMITID", "True").lower() == "true"
 
 
 def load_module_from_path(module_name, path):
