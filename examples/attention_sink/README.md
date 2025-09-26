@@ -8,7 +8,7 @@ We compare with an optimized version of the official Triton implementation at [h
 The only change from vanilla FlashAttention is that `sinks` should be taken into consideration in the softmax, which requires an extra rescaling at the epilogue stage.
 
 ### Backward
-Based on detailed mathematical derivation, interestingly, the backward computation process of `dQ`, `dK`, `dv` is almost identical to that in vanilla FlashAttention, except for that the specific meanings of `lse` differ. We only need to compute `dsinks`, which is given by:
+Based on detailed mathematical derivation, interestingly, the backward computation process of `dQ`, `dK`, `dv` is almost identical to that in vanilla FlashAttention, except for that the specific meanings of `lse` differ. We only need to compute `dsinks` additionally, which is given by:
 
 $$
 dsink_h=-\sum_{b}\sum_{q}P_{b, h, q}Delta_{b, h, q}
@@ -29,7 +29,7 @@ where $P_{b, h, q}$ is the proportion of $sink_h$ in the softmax in the $b$-th b
 - batch_size=1, heads=64, kv_heads=8 (the setting of GPT-OSS-120B)
 - Full attention is adopted.
 
-| SEQ_LEN | headdim | Triton TFLOPS | TileLang TFLOPS      | Speedup |
+| SEQ_LEN | headdim | Triton TFLOPs | TileLang TFLOPs      | Speedup |
 |---------|---------|---------------|----------------------|---------|
 | 2048    |   64    | 231.55        | **277.07**           | 1.20x   |
 | 2048    |  128    | 313.55        | **393.98**           | 1.26x   |
