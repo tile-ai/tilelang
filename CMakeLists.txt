@@ -108,13 +108,21 @@ endif()
 if(DEFINED TVM_PREBUILD_PATH)
   message(STATUS "Using prebuilt TVM from ${TVM_PREBUILD_PATH}")
   add_library(tvm SHARED IMPORTED)
+  find_library(TVM_LIBRARY_LOCATION
+    NAMES tvm
+    HINTS "${TVM_PREBUILD_PATH}"
+  )
   set_target_properties(tvm PROPERTIES
-    IMPORTED_LOCATION "${TVM_PREBUILD_PATH}/libtvm.so"
+    IMPORTED_LOCATION "${TVM_LIBRARY_LOCATION}"
     INTERFACE_INCLUDE_DIRECTORIES "${TVM_PREBUILD_PATH}/../include"
   )
   add_library(tvm_runtime SHARED IMPORTED)
+  find_library(TVM_RUNTIME_LIBRARY_LOCATION
+    NAMES tvm_runtime
+    HINTS "${TVM_PREBUILD_PATH}"
+  )
   set_target_properties(tvm_runtime PROPERTIES
-    IMPORTED_LOCATION "${TVM_PREBUILD_PATH}/libtvm_runtime.so"
+    IMPORTED_LOCATION "${TVM_RUNTIME_LIBRARY_LOCATION}"
     INTERFACE_INCLUDE_DIRECTORIES "${TVM_PREBUILD_PATH}/../include"
   )
 else()
@@ -155,6 +163,13 @@ if(USE_ROCM)
     src/target/rt_mod_hip.cc
   )
   list(APPEND TILE_LANG_SRCS ${TILE_LANG_HIP_SRCS})
+endif()
+
+if(USE_METAL)
+  tilelang_file_glob(GLOB TILE_LANG_METAL_SRCS
+    src/target/rt_mod_metal.cc
+  )
+  list(APPEND TILE_LANG_SRCS ${TILE_LANG_METAL_SRCS})
 endif()
 
 message(STATUS "Collected source files: ${TILE_LANG_SRCS}")
@@ -221,6 +236,9 @@ target_compile_definitions(tilelang_objs PRIVATE -DTILE_LANG_EXPORTS)
 # Shared library
 add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
 target_link_libraries(tilelang PUBLIC tvm_runtime)
+if(USE_METAL)
+  target_link_libraries(tilelang PUBLIC tvm)
+endif()
 
 # Static library
 add_library(tilelang_static STATIC $<TARGET_OBJECTS:tilelang_objs>)

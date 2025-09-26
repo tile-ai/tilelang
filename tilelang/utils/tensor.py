@@ -58,10 +58,11 @@ def adapt_torch2tvm(arg):
 def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
 
     from tilelang.engine.param import KernelParam
+    from .device import get_current_device
 
     def get_tensor(param: KernelParam) -> torch.Tensor:
         dtype: torch.dtype = param.dtype
-        device: torch.device = torch.cuda.current_device()
+        device = get_current_device()
 
         if hasattr(param, "shape") and not param.shape:
             raise ValueError(

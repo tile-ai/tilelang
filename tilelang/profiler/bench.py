@@ -3,6 +3,10 @@
 import torch
 from typing import Callable, List, Literal, Optional, Union
 
+IS_CUDA = torch.cuda.is_available()
+device = 'cuda:0' if IS_CUDA else 'mps:0'
+Event = torch.cuda.Event if IS_CUDA else torch.mps.Event
+
 
 def do_bench(
     fn: Callable,
@@ -39,25 +43,26 @@ def do_bench(
     """
     assert return_mode in ["min", "max", "mean", "median"]
     fn()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # We maintain a buffer of 256 MB that we clear
     # before each kernel call to make sure that the L2
     # doesn't contain any input data before the run
     if fast_flush:
-        cache = torch.empty(int(256e6 // 4), dtype=torch.int, device="cuda")
+        cache = torch.empty(int(256e6 // 4), dtype=torch.int, device=device)
     else:
-        cache = torch.empty(int(256e6), dtype=torch.int8, device="cuda")
+        cache = torch.empty(int(256e6), dtype=torch.int8, device=device)
 
     # Estimate the runtime of the function
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = Event(enable_timing=True)
+    end_event = Event(enable_timing=True)
     start_event.record()
     for _ in range(5):
         cache.zero_()
         fn()
     end_event.record()
-    torch.cuda.synchronize()
+    start_event.synchronize()
+    end_event.synchronize()
     estimate_ms = start_event.elapsed_time(end_event) / 5
 
     # compute number of warmup and repeat
@@ -67,8 +72,8 @@ def do_bench(
         n_warmup = _n_warmup
     if _n_repeat > 0:
         n_repeat = _n_repeat
-    start_event = [torch.cuda.Event(enable_timing=True) for i in range(n_repeat)]
-    end_event = [torch.cuda.Event(enable_timing=True) for i in range(n_repeat)]
+    start_event = [Event(enable_timing=True) for _ in range(n_repeat)]
+    end_event = [Event(enable_timing=True) for _ in range(n_repeat)]
     # Warm-up
     for _ in range(n_warmup):
         fn()
@@ -87,7 +92,8 @@ def do_bench(
         fn()
         end_event[i].record()
     # Record clocks
-    torch.cuda.synchronize()
+    [(s.synchronize(), e.synchronize()) for s, e in zip(start_event, end_event)]
+    torch.accelerator.synchronize()
     times = torch.tensor(
         [s.elapsed_time(e) for s, e in zip(start_event, end_event)],
         dtype=torch.float,
