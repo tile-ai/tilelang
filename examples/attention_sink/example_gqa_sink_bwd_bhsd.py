@@ -1,4 +1,4 @@
-# Adapted from tilelang/examples/flash_attention/example_mha_bwd_bhsd.py
+# Adapted from tilelang/examples/flash_attention/example_gqa_bwd.py
 
 import torch
 import tilelang
@@ -27,32 +27,34 @@ def flashattn_fwd(
         heads,
         seq_len,
         dim,
+        groups=1,
         window_size=None,  # None for full attention,
-        block_M=64,
-        block_N=64,
-        num_stages=1,
-        threads=128):
+        block_M=128,
+        block_N=128,
+        num_stages=2,
+        threads=256):
 
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
 
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
-    shape = [batch, heads, seq_len, dim]
+    head_kv = heads // groups
+    q_shape = [batch, heads, seq_len, dim]
+    kv_shape = [batch, head_kv, seq_len, dim]
     dtype = "float16"
     accum_dtype = "float"
 
     @T.prim_func
     def flash_fwd(
-            Q: T.Tensor(shape, dtype),  # type: ignore
-            K: T.Tensor(shape, dtype),  # type: ignore
-            V: T.Tensor(shape, dtype),  # type: ignore
-            Output: T.Tensor(shape, dtype),  # type: ignore
+            Q: T.Tensor(q_shape, dtype),  # type: ignore
+            K: T.Tensor(kv_shape, dtype),  # type: ignore
+            V: T.Tensor(kv_shape, dtype),  # type: ignore
+            Output: T.Tensor(q_shape, dtype),  # type: ignore
             lse: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
             Sinks: T.Tensor([heads], dtype),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
-            # Q_local = T.alloc_fragment([block_M, dim], dtype)
             K_shared = T.alloc_shared([block_N, dim], dtype)
             V_shared = T.alloc_shared([block_N, dim], dtype)
             acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
@@ -72,9 +74,7 @@ def flashattn_fwd(
             T.fill(scores_max, -T.infinity(accum_dtype))
             for i in T.Parallel(block_M):
                 sinks[i] = Sinks[by]
-            # T.copy(Q_shared, Q_local)
-            # for i, j in T.Parallel(block_M, dim):
-            #     Q_local[i, j] *= scale
+
             end = T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N))
             start = T.alloc_local([1], 'int32')
             if window_size is not None:
@@ -83,7 +83,7 @@ def flashattn_fwd(
                 start[0] = 0
 
             for k in T.Pipelined(start[0], end, num_stages=num_stages):
-                T.copy(K[bz, by, k * block_N:(k + 1) * block_N, :], K_shared)
+                T.copy(K[bz, by // groups, k * block_N:(k + 1) * block_N, :], K_shared)
                 for i, j in T.Parallel(block_M, block_N):
                     q_idx = bx * block_M + i
                     k_idx = k * block_N + j
@@ -94,7 +94,7 @@ def flashattn_fwd(
                         acc_s[i, j] = T.if_then_else(q_idx >= k_idx, 0, -T.infinity(acc_s.dtype))
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
-                T.copy(V[bz, by, k * block_N:(k + 1) * block_N, :], V_shared)
+                T.copy(V[bz, by // groups, k * block_N:(k + 1) * block_N, :], V_shared)
                 T.copy(scores_max, scores_max_prev)
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                 # To do causal softmax, we need to set the scores_max to 0 if it is -inf
@@ -204,39 +204,36 @@ def flashattn_bwd(
         heads,
         seq_len,
         dim,
-        window_size=None,  # None for full attention,
-    ):
-
-    block_M, block_N, num_stages, threads = get_bwd_configs()
-
+        groups,
+        window_size=None):  # None for full attention
     sm_scale = (1.0 / dim)**0.5
     scale = sm_scale * 1.44269504  # log2(e)
-    shape = [batch, heads, seq_len, dim]
+    head_kv = heads // groups
+    q_shape = [batch, heads, seq_len, dim]
+    kv_shape = [batch, head_kv, seq_len, dim]
     dtype = "float16"
     accum_dtype = "float"
+
+    block_M, block_N, num_stages, threads = get_bwd_configs()
 
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_M"
 
     @T.prim_func
     def flash_bwd(
-            Q: T.Tensor(shape, dtype),  # type: ignore
-            K: T.Tensor(shape, dtype),  # type: ignore
-            V: T.Tensor(shape, dtype),  # type: ignore
-            dO: T.Tensor(shape, dtype),  # type: ignore
+            Q: T.Tensor(q_shape, dtype),  # type: ignore
+            K: T.Tensor(kv_shape, dtype),  # type: ignore
+            V: T.Tensor(kv_shape, dtype),  # type: ignore
+            dO: T.Tensor(q_shape, dtype),  # type: ignore
             lse: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
             Delta: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
-            dQ: T.Tensor(shape, accum_dtype),  # type: ignore
-            dK: T.Tensor(shape, dtype),  # type: ignore
-            dV: T.Tensor(shape, dtype),  # type: ignore
+            dQ: T.Tensor(q_shape, accum_dtype),  # type: ignore
+            dK: T.Tensor(kv_shape, dtype),  # type: ignore
+            dV: T.Tensor(kv_shape, dtype),  # type: ignore
     ):
         with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=threads) as (bx, by, bz):
             K_shared = T.alloc_shared([block_M, dim], dtype)
             dsT_shared = T.alloc_shared([block_M, block_N], dtype)
-            # should not store K to local if dim is large
-            # K_local = T.alloc_fragment([block_M, dim], dtype)
-            # K_local_T = T.alloc_fragment([block_M, dim], dtype)
-            # V_local = T.alloc_fragment([block_M, dim], dtype)
             q = T.alloc_shared([block_N, dim], dtype)
             V_shared = T.alloc_shared([block_M, dim], dtype)
             qkT = T.alloc_fragment([block_M, block_N], accum_dtype)
@@ -258,11 +255,10 @@ def flashattn_bwd(
                 dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
                 dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
             })
-            T.copy(K[bz, bx, by * block_M:(by + 1) * block_M, :], K_shared)
-            T.copy(V[bz, bx, by * block_M:(by + 1) * block_M, :], V_shared)
+            T.copy(K[bz, bx // groups, by * block_M:(by + 1) * block_M, :], K_shared)
+            T.copy(V[bz, bx // groups, by * block_M:(by + 1) * block_M, :], V_shared)
             T.clear(dv)
             T.clear(dk)
-
 
             loop_st = T.floordiv(by * block_M, block_N)
             loop_ed = T.alloc_local([1], 'int32')
@@ -302,16 +298,17 @@ def flashattn_bwd(
                 for i, j in T.Parallel(block_N, dim):
                     if k * block_N + i < seq_len:
                         T.atomic_add(dQ[bz, bx, k * block_N + i, j], dq[i, j])
-            T.copy(dv, dv_shared)
-            T.copy(dk, dk_shared)
-            T.copy(dv_shared, dV[bz, bx, by * block_M:(by + 1) * block_M, :])
-            T.copy(dk_shared, dK[bz, bx, by * block_M:(by + 1) * block_M, :])
+
+            for i, j in T.Parallel(block_M, dim):
+                T.atomic_add(dV[bz, bx // groups, by * block_M + i, j], dv[i, j])
+            for i, j in T.Parallel(block_M, dim):
+                T.atomic_add(dK[bz, bx // groups, by * block_M + i, j], dk[i, j])
 
     return flash_bwd
 
 
 @tilelang.jit(out_idx=-1)
-def flashattn_bwd_dsink(batch, heads, seq_len, block=128):
+def flashattn_bwd_dsink(batch, heads, seq_len, block=256):
     dtype = "float16"
     accum_dtype = "float"
     shape = [batch, heads, seq_len]
@@ -323,7 +320,7 @@ def flashattn_bwd_dsink(batch, heads, seq_len, block=128):
             lse: T.Tensor(shape, accum_dtype),  # type: ignore
             dsinks: T.Tensor(shape, dtype),  # type: ignore
     ):
-        with T.Kernel(heads, T.ceildiv(seq_len, block), batch, threads=128) as (bx, by, bz):
+        with T.Kernel(heads, T.ceildiv(seq_len, block), batch, threads=256) as (bx, by, bz):
             sink = T.alloc_local([1], dtype)
             lse_fragment = T.alloc_fragment([block], accum_dtype)
             delta_fragment = T.alloc_fragment([block], accum_dtype)
@@ -343,20 +340,20 @@ def flashattn_bwd_dsink(batch, heads, seq_len, block=128):
 class _attention(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, q, k, v, sinks, window_size):
+    def forward(ctx, q, k, v, sinks, window_size, groups):
         BATCH, H, N_CTX, D_HEAD = q.shape
-        block_M = 64
-        block_N = 64 if D_HEAD <= 128 else 32
-        kernel = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, window_size, block_M, block_N)
+        kernel = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, groups, window_size)
         o, lse = kernel(q, k, v, sinks)
         ctx.save_for_backward(q, k, v, sinks, o, lse)
         ctx.window_size = window_size
+        ctx.groups = groups
         return o
 
     @staticmethod
     def backward(ctx, do):
         q, k, v, sinks, o, lse = ctx.saved_tensors
         BATCH, H, N_CTX, D_HEAD = q.shape
+        groups = ctx.groups
 
         def maybe_contiguous(x):
             if x.stride(-1) != 1:
@@ -364,23 +361,23 @@ class _attention(torch.autograd.Function):
             return x
 
         do, q, k, v, sinks, o = [maybe_contiguous(x) for x in (do, q, k, v, sinks, o)]
-        block_M = 64
-        block_N = 64 if D_HEAD <= 64 else 32
         kernel_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD)
         kernel_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD)
         delta = kernel_prep(o, do)
-        kernel = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, ctx.window_size)
-        shape = [BATCH, H, N_CTX, D_HEAD]
-        dq = torch.zeros(shape, dtype=torch.float32, device=q.device)  # acc for atomicAdd
-        dk = torch.empty(shape, dtype=torch.float16, device=q.device)
-        dv = torch.empty(shape, dtype=torch.float16, device=q.device)
+        kernel = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, groups, ctx.window_size)
+        q_shape = [BATCH, H, N_CTX, D_HEAD]
+        head_kv = H // groups
+        kv_shape = [BATCH, head_kv, N_CTX, D_HEAD]
+        dq = torch.zeros(q_shape, dtype=torch.float32, device=q.device)  # acc for atomicAdd
+        dk = torch.zeros(kv_shape, dtype=torch.float16, device=q.device)
+        dv = torch.zeros(kv_shape, dtype=torch.float16, device=q.device)
         dsinks = torch.empty([BATCH, H], dtype=torch.float32, device=q.device)
         kernel(q, k, v, do, lse, delta, dq, dk, dv)
         dq = kernel_post(dq)
 
         kernel_dsink = flashattn_bwd_dsink(BATCH, H, N_CTX)
         dsinks = kernel_dsink(sinks, delta, lse).sum(0).sum(1)
-        return dq, dk, dv, dsinks, None
+        return dq, dk, dv, dsinks, None, None
 
 
 attention = _attention.apply
@@ -394,15 +391,14 @@ def ref_program(query: torch.Tensor,
                 sinks: torch.Tensor,
                 sliding_window: int | None = None) -> torch.Tensor:
 
-    query = query.transpose(1, 2).contiguous().unsqueeze(
-        3)  # align with the original function'sinterface
     key = key.transpose(1, 2).contiguous()
     value = value.transpose(1, 2).contiguous()
-
-    batch_size, num_queries, num_key_value_heads, num_key_value_groups, head_dim = query.shape
     batch_size, num_keys, num_key_value_heads, head_dim = key.shape
-    start_q = num_keys - num_queries
+    query = query.transpose(1, 2).contiguous()
+    query = query.view(batch_size, query.shape[1], num_key_value_heads, -1, head_dim)
+    batch_size, num_queries, num_key_value_heads, num_key_value_groups, head_dim = query.shape
 
+    start_q = num_keys - num_queries
     sm_scale: float = 1.0 / head_dim**0.5
 
     sinks = sinks.view(1, num_key_value_heads, num_key_value_groups, 1, 1).float()
@@ -436,9 +432,10 @@ def ref_program(query: torch.Tensor,
 
 
 def main(BATCH: int = 1,
-         H: int = 1,
+         H: int = 8,
          N_CTX: int = 512,
-         D_HEAD: int = 128,
+         D_HEAD: int = 64,
+         groups: int = 2,
          window_size: int | None = None):
     if window_size is not None:
         print('Using sliding window attention.')
@@ -451,14 +448,15 @@ def main(BATCH: int = 1,
     total_flops = 5 * flops_per_matmul
 
     Q = (
-        torch.empty(BATCH, H, N_CTX, D_HEAD, dtype=torch.half,
+        torch.empty(BATCH, H, N_CTX, D_HEAD, dtype=torch.float16,
                     device="cuda").normal_().requires_grad_())
-    K = torch.empty_like(Q).normal_().requires_grad_()
-    V = torch.empty_like(Q).normal_().requires_grad_()
-    sinks = torch.randn(H, dtype=torch.float16, device=Q.device).requires_grad_()
+    K = torch.empty(BATCH, H // groups, N_CTX, D_HEAD,
+                    dtype=torch.float16, device="cuda").normal_().requires_grad_()
+    V = torch.empty_like(K).normal_().requires_grad_()
+    sinks = torch.randn(H, dtype=torch.float16, device="cuda").requires_grad_()
     dO = torch.randn_like(Q)
 
-    O = attention(Q, K, V, sinks, window_size)
+    O = attention(Q, K, V, sinks, window_size, groups)
     O.backward(dO, retain_graph=True)
     dQ, Q.grad = Q.grad.clone(), None
     dK, K.grad = K.grad.clone(), None
@@ -499,13 +497,14 @@ def main(BATCH: int = 1,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=1, help='Batch size')
-    parser.add_argument('--h', type=int, default=32, help='Number of heads')
+    parser.add_argument('--h', type=int, default=64, help='Number of heads')
     parser.add_argument('--n_ctx', type=int, default=1024, help='Context size')
     parser.add_argument('--d_head', type=int, default=128, help='Head dimension')
+    parser.add_argument('--groups', type=int, default=8, help='Groups')
     parser.add_argument(
         '--window_size',
         type=int,
         default=None,
         help='window size (default: None, which means full attention)')
     args = parser.parse_args()
-    main(args.batch, args.h, args.n_ctx, args.d_head, args.window_size)
+    main(args.batch, args.h, args.n_ctx, args.d_head, args.groups, args.window_size)
