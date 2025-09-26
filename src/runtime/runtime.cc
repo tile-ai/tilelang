@@ -91,8 +91,8 @@ struct TensorMapArgs {
 // set device api
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def_packed("tvm_tensormap_create_tiled", [](PackedArgs args,
-                                                                Any *ret) {
+  refl::GlobalDef().def_packed(
+    "tvm_tensormap_create_tiled", [](PackedArgs args, Any *ret) {
     TensorMapArgs T = TensorMapArgs::Extract(args);
     CUresult result = cuTensorMapEncodeTiled(
         T.map, T.type, T.tensorRank, T.globalAddress, T.globalDim,

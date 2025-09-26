@@ -73,7 +73,6 @@ pack_float16x4(const half x, const half y, const half z, const half w) {
 
 // Helper function to find the largest K that 2**K <= N
 // Requires N > 0
-// TODO (intlsy) Alignment?
 template <int N, int K = 0>
 __device__ __forceinline__ constexpr int get_floor_log2() {
   static_assert(N > 0);

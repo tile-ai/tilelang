@@ -166,17 +166,25 @@ TileOperator GemmNode::Clone() const {
   return Gemm(op);
 }
 
-GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
+bool GemmNode::AllowUTCMMA(Target target) const {
+  return TargetIsSm100(target) &&
+         ((A.scope() == "shared.dyn" || A.scope() == "shared" ||
+           A.scope() == "shared.tmem") &&
+          (B.scope() == "shared.dyn" || B.scope() == "shared") &&
+          C.scope() == "shared.tmem") &&
+         GetUTCMMAMeta(M, N, K, A->dtype, C->dtype).first;
+}
+
+bool GemmNode::AllowWGMMA(int block_size, Target target) const {
   int warp_size = TargetGetWarpSize(target);
   int num_warps = block_size / warp_size;
-  bool allow_wgmma =
-      TargetIsHopper(target) && (this->M >= 64) && (num_warps % 4 == 0);
-  bool allow_utcmma = TargetIsSm100(target) &&
-                      ((A.scope() == "shared.dyn" || A.scope() == "shared" ||
-                        A.scope() == "shared.tmem") &&
-                       (B.scope() == "shared.dyn" || B.scope() == "shared") &&
-                       C.scope() == "shared.tmem") &&
-                      GetUTCMMAMeta(M, N, K, A->dtype, C->dtype).first;
+  return TargetIsHopper(target) && (this->M >= 64) && (num_warps % 4 == 0) &&
+         CheckWGMMA();
+}
+
+GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
+  bool allow_utcmma = AllowUTCMMA(target);
+  bool allow_wgmma = AllowWGMMA(block_size, target);
   if (allow_utcmma) {
     return GemmInst::kUTCMMA;
   } else if (allow_wgmma) {

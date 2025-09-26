@@ -191,6 +191,8 @@ public:
 
 private:
   GemmInst GetGemmInst(int block_size, Target target) const;
+  bool AllowUTCMMA(Target target) const;
+  bool AllowWGMMA(int block_size, Target target) const;
 
   mutable bool completed_ = false;
 };

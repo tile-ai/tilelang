@@ -82,6 +82,7 @@ def run_gemm(
     )
 
     kernel = tilelang.compile(program, out_idx=[2])
+    print(kernel.get_kernel_source())
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -536,4 +537,18 @@ def test_gemm_f16f16f16_rs():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    tilelang.disable_cache()
+    run_gemm(
+        512,
+        1024,
+        768,
+        False,
+        False,
+        "float32",
+        "float32",
+        "float32",
+        64,
+        128,
+        32,
+    )
