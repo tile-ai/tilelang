@@ -18,7 +18,7 @@ __all__ = [
     'requires_llvm',
     'main',
     'requires_cuda_compute_version',
-] + ['requires_cuda_compute_version_{op}' for op in ('ge', 'gt', 'le', 'lt', 'eq')]
+] + [f'requires_cuda_compute_version_{op}' for op in ('ge', 'gt', 'le', 'lt', 'eq')]
 
 
 # pytest.main() wrapper to allow running single test file
