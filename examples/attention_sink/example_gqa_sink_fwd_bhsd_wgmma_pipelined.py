@@ -6,6 +6,7 @@ import tilelang
 from tilelang.autotuner import autotune
 from tilelang.profiler import do_bench
 import tilelang.language as T
+from tilelang.layout import make_swizzled_layout
 import itertools
 import argparse
 import triton
@@ -151,6 +152,13 @@ def flashattn(
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
             sinks = T.alloc_fragment([block_M], dtype)
+
+            T.annotate_layout({
+                Q_shared: make_swizzled_layout(Q_shared),
+                K_shared: make_swizzled_layout(K_shared),
+                V_shared: make_swizzled_layout(V_shared),
+                O_shared: make_swizzled_layout(O_shared),
+            })
 
             T.copy(Q[bz, by, bx * block_M:(bx + 1) * block_M, :], Q_shared)
             T.fill(acc_o, 0)
@@ -425,22 +433,24 @@ def main(
             print("Checks for triton failed.❌")
 
         # Benchmark triton
-        latency = do_bench(lambda: triton_program(Q, K, V, sinks, window_size), warmup=500)
-        print("Triton: {:.2f} ms".format(latency))
-        print("Triton: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        latency_triton = do_bench(lambda: triton_program(Q, K, V, sinks, window_size), warmup=500)
+        print("Triton: {:.2f} ms".format(latency_triton))
+        print("Triton: {:.2f} TFlops".format(total_flops / latency_triton * 1e-9))
 
         # Benchmark tilelang
-        latency = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500)
-        print("Tilelang: {:.2f} ms".format(latency))
-        print("Tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        latency_tilelang = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500)
+        print("Tilelang: {:.2f} ms".format(latency_tilelang))
+        print("Tilelang: {:.2f} TFlops".format(total_flops / latency_tilelang * 1e-9))
+
+        print("Speedup: {:.2f}x".format(latency_triton / latency_tilelang))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=1, help='batch size')
     parser.add_argument('--heads', type=int, default=64, help='heads')
-    parser.add_argument('--seq_q', type=int, default=4096, help='sequence length of query')
-    parser.add_argument('--seq_kv', type=int, default=4096, help='sequence length of key/value')
+    parser.add_argument('--seq_q', type=int, default=2048, help='sequence length of query')
+    parser.add_argument('--seq_kv', type=int, default=2048, help='sequence length of key/value')
     parser.add_argument('--dim', type=int, default=128, help='dim')
     parser.add_argument('--groups', type=int, default=8, help='groups')
     parser.add_argument(

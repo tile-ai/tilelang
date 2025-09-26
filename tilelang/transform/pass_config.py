@@ -47,6 +47,8 @@ class PassConfigKey(str, Enum):
 
     TL_DISABLE_VECTORIZE_256 = "tl.disable_vectorize_256"
     """Disable usage of LDG/STG 256. Default: False"""
+    TL_DISABLE_WGMMA = "tl.disable_wgmma"
+    """Disable usage of Hopper WGMMA. Default: False"""
 
     TL_DEBUG_MERGE_SHARED_MEMORY_ALLOCATIONS = "tl.debug_merge_shared_memory_allocations"
     """Enable debug information for merge shared memory allocations. Default: False"""

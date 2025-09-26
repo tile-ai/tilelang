@@ -5,6 +5,7 @@ import tilelang
 from tilelang.autotuner import autotune
 from tilelang.profiler import do_bench
 import tilelang.language as T
+from tilelang.layout import make_swizzled_layout
 import itertools
 import argparse
 
@@ -139,6 +140,13 @@ def flashattn(
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
             sinks = T.alloc_fragment([block_M], dtype)
+
+            T.annotate_layout({
+                Q_shared: make_swizzled_layout(Q_shared),
+                K_shared: make_swizzled_layout(K_shared),
+                V_shared: make_swizzled_layout(V_shared),
+                O_shared: make_swizzled_layout(O_shared),
+            })
 
             T.copy(Q[bz, by, bx * block_M:(bx + 1) * block_M, :], Q_shared)
             T.fill(acc_o, 0)

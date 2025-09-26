@@ -128,9 +128,13 @@ private:
  * visitor's reducer_info_map_. Continues traversal into the loop body.
  */
 void ParallelLoopNestVisitor::VisitStmt_(const ForNode *op) {
-  ICHECK(op->kind == ForKind::kParallel);
-  p->loop_vars_.push_back(
-      IterVar(Range(op->min, op->extent), op->loop_var, IterVarType::kDataPar));
+  if (op->kind == ForKind::kParallel)
+    p->loop_vars_.push_back(IterVar(Range(op->min, op->extent), op->loop_var,
+                                    IterVarType::kDataPar));
+  else
+    p->inner_vars_.Set(op->loop_var,
+                       IterVar(Range(op->min, op->extent), op->loop_var,
+                               IterVarType::kOrdered));
   p->analyzer_.Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
   auto reducer_info_map =
       op->annotations.Get(attr::kReducerInfo)->as<Map<Var, ReducerInfo>>();
@@ -244,17 +248,33 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   }
   auto compute_loop_layout_from_buffer = [&](const Buffer &buffer) {
     Fragment src_layout = T.layout_map[buffer].as<Fragment>().value();
+    DLOG(INFO) << "[compute_loop_layout_from_buffer] infer from buffer `"
+               << buffer << "` of layout " << src_layout->DebugOutput() << '\n';
+    Fragment result;
     if (IsCommonAccessIndice(buffer)) {
-      return src_layout;
+      result = src_layout;
     } else {
       Var rep;
       auto rep_iter = IterVar({0, src_layout->ReplicateExtent()}, rep,
                               IterVarType::kDataPar);
       PrimExpr loop_var_to_thread =
           src_layout->ForwardThread(indice_map_[buffer], rep);
-      return Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter)
-          ->BindThreadRange(T.thread_bounds);
+      loop_var_to_thread = analyzer_.Simplify(loop_var_to_thread);
+      PostOrderVisit(loop_var_to_thread, [&](const ObjectRef &objref) {
+        if (auto opt_var = objref.as<Var>();
+            opt_var && inner_vars_.count(*opt_var)) {
+          std::ostringstream oss;
+          oss << "loop_var_to_thread = " << loop_var_to_thread
+              << "contains inner var" << *opt_var;
+          throw LayoutConflictException(oss.str());
+        }
+      });
+      result = Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter)
+                   ->BindThreadRange(T.thread_bounds);
     }
+    DLOG(INFO) << "[compute_loop_layout_from_buffer] ... and get "
+               << result->DebugOutput() << '\n';
+    return result;
   };
   if (source_buffer.defined()) {
     loop_layout_ = compute_loop_layout_from_buffer(source_buffer);
@@ -317,15 +337,21 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
           IfBufferRemapLoopGenerator::run(root_, T.buffer_remap, T.layout_map);
       int vector_size = GetVectorizeSize(maybe_remapped_root_);
 
+      DLOG(INFO) << "[PlanLoopPartition] vector_size = " << vector_size << '\n';
+
       PrimExpr loop_total_size = 1;
       for (Stmt l = root_; l.as<For>().has_value();
            l = l.as<For>().value()->body)
         loop_total_size = loop_total_size * l.as<For>().value()->extent;
+      DLOG(INFO) << "[PlanLoopPartition] loop_total_size = " << loop_total_size
+                 << '\n';
       while (!analyzer_.CanProve(
                  floormod(loop_total_size,
                           T.thread_bounds->extent * vector_size) == 0) &&
              vector_size > 1)
         vector_size /= 2;
+      DLOG(INFO) << "[PlanLoopPartition] after adjust: vector_size = "
+                 << vector_size << '\n';
 
       // Check if coalesced_width is defined
       if (auto coalesced_width =
@@ -342,7 +368,12 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
           LOG(FATAL) << "coalesced_width should be an IntImmNode.";
         }
       }
+      DLOG(INFO) << "[PlanLoopPartition] root_ = " << root_
+                 << " ############# vector_size = " << vector_size
+                 << ", thread_bounds = " << T.thread_bounds << '\n';
       loop_layout_ = PlanLoopPartition(root_, vector_size, T.thread_bounds);
+      DLOG(INFO) << "[PlanLoopPartition] loop_layout_ = "
+                 << loop_layout_->DebugOutput() << '\n';
     }
   } else {
     return {};

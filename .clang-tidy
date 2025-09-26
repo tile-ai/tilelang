@@ -44,7 +44,7 @@ Checks: >
   -performance-enum-size,
   -cppcoreguidelines-pro-bounds-pointer-arithmetic,
   -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
-
+  -clang-analyzer-deadcode.DeadStores,
 
 WarningsAsErrors: '*'
 
