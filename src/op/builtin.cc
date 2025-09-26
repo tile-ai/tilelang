@@ -65,6 +65,35 @@ TIR_DEFINE_TL_BUILTIN(__cos).set_num_inputs(1).set_attr<TCallEffectKind>(
 TIR_DEFINE_TL_BUILTIN(__sin).set_num_inputs(1).set_attr<TCallEffectKind>(
     "TCallEffectKind", Integer(CallEffectKind::kOpaque));
 
+// high precision with IEEE-compliant
+TIR_DEFINE_TL_BUILTIN(ieee_add).set_num_inputs(3).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(ieee_sub).set_num_inputs(3).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(ieee_mul).set_num_inputs(3).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(ieee_fmaf).set_num_inputs(4).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(ieee_frcp).set_num_inputs(2).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(ieee_fsqrt)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(ieee_frsqrt)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure));
+
+TIR_DEFINE_TL_BUILTIN(ieee_fdiv).set_num_inputs(3).set_attr<TCallEffectKind>(
+    "TCallEffectKind", Integer(CallEffectKind::kPure));
+
 TIR_DEFINE_TL_BUILTIN(create_list_of_mbarrier)
     .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",

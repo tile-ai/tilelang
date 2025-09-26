@@ -94,6 +94,18 @@ struct CUDAFastMathTan : public CUDAMath {
   }
 };
 
+struct CUDAIEEEMath {
+  std::string operator()(DataType t, std::string name,
+                         std::string rounding_mode) const {
+    if (t.is_float() && t.bits() == 32) {
+      return "__" + name + "_" + rounding_mode;
+    } else if (t.is_float() && t.bits() == 64) {
+      return "__d" + name + "_" + rounding_mode;
+    }
+    return "";
+  }
+};
+
 static std::string GetFP8Type(DataType type) {
   std::stringstream stream;
   int32_t lanes = type.lanes();
@@ -1733,6 +1745,50 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "sin");
     os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::ieee_add())) {
+    CUDAIEEEMath math_func;
+    std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
+    std::string func_name = math_func(op->dtype, "fadd", rounding_mode);
+    os << func_name << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::ieee_sub())) {
+    CUDAIEEEMath math_func;
+    std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
+    std::string func_name = math_func(op->dtype, "fsub", rounding_mode);
+    os << func_name << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::ieee_mul())) {
+    CUDAIEEEMath math_func;
+    std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
+    std::string func_name = math_func(op->dtype, "fmul", rounding_mode);
+    os << func_name << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::ieee_fmaf())) {
+    CUDAIEEEMath math_func;
+    std::string rounding_mode = Downcast<StringImm>(op->args[3])->value;
+    std::string func_name = math_func(op->dtype, "fmaf", rounding_mode);
+    os << func_name << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ")";
+  } else if (op->op.same_as(tl::ieee_frcp())) {
+    CUDAIEEEMath math_func;
+    std::string rounding_mode = Downcast<StringImm>(op->args[1])->value;
+    std::string func_name = math_func(op->dtype, "frcp", rounding_mode);
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::ieee_fsqrt())) {
+    CUDAIEEEMath math_func;
+    std::string rounding_mode = Downcast<StringImm>(op->args[1])->value;
+    std::string func_name = math_func(op->dtype, "fsqrt", rounding_mode);
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::ieee_frsqrt())) {
+    CUDAIEEEMath math_func;
+    std::string func_name = math_func(op->dtype, "frsqrt", "rn");
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::ieee_fdiv())) {
+    CUDAIEEEMath math_func;
+    std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
+    std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
+    os << func_name << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }

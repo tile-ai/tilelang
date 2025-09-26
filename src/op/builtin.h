@@ -76,14 +76,40 @@ static constexpr const char *kDynamicAlignment = "tl.dynamic_alignment";
 DataType cuTensorMapType();
 
 // fast math related op
+// __exp(x) - fast exponential
 TVM_DLL const Op &__exp();
+// __exp10(x) - fast base-10 exponential
 TVM_DLL const Op &__exp10();
+// __log(x) - fast natural logarithm
 TVM_DLL const Op &__log();
+// __log2(x) - fast base-2 logarithm
 TVM_DLL const Op &__log2();
+// __log10(x) - fast base-10 logarithm
 TVM_DLL const Op &__log10();
+// __tan(x) - fast tangent
 TVM_DLL const Op &__tan();
+// __cos(x) - fast cosine
 TVM_DLL const Op &__cos();
+// __sin(x) - fast sine
 TVM_DLL const Op &__sin();
+
+// high precision with IEEE-compliant.
+// ieee_add(x, y, rounding_mode) - IEEE-compliant addition
+TVM_DLL const Op &ieee_add();
+// ieee_sub(x, y, rounding_mode) - IEEE-compliant subtraction
+TVM_DLL const Op &ieee_sub();
+// ieee_mul(x, y, rounding_mode) - IEEE-compliant multiplication
+TVM_DLL const Op &ieee_mul();
+// ieee_fmaf(x, y, z, rounding_mode) - IEEE-compliant fused multiply-add
+TVM_DLL const Op &ieee_fmaf();
+// ieee_frcp(x, rounding_mode) - IEEE-compliant reciprocal
+TVM_DLL const Op &ieee_frcp();
+// ieee_fsqrt(x, rounding_mode) - IEEE-compliant square root
+TVM_DLL const Op &ieee_fsqrt();
+// ieee_frsqrt(x) - IEEE-compliant reciprocal square root (rn only)
+TVM_DLL const Op &ieee_frsqrt();
+// ieee_fdiv(x, y, rounding_mode) - IEEE-compliant division
+TVM_DLL const Op &ieee_fdiv();
 
 /*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load
