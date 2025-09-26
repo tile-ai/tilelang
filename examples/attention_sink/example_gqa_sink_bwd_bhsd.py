@@ -199,13 +199,7 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
 @tilelang.jit(pass_configs={
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
 })
-def flashattn_bwd(
-        batch,
-        heads,
-        seq_len,
-        dim,
-        groups,
-        window_size=None):  # None for full attention
+def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None):  # None for full attention
     sm_scale = (1.0 / dim)**0.5
     scale = sm_scale * 1.44269504  # log2(e)
     head_kv = heads // groups
@@ -263,7 +257,9 @@ def flashattn_bwd(
             loop_st = T.floordiv(by * block_M, block_N)
             loop_ed = T.alloc_local([1], 'int32')
             if window_size is not None:
-                loop_ed[0] = T.min(T.ceildiv((by+1) * block_M + window_size, block_N), T.ceildiv(seq_len, block_N))
+                loop_ed[0] = T.min(
+                    T.ceildiv((by + 1) * block_M + window_size, block_N),
+                    T.ceildiv(seq_len, block_N))
             else:
                 loop_ed[0] = T.ceildiv(seq_len, block_N)
             for k in T.Pipelined(loop_st, loop_ed[0], num_stages=num_stages):
@@ -276,10 +272,11 @@ def flashattn_bwd(
                 for i, j in T.Parallel(block_M, block_N):
                     if window_size is not None:
                         qkT[i, j] = T.if_then_else(
-                            by * block_M + i <= k * block_N + j and by * block_M + i > k * block_N + j - window_size,
-                            qkT[i, j], 0)
+                            by * block_M + i <= k * block_N + j and
+                            by * block_M + i > k * block_N + j - window_size, qkT[i, j], 0)
                     else:
-                        qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j], 0)
+                        qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j],
+                                                   0)
                 T.copy(dO[bz, bx, k * block_N:(k + 1) * block_N, :], dst=do)
                 T.clear(dsT)
                 T.gemm(V_shared, do, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -450,8 +447,9 @@ def main(BATCH: int = 1,
     Q = (
         torch.empty(BATCH, H, N_CTX, D_HEAD, dtype=torch.float16,
                     device="cuda").normal_().requires_grad_())
-    K = torch.empty(BATCH, H // groups, N_CTX, D_HEAD,
-                    dtype=torch.float16, device="cuda").normal_().requires_grad_()
+    K = torch.empty(
+        BATCH, H // groups, N_CTX, D_HEAD, dtype=torch.float16,
+        device="cuda").normal_().requires_grad_()
     V = torch.empty_like(K).normal_().requires_grad_()
     sinks = torch.randn(H, dtype=torch.float16, device="cuda").requires_grad_()
     dO = torch.randn_like(Q)

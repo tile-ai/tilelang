@@ -205,7 +205,7 @@ def flashattn_bwd(
         seq_len,
         dim,
         window_size=None,  # None for full attention,
-    ):
+):
 
     block_M, block_N, num_stages, threads = get_bwd_configs()
 
@@ -263,11 +263,12 @@ def flashattn_bwd(
             T.clear(dv)
             T.clear(dk)
 
-
             loop_st = T.floordiv(by * block_M, block_N)
             loop_ed = T.alloc_local([1], 'int32')
             if window_size is not None:
-                loop_ed[0] = T.min(T.ceildiv((by+1) * block_M + window_size, block_N), T.ceildiv(seq_len, block_N))
+                loop_ed[0] = T.min(
+                    T.ceildiv((by + 1) * block_M + window_size, block_N),
+                    T.ceildiv(seq_len, block_N))
             else:
                 loop_ed[0] = T.ceildiv(seq_len, block_N)
             for k in T.Pipelined(loop_st, loop_ed[0], num_stages=num_stages):
@@ -280,10 +281,11 @@ def flashattn_bwd(
                 for i, j in T.Parallel(block_M, block_N):
                     if window_size is not None:
                         qkT[i, j] = T.if_then_else(
-                            by * block_M + i <= k * block_N + j and by * block_M + i > k * block_N + j - window_size,
-                            qkT[i, j], 0)
+                            by * block_M + i <= k * block_N + j and
+                            by * block_M + i > k * block_N + j - window_size, qkT[i, j], 0)
                     else:
-                        qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j], 0)
+                        qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j],
+                                                   0)
                 T.copy(dO[bz, bx, k * block_N:(k + 1) * block_N, :], dst=do)
                 T.clear(dsT)
                 T.gemm(V_shared, do, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -364,8 +366,6 @@ class _attention(torch.autograd.Function):
             return x
 
         do, q, k, v, sinks, o = [maybe_contiguous(x) for x in (do, q, k, v, sinks, o)]
-        block_M = 64
-        block_N = 64 if D_HEAD <= 64 else 32
         kernel_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD)
         kernel_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD)
         delta = kernel_prep(o, do)
