@@ -54,6 +54,13 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_SHUFFLE_ELECT = "tl.disable_shuffle_elect"
     """Disable shuffle election optimization. Default: False"""
 
+    TL_DISABLE_THREAD_STORAGE_SYNC = "tl.disable_thread_storage_sync"
+    """Disable thread storage synchronization pass. When enabled, disables the
+    automatic insertion of thread synchronization barriers (e.g., __syncthreads())
+    for shared memory access coordination. This can be useful for performance
+    optimization in cases where manual synchronization is preferred or when
+    synchronization is not needed. Default: False"""
+
     # TIR related configs
     TIR_ENABLE_EQUIV_TERMS_IN_CSE = "tir.enable_equiv_terms_in_cse_tir"
     """Enable equivalent terms in TIR Common Subexpression Elimination. Default: True"""

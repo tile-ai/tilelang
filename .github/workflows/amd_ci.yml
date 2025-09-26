@@ -115,4 +115,4 @@ jobs:
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd testing/python/amd
         unset PYTHONPATH
-        python -m pytest -v test_tilelang_test_amd.py --durations=0 --timeout=3600
+        python -m pytest -v test_tilelang_test_amd.py

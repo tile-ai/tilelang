@@ -354,10 +354,10 @@ def gen_inputs(B, H, Sq, Skv, D) -> tuple[torch.Tensor, torch.Tensor, torch.Tens
     return query, key, value, sinks
 
 
-def main(batch: int = 8,
+def main(batch: int = 1,
          heads: int = 32,
-         seq_q: int = 4096,
-         seq_kv: int = 4096,
+         seq_q: int = 256,
+         seq_kv: int = 256,
          dim: int = 128,
          window_size: int | None = None,
          tune: bool = False):

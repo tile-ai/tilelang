@@ -56,6 +56,20 @@ static constexpr const char *kDisableDynamicTailSplit =
     "tl.disable_dynamic_tail_split";
 
 /*!
+ * \brief Whether to disable thread storage synchronization
+ *
+ * When enabled, disables the automatic insertion of thread synchronization
+ * barriers (e.g., __syncthreads()) for shared memory access coordination.
+ * This can be useful for performance optimization in cases where manual
+ * synchronization is preferred or when synchronization is not needed.
+ *
+ * kDisableThreadStorageSync = "tl.disable_thread_storage_sync"
+ *
+ */
+static constexpr const char *kDisableThreadStorageSync =
+    "tl.disable_thread_storage_sync";
+
+/*!
  * \brief The size of the vectorized dimension in buffer, designed by user
  *
  * For example, if the vectorized dimension is 128 bits and the dtype of buffer
