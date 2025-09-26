@@ -48,7 +48,7 @@ public:
   TVM_DECLARE_BASE_OBJECT_INFO(LayoutNode, Object);
 
 protected:
-  Map<Var, Range> getVarMap() const;
+  virtual Map<Var, Range> getVarMap() const;
   void UpdateAnalyzer(arith::Analyzer *analyzer) const;
   Array<PrimExpr> forward_index_;
   Array<PrimExpr> input_size_;
@@ -108,7 +108,7 @@ public:
   TVM_DECLARE_FINAL_OBJECT_INFO(FragmentNode, LayoutNode);
 
 protected:
-  Map<Var, Range> getVarMap() const;
+  Map<Var, Range> getVarMap() const final;
   Range thread_range_;
   PrimExpr forward_thread_;
   PrimExpr replicate_size_;
