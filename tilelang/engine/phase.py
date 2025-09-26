@@ -149,7 +149,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         if allow_fence_proxy(target=target):
             # in hopper device, wgmma is an async proxy
             # so we need to inject a fence proxy before it
-            # TODO (intlsy) Inject the proxy in Blackwell
             mod = tilelang.transform.InjectFenceProxy()(mod)
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)

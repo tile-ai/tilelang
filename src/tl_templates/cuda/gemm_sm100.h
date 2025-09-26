@@ -323,7 +323,7 @@ public:
     Tensor sB = make_tensor(make_smem_ptr(reinterpret_cast<B_type *>(pB)),
                             SmemLayoutB{});
 
-    // NOTE (intlsy): Normal UTCMMA (the one w/o ws) don't saturate all 128
+    // TODO (lei): Normal UTCMMA (the one w/o ws) don't saturate all 128
     // lanes when M == 64
     // (see layout F in
     // https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-data-path-layout-f)
@@ -362,7 +362,7 @@ using tl_mma::gemm_rs;
 using tl_mma::gemm_sr;
 using tl_mma::gemm_ss;
 
-// TODO (intlsy): Implement gemm_ts
+// TODO (lei): Implement gemm_ts
 // template <int M, int N, int K, int warp_m, int warp_n, bool trans_A, bool
 // trans_B, bool clear_accum, typename A_type, typename B_type, typename C_type>
 // TL_DEVICE void gemm_ts(A_type *pA, B_type *pB, C_type *accum, uint64_t

@@ -127,7 +127,7 @@ private:
               BufferRegion::FullRegion(c_buf));
         }
       }
-      // TODO (intlsy) Link wgmma to buffers and tl.wait_wgmma
+      // TODO (lei) Link wgmma to buffers and tl.wait_wgmma
     } else if (op->op.same_as(tir::builtin::if_then_else())) {
       const PrimExpr &then_expr = args[1];
       const PrimExpr &else_expr = args[2];

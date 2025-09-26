@@ -25,7 +25,7 @@ struct UTCMMAMeta {
 // Return {is_success, meta}
 static inline std::pair<bool, UTCMMAMeta>
 GetUTCMMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
-// NOTE (intlsy) Currently not all shapes / dtypes are supported for UTCMMA.
+// TODO (lei) Currently not all shapes / dtypes are supported for UTCMMA.
 #define FAIL                                                                   \
   return {                                                                     \
     false, UTCMMAMeta { 0, 0, 0 }                                              \
