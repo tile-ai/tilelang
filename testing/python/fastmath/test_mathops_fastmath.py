@@ -262,7 +262,8 @@ def run_fastmath_mathop_test(mathop_name,
 @tilelang.testing.requires_cuda
 def test_mathops_generate_no_fastmath():
     """Test that our tl.* mathops generate fastmath CUDA code (__expf etc.)"""
-    # Based on test results, our tl.* intrinsics actually generate fastmath versions
+    # Based on test results, our tl.* intrinsics actually generate 
+    # no fastmath versions
     # This appears to be the intended behavior
     single_arg_mathops = [
         ("exp", T.exp),
@@ -333,4 +334,5 @@ def test_fastmath_versions():
 
 
 if __name__ == "__main__":
+    tilelang.disable_cache()
     tilelang.testing.main()
