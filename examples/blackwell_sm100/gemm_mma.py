@@ -1,15 +1,6 @@
 import tilelang
 import tilelang.language as T
 
-print(tilelang.__path__)
-# `make_mma_swizzle_layout` is a python defined layout function
-# specifically designed for MMA operations
-# which ensures the consistency with the nvidia CUTLASS Library.
-# to avoid bank conflicts and maximize the performance.
-from tilelang.intrinsics import (
-    make_mma_swizzle_layout as make_swizzle_layout,)  # noqa: F401
-
-
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
@@ -25,16 +16,6 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_N, block_K), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-
-            # Apply layout optimizations or define your own layout (Optional)
-            # If not specified, we will deduce the layout automatically
-            # T.annotate_layout({
-            #     A_shared: make_swizzle_layout(A_shared),
-            #     B_shared: make_swizzle_layout(B_shared),
-            # })
-
-            # Enable rasterization for better L2 cache locality (Optional)
-            # T.use_swizzle(panel_size=10, enable=True)
 
             # Clear local accumulation
             T.clear(C_local)
