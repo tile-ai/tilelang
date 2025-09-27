@@ -85,9 +85,8 @@ def main(
             T.mbarrier_wait_parity(mbar, k%2)
 
         # 3. Output processing (only subset of threads)
-        if T.get_thread_binding() < 128:
-            T.copy(C_tmem, C_local)      # Tensor Memory → registers
-            T.copy(C_local, C_shared)    # registers → shared memory
+        T.copy(C_tmem, C_local)      # Tensor Memory → registers
+        T.copy(C_local, C_shared)    # registers → shared memory
 
         # 4. Write back to global memory
         T.copy(C_shared, C[by * block_M, bx * block_N])

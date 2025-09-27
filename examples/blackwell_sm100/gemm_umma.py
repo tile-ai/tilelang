@@ -2,8 +2,6 @@ import torch
 import tilelang
 import tilelang.language as T
 
-tilelang.disable_cache()
-
 
 def matmul(
     M,
@@ -35,7 +33,7 @@ def matmul(
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
-            mbar = T.alloc_barrier(1)  # 这里的 1 是 expect-arrive-count
+            mbar = T.alloc_barrier(arrive_count=1)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
 
@@ -53,10 +51,8 @@ def matmul(
                     clear_accum=k == 0)
                 T.mbarrier_wait_parity(mbar, k % 2)
 
-            if T.get_thread_binding() < 128:
-                T.copy(C_tmem, C_local)
-                T.copy(C_local, C_shared)
-
+            T.copy(C_tmem, C_local)
+            T.copy(C_local, C_shared)
             T.copy(C_shared, C[by * block_M, bx * block_N])
 
     return main
