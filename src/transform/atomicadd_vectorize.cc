@@ -319,6 +319,9 @@ static int GetVectorizeSizeMax(int compute_capability, DataType dtype) {
 For VectorizeAtomicAdd(const For &for_node, const Var &thread_var,
                        const Range &thread_bounds, int compute_capability) {
 
+  // ParseIndex tries to extract a single (Var * IntImm) pattern from an index.
+  // We use this to identify thread/block variables with their stride.
+  // If there is not exactly one valid MulNode of this form, we fallback.
   auto ParseIndex = [](const PrimExpr &idx, PrimExpr &var_out,
                        int &stride_out) -> bool {
     int mul_count = 0, legal_mul_count = 0;
