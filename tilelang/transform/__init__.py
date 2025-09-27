@@ -69,6 +69,17 @@ def InjectSoftwarePipeline():
     return _ffi_api.InjectSoftwarePipeline()  # type: ignore
 
 
+def FrontendLegalize():
+    """FrontendLegalize
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.FrontendLegalize()  # type: ignore
+
+
 def InjectAssumes():
     """Inject Assumes
 
@@ -427,6 +438,12 @@ def LowerDeviceKernelLaunch():
         tvm.transform.Pass: The transform pass that performs device kernel launch lowering.
     """
     return _ffi_api.LowerDeviceKernelLaunch()  # type: ignore
+
+
+def LowerSharedTmem():
+    """LowerSharedTmem
+    """
+    return _ffi_api.LowerSharedTmem()  # type: ignore
 
 
 def LayoutReducer():

@@ -45,6 +45,8 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_SAFE_MEMORY_ACCESS = "tl.disable_safe_memory_legalize"
     """Disable safe memory access optimization. Default: False"""
 
+    TL_DISABLE_VECTORIZE_256 = "tl.disable_vectorize_256"
+    """Disable usage of LDG/STG 256. Default: False"""
     TL_DISABLE_WGMMA = "tl.disable_wgmma"
     """Disable usage of Hopper WGMMA. Default: False"""
 

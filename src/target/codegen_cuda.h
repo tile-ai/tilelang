@@ -36,6 +36,10 @@ public:
                         std::ostream &os) final; // NOLINT(*)
   void PrintVecElemStore(const std::string &vec, DataType t, int i,
                          const std::string &value) final;
+  std::string GetVecLoad(DataType t, const BufferNode *buffer,
+                         PrimExpr base) final;
+  void PrintVecStore(const BufferNode *buffer, DataType t, PrimExpr base,
+                     const std::string &value) final;
   void BindThreadIndex(const IterVar &iv) final; // NOLINT(*)
   void PrintVecElemLoadExpr(DataType t, int i, const std::string &value,
                             std::ostream &os) final;

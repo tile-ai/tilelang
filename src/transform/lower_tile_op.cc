@@ -73,6 +73,34 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
                 buffer->buffer_type);
 }
 
+// The function `makeBufferWithLayout` creates a new Buffer object based on the
+// given buffer and layout. It handles remapping of buffer variables, adjusts
+// the storage scope if needed (e.g., from "local.fragment" to "local"), and
+// computes the output shape according to the layout. For shared memory buffers,
+// it also handles replication if the buffer's extent is larger than the
+// layout's extent.
+class LayoutRemapRewriter : public arith::IRMutatorWithAnalyzer {
+public:
+  static Stmt Substitute(Stmt stmt, Map<Buffer, Layout> layout_remap) {
+    arith::Analyzer analyzer;
+    LayoutRemapRewriter substituter(&analyzer);
+    substituter.layout_remap_ = std::move(layout_remap);
+    return substituter.VisitStmt(stmt);
+  }
+
+private:
+  using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
+
+  Stmt VisitStmt_(const BlockNode *op) final {
+    auto block = Downcast<Block>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
+    if (op->annotations.count(attr::kLayoutMap)) {
+      block.CopyOnWrite()->annotations.Set(attr::kLayoutMap, layout_remap_);
+    }
+    return block;
+  }
+
+  Map<Buffer, Layout> layout_remap_;
+};
 class BufferGemmCollector : public StmtExprVisitor {
 public:
   BufferGemmCollector() { Clear(); }
@@ -227,6 +255,8 @@ public:
     fptr->body = substituter.VisitStmt(f->body);
     fptr->body =
         RemapBufferRewriter::Substitute(fptr->body, substituter.buffer_remap_);
+    fptr->body =
+        LayoutRemapRewriter::Substitute(fptr->body, substituter.layout_remap_);
     tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
     Optional<Bool> opt_disable_tma_lower =
         ctxt->GetConfig(kDisableTMALower, Optional<Bool>());
@@ -275,7 +305,6 @@ private:
     for (const auto &buffer : workspaces_)
       block_ptr->alloc_buffers.push_back(buffer);
     workspaces_.clear();
-    block_ptr->annotations.erase(attr::kLayoutMap);
     return block;
   }
 
@@ -363,6 +392,7 @@ private:
 
       auto new_access_ptr = access_ptr_call.CopyOnWrite();
       new_access_ptr->args.Set(0, BufferLoad(new_buffer, new_indices));
+      layout_remap_.Set(new_buffer, layout_map_[load->buffer]);
     } else {
       LOG(FATAL) << "Invalid access op for permuted layout: " << access_ptr;
     }
@@ -430,6 +460,7 @@ private:
     if (buffer_remap_.count(buffer)) {
       auto new_indices = layout_map_[buffer]->Forward(load->indices);
       auto new_buffer = buffer_remap_[load->buffer];
+      layout_remap_.Set(new_buffer, layout_map_[load->buffer]);
       return BufferLoad(new_buffer, new_indices);
     } else if (var_remap_.count(buffer->data)) {
       auto new_buffer = Buffer(
@@ -447,6 +478,7 @@ private:
     if (buffer_remap_.count(buffer)) {
       auto new_indices = layout_map_[buffer]->Forward(store->indices);
       auto new_buffer = buffer_remap_[store->buffer];
+      layout_remap_.Set(new_buffer, layout_map_[store->buffer]);
       return BufferStore(new_buffer, store->value, new_indices);
     } else if (var_remap_.count(buffer->data)) {
       auto new_buffer = Buffer(
@@ -547,6 +579,7 @@ private:
   Target target_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Layout> layout_map_;
+  Map<Buffer, Layout> layout_remap_;
   Map<Buffer, Buffer> buffer_remap_;
   // This is a workaround for cpu backend,
   // we need to define a thread_var for the serial loop.

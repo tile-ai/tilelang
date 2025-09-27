@@ -26,7 +26,7 @@ std::pair<int, int> GemmSPWarpPolicyNode::ComputeWarpPartition(int M, int N,
   int num_warps = block_size / TargetGetWarpSize(target);
 
   auto [m_warp, n_warp] = GemmWarpPolicyNode::ComputeWarpPartition(
-      M, N, block_size, target, use_wgmma);
+      M, N, block_size, target, use_wgmma ? GemmInst::kWGMMA : GemmInst::kMMA);
 
   // Special handling for gemm_sp when the tiling size is not a multiple
   // This should be consistent with shape check in gemm_sp_sm80.h

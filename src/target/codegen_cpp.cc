@@ -437,7 +437,6 @@ void CodeGenTileLangCPP::VisitStmt_(const AllocateNode *op) {
 
   this->PrintIndent();
   std::string scope = GetPtrStorageScope(op->buffer_var);
-  const VarNode *buffer = op->buffer_var.as<VarNode>();
 
   PrintType(op->dtype, stream);
   size_t constant_size = op->ConstantAllocationSize();

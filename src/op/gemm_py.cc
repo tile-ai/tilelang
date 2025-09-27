@@ -92,8 +92,7 @@ TileOperator GemmPyNode::Clone() const {
   return GemmPy(op);
 }
 
-GemmPyNode::GemmInst GemmPyNode::GetGemmInst(int block_size,
-                                             Target target) const {
+GemmInst GemmPyNode::GetGemmInst(int block_size, Target target) const {
   int warp_size = TargetGetWarpSize(target);
   int num_warps = block_size / warp_size;
   bool allow_wgmma = TargetIsHopper(target) && (this->M >= 64) &&
@@ -221,8 +220,9 @@ static int GetArchInt(Target target) {
 Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
   GemmInst gemm_inst = GetGemmInst(block_size, T.target);
-  auto [warp_m, warp_n] = policy->ComputeWarpPartition(
-      M, N, block_size, T.target, gemm_inst == GemmInst::kWGMMA);
+
+  auto [warp_m, warp_n] =
+      policy->ComputeWarpPartition(M, N, block_size, T.target, gemm_inst);
 
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.lower")) {
     auto prim_func = Downcast<PrimFunc>(

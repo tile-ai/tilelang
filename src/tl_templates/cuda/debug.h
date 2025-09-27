@@ -48,6 +48,16 @@ template <> __device__ void debug_print_var<int>(const char *msg, int var) {
          threadIdx.z, var);
 }
 
+// Specialization for unsigned integer type
+template <>
+__device__ void debug_print_var<unsigned int>(const char *msg,
+                                              unsigned int var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=int "
+         "value=%u\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, var);
+}
+
 // Specialization for float type
 template <> __device__ void debug_print_var<float>(const char *msg, float var) {
   printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=float "
@@ -145,6 +155,17 @@ __device__ void debug_print_buffer_value<int>(const char *msg,
                                               int var) {
   printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): buffer=%s, "
          "index=%d, dtype=int value=%d\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, buf_name, index, var);
+}
+
+// Specialization for unsigned integer type
+template <>
+__device__ void
+debug_print_buffer_value<unsigned int>(const char *msg, const char *buf_name,
+                                       int index, unsigned int var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): buffer=%s, "
+         "index=%d, dtype=int value=%u\n",
          msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
          threadIdx.z, buf_name, index, var);
 }

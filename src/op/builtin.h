@@ -45,6 +45,7 @@ static constexpr const char *kPtxasRegisterUsageLevel =
     "tl.ptxas_register_usage_level";
 static constexpr const char *kEnablePTXASVerboseOutput =
     "tl.enable_ptxas_verbose_output";
+static constexpr const char *kDisableVectorize256 = "tl.disable_vectorize_256";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 /*!
@@ -214,6 +215,22 @@ TVM_DLL const Op &mbarrier_wait_parity();
  *
  */
 TVM_DLL const Op &mbarrier_expect_tx();
+
+/*!
+ * \brief tvm intrinsics for initializing tensor memory
+ *
+ * ptx_init_tensor_memory(tmem_buffer, num_cols)
+ *
+ */
+const Op &ptx_init_tensor_memory();
+
+/*!
+ * \brief tvm intrinsics for deallocating tensor memory
+ *
+ * tmem_deallocate(tmem_buffer)
+ *
+ */
+const Op &ptx_deallocate_tensor_memory();
 
 /*!
  * \brief tvm intrinsics for ldmatrix

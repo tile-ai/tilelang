@@ -49,7 +49,8 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
 def assert_matmul_codegen(M=1024, N=1024, K=1024, block_M=128, block_N=128, block_K=32):
     func = matmul(M, N, K, block_M, block_N, block_K)
 
-    artifact = tilelang.lower(func, target="c")
+    with tvm.target.Target("c"):
+        artifact = tilelang.lower(func)
 
     code = artifact.kernel_source
 
@@ -101,7 +102,8 @@ def test_matmul_compile():
     M, N, K = 1024, 512, 512
     block_M, block_N, block_K = M // 4, N // 4, K // 4
     cpu_func = matmul_jit_test(M, N, K, block_M, block_N, block_K)
-    complied_fun = tilelang.compile(cpu_func, -1, execution_backend="ctypes", target="c")
+    with tvm.target.Target("c"):
+        complied_fun = tilelang.compile(cpu_func, -1, execution_backend="ctypes")
 
     in_dtype = "float16"
     A = torch.randn(M, K, dtype=torch.__getattribute__(in_dtype))
