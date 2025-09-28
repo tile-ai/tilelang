@@ -329,7 +329,8 @@ Fragment::Fragment(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
 // which means the forward_thread is rep_var -> lambda i, rep: rep
 bool FragmentNode::IsCompletedReplicated() const {
   arith::Analyzer analyzer;
-  return ExprDeepEqual()(analyzer.Simplify(forward_thread_), ReplicationPlaceholder());
+  return ExprDeepEqual()(analyzer.Simplify(forward_thread_),
+                         ReplicationPlaceholder());
 }
 
 PrimExpr FragmentNode::ThreadExtent() const {
