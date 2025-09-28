@@ -101,6 +101,8 @@ public:
 
   bool IsEqual(const FragmentNode *other, bool skip_index = false) const;
 
+  bool IsCompletedReplicated() const;
+
   static void RegisterReflection();
 
   bool SEqualReduce(const FragmentNode *other, SEqualReducer equal) const;

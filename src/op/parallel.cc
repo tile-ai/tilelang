@@ -213,9 +213,57 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
                                       InferLevel level) const {
   if (loop_layout_.defined())
     return {};
-  if (level == InferLevel::kStrict)
-    return {};
+  if (level == InferLevel::kStrict){
+    LayoutMap results;
+    // Deduce buffers that shoule be complicated replicated.
+    // For example:
+    // for i in T.Parllel(m):
+    //   fragment[0] = x[i]
+    // then fragment[0] must be replicated on all threads.
+    for (const auto &[buffer, indices] : indice_map_) {
+      if (T.layout_map.count(buffer)) {
+        continue;
+      }
+      if (buffer.scope() != "local.fragment") continue;
+      for (const auto &index : indices) {
+        if (const auto *imm = index.as<IntImmNode>()) {
+          if (imm->value == 0){
+            Array<IterVar> forward_vars;
+            for (const auto &s : buffer->shape) {
+              forward_vars.push_back(IterVar(Range(0, s), Var(), IterVarType::kDataPar));
+            }
+            Array<PrimExpr> forward_index;
+            for (const auto &iv : forward_vars) {
+              forward_index.push_back(iv->var);
+            }
+            Var rep;
+            auto rep_iter = IterVar({0, T.thread_bounds->extent}, rep,
+                                    IterVarType::kDataPar);
 
+            PrimExpr forward_thread = rep;
+            results.Set(buffer, Fragment(forward_vars, forward_index, forward_thread, rep_iter));
+          } else {
+            LOG(FATAL) << "Fragment buffer access with non-zero index [" << imm->value << "] is not supported. "
+                       << "Only fragment[0] access is allowed within T.Parallel loop.";
+          }
+        }
+      }
+    }
+    return results;
+  }
+  auto buffer_is_completed_replicated = [&](const Buffer &buffer) {
+    if (buffer.scope() != "local.fragment") return false;
+    auto frag = T.layout_map[buffer].as<Fragment>().value();
+    // buffer indices should be IntImm
+    for (const auto &index : indice_map_[buffer]) {
+      if (!index.as<IntImmNode>()) {
+        return false;
+      } else if (index.as<IntImmNode>()->value != 0) {
+        LOG(FATAL) << "buffer " << buffer << " is not completed replicated";
+      }
+    }
+    return frag->IsCompletedReplicated();
+  };
   // Step 1: try to infer loop's partition from a source fragment
   Buffer source_buffer, read_source_buffer;
   for (const auto &[buffer, indices] : indice_map_) {
@@ -226,15 +274,18 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
         continue;
 
       auto frag = T.layout_map[buffer].as<Fragment>().value();
+
       if (buffer_is_write_.count(buffer)) {
         source_buffer = buffer;
       } else {
         // Keep the buffer with largest number of indices
         // (which means the inference based on that buffer is more accurate)
         // as read_source_buffer to get more accurate layout
-        if (!read_source_buffer.defined() ||
+        // if the buffer is completed replicated, we don't need to infer the layout from this buffer.
+        if ((!read_source_buffer.defined() ||
             indice_map_[buffer].size() >
-                indice_map_[read_source_buffer].size()) {
+                indice_map_[read_source_buffer].size()) &&
+            !buffer_is_completed_replicated(buffer)) {
           read_source_buffer = buffer;
         }
         // If the buffer is not replicated and shape is equal to the
