@@ -107,7 +107,6 @@ public:
 
 private:
   // Target GEMM instruction
-  enum class GemmInst : uint8_t { kMMA, kWGMMA, kUTCMMA, kMFMA };
   GemmInst GetGemmInst(int block_size, Target target) const;
 
   mutable bool completed_ = false;
