@@ -42,7 +42,10 @@ Checks: >
   -cppcoreguidelines-pro-type-static-cast-downcast,
   -performance-unnecessary-value-param,
   -performance-enum-size,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
   -clang-analyzer-deadcode.DeadStores,
+  -clang-analyzer-optin.cplusplus.VirtualCall,
 
 WarningsAsErrors: '*'
 

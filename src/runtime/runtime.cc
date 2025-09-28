@@ -72,19 +72,18 @@ struct TensorMapArgs {
 
   std::string ToDebugString() {
     std::stringstream ss;
-    ss << "TMA Desc Addr:   " << map << std::endl
-       << "format         " << type << std::endl
-       << "dim            " << tensorRank << std::endl
-       << "gmem_address   " << globalAddress << std::endl
-       << "globalDim      " << ArrayToStr(globalDim, tensorRank) << std::endl
-       << "globalStrides  " << ArrayToStr(globalStride, tensorRank) << std::endl
-       << "boxDim         " << ArrayToStr(boxDim, tensorRank) << std::endl
-       << "elementStrides " << ArrayToStr(elementStrides, tensorRank)
-       << std::endl
-       << "interleave     " << interleave << std::endl
-       << "swizzle        " << swizzle << std::endl
-       << "l2Promotion    " << l2Promotion << std::endl
-       << "oobFill        " << oobFill << std::endl;
+    ss << "TMA Desc Addr:   " << map << '\n'
+       << "format         " << type << '\n'
+       << "dim            " << tensorRank << '\n'
+       << "gmem_address   " << globalAddress << '\n'
+       << "globalDim      " << ArrayToStr(globalDim, tensorRank) << '\n'
+       << "globalStrides  " << ArrayToStr(globalStride, tensorRank) << '\n'
+       << "boxDim         " << ArrayToStr(boxDim, tensorRank) << '\n'
+       << "elementStrides " << ArrayToStr(elementStrides, tensorRank) << '\n'
+       << "interleave     " << interleave << '\n'
+       << "swizzle        " << swizzle << '\n'
+       << "l2Promotion    " << l2Promotion << '\n'
+       << "oobFill        " << oobFill << '\n';
     return ss.str();
   }
 };
@@ -92,20 +91,19 @@ struct TensorMapArgs {
 // set device api
 TVM_FFI_STATIC_INIT_BLOCK({
   namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def_packed(
-      "tvm_tensormap_create_tiled", [](PackedArgs args, Any *ret) {
-        TensorMapArgs T = TensorMapArgs::Extract(args);
-        CUresult result = cuTensorMapEncodeTiled(
-            T.map, T.type, T.tensorRank, T.globalAddress, T.globalDim,
-            T.globalStride + 1, T.boxDim, T.elementStrides, T.interleave,
-            T.swizzle, T.l2Promotion, T.oobFill);
-        if (result != CUDA_SUCCESS) {
-          LOG_FATAL << "Failed to initialize the TMA descriptor " << result
-                    << std::endl
-                    << T.ToDebugString();
-        }
-        *ret = static_cast<int>(result);
-      });
+  refl::GlobalDef().def_packed("tvm_tensormap_create_tiled", [](PackedArgs args,
+                                                                Any *ret) {
+    TensorMapArgs T = TensorMapArgs::Extract(args);
+    CUresult result = cuTensorMapEncodeTiled(
+        T.map, T.type, T.tensorRank, T.globalAddress, T.globalDim,
+        T.globalStride + 1, T.boxDim, T.elementStrides, T.interleave, T.swizzle,
+        T.l2Promotion, T.oobFill);
+    if (result != CUDA_SUCCESS) {
+      LOG_FATAL << "Failed to initialize the TMA descriptor " << result << '\n'
+                << T.ToDebugString();
+    }
+    *ret = static_cast<int>(result);
+  });
 });
 
 struct TensorMapIm2ColArgs {
@@ -161,24 +159,23 @@ struct TensorMapIm2ColArgs {
 
   std::string ToDebugString() {
     std::stringstream ss;
-    ss << "TMA Desc Addr:   " << map << std::endl
-       << "format         " << type << std::endl
-       << "dim            " << tensorRank << std::endl
-       << "gmem_address   " << globalAddress << std::endl
-       << "globalDim      " << ArrayToStr(globalDim, tensorRank) << std::endl
-       << "globalStrides  " << ArrayToStr(globalStride, tensorRank) << std::endl
-       << "smem_box_pixel " << smem_box_pixel << std::endl
-       << "smem_box_channel " << smem_box_channel << std::endl
+    ss << "TMA Desc Addr:   " << map << '\n'
+       << "format         " << type << '\n'
+       << "dim            " << tensorRank << '\n'
+       << "gmem_address   " << globalAddress << '\n'
+       << "globalDim      " << ArrayToStr(globalDim, tensorRank) << '\n'
+       << "globalStrides  " << ArrayToStr(globalStride, tensorRank) << '\n'
+       << "smem_box_pixel " << smem_box_pixel << '\n'
+       << "smem_box_channel " << smem_box_channel << '\n'
        << "pixelBoxLowerCorner  "
-       << ArrayToStr(pixelBoxLowerCorner, tensorRank - 2) << std::endl
+       << ArrayToStr(pixelBoxLowerCorner, tensorRank - 2) << '\n'
        << "pixelBoxUpperCorner  "
-       << ArrayToStr(pixelBoxUpperCorner, tensorRank - 2) << std::endl
-       << "elementStrides " << ArrayToStr(elementStrides, tensorRank)
-       << std::endl
-       << "interleave     " << interleave << std::endl
-       << "swizzle        " << swizzle << std::endl
-       << "l2Promotion    " << l2Promotion << std::endl
-       << "oobFill        " << oobFill << std::endl;
+       << ArrayToStr(pixelBoxUpperCorner, tensorRank - 2) << '\n'
+       << "elementStrides " << ArrayToStr(elementStrides, tensorRank) << '\n'
+       << "interleave     " << interleave << '\n'
+       << "swizzle        " << swizzle << '\n'
+       << "l2Promotion    " << l2Promotion << '\n'
+       << "oobFill        " << oobFill << '\n';
     return ss.str();
   }
 };
@@ -195,7 +192,7 @@ TVM_FFI_STATIC_INIT_BLOCK({
             T.interleave, T.swizzle, T.l2Promotion, T.oobFill);
         if (result != CUDA_SUCCESS) {
           LOG_FATAL << "Failed to initialize the TMA descriptor " << result
-                    << std::endl
+                    << '\n'
                     << T.ToDebugString();
         }
         *ret = static_cast<int>(result);
