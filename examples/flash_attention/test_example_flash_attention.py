@@ -2,6 +2,7 @@ import tilelang.testing
 
 import example_gqa_bwd
 import example_mha_bwd
+import example_mha_bwd_bhsd
 import example_mha_fwd_bhsd_wgmma_pipelined
 import example_gqa_fwd_bshd
 import example_mha_fwd_bshd
@@ -20,6 +21,11 @@ def test_example_gqa_bwd():
 @tilelang.testing.requires_cuda
 def test_example_mha_bwd():
     example_mha_bwd.main()
+
+
+@tilelang.testing.requires_cuda
+def test_example_mha_bwd_bhsd():
+    example_mha_bwd_bhsd.main()
 
 
 @tilelang.testing.requires_cuda

@@ -77,16 +77,17 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
                                                bx * block_N + t % (block_N // vec_load_b) *
                                                (block_N // vec_load_b) + vec], T.float16(0))
 
-    mod = tvm.tir.transform.BindTarget(auto_target)(Before)
-    mod = tl.transform.LayoutInference()(mod)
-    mod = tvm.tir.transform.Simplify()(mod)
-    ref_mod = tvm.tir.transform.BindTarget(auto_target)(After)
-    ref_mod = tvm.tir.transform.Simplify()(ref_mod)
-    # Note(tzj): The structures are equal except one more "for" loop after the LayoutInference pass
-    # This loop is "for vec in T.parallel(1)",
-    # Since the loop var "vec" is never used in the loop body, it does not affect the correctness
-    tvm.ir.structural_equal(mod, ref_mod)
-    # tvm.ir.assert_structural_equal(mod, ref_mod)
+    with tvm.target.Target(auto_target):
+        mod = tvm.tir.transform.BindTarget(auto_target)(Before)
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tvm.tir.transform.Simplify()(mod)
+        ref_mod = tvm.tir.transform.BindTarget(auto_target)(After)
+        ref_mod = tvm.tir.transform.Simplify()(ref_mod)
+        # Note(tzj): The structures are equal except one more "for" loop after the LayoutInference pass
+        # This loop is "for vec in T.parallel(1)",
+        # Since the loop var "vec" is never used in the loop body, it does not affect the correctness
+        tvm.ir.structural_equal(mod, ref_mod)
+        # tvm.ir.assert_structural_equal(mod, ref_mod)
 
 
 if __name__ == "__main__":

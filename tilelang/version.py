@@ -41,8 +41,12 @@ def get_git_commit_id() -> Union[str, None]:
 # NOTE(lei): Although the local commit id cannot capture locally staged changes,
 # the local commit id can help mitigate issues caused by incorrect cache to some extent,
 # so it should still be kept.
-if "+" not in __version__ and (commit_id := get_git_commit_id()):
-    __version__ = f"{__version__}+{commit_id}"
+# Check WITH_COMMITID environment variable to control whether to include commit ID
+WITH_COMMITID = os.environ.get("WITH_COMMITID", "True").lower() == "true"
+if WITH_COMMITID and "+" not in __version__ and (commit_id := get_git_commit_id()):
+    # Use short commit ID (8 characters) for better compatibility
+    short_commit_id = commit_id[:8]
+    __version__ = f"{__version__}+{short_commit_id}"
 
 # Define the public API for the module
 __all__ = ["__version__"]

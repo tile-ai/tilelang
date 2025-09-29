@@ -26,6 +26,7 @@ from .parallel import Parallel  # noqa: F401
 from .pipeline import Pipelined  # noqa: F401
 from .persistent import Persistent  # noqa: F401
 from .frame import has_let_value, get_let_value  # noqa: F401
+from .math_intrinsics import *  # noqa: F401
 from .kernel import (
     Kernel,  # noqa: F401
     KernelLaunchFrame,  # noqa: F401
@@ -41,6 +42,7 @@ from .allocate import (
     alloc_shared,  # noqa: F401
     alloc_fragment,  # noqa: F401
     alloc_barrier,  # noqa: F401
+    alloc_tmem,  # noqa: F401
     alloc_reducer,  # noqa: F401
 )
 from .copy import copy, c2d_im2col  # noqa: F401

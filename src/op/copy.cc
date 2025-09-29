@@ -692,8 +692,8 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   PassContext pass_ctx = PassContext::Current();
   bool disable_tma_lower =
       pass_ctx->GetConfig<bool>(kDisableTMALower, false).value();
-  auto copy_inst =
-      GetCopyInst(target, disable_tma_lower, T.layout_map, analyzer);
+  auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma,
+                               T.layout_map, analyzer);
   if (copy_inst == CopyInst::kBulkLoad1D ||
       copy_inst == CopyInst::kBulkStore1D) {
     auto bulk_copy = LowerBulkCopy1D(T, analyzer, copy_inst);

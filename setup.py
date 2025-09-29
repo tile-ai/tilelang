@@ -66,6 +66,8 @@ USE_METAL = _read_bool_env("USE_METAL", MAYBE_METAL)
 USE_CUDA = _read_bool_env("USE_CUDA", IS_LINUX and not USE_ROCM)
 # Build with Debug mode
 DEBUG_MODE = _read_bool_env('DEBUG_MODE')
+# Include commit ID in wheel filename and package metadata
+WITH_COMMITID = _read_bool_env("WITH_COMMITID")
 
 TVM_PREBUILD_ITEMS = [
     "libtvm_runtime.so",
@@ -208,7 +210,12 @@ def get_tilelang_version(with_cuda=USE_CUDA,
         except subprocess.SubprocessError as error:
             logger.warning(f"Ignore commit id because failed to get git commit id: {str(error)}")
         if commit_id:
-            version += f"+{commit_id}"
+            # Truncate commit ID to 8 characters to keep version string reasonable
+            short_commit_id = commit_id[:8]
+            if local_version_parts:
+                version += f".{short_commit_id}"
+            else:
+                version += f"+{short_commit_id}"
 
     return version
 
@@ -579,7 +586,7 @@ class TileLangBuilPydCommand(build_py):
             # if is VERSION file, replace the content with the new version with commit id
             if not PYPI_BUILD and item == "VERSION":
                 version = get_tilelang_version(
-                    with_cuda=False, with_system_info=False, with_commit_id=True)
+                    with_cuda=False, with_system_info=False, with_commit_id=WITH_COMMITID)
                 target_dir = os.path.dirname(target_dir)
                 if not os.path.exists(target_dir):
                     os.makedirs(target_dir)
@@ -604,7 +611,7 @@ class TileLangSdistCommand(sdist):
     def make_distribution(self):
         self.distribution.metadata.name = PACKAGE_NAME
         self.distribution.metadata.version = get_tilelang_version(
-            with_cuda=False, with_system_info=False, with_commit_id=False)
+            with_cuda=False, with_system_info=False, with_commit_id=WITH_COMMITID)
         super().make_distribution()
 
 
@@ -891,8 +898,8 @@ if not MAYBE_METAL:
 
 setup(
     name=PACKAGE_NAME,
-    version=(get_tilelang_version(with_cuda=False, with_system_info=False)
-             if PYPI_BUILD else get_tilelang_version()),
+    version=(get_tilelang_version(with_cuda=False, with_system_info=False, with_commit_id=False)
+             if PYPI_BUILD else get_tilelang_version(with_commit_id=WITH_COMMITID)),
     packages=find_packages(where="."),
     package_dir={"": "."},
     author="Tile-AI",
