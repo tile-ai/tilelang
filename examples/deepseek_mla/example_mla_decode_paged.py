@@ -11,8 +11,17 @@ import math
     out_idx=[8], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
-def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, block_H, num_split,
-                        block_size, softmax_scale=None):
+def mla_decode_tilelang(batch,
+                        h_q,
+                        h_kv,
+                        max_seqlen_pad,
+                        dv,
+                        dpe,
+                        block_N,
+                        block_H,
+                        num_split,
+                        block_size,
+                        softmax_scale=None):
     if softmax_scale is None:
         softmax_scale = (dv + dpe)**-0.5
     scale = float(softmax_scale * 1.44269504)  # log2(e)

@@ -88,7 +88,7 @@ def run_flash_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q,
 
 @torch.inference_mode()
 def run_flashinfer(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens,
-                    h_q, h_kv, d, dv, causal, dtype):
+                   h_q, h_kv, d, dv, causal, dtype):
     # pip install flashinfer-python
     import flashinfer
     assert d > dv, "mla with rope dim should be larger than no rope dim"
