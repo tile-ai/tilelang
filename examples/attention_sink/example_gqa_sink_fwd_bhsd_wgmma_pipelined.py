@@ -36,6 +36,7 @@ def flashattn(
     dim,
     groups=1,
     window_size=None,  # None for full attention
+    sm_scale=None,
     block_M=128,
     block_N=128,
     num_stages=2,
@@ -45,7 +46,10 @@ def flashattn(
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
 
-    scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
+    if sm_scale is None:
+        sm_scale = (1.0 / dim)**0.5 
+    scale = sm_scale * 1.44269504  # log2(e)
+
     head_kv = heads // groups
     q_shape = [batch, heads, seq_q, dim]
     kv_shape = [batch, head_kv, seq_kv, dim]

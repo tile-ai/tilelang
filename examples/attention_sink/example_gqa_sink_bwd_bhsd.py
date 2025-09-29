@@ -28,7 +28,8 @@ def flashattn_fwd(
         seq_len,
         dim,
         groups=1,
-        window_size=None,  # None for full attention,
+        window_size=None,  # None for full attention
+        sm_scale=None,
         block_M=128,
         block_N=128,
         num_stages=2,
@@ -37,7 +38,10 @@ def flashattn_fwd(
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
 
-    scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
+    if sm_scale is None:
+        sm_scale = (1.0 / dim)**0.5 
+    scale = sm_scale * 1.44269504  # log2(e)
+
     head_kv = heads // groups
     q_shape = [batch, heads, seq_len, dim]
     kv_shape = [batch, head_kv, seq_len, dim]
@@ -199,9 +203,11 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
 @tilelang.jit(pass_configs={
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
 })
-def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None):  # None for full attention
-    sm_scale = (1.0 / dim)**0.5
+def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None, sm_scale=None):  # None for full attention
+    if sm_scale is None:
+        sm_scale = (1.0 / dim)**0.5
     scale = sm_scale * 1.44269504  # log2(e)
+
     head_kv = heads // groups
     q_shape = [batch, heads, seq_len, dim]
     kv_shape = [batch, head_kv, seq_len, dim]
@@ -338,6 +344,11 @@ class _attention(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, sinks, window_size, groups):
+        def maybe_contiguous(x):
+            if x.stride(-1) != 1:
+                return x.contiguous()
+            return x
+        q, k, v, sinks= [maybe_contiguous(x) for x in (q, k, v, sinks)]
         BATCH, H, N_CTX, D_HEAD = q.shape
         kernel = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, groups, window_size)
         o, lse = kernel(q, k, v, sinks)
@@ -352,12 +363,6 @@ class _attention(torch.autograd.Function):
         BATCH, H, N_CTX, D_HEAD = q.shape
         groups = ctx.groups
 
-        def maybe_contiguous(x):
-            if x.stride(-1) != 1:
-                return x.contiguous()
-            return x
-
-        do, q, k, v, sinks, o = [maybe_contiguous(x) for x in (do, q, k, v, sinks, o)]
         kernel_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD)
         kernel_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD)
         delta = kernel_prep(o, do)

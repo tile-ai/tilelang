@@ -28,6 +28,7 @@ def flashattn_fwd(
         seq_len,
         dim,
         window_size=None,  # None for full attention,
+        sm_scale=None,
         block_M=64,
         block_N=64,
         num_stages=1,
@@ -36,7 +37,10 @@ def flashattn_fwd(
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
 
-    scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
+    if sm_scale is None:
+        sm_scale = (1.0 / dim)**0.5 
+    scale = sm_scale * 1.44269504  # log2(e)
+
     shape = [batch, heads, seq_len, dim]
     dtype = "float16"
     accum_dtype = "float"
@@ -52,7 +56,6 @@ def flashattn_fwd(
     ):
         with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
-            # Q_local = T.alloc_fragment([block_M, dim], dtype)
             K_shared = T.alloc_shared([block_N, dim], dtype)
             V_shared = T.alloc_shared([block_N, dim], dtype)
             acc_s = T.alloc_fragment([block_M, block_N], accum_dtype)
@@ -72,9 +75,6 @@ def flashattn_fwd(
             T.fill(scores_max, -T.infinity(accum_dtype))
             for i in T.Parallel(block_M):
                 sinks[i] = Sinks[by]
-            # T.copy(Q_shared, Q_local)
-            # for i, j in T.Parallel(block_M, dim):
-            #     Q_local[i, j] *= scale
             end = T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N))
             start = T.alloc_local([1], 'int32')
             if window_size is not None:
@@ -204,13 +204,16 @@ def flashattn_bwd(
         heads,
         seq_len,
         dim,
-        window_size=None,  # None for full attention,
+        window_size=None,  # None for full attention
+        sm_scale=None,
 ):
 
     block_M, block_N, num_stages, threads = get_bwd_configs()
 
-    sm_scale = (1.0 / dim)**0.5
+    if sm_scale is None:
+        sm_scale = (1.0 / dim)**0.5 
     scale = sm_scale * 1.44269504  # log2(e)
+
     shape = [batch, heads, seq_len, dim]
     dtype = "float16"
     accum_dtype = "float"
@@ -349,7 +352,7 @@ class _attention(torch.autograd.Function):
         BATCH, H, N_CTX, D_HEAD = q.shape
         block_M = 64
         block_N = 64 if D_HEAD <= 128 else 32
-        kernel = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, window_size, block_M, block_N)
+        kernel = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, window_size, block_M=block_M, block_N=block_N)
         o, lse = kernel(q, k, v, sinks)
         ctx.save_for_backward(q, k, v, sinks, o, lse)
         ctx.window_size = window_size
