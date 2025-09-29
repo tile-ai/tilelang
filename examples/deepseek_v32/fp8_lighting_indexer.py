@@ -258,10 +258,7 @@ def ref_fp8_mqa_logits(q: torch.Tensor, kv: torch.Tensor, weights: torch.Tensor,
     cost = mask.sum()
     return logits, cost
 
-
-if __name__ == "__main__":
-    torch.manual_seed(0)
-    S, SKV, H, HKV, D, kv_stride = 4096, 8192, 32, 1, 64, 1
+def test_fp8_lighting_indexer(S=4096, SKV=8192, H=32, HKV=1, D=64, kv_stride=1):
     q = torch.randn(S, H, D, device="cuda", dtype=torch.bfloat16).to(torch.bfloat16)
     kv = torch.randn(SKV, D, device="cuda", dtype=torch.bfloat16).to(torch.bfloat16)
     weights = torch.randn(S, H, device="cuda", dtype=torch.float32)
@@ -304,3 +301,6 @@ if __name__ == "__main__":
     logits_tflops = logits_flops / (logits_ms * 1e-3) / 1e12
     print(f"logits_tflops: {logits_tflops}, logits_ms: {logits_ms}")
     print(f"cost_ref: {cost_ref}")
+
+if __name__ == "__main__":
+    test_fp8_lighting_indexer()

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//weka-hg/prod/deepseek/permanent/wanglei/tilelang/examples/deepseek_v32/**)",
+      "Read(//weka-hg/prod/deepseek/permanent/wanglei/tilelang/examples/deepseek_mla/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
