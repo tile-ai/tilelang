@@ -1,13 +1,9 @@
 import itertools
-import math
-from einops import rearrange
 import tilelang
 from tilelang import language as T
 import torch
-from tilelang.autotuner import autotune
 from tilelang import tvm
-from utils import cal_cu_seqlen_ke_for_q, cal_cu_seqlen_ks_for_q
-
+from utils import cal_cu_seqlen_ke_for_q, cal_cu_seqlen_ks_for_q, assert_similar
 from typing import Tuple
 
 
@@ -15,54 +11,15 @@ def ceil_to_ue8m0(x: torch.Tensor):
     assert x.view(-1).amax().item() > 0
     return torch.pow(2.0, torch.ceil(torch.log2(x.abs())))
 
-def per_custom_dims_cast_to_fp8(x: torch.Tensor, dims: Tuple[int], use_ue8m0: bool) -> Tuple[torch.Tensor, torch.Tensor]:
+
+def per_custom_dims_cast_to_fp8(x: torch.Tensor, dims: Tuple[int],
+                                use_ue8m0: bool) -> Tuple[torch.Tensor, torch.Tensor]:
     excluded_dims = tuple([i for i in range(x.dim()) if i not in set(dims)])
     x_amax = x.abs().float().amax(dim=excluded_dims, keepdim=True).clamp(1e-4)
     sf = x_amax / 448.0
     sf = ceil_to_ue8m0(sf) if use_ue8m0 else sf
     x_scaled = (x * (1.0 / sf)).to(torch.float8_e4m3fn)
     return x_scaled, sf.squeeze()
-
-def print_red_warning(message):
-    print(f"\033[31mWARNING: {message}\033[0m")
-
-
-def calc_sim(x, y, name="tensor"):
-    x, y = x.data.double(), y.data.double()
-    denominator = (x * x + y * y).sum()
-    if denominator == 0:
-        print_red_warning(f"{name} all zero")
-        return 1
-    sim = 2 * (x * y).sum() / denominator
-    return sim
-
-
-def assert_similar(x, y, eps=1e-8, name="tensor", raise_assert=True):
-    x_mask = torch.isfinite(x)
-    y_mask = torch.isfinite(y)
-    if not torch.all(x_mask == y_mask):
-        print_red_warning(f"{name} Error: isfinite mask mismatch")
-        if raise_assert:
-            assert False
-    if not torch.isclose(
-        x.masked_fill(x_mask, 0),
-        y.masked_fill(y_mask, 0),
-        rtol=0,
-        atol=0,
-        equal_nan=True,
-    ).all():
-        print_red_warning(f"{name} Error: nonfinite value mismatch")
-        if raise_assert:
-            assert False
-    x = x.masked_fill(~x_mask, 0)
-    y = y.masked_fill(~y_mask, 0)
-    sim = calc_sim(x, y, name)
-    diff = 1.0 - sim
-    if not (0 <= diff <= eps):
-        print_red_warning(f"{name} Error: {diff}")
-        if raise_assert:
-            assert False
-    return diff
 
 
 def get_configs():
@@ -72,13 +29,13 @@ def get_configs():
         threads=[128, 256],
         block_Q=[1, 2, 4],
     )
-    return [
-        {k: v for k, v in zip(iter_params, values)}
-        for values in itertools.product(*iter_params.values())
-    ]
+    return [{
+        k: v for k, v in zip(iter_params, values)
+    } for values in itertools.product(*iter_params.values())]
 
 
 class SupplyProg:
+
     def __init__(self):
         self.tensors_dict = {}
 
@@ -127,13 +84,13 @@ def mqa_attn_return_logits(
 
     @T.prim_func
     def mqa_attn_return_logits_kernel(
-        IndexQ: T.Tensor(index_q_shape, dtype),  # type: ignore
-        IndexK: T.Tensor(index_k_shape, dtype),  # type: ignore
-        IndexKScale: T.Tensor(index_k_scale_shape, accum_dtype),  # type: ignore
-        Logits: T.Tensor(logits_shape, accum_dtype),  # type: ignore
-        Weights: T.Tensor([seq_len, heads], accum_dtype),  # type: ignore
-        CuSeqLenKS: T.Tensor([seq_len], index_dtype),  # type: ignore
-        CuSeqLenKE: T.Tensor([seq_len], index_dtype),  # type: ignore
+            IndexQ: T.Tensor(index_q_shape, dtype),  # type: ignore
+            IndexK: T.Tensor(index_k_shape, dtype),  # type: ignore
+            IndexKScale: T.Tensor(index_k_scale_shape, accum_dtype),  # type: ignore
+            Logits: T.Tensor(logits_shape, accum_dtype),  # type: ignore
+            Weights: T.Tensor([seq_len, heads], accum_dtype),  # type: ignore
+            CuSeqLenKS: T.Tensor([seq_len], index_dtype),  # type: ignore
+            CuSeqLenKE: T.Tensor([seq_len], index_dtype),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(seq_len, block_Q), threads=threads) as bx:
 
@@ -156,20 +113,17 @@ def mqa_attn_return_logits(
             cu_k_e_max[0] = -2147483648
 
             for bq_i in T.serial(block_Q):
-                cu_k_s_min[0] = T.min(
-                    cu_k_s_min[0], T.min(CuSeqLenKS[seq_len_i + bq_i], seq_len_kv)
-                )
+                cu_k_s_min[0] = T.min(cu_k_s_min[0], T.min(CuSeqLenKS[seq_len_i + bq_i],
+                                                           seq_len_kv))
             for bq_i in T.serial(block_Q):
-                cu_k_e_max[0] = T.max(
-                    cu_k_e_max[0], T.min(CuSeqLenKE[seq_len_i + bq_i], seq_len_kv)
-                )
+                cu_k_e_max[0] = T.max(cu_k_e_max[0], T.min(CuSeqLenKE[seq_len_i + bq_i],
+                                                           seq_len_kv))
 
             T.copy(IndexQ[seq_len_i * heads, 0], index_q_shared)
             T.copy(Weights[seq_len_i, 0], weights)
 
             for nbn_i in T.Pipelined(
-                T.ceildiv(cu_k_e_max[0] - cu_k_s_min[0], block_N), num_stages=num_stages
-            ):
+                    T.ceildiv(cu_k_e_max[0] - cu_k_s_min[0], block_N), num_stages=num_stages):
                 T.copy(IndexK[cu_k_s_min[0] + nbn_i * block_N, 0], index_k_shared)
                 T.copy(IndexKScale[cu_k_s_min[0] + nbn_i * block_N], index_k_scale_fragment)
 
@@ -183,16 +137,16 @@ def mqa_attn_return_logits(
                 )
 
                 for bn_i, bq_i, h_i in T.Parallel(block_N, block_Q, heads):
-                    s_reshaped[bn_i, bq_i, h_i] = (
-                        T.max(s[bn_i, bq_i * heads + h_i], 0) * weights[bq_i, h_i]
-                    )  * index_k_scale_fragment[bn_i]
+                    s_reshaped[bn_i, bq_i,
+                               h_i] = (T.max(s[bn_i, bq_i * heads + h_i], 0) *
+                                       weights[bq_i, h_i]) * index_k_scale_fragment[bn_i]
 
                 T.reduce_sum(s_reshaped, logits, dim=-1, clear=True)
 
                 for bq_i, bn_i in T.Parallel(block_Q, block_N):
                     Logits[seq_len_i + bq_i, cu_k_s_min[0] + nbn_i * block_N + bn_i] = (
-                        logits[bn_i, bq_i]
-                    )
+                        logits[bn_i, bq_i])
+
     return mqa_attn_return_logits_kernel
 
 
@@ -209,9 +163,9 @@ def clean_logits_(
 
     @T.prim_func
     def clean_logits_kernel(
-        Logits: T.Tensor([seq_len, seq_len_kv], dtype),  # type: ignore
-        CuSeqLenKS: T.Tensor([seq_len], indices_dtype),  # type: ignore
-        CuSeqLenKE: T.Tensor([seq_len], indices_dtype),  # type: ignore
+            Logits: T.Tensor([seq_len, seq_len_kv], dtype),  # type: ignore
+            CuSeqLenKS: T.Tensor([seq_len], indices_dtype),  # type: ignore
+            CuSeqLenKE: T.Tensor([seq_len], indices_dtype),  # type: ignore
     ):
         with T.Kernel(seq_len, threads=threads) as bx:
             tx = T.thread_binding(0, threads, thread="threadIdx.x")
@@ -229,17 +183,19 @@ def clean_logits_(
     return clean_logits_kernel
 
 
-def mqa_attn_return_logits_interface(
-    q, kv, kv_scales, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits=True
-):
+def mqa_attn_return_logits_interface(q,
+                                     kv,
+                                     kv_scales,
+                                     weights,
+                                     cu_seqlen_ks,
+                                     cu_seqlen_ke,
+                                     clean_logits=True):
     seq_len, heads, index_dim = q.shape
     seq_len_kv = kv.shape[0]
 
     clean_logits_kernel = clean_logits_()
 
-    mqa_attn_return_logits_kernel = mqa_attn_return_logits(
-        heads=heads, index_dim=index_dim
-    )
+    mqa_attn_return_logits_kernel = mqa_attn_return_logits(heads=heads, index_dim=index_dim)
     logits = torch.empty([seq_len, seq_len_kv], device=q.device, dtype=torch.float32)
     mqa_attn_return_logits_kernel(
         q.view(seq_len * heads, index_dim),
@@ -273,33 +229,30 @@ def ref_fp8_mqa_logits(q: torch.Tensor, kv: torch.Tensor, weights: torch.Tensor,
     cost = mask.sum()
     return logits, cost
 
+
 if __name__ == "__main__":
     torch.manual_seed(0)
     S, SKV, H, HKV, D, kv_stride = 4096, 8192, 32, 1, 64, 1
-    q = torch.randn(S, H, D, device="cuda", dtype=torch.bfloat16).to(
-        torch.bfloat16
-    )
-    kv = torch.randn(SKV, D, device="cuda", dtype=torch.bfloat16).to(
-        torch.bfloat16
-    )
+    q = torch.randn(S, H, D, device="cuda", dtype=torch.bfloat16).to(torch.bfloat16)
+    kv = torch.randn(SKV, D, device="cuda", dtype=torch.bfloat16).to(torch.bfloat16)
     weights = torch.randn(S, H, device="cuda", dtype=torch.float32)
     p = (torch.randn(S, SKV, device="cuda", dtype=torch.float32) * 4).softmax(dim=-1)
 
-    def generate_random_cu_seqlens(
-        per_cp_seqlen, cp_size=4, cp_rank=3, kv_stride=1, average_q_len=512
-    ):
+    def generate_random_cu_seqlens(per_cp_seqlen,
+                                   cp_size=4,
+                                   cp_rank=3,
+                                   kv_stride=1,
+                                   average_q_len=512):
         total_seqlen = per_cp_seqlen * cp_size
 
-        cu_seqlens = torch.randint(
-            0, average_q_len * 2, (total_seqlen // average_q_len * 2,)
-        ).cuda()
+        cu_seqlens = torch.randint(0, average_q_len * 2,
+                                   (total_seqlen // average_q_len * 2,)).cuda()
         last_seq_id = torch.where(cu_seqlens.cumsum(0) >= total_seqlen)[0][0]
         cu_seqlens = cu_seqlens[:last_seq_id]
 
         if cu_seqlens.sum() < total_seqlen:
             cu_seqlens = torch.cat(
-                [cu_seqlens, torch.tensor([total_seqlen - cu_seqlens.sum()]).cuda()]
-            )
+                [cu_seqlens, torch.tensor([total_seqlen - cu_seqlens.sum()]).cuda()])
 
         total_seqlen_k = (cu_seqlens // kv_stride).sum()
 
@@ -328,75 +281,65 @@ if __name__ == "__main__":
 
         assert per_cp_seqlen % 2 == 0
         per_chunk_seqlen = per_cp_seqlen // 2
-        slice_short = slice(
-            cp_rank * per_chunk_seqlen, (cp_rank + 1) * per_chunk_seqlen
-        )
+        slice_short = slice(cp_rank * per_chunk_seqlen, (cp_rank + 1) * per_chunk_seqlen)
         slice_long = slice(
             total_seqlen - (cp_rank + 1) * per_chunk_seqlen,
             total_seqlen - cp_rank * per_chunk_seqlen,
         )
-        ks = torch.cat(
-            [
-                cu_seqlens_ks_for_each_q[slice_short],
-                cu_seqlens_ks_for_each_q[slice_long],
-            ]
-        )
-        ke = torch.cat(
-            [
-                cu_seqlens_ke_for_each_q[slice_short],
-                cu_seqlens_ke_for_each_q[slice_long],
-            ]
-        )
+        ks = torch.cat([
+            cu_seqlens_ks_for_each_q[slice_short],
+            cu_seqlens_ks_for_each_q[slice_long],
+        ])
+        ke = torch.cat([
+            cu_seqlens_ke_for_each_q[slice_short],
+            cu_seqlens_ke_for_each_q[slice_long],
+        ])
         assert len(ks) == len(ke) == per_cp_seqlen
         return ks, ke
 
     ks, ke = generate_random_cu_seqlens(
-        per_cp_seqlen=S, cp_size=4, cp_rank=3, kv_stride=kv_stride, average_q_len=2048
-    )
+        per_cp_seqlen=S, cp_size=4, cp_rank=3, kv_stride=kv_stride, average_q_len=2048)
 
     logits_ref, cost_ref = ref_fp8_mqa_logits(
-        q=q, kv=kv, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke
-    )
-    
+        q=q, kv=kv, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke)
+
     q_fp8 = q.to(torch.float8_e4m3fn)
-    kv_fp8, kv_scales = per_custom_dims_cast_to_fp8(kv, (0, ), False)
+    kv_fp8, kv_scales = per_custom_dims_cast_to_fp8(kv, (0,), False)
 
     logits_tl = mqa_attn_return_logits_interface(
-        q=q_fp8, kv=kv_fp8, kv_scales=kv_scales, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke
-    )
-    diff = assert_similar(
-        logits_ref, logits_tl, eps=1e-14, name="logits", raise_assert=False
-    )
+        q=q_fp8, kv=kv_fp8, kv_scales=kv_scales, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke)
+    diff = assert_similar(logits_ref, logits_tl, eps=1e-14, name="logits", raise_assert=False)
 
     original_diff = None
     for i in range(10):
         logits_tl = mqa_attn_return_logits_interface(
-            q=q_fp8, kv=kv_fp8, kv_scales=kv_scales, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke
-        )
-        diff = assert_similar(
-            logits_ref, logits_tl, eps=1e-14, name="logits", raise_assert=False
-        )
+            q=q_fp8,
+            kv=kv_fp8,
+            kv_scales=kv_scales,
+            weights=weights,
+            cu_seqlen_ks=ks,
+            cu_seqlen_ke=ke)
+        diff = assert_similar(logits_ref, logits_tl, eps=1e-14, name="logits", raise_assert=False)
         if original_diff is None:
             original_diff = diff
         else:
             assert original_diff == diff
 
-    from tilelang.profiler import do_bench  
-
+    from tilelang.profiler import do_bench
 
     def logits_fn():
         return mqa_attn_return_logits_interface(
-            q=q_fp8, kv=kv_fp8, kv_scales=kv_scales, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke
-        )
+            q=q_fp8,
+            kv=kv_fp8,
+            kv_scales=kv_scales,
+            weights=weights,
+            cu_seqlen_ks=ks,
+            cu_seqlen_ke=ke)
 
-    with torch.profiler.profile(
-        activities=[torch.profiler.ProfilerActivity.CUDA]
-    ) as prof:
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
         logits_fn()
 
-    print(
-        prof.key_averages().table(sort_by="cuda_time_total", max_name_column_width=50)
-    )
+    print(prof.key_averages().table(sort_by="cuda_time_total", max_name_column_width=50))
 
     logits_ms = do_bench(logits_fn, warmup=100, rep=100)
     logits_flops = 2 * cost_ref * H * D

@@ -7,19 +7,15 @@ from tilelang import tvm
 from tilelang.engine.callback import register_cuda_postproc_callback
 import argparse
 
+
 @tilelang.jit(
     out_idx=[-2, -1],
     compile_flags=[
-        "-O3",
-        "-Wno-deprecated-declarations",
-        "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__",
-        "-U__CUDA_NO_HALF2_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "--expt-relaxed-constexpr",
-        "--expt-extended-lambda",
-        "--ptxas-options=-v,--register-usage-level=10",
-        "-DNDEBUG"],
+        "-O3", "-Wno-deprecated-declarations", "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__", "-U__CUDA_NO_HALF2_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "--expt-relaxed-constexpr", "--expt-extended-lambda",
+        "--ptxas-options=-v,--register-usage-level=10", "-DNDEBUG"
+    ],
 )
 def sparse_attention_fwd(
     batch,
@@ -38,14 +34,10 @@ def sparse_attention_fwd(
     num_stages=0,
     threads=384,
 ):
-    '''
-    This code implements sparse attn
-    Note that the first kv_stride - 1 token's out would be nan. since this isn't used, we assume it doesn't matter. (**still, one might have to handle carefully in backward to avoid dout * nan propagated!**)
-    It might be OK to set these nan to zero, but we assume it might serve as a reminder of taking care of these out in 'delta = out * dout'.
-    The above feature might be replaced with out being undefined if we fix CP0 logic (this logic is currently wrong due to some bug in compiler)
-    '''
-    assert dim == tilelang.math.next_power_of_2(dim), f"haven't check padding correctness yet, dim={dim}"
-    assert tail_dim == tilelang.math.next_power_of_2(tail_dim), f"haven't check padding correctness yet, dim={tail_dim}"
+    assert dim == tilelang.math.next_power_of_2(
+        dim), f"haven't check padding correctness yet, dim={dim}"
+    assert tail_dim == tilelang.math.next_power_of_2(
+        tail_dim), f"haven't check padding correctness yet, dim={tail_dim}"
     assert is_causal == True, 'non-casual is not supported'
     assert topk % block_I == 0, 'otherwise will load some index=0 thus causing wrong kv to be loaded'
     if sm_scale is None:
@@ -67,7 +59,7 @@ def sparse_attention_fwd(
     H = head_kv
     padded_H = max(tilelang.math.next_power_of_2(head_kv), 16)
     if padded_H != H:
-        assert kv_group == 1, 'here we solve the H padding automically, other wise you should handle Q copy and Output copy with your mask (when kv_group == 1, use g_i * padded_H:(g_i+1) * padded_H would be handled automically)'
+        assert kv_group == 1, 'here we solve the H padding automatically, other wise you should handle Q copy and Output copy with your mask (when kv_group == 1, use g_i * padded_H:(g_i+1) * padded_H would be handled automatically)'
     BI = block_I
     NI = tilelang.cdiv(topk, block_I)
     assert NI % 2 == 0, 'NI should be a multiple of 2'
@@ -84,14 +76,18 @@ def sparse_attention_fwd(
 
     @T.prim_func
     def main(
-        Q: T.Tensor(q_shape, dtype),  # type: ignore
-        KV: T.Tensor(kv_shape, dtype),  # type: ignore
-        Indices: T.Tensor(indices_shape, indices_dtype),  # type: ignore
-        q_start_index_s: T.Tensor(1, indices_dtype),
-        Output: T.Tensor(o_shape, dtype),  # type: ignore
-        Lse: T.Tensor(lse_shape, accum_dtype),  # type: ignore
+            Q: T.Tensor(q_shape, dtype),  # type: ignore
+            KV: T.Tensor(kv_shape, dtype),  # type: ignore
+            Indices: T.Tensor(indices_shape, indices_dtype),  # type: ignore
+            q_start_index_s: T.Tensor(1, indices_dtype),
+            Output: T.Tensor(o_shape, dtype),  # type: ignore
+            Lse: T.Tensor(lse_shape, accum_dtype),  # type: ignore
     ):
-        with T.Kernel((seq_len - kv_stride + 1 if CP0 else seq_len) * REPLICATE_H, batch, kv_group, threads=threads) as (bx, by, bz):
+        with T.Kernel(
+            (seq_len - kv_stride + 1 if CP0 else seq_len) * REPLICATE_H,
+                batch,
+                kv_group,
+                threads=threads) as (bx, by, bz):
             Q_shared_l = T.alloc_shared([H_per_block, D // 2], dtype)
             Q_shared_r = T.alloc_shared([H_per_block, D // 2], dtype)
             Q_tail_shared = T.alloc_shared([H_per_block, D_tail], dtype)
@@ -128,7 +124,8 @@ def sparse_attention_fwd(
             bar_sScale_and_sS_free = T.alloc_barrier(arrive_count=256)
 
             b_i, g_i = by, bz
-            s_i = (bx + (KV_stride - 1 if CP0 else 0)) if REPLICATE_H == 1 else (bx // REPLICATE_H + (KV_stride - 1 if CP0 else 0))
+            s_i = (bx + (KV_stride - 1 if CP0 else 0)) if REPLICATE_H == 1 else (
+                bx // REPLICATE_H + (KV_stride - 1 if CP0 else 0))
             q_i = q_start_index_s[0] + s_i
             max_kv_i = (q_i + 1 - KV_stride) // KV_stride
 
@@ -155,13 +152,14 @@ def sparse_attention_fwd(
                     T.barrier_wait(bar_k_0_ready[0], (i_i & 1))
 
                     for h_i, bi_i in T.Parallel(H_per_block, BI):
-                        acc_s[h_i, bi_i] = T.if_then_else(is_kv_valid[bi_i], 0, -T.infinity(acc_s.dtype))
+                        acc_s[h_i, bi_i] = T.if_then_else(is_kv_valid[bi_i], 0,
+                                                          -T.infinity(acc_s.dtype))
                     T.gemm(Q_shared_l, KV_shared_0_l, acc_s, transpose_B=True, wg_wait=-1)
                     T.gemm(Q_shared_r, KV_shared_0_r, acc_s, transpose_B=True, wg_wait=-1)
                     T.gemm(Q_tail_shared, K_tail_shared_0, acc_s, transpose_B=True, wg_wait=-1)
 
                     T.wait_wgmma(0)
-                    
+
                     if i_i != 0:
                         T.barrier_arrive(bar_sScale_and_sS_free)
                         T.barrier_wait(bar_sScale_and_sS_free, ((i_i * 2) & 1) ^ 1)
@@ -185,12 +183,12 @@ def sparse_attention_fwd(
                     T.barrier_arrive(bar_sScale_and_sS_ready)
                     T.barrier_arrive(bar_k_0_free[0])
 
-
                     # Buffer 1
                     T.barrier_wait(bar_k_1_ready[0], (i_i & 1))
 
                     for h_i, bi_i in T.Parallel(H_per_block, BI):
-                        acc_s[h_i, bi_i] = T.if_then_else(is_kv_valid[bi_i], 0, -T.infinity(acc_s.dtype))
+                        acc_s[h_i, bi_i] = T.if_then_else(is_kv_valid[bi_i], 0,
+                                                          -T.infinity(acc_s.dtype))
                     T.gemm(Q_shared_l, KV_shared_1_l, acc_s, transpose_B=True, wg_wait=-1)
                     T.gemm(Q_shared_r, KV_shared_1_r, acc_s, transpose_B=True, wg_wait=-1)
                     T.gemm(Q_tail_shared, K_tail_shared_1, acc_s, transpose_B=True, wg_wait=-1)
@@ -265,39 +263,65 @@ def sparse_attention_fwd(
                     # Buffer 0
                     T.barrier_wait(bar_k_0_free[0], ((i_i & 1) ^ 1))
                     for r in T.serial(4):
-                        indices_local[0] = Indices[b_i, s_i, g_i, (i_i * 2) * BI + r * 16 + (tx - 256) // 8]
+                        indices_local[0] = Indices[b_i, s_i, g_i,
+                                                   (i_i * 2) * BI + r * 16 + (tx - 256) // 8]
                         is_kv_valid[r * 16 + (tx - 256) // 8] = indices_local[0] <= max_kv_i
                         if is_kv_valid[r * 16 + (tx - 256) // 8]:
                             with T.attr("default", "async_scope", 1):
                                 for u in T.serial(4):
                                     for v in T.vectorized(8):
-                                        KV_shared_0_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[b_i, indices_local[0], g_i, 64 * u + (tx - 256) % 8 * 8 + v]   
-                                        KV_shared_0_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[b_i, indices_local[0], g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8 + v]
+                                        KV_shared_0_l[r * 16 + (tx - 256) // 8,
+                                                      64 * u + (tx - 256) % 8 * 8 +
+                                                      v] = KV[b_i, indices_local[0], g_i,
+                                                              64 * u + (tx - 256) % 8 * 8 + v]
+                                        KV_shared_0_r[r * 16 + (tx - 256) // 8,
+                                                      64 * u + (tx - 256) % 8 * 8 +
+                                                      v] = KV[b_i, indices_local[0], g_i, D // 2 +
+                                                              64 * u + (tx - 256) % 8 * 8 + v]
                             with T.attr("default", "async_scope", 1):
                                 for v in T.vectorized(8):
-                                    K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v] = KV[b_i, indices_local[0], g_i, D + (tx - 256) % 8 * 8 + v]
+                                    K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 +
+                                                    v] = KV[b_i, indices_local[0], g_i,
+                                                            D + (tx - 256) % 8 * 8 + v]
                     T.cp_async_barrier_noinc(bar_k_0_ready[0])
 
                     # Buffer 1
                     T.barrier_wait(bar_k_1_free[0], ((i_i & 1) ^ 1))
                     for r in T.serial(4):
-                        indices_local[0] = Indices[b_i, s_i, g_i, (i_i * 2 + 1) * BI + r * 16 + (tx - 256) // 8]
+                        indices_local[0] = Indices[b_i, s_i, g_i,
+                                                   (i_i * 2 + 1) * BI + r * 16 + (tx - 256) // 8]
                         is_kv_valid[r * 16 + (tx - 256) // 8] = indices_local[0] <= max_kv_i
                         if is_kv_valid[r * 16 + (tx - 256) // 8]:
                             with T.attr("default", "async_scope", 1):
                                 for u in T.serial(4):
                                     for v in T.vectorized(8):
-                                        KV_shared_1_l[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[b_i, indices_local[0], g_i, 64 * u + (tx - 256) % 8 * 8 + v]   
-                                        KV_shared_1_r[r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v] = KV[b_i, indices_local[0], g_i, D // 2 + 64 * u + (tx - 256) % 8 * 8 + v]
+                                        KV_shared_1_l[r * 16 + (tx - 256) // 8,
+                                                      64 * u + (tx - 256) % 8 * 8 +
+                                                      v] = KV[b_i, indices_local[0], g_i,
+                                                              64 * u + (tx - 256) % 8 * 8 + v]
+                                        KV_shared_1_r[r * 16 + (tx - 256) // 8,
+                                                      64 * u + (tx - 256) % 8 * 8 +
+                                                      v] = KV[b_i, indices_local[0], g_i, D // 2 +
+                                                              64 * u + (tx - 256) % 8 * 8 + v]
                             with T.attr("default", "async_scope", 1):
                                 for v in T.vectorized(8):
-                                    K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v] = KV[b_i, indices_local[0], g_i, D + (tx - 256) % 8 * 8 + v]
+                                    K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 +
+                                                    v] = KV[b_i, indices_local[0], g_i,
+                                                            D + (tx - 256) % 8 * 8 + v]
                     T.cp_async_barrier_noinc(bar_k_1_ready[0])
 
     return main
 
 
-def sparse_attention_fwd_interface(q, kv, indices, q_start_index_s, kv_stride, sm_scale=None, is_casual=True, return_kernel=False, print_kernel=False):
+def sparse_attention_fwd_interface(q,
+                                   kv,
+                                   indices,
+                                   q_start_index_s,
+                                   kv_stride,
+                                   sm_scale=None,
+                                   is_casual=True,
+                                   return_kernel=False,
+                                   print_kernel=False):
     assert q.is_contiguous() and kv.is_contiguous() and indices.is_contiguous()
     batch, seq_len, heads, dim_plus_tail_dim = q.shape
     _, seq_len_kv, kv_group, _ = kv.shape
@@ -315,18 +339,26 @@ def sparse_attention_fwd_interface(q, kv, indices, q_start_index_s, kv_stride, s
         assert q_start_index_s > kv_stride, "If it is because each cp has too short length, you should fix the logic involving CP0 (cp_rank == 0), to make sure q with pos < KV_Stride - 1 is masked (or you may just ignore how this is handled if nan in these q's Out would not effect others, which is reported to be likely to happen by wangding)"
     CP0 = q_start_index_s == 0
 
-    kernel = sparse_attention_fwd(batch, seq_len, seq_len_kv, heads, dim, tail_dim, topk, kv_stride, kv_group, sm_scale, is_casual, CP0)
+    kernel = sparse_attention_fwd(batch, seq_len, seq_len_kv, heads, dim, tail_dim, topk, kv_stride,
+                                  kv_group, sm_scale, is_casual, CP0)
     if print_kernel:
         print(kernel.get_kernel_source())
-    out, lse = kernel(q, kv, indices, torch.tensor([q_start_index_s], dtype=torch.int32, device="cuda"))
+    out, lse = kernel(q, kv, indices,
+                      torch.tensor([q_start_index_s], dtype=torch.int32, device="cuda"))
     if return_kernel:
         return kernel
     if q_start_index_s == 0 and kv_stride > 1:
-        out[:, :kv_stride-1, :, :] = 0
+        out[:, :kv_stride - 1, :, :] = 0
     return out, lse
 
 
-def ref_sparse_attention_fwd_interface(q, kv, indices, q_start_index_s, kv_stride=4, sm_scale=None, is_casual=True):
+def ref_sparse_attention_fwd_interface(q,
+                                       kv,
+                                       indices,
+                                       q_start_index_s,
+                                       kv_stride=4,
+                                       sm_scale=None,
+                                       is_casual=True):
     q = q.float()
     kv = kv.float()
     indices = indices.transpose(1, 2)
@@ -344,7 +376,10 @@ def ref_sparse_attention_fwd_interface(q, kv, indices, q_start_index_s, kv_strid
     num_kv_per_index = 1
     g_index = g
     h_index = h // g
-    compressed_casual_mask = torch.arange(q_start_index_s, sq + q_start_index_s, dtype=torch.int32, device="cuda").view(-1, 1) >= torch.arange(kv_stride-1, sk * kv_stride, kv_stride, dtype=torch.int32, device="cuda").view(1, -1)
+    compressed_casual_mask = torch.arange(
+        q_start_index_s, sq + q_start_index_s, dtype=torch.int32,
+        device="cuda").view(-1, 1) >= torch.arange(
+            kv_stride - 1, sk * kv_stride, kv_stride, dtype=torch.int32, device="cuda").view(1, -1)
 
     mask = q.new_zeros(b, g_index, sq, sk + 1, dtype=torch.bool).scatter(3, indices.long(), 1)
     mask = mask[..., :-1]
@@ -354,7 +389,7 @@ def ref_sparse_attention_fwd_interface(q, kv, indices, q_start_index_s, kv_strid
 
     q = q.view(b, sq, g, -1, dim_q)
     score = torch.einsum("bmghd,bngd->bghmn", q, k)
-    sm_scale = dim_q ** -0.5 if sm_scale is None else sm_scale
+    sm_scale = dim_q**-0.5 if sm_scale is None else sm_scale
     score = score.masked_fill(~mask, float("-inf")).mul(sm_scale)
     p = score.softmax(dim=-1)
     p = p.view(b, g_index, h_index, -1, sq, sk)
@@ -363,6 +398,7 @@ def ref_sparse_attention_fwd_interface(q, kv, indices, q_start_index_s, kv_strid
     o = o.reshape(b, sq, h, dim_v)
     return o.to(torch.float16)
 
+
 def test_sparse_attn_mla_fwd(test_correctness=False):
     KV_stride = 1
     if test_correctness:
@@ -370,11 +406,11 @@ def test_sparse_attn_mla_fwd(test_correctness=False):
         q_start_s_index = 1024
     else:
         B, S, SKV, H, HKV, DQK, DV, topk, dtype = 1, 4096, 8192, 128, 1, 576, 512, 2048, torch.bfloat16
-        q_start_s_index = 4096*64
+        q_start_s_index = 4096 * 64
 
     torch.random.manual_seed(0)
-    q = torch.randn((B, S, H, DQK), dtype=dtype, device='cuda').requires_grad_(True)/10
-    kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device='cuda').requires_grad_(True)/10
+    q = torch.randn((B, S, H, DQK), dtype=dtype, device='cuda').requires_grad_(True) / 10
+    kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device='cuda').requires_grad_(True) / 10
     q_start_s_index_t = torch.tensor([q_start_s_index], dtype=torch.int32, device="cuda")
 
     q.clamp_(-10, 10)
@@ -387,11 +423,13 @@ def test_sparse_attn_mla_fwd(test_correctness=False):
                 i_i = torch.randperm(min(max(1, ((t + q_start_s_index) // KV_stride)), SKV))[:topk]
                 indices[b, t, h, :len(i_i)] = i_i
 
-    kernel = sparse_attention_fwd_interface(q, kv, indices, q_start_s_index, KV_stride, return_kernel=True, print_kernel=True)
-    def fn(): 
+    kernel = sparse_attention_fwd_interface(
+        q, kv, indices, q_start_s_index, KV_stride, return_kernel=True, print_kernel=True)
+
+    def fn():
         out, lse = kernel(q, kv, indices, q_start_s_index_t)
         if q_start_s_index == 0 and kv_stride > 1:
-            out[:, :kv_stride-1, :, :] = 0
+            out[:, :kv_stride - 1, :, :] = 0
         return out, lse
 
     tl_out, tl_lse = fn()
@@ -410,6 +448,7 @@ def test_sparse_attn_mla_fwd(test_correctness=False):
     print(f"Average time: {ms:.3f} ms")
     print(f'fwd io bandwidth = ', (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
     print(f'fwd tflops = ', (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

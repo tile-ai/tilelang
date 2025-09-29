@@ -4,6 +4,7 @@ from tilelang import language as T
 from tilelang import tvm
 from utils import print_red_warning, calc_sim, assert_similar
 
+
 @tilelang.jit(
     out_idx=[-2, -1],
     pass_configs={
@@ -25,17 +26,14 @@ def sparse_attention_fwd(
     threads=256,
 ):
     assert dim == tilelang.math.next_power_of_2(
-        dim
-    ), f"haven't check padding correctness yet, dim={dim}"
+        dim), f"haven't check padding correctness yet, dim={dim}"
     assert tail_dim == tilelang.math.next_power_of_2(
-        tail_dim
-    ), f"haven't check padding correctness yet, dim={tail_dim}"
+        tail_dim), f"haven't check padding correctness yet, dim={tail_dim}"
     assert is_causal == True, "non-casual is not supported"
-    assert (
-        topk % block_I == 0
-    ), "otherwise will load some index=0 thus causing wrong kv to be loaded"
+    assert (topk %
+            block_I == 0), "otherwise will load some index=0 thus causing wrong kv to be loaded"
     if sm_scale is None:
-        sm_scale = (1.0 / (dim + tail_dim)) ** 0.5 * 1.44269504  # log2(e)
+        sm_scale = (1.0 / (dim + tail_dim))**0.5 * 1.44269504  # log2(e)
     else:
         sm_scale = sm_scale * 1.44269504  # log2(e)
 
@@ -59,7 +57,7 @@ def sparse_attention_fwd(
     if padded_H != H:
         assert (
             kv_group == 1
-        ), "here we solve the H padding automically, other wise you should handle Q copy and Output copy with your mask (when kv_group == 1, use g_i * padded_H:(g_i+1) * padded_H would be handled automically)"
+        ), "here we solve the H padding automatically, other wise you should handle Q copy and Output copy with your mask (when kv_group == 1, use g_i * padded_H:(g_i+1) * padded_H would be handled automatically)"
     BI = block_I
     NI = tilelang.cdiv(topk, block_I)
     D = dim
@@ -75,17 +73,18 @@ def sparse_attention_fwd(
 
     @T.prim_func
     def main(
-        Q: T.Tensor(q_shape, dtype),  # type: ignore
-        KV: T.Tensor(kv_shape, dtype),  # type: ignore
-        Indices: T.Tensor(indices_shape, indices_dtype),  # type: ignore
-        Output: T.Tensor(o_shape, dtype),  # type: ignore
-        Lse: T.Tensor(lse_shape, accum_dtype),  # type: ignore
+            Q: T.Tensor(q_shape, dtype),  # type: ignore
+            KV: T.Tensor(kv_shape, dtype),  # type: ignore
+            Indices: T.Tensor(indices_shape, indices_dtype),  # type: ignore
+            Output: T.Tensor(o_shape, dtype),  # type: ignore
+            Lse: T.Tensor(lse_shape, accum_dtype),  # type: ignore
     ):
-        with T.Kernel(seq_len * REPLICATE_H, batch, kv_group, threads=threads) as (
-            bx,
-            by,
-            bz,
-        ):
+        with T.Kernel(
+                seq_len * REPLICATE_H, batch, kv_group, threads=threads) as (
+                    bx,
+                    by,
+                    bz,
+                ):
             Q_shared = T.alloc_shared([H_per_block, D], dtype)
             Q_tail_shared = T.alloc_shared([H_per_block, D_tail], dtype)
             KV_shared = T.alloc_shared([BI, D], dtype)
@@ -124,18 +123,14 @@ def sparse_attention_fwd(
                     mask[bi_i] = Indices[b_i, s_i, g_i, i_i * BI + bi_i] <= max_kv_i
 
                 for bi_i, d_i in T.Parallel(BI, D):
-                    KV_shared[bi_i, d_i] = KV[
-                        b_i, Indices[b_i, s_i, g_i, i_i * BI + bi_i], g_i, d_i
-                    ]
+                    KV_shared[bi_i, d_i] = KV[b_i, Indices[b_i, s_i, g_i, i_i * BI + bi_i], g_i,
+                                              d_i]
                 for bi_i, d_i in T.Parallel(BI, D_tail):
-                    K_tail_shared[bi_i, d_i] = KV[
-                        b_i, Indices[b_i, s_i, g_i, i_i * BI + bi_i], g_i, D + d_i
-                    ]
+                    K_tail_shared[bi_i, d_i] = KV[b_i, Indices[b_i, s_i, g_i, i_i * BI + bi_i], g_i,
+                                                  D + d_i]
 
                 for h_i, bi_i in T.Parallel(H_per_block, BI):
-                    acc_s[h_i, bi_i] = T.if_then_else(
-                        mask[bi_i], 0, -T.infinity(acc_s.dtype)
-                    )
+                    acc_s[h_i, bi_i] = T.if_then_else(mask[bi_i], 0, -T.infinity(acc_s.dtype))
                 T.gemm(
                     Q_shared,
                     KV_shared,
@@ -155,9 +150,7 @@ def sparse_attention_fwd(
                 for h_i in T.Parallel(H_per_block):
                     alpha[h_i] = T.exp2((m_i_prev[h_i] - m_i[h_i]) * sm_scale)
                 for h_i, bi_i in T.Parallel(H_per_block, BI):
-                    acc_s[h_i, bi_i] = T.exp2(
-                        acc_s[h_i, bi_i] * sm_scale - m_i[h_i] * sm_scale
-                    )
+                    acc_s[h_i, bi_i] = T.exp2(acc_s[h_i, bi_i] * sm_scale - m_i[h_i] * sm_scale)
                 T.reduce_sum(acc_s, sumexp_i, dim=1)  # is this a accumulate operator?
                 for h_i in T.Parallel(H_per_block):
                     sumexp[h_i] = sumexp[h_i] * alpha[h_i] + sumexp_i[h_i]
@@ -181,9 +174,12 @@ def sparse_attention_fwd(
     return main
 
 
-def sparse_attention_fwd_interface(
-    q, kv, indices, sm_scale=None, return_p_sum: bool = False, d_v=512
-):
+def sparse_attention_fwd_interface(q,
+                                   kv,
+                                   indices,
+                                   sm_scale=None,
+                                   return_p_sum: bool = False,
+                                   d_v=512):
     is_casual = True
     assert return_p_sum == False, "This kernel file is for fwd only"
     assert q.is_contiguous() and kv.is_contiguous() and indices.is_contiguous()
@@ -199,9 +195,7 @@ def sparse_attention_fwd_interface(
     _, _, _, topk = indices.shape
     assert indices.shape == (batch, seq_len, kv_group, topk)
 
-    kernel = sparse_attention_fwd(
-        heads, dim, tail_dim, topk, kv_group, sm_scale, is_casual
-    )
+    kernel = sparse_attention_fwd(heads, dim, tail_dim, topk, kv_group, sm_scale, is_casual)
     out, lse = kernel(q, kv, indices)
     return out, lse
 
@@ -222,16 +216,14 @@ def ref_sparse_attention_fwd_interface(q, kv, indices, sm_scale=None, is_casual=
     num_kv_per_index = 1
     g_index = g
     h_index = h // g
-    compressed_casual_mask = torch.arange(0, sq, dtype=torch.int32, device="cuda").view(
-        -1, 1
-    ) >= torch.arange(1 - 1, sk * 1, 1, dtype=torch.int32, device="cuda").view(1, -1)
+    compressed_casual_mask = torch.arange(
+        0, sq, dtype=torch.int32, device="cuda").view(-1, 1) >= torch.arange(
+            1 - 1, sk * 1, 1, dtype=torch.int32, device="cuda").view(1, -1)
 
-    mask = q.new_zeros(b, g_index, sq, sk + 1, dtype=torch.bool).scatter(
-        3, indices.long(), 1
-    )
+    mask = q.new_zeros(b, g_index, sq, sk + 1, dtype=torch.bool).scatter(3, indices.long(), 1)
     mask = mask[..., :-1]
     mask = mask & compressed_casual_mask.view(1, 1, sq, sk)
-    mask[:, :, : 1 - 1, 0] = True
+    mask[:, :, :1 - 1, 0] = True
     mask = mask.view(b, g_index, 1, sq, sk)
 
     q = q.view(b, sq, g, -1, dim_q)
@@ -244,6 +236,7 @@ def ref_sparse_attention_fwd_interface(q, kv, indices, sm_scale=None, is_casual=
     o = torch.einsum("bghmn,bngd->bmghd", p.type(v.dtype), v)
     o = o.reshape(b, sq, h, dim_v)
     return o.to(torch.float16)
+
 
 def test_sparse_attn_mla_fwd():
     B, S, SKV, H, HKV, DQK, DV, topk, dtype = (
@@ -260,16 +253,14 @@ def test_sparse_attn_mla_fwd():
 
     torch.random.manual_seed(0)
     q = torch.randn((B, S, H, DQK), dtype=dtype, device="cuda").requires_grad_(True)
-    kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device="cuda").requires_grad_(
-        True
-    )
+    kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device="cuda").requires_grad_(True)
 
     indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device="cuda")
     for b in range(B):
         for t in range(S):
             for h in range(HKV):
                 i_i = torch.randperm(max(1, t))[:topk]
-                indices[b, t, h, : len(i_i)] = i_i
+                indices[b, t, h, :len(i_i)] = i_i
 
     tl_out, tl_lse = sparse_attention_fwd_interface(q, kv, indices)
 
