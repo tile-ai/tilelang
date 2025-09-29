@@ -15,7 +15,7 @@ deepseek_v32/
 
 ### Architecture Overview
 
-![DeepSeek V3.2 Architecture](figures/v32_arch.png)
+![DeepSeek V3.2 Architecture](./figures/v32_arch.png)
 
 The architecture diagram above highlights three key components (shown in green) that correspond to our kernel implementations:
 
