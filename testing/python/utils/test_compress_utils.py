@@ -5,7 +5,6 @@ import tilelang.testing
 from tilelang.utils.sparse import compress_sm90, randn_semi_sparse
 
 
-
 def _test_compress_sm90(M, K, block_k, dtype):
     A = randn_semi_sparse(M, K, dtype=dtype, device='cuda')
     A_sparse, E = compress_sm90(A, block_k, False)

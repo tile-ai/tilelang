@@ -152,6 +152,7 @@ def matmul_sp_sm80(
 
     return main
 
+
 def normalize(tensor, max_range=100.0):
     assert max_range <= 448.0
     max_v = tensor.abs().max().clamp(1e-4)
@@ -181,16 +182,15 @@ def run_gemm_sp(
         kernel,
         out_idx=[-1],
     )
-    A = randn_semi_sparse(
-        M, K, dtype=STR_TO_TYPE[in_dtype], device='cuda', transposed=trans_A)
+    A = randn_semi_sparse(M, K, dtype=STR_TO_TYPE[in_dtype], device='cuda', transposed=trans_A)
     if trans_B:
         B = torch.randn((N, K), device='cuda', dtype=torch.float32)
     else:
         B = torch.randn((K, N), device='cuda', dtype=torch.float32)
 
     if "float8" in in_dtype or "int8" in in_dtype:
-        A = normalize(A)
-        B = normalize(B)
+        A = normalize(A.float())
+        B = normalize(B.float())
 
     A = A.to(STR_TO_TYPE[in_dtype])
     B = B.to(STR_TO_TYPE[in_dtype])
