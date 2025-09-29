@@ -94,7 +94,7 @@ def compress(A: torch.Tensor,
                          "Supported versions are sm_80 and sm_90.")
 
 
-def randn_semi_sparse(M: int, K: int, dtype=torch.float16, device='cuda', transposed: bool=False):
+def randn_semi_sparse(M: int, K: int, dtype=torch.float16, device='cuda', transposed: bool = False):
     """
     Generate a random semi-sparse tensor. The generated tensor will have 2:4 sparsity along the K dimension.
     Args:
@@ -105,20 +105,20 @@ def randn_semi_sparse(M: int, K: int, dtype=torch.float16, device='cuda', transp
         transpose (bool): If True, returns a transposed tensor of shape (K, M)
     """
     elem, group = 2, 4
+    tensor = torch.randn((M, K), dtype=torch.float, device=device).view(M, -1, group)
+    indice = tensor.topk(elem, dim=-1).indices
+    tensor.scatter_(-1, indice, 0)
+    tensor = tensor.view(M, K)
     if transposed:
-        tensor = torch.randn((K, M), dtype=torch.float, device=device).view(group, -1, M)
-        indice = tensor.topk(elem, dim=0).indices
-        tensor.scatter_(0, indice, 0)
-        tensor = tensor.view(K, M)
-    else:
-        tensor = torch.randn((M, K), dtype=torch.float, device=device).view(M, -1, group)
-        indice = tensor.topk(elem, dim=-1).indices
-        tensor.scatter_(-1, indice, 0)
-        tensor = tensor.view(M, K)
+        tensor = tensor.t().contiguous()
     return tensor.to(dtype)  # dtype like float8 might not have randn kernel
 
 
-def arange_semi_sparse(M: int, K: int, dtype=torch.float16, device='cuda', transposed: bool=False):
+def arange_semi_sparse(M: int,
+                       K: int,
+                       dtype=torch.float16,
+                       device='cuda',
+                       transposed: bool = False):
     """
     Generate a semi-sparse tensor with values from 0 to M*K-1. The generated tensor will have 2:4 sparsity along the K dimension.
     Args:
@@ -129,14 +129,10 @@ def arange_semi_sparse(M: int, K: int, dtype=torch.float16, device='cuda', trans
         transpose (bool): If True, returns a transposed tensor of shape (K, M)
     """
     elem, group = 2, 4
+    tensor = torch.arange(M * K, dtype=dtype, device=device).view(group, -1, M)
+    indice = tensor.topk(elem, dim=0).indices
+    tensor.scatter_(0, indice, 0)
+    tensor = tensor.view(K, M)
     if transposed:
-        tensor = torch.arange(M * K, dtype=dtype, device=device).view(group, -1, M)
-        indice = tensor.topk(elem, dim=0).indices
-        tensor.scatter_(0, indice, 0)
-        tensor = tensor.view(K, M)
-    else:
-        tensor = torch.arange(M * K, dtype=dtype, device=device).view(M, -1, group)
-        indice = tensor.topk(elem, dim=-1).indices
-        tensor.scatter_(-1, indice, 0)
-        tensor = tensor.view(M, K)
+        tensor = tensor.t().contiguous()
     return tensor
