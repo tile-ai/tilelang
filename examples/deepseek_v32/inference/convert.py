@@ -7,7 +7,6 @@ from tqdm import tqdm, trange
 import torch
 from safetensors.torch import safe_open, save_file
 
-
 mapping = {
     "embed_tokens": ("embed", 0),
     "input_layernorm": ("attn_norm", None),
@@ -74,7 +73,8 @@ def main(hf_ckpt_path, save_path, n_experts, mp):
                         if idx < i * n_local_experts or idx >= (i + 1) * n_local_experts:
                             continue
                     elif dim is not None:
-                        assert param.size(dim) % mp == 0, f"Dimension {dim} must be divisible by {mp}"
+                        assert param.size(
+                            dim) % mp == 0, f"Dimension {dim} must be divisible by {mp}"
                         shard_size = param.size(dim) // mp
                         new_param = param.narrow(dim, i * shard_size, shard_size).contiguous()
                     state_dicts[i][name] = new_param

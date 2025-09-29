@@ -28,13 +28,11 @@ def sample(logits, temperature: float = 1.0):
 
 
 @torch.inference_mode()
-def generate(
-    model: Transformer,
-    prompt_tokens: List[List[int]],
-    max_new_tokens: int,
-    eos_id: int,
-    temperature: float = 1.0
-) -> List[List[int]]:
+def generate(model: Transformer,
+             prompt_tokens: List[List[int]],
+             max_new_tokens: int,
+             eos_id: int,
+             temperature: float = 1.0) -> List[List[int]]:
     """
     Generates new tokens based on the given prompt tokens using the specified model.
 
@@ -49,7 +47,9 @@ def generate(
         List[List[int]]: A list of lists containing the generated tokens for each sequence.
     """
     prompt_lens = [len(t) for t in prompt_tokens]
-    assert max(prompt_lens) <= model.max_seq_len, f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
+    assert max(
+        prompt_lens
+    ) <= model.max_seq_len, f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
     total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens))
     tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.long, device="cuda")
     for i, t in enumerate(prompt_tokens):
@@ -71,7 +71,7 @@ def generate(
             break
     completion_tokens = []
     for i, toks in enumerate(tokens.tolist()):
-        toks = toks[prompt_lens[i]:prompt_lens[i]+max_new_tokens]
+        toks = toks[prompt_lens[i]:prompt_lens[i] + max_new_tokens]
         if eos_id in toks:
             toks = toks[:toks.index(eos_id)]
         completion_tokens.append(toks)
@@ -139,16 +139,26 @@ def main(
                 continue
             messages.append({"role": "user", "content": prompt})
             prompt_tokens = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
-            completion_tokens = generate(model, [prompt_tokens], max_new_tokens, tokenizer.eos_token_id, temperature)
+            completion_tokens = generate(model, [prompt_tokens], max_new_tokens,
+                                         tokenizer.eos_token_id, temperature)
             completion = tokenizer.decode(completion_tokens[0], skip_special_tokens=True)
             print(completion)
             messages.append({"role": "assistant", "content": completion})
     else:
         with open(input_file) as f:
             prompts = f.read().split("\n\n")
-        assert len(prompts) <= args.max_batch_size, f"Number of prompts exceeds maximum batch size ({args.max_batch_size})"
-        prompt_tokens = [tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True) for prompt in prompts]
-        completion_tokens = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature)
+        assert len(
+            prompts
+        ) <= args.max_batch_size, f"Number of prompts exceeds maximum batch size ({args.max_batch_size})"
+        prompt_tokens = [
+            tokenizer.apply_chat_template([{
+                "role": "user",
+                "content": prompt
+            }],
+                                          add_generation_prompt=True) for prompt in prompts
+        ]
+        completion_tokens = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id,
+                                     temperature)
         completions = tokenizer.batch_decode(completion_tokens, skip_special_tokens=True)
         for prompt, completion in zip(prompts, completions):
             print("Prompt:", prompt)
@@ -183,4 +193,5 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.6)
     args = parser.parse_args()
     assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
-    main(args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens, args.temperature)
+    main(args.ckpt_path, args.config, args.input_file, args.interactive, args.max_new_tokens,
+         args.temperature)
