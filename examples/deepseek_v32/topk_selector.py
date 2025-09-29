@@ -185,7 +185,8 @@ def tl_topk(input, starts, ends, topk):
     return indexes
 
 
-if __name__ == "__main__":
+def test_topk_selector(batch=64, seq_len=32 * 1024, topk=2048):
+
     batch = 64
     seq_len = 32 * 1024
     topk = 2048
@@ -242,3 +243,7 @@ if __name__ == "__main__":
     torch.cuda.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print(f"Average torch.topk time: {elapsed_time_ms / n_iters:.3f} ms")
+
+
+if __name__ == "__main__":
+    test_topk_selector()

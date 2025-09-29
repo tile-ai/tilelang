@@ -397,14 +397,17 @@ def ref_sparse_mla_fwd_interface(q,
     return o.to(torch.bfloat16)
 
 
-def test_sparse_mla_fwd(test_correctness=False):
+def test_sparse_mla_fwd_pipelined(B=1,
+                                  S=4096,
+                                  SKV=4096,
+                                  H=128,
+                                  HKV=1,
+                                  DQK=576,
+                                  DV=512,
+                                  topk=2048,
+                                  dtype=torch.bfloat16,
+                                  q_start_s_index=1024):
     KV_stride = 1
-    if test_correctness:
-        B, S, SKV, H, HKV, DQK, DV, topk, dtype = 1, 1024, 2048, 128, 1, 576, 512, 2048, torch.bfloat16
-        q_start_s_index = 1024
-    else:
-        B, S, SKV, H, HKV, DQK, DV, topk, dtype = 1, 4096, 8192, 128, 1, 576, 512, 2048, torch.bfloat16
-        q_start_s_index = 4096 * 64
 
     torch.random.manual_seed(0)
     q = torch.randn((B, S, H, DQK), dtype=dtype, device='cuda').requires_grad_(True) / 10
@@ -426,14 +429,14 @@ def test_sparse_mla_fwd(test_correctness=False):
 
     def fn():
         out, lse = kernel(q, kv, indices, q_start_s_index_t)
-        if q_start_s_index == 0 and kv_stride > 1:
-            out[:, :kv_stride - 1, :, :] = 0
+        if q_start_s_index == 0 and KV_stride > 1:
+            out[:, :KV_stride - 1, :, :] = 0
         return out, lse
 
     tl_out, tl_lse = fn()
     ref_out = ref_sparse_mla_fwd_interface(q, kv, indices, q_start_s_index, KV_stride)
-    print(f"tl_out: {tl_out}")
-    print(f"ref_out: {ref_out}")
+    # print(f"tl_out: {tl_out}")
+    # print(f"ref_out: {ref_out}")
 
     torch.testing.assert_close(tl_out, ref_out, rtol=1e-3, atol=1e-3)
 
@@ -452,4 +455,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--test_correctness", action="store_true")
     args = parser.parse_args()
-    test_sparse_mla_fwd(args.test_correctness)
+    if args.test_correctness:
+        B, S, SKV, H, HKV, DQK, DV, topk, dtype = 1, 1024, 2048, 128, 1, 576, 512, 2048, torch.bfloat16
+    else:
+        B, S, SKV, H, HKV, DQK, DV, topk, dtype = 1, 4096, 8192, 128, 1, 576, 512, 2048, torch.bfloat16
+    test_sparse_mla_fwd(B, S, SKV, H, HKV, DQK, DV, topk, dtype)
+    test_sparse_mla_fwd(B, S, SKV, H, HKV, DQK, DV, topk, dtype)

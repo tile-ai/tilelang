@@ -231,19 +231,15 @@ def ref_sparse_mla_fwd_interface(q, kv, indices, sm_scale=None, is_casual=True):
     return o.to(torch.bfloat16)
 
 
-def test_sparse_mla_fwd():
-    B, S, SKV, H, HKV, DQK, DV, topk, dtype = (
-        1,
-        4096,
-        32768,
-        128,
-        1,
-        576,
-        512,
-        2048,
-        torch.bfloat16,
-    )
-
+def test_sparse_mla_fwd(B=1,
+                        S=4096,
+                        SKV=4096,
+                        H=128,
+                        HKV=1,
+                        DQK=576,
+                        DV=512,
+                        topk=2048,
+                        dtype=torch.bfloat16):
     torch.random.manual_seed(0)
     q = torch.randn((B, S, H, DQK), dtype=dtype, device="cuda").requires_grad_(True)
     kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device="cuda").requires_grad_(True)
@@ -273,4 +269,5 @@ def test_sparse_mla_fwd():
 
 
 if __name__ == "__main__":
-    test_sparse_mla_fwd()
+    test_sparse_mla_fwd(
+        B=1, S=4096, SKV=32768, H=128, HKV=1, DQK=576, DV=512, topk=2048, dtype=torch.bfloat16)
