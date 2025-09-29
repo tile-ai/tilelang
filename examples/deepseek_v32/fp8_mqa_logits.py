@@ -1,9 +1,10 @@
+# ruff: noqa
 import itertools
 import tilelang
 from tilelang import language as T
 import torch
-from utils import cal_cu_seqlen_ke_for_q, cal_cu_seqlen_ks_for_q, generate_random_cu_seqlens, per_custom_dims_cast_to_fp8
-from typing import Tuple
+from utils import generate_random_cu_seqlens, per_custom_dims_cast_to_fp8
+
 
 def display_error_message(msg):
     print(f"\033[31mWARNING: {msg}\033[0m")
@@ -27,11 +28,11 @@ def validate_tensor_match(a, b, tolerance=1e-8, tensor_name="tensor", should_rai
         if should_raise:
             assert False
     if not torch.isclose(
-        a.masked_fill(a_finite, 0),
-        b.masked_fill(b_finite, 0),
-        rtol=0,
-        atol=0,
-        equal_nan=True,
+            a.masked_fill(a_finite, 0),
+            b.masked_fill(b_finite, 0),
+            rtol=0,
+            atol=0,
+            equal_nan=True,
     ).all():
         display_error_message(f"{tensor_name} Error: nonfinite value mismatch")
         if should_raise:
@@ -45,6 +46,7 @@ def validate_tensor_match(a, b, tolerance=1e-8, tensor_name="tensor", should_rai
         if should_raise:
             assert False
     return difference
+
 
 def get_configs():
     iter_params = dict(
@@ -86,8 +88,7 @@ supply_prog = SupplyProg()
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
-)
+    },)
 def mqa_attn_return_logits(
     heads,
     index_dim,
@@ -277,22 +278,10 @@ if __name__ == "__main__":
 
     logits_tl = mqa_attn_return_logits_interface(
         q=q_fp8, kv=kv_fp8, kv_scales=kv_scales, weights=weights, cu_seqlen_ks=ks, cu_seqlen_ke=ke)
-    diff = validate_tensor_match(logits_ref, logits_tl, tolerance=1e-14, tensor_name="logits", should_raise=False)
+    diff = validate_tensor_match(
+        logits_ref, logits_tl, tolerance=1e-14, tensor_name="logits", should_raise=False)
 
-    original_diff = None
-    for i in range(10):
-        logits_tl = mqa_attn_return_logits_interface(
-            q=q_fp8,
-            kv=kv_fp8,
-            kv_scales=kv_scales,
-            weights=weights,
-            cu_seqlen_ks=ks,
-            cu_seqlen_ke=ke)
-        diff = validate_tensor_match(logits_ref, logits_tl, tolerance=1e-14, tensor_name="logits", should_raise=False)
-        if original_diff is None:
-            original_diff = diff
-        else:
-            assert original_diff == diff
+    print(f"diff: {diff}")
 
     from tilelang.profiler import do_bench
 

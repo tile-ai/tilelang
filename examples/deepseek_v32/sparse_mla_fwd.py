@@ -1,6 +1,8 @@
+# ruff: noqa
 import torch
 import tilelang
 from tilelang import language as T
+
 
 @tilelang.jit(
     out_idx=[-2, -1],
@@ -171,12 +173,7 @@ def sparse_mla_fwd(
     return main
 
 
-def sparse_mla_fwd_interface(q,
-                                   kv,
-                                   indices,
-                                   sm_scale=None,
-                                   return_p_sum: bool = False,
-                                   d_v=512):
+def sparse_mla_fwd_interface(q, kv, indices, sm_scale=None, return_p_sum: bool = False, d_v=512):
     is_casual = True
     assert return_p_sum == False, "This kernel file is for fwd only"
     assert q.is_contiguous() and kv.is_contiguous() and indices.is_contiguous()
@@ -210,7 +207,6 @@ def ref_sparse_mla_fwd_interface(q, kv, indices, sm_scale=None, is_casual=True):
     v = kv[..., :dim]
 
     b, _, _, dim_v = v.shape
-    num_kv_per_index = 1
     g_index = g
     h_index = h // g
     compressed_casual_mask = torch.arange(
@@ -272,8 +268,8 @@ def test_sparse_mla_fwd():
         warmup=250,
     )
     print(f"Average time: {ms:.3f} ms")
-    print(f"fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
-    print(f"fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
+    print("fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
+    print("fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
 
 
 if __name__ == "__main__":

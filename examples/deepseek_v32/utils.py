@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# ruff: noqa
 
 import torch
 import torch.nn.functional as F
@@ -182,6 +183,7 @@ def cal_ks_ke_from_cu_seqlen_qk(cu_seqlens_q: torch.LongTensor,
 
     return ks, ke
 
+
 def ceil_to_ue8m0(x: torch.Tensor):
     assert x.view(-1).amax().item() > 0
     return torch.pow(2.0, torch.ceil(torch.log2(x.abs())))
@@ -196,64 +198,57 @@ def per_custom_dims_cast_to_fp8(x: torch.Tensor, dims: Tuple[int],
     x_scaled = (x * (1.0 / sf)).to(torch.float8_e4m3fn)
     return x_scaled, sf.squeeze()
 
-def generate_random_cu_seqlens(per_cp_seqlen,
-                                   cp_size=4,
-                                   cp_rank=3,
-                                   kv_stride=1,
-                                   average_q_len=512):
-        total_seqlen = per_cp_seqlen * cp_size
 
-        cu_seqlens = torch.randint(0, average_q_len * 2,
-                                   (total_seqlen // average_q_len * 2,)).cuda()
-        last_seq_id = torch.where(cu_seqlens.cumsum(0) >= total_seqlen)[0][0]
-        cu_seqlens = cu_seqlens[:last_seq_id]
+def generate_random_cu_seqlens(per_cp_seqlen, cp_size=4, cp_rank=3, kv_stride=1, average_q_len=512):
+    total_seqlen = per_cp_seqlen * cp_size
 
-        if cu_seqlens.sum() < total_seqlen:
-            cu_seqlens = torch.cat(
-                [cu_seqlens, torch.tensor([total_seqlen - cu_seqlens.sum()]).cuda()])
+    cu_seqlens = torch.randint(0, average_q_len * 2, (total_seqlen // average_q_len * 2,)).cuda()
+    last_seq_id = torch.where(cu_seqlens.cumsum(0) >= total_seqlen)[0][0]
+    cu_seqlens = cu_seqlens[:last_seq_id]
 
-        total_seqlen_k = (cu_seqlens // kv_stride).sum()
+    if cu_seqlens.sum() < total_seqlen:
+        cu_seqlens = torch.cat([cu_seqlens, torch.tensor([total_seqlen - cu_seqlens.sum()]).cuda()])
 
-        cu_seqlens_cumsum = torch.cumsum(cu_seqlens, dim=0)
-        cu_seqlens_k_cumsum = torch.cumsum(cu_seqlens // kv_stride, dim=0)
-        cu_seqlens_qs = torch.cat([torch.tensor([0]).cuda(), cu_seqlens_cumsum[:-1]])
-        cu_seqlens_ks = torch.cat([torch.tensor([0]).cuda(), cu_seqlens_k_cumsum[:-1]])
-        cu_seqlens_qe = cu_seqlens_cumsum.clone()
-        cu_seqlens_ke = cu_seqlens_k_cumsum.clone()
+    cu_seqlens_cumsum = torch.cumsum(cu_seqlens, dim=0)
+    cu_seqlens_k_cumsum = torch.cumsum(cu_seqlens // kv_stride, dim=0)
+    cu_seqlens_qs = torch.cat([torch.tensor([0]).cuda(), cu_seqlens_cumsum[:-1]])
+    cu_seqlens_ks = torch.cat([torch.tensor([0]).cuda(), cu_seqlens_k_cumsum[:-1]])
+    cu_seqlens_qe = cu_seqlens_cumsum.clone()
+    cu_seqlens_ke = cu_seqlens_k_cumsum.clone()
 
-        cu_seqlens_ks_for_each_q = cal_cu_seqlen_ks_for_q(
-            cu_seqlens_qs=cu_seqlens_qs,
-            cu_seqlens_qe=cu_seqlens_qe,
-            cu_seqlens_ks=cu_seqlens_ks,
-            seq_len=total_seqlen,
-        )
-        cu_seqlens_ke_for_each_q = cal_cu_seqlen_ke_for_q(
-            cu_seqlens_qs=cu_seqlens_qs,
-            cu_seqlens_qe=cu_seqlens_qe,
-            cu_seqlens_ks=cu_seqlens_ks,
-            cu_seqlens_ke=cu_seqlens_ke,
-            q_start_idxs=torch.zeros_like(cu_seqlens_qs),
-            seq_len=total_seqlen,
-            kv_stride=kv_stride,
-        )
+    cu_seqlens_ks_for_each_q = cal_cu_seqlen_ks_for_q(
+        cu_seqlens_qs=cu_seqlens_qs,
+        cu_seqlens_qe=cu_seqlens_qe,
+        cu_seqlens_ks=cu_seqlens_ks,
+        seq_len=total_seqlen,
+    )
+    cu_seqlens_ke_for_each_q = cal_cu_seqlen_ke_for_q(
+        cu_seqlens_qs=cu_seqlens_qs,
+        cu_seqlens_qe=cu_seqlens_qe,
+        cu_seqlens_ks=cu_seqlens_ks,
+        cu_seqlens_ke=cu_seqlens_ke,
+        q_start_idxs=torch.zeros_like(cu_seqlens_qs),
+        seq_len=total_seqlen,
+        kv_stride=kv_stride,
+    )
 
-        assert per_cp_seqlen % 2 == 0
-        per_chunk_seqlen = per_cp_seqlen // 2
-        slice_short = slice(cp_rank * per_chunk_seqlen, (cp_rank + 1) * per_chunk_seqlen)
-        slice_long = slice(
-            total_seqlen - (cp_rank + 1) * per_chunk_seqlen,
-            total_seqlen - cp_rank * per_chunk_seqlen,
-        )
-        ks = torch.cat([
-            cu_seqlens_ks_for_each_q[slice_short],
-            cu_seqlens_ks_for_each_q[slice_long],
-        ])
-        ke = torch.cat([
-            cu_seqlens_ke_for_each_q[slice_short],
-            cu_seqlens_ke_for_each_q[slice_long],
-        ])
-        assert len(ks) == len(ke) == per_cp_seqlen
-        return ks, ke
+    assert per_cp_seqlen % 2 == 0
+    per_chunk_seqlen = per_cp_seqlen // 2
+    slice_short = slice(cp_rank * per_chunk_seqlen, (cp_rank + 1) * per_chunk_seqlen)
+    slice_long = slice(
+        total_seqlen - (cp_rank + 1) * per_chunk_seqlen,
+        total_seqlen - cp_rank * per_chunk_seqlen,
+    )
+    ks = torch.cat([
+        cu_seqlens_ks_for_each_q[slice_short],
+        cu_seqlens_ks_for_each_q[slice_long],
+    ])
+    ke = torch.cat([
+        cu_seqlens_ke_for_each_q[slice_short],
+        cu_seqlens_ke_for_each_q[slice_long],
+    ])
+    assert len(ks) == len(ke) == per_cp_seqlen
+    return ks, ke
 
 
 def print_red_warning(message):
@@ -276,7 +271,7 @@ def assert_similar(x, y, eps=1e-8, name="tensor", raise_assert=True):
     if not (0 <= diff <= eps):
         print_red_warning(f'{name} Error: {diff}')
         if raise_assert:
-            assert False
+            assert False  # noqa: B011
 
 
 if __name__ == "__main__":
@@ -292,5 +287,5 @@ if __name__ == "__main__":
 
     from tilelang.profiler import do_bench
 
-    fn = lambda: cal_seq_idx_for_q(cu_seqlens_qs, cu_seqlens_qe, seq_len)
+    fn = lambda: cal_seq_idx_for_q(cu_seqlens_qs, cu_seqlens_qe, seq_len)  # noqa: E731
     ms = do_bench(fn, warmup=25, rep=100)
