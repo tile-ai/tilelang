@@ -18,7 +18,7 @@ Check out the preview here:
 🔗 [link](https://github.com/tile-ai/tilelang-ascend).
 This includes implementations across two branches:
 [ascendc_pto](https://github.com/tile-ai/tilelang-ascend) and
-[ascendnpu_ir](https://github.com/tile-ai/tilelang-ascend/tree/ascendnpu_ir).
+[npuir](https://github.com/tile-ai/tilelang-ascend/tree/npuir).
 Feel free to explore and share your feedback! 
 - 07/04/2025 🚀: Introduced `T.gemm_sp` for 2:4 sparse tensor core support, check out [Pull Request #526](https://github.com/tile-ai/tilelang/pull/526) for details.
 - 06/05/2025 ✨: Added [NVRTC Backend](https://github.com/tile-ai/tilelang/pull/461) to significantly reduce compilation time for cute templates!
