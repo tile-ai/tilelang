@@ -220,4 +220,4 @@ for bi_i, d_i in T.Parallel(BI // split_store, D // 4):
 - **H800 SXM**: ~100 TFlops
 - **H200 SXM**: ~115 TFlops
 
-The implementation efficiently handles the irregular memory access patterns inherent in sparse attention while maintaining high compute utilization through careful memory management and atomic update strategies.
+The implementation efficiently handles the irregular memory access patterns inherent in sparse attention while maintaining high compute utilization through careful memory management and atomic update strategies. Note that this is a relatively naive implementation that requires further optimization.
