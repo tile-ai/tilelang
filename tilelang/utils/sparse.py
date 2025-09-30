@@ -102,7 +102,7 @@ def randn_semi_sparse(M: int, K: int, dtype=torch.float16, device='cuda', transp
         K (int): Number of columns
         dtype: Data type of the tensor
         device: Device to create the tensor on
-        transpose (bool): If True, returns a transposed tensor of shape (K, M)
+        transposed (bool): If True, returns a transposed tensor of shape (K, M)
     """
     elem, group = 2, 4
     tensor = torch.randn((M, K), dtype=torch.float, device=device).view(M, -1, group)
@@ -126,13 +126,13 @@ def arange_semi_sparse(M: int,
         K (int): Number of columns
         dtype: Data type of the tensor
         device: Device to create the tensor on
-        transpose (bool): If True, returns a transposed tensor of shape (K, M)
+        transposed (bool): If True, returns a transposed tensor of shape (K, M)
     """
     elem, group = 2, 4
-    tensor = torch.arange(M * K, dtype=dtype, device=device).view(group, -1, M)
-    indice = tensor.topk(elem, dim=0).indices
-    tensor.scatter_(0, indice, 0)
-    tensor = tensor.view(K, M)
+    tensor = torch.arange(M * K, dtype=dtype, device=device).view(M, -1, group)
+    indice = tensor.topk(elem, dim=-1).indices
+    tensor.scatter_(-1, indice, 0)
+    tensor = tensor.view(M, K)
     if transposed:
         tensor = tensor.t().contiguous()
     return tensor
