@@ -8,7 +8,7 @@ from functools import partial
 num_split = 4
 
 
-@tilelang.jit(out_idx=[5], pass_configs={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True})
+@tilelang.jit(out_idx=[5])
 def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_N):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     shape_q = [batch, seqlen_q, heads, dim]
@@ -124,7 +124,9 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
             bid = by // heads
             sid = bz
 
-            T.copy(Q[bid, mid * block_M:(mid + 1) * block_M, hid, :], Q_shared)
+            # NOTE(wt): tma barrier has some problems with padded dimensions (seq_q here) currently
+            # disable relevant tma copy and use SIMT as fallback for now
+            T.copy(Q[bid, mid * block_M:(mid + 1) * block_M, hid, :], Q_shared, disable_tma=True)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -147,7 +149,10 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
                 logsum[i] = T.log2(logsum[i]) + scores_max[i] * scale
             T.copy(logsum, glse[bid, hid, sid, mid * block_M:(mid + 1) * block_M])
             T.copy(acc_o, O_shared)
-            T.copy(O_shared, Output_partial[bid, mid * block_M:(mid + 1) * block_M, hid, sid, :])
+            T.copy(
+                O_shared,
+                Output_partial[bid, mid * block_M:(mid + 1) * block_M, hid, sid, :],
+                disable_tma=True)
 
     @T.macro
     def combine(
@@ -188,7 +193,10 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
             for i in T.Parallel(block_M):
                 lse_logsum_local[i] = T.log2(lse_logsum_local[i]) + lse_max_local[i]
             for k in T.Pipelined(num_split, num_stages=2):
-                T.copy(Output_partial[bz, bx * block_M:(bx + 1) * block_M, by, k, :], po_shared)
+                T.copy(
+                    Output_partial[bz, bx * block_M:(bx + 1) * block_M, by, k, :],
+                    po_shared,
+                    disable_tma=True)
                 T.copy(po_shared, po_local)
                 for i in T.Parallel(block_M):
                     lse_local_split[i] = lse_local[k, i]
@@ -197,7 +205,7 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
                 for i, j in T.Parallel(block_M, dim):
                     o_accum_local[i, j] += po_local[i, j] * scale_local[i]
             T.copy(o_accum_local, o_shared)
-            T.copy(o_shared, Output[bz, bx * block_M:(bx + 1) * block_M, by, :])
+            T.copy(o_shared, Output[bz, bx * block_M:(bx + 1) * block_M, by, :], disable_tma=True)
 
     @T.prim_func
     def flashattn_mha_inference(

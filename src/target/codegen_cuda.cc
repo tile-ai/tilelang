@@ -14,11 +14,97 @@
 #include <vector>
 
 #include "../op/builtin.h"
+#include "./ptx.h"
 #include "arith/pattern_match.h"
-#include "target/source/ptx.h"
 
 namespace tvm {
 namespace codegen {
+using namespace tvm::tl::codegen;
+
+struct CUDAMath {
+  std::string operator()(DataType t, std::string name) const {
+    if (t.is_float()) {
+      switch (t.bits()) {
+      case 64:
+        return name;
+      case 32:
+        return name + 'f';
+      case 16: {
+        if (name == "fabs") {
+          return "__habs";
+        } else if (name == "round") {
+          return "hrint";
+        } else {
+          return "h" + name;
+        }
+      }
+      default:
+        return "";
+      }
+    } else if (t.is_bfloat16()) {
+      if (name == "fabs") {
+        return "__habs";
+      } else if (name == "round") {
+        return "hrint";
+      } else {
+        return "h" + name;
+      }
+    } else if (t.is_int() || t.is_uint()) {
+      switch (t.bits()) {
+      case 32:
+        return "__" + name;
+      case 64:
+        return "__" + name + "ll";
+      default:
+        return "";
+      }
+    }
+    return "";
+  }
+};
+
+struct CUDAFastMath : public CUDAMath {
+  std::string operator()(DataType t, std::string name) const {
+    if (t.is_float() && t.bits() == 32) {
+      return "__" + name + 'f';
+    } else {
+      return CUDAMath::operator()(t, name);
+    }
+    return "";
+  }
+};
+
+struct CUDAFastMathTan : public CUDAMath {
+  std::string operator()(DataType t, std::string name) const {
+    if (t.is_float()) {
+      switch (t.bits()) {
+      case 64:
+        return name;
+      // `__tanf` seems to produce some values too deviant from numpy tan
+      // version. So, let's use just `tanf` instead.
+      case 32:
+        return name + 'f';
+      case 16:
+        return 'h' + name;
+      default:
+        return "";
+      }
+    }
+    return "";
+  }
+};
+
+struct CUDAIEEEMath {
+  std::string operator()(DataType t, std::string name,
+                         std::string rounding_mode) const {
+    if (t.is_float() && t.bits() == 32) {
+      return "__" + name + "_" + rounding_mode;
+    } else if (t.is_float() && t.bits() == 64) {
+      return "__d" + name + "_" + rounding_mode;
+    }
+    return "";
+  }
+};
 
 static std::string GetFP8Type(DataType type) {
   std::stringstream stream;
@@ -34,9 +120,12 @@ static std::string GetFP8Type(DataType type) {
     vec = "_8";
   } else if (lanes == 16) {
     vec = "_16";
+  } else if (lanes == 32) {
+    vec = "_32";
   } else {
-    LOG(FATAL) << "Only support scalar and vector types of width (2, 4, 8, 16) "
-                  "for FP8";
+    LOG(FATAL)
+        << "Only support scalar and vector types of width (2, 4, 8, 16, 32) "
+           "for FP8";
   }
   if (type.is_float8_e4m3fn() || type.is_float8_e4m3fnuz() ||
       type.is_float8_e4m3()) {
@@ -268,6 +357,10 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
         //
         ICHECK_EQ(lanes % 2, 0) << "only support even lane for half type";
         os << "uint" << lanes / 2;
+      } else if (lanes <= 16) {
+        ICHECK_EQ(lanes % 4, 0) << "only support (mod 4 = 0) lanes for half "
+                                   "type of more than 8 lanes";
+        os << "ulonglong" << lanes / 4;
       } else {
         fail = true;
       }
@@ -312,6 +405,10 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
     } else if (lanes <= 8) {
       ICHECK_EQ(lanes % 2, 0) << "only support even lane for half type";
       os << "uint" << lanes / 2;
+    } else if (lanes <= 16) {
+      ICHECK_EQ(lanes % 4, 0) << "only support (mod 4 = 0) lanes for half type "
+                                 "of more than 8 lanes";
+      os << "ulonglong" << lanes / 4;
     } else {
       fail = true;
     }
@@ -408,6 +505,10 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
         enable_int8_ = true;
         os << "int4";
         return;
+      } else if (t.lanes() == 32) {
+        enable_int8_ = true;
+        os << "longlong4";
+        return;
       } else if (!t.is_uint() && t.is_scalar()) {
         os << "signed char";
         break;
@@ -475,8 +576,13 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
         os << "longlong3";
       } else if (t.lanes() == 4) {
         os << "longlong4";
+      } else {
+        fail = true;
       }
-      return;
+      if (!fail) {
+        return;
+      }
+      break;
     }
     default:
       fail = true;
@@ -538,23 +644,48 @@ void CodeGenTileLangCUDA::PrintVecElemLoad(const std::string &vec, DataType t,
   }
 
   static const char access[] = {'x', 'y', 'z', 'w'};
-  ICHECK(i >= 0 && i < (t.bits() == 8                        ? 16
-                        : (t.bits() == 16 || t.bits() == 32) ? 8
-                                                             : 4));
+  ICHECK(i >= 0 && i < 256 / t.bits());
   if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     std::string type_name = t.is_int() ? "char" : "unsigned char";
     if (t.lanes() == 2 || t.lanes() == 3) {
       os << vec << "." << access[i % t.lanes()];
-    } else {
+    } else if (t.lanes() <= 16) {
       std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
       os << "((" << type_name << ")(" << ac << " >> " << i % 4 * 8 << "))";
+    } else {
+      ICHECK(t.lanes() == 32);
+      std::string ac = vec + "." + access[i / 8];
+      os << "((" << type_name << ")(" << ac << " >> " << i % 8 * 8 << "))";
     }
   } else if (t.is_float16()) {
-    os << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
-       << access[i % 2];
+    if (t.lanes() <= 8) {
+      os << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
+         << access[i % 2];
+    } else {
+      os << "(((half2*)(&(" << vec << "." << access[i / 4] << "))) + "
+         << (i / 2 % 2) << ")->" << access[i % 2];
+    }
   } else if (t.is_bfloat16()) {
-    os << "((nv_bfloat162*)(&(" << vec << "." << access[i / 2] << ")))->"
-       << access[i % 2];
+    if (t.lanes() <= 8) {
+      os << "((nv_bfloat162*)(&(" << vec << "." << access[i / 2] << ")))->"
+         << access[i % 2];
+    } else {
+      os << "(((nv_bfloat162*)(&(" << vec << "." << access[i / 4] << "))) + "
+         << (i / 2 % 2) << ")->" << access[i % 2];
+    }
+  } else if (t.is_float8()) {
+    os << vec;
+    // fp8_e5_32_t
+    if (t.lanes() >= 32)
+      os << "." << access[i / 16];
+    // fp8_e5_16_t
+    if (t.lanes() >= 16)
+      os << "." << access[(i % 16) / 8];
+    // fp8_e5_8_t
+    if (t.lanes() >= 8)
+      os << "." << access[(i % 8) / 4];
+    // fp8_e5_4_t or fp8_e5_2_t
+    os << "." << access[i % 4];
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
@@ -584,14 +715,12 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
                                             int i, const std::string &value) {
   this->PrintIndent();
   static const char access[] = {'x', 'y', 'z', 'w'};
-  ICHECK(i >= 0 && i < (t.bits() == 8                        ? 16
-                        : (t.bits() == 16 || t.bits() == 32) ? 8
-                                                             : 4));
+  ICHECK(i >= 0 && i < 256 / t.bits());
   if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
     if (t.lanes() == 2 || t.lanes() == 3) {
       stream << vec << '.' << access[i % t.lanes()] << "="
              << "(" << value << ");\n";
-    } else {
+    } else if (t.lanes() <= 16) {
       std::string ac = t.lanes() == 4 ? vec : (vec + "." + access[i / 4]);
       stream << ac << "=";
       // Do not read the first undef lane.
@@ -599,13 +728,47 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
         stream << ac << " & ~(0x000000ff << " << i % 4 * 8 << ") |";
       }
       stream << "(" << value << " << " << i % 4 * 8 << ");\n";
+    } else {
+      ICHECK(t.lanes() == 32);
+      std::string ac = vec + "." + access[i / 8];
+      stream << ac << "=";
+      // Do not read the first undef lane.
+      if (i != 0) {
+        stream << ac << " & ~(0x000000ff << " << i % 8 * 8 << ") |";
+      }
+      stream << "(" << value << " << " << i % 8 * 8 << ");\n";
     }
   } else if (t.is_float16()) {
-    stream << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
-           << access[i % 2] << " = " << value << ";\n";
+    if (t.lanes() <= 8) {
+      stream << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
+             << access[i % 2] << " = " << value << ";\n";
+    } else {
+      stream << "(((half2*)(&(" << vec << "." << access[i / 4] << "))) + "
+             << (i / 2 % 2) << ")->" << access[i % 2] << " = " << value
+             << ";\n";
+    }
   } else if (t.is_bfloat16()) {
-    stream << "((nv_bfloat162*)(&(" << vec << "." << access[i / 2] << ")))->"
-           << access[i % 2] << " = " << value << ";\n";
+    if (t.lanes() <= 8) {
+      stream << "((nv_bfloat162*)(&(" << vec << "." << access[i / 2] << ")))->"
+             << access[i % 2] << " = " << value << ";\n";
+    } else {
+      stream << "(((nv_bfloat162*)(&(" << vec << "." << access[i / 4]
+             << "))) + " << (i / 2 % 2) << ")->" << access[i % 2] << " = "
+             << value << ";\n";
+    }
+  } else if (t.is_float8()) {
+    stream << vec;
+    // fp8_e5_32_t
+    if (t.lanes() >= 32)
+      stream << "." << access[i / 16];
+    // fp8_e5_16_t
+    if (t.lanes() >= 16)
+      stream << "." << access[(i % 16) / 8];
+    // fp8_e5_8_t
+    if (t.lanes() >= 8)
+      stream << "." << access[(i % 8) / 4];
+    // fp8_e5_4_t or fp8_e5_2_t
+    stream << "." << access[i % 4] << " = " << value << ";\n";
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
@@ -713,6 +876,9 @@ std::string CodeGenTileLangCUDA::CastFromTo(std::string value, DataType from,
     }
     os << "int)";
   }
+  if ((from.is_float16() || from.is_bfloat16()) && target.is_float8()) {
+    os << "(float)";
+  }
   os << value << ")";
   return os.str();
 }
@@ -738,21 +904,25 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   bool used_bf16_op = false;
   if (from_ty.is_bfloat16() || target_ty.is_bfloat16()) {
     std::ostringstream func_name;
-    if (from_ty.is_bfloat16())
+    if (from_ty.is_bfloat16()) {
       func_name << "bf16";
-    else if (from_ty.is_float())
+    } else if (from_ty.is_float()) {
       func_name << "float";
-    if (from_ty.lanes() > 1)
+    }
+    if (from_ty.lanes() > 1) {
       func_name << from_ty.lanes();
+    }
     func_name << "2";
-    if (target_ty.is_bfloat16())
+    if (target_ty.is_bfloat16()) {
       func_name << "bf16";
-    else if (target_ty.is_float())
+    } else if (target_ty.is_float()) {
       func_name << "float";
-    else if (target_ty == DataType::Int(16))
+    } else if (target_ty == DataType::Int(16)) {
       func_name << "int16";
-    if (target_ty.lanes() > 1)
+    }
+    if (target_ty.lanes() > 1) {
       func_name << target_ty.lanes();
+    }
 
     auto fname = func_name.str();
     if (bf16_supported_ops_.count(fname)) {
@@ -760,20 +930,24 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       stream << "#ifdef ENABLE_BF16\n";
       PrintIndent();
       stream << "reinterpret_cast<";
-      if (target_ty.is_bfloat16())
+      if (target_ty.is_bfloat16()) {
         stream << "__nv_bfloat16";
-      else
+      } else {
         PrintType(target_ty.element_of(), stream);
-      if (target_ty.lanes() > 1)
+      }
+      if (target_ty.lanes() > 1) {
         stream << target_ty.lanes();
+      }
       stream << " &>(" << sret << ") = fastertransformer::" << fname
              << "(reinterpret_cast<";
-      if (from_ty.is_bfloat16())
+      if (from_ty.is_bfloat16()) {
         stream << "__nv_bfloat16";
-      else
+      } else {
         PrintType(from_ty.element_of(), stream);
-      if (from_ty.lanes() > 1)
+      }
+      if (from_ty.lanes() > 1) {
         stream << from_ty.lanes();
+      }
       stream << " const &>(" << src << "));\n";
       stream << "#else\n";
     }
@@ -918,6 +1092,53 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   }
 
   return os.str();
+}
+
+std::string CodeGenTileLangCUDA::GetVecLoad(DataType t,
+                                            const BufferNode *buffer,
+                                            PrimExpr base) {
+  const VarNode *buffer_var = buffer->data.get();
+  std::string scope;
+  if (alloc_storage_scope_.count(buffer_var)) {
+    scope = alloc_storage_scope_.at(buffer_var);
+  }
+  if (scope.empty()) {
+    scope = GetPtrStorageScope(buffer->data);
+  }
+
+  if (scope != "global" || t.bits() * t.lanes() <= 128) {
+    return this->CodeGenC::GetVecLoad(t, buffer, base);
+  }
+  ICHECK_EQ(t.bits() * t.lanes(), 256)
+      << "Unsupported vector load size: " << t.bits() * t.lanes();
+  auto buffer_ref = this->GetBufferRef(t, buffer, base);
+  std::ostringstream os;
+  os << "tl::ld_global_256(&(" << buffer_ref << "))";
+  return os.str();
+}
+
+void CodeGenTileLangCUDA::PrintVecStore(const BufferNode *buffer, DataType t,
+                                        PrimExpr base,
+                                        const std::string &value) {
+  const VarNode *buffer_var = buffer->data.get();
+  std::string scope;
+  if (alloc_storage_scope_.count(buffer_var)) {
+    scope = alloc_storage_scope_.at(buffer_var);
+  }
+  if (scope.empty()) {
+    scope = GetPtrStorageScope(buffer->data);
+  }
+
+  if (scope != "global" || t.bits() * t.lanes() <= 128) {
+    this->CodeGenC::PrintVecStore(buffer, t, base, value);
+    return;
+  }
+  ICHECK_EQ(t.bits() * t.lanes(), 256)
+      << "Unsupported vector load size: " << t.bits() * t.lanes();
+  auto buffer_ref = this->GetBufferRef(t, buffer, base);
+  this->PrintIndent();
+  this->stream << "tl::st_global_256(&(" << buffer_ref << "), " << value
+               << ");\n";
 }
 
 /**
@@ -1065,6 +1286,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     }
   } else if (op->op.same_as(builtin::ptx_cp_async_barrier())) {
     print_extern_call_stmt("tl::mbarrier_cp_async_arrive");
+  } else if (op->op.same_as(tl::ptx_fence_barrier_init())) {
+    print_extern_call_stmt("tl::fence_barrier_init");
+  } else if (op->op.same_as(tl::ptx_cp_async_barrier_noinc())) {
+    print_extern_call_stmt("tl::mbarrier_cp_async_arrive_noinc");
   } else if (op->op.same_as(tl::mbarrier_expect_tx())) {
     ICHECK_EQ(op->args.size(), 2);
     this->PrintIndent();
@@ -1259,7 +1484,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string asm_code = PrintMMAAssembly(
         shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref, a_bias,
         b_ref, b_bias, c_ref, c_bias, "", "", "", bit_op, false, saturate);
-
+    this->PrintIndent();
     this->stream << asm_code;
   } else if (op->op.same_as(builtin::ptx_mma_sp())) {
     // arg 0: shape: mXnXkX
@@ -1295,6 +1520,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     std::string metadata_offset = this->PrintExpr(op->args[13]);
     std::string sparse_selector = this->PrintExpr(op->args[14]);
     bool saturate = Downcast<Bool>(op->args[15])->value;
+    this->PrintIndent();
     std::string asm_code = PrintMMAAssembly(
         shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref, a_offset,
         b_ref, b_offset, c_ref, c_offset, metadata, metadata_offset,
@@ -1330,10 +1556,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << "}\n";
     } else {
       std::string smem_elem_offset = this->PrintExpr(op->args[6]);
-      need_cast_smem_ptr_to_int_ = true;
-      this->stream << PrintLoadMatrixAssembly(trans, num, type, local_ptr,
-                                              local_elem_offset, smem_ptr,
-                                              smem_elem_offset);
+      std::string func_name = "tl::ptx_ldmatrix_x" + std::to_string(num);
+      if (trans == 1)
+        func_name += "_trans";
+      this->PrintIndent();
+      this->stream << func_name << "(" << smem_ptr << " + " << smem_elem_offset
+                   << ", " << local_ptr << " + " << local_elem_offset << ");\n";
     }
   } else if (op->op.same_as(builtin::mma_store())) {
     int m = Downcast<Integer>(op->args[0])->value;
@@ -1622,6 +1850,82 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                           op->args, true, os);
   } else if (op->op.same_as(tl::tl_shuffle_elect())) {
     os << "tl::tl_shuffle_elect<" << PrintExpr(op->args[0]) << ">()";
+  } else if (op->op.same_as(tl::__exp())) {
+    CUDAFastMath math_func;
+    std::string func_name = math_func(op->dtype, "exp");
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::__exp10())) {
+    CUDAFastMath math_func;
+    std::string func_name = math_func(op->dtype, "exp10");
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::__log())) {
+    CUDAFastMath math_func;
+    std::string func_name = math_func(op->dtype, "log");
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::__log2())) {
+    CUDAFastMath math_func;
+    std::string func_name = math_func(op->dtype, "log2");
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::__log10())) {
+    CUDAFastMath math_func;
+    std::string func_name = math_func(op->dtype, "log10");
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::__tan())) {
+    CUDAFastMath math_func;
+    std::string func_name = math_func(op->dtype, "tan");
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::__cos())) {
+    CUDAFastMath math_func;
+    std::string func_name = math_func(op->dtype, "cos");
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::__sin())) {
+    CUDAFastMath math_func;
+    std::string func_name = math_func(op->dtype, "sin");
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::ieee_add())) {
+    CUDAIEEEMath math_func;
+    std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
+    std::string func_name = math_func(op->dtype, "fadd", rounding_mode);
+    os << func_name << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::ieee_sub())) {
+    CUDAIEEEMath math_func;
+    std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
+    std::string func_name = math_func(op->dtype, "fsub", rounding_mode);
+    os << func_name << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::ieee_mul())) {
+    CUDAIEEEMath math_func;
+    std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
+    std::string func_name = math_func(op->dtype, "fmul", rounding_mode);
+    os << func_name << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
+  } else if (op->op.same_as(tl::ieee_fmaf())) {
+    CUDAIEEEMath math_func;
+    std::string rounding_mode = Downcast<StringImm>(op->args[3])->value;
+    std::string func_name = math_func(op->dtype, "fmaf", rounding_mode);
+    os << func_name << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ")";
+  } else if (op->op.same_as(tl::ieee_frcp())) {
+    CUDAIEEEMath math_func;
+    std::string rounding_mode = Downcast<StringImm>(op->args[1])->value;
+    std::string func_name = math_func(op->dtype, "frcp", rounding_mode);
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::ieee_fsqrt())) {
+    CUDAIEEEMath math_func;
+    std::string rounding_mode = Downcast<StringImm>(op->args[1])->value;
+    std::string func_name = math_func(op->dtype, "fsqrt", rounding_mode);
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::ieee_frsqrt())) {
+    CUDAIEEEMath math_func;
+    std::string func_name = math_func(op->dtype, "frsqrt", "rn");
+    os << func_name << "(" << PrintExpr(op->args[0]) << ")";
+  } else if (op->op.same_as(tl::ieee_fdiv())) {
+    CUDAIEEEMath math_func;
+    std::string rounding_mode = Downcast<StringImm>(op->args[2])->value;
+    std::string func_name = math_func(op->dtype, "fdiv", rounding_mode);
+    os << func_name << "(" << PrintExpr(op->args[0]) << ", "
+       << PrintExpr(op->args[1]) << ")";
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
@@ -1837,19 +2141,34 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
 void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
                                      std::ostream &os) { // NOLINT(*)
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
-  if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 8 &&
-      lanes == 4) {
-    // make_int8x4
-    const int64_t *p = as_const_int(op->value);
-    ICHECK(p);
-    int64_t v = *p & 0xFF;
-    v = (v << 24) | (v << 16) | (v << 8) | v;
-    if (op->dtype.is_uint()) {
-      os << "(uint)" << v;
-    } else {
-      os << "(int)" << v;
+  if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 8) {
+    if (lanes == 4) {
+      // make_int8x4
+      const int64_t *p = as_const_int(op->value);
+      ICHECK(p);
+      int64_t v = *p & 0xFF;
+      v = (v << 24) | (v << 16) | (v << 8) | v;
+      if (op->dtype.is_uint()) {
+        os << "(uint)" << v;
+      } else {
+        os << "(int)" << v;
+      }
+      return;
+    } else if (lanes == 32) {
+      // make_int8x32
+      const int64_t *p = as_const_int(op->value);
+      ICHECK(p);
+      int64_t v = *p & 0xFF;
+      v = (v << 24) | (v << 16) | (v << 8) | v;
+      if (op->dtype.is_uint()) {
+        os << "make_ulonglong4(" << v << ", " << v << ", " << v << ", " << v
+           << ")";
+      } else {
+        os << "make_longlong4(" << v << ", " << v << ", " << v << ", " << v
+           << ")";
+      }
+      return;
     }
-    return;
   }
 
   if (op->dtype.is_float16()) {
@@ -1857,10 +2176,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     os << "make_";
     PrintType(op->dtype, os);
     os << '(';
-    for (int i = 0; i < lanes / 2; ++i) {
-      if (i != 0)
-        os << ", ";
-      os << "__pack_half2(" << v << ", " << v << ")";
+    if (lanes <= 8) {
+      for (int i = 0; i < lanes / 2; ++i) {
+        if (i != 0)
+          os << ", ";
+        os << "__pack_half2(" << v << ", " << v << ")";
+      }
+    } else {
+      for (int i = 0; i < lanes / 4; ++i) {
+        if (i != 0)
+          os << ", ";
+        os << "tl::pack_float16x4(" << v << ", " << v << ", " << v << ", " << v
+           << ")";
+      }
     }
     os << ')';
     return;
@@ -1871,10 +2199,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     os << "make_";
     PrintType(op->dtype, os);
     os << '(';
-    for (int i = 0; i < lanes / 2; ++i) {
-      if (i != 0)
-        os << ", ";
-      os << "__pack_nv_bfloat162(" << v << ", " << v << ")";
+    if (lanes <= 8) {
+      for (int i = 0; i < lanes / 2; ++i) {
+        if (i != 0)
+          os << ", ";
+        os << "__pack_nv_bfloat162(" << v << ", " << v << ")";
+      }
+    } else {
+      for (int i = 0; i < lanes / 4; ++i) {
+        if (i != 0)
+          os << ", ";
+        os << "tl::pack_bfloat16x4(" << v << ", " << v << ", " << v << ", " << v
+           << ")";
+      }
     }
     os << ')';
     return;

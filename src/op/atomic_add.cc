@@ -293,10 +293,7 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   if (dst_predicate.defined())
     dst_value = if_then_else(dst_predicate, dst_value, make_zero(dst->dtype));
 
-  Call address_of_value =
-      tvm::tir::Call(DataType::Handle(), builtin::address_of(), {dst_value});
-
-  new_args.push_back(address_of_value);
+  new_args.push_back(dst_value);
   new_args.push_back(src_value);
 
   Call atomicadd_call =
@@ -360,8 +357,9 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                     InferLevel::kFree};
   for (auto level : levels) {
-    (par_op)->InferLayout(
-        {T.target, T.thread_bounds, T.layout_map, T.buffer_remap}, level);
+    (par_op)->InferLayout({T.target, T.thread_bounds, T.layout_map, analyzer,
+                           false, T.buffer_remap},
+                          level);
   }
   auto loop_layout = par_op->GetLoopLayout();
   Var thread_var = T.thread_var;

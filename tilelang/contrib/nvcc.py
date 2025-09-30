@@ -6,6 +6,7 @@ from __future__ import absolute_import as _abs
 import os
 import subprocess
 import warnings
+from typing import Tuple
 from tilelang.env import CUDA_HOME
 
 import tvm.ffi
@@ -126,7 +127,7 @@ def compile_cuda(code,
 
 def find_cuda_path():
     """Utility function to find cuda path
-    
+
     Returns
     -------
     path : str
@@ -298,7 +299,7 @@ def get_target_compute_version(target=None):
                      "Try specifying it by adding '-arch=sm_xx' to your target.")
 
 
-def parse_compute_version(compute_version) -> tuple[int, int]:
+def parse_compute_version(compute_version) -> Tuple[int, int]:
     """Parse compute capability string to divide major and minor version
 
     Parameters
@@ -446,6 +447,14 @@ def have_tma(target):
     conditions = [False]
     conditions.append(major >= 9)
     return any(conditions)
+
+
+def is_hopper(target):
+    if target.kind.name != "cuda":
+        return False
+    compute_version = get_target_compute_version(target)
+    major, minor = parse_compute_version(compute_version)
+    return major == 9 and minor == 0
 
 
 def get_nvcc_compiler() -> str:

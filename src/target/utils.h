@@ -19,12 +19,14 @@ bool TargetIsVolta(Target target);
 bool TargetIsTuring(Target target);
 bool TargetIsAmpere(Target target);
 bool TargetIsHopper(Target target);
+bool TargetIsSm100(Target target);
 bool TargetIsSM120(Target target);
 bool TargetIsCDNA(Target target);
 
 bool TargetHasAsyncCopy(Target target);
 bool TargetHasLdmatrix(Target target);
 bool TargetHasStmatrix(Target target);
+bool TargetHasTmem(Target target);
 bool TargetHasBulkCopy(Target target);
 int TargetGetWarpSize(Target target);
 

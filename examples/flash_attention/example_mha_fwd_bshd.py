@@ -14,7 +14,10 @@ def get_configs():
 
 
 @autotune(configs=get_configs(), warmup=10, rep=10)
-@tilelang.jit(out_idx=[3])
+@tilelang.jit(
+    out_idx=[3], pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    })
 def flashattn(batch,
               heads,
               seq_len,
@@ -193,7 +196,7 @@ def main(
         print("Tile-lang: {:.2f} ms".format(latency))
         print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
     else:
-        best_result = flashattn(batch, heads, seq_len, dim, is_causal, tune=tune)
+        best_result = flashattn(batch, heads, seq_len, dim, is_causal)
         best_latency = best_result.latency
         best_config = best_result.config
         ref_latency = best_result.ref_latency

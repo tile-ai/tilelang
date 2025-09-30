@@ -235,7 +235,8 @@ private:
 
   bool IsLocalBuffer(const Buffer &buffer) {
     String scope = buffer.scope();
-    return scope == "local" || scope == "local.fragment";
+    return scope == "local" || scope == "local.fragment" ||
+           scope == "local.var";
   }
 
   bool isSharedBuffer(const Buffer &buffer) {

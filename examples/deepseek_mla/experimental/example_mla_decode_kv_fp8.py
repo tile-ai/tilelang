@@ -7,7 +7,10 @@ from einops import rearrange, einsum
 import argparse
 
 
-@tilelang.jit(out_idx=[-1])
+@tilelang.jit(
+    out_idx=[-1], pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    })
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     dtype = "float16"

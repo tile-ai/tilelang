@@ -217,14 +217,14 @@ namespace tl {
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum = false, bool use_wgmma = true,
           int wg_wait = 0, typename A_type, typename B_type, typename C_type,
-          typename MMA = cute::tl_wgmma_sp::GemmTensorOp<
+          typename GMMA = cute::tl_wgmma_sp::GemmTensorOp<
               M, N, K, num_warp_m, num_warp_n, trans_A, trans_B, clear_accum,
               A_type, B_type, C_type>,
-          typename E_type = typename MMA::ElementEMma::raw_type>
+          typename E_type = typename GMMA::ElementEMma::raw_type>
 TL_DEVICE void gemm_sp_ss(A_type *pA, B_type *pB, C_type *accum, E_type *pE) {
   static_assert(use_wgmma, "only wgmma is supported for now");
   if constexpr (use_wgmma) {
-    MMA::body<wg_wait>(pA, pB, accum, pE);
+    GMMA::body<wg_wait>(pA, pB, accum, pE);
   } else {
     CUTE_GCC_UNREACHABLE;
   }

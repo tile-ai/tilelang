@@ -22,6 +22,8 @@ enum class GemmWarpPolicyType : uint8_t {
   kFree = 3,
 };
 
+// Target GEMM instruction
+enum class GemmInst : uint8_t { kMMA, kWGMMA, kTCGEN5MMA, kMFMA };
 class GemmWarpPolicyNode : public Object {
 public:
   mutable int m_warp{0};
@@ -55,7 +57,8 @@ public:
   static constexpr bool _type_has_method_shash_reduce = true;
 
   std::pair<int, int> ComputeWarpPartition(int M, int N, int block_size,
-                                           Target target, bool use_wgmma) const;
+                                           Target target,
+                                           GemmInst gemm_inst) const;
 
   bool isSquare() const {
     return policy_type == int(GemmWarpPolicyType::kSquare);
@@ -109,6 +112,9 @@ public:
   // only will be enabled under cdna mfma instructions
   int kPack = 1;
   int wg_wait = 0;
+  PrimExpr mbarptr;
+  std::optional<tir::Buffer> mbar; // mbar is optional, only used for TCGEN5MMA
+  Array<PrimExpr> C_coords;
   mutable GemmWarpPolicy policy;
 
   static constexpr const char *_type_key = "tl.Gemm";
@@ -146,7 +152,7 @@ public:
            equal(N, other->N) && equal(K, other->K) &&
            equal(stride_A, other->stride_A) &&
            equal(stride_B, other->stride_B) &&
-           equal(offset_A, other->offset_B) &&
+           equal(offset_A, other->offset_A) &&
            equal(offset_B, other->offset_B) &&
            equal(clear_accum, other->clear_accum) &&
            equal(kPack, other->kPack) && equal(wg_wait, other->wg_wait) &&
@@ -184,9 +190,9 @@ public:
   TileOperator Clone() const;
 
 private:
-  // Target GEMM instruction
-  enum class GemmInst : uint8_t { kMMA, kWGMMA, kUTCMMA, kMFMA };
   GemmInst GetGemmInst(int block_size, Target target) const;
+  bool AllowTCGEN5MMA(Target target) const;
+  bool AllowWGMMA(int block_size, Target target) const;
 
   mutable bool completed_ = false;
 };

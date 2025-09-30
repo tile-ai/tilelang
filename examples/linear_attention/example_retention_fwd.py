@@ -33,7 +33,7 @@ def chunk_retention_fwd_kernel(
             Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
             K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
             V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
-            O: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore 
+            O: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore
     ):
         with T.Kernel(NV, NK, B * H) as (i_v, i_k, i_bh):
             i_b = i_bh // H

@@ -37,7 +37,7 @@ def get_configs():
     num_stages = [0,1]
     enable_rasterization = [True]
     k_pack = [2]
-    panel_size = [7, 8, 9, 10]
+    panel_size = [7, 8]
     qk_coalesced_width = [8]
     v_coalesced_width = [4]
 

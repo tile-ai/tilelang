@@ -25,6 +25,8 @@ namespace attr {
 static constexpr const char *kPaddingMap = "padding_map";
 static constexpr const char *kWarpSpecializationScope =
     "kWarpSpecializationScope";
+static constexpr const char *kCustomWarpSpecialization =
+    "kCustomWarpSpecialization";
 } // namespace attr
 
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
@@ -38,10 +40,13 @@ static constexpr const char *kConfigIndexBitwidth = "tl.config_index_bitwidth";
 static constexpr const char *kEnableAggressiveSharedMemoryMerge =
     "tl.enable_aggressive_shared_memory_merge";
 static constexpr const char *kDisableFastMath = "tl.disable_fast_math";
+static constexpr const char *kEnableFastMath = "tl.enable_fast_math";
 static constexpr const char *kPtxasRegisterUsageLevel =
     "tl.ptxas_register_usage_level";
 static constexpr const char *kEnablePTXASVerboseOutput =
     "tl.enable_ptxas_verbose_output";
+static constexpr const char *kDisableVectorize256 = "tl.disable_vectorize_256";
+static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
 /*!
  * \brief Whether to disable dynamic tail split
@@ -51,6 +56,20 @@ static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
  */
 static constexpr const char *kDisableDynamicTailSplit =
     "tl.disable_dynamic_tail_split";
+
+/*!
+ * \brief Whether to disable thread storage synchronization
+ *
+ * When enabled, disables the automatic insertion of thread synchronization
+ * barriers (e.g., __syncthreads()) for shared memory access coordination.
+ * This can be useful for performance optimization in cases where manual
+ * synchronization is preferred or when synchronization is not needed.
+ *
+ * kDisableThreadStorageSync = "tl.disable_thread_storage_sync"
+ *
+ */
+static constexpr const char *kDisableThreadStorageSync =
+    "tl.disable_thread_storage_sync";
 
 /*!
  * \brief The size of the vectorized dimension in buffer, designed by user
@@ -71,6 +90,42 @@ static constexpr const char *kDynamicAlignment = "tl.dynamic_alignment";
  *
  */
 DataType cuTensorMapType();
+
+// fast math related op
+// __exp(x) - fast exponential
+TVM_DLL const Op &__exp();
+// __exp10(x) - fast base-10 exponential
+TVM_DLL const Op &__exp10();
+// __log(x) - fast natural logarithm
+TVM_DLL const Op &__log();
+// __log2(x) - fast base-2 logarithm
+TVM_DLL const Op &__log2();
+// __log10(x) - fast base-10 logarithm
+TVM_DLL const Op &__log10();
+// __tan(x) - fast tangent
+TVM_DLL const Op &__tan();
+// __cos(x) - fast cosine
+TVM_DLL const Op &__cos();
+// __sin(x) - fast sine
+TVM_DLL const Op &__sin();
+
+// high precision with IEEE-compliant.
+// ieee_add(x, y, rounding_mode) - IEEE-compliant addition
+TVM_DLL const Op &ieee_add();
+// ieee_sub(x, y, rounding_mode) - IEEE-compliant subtraction
+TVM_DLL const Op &ieee_sub();
+// ieee_mul(x, y, rounding_mode) - IEEE-compliant multiplication
+TVM_DLL const Op &ieee_mul();
+// ieee_fmaf(x, y, z, rounding_mode) - IEEE-compliant fused multiply-add
+TVM_DLL const Op &ieee_fmaf();
+// ieee_frcp(x, rounding_mode) - IEEE-compliant reciprocal
+TVM_DLL const Op &ieee_frcp();
+// ieee_fsqrt(x, rounding_mode) - IEEE-compliant square root
+TVM_DLL const Op &ieee_fsqrt();
+// ieee_frsqrt(x) - IEEE-compliant reciprocal square root (rn only)
+TVM_DLL const Op &ieee_frsqrt();
+// ieee_fdiv(x, y, rounding_mode) - IEEE-compliant division
+TVM_DLL const Op &ieee_fdiv();
 
 /*!
  * \brief tvm intrinsics for TMADescriptor creation for tiled load
@@ -162,6 +217,22 @@ TVM_DLL const Op &mbarrier_wait_parity();
 TVM_DLL const Op &mbarrier_expect_tx();
 
 /*!
+ * \brief tvm intrinsics for initializing tensor memory
+ *
+ * ptx_init_tensor_memory(tmem_buffer, num_cols)
+ *
+ */
+const Op &ptx_init_tensor_memory();
+
+/*!
+ * \brief tvm intrinsics for deallocating tensor memory
+ *
+ * tmem_deallocate(tmem_buffer)
+ *
+ */
+const Op &ptx_deallocate_tensor_memory();
+
+/*!
  * \brief tvm intrinsics for ldmatrix
  *
  * ptx_ldmatrix(transposed, num, shared_addr, local_addr)
@@ -176,6 +247,14 @@ TVM_DLL const Op &ptx_ldmatrix();
  *
  */
 TVM_DLL const Op &ptx_stmatrix();
+
+/*!
+ * \brief tvm intrinsic for ptx async copy barrier using
+ * cp.async.mbarrier.arrive.noinc
+ *
+ *  This op is used to represent a ptx async copy barrier operation in tilelang.
+ */
+TVM_DLL const Op &ptx_cp_async_barrier_noinc();
 
 /*!
  * \brief Pack two b16 value into a b32 value

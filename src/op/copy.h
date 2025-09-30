@@ -15,11 +15,15 @@ using namespace tir;
 
 /// Copy instruction types for different memory access patterns
 enum class CopyInst : uint8_t {
-  kNormal = 0,    ///< Standard memory copy (ldg/stg/cpasync)
-  kLDSM = 1,      ///< Load matrix instruction
-  kSTSM = 2,      ///< Store matrix instruction
-  kBulkLoad = 3,  ///< Tensor Memory Access load
-  kBulkStore = 4, ///< Tensor Memory Access store
+  kNormal = 0,    // utilize ldg/stg or cpasync or any buffer copy
+  kLDSM = 1,      // ldmatrix memory copy
+  kSTSM = 2,      // stmatrix memory copy
+  kBulkLoad = 3,  // utilize tma load
+  kBulkStore = 4, // utilize tma store
+  // we should separate the bulk load and store for 1d and multi-dim
+  // as they have different memory access patterns
+  kBulkLoad1D = 5,  // utilize tma load 1d
+  kBulkStore1D = 6, // utilize tma store 1d
 };
 
 /// Descriptor for Tensor Memory Access (TMA) copy operations
@@ -137,17 +141,41 @@ public:
    * \param T     Arguments for layout inference.
    * \param level Level of inference (basic or detailed).
    */
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
 
   /*!
    * \brief Check if bulk copy is supported.
    */
-  bool CheckBulkLoad(Target target) const;
+  bool CheckBulkLoad(Target target, arith::Analyzer *analyzer,
+                     bool check_last_dim = true) const;
 
   /*!
    * \brief Check if bulk store is supported.
    */
-  bool CheckBulkStore(Target target) const;
+  bool CheckBulkStore(Target target, arith::Analyzer *analyzer,
+                      bool check_last_dim = true) const;
+
+  /*!
+   * \brief Check if bulk copy 1d load is supported.
+   */
+  bool CheckBulkLoad1D(Target target, const LayoutMap &layout_map,
+                       arith::Analyzer *analyzer) const;
+
+  /*!
+   * \brief Check if bulk copy 1d store is supported.
+   */
+  bool CheckBulkStore1D(Target target, const LayoutMap &layout_map,
+                        arith::Analyzer *analyzer) const;
+
+  /*!
+   * \brief Check if bulk copy 1d is supported.
+   */
+  bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
+                       const Array<Range> &global_range,
+                       const Array<Range> &shared_range,
+                       const LayoutMap &layout_map,
+                       arith::Analyzer *analyzer) const;
 
   /*!
    * \brief Check if lds memory copy is supported.
@@ -162,17 +190,22 @@ public:
   /*!
    * \brief Get the copy instruction type.
    */
-  CopyInst GetCopyInst(Target target, bool disable_tma_lower) const;
+  CopyInst GetCopyInst(Target target, bool disable_tma_lower,
+                       const LayoutMap &layout_map, arith::Analyzer *analyzer,
+                       bool buffer_oob) const;
 
-  /*!
-   * \brief Clone this copy operator.
-   */
 protected:
   /*!
    * \brief Generate lowering for bulk/global-to-shared copy.
    */
   Stmt LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
                      CopyInst copy_inst) const;
+
+  /*!
+   * \brief Generate lowering for bulk copy 1d.
+   */
+  Stmt LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
+                       CopyInst copy_inst) const;
 
   /*!
    * \brief Generate lowering for LDS Memory Copy (shared memory to shared
@@ -316,7 +349,8 @@ public:
   /*!
    * \brief Infer layout for this operator.
    */
-  LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const;
+  LayoutMap InferLayout(const LayoutInferArgs &T,
+                        InferLevel level) const override;
 
   /*!
    * \brief Get TVM Op handle.

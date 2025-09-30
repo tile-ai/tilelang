@@ -1,5 +1,6 @@
 from typing import Literal, Union
 from tilelang import tvm as tvm
+from tilelang import _ffi_api
 from tvm.target import Target
 from tvm.contrib import rocm
 from tilelang.contrib import nvcc
@@ -61,6 +62,9 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
     return_var: Union[str, Target] = target
 
     if target == "auto":
+        target = tvm.target.Target.current(allow_none=True)
+        if target is not None:
+            return target
         # Check for CUDA and HIP availability
         is_cuda_available = check_cuda_availability()
         is_hip_available = check_hip_availability()
@@ -81,3 +85,55 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
     if return_object:
         return Target(return_var)
     return return_var
+
+
+def target_is_cuda(target: Target) -> bool:
+    return _ffi_api.TargetIsCuda(target)
+
+
+def target_is_hip(target: Target) -> bool:
+    return _ffi_api.TargetIsRocm(target)
+
+
+def target_is_volta(target: Target) -> bool:
+    return _ffi_api.TargetIsVolta(target)
+
+
+def target_is_turing(target: Target) -> bool:
+    return _ffi_api.TargetIsTuring(target)
+
+
+def target_is_ampere(target: Target) -> bool:
+    return _ffi_api.TargetIsAmpere(target)
+
+
+def target_is_hopper(target: Target) -> bool:
+    return _ffi_api.TargetIsHopper(target)
+
+
+def target_is_sm120(target: Target) -> bool:
+    return _ffi_api.TargetIsSM120(target)
+
+
+def target_is_cdna(target: Target) -> bool:
+    return _ffi_api.TargetIsCDNA(target)
+
+
+def target_has_async_copy(target: Target) -> bool:
+    return _ffi_api.TargetHasAsyncCopy(target)
+
+
+def target_has_ldmatrix(target: Target) -> bool:
+    return _ffi_api.TargetHasLdmatrix(target)
+
+
+def target_has_stmatrix(target: Target) -> bool:
+    return _ffi_api.TargetHasStmatrix(target)
+
+
+def target_has_bulk_copy(target: Target) -> bool:
+    return _ffi_api.TargetHasBulkCopy(target)
+
+
+def target_get_warp_size(target: Target) -> int:
+    return _ffi_api.TargetGetWarpSize(target)

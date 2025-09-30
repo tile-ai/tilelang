@@ -377,14 +377,14 @@ __device__ void decode_i4b_to_f16_scale_zeros_quantized_offset(T1 *_i4s, T2 *B_l
     T3 const scale_r = *(scale + scale_offset);
     uint const packed_scales_l = __pack_half2(scale_l, scale_l);
     uint const packed_scales_r = __pack_half2(scale_r, scale_r);
-    
+
     const int num_elems_per_storage_dtype = sizeof(T1) * 8 / 4;
 
     T1 const qzeros_l = *qzeros;
     T1 const qzeros_r = *(qzeros + qzeros_offset);
     int16_t const zero_l = (qzeros_l >> (group_offset * 4) & 0xf);
     int16_t const zero_r = (qzeros_r >> (group_offset * 4) & 0xf);
-    
+
     uint median_num_l = ((0xe400 | zero_l) << 16) | (0xe400 | zero_l);
     uint median_num_r = ((0xe400 | zero_r) << 16) | (0xe400 | zero_r);
 

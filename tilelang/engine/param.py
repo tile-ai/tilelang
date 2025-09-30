@@ -21,13 +21,13 @@ class KernelParam:
     def from_buffer(cls, buffer: Buffer):
         """
         Creates a KernelParam instance from a TVM Buffer object.
-        
+
         Args:
             buffer: TVM Buffer object containing dtype and shape information
-            
+
         Returns:
             KernelParam instance with converted dtype and shape
-            
+
         Raises:
             ValueError: If dimension type is not supported (not IntImm or Var)
         """
@@ -47,10 +47,10 @@ class KernelParam:
         """
         Creates a KernelParam instance from a TVM Variable object.
         Used for scalar parameters.
-        
+
         Args:
             var: TVM Variable object containing dtype information
-            
+
         Returns:
             KernelParam instance representing a scalar (empty shape)
         """
@@ -60,7 +60,7 @@ class KernelParam:
     def is_scalar(self) -> bool:
         """
         Checks if the parameter represents a scalar value.
-        
+
         Returns:
             bool: True if parameter has no dimensions (empty shape), False otherwise
         """
@@ -69,7 +69,7 @@ class KernelParam:
     def is_unsigned(self) -> bool:
         """
         Checks if the parameter represents an unsigned integer type.
-        
+
         Returns:
             bool: True if parameter is an unsigned integer type, False otherwise
         """
@@ -81,7 +81,7 @@ class KernelParam:
     def is_float8(self) -> bool:
         """
         Checks if the parameter represents a float8 type.
-        
+
         Returns:
             bool: True if parameter is a float8 type, False otherwise
         """
@@ -93,7 +93,7 @@ class KernelParam:
     def is_boolean(self) -> bool:
         """
         Checks if the parameter represents a boolean type.
-        
+
         Returns:
             bool: True if parameter is a boolean type, False otherwise
         """

@@ -48,6 +48,16 @@ template <> __device__ void debug_print_var<int>(const char *msg, int var) {
          threadIdx.z, var);
 }
 
+// Specialization for unsigned integer type
+template <>
+__device__ void debug_print_var<unsigned int>(const char *msg,
+                                              unsigned int var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=int "
+         "value=%u\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, var);
+}
+
 // Specialization for float type
 template <> __device__ void debug_print_var<float>(const char *msg, float var) {
   printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): dtype=float "
@@ -149,6 +159,17 @@ __device__ void debug_print_buffer_value<int>(const char *msg,
          threadIdx.z, buf_name, index, var);
 }
 
+// Specialization for unsigned integer type
+template <>
+__device__ void
+debug_print_buffer_value<unsigned int>(const char *msg, const char *buf_name,
+                                       int index, unsigned int var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): buffer=%s, "
+         "index=%d, dtype=int value=%u\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, buf_name, index, var);
+}
+
 // Specialization for float type
 template <>
 __device__ void debug_print_buffer_value<float>(const char *msg,
@@ -224,4 +245,15 @@ __device__ void debug_print_buffer_value<fp8_e5_t>(const char *msg,
          "index=%d, dtype=fp8_e5_t value=%f\n",
          msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
          threadIdx.z, buf_name, index, (float)var);
+}
+
+// Specialization for int16 type
+template <>
+__device__ void debug_print_buffer_value<int16_t>(const char *msg,
+                                                  const char *buf_name,
+                                                  int index, int16_t var) {
+  printf("msg='%s' BlockIdx=(%d, %d, %d), ThreadIdx=(%d, %d, %d): buffer=%s, "
+         "index=%d, dtype=int16_t value=%d\n",
+         msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
+         threadIdx.z, buf_name, index, (int32_t)var);
 }

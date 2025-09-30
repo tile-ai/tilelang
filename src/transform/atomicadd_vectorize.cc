@@ -54,25 +54,19 @@ private:
     if (node->op == builtin::call_extern() && node->args.size() >= 2) {
       if (const auto *func_name = node->args[0].as<StringImmNode>()) {
         if (func_name->value == "AtomicAdd") {
+          const BufferLoadNode *buffer_load_dst =
+              node->args[1].as<BufferLoadNode>();
+          const BufferLoadNode *buffer_load_src =
+              node->args[2].as<BufferLoadNode>();
+          if (buffer_load_src && buffer_load_src->buffer.defined() &&
+              buffer_load_dst && buffer_load_dst->buffer.defined()) {
 
-          const CallNode *addr_call = node->args[1].as<CallNode>();
-          if (addr_call && addr_call->op == builtin::address_of() &&
-              addr_call->args.size() == 1) {
-
-            const BufferLoadNode *buffer_load_dst =
-                addr_call->args[0].as<BufferLoadNode>();
-            const BufferLoadNode *buffer_load_src =
-                node->args[2].as<BufferLoadNode>();
-            if (buffer_load_src && buffer_load_src->buffer.defined() &&
-                buffer_load_dst && buffer_load_dst->buffer.defined()) {
-
-              Buffer dst_buffer = buffer_load_dst->buffer;
-              Array<PrimExpr> indices_dst = buffer_load_dst->indices;
-              UpdateVectorSize(indices_dst, dst_buffer);
-              Buffer src_buffer = buffer_load_src->buffer;
-              Array<PrimExpr> indices_src = buffer_load_src->indices;
-              UpdateVectorSize(indices_src, src_buffer);
-            }
+            Buffer dst_buffer = buffer_load_dst->buffer;
+            Array<PrimExpr> indices_dst = buffer_load_dst->indices;
+            UpdateVectorSize(indices_dst, dst_buffer);
+            Buffer src_buffer = buffer_load_src->buffer;
+            Array<PrimExpr> indices_src = buffer_load_src->indices;
+            UpdateVectorSize(indices_src, src_buffer);
           }
         }
       }
@@ -219,13 +213,8 @@ private:
             //        bx * stride_x + (i % (stride_x / (tx_extent *
             //        vector_size_)) * (tx_extent * vector_size_) + (tx_var_ %
             //        (stride / vector_size_)) * vector_size_]
-            const CallNode *addr_call = node->args[1].as<CallNode>();
-            if (!addr_call || addr_call->op != builtin::address_of() ||
-                addr_call->args.size() != 1) {
-              return StmtExprMutator::VisitExpr_(node);
-            }
             const BufferLoadNode *old_dst_node =
-                addr_call->args[0].as<BufferLoadNode>();
+                node->args[1].as<BufferLoadNode>();
             const BufferLoadNode *old_value_node =
                 node->args[2].as<BufferLoadNode>();
             if (!old_dst_node || !old_value_node) {
@@ -339,8 +328,7 @@ For VectorizeAtomicAdd(const For &for_node, const Var &thread_var,
       if (call->op == builtin::call_extern() && call->args.size() >= 2) {
         const auto *func_name = call->args[0].as<StringImmNode>();
         if (func_name->value == "AtomicAdd") {
-          DataType dtype =
-              call->args[1].as<CallNode>()->args[0].as<BufferLoadNode>()->dtype;
+          DataType dtype = call->args[1].as<BufferLoadNode>()->dtype;
           vectorize_size_max = GetVectorizeSizeMax(compute_capability, dtype);
         }
       }

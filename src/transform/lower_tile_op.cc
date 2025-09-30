@@ -73,6 +73,34 @@ static Buffer makeBufferWithLayout(const Buffer &buffer, const Layout &layout,
                 buffer->buffer_type);
 }
 
+// The function `makeBufferWithLayout` creates a new Buffer object based on the
+// given buffer and layout. It handles remapping of buffer variables, adjusts
+// the storage scope if needed (e.g., from "local.fragment" to "local"), and
+// computes the output shape according to the layout. For shared memory buffers,
+// it also handles replication if the buffer's extent is larger than the
+// layout's extent.
+class LayoutRemapRewriter : public arith::IRMutatorWithAnalyzer {
+public:
+  static Stmt Substitute(Stmt stmt, Map<Buffer, Layout> layout_remap) {
+    arith::Analyzer analyzer;
+    LayoutRemapRewriter substituter(&analyzer);
+    substituter.layout_remap_ = std::move(layout_remap);
+    return substituter.VisitStmt(stmt);
+  }
+
+private:
+  using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
+
+  Stmt VisitStmt_(const BlockNode *op) final {
+    auto block = Downcast<Block>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
+    if (op->annotations.count(attr::kLayoutMap)) {
+      block.CopyOnWrite()->annotations.Set(attr::kLayoutMap, layout_remap_);
+    }
+    return block;
+  }
+
+  Map<Buffer, Layout> layout_remap_;
+};
 class BufferGemmCollector : public StmtExprVisitor {
 public:
   BufferGemmCollector() { Clear(); }
@@ -227,6 +255,8 @@ public:
     fptr->body = substituter.VisitStmt(f->body);
     fptr->body =
         RemapBufferRewriter::Substitute(fptr->body, substituter.buffer_remap_);
+    fptr->body =
+        LayoutRemapRewriter::Substitute(fptr->body, substituter.layout_remap_);
     tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
     Optional<Bool> opt_disable_tma_lower =
         ctxt->GetConfig(kDisableTMALower, Optional<Bool>());
@@ -275,7 +305,6 @@ private:
     for (const auto &buffer : workspaces_)
       block_ptr->alloc_buffers.push_back(buffer);
     workspaces_.clear();
-    block_ptr->annotations.erase(attr::kLayoutMap);
     return block;
   }
 
@@ -303,26 +332,27 @@ private:
     } else if (access_ptr_call->op.same_as(builtin::address_of())) {
       BufferLoad load = Downcast<BufferLoad>(access_ptr_call->args[0]);
       Array<PrimExpr> indices = load->indices;
-      Array<PrimExpr> shape = load->buffer->shape;
+      Array<PrimExpr> old_shape = load->buffer->shape;
 
-      CHECK_EQ(indices.size(), shape.size())
+      CHECK_EQ(indices.size(), old_shape.size())
           << "Indices size and shape size must match for general N-dimensional "
              "buffer "
           << "but got indices size: " << indices.size()
-          << " and shape size: " << shape.size();
+          << " and shape size: " << old_shape.size();
 
       PrimExpr elem_offset = 0;
       PrimExpr stride = 1;
 
-      for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
+      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
         elem_offset += indices[i] * stride;
-        stride *= shape[i];
+        stride *= old_shape[i];
       }
 
       PrimExpr smem_offset =
           elem_offset + (offset.defined() ? offset.value() : 0);
 
       auto new_buffer = buffer_remap_[load->buffer];
+      auto new_shape = new_buffer->shape;
 
       auto buffer_map_iter =
           buffer_map_.find(Downcast<Var>(load->buffer->data));
@@ -337,30 +367,32 @@ private:
       Array<PrimExpr> multi_dim_indices;
       PrimExpr remaining_offset = smem_offset;
 
-      for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
+      for (int i = static_cast<int>(old_shape.size()) - 1; i >= 0; --i) {
         multi_dim_indices.insert(multi_dim_indices.begin(),
-                                 floormod(remaining_offset, shape[i]));
-        remaining_offset = floordiv(remaining_offset, shape[i]);
+                                 floormod(remaining_offset, old_shape[i]));
+        remaining_offset = floordiv(remaining_offset, old_shape[i]);
       }
 
       auto forward_indices =
           layout_map_[load->buffer]->Forward(multi_dim_indices);
       PrimExpr new_offset = 0;
       PrimExpr stride_offset = 1;
-      for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
+      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
         new_offset += forward_indices[i] * stride_offset;
-        stride_offset *= shape[i];
+        stride_offset *= new_shape[i];
       }
       new_offset = analyzer_->Simplify(new_offset);
 
       Array<PrimExpr> new_indices;
-      for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
-        new_indices.insert(new_indices.begin(), floormod(new_offset, shape[i]));
-        new_offset = floordiv(new_offset, shape[i]);
+      for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
+        new_indices.insert(new_indices.begin(),
+                           floormod(new_offset, new_shape[i]));
+        new_offset = floordiv(new_offset, new_shape[i]);
       }
 
       auto new_access_ptr = access_ptr_call.CopyOnWrite();
       new_access_ptr->args.Set(0, BufferLoad(new_buffer, new_indices));
+      layout_remap_.Set(new_buffer, layout_map_[load->buffer]);
     } else {
       LOG(FATAL) << "Invalid access op for permuted layout: " << access_ptr;
     }
@@ -397,7 +429,6 @@ private:
         LOG(FATAL) << "Invalid access ptr for permuted layout: " << access_ptr;
       }
       BufferLoad load = Downcast<BufferLoad>(address_of_call->args[0]);
-
       if (buffer_remap_.count(load->buffer)) {
         auto new_access_ptr =
             HandleAccessPtrAndOffset(access_ptr, smem_offset, call->dtype);
@@ -429,6 +460,7 @@ private:
     if (buffer_remap_.count(buffer)) {
       auto new_indices = layout_map_[buffer]->Forward(load->indices);
       auto new_buffer = buffer_remap_[load->buffer];
+      layout_remap_.Set(new_buffer, layout_map_[load->buffer]);
       return BufferLoad(new_buffer, new_indices);
     } else if (var_remap_.count(buffer->data)) {
       auto new_buffer = Buffer(
@@ -446,6 +478,7 @@ private:
     if (buffer_remap_.count(buffer)) {
       auto new_indices = layout_map_[buffer]->Forward(store->indices);
       auto new_buffer = buffer_remap_[store->buffer];
+      layout_remap_.Set(new_buffer, layout_map_[store->buffer]);
       return BufferStore(new_buffer, store->value, new_indices);
     } else if (var_remap_.count(buffer->data)) {
       auto new_buffer = Buffer(
@@ -494,9 +527,7 @@ private:
    * visitor processing.
    */
   Stmt VisitStmt_(const EvaluateNode *op) final {
-    // LOG(INFO) << "evaluate node: " << op->value;
     const CallNode *call = op->value.as<CallNode>();
-    // LOG(INFO) << "call: " << call->op;
     // Do not analysis the call node to the global function.
     if (call && call->op.as<GlobalVarNode>())
       return Downcast<Evaluate>(IRMutatorWithAnalyzer::VisitStmt_(op));
@@ -548,6 +579,7 @@ private:
   Target target_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Layout> layout_map_;
+  Map<Buffer, Layout> layout_remap_;
   Map<Buffer, Buffer> buffer_remap_;
   // This is a workaround for cpu backend,
   // we need to define a thread_var for the serial loop.

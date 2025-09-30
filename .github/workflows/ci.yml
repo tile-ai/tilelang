@@ -118,4 +118,4 @@ jobs:
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd testing/python
         unset PYTHONPATH
-        python -m pytest -n 4 -v -r fE --durations=0
+        python -m pytest -n 4 -v -r fE --durations=0 --timeout=3600
