@@ -8,239 +8,406 @@
 
 </div>
 
-Tile Language (**tile-lang**) is a concise domain-specific language designed to streamline the development of high-performance GPU/CPU kernels (e.g., GEMM, Dequant GEMM, FlashAttention, LinearAttention). By employing a Pythonic syntax with an underlying compiler infrastructure on top of [TVM](https://tvm.apache.org/), tile-lang allows developers to focus on productivity without sacrificing the low-level optimizations necessary for state-of-the-art performance.
+Tile Language (**tile-lang**) is a concise domain-specific language designed to streamline the development of high-performance GPU/CPU kernels (e.g., GEMM, Dequant GEMM, FlashAttention, LinearAttention) as well as accelerators such as [Tenstorrent AI architecture](https://github.com/tenstorrent/tt-metal/blob/main/METALIUM_GUIDE.md) and Huawei Ascend NPU. By employing a Pythonic syntax with an underlying compiler infrastructure on top of [TVM](https://tvm.apache.org/), tile-lang allows developers to focus on productivity without sacrificing the low-level optimizations necessary for state-of-the-art performance.
 
 <img src=./images/MatmulExample.png />
 
-## Latest News
-- 09/29/2025  🎉: Thrilled to announce that ​​AscendC​​ and ​Ascend​NPU IR​​ backends targeting Huawei Ascend chips are now supported!
-Check out the preview here:
-🔗 [link](https://github.com/tile-ai/tilelang-ascend).
-This includes implementations across two branches:
-[ascendc_pto](https://github.com/tile-ai/tilelang-ascend) and
-[npuir](https://github.com/tile-ai/tilelang-ascend/tree/npuir).
-Feel free to explore and share your feedback! 
-- 07/04/2025 🚀: Introduced `T.gemm_sp` for 2:4 sparse tensor core support, check out [Pull Request #526](https://github.com/tile-ai/tilelang/pull/526) for details.
-- 06/05/2025 ✨: Added [NVRTC Backend](https://github.com/tile-ai/tilelang/pull/461) to significantly reduce compilation time for cute templates!
-- 04/14/2025 🚀: Added high-performance FlashMLA implementation for AMD MI300X, achieving performance parity with hand-optimized assembly kernels of Aiter! See [example_mla_amd](./examples/deepseek_mla/amd/README.md) for details.
-- 03/03/2025 🚀: Added high-performance MLA Decoding support using only 80 lines of Python code, achieving performance on par with FlashMLA on H100 (see [example_mla_decode.py](./examples/deepseek_mla/example_mla_decode.py))! We also provide [documentation](./examples/deepseek_mla/README.md) explaining how TileLang achieves this.
-- 02/15/2025 ✨: Added WebGPU Codegen support, see [Pull Request #86](https://github.com/tile-ai/tilelang/pull/86)!
-- 02/12/2025 ✨: Excited to announce the release of [v0.1.0](https://github.com/tile-ai/tilelang/releases/tag/v0.1.0)!
-- 02/10/2025 🚀: Added debug tools for TileLang—`T.print` for printing variables/buffers ([docs](https://tilelang.com/tutorials/debug_tools_for_tilelang.html)) and a memory layout plotter ([examples/plot_layout](./examples/plot_layout)).
-- 01/20/2025 ✨: We are excited to announce that tile-lang, a dsl for high performance AI workloads, is now open source and available to the public!
+# TileLang → Tenstorrent (TT-Metalium) Backend
 
-## Tested Devices
-Although tile-lang aims to be portable across a range of Devices, it has been specifically tested and validated on the following devices: for NVIDIA GPUs, this includes the H100 (with Auto TMA/WGMMA support), A100, V100, RTX 4090, RTX 3090, and RTX A6000; for AMD GPUs, it includes the MI250 (with Auto MatrixCore support) and the MI300X (with Async Copy support).
+**Status:** Draft proposal for community discussion  
+**Goal:** Add a first‑class **Tenstorrent TT‑Metalium** backend to TileLang, alongside the existing NVIDIA (CUDA), AMD (HIP), and Ascend targets.
 
-## OP Implementation Examples
-**tile-lang** provides the building blocks to implement a wide variety of operators. Some examples include:
-
-- [Matrix Multiplication](./examples/gemm/)
-- [Dequantization GEMM](./examples/dequantize_gemm/)
-- [Flash Attention](./examples/flash_attention/)
-- [Flash Linear Attention](./examples/linear_attention/)
-- [Flash MLA Decoding](./examples/deepseek_mla/)
-- [Native Sparse Attention](./examples/deepseek_nsa/)
-
-Within the `examples` directory, you will also find additional complex kernels—such as convolutions, forward/backward passes for FlashAttention, more operators will continuously be added.
-
-
-## Benchmark Summary
-
-TileLang achieves exceptional performance across a variety of computational patterns. Comprehensive benchmark scripts and settings are available at [tilelang-benchmark](https://github.com/tile-ai/tilelang-benchmark). Below are selected results showcasing its capabilities:
-
-- MLA Decoding Performance on H100
-
-  <div style="display: flex; gap: 10px; justify-content: center;">
-    <div style="flex: 1;">
-      <img src="./examples/deepseek_mla/figures/bs64_float16.png" alt="mla decode performance bs64 on H100" width="100%" />
-    </div>
-    <div style="flex: 1;">
-      <img src="./examples/deepseek_mla/figures/bs128_float16.png" alt="mla decode performance bs128 on H100" width="100%" />
-    </div>
-  </div>
-  
-- Flash Attention Performance on H100
-
-  <div align="center">    <img src="./images/mha_performance_h100.png" alt="operator performance on H100" width=80% />
-  </div>
-
-- Matmul Performance on GPUs (RTX 4090, A100, H100, MI300X)
-
-  <div>
-    <img src="./images/op_benchmark_consistent_gemm_fp16.png" alt="gemm fp16 performance on Gpus" />
-  </div>
-
-- Dequantize Matmul Performance on A100
-
-  <div>
-    <img src="./images/op_benchmark_a100_wq_gemv.png" alt="dequantize gemv performance on A100" />
-  </div>
-
-## Installation
-### Method 1: Install with Pip
-
-The quickest way to get started is to install the latest release from PyPI:
-
-```bash
-pip install tilelang
-```
-
-Alternatively, you can install directly from the GitHub repository:
-
-```bash
-pip install git+https://github.com/tile-ai/tilelang
-```
-
-Or install locally:
-
-```bash
-# install required system dependencies
-sudo apt-get update
-sudo apt-get install -y python3-setuptools gcc libtinfo-dev zlib1g-dev build-essential cmake libedit-dev libxml2-dev
-
-pip install -e . -v # remove -e option if you don't want to install in editable mode, -v for verbose output
-```
-
-### Method 2: Build from Source
-We currently provide three ways to install **tile-lang** from source:
- - [Install from Source (using your own TVM installation)](./docs/get_started/Installation.md#method-1-install-from-source-using-your-own-tvm-installation)
- - [Install from Source (using the bundled TVM submodule)](./docs/get_started/Installation.md#method-2-install-from-source-using-the-bundled-tvm-submodule)
- - [Install Using the Provided Script](./docs/get_started/Installation.md#method-3-install-using-the-provided-script)
-
-### Method 3: Install with Nightly Version
-
-For users who want access to the latest features and improvements before official releases, we provide nightly builds of **tile-lang**.
-
-```bash
-pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu121/
-# or pip install tilelang --find-links https://tile-ai.github.io/whl/nightly/cu121/
-```
-
-> **Note:** Nightly builds contain the most recent code changes but may be less stable than official releases. They're ideal for testing new features or if you need a specific bugfix that hasn't been released yet.
-
-## Quick Start
-
-In this section, you'll learn how to write and execute a straightforward GEMM (matrix multiplication) kernel using tile-lang, followed by techniques for layout optimizations, pipelining, and L2-cache–friendly swizzling.
-
-### GEMM Example with Annotations (Layout, L2 Cache Swizzling, and Pipelining, etc.)
-
-Below is an example that demonstrates more advanced features: layout annotation, parallelized copy, and swizzle for improved L2 cache locality. This snippet shows how to adapt your kernel to maximize performance on complex hardware.
-
-```python
-import tilelang
-import tilelang.language as T
-
-# @tilelang.jit(target="cuda")
-# target currently can be "cuda" or "hip" or "cpu".
-# if not specified, it will be inferred from the input tensors during compile time
-@tilelang.jit
-def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
-
-    @T.prim_func
-    def matmul_relu_kernel(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((K, N), dtype),
-            C: T.Tensor((M, N), dtype),
-    ):
-        # Initialize Kernel Context
-        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_K), dtype)
-            B_shared = T.alloc_shared((block_K, block_N), dtype)
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-
-            # Enable rasterization for better L2 cache locality (Optional)
-            # T.use_swizzle(panel_size=10, enable=True)
-
-            # Clear local accumulation
-            T.clear(C_local)
-
-            for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
-                # Copy tile of A
-                # This is a sugar syntax for parallelized copy
-                T.copy(A[by * block_M, ko * block_K], A_shared)
-
-                # Copy tile of B
-                T.copy(B[ko * block_K, bx * block_N], B_shared)
-
-                # Perform a tile-level GEMM on the shared buffers
-                # Currently we dispatch to the cute/hip on Nvidia/AMD GPUs
-                T.gemm(A_shared, B_shared, C_local)
-            
-            # relu
-            for i, j in T.Parallel(block_M, block_N):
-                C_local[i, j] = T.max(C_local[i, j], 0)
-
-            # Copy result back to global memory
-            T.copy(C_local, C[by * block_M, bx * block_N])
-
-    return matmul_relu_kernel
-
-
-M = 1024  # M = T.symbolic("m") if you want to use dynamic shape
-N = 1024
-K = 1024
-block_M = 128
-block_N = 128
-block_K = 32
-
-# 1. Define the kernel (matmul) and compile/lower it into an executable module
-matmul_relu_kernel = matmul(M, N, K, block_M, block_N, block_K)
-
-# 3. Test the kernel in Python with PyTorch data
-import torch
-
-# Create random input tensors on the GPU
-a = torch.randn(M, K, device="cuda", dtype=torch.float16)
-b = torch.randn(K, N, device="cuda", dtype=torch.float16)
-c = torch.empty(M, N, device="cuda", dtype=torch.float16)
-
-# Run the kernel through the Profiler
-matmul_relu_kernel(a, b, c)
-
-print(c)
-# Reference multiplication using PyTorch
-ref_c = torch.relu(a @ b)
-
-# Validate correctness
-torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
-print("Kernel output matches PyTorch reference.")
-
-# 4. Retrieve and inspect the generated CUDA source (optional)
-# cuda_source = jit_kernel.get_kernel_source()
-# print("Generated CUDA kernel:\n", cuda_source)
-
-# 5.Profile latency with kernel
-profiler = matmul_relu_kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
-
-latency = profiler.do_bench()
-
-print(f"Latency: {latency} ms")
-```
-
-### Dive Deep into TileLang Beyond GEMM
-
-In addition to GEMM, we provide a variety of examples to showcase the versatility and power of TileLang, including:
-
-- [Dequantize GEMM](./examples/dequantize_gemm/): Achieve high-performance dequantization by **fine-grained control over per-thread operations**, with many features now adopted as default behaviors in [BitBLAS](https://github.com/microsoft/BitBLAS), which utilizing magic layout transformation and intrins to accelerate dequantize gemm.
-- [FlashAttention](./examples/flash_attention/): Enable cross-operator fusion with simple and intuitive syntax, and we also provide an example of auto tuning.
-- [LinearAttention](./examples/linear_attention/): Examples include RetNet and Mamba implementations.
-- [Convolution](./examples/convolution/): Implementations of Convolution with IM2Col.
-
-## Upcoming Features
-
-Check our [tilelang v0.2.0 release plan](https://github.com/tile-ai/tilelang/issues/79) for upcoming features.
+This README doubles as a **technical plan** and a **call for contributions**. The intended path is to begin in a **public fork** and upstream in stages once CI and core features stabilize.
 
 ---
 
-TileLang has now been used in project [BitBLAS](https://github.com/microsoft/BitBLAS) and [AttentionEngine](https://github.com/microsoft/AttentionEngine).
+## Table of Contents
 
-## Join the Discussion
+- [Motivation](#motivation)
+- [Background: Persistent Kernels & Tiles on Tenstorrent](#background-persistent-kernels--tiles-on-tenstorrent)
+- [Key Idea: Grid‑to‑Persistent Mapping](#key-idea-grid-to-persistent-mapping)
+- [User‑Facing Annotations](#user-facing-annotations)
+  - [Static Schedule Annotations](#static-schedule-annotations)
+  - [Sharding & Layout Annotations](#sharding--layout-annotations)
+  - [Defaults & Backward Compatibility](#defaults--backward-compatibility)
+- [End‑to‑End Examples](#end-to-end-examples)
+  - [GEMM (no annotations → defaults)](#gemm-no-annotations--defaults)
+  - [Attention (with schedule & layout hints)](#attention-with-schedule--layout-hints)
+- [Compiler & Codegen Plan (TVM/TileLang)](#compiler--codegen-plan-tvmtilelang)
+  - [Phase 0 — MVP (GEMM, Elementwise)](#phase-0--mvp-gemm-elementwise)
+  - [Phase 1 — SDPA, Dequant‑GEMM, Reuse/Multicast](#phase-1--sdpa-dequant-gemm-reusemulticast)
+  - [Phase 2 — Ergonomics, Safety, Diagnostics](#phase-2--ergonomics-safety-diagnostics)
+- [Runtime Integration & Build](#runtime-integration--build)
+- [Developer Workflow & Repository Layout](#developer-workflow--repository-layout)
+- [Risks & Mitigations](#risks--mitigations)
+- [Call for Contributions](#call-for-contributions)
+- [Appendix](#appendix)
+  - [Why the Defaults Are Safe](#why-the-defaults-are-safe)
+  - [Attribute & API Sketch](#attribute--api-sketch)
+  - [Open Questions](#open-questions)
+  - [License](#license)
 
-Welcome to join our Discord community for discussions, support, and collaboration!
+---
 
-[![Join our Discord](https://img.shields.io/badge/Discord-Join%20Us-blue?logo=discord&style=for-the-badge)](https://discord.gg/TUrHyJnKPG)
+## Motivation
 
-## Acknowledgements
+- **Tenstorrent’s execution model is persistent**: each selected core runs a long‑lived kernel and iterates over a statically assigned set of **tiles** (typically 32×32 elements), while dedicated reader/compute/writer stages move tiles between **DRAM ↔ L1** and perform compute.
+- **TileLang already supports GPU‑style grid kernels** (`bx, by`) and layout hints. We propose a backend that **automatically converts grid kernels into persistent TT kernels** by generating an **outer per‑core scheduler loop** inside the compute kernel.
+- Users keep writing **grid‑style** kernels. When targeting TT, the backend injects a static, per‑core loop that visits the blocks (tiles) assigned to that core. Optional **annotations** let users choose the static schedule and **TT sharding/layout**. **Sane defaults** ensure most GPU‑style kernels “just work”.
 
-We would like to express our gratitude to the [TVM](https://github.com/apache/tvm) community for their invaluable contributions. The initial version of this project was mainly developed by [LeiWang1999](https://github.com/LeiWang1999), [chengyupku](https://github.com/chengyupku) and [nox-410](https://github.com/nox-410) with supervision from Prof. [Zhi Yang](https://yangzhihome.github.io) at Peking University. Part of this work was carried out during an internship at Microsoft Research, where Dr. Lingxiao Ma, Dr. Yuqing Xia, Dr. Jilong Xue, and Dr. Fan Yang offered valuable advice and support. We deeply appreciate their mentorship and contributions.
+---
+
+## Background: Persistent Kernels & Tiles on Tenstorrent
+
+- **Static partitioning:** The host partitions the global tile space into per‑core chunks (e.g., `(start_id, count)`), then launches one persistent kernel per participating core.  
+- **Tiles:** Compute operates on **tile‑formatted** tensors (e.g., 32×32). Tiles may **reside in DRAM**; reader kernels stream tiles into L1 circular buffers; compute kernels consume them; writer kernels commit results back to DRAM.
+- **Program model:** A host **Program** creates kernels on a **CoreRange / CoreRangeSet**, wires circular buffers, sets runtime args, and enqueues work.
+
+---
+
+## Key Idea: Grid‑to‑Persistent Mapping
+
+**Write once (GPU‑style) in TileLang:**
+
+```python
+with T.Kernel(grid_x=Nt, grid_y=Mt, threads=(...)) as (bx, by):
+    compute_one_block(bx, by)   # body indexes by bx/by; no TT specifics
+```
+
+**Generated for TT (inside the compute kernel):**
+
+```cpp
+// Runtime args per core: start_id, count, grid_x (Nt), grid_y (Mt), etc.
+for (uint32_t i = 0; i < count; ++i) {       // persistent outer loop
+    uint32_t tid = start_id + i;             // row-major block id
+    uint32_t by  = tid / grid_x;             // recover (bx, by)
+    uint32_t bx  = tid % grid_x;
+    compute_one_block(bx, by);               // same inner body as GPU-style kernel
+}
+```
+
+This preserves the developer’s **grid mental model** while embracing TT’s **persistent, statically scheduled** execution.
+
+---
+
+## User‑Facing Annotations
+
+### Static Schedule Annotations
+
+Control how the global 2‑D block grid (`grid_x × grid_y`) is **partitioned across cores** and iterated **inside** the per‑core outer loop.
+
+```python
+T.annotate_tt_schedule(
+    policy="contiguous",          # "contiguous" | "strided" | "rect"
+    order="row_major",            # "row_major" | "block_linear(k)"
+    rect=(by0, bx0, H, W),        # for policy="rect"
+    stride=(first, step),         # for policy="strided"
+    chunk_k_tiles=None,           # optional: K-panel chunking for GEMM
+    qk_chunk_tiles=None,          # optional: K/V chunking for Attention
+)
+```
+
+- **contiguous** (default): even, contiguous intervals `(start_id, count)` per core.
+- **strided**: `tid = first + n*step` sequence per core; useful for load balancing irregular blocks.
+- **rect**: assign **rectangles** of blocks to cores/groups; pairs well with reuse/multicast.
+- **order**: default `row_major`, with optional `block_linear(k)` for cache/NoC locality.
+- **chunk knobs**: feed into reader/compute loops (e.g., `Kt` for GEMM, `Sk` chunks for SDPA).
+
+### Sharding & Layout Annotations
+
+Describe how tensors are **tilized**, **sharded across cores**, and **placed** (DRAM/L1). Extends TileLang’s layout hints with **TT‑specific sharding**.
+
+```python
+T.annotate_tt_sharding({
+    A: T.TTShard(axis=0,           tiles=("rows", 32), placement="DRAM",
+                 order="row_major", faces="16x16"),
+    B: T.TTShard(axis=1,           tiles=("cols", 32), placement="DRAM",
+                 order="row_major"),
+    C: T.TTShard(axis=(0, 1),      tiles=("rows","cols", 32), placement="DRAM"),
+})
+```
+
+- **axis**: which dimension(s) are sharded into tiles across cores.
+- **tiles**: 32×32 by default; dtype determines bytes per tile.
+- **placement**: `"DRAM"` for persistent tensors; temporaries use **L1** circular buffers automatically.
+- **order** / **faces**: row/col tile orders; optional faces/packing hints if needed.
+
+### Defaults & Backward Compatibility
+
+If **no annotations** are provided:
+
+- **Schedule default:** `policy="contiguous"`, `order="row_major"`.  
+- **Layout default:** **row‑major 32×32 DRAM tilization**; L1 CBs are synthesized around `T.copy` sites.  
+- Result: **existing GPU‑style kernels run unchanged** on TT (subject to tile padding rules).
+
+---
+
+## End‑to‑End Examples
+
+### GEMM (no annotations → defaults)
+
+```python
+import tilelang.language as T
+BLOCK = 32
+
+@T.prim_func
+def gemm(A: T.Buffer((M, K), "bf16"),
+         B: T.Buffer((K, N), "bf16"),
+         C: T.Buffer((M, N), "bf16")):
+    Mt, Nt, Kt = T.ceildiv(M, BLOCK), T.ceildiv(N, BLOCK), T.ceildiv(K, BLOCK)
+    with T.Kernel(grid_x=Nt, grid_y=Mt, threads=(32, 4)) as (bx, by):
+        i0, j0 = by * BLOCK, bx * BLOCK
+        Cacc = T.alloc_fragment((BLOCK, BLOCK), "bf16"); T.fill(Cacc, 0)
+        for kk in range(Kt):
+            Ablk = T.alloc_shared((BLOCK, BLOCK), "bf16")
+            Bblk = T.alloc_shared((BLOCK, BLOCK), "bf16")
+            T.copy(T.region(A[i0, kk*BLOCK], "r", BLOCK, BLOCK), Ablk)
+            T.copy(T.region(B[kk*BLOCK, j0], "r", BLOCK, BLOCK), Bblk)
+            T.gemm(Ablk, Bblk, Cacc)
+        T.copy(Cacc, T.region(C[i0, j0], "w", BLOCK, BLOCK))
+```
+
+**TT mapping generated by backend:**
+
+- Per core runtime args `(start_id, count, grid_x=Nt, grid_y=Mt, Kt, …)`.
+- Compute kernel outer loop iterates `i in [0..count)` and recovers `(bx,by)` from `start_id+i`.
+- Reader/Writer kernels move DRAM tiles to/from L1 CBs; compute kernel calls TT tile primitives in the K‑panel loop.
+
+### Attention (with schedule & layout hints)
+
+```python
+# Schedule & layout annotations (optional – can be omitted)
+T.annotate_tt_schedule(policy="contiguous", order="row_major", qk_chunk_tiles=16)
+T.annotate_tt_sharding({
+    Q: T.TTShard(axis=0, tiles=("rows",32), placement="DRAM"),
+    K: T.TTShard(axis=0, tiles=("rows",32), placement="DRAM"),
+    V: T.TTShard(axis=0, tiles=("rows",32), placement="DRAM"),
+    O: T.TTShard(axis=0, tiles=("rows",32), placement="DRAM"),
+})
+
+@T.prim_func
+def sdpa(Q, K, V, O, scale: T.float32, causal: T.int32):
+    Sq_t = T.ceildiv(Sq, 32)   # Q tiles
+    Sk_t = T.ceildiv(Sk, 32)   # K/V tiles
+    BH   = B * H               # fused batch×heads
+
+    # grid = (Sq_t, BH); bx = q-tile, by = (b,h)
+    with T.Kernel(grid_x=Sq_t, grid_y=BH, threads=(...)) as (bx, by):
+        # streaming softmax state for (by, bx)
+        for k0 in range(0, Sk_t, 16):   # comes from qk_chunk_tiles
+            # read Q(bx), K/V(k0 : k0+chunk)
+            # scores = Q @ K^T (tile GEMMs) → update (m,l)
+            # O(bx) += P @ V
+        # write O(bx)
+```
+
+**TT mapping generated by backend:**
+
+- Outer per‑core loop over `tid in [start_id, start_id+count)`, with `by = tid / grid_x`, `bx = tid % grid_x`.
+- Reader streams K/V in chunks (`qk_chunk_tiles`), compute updates streaming softmax, writer stores outputs.
+
+---
+
+## Compiler & Codegen Plan (TVM/TileLang)
+
+> We integrate via TVM’s **BYOC** (external codegen), keeping the TT backend cleanly modular.
+
+### Phase 0 — MVP (GEMM, Elementwise)
+
+1. **`GridToPersistentTT` (new pass)**  
+   - **In:** TIR/TileLang PrimFunc using `T.Kernel(grid_x, grid_y)` and `bx/by`.  
+   - **Out:** Function wrapped in a **per‑core outer loop** driven by the selected schedule.  
+   - **Spec:**  
+     - Compute `total = grid_x * grid_y`; materialize policy = contiguous/strided/rect.  
+     - Replace `bx/by` with expressions of `tid` recovered inside the loop.  
+     - Attach PrimFunc attrs:  
+       - `tt.grid = (grid_y, grid_x)`  
+       - `tt.schedule = {policy, order, rect?, stride?, chunk_k_tiles?, qk_chunk_tiles?}`  
+       - `tt.runtime_args = ["start_id","count", …]`  
+     - **Error cases:** missing `grid_x/grid_y`; unsupported nest shapes; negative extents.
+
+2. **`TTShardToCoreMap` (new pass)**  
+   - **In:** TT sharding/layout annotations.  
+   - **Out:** Concrete **CoreRangeSet** and per‑tensor sharding metadata.  
+   - **Spec:**  
+     - Translate high‑level `TTShard` into `(axis, tilization, order, placement)` + core ranges.  
+     - Attach `tt.core_ranges`, `tt.shards` to buffers/PrimFunc.  
+     - **Error cases:** non‑tile‑multiple shapes (defer to `TilePadTT`), inconsistent placements.
+
+3. **`TilePadTT` (new pass)**  
+   - **In:** Tensors with extents not multiple of 32 on tiled axes.  
+   - **Out:** Insert pad/unpad around compute or request zero‑fill tails in readers/writers.  
+   - **Spec:** dtype‑aware tile bytes; optionally fuse pad into reader; mark effective shape.
+
+4. **`MemorySpaceLowerTT` (new pass)**  
+   - **In:** TIR with `T.copy` & shared/fragment allocations.  
+   - **Out:** Explicit **DRAM↔L1** moves, **circular buffer** descriptors, syncs.  
+   - **Spec:**  
+     - Map `T.alloc_shared` → L1 CB segments; compute depths from schedule/chunk knobs.  
+     - Lower copies to reader/writer enqueue ops; add attrs `tt.cb.{depth,format,bytes}`.
+
+5. **`TensorizeTT` (new pass)**  
+   - **In:** Canonical tile GEMM/epilogue patterns.  
+   - **Out:** Calls to TT tile micro‑kernels (e.g., `matmul_tiles`).  
+   - **Spec:** pattern match, replace with intrinsic calls; keep fallbacks if not matched.
+
+6. **`EmitTTKernels` (codegen)**  
+   - **Out:**  
+     - **Compute kernel** C++ source with the generated **outer scheduler loop** + intrinsic calls.  
+     - **Reader/Writer kernels** C++ sources with DRAM address math from `(bx,by)` or rectangles.  
+     - **Host stub** that builds the Program, creates kernels on **CoreRange/CoreRangeSet**, allocates CBs, sets **runtime args** (`start_id`, `count`, `grid`, `Kt`/chunk), and enqueues.
+
+7. **Runtime glue**  
+   - Produce a `tvm.runtime.Module` that compiles the host stub and kernels, resolves TT‑Metalium SDK, and exposes a callable `run(...)`.  
+   - CMake guards: `-DTL_TT_BACKEND=ON`, `TT_METAL_HOME` discovery; non‑TT builds remain unaffected.
+
+### Phase 1 — SDPA, Dequant‑GEMM, Reuse/Multicast
+
+8. **`SDPAFusionTT` (new pass)**  
+   - Fuse `Q·Kᵀ → softmax → P·V` into a streaming loop over **(B×H, Q tiles)** with **K‑chunking**.  
+   - Emit per‑core persistent outer loop; map `qk_chunk_tiles` into reader/compute loops.
+
+9. **`TTMulticastReuse` (opt pass)**  
+   - Where layout implies neighbor reuse (A/B in GEMM, Q or K in SDPA), introduce sender/receiver ranges and multicast paths; synthesize variant readers/writers per range.
+
+10. **`RasterizationTT` (opt pass)**  
+    - Switch `tid → (by,bx)` mapping to `block_linear(k)` or other locality‑aware orders.
+
+### Phase 2 — Ergonomics, Safety, Diagnostics
+
+11. **Legalize & Guards**  
+    - Insert masks/tails where partial tiles are unavoidable; fall back to scalar or smaller vectors.
+
+12. **Diagnostics**  
+    - Validate shard/schedule feasibility; emit actionable errors.  
+    - Dump `tt.plan.json` containing per‑core `(start_id, count)` or rectangle maps for inspection.
+
+---
+
+## Runtime Integration & Build
+
+- Integrate as a **BYOC external codegen** module (e.g., `tilelang_tt`) with clean boundaries.  
+- Build only when `TL_TT_BACKEND=ON` and TT SDK is discoverable.  
+- Provide a **“dry‑run”** mode that emits the host/kernel sources and `tt.plan.json` without executing (useful for CI without hardware).
+
+---
+
+## Developer Workflow & Repository Layout
+
+**Phase 1 (public fork):** start at `tile-ai/tilelang-tt` (or similar)
+
+```
+tilelang-tt/
+├─ python/tilelang_tt/annotations.py        # annotate_tt_schedule / annotate_tt_sharding
+├─ src/tt/passes/*.cc                       # GridToPersistentTT, TTShardToCoreMap, ...
+├─ src/tt/codegen/*.cc                      # EmitTTKernels + host stubs
+├─ include/tilelang_tt/*.h
+├─ cmake/TTMetal.cmake                      # SDK discovery
+├─ tests/tt/*.py                            # compile-only & dry-run tests
+└─ docs/                                    # design notes, tt.plan.json examples
+```
+
+- Keep **vendor SDK deps** behind CMake options; never block other backends.
+- Land **Phase 0** (GEMM) with compile‑time tests and at least one **hardware smoke test**.
+- Publish **design docs** and **plans** per pass; keep PRs small and reviewable.
+
+**Phase 2 (upstream):** open a TileLang **RFC PR** to integrate as an official backend once:
+- CI is green (build‑only + optional HIL),  
+- the API surface (annotations & attrs) is stable,  
+- core operators (GEMM, elementwise) and at least one **attention** path are in.
+
+---
+
+## Risks & Mitigations
+
+| Risk | Mitigation |
+|---|---|
+| Shapes not multiple of tile size | `TilePadTT` + reader/writer tails; clear diagnostics. |
+| Backend drift / SDK changes | Version‑gated CMake; isolate TT APIs in one module. |
+| CI without TT hardware | “Dry‑run” build that prints generated sources + `tt.plan.json`. |
+| Over‑eager tensorization | Keep fallbacks; allow `--disable-tt-tensorize` for debugging. |
+
+---
+
+## Call for Contributions
+
+We’re looking for collaborators in these areas:
+
+- **Pass implementation:** `GridToPersistentTT`, `MemorySpaceLowerTT`, `TensorizeTT`.  
+- **Kernel stencils:** robust **reader / compute / writer** templates for GEMM & SDPA.  
+- **Sharding heuristics:** sensible defaults for **CoreRangeSet** selection per device.  
+- **Testing:** correctness (NumPy/PyTorch refs), perf baselines, CI scaffold (dry‑run + optional HIL).  
+- **Docs & examples:** dequant‑GEMM, Flash/MLA‑style attention with `qk_chunk_tiles`.
+
+Please open issues/PRs in the fork and tag **`area:tt-backend`**. Include hardware/driver details where relevant.
+
+---
+
+## Appendix
+
+### Why the Defaults Are Safe
+
+- **Schedule:** `contiguous + row_major` matches the standard static split used in multi‑core matmul tutorials—each core gets a contiguous range of tile IDs.  
+- **Layout:** **Row‑major 32×32 tilization in DRAM** aligns with TT’s common tile format; L1 circular buffers are synthesized automatically around copy sites.
+
+### Attribute & API Sketch
+
+**Python (user annotations)**
+
+```python
+# Scheduling
+T.annotate_tt_schedule(policy="contiguous",
+                       order="row_major",
+                       rect=None,
+                       stride=None,
+                       chunk_k_tiles=None,
+                       qk_chunk_tiles=None)
+
+# Sharding / layout
+T.annotate_tt_sharding({
+    TensorA: T.TTShard(axis=0, tiles=("rows", 32), placement="DRAM"),
+    TensorB: T.TTShard(axis=1, tiles=("cols", 32), placement="DRAM"),
+})
+```
+
+**PrimFunc / Buffer attributes (internal)**
+
+```text
+tt.grid           = (grid_y, grid_x)
+tt.schedule       = { policy, order, rect?, stride?, chunk_k_tiles?, qk_chunk_tiles? }
+tt.core_ranges    = CoreRangeSet(...)
+tt.shards         = { buffer_name: { axis, tiles, placement, order, faces? } }
+tt.runtime_args   = ["start_id","count", ...]
+tt.cb             = { name: { depth, format, l1_bytes } }
+```
+
+**`tt.plan.json` (debug dump)**
+
+```json
+{
+  "grid": [Mt, Nt],
+  "policy": "contiguous",
+  "mapping": [
+    {"core": [y,x], "start_id": 0,  "count": 128},
+    {"core": [y,x], "start_id": 128,"count": 128}
+  ]
+}
+```
+
+### Open Questions
+
+- Do we expose **CoreRangeSet selection** in Python, or compute it from sharding and device defaults?  
+- Preferred **default CB depths** per op and dtype? (derive from chunk sizes?)  
+- How soon to enable **multicast / reuse** by default for attention/GEMM rectangles?  
+- Which **TT devices** and SDK versions to qualify first (e.g., Wormhole/Blackhole)?
+
+### License
+
+This backend will be contributed under the same license as TileLang. Vendor SDK headers/libraries remain under their respective licenses.
+
+---
+
+**Next steps:**  
+- Create the public fork, land **Phase 0** (GEMM) with compile‑time CI + optional hardware smoke tests.  
+- Iterate on annotations/spec, then open an upstream **RFC PR** to integrate as an official backend.
+
