@@ -73,6 +73,7 @@ class KernelCache:
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
         pass_configs: dict = None,
+        compile_flags: Optional[List[str]] = None,
     ) -> str:
         """
         Generates a unique hash key for caching compiled kernels.
@@ -101,6 +102,7 @@ class KernelCache:
             "target_host": str(target_host) if target_host else None,
             "execution_backend": execution_backend,
             "pass_configs": pass_configs,
+            "compile_flags": compile_flags,
         }
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)
@@ -152,6 +154,7 @@ class KernelCache:
             target=target,
             target_host=target_host,
             pass_configs=pass_configs,
+            compile_flags=compile_flags,
         )
         with self._lock:
             # First check in-memory cache
@@ -165,7 +168,7 @@ class KernelCache:
 
             # Then check disk cache
             kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
-                                                 execution_backend, pass_configs, func, verbose)
+                                                 execution_backend, pass_configs, compile_flags, func, verbose)
             if kernel is not None:
                 if verbose:
                     self.logger.debug(
@@ -185,6 +188,7 @@ class KernelCache:
             target_host=target_host,
             verbose=verbose,
             pass_configs=pass_configs,
+            compile_flags=compile_flags,
         )
         if execution_backend == "dlpack":
             self.logger.warning("DLPack backend does not support cache saving to disk.")
@@ -322,6 +326,7 @@ class KernelCache:
         out_idx: List[int] = None,
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         pass_configs: dict = None,
+        compile_flags: Optional[List[str]] = None,
         func: Callable = None,
         verbose: bool = False,
     ) -> Optional[JITKernel]:
@@ -382,6 +387,7 @@ class KernelCache:
                 out_idx=out_idx,
                 execution_backend=execution_backend,
                 pass_configs=pass_configs,
+                compile_flags=compile_flags,
             )
         else:
             return None
