@@ -19,6 +19,11 @@ Tile Language (**tile-lang**) is a concise domain-specific language designed to 
 
 This README doubles as a **technical plan** and a **call for contributions**. The intended path is to begin in a **public fork** and upstream in stages once CI and core features stabilize.
 
+**Related docs**
+
+- **Architecture comparison:** [GPU vs. Tenstorrent (TT‑Metalium)](doc/tenstorrent/GPU_vs_Tenstorrent.md)
+- **Kernel authoring patterns:** [GPU vs. Tenstorrent — Kernel Authoring](docs/tenstorrent/Kernel_Authoring_Comparison.md)
+
 ---
 
 ## Table of Contents
