@@ -73,7 +73,7 @@ class KernelCache:
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
         pass_configs: dict = None,
-        compile_flags: Optional[List[str]] = None,
+        compile_flags: Optional[Union[List[str], str]] = None,
     ) -> str:
         """
         Generates a unique hash key for caching compiled kernels.
@@ -119,7 +119,7 @@ class KernelCache:
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         verbose: bool = False,
         pass_configs: dict = None,
-        compile_flags: Optional[List[str]] = None,
+        compile_flags: Optional[Union[List[str], str]] = None,
     ) -> JITKernel:
         """
         Caches and reuses compiled kernels to avoid redundant compilation.
@@ -326,7 +326,7 @@ class KernelCache:
         out_idx: List[int] = None,
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         pass_configs: dict = None,
-        compile_flags: Optional[List[str]] = None,
+        compile_flags: Optional[Union[List[str], str]] = None,
         func: Callable = None,
         verbose: bool = False,
     ) -> Optional[JITKernel]:
