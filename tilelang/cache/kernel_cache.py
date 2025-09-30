@@ -168,7 +168,8 @@ class KernelCache:
 
             # Then check disk cache
             kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
-                                                 execution_backend, pass_configs, compile_flags, func, verbose)
+                                                 execution_backend, pass_configs, compile_flags,
+                                                 func, verbose)
             if kernel is not None:
                 if verbose:
                     self.logger.debug(

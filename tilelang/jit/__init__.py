@@ -137,6 +137,9 @@ class _JitImplementation:
             If None, no debug information is saved (default: None).
             If a relative path is given, it's made absolute relative to the project root
             or current working directory.
+        compile_flags : Optional[Union[List[str], str]], optional
+            Additional compilation flags to pass to the compiler.
+            If None, no additional compilation flags are passed (default: None).
         """
         self.out_idx = out_idx
         self.execution_backend = execution_backend
