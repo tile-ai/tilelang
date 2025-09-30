@@ -1175,7 +1175,7 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     os << "bfloat16_t";
     os << '(' << std::scientific << op->value << 'f' << ')';
     return;
-  } else if (op->dtype.is_float8_e4m3fnuz()) {
+  } else if (op->dtype.is_float8_e4m3fnuz() || op->dtype.is_float8_e4m3() || op->dtype.is_float8_e4m3fn()) {
     os << "fp8_e4_t";
     os << '(' << std::scientific << op->value << 'f' << ')';
     return;

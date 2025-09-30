@@ -8,8 +8,9 @@ using fp8_e4_2_t = __hip_fp8x2_e4m3_fnuz;
 // Additional FP8 types for compatibility
 using fp8_e5_t = __hip_fp8_e5m2_fnuz;
 using fp8_e5_2_t = __hip_fp8x2_e5m2_fnuz;
-using fp8_e8_t = __hip_fp8_e8m0_fnuz;
-using fp8_e8_2_t = __hip_fp8x2_e8m0_fnuz;
+// Note: E8M0 types are not supported in current HIP version
+// using fp8_e8_t = __hip_fp8_e8m0_fnuz;
+// using fp8_e8_2_t = __hip_fp8x2_e8m0_fnuz;
 
 // Simple wrapper that provides member access for generated code
 struct fp8_e4_4_t {
@@ -72,7 +73,8 @@ struct __align__(16) fp8_e5_16_t {
   fp8_e5_8_t y;
 };
 
-// FP8 E8M0 vector types
+// FP8 E8M0 vector types - not supported in current HIP version
+/*
 struct fp8_e8_4_t {
   union {
     __hip_fp8x4_e8m0_fnuz data;
@@ -94,6 +96,7 @@ struct __align__(16) fp8_e8_16_t {
   fp8_e8_8_t x;
   fp8_e8_8_t y;
 };
+*/
 
 __device__ fp8_e4_4_t make_fp8_e4_4_t(fp8_e4_t x, fp8_e4_t y, fp8_e4_t z,
                                       fp8_e4_t w) {
