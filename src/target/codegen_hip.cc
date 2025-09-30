@@ -41,10 +41,18 @@ static std::string GetFP8Type(DataType type) {
     stream << "fp8_e4" << vec << "_t";
   } else if (type.code() == DataType::kFloat8_e4m3fnuz) {
     stream << "fp8_e4" << vec << "_t";
+  } else if (type.code() == DataType::kFloat8_e4m3) {
+    stream << "fp8_e4" << vec << "_t";
+  } else if (type.code() == DataType::kFloat8_e4m3b11fnuz) {
+    stream << "fp8_e4" << vec << "_t";
   } else if (type.code() == DataType::kFloat8_e5m2) {
     stream << "fp8_e5" << vec << "_t";
+  } else if (type.code() == DataType::kFloat8_e5m2fnuz) {
+    stream << "fp8_e5" << vec << "_t";
+  } else if (type.code() == DataType::kFloat8_e8m0fnu) {
+    stream << "fp8_e8" << vec << "_t";
   } else {
-    LOG(FATAL) << "Unsupported FP8 type in HIP codegen";
+    LOG(FATAL) << "Unsupported FP8 type in HIP codegen: " << type;
   }
   return stream.str();
 }
@@ -955,6 +963,13 @@ void CodeGenTileLangHIP::VisitExpr_(const CallNode *op, std::ostream &os) {
                           op->args, true, os);
   } else if (op->op.same_as(tl::tl_gemm_sp())) {
     LOG(FATAL) << "tl_gemm_sp is not supported on HIP";
+  } else if (op->op.same_as(tl::loop_break())) {
+    this->PrintIndent();
+    this->stream << "break;\n";
+  } else if (op->op.same_as(tl::no_set_max_nreg())) {
+    // HIP doesn't need explicit register management like CUDA
+    // This is a no-op for HIP
+    return;
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
