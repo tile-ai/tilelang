@@ -224,27 +224,16 @@ def fast_flashattn(
     return main
 
 
-# ==============================================================================
-# ======================== MODIFICATION STARTS HERE ============================
-# ==============================================================================
-
 def get_bwd_configs():
-    block_M = [16, 32, 64, 128]
-    block_N = [16, 32, 64, 128]
-    threads = [128, 256, 512]
-    num_stages = [0, 1,2,3]
-    enable_rasterization = [True,False]
+    block_M = [16, 32, 64, 128, 256]
+    block_N = [16, 32, 64, 128, 256]
+    threads = [64, 128, 256, 512, 1024]
+    num_stages = [0, 1, 2]
+    enable_rasterization = [True]
     panel_size = [7, 8, 9, 10]
-    k_pack = [1,2]
-    qk_coalesced_width = [4,8]
-    v_coalesced_width = [4,8]
 
     configs = []
-    # --- ADDED NEW PARAMETERS TO THE PRODUCT ---
-    for m, n, stages, t, r, p, kp, qkw, vw in itertools.product(
-        block_M, block_N, num_stages, threads, enable_rasterization,
-        panel_size, k_pack, qk_coalesced_width, v_coalesced_width
-    ):
+    for m, n, stages, t, r, p in itertools.product(block_M, block_N, num_stages, threads, enable_rasterization, panel_size):
         configs.append({
             "block_M": m,
             "block_N": n,
@@ -252,10 +241,6 @@ def get_bwd_configs():
             "threads": t,
             "enable_rasterization": r,
             "panel_size": p,
-            # --- ADDED NEW PARAMETERS TO THE CONFIG DICTIONARY ---
-            "k_pack": kp,
-            "qk_coalesced_width": qkw,
-            "v_coalesced_width": vw,
         })
 
     return configs
@@ -289,9 +274,7 @@ def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
 @tilelang.jit
 def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups,
                   block_M: int, block_N: int, num_stages: int, threads: int,
-                  enable_rasterization: bool, panel_size: int,
-                  # --- ADDED NEW PARAMETERS TO FUNCTION SIGNATURE ---
-                  k_pack: int, qk_coalesced_width: int, v_coalesced_width: int):
+                  enable_rasterization: bool, panel_size: int):
     sm_scale = (1.0 / dim)**0.5
     head_kv = heads // groups
     q_shape = [batch, seq_len, heads, dim]
@@ -325,9 +308,8 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups,
             dk = T.alloc_fragment([block_M, dim], accum_dtype)
             dq = T.alloc_fragment([block_N, dim], accum_dtype)
 
-            # --- APPLIED COALESCED_WIDTH TO MEMORY LOADS ---
-            T.copy(K[bz, by * block_M:(by + 1) * block_M, bx // groups, :], K_shared, coalesced_width=qk_coalesced_width)
-            T.copy(V[bz, by * block_M:(by + 1) * block_M, bx // groups, :], V_shared, coalesced_width=v_coalesced_width)
+            T.copy(K[bz, by * block_M:(by + 1) * block_M, bx // groups, :], K_shared)
+            T.copy(V[bz, by * block_M:(by + 1) * block_M, bx // groups, :], V_shared)
             T.clear(dv)
             T.clear(dk)
 
@@ -335,12 +317,10 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups,
             loop_ed = T.ceildiv(seq_len, block_N)
 
             for k in T.Pipelined(loop_st, loop_ed, num_stages=num_stages):
-                # --- APPLIED COALESCED_WIDTH TO MEMORY LOADS ---
-                T.copy(Q[bz, k * block_N:(k + 1) * block_N, bx, :], q_shared, coalesced_width=qk_coalesced_width)
+                T.copy(Q[bz, k * block_N:(k + 1) * block_N, bx, :], q_shared)
                 T.clear(qkT)
 
-                # --- APPLIED K_PACK TO GEMM ---
-                T.gemm(K_shared, q_shared, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow, k_pack=k_pack)
+                T.gemm(K_shared, q_shared, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(lse[bz, bx, k * block_N:(k + 1) * block_N], lse_shared)
 
@@ -351,29 +331,24 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups,
                     for i, j in T.Parallel(block_M, block_N):
                         P_acc[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, P_acc[i, j], 0.0)
 
-                # --- APPLIED COALESCED_WIDTH TO MEMORY LOADS ---
-                T.copy(dO[bz, k * block_N:(k + 1) * block_N, bx, :], do_shared, coalesced_width=v_coalesced_width)
+                T.copy(dO[bz, k * block_N:(k + 1) * block_N, bx, :], do_shared)
                 T.clear(dP)
 
-                # --- APPLIED K_PACK TO GEMM ---
-                T.gemm(V_shared, do_shared, dP, transpose_B=True, policy=T.GemmWarpPolicy.FullRow, k_pack=k_pack)
+                T.gemm(V_shared, do_shared, dP, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(P_acc, p_cast)
-                # --- APPLIED K_PACK TO GEMM ---
-                T.gemm(p_cast, do_shared, dv, policy=T.GemmWarpPolicy.FullRow, k_pack=k_pack)
+                T.gemm(p_cast, do_shared, dv, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(Delta[bz, bx, k * block_N:(k + 1) * block_N], delta_shared)
 
                 for i, j in T.Parallel(block_M, block_N):
                     p_cast[i, j] = P_acc[i, j] * (dP[i, j] - delta_shared[j]) * sm_scale
 
-                # --- APPLIED K_PACK TO GEMM ---
-                T.gemm(p_cast, q_shared, dk, policy=T.GemmWarpPolicy.FullRow, k_pack=k_pack)
+                T.gemm(p_cast, q_shared, dk, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(p_cast, ds_shared)
                 T.clear(dq)
-                # --- APPLIED K_PACK TO GEMM ---
-                T.gemm(ds_shared, K_shared, dq, transpose_A=True, policy=T.GemmWarpPolicy.FullRow, k_pack=k_pack)
+                T.gemm(ds_shared, K_shared, dq, transpose_A=True, policy=T.GemmWarpPolicy.FullRow)
 
                 for i, j in T.Parallel(block_N, dim):
                     if k * block_N + i < seq_len:
@@ -383,10 +358,6 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups,
                 T.atomic_add(dV[bz, by * block_M + i, bx // groups, j], dv[i, j])
                 T.atomic_add(dK[bz, by * block_M + i, bx // groups, j], dk[i, j])
     return flash_bwd_kernel
-
-# ==============================================================================
-# ========================= MODIFICATION ENDS HERE =============================
-# ==============================================================================
 
 
 @tilelang.jit(out_idx=[1])
