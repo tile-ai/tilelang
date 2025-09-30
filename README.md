@@ -21,7 +21,7 @@ This README doubles as a **technical plan** and a **call for contributions**. Th
 
 **Related docs**
 
-- **Architecture comparison:** [GPU vs. Tenstorrent (TT‑Metalium)](doc/tenstorrent/GPU_vs_Tenstorrent.md)
+- **Architecture comparison:** [GPU vs. Tenstorrent (TT‑Metalium)](docs/tenstorrent/GPU_vs_Tenstorrent.md)
 - **Kernel authoring patterns:** [GPU vs. Tenstorrent — Kernel Authoring](docs/tenstorrent/Kernel_Authoring_Comparison.md)
 
 ---
