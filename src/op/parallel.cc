@@ -226,32 +226,42 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
       }
       if (buffer.scope() != "local.fragment")
         continue;
+
+      // Check if all indices are zero
+      bool all_indices_zero = true;
       for (const auto &index : indices) {
         if (const auto *imm = index.as<IntImmNode>()) {
-          if (imm->value == 0) {
-            Array<IterVar> forward_vars;
-            for (const auto &s : buffer->shape) {
-              forward_vars.push_back(
-                  IterVar(Range(0, s), Var(), IterVarType::kDataPar));
-            }
-            Array<PrimExpr> forward_index;
-            for (const auto &iv : forward_vars) {
-              forward_index.push_back(iv->var);
-            }
-            Var rep;
-            auto rep_iter = IterVar({0, T.thread_bounds->extent}, rep,
-                                    IterVarType::kDataPar);
-
-            const PrimExpr &forward_thread = rep;
-            results.Set(buffer, Fragment(forward_vars, forward_index,
-                                         forward_thread, rep_iter));
-          } else {
+          if (imm->value != 0) {
+            all_indices_zero = false;
             LOG(FATAL)
                 << "Fragment buffer access with non-zero index [" << imm->value
                 << "] is not supported. "
                 << "Only fragment[0] access is allowed within T.Parallel loop.";
           }
+        } else {
+          // Non-constant index, not all zero
+          all_indices_zero = false;
         }
+      }
+
+      // Only set layout if all indices are zero
+      if (all_indices_zero) {
+        Array<IterVar> forward_vars;
+        for (const auto &s : buffer->shape) {
+          forward_vars.push_back(
+              IterVar(Range(0, s), Var(), IterVarType::kDataPar));
+        }
+        Array<PrimExpr> forward_index;
+        for (const auto &iv : forward_vars) {
+          forward_index.push_back(iv->var);
+        }
+        Var rep;
+        auto rep_iter =
+            IterVar({0, T.thread_bounds->extent}, rep, IterVarType::kDataPar);
+
+        const PrimExpr &forward_thread = rep;
+        results.Set(buffer, Fragment(forward_vars, forward_index,
+                                     forward_thread, rep_iter));
       }
     }
     return results;
