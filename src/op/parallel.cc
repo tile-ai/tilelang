@@ -270,6 +270,36 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     }
     return frag->IsCompletedReplicated();
   };
+  // Collect fragment buffers with const index and all fragment_buffers
+  std::vector<Buffer> const_index_fragment_buffer, fragment_buffers;
+  for (const auto &[buffer, indices] : indice_map_) {
+    if (buffer.scope() != "local.fragment")
+      continue;
+    fragment_buffers.push_back(buffer);
+
+    bool is_const_index = true;
+    for (const auto &index : indices) {
+      if (!index.as<IntImmNode>()) {
+        is_const_index = false;
+        break;
+      }
+    }
+    if (is_const_index) {
+      const_index_fragment_buffer.push_back(buffer);
+    }
+  }
+
+  // Determine if common layout propagation should be applied.
+  // If there are fragment buffers with non-constant indices, we need to
+  // propagate the common layout pattern to ensure consistency across all
+  // fragments. Example cases:
+  //   - Need propagation: frag_a[0] = T.min(frag_a[0], frag_b[i])
+  //     (const index frag_a interacts with non-const index frag_b)
+  //   - No propagation needed: shared_a[i] = frag_a[0]
+  //     (const index frag_a with non-fragment buffer)
+  bool allow_layout_propgate =
+      fragment_buffers.size() > const_index_fragment_buffer.size();
+
   // Step 1: try to infer loop's partition from a source fragment
   Buffer source_buffer, read_source_buffer;
   Buffer replicated_write_buffer; // Backup: fully replicated write buffer
@@ -283,25 +313,9 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
 
       auto frag = T.layout_map[buffer].as<Fragment>().value();
       bool is_fully_replicated = buffer_is_completed_replicated(buffer);
-      bool is_reducer = reducer_info_map_.count(buffer->data);
 
       if (buffer_is_write_.count(buffer)) {
-        // Allow fully replicated write buffers if they are reducers
-        // (reducers need replication for correctness)
-        if (!is_fully_replicated || is_reducer) {
-          // Prefer non-replicated write buffers, but also allow replicated
-          // reducers
-          if (!source_buffer.defined() ||
-              (!is_fully_replicated && source_buffer.defined())) {
-            source_buffer = buffer;
-          }
-        } else if (!replicated_write_buffer.defined()) {
-          // Keep fully replicated NON-reducer write buffer as backup
-          replicated_write_buffer = buffer;
-          DLOG(INFO) << "Found fully replicated non-reducer write buffer "
-                     << buffer << " as backup for loop layout inference"
-                     << '\n';
-        }
+        source_buffer = buffer;
       } else {
         // Keep the buffer with largest number of indices
         // (which means the inference based on that buffer is more accurate)
@@ -310,8 +324,7 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
         // layout from this buffer.
         if ((!read_source_buffer.defined() ||
              indice_map_[buffer].size() >
-                 indice_map_[read_source_buffer].size()) &&
-            !buffer_is_completed_replicated(buffer)) {
+                 indice_map_[read_source_buffer].size())) {
           read_source_buffer = buffer;
         }
         // If the buffer is not replicated and shape is equal to the
@@ -328,17 +341,6 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     DLOG(INFO) << "[compute_loop_layout_from_buffer] infer from buffer `"
                << buffer << "` of layout " << src_layout->DebugOutput() << '\n';
 
-    // Check if this buffer is a reducer
-    bool is_reducer = reducer_info_map_.count(buffer->data);
-
-    // Defensive check: warn if attempting to infer from fully replicated buffer
-    // But allow it for reducers (they need replication for correctness)
-    if (src_layout->IsCompletedReplicated() && !is_reducer) {
-      DLOG(WARNING)
-          << "Attempting to infer loop layout from fully replicated buffer "
-          << buffer << ", this may cause incorrect replication propagation";
-    }
-
     Fragment result;
     if (IsCommonAccessIndice(buffer)) {
       result = src_layout;
@@ -350,42 +352,6 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
           src_layout->ForwardThread(indice_map_[buffer], rep);
       loop_var_to_thread = analyzer_.Simplify(loop_var_to_thread);
 
-      // Check if loop_var_to_thread only depends on rep (not on loop_vars)
-      // This indicates a fully replicated buffer that shouldn't determine loop
-      // layout UNLESS it's a reducer (reducers need full replication)
-      bool uses_loop_var = false;
-      PostOrderVisit(loop_var_to_thread, [&](const ObjectRef &objref) {
-        if (auto var = objref.as<Var>()) {
-          for (const auto &loop_var : loop_vars_) {
-            if (var->same_as(loop_var->var)) {
-              uses_loop_var = true;
-              break;
-            }
-          }
-        }
-      });
-
-      if (!uses_loop_var && !is_reducer) {
-        // loop_var_to_thread only depends on rep, not on loop variables
-        // And it's not a reducer, so this is likely an index offset case
-        DLOG(WARNING) << "Buffer " << buffer
-                      << " is fully replicated (not a reducer). "
-                      << "Cannot use it to infer loop layout. "
-                      << "loop_var_to_thread = " << loop_var_to_thread
-                      << " (only depends on rep)";
-        throw LayoutConflictException("Buffer is fully replicated and cannot "
-                                      "be used for layout inference");
-      }
-
-      PostOrderVisit(loop_var_to_thread, [&](const ObjectRef &objref) {
-        if (auto opt_var = objref.as<Var>();
-            opt_var && inner_vars_.count(*opt_var)) {
-          std::ostringstream oss;
-          oss << "loop_var_to_thread = " << loop_var_to_thread
-              << "contains inner var" << *opt_var;
-          throw LayoutConflictException(oss.str());
-        }
-      });
       result = Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter)
                    ->BindThreadRange(T.thread_bounds);
     }
@@ -400,10 +366,10 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
   // 3. Fully replicated write buffer (backup, may cause issues)
   // 4. Free inference mode (no source buffer)
 
-  if (source_buffer.defined()) {
+  if (source_buffer.defined() && allow_layout_propgate) {
     loop_layout_ = compute_loop_layout_from_buffer(source_buffer);
   } else if (level == InferLevel::kFree) {
-    if (read_source_buffer.defined()) {
+    if (read_source_buffer.defined() && allow_layout_propgate) {
       loop_layout_ = compute_loop_layout_from_buffer(read_source_buffer);
       // // Loop don't need to be replicated.
       // if (!is_one(loop_layout_->ReplicateExtent()))
@@ -453,21 +419,6 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
         fwd.push_back(InputPlaceholder(0) - T.thread_bounds->min);
         auto rep = inv->Forward(fwd).back();
         AddPredicate(EQ(rep, 0));
-      }
-    } else if (replicated_write_buffer.defined()) {
-      // Backup: try to use fully replicated write buffer
-      // This may cause replication propagation, but it's better than failing
-      DLOG(WARNING) << "Using fully replicated buffer "
-                    << replicated_write_buffer
-                    << " for loop layout inference as no other source buffer "
-                       "is available";
-      try {
-        loop_layout_ = compute_loop_layout_from_buffer(replicated_write_buffer);
-      } catch (const LayoutConflictException &e) {
-        // If fails, fall back to free mode
-        DLOG(WARNING) << "Failed to infer from replicated buffer: " << e.what()
-                      << ". Falling back to free mode";
-        replicated_write_buffer = Buffer(); // Clear to trigger free mode below
       }
     }
 
