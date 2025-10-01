@@ -262,9 +262,9 @@ class KernelCache:
             kernel_path = os.path.join(cache_path, KERNEL_PATH)
             if verbose:
                 self.logger.debug(f"Saving kernel source code to file: {kernel_path}")
-            if kernel.artifact.kernel_source is not None:
+            if kernel.kernel_source is not None:
                 KernelCache._safe_write_file(kernel_path, "w",
-                                             lambda file: file.write(kernel.artifact.kernel_source))
+                                             lambda file: file.write(kernel.kernel_source))
         except Exception as e:
             self.logger.error(f"Error saving kernel source code to disk: {e}")
 
