@@ -154,6 +154,8 @@ def flashattn_bwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
     q_shape = [batch, seq_len, heads, dim_qk]
     k_shape = [batch, seq_len, head_kv, dim_qk]
     v_shape = [batch, seq_len, head_kv, dim_v]
+    dk_shape = [groups, batch, seq_len, head_kv, dim_qk]  # sum after kernel
+    dv_shape = [groups, batch, seq_len, head_kv, dim_v]  # sum after kernel
     dtype = "float16"
     accum_dtype = "float"
 
@@ -166,8 +168,8 @@ def flashattn_bwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
             lse: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
             Delta: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
             dQ: T.Tensor(q_shape, accum_dtype),  # type: ignore
-            dK: T.Tensor(k_shape, dtype),  # type: ignore
-            dV: T.Tensor(v_shape, dtype),  # type: ignore
+            dK: T.Tensor(dk_shape, dtype),  # type: ignore
+            dV: T.Tensor(dv_shape, dtype),  # type: ignore
     ):
         with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=128) as (bx, by, bz):
             K_shared = T.alloc_shared([block_M, dim_qk], dtype)
@@ -184,8 +186,8 @@ def flashattn_bwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
             dv = T.alloc_fragment([block_M, dim_v], accum_dtype)
             dk = T.alloc_fragment([block_M, dim_qk], accum_dtype)
             dq = T.alloc_fragment([block_N, dim_qk], accum_dtype)
-            dv_shared = T.alloc_shared([block_N, dim_v], dtype)
-            dk_shared = T.alloc_shared([block_N, dim_qk], dtype)
+            dv_shared = T.alloc_shared([block_M, dim_v], dtype)
+            dk_shared = T.alloc_shared([block_M, dim_qk], dtype)
 
             T.annotate_layout({
                 dQ: make_dq_layout(dQ),
@@ -230,10 +232,10 @@ def flashattn_bwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
                     if k * block_N + i < seq_len:
                         T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
 
-            for i, j in T.Parallel(block_M, dim_v):
-                T.atomic_add(dV[bz, by * block_M + i, bx // groups, j], dv[i, j])
-            for i, j in T.Parallel(block_M, dim_qk):
-                T.atomic_add(dK[bz, by * block_M + i, bx // groups, j], dk[i, j])
+            T.copy(dv, dv_shared)
+            T.copy(dv_shared, dV[bx % groups, bz, by * block_M:(by + 1) * block_M, bx // groups, :])
+            T.copy(dk, dk_shared)
+            T.copy(dk, dK[bx % groups, bz, by * block_M:(by + 1) * block_M, bx // groups, :])
 
     return flash_bwd
 
@@ -274,13 +276,14 @@ class _attention(torch.autograd.Function):
         kernel = flashattn_bwd(BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, ctx.causal, block_M, block_N,
                                groups)
         shape_q = [BATCH, N_CTX, H, D_HEAD_QK]
-        shape_k = [BATCH, N_CTX, HEAD_KV, D_HEAD_QK]
-        shape_v = [BATCH, N_CTX, HEAD_KV, D_HEAD_V]
+        shape_k = [groups, BATCH, N_CTX, HEAD_KV, D_HEAD_QK]  # sum after kernel
+        shape_v = [groups, BATCH, N_CTX, HEAD_KV, D_HEAD_V]  # sum after kernel
         dq = torch.zeros(shape_q, dtype=torch.float32, device=q.device)
-        dk = torch.zeros(shape_k, dtype=torch.float16, device=q.device)
-        dv = torch.zeros(shape_v, dtype=torch.float16, device=q.device)
+        dk = torch.empty(shape_k, dtype=torch.float16, device=q.device)
+        dv = torch.empty(shape_v, dtype=torch.float16, device=q.device)
         kernel(q, k, v, do, lse, delta, dq, dk, dv)
         dq = mod_post(dq)
+        dk, dv = dk.sum(0), dv.sum(0)
         return dq, dk, dv, None, None
 
 
@@ -354,6 +357,7 @@ def main(BATCH: int = 1,
     torch.testing.assert_close(dV, dV_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dK, dK_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dQ, dQ_ref, rtol=1e-2, atol=1e-2)
+    print('All checks passed.✅')
 
     def run():
         O_ref.backward(dO, retain_graph=True)
