@@ -7,8 +7,7 @@ tilelang.disable_cache()
 # add decorator @tilelang.jit if you want to return a torch function
 # @tilelang.jit
 @tilelang.jit(
-    out_idx=[2],
-    pass_configs={
+    out_idx=[2], pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
     })
 def matmul_warp_specialize_copy_1_gemm_0(M,
