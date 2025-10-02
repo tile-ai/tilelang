@@ -126,8 +126,18 @@ public:
           // Actually this test has been done in ParallelOp::InferLayout
           // already. Just do it again to avoid missing implementations in other
           // `TileOperator`s.
-          auto dst_layout = layout.as<Fragment>().value();
-          auto src_layout = layout_map[buffer].as<Fragment>().value();
+
+          auto dst_layout_opt = layout.as<Fragment>();
+          ICHECK(dst_layout_opt.has_value())
+              << "Failed to cast layout to Fragment for buffer " << buffer
+              << ", layout type is " << layout->GetTypeKey();
+          auto dst_layout = dst_layout_opt.value();
+          auto src_layout_opt = layout_map[buffer].as<Fragment>();
+          ICHECK(src_layout_opt.has_value())
+              << "Failed to cast layout_map[buffer] to Fragment for buffer "
+              << buffer << ", layout type is "
+              << layout_map[buffer]->GetTypeKey();
+          auto src_layout = src_layout_opt.value();
           ICHECK(dst_layout->InputDim() == src_layout->InputDim());
           Array<PrimExpr> indices;
           indices.reserve(dst_layout->InputDim());
@@ -382,7 +392,13 @@ private:
       return std::nullopt;
     }
     if (call->op.same_as(builtin::tvm_access_ptr())) {
-      auto var = call->args[1].as<Var>().value();
+      auto var_opt = call->args[1].as<Var>();
+      if (!var_opt.has_value()) {
+        DLOG(WARNING) << "[getBufferFromAccessPtr] args[1] is not a Var, type: "
+                      << call->args[1]->GetTypeKey();
+        return std::nullopt;
+      }
+      auto var = var_opt.value();
       return buffer_data_to_buffer_[var];
     } else if (call->op.same_as(RegionOp::Get())) {
       return call->args[0].as<BufferLoadNode>()->buffer;
