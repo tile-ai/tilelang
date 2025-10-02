@@ -588,7 +588,10 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   ss << op_name << "<" << M << ", " << N << ", " << K << ", ";
   ss << warp_m << ", " << warp_n << ", ";
   ss << trans_A << ", " << trans_B;
-  ss << ", " << clear_accum;
+  auto clear_accum_bool = clear_accum.as<Bool>();
+  ICHECK(clear_accum_bool.has_value())
+      << "clear_accum must be a constant Bool type, got " << clear_accum;
+  ss << ", " << bool(clear_accum_bool);
   if (TargetIsCuda(T.target) && (GetArchInt(T.target) >= 75)) {
     ss << ", " << stride_A << ", " << stride_B;
     ss << ", " << offset_A << ", " << offset_B;
