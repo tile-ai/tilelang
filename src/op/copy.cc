@@ -409,14 +409,14 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
   // Handle tensor memory (tmem) layout inference
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
     // Tensor memory copy
-    // TODO (intlsy) Add support for tcgen05.st/cp (in conj. with LowerTmemCopy)
+    // TODO (mzw) Add support for tcgen05.st/cp (in conj. with LowerTmemCopy)
     ICHECK(copy_inst == CopyInst::kTMemLoad)
         << "Only support tensor memory copy from shared.tmem to local.fragment "
            "currently";
     LayoutMap results;
     if (!T.layout_map.count(dst) && T.layout_map.count(src)) {
       // Use the default layout (32dp32b) if not specified
-      // NOTE (intlsy) We will check the layout in LowerTmemCopy(), so don't
+      // NOTE (mzw) We will check the layout in LowerTmemCopy(), so don't
       // worry for tmem-incompatible layout
       Layout src_layout = T.layout_map[src];
       Array<IterVar> logical_coords = MakeIterVars();
@@ -1130,11 +1130,11 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
               << ", dst scope = " << dst.scope();
   }
   // Currently tcgen05.cp is not supported
-  // TODO (intlsy) Support tcgen05.cp
+  // TODO (mzw) Support tcgen05.cp
   ICHECK(!is_cp)
       << "Copy from shared memory to tensor memory is not supported yet";
   // Currently tcgen05.st is not supported
-  // TODO (intlsy) Support tcgen05.st
+  // TODO (mzw) Support tcgen05.st
   ICHECK(!is_st) << "Copy from register to tensor memory is not supported yet";
 
   // Extract loop variables and ranges
@@ -1172,7 +1172,7 @@ Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
          "warpgroups, but found "
       << "thread range = " << T.thread_bounds;
 
-  // TODO (intlsy) Buffer remap for shared.dyn when is_cp is true?
+  // TODO (mzw) Buffer remap for shared.dyn when is_cp is true?
 
   // Retrieve layout
   ICHECK(T.layout_map.count(src))
