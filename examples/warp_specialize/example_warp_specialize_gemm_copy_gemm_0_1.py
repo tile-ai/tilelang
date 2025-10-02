@@ -10,7 +10,6 @@ tilelang.disable_cache()
     out_idx=[2],
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        # tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     })
 def matmul_warp_specialize_copy_1_gemm_0(M,
                                          N,
