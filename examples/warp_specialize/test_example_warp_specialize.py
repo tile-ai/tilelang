@@ -10,7 +10,7 @@ import example_warp_specialize_gemm_softpipe_stage2
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_example_warp_specialize_flashmla():
-    example_warp_specialize_flashmla.main(M=1024, N=1024, K=1024)
+    example_warp_specialize_flashmla.main()
 
 
 @tilelang.testing.requires_cuda
