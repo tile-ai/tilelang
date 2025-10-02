@@ -817,7 +817,6 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       } else {
         ICHECK(0);
       }
-      LOG(INFO) << "set C layout to be " << res->DebugOutput();
       results.Set(C, res);
     }
   } else if (TargetIsCDNA(T.target)) {
