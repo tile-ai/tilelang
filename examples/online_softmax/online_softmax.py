@@ -38,8 +38,7 @@ def softmax_kernel(
                 T.reduce_max(x, max_x, dim=0, clear=True)
 
                 for j in T.Parallel(BN):
-                    exp_x[j] = T.if_then_else(j + i_n * BN < N,
-                                              T.exp2(x[j] * scale - max_x[0] * scale), 0)
+                    exp_x[j] = T.exp2(x[j] * scale - max_x[0] * scale)
 
                 T.reduce_sum(exp_x, sum_exp_x, dim=0, clear=True)
 
@@ -49,9 +48,7 @@ def softmax_kernel(
                 T.copy(X[i_m, i_n * BN:(i_n + 1) * BN], x)
 
                 for j in T.Parallel(BN):
-
-                    if j + i_n * BN < N:
-                        y[j] = T.exp2(x[j] * scale - lse[0])
+                    y[j] = T.exp2(x[j] * scale - lse[0])
 
                 T.copy(y, Y[i_m, i_n * BN:(i_n + 1) * BN])
 
