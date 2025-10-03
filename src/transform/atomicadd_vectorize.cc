@@ -5,6 +5,7 @@
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
+#include "../transform/loop_partition.h"
 #include "arith/int_operator.h"
 #include "arith/ir_visitor_with_analyzer.h"
 #include "common/loop_vectorization_utils.h"
@@ -27,6 +28,30 @@ struct AtomicAddVectorizePlanResult {
   int vector_size;
   bool dynamic;
   PrimExpr condition;
+};
+
+class BufferIndiceSimplify : public StmtExprMutator {
+public:
+  BufferIndiceSimplify(arith::Analyzer *analyzer) : analyzer_(analyzer) {}
+
+private:
+  PrimExpr VisitExpr_(const BufferLoadNode *node) final {
+    auto visited = StmtExprMutator::VisitExpr_(node);
+    auto n = Downcast<BufferLoad>(visited);
+    auto nptr = n.CopyOnWrite();
+    nptr->indices = nptr->indices.Map(
+        [&](const auto &e) { return analyzer_->Simplify(e); });
+    return n;
+  }
+  Stmt VisitStmt_(const BufferStoreNode *node) final {
+    auto visited = StmtExprMutator::VisitStmt_(node);
+    auto n = Downcast<BufferStore>(visited);
+    auto nptr = n.CopyOnWrite();
+    nptr->indices = nptr->indices.Map(
+        [&](const auto &e) { return analyzer_->Simplify(e); });
+    return n;
+  }
+  arith::Analyzer *analyzer_;
 };
 
 class AtomicAddVectorizePlanner : public arith::IRVisitorWithAnalyzer {
@@ -137,69 +162,75 @@ private:
 class AtomicAddVectorizeRewriter : public StmtExprMutator {
 public:
   AtomicAddVectorizeRewriter(const AtomicAddVectorizePlanResult &plan,
-                             Var thread_var, PrimExpr by_var, PrimExpr bx_var,
-                             const Range &thread_bounds, int stride_y,
-                             int stride_x)
+                             Var thread_var, const Range &thread_bounds)
       : vector_size_(plan.vector_size), condition_(plan.condition),
-        dynamic_(plan.dynamic), tx_var_(std::move(thread_var)),
-        by_var_(std::move(by_var)), bx_var_(std::move(bx_var)),
-        stride_y_(stride_y), stride_x_(stride_x) {
+        dynamic_(plan.dynamic), tx_var_(std::move(thread_var)) {
     const int64_t *tx_ext = as_const_int(thread_bounds->extent);
     ICHECK(tx_ext)
         << "thread_bounds->extent must be a constant for vectorization.";
     extent_tx_ = static_cast<int>(*tx_ext);
   }
 
-private:
-  /**
-   * @brief Visits a For node and rewrites the innermost loop for atomic-add
-   * vectorization.
-   *
-   * If the visited For node is the recorded innermost loop, this method
-   * validates that the loop extent is a constant, divisible by the planned
-   * vector size, and has a zero minimum. When vectorization is enabled
-   * (dynamic_ == false) it:
-   *  - locates the thread index variable named "tx" inside the loop body,
-   *  - creates a new outer loop variable named "<old_loop_var>_outer",
-   *  - substitutes occurrences of `tx` with `tx * vector_size_` and the old
-   * loop var with `outer_var * vector_size_` so each outer iteration maps to a
-   * contiguous vector-sized chunk,
-   *  - returns a new For with extent divided by vector_size_ and the
-   * transformed body.
-   *
-   * If dynamic_ is true, the method returns the (possibly mutated) inner For
-   * unchanged.
-   *
-   * Side effects:
-   *  - updates inner_for_ to point to the current For node during visitation.
-   *  - performs runtime checks (ICHECK) to enforce: constant extent, extent %
-   * vector_size_ == 0, and zero loop minimum; violations terminate execution.
-   *
-   * @return The original or transformed For statement as a Stmt.
-   */
-  Stmt VisitStmt_(const ForNode *node) final {
-    inner_for_ = node;
-    iter_var_ = Var(node->loop_var->name_hint + "_outer");
-    auto ret = StmtExprMutator::VisitStmt_(node);
-    if (inner_for_ == node) { // rewrite the innermost loop
-      For fnode = ret.as<For>().value();
-      auto extent_ptr = as_const_int(fnode->extent);
-      ICHECK(extent_ptr) << fnode->extent;
-      int extent = *extent_ptr;
-      ICHECK(extent % vector_size_ == 0)
-          << "extent: " << extent << " vector_size_: " << vector_size_;
-      ICHECK(is_zero(fnode->min));
-      if (!dynamic_) {
-        Map<Var, PrimExpr> vmap;
-        vmap.Set(fnode->loop_var, iter_var_);
-        Stmt body = Substitute(fnode->body, vmap);
-        return For(iter_var_, 0, extent / vector_size_, fnode->kind, body,
-                   fnode->thread_binding, fnode->annotations, fnode->span);
-      }
+  For run(For for_node, const Fragment &loop_layout,
+          arith::Analyzer *analyzer) {
+    int old_loop_depth = loop_layout->InputDim();
+    int new_loop_depth = loop_layout->OutputDim();
+
+    Array<Var> vars;
+    for (int i = 0; i < new_loop_depth; i++) {
+      Var var = Var(std::string{char('i' + i)});
+      vars.push_back(var);
     }
-    return ret;
+    vars.push_back(tx_var_);
+    Map<Var, PrimExpr> vmap;
+    Stmt body = std::move(for_node);
+    auto inv_loop = loop_layout->Inverse();
+    auto indices = inv_loop->Forward(Array<PrimExpr>(vars.begin(), vars.end()));
+    // the innerest iter_var need expand because of vectorize
+
+    const ForNode *loop = body.as<ForNode>();
+    ICHECK(loop != nullptr);
+    vmap.Set(loop->loop_var, indices[0] * vector_size_);
+    body = loop->body;
+    for (int i = 1; i < old_loop_depth; i++) {
+      const ForNode *loop = body.as<ForNode>();
+      ICHECK(loop != nullptr);
+      vmap.Set(loop->loop_var, indices[i]);
+      body = loop->body;
+    }
+    body = Substitute(body, vmap);
+
+    // innerest iter_var extent need to be shorter because of vectorize
+
+    body = For(vars[new_loop_depth - 1],
+               make_zero(vars[new_loop_depth - 1]->dtype),
+               div(inv_loop->InputShape()[new_loop_depth - 1], vector_size_),
+               ForKind::kSerial, body);
+    analyzer->Bind(vars[new_loop_depth - 1],
+                   Range(0, div(inv_loop->InputShape()[new_loop_depth - 1],
+                                vector_size_)));
+
+    for (int i = new_loop_depth - 2; i >= 0; i--) {
+      body = For(vars[i], make_zero(vars[i]->dtype),
+                 div(inv_loop->InputShape()[i], vector_size_), ForKind::kSerial,
+                 body);
+      analyzer->Bind(vars[i], Range(0, inv_loop->InputShape()[i]));
+    }
+
+    body = BufferIndiceSimplify(analyzer)(body);
+
+    auto node = LoopPragmaUnroll(Downcast<For>(body));
+    if (loop_layout->ThreadRange().defined()) {
+      auto range = loop_layout->ThreadRange();
+      auto thread_var_with_offset = tx_var_ - range->min;
+      node.CopyOnWrite()->body =
+          Substitute(node->body, {{tx_var_, thread_var_with_offset}});
+    }
+    auto new_stmt = this->VisitStmt(node);
+    return Downcast<For>(new_stmt);
   }
 
+private:
   PrimExpr VisitExpr_(const CallNode *node) final {
     if (dynamic_) {
       return StmtExprMutator::VisitExpr_(node);
@@ -208,57 +239,18 @@ private:
       if (node->op == builtin::call_extern() && node->args.size() >= 2) {
         if (const auto *func_name = node->args[0].as<StringImmNode>()) {
           if (func_name->value == "AtomicAdd") {
-            // Matrix[by * stride_y + i / (stride_x / (tx_txtent *
-            // vector_size_)) + tx_var_ / (stride_x / vector_size_),
-            //        bx * stride_x + (i % (stride_x / (tx_extent *
-            //        vector_size_)) * (tx_extent * vector_size_) + (tx_var_ %
-            //        (stride / vector_size_)) * vector_size_]
-            const BufferLoadNode *old_dst_node =
+            const BufferLoadNode *temp_dst_node =
                 node->args[1].as<BufferLoadNode>();
-            const BufferLoadNode *old_value_node =
+            const BufferLoadNode *temp_value_node =
                 node->args[2].as<BufferLoadNode>();
-            if (!old_dst_node || !old_value_node) {
+            if (!temp_dst_node || !temp_value_node) {
               return StmtExprMutator::VisitExpr_(node);
             }
-            Array<PrimExpr> dst_indices, value_indices;
-            if ((extent_tx_ * vector_size_) > stride_x_) {
-              dst_indices.push_back(
-                  by_var_ * stride_y_ +
-                  iter_var_ * (extent_tx_ * vector_size_ / stride_x_) +
-                  truncdiv(tx_var_, stride_x_ / vector_size_));
-              dst_indices.push_back(
-                  bx_var_ * stride_x_ +
-                  truncmod(tx_var_, stride_x_ / vector_size_) * vector_size_);
-              value_indices.push_back(
-                  iter_var_ * (extent_tx_ * vector_size_ / stride_x_) +
-                  truncdiv(tx_var_ * vector_size_, stride_x_));
-              value_indices.push_back(
-                  truncmod(tx_var_, stride_x_ / vector_size_) * vector_size_);
-            } else {
-              dst_indices.push_back(
-                  by_var_ * stride_y_ +
-                  truncdiv(iter_var_, stride_x_ / (extent_tx_ * vector_size_)) +
-                  truncdiv(tx_var_, stride_x_ / vector_size_));
-              dst_indices.push_back(
-                  bx_var_ * stride_x_ +
-                  truncmod(iter_var_, stride_x_ / (extent_tx_ * vector_size_)) *
-                      (extent_tx_ * vector_size_) +
-                  truncmod(tx_var_, stride_x_ / vector_size_) * vector_size_);
-              value_indices.push_back(
-                  truncdiv(iter_var_, stride_x_ / (extent_tx_ * vector_size_)) +
-                  truncdiv(tx_var_, stride_x_ / vector_size_));
-              value_indices.push_back(
-                  truncmod(iter_var_, stride_x_ / (extent_tx_ * vector_size_)) *
-                      (extent_tx_ * vector_size_) +
-                  truncmod(tx_var_, stride_x_ / vector_size_) * vector_size_);
-            }
+            const BufferLoad dst_node =
+                Downcast<BufferLoad>(node->args[1].as<BufferLoadNode>());
+            const BufferLoad value_node =
+                Downcast<BufferLoad>(node->args[2].as<BufferLoadNode>());
 
-            BufferLoad dst_node =
-                BufferLoad(old_dst_node->buffer, dst_indices,
-                           old_dst_node->predicate, old_dst_node->span);
-            BufferLoad value_node =
-                BufferLoad(old_value_node->buffer, value_indices,
-                           old_value_node->predicate, old_value_node->span);
             Call address_of_dst =
                 Call(DataType::Handle(), builtin::address_of(), {dst_node});
             Call address_of_value =
@@ -287,10 +279,7 @@ private:
   const int vector_size_;
   const PrimExpr condition_;
   const bool dynamic_;
-  const PrimExpr by_var_, bx_var_;
-  int stride_y_, stride_x_;
   const Var tx_var_;
-  Var iter_var_;
   int extent_tx_;
 };
 
@@ -317,11 +306,10 @@ static int GetVectorizeSizeMax(int compute_capability, DataType dtype) {
 }
 
 For VectorizeAtomicAdd(const For &for_node, const Var &thread_var,
-                       const Range &thread_bounds, int compute_capability) {
+                       const Range &thread_bounds, int compute_capability,
+                       arith::Analyzer *analyzer, const Fragment &loop_layout) {
 
   int vectorize_size_max = 1;
-  int stride_x = -1, stride_y = -1;
-  PrimExpr bx_var, by_var;
 
   PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
     if (const auto *call = obj.as<CallNode>()) {
@@ -333,40 +321,22 @@ For VectorizeAtomicAdd(const For &for_node, const Var &thread_var,
         }
       }
     }
-    if (const MulNode *mul = obj.as<MulNode>()) {
-      const VarNode *var = nullptr;
-      const IntImmNode *imm = nullptr;
-      PrimExpr var_expr;
-      if ((var = mul->a.as<VarNode>()) && (imm = mul->b.as<IntImmNode>())) {
-        var_expr = mul->a;
-      } else if ((var = mul->b.as<VarNode>()) &&
-                 (imm = mul->a.as<IntImmNode>())) {
-        var_expr = mul->b;
-      }
-      if (var && imm) {
-        if (var->name_hint == "bx") {
-          stride_x = imm->value;
-          bx_var = var_expr;
-        } else if (var->name_hint == "by") {
-          stride_y = imm->value;
-          by_var = var_expr;
-        }
-      }
-    }
   });
+
   if (vectorize_size_max != 1) {
     int vectorize_hint = vectorize_size_max;
     AtomicAddVectorizePlanResult res = {1, false, 0};
     AtomicAddVectorizePlanner planner;
-    res = planner.Plan(for_node, thread_var, thread_bounds, vectorize_hint);
+    For simplified_for_node =
+        PartitionLoop(for_node, thread_var, analyzer, loop_layout);
+    res = planner.Plan(simplified_for_node, thread_var, thread_bounds,
+                       vectorize_hint);
     vectorize_hint = res.vector_size;
 
-    if (vectorize_hint == 1 || stride_x == -1 || stride_y == -1 ||
-        !bx_var.defined() || !by_var.defined())
+    if (vectorize_hint == 1)
       return for_node;
-    auto rewriter = AtomicAddVectorizeRewriter(
-        res, thread_var, by_var, bx_var, thread_bounds, stride_y, stride_x);
-    return Downcast<For>(rewriter(for_node));
+    auto rewriter = AtomicAddVectorizeRewriter(res, thread_var, thread_bounds);
+    return rewriter.run(for_node, loop_layout, analyzer);
   } else {
     return for_node;
   }

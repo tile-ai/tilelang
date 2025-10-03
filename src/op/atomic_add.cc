@@ -13,7 +13,6 @@
 #include "../target/utils.h"
 #include "../transform/atomicadd_vectorize.h"
 #include "../transform/common/loop_fusion_utils.h"
-#include "../transform/loop_partition.h"
 #include "builtin.h"
 
 namespace tvm {
@@ -362,18 +361,14 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                           level);
   }
   auto loop_layout = par_op->GetLoopLayout();
-  Var thread_var = T.thread_var;
-  Range thread_bounds = T.thread_bounds;
-  auto thread_loop =
-      PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer, loop_layout);
-  auto vectorized_thread_loop = VectorizeAtomicAdd(
-      thread_loop, thread_var, thread_bounds, GetArchInt(target));
+  auto vectorized_thread_loop =
+      VectorizeAtomicAdd(par_op->GetRoot(), T.thread_var, T.thread_bounds,
+                         GetArchInt(target), analyzer, loop_layout);
 
   if (par_op->GetPredicate(T.thread_var).defined()) {
     return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
                       vectorized_thread_loop);
   }
-
   return vectorized_thread_loop;
 }
 
