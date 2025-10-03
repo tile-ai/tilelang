@@ -11,7 +11,7 @@ def softmax_kernel(
     N,
     dtype: str = "float16",
 ) -> "Callable":
-    BN = min(tl.next_power_of_2(N), 1024)
+    BN = min(tl.next_power_of_2(N), 8192)
     NN = tl.cdiv(N, BN)
 
     accum_dtype = "float"
@@ -21,7 +21,7 @@ def softmax_kernel(
     @T.prim_func
     def main(
             X: T.Tensor([M, N], dtype),
-            Y: T.Tensor([M, N], accum_dtype),
+            Y: T.Tensor([M, N], dtype),
     ):
         with T.Kernel(M, threads=128) as (i_m):
             x = T.alloc_fragment([BN], dtype)
@@ -63,7 +63,7 @@ N = 8192
 kernel = softmax_kernel(M, N)
 dtype = torch.float16
 X = torch.randn(M, N, dtype=dtype, device="cuda")
-Y = kernel(X).to(dtype)
+Y = kernel(X)
 Y_ref = X.softmax(dim=1)
 
 torch.testing.assert_close(Y, Y_ref, rtol=1e-2, atol=1e-2)
