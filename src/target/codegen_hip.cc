@@ -480,7 +480,7 @@ void CodeGenTileLangHIP::PrintVecElemLoad(const std::string &vec, DataType t,
     os << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
        << access[i % 2];
   } else if (t.is_bfloat16()) {
-    os << "((nv_bfloat162*)(&(" << vec << "." << access[i / 2] << ")))->"
+    os << "((bfloat16x2*)(&(" << vec << "." << access[i / 2] << ")))->"
        << access[i % 2];
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;

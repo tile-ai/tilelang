@@ -2,8 +2,13 @@
 
 #include "common.h"
 
-#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 900))
+#ifdef __CUDA_ARCH_LIST__
+#if __CUDA_ARCH_LIST__ >= 900
 #include "copy_sm90.h"
+#endif
+#if __CUDA_ARCH_LIST__ >= 1000
+#include "copy_sm100.h"
+#endif
 #endif
 
 namespace tl {

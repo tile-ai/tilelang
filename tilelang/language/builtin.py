@@ -330,14 +330,19 @@ def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, 
         return tir.call_extern(value.dtype, "__shfl_up_sync", 0xffffffff, value, offset)
 
 
-def sync_threads():
-    """Synchronize all threads in a warp.
+def sync_threads(barrier_id: int = None, arrive_count: int = None):
+    """Synchronize all threads in a block.
     """
-    return tir.op.tvm_storage_sync("shared")
+    args = []
+    if barrier_id is not None:
+        args.append(barrier_id)
+    if arrive_count is not None:
+        args.append(arrive_count)
+    return tir.call_intrin("int32", "tir.tvm_storage_sync", "shared", *args)
 
 
 def sync_global():
-    """Synchronize all threads in a block.
+    """Synchronize all threads in the entire grid.
     """
     tx, ty, tz = get_thread_bindings()
     ex, ey, ez = get_block_extents()
@@ -350,6 +355,12 @@ def sync_grid():
     """Synchronize all threads in a grid.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"))
+
+
+def loop_break():
+    """Break out of the innermost loop.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.loop_break"))
 
 
 def cp_async_barrier_noinc(barrier_id: Union[int, PrimExpr, tir.Call]):

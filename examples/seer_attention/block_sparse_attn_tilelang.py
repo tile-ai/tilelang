@@ -29,7 +29,10 @@ def get_sparse_attn_mask_from_threshold(x, threshold, use_dense_for_last_block=F
     return dense_mask
 
 
-@tilelang.jit(out_idx=[4])
+@tilelang.jit(
+    out_idx=[4], pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    })
 def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_causal):
     block_M = 64
     block_N = 64

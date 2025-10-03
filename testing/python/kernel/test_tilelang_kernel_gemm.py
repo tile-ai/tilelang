@@ -82,6 +82,7 @@ def run_gemm(
     )
 
     kernel = tilelang.compile(program, out_idx=[2])
+    print(kernel.get_kernel_source())
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):

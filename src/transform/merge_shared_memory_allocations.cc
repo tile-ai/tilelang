@@ -639,13 +639,13 @@ private:
   };
 
   void PlanAlignment(const Stmt &stmt) {
-    LOG(INFO) << "PlanAlignment";
+    DLOG(INFO) << "PlanAlignment";
     PostOrderVisit(stmt, [&](const ObjectRef &node) {
       if (const auto *call = node.as<CallNode>()) {
         if (call->op.same_as(tl::tl_gemm()) ||
             call->op.same_as(tl::tl_gemm_sp())) {
-          LOG(INFO) << "PostOrderVisit CallNode tl_gemm and tl_gemm_sp: "
-                    << call->op;
+          DLOG(INFO) << "PostOrderVisit CallNode tl_gemm and tl_gemm_sp: "
+                     << call->op;
         }
       }
     });

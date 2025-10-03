@@ -101,6 +101,8 @@ public:
 
   bool IsEqual(const FragmentNode *other, bool skip_index = false) const;
 
+  bool IsCompletedReplicated() const;
+
   static void RegisterReflection();
 
   bool SEqualReduce(const FragmentNode *other, SEqualReducer equal) const;
@@ -131,6 +133,7 @@ public:
 
 Var InputPlaceholder(size_t idx);
 Var ReplicationPlaceholder();
+IterVar make_itervar(std::string name, PrimExpr dom);
 
 Fragment makeGemmFragment8x8();
 Fragment makeGemmFragment8x8Transposed();
@@ -166,6 +169,8 @@ Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
                         int element_size, int kfactor);
 Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
                               int continuity, int element_size, int kfactor);
+Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
+                             int element_size, int kfactor);
 Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,
                             int kfactor);
 

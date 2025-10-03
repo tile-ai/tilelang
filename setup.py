@@ -43,6 +43,8 @@ USE_LLVM = os.environ.get("USE_LLVM", "False").lower() == "true"
 USE_ROCM = os.environ.get("USE_ROCM", "False").lower() == "true"
 # Build with Debug mode
 DEBUG_MODE = os.environ.get("DEBUG_MODE", "False").lower() == "true"
+# Include commit ID in wheel filename and package metadata
+WITH_COMMITID = os.environ.get("WITH_COMMITID", "True").lower() == "true"
 
 
 def load_module_from_path(module_name, path):
@@ -172,7 +174,12 @@ def get_tilelang_version(with_cuda=True, with_system_info=True, with_commit_id=F
         except subprocess.SubprocessError as error:
             logger.warning(f"Ignore commit id because failed to get git commit id: {str(error)}")
         if commit_id:
-            version += f"+{commit_id}"
+            # Truncate commit ID to 8 characters to keep version string reasonable
+            short_commit_id = commit_id[:8]
+            if local_version_parts:
+                version += f".{short_commit_id}"
+            else:
+                version += f"+{short_commit_id}"
 
     return version
 
@@ -543,7 +550,7 @@ class TileLangBuilPydCommand(build_py):
             # if is VERSION file, replace the content with the new version with commit id
             if not PYPI_BUILD and item == "VERSION":
                 version = get_tilelang_version(
-                    with_cuda=False, with_system_info=False, with_commit_id=True)
+                    with_cuda=False, with_system_info=False, with_commit_id=WITH_COMMITID)
                 target_dir = os.path.dirname(target_dir)
                 if not os.path.exists(target_dir):
                     os.makedirs(target_dir)
@@ -568,7 +575,7 @@ class TileLangSdistCommand(sdist):
     def make_distribution(self):
         self.distribution.metadata.name = PACKAGE_NAME
         self.distribution.metadata.version = get_tilelang_version(
-            with_cuda=False, with_system_info=False, with_commit_id=False)
+            with_cuda=False, with_system_info=False, with_commit_id=WITH_COMMITID)
         super().make_distribution()
 
 
@@ -841,8 +848,8 @@ class TilelangExtensionBuild(build_ext):
 
 setup(
     name=PACKAGE_NAME,
-    version=(get_tilelang_version(with_cuda=False, with_system_info=False)
-             if PYPI_BUILD else get_tilelang_version()),
+    version=(get_tilelang_version(with_cuda=False, with_system_info=False, with_commit_id=False)
+             if PYPI_BUILD else get_tilelang_version(with_commit_id=WITH_COMMITID)),
     packages=find_packages(where="."),
     package_dir={"": "."},
     author="Tile-AI",

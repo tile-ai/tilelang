@@ -15,6 +15,7 @@ tilelang.testing.set_random_seed(42)
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
 def native_sparse_attention(
     batch,

@@ -26,7 +26,7 @@ public:
   int M, N, K;
   int stride_A, stride_B;
   int offset_A, offset_B;
-  bool clear_accum = false;
+  PrimExpr clear_accum = const_false();
   // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
   // only will be enabled under cdna mfma instructions
   int kPack = 1;
@@ -107,7 +107,6 @@ public:
 
 private:
   // Target GEMM instruction
-  enum class GemmInst : uint8_t { kMMA, kWGMMA, kUTCMMA, kMFMA };
   GemmInst GetGemmInst(int block_size, Target target) const;
 
   mutable bool completed_ = false;

@@ -1,7 +1,7 @@
 import os
 import torch
 import warnings
-from typing import Optional
+from typing import Optional, Tuple
 from tilelang.contrib import nvcc
 from torch.utils.cpp_extension import load, _import_module_from_library
 from tilelang import env
@@ -44,7 +44,7 @@ def _get_cached_lib():
 
 
 def compress_sm90(A: torch.Tensor, block_k: int,
-                  transposed: bool) -> tuple[torch.Tensor, torch.Tensor]:
+                  transposed: bool) -> Tuple[torch.Tensor, torch.Tensor]:
     if block_k > 128:
         block_k = 128
         # Ref: https://github.com/NVIDIA/cutlass/blob/c2ad7c5b20f131c4ba33601860f1da3f9c9df0f3/include/cutlass/gemm/collective/builders/sm90_sparse_gmma_builder.inl#L145-L146
@@ -56,7 +56,7 @@ def compress_sm90(A: torch.Tensor, block_k: int,
     return compress_lib.compress_sm90(A, block_k, transposed)
 
 
-def compress_sm80(A: torch.Tensor, transposed: bool) -> tuple[torch.Tensor, torch.Tensor]:
+def compress_sm80(A: torch.Tensor, transposed: bool) -> Tuple[torch.Tensor, torch.Tensor]:
     try:
         from torch.sparse import to_sparse_semi_structured, SparseSemiStructuredTensor
     except ImportError as err:
@@ -76,7 +76,7 @@ def compress_sm80(A: torch.Tensor, transposed: bool) -> tuple[torch.Tensor, torc
 def compress(A: torch.Tensor,
              transposed: bool,
              arch: Optional[str] = None,
-             **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
+             **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compress a tensor using the appropriate method based on the CUDA architecture.
     """
@@ -92,3 +92,47 @@ def compress(A: torch.Tensor,
     else:
         raise ValueError(f"Unsupported CUDA compute version: {compute_version}. "
                          "Supported versions are sm_80 and sm_90.")
+
+
+def randn_semi_sparse(M: int, K: int, dtype=torch.float16, device='cuda', transposed: bool = False):
+    """
+    Generate a random semi-sparse tensor. The generated tensor will have 2:4 sparsity along the K dimension.
+    Args:
+        M (int): Number of rows
+        K (int): Number of columns
+        dtype: Data type of the tensor
+        device: Device to create the tensor on
+        transposed (bool): If True, returns a transposed tensor of shape (K, M)
+    """
+    elem, group = 2, 4
+    tensor = torch.randn((M, K), dtype=torch.float, device=device).view(M, -1, group)
+    indice = tensor.topk(elem, dim=-1).indices
+    tensor.scatter_(-1, indice, 0)
+    tensor = tensor.view(M, K)
+    if transposed:
+        tensor = tensor.t().contiguous()
+    return tensor.to(dtype)  # dtype like float8 might not have randn kernel
+
+
+def arange_semi_sparse(M: int,
+                       K: int,
+                       dtype=torch.float16,
+                       device='cuda',
+                       transposed: bool = False):
+    """
+    Generate a semi-sparse tensor with values from 0 to M*K-1. The generated tensor will have 2:4 sparsity along the K dimension.
+    Args:
+        M (int): Number of rows
+        K (int): Number of columns
+        dtype: Data type of the tensor
+        device: Device to create the tensor on
+        transposed (bool): If True, returns a transposed tensor of shape (K, M)
+    """
+    elem, group = 2, 4
+    tensor = torch.arange(M * K, dtype=dtype, device=device).view(M, -1, group)
+    indice = tensor.topk(elem, dim=-1).indices
+    tensor.scatter_(-1, indice, 0)
+    tensor = tensor.view(M, K)
+    if transposed:
+        tensor = tensor.t().contiguous()
+    return tensor

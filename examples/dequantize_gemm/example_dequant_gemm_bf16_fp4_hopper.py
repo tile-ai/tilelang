@@ -4,7 +4,7 @@ from tilelang import tvm as tvm
 from tvm import DataType
 from tvm import tir
 import torch
-from utils import torch_convert_bit_twiddling, torch_convert
+from dequantize_utils import torch_convert_bit_twiddling, torch_convert
 
 
 def get_configs():
