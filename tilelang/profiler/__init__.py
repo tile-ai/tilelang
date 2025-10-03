@@ -223,7 +223,7 @@ class Profiler:
         n_warmup: int = 1,
         n_repeat: int = 1,
         input_tensors: List[torch.Tensor] = None,
-        kernel_names = None,
+        kernel_names=None,
         grad_to_none: Optional[List[torch.Tensor]] = None,
         quantiles: Optional[List[float]] = None,
         return_mode: Literal["min", "max", "mean", "median"] = "mean",

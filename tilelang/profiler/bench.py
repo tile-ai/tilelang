@@ -101,7 +101,9 @@ def do_bench_event(
         return ret
     return getattr(torch, return_mode)(times).item()
 
+
 class empty_suppress:
+
     def __enter__(self):
         return self
 
@@ -110,6 +112,7 @@ class empty_suppress:
 
 
 class suppress_stdout_stderr:
+
     def __enter__(self):
         self.outnull_file = open(os.devnull, 'w')
         self.errnull_file = open(os.devnull, 'w')
@@ -143,6 +146,7 @@ class suppress_stdout_stderr:
         self.outnull_file.close()
         self.errnull_file.close()
 
+
 # from https://github.com/deepseek-ai/DeepGEMM/blob/main/deep_gemm/testing/bench.py
 def do_bench_kineto(
     fn: Callable,
@@ -169,7 +173,7 @@ def do_bench_kineto(
         cache = torch.empty(int(256e6 // 4), dtype=torch.int, device="cuda")
     else:
         cache = torch.empty(int(256e6), dtype=torch.int8, device="cuda")
-    
+
     # Estimate the runtime of the function
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
@@ -182,12 +186,12 @@ def do_bench_kineto(
     estimate_ms = start_event.elapsed_time(end_event) / 5
 
     n_warmup = max(1, int(warmup / estimate_ms))
-    n_repeat = max(1, int(rep / estimate_ms)) 
+    n_repeat = max(1, int(rep / estimate_ms))
     if _n_warmup > 0:
         n_warmup = _n_warmup
     if _n_repeat > 0:
         n_repeat = _n_repeat
-    
+
     # warm-up
     for _ in range(n_warmup):
         fn()
@@ -196,10 +200,13 @@ def do_bench_kineto(
     using_nsys = int(os.environ.get('DG_NSYS_PROFILING', 0))
     suppress = suppress_stdout_stderr if suppress_kineto_output and not using_nsys else empty_suppress
     with suppress():
-        schedule = torch.profiler.schedule(wait=1, warmup=0, active=1, repeat=1) if not using_nsys else None
-        profiler = torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA], schedule=schedule) if not using_nsys else empty_suppress()
+        schedule = torch.profiler.schedule(
+            wait=1, warmup=0, active=1, repeat=1) if not using_nsys else None
+        profiler = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CUDA],
+            schedule=schedule) if not using_nsys else empty_suppress()
         with profiler:
-            for i in range(2):
+            for _i in range(2):
                 for _ in range(n_repeat):
                     cache.zero_()
                     fn()
@@ -209,15 +216,17 @@ def do_bench_kineto(
 
     if using_nsys:
         return 1
-    
+
     # Parse the profiling table
-    assert isinstance(kernel_names, str) or isinstance(kernel_names, tuple)
+    assert isinstance(kernel_names, str) or isinstance(kernel_names, tuple)  # noqa: SIM101
     is_tuple = isinstance(kernel_names, tuple)
-    prof_lines = profiler.key_averages().table(sort_by='cuda_time_total', max_name_column_width=100).split('\n')
-    kernel_names = (kernel_names, ) if isinstance(kernel_names, str) else kernel_names
+    prof_lines = profiler.key_averages().table(
+        sort_by='cuda_time_total', max_name_column_width=100).split('\n')
+    kernel_names = (kernel_names,) if isinstance(kernel_names, str) else kernel_names
     if not with_multiple_kernels:
         for name in kernel_names:
-            assert sum([name in line for line in prof_lines]) <= 1, f'Errors of the kernel {name} in the profiling table'
+            assert sum([name in line for line in prof_lines
+                       ]) <= 1, f'Errors of the kernel {name} in the profiling table'
 
     # Save chrome traces
     if trace_path is not None:
@@ -235,10 +244,10 @@ def do_bench_kineto(
                 for unit, scale in units.items():
                     if unit in time_str:
                         call_time = float(time_str.replace(unit, '')) / scale * int(num_str)
-                        all_times.extend([call_time]) 
+                        all_times.extend([call_time])
                         break
         # to ms
         times = torch.tensor(all_times, dtype=torch.float) * 1e3
         kernel_times.append(getattr(torch, return_mode)(times).item())
-    
+
     return tuple(kernel_times) if is_tuple else kernel_times[0]
