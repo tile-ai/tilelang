@@ -5,6 +5,7 @@
 import tilelang.language as T
 from tvm import ir
 from tvm.tir import PrimExpr, Buffer, BufferRegion, Var, op
+from tvm.tir.expr import BufferLoad, Ramp
 from typing import Optional
 
 _MEMORY_ORDER_ID_MAP = {
@@ -175,13 +176,41 @@ def atomic_add(dst: Buffer,
             return data.shape
         elif isinstance(data, BufferRegion):
             return [x.extent for x in data.region]
+        elif isinstance(data, BufferLoad):
+            ret = []
+            new_indices = []
+            for x in data.indices:
+                if isinstance(x, Ramp):
+                    ret.append(x.lanes)
+                    new_indices.append(x.base)
+                else:
+                    ret.append(1)
+                    new_indices.append(x)
+            return ret
         else:
             return None
 
-    src_extent = get_extent(value)
-    dst_extent = get_extent(dst)
+    src_extent = list(get_extent(value))
+    dst_extent = list(get_extent(dst))
+    legal = True
 
-    if dst_extent is None and src_extent is None:
+    if (dst_extent is None and src_extent is None) or len(dst_extent) < len(src_extent):
+        legal = False
+    elif (dst_extent and src_extent):
+        if len(dst_extent) > len(src_extent):
+            dst_extent_dims = [x for x in dst_extent if x != 1]
+            if dst_extent_dims != src_extent:
+                legal = False
+        else:
+            if dst_extent != src_extent:
+                legal = False
+    else:
+        src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
+        dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
+        extent = max(dst_extent, src_extent)
+        dst_extent = src_extent = extent
+
+    if not legal:
         func_name = "AtomicAddRet" if return_prev else "AtomicAdd"
         return_type = dst.dtype if return_prev else "handle"
 
@@ -194,12 +223,7 @@ def atomic_add(dst: Buffer,
     if isinstance(dst, Buffer) and isinstance(value, Buffer):
         ir.assert_structural_equal(dst.shape, value.shape)
 
-    assert src_extent or dst_extent, "Can't deduce atomicadd extents from args"
-    src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
-    dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
-    extent = max(src_extent, dst_extent)
-
-    def _to_region(data, access_type):
+    def _to_region(data, extent, access_type):
         from .customize import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
 
         if isinstance(data, Var) and T.has_let_value(data):
@@ -209,10 +233,17 @@ def atomic_add(dst: Buffer,
         elif isinstance(data, BufferRegion):
             return buffer_region_to_tile_region(data, access_type, extent)
         else:
+            new_indices = []
+            for x in data.indices:
+                if isinstance(x, Ramp):
+                    new_indices.append(x.base)
+                else:
+                    new_indices.append(x)
+            data = T.BufferLoad(data.buffer, new_indices)
             return buffer_load_to_tile_region(data, access_type, extent)
 
-    value = _to_region(value, "r")
-    dst = _to_region(dst, "w")
+    value = _to_region(value, src_extent, "r")
+    dst = _to_region(dst, dst_extent, "w")
 
     # Note: tile-region-based atomic operations don't support return_prev yet
     # This would need to be implemented in the tile runtime
