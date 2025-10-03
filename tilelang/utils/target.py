@@ -1,3 +1,4 @@
+from platform import mac_ver
 from typing import Literal, Union
 from tilelang import tvm as tvm
 from tilelang import _ffi_api
@@ -12,6 +13,7 @@ AVALIABLE_TARGETS = {
     "webgpu",
     "c",  # represent c source backend
     "llvm",
+    "metal",
 }
 
 
@@ -39,6 +41,14 @@ def check_hip_availability() -> bool:
         return True
     except Exception:
         return False
+
+
+def check_metal_availability() -> bool:
+    mac_release, _, arch = mac_ver()
+    if not mac_release:
+        return False
+    # todo: check torch version?
+    return arch == 'arm64'
 
 
 def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
@@ -74,8 +84,10 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
             return_var = "cuda"
         elif is_hip_available:
             return_var = "hip"
+        elif check_metal_availability():
+            return_var = "metal"
         else:
-            raise ValueError("No CUDA or HIP available on this system.")
+            raise ValueError("No CUDA or HIP or MPS available on this system.")
     else:
         # Validate the target if it's not "auto"
         assert isinstance(

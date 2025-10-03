@@ -18,3 +18,9 @@ class CPU(TileDevice):
             raise RuntimeError("Cannot find cpu device 0.")
         self.device: tvm.runtime.Device = device
         self.platform: str = "CPU"
+
+
+__all__ = [
+    'is_cpu_arch',
+    'CPU',
+]

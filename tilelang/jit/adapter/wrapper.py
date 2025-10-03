@@ -3,8 +3,8 @@ from tilelang import tvm as tvm
 from typing import Optional, List, Dict, Union, Any
 from tvm import IRModule
 from tvm.target import Target
-from .utils import (match_declare_kernel, match_declare_kernel_cpu, is_cuda_target, is_hip_target,
-                    is_cpu_target, get_annotated_mod, pythonic_expr)
+from .utils import (is_metal_target, match_declare_kernel, match_declare_kernel_cpu, is_cuda_target,
+                    is_hip_target, is_cpu_target, get_annotated_mod, pythonic_expr)
 import re
 import logging
 import textwrap
@@ -1066,6 +1066,28 @@ class TLCPUSourceWrapper(object):
             raise ValueError("Cannot find primary function in the module.")
 
 
+class TLMetalSourceWrapper(object):
+
+    def __init__(self,
+                 scheduled_ir_module: IRModule,
+                 source: str,
+                 target: Target,
+                 device_mod: Optional[IRModule] = None,
+                 host_mod: Optional[IRModule] = None,
+                 pass_configs: Optional[Dict[str, Any]] = None):
+        self.mod = scheduled_ir_module
+        self.target = target
+        self.source = source
+        self.pass_configs = pass_configs
+        self.device_mod = device_mod
+        self.host_mod = host_mod
+        self.lib_code = self.update_lib_code(source)
+
+    def update_lib_code(self, code: str):
+        self.lib_code = code
+        return self.lib_code
+
+
 class TLWrapper(BaseWrapper):
     """
     A wrapper class for the TileLang backend.
@@ -1104,6 +1126,8 @@ class TLWrapper(BaseWrapper):
             wrapper_class = TLHIPSourceWrapper
         elif is_cpu_target(self.target):
             wrapper_class = TLCPUSourceWrapper
+        elif is_metal_target(self.target):
+            wrapper_class = TLMetalSourceWrapper
         else:
             raise ValueError(f"Unsupported platform: {self.arch.platform}")
         wrapper = wrapper_class(
