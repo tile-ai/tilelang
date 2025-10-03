@@ -211,9 +211,8 @@ public:
                                 vector_size_)));
 
     for (int i = new_loop_depth - 2; i >= 0; i--) {
-      body = For(vars[i], make_zero(vars[i]->dtype),
-                 div(inv_loop->InputShape()[i], vector_size_), ForKind::kSerial,
-                 body);
+      body = For(vars[i], make_zero(vars[i]->dtype), inv_loop->InputShape()[i],
+                 ForKind::kSerial, body);
       analyzer->Bind(vars[i], Range(0, inv_loop->InputShape()[i]));
     }
 
