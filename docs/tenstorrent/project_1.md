@@ -22,6 +22,13 @@
 - Wire the helper into the standard lowering entry point (`tilelang/engine/lower.lower`) right after target determination.
   - **Justification:** The TT default synthesis is backend-specific and would clutter the generic TileLang frontend if inlined; isolating it in `tilelang_tt` keeps other targets pristine.
 
+**Dependency Graph**
+- `ws1_target_registration.md` → foundational; must land before any TT-specific branching.
+- `ws1_engine_adapter.md` depends on target registration; unblocks TT-specific lowering orchestration.
+- `ws1_default_annotation_helper.md` can start once the engine adapter skeleton exists; helper implementation can proceed in parallel with wiring work but requires the adapter before integration.
+- `ws1_lower_hook.md` comes after the helper so defaults are callable; also gated on the adapter being in place.
+- `ws1_target_registration_test.md` exercises the full chain and therefore runs last; it may be authored in parallel but only passes once prior tickets integrate.
+
 **Testing**
 - New Python unit test `tests/python/tt/test_target_registration.py` that checks:
   - `determine_target("tenstorrent", return_object=True)` returns a `Target` named `tenstorrent`.
