@@ -10,7 +10,7 @@ from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter,
                                   NVRTCKernelAdapter, TorchDLPackKernelAdapter)
 from tilelang.profiler import Profiler, TensorSupplyType
-from tilelang.utils.target import AVALIABLE_TARGETS, determine_target
+from tilelang.utils.target import AVAILABLE_TARGETS, determine_target
 import logging
 
 logger = logging.getLogger(__name__)
@@ -91,7 +91,7 @@ class JITKernel(object):
 
         # If the target is specified as a string, validate it and convert it to a TVM Target.
         if isinstance(target, str):
-            assert target in AVALIABLE_TARGETS, f"Invalid target: {target}"
+            assert target in AVAILABLE_TARGETS, f"Invalid target: {target}"
             target = determine_target(target)
 
         # Ensure the target is always a TVM Target object.

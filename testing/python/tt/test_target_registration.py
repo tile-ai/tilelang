@@ -25,7 +25,7 @@ def toggle_tt_backend(monkeypatch):
 
 
 def test_available_targets_contains_tt():
-    assert _target_mod.TENSTORRENT_TARGET in _target_mod.AVALIABLE_TARGETS
+    assert _target_mod.TENSTORRENT_TARGET in _target_mod.AVAILABLE_TARGETS
 
 
 def test_determine_target_returns_target_when_backend_enabled(toggle_tt_backend):
