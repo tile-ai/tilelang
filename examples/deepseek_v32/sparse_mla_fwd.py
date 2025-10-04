@@ -2,6 +2,7 @@
 import torch
 import tilelang
 from tilelang import language as T
+from utils import assert_tensors_similar
 
 
 @tilelang.jit(
@@ -253,6 +254,12 @@ def test_sparse_mla_fwd(B=1,
 
     tl_out, tl_lse = sparse_mla_fwd_interface(q, kv, indices)
 
+    if SKV <= 4096:
+        # otherwise may cause out of memory
+        ref_out = ref_sparse_mla_fwd_interface(q, kv, indices)
+        assert_tensors_similar(tl_out, ref_out, eps=1e-2, name="out")
+        print("assert_tensors_similar passed")
+
     def fn():
         return sparse_mla_fwd_interface(q, kv, indices)
 
@@ -270,4 +277,4 @@ def test_sparse_mla_fwd(B=1,
 
 if __name__ == "__main__":
     test_sparse_mla_fwd(
-        B=1, S=4096, SKV=32768, H=128, HKV=1, DQK=576, DV=512, topk=2048, dtype=torch.bfloat16)
+        B=1, S=4096, SKV=4096, H=128, HKV=1, DQK=576, DV=512, topk=2048, dtype=torch.bfloat16)
