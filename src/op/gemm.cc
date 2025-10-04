@@ -128,7 +128,7 @@ Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
   node->N = args[6].as<IntImm>().value()->value;
   node->K = args[7].as<IntImm>().value()->value;
   node->policy = GemmWarpPolicy(args[8].as<IntImm>().value()->value);
-  node->clear_accum = args[9].as<Bool>().value();
+  node->clear_accum = args[9].as<PrimExpr>().value();
   node->stride_A = args[10].as<IntImm>().value()->value;
   node->stride_B = args[11].as<IntImm>().value()->value;
   node->offset_A = args[12].as<IntImm>().value()->value;
@@ -588,7 +588,10 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   ss << op_name << "<" << M << ", " << N << ", " << K << ", ";
   ss << warp_m << ", " << warp_n << ", ";
   ss << trans_A << ", " << trans_B;
-  ss << ", " << clear_accum;
+  auto clear_accum_bool = clear_accum.as<Bool>();
+  ICHECK(clear_accum_bool.has_value())
+      << "clear_accum must be a constant Bool type, got " << clear_accum;
+  ss << ", " << bool(clear_accum_bool.value());
   if (TargetIsCuda(T.target) && (GetArchInt(T.target) >= 75)) {
     ss << ", " << stride_A << ", " << stride_B;
     ss << ", " << offset_A << ", " << offset_B;
@@ -651,7 +654,6 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
   GemmInst gemm_inst = GetGemmInst(block_size, T.target);
   auto [warp_m, warp_n] =
       policy->ComputeWarpPartition(M, N, block_size, T.target, gemm_inst);
-
   if (TargetIsVolta(T.target)) {
     ICHECK(C.scope() == "local.fragment")
         << "Volta gemm only supports C in local.fragment scope, got "

@@ -24,6 +24,8 @@ enum class CopyInst : uint8_t {
   // as they have different memory access patterns
   kBulkLoad1D = 5,  // utilize tma load 1d
   kBulkStore1D = 6, // utilize tma store 1d
+  kTMemLoad = 7,    // tcgen05.ld (tensor memory -> register)
+  kTMemStore = 8,   // tcgen05.st (register -> tensor memory)
 };
 
 /// Descriptor for Tensor Memory Access (TMA) copy operations
@@ -188,6 +190,16 @@ public:
   bool CheckSTSMCopy(Target target) const;
 
   /*!
+   * \brief Check if tensor memory load is supported.
+   */
+  bool CheckTMemLoad(Target target) const;
+
+  /*!
+   * \brief Check if tensor memory store is supported.
+   */
+  bool CheckTMemStore(Target target) const;
+
+  /*!
    * \brief Get the copy instruction type.
    */
   CopyInst GetCopyInst(Target target, bool disable_tma_lower,
@@ -213,6 +225,11 @@ protected:
    */
   Stmt LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
                      CopyInst copy_inst) const;
+
+  /*!
+   * \brief Generate lowering for tensor memory copy (tcgen05.ld/st/cp).
+   */
+  Stmt LowerTmemCopy(const LowerArgs &T, arith::Analyzer *analyzer) const;
 
   /*!
    * \brief Generate lowering for normal copy.

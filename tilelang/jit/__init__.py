@@ -95,7 +95,7 @@ class _JitImplementation:
     verbose: bool
     pass_configs: Optional[Dict[str, Any]]
     debug_root_path: Optional[str]
-    compile_flags: Optional[List[str]]
+    compile_flags: Optional[Union[List[str], str]]
 
     def __init__(self,
                  out_idx: Any = None,
@@ -105,7 +105,7 @@ class _JitImplementation:
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None,
                  debug_root_path: Optional[str] = None,
-                 compile_flags: Optional[List[str]] = None):
+                 compile_flags: Optional[Union[List[str], str]] = None):
         """
         Initializes the JIT compiler decorator.
 
@@ -137,6 +137,9 @@ class _JitImplementation:
             If None, no debug information is saved (default: None).
             If a relative path is given, it's made absolute relative to the project root
             or current working directory.
+        compile_flags : Optional[Union[List[str], str]], optional
+            Additional compilation flags to pass to the compiler.
+            If None, no additional compilation flags are passed (default: None).
         """
         self.out_idx = out_idx
         self.execution_backend = execution_backend

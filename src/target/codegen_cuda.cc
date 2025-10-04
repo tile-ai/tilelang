@@ -1303,6 +1303,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto mbarrier_obj = print_mbarrier_obj(op->args[0]);
     auto phase = this->PrintExpr(op->args[1]);
     this->stream << mbarrier_obj << ".wait(" << phase << ");\n";
+  } else if (op->op.same_as(tl::ptx_init_tensor_memory())) {
+    print_extern_call_stmt("tl::tmem_allocate");
+  } else if (op->op.same_as(tl::ptx_deallocate_tensor_memory())) {
+    print_extern_call_stmt("tl::tmem_deallocate");
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     return;
   } else if (op->op.same_as(tl::tma_load())) {
@@ -1387,7 +1391,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::sync_grid())) {
     this->need_cooperative_groups_ = true;
     this->PrintIndent();
-    this->stream << "cooperative_groups::this_grid().sync();\n";
+    this->stream << "cooperative_groups::grid_group grid = "
+                    "cooperative_groups::this_grid();\n";
+    this->PrintIndent();
+    this->stream << "grid.sync();\n";
   } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";

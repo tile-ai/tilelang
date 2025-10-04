@@ -49,10 +49,7 @@ def matmul_warp_specialize_copy_1_gemm_0(M,
     return main
 
 
-def main():
-    M = 16384
-    N = 16384
-    K = 16384
+def main(M=16384, N=16384, K=16384):
     block_M = 128
     block_N = 128
     block_K = 64
