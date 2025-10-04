@@ -53,7 +53,7 @@ def main():
 
     # benchmark
     profiler = kernel.get_profiler()
-    latency = profiler.do_bench(kernel_names="gemm_kernel")
+    latency = profiler.do_bench(backend="cupti")
     # latency = profiler.do_bench()
     print(f"tilelang Latency: {latency}ms")
 

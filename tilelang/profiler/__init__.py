@@ -14,7 +14,7 @@ from tilelang.utils.tensor import (
 )
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
-from tilelang.profiler.bench import do_bench_event, do_bench_kineto
+from tilelang.profiler.bench import do_bench
 
 
 @dataclass
@@ -223,13 +223,12 @@ class Profiler:
         n_warmup: int = 1,
         n_repeat: int = 1,
         input_tensors: List[torch.Tensor] = None,
-        kernel_names=None,
+        backend: Literal["event", "cupti"] = "event",
         grad_to_none: Optional[List[torch.Tensor]] = None,
         quantiles: Optional[List[float]] = None,
         return_mode: Literal["min", "max", "mean", "median"] = "mean",
         trace_path: str = None,
         suppress_kineto_output: bool = False,
-        with_multiple_kernels: bool = False,
     ) -> float:
         """Benchmarks the execution time of a given function.
 
@@ -252,18 +251,9 @@ class Profiler:
                 func = self.adapter
             ins = self._get_inputs() if input_tensors is None else input_tensors
             bench_func = partial(func, *ins)
-            return do_bench_event(
+            return do_bench(
                 bench_func,
-                warmup=warmup,
-                rep=rep,
-                _n_warmup=n_warmup,
-                _n_repeat=n_repeat,
-                grad_to_none=grad_to_none,
-                quantiles=quantiles,
-                return_mode=return_mode,
-            ) if kernel_names is None else do_bench_kineto(
-                bench_func,
-                kernel_names=kernel_names,
+                backend=backend,
                 warmup=warmup,
                 rep=rep,
                 _n_warmup=n_warmup,
@@ -271,7 +261,6 @@ class Profiler:
                 return_mode=return_mode,
                 trace_path=trace_path,
                 suppress_kineto_output=suppress_kineto_output,
-                with_multiple_kernels=with_multiple_kernels,
             )
         elif profiler == "tvm":
             assert func is not None, "func should not be None"

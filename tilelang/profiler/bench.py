@@ -6,7 +6,7 @@ import os
 import sys
 
 
-def do_bench_event(
+def _do_bench_event(
     fn: Callable,
     warmup: float = 25,
     rep: float = 100,
@@ -148,9 +148,8 @@ class suppress_stdout_stderr:
 
 
 # from https://github.com/deepseek-ai/DeepGEMM/blob/main/deep_gemm/testing/bench.py
-def do_bench_kineto(
+def _do_bench_kineto(
     fn: Callable,
-    kernel_names,
     warmup: float = 25,
     rep: float = 100,
     _n_warmup: int = 0,
@@ -159,7 +158,6 @@ def do_bench_kineto(
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
     trace_path: str = None,
     suppress_kineto_output: bool = False,
-    with_multiple_kernels: bool = False,
 ) -> Union[float, List[float]]:
     """Benchmarks the runtime of a PyTorch function using Kineto."""
     assert return_mode in ["min", "max", "mean", "median"]
@@ -217,37 +215,56 @@ def do_bench_kineto(
     if using_nsys:
         return 1
 
-    # Parse the profiling table
-    assert isinstance(kernel_names, str) or isinstance(kernel_names, tuple)  # noqa: SIM101
-    is_tuple = isinstance(kernel_names, tuple)
-    prof_lines = profiler.key_averages().table(
-        sort_by='cuda_time_total', max_name_column_width=100).split('\n')
-    kernel_names = (kernel_names,) if isinstance(kernel_names, str) else kernel_names
-    if not with_multiple_kernels:
-        for name in kernel_names:
-            assert sum([name in line for line in prof_lines
-                       ]) <= 1, f'Errors of the kernel {name} in the profiling table'
-
     # Save chrome traces
     if trace_path is not None:
         profiler.export_chrome_trace(trace_path)
 
-    # Return average kernel times
-    units = {'ms': 1e3, 'us': 1e6}
-    kernel_times = []
-    for name in kernel_names:
-        all_times = []
-        for line in prof_lines:
-            if name in line:
-                time_str = line.split()[-2]
-                num_str = line.split()[-1]
-                for unit, scale in units.items():
-                    if unit in time_str:
-                        call_time = float(time_str.replace(unit, '')) / scale * int(num_str)
-                        all_times.extend([call_time])
-                        break
-        # to ms
-        times = torch.tensor(all_times, dtype=torch.float) * 1e3
-        kernel_times.append(getattr(torch, return_mode)(times).item())
+    # # Return average kernel times
+    total_cuda_time = 0.0
+    excluded_time = 0.0
+    excluded_kernels = "at::native::vectorized_elementwise"
+    for e in profiler.key_averages():
+        total_cuda_time += e.self_device_time_total
+        if excluded_kernels in e.key:
+            excluded_time += e.self_device_time_total
 
-    return tuple(kernel_times) if is_tuple else kernel_times[0]
+    kernel_time = (total_cuda_time - excluded_time) / n_repeat
+
+    return kernel_time * 1e-3
+
+
+def do_bench(
+    fn: Callable,
+    warmup: float = 25,
+    rep: float = 100,
+    _n_warmup: int = 0,
+    _n_repeat: int = 0,
+    grad_to_none: Optional[List[torch.Tensor]] = None,
+    quantiles: Optional[List[float]] = None,
+    fast_flush: bool = True,
+    backend: Literal["event", "cupti"] = "event",
+    return_mode: Literal["min", "max", "mean", "median"] = "mean",
+    trace_path: str = None,
+    suppress_kineto_output: bool = False,
+) -> Union[float, List[float]]:
+    return _do_bench_event(
+        fn,
+        warmup,
+        rep,
+        _n_warmup,
+        _n_repeat,
+        grad_to_none,
+        quantiles,
+        fast_flush,
+        return_mode,
+    ) if backend == "event" else _do_bench_kineto(
+        fn,
+        warmup,
+        rep,
+        _n_warmup,
+        _n_repeat,
+        fast_flush,
+        return_mode,
+        trace_path,
+        suppress_kineto_output,
+    )
