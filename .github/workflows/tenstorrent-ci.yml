@@ -33,15 +33,17 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install ruff black
+        pip install -r requirements-lint.txt
 
-    - name: Run ruff linter
+    - name: Run format.sh check
       run: |
-        ruff check tilelang/engine/tt/ testing/python/tt/ --output-format=github
-
-    - name: Run black formatter check
-      run: |
-        black --check tilelang/engine/tt/ testing/python/tt/
+        bash format.sh
+        # Check if format.sh made any changes
+        if ! git diff --quiet; then
+          echo "Code formatting issues found. Please run format.sh locally and commit the changes."
+          git diff
+          exit 1
+        fi
 
   build-and-test:
     runs-on: ubuntu-latest
