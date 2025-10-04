@@ -7,15 +7,6 @@ import sys
 
 
 # from https://github.com/deepseek-ai/DeepGEMM/blob/main/deep_gemm/testing/bench.py
-class empty_suppress:
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_):
-        pass
-
-
 class suppress_stdout_stderr:
 
     def __enter__(self):
@@ -153,25 +144,19 @@ def do_bench(
         return getattr(torch, return_mode)(times).item()
 
     elif backend == "cupti":
-        using_nsys = int(os.environ.get('DG_NSYS_PROFILING', 0))
-        suppress = suppress_stdout_stderr if not using_nsys else empty_suppress
-        with suppress():
+        with suppress_stdout_stderr():
             schedule = torch.profiler.schedule(
-                wait=1, warmup=0, active=1, repeat=1) if not using_nsys else None
+                wait=1, warmup=0, active=1, repeat=1)
             profiler = torch.profiler.profile(
                 activities=[torch.profiler.ProfilerActivity.CUDA],
-                schedule=schedule) if not using_nsys else empty_suppress()
+                schedule=schedule)
             with profiler:
                 for _i in range(2):
                     for _ in range(n_repeat):
                         cache.zero_()
                         fn()
 
-                    if not using_nsys:
-                        profiler.step()
-
-        if using_nsys:
-            return 1
+                    profiler.step()
 
         # Return average kernel times
         total_cuda_time = 0.0
