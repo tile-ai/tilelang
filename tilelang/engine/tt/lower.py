@@ -59,13 +59,9 @@ def lower(
     # Validate that we're actually targeting Tenstorrent
     target_kind = get_target_kind(target)
     if target_kind != TENSTORRENT_TARGET:
-        raise ValueError(
-            f"Tenstorrent lowering called with invalid target: {target_kind}. "
-            f"Expected: {TENSTORRENT_TARGET}"
-        )
+        raise ValueError(f"Tenstorrent lowering called with invalid target: {target_kind}. "
+                         f"Expected: {TENSTORRENT_TARGET}")
 
-    raise NotImplementedError(
-        "Tenstorrent backend lowering is not yet implemented. "
-        "This is a stub implementation. The lowering pipeline will be "
-        "added in future workstreams."
-    )
+    raise NotImplementedError("Tenstorrent backend lowering is not yet implemented. "
+                              "This is a stub implementation. The lowering pipeline will be "
+                              "added in future workstreams.")
