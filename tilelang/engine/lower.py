@@ -10,12 +10,13 @@ from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
 from tilelang.engine.param import KernelParam, CompiledArtifact
-from tilelang.engine.tt import lower_tenstorrent
-from tilelang.utils.target import TENSTORRENT_TARGET, determine_target
+from tilelang.utils.target import determine_target
 from tilelang.engine.phase import (
     LowerAndLegalize,
     OptimizeForTarget,
 )
+from tilelang.engine.tt import lower_tenstorrent
+from tilelang.utils.target import TENSTORRENT_TARGET
 
 
 def is_cpu_device_backend(target: Target):
