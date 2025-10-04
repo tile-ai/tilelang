@@ -12,6 +12,7 @@ def _is_tenstorrent_backend_enabled() -> bool:
     """Detect whether the Tenstorrent backend has been registered with TVM."""
     return bool(tvm.get_global_func("target.build.tilelang_tt", allow_missing=True))
 
+
 AVALIABLE_TARGETS = {
     "auto",
     "cuda",
@@ -21,7 +22,6 @@ AVALIABLE_TARGETS = {
     "llvm",
     TENSTORRENT_TARGET,
 }
-
 
 _HAS_TENSTORRENT_BACKEND = _is_tenstorrent_backend_enabled()
 
@@ -94,8 +94,7 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
             target, Target) or target_kind in AVALIABLE_TARGETS, f"Target {target} is not supported"
         if target_kind == TENSTORRENT_TARGET and not _HAS_TENSTORRENT_BACKEND:
             raise ValueError(
-                "Tenstorrent backend requires TileLang to be built with TL_TT_BACKEND enabled."
-            )
+                "Tenstorrent backend requires TileLang to be built with TL_TT_BACKEND enabled.")
         return_var = target
 
     if return_object:
