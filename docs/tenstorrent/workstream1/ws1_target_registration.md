@@ -22,4 +22,4 @@ Enable explicit opt-in for the Tenstorrent backend by adding `"tenstorrent"` to 
 ## Validation
 - Covered by `tests/python/tt/test_target_registration.py` (see Workstream 1 testing ticket).
 
-Status: TODO
+Status: In Review (changes pending on branch `tt-matmul-mvp-plan`)
