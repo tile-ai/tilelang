@@ -73,12 +73,13 @@ The Tenstorrent backend CI is defined in `.github/workflows/tenstorrent-ci.yml` 
 
 **Steps:**
 1. Checkout repository
-2. Set up Python with pip caching
-3. Install mypy
+2. Set up Python with pip caching (caches `requirements-mypy.txt` dependencies)
+3. Install mypy from requirements-mypy.txt
 4. Run mypy on `tilelang/engine/tt/` (currently set to continue-on-error)
 
 **Caching:**
-- Pip packages are cached automatically
+- Pip packages are cached based on `requirements-mypy.txt` hash
+- Ensures consistent caching behavior across CI runs
 
 ## Caching Summary
 
@@ -90,7 +91,7 @@ The CI uses multiple layers of caching for efficiency:
 | build-and-test | TVM build | TVM submodule commit + OS | Avoid rebuilding TVM (~30+ min) |
 | build-and-test | Apt packages | OS + deps version | Fast apt install |
 | build-and-test | Pip packages | requirements hash | Fast pytest install |
-| static-analysis | Pip packages | Auto (setup-python) | Fast mypy installation |
+| static-analysis | Pip packages | requirements-mypy.txt hash | Fast mypy installation |
 
 ## Running Locally
 
