@@ -1,0 +1,3 @@
+att: TARGET_CU=1
+SIMD_MASK=0x3
+KERNEL=flash_bwd_kernel
