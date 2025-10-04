@@ -33,7 +33,7 @@ def lower(
     """
 
     # TODO(tenstorrent): replace placeholder once the TT lowering pipeline is implemented.
-    _ = (target, target_host, runtime_only, enable_host_codegen, enable_device_compile)
+    del target, target_host, runtime_only, enable_host_codegen, enable_device_compile
 
     host_mod = tvm.IRModule()
     device_mod = tvm.IRModule()
