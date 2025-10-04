@@ -49,9 +49,6 @@ jobs:
 
   build-and-test:
     runs-on: ubuntu-latest
-    container:
-      image: nvcr.io/nvidia/pytorch:23.01-py3
-      options: --user root
 
     steps:
     - name: Checkout repository
@@ -60,38 +57,26 @@ jobs:
         fetch-depth: 0
         submodules: recursive
 
-    - name: Cache apt packages
-      uses: actions/cache@v4
+    - name: Set up Python
+      uses: actions/setup-python@v4
       with:
-        path: /var/cache/apt/archives
-        key: apt-${{ runner.os }}-build-deps-v1
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+        cache-dependency-path: 'requirements-test.txt'
 
-    - name: Install build dependencies
+    - name: Install system dependencies
       run: |
-        export DEBIAN_FRONTEND=noninteractive
-        export TZ=Etc/UTC
-        apt-get update
-        apt-get install -y \
+        sudo apt-get update
+        sudo apt-get install -y \
           build-essential \
           cmake \
           ninja-build \
-          git \
-          python3-dev \
-          zlib1g-dev \
-          libedit-dev \
-          libxml2-dev
+          llvm-dev \
+          libpolly-dev
 
-    - name: Cache pip packages
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: pip-${{ runner.os }}-${{ hashFiles('requirements-test.txt') }}
-        restore-keys: |
-          pip-${{ runner.os }}-
-
-    - name: Set up Python environment
+    - name: Install Python dependencies
       run: |
-        python3 -m pip install --upgrade pip
+        python -m pip install --upgrade pip
         pip install -r requirements-test.txt
 
     - name: Generate TVM cache key
@@ -109,19 +94,19 @@ jobs:
         path: |
           build/libtvm*.so
           build/3rdparty/
-        key: tvm-build-cuda-${{ steps.tvm-cache-key.outputs.tvm_commit }}-${{ runner.os }}
+        key: tvm-build-llvm-${{ steps.tvm-cache-key.outputs.tvm_commit }}-${{ runner.os }}
         restore-keys: |
-          tvm-build-cuda-${{ steps.tvm-cache-key.outputs.tvm_commit }}-
-          tvm-build-cuda-
+          tvm-build-llvm-${{ steps.tvm-cache-key.outputs.tvm_commit }}-
+          tvm-build-llvm-
 
-    - name: Build TileLang with CUDA
+    - name: Build TileLang with LLVM
       run: |
         mkdir -p build
         cd build
         # Create config.cmake for TVM
         cp ../3rdparty/tvm/cmake/config.cmake .
-        echo "set(USE_CUDA ON)" >> config.cmake
-        echo "set(USE_LLVM OFF)" >> config.cmake
+        echo "set(USE_LLVM ON)" >> config.cmake
+        echo "set(USE_CUDA OFF)" >> config.cmake
 
         # Configure with CMake
         cmake .. \
