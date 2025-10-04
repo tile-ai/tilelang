@@ -227,8 +227,6 @@ class Profiler:
         grad_to_none: Optional[List[torch.Tensor]] = None,
         quantiles: Optional[List[float]] = None,
         return_mode: Literal["min", "max", "mean", "median"] = "mean",
-        trace_path: str = None,
-        suppress_kineto_output: bool = False,
     ) -> float:
         """Benchmarks the execution time of a given function.
 
@@ -253,14 +251,14 @@ class Profiler:
             bench_func = partial(func, *ins)
             return do_bench(
                 bench_func,
-                backend=backend,
                 warmup=warmup,
                 rep=rep,
                 _n_warmup=n_warmup,
                 _n_repeat=n_repeat,
+                grad_to_none=grad_to_none,
+                quantiles=quantiles,
+                backend=backend,
                 return_mode=return_mode,
-                trace_path=trace_path,
-                suppress_kineto_output=suppress_kineto_output,
             )
         elif profiler == "tvm":
             assert func is not None, "func should not be None"
