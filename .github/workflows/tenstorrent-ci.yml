@@ -127,8 +127,11 @@ jobs:
         cp build/*.so tilelang/lib/ || true
 
         # Install Python package in development mode
-        # Set dummy CUDA_HOME to satisfy setup.py check (we're using LLVM)
+        # Set USE_LLVM=true for LLVM build, dummy CUDA_HOME to pass validation,
+        # and disable commit ID to avoid nvcc check
+        export USE_LLVM=true
         export CUDA_HOME=/usr
+        export WITH_COMMITID=False
         pip install -e .
 
     - name: Run Tenstorrent target registration tests
