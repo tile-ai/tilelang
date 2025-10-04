@@ -171,7 +171,7 @@ def flashattn_bwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
             dK: T.Tensor(dk_shape, dtype),  # type: ignore
             dV: T.Tensor(dv_shape, dtype),  # type: ignore
     ):
-        with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=128) as (bx, by, bz):
+        with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=256) as (bx, by, bz):
             K_shared = T.alloc_shared([block_M, dim_qk], dtype)
             dsT_shared = T.alloc_shared([block_M, block_N], dtype)
             q = T.alloc_shared([block_N, dim_qk], dtype)
@@ -202,10 +202,22 @@ def flashattn_bwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
             T.clear(dk)
             loop_st = T.floordiv(by * block_M, block_N) if is_causal else 0
             loop_ed = T.ceildiv(seq_len, block_N)
-            for k in T.Pipelined(loop_st, loop_ed, num_stages=1):
+            for k in T.Pipelined(loop_st, loop_ed, num_stages=2):
                 T.copy(Q[bz, k * block_N:(k + 1) * block_N, bx, :], q)
                 T.clear(qkT)
-                T.gemm(K_shared, q, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(
+                    K_shared, q, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow, wg_wait=-1)
+                T.copy(dO[bz, k * block_N:(k + 1) * block_N, bx, :], do)
+                T.clear(dsT)
+                T.gemm(
+                    V_shared,
+                    do,
+                    dsT,
+                    transpose_B=True,
+                    policy=T.GemmWarpPolicy.FullRow,
+                    wg_wait=-1)
+                T.wait_wgmma(1)
+
                 T.copy(lse[bz, bx, k * block_N:(k + 1) * block_N], lse_shared)
                 for i, j in T.Parallel(block_M, block_N):
                     qkT[i, j] = T.exp2(qkT[i, j] * scale - lse_shared[j])
@@ -213,21 +225,20 @@ def flashattn_bwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
                     for i, j in T.Parallel(block_M, block_N):
                         qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j],
                                                    0)
-                T.copy(dO[bz, k * block_N:(k + 1) * block_N, bx, :], do)
-                T.clear(dsT)
-                T.gemm(V_shared, do, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                T.wait_wgmma(0)
                 T.copy(qkT, qkT_cast)
-                T.gemm(qkT_cast, do, dv, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(qkT_cast, do, dv, policy=T.GemmWarpPolicy.FullRow, wg_wait=-1)
 
                 T.copy(Delta[bz, bx, k * block_N:(k + 1) * block_N], delta)
 
                 for i, j in T.Parallel(block_M, block_N):
                     dsT_cast[i, j] = qkT[i, j] * (dsT[i, j] - delta[j]) * sm_scale
-                T.gemm(dsT_cast, q, dk, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(dsT_cast, q, dk, policy=T.GemmWarpPolicy.FullRow, wg_wait=1)
 
                 T.copy(dsT_cast, dsT_shared)
                 T.clear(dq)
-                T.gemm(dsT_shared, K_shared, dq, transpose_A=True)
+                T.gemm(dsT_shared, K_shared, dq, transpose_A=True, wg_wait=1)
+                T.wait_wgmma(0)
                 for i, j in T.Parallel(block_N, dim_qk):
                     if k * block_N + i < seq_len:
                         T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
@@ -268,7 +279,7 @@ class _attention(torch.autograd.Function):
             return x
 
         do, q, k, v, o = [maybe_contiguous(x) for x in (do, q, k, v, o)]
-        block_M = 64
+        block_M = 128
         block_N = 32
         mod_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD_V)
         mod_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD_QK)
