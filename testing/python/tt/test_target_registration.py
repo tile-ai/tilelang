@@ -5,8 +5,8 @@ import pytest
 try:
     import tvm
     from tvm.target import Target
-except ModuleNotFoundError:
-    pytest.skip("TVM not available", allow_module_level=True)
+except ModuleNotFoundError as exc:
+    pytest.skip(f"TVM not available: {exc}", allow_module_level=True)
 
 _target_mod = importlib.import_module("tilelang.utils.target")
 _tt_lower = importlib.import_module("tilelang.engine.tt.lower")

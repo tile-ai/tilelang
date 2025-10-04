@@ -40,13 +40,12 @@ def lower(
         enable_host_codegen: Whether to enable host code generation (unused in stub)
         enable_device_compile: Whether to enable device compilation (unused in stub)
 
-    Returns:
-        This function never returns successfully.
-
     Raises:
         ValueError: If the target is not a Tenstorrent target
-        NotImplementedError: Always raised as this is a stub implementation
+        NotImplementedError: This stub implementation always raises this exception
+            instead of returning a CompiledArtifact
     """
+    from tilelang.engine.lower import get_target_kind
     from tilelang.utils.target import TENSTORRENT_TARGET
 
     # Unused parameters in this stub implementation - will be used in full implementation
@@ -58,7 +57,7 @@ def lower(
     _ = enable_device_compile
 
     # Validate that we're actually targeting Tenstorrent
-    target_kind = target.kind.name if isinstance(target, Target) else target
+    target_kind = get_target_kind(target)
     if target_kind != TENSTORRENT_TARGET:
         raise ValueError(
             f"Tenstorrent lowering called with invalid target: {target_kind}. "
