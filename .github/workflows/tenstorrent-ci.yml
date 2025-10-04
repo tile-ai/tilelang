@@ -76,6 +76,26 @@ jobs:
         python3 -m pip install --upgrade pip
         pip install pytest pytest-xdist
 
+    - name: Generate TVM cache key
+      id: tvm-cache-key
+      run: |
+        # Cache key based on TVM submodule commit hash
+        TVM_COMMIT=$(git rev-parse HEAD:3rdparty/tvm)
+        echo "tvm_commit=$TVM_COMMIT" >> $GITHUB_OUTPUT
+        echo "TVM submodule at commit: $TVM_COMMIT"
+
+    - name: Cache TVM build
+      id: cache-tvm
+      uses: actions/cache@v4
+      with:
+        path: |
+          build/libtvm*.so
+          build/3rdparty/
+        key: tvm-build-cuda-${{ steps.tvm-cache-key.outputs.tvm_commit }}-${{ runner.os }}
+        restore-keys: |
+          tvm-build-cuda-${{ steps.tvm-cache-key.outputs.tvm_commit }}-
+          tvm-build-cuda-
+
     - name: Build TileLang with CUDA
       run: |
         mkdir -p build
@@ -92,6 +112,7 @@ jobs:
           -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
         # Build (use fewer jobs to avoid OOM on GitHub runners)
+        # If cache hit, this will be much faster as TVM is already built
         cmake --build . --config Release -j 2
 
     - name: Install TileLang
