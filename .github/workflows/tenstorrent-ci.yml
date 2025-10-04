@@ -29,6 +29,8 @@ jobs:
       uses: actions/setup-python@v4
       with:
         python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+        cache-dependency-path: 'requirements-lint.txt'
 
     - name: Install dependencies
       run: |
@@ -58,6 +60,12 @@ jobs:
         fetch-depth: 0
         submodules: recursive
 
+    - name: Cache apt packages
+      uses: actions/cache@v4
+      with:
+        path: /var/cache/apt/archives
+        key: apt-${{ runner.os }}-build-deps-v1
+
     - name: Install build dependencies
       run: |
         export DEBIAN_FRONTEND=noninteractive
@@ -72,6 +80,14 @@ jobs:
           zlib1g-dev \
           libedit-dev \
           libxml2-dev
+
+    - name: Cache pip packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: pip-${{ runner.os }}-${{ hashFiles('requirements-test.txt') }}
+        restore-keys: |
+          pip-${{ runner.os }}-
 
     - name: Set up Python environment
       run: |
@@ -150,6 +166,7 @@ jobs:
       uses: actions/setup-python@v4
       with:
         python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
 
     - name: Install mypy
       run: |
