@@ -101,6 +101,9 @@ jobs:
           tvm-build-llvm-${{ steps.tvm-cache-key.outputs.tvm_commit }}-
           tvm-build-llvm-
 
+    - name: Log TVM cache status
+      run: echo "TVM cache hit: ${{ steps.cache-tvm.outputs.cache-hit }}"
+
     - name: Build TileLang with LLVM
       run: |
         mkdir -p build
