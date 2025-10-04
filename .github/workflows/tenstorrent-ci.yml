@@ -71,8 +71,10 @@ jobs:
           build-essential \
           cmake \
           ninja-build \
-          llvm-dev \
-          libpolly-dev
+          llvm \
+          libedit-dev \
+          libxml2-dev \
+          zlib1g-dev
 
     - name: Install Python dependencies
       run: |
