@@ -20,4 +20,4 @@ Add Python regression coverage ensuring the Tenstorrent target can be selected a
 ## Validation
 - Test passes under `pytest tests/python/tt/test_target_registration.py` and is added to CI once Workstream 1 lands.
 
-Status: TODO
+Status: In Review (tests added on branch `tt-matmul-mvp-plan`)
