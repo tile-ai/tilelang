@@ -47,16 +47,29 @@ def test_determine_target_raises_when_backend_disabled(toggle_tt_backend):
         _target_mod.determine_target(_target_mod.TENSTORRENT_TARGET)
 
 
-def test_tenstorrent_engine_lower_returns_placeholder(toggle_tt_backend):
+def test_tenstorrent_engine_lower_raises_not_implemented(toggle_tt_backend):
     toggle_tt_backend(True)
-    artifact = _tt_lower.lower(
-        tvm.IRModule(),
-        params=None,
-        target=_target_mod.TENSTORRENT_TARGET,
-        target_host=None,
-        runtime_only=False,
-        enable_host_codegen=False,
-        enable_device_compile=False,
-    )
-    assert isinstance(artifact, CompiledArtifact)
-    assert artifact.kernel_source.startswith("// Tenstorrent backend lowering")
+    with pytest.raises(NotImplementedError, match="Tenstorrent backend lowering is not yet implemented"):
+        _tt_lower.lower(
+            tvm.IRModule(),
+            params=None,
+            target=_target_mod.TENSTORRENT_TARGET,
+            target_host=None,
+            runtime_only=False,
+            enable_host_codegen=False,
+            enable_device_compile=False,
+        )
+
+
+def test_tenstorrent_engine_lower_validates_target(toggle_tt_backend):
+    toggle_tt_backend(True)
+    with pytest.raises(ValueError, match="Tenstorrent lowering called with invalid target"):
+        _tt_lower.lower(
+            tvm.IRModule(),
+            params=None,
+            target="cuda",
+            target_host=None,
+            runtime_only=False,
+            enable_host_codegen=False,
+            enable_device_compile=False,
+        )

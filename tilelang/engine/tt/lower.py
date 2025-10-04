@@ -27,15 +27,36 @@ def lower(
 ) -> CompiledArtifact:
     """Lower the given module for the Tenstorrent backend.
 
-    The concrete lowering pipeline will be filled in by later workstreams. For now
-    we return a placeholder ``CompiledArtifact`` so that callers can exercise the
-    Tenstorrent code path without tripping assertions in the shared engine code.
+    This is a stub implementation that raises NotImplementedError. The concrete
+    lowering pipeline will be implemented in future workstreams.
+
+    Args:
+        mod: The TVM IRModule to lower
+        params: Optional list of kernel parameters
+        target: The target (should be Tenstorrent target)
+        target_host: Optional host target
+        runtime_only: Whether to generate runtime-only code
+        enable_host_codegen: Whether to enable host code generation
+        enable_device_compile: Whether to enable device compilation
+
+    Returns:
+        CompiledArtifact: The compiled artifact
+
+    Raises:
+        NotImplementedError: Always raised as this is a stub implementation
     """
+    from tilelang.utils.target import TENSTORRENT_TARGET
 
-    # TODO(tenstorrent): replace placeholder once the TT lowering pipeline is implemented.
-    del target, target_host, runtime_only, enable_host_codegen, enable_device_compile
+    # Validate that we're actually targeting Tenstorrent
+    target_kind = target.kind.name if isinstance(target, Target) else target
+    if target_kind != TENSTORRENT_TARGET:
+        raise ValueError(
+            f"Tenstorrent lowering called with invalid target: {target_kind}. "
+            f"Expected: {TENSTORRENT_TARGET}"
+        )
 
-    host_mod = tvm.IRModule()
-    device_mod = tvm.IRModule()
-    kernel_source = "// Tenstorrent backend lowering not yet implemented\n"
-    return CompiledArtifact(host_mod, device_mod, params or [], kernel_source)
+    raise NotImplementedError(
+        "Tenstorrent backend lowering is not yet implemented. "
+        "This is a stub implementation. The lowering pipeline will be "
+        "added in future workstreams."
+    )
