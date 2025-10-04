@@ -49,7 +49,6 @@ def do_bench(
     rep: float = 100,
     _n_warmup: int = 0,
     _n_repeat: int = 0,
-    grad_to_none: Optional[List[torch.Tensor]] = None,
     quantiles: Optional[List[float]] = None,
     fast_flush: bool = True,
     backend: Literal["event", "cupti"] = "event",
@@ -118,12 +117,6 @@ def do_bench(
         start_event = [torch.cuda.Event(enable_timing=True) for i in range(n_repeat)]
         end_event = [torch.cuda.Event(enable_timing=True) for i in range(n_repeat)]
         for i in range(n_repeat):
-            # we don't want `fn` to accumulate gradient values
-            # if it contains a backward pass. So we clear the
-            # provided gradients
-            if grad_to_none is not None:
-                for x in grad_to_none:
-                    x.grad = None
             # we clear the L2 cache before each run
             cache.zero_()
             # record time of `fn`
@@ -145,11 +138,9 @@ def do_bench(
 
     elif backend == "cupti":
         with suppress_stdout_stderr():
-            schedule = torch.profiler.schedule(
-                wait=1, warmup=0, active=1, repeat=1)
+            schedule = torch.profiler.schedule(wait=1, warmup=0, active=1, repeat=1)
             profiler = torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CUDA],
-                schedule=schedule)
+                activities=[torch.profiler.ProfilerActivity.CUDA], schedule=schedule)
             with profiler:
                 for _i in range(2):
                     for _ in range(n_repeat):
