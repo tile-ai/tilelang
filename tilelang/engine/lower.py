@@ -15,10 +15,24 @@ from tilelang.engine.phase import (
     LowerAndLegalize,
     OptimizeForTarget,
 )
+from tilelang.engine.tt import lower_tenstorrent
+from tilelang.utils.target import TENSTORRENT_TARGET
 
 
 def is_cpu_device_backend(target: Target):
     return target.kind.name == "c"
+
+
+def get_target_kind(target: Union[str, Target]) -> str:
+    """Extract the target kind name from a target object or string.
+
+    Args:
+        target: Either a string target name or a Target object
+
+    Returns:
+        The target kind name as a string
+    """
+    return target.kind.name if isinstance(target, Target) else target
 
 
 def has_device_kernel_launch(attrs) -> bool:
@@ -213,8 +227,19 @@ def lower(
         target = determine_target(target)
 
     target_host = canon_target_host(target, target_host)
-
     target_host = tvm.target.Target.canon_target(target_host)
+
+    if get_target_kind(target) == TENSTORRENT_TARGET:
+        return lower_tenstorrent(
+            mod,
+            params,
+            target,
+            target_host,
+            runtime_only=runtime_only,
+            enable_host_codegen=enable_host_codegen,
+            enable_device_compile=enable_device_compile,
+        )
+
     target = tvm.target.Target(target, target_host)
 
     _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))

@@ -3,11 +3,14 @@ import importlib
 import pytest
 
 try:
+    import tvm
     from tvm.target import Target
 except ModuleNotFoundError as exc:
-    pytest.skip("TVM not available", allow_module_level=True)  # pragma: no cover
+    pytest.skip(f"TVM not available: {exc}", allow_module_level=True)
 
 _target_mod = importlib.import_module("tilelang.utils.target")
+_tt_lower = importlib.import_module("tilelang.engine.tt.lower")
+CompiledArtifact = importlib.import_module("tilelang.engine.param").CompiledArtifact
 
 
 @pytest.fixture
@@ -42,3 +45,31 @@ def test_determine_target_raises_when_backend_disabled(toggle_tt_backend):
     toggle_tt_backend(False)
     with pytest.raises(ValueError, match="Tenstorrent backend requires"):
         _target_mod.determine_target(_target_mod.TENSTORRENT_TARGET)
+
+
+def test_tenstorrent_engine_lower_raises_not_implemented(toggle_tt_backend):
+    toggle_tt_backend(True)
+    with pytest.raises(NotImplementedError, match="Tenstorrent backend lowering is not yet implemented"):
+        _tt_lower.lower(
+            tvm.IRModule(),
+            params=None,
+            target=_target_mod.TENSTORRENT_TARGET,
+            target_host=None,
+            runtime_only=False,
+            enable_host_codegen=False,
+            enable_device_compile=False,
+        )
+
+
+def test_tenstorrent_engine_lower_validates_target(toggle_tt_backend):
+    toggle_tt_backend(True)
+    with pytest.raises(ValueError, match="Tenstorrent lowering called with invalid target"):
+        _tt_lower.lower(
+            tvm.IRModule(),
+            params=None,
+            target="cuda",
+            target_host=None,
+            runtime_only=False,
+            enable_host_codegen=False,
+            enable_device_compile=False,
+        )
