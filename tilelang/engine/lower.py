@@ -10,7 +10,8 @@ from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
 from tilelang.engine.param import KernelParam, CompiledArtifact
-from tilelang.utils.target import determine_target
+from tilelang.engine.tt import lower_tenstorrent
+from tilelang.utils.target import TENSTORRENT_TARGET, determine_target
 from tilelang.engine.phase import (
     LowerAndLegalize,
     OptimizeForTarget,
@@ -213,8 +214,20 @@ def lower(
         target = determine_target(target)
 
     target_host = canon_target_host(target, target_host)
-
     target_host = tvm.target.Target.canon_target(target_host)
+
+    target_kind = target.kind.name if isinstance(target, Target) else target
+    if target_kind == TENSTORRENT_TARGET:
+        return lower_tenstorrent(
+            mod,
+            params,
+            target,
+            target_host,
+            runtime_only=runtime_only,
+            enable_host_codegen=enable_host_codegen,
+            enable_device_compile=enable_device_compile,
+        )
+
     target = tvm.target.Target(target, target_host)
 
     _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))

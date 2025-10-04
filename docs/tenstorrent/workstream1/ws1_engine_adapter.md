@@ -19,4 +19,4 @@ Teach the TileLang lowering entry point to delegate device codegen to a dedicate
 ## Validation
 - Smoke test through `tests/python/tt/test_target_registration.py` to confirm the TT branch executes without raising.
 
-Status: TODO
+Status: In Review (changes pending on branch `ws1-engine-adapter`)
