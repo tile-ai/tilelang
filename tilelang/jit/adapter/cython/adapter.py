@@ -175,7 +175,7 @@ from cython_wrapper import CythonKernelWrapper
 
 
 class CythonKernelAdapter(BaseKernelAdapter):
-    """Adapter class that converts TVM/TIR functions to callable CUDA kernels using ctypes.
+    """Adapter class that converts TVM/TIR functions to callable CUDA kernels using cython.
 
     This adapter handles:
     1. Converting TIR functions to compiled CUDA libraries

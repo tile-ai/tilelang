@@ -51,6 +51,12 @@ def main():
     print("CUDA Source:")
     print(kernel.get_kernel_source())
 
+    # benchmark
+    profiler = kernel.get_profiler()
+    latency = profiler.do_bench(backend="cupti")
+    # latency = profiler.do_bench()
+    print(f"tilelang Latency: {latency}ms")
+
 
 if __name__ == "__main__":
     main()
