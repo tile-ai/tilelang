@@ -2,11 +2,7 @@
 import tilelang
 from tilelang import language as T
 import torch
-import time
-
-tilelang.disable_cache()
-torch.random.manual_seed(42)
-
+from utils import assert_similar
 
 @tilelang.jit(
     out_idx=[-1]
@@ -26,7 +22,7 @@ def preprocess(
     shape = [B, S, H, D]
 
     @T.prim_func
-    def main(
+    def preprocess_kernel(
         O: T.Tensor(shape, dtype),
         dO: T.Tensor(shape, dtype),
         Delta: T.Tensor([B, S, H], accum_dtype),
@@ -45,7 +41,7 @@ def preprocess(
             T.reduce_sum(acc, delta, 1)
             T.copy(delta, Delta[bz, by * block_ND:(by + 1) * block_ND, bx])
 
-    return main
+    return preprocess_kernel
 
 
 @tilelang.jit(
@@ -313,11 +309,9 @@ def test_sparse_mla_bwd(B=1,
                         DQKV=576,
                         DV=512,
                         topk=2048,
-                        KV_stride=4,
-                        q_start_index_s=4096*7,
                         dtype=torch.bfloat16):
-    B, S, SKV, H, HKV, DQKV, DV, topk, KV_stride, q_start_index_s, dtype = 1, 4096, 32768, 64, 1, 512 + 64, 512, 2048, 1, 4096*7, torch.bfloat16
-
+    KV_stride = 4
+    q_start_index_s = 0
     # Prepare data
     q = torch.randn((B, S, H, DQKV), dtype=dtype, device='cuda').requires_grad_(True)
     kv = torch.randn((B, SKV, HKV, DQKV), dtype=dtype, device='cuda').requires_grad_(True)
@@ -332,21 +326,14 @@ def test_sparse_mla_bwd(B=1,
                 indices[b, t, h, :len(i_i)] = i_i
 
     # Forward
-    from examples.deepseek_v32.sparse_mla_fwd_pipelined import sparse_mla_fwd_interface
-    tl_out, tl_lse = sparse_mla_fwd_interface(q, kv, indices, q_start_index_s, KV_stride)
+    from examples.deepseek_v32.sparse_mla_fwd import sparse_mla_fwd_interface
+    tl_out, tl_lse = sparse_mla_fwd_interface(q, kv, indices)
 
-    # Backward    
-    torch.cuda.synchronize()
-    for warmup_iter in range(20):
-        tl_dq, tl_dkv = sparse_mla_bwd(q, kv, tl_out, do, indices, tl_lse, q_start_index_s, KV_stride)
-    start_time = time.time()
-    for profile_iter in range(100):
-        tl_dq, tl_dkv = sparse_mla_bwd(q, kv, tl_out, do, indices, tl_lse, q_start_index_s, KV_stride)
-    torch.cuda.synchronize()
-    end_time = time.time()
+    tl_dq, tl_dkv = sparse_mla_bwd(q, kv, tl_out, do, indices, tl_lse, q_start_index_s, KV_stride)
+    ref_dq, ref_dkv = ref_sparse_mla_bwd_interface(q, kv, None, do, indices, None, q_start_index_s, KV_stride)
     
-    kernel_time = (end_time - start_time) / 100 * 1000 # convert to ms
-    # ref_dq, ref_dkv = ref_sparse_mla_bwd_interface(q, kv, None, do, indices, None, q_start_index_s, KV_stride)
+    assert_similar(tl_dq, ref_dq, eps=1e-4, name="dq")
+    assert_similar(tl_dkv, ref_dkv, eps=1e-4, name="dkv")
 
     per_token_flop = 2 * sum([
         H * DV * topk,
@@ -355,22 +342,23 @@ def test_sparse_mla_bwd(B=1,
         H * DQKV * topk,
         H * DV * topk,
     ])
-
-    print(f"Average time: {kernel_time:.3f} ms")
-    print(f'bwd io bandwidth = ', (B * S * max(DQKV * 2, DQKV + DV) * topk * 2)/ (kernel_time * 1e-3) / 1e12)
-    print(f'bwd tflops = ', per_token_flop * S / (kernel_time * 1e-3) / 1e12)    
+    from tilelang.profiler import do_bench
+    def fn():
+        return sparse_mla_bwd(q, kv, tl_out, do, indices, tl_lse, q_start_index_s, KV_stride)
+    ms = do_bench(fn, rep=100, warmup=250)
+    print(f"Average time: {ms:.3f} ms")
+    print(f'bwd io bandwidth = ', (B * S * max(DQKV * 2, DQKV + DV) * topk * 2)/ (ms * 1e-3) / 1e12)
+    print(f'bwd tflops = ', per_token_flop * S / (ms * 1e-3) / 1e12)    
 
 
 if __name__ == "__main__":
     test_sparse_mla_bwd(
         B=1,
         S=4096,
-        SKV=32768,
+        SKV=4096,
         H=64,
         HKV=1,
         DQKV=576,
         DV=512,
         topk=2048,
-        KV_stride=4,
-        q_start_index_s=4096*7,
         dtype=torch.bfloat16)
