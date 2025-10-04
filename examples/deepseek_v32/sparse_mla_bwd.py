@@ -321,12 +321,12 @@ def sparse_mla_bwd(q,
 
 
 def ref_sparse_mla_bwd_interface(q, kv, o, do, indices, lse, sm_scale=None, is_casual=True):
-    from examples.deepseek_v32.sparse_mla_fwd_pipelined import ref_sparse_mla_fwd_interface
+    from sparse_mla_fwd import ref_sparse_mla_fwd_interface
     q = q.detach().clone()
     kv = kv.detach().clone()
     q.requires_grad = True
     kv.requires_grad = True
-    o = ref_sparse_mla_fwd_interface(q, kv, indices, 0, 1, sm_scale, is_casual)
+    o = ref_sparse_mla_fwd_interface(q, kv, indices, sm_scale, is_casual)
     o.backward(do)
     return q.grad, kv.grad
 
@@ -353,7 +353,7 @@ def test_sparse_mla_bwd(B=1,
                 indices[b, t, h, :len(i_i)] = i_i
 
     # Forward
-    from examples.deepseek_v32.sparse_mla_fwd import sparse_mla_fwd_interface
+    from sparse_mla_fwd import sparse_mla_fwd_interface
     tl_out, tl_lse = sparse_mla_fwd_interface(q, kv, indices)
 
     tl_dq, tl_dkv = sparse_mla_bwd(q, kv, tl_out, do, indices, tl_lse)
