@@ -224,7 +224,6 @@ class Profiler:
         n_repeat: int = 1,
         input_tensors: List[torch.Tensor] = None,
         backend: Literal["event", "cupti"] = "event",
-        grad_to_none: Optional[List[torch.Tensor]] = None,
         quantiles: Optional[List[float]] = None,
         return_mode: Literal["min", "max", "mean", "median"] = "mean",
     ) -> float:
@@ -255,7 +254,6 @@ class Profiler:
                 rep=rep,
                 _n_warmup=n_warmup,
                 _n_repeat=n_repeat,
-                grad_to_none=grad_to_none,
                 quantiles=quantiles,
                 backend=backend,
                 return_mode=return_mode,
