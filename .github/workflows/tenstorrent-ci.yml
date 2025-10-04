@@ -167,10 +167,11 @@ jobs:
       with:
         python-version: ${{ env.PYTHON_VERSION }}
         cache: 'pip'
+        cache-dependency-path: 'requirements-mypy.txt'
 
     - name: Install mypy
       run: |
-        pip install mypy
+        pip install -r requirements-mypy.txt
 
     - name: Type check Tenstorrent backend
       run: |
