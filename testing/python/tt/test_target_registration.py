@@ -5,7 +5,7 @@ import pytest
 try:
     import tvm
     from tvm.target import Target
-except ModuleNotFoundError:  # pragma: no cover
+except ModuleNotFoundError:
     pytest.skip("TVM not available", allow_module_level=True)
 
 _target_mod = importlib.import_module("tilelang.utils.target")

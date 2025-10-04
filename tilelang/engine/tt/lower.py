@@ -27,25 +27,35 @@ def lower(
 ) -> CompiledArtifact:
     """Lower the given module for the Tenstorrent backend.
 
-    This is a stub implementation that raises NotImplementedError. The concrete
-    lowering pipeline will be implemented in future workstreams.
+    This is a stub implementation. It validates the target and then raises
+    NotImplementedError, since the actual lowering pipeline is not yet implemented.
+    The concrete lowering pipeline will be implemented in future workstreams.
 
     Args:
-        mod: The TVM IRModule to lower
-        params: Optional list of kernel parameters
+        mod: The TVM IRModule to lower (unused in stub)
+        params: Optional list of kernel parameters (unused in stub)
         target: The target (should be Tenstorrent target)
-        target_host: Optional host target
-        runtime_only: Whether to generate runtime-only code
-        enable_host_codegen: Whether to enable host code generation
-        enable_device_compile: Whether to enable device compilation
+        target_host: Optional host target (unused in stub)
+        runtime_only: Whether to generate runtime-only code (unused in stub)
+        enable_host_codegen: Whether to enable host code generation (unused in stub)
+        enable_device_compile: Whether to enable device compilation (unused in stub)
 
     Returns:
-        CompiledArtifact: The compiled artifact
+        This function never returns successfully.
 
     Raises:
+        ValueError: If the target is not a Tenstorrent target
         NotImplementedError: Always raised as this is a stub implementation
     """
     from tilelang.utils.target import TENSTORRENT_TARGET
+
+    # Unused parameters in this stub implementation - will be used in full implementation
+    _ = mod
+    _ = params
+    _ = target_host
+    _ = runtime_only
+    _ = enable_host_codegen
+    _ = enable_device_compile
 
     # Validate that we're actually targeting Tenstorrent
     target_kind = target.kind.name if isinstance(target, Target) else target
