@@ -92,7 +92,7 @@ jobs:
     - name: Set up Python environment
       run: |
         python3 -m pip install --upgrade pip
-        pip install pytest pytest-xdist
+        pip install -r requirements-test.txt
 
     - name: Generate TVM cache key
       id: tvm-cache-key
