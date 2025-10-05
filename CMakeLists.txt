@@ -66,8 +66,9 @@ set(TILE_LANG_INCLUDES
 target_include_directories(tilelang_objs PRIVATE ${TILE_LANG_INCLUDES})
 
 add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
+add_library(tilelang_module SHARED $<TARGET_OBJECTS:tilelang_objs>)
 target_link_libraries(tilelang PUBLIC tvm_runtime)
-target_link_libraries(tilelang PUBLIC tvm)
+target_link_libraries(tilelang_module PUBLIC tvm)
 
 set(PREBUILD_CYTHON ON)
 
@@ -92,5 +93,5 @@ endif()
 set_target_properties(tilelang PROPERTIES
     INSTALL_RPATH "$ORIGIN"
 )
-install(TARGETS tvm tvm_runtime tilelang LIBRARY DESTINATION tilelang/lib)
+install(TARGETS tvm tvm_runtime tilelang_module tilelang LIBRARY DESTINATION tilelang/lib)
 

@@ -18,7 +18,7 @@ def get_env_paths(env_var, splitter):
 
 def get_dll_directories():
     """Get extra tile lang dll directories"""
-    curr_dir = os.path.dirname(os.path.realpath(os.path.expanduser(__file__)))
+    curr_dir = os.path.dirname(os.path.realpath(__file__))
     source_dir = os.path.abspath(os.path.join(curr_dir, ".."))
     dll_path = [
         curr_dir,
