@@ -51,6 +51,9 @@ file(GLOB TILE_LANG_SRCS
   src/target/intrin_rule*.cc
 )
 
+# Resolve compile warnings in tvm
+add_compile_definitions(DMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>)
+
 # Add TileLang object library
 add_library(tilelang_objs OBJECT ${TILE_LANG_SRCS})
 
