@@ -236,12 +236,11 @@ def matmul(M,
     return gemm_autotune
 
 
-def main(m: int = 4096,
-         n: int = 4096,
-         k: int = 4096,
+def main(M: int = 4096,
+         N: int = 4096,
+         K: int = 4096,
          use_autotune: bool = False,
          with_roller: bool = False):
-    M, N, K = m, n, k
     use_autotune = True
     if use_autotune:
         result = get_best_config(M, N, K, with_roller)

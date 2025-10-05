@@ -2,6 +2,7 @@
 import torch
 import tilelang
 from tilelang import language as T
+from utils import assert_tensors_similar
 
 
 @tilelang.jit(
@@ -231,19 +232,15 @@ def ref_sparse_mla_fwd_interface(q, kv, indices, sm_scale=None, is_casual=True):
     return o.to(torch.bfloat16)
 
 
-def test_sparse_mla_fwd():
-    B, S, SKV, H, HKV, DQK, DV, topk, dtype = (
-        1,
-        4096,
-        32768,
-        128,
-        1,
-        576,
-        512,
-        2048,
-        torch.bfloat16,
-    )
-
+def test_sparse_mla_fwd(B=1,
+                        S=4096,
+                        SKV=4096,
+                        H=128,
+                        HKV=1,
+                        DQK=576,
+                        DV=512,
+                        topk=2048,
+                        dtype=torch.bfloat16):
     torch.random.manual_seed(0)
     q = torch.randn((B, S, H, DQK), dtype=dtype, device="cuda").requires_grad_(True)
     kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device="cuda").requires_grad_(True)
@@ -256,6 +253,12 @@ def test_sparse_mla_fwd():
                 indices[b, t, h, :len(i_i)] = i_i
 
     tl_out, tl_lse = sparse_mla_fwd_interface(q, kv, indices)
+
+    if SKV <= 4096:
+        # otherwise may cause out of memory
+        ref_out = ref_sparse_mla_fwd_interface(q, kv, indices)
+        assert_tensors_similar(tl_out, ref_out, eps=1e-2, name="out")
+        print("assert_tensors_similar passed")
 
     def fn():
         return sparse_mla_fwd_interface(q, kv, indices)
@@ -273,4 +276,5 @@ def test_sparse_mla_fwd():
 
 
 if __name__ == "__main__":
-    test_sparse_mla_fwd()
+    test_sparse_mla_fwd(
+        B=1, S=4096, SKV=4096, H=128, HKV=1, DQK=576, DV=512, topk=2048, dtype=torch.bfloat16)

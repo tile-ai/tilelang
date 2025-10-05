@@ -57,3 +57,4 @@ ignore = [
 ]
 [tool.ruff.lint.per-file-ignores]
 "3rdparty/**/*" = ["ALL"]
+"examples/deepseek_v32/inference/**/*" = ["ALL"]

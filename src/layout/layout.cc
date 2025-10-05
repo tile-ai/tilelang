@@ -326,6 +326,13 @@ Fragment::Fragment(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
   data_ = std::move(n);
 }
 
+// which means the forward_thread is rep_var -> lambda i, rep: rep
+bool FragmentNode::IsCompletedReplicated() const {
+  arith::Analyzer analyzer;
+  return ExprDeepEqual()(analyzer.Simplify(forward_thread_),
+                         ReplicationPlaceholder());
+}
+
 PrimExpr FragmentNode::ThreadExtent() const {
   Array<PrimExpr> ret(OutputDim(), 1);
   arith::Analyzer analyzer;

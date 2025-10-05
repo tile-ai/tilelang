@@ -73,6 +73,7 @@ class KernelCache:
         target: Union[str, Target] = "auto",
         target_host: Union[str, Target] = None,
         pass_configs: dict = None,
+        compile_flags: Optional[Union[List[str], str]] = None,
     ) -> str:
         """
         Generates a unique hash key for caching compiled kernels.
@@ -101,6 +102,7 @@ class KernelCache:
             "target_host": str(target_host) if target_host else None,
             "execution_backend": execution_backend,
             "pass_configs": pass_configs,
+            "compile_flags": compile_flags,
         }
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)
@@ -117,7 +119,7 @@ class KernelCache:
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         verbose: bool = False,
         pass_configs: dict = None,
-        compile_flags: Optional[List[str]] = None,
+        compile_flags: Optional[Union[List[str], str]] = None,
     ) -> JITKernel:
         """
         Caches and reuses compiled kernels to avoid redundant compilation.
@@ -152,6 +154,7 @@ class KernelCache:
             target=target,
             target_host=target_host,
             pass_configs=pass_configs,
+            compile_flags=compile_flags,
         )
         with self._lock:
             # First check in-memory cache
@@ -165,7 +168,8 @@ class KernelCache:
 
             # Then check disk cache
             kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
-                                                 execution_backend, pass_configs, func, verbose)
+                                                 execution_backend, pass_configs, compile_flags,
+                                                 func, verbose)
             if kernel is not None:
                 if verbose:
                     self.logger.debug(
@@ -185,6 +189,7 @@ class KernelCache:
             target_host=target_host,
             verbose=verbose,
             pass_configs=pass_configs,
+            compile_flags=compile_flags,
         )
         if execution_backend in ("dlpack", "torch"):
             self.logger.warning("DLPack or torch backend does not support cache saving to disk.")
@@ -262,9 +267,9 @@ class KernelCache:
             kernel_path = os.path.join(cache_path, KERNEL_PATH)
             if verbose:
                 self.logger.debug(f"Saving kernel source code to file: {kernel_path}")
-            if kernel.artifact.kernel_source is not None:
+            if kernel.kernel_source is not None:
                 KernelCache._safe_write_file(kernel_path, "w",
-                                             lambda file: file.write(kernel.artifact.kernel_source))
+                                             lambda file: file.write(kernel.kernel_source))
         except Exception as e:
             self.logger.error(f"Error saving kernel source code to disk: {e}")
 
@@ -322,6 +327,7 @@ class KernelCache:
         out_idx: List[int] = None,
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         pass_configs: dict = None,
+        compile_flags: Optional[Union[List[str], str]] = None,
         func: Callable = None,
         verbose: bool = False,
     ) -> Optional[JITKernel]:
@@ -382,6 +388,7 @@ class KernelCache:
                 out_idx=out_idx,
                 execution_backend=execution_backend,
                 pass_configs=pass_configs,
+                compile_flags=compile_flags,
             )
         else:
             return None

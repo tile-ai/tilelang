@@ -118,13 +118,7 @@ def ref_program(A, B):
     return A @ B
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--M', type=int, default=8192, help='M dimension')
-    parser.add_argument('--N', type=int, default=8192, help='N dimension')
-    parser.add_argument('--K', type=int, default=8192, help='K dimension')
-    args = parser.parse_args()
-    M, N, K = args.M, args.N, args.K
+def main(M=4096, N=4096, K=4096):
     total_flops = 2 * M * N * K
 
     BLOCK_M = 128
@@ -156,4 +150,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--M', type=int, default=8192, help='M dimension')
+    parser.add_argument('--N', type=int, default=8192, help='N dimension')
+    parser.add_argument('--K', type=int, default=8192, help='K dimension')
+    args = parser.parse_args()
+    M, N, K = args.M, args.N, args.K
+    main(M, N, K)

@@ -35,11 +35,11 @@ def matmul(
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_tmem = T.alloc_tmem([block_M, block_N], accum_dtype)
-            mbar = T.alloc_barrier(1)  # 这里的 1 是 expect-arrive-count
+            mbar = T.alloc_barrier(1)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
 
-            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=1):
+            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(A[by * block_M, k * block_K], A_shared)
                 T.copy(B[bx * block_N, k * block_K], B_shared)
                 T.gemm(
@@ -53,9 +53,8 @@ def matmul(
                     clear_accum=k == 0)
                 T.mbarrier_wait_parity(mbar, k % 2)
 
-            if T.get_thread_binding() < 128:
-                T.copy(C_tmem, C_local)
-                T.copy(C_local, C_shared)
+            T.copy(C_tmem, C_local)
+            T.copy(C_local, C_shared)
 
             T.copy(C_shared, C[by * block_M, bx * block_N])
 
@@ -66,7 +65,7 @@ M, N, K = 4096, 4096, 8192
 block_M, block_N, block_K = 128, 256, 128
 trans_A, trans_B = False, True
 in_dtype, out_dtype, accum_dtype = "bfloat16", "bfloat16", "float"
-num_stages = 0
+num_stages = 2
 threads = 256
 
 func = matmul(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtype, out_dtype,
