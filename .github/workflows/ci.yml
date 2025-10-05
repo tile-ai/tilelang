@@ -9,11 +9,7 @@ jobs:
   format-check:
     runs-on: [self-hosted, nvidia]
     permissions:
-      contents: write 
-    env:
-      CMAKE_C_COMPILER_LAUNCHER: ccache
-      CMAKE_CXX_COMPILER_LAUNCHER: ccache
-
+      contents: write
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -28,12 +24,6 @@ jobs:
         ignore-nothing-to-cache: true
         activate-environment: true
         python-version: ${{ env.PYTHON_VERSION }}
-
-    - name: ccache
-      uses: hendrikmuhs/ccache-action@v1.2
-      with:
-        create-symlink: true
-        key: ${{ github.job }}-${{ matrix.os }}
 
     - name: Ensure venv (local & persistent)
       run: |
@@ -63,9 +53,6 @@ jobs:
     needs: format-check
     permissions:
       contents: read
-    env:
-      CMAKE_C_COMPILER_LAUNCHER: ccache
-      CMAKE_CXX_COMPILER_LAUNCHER: ccache
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -82,12 +69,6 @@ jobs:
         ignore-nothing-to-cache: true
         activate-environment: true
         python-version: ${{ env.PYTHON_VERSION }}
-
-    - name: ccache
-      uses: hendrikmuhs/ccache-action@v1.2
-      with:
-        create-symlink: true
-        key: ${{ github.job }}-${{ matrix.os }}
 
     - name: Setup venv
       run: |
