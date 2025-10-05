@@ -14,6 +14,9 @@ requires = [
 ]
 build-backend = "scikit_build_core.build"
 
+[tool.scikit-build]
+wheel.py-api = "cp38"
+
 [tool.yapf]
 based_on_style = "yapf"
 column_limit = 100

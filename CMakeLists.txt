@@ -5,8 +5,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-find_package(Python COMPONENTS Interpreter Development.SABIModule REQUIRED)
-
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 find_package(TVM REQUIRED)
@@ -14,25 +12,29 @@ find_package(TVM REQUIRED)
 if(NOT TVM_FOUND)
   if(EXISTS ${TVM_SOURCE}/cmake/config.cmake)
     include(${TVM_SOURCE}/cmake/config.cmake)
-
-    if($ENV{USE_METAL})
-      set(USE_METAL ON)
-    elseif($ENV{USE_CUDA})
-      find_package(CUDAToolkit REQUIRED)
-
-      if(NOT CUDAToolkit_FOUND)
-        message(FATAL_ERROR "CUDA Toolkit not found. Please set CUDAToolkit_ROOT.")
-      endif()
-
-      cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
-    endif()
-
-    add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
+    set(TVM_BUILD_FROM_SOURCE TRUE)
   else()
     message(FATAL_ERROR "Nor prebuilt tvm provided or submodule checkout-ed.")
   endif()
 endif()
 
+if($ENV{USE_METAL})
+  set(USE_METAL ON)
+elseif($ENV{USE_CUDA})
+  find_package(CUDAToolkit REQUIRED)
+
+  if(NOT CUDAToolkit_FOUND)
+    message(FATAL_ERROR "CUDA Toolkit not found. Please set CUDAToolkit_ROOT.")
+  endif()
+
+  # Set `USE_CUDA=/usr/local/cuda-x.y`
+  cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
+endif()
+
+# Build tvm after all configs have been populated
+if(TVM_BUILD_FROM_SOURCE)
+  add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
+endif()
 
 # Collect source files
 file(GLOB TILE_LANG_SRCS
@@ -70,6 +72,8 @@ target_link_libraries(tilelang PUBLIC tvm)
 set(PREBUILD_CYTHON ON)
 
 if(PREBUILD_CYTHON)
+  find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})
+
   add_custom_command(
     OUTPUT "${CMAKE_BINARY_DIR}/tl_cython_wrapper.cpp"
     COMMENT
@@ -80,8 +84,9 @@ if(PREBUILD_CYTHON)
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/cython/cython_wrapper.pyx"
     VERBATIM)
 
-  python_add_library(tilelang_cython MODULE "${CMAKE_BINARY_DIR}/tl_cython_wrapper.cpp" USE_SABI 3.8)
+  python_add_library(tilelang_cython MODULE "${CMAKE_BINARY_DIR}/tl_cython_wrapper.cpp" USE_SABI ${SKBUILD_SABI_VERSION})
   install(TARGETS tilelang_cython LIBRARY DESTINATION tilelang/lib)
 endif()
 
 install(TARGETS tvm tvm_runtime tilelang LIBRARY DESTINATION tilelang/lib)
+
