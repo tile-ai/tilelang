@@ -1,3 +1,7 @@
+[project]
+name = "tilelang"
+version = "0.1.6"
+
 [build-system]
 requires = [
     "build",
@@ -5,10 +9,10 @@ requires = [
     "packaging",
     "setuptools>=61",
     "wheel",
-    "patchelf",
     "Cython>=3.0.0",
+    "scikit-build-core",
 ]
-build-backend = "setuptools.build_meta"
+build-backend = "scikit_build_core.build"
 
 [tool.yapf]
 based_on_style = "yapf"
