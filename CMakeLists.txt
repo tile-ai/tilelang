@@ -88,5 +88,9 @@ if(PREBUILD_CYTHON)
   install(TARGETS tilelang_cython LIBRARY DESTINATION tilelang/lib)
 endif()
 
+# let libtilelang to search tvm/tvm_runtime in same dir
+set_target_properties(tilelang PROPERTIES
+    INSTALL_RPATH "$ORIGIN"
+)
 install(TARGETS tvm tvm_runtime tilelang LIBRARY DESTINATION tilelang/lib)
 
