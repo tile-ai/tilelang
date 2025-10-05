@@ -147,7 +147,17 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim_qk):
 @tilelang.jit(pass_configs={
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
 })
-def flashattn_bwd_atomic_add(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, block_N, threads=256, num_stages=2, groups=1):
+def flashattn_bwd_atomic_add(batch,
+                             heads,
+                             seq_len,
+                             dim_qk,
+                             dim_v,
+                             is_causal,
+                             block_M,
+                             block_N,
+                             threads=256,
+                             num_stages=2,
+                             groups=1):
     sm_scale = (1.0 / dim_qk)**0.5
     scale = (1.0 / dim_qk)**0.5 * 1.44269504  # log2(e)
     head_kv = heads // groups
@@ -228,9 +238,9 @@ def flashattn_bwd_atomic_add(batch, heads, seq_len, dim_qk, dim_v, is_causal, bl
                     if k * block_N + i < seq_len:
                         T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
             T.copy(dv, dv_shared)
-            T.atomic_add(dV[bz, by * block_M:(by+1) * block_M, bx // groups, :], dv_shared)
+            T.atomic_add(dV[bz, by * block_M:(by + 1) * block_M, bx // groups, :], dv_shared)
             T.copy(dk, dk_shared)
-            T.atomic_add(dK[bz, by * block_M:(by+1) * block_M, bx // groups, :], dk_shared)
+            T.atomic_add(dK[bz, by * block_M:(by + 1) * block_M, bx // groups, :], dk_shared)
 
     return flash_bwd
 
@@ -238,7 +248,17 @@ def flashattn_bwd_atomic_add(batch, heads, seq_len, dim_qk, dim_v, is_causal, bl
 @tilelang.jit(pass_configs={
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
 })
-def flashattn_bwd_split(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, block_N, threads=256, num_stages=2, groups=1):
+def flashattn_bwd_split(batch,
+                        heads,
+                        seq_len,
+                        dim_qk,
+                        dim_v,
+                        is_causal,
+                        block_M,
+                        block_N,
+                        threads=256,
+                        num_stages=2,
+                        groups=1):
     sm_scale = (1.0 / dim_qk)**0.5
     scale = (1.0 / dim_qk)**0.5 * 1.44269504  # log2(e)
     head_kv = heads // groups
@@ -367,8 +387,18 @@ class _attention(torch.autograd.Function):
         delta = mod_prep(o, do)
 
         if ctx.use_atomic:
-            kernel = flashattn_bwd_atomic_add(BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, ctx.causal, block_M, block_N,
-                                              threads=256, num_stages=2, groups=groups)
+            kernel = flashattn_bwd_atomic_add(
+                BATCH,
+                H,
+                N_CTX,
+                D_HEAD_QK,
+                D_HEAD_V,
+                ctx.causal,
+                block_M,
+                block_N,
+                threads=256,
+                num_stages=2,
+                groups=groups)
             shape_q = [BATCH, N_CTX, H, D_HEAD_QK]
             shape_k = [BATCH, N_CTX, HEAD_KV, D_HEAD_QK]
             shape_v = [BATCH, N_CTX, HEAD_KV, D_HEAD_V]
@@ -380,8 +410,18 @@ class _attention(torch.autograd.Function):
             dk = dk.to(torch.float16)
             dv = dv.to(torch.float16)
         else:
-            kernel = flashattn_bwd_split(BATCH, H, N_CTX, D_HEAD_QK, D_HEAD_V, ctx.causal, block_M, block_N,
-                                         threads=256, num_stages=2, groups=groups)
+            kernel = flashattn_bwd_split(
+                BATCH,
+                H,
+                N_CTX,
+                D_HEAD_QK,
+                D_HEAD_V,
+                ctx.causal,
+                block_M,
+                block_N,
+                threads=256,
+                num_stages=2,
+                groups=groups)
             shape_q = [BATCH, N_CTX, H, D_HEAD_QK]
             shape_k = [groups, BATCH, N_CTX, HEAD_KV, D_HEAD_QK]  # sum after kernel
             shape_v = [groups, BATCH, N_CTX, HEAD_KV, D_HEAD_V]  # sum after kernel
@@ -493,8 +533,10 @@ if __name__ == "__main__":
     parser.add_argument('--d_head_v', type=int, default=128, help='Head dimension for V')
     parser.add_argument('--causal', action='store_true', help='Causal flag')
     parser.add_argument('--groups', type=int, default=16, help='groups')
-    parser.add_argument('--use_atomic', action='store_true', default=False, help='Use atomic add for dK/dV')
-    parser.add_argument('--use_split', action='store_true', default=False, help='Use split for dK/dV')
+    parser.add_argument(
+        '--use_atomic', action='store_true', default=False, help='Use atomic add for dK/dV')
+    parser.add_argument(
+        '--use_split', action='store_true', default=False, help='Use split for dK/dV')
     args = parser.parse_args()
 
     # Handle backward compatibility and logic
@@ -506,4 +548,5 @@ if __name__ == "__main__":
         # Default: use atomic
         use_atomic = True
 
-    main(args.batch, args.h, args.n_ctx, args.d_head_qk, args.d_head_v, args.groups, args.causal, use_atomic)
+    main(args.batch, args.h, args.n_ctx, args.d_head_qk, args.d_head_v, args.groups, args.causal,
+         use_atomic)

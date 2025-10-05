@@ -1,10 +1,10 @@
 """The language interface for tl programs."""
 
 import tilelang.language as T
-from tvm.tir import PrimExpr, Buffer, BufferLoad, BufferRegion, op
+from tvm.tir import PrimExpr, Buffer, op
 from typing import List, Union
 from .atomic import atomic_max, atomic_min, atomic_add, atomic_addx2, atomic_addx4, atomic_load, atomic_store  # noqa: F401
-from tilelang.language.utils import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
+
 
 def dp4a(A: Buffer, B: Buffer, C: Buffer) -> PrimExpr:
     """Perform a 4-element dot product with accumulation (DP4A).

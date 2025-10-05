@@ -1,6 +1,6 @@
 """The language interface for tl programs."""
 
-from typing import Union, List, Optional, Literal
+from typing import Union, Optional, Literal
 from tilelang import language as T
 from tilelang.utils.language import get_buffer_region_from_load
 from tvm import ir, tir

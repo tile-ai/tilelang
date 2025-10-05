@@ -1,7 +1,7 @@
 from tilelang import tvm as tvm
 from typing import List
 from tvm import tir
-from tvm.tir import PrimExpr, Buffer, BufferLoad, BufferRegion, op
+from tvm.tir import PrimExpr, Buffer, BufferLoad, op
 from tilelang import language as T
 
 
@@ -26,6 +26,7 @@ def region(buffer: BufferLoad, access_type: str, *args: PrimExpr):
     access_type = {"r": 1, "w": 2, "rw": 3}[access_type]
     return T.call_intrin("handle", op.Op.get("tl.region"), buffer, access_type, *args)
 
+
 def buffer_to_tile_region(buffer: Buffer, access_type: str):
     """Convert a TVM buffer to a tile region descriptor.
 
@@ -39,6 +40,7 @@ def buffer_to_tile_region(buffer: Buffer, access_type: str):
     mins = [0 for _ in buffer.shape]
     extents = [x for x in buffer.shape]
     return region(T.BufferLoad(buffer, mins), access_type, *extents)
+
 
 def buffer_load_to_tile_region(load: BufferLoad, access_type: str, extents: List[PrimExpr]):
     """Convert a buffer load operation to a tile region descriptor.
@@ -86,6 +88,7 @@ def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: s
     ), f"region_extents must be >= extents, region_extents = {region_extents}, extents = {extents}"
 
     return region(T.BufferLoad(buffer_region.buffer, mins), access_type, *region_extents)
+
 
 def index_to_coordinates(index, shape) -> List[PrimExpr]:
     """

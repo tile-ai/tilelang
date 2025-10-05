@@ -286,7 +286,8 @@ std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
     }
 
     ICHECK(m_warp * n_warp == num_warps)
-        << "m_warp * n_warp must equal num_warps, m_warp: " << m_warp << ", n_warp: " << n_warp << ", num_warps: " << num_warps;
+        << "m_warp * n_warp must equal num_warps, m_warp: " << m_warp
+        << ", n_warp: " << n_warp << ", num_warps: " << num_warps;
 
     // Store the computed values in the object's member variables
     this->m_warp = m_warp;
@@ -371,7 +372,8 @@ std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
     ICHECK(0) << "Unknown GemmWarpPolicy";
   }
   ICHECK(m_warp * n_warp == num_warps)
-      << "m_warp * n_warp must equal num_warps, m_warp: " << m_warp << ", n_warp: " << n_warp << ", num_warps: " << num_warps;
+      << "m_warp * n_warp must equal num_warps, m_warp: " << m_warp
+      << ", n_warp: " << n_warp << ", num_warps: " << num_warps;
 
   // Store the computed values in the object's member variables
   this->m_warp = m_warp;
