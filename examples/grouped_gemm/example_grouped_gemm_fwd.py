@@ -4,8 +4,6 @@ import tilelang
 import tilelang.language as T
 import math
 
-# tilelang.disable_cache()
-
 
 def torch_gmm(a, b, batch_sizes, batch_offsets_tensor, trans_b=False):
     """
