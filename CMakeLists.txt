@@ -7,7 +7,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Python COMPONENTS Interpreter Development.SABIModule REQUIRED)
 
-# include(cmake/FindTVM.cmake)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 find_package(TVM REQUIRED)
@@ -59,4 +58,21 @@ add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
 target_link_libraries(tilelang PUBLIC tvm_runtime)
 target_link_libraries(tilelang PUBLIC tvm)
 
-install(TARGETS tvm tvm_runtime tilelang LIBRARY DESTINATION .)
+set(PREBUILD_CYTHON ON)
+
+if(PREBUILD_CYTHON)
+  add_custom_command(
+    OUTPUT "${CMAKE_BINARY_DIR}/tl_cython_wrapper.cpp"
+    COMMENT
+      "Cythoning tilelang/jit/adapter/cython/cython_wrapper.pyx"
+    COMMAND Python::Interpreter -m cython
+            "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/cython/cython_wrapper.pyx"
+            --cplus --output-file "${CMAKE_BINARY_DIR}/tl_cython_wrapper.cpp"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/cython/cython_wrapper.pyx"
+    VERBATIM)
+
+  python_add_library(tilelang_cython MODULE "${CMAKE_BINARY_DIR}/tl_cython_wrapper.cpp" USE_SABI 3.8)
+  install(TARGETS tilelang_cython LIBRARY DESTINATION tilelang/lib)
+endif()
+
+install(TARGETS tvm tvm_runtime tilelang LIBRARY DESTINATION tilelang/lib)
