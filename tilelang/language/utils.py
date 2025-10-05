@@ -54,8 +54,7 @@ def buffer_load_to_tile_region(load: BufferLoad, access_type: str, extents: List
         tir.Call: A region descriptor for the loaded area
     """
     indices = load.indices
-    print("indices", indices)
-    print("extents", extents)
+
     if len(indices) > len(extents):
         # (f"mismatch between indices and extents for buffer load {load}: indices = {indices}, extents = {extents}, "
         # f"region will be expanded in the last 2 dimensions")
