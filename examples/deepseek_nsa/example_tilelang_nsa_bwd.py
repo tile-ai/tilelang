@@ -17,9 +17,12 @@ from einops import rearrange
 import tilelang
 
 
-@tilelang.jit(pass_configs={
-    tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-})
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    })
 def tilelang_kernel_fwd(
     batch,
     heads,
