@@ -1,8 +1,5 @@
 #!/bin/bash
 
-# Copyright (c) Tile-AI Organization.
-# Licensed under the MIT License.
-
 set -eux
 
 git submodule update --init --recursive
