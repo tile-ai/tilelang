@@ -14,14 +14,23 @@ find_package(TVM REQUIRED)
 if(NOT TVM_FOUND)
   if(EXISTS ${TVM_SOURCE}/cmake/config.cmake)
     include(${TVM_SOURCE}/cmake/config.cmake)
+
+    if($ENV{USE_METAL})
+      set(USE_METAL ON)
+    elseif($ENV{USE_CUDA})
+      find_package(CUDAToolkit REQUIRED)
+
+      if(NOT CUDAToolkit_FOUND)
+        message(FATAL_ERROR "CUDA Toolkit not found. Please set CUDAToolkit_ROOT.")
+      endif()
+
+      cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
+    endif()
+
     add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
   else()
     message(FATAL_ERROR "Nor prebuilt tvm provided or submodule checkout-ed.")
   endif()
-endif()
-
-if(DEFINED ENV{USE_METAL})
-  set(USE_METAL ON)
 endif()
 
 
