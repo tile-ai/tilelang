@@ -132,7 +132,10 @@ def get_buffer_region_from_load(buffer_load: tir.BufferLoad) -> Optional[tir.Buf
     buffer, indices = buffer_load.buffer, buffer_load.indices
     regions = []
     for indice in indices:
-        if not isinstance(indice, tir.Ramp):
-            return None
-        regions.append(ir.Range.from_min_extent(indice.base, indice.lanes))
+        if isinstance(indice, tir.Ramp):
+            regions.append(ir.Range.from_min_extent(indice.base, indice.lanes))
+        elif isinstance(indice, tir.PrimExpr):
+            regions.append(ir.Range.from_min_extent(indice, 1))
+        else:
+            raise ValueError("Unsupported type: ", type(indice))
     return tir.BufferRegion(buffer, regions)

@@ -3,9 +3,11 @@
 """Atomic operations for tilelang."""
 
 import tilelang.language as T
-from tvm import ir
+from tvm import ir, tir
 from tvm.tir import PrimExpr, Buffer, BufferRegion, Var, op
 from typing import Optional
+from tilelang.language.utils import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
+from tilelang.utils.language import get_buffer_region_from_load
 
 _MEMORY_ORDER_ID_MAP = {
     "relaxed": 0,
@@ -200,14 +202,17 @@ def atomic_add(dst: Buffer,
     extent = max(src_extent, dst_extent)
 
     def _to_region(data, access_type):
-        from .customize import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
-
-        if isinstance(data, Var) and T.has_let_value(data):
+        if isinstance(data, tir.Var) and T.has_let_value(data):
             data = T.get_let_value(data)
-        if isinstance(data, Buffer):
+        if isinstance(data, tir.Buffer):
             return buffer_to_tile_region(data, access_type)
-        elif isinstance(data, BufferRegion):
+        elif isinstance(data, tir.BufferRegion):
             return buffer_region_to_tile_region(data, access_type, extent)
+        elif isinstance(data, tir.BufferLoad):
+            region = get_buffer_region_from_load(data)
+            if region is None:
+                return buffer_load_to_tile_region(data, access_type, extent)
+            return buffer_region_to_tile_region(region, access_type, extent)
         else:
             return buffer_load_to_tile_region(data, access_type, extent)
 
