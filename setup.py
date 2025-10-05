@@ -65,15 +65,18 @@ if USE_ROCM and not ROCM_HOME:
     raise ValueError(
         "ROCM support is enabled (USE_ROCM=True) but ROCM_HOME is not set or detected.")
 
-if not USE_ROCM and not CUDA_HOME:
-    raise ValueError(
-        "CUDA support is enabled by default (USE_ROCM=False) but CUDA_HOME is not set or detected.")
+# For LLVM-only builds, skip CUDA/ROCM validation
+if not USE_LLVM:
+    if not USE_ROCM and not CUDA_HOME:
+        raise ValueError(
+            "CUDA support is enabled by default (USE_ROCM=False) but CUDA_HOME is not set or detected."
+        )
 
-# Ensure one of CUDA or ROCM is available
-if not (CUDA_HOME or ROCM_HOME):
-    raise ValueError(
-        "Failed to automatically detect CUDA or ROCM installation. Please set the CUDA_HOME or ROCM_HOME environment variable manually (e.g., export CUDA_HOME=/usr/local/cuda or export ROCM_HOME=/opt/rocm)."
-    )
+    # Ensure one of CUDA or ROCM is available
+    if not (CUDA_HOME or ROCM_HOME):
+        raise ValueError(
+            "Failed to automatically detect CUDA or ROCM installation. Please set the CUDA_HOME or ROCM_HOME environment variable manually (e.g., export CUDA_HOME=/usr/local/cuda or export ROCM_HOME=/opt/rocm)."
+        )
 
 # TileLang only supports Linux platform
 assert sys.platform.startswith("linux"), "TileLang only supports Linux platform (including WSL)."
@@ -158,9 +161,11 @@ def get_tilelang_version(with_cuda=True, with_system_info=True, with_commit_id=F
                 local_version_parts.append(f"rocm{rocm_version_str}")
         else:
             if CUDA_HOME:
-                cuda_version = str(get_nvcc_cuda_version())
-                cuda_version_str = cuda_version.replace(".", "")[:3]
-                local_version_parts.append(f"cu{cuda_version_str}")
+                nvcc_path = os.path.join(CUDA_HOME, "bin", "nvcc")
+                if os.path.exists(nvcc_path):
+                    cuda_version = str(get_nvcc_cuda_version())
+                    cuda_version_str = cuda_version.replace(".", "")[:3]
+                    local_version_parts.append(f"cu{cuda_version_str}")
 
     if local_version_parts:
         version += f"+{'.'.join(local_version_parts)}"
@@ -358,8 +363,19 @@ def update_submodules():
 
 
 def setup_llvm_for_tvm():
-    """Downloads and extracts LLVM, then configures TVM to use it."""
-    # Assume the download_and_extract_llvm function and its dependencies are defined elsewhere in this script
+    """Downloads and extracts LLVM, then configures TVM to use it.
+
+    If system llvm-config is available, uses that instead of downloading LLVM.
+    """
+    # Check if system llvm-config is available
+    system_llvm_config = shutil.which("llvm-config")
+    if system_llvm_config:
+        logger.info(f"Using system llvm-config at {system_llvm_config}")
+        extract_path = os.path.dirname(os.path.dirname(system_llvm_config))  # Go up to LLVM root
+        return extract_path, system_llvm_config
+
+    # Otherwise download LLVM
+    logger.info(f"System llvm-config not found, downloading LLVM {LLVM_VERSION}")
     extract_path = download_and_extract_llvm(LLVM_VERSION, IS_AARCH64, EXTRACT_PATH)
     llvm_config_path = os.path.join(extract_path, "bin", "llvm-config")
     return extract_path, llvm_config_path

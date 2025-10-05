@@ -42,14 +42,19 @@ The Tenstorrent backend CI is defined in `.github/workflows/tenstorrent-ci.yml` 
 4. Install Python dependencies from requirements-test.txt
 5. **TVM Build Caching:**
    - Generate cache key based on TVM submodule commit hash
-   - Restore cached TVM build artifacts if available
+   - Restore cached TVM build artifacts if available (uses `actions/cache/restore@v4`)
    - Caches: `build/libtvm*.so` and `build/3rdparty/`
+   - Save TVM artifacts after build completes (uses `actions/cache/save@v4` with `if: always()`)
+   - Cache is saved even if job fails, preventing redundant TVM rebuilds
    - Only rebuilds TVM when the submodule is updated
 6. Build TileLang with LLVM backend
    - Uses Ninja build system
    - Limited to 2 parallel jobs to avoid OOM on GitHub runners
    - LLVM backend is sufficient for CPU-only testing
 7. Install TileLang in development mode
+   - Sets `USE_LLVM=true` to enable LLVM backend
+   - setup.py checks for nvcc availability before trying to use it
+   - Gracefully skips CUDA version detection if nvcc is not found
 8. Run Tenstorrent target registration tests
 9. Run all Tenstorrent Python tests (CPU-only)
 
@@ -83,7 +88,8 @@ The CI uses multiple layers of caching for efficiency:
 | Job | What's Cached | Cache Key | Benefit |
 |-----|---------------|-----------|---------|
 | lint-and-format | Pip packages | requirements-lint.txt hash | Fast linter installation |
-| build-and-test | TVM build | TVM submodule commit + OS | Avoid rebuilding TVM (~30+ min) |
+| build-and-test | TVM build artifacts | TVM submodule commit + OS | Avoid rebuilding TVM (~30+ min), saved even on failure |
+| build-and-test | ccache compiler cache | CMakeLists.txt hash + OS + version | Fast recompilation of unchanged files |
 | build-and-test | Pip packages | requirements-test.txt hash | Fast pytest install |
 | static-analysis | Pip packages | requirements-mypy.txt hash | Fast mypy installation |
 

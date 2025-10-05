@@ -12,163 +12,207 @@ on:
       - main
       - 'ws1-**'
 
+# Auto-cancel superseded runs on the same branch/PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
   PYTHON_VERSION: '3.10'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
 
 jobs:
   lint-and-format:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-        submodules: recursive
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          submodules: recursive
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
-        cache: 'pip'
-        cache-dependency-path: 'requirements-lint.txt'
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          # Include any file that can affect the lock of Python deps
+          cache-dependency-path: |
+            requirements-lint.txt
+            requirements-dev.txt
+            pyproject.toml
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements-lint.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-lint.txt
 
-    - name: Run format.sh check
-      run: |
-        bash format.sh
-        # Check if format.sh made any changes
-        if ! git diff --quiet; then
-          echo "Code formatting issues found. Please run format.sh locally and commit the changes."
-          git diff
-          exit 1
-        fi
+      - name: Run format.sh check
+        run: |
+          bash format.sh
+          # Fail if the formatter changed files
+          if ! git diff --quiet; then
+            echo "Code formatting issues found."
+            git diff
+            exit 1
+          fi
 
   build-and-test:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-        submodules: recursive
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          submodules: recursive
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
-        cache: 'pip'
-        cache-dependency-path: 'requirements-test.txt'
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements-test.txt
+            requirements-build.txt
+            requirements.txt
+            pyproject.toml
 
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential \
-          cmake \
-          ninja-build \
-          llvm \
-          libedit-dev \
-          libxml2-dev \
-          zlib1g-dev
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            llvm \
+            libedit-dev \
+            libxml2-dev \
+            zlib1g-dev
 
-    - name: Install Python dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements-test.txt
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-test.txt
 
-    - name: Generate TVM cache key
-      id: tvm-cache-key
-      run: |
-        # Cache key based on TVM submodule commit hash
-        TVM_COMMIT=$(git rev-parse HEAD:3rdparty/tvm)
-        echo "tvm_commit=$TVM_COMMIT" >> $GITHUB_OUTPUT
-        echo "TVM submodule at commit: $TVM_COMMIT"
+      # Compiler cache persisted via GitHub Actions cache
+      - name: Enable ccache
+        uses: hendrikmuhs/ccache-action@v1.2.19
+        with:
+          # Key on OS and build config; ccache handles file-level caching internally
+          key: ${{ runner.os }}-ccache-llvm-${{ hashFiles('CMakeLists.txt') }}-v1
+          max-size: 2G
+          create-symlink: true
 
-    - name: Cache TVM build
-      id: cache-tvm
-      uses: actions/cache@v4
-      with:
-        path: |
-          build/libtvm*.so
-          build/3rdparty/
-        key: tvm-build-llvm-${{ steps.tvm-cache-key.outputs.tvm_commit }}-${{ runner.os }}
-        restore-keys: |
-          tvm-build-llvm-${{ steps.tvm-cache-key.outputs.tvm_commit }}-
-          tvm-build-llvm-
+      - name: Generate TVM cache key
+        id: tvm-cache-key
+        run: |
+          # Cache key based on TVM submodule commit hash
+          TVM_COMMIT=$(git rev-parse HEAD:3rdparty/tvm)
+          echo "tvm_commit=$TVM_COMMIT" >> $GITHUB_OUTPUT
+          echo "TVM submodule at commit: $TVM_COMMIT"
 
-    - name: Log TVM cache status
-      run: echo "TVM cache hit: ${{ steps.cache-tvm.outputs.cache-hit }}"
+      - name: Restore TVM build cache
+        id: cache-tvm-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build/tvm/
+            build/libtilelang*.so
+            build/3rdparty/
+          key: tvm-build-llvm-${{ steps.tvm-cache-key.outputs.tvm_commit }}-${{ runner.os }}
+          restore-keys: |
+            tvm-build-llvm-${{ steps.tvm-cache-key.outputs.tvm_commit }}-
+            tvm-build-llvm-
 
-    - name: Build TileLang with LLVM
-      run: |
-        mkdir -p build
-        cd build
-        # Create config.cmake for TVM
-        cp ../3rdparty/tvm/cmake/config.cmake .
-        echo "set(USE_LLVM ON)" >> config.cmake
-        echo "set(USE_CUDA OFF)" >> config.cmake
+      - name: Build TileLang with LLVM (ccache-enabled)
+        run: |
+          mkdir -p build
+          cd build
+          # Create config.cmake for TVM
+          cp ../3rdparty/tvm/cmake/config.cmake .
+          echo "set(USE_LLVM ON)" >> config.cmake
+          echo "set(USE_CUDA OFF)" >> config.cmake
+          # Configure with CMake; enable ccache via compiler launcher
+          cmake .. \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          # Build (use fewer jobs to avoid OOM on GitHub runners)
+          cmake --build . --config Release -j 2
 
-        # Configure with CMake
-        cmake .. \
-          -G Ninja \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      - name: Install TileLang
+        run: |
+          # Copy built libraries to tilelang/lib
+          mkdir -p tilelang/lib
+          cp build/*.so tilelang/lib/ || true
+          # Install TVM Python package
+          # Set TVM_LIBRARY_PATH so TVM can find the built libraries
+          export TVM_LIBRARY_PATH=$(pwd)/build/tvm
+          cd 3rdparty/tvm/python
+          pip install -e .
+          cd ../../..
+          # Install TileLang
+          export USE_LLVM=true
+          pip install -e .
 
-        # Build (use fewer jobs to avoid OOM on GitHub runners)
-        # If cache hit, this will be much faster as TVM is already built
-        cmake --build . --config Release -j 2
+      - name: Print ccache stats
+        if: always()
+        run: |
+          if command -v ccache >/dev/null 2>&1; then
+            ccache -s
+          else
+            echo "ccache not found; skipping stats."
+          fi
 
-    - name: Install TileLang
-      run: |
-        # Copy built libraries to tilelang/lib
-        mkdir -p tilelang/lib
-        cp build/*.so tilelang/lib/ || true
+      - name: Run Tenstorrent target registration tests
+        run: |
+          export LD_LIBRARY_PATH=$(pwd)/build/tvm:$LD_LIBRARY_PATH
+          cd testing/python/tt
+          pytest test_target_registration.py -v --tb=short
+        continue-on-error: true  # Don't fail if TVM isn't fully available
 
-        # Install Python package in development mode
-        # Set USE_LLVM=true for LLVM build, dummy CUDA_HOME to pass validation,
-        # and disable commit ID to avoid nvcc check
-        export USE_LLVM=true
-        export CUDA_HOME=/usr
-        export WITH_COMMITID=False
-        pip install -e .
+      - name: Run all Python tests (if TVM available)
+        run: |
+          export LD_LIBRARY_PATH=$(pwd)/build/tvm:$LD_LIBRARY_PATH
+          cd testing/python
+          pytest tt/ -v --tb=short -k "not gpu" || echo "Some tests skipped (no GPU)"
+        continue-on-error: true
 
-    - name: Run Tenstorrent target registration tests
-      run: |
-        cd testing/python/tt
-        pytest test_target_registration.py -v --tb=short
-      continue-on-error: true  # Don't fail if TVM isn't fully available
-
-    - name: Run all Python tests (if TVM available)
-      run: |
-        cd testing/python
-        pytest tt/ -v --tb=short -k "not gpu" || echo "Some tests skipped (no GPU)"
-      continue-on-error: true
+      - name: Save TVM build cache
+        uses: actions/cache/save@v4
+        if: always() && steps.cache-tvm-restore.outputs.cache-hit != true
+        with:
+          path: |
+            build/tvm/
+            build/libtilelang*.so
+            build/3rdparty/
+          key: tvm-build-llvm-${{ steps.tvm-cache-key.outputs.tvm_commit }}-${{ runner.os }}
 
   static-analysis:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
-        cache: 'pip'
-        cache-dependency-path: 'requirements-mypy.txt'
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: |
+            requirements-mypy.txt
+            pyproject.toml
 
-    - name: Install mypy
-      run: |
-        pip install -r requirements-mypy.txt
+      - name: Install mypy
+        run: pip install -r requirements-mypy.txt
 
-    - name: Type check Tenstorrent backend
-      run: |
-        mypy tilelang/engine/tt/ --ignore-missing-imports || true
-      continue-on-error: true
+      - name: Type check Tenstorrent backend
+        run: mypy tilelang/engine/tt/ --ignore-missing-imports || true
+        continue-on-error: true
