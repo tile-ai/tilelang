@@ -6,8 +6,6 @@ from tilelang.profiler import do_bench
 import tilelang.language as T
 import argparse
 
-tilelang.disable_cache()
-
 
 def get_bwd_configs():
     sm_major, sm_minor = torch.cuda.get_device_capability()
@@ -299,7 +297,7 @@ def flashattn_bwd(
                 T.copy(Delta[bz, bx, k * block_N:(k + 1) * block_N], delta)
 
                 for i, j in T.Parallel(block_M, block_N):
-                    dsT_cast[i, j] = qkT[i, j] * (dsT[i, j] - delta[j]) * scale
+                    dsT_cast[i, j] = qkT[i, j] * (dsT[i, j] - delta[j]) * sm_scale
                 T.gemm(dsT_cast, q, dk, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(dsT_cast, dsT_shared)
