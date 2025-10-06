@@ -38,10 +38,9 @@ def find_lib_path(name: str, optional=False):
         lib_name = f"lib{name}.so"
 
     for lib_root in tl_lib:
-        lib_dll_path = [os.path.join(p, lib_name) for p in tl_lib]
-        for lib in lib_dll_path:
-            if os.path.exists(lib) and os.path.isfile(lib):
-                return lib
+        lib_dll_path = os.path.join(lib_root, lib_name)
+        if os.path.exists(lib_dll_path) and os.path.isfile(lib_dll_path):
+            return lib_dll_path
     else:
         message = (f"Cannot find libraries: {lib_name}\n" + "List of candidates:\n" +
                    "\n".join(lib_dll_path))
