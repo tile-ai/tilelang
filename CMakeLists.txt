@@ -20,15 +20,28 @@ endif()
 
 if($ENV{USE_METAL})
   set(USE_METAL ON)
-elseif($ENV{USE_CUDA})
-  find_package(CUDAToolkit REQUIRED)
-
-  if(NOT CUDAToolkit_FOUND)
-    message(FATAL_ERROR "CUDA Toolkit not found. Please set CUDAToolkit_ROOT.")
+elseif($ENV{USE_ROCM})
+else()
+  if($ENV{USE_CUDA})
+    set(USE_CUDA ON)
+  elseif(DEFINED ENV{USE_CUDA} AND NOT $ENV{USE_CUDA})
+    # Build CPU-only when we explicitly disable CUDA
+    set(USE_CUDA OFF)
+  else()
+    message(TRACE "Enable CUDA support by default.")
+    set(USE_CUDA ON)
   endif()
 
-  # Set `USE_CUDA=/usr/local/cuda-x.y`
-  cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
+  if(USE_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+
+    if(NOT CUDAToolkit_FOUND)
+      message(FATAL_ERROR "CUDA Toolkit not found. Please set CUDAToolkit_ROOT.")
+    endif()
+
+    # Set `USE_CUDA=/usr/local/cuda-x.y`
+    cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
+  endif()
 endif()
 
 # Build tvm after all configs have been populated
@@ -88,7 +101,11 @@ if(PREBUILD_CYTHON)
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/cython/cython_wrapper.pyx"
     VERBATIM)
 
-  python_add_library(tilelang_cython MODULE "${CMAKE_BINARY_DIR}/tl_cython_wrapper.cpp" USE_SABI ${SKBUILD_SABI_VERSION})
+  if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
+    python_add_library(tilelang_cython MODULE "${CMAKE_BINARY_DIR}/tl_cython_wrapper.cpp" USE_SABI ${SKBUILD_SABI_VERSION})
+  else()
+    python_add_library(tilelang_cython MODULE "${CMAKE_BINARY_DIR}/tl_cython_wrapper.cpp")
+  endif()
   install(TARGETS tilelang_cython LIBRARY DESTINATION tilelang/lib)
 endif()
 
