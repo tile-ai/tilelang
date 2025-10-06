@@ -11,9 +11,9 @@ def get_bwd_configs():
     sm_major, sm_minor = torch.cuda.get_device_capability()
     sm_version = sm_major * 10 + sm_minor
     if sm_version == 80:
-        return 64, 64, 1, 128
+        return 64, 32, 1, 128
     elif sm_version == 90:
-        return 128, 128, 2, 256
+        return 128, 32, 2, 256
     else:
         raise ValueError(f"Unsupported SM version: {sm_version}")
 
@@ -494,6 +494,8 @@ def main(BATCH: int = 1,
     # Checks
     assert torch.allclose(O, O_ref, rtol=1e-2, atol=1e-2)
     assert torch.allclose(dV, dV_ref, rtol=1e-2, atol=1e-2)
+    print(f'dk max err: {torch.max(torch.abs(dK - dK_ref))}')
+    print(f'dq max err: {torch.max(torch.abs(dQ - dQ_ref))}')
     assert torch.allclose(dK, dK_ref, rtol=1e-2, atol=1e-2)
     assert torch.allclose(dQ, dQ_ref, rtol=1e-2, atol=1e-2)
     assert torch.allclose(dsinks, dsinks_ref, rtol=1e-2, atol=1e-2), f'{dsinks=}, {dsinks_ref=}'

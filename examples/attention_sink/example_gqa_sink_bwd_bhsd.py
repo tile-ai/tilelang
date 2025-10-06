@@ -11,9 +11,9 @@ def get_bwd_configs():
     sm_major, sm_minor = torch.cuda.get_device_capability()
     sm_version = sm_major * 10 + sm_minor
     if sm_version == 80:
-        return 64, 64, 1, 128
+        return 64, 32, 1, 128
     elif sm_version == 90:
-        return 128, 128, 2, 256
+        return 128, 32, 2, 256
     else:
         raise ValueError(f"Unsupported SM version: {sm_version}")
 
@@ -509,7 +509,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=1, help='Batch size')
     parser.add_argument('--h', type=int, default=64, help='Number of heads')
-    parser.add_argument('--n_ctx', type=int, default=1024, help='Context size')
+    parser.add_argument('--n_ctx', type=int, default=4096, help='Context size')
     parser.add_argument('--d_head', type=int, default=128, help='Head dimension')
     parser.add_argument('--groups', type=int, default=8, help='Groups')
     parser.add_argument(
