@@ -20,7 +20,8 @@ jobs:
     - name: Install python via uv
       uses: astral-sh/setup-uv@v6
       with:
-        enable-cache: true
+        enable-cache: false
+        cache-local-path: ${{ runner.tool_cache }}/uv
         ignore-nothing-to-cache: true
         activate-environment: true
         python-version: ${{ env.PYTHON_VERSION }}
@@ -65,8 +66,8 @@ jobs:
     - name: Install python via uv
       uses: astral-sh/setup-uv@v6
       with:
-        enable-cache: true
-        ignore-nothing-to-cache: true
+        enable-cache: false
+        cache-local-path: ${{ runner.tool_cache }}/uv
         activate-environment: true
         python-version: ${{ env.PYTHON_VERSION }}
 
