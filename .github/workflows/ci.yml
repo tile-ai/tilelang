@@ -29,8 +29,8 @@ jobs:
     - name: Ensure venv (local & persistent)
       run: |
         [[ -f requirements-test.txt ]] && \
-          uv pip install -r requirements-test.txt --no-build-isolation
-        uv pip install flash_attn==2.5.8 --no-build-isolation
+          uv pip install -r requirements-test.txt --no-build-isolation -i https://mirrors.bfsu.edu.cn/pypi/web/simple
+        uv pip install flash_attn==2.5.8 --no-build-isolation -i https://mirrors.bfsu.edu.cn/pypi/web/simple
 
     - name: Run format check
       run: |
