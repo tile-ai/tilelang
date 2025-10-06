@@ -90,7 +90,7 @@ def get_cplus_compiler():
     return None
 
 
-def is_mac():
+def is_darwin():
     return platform.system() == 'Darwin'
 
 
