@@ -56,11 +56,12 @@ logger = logging.getLogger(__name__)
 from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
 from .env import env as env  # noqa: F401
 
+# Setup tvm search path before importing tvm
+from . import libinfo
+
 import tvm
 import tvm.base
 from tvm import DataType  # noqa: F401
-
-from . import libinfo
 
 
 def _load_tile_lang_lib():
@@ -72,7 +73,7 @@ def _load_tile_lang_lib():
     lib_name = "tilelang" if tvm.base._RUNTIME_ONLY else "tilelang_module"
     # pylint: enable=protected-access
     lib_path = libinfo.find_lib_path(lib_name, optional=False)
-    return ctypes.CDLL(lib_path[0]), lib_path[0]
+    return ctypes.CDLL(lib_path), lib_path
 
 
 # only load once here

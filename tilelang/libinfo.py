@@ -1,45 +1,23 @@
-"""Library information. This is a standalone file that can be used to get various info.
-Modified from: https://github.com/mlc-ai/mlc-llm/blob/main/python/mlc_llm/libinfo.py
+"""
+As we're using sk-build-core,
+all libraries will be installed in <site-packages>/tilelang/lib,
+no matter if it's editable install.
+
+We need to:
+1. setup `TVM_LIBRARY_PATH` so tvm could be found;
 """
 
-#! pylint: disable=protected-access
-import os
 import sys
+import os
+import site
 
-TILELANG_LIBRARY_PATH = os.environ.get("TILELANG_LIBRARY_PATH", None)
+tl_lib = [os.path.join(i, 'tilelang/lib') for i in site.getsitepackages()]
+tl_lib = [i for i in tl_lib if os.path.exists(i)]
 
-
-def get_env_paths(env_var, splitter):
-    """Get path in env variable"""
-    if os.environ.get(env_var, None):
-        return [p.strip() for p in os.environ[env_var].split(splitter)]
-    return []
+os.environ['TVM_LIBRARY_PATH'] = ':'.join(tl_lib + [os.environ.get('TVM_LIBRARY_PATH', '')])
 
 
-def get_dll_directories():
-    """Get extra tile lang dll directories"""
-    curr_dir = os.path.dirname(os.path.realpath(__file__))
-    source_dir = os.path.abspath(os.path.join(curr_dir, ".."))
-    dll_path = [
-        curr_dir,
-        os.path.join(source_dir, "build"),  # local build
-        os.path.join(source_dir, "build", "Release"),
-        os.path.join(curr_dir, "lib"),  # pypi build
-    ]
-    if TILELANG_LIBRARY_PATH:
-        dll_path.append(TILELANG_LIBRARY_PATH)
-    if "CONDA_PREFIX" in os.environ:
-        dll_path.append(os.path.join(os.environ["CONDA_PREFIX"], "lib"))
-    if sys.platform.startswith("linux") or sys.platform.startswith("freebsd"):
-        dll_path.extend(get_env_paths("LD_LIBRARY_PATH", ":"))
-    elif sys.platform.startswith("darwin"):
-        dll_path.extend(get_env_paths("DYLD_LIBRARY_PATH", ":"))
-    elif sys.platform.startswith("win32"):
-        dll_path.extend(get_env_paths("PATH", ";"))
-    return [os.path.abspath(p) for p in dll_path if os.path.isdir(p)]
-
-
-def find_lib_path(name, optional=False):
+def find_lib_path(name: str, optional=False):
     """Find tile lang library
 
     Parameters
@@ -59,11 +37,12 @@ def find_lib_path(name, optional=False):
     else:
         lib_name = f"lib{name}.so"
 
-    dll_paths = get_dll_directories()
-    lib_dll_path = [os.path.join(p, lib_name) for p in dll_paths]
-    lib_found = [p for p in lib_dll_path if os.path.exists(p) and os.path.isfile(p)]
-    if not lib_found and not optional:
+    for lib_root in tl_lib:
+        lib_dll_path = [os.path.join(p, lib_name) for p in tl_lib]
+        for lib in lib_dll_path:
+            if os.path.exists(lib) and os.path.isfile(lib):
+                return lib
+    else:
         message = (f"Cannot find libraries: {lib_name}\n" + "List of candidates:\n" +
                    "\n".join(lib_dll_path))
         raise RuntimeError(message)
-    return lib_found
