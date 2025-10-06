@@ -19,9 +19,10 @@ def get_bwd_configs():
 
 
 @tilelang.jit(
-    out_idx=[3, 4], pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    out_idx=[3, 4],
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,}, 
+    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"]
+)
 def flashattn_fwd(
         batch,
         heads,
@@ -137,9 +138,10 @@ def flashattn_fwd(
 
 
 @tilelang.jit(
-    out_idx=[2], pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    out_idx=[2],
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,}, 
+    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"]
+)
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: str = "float16"):
     accum_dtype = "float"
     shape = [batch, heads, seq_len, dim]
@@ -175,9 +177,10 @@ def make_dq_layout(dQ):
 
 
 @tilelang.jit(
-    out_idx=[1], pass_configs={
-        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    out_idx=[1],
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,}, 
+    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"]
+)
 def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = "float16"):
     accum_dtype = "float"
     shape = [batch, heads, seq_len, dim]
@@ -198,9 +201,10 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = "float16"
     return flash_bwd_post
 
 
-@tilelang.jit(pass_configs={
-    tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-})
+@tilelang.jit(
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,}, 
+    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"]
+)
 def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None, sm_scale=None, dtype="float16"):  # None for full attention
     if sm_scale is None:
         sm_scale = (1.0 / dim)**0.5
@@ -307,7 +311,11 @@ def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None, sm_scale
     return flash_bwd
 
 
-@tilelang.jit(out_idx=-1)
+@tilelang.jit(
+    out_idx=-1,
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,}, 
+    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"]
+)
 def flashattn_bwd_dsink(batch, heads, seq_len, block=256, dtype: str = "float16"):
     accum_dtype = "float"
     shape = [batch, heads, seq_len]
