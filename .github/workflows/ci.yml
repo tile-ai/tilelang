@@ -10,6 +10,8 @@ jobs:
     runs-on: [self-hosted, nvidia]
     permissions:
       contents: write
+    env:
+      UV_INDEX_URL: https://mirrors.bfsu.edu.cn/pypi/web/simple
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
@@ -22,15 +24,14 @@ jobs:
       with:
         enable-cache: false
         cache-local-path: ${{ runner.tool_cache }}/uv
-        ignore-nothing-to-cache: true
         activate-environment: true
         python-version: ${{ env.PYTHON_VERSION }}
 
     - name: Ensure venv (local & persistent)
       run: |
         [[ -f requirements-test.txt ]] && \
-          uv pip install -r requirements-test.txt --no-build-isolation -i https://mirrors.bfsu.edu.cn/pypi/web/simple
-        uv pip install flash_attn==2.5.8 --no-build-isolation -i https://mirrors.bfsu.edu.cn/pypi/web/simple
+          uv pip install -r requirements-test.txt --no-build-isolation
+        uv pip install flash_attn==2.5.8 --no-build-isolation
 
     - name: Run format check
       run: |
@@ -54,6 +55,8 @@ jobs:
     needs: format-check
     permissions:
       contents: read
+    env:
+      UV_INDEX_URL: https://mirrors.bfsu.edu.cn/pypi/web/simple
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
