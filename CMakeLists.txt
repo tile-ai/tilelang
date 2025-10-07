@@ -26,9 +26,21 @@ if(NOT TVM_FOUND)
   endif()
 endif()
 
-if($ENV{USE_METAL})
+# Backend-specific checks and configs
+if(APPLE)
+  message(STATUS "Enable Metal support by default.")
+  set(USE_METAL ON)
+elseif($ENV{USE_METAL})
   set(USE_METAL ON)
 elseif($ENV{USE_ROCM})
+  set(CMAKE_HIP_STANDARD 17)
+
+  include(${TVM_SOURCE}/cmake/utils/FindROCM.cmake)
+  find_rocm($ENV{USE_ROCM})
+
+  add_compile_definitions(__HIP_PLATFORM_AMD__ __HIP_PLATFORM_HCC__=1)
+
+  include_directories(SYSTEM ${ROCM_INCLUDE_DIRS})
 else()
   if($ENV{USE_CUDA})
     set(USE_CUDA ON)
@@ -36,16 +48,12 @@ else()
     # Build CPU-only when we explicitly disable CUDA
     set(USE_CUDA OFF)
   else()
-    message(TRACE "Enable CUDA support by default.")
+    message(STATUS "Enable CUDA support by default.")
     set(USE_CUDA ON)
   endif()
 
   if(USE_CUDA)
     find_package(CUDAToolkit REQUIRED)
-
-    if(NOT CUDAToolkit_FOUND)
-      message(FATAL_ERROR "CUDA Toolkit not found. Please set CUDAToolkit_ROOT.")
-    endif()
 
     # Set `USE_CUDA=/usr/local/cuda-x.y`
     cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
@@ -116,8 +124,15 @@ if(PREBUILD_CYTHON)
 endif()
 
 # let libtilelang to search tvm/tvm_runtime in same dir
-set_target_properties(tilelang PROPERTIES
-    INSTALL_RPATH "$ORIGIN"
-)
+if(APPLE)
+  set_target_properties(tilelang PROPERTIES INSTALL_RPATH "@loader_path")
+else()
+  set_target_properties(tilelang PROPERTIES INSTALL_RPATH "\$ORIGIN")
+endif()
+
 install(TARGETS tvm tvm_runtime tilelang_module tilelang LIBRARY DESTINATION tilelang/lib)
 
+# Copy tvm cython ext for wheels. Not necessary for editable builds.
+install(
+    FILES "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/tvm/python/tvm/ffi/core.abi3.so"
+    DESTINATION tilelang/3rdparty/tvm/python/tvm/ffi)

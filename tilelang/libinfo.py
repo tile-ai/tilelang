@@ -43,5 +43,5 @@ def find_lib_path(name: str, optional=False):
             return lib_dll_path
     else:
         message = (f"Cannot find libraries: {lib_name}\n" + "List of candidates:\n" +
-                   "\n".join(lib_dll_path))
+                   "\n".join(tl_lib))
         raise RuntimeError(message)
