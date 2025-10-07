@@ -521,7 +521,13 @@ def custom_kernel(data: Tuple[torch.Tensor, Dict, Dict]) -> torch.Tensor:
     return output
 
 
-def main(d_hidden=7168, d_expert=2048, n_routed_experts=8, n_shared_experts=1, n_experts_per_token=4, batch_size=1, seq_len=8192):
+def main(d_hidden=7168,
+         d_expert=2048,
+         n_routed_experts=8,
+         n_shared_experts=1,
+         n_experts_per_token=4,
+         batch_size=1,
+         seq_len=8192):
     config = {
         "dhidden": d_hidden,
         "dexpert": d_expert,
