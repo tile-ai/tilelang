@@ -1,13 +1,23 @@
 [project]
 name = "tilelang"
 version = "0.1.6"
+dep = [
+    "Cython>=3.0.0",
+    "numpy>=1.23.5",
+    "tqdm>=4.62.3",
+    "typing_extensions>=4.10.0",
+    "cloudpickle",
+    # mldtypes should be greater than 0.5.1
+    # if you want to enable fp4
+    "ml_dtypes",
+    "psutil",
+    "torch",
+]
+requires-python = ">=3.8"
 
 [build-system]
 requires = [
-    "build",
-    "packaging",
     "setuptools>=61",
-    "wheel",
     "Cython>=3.0.0",
     "scikit-build-core",
 ]
@@ -15,6 +25,12 @@ build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
 wheel.py-api = "cp38"
+cmake.version = ">=3.26.1"
+
+[tool.scikit-build.wheel.packages]
+tilelang = "tilelang"
+"tilelang/src" = "src"
+"tilelang/3rdparty" = "3rdparty"
 
 [tool.yapf]
 based_on_style = "yapf"
