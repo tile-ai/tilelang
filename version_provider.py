@@ -7,8 +7,9 @@ from typing import Optional
 
 base_version = '0.1.6'
 
+
 def _read_cmake_bool(i: str):
-    return i.lower() not in ('0', 'false', 'off', 'no' ,'n', '')
+    return i.lower() not in ('0', 'false', 'off', 'no', 'n', '')
 
 
 def get_git_commit_id() -> Optional[str]:
