@@ -53,6 +53,7 @@ class suppress_stdout_stderr:
         self.outnull_file.close()
         self.errnull_file.close()
 
+
 IS_CUDA = torch.cuda.is_available()
 device = 'cuda:0' if IS_CUDA else 'mps:0'
 Event = torch.cuda.Event if IS_CUDA else torch.mps.Event
