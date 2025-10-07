@@ -39,7 +39,7 @@ jobs:
         mkdir -p build
         # run cmake to create the build directory with compile_commands.json
         uv pip install cmake
-        cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_CUDA=ON; cd ..
+        cd build; USE_CUDA=1 cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON; cd ..
         if ! output=$(./format.sh 2>&1); then
           echo "------------------------------------"
           echo "message:"
@@ -87,11 +87,9 @@ jobs:
     - name: Run examples
       run: |
         cd examples
-        unset PYTHONPATH
         python -m pytest -n 4 **/test*.py -v -r fE --durations=0
 
     - name: Run tests
       run: |
         cd testing/python
-        unset PYTHONPATH
         python -m pytest -n 4 -v -r fE --durations=0 --timeout=3600

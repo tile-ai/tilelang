@@ -33,45 +33,6 @@ if(NOT TVM_FOUND)
   endif()
 endif()
 
-# Backend-specific checks and configs
-if(APPLE)
-  message(STATUS "Enable Metal support by default.")
-  set(USE_METAL ON)
-elseif($ENV{USE_METAL})
-  set(USE_METAL ON)
-elseif($ENV{USE_ROCM})
-  set(CMAKE_HIP_STANDARD 17)
-
-  include(${TVM_SOURCE}/cmake/utils/FindROCM.cmake)
-  find_rocm($ENV{USE_ROCM})
-
-  add_compile_definitions(__HIP_PLATFORM_AMD__ __HIP_PLATFORM_HCC__=1)
-
-  include_directories(SYSTEM ${ROCM_INCLUDE_DIRS})
-else()
-  if($ENV{USE_CUDA})
-    set(USE_CUDA ON)
-  elseif(DEFINED ENV{USE_CUDA} AND NOT $ENV{USE_CUDA})
-    # Build CPU-only when we explicitly disable CUDA
-    set(USE_CUDA OFF)
-  else()
-    message(STATUS "Enable CUDA support by default.")
-    set(USE_CUDA ON)
-  endif()
-
-  if(USE_CUDA)
-    find_package(CUDAToolkit REQUIRED)
-
-    # Set `USE_CUDA=/usr/local/cuda-x.y`
-    cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
-  endif()
-endif()
-
-# Build tvm after all configs have been populated
-if(TVM_BUILD_FROM_SOURCE)
-  add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
-endif()
-
 # Collect source files
 file(GLOB TILE_LANG_SRCS
   src/*.cc
@@ -87,12 +48,6 @@ file(GLOB TILE_LANG_SRCS
   src/target/intrin_rule*.cc
 )
 
-# Resolve compile warnings in tvm
-add_compile_definitions(DMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>)
-
-# Add TileLang object library
-add_library(tilelang_objs OBJECT ${TILE_LANG_SRCS})
-
 # Include directories for TileLang
 set(TILE_LANG_INCLUDES
   ${TVM_SOURCE}/include
@@ -101,6 +56,77 @@ set(TILE_LANG_INCLUDES
   ${TVM_SOURCE}/3rdparty/dlpack/include
   ${TVM_SOURCE}/3rdparty/dmlc-core/include
 )
+
+# Backend-specific checks and configs
+if($ENV{USE_METAL})
+  set(USE_METAL ON)
+elseif(APPLE)
+  message(STATUS "Enable Metal support by default.")
+  set(USE_METAL ON)
+elseif($ENV{USE_ROCM})
+  set(USE_ROCM ON)
+else()
+  if($ENV{USE_CUDA})
+    set(USE_CUDA ON)
+  elseif(DEFINED ENV{USE_CUDA} AND NOT $ENV{USE_CUDA})
+    # Build CPU-only when we explicitly disable CUDA
+    set(USE_CUDA OFF)
+  else()
+    message(STATUS "Enable CUDA support by default.")
+    set(USE_CUDA ON)
+  endif()
+endif()
+
+if(USE_METAL)
+  file(GLOB TILE_LANG_METAL_SRCS
+    src/target/rt_mod_metal.cc
+  )
+  list(APPEND TILE_LANG_SRCS ${TILE_LANG_METAL_SRCS})
+elseif(USE_ROCM)
+  set(CMAKE_HIP_STANDARD 17)
+  include(${TVM_SOURCE}/cmake/utils/FindROCM.cmake)
+  find_rocm($ENV{USE_ROCM})
+  add_compile_definitions(__HIP_PLATFORM_AMD__ __HIP_PLATFORM_HCC__=1)
+
+  file(GLOB TILE_LANG_HIP_SRCS
+    src/target/codegen_hip.cc
+    src/target/rt_mod_hip.cc
+  )
+  list(APPEND TILE_LANG_SRCS ${TILE_LANG_HIP_SRCS})
+  list(APPEND TILE_LANG_INCLUDES ${ROCM_INCLUDE_DIRS})
+elseif(USE_CUDA)
+  set(CMAKE_CUDA_STANDARD 17)
+  find_package(CUDAToolkit REQUIRED)
+  add_compile_definitions("CUDA_MAJOR_VERSION=${CUDA_MAJOR_VERSION}")
+
+  # Set `USE_CUDA=/usr/local/cuda-x.y`
+  cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
+
+  file(GLOB TILE_LANG_CUDA_SRCS
+    src/runtime/*.cc
+    src/target/ptx.cc
+    src/target/codegen_cuda.cc
+    src/target/rt_mod_cuda.cc
+  )
+  list(APPEND TILE_LANG_SRCS ${TILE_LANG_CUDA_SRCS})
+  list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
+endif()
+
+# Resolve compile warnings in tvm
+add_compile_definitions(DMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>)
+
+# Build tvm after all configs have been populated
+if(TVM_BUILD_FROM_SOURCE)
+  add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
+endif()
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  target_compile_definitions(tilelang PRIVATE "TVM_LOG_DEBUG")
+  target_compile_definitions(tilelang_objs PRIVATE "TVM_LOG_DEBUG")
+  target_compile_definitions(tilelang_static PRIVATE "TVM_LOG_DEBUG")
+endif()
+
+add_library(tilelang_objs OBJECT ${TILE_LANG_SRCS})
 
 target_include_directories(tilelang_objs PRIVATE ${TILE_LANG_INCLUDES})
 

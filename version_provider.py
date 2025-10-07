@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import os
+import platform
 import subprocess
 from typing import Optional
 
 base_version = '0.1.6'
+
+def _read_cmake_bool(i: str):
+    return i.lower() not in ('0', 'false', 'off', 'no' ,'n', '')
 
 
 def get_git_commit_id() -> Optional[str]:
@@ -26,19 +30,15 @@ def dynamic_metadata(
     assert field == 'version'
 
     exts = []
-    try:
-        import torch
-
-        if torch.cuda.is_available():
-            backend = 'cuda' if torch.version.hip is None else 'rocm'
-        elif torch.mps.is_availabe():
-            backend = 'metal'
-        else:
-            backend = 'cpu'
-
-        exts.append(backend)
-    except Exception:
-        pass
+    if platform.system() == 'Darwin':
+        backend = 'metal'
+    elif _read_cmake_bool(os.environ.get('USE_ROCM', '')):
+        backend = 'rocm'
+    elif 'USE_CUDA' in os.environ and not _read_cmake_bool(os.environ.get('USE_ROCM')):
+        backend = 'cpu'
+    else:
+        backend = 'cuda'
+    exts.append(backend)
 
     if git_hash := get_git_commit_id():
         exts.append(f'git{git_hash[:8]}')
