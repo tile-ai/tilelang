@@ -27,7 +27,7 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
     return gemm
 
 
-def main():
+def test_profiler():
     kernel = matmul(1024, 1024, 1024, 128, 128, 32)
 
     import torch
@@ -36,27 +36,20 @@ def main():
     b = torch.randn(1024, 1024).cuda().half()
 
     c = kernel(a, b)
-
     ref_c = a @ b
-
-    print("c:")
-    print(c)
-    print("ref_c:")
-    print(ref_c)
-
     torch.testing.assert_close(c, ref_c, rtol=1e-2, atol=1e-2)
-    print("All check passed.")
-
-    # Get CUDA Source
-    print("CUDA Source:")
-    print(kernel.get_kernel_source())
 
     # benchmark
     profiler = kernel.get_profiler()
-    latency = profiler.do_bench(backend="cupti")
-    # latency = profiler.do_bench()
-    print(f"tilelang Latency: {latency}ms")
+
+    # use cupti backend
+    cupti_latency = profiler.do_bench(backend="cupti")
+
+    # use event backend
+    event_latency = profiler.do_bench(backend="event")
+    print(f"cupti Latency: {cupti_latency}ms")
+    print(f"event Latency: {event_latency}ms")
 
 
 if __name__ == "__main__":
-    main()
+    tilelang.testing.main()

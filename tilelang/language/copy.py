@@ -1,84 +1,10 @@
 """The language interface for tl programs."""
 
-from typing import Union, List, Optional, Literal
+from typing import Union, Optional, Literal
 from tilelang import language as T
 from tilelang.utils.language import get_buffer_region_from_load
 from tvm import ir, tir
-
-
-def region(buffer: tir.BufferLoad, access_type: str, *args: tir.PrimExpr):
-    """Create a memory region descriptor for tile operations.
-
-    Args:
-        buffer (tir.BufferLoad): The buffer to create a region for
-        access_type (str): Type of access - 'r' for read, 'w' for write, 'rw' for read-write
-        *args (tir.PrimExpr): Extent expressions defining the region size
-
-    Returns:
-        tir.Call: A region descriptor for tile operations
-    """
-    access_type = {"r": 1, "w": 2, "rw": 3}[access_type]
-    return tir.call_intrin("handle", tir.op.Op.get("tl.region"), buffer, access_type, *args)
-
-
-def buffer_to_tile_region(buffer: tir.Buffer, access_type: str):
-    """Convert a TVM buffer to a tile region descriptor.
-
-    Args:
-        buffer (tir.Buffer): The buffer to convert
-        access_type (str): Type of access - 'r' for read, 'w' for write, 'rw' for read-write
-
-    Returns:
-        tir.Call: A region descriptor covering the entire buffer
-    """
-    mins = [0 for _ in buffer.shape]
-    extents = [x for x in buffer.shape]
-    return region(T.BufferLoad(buffer, mins), access_type, *extents)
-
-
-def buffer_load_to_tile_region(load: tir.BufferLoad, access_type: str, extents: List[tir.PrimExpr]):
-    """Convert a buffer load operation to a tile region descriptor.
-
-    Args:
-        load (tir.BufferLoad): The buffer load operation
-        access_type (str): Type of access - 'r' for read, 'w' for write, 'rw' for read-write
-        extents (List[tir.PrimExpr]): List of expressions defining the region size
-
-    Returns:
-        tir.Call: A region descriptor for the loaded area
-    """
-    indices = load.indices
-    if len(indices) > len(extents):
-        # (f"mismatch between indices and extents for buffer load {load}: indices = {indices}, extents = {extents}, "
-        # f"region will be expanded in the last 2 dimensions")
-        new_extents = []
-        for _ in range(len(indices) - len(extents)):
-            new_extents.append(1)
-        for extent in extents:
-            new_extents.append(extent)
-        extents = new_extents
-    assert len(indices) == len(extents), f"indices = {indices}, extents = {extents}"
-    return region(load, access_type, *extents)
-
-
-def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: str,
-                                 extents: List[tir.PrimExpr]):
-    """Convert a buffer region to a tile region descriptor.
-
-    Args:
-        buffer_region (tir.BufferRegion): The buffer region to convert
-        access_type (str): Type of access - 'r' for read, 'w' for write, 'rw' for read-write
-
-    Returns:
-        tir.Call: A region descriptor for the specified buffer region
-    """
-    mins = [x.min for x in buffer_region.region]
-    region_extents = [x.extent for x in buffer_region.region]
-    assert len(region_extents) >= len(
-        extents
-    ), f"region_extents must be >= extents, region_extents = {region_extents}, extents = {extents}"
-
-    return region(T.BufferLoad(buffer_region.buffer, mins), access_type, *region_extents)
+from tilelang.language.utils import buffer_to_tile_region, buffer_region_to_tile_region, buffer_load_to_tile_region
 
 
 def copy(src: Union[tir.Buffer, tir.BufferLoad, tir.BufferRegion],
