@@ -159,8 +159,10 @@ endif()
 # let libtilelang to search tvm/tvm_runtime in same dir
 if(APPLE)
   set_target_properties(tilelang PROPERTIES INSTALL_RPATH "@loader_path")
+  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "@loader_path")
 else()
   set_target_properties(tilelang PROPERTIES INSTALL_RPATH "\$ORIGIN")
+  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN")
 endif()
 
 install(TARGETS tvm tvm_runtime tilelang_module tilelang LIBRARY DESTINATION tilelang/lib)
