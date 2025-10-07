@@ -32,19 +32,60 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+
+def _read_bool_env(name: str, default: bool = False) -> bool:
+    if env := os.environ.get(name):
+        env = env.lower()
+        if env in ['on', '1', 'true']:
+            return True
+        elif env in ['', 'off', '0', 'false']:
+            return False
+    return default
+
+
 # Environment variables False/True
-PYPI_BUILD = os.environ.get("PYPI_BUILD", "False").lower() == "true"
+PYPI_BUILD = _read_bool_env('PYPI_BUILD')
 PACKAGE_NAME = "tilelang"
 ROOT_DIR = os.path.dirname(__file__)
 
+CYCACHE = Path(os.path.join(ROOT_DIR, "tilelang", "jit", "adapter", "cython", ".cycache"))
+if not CYCACHE.exists():
+    # tvm may needs this, we won't always build cython backend so mkdir here.
+    CYCACHE.mkdir(exist_ok=True)
+
+IS_LINUX = platform.system() == 'Linux'
+MAYBE_METAL = platform.mac_ver()[2] == 'arm64'
+
 # Add LLVM control environment variable
-USE_LLVM = os.environ.get("USE_LLVM", "False").lower() == "true"
+USE_LLVM = _read_bool_env('USE_LLVM')
 # Add ROCM control environment variable
-USE_ROCM = os.environ.get("USE_ROCM", "False").lower() == "true"
+USE_ROCM = _read_bool_env("USE_ROCM")
+# Add ROCM control environment variable
+USE_METAL = _read_bool_env("USE_METAL", MAYBE_METAL)
+# Add ROCM control environment variable
+USE_CUDA = _read_bool_env("USE_CUDA", IS_LINUX and not USE_ROCM)
 # Build with Debug mode
-DEBUG_MODE = os.environ.get("DEBUG_MODE", "False").lower() == "true"
+DEBUG_MODE = _read_bool_env('DEBUG_MODE')
 # Include commit ID in wheel filename and package metadata
-WITH_COMMITID = os.environ.get("WITH_COMMITID", "True").lower() == "true"
+WITH_COMMITID = _read_bool_env("WITH_COMMITID")
+
+TVM_PREBUILD_ITEMS = [
+    "libtvm_runtime.so",
+    "libtvm.so",
+    "libtilelang.so",
+    "libtilelang_module.so",
+] if IS_LINUX else [
+    "libtvm_runtime.dylib",
+    "libtvm.dylib",
+    "libtilelang.dylib",
+    "libtilelang_module.dylib",
+]
+
+# from tvm's internal cython?
+TVM_PREBUILD_ITEMS_TO_DELETE = [] if IS_LINUX else [
+    'libtvm_runtime.dylib.dSYM',
+    'libtvm.dylib.dSYM',
+]
 
 
 def load_module_from_path(module_name, path):
@@ -65,23 +106,16 @@ if USE_ROCM and not ROCM_HOME:
     raise ValueError(
         "ROCM support is enabled (USE_ROCM=True) but ROCM_HOME is not set or detected.")
 
-if not USE_ROCM and not CUDA_HOME:
+if USE_CUDA and not CUDA_HOME:
     raise ValueError(
-        "CUDA support is enabled by default (USE_ROCM=False) but CUDA_HOME is not set or detected.")
+        "CUDA support is enabled by default on linux if `USE_ROCM=False`," \
+        " but CUDA_HOME is not set or detected.")
 
 # Ensure one of CUDA or ROCM is available
-if not (CUDA_HOME or ROCM_HOME):
+if IS_LINUX and not (CUDA_HOME or ROCM_HOME):
     raise ValueError(
         "Failed to automatically detect CUDA or ROCM installation. Please set the CUDA_HOME or ROCM_HOME environment variable manually (e.g., export CUDA_HOME=/usr/local/cuda or export ROCM_HOME=/opt/rocm)."
     )
-
-# TileLang only supports Linux platform
-assert sys.platform.startswith("linux"), "TileLang only supports Linux platform (including WSL)."
-
-
-def _is_linux_like():
-    return (sys.platform == "darwin" or sys.platform.startswith("linux") or
-            sys.platform.startswith("freebsd"))
 
 
 def get_path(*filepath) -> str:
@@ -144,7 +178,9 @@ def get_rocm_version():
     return Version("5.0.0")
 
 
-def get_tilelang_version(with_cuda=True, with_system_info=True, with_commit_id=False) -> str:
+def get_tilelang_version(with_cuda=USE_CUDA,
+                         with_system_info=not MAYBE_METAL,
+                         with_commit_id=False) -> str:
     version = find_version(get_path(".", "VERSION"))
     local_version_parts = []
     if with_system_info:
@@ -193,9 +229,6 @@ def get_cplus_compiler():
     out: Optional[str]
         The path to the default C/C++ compiler, or None if none was found.
     """
-
-    if not _is_linux_like():
-        return None
 
     env_cxx = os.environ.get("CXX") or os.environ.get("CC")
     if env_cxx:
@@ -371,6 +404,8 @@ def patch_libs(libpath):
     and have a hard-coded rpath.
     Set rpath to the directory of libs so auditwheel works well.
     """
+    if not IS_LINUX:
+        return
     # check if patchelf is installed
     # find patchelf in the system
     patchelf_path = shutil.which("patchelf")
@@ -432,13 +467,6 @@ class TileLangBuilPydCommand(build_py):
                     os.makedirs(target_dir)
                 shutil.copy2(source_dir, target_dir)
 
-        TVM_PREBUILD_ITEMS = [
-            "libtvm_runtime.so",
-            "libtvm.so",
-            "libtilelang.so",
-            "libtilelang_module.so",
-        ]
-
         potential_dirs = [
             ext_output_dir,
             self.build_lib,
@@ -467,6 +495,14 @@ class TileLangBuilPydCommand(build_py):
                 os.remove(source_lib_file)
             else:
                 logger.info(f"WARNING: {item} not found in any expected directories!")
+
+        for item in TVM_PREBUILD_ITEMS_TO_DELETE:
+            source_lib_file = None
+            for dir in potential_dirs:
+                candidate = os.path.join(dir, item)
+                if os.path.exists(candidate):
+                    shutil.rmtree(candidate)
+                    break
 
         TVM_CONFIG_ITEMS = [
             f"{build_temp_dir}/config.cmake",
@@ -587,10 +623,10 @@ class CMakeExtension(Extension):
     :param sourcedir: Directory containing the top-level CMakeLists.txt.
     """
 
-    def __init__(self, name, sourcedir=""):
+    def __init__(self, name, sourcedir="", **kwargs):
         # We pass an empty 'sources' list because
         # the actual build is handled by CMake, not setuptools.
-        super().__init__(name=name, sources=[])
+        super().__init__(name=name, sources=[], **kwargs)
 
         # Convert the source directory to an absolute path
         # so that CMake can correctly locate the CMakeLists.txt.
@@ -642,7 +678,7 @@ class TilelangExtensionBuild(build_ext):
         # To make it works with editable install,
         # we need to copy the lib*.so files to the tilelang/lib directory
         import glob
-        files = glob.glob("*.so")
+        files = glob.glob("*.so" if IS_LINUX else "*.dylib")
         if os.path.exists(PACKAGE_NAME):
             target_lib_dir = os.path.join(PACKAGE_NAME, "lib")
             for file in files:
@@ -724,7 +760,10 @@ class TilelangExtensionBuild(build_ext):
                             os.system(f"{cython} {cython_wrapper_path} --cplus -o {source_path}")
                             python_include_path = sysconfig.get_path("include")
                             cc = get_cplus_compiler()
+                            if MAYBE_METAL:
+                                cc += ' -Wl,-undefined,dynamic_lookup'
                             command = f"{cc} -shared -pthread -fPIC -fwrapv -O2 -Wall -fno-strict-aliasing -I{python_include_path} {source_path} -o {temp_path}"
+                            logger.info(command)
                             os.system(command)
 
                             # rename the temp file to the library file
@@ -783,7 +822,7 @@ class TilelangExtensionBuild(build_ext):
             "-G",
             "Ninja",
         ]
-        if not USE_ROCM:
+        if USE_CUDA and not USE_ROCM:
             cmake_args.append(f"-DCMAKE_CUDA_COMPILER={os.path.join(CUDA_HOME, 'bin', 'nvcc')}")
 
         # Create the temporary build directory (if it doesn't exist).
@@ -804,12 +843,17 @@ class TilelangExtensionBuild(build_ext):
         content_lines.append(f"set(USE_LLVM {llvm_config_path})")
 
         # Append GPU backend configuration based on environment
-        if USE_ROCM:
+        if USE_METAL:
+            content_lines += [
+                "set(USE_METAL ON)",
+                "set(USE_ROCM OFF)",
+            ]
+        elif USE_ROCM:
             content_lines += [
                 f"set(USE_ROCM {ROCM_HOME})",
                 "set(USE_CUDA OFF)",
             ]
-        else:
+        elif CUDA_HOME:
             content_lines += [
                 f"set(USE_CUDA {CUDA_HOME})",
                 "set(USE_ROCM OFF)",
@@ -845,6 +889,12 @@ class TilelangExtensionBuild(build_ext):
              str(num_jobs)],
             cwd=build_temp)
 
+
+ext_modules = [
+    CMakeExtension("TileLangCXX", sourcedir="."),
+]
+if not MAYBE_METAL:
+    ext_modules.append(CythonExtension("TileLangCython", sourcedir="."))
 
 setup(
     name=PACKAGE_NAME,

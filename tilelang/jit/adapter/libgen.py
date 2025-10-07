@@ -20,16 +20,13 @@ from .utils import is_cpu_target, is_cuda_target, is_hip_target
 
 logger = logging.getLogger(__name__)
 
-is_nvrtc_available = False
-NVRTC_UNAVAILABLE_WARNING = "cuda-python is not available, nvrtc backend cannot be used. " \
-                            "Please install cuda-python via `pip install cuda-python` " \
-                            "if you want to use the nvrtc backend."
 try:
-    import cuda.bindings.driver as cuda
-    from tilelang.contrib.nvrtc import compile_cuda
-    is_nvrtc_available = True
+    from tilelang.jit.adapter.nvrtc import is_nvrtc_available
+    if is_nvrtc_available:
+        import cuda.bindings.driver as cuda
+        from tilelang.contrib.nvrtc import compile_cuda
 except ImportError:
-    pass
+    is_nvrtc_available = False
 
 
 class LibraryGenerator(object):
@@ -194,7 +191,9 @@ class PyLibraryGenerator(LibraryGenerator):
 
     def __init__(self, target: Target, verbose: bool = False):
         if not is_nvrtc_available:
-            raise ImportError(NVRTC_UNAVAILABLE_WARNING)
+            raise ImportError("cuda-python is not available, nvrtc backend cannot be used. "
+                              "Please install cuda-python via `pip install cuda-python` "
+                              "if you want to use the nvrtc backend.")
         super().__init__(target, verbose)
 
     @staticmethod
@@ -243,7 +242,7 @@ class PyLibraryGenerator(LibraryGenerator):
             else:
                 tl_template_path = TILELANG_TEMPLATE_PATH
 
-            cuda_home = "/usr/local/cuda" if CUDA_HOME is None else CUDA_HOME
+            cuda_home = CUDA_HOME if CUDA_HOME else "/usr/local/cuda"
 
             options = [f"-I{tl_template_path}", f"-I{cutlass_path}", f"-I{cuda_home}/include"]
             if self.compile_flags:
