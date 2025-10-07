@@ -97,7 +97,7 @@ elseif(USE_ROCM)
 elseif(USE_CUDA)
   set(CMAKE_CUDA_STANDARD 17)
   find_package(CUDAToolkit REQUIRED)
-  add_compile_definitions("CUDA_MAJOR_VERSION=${CUDA_MAJOR_VERSION}")
+  add_compile_definitions("CUDA_MAJOR_VERSION=${CUDAToolkit_VERSION_MAJOR}")
 
   # Set `USE_CUDA=/usr/local/cuda-x.y`
   cmake_path(GET CUDAToolkit_BIN_DIR PARENT_PATH USE_CUDA)
@@ -139,21 +139,21 @@ if(PREBUILD_CYTHON)
   find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})
 
   add_custom_command(
-    OUTPUT "${CMAKE_BINARY_DIR}/tl_cython_wrapper.cpp"
+    OUTPUT "${CMAKE_BINARY_DIR}/cython_wrapper.cpp"
     COMMENT
       "Cythoning tilelang/jit/adapter/cython/cython_wrapper.pyx"
     COMMAND Python::Interpreter -m cython
             "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/cython/cython_wrapper.pyx"
-            --cplus --output-file "${CMAKE_BINARY_DIR}/tl_cython_wrapper.cpp"
+            --cplus --output-file "${CMAKE_BINARY_DIR}/cython_wrapper.cpp"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/cython/cython_wrapper.pyx"
     VERBATIM)
 
   if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
-    python_add_library(tilelang_cython MODULE "${CMAKE_BINARY_DIR}/tl_cython_wrapper.cpp" USE_SABI ${SKBUILD_SABI_VERSION})
+    python_add_library(cython_wrapper MODULE "${CMAKE_BINARY_DIR}/cython_wrapper.cpp" USE_SABI ${SKBUILD_SABI_VERSION})
   else()
-    python_add_library(tilelang_cython MODULE "${CMAKE_BINARY_DIR}/tl_cython_wrapper.cpp")
+    python_add_library(cython_wrapper MODULE "${CMAKE_BINARY_DIR}/cython_wrapper.cpp")
   endif()
-  install(TARGETS tilelang_cython LIBRARY DESTINATION tilelang/lib)
+  install(TARGETS cython_wrapper LIBRARY DESTINATION tilelang)
 endif()
 
 # let libtilelang to search tvm/tvm_runtime in same dir
