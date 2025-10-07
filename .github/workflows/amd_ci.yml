@@ -69,7 +69,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0
+        fetch-depth: 1
         repository: ${{ github.event.pull_request.head.repo.full_name }}
         ref: ${{ github.event.pull_request.head.ref }}
 
@@ -107,6 +107,7 @@ jobs:
       run: |
         echo "Installing project (wheel form)"
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+        git submodule update --init --recursive --checkout --recommend-shallow
         USE_ROCM=True pip install . --no-user
 
     - name: Run tests
