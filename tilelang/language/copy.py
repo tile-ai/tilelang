@@ -45,6 +45,14 @@ def copy(src: Union[tir.Buffer, tir.BufferLoad, tir.BufferRegion],
 
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
+    # Combine the nested if statements into a single if statement as suggested by SIM102
+    if (src_extent is None and dst_extent is None and isinstance(src, tir.BufferLoad) and
+            isinstance(dst, tir.BufferLoad)):
+        # check if the case is like this:
+        # copy(buffer_a[i], buffer_b[i]) where both are BufferLoad nodes
+        # In this case, lower it to a simple BufferStore: buffer_b[i] = buffer_a[i]
+        return tir.BufferStore(dst.buffer, src, dst.indices)
+
     assert src_extent or dst_extent, "Can't deduce copy extents from args"
     src_extent = list(src_extent) if src_extent else [1] * len(dst_extent)
     dst_extent = list(dst_extent) if dst_extent else [1] * len(src_extent)
