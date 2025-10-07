@@ -761,11 +761,11 @@ Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
   else
     ICHECK(0) << "Unsupported layout for Hopper with stride=" << mat_stride
               << ", continuous=" << mat_continuous
-              << ", element_size=" << element_size << ", kfactor=" << kfactor;
+              << ", element_size=" << element_size << ", k_inner=" << k_inner;
 }
 
 Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
-                             int element_size, int kfactor) {
+                             int element_size, bool k_inner) {
   if (element_size == 64) {
     ICHECK(0) << "float64 on sm100 is not supported now";
   }
@@ -782,7 +782,7 @@ Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
   else
     ICHECK(0) << "Unsupported layout for sm100 with stride=" << mat_stride
               << ", continuous=" << mat_continuous
-              << ", element_size=" << element_size << ", kfactor=" << kfactor;
+              << ", element_size=" << element_size << ", k_inner=" << k_inner;
   __builtin_unreachable(); // to prevent compiler warning
 }
 

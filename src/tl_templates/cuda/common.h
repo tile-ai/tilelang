@@ -5,6 +5,7 @@
 #endif
 
 #include "atomic.h"
+#include <cute/arch/util.hpp>
 #include <cutlass/fast_math.h>
 #include <cutlass/numeric_types.h>
 #include <math_constants.h>
