@@ -234,13 +234,14 @@ def ref_sparse_mla_fwd_interface(q, kv, indices, sm_scale=None, is_casual=True):
 
 def test_sparse_mla_fwd(B=1,
                         S=4096,
-                        SKV=4096,
+                        SKV=8192,
                         H=128,
                         HKV=1,
                         DQK=576,
                         DV=512,
                         topk=2048,
-                        dtype=torch.bfloat16):
+                        dtype=torch.bfloat16,
+                        check_correctness=True):
     torch.random.manual_seed(0)
     q = torch.randn((B, S, H, DQK), dtype=dtype, device="cuda").requires_grad_(True)
     kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device="cuda").requires_grad_(True)
@@ -254,7 +255,7 @@ def test_sparse_mla_fwd(B=1,
 
     tl_out, tl_lse = sparse_mla_fwd_interface(q, kv, indices)
 
-    if SKV <= 4096:
+    if check_correctness:
         # otherwise may cause out of memory
         ref_out = ref_sparse_mla_fwd_interface(q, kv, indices)
         assert_tensors_similar(tl_out, ref_out, eps=1e-2, name="out")
@@ -277,4 +278,13 @@ def test_sparse_mla_fwd(B=1,
 
 if __name__ == "__main__":
     test_sparse_mla_fwd(
-        B=1, S=4096, SKV=4096, H=128, HKV=1, DQK=576, DV=512, topk=2048, dtype=torch.bfloat16)
+        B=1,
+        S=4096,
+        SKV=4096,
+        H=128,
+        HKV=1,
+        DQK=576,
+        DV=512,
+        topk=2048,
+        dtype=torch.bfloat16,
+        check_correctness=True)
