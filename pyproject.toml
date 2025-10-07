@@ -35,6 +35,11 @@ tilelang = "tilelang"
 "tilelang/src" = "src"
 "tilelang/3rdparty" = "3rdparty"
 
+# TODO: we might want to not include these in wheel?
+"tilelang/benchmark" = "benchmark"
+"tilelang/examples" = "examples"
+"tilelang/testing" = "testing"
+
 [tool.yapf]
 based_on_style = "yapf"
 column_limit = 100
