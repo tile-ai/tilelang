@@ -61,13 +61,11 @@ from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
 from .env import env as env  # noqa: F401
 
 import tvm
-import tvm.base
-from tvm import DataType  # noqa: F401
+import tvm.base as _
+from tvm import DataType as _
 
 # Setup tvm search path before importing tvm
 from . import libinfo
-
-from .contrib.cc import is_darwin
 
 
 def _load_tile_lang_lib():
