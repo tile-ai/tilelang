@@ -85,8 +85,6 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     """
     mod = tir.transform.BindTarget(target)(mod)
 
-    # Inline let expressions and statements
-    mod = tilelang.transform.LetInline()(mod)
     # Add wrapper for single buf store
     mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)
     # Inject assumes to speedup tvm prover
