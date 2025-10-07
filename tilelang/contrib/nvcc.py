@@ -4,6 +4,7 @@
 from __future__ import absolute_import as _abs
 
 import os
+import shutil
 import subprocess
 import warnings
 from typing import Tuple
@@ -14,6 +15,18 @@ from tvm.target import Target
 
 from tvm.base import py_str
 from tvm.contrib import utils
+
+
+def find_cuda_home():
+    """Find the CUDA install path."""
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if cuda_home is None:
+        nvcc_path = shutil.which("nvcc")
+        if nvcc_path is not None:
+            cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
+        else:
+            cuda_home = "/usr/local/cuda"
+    return cuda_home
 
 
 def compile_cuda(code,
