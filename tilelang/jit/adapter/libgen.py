@@ -11,7 +11,7 @@ from tvm.target import Target
 
 from tilelang import tvm as tvm
 from tilelang.transform import PassConfigKey
-from tilelang.contrib.nvcc import find_cuda_home, get_nvcc_compiler, get_target_arch, get_target_compute_version
+from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_arch, get_target_compute_version
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
 from tilelang.utils.deprecated import deprecated_warning
@@ -243,7 +243,7 @@ class PyLibraryGenerator(LibraryGenerator):
             else:
                 tl_template_path = TILELANG_TEMPLATE_PATH
 
-            cuda_home = CUDA_HOME if CUDA_HOME is not None else find_cuda_home()
+            cuda_home = CUDA_HOME if CUDA_HOME else "/usr/local/cuda"
 
             options = [f"-I{tl_template_path}", f"-I{cutlass_path}", f"-I{cuda_home}/include"]
             if self.compile_flags:
