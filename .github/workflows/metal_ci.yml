@@ -82,7 +82,7 @@ jobs:
     - name: Build wheel
       run: |
         source .venv/bin/activate
-        uv pip install -v --no-build-isolation .
+        uv pip install -v .
 
     - name: Run metal test
       run: |
