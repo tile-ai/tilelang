@@ -20,7 +20,6 @@ from .utils import is_cpu_target, is_cuda_target, is_hip_target
 
 logger = logging.getLogger(__name__)
 
-# Import NVRTC availability check from centralized location
 try:
     from tilelang.jit.adapter.nvrtc import is_nvrtc_available
     if is_nvrtc_available:
