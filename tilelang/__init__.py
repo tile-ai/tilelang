@@ -61,8 +61,8 @@ from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
 from .env import env as env  # noqa: F401
 
 import tvm
-import tvm.base as _
-from tvm import DataType as _
+import tvm.base  # noqa: F401
+from tvm import DataType  # noqa: F401
 
 # Setup tvm search path before importing tvm
 from . import libinfo
