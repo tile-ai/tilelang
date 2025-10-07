@@ -1,8 +1,37 @@
 #include <hip/amd_detail/amd_hip_fp8.h>
 
+#define HIP_FP8_ENABLED 1
+
 using fp8_e4_t = __hip_fp8_e4m3_fnuz;
 using fp8_e4_2_t = __hip_fp8x2_e4m3_fnuz;
-using fp8_e4_4_t = __hip_fp8x4_e4m3_fnuz;
+
+// Simple wrapper that provides member access for generated code
+struct fp8_e4_4_t {
+  union {
+    __hip_fp8x4_e4m3_fnuz data;
+    struct {
+      fp8_e4_t x, y, z, w;
+    };
+  };
+
+  // Default constructor
+  __device__ fp8_e4_4_t() = default;
+
+  // Constructor from __hip_fp8x4_e4m3_fnuz
+  __device__ fp8_e4_4_t(const __hip_fp8x4_e4m3_fnuz &val) : data(val) {}
+
+  // Constructor from float4
+  __device__ fp8_e4_4_t(const float4 &val) : data(val) {}
+
+  // Conversion operator to __hip_fp8x4_e4m3_fnuz
+  __device__ operator __hip_fp8x4_e4m3_fnuz() const { return data; }
+
+  // Assignment operator
+  __device__ fp8_e4_4_t &operator=(const __hip_fp8x4_e4m3_fnuz &val) {
+    data = val;
+    return *this;
+  }
+};
 
 struct __align__(8) fp8_e4_8_t {
   fp8_e4_4_t x;

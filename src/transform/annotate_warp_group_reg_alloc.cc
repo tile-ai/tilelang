@@ -2,16 +2,10 @@
  * \file annotate_warp_group_reg_alloc.cc
  * \brief Annotate warp group reg alloc for warp specialization
  */
-#include <tvm/tir/op.h>
-#include <tvm/tir/stmt_functor.h>
-#include <tvm/tir/transform.h>
 
+#include "warp_specialized_rewriter.h"
 #include <unordered_set>
-#include <utility>
 #include <vector>
-
-#include "../op/builtin.h"
-#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -23,6 +17,9 @@ public:
   static Array<IntImm> Collect(const PrimFunc &f) {
     SetMaxNRegCollector collector;
     collector(f->body);
+    if (collector.warp_specialized_) {
+      return Array<IntImm>({});
+    }
     return collector.has_no_set_max_nreg_
                ? Array<IntImm>({IntImm(DataType::Int(32), -1),
                                 IntImm(DataType::Int(32), -1)})
@@ -49,9 +46,17 @@ private:
     StmtExprVisitor::VisitStmt_(op);
   }
 
+  void VisitStmt_(const AttrStmtNode *op) final {
+    if (op->attr_key == attr::kCustomWarpSpecialization) {
+      warp_specialized_ = true;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
   Array<IntImm> nreg_{IntImm(DataType::Int(32), 0),
                       IntImm(DataType::Int(32), 0)};
   bool has_no_set_max_nreg_ = false;
+  bool warp_specialized_ = false;
 };
 
 class SetMaxNRegInjector : public StmtExprMutator {
@@ -59,6 +64,9 @@ public:
   static PrimFunc Inject(PrimFunc f) {
     auto T = SetMaxNRegInjector();
     T.nreg_ = SetMaxNRegCollector::Collect(f);
+    if (T.nreg_.empty()) {
+      return f;
+    }
     f.CopyOnWrite()->body = T(f->body);
     return f;
   }

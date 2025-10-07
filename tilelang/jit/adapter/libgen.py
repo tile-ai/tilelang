@@ -14,21 +14,19 @@ from tilelang.transform import PassConfigKey
 from tilelang.contrib.nvcc import get_nvcc_compiler, get_target_arch, get_target_compute_version
 from tilelang.contrib.rocm import find_rocm_path, get_rocm_arch
 from tilelang.env import TILELANG_TEMPLATE_PATH
+from tilelang.utils.deprecated import deprecated_warning
 
 from .utils import is_cpu_target, is_cuda_target, is_hip_target
 
 logger = logging.getLogger(__name__)
 
-is_nvrtc_available = False
-NVRTC_UNAVAILABLE_WARNING = "cuda-python is not available, nvrtc backend cannot be used. " \
-                            "Please install cuda-python via `pip install cuda-python` " \
-                            "if you want to use the nvrtc backend."
 try:
-    import cuda.bindings.driver as cuda
-    from tilelang.contrib.nvrtc import compile_cuda
-    is_nvrtc_available = True
+    from tilelang.jit.adapter.nvrtc import is_nvrtc_available
+    if is_nvrtc_available:
+        import cuda.bindings.driver as cuda
+        from tilelang.contrib.nvrtc import compile_cuda
 except ImportError:
-    pass
+    is_nvrtc_available = False
 
 
 class LibraryGenerator(object):
@@ -70,7 +68,17 @@ class LibraryGenerator(object):
             target_arch = get_target_arch(get_target_compute_version(target))
             libpath = src.name.replace(".cu", ".so")
 
-            disable_fast_math = self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH, False)
+            if self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH):
+                deprecated_warning(
+                    "TL_DISABLE_FAST_MATH",
+                    "TL_ENABLE_FAST_MATH",
+                    "0.1.7",
+                )
+                enable_fast_math = not self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH,
+                                                             True)
+            else:
+                enable_fast_math = self.pass_configs.get(PassConfigKey.TL_ENABLE_FAST_MATH, False)
+
             ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL,
                                                       None)
             verbose_ptxas_output = self.pass_configs.get(
@@ -91,7 +99,7 @@ class LibraryGenerator(object):
                 "-gencode",
                 f"arch=compute_{target_arch},code=sm_{target_arch}",
             ]
-            if not disable_fast_math:
+            if enable_fast_math:
                 command += ["--use_fast_math"]
             if ptxas_usage_level is not None:
                 command += [f"--ptxas-options=--register-usage-level={ptxas_usage_level}"]
@@ -183,7 +191,9 @@ class PyLibraryGenerator(LibraryGenerator):
 
     def __init__(self, target: Target, verbose: bool = False):
         if not is_nvrtc_available:
-            raise ImportError(NVRTC_UNAVAILABLE_WARNING)
+            raise ImportError("cuda-python is not available, nvrtc backend cannot be used. "
+                              "Please install cuda-python via `pip install cuda-python` "
+                              "if you want to use the nvrtc backend.")
         super().__init__(target, verbose)
 
     @staticmethod
@@ -232,7 +242,7 @@ class PyLibraryGenerator(LibraryGenerator):
             else:
                 tl_template_path = TILELANG_TEMPLATE_PATH
 
-            cuda_home = "/usr/local/cuda" if CUDA_HOME is None else CUDA_HOME
+            cuda_home = CUDA_HOME if CUDA_HOME else "/usr/local/cuda"
 
             options = [f"-I{tl_template_path}", f"-I{cutlass_path}", f"-I{cuda_home}/include"]
             if self.compile_flags:

@@ -1,6 +1,6 @@
 """
-This module provides an auto-tuning infrastructure for TileLang (tl) programs. 
-It includes functionality to JIT-compile TileLang programs into a runnable 
+This module provides an auto-tuning infrastructure for TileLang (tl) programs.
+It includes functionality to JIT-compile TileLang programs into a runnable
 kernel adapter using TVM.
 """
 
@@ -16,6 +16,7 @@ from typing import (
     Optional,
 )
 from tilelang import tvm as tvm
+from tilelang.jit.adapter.utils import is_metal_target
 from tvm.tir import PrimFunc
 from tvm.target import Target
 
@@ -74,6 +75,9 @@ def compile(
     # This path is not a performance critical path, so we can afford to convert the target.
     target = Target(determine_target(target))
 
+    if is_metal_target(target):
+        assert execution_backend == 'torch', 'Currently metal target only support `tl.jit(execution_backend="torch")`'
+
     return cached(
         func=func,
         out_idx=out_idx,
@@ -95,7 +99,7 @@ class _JitImplementation:
     verbose: bool
     pass_configs: Optional[Dict[str, Any]]
     debug_root_path: Optional[str]
-    compile_flags: Optional[List[str]]
+    compile_flags: Optional[Union[List[str], str]]
 
     def __init__(self,
                  out_idx: Any = None,
@@ -105,7 +109,7 @@ class _JitImplementation:
                  verbose: bool = False,
                  pass_configs: Optional[Dict[str, Any]] = None,
                  debug_root_path: Optional[str] = None,
-                 compile_flags: Optional[List[str]] = None):
+                 compile_flags: Optional[Union[List[str], str]] = None):
         """
         Initializes the JIT compiler decorator.
 
@@ -137,6 +141,9 @@ class _JitImplementation:
             If None, no debug information is saved (default: None).
             If a relative path is given, it's made absolute relative to the project root
             or current working directory.
+        compile_flags : Optional[Union[List[str], str]], optional
+            Additional compilation flags to pass to the compiler.
+            If None, no additional compilation flags are passed (default: None).
         """
         self.out_idx = out_idx
         self.execution_backend = execution_backend
@@ -261,7 +268,7 @@ def jit(  # This is the new public interface
         Compilation target for TVM (e.g., "cuda", "llvm"). Defaults to "auto".
     target_host : Union[str, Target], optional
         Target host for cross-compilation. Defaults to None.
-    execution_backend : Literal["dlpack", "ctypes", "cython"], optional
+    execution_backend : Literal["dlpack", "ctypes", "cython", "nvrtc"], optional
         Backend for kernel execution and argument passing. Defaults to "cython".
     verbose : bool, optional
         Enables verbose logging during compilation. Defaults to False.

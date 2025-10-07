@@ -1,5 +1,6 @@
 from typing import Any, Callable, Dict, List, Literal, Optional, Union
 
+from tilelang.jit.adapter.utils import is_metal_target
 from tvm.target import Target
 from tvm.tir import PrimFunc
 
@@ -8,7 +9,7 @@ from tilelang import tvm
 from tilelang import env
 from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter,
-                                  NVRTCKernelAdapter, TorchDLPackKernelAdapter)
+                                  NVRTCKernelAdapter, TorchDLPackKernelAdapter, MetalKernelAdapter)
 from tilelang.profiler import Profiler, TensorSupplyType
 from tilelang.utils.target import AVALIABLE_TARGETS, determine_target
 import logging
@@ -103,6 +104,7 @@ class JITKernel(object):
             "ctypes",
             "cython",
             "nvrtc",
+            "torch",
         ], f"Invalid execution backend. {execution_backend}"
         if execution_backend == "cython":
             from tilelang.contrib.cc import get_cplus_compiler
@@ -277,6 +279,20 @@ class JITKernel(object):
                 verbose=verbose,
                 pass_configs=pass_configs,
                 compile_flags=compile_flags,
+            )
+        elif execution_backend == "torch":
+            assert is_metal_target(target)
+            adapter = MetalKernelAdapter(
+                params=artifact.params,
+                result_idx=out_idx,
+                # target=target,
+                func_or_mod=tilelang_func,
+                # host_mod=artifact.host_mod,
+                device_mod=artifact.device_mod,
+                kernel_global_source=artifact.kernel_source,
+                verbose=verbose,
+                # pass_configs=pass_configs,
+                # compile_flags=compile_flags,
             )
         else:
             # Handle invalid backend.

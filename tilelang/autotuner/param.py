@@ -172,9 +172,9 @@ class AutotuneResult:
             kernel_path = os.path.join(cache_path, KERNEL_PATH)
             if verbose:
                 logger.debug(f"Saving kernel source code to file: {kernel_path}")
-            if kernel.artifact.kernel_source is not None:
+            if kernel.kernel_source is not None:
                 with open(kernel_path, "w") as f:
-                    f.write(kernel.artifact.kernel_source)
+                    f.write(kernel.kernel_source)
         except Exception as e:
             logger.error(f"Error saving kernel source code to disk: {e}")
 

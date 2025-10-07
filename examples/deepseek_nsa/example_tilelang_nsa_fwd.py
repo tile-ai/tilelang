@@ -8,7 +8,13 @@ import tilelang.testing
 tilelang.testing.set_random_seed(0)
 
 
-@tilelang.jit(out_idx=[-1])
+@tilelang.jit(
+    out_idx=[-1],
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    })
 def native_sparse_attention(batch,
                             heads,
                             seq_len,

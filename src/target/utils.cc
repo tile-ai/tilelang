@@ -53,6 +53,13 @@ bool TargetIsHopper(Target target) {
   return arch >= 90 && arch < 100;
 }
 
+bool TargetIsSm100(Target target) {
+  if (!TargetIsCuda(target))
+    return false;
+  int arch = GetArchInt(target);
+  return arch >= 100 & arch <= 103;
+}
+
 bool TargetIsSM120(Target target) {
   if (!TargetIsCuda(target))
     return false;
@@ -102,6 +109,12 @@ bool TargetHasStmatrix(Target target) {
     return false;
   int arch = GetArchInt(target);
   return arch >= 90;
+}
+
+bool TargetHasTmem(Target target) {
+  if (!TargetIsCuda(target))
+    return false;
+  return TargetIsSm100(target);
 }
 
 bool TargetHasBulkCopy(Target target) {

@@ -13,8 +13,8 @@ from typing import List
 class Fragment(Layout):
     """
     A Fragment layout object that encapsulates iteration variables (forward_vars),
-    thread iteration variables (forward_thread), and index transformations 
-    (forward_index). This class supports replication (thread_replicate) and 
+    thread iteration variables (forward_thread), and index transformations
+    (forward_index). This class supports replication (thread_replicate) and
     index mapping for fine-grained control over multi-dimensional data layouts.
     """
 
@@ -49,7 +49,7 @@ class Fragment(Layout):
             used for multi-threading or replication in the hardware threads. Defaults to 1.
         forward_index_fn : callable, optional
             A function that takes iteration variables and returns an index or list
-            of indices for this fragment. Used when `forward_fn` is None and 
+            of indices for this fragment. Used when `forward_fn` is None and
             the index transformation is derived separately.
         """
 

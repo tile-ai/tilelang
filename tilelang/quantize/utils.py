@@ -76,7 +76,7 @@ def interleave_weight(qweight, nbits=4, target_dtype="float16"):
 
     Returns:
         _type_: _description_
-    
+
     Example:
         qweight = torch.randint(0, 127, (10, 10), dtype=torch.int8).cuda()
         interleave_weight(qweight, 4, "float16")

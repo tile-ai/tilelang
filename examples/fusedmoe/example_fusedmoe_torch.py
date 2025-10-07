@@ -100,13 +100,13 @@ class MoETorch(nn.Module):
 def ref_kernel(data: Tuple[torch.Tensor, Dict, Dict]) -> torch.Tensor:
     """
     Reference implementation of DeepSeek-style Mixture of Experts using PyTorch.
-    
+
     Args:
         data: Tuple of (input: torch.Tensor, weights: Dict[str, torch.Tensor], config: Dict)
             - input: Input tensor of shape [batch_size, seq_len, hidden_dim]
             - weights: Dictionary containing model weights
             - config: Dictionary containing model configuration parameters
-            
+
     Returns:
         Tuple containing:
             - output: Processed tensor [batch_size, seq_len, d_model]

@@ -6,6 +6,7 @@ from .simplify import Simplify, simplify_prim_func, LetInline  # noqa: F401
 from .pass_config import PassConfigKey  # noqa: F401
 from tilelang import tvm as tvm  # noqa: F401
 from tvm.ir.transform import PassContext  # noqa: F401
+from .add_bufstore_wrapper import AddWrapperForSingleBufStore  # noqa: F401
 
 
 def get_pass_context():
@@ -68,9 +69,20 @@ def InjectSoftwarePipeline():
     return _ffi_api.InjectSoftwarePipeline()  # type: ignore
 
 
+def FrontendLegalize():
+    """FrontendLegalize
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.FrontendLegalize()  # type: ignore
+
+
 def InjectAssumes():
     """Inject Assumes
-    
+
     Returns:
     -------
     fpass : tvm.transform.Pass
@@ -418,22 +430,28 @@ def LowerThreadAllreduce():
 def LowerDeviceKernelLaunch():
     """
     Create and return a transform pass that lowers device kernel launch constructs to target-specific IR.
-    
+
     This pass transforms high-level device kernel launch and related intrinsics into lower-level
     IR suitable for backend code generation and device-side lowering.
-    
+
     Returns:
         tvm.transform.Pass: The transform pass that performs device kernel launch lowering.
     """
     return _ffi_api.LowerDeviceKernelLaunch()  # type: ignore
 
 
+def LowerSharedTmem():
+    """LowerSharedTmem
+    """
+    return _ffi_api.LowerSharedTmem()  # type: ignore
+
+
 def LayoutReducer():
     """
     Return a TVM transform pass that performs layout reduction/normalization.
-    
+
     This wrapper delegates to the underlying FFI implementation and returns a pass object suitable for use in a PassContext or pass pipeline. The pass is intended to simplify or reduce tensor/layout-related representations during relay/tile transformations.
-    
+
     Returns:
         The transform pass object produced by the FFI backend.
     """

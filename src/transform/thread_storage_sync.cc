@@ -32,6 +32,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "../op/builtin.h"
 #include "./common/thread_sync_types.h"
 #include "./storage_access.h"
 #include "arith/ir_mutator_with_analyzer.h"
@@ -769,6 +770,12 @@ tvm::transform::Pass ThreadSync(const String &storage_scope) {
   auto pass_func = [storage_scope](PrimFunc f, const IRModule &m,
                                    const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
+    // Check if thread storage sync is disabled
+    bool disable_syncthreads =
+        ctx->GetConfig(kDisableThreadStorageSync, Bool(false)).value()->value;
+    if (disable_syncthreads) {
+      return f;
+    }
     return tl::TileLangThreadSync(std::move(f), storage_scope);
     ;
   };

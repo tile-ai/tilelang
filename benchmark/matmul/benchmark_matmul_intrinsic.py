@@ -165,7 +165,7 @@ def ref_program(A, B):
 def get_configs(args, kwargs):
     """
     Generate a list of configuration dictionaries that will be used for tuning.
-    
+
     Parameters
     ----------
     with_roller : bool

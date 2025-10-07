@@ -87,8 +87,8 @@ def run_flash_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q,
 
 
 @torch.inference_mode()
-def run_flash_infer(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens,
-                    h_q, h_kv, d, dv, causal, dtype):
+def run_flashinfer(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_q, cache_seqlens,
+                   h_q, h_kv, d, dv, causal, dtype):
     # pip install flashinfer-python
     import flashinfer
     assert d > dv, "mla with rope dim should be larger than no rope dim"
@@ -128,7 +128,7 @@ def run_flash_infer(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_
         blocked_k.dtype,
     )
 
-    def flash_infer():
+    def flashinfer():
         output, lse = mla_wrapper.run(
             q_nope.view(-1, h_q, dv),
             q_pe.view(-1, h_q, d - dv),
@@ -137,8 +137,8 @@ def run_flash_infer(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s_
             return_lse=True)
         return output.view(b, -1, h_q, dv), lse.view(b, h_q, 1)
 
-    out_flash, lse_flash = flash_infer()
-    t = triton.testing.do_bench(flash_infer)
+    out_flash, lse_flash = flashinfer()
+    t = triton.testing.do_bench(flashinfer)
     return out_flash, lse_flash, t
 
 
@@ -459,7 +459,7 @@ FUNC_TABLE = {
     "torch": run_torch_mla,
     "tilelang": run_flash_mla_tilelang,
     "flash_mla": run_flash_mla,
-    "flash_infer": run_flash_infer,
+    "flashinfer": run_flashinfer,
     "flash_mla_triton": run_flash_mla_triton,
 }
 
@@ -496,9 +496,9 @@ def compare_ab(baseline, target, b, s_q, cache_seqlens, h_q, h_kv, d, dv, causal
                                        s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
 
     torch.testing.assert_close(out_b.float(), out_a.float(), atol=1e-2, rtol=1e-2), "out"
-    if target not in ["flash_infer", "flash_mla_triton", "tilelang"
-                     ] and baseline not in ["flash_infer", "flash_mla_triton", "tilelang"]:
-        # flash_infer has a different lse return value
+    if target not in ["flashinfer", "flash_mla_triton", "tilelang"
+                     ] and baseline not in ["flashinfer", "flash_mla_triton", "tilelang"]:
+        # flashinfer has a different lse return value
         # flash_mla_triton and flash_mla_tilelang doesn't return lse
         torch.testing.assert_close(lse_b.float(), lse_a.float(), atol=1e-2, rtol=1e-2), "lse"
 
@@ -554,7 +554,7 @@ available_targets = [
     "torch",
     "tilelang",
     "flash_mla",
-    "flash_infer",
+    "flashinfer",
     "flash_mla_triton",
 ]
 

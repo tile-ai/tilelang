@@ -58,7 +58,10 @@ def get_configs(user_config=None):
 
 
 @autotune(configs=get_configs(), warmup=10, rep=10)
-@tilelang.jit(out_idx=[3])
+@tilelang.jit(
+    out_idx=[3], pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    })
 def flashattn(batch,
               heads,
               seq_len,
@@ -99,7 +102,7 @@ def flashattn(batch,
     @T.macro
     def MMA1(
         V: T.Tensor(kv_shape, dtype),
-        V_shared: T.SharedBuffer([block_M, dim], dtype),
+        V_shared: T.SharedBuffer([block_N, dim], dtype),
         acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
         acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
         k: T.int32,

@@ -62,7 +62,7 @@ GemmPy::GemmPy(Array<PrimExpr> args, BufferMap vmap) {
   node->N = args[6].as<IntImm>().value()->value;
   node->K = args[7].as<IntImm>().value()->value;
   node->policy = GemmWarpPolicy(args[8].as<IntImm>().value()->value);
-  node->clear_accum = args[9].as<Bool>().value();
+  node->clear_accum = args[9].as<PrimExpr>().value();
   node->stride_A = args[10].as<IntImm>().value()->value;
   node->stride_B = args[11].as<IntImm>().value()->value;
   node->offset_A = args[12].as<IntImm>().value()->value;
@@ -92,8 +92,7 @@ TileOperator GemmPyNode::Clone() const {
   return GemmPy(op);
 }
 
-GemmPyNode::GemmInst GemmPyNode::GetGemmInst(int block_size,
-                                             Target target) const {
+GemmInst GemmPyNode::GetGemmInst(int block_size, Target target) const {
   int warp_size = TargetGetWarpSize(target);
   int num_warps = block_size / warp_size;
   bool allow_wgmma = TargetIsHopper(target) && (this->M >= 64) &&
@@ -223,8 +222,9 @@ static int GetArchInt(Target target) {
 Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   auto block_size = *as_const_int(T.thread_bounds->extent);
   GemmInst gemm_inst = GetGemmInst(block_size, T.target);
-  auto [warp_m, warp_n] = policy->ComputeWarpPartition(
-      M, N, block_size, T.target, gemm_inst == GemmInst::kWGMMA);
+
+  auto [warp_m, warp_n] =
+      policy->ComputeWarpPartition(M, N, block_size, T.target, gemm_inst);
 
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.lower")) {
     auto prim_func =
