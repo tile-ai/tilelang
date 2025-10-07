@@ -23,6 +23,7 @@ requires = [
     "setuptools>=61",
     "Cython>=3.0.0",
     "scikit-build-core",
+    "setuptools",
 ]
 build-backend = "scikit_build_core.build"
 

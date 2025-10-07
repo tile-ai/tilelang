@@ -132,7 +132,10 @@ endif()
 
 install(TARGETS tvm tvm_runtime tilelang_module tilelang LIBRARY DESTINATION tilelang/lib)
 
-# Copy tvm cython ext for wheels. Not necessary for editable builds.
-install(
-    FILES "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/tvm/python/tvm/ffi/core.abi3.so"
-    DESTINATION tilelang/3rdparty/tvm/python/tvm/ffi)
+# Copy tvm cython ext for wheels
+# TODO: not necessary for editable builds
+if(TVM_BUILD_FROM_SOURCE)
+  add_dependencies(tilelang tvm_cython)
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/tvm/python/tvm/ffi/core.abi3.so" DESTINATION tilelang/3rdparty/tvm/python/tvm/ffi/)
+endif()
+
