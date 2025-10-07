@@ -4,6 +4,7 @@ import pathlib
 import logging
 import shutil
 import glob
+import site
 from dataclasses import dataclass
 from typing import Optional
 
@@ -18,6 +19,12 @@ COMPOSABLE_KERNEL_NOT_FOUND_MESSAGE = (
 TL_TEMPLATE_NOT_FOUND_MESSAGE = ("TileLang is not installed or found in the expected path")
 ", which may lead to compilation bugs when utilize tilelang backend."
 TVM_LIBRARY_NOT_FOUND_MESSAGE = ("TVM is not installed or found in the expected path")
+
+
+SITE_PACKAGES = site.getsitepackages()
+
+TL_LIBS = [os.path.join(i, 'tilelang/lib') for i in site.getsitepackages()]
+TL_LIBS = [i for i in TL_LIBS if os.path.exists(i)]
 
 
 def _find_cuda_home() -> str:
@@ -264,24 +271,8 @@ else:
         sys.path.insert(0, develop_tvm_path + "/python")
         env.TVM_IMPORT_PYTHON_PATH = develop_tvm_path + "/python"
 
-    develop_tvm_library_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "..", "build", "tvm")
-    install_tvm_library_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
     if os.environ.get("TVM_LIBRARY_PATH") is None:
-        if os.path.exists(develop_tvm_library_path):
-            os.environ["TVM_LIBRARY_PATH"] = develop_tvm_library_path
-        elif os.path.exists(install_tvm_library_path):
-            os.environ["TVM_LIBRARY_PATH"] = install_tvm_library_path
-        else:
-            logger.warning(TVM_LIBRARY_NOT_FOUND_MESSAGE)
-        # pip install build library path
-        lib_path = os.path.join(env.TILELANG_PACKAGE_PATH, "lib")
-        existing_path = os.environ.get("TVM_LIBRARY_PATH")
-        if existing_path:
-            os.environ["TVM_LIBRARY_PATH"] = f"{existing_path}:{lib_path}"
-        else:
-            os.environ["TVM_LIBRARY_PATH"] = lib_path
-        env.TVM_LIBRARY_PATH = os.environ.get("TVM_LIBRARY_PATH", None)
+        os.environ['TVM_LIBRARY_PATH'] = env.TVM_LIBRARY_PATH = ':'.join(TL_LIBS)
 
 # Initialize CUTLASS paths
 if os.environ.get("TL_CUTLASS_PATH", None) is None:

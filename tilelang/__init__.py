@@ -5,6 +5,10 @@ import ctypes
 import logging
 from tqdm import tqdm
 
+from importlib.metadata import version
+
+__version__ = version('tilelang')
+
 
 class TqdmLoggingHandler(logging.Handler):
     """Custom logging handler that directs log output to tqdm progress bar to avoid interference."""
@@ -56,12 +60,12 @@ logger = logging.getLogger(__name__)
 from .env import enable_cache, disable_cache, is_cache_enabled  # noqa: F401
 from .env import env as env  # noqa: F401
 
-# Setup tvm search path before importing tvm
-from . import libinfo
-
 import tvm
 import tvm.base
 from tvm import DataType  # noqa: F401
+
+# Setup tvm search path before importing tvm
+from . import libinfo
 
 
 def _load_tile_lang_lib():
@@ -107,7 +111,3 @@ from .math import *  # noqa: F403
 from . import ir  # noqa: F401
 
 from . import tileop  # noqa: F401
-
-from importlib.metadata import version
-
-__version__ = version('tilelang')

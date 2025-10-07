@@ -1,21 +1,8 @@
-"""
-As we're using sk-build-core,
-all libraries will be installed in <site-packages>/tilelang/lib,
-no matter if it's editable install.
-
-We need to:
-1. setup `TVM_LIBRARY_PATH` so tvm could be found;
-"""
 
 import sys
 import os
-import site
 
-tl_lib = [os.path.join(i, 'tilelang/lib') for i in site.getsitepackages()]
-tl_lib = [i for i in tl_lib if os.path.exists(i)]
-
-os.environ['TVM_LIBRARY_PATH'] = ':'.join(tl_lib + [os.environ.get('TVM_LIBRARY_PATH', '')])
-
+from .env import TL_LIBS
 
 def find_lib_path(name: str, optional=False):
     """Find tile lang library
@@ -37,11 +24,11 @@ def find_lib_path(name: str, optional=False):
     else:
         lib_name = f"lib{name}.so"
 
-    for lib_root in tl_lib:
+    for lib_root in TL_LIBS:
         lib_dll_path = os.path.join(lib_root, lib_name)
         if os.path.exists(lib_dll_path) and os.path.isfile(lib_dll_path):
             return lib_dll_path
     else:
         message = (f"Cannot find libraries: {lib_name}\n" + "List of candidates:\n" +
-                   "\n".join(tl_lib))
+                   "\n".join(TL_LIBS))
         raise RuntimeError(message)
