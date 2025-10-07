@@ -102,10 +102,12 @@ from .transform import PassConfigKey  # noqa: F401
 
 from .engine import lower, register_cuda_postproc, register_hip_postproc  # noqa: F401
 
-from .version import __version__  # noqa: F401
-
 from .math import *  # noqa: F403
 
 from . import ir  # noqa: F401
 
 from . import tileop  # noqa: F401
+
+from importlib.metadata import version
+
+__version__ = version('tilelang')

@@ -1,6 +1,5 @@
 [project]
 name = "tilelang"
-version = "0.1.6"
 dependencies = [
     "Cython>=3.0.0",
     "numpy>=1.23.5",
@@ -12,6 +11,7 @@ dependencies = [
     "torch",
 ]
 requires-python = ">=3.8"
+dynamic = ["version"]
 
 [project.optional-dependencies]
 # mldtypes should be greater than 0.5.1
@@ -29,6 +29,11 @@ build-backend = "scikit_build_core.build"
 [tool.scikit-build]
 wheel.py-api = "cp38"
 cmake.version = ">=3.26.1"
+
+# Include backend and git info in version
+metadata.version.provider = "version_provider"
+metadata.version.provider-path = "."
+experimental = true
 
 [tool.scikit-build.wheel.packages]
 tilelang = "tilelang"
