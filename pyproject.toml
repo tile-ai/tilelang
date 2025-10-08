@@ -1,17 +1,32 @@
 [project]
 name = "tilelang"
-dependencies = [
-    "Cython>=3.0.0",
-    "numpy>=1.23.5",
-    "tqdm>=4.62.3",
-    "typing_extensions>=4.10.0",
-    "cloudpickle",
-    "ml_dtypes",
-    "psutil",
-    "torch",
+authors = [{name = "Tile-AI"}]
+description = "A tile level programming language to generate high performance code."
+readme.file = "README.md"
+license = "MIT"
+keywords = ["BLAS", "CUDA", "HIP", "Code Generation", "TVM"]
+classifiers = [
+    "Environment :: GPU",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: OS Independent",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Scientific/Engineering :: Artificial Intelligence",
 ]
+
+readme.content-type = "text/markdown"
 requires-python = ">=3.8"
-dynamic = ["version"]
+
+dynamic = ["version", "dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
 
 [project.optional-dependencies]
 # mldtypes should be greater than 0.5.1

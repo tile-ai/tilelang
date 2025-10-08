@@ -27,6 +27,7 @@ set(WITH_TOOLCHAIN_VERSION ON)
 if($ENV{NO_TOOLCHAIN_VERSION})
   set(WITH_TOOLCHAIN_VERSION OFF)
 endif()
+file(REMOVE "${CMAKE_CURRENT_SOURCE_DIR}/_toolchain_version.txt")
 # Configs end
 
 find_package(TVM REQUIRED)
