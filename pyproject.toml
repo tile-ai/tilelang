@@ -1,6 +1,7 @@
 [project]
 name = "tilelang"
 authors = [{name = "Tile-AI"}]
+maintainers = [{name = "Lei Wang", email = "leiwang1999@outlook.com"}]
 description = "A tile level programming language to generate high performance code."
 readme.file = "README.md"
 license = "MIT"
