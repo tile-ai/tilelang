@@ -20,7 +20,6 @@ set(USE_ROCM OFF)
 set(USE_METAL OFF)
 set(PREBUILD_CYTHON ON)
 set(STATIC_LIB OFF)
-set(RUNTIME_ONLY TRUE)
 # Configs end
 
 find_package(TVM REQUIRED)
@@ -79,8 +78,6 @@ else()
 endif()
 
 if(USE_METAL)
-  set(RUNTIME_ONLY FALSE)
-
   file(GLOB TILE_LANG_METAL_SRCS
     src/target/rt_mod_metal.cc
   )
@@ -134,12 +131,9 @@ add_library(tilelang_objs OBJECT ${TILE_LANG_SRCS})
 target_include_directories(tilelang_objs PRIVATE ${TILE_LANG_INCLUDES})
 
 add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
-target_link_libraries(tilelang PUBLIC tvm)
-if(RUNTIME_ONLY)
-  target_link_libraries(tilelang PUBLIC tvm_runtime)
-else()
-  target_link_libraries(tilelang PUBLIC tvm)
-endif()
+add_library(tilelang_module SHARED $<TARGET_OBJECTS:tilelang_objs>)
+target_link_libraries(tilelang PUBLIC tvm_runtime)
+target_link_libraries(tilelang_module PUBLIC tvm)
 
 if(PREBUILD_CYTHON)
   find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})
@@ -165,11 +159,13 @@ endif()
 # let libtilelang to search tvm/tvm_runtime in same dir
 if(APPLE)
   set_target_properties(tilelang PROPERTIES INSTALL_RPATH "@loader_path")
+  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "@loader_path")
 else()
   set_target_properties(tilelang PROPERTIES INSTALL_RPATH "\$ORIGIN")
+  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN")
 endif()
 
-install(TARGETS tvm tvm_runtime tilelang LIBRARY DESTINATION tilelang/lib)
+install(TARGETS tvm tvm_runtime tilelang_module tilelang LIBRARY DESTINATION tilelang/lib)
 
 # Copy tvm cython ext for wheels
 # TODO: not necessary for editable builds
