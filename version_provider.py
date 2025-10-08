@@ -4,6 +4,7 @@ import os
 import platform
 import subprocess
 from typing import Optional
+from pathlib import Path
 
 base_version = '0.1.6'
 
@@ -31,7 +32,9 @@ def dynamic_metadata(
     assert field == 'version'
 
     exts = []
-    if platform.system() == 'Darwin':
+    if (toolchain_version := Path(__file__).parent / '_toolchain_version.txt').exists():
+        backend = toolchain_version.read_text().strip()
+    elif platform.system() == 'Darwin':
         backend = 'metal'
     elif _read_cmake_bool(os.environ.get('USE_ROCM', '')):
         backend = 'rocm'

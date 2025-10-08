@@ -19,6 +19,11 @@ set(USE_CUDA OFF)
 set(USE_ROCM OFF)
 set(USE_METAL OFF)
 set(PREBUILD_CYTHON ON)
+set(WITH_TOOLCHAIN_VERSION ON)
+
+if($ENV{NO_TOOLCHAIN_VERSION})
+  set(WITH_TOOLCHAIN_VERSION OFF)
+endif()
 # Configs end
 
 find_package(TVM REQUIRED)
@@ -109,6 +114,10 @@ elseif(USE_CUDA)
   )
   list(APPEND TILE_LANG_SRCS ${TILE_LANG_CUDA_SRCS})
   list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
+
+  if(WITH_TOOLCHAIN_VERSION)
+    write_file("${CMAKE_CURRENT_SOURCE_DIR}/_toolchain_version.txt" "cu${CUDAToolkit_VERSION_MAJOR}${CUDAToolkit_VERSION_MINOR}")
+  endif()
 endif()
 
 # Resolve compile warnings in tvm

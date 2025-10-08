@@ -95,3 +95,6 @@ tilelang/jit/adapter/cython/.cycache
 
 # claude
 **/.claude
+
+# Build time version info
+_toolchain_version.txt
