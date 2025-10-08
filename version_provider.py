@@ -34,7 +34,10 @@ def dynamic_metadata(
     assert field == 'version'
 
     exts = []
-    if (toolchain_version := ROOT / '_toolchain_version.txt').exists():
+    backend = None
+    if _read_cmake_bool(os.environ.get('NO_TOOLCHAIN_VERSION', '')):
+        pass
+    elif (toolchain_version := ROOT / '_toolchain_version.txt').exists():
         backend = toolchain_version.read_text().strip()
     elif platform.system() == 'Darwin':
         backend = 'metal'
@@ -44,7 +47,8 @@ def dynamic_metadata(
         backend = 'cpu'
     else:
         backend = 'cuda'
-    exts.append(backend)
+    if backend:
+        exts.append(backend)
 
     if git_hash := get_git_commit_id():
         exts.append(f'git{git_hash[:8]}')

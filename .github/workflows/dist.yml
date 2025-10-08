@@ -39,7 +39,11 @@ jobs:
     
     - name: Build wheel with uv
       run: |
-        uv build
+        uv pip install build wheel auditwheel patchelf
+        python -mbuild -w
+        auditwheel repair dist/*.whl
+        rm dist/
+        mv wheelhouse dist
 
     - uses: actions/upload-artifact@v4
       with:
