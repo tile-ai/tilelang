@@ -1,16 +1,28 @@
-name: CI
+name: Dist
 on: [pull_request]
 
 env:
   PYTHON_VERSION: '3.12'
 
 jobs:
-  wheel-linux-cuda-x86:
-    runs-on: [ubuntu-latest]
-    permissions:
-      contents: write
+  build-wheel-linux:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm]
+        image:
+        - nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
+        - nvidia/cuda:13.0.1-cudnn-devel-ubuntu22.04
+        - rocm/dev-ubuntu-22.04:6.4.4-complete
+        exclude:
+        - os: nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
+          image: rocm/dev-ubuntu-22.04:6.4.4-complete
+      fail-fast: true
+      max-parallel: 1
+    runs-on: ${{ matrix.os }}
     container:
       image: nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
+    env:
+      UV_LINK_MODE: copy
     steps:
     - name: Setup
       run: |
@@ -36,12 +48,16 @@ jobs:
         cache-local-path: ${{ runner.tool_cache }}/uv
         activate-environment: true
         python-version: ${{ env.PYTHON_VERSION }}
-    
-    - name: Build wheel with uv
+
+    - name: Build wheel
       run: |
         uv pip install build wheel auditwheel patchelf
         python -mbuild -w
-        auditwheel repair dist/*.whl
+        auditwheel repair \
+            -L /lib \
+            --exclude libcuda.so.1 --exclude /usr/local/cuda\* \
+            --exclude /opt/amdgpu\* --exclude /opt/rocm\* \
+            dist/*.whl
         rm dist/
         mv wheelhouse dist
 
