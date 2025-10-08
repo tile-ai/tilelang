@@ -12,10 +12,11 @@ jobs:
         image:
         - nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
         - nvidia/cuda:13.0.1-cudnn-devel-ubuntu22.04
-        - rocm/dev-ubuntu-22.04:6.4.4-complete
-        exclude:
-        - os: nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
-          image: rocm/dev-ubuntu-22.04:6.4.4-complete
+        # rocm image is too large for Github Actions
+        # - rocm/dev-ubuntu-22.04:6.4.4-complete
+        # exclude:
+        # - os: ubuntu-22.04-arm
+        #   image: rocm/dev-ubuntu-22.04:6.4.4-complete
       fail-fast: true
       max-parallel: 1
     runs-on: ${{ matrix.os }}
