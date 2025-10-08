@@ -1,0 +1,41 @@
+name: CI
+on: [pull_request]
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  wheel-linux-cuda-x86:
+    runs-on: [ubuntu-latest]
+    permissions:
+      contents: write
+    container:
+      image: pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+        submodules: recursive
+
+    - name: ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        create-symlink: true
+        key: ${{ github.job }}-${{ matrix.os }}
+
+    - name: Install python via uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: false
+        cache-local-path: ${{ runner.tool_cache }}/uv
+        activate-environment: true
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Build wheel with uv
+      run: |
+        uv build
+
+    - uses: actions/upload-artifact@v4
+      with:
+        path: dist
