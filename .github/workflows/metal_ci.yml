@@ -77,7 +77,7 @@ jobs:
         python-version: ${{ env.PYTHON_VERSION }}
 
     - name: Ensure venv (local & persistent)
-      run: uv pip install -r requirements-test.txt -r requirements-build.txt
+      run: uv pip install -r requirements-test.txt
 
     - name: Build wheel
       run: |
