@@ -82,7 +82,7 @@ void LayoutNode::RegisterReflection() {
 }
 
 void LayoutNode::UpdateAnalyzer(arith::Analyzer *analyzer) const {
-  for (const auto &[var, dom] : LayoutNode::getVarMap()) {
+  for (const auto &[var, dom] : getVarMap()) {
     analyzer->Bind(var, dom);
   }
 }
@@ -547,6 +547,10 @@ TVM_FFI_STATIC_INIT_BLOCK({
            [](int stride, int continuous, int element_size) {
              return makeQuarterBankSwizzleLayout(stride, continuous,
                                                  element_size);
+           })
+      .def("tl.make_linear_layout",
+           [](int stride, int continuous) {
+             return makeGemmLayoutLinear(stride, continuous);
            });
 });
 

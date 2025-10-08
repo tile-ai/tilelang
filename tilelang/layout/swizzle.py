@@ -25,6 +25,7 @@ def make_wgmma_swizzled_layout(buffer: tvm.tir.Buffer,
     assert len(buffer.shape) == 2
     if continuity is None:
         continuity = int(buffer.shape[1])
+    print(f"make_wgmma_swizzled_layout: {buffer.shape[0]}, {buffer.shape[1]}, {continuity}, {tvm.DataType(buffer.dtype).bits}, {k_major}")
     return _ffi_api.make_wgmma_swizzled_layout(
         int(buffer.shape[0]),
         int(buffer.shape[1]),
@@ -106,4 +107,24 @@ def make_quarter_bank_swizzled_layout(*args):
         stride,
         continuous,
         element_size,
+    )
+
+def make_linear_layout(*args):
+    """
+    Args:
+        args: buffer or (stride, continuous)
+    Examples:
+        make_linear_layout(buffer)
+        make_linear_layout(stride, continuous)
+    """
+    if len(args) == 1:
+        buffer = args[0]
+        stride, continuous = int(buffer.shape[0]), int(buffer.shape[1])
+    elif len(args) == 2:
+        stride, continuous = args
+    else:
+        raise ValueError(f"Invalid arguments: {args}")
+    return _ffi_api.make_linear_layout(
+        stride,
+        continuous,
     )

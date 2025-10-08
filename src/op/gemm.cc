@@ -756,6 +756,8 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
       const int64_t continuity =
           trans_B ? mat_continuous : mat_continuous / warp_n;
+
+    LOG(INFO) << "gemm_inst: " << (int)gemm_inst << ", trans_B: " << trans_B;
       auto ABLayout =
           gemm_inst == GemmInst::kWGMMA
               ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,

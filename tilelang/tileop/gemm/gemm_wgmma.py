@@ -34,7 +34,8 @@ class GemmWGMMA(GemmBase):
 
         if self.is_gemm_ss():
             a_continuity = self.M if a_is_k_major else 4 * self.K // m_warp
-            b_continuity = self.N if b_is_k_major else 4 * self.K // n_warp
+            b_continuity = self.K if b_is_k_major else self.N // n_warp
+
             return {
                 # WGMMA does not support padding
                 self.A:
