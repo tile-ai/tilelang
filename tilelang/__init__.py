@@ -67,6 +67,8 @@ from tvm import DataType  # noqa: F401
 # Setup tvm search path before importing tvm
 from . import libinfo
 
+from .contrib.cc import is_darwin
+
 
 def _load_tile_lang_lib():
     """Load Tile Lang lib"""
