@@ -749,7 +749,7 @@ Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
                                         element_size);
   }
   int vector_size = 128 / element_size;
- 
+
   if (mat_continuous % (vector_size * 8) == 0)
     return makeFullBankSwizzleLayout(mat_stride, mat_continuous, element_size);
   else if (mat_continuous % (vector_size * 4) == 0)

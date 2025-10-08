@@ -548,10 +548,9 @@ TVM_FFI_STATIC_INIT_BLOCK({
              return makeQuarterBankSwizzleLayout(stride, continuous,
                                                  element_size);
            })
-      .def("tl.make_linear_layout",
-           [](int stride, int continuous) {
-             return makeGemmLayoutLinear(stride, continuous);
-           });
+      .def("tl.make_linear_layout", [](int stride, int continuous) {
+        return makeGemmLayoutLinear(stride, continuous);
+      });
 });
 
 TVM_FFI_STATIC_INIT_BLOCK({

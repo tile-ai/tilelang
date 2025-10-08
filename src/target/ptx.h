@@ -33,7 +33,7 @@ namespace tvm::tl {
 namespace codegen {
 
 namespace ptx {
-    
+
 /*!
  * \brief PTX data type.
  * \note
@@ -73,7 +73,6 @@ enum class DataType : int {
  */
 DataType DTypeFromString(const std::string str);
 
-
 /*!
  * \brief Print ptx data type from enum.
  */
@@ -89,7 +88,6 @@ std::string DTypeEnumToString(const std::string &dtype);
  */
 std::tuple<int, int, int> ParseMMAShape(const std::string &str);
 } // namespace ptx
-
 
 /*!
  * \brief Replace patterns with replacement strings.
@@ -162,16 +160,18 @@ PrintMMAAssembly(const std::string &shape, const std::string &A_layout,
  * \param B_dtype The data type of multiplicand B.
  * \param C_dtype The data type of multiplicand C.
  */
-std::string PrintWGMMAAssembly(
-    const std::string &shape, const bool &a_is_k_major, const bool &b_is_k_major,
-    const std::string &A_dtype, const std::string &B_dtype,
-    const std::string &C_dtype, const std::string &a_desc,
-    const std::string &A_offset, const std::string &b_desc,
-    const std::string &B_offset, const std::string &c_ptr,
-    const std::string &c_offset, const bool &scale_out, const bool &scale_in_a,
-    const bool &scale_in_b, const bool &a_is_shared,
-    const std::string &metadata, const std::string &metadata_offset,
-    const std::string &sparsity_selector, bool sparse);
+std::string
+PrintWGMMAAssembly(const std::string &shape, const bool &a_is_k_major,
+                   const bool &b_is_k_major, const std::string &A_dtype,
+                   const std::string &B_dtype, const std::string &C_dtype,
+                   const std::string &a_desc, const std::string &A_offset,
+                   const std::string &b_desc, const std::string &B_offset,
+                   const std::string &c_ptr, const std::string &c_offset,
+                   const bool &scale_out, const bool &scale_in_a,
+                   const bool &scale_in_b, const bool &a_is_shared,
+                   const std::string &metadata,
+                   const std::string &metadata_offset,
+                   const std::string &sparsity_selector, bool sparse);
 
 /*!
  * \brief Print ldmatrix assembly string given parameters.

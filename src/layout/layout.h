@@ -168,7 +168,8 @@ Layout makeGemmABLayoutPadded(int stride, int continuous, int element_size);
 Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
                         int element_size, bool k_inner = true);
 Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
-                              int continuity, int element_size, bool k_inner = true);
+                              int continuity, int element_size,
+                              bool k_inner = true);
 Layout makeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
                              int element_size, bool k_inner = true);
 Layout makeGemmABLayoutCDNA(int stride, int continuous, int element_size,

@@ -36,9 +36,11 @@ namespace codegen {
 namespace ptx {
 
 static const char *enum_to_str[] = {
-    "kInt4",   "kUInt4",  "kInt8",   "kUInt8",   "kInt16", "kUInt16",  "kInt32",   "kUInt32",
-    "kInt64",  "kUInt64", "kFloat8_e4m3", "kFloat8_e5m2", "kFloat16", "kBFloat16", "kFloat16x2", "kFloat32",
-    "kTensorFloat32", "kFloat64", "kBit1",   "kBit8",   "kBit16", "kBit32",  "kBit64"};
+    "kInt4",        "kUInt4",         "kInt8",    "kUInt8",    "kInt16",
+    "kUInt16",      "kInt32",         "kUInt32",  "kInt64",    "kUInt64",
+    "kFloat8_e4m3", "kFloat8_e5m2",   "kFloat16", "kBFloat16", "kFloat16x2",
+    "kFloat32",     "kTensorFloat32", "kFloat64", "kBit1",     "kBit8",
+    "kBit16",       "kBit32",         "kBit64"};
 
 static const char *dtype_str[] = {
     ".s4",   ".u4",  ".s8",   ".u8",   ".s16", ".u16",  ".s32",   ".u32",
@@ -103,13 +105,13 @@ DataType DTypeFromString(const std::string str) {
   }
 }
 
-
 std::string DTypeEnumToString(const ptx::DataType &dtype) {
-    return "tl::DataType::" + std::string(enum_to_str[static_cast<int>(dtype)]);
+  return "tl::DataType::" + std::string(enum_to_str[static_cast<int>(dtype)]);
 }
 
 std::string DTypeEnumToString(const std::string &dtype) {
-    return "tl::DataType::" + std::string(enum_to_str[static_cast<int>(DTypeFromString(dtype))]);
+  return "tl::DataType::" +
+         std::string(enum_to_str[static_cast<int>(DTypeFromString(dtype))]);
 }
 
 /*!
@@ -1183,16 +1185,18 @@ PrintMMAAssembly(const std::string &shape, const std::string &A_layout,
   return asm_code;
 }
 
-std::string PrintWGMMAAssembly(
-    const std::string &shape, const bool &a_is_k_major, const bool &b_is_k_major,
-    const std::string &A_dtype, const std::string &B_dtype,
-    const std::string &C_dtype, const std::string &a_desc,
-    const std::string &A_offset, const std::string &b_desc,
-    const std::string &B_offset, const std::string &c_ptr,
-    const std::string &c_offset, const bool &scale_out, const bool &scale_in_a,
-    const bool &scale_in_b, const bool &a_is_shared,
-    const std::string &metadata, const std::string &metadata_offset,
-    const std::string &sparsity_selector, bool sparse) {
+std::string
+PrintWGMMAAssembly(const std::string &shape, const bool &a_is_k_major,
+                   const bool &b_is_k_major, const std::string &A_dtype,
+                   const std::string &B_dtype, const std::string &C_dtype,
+                   const std::string &a_desc, const std::string &A_offset,
+                   const std::string &b_desc, const std::string &B_offset,
+                   const std::string &c_ptr, const std::string &c_offset,
+                   const bool &scale_out, const bool &scale_in_a,
+                   const bool &scale_in_b, const bool &a_is_shared,
+                   const std::string &metadata,
+                   const std::string &metadata_offset,
+                   const std::string &sparsity_selector, bool sparse) {
   ptx::DataType dtype_a = ptx::DTypeFromString(A_dtype),
                 dtype_b = ptx::DTypeFromString(B_dtype),
                 dtype_c = ptx::DTypeFromString(C_dtype);

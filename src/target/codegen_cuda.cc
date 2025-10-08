@@ -1565,23 +1565,29 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     const bool a_is_shared = true;
     this->PrintIndent();
     std::string asm_code = PrintWGMMAAssembly(
-        shape, a_is_k_major, b_is_k_major, A_dtype, B_dtype, C_dtype, a_desc, A_offset,
-        b_desc, B_offset, c_ref, c_offset, scale_out, scale_in_a, scale_in_b,
-        a_is_shared, "", "", "", false);
+        shape, a_is_k_major, b_is_k_major, A_dtype, B_dtype, C_dtype, a_desc,
+        A_offset, b_desc, B_offset, c_ref, c_offset, scale_out, scale_in_a,
+        scale_in_b, a_is_shared, "", "", "", false);
     auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
-    std::string wgmma_asm_code = "tl::wgmma_ss<(AType), (BType), (CType), (M), (N), (K), (tnspA), (tnspB), (scaleA), (scaleB)>(uint64_t((desc_a) + (A_offset)), uint64_t((desc_b) + (B_offset)), ((uint32_t*)((C))), (scale_out));\n";
+    std::string wgmma_asm_code =
+        "tl::wgmma_ss<(AType), (BType), (CType), (M), (N), (K), (tnspA), "
+        "(tnspB), (scaleA), (scaleB)>(uint64_t((desc_a) + (A_offset)), "
+        "uint64_t((desc_b) + (B_offset)), ((uint32_t*)((C))), (scale_out));\n";
     // replace patterns
     tl::codegen::Replacer replacer;
-    replacer.register_rule("(AType)", tl::codegen::ptx::DTypeEnumToString(A_dtype));
-    replacer.register_rule("(BType)", tl::codegen::ptx::DTypeEnumToString(B_dtype));
-    replacer.register_rule("(CType)", tl::codegen::ptx::DTypeEnumToString(C_dtype));
+    replacer.register_rule("(AType)",
+                           tl::codegen::ptx::DTypeEnumToString(A_dtype));
+    replacer.register_rule("(BType)",
+                           tl::codegen::ptx::DTypeEnumToString(B_dtype));
+    replacer.register_rule("(CType)",
+                           tl::codegen::ptx::DTypeEnumToString(C_dtype));
     replacer.register_rule("(M)", std::to_string(m));
     replacer.register_rule("(N)", std::to_string(n));
     replacer.register_rule("(K)", std::to_string(k));
-    replacer.register_rule("(tnspA)", a_is_k_major? "false": "true");
-    replacer.register_rule("(tnspB)", b_is_k_major? "false": "true");
-    replacer.register_rule("(scaleA)", scale_in_a? "1": "-1");
-    replacer.register_rule("(scaleB)", scale_in_b? "1": "-1");
+    replacer.register_rule("(tnspA)", a_is_k_major ? "false" : "true");
+    replacer.register_rule("(tnspB)", b_is_k_major ? "false" : "true");
+    replacer.register_rule("(scaleA)", scale_in_a ? "1" : "-1");
+    replacer.register_rule("(scaleB)", scale_in_b ? "1" : "-1");
     replacer.register_rule("(desc_a)", a_desc);
     replacer.register_rule("(A_offset)", A_offset);
     replacer.register_rule("(desc_b)", b_desc);

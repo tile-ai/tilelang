@@ -81,17 +81,17 @@ class GemmPy(Node, Scriptable):
 
     def _select_gemm_instruction(self, thread_nums: int, target: Target) -> GemmInst:
         """Select the appropriate GEMM instruction based on target and thread configuration.
-        
+
         The selection logic follows this priority:
         1. WGMMA for Hopper architecture with sufficient matrix size and warp count
         2. MFMA for CDNA (AMD) architecture
         3. MMA for CUDA architecture
         4. Fallback to MMA for other cases
-        
+
         Args:
             thread_nums: Number of threads in the block
             target: Target architecture
-            
+
         Returns:
             GemmInst: The selected GEMM instruction type
         """
@@ -99,13 +99,13 @@ class GemmPy(Node, Scriptable):
 
     def _get_implementation_class(self, gemm_inst: GemmInst):
         """Get the appropriate implementation class for the given GEMM instruction.
-        
+
         Args:
             gemm_inst: The selected GEMM instruction type
-            
+
         Returns:
             The implementation class for the instruction type
-            
+
         Raises:
             NotImplementedError: If the instruction type is not supported
             ValueError: If the instruction type is unknown
