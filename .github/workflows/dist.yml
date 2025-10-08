@@ -22,7 +22,7 @@ jobs:
         # - os: ubuntu-22.04-arm
         #   image: rocm/dev-ubuntu-22.04:6.4.4-complete
       fail-fast: true
-      # max-parallel: 1
+      max-parallel: 1  # try to reuse cache
     runs-on: ${{ matrix.os }}
     container:
       image: ${{ matrix.image }}
@@ -68,11 +68,47 @@ jobs:
             dist/*.whl
         echo "whl_name=$(ls wheelhouse)\n" >> $GITHUB_OUTPUT
 
-    # - name: Repair wheel on Darwin
-    #   if: ${{ startsWith(matrix.os , 'macos') }}
-    #   run: |
-    #     uv pip install delocate
-    #     delocate-wheel -w wheelhouse -v dist/*
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.repair.outputs.whl_name }}.zip
+        path: wheelhouse/${{ steps.repair.outputs.whl_name }}
+        compression-level: 0
+
+  build-wheel-macos:
+    strategy:
+      matrix:
+        os: [macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+        submodules: recursive
+
+    - name: ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        create-symlink: true
+        key: ${{ github.job }}-${{ matrix.os }}
+
+    - name: Install python via uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        activate-environment: true
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Build wheel
+      run: |
+        uv pip install build wheel
+        python -mbuild -w
+
+    - name: Repair wheel on Darwin
+      id: repair
+      run: |
+        uv pip install delocate
+        delocate-wheel -w wheelhouse -v dist/*
+        echo "whl_name=$(ls wheelhouse)\n" >> $GITHUB_OUTPUT
 
     - uses: actions/upload-artifact@v4
       with:
