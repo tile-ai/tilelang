@@ -20,7 +20,7 @@ jobs:
       max-parallel: 1
     runs-on: ${{ matrix.os }}
     container:
-      image: nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
+      image: ${{ matrix.image }}
     env:
       UV_LINK_MODE: copy
     steps:
