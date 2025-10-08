@@ -46,6 +46,7 @@ def dynamic_metadata(
     elif 'USE_CUDA' in os.environ and not _read_cmake_bool(os.environ.get('USE_ROCM')):
         backend = 'cpu'
     else:
+        assert False, f"{(ROOT / '_toolchain_version.txt')}, {list(ROOT.glob('*'))}, {(ROOT / '_toolchain_version.txt').exists()}"
         backend = 'cuda'
     if backend:
         exts.append(backend)

@@ -126,7 +126,7 @@ endif()
 
 
 if(WITH_TOOLCHAIN_VERSION)
-  message(STATUS "Toolchain version: ${TOOLCHAIN_VERSION}")
+  message(STATUS "Write toolchain version ${TOOLCHAIN_VERSION} to ${CMAKE_CURRENT_SOURCE_DIR}/_toolchain_version.txt")
   write_file("${CMAKE_CURRENT_SOURCE_DIR}/_toolchain_version.txt" "${TOOLCHAIN_VERSION}")
 endif()
 
