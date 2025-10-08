@@ -90,7 +90,8 @@ jobs:
       uses: hendrikmuhs/ccache-action@v1.2
       with:
         create-symlink: true
-        key: ${{ github.job }}-${{ matrix.os }}
+        # add postfix so ubuntu-22.04 won't match ubuntu-22.04-arm
+        key: ${{ github.job }}-${{ matrix.os }}-cache
 
     - name: Install python via uv
       uses: astral-sh/setup-uv@v6
