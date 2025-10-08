@@ -4,6 +4,10 @@ on: [pull_request]
 env:
   PYTHON_VERSION: '3.12'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-wheel-linux:
     strategy:
@@ -71,8 +75,8 @@ jobs:
     #     delocate-wheel -w wheelhouse -v dist/*
 
     - uses: actions/upload-artifact@v4
+      working-directory: wheelhouse
       with:
         name: ${{ steps.repair.outputs.whl_name }}.zip
         path: ${{ steps.repair.outputs.whl_name }}
         compression-level: 0
-      working-directory: wheelhouse

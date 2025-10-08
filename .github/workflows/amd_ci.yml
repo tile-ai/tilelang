@@ -8,7 +8,7 @@ env:
 
 jobs:
   format-check:
-    enable: false
+    if: false
     runs-on: [self-hosted, amd, gpu]
 
     permissions:

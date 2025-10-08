@@ -7,7 +7,7 @@ env:
 
 jobs:
   format-check:
-    enable: false
+    if: false
     runs-on: [macos-latest]
 
     permissions:
