@@ -11,8 +11,8 @@ ROOT = Path(__file__).parent
 base_version = (ROOT / 'VERSION').read_text().strip()
 
 
-def _read_cmake_bool(i: str):
-    return i.lower() not in ('0', 'false', 'off', 'no', 'n', '')
+def _read_cmake_bool(i: str | None):
+    return i and i.lower() not in ('0', 'false', 'off', 'no', 'n', '')
 
 
 def get_git_commit_id() -> Optional[str]:
@@ -35,18 +35,20 @@ def dynamic_metadata(
 
     exts = []
     backend = None
-    if _read_cmake_bool(os.environ.get('NO_TOOLCHAIN_VERSION', '')):
+    if _read_cmake_bool(os.environ.get('NO_TOOLCHAIN_VERSION')):
         pass
-    elif (toolchain_version := ROOT / '_toolchain_version.txt').exists():
-        backend = toolchain_version.read_text().strip()
     elif platform.system() == 'Darwin':
         backend = 'metal'
     elif _read_cmake_bool(os.environ.get('USE_ROCM', '')):
         backend = 'rocm'
-    elif 'USE_CUDA' in os.environ and not _read_cmake_bool(os.environ.get('USE_ROCM')):
+    elif 'USE_CUDA' in os.environ and not _read_cmake_bool(os.environ.get('USE_CUDA')):
         backend = 'cpu'
-    else:
-        backend = 'cuda'
+    else:  # cuda
+        if cuda_version := os.environ.get('CUDA_VERSION'):
+            major, minor, *_ = cuda_version.split('.')
+            backend = f'cu{major}{minor}'
+        else:
+            backend = 'cuda'
     if backend:
         exts.append(backend)
 
