@@ -10,7 +10,7 @@ jobs:
     permissions:
       contents: write
     container:
-      image: nvidia/cuda:12.1.0-devel-ubuntu18.04
+      image: nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
