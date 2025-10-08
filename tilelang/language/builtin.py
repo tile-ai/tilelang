@@ -415,6 +415,7 @@ def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimEx
         tir.call_intrin("handle", tir.op.Op.get("tl.increase_descriptor_offset"), descriptor,
                         offset))
 
+
 def loop_break():
     """Break out of the innermost loop.
     """

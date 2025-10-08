@@ -385,7 +385,6 @@ Layout makeQuarterBankSwizzleLayout(int stride, int continuous,
   Var i = InputPlaceholder(0);
   Var j = InputPlaceholder(1);
   int vector_size = 128 / element_size;
-  LOG(INFO) << "makeQuarterBankSwizzleLayout: " << stride << ", " << continuous << ", " << element_size;
   ICHECK(stride % 8 == 0) << "stride=" << stride;
   ICHECK(continuous % (vector_size * 2) == 0)
       << "continuous=" << continuous << ", vector_size=" << vector_size;
@@ -741,7 +740,6 @@ Layout makeGemmABLayout(int mat_stride, int mat_continuous, int continuity,
 
 Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
                               int continuity, int element_size, bool k_inner) {
-  LOG(INFO) << "makeGemmABLayoutHopper: " << mat_stride << ", " << mat_continuous << ", " << continuity << ", " << element_size << ", " << k_inner;
   if (element_size == 64) {
     if (!k_inner && continuity % 16 == 0) // float64 KxN
       return makeGemmABLayoutF64_Kouter(mat_stride, mat_continuous);
@@ -751,12 +749,7 @@ Layout makeGemmABLayoutHopper(int mat_stride, int mat_continuous,
                                         element_size);
   }
   int vector_size = 128 / element_size;
-  LOG(INFO) << "makeGemmABLayoutHopper: mat_continuous: " << mat_continuous << ", mat_stride: " << mat_stride << ", element_size: " << element_size;
-  LOG(INFO) << "vector_size: " << vector_size;
-  LOG(INFO) << "mat_continuous % (vector_size * 8): " << mat_continuous % (vector_size * 8);
-  LOG(INFO) << "mat_continuous % (vector_size * 4): " << mat_continuous % (vector_size * 4);
-  LOG(INFO) << "mat_continuous % (vector_size * 2): " << mat_continuous % (vector_size * 2);
-  LOG(INFO) << "mat_continuous % vector_size: " << mat_continuous % vector_size;
+ 
   if (mat_continuous % (vector_size * 8) == 0)
     return makeFullBankSwizzleLayout(mat_stride, mat_continuous, element_size);
   else if (mat_continuous % (vector_size * 4) == 0)

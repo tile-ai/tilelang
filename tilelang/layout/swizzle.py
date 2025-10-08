@@ -25,7 +25,6 @@ def make_wgmma_swizzled_layout(buffer: tvm.tir.Buffer,
     assert len(buffer.shape) == 2
     if continuity is None:
         continuity = int(buffer.shape[1])
-    print(f"make_wgmma_swizzled_layout: {buffer.shape[0]}, {buffer.shape[1]}, {continuity}, {tvm.DataType(buffer.dtype).bits}, {k_major}")
     return _ffi_api.make_wgmma_swizzled_layout(
         int(buffer.shape[0]),
         int(buffer.shape[1]),
@@ -108,6 +107,7 @@ def make_quarter_bank_swizzled_layout(*args):
         continuous,
         element_size,
     )
+
 
 def make_linear_layout(*args):
     """
