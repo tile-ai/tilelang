@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 
-base_version = (ROOT / 'VERSION').read_text().split()
+base_version = (ROOT / 'VERSION').read_text().strip()
 
 
 def _read_cmake_bool(i: str):
