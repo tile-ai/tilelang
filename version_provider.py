@@ -6,7 +6,9 @@ import subprocess
 from typing import Optional
 from pathlib import Path
 
-base_version = '0.1.6'
+ROOT = Path(__file__).parent
+
+base_version = (ROOT / 'VERSION').read_text().split()
 
 
 def _read_cmake_bool(i: str):
@@ -32,7 +34,7 @@ def dynamic_metadata(
     assert field == 'version'
 
     exts = []
-    if (toolchain_version := Path(__file__).parent / '_toolchain_version.txt').exists():
+    if (toolchain_version := ROOT / '_toolchain_version.txt').exists():
         backend = toolchain_version.read_text().strip()
     elif platform.system() == 'Darwin':
         backend = 'metal'
