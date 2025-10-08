@@ -1,3 +1,6 @@
+# Learn a lot from the MLC - LLM Project
+# https://github.com/mlc-ai/mlc-llm/blob/main/CMakeLists.txt
+
 cmake_minimum_required(VERSION 3.26)
 project(TILE_LANG C CXX)
 
