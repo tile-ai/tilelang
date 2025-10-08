@@ -49,6 +49,11 @@ jobs:
         activate-environment: true
         python-version: ${{ env.PYTHON_VERSION }}
 
+    - uses: actions/download-artifact@v4
+      with:
+        name: wheelhouse
+        path: wheelhouse
+
     - name: Build wheel
       run: |
         uv pip install build wheel auditwheel patchelf
@@ -58,9 +63,9 @@ jobs:
             --exclude libcuda.so.1 --exclude /usr/local/cuda\* \
             --exclude /opt/amdgpu\* --exclude /opt/rocm\* \
             dist/*.whl
-        rm -rf dist/
-        mv wheelhouse dist
 
     - uses: actions/upload-artifact@v4
       with:
-        path: dist
+        name: wheelhouse
+        path: wheelhouse
+        overwrite: true
