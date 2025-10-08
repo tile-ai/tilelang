@@ -300,7 +300,7 @@ if os.environ.get("TL_COMPOSABLE_KERNEL_PATH", None) is None:
 
 # Initialize TL_TEMPLATE_PATH
 if os.environ.get("TL_TEMPLATE_PATH", None) is None:
-    tl_template_path = os.path.join(THIRD_PARTY_ROOT, "..")
+    tl_template_path = os.path.join(THIRD_PARTY_ROOT, "..", "src")
     if os.path.exists(tl_template_path):
         os.environ["TL_TEMPLATE_PATH"] = env.TILELANG_TEMPLATE_PATH = tl_template_path
     else:
