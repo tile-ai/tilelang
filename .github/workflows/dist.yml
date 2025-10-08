@@ -18,7 +18,7 @@ jobs:
         # - os: ubuntu-22.04-arm
         #   image: rocm/dev-ubuntu-22.04:6.4.4-complete
       fail-fast: true
-      max-parallel: 1
+      # max-parallel: 1
     runs-on: ${{ matrix.os }}
     container:
       image: ${{ matrix.image }}
@@ -45,29 +45,34 @@ jobs:
     - name: Install python via uv
       uses: astral-sh/setup-uv@v6
       with:
-        enable-cache: false
-        cache-local-path: ${{ runner.tool_cache }}/uv
         activate-environment: true
         python-version: ${{ env.PYTHON_VERSION }}
 
-    - uses: actions/download-artifact@v4
-      with:
-        name: wheelhouse
-        path: wheelhouse
-      continue-on-error: true
-
     - name: Build wheel
       run: |
-        uv pip install build wheel auditwheel patchelf
+        uv pip install build wheel
         python -mbuild -w
+
+    - name: Repair wheel on Linux
+      id: repair
+      run: |
+        uv pip install auditwheel patchelf
         auditwheel repair \
             -L /lib \
             --exclude libcuda.so.1 --exclude /usr/local/cuda\* \
             --exclude /opt/amdgpu\* --exclude /opt/rocm\* \
             dist/*.whl
+        echo "whl_name=$(ls wheelhouse)\n" >> $GITHUB_OUTPUT
+
+    # - name: Repair wheel on Darwin
+    #   if: ${{ startsWith(matrix.os , 'macos') }}
+    #   run: |
+    #     uv pip install delocate
+    #     delocate-wheel -w wheelhouse -v dist/*
 
     - uses: actions/upload-artifact@v4
       with:
-        name: wheelhouse
-        path: wheelhouse
-        overwrite: true
+        name: ${{ steps.repair.outputs.whl_name }}.zip
+        path: ${{ steps.repair.outputs.whl_name }}
+        compression-level: 0
+      working-directory: wheelhouse

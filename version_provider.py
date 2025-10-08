@@ -44,6 +44,9 @@ def dynamic_metadata(
     elif 'USE_CUDA' in os.environ and not _read_cmake_bool(os.environ.get('USE_CUDA')):
         backend = 'cpu'
     else:  # cuda
+        # Read nvcc version from env.
+        # This is not exactly how it should be,
+        # but works for now if building in a nvidia/cuda image.
         if cuda_version := os.environ.get('CUDA_VERSION'):
             major, minor, *_ = cuda_version.split('.')
             backend = f'cu{major}{minor}'
