@@ -53,6 +53,7 @@ jobs:
       with:
         name: wheelhouse
         path: wheelhouse
+      continue-on-error: true
 
     - name: Build wheel
       run: |
