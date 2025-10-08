@@ -75,8 +75,7 @@ jobs:
     #     delocate-wheel -w wheelhouse -v dist/*
 
     - uses: actions/upload-artifact@v4
-      working-directory: wheelhouse
       with:
         name: ${{ steps.repair.outputs.whl_name }}.zip
-        path: ${{ steps.repair.outputs.whl_name }}
+        path: wheelhouse/${{ steps.repair.outputs.whl_name }}
         compression-level: 0
