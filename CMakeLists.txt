@@ -120,8 +120,14 @@ elseif(USE_CUDA)
   list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
 
   if(WITH_TOOLCHAIN_VERSION)
-    write_file("${CMAKE_CURRENT_SOURCE_DIR}/_toolchain_version.txt" "cu${CUDAToolkit_VERSION_MAJOR}${CUDAToolkit_VERSION_MINOR}")
+    set(TOOLCHAIN_VERSION "cu${CUDAToolkit_VERSION_MAJOR}${CUDAToolkit_VERSION_MINOR}")
   endif()
+endif()
+
+
+if(WITH_TOOLCHAIN_VERSION)
+  message(STATUS "Toolchain version: ${TOOLCHAIN_VERSION}")
+  write_file("${CMAKE_CURRENT_SOURCE_DIR}/_toolchain_version.txt" "${TOOLCHAIN_VERSION}")
 endif()
 
 # Resolve compile warnings in tvm
