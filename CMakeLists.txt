@@ -134,29 +134,28 @@ add_library(tilelang_module SHARED $<TARGET_OBJECTS:tilelang_objs>)
 target_link_libraries(tilelang PUBLIC tvm_runtime)
 target_link_libraries(tilelang_module PUBLIC tvm)
 if(APPLE)
-  target_link_libraries(tilelang_module PUBLIC tvm_runtime)
+  target_link_libraries(tilelang PUBLIC tvm)
 endif()
 
-if(PREBUILD_CYTHON)
-  find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})
+# Build cython extension
+find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})
 
-  add_custom_command(
-    OUTPUT "${CMAKE_BINARY_DIR}/cython_wrapper.cpp"
-    COMMENT
-      "Cythoning tilelang/jit/adapter/cython/cython_wrapper.pyx"
-    COMMAND Python::Interpreter -m cython
-            "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/cython/cython_wrapper.pyx"
-            --cplus --output-file "${CMAKE_BINARY_DIR}/cython_wrapper.cpp"
-    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/cython/cython_wrapper.pyx"
-    VERBATIM)
+add_custom_command(
+  OUTPUT "${CMAKE_BINARY_DIR}/cython_wrapper.cpp"
+  COMMENT
+    "Cythoning tilelang/jit/adapter/cython/cython_wrapper.pyx"
+  COMMAND Python::Interpreter -m cython
+          "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/cython/cython_wrapper.pyx"
+          --cplus --output-file "${CMAKE_BINARY_DIR}/cython_wrapper.cpp"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/cython/cython_wrapper.pyx"
+  VERBATIM)
 
-  if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
-    python_add_library(cython_wrapper MODULE "${CMAKE_BINARY_DIR}/cython_wrapper.cpp" USE_SABI ${SKBUILD_SABI_VERSION})
-  else()
-    python_add_library(cython_wrapper MODULE "${CMAKE_BINARY_DIR}/cython_wrapper.cpp")
-  endif()
-  install(TARGETS cython_wrapper LIBRARY DESTINATION tilelang)
+if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
+  set(USE_SABI USE_SABI ${SKBUILD_SABI_VERSION})
 endif()
+
+python_add_library(cython_wrapper MODULE "${CMAKE_BINARY_DIR}/cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
+install(TARGETS cython_wrapper LIBRARY DESTINATION tilelang)
 
 # let libtilelang to search tvm/tvm_runtime in same dir
 if(APPLE)
