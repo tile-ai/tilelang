@@ -12,6 +12,11 @@ jobs:
     container:
       image: nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
     steps:
+    - name: Setup
+      run: |
+        apt-get update
+        apt-get install -y git
+
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
