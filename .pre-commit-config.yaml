@@ -8,24 +8,26 @@ ci:
 default_stages: [pre-commit, pre-push, manual]
 exclude: '^(build|3rdparty)/.*$'  # exclude build and 3rdparty directories
 repos:
-  # - repo: https://github.com/pre-commit/pre-commit-hooks
-  #   rev: v6.0.0
-  #   hooks:
-  #     - id: check-symlinks
-  #     - id: destroyed-symlinks
-  #     - id: trailing-whitespace
-  #     - id: end-of-file-fixer
-  #     - id: check-added-large-files
-  #     - id: check-merge-conflict
-  #       fail_fast: true
-  #     - id: check-executables-have-shebangs
-  #     - id: check-shebang-scripts-are-executable
-  #     - id: detect-private-key
-  #     - id: check-yaml
-  #     - id: check-toml
-  #     - id: check-ast
-  #       fail_fast: true
-  #     - id: debug-statements
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-symlinks
+      - id: destroyed-symlinks
+      # FIXME: enable these hooks
+      # - id: trailing-whitespace
+      # - id: end-of-file-fixer
+      - id: check-added-large-files
+      - id: check-merge-conflict
+        fail_fast: true
+      # FIXME: enable these hooks
+      # - id: check-executables-have-shebangs
+      # - id: check-shebang-scripts-are-executable
+      - id: detect-private-key
+      - id: check-yaml
+      - id: check-toml
+      - id: check-ast
+        fail_fast: true
+      - id: debug-statements
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v15.0.7  # sync with requirements-lint.txt
     hooks:
