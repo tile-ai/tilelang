@@ -24,10 +24,21 @@ classifiers = [
 readme.content-type = "text/markdown"
 requires-python = ">=3.8"
 
-dynamic = ["version", "dependencies"]
+dynamic = ["version"]
 
-[tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
+# Somehow this does not work, hard-code for now
+# dynamic = ["version", "dependencies"]
+# [tool.setuptools.dynamic]
+# dependencies = {file = ["requirements.txt"]}
+dependencies = [
+    "numpy>=1.23.5",
+    "tqdm>=4.62.3",
+    "typing_extensions>=4.10.0",
+    "cloudpickle",
+    "ml_dtypes",
+    "psutil",
+    "torch",
+]
 
 [project.optional-dependencies]
 # mldtypes should be greater than 0.5.1
@@ -36,10 +47,9 @@ fp4 = ["ml_dtypes>=0.5.1"]
 
 [build-system]
 requires = [
-    "setuptools>=61",
+    "setuptools>=63",
     "Cython>=3.0.0",
     "scikit-build-core",
-    "setuptools",
 ]
 build-backend = "scikit_build_core.build"
 
