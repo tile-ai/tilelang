@@ -15,8 +15,9 @@ jobs:
         os: [ubuntu-22.04, ubuntu-22.04-arm]
         image:
         # I tried a lot of options here,
-        # e.g. using pytorch/builder or install cuda runtime from runfile
-        # All of those trigger OOM or out of space.
+        # e.g. using pytorch/builder or
+        # install cuda runtime from runfile from manylinux_2_28,
+        # all of those trigger OOM or out of space.
         # Below images have too high glibc (2.31) so
         # the artifacts shouldn't be uploaded to pypi.
         # Instead, use this file as an example or nightly build.
