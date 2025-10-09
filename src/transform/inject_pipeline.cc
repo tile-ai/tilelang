@@ -899,10 +899,11 @@ private:
           Var var = let_stmt->var;
           PrimExpr value = let_stmt->value;
           Span span = let_stmt->span;
-          rewrap_fns.emplace_back(
-              [var = std::move(var), value = std::move(value), span](Stmt body) -> Stmt {
-                return LetStmt(var, value, body, span);
-              });
+          rewrap_fns.emplace_back([var = std::move(var),
+                                   value = std::move(value),
+                                   span](Stmt body) -> Stmt {
+            return LetStmt(var, value, body, span);
+          });
           current = let_stmt->body;
           continue;
         }
@@ -1001,9 +1002,9 @@ private:
           BlockNode *block_node = pipeline_block.CopyOnWrite();
           block_node->body = apply_wrappers(block_node->body);
         }
-        pipeline =
-            BlockRealize(pipeline_realize->iter_values, pipeline_realize->predicate,
-                         pipeline_block, pipeline_realize->span);
+        pipeline = BlockRealize(pipeline_realize->iter_values,
+                                pipeline_realize->predicate, pipeline_block,
+                                pipeline_realize->span);
       } else {
         pipeline = apply_wrappers(pipeline);
       }
