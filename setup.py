@@ -417,7 +417,7 @@ def patch_libs(libpath):
     subprocess.run([patchelf_path, '--set-rpath', '$ORIGIN', libpath])
 
 
-class TileLangBuilPydCommand(build_py):
+class TileLangBuildPyCommand(build_py):
     """Customized setuptools install command - builds TVM after setting up LLVM."""
 
     def run(self):
@@ -643,7 +643,7 @@ class CythonExtension(Extension):
         self.sourcedir = os.path.abspath(sourcedir)
 
 
-class TilelangExtensionBuild(build_ext):
+class TileLangExtensionBuild(build_ext):
     """
     Custom build_ext command for CMake-based projects.
 
@@ -929,8 +929,8 @@ setup(
         CythonExtension("TileLangCython", sourcedir="."),
     ],
     cmdclass={
-        "build_py": TileLangBuilPydCommand,
+        "build_py": TileLangBuildPyCommand,
         "sdist": TileLangSdistCommand,
-        "build_ext": TilelangExtensionBuild,
+        "build_ext": TileLangExtensionBuild,
     },
 )
