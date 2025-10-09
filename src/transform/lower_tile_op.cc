@@ -5,9 +5,11 @@
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/builtin.h>
+#include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
+#include <unordered_map>
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
@@ -318,10 +320,16 @@ private:
     return buffer_row_size;
   }
 
-  PrimExpr
+  struct AccessPtrResult {
+    PrimExpr expr;
+    bool rewritten{false};
+  };
+
+  AccessPtrResult
   HandleAccessPtrAndOffset(const PrimExpr &access_ptr,
                            const Optional<PrimExpr> &offset = std::nullopt,
                            DataType dtype = DataType::Int(32)) {
+    AccessPtrResult result{access_ptr, false};
     // The 2th arg of T.tvm_access_ptr call is offset, we set it to 0 and
     // accumulate it to smem_offset
     CHECK(access_ptr->IsInstance<CallNode>())
@@ -330,6 +338,16 @@ private:
     if (access_ptr_call->op.same_as(builtin::tvm_access_ptr())) {
       LOG(FATAL) << "Transformation for tvm_access_ptr is not implemented yet";
     } else if (access_ptr_call->op.same_as(builtin::address_of())) {
+      Optional<PrimExpr> resolved = ResolveBufferLoad(access_ptr_call->args[0]);
+      ICHECK(resolved.defined())
+          << "Invalid access op for permuted layout: " << access_ptr;
+      PrimExpr load_expr = resolved.value();
+      if (!load_expr.same_as(access_ptr_call->args[0])) {
+        auto node = access_ptr_call.CopyOnWrite();
+        node->args.Set(0, load_expr);
+        access_ptr_call = Call(access_ptr_call->dtype, access_ptr_call->op,
+                               {load_expr}, access_ptr_call->span);
+      }
       BufferLoad load = Downcast<BufferLoad>(access_ptr_call->args[0]);
       Array<PrimExpr> indices = load->indices;
       Array<PrimExpr> old_shape = load->buffer->shape;
@@ -351,14 +369,17 @@ private:
       PrimExpr smem_offset =
           elem_offset + (offset.defined() ? offset.value() : 0);
 
-      auto new_buffer = buffer_remap_[load->buffer];
+      Buffer remap_key = FindRemapBuffer(load->buffer).value_or(load->buffer);
+      Optional<Layout> layout = FindLayout(remap_key);
+      if (!layout.defined() || !buffer_map_.count(remap_key->data)) {
+        return result;
+      }
+      auto new_buffer = buffer_remap_.count(remap_key)
+                            ? buffer_remap_[remap_key]
+                            : load->buffer;
       auto new_shape = new_buffer->shape;
 
-      auto buffer_map_iter =
-          buffer_map_.find(Downcast<Var>(load->buffer->data));
-      CHECK(buffer_map_iter != buffer_map_.end())
-          << "The buffer corresponding to data Var " << access_ptr_call->args[0]
-          << " is not found";
+      auto buffer_map_iter = buffer_map_.find(Downcast<Var>(remap_key->data));
 
       int buffer_row_size = CheckAndGetBufferRowSize(buffer_map_iter->second);
       (void)buffer_row_size;
@@ -373,8 +394,7 @@ private:
         remaining_offset = floordiv(remaining_offset, old_shape[i]);
       }
 
-      auto forward_indices =
-          layout_map_[load->buffer]->Forward(multi_dim_indices);
+      auto forward_indices = layout.value()->Forward(multi_dim_indices);
       PrimExpr new_offset = 0;
       PrimExpr stride_offset = 1;
       for (int i = static_cast<int>(new_shape.size()) - 1; i >= 0; --i) {
@@ -390,14 +410,71 @@ private:
         new_offset = floordiv(new_offset, new_shape[i]);
       }
 
-      auto new_access_ptr = access_ptr_call.CopyOnWrite();
-      new_access_ptr->args.Set(0, BufferLoad(new_buffer, new_indices));
-      layout_remap_.Set(new_buffer, layout_map_[load->buffer]);
+      Array<PrimExpr> new_args = {BufferLoad(new_buffer, new_indices)};
+      if (buffer_remap_.count(remap_key)) {
+        layout_remap_.Set(new_buffer, layout.value());
+      }
+      result.rewritten = true;
+      result.expr = Call(access_ptr_call->dtype, access_ptr_call->op, new_args,
+                         access_ptr_call->span);
+      return result;
     } else {
       LOG(FATAL) << "Invalid access op for permuted layout: " << access_ptr;
     }
 
-    return access_ptr_call;
+    return result;
+  }
+
+  Optional<PrimExpr> ResolveBufferLoad(const PrimExpr &expr) const {
+    if (expr->IsInstance<BufferLoadNode>()) {
+      return expr;
+    }
+    if (const auto *var_node = expr.as<VarNode>()) {
+      Var var = GetRef<Var>(var_node);
+      auto it = let_bindings_.find(var);
+      if (it != let_bindings_.end()) {
+        return it->second;
+      }
+    }
+    return Optional<PrimExpr>();
+  }
+
+  Optional<Buffer> FindRemapBuffer(const Buffer &buffer) const {
+    if (buffer_remap_.count(buffer)) {
+      return buffer;
+    }
+    auto it = buffer_map_.find(buffer->data);
+    if (it != buffer_map_.end() && buffer_remap_.count(it->second)) {
+      return it->second;
+    }
+    for (const auto &kv : buffer_remap_) {
+      if (kv.first->data.same_as(buffer->data)) {
+        return kv.first;
+      }
+      if (kv.first->name == buffer->name) {
+        return kv.first;
+      }
+    }
+    return Optional<Buffer>();
+  }
+
+  Optional<Layout> FindLayout(const Buffer &buffer) const {
+    if (layout_map_.count(buffer)) {
+      return layout_map_[buffer];
+    }
+    auto it = buffer_map_.find(buffer->data);
+    if (it != buffer_map_.end() && layout_map_.count(it->second)) {
+      return layout_map_[it->second];
+    }
+    for (const auto &kv : layout_map_) {
+      if (kv.first->data.same_as(buffer->data)) {
+        return kv.second;
+      }
+      if (kv.first->name == buffer->name) {
+        return kv.second;
+      }
+    }
+    return Optional<Layout>();
   }
 
   PrimExpr VisitExpr_(const tir::CallNode *op) final {
@@ -422,18 +499,30 @@ private:
       // form: T.ptx_ldmatrix(..., smem_ptr, smem_offset)
       // smem_ptr: T.tvm_access_ptr(ptype, data, offset, extent, rw_mask)
       // or T.address_of(buffer, offset)
-      auto access_ptr = call->args[5];
+      PrimExpr access_ptr = call->args[5];
       PrimExpr smem_offset = call->args[6];
       Call address_of_call = Downcast<Call>(access_ptr);
       if (!address_of_call->op.same_as(builtin::address_of())) {
         LOG(FATAL) << "Invalid access ptr for permuted layout: " << access_ptr;
       }
+      Optional<PrimExpr> resolved = ResolveBufferLoad(address_of_call->args[0]);
+      ICHECK(resolved.defined())
+          << "Invalid address_of argument for permuted layout: "
+          << address_of_call->args[0];
+      PrimExpr load_expr = resolved.value();
+      if (!load_expr.same_as(address_of_call->args[0])) {
+        auto call_node = call.CopyOnWrite();
+        call_node->args.Set(5, Call(address_of_call->dtype, address_of_call->op,
+                                    {load_expr}, address_of_call->span));
+        address_of_call = Downcast<Call>(call->args[5]);
+        access_ptr = call->args[5];
+      }
       BufferLoad load = Downcast<BufferLoad>(address_of_call->args[0]);
-      if (buffer_remap_.count(load->buffer)) {
-        auto new_access_ptr =
-            HandleAccessPtrAndOffset(access_ptr, smem_offset, call->dtype);
+      auto new_access_ptr =
+          HandleAccessPtrAndOffset(access_ptr, smem_offset, call->dtype);
+      if (new_access_ptr.rewritten) {
         auto new_call = call.CopyOnWrite();
-        new_call->args.Set(5, new_access_ptr);
+        new_call->args.Set(5, new_access_ptr.expr);
         new_call->args.Set(6, IntImm(smem_offset->dtype, 0));
       }
     } else if (call->op.same_as(builtin::mma_store())) {
@@ -442,8 +531,10 @@ private:
       auto access_ptr = call->args[2];
       auto new_access_ptr =
           HandleAccessPtrAndOffset(access_ptr, std::nullopt, call->dtype);
-      auto new_call = call.CopyOnWrite();
-      new_call->args.Set(2, new_access_ptr);
+      if (new_access_ptr.rewritten) {
+        auto new_call = call.CopyOnWrite();
+        new_call->args.Set(2, new_access_ptr.expr);
+      }
     } else {
       LOG(FATAL) << "Invalid call node: " << call;
     }
@@ -498,6 +589,30 @@ private:
         return buffer_remap_[buffer]->data;
     }
     return var;
+  }
+
+  Stmt VisitStmt_(const LetStmtNode *op) final {
+    PrimExpr value = this->VisitExpr(op->value);
+    bool recorded = false;
+    if (value->IsInstance<BufferLoadNode>()) {
+      let_bindings_[op->var] = value;
+      recorded = true;
+    }
+    if (SideEffect(value) <= CallEffectKind::kPure) {
+      analyzer_->Bind(op->var, value);
+    }
+    Stmt body = this->VisitStmt(op->body);
+    if (recorded) {
+      let_bindings_.erase(op->var);
+    }
+    if (value.same_as(op->value) && body.same_as(op->body)) {
+      return GetRef<Stmt>(op);
+    } else {
+      auto n = this->CopyOnWrite(op);
+      n->value = value;
+      n->body = body;
+      return Stmt(n);
+    }
   }
 
   /**
@@ -590,6 +705,8 @@ private:
   // For ptx Node, we need to remap the buffer and indices
   // By access CallNode instead of BufferLoad Node.
   bool is_ptx_{false};
+  std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>
+      let_bindings_;
   // Mapping from data Var of a Buffer to Buffer, for lookup
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   Map<Var, Var> var_remap_;

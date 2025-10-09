@@ -2,10 +2,12 @@
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
+#include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include <unordered_map>
 #include <utility>
 
 #include "../target/utils.h"
@@ -204,10 +206,20 @@ private:
   void VisitExpr_(const CallNode *op) final {
     auto args = op->args;
     if (op->op.same_as(builtin::address_of())) {
-      const BufferLoad load = Downcast<BufferLoad>(op->args[0]);
-      const BufferRegion buffer_region = BufferRegion::FullRegion(load->buffer);
-      // because we only care about the buffer itself instead of indices
-      reads_.push_back(buffer_region);
+      BufferRegion buffer_region;
+      if (const auto *load = op->args[0].as<BufferLoadNode>()) {
+        buffer_region = BufferRegion::FullRegion(load->buffer);
+      } else if (const auto *var_node = op->args[0].as<VarNode>()) {
+        Var data_var = GetRef<Var>(var_node);
+        auto it = buffer_data_to_buffer_.find(data_var);
+        if (it != buffer_data_to_buffer_.end()) {
+          buffer_region = BufferRegion::FullRegion((*it).second);
+        }
+      }
+      if (buffer_region.defined()) {
+        // because we only care about the buffer itself instead of indices
+        reads_.push_back(buffer_region);
+      }
     } else if (op->op.same_as(builtin::tvm_access_ptr())) {
       const VarNode *buffer_var = op->args[1].as<VarNode>();
       ICHECK(buffer_var);
