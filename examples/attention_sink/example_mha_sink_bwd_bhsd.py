@@ -31,10 +31,10 @@ def flashattn_fwd(
         dim,
         window_size=None,  # None for full attention,
         sm_scale=None,
-        block_M=128,
-        block_N=32,
-        num_stages=2,
-        threads=256,
+        block_M=64,
+        block_N=64,
+        num_stages=1,
+        threads=128,
         dtype: str = "float16"):
 
     if window_size is not None:
@@ -356,11 +356,8 @@ class _attention(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, sinks, window_size):
         BATCH, H, N_CTX, D_HEAD = q.shape
-        block_M = 64
-        block_N = 64 if D_HEAD <= 128 else 32
         dtype = "float16" if q.dtype == torch.float16 else "bfloat16"
-        kernel = flashattn_fwd(
-            BATCH, H, N_CTX, D_HEAD, window_size, block_M=block_M, block_N=block_N, dtype=dtype)
+        kernel = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, window_size, dtype=dtype)
         o, lse = kernel(q, k, v, sinks)
         ctx.save_for_backward(q, k, v, sinks, o, lse)
         ctx.window_size = window_size

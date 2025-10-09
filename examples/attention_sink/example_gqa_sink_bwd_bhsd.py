@@ -32,10 +32,10 @@ def flashattn_fwd(
         groups=1,
         window_size=None,  # None for full attention
         sm_scale=None,
-        block_M=128,
-        block_N=128,
-        num_stages=2,
-        threads=256,
+        block_M=64,
+        block_N=64,
+        num_stages=1,
+        threads=128,
         dtype: str = "float16"):
 
     if window_size is not None:
