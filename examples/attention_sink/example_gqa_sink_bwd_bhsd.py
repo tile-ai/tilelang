@@ -140,7 +140,7 @@ def flashattn_fwd(
 @tilelang.jit(
     out_idx=[2],
     pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,}, 
-    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"]
+    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"]   
 )
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: str = "float16"):
     accum_dtype = "float"
@@ -311,11 +311,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None, sm_scale
     return flash_bwd
 
 
-@tilelang.jit(
-    out_idx=-1,
-    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,}, 
-    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"]
-)
+@tilelang.jit(out_idx=-1)
 def flashattn_bwd_dsink(batch, heads, seq_len, block=256, dtype: str = "float16"):
     accum_dtype = "float"
     shape = [batch, heads, seq_len]
@@ -381,8 +377,6 @@ class _attention(torch.autograd.Function):
         dv = torch.zeros(kv_shape, dtype=torch.float32, device=q.device)
         kernel(q, k, v, do, lse, delta, dq, dk, dv)
         dq = kernel_post(dq)
-        dk = dk.to(torch.float16)
-        dv = dv.to(torch.float16)
 
         kernel_dsink = flashattn_bwd_dsink(BATCH, H, N_CTX, dtype=dtype)
         dsinks = kernel_dsink(sinks, delta, lse).sum(0).sum(1)
@@ -460,12 +454,12 @@ def main(BATCH: int = 1,
     total_flops = 5 * flops_per_matmul
 
     Q = (
-        torch.empty(BATCH, H, N_CTX, D_HEAD, dtype=torch_dtype,
-                    device="cuda").normal_().requires_grad_())
-    K = torch.empty(
+        torch.randn(BATCH, H, N_CTX, D_HEAD, dtype=torch_dtype,
+                    device="cuda").requires_grad_())
+    K = torch.randn(
         BATCH, H // groups, N_CTX, D_HEAD, dtype=torch_dtype,
-        device="cuda").normal_().requires_grad_()
-    V = torch.empty_like(K).normal_().requires_grad_()
+        device="cuda").requires_grad_()
+    V = torch.randn_like(K).requires_grad_()
     sinks = torch.randn(H, dtype=torch_dtype, device="cuda").requires_grad_()
     dO = torch.randn_like(Q)
 
@@ -484,11 +478,15 @@ def main(BATCH: int = 1,
     dsinks_ref, sinks.grad = sinks.grad.clone(), None
 
     # Checks
-    assert torch.allclose(O, O_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dV, dV_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dK, dK_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dQ, dQ_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dsinks, dsinks_ref, rtol=1e-2, atol=1e-2), f'{dsinks=}, {dsinks_ref=}'
+    rtol, atol = {
+        "float16": (1e-2, 1e-2),
+        "bfloat16": (2e-2, 2e-2),
+    }[dtype]
+    assert torch.allclose(O, O_ref, rtol=rtol, atol=atol), f'O max err: {(O-O_ref).abs().max()}'
+    assert torch.allclose(dV, dV_ref, rtol=rtol, atol=atol), f'dV max err: {(dV-dV_ref).abs().max()}'
+    assert torch.allclose(dK, dK_ref, rtol=rtol, atol=atol), f'dK max err: {(dK-dK_ref).abs().max()}'
+    assert torch.allclose(dQ, dQ_ref, rtol=rtol, atol=atol), f'dq max err: {(dQ-dQ_ref).abs().max()}'
+    assert torch.allclose(dsinks, dsinks_ref, rtol=rtol, atol=atol), f'dsinks max err: {(dsinks-dsinks_ref).abs().max()}'
 
     print("All checks passed for tilelang kernels.✅")
 

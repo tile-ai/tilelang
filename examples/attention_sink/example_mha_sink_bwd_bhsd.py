@@ -30,10 +30,10 @@ def flashattn_fwd(
         dim,
         window_size=None,  # None for full attention,
         sm_scale=None,
-        block_M=64,
-        block_N=64,
-        num_stages=1,
-        threads=128,
+        block_M=128,
+        block_N=32,
+        num_stages=2,
+        threads=256,
         dtype: str = "float16"):
 
     if window_size is not None:
@@ -67,7 +67,7 @@ def flashattn_fwd(
             scores_scale = T.alloc_fragment([block_M], accum_dtype)
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
-            sinks = T.alloc_fragment([heads], accum_dtype)
+            sinks = T.alloc_fragment([heads], dtype)
 
             T.annotate_layout({Q_shared: tilelang.layout.make_swizzled_layout(Q_shared)})
             T.copy(Q[bz, by, bx * block_M:(bx + 1) * block_M, :], Q_shared)
@@ -76,6 +76,7 @@ def flashattn_fwd(
             T.fill(scores_max, -T.infinity(accum_dtype))
             for i in T.Parallel(block_M):
                 sinks[i] = Sinks[by]
+
             end = T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N))
             start = T.alloc_local([1], 'int32')
             if window_size is not None:
@@ -134,9 +135,9 @@ def flashattn_fwd(
 
 
 @tilelang.jit(
-    out_idx=[2],     
-    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,},
-    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"]
+    out_idx=[2],  
+    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,}, 
+    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"]   
 )
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: str = "float16"):
     accum_dtype = "float"
@@ -317,11 +318,7 @@ def flashattn_bwd(
     return flash_bwd
 
 
-@tilelang.jit(
-    out_idx=-1,     
-    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,}, 
-    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"]
-)
+@tilelang.jit(out_idx=-1)
 def flashattn_bwd_dsink(batch, heads, seq_len, block=128, dtype: str = "float16"):
     accum_dtype = "float"
     shape = [batch, heads, seq_len]
@@ -331,13 +328,13 @@ def flashattn_bwd_dsink(batch, heads, seq_len, block=128, dtype: str = "float16"
             Sinks: T.Tensor([heads], dtype),  # type: ignore
             Delta: T.Tensor(shape, accum_dtype),  # type: ignore
             lse: T.Tensor(shape, accum_dtype),  # type: ignore
-            dsinks: T.Tensor(shape, dtype),  # type: ignore
+            dsinks: T.Tensor(shape, accum_dtype),  # type: ignore
     ):
         with T.Kernel(heads, T.ceildiv(seq_len, block), batch, threads=128) as (bx, by, bz):
             sink = T.alloc_local([1], dtype)
             lse_fragment = T.alloc_fragment([block], accum_dtype)
             delta_fragment = T.alloc_fragment([block], accum_dtype)
-            dsink_fragment = T.alloc_fragment([block], dtype)
+            dsink_fragment = T.alloc_fragment([block], accum_dtype)
 
             sink[0] = Sinks[bx]
             T.copy(lse[bz, bx, by * block:(by + 1) * block], lse_fragment)
@@ -422,7 +419,7 @@ def ref_program(query: torch.Tensor,
 
     sm_scale: float = 1.0 / head_dim**0.5
 
-    sinks = sinks.view(1, num_key_value_heads, num_key_value_groups, 1, 1).float()
+    sinks = sinks.view(1, num_key_value_heads, num_key_value_groups, 1, 1)
     key = key.unsqueeze(3)
     value = value.unsqueeze(3)
 
@@ -470,13 +467,13 @@ def main(BATCH: int = 1,
     total_flops = 5 * flops_per_matmul
 
     Q = (
-        torch.empty(BATCH, H, N_CTX, D_HEAD, dtype=torch_dtype,
-                    device="cuda").normal_().requires_grad_())
-    K = torch.empty_like(Q).normal_().requires_grad_()
-    V = torch.empty_like(Q).normal_().requires_grad_()
+        torch.randn(BATCH, H, N_CTX, D_HEAD, dtype=torch_dtype,
+                    device="cuda").requires_grad_())
+    K = torch.randn_like(Q).requires_grad_()
+    V = torch.randn_like(Q).requires_grad_()
     sinks = torch.randn(H, dtype=torch_dtype, device=Q.device).requires_grad_()
     dO = torch.randn_like(Q)
-
+    
     O = attention(Q, K, V, sinks, window_size)
     O.backward(dO, retain_graph=True)
     dQ, Q.grad = Q.grad.clone(), None
@@ -492,13 +489,15 @@ def main(BATCH: int = 1,
     dsinks_ref, sinks.grad = sinks.grad.clone(), None
 
     # Checks
-    assert torch.allclose(O, O_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dV, dV_ref, rtol=1e-2, atol=1e-2)
-    print(f'dk max err: {torch.max(torch.abs(dK - dK_ref))}')
-    print(f'dq max err: {torch.max(torch.abs(dQ - dQ_ref))}')
-    assert torch.allclose(dK, dK_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dQ, dQ_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dsinks, dsinks_ref, rtol=1e-2, atol=1e-2), f'{dsinks=}, {dsinks_ref=}'
+    rtol, atol = {
+        "float16": (1e-2, 1e-2),
+        "bfloat16": (2e-2, 2e-2),
+    }[dtype]
+    assert torch.allclose(O, O_ref, rtol=rtol, atol=atol), f'O max err: {(O-O_ref).abs().max()}'
+    assert torch.allclose(dV, dV_ref, rtol=rtol, atol=atol), f'dV max err: {(dV-dV_ref).abs().max()}'
+    assert torch.allclose(dK, dK_ref, rtol=rtol, atol=atol), f'dK max err: {(dK-dK_ref).abs().max()}'
+    assert torch.allclose(dQ, dQ_ref, rtol=rtol, atol=atol), f'dq max err: {(dQ-dQ_ref).abs().max()}'
+    assert torch.allclose(dsinks, dsinks_ref, rtol=rtol, atol=atol), f'dsinks max err: {(dsinks-dsinks_ref).abs().max()}'
 
     print("All checks passed for tilelang kernels.✅")
 
