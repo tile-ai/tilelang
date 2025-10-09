@@ -263,7 +263,7 @@ def prepend_pythonpath(path):
     if not os.environ.get("PYTHONPATH", None):
         os.environ["PYTHONPATH"] = path
     else:
-        os.environ["PYTHONPATH"] = path + ':' + os.environ["PYTHONPATH"]
+        os.environ["PYTHONPATH"] = path + os.pathsep + os.environ["PYTHONPATH"]
 
     sys.path.insert(0, path)
 
@@ -280,7 +280,7 @@ else:
         env.TVM_IMPORT_PYTHON_PATH = tvm_python_binding
 
     if os.environ.get("TVM_LIBRARY_PATH") is None:
-        os.environ['TVM_LIBRARY_PATH'] = env.TVM_LIBRARY_PATH = ':'.join(TL_LIBS)
+        os.environ['TVM_LIBRARY_PATH'] = env.TVM_LIBRARY_PATH = os.pathsep.join(TL_LIBS)
 
 # Initialize CUTLASS paths
 if os.environ.get("TL_CUTLASS_PATH", None) is None:
