@@ -1,6 +1,10 @@
 name: CI Test on AMD
 on: [pull_request]
 
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   PYTHON_VERSION: '3.12'
   VENV_DIR: tilelang_ci
@@ -11,7 +15,7 @@ jobs:
     runs-on: [self-hosted, amd, gpu]
 
     permissions:
-      contents: write 
+      contents: write
 
     steps:
     - name: Checkout repository
@@ -84,7 +88,7 @@ jobs:
         set -e
         REQS_HASH=$(sha256sum requirements-rocm.txt | cut -d ' ' -f 1)
         MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
-        
+
         echo "Installing requirements"
         if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
           echo "venv exists and hash matches – reuse it"
