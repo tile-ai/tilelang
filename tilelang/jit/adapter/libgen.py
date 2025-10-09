@@ -29,7 +29,7 @@ except ImportError:
     is_nvrtc_available = False
 
 
-class LibraryGenerator(object):
+class LibraryGenerator:
     srcpath: Optional[str] = None
     libpath: Optional[str] = None
     lib_code: Optional[str] = None

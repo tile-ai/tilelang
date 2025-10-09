@@ -363,7 +363,7 @@ class KernelCache:
             if verbose:
                 self.logger.debug(
                     f"Loading wrapped kernel source code from file: {wrapped_kernel_path}")
-            with open(wrapped_kernel_path, "r") as f:
+            with open(wrapped_kernel_path) as f:
                 kernel_global_source = f.read()
         except Exception as e:
             self.logger.error(f"Error loading wrapped kernel source code from disk: {e}")

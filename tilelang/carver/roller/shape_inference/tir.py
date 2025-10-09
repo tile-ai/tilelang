@@ -47,7 +47,7 @@ def _merge_two_bounds(x: arith.ConstIntBound, y: arith.ConstIntBound):
     return arith.ConstIntBound(min(x.min_value, y.min_value), max(x.max_value, y.max_value))
 
 
-class TensorDepNode(object):
+class TensorDepNode:
     """
     For tensor dependency analysis.
     """
@@ -76,7 +76,7 @@ class TensorDepNode(object):
         return self.name
 
 
-class DependencyAnalysis(object):
+class DependencyAnalysis:
 
     def __init__(self, deps):
         self.deps = deps
@@ -351,7 +351,7 @@ def walk_indice(expr):
     elif isinstance(expr, tir.Call):
         return None
     else:
-        raise Exception("Unhandled node type in walk_indice(): %s" % expr)
+        raise Exception(f"Unhandled node type in walk_indice(): {expr}")
 
 
 def _extract_dependent_region(block_analyzer, block: BlockRV) -> Dict[str, List[tir.PrimExpr]]:

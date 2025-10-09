@@ -29,7 +29,7 @@ def pre_order_traverse(block_analyzer, blocks, func):
         _traverse(block)
 
 
-class BlockAnalyzer(object):
+class BlockAnalyzer:
 
     def __init__(self, sch) -> None:
         self.sch: tir.Schedule = sch
@@ -90,7 +90,7 @@ class Edge:
     dst_id: int
 
 
-class Node(object):
+class Node:
 
     def __init__(self, tags: Optional[Dict] = None, name: str = "Node") -> None:
         self.name = name
@@ -301,7 +301,7 @@ class PrimFuncNode(Node):
         else:
             return value
 
-    @functools.lru_cache()
+    @functools.lru_cache
     def get_space_dim(self) -> List[int]:
         dim_size = []
         if self.reduction_block:
@@ -418,7 +418,7 @@ class PrimFuncNode(Node):
             for b in self.block_analyzer.get_input_buffers(self.reduction_block)
         }
 
-    @functools.lru_cache()
+    @functools.lru_cache
     def infer_tensorcore_axis(self) -> Tuple[int]:
         # axis is fixed for one expression, so only inference and cached
         assert self.get_tag("tensorcore_config")

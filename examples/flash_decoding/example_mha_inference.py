@@ -318,11 +318,11 @@ def main():
     print("All checks passed!")
 
     latency = profiler.do_bench(ref_fn, warmup=500)
-    print("{:.2f} ms".format(latency))
-    print("{:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"{latency:.2f} ms")
+    print(f"{total_flops / latency * 1e-9:.2f} TFlops")
     latency = profiler.do_bench(n_warmup=10, n_repeat=10)
-    print("{:.4f} ms".format(latency))
-    print("{:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"{latency:.4f} ms")
+    print(f"{total_flops / latency * 1e-9:.2f} TFlops")
 
 
 if __name__ == "__main__":

@@ -199,10 +199,10 @@ def main():
         return x_fp8_torch_, x_amax_torch_
 
     latency = do_bench(run_tilelang)
-    print("Tile-lang: {:.2f} ms".format(latency))
+    print(f"Tile-lang: {latency:.2f} ms")
 
     latency = do_bench(run_torch)
-    print("Torch: {:.2f} ms".format(latency))
+    print(f"Torch: {latency:.2f} ms")
 
 
 if __name__ == "__main__":

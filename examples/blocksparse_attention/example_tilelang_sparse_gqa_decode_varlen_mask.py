@@ -180,7 +180,7 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
 class SparseFlashAttn(torch.nn.Module):
 
     def __init__(self, batch, heads, heads_kv, dim, dim_v, block_size):
-        super(SparseFlashAttn, self).__init__()
+        super().__init__()
         self.batch = batch
         self.heads = heads
         self.heads_kv = heads_kv
@@ -354,15 +354,12 @@ def ref_program_fa(query, key, value, block_indices, cache_seqlens, max_cache_se
 
 def debug(name, expect, actual, atol=1e-3, rtol=1e-3):
     all_close = torch.allclose(expect, actual, atol=atol, rtol=rtol)
-    print(name + "  all_close={}".format(all_close))
+    print(name + f"  all_close={all_close}")
     if not all_close:
         # print(expect[3, 28])
         # print(actual[3, 28])
         diff = (expect - actual).abs()
-        print("all_close={}, max={}, min={}, mean={}".format(all_close,
-                                                             diff.max().item(),
-                                                             diff.min().item(),
-                                                             diff.mean().item()))
+        print(f"all_close={all_close}, max={diff.max().item()}, min={diff.min().item()}, mean={diff.mean().item()}")
         max_indices = torch.nonzero(diff == diff.max().item())
         first_index = tuple(max_indices[0].tolist())
         print(f"Index: {first_index}, expect: {expect[first_index]}, actual: {actual[first_index]}")

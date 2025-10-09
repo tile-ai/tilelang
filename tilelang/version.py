@@ -21,7 +21,7 @@ else:
 
 # Read and store the version information from the VERSION file
 # Use 'strip()' to remove any leading/trailing whitespace or newline characters
-with open(version_file_path, "r") as version_file:
+with open(version_file_path) as version_file:
     __version__ = version_file.read().strip()
 
 

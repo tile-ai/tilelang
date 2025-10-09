@@ -136,7 +136,7 @@ class _GroupedGEMM(torch.autograd.Function):
                 return x.contiguous()
             return x
 
-        A, B, batch_sizes = [maybe_contiguous(x) for x in (A, B, batch_sizes)]
+        A, B, batch_sizes = (maybe_contiguous(x) for x in (A, B, batch_sizes))
         kernel = grouped_gemm_bwd(ctx.batch_sum, ctx.batch_count, M, N, block_M, block_N, block_K,
                                   num_stages, threads)
 

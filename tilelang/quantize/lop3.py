@@ -1186,9 +1186,9 @@ def get_lop3_intrin_group(
     elif out_dtype == "int4":
         d4f = "i4s"
     else:
-        raise ValueError("Unsupported target dtype: {}".format(target_dtype))
+        raise ValueError(f"Unsupported target dtype: {target_dtype}")
     source_symbol = "u" if source_format == "uint" else "s"
-    func_name = "decode_i{}{}_to_{}".format(source_bit, source_symbol, d4f)
+    func_name = f"decode_i{source_bit}{source_symbol}_to_{d4f}"
     if with_scaling:
         func_name += "_scale"
     if with_zeros:

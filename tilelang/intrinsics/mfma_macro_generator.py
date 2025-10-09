@@ -11,7 +11,7 @@ from .utils import (
 lift = convert
 
 
-class MatrixCoreIntrinEmitter(object):
+class MatrixCoreIntrinEmitter:
     """
     To eliminate Python syntax within TIR Macro.
     """

@@ -1,4 +1,5 @@
 # Modified from tilelang/examples/flash_attention/example_mha_fwd_bhsd.py
+from __future__ import annotations
 
 import torch
 import tilelang
@@ -285,11 +286,11 @@ def main(batch: int = 1,
         print("All checks passed.✅")
 
         latency = do_bench(lambda: ref_program(Q, K, V, sinks, window_size), warmup=500)
-        print("Ref: {:.2f} ms".format(latency))
-        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Ref: {latency:.2f} ms")
+        print(f"Ref: {total_flops / latency * 1e-9:.2f} TFlops")
         latency = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500)
-        print("Tilelang: {:.2f} ms".format(latency))
-        print("Tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Tilelang: {latency:.2f} ms")
+        print(f"Tilelang: {total_flops / latency * 1e-9:.2f} TFlops")
 
 
 if __name__ == "__main__":

@@ -102,7 +102,7 @@ def get_cached_lib(source_code: str) -> Tuple[Optional[ctypes.CDLL], Path]:
 current_dir = os.path.dirname(os.path.abspath(__file__))
 cython_wrapper_path = os.path.join(current_dir, "cython_wrapper.pyx")
 
-with open(cython_wrapper_path, "r") as f:
+with open(cython_wrapper_path) as f:
     cython_wrapper_code = f.read()
     cache_dir = get_cache_dir()
     source_path = cache_dir / "cython_wrapper.cpp"
@@ -115,7 +115,7 @@ with open(cython_wrapper_path, "r") as f:
     # Check if cached version exists and is valid
     need_compile = True
     if md5_path.exists() and library_path.exists():
-        with open(md5_path, "r") as f:
+        with open(md5_path) as f:
             cached_hash = f.read().strip()
             if cached_hash == code_hash:
                 logger.debug("Cython JIT adapter is up to date, no need to compile...")
@@ -132,7 +132,7 @@ with open(cython_wrapper_path, "r") as f:
             try:
                 # After acquiring the lock, check again if the file has been compiled by another process
                 if md5_path.exists() and library_path.exists():
-                    with open(md5_path, "r") as f:
+                    with open(md5_path) as f:
                         cached_hash = f.read().strip()
                         if cached_hash == code_hash:
                             logger.info(

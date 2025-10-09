@@ -54,7 +54,7 @@ def main(args):
 
         avg_loss = acc_loss / count / math.log(2)
         ppl.append(2**avg_loss)
-        print("{} PPL: {}".format(dataset, ppl[-1]))
+        print(f"{dataset} PPL: {ppl[-1]}")
 
     print(ppl)
     print("Avg PPL:", sum(ppl) / len(ppl))

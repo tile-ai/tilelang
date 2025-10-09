@@ -1,7 +1,6 @@
 import fcntl
 import functools
 import hashlib
-import io
 import subprocess
 import shutil
 from setuptools import setup, find_packages, Extension
@@ -138,7 +137,7 @@ def find_version(version_file_path: str) -> str:
     # Use 'strip()' to remove any leading/trailing whitespace or newline characters
     if not os.path.exists(version_file_path):
         raise FileNotFoundError(f"Version file not found at {version_file_path}")
-    with open(version_file_path, "r") as version_file:
+    with open(version_file_path) as version_file:
         version = version_file.read().strip()
     return version
 
@@ -169,7 +168,7 @@ def get_rocm_version():
         rocm_version_file = os.path.join(rocm_path, "lib", "cmake", "rocm",
                                          "rocm-config-version.cmake")
         if os.path.exists(rocm_version_file):
-            with open(rocm_version_file, "r") as f:
+            with open(rocm_version_file) as f:
                 content = f.read()
                 match = re.search(r'set\(PACKAGE_VERSION "(\d+\.\d+\.\d+)"', content)
                 if match:
@@ -310,7 +309,7 @@ def read_readme() -> str:
     """Read the README file if present."""
     p = get_path("README.md")
     if os.path.isfile(p):
-        return io.open(get_path("README.md"), "r", encoding="utf-8").read()
+        return open(get_path("README.md"), encoding="utf-8").read()  # noqa: SIM115
     else:
         return ""
 
@@ -709,7 +708,7 @@ class TilelangExtensionBuild(build_ext):
         cache_dir = Path(cython_warpper_dir) / ".cycache" / py_version
         os.makedirs(cache_dir, exist_ok=True)
 
-        with open(cython_wrapper_path, "r") as f:
+        with open(cython_wrapper_path) as f:
             cython_wrapper_code = f.read()
             source_path = cache_dir / "cython_wrapper.cpp"
             library_path = cache_dir / "cython_wrapper.so"
@@ -721,7 +720,7 @@ class TilelangExtensionBuild(build_ext):
             # Check if cached version exists and is valid
             need_compile = True
             if md5_path.exists() and library_path.exists():
-                with open(md5_path, "r") as f:
+                with open(md5_path) as f:
                     cached_hash = f.read().strip()
                     if cached_hash == code_hash:
                         logger.info("Cython JIT adapter is up to date, no need to compile...")
@@ -738,7 +737,7 @@ class TilelangExtensionBuild(build_ext):
                     try:
                         # After acquiring the lock, check again if the file has been compiled by another process
                         if md5_path.exists() and library_path.exists():
-                            with open(md5_path, "r") as f:
+                            with open(md5_path) as f:
                                 cached_hash = f.read().strip()
                                 if cached_hash == code_hash:
                                     logger.info(

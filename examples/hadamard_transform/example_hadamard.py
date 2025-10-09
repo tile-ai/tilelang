@@ -151,7 +151,7 @@ def main():
 
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Auto)
     latency = profiler.do_bench(warmup=100)
-    print("Tile-lang: {:.2f} ms".format(latency))
+    print(f"Tile-lang: {latency:.2f} ms")
 
 
 if __name__ == '__main__':

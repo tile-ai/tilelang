@@ -25,7 +25,7 @@ from tilelang.intrinsics.mma_layout import (
 lift = convert
 
 
-class TensorCoreIntrinEmitter(object):
+class TensorCoreIntrinEmitter:
     """
     To eliminate Python syntax within TIR Macro.
     """
@@ -518,8 +518,7 @@ class TensorCoreIntrinEmitter(object):
         else:
             raise ValueError(f"Unsupported matrix {matrix}")
 
-        assert is_fragment(local_buf), "local_buf must be a fragment, but got {}".format(
-            local_buf.scope())
+        assert is_fragment(local_buf), f"local_buf must be a fragment, but got {local_buf.scope()}"
 
         if matrix_is_a:
             micro_size_s, micro_size_r = self.micro_size_x, self.micro_size_k

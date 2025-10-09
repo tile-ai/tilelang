@@ -31,7 +31,7 @@ select = [
     # Pyflakes
     "F",
     # pyupgrade
-    # "UP",
+    "UP", "FA102",
     # flake8-bugbear
     "B",
     # flake8-simplify

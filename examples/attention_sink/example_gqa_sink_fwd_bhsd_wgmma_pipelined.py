@@ -1,5 +1,6 @@
 # Modified from tilelang/examples/flash_attention/example_gqa_fwd_bshd_wgmma_pipelined.py
 # Optimized for Hopper architecture, with a benchmark to compare with official Triton impl
+from __future__ import annotations
 
 import torch
 import tilelang
@@ -434,15 +435,15 @@ def main(
 
         # Benchmark triton
         latency_triton = do_bench(lambda: triton_program(Q, K, V, sinks, window_size), warmup=500)
-        print("Triton: {:.2f} ms".format(latency_triton))
-        print("Triton: {:.2f} TFlops".format(total_flops / latency_triton * 1e-9))
+        print(f"Triton: {latency_triton:.2f} ms")
+        print(f"Triton: {total_flops / latency_triton * 1e-9:.2f} TFlops")
 
         # Benchmark tilelang
         latency_tilelang = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500)
-        print("Tilelang: {:.2f} ms".format(latency_tilelang))
-        print("Tilelang: {:.2f} TFlops".format(total_flops / latency_tilelang * 1e-9))
+        print(f"Tilelang: {latency_tilelang:.2f} ms")
+        print(f"Tilelang: {total_flops / latency_tilelang * 1e-9:.2f} TFlops")
 
-        print("Speedup: {:.2f}x".format(latency_triton / latency_tilelang))
+        print(f"Speedup: {latency_triton / latency_tilelang:.2f}x")
 
 
 if __name__ == "__main__":

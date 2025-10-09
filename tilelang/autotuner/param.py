@@ -246,7 +246,7 @@ class AutotuneResult:
             wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
             if verbose:
                 logger.debug(f"Loading wrapped kernel source code from file: {wrapped_kernel_path}")
-            with open(wrapped_kernel_path, "r") as f:
+            with open(wrapped_kernel_path) as f:
                 kernel_global_source = f.read()
         except Exception as e:
             logger.error(f"Error loading wrapped kernel source code from disk: {e}")
@@ -315,7 +315,7 @@ class AutotuneResult:
         # load best config
         if verbose:
             logger.debug(f"Loading best config from file: {path / BEST_CONFIG_PATH}")
-        with open(path / BEST_CONFIG_PATH, "r") as f:
+        with open(path / BEST_CONFIG_PATH) as f:
             config = json.load(f)
 
         # load function
@@ -327,7 +327,7 @@ class AutotuneResult:
         # load latency
         if verbose:
             logger.debug(f"Loading latency from file: {path / LATENCY_PATH}")
-        with open(path / LATENCY_PATH, "r") as f:
+        with open(path / LATENCY_PATH) as f:
             latency = json.load(f)
             latency, ref_latency = latency["latency"], latency["ref_latency"]
 

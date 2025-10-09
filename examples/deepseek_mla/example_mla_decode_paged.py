@@ -400,5 +400,5 @@ if __name__ == "__main__":
     out_flash, latency = run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b,
                                           s_q, cache_seqlens, h_q, h_kv, d, dv, causal, dtype)
 
-    print("Tile-lang: {:.2f} ms".format(latency))
-    print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"Tile-lang: {latency:.2f} ms")
+    print(f"Tile-lang: {total_flops / latency * 1e-9:.2f} TFlops")

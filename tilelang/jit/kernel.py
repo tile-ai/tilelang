@@ -17,7 +17,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class JITKernel(object):
+class JITKernel:
     """
     A wrapper class for compiling and invoking TileLang (TVM TIR) functions as PyTorch-compatible functions.
 

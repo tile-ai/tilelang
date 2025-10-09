@@ -91,7 +91,7 @@ def is_tensorcore_supported_precision(in_dtype: str, accum_dtype: str, arch: Til
         raise ValueError(f"Unsupported architecture: {arch}")
 
 
-class TensorInstruction(object):
+class TensorInstruction:
 
     def __init__(
         self,

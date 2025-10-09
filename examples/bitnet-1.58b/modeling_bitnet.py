@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
@@ -1513,7 +1512,7 @@ class BitnetForCausalLM(BitnetPreTrainedModel):
         import json
 
         # get quantize format
-        with open(quantize_file, "r") as f:
+        with open(quantize_file) as f:
             quant_config = json.load(f)
         checkpoint_format = quant_config["checkpoint_format"]
         assert checkpoint_format in ["bitblas"], "quantize format not supported"

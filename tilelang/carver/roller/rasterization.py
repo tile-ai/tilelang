@@ -89,5 +89,5 @@ __device__ __inline__ dim3 rasterization2DColumn(const int panel_width) {
             panel_width = self.panel_width_
         return [
             self.get_device_function(),
-            "const dim3 blockIdx = rasterization2DColumn({});\n".format(panel_width),
+            f"const dim3 blockIdx = rasterization2DColumn({panel_width});\n",
         ]
