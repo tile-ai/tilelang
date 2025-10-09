@@ -24,6 +24,11 @@ skip = [
     ".venv"
 ]
 
+[tool.ruff]
+target-version = "py38"
+line-length = 100
+output-format = "full"
+
 [tool.ruff.lint]
 select = [
     # pycodestyle
