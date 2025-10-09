@@ -14,13 +14,16 @@ jobs:
       matrix:
         os: [ubuntu-22.04, ubuntu-22.04-arm]
         image:
+        # I tried a lot of options here,
+        # e.g. using pytorch/builder or install cuda runtime from runfile
+        # All of those trigger OOM or out of space.
+        # Below images have too high glibc (2.31) so
+        # the artifacts shouldn't be uploaded to pypi.
+        # Instead, use this file as an example or nightly build.
         - nvidia/cuda:12.9.1-cudnn-devel-ubuntu20.04
         - nvidia/cuda:13.0.1-cudnn-devel-ubuntu22.04
         # rocm image is too large for Github Actions
         # - rocm/dev-ubuntu-22.04:6.4.4-complete
-        # exclude:
-        # - os: ubuntu-22.04-arm
-        #   image: rocm/dev-ubuntu-22.04:6.4.4-complete
       fail-fast: true
       max-parallel: 1  # try to reuse cache
     runs-on: ${{ matrix.os }}
@@ -91,7 +94,8 @@ jobs:
       uses: hendrikmuhs/ccache-action@v1.2
       with:
         create-symlink: true
-        key: ${{ github.job }}-${{ matrix.os }}
+        # add postfix so ubuntu-22.04 won't match ubuntu-22.04-arm
+        key: ${{ github.job }}-${{ matrix.os }}-cache
 
     - name: Install python via uv
       uses: astral-sh/setup-uv@v6
