@@ -34,7 +34,7 @@ def test_example_sparse_mla_fwd_pipelined():
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_example_sparse_mla_bwd():
     test_sparse_mla_bwd(
-        B=1, S=4096, SKV=4096, H=64, HKV=1, DQKV=576, DV=512, topk=2048, dtype=torch.bfloat16)
+        B=1, S=4096, SKV=4096, H=64, HKV=1, DQKV=576, DV=512, topk=2048)
 
 
 if __name__ == "__main__":
