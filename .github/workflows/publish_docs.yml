@@ -41,4 +41,3 @@ jobs:
           else
             echo "No changes detected, skipping commit and push."
           fi
-
