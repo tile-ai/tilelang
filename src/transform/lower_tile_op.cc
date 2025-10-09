@@ -85,7 +85,12 @@ public:
 
 private:
   void VisitStmt_(const EvaluateNode *op) {
-    auto call = Downcast<Call>(op->value);
+    const CallNode *call_node = op->value.as<CallNode>();
+    // Value of EvaluateNode may not be a call
+    if (!call_node) {
+      return;
+    }
+    auto call = Downcast<Call>(call_node);
     if (call->op.same_as(Gemm::Get())) {
       auto srcA_buffer_access_ptr = Downcast<Call>(call->args[0]);
       ICHECK(srcA_buffer_access_ptr->op.same_as(builtin::tvm_access_ptr()));
