@@ -1,6 +1,6 @@
 name: Bot
 
-on: 
+on:
   issue_comment:
     types: [created]
 
@@ -36,7 +36,7 @@ jobs:
       - name: Build original version
         run: |
           echo "Check files to be deleted!"
-          git clean -dxn | grep -v 'tll/' | xargs -I{} echo {} 
+          git clean -dxn | grep -v 'tll/' | xargs -I{} echo {}
           git clean -dxn | grep -v 'tll/' | xargs -I{} rm -rf {}
           echo "Delete files completed!"
           git checkout main
