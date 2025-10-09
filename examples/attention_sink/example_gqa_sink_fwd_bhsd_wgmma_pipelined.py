@@ -25,10 +25,11 @@ def get_configs():
     rep=100,
 )
 @tilelang.jit(
-    out_idx=[3], 
-    pass_configs={tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,}, 
-    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"]
-)
+    out_idx=[3],
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
+    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"])
 def flashattn(
     batch,
     heads,
@@ -49,7 +50,7 @@ def flashattn(
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
 
     if sm_scale is None:
-        sm_scale = (1.0 / dim)**0.5 
+        sm_scale = (1.0 / dim)**0.5
     scale = sm_scale * 1.44269504  # log2(e)
 
     head_kv = heads // groups
@@ -369,9 +370,14 @@ def triton_program(Q, K, V, Sinks, window_size: int | None = None) -> torch.Tens
     return o
 
 
-def gen_inputs(B, H, Sq, Skv, D,
-               groups,
-               dtype=torch.float16) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def gen_inputs(
+        B,
+        H,
+        Sq,
+        Skv,
+        D,
+        groups,
+        dtype=torch.float16) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     query = torch.randn([B, H, Sq, D], dtype=dtype, device='cuda')
     key = torch.randn([B, H // groups, Skv, D], dtype=dtype, device='cuda')
     value = torch.randn([B, H // groups, Skv, D], dtype=dtype, device='cuda')
@@ -471,7 +477,8 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help='window size (default: None, which means full attention)')
-    parser.add_argument('--dtype', type=str, default="float16", help="dtype, can be float16 or bfloat16")
+    parser.add_argument(
+        '--dtype', type=str, default="float16", help="dtype, can be float16 or bfloat16")
     parser.add_argument('--tune', action='store_true', help='tune configs')
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.groups, args.window_size,
