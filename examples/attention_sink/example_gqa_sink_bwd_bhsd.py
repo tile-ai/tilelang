@@ -5,6 +5,7 @@ import tilelang
 from tilelang.profiler import do_bench
 import tilelang.language as T
 import argparse
+from typing import Optional
 
 
 def get_bwd_configs():
@@ -23,7 +24,7 @@ def get_bwd_configs():
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
-    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"])
+    compile_flags=["-O3", "-DENABLE_BF16"])
 def flashattn_fwd(
         batch,
         heads,
@@ -143,7 +144,7 @@ def flashattn_fwd(
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
-    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"])
+    compile_flags=["-O3", "-DENABLE_BF16"])
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: str = "float16"):
     accum_dtype = "float"
     shape = [batch, heads, seq_len, dim]
@@ -183,7 +184,7 @@ def make_dq_layout(dQ):
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
-    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"])
+    compile_flags=["-O3", "-DENABLE_BF16"])
 def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = "float16"):
     accum_dtype = "float"
     shape = [batch, heads, seq_len, dim]
@@ -208,7 +209,7 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = "float16"
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
-    compile_flags=["--use_fast_math", "-O3", "-DENABLE_BF16"])
+    compile_flags=["-O3", "-DENABLE_BF16"])
 def flashattn_bwd(batch,
                   heads,
                   seq_len,
@@ -311,8 +312,7 @@ def flashattn_bwd(batch,
                 T.clear(dq)
                 T.gemm(dsT_shared, K_shared, dq, transpose_A=True)
                 for i, j in T.Parallel(block_N, dim):
-                    if k * block_N + i < seq_len:
-                        T.atomic_add(dQ[bz, bx, k * block_N + i, j], dq[i, j])
+                    T.atomic_add(dQ[bz, bx, k * block_N + i, j], dq[i, j])
 
             T.copy(dv, dv_shared)
             T.atomic_add(dV[bz, bx // groups, by * block_M:(by + 1) * block_M, :], dv_shared)
@@ -405,7 +405,7 @@ def ref_program(query: torch.Tensor,
                 key: torch.Tensor,
                 value: torch.Tensor,
                 sinks: torch.Tensor,
-                sliding_window: int | None = None,
+                sliding_window: Optional[int] = None,
                 dtype: torch.dtype = torch.float16) -> torch.Tensor:
 
     key = key.transpose(1, 2).contiguous()
