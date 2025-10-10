@@ -102,7 +102,7 @@ jobs:
         run: |
           # Use runner tool_cache as cache root for self-hosted runners to avoid internet connection
           # issues and to share cache between jobs.
-          export XDG_CACHE_HOME="${{ runner.tool_cache }}"
+          export XDG_CACHE_HOME="${{ runner.tool_cache }}/.ci-cache-${{ github.workflow }}"
           echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" | tee -a "${GITHUB_ENV}"
           echo "PIP_CACHE_DIR=${XDG_CACHE_HOME}/pip" | tee -a "${GITHUB_ENV}"
           echo "UV_CACHE_DIR=${XDG_CACHE_HOME}/uv" | tee -a "${GITHUB_ENV}"
@@ -224,18 +224,17 @@ jobs:
         run: |
           mkdir -p build
           # Run cmake to create the build directory with compile_commands.json
-          pushd build
-          cmake .. ${CMAKE_CONFIGURE_OPTIONS}
-          popd
-          if ! output=$(./format.sh 2>&1); then
-            echo "------------------------------------"
-            echo "message:"
-            echo "$output"
-            printf '%s\n' "$output" | grep "Please review and stage the changes."
-            echo "------------------------------------"
+          (
+            cd build
+            cmake .. ${CMAKE_CONFIGURE_OPTIONS}
+          )
+          rc=0
+          bash format.sh || rc="$?"
+          rm -rf build
+          if [[ "${rc}" -ne 0 ]]; then
+            echo "::error::Format check failed. Please run 'bash format.sh' locally to fix the issues."
             exit 1
           fi
-          rm -rf build
 
       - name: Install project (wheel form)
         env:
