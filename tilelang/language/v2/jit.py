@@ -34,9 +34,15 @@ logger = logging.getLogger(__name__)
 
 
 class JITLib(Protocol):
-    def init(self) -> int: ...
-    def get_last_error(self) -> bytes: ...
-    def call(self, *args): ...
+
+    def init(self) -> int:
+        ...
+
+    def get_last_error(self) -> bytes:
+        ...
+
+    def call(self, *args):
+        ...
 
 
 _P = ParamSpec("_P")
@@ -109,6 +115,7 @@ def compile(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
 
 
 class JITDispatcher(Generic[_P, _T]):
+
     def __init__(
         self,
         func: Callable[_P, _T],
@@ -181,7 +188,10 @@ class JITDispatcher(Generic[_P, _T]):
 
 
 @overload
-def jit(func: Callable[_P, _T]) -> JITDispatcher[_P, _T]: ...
+def jit(func: Callable[_P, _T]) -> JITDispatcher[_P, _T]:
+    ...
+
+
 @overload
 def jit(
     target: Union[str, Target] = "auto",
@@ -189,7 +199,8 @@ def jit(
     verbose: bool = False,
     pass_configs: Dict[str, Any] = None,
     compile_flags: List[str] = None,
-) -> Callable[[Callable[_P, _T]], JITDispatcher[_P, _T]]: ...
+) -> Callable[[Callable[_P, _T]], JITDispatcher[_P, _T]]:
+    ...
 
 
 def jit(

@@ -3,6 +3,7 @@ from typing import Dict, Optional, List, Any
 
 
 class QuoteVisitor(ast.NodeTransformer):
+
     def __init__(self, names: Dict[str, ast.AST], passes: Optional[List[Any]] = None):
         self.names = names
         self.passes = passes or []
@@ -18,17 +19,13 @@ class QuoteVisitor(ast.NodeTransformer):
         return item if item else node
 
 
-def quote(
-    expr: str, *, passes: Optional[List[Any]] = None, span=None, **kws
-) -> List[ast.AST]:
+def quote(expr: str, *, passes: Optional[List[Any]] = None, span=None, **kws) -> List[ast.AST]:
     tree = ast.parse(expr)
     tree = QuoteVisitor(kws, passes).visit(tree)
     return tree.body
 
 
-def quote1(
-    expr: str, *, passes: Optional[List[Any]] = None, span=None, **kws
-) -> ast.AST:
+def quote1(expr: str, *, passes: Optional[List[Any]] = None, span=None, **kws) -> ast.AST:
     res = quote(expr, passes=passes, span=span, **kws)
     assert len(res) == 1
     return res[0]
@@ -41,6 +38,7 @@ def quote_expr(expr: str, **kws) -> List[ast.AST]:
 
 
 class DSLMutator(ast.NodeTransformer):
+
     def __init__(self):
         self.tmp_counter = 0
 
@@ -69,9 +67,7 @@ class DSLMutator(ast.NodeTransformer):
         if isinstance(target, ast.Name):
             return f"'{target.id}'"
         elif isinstance(target, ast.Tuple):
-            return (
-                "(" + ",".join([self._parse_names(elt) for elt in target.elts]) + ",)"
-            )
+            return ("(" + ",".join([self._parse_names(elt) for elt in target.elts]) + ",)")
         else:
             raise SyntaxError("Unsupported for target")
 
@@ -85,25 +81,18 @@ class DSLMutator(ast.NodeTransformer):
             passes=[node.body],
         )
 
-    def _emit_assign_tuple(
-        self, targets: List[ast.expr], rval: ast.expr
-    ) -> List[ast.AST]:
+    def _emit_assign_tuple(self, targets: List[ast.expr], rval: ast.expr) -> List[ast.AST]:
         tmp_names = [self.get_tmp() for _ in range(len(targets))]
         unpack = quote1(",".join(tmp_names) + ", = value", value=rval)
         stmts = [unpack]
         for i, target in enumerate(targets):
             stmts.extend(
-                self._emit_assign_target(
-                    target, ast.Name(id=tmp_names[i], ctx=ast.Load())
-                )
-            )
+                self._emit_assign_target(target, ast.Name(id=tmp_names[i], ctx=ast.Load())))
         return stmts
 
     def _emit_assign_target(self, target: ast.expr, rval: ast.expr) -> List[ast.AST]:
         if isinstance(target, ast.Name):
-            return quote(
-                f"name = __tl.bind('{target.id}', value)", name=target, value=rval
-            )
+            return quote(f"name = __tl.bind('{target.id}', value)", name=target, value=rval)
         elif isinstance(target, ast.Subscript):
             return quote(
                 "__tl.assign(lval, slice, value)",
@@ -134,8 +123,7 @@ class DSLMutator(ast.NodeTransformer):
             name = arg.arg
             if arg.annotation is not None:
                 arg_stmt = quote1(
-                    f'{name} = __tl.arg("{name}", {name}, annot)', annot=arg.annotation
-                )
+                    f'{name} = __tl.arg("{name}", {name}, annot)', annot=arg.annotation)
             else:
                 arg_stmt = quote1(f'{name} = __tl.arg("{name}", {name})')
             stmts.append(arg_stmt)
@@ -147,9 +135,7 @@ class DSLMutator(ast.NodeTransformer):
             passes=[stmts + node.body],
         )
         node.decorator_list.pop()
-        return quote1(
-            f"def __closure(__tl):\n  pass\n  return {node.name}\n", passes=[node]
-        )
+        return quote1(f"def __closure(__tl):\n  pass\n  return {node.name}\n", passes=[node])
 
     def visit_BoolOp(self, node: ast.BoolOp):
         node = self.generic_visit(node)
@@ -183,9 +169,7 @@ class DSLMutator(ast.NodeTransformer):
             left = comp
         last = splited[-1]
         for i in reversed(range(len(splited) - 1)):
-            last = quote_expr(
-                "__tl.logical_and(left, lambda: right)", left=splited[i], right=last
-            )
+            last = quote_expr("__tl.logical_and(left, lambda: right)", left=splited[i], right=last)
         return last
 
     def visit_Return(self, node: ast.Return):

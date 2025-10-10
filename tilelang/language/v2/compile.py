@@ -44,8 +44,12 @@ import ast
 _P = ParamSpec('_P')
 _T = TypeVar("_T")
 
+
 class JITPyFunc(Protocol[_P, _T]):
-    def __call__(self, *args: _P.args, **kws: _P.kwargs) -> _T: ...
+
+    def __call__(self, *args: _P.args, **kws: _P.kwargs) -> _T:
+        ...
+
     __tl_code__: str
 
 
@@ -60,7 +64,8 @@ def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITPyFunc[_P, T
     def add_dyn(var_name: str, data: str):
         nonlocal code_parse_arg, tup_dyn, dyn_dict
         if var_name in dyn_dict:
-            code_parse_arg.append(f"assert {data} == {dyn_dict[var_name]}, 'dyn argument {var_name} mismatch'")
+            code_parse_arg.append(
+                f"assert {data} == {dyn_dict[var_name]}, 'dyn argument {var_name} mismatch'")
         else:
             dyn_dict[var_name] = data
             tup_dyn.append(data)
@@ -84,13 +89,11 @@ def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITPyFunc[_P, T
             tup_dyn.append(f"{name}.data_ptr()")
             tup_const.append(f"{name}.dtype")
             code_parse_arg.append(
-                f'assert {name}.device != __device_cpu__, "Expected a non cpu tensor"'
-            )
+                f'assert {name}.device != __device_cpu__, "Expected a non cpu tensor"')
             if schema.shape is not None:
                 code_parse_arg.append(
-                    ", ".join([f"{name}__shape_{i}" for i in range(len(schema.stride))])
-                    + f" = {name}.shape"
-                )
+                    ", ".join([f"{name}__shape_{i}" for i in range(len(schema.stride))]) +
+                    f" = {name}.shape")
                 # code_parse_arg.append(f'{name}__shape_ = {name}.shape')
                 for i, dim in enumerate(schema.shape):
                     if isinstance(dim, DynSchema):
@@ -102,11 +105,8 @@ def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITPyFunc[_P, T
                 tup_const.append(f"{name}.shape")
             if schema.stride is not None:
                 code_parse_arg.append(
-                    ", ".join(
-                        [f"{name}__stride_{i}" for i in range(len(schema.stride))]
-                    )
-                    + f" = {name}.stride()"
-                )
+                    ", ".join([f"{name}__stride_{i}" for i in range(len(schema.stride))]) +
+                    f" = {name}.stride()")
                 for i, dim in enumerate(schema.stride):
                     if isinstance(dim, DynSchema):
                         var_name = dim.name or f"{name}__stride_{i}"
@@ -154,6 +154,7 @@ def get_current_stream_functor():
             return lambda: get_stream().cuda_stream
     else:
         return lambda: 0
+
 
 @dataclass(slots=True)
 class JITFunc(Generic[_P, _T]):
@@ -231,31 +232,23 @@ class JITFunc(Generic[_P, _T]):
                     closure[name] = expr
                     shape_args.append(name)
                 else:
-                    raise RuntimeError(
-                        f"Unsupported shape expression type: {type(expr)}"
-                    )
+                    raise RuntimeError(f"Unsupported shape expression type: {type(expr)}")
             dtype_name = f"__{allocs.buffer.name}_dtype"
             device_name = f"__{allocs.buffer.name}_device"
             closure[dtype_name] = cvt_tvm_dtype_to_torch(allocs.dtype)
             closure[device_name] = allocs.device or torch.device("cuda")
             arg_name = call_args[allocs.arg_idx]
             tensor_name = f"{arg_name}_tensor"
-            stmts.append(
-                f"{tensor_name} = __tl_empty("
-                + ",".join(shape_args)
-                + f", dtype={dtype_name}, device={device_name})"
-            )
+            stmts.append(f"{tensor_name} = __tl_empty(" + ",".join(shape_args) +
+                         f", dtype={dtype_name}, device={device_name})")
             stmts.append(f"{arg_name} = {tensor_name}.data_ptr()")
         for out in self.outs:
             arg_name = call_args[out.arg_idx]
             returns.append(f"{arg_name}_tensor")
         closure["__stream_functor__"] = get_current_stream_functor()
         stmts.append("if __stream__ is None: __stream__ = __stream_functor__()")
-        stmts.append(
-            "assert __tl_kernel("
-            + ",".join(call_args)
-            + ", __stream__) == 0, 'Kernel call failed'"
-        )
+        stmts.append("assert __tl_kernel(" + ",".join(call_args) +
+                     ", __stream__) == 0, 'Kernel call failed'")
 
         source = ""
         source += "def __closure(" + ", ".join(closure.keys()) + "):\n"
@@ -357,9 +350,7 @@ class DSLBuilder:
             return tuple(shape)
         else:
             shape = list(shape)
-            assert len(shape) == len(
-                shape_schema
-            ), "Expected a tensor with matching rank"
+            assert len(shape) == len(shape_schema), "Expected a tensor with matching rank"
             for i, dim in enumerate(shape_schema):
                 if isinstance(dim, DynSchema):
                     var_name = dim.name or f"{name_hint}_{i}"
@@ -376,12 +367,9 @@ class DSLBuilder:
                 shape = tuple(expr.shape)
                 stride = tuple(expr.stride())
             else:
-                shape = self._convert_shape(
-                    expr.shape, annot.shape, name_hint=f"{name}_shape"
-                )
+                shape = self._convert_shape(expr.shape, annot.shape, name_hint=f"{name}_shape")
                 stride = self._convert_shape(
-                    expr.stride(), annot.stride, name_hint=f"{name}_stride"
-                )
+                    expr.stride(), annot.stride, name_hint=f"{name}_stride")
             buffer = tir.decl_buffer(
                 name=name,
                 shape=shape,
@@ -402,9 +390,7 @@ class DSLBuilder:
                 device=expr.device,
             )
         else:
-            assert not isinstance(
-                expr, torch.Tensor
-            ), "Tensor argument must be annotated"
+            assert not isinstance(expr, torch.Tensor), "Tensor argument must be annotated"
             return expr
 
     def bind(self, name: str, expr: Any, annot: Any = None) -> Any:
@@ -491,18 +477,10 @@ class DSLBuilder:
         return ctx
 
     def logical_and(self, val, rclosure) -> bool:
-        return (
-            tir.And(val, rclosure())
-            if isinstance(val, tir.PrimExpr)
-            else (val or rclosure())
-        )
+        return (tir.And(val, rclosure()) if isinstance(val, tir.PrimExpr) else (val or rclosure()))
 
     def logical_or(self, val, rclosure) -> bool:
-        return (
-            tir.Or(val, rclosure())
-            if isinstance(val, tir.PrimExpr)
-            else (val or rclosure())
-        )
+        return (tir.Or(val, rclosure()) if isinstance(val, tir.PrimExpr) else (val or rclosure()))
 
 
 def _remove_leading_ident(source: str):
@@ -510,9 +488,7 @@ def _remove_leading_ident(source: str):
     if not lines:
         return source
     ident_size = len(lines[0]) - len(lines[0].lstrip())
-    return "\n".join(
-        [line[ident_size:] if len(line) >= ident_size else line for line in lines]
-    )
+    return "\n".join([line[ident_size:] if len(line) >= ident_size else line for line in lines])
 
 
 def make_prim_func_generator(func):
