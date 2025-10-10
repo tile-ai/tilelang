@@ -34,7 +34,7 @@ def get_configs():
     block_N = [32, 64, 128, 256]
     threads = [128, 256, 512]
     num_split_q = [64, 128, 256]
-    num_stages = [0,1]
+    num_stages = [0, 1]
     enable_rasterization = [True]
     k_pack = [2]
     panel_size = [7, 8]
