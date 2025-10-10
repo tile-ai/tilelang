@@ -41,7 +41,18 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Setup Python
+      - name: Setup Python 3.8
+        id: setup-py38
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.8"  # use lowest supported version for linting
+          update-environment: false
+
+      - name: Check AST with Python 3.8
+        run: |
+          "${{ steps.setup-py38.outputs.python-path }}" -m compileall -q -f tilelang
+
+      - name: Setup Python 3.12
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -99,8 +110,8 @@ jobs:
             **/requirements*.txt
 
       - name: Set up venv cache
-        uses: actions/cache@v4
         id: venv-cache
+        uses: actions/cache@v4
         with:
           path: |
             venv
