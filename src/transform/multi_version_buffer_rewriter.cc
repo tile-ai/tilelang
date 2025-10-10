@@ -10,8 +10,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
-#include <utility>
 #include <unordered_set>
+#include <utility>
 
 #include "../op/builtin.h"
 
@@ -287,8 +287,7 @@ private:
         LOG(FATAL)
             << "MultiVersionBuffer: Can't handle the body of the loop because "
             << "it is not a SeqStmt, IfThenElse without else, "
-            << "or LetStmt wrapping them, but got "
-            << current->GetTypeKey();
+            << "or LetStmt wrapping them, but got " << current->GetTypeKey();
       }
     }
     ICHECK(pipeline_body_seq != nullptr);
@@ -422,12 +421,14 @@ private:
 
   PrimExpr version_index_;
   std::vector<std::pair<Var, PrimExpr>> loop_stack_;
-  // Track ancestor statements to query whether an LCA is inside the current loop.
+  // Track ancestor statements to query whether an LCA is inside the current
+  // loop.
   std::vector<const StmtNode *> stmt_stack_;
   Map<Var, Buffer> buffer_data_to_buffer_;
   Map<Buffer, Optional<Stmt>> buffer_lca_;
   Map<Buffer, Buffer> buffer_remap_;
-  // Remember each block's alloc list so the loop can see buffers defined in parents.
+  // Remember each block's alloc list so the loop can see buffers defined in
+  // parents.
   std::unordered_map<const BlockNode *, Array<Buffer>> block_alloc_buffers_;
 };
 
