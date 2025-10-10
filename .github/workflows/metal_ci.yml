@@ -92,4 +92,4 @@ jobs:
       run: |
         cd testing/python
         unset PYTHONPATH
-        python -m pytest -k metal -v -r fE --durations=0 --timeout=3600
+        python -m pytest -k metal -v -r fE --durations=0 --cache-clear --timeout=3600

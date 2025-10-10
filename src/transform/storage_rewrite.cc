@@ -674,7 +674,8 @@ private:
   bool IsSpecialTaggedMemory(const StorageScope &scope) {
     return !scope.tag.empty() && scope.tag != ".dyn" &&
            scope.tag != ".barrier" && scope.tag != ".workspace" &&
-           scope.tag != ".vtcm" && scope.tag != ".var";
+           scope.tag != ".vtcm" && scope.tag != ".var" &&
+           scope.tag != ".descriptor";
   }
 
   // Allocate entry of node.
@@ -844,7 +845,8 @@ private:
     // allocate with element type.
     ICHECK_NE(e->const_nbits, 0U);
     MemoryInfo info;
-    if (e->scope.tag != ".barrier" && e->scope.tag != ".var") {
+    if (e->scope.tag != ".barrier" && e->scope.tag != ".var" &&
+        e->scope.tag != ".descriptor") {
       info = GetMemoryInfo(e->scope.to_string());
     }
     uint64_t total_bits = e->const_nbits;

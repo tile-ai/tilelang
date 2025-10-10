@@ -46,6 +46,7 @@ Checks: >
   -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
   -clang-analyzer-deadcode.DeadStores,
   -clang-analyzer-optin.cplusplus.VirtualCall,
+  -clang-diagnostic-tautological-constant-compare,
 
 WarningsAsErrors: '*'
 

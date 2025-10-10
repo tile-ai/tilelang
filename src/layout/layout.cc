@@ -484,6 +484,11 @@ TVM_FFI_STATIC_INIT_BLOCK({
            [](Layout layout) { return layout->GetForwardIndex(); })
       .def("tl.Layout_forward_vars",
            [](Layout layout) { return layout->GetForwardVars(); })
+      .def("tl.Layout_is_equal",
+           [](Layout layout, Layout other) {
+             const LayoutNode *other_node = other.as<LayoutNode>();
+             return layout->IsEqual(other_node);
+           })
       .def_packed("tl.Fragment",
                   [](PackedArgs args, Any *rv) {
                     *rv = Fragment(
@@ -492,6 +497,11 @@ TVM_FFI_STATIC_INIT_BLOCK({
                         /*forward_thread=*/args[2].cast<PrimExpr>(),
                         /*thread_replicate=*/args[3].cast<IterVar>());
                   })
+      .def("tl.Fragment_is_equal",
+           [](Fragment fragment, Fragment other) {
+             const FragmentNode *other_node = other.as<FragmentNode>();
+             return fragment->IsEqual(other_node);
+           })
       .def("tl.Fragment_thread_size",
            [](Fragment fragment) { return fragment->ThreadExtent(); })
       .def("tl.Fragment_thread",
@@ -509,10 +519,38 @@ TVM_FFI_STATIC_INIT_BLOCK({
       .def("tl.Fragment_condense_rep_var",
            [](Fragment fragment) { return fragment->CondenseReplicateVar(); })
       .def("tl.make_swizzled_layout",
+           [](int stride, int continuous, int element_size, bool k_inner,
+              bool allow_pad = true) {
+             if (allow_pad) {
+               return makeGemmABLayout(stride, continuous, continuous,
+                                       element_size, k_inner);
+             } else {
+               return makeGemmABLayoutHopper(stride, continuous, continuous,
+                                             element_size, k_inner);
+             }
+           })
+      .def("tl.make_wgmma_swizzled_layout",
+           [](int stride, int mat_continuous, int continuity, int element_size,
+              bool k_inner) {
+             return makeGemmABLayoutHopper(stride, mat_continuous, continuity,
+                                           element_size, k_inner);
+           })
+      .def("tl.make_full_bank_swizzled_layout",
            [](int stride, int continuous, int element_size) {
-             return makeGemmABLayout(stride, continuous, continuous,
-                                     element_size, 0);
-           });
+             return makeFullBankSwizzleLayout(stride, continuous, element_size);
+           })
+      .def("tl.make_half_bank_swizzled_layout",
+           [](int stride, int continuous, int element_size) {
+             return makeHalfBankSwizzleLayout(stride, continuous, element_size);
+           })
+      .def("tl.make_quarter_bank_swizzled_layout",
+           [](int stride, int continuous, int element_size) {
+             return makeQuarterBankSwizzleLayout(stride, continuous,
+                                                 element_size);
+           })
+      .def("tl.make_linear_layout", [](int stride, int continuous) {
+        return makeGemmLayoutLinear(stride, continuous);
+      });
 });
 
 TVM_FFI_STATIC_INIT_BLOCK({
