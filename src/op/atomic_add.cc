@@ -13,6 +13,7 @@
 #include "../target/utils.h"
 #include "../transform/atomicadd_vectorize.h"
 #include "../transform/common/loop_fusion_utils.h"
+#include "../transform/common/loop_parallel_transform_utils.h"
 #include "../transform/loop_partition.h"
 #include "builtin.h"
 
@@ -225,34 +226,6 @@ PrimExpr AtomicAddNode::MakePredicate(arith::Analyzer *analyzer,
   }
 }
 
-/**
- * @brief Build a SIMT-style loop nest that performs element-wise atomic
- * additions from src to dst.
- *
- * Constructs a nested loop (parallelized per iter var) that loads a value from
- * the source buffer, optionally casts it to the destination dtype, and performs
- * an extern atomic add into the destination buffer address. For scalar
- * (zero-dimensional) operations a trivial serial For with a single BufferStore
- * is returned.
- *
- * The method:
- * - Creates iter vars for all non-singleton extents and binds them into the
- * provided analyzer.
- * - Validates loop variable counts against src/dst ranges (ICHECK on mismatch).
- * - Computes indexed accesses and emits optional bound predicates;
- * out-of-bounds accesses are masked to zero when predicates are uncertain.
- * - Emits an extern `call_extern("AtomicAdd", address_of(dst_value),
- * src_value)` call wrapped in an Evaluate statement.
- * - Wraps the body with a parallel For at each loop level. If `coalesced_width`
- * is defined it is attached as the "coalesced_width" annotation on each loop.
- *
- * Note: This function mutates the analyzer binding state by binding loop
- * variables and may fail via ICHECK if internal assumptions about shapes are
- * violated.
- *
- * @return A nested For loop (parallel loops) implementing the atomic-add
- * kernel. For scalar cases a serial For of extent 1 is returned.
- */
 For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.empty();
@@ -416,6 +389,152 @@ LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
     }
   }
   return par_op_->InferLayout(T, level);
+}
+
+Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
+  Target target = T.target;
+  auto simt_loop = MakeSIMTLoop(analyzer);
+  auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
+  auto transformed_loop =
+      Downcast<For>(ParallelLoopTransformer::Substitute(fused_loop));
+  LOG(INFO) << transformed_loop;
+
+  auto GetArchInt = [&](const Target &tgt) -> int {
+    int arch_int = 0;
+    if (auto s = tgt->GetAttr<String>("arch")) {
+      std::string arch = s.value();
+      if (arch.rfind("sm_", 0) == 0)
+        arch_int = std::stoi(arch.substr(3));
+    }
+    return arch_int;
+  };
+
+  struct AtomicLoopNestCollector : tir::StmtExprVisitor {
+    Array<IterVar> loop_vars;
+    Map<Buffer, Array<PrimExpr>> indice_map;
+    std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> writes;
+    arith::Analyzer analyzer;
+
+    void Run(const Stmt &s) { StmtExprVisitor::VisitStmt(s); }
+
+    void VisitStmt_(const ForNode *op) final {
+      if (op->kind == ForKind::kParallel) {
+        loop_vars.push_back(IterVar(Range(op->min, op->extent), op->loop_var,
+                                    IterVarType::kDataPar));
+      }
+      analyzer.Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
+      StmtExprVisitor::VisitStmt_(op);
+    }
+    void VisitStmt_(const BufferStoreNode *op) final {
+      if (op->buffer.scope() == "local.fragment") {
+        indice_map.Set(op->buffer, op->indices);
+        writes.insert(op->buffer);
+      }
+      StmtExprVisitor::VisitStmt_(op);
+    }
+    void VisitExpr_(const BufferLoadNode *op) final {
+      if (op->buffer.scope() == "local.fragment") {
+        indice_map.Set(op->buffer, op->indices);
+      }
+      StmtExprVisitor::VisitExpr_(op);
+    }
+  };
+
+  auto ComputeLoopLayoutFromBuffer =
+      [&](const Buffer &buf, const Array<PrimExpr> &indices,
+          const LayoutMap &layout_map, const Range &thread_bounds,
+          const Array<IterVar> &loop_vars) -> Fragment {
+    Fragment src = layout_map[buf].as<Fragment>().value();
+    Var rep;
+    auto rep_iter =
+        IterVar(Range(0, src->ReplicateExtent()), rep, IterVarType::kDataPar);
+    PrimExpr fth = src->ForwardThread(indices, rep);
+    fth = analyzer->Simplify(fth);
+    Fragment out = Fragment(loop_vars, /*forward_index=*/{}, fth, rep_iter)
+                       ->BindThreadRange(thread_bounds);
+    return out;
+  };
+
+  struct AtomicInferResult {
+    Fragment loop_layout;
+    Optional<PrimExpr> predicate;
+  };
+
+  auto AtomicAddInferLayout =
+      [&](const For &loop, const LayoutInferArgs &args) -> AtomicInferResult {
+    AtomicLoopNestCollector C;
+    C.Run(loop);
+    Optional<Buffer> read_src;
+    int best_rank = -1;
+    for (auto kv : C.indice_map) {
+      const Buffer &buf = kv.first;
+      if (buf.scope() != "local.fragment")
+        continue;
+      if (!args.layout_map.count(buf))
+        continue;
+      int rank = static_cast<int>(kv.second.size());
+      if (rank > best_rank) {
+        best_rank = rank;
+        read_src = buf;
+      }
+    }
+    AtomicAddVectorizePlanner planner;
+    int sm = GetArchInt(target);
+    auto plan = planner.Plan(loop, sm);
+    int vec = std::max(plan.vector_size, 1);
+    if (auto cw = loop->annotations.Get("coalesced_width")) {
+      if (const auto *imm = cw->as<IntImmNode>()) {
+        int expected = imm->value;
+        ICHECK_GT(expected, 0);
+        ICHECK(vec % expected == 0)
+            << "vector_size " << vec << " not divisible by coalesced_width "
+            << expected;
+        vec = expected;
+      } else {
+        LOG(FATAL) << "coalesced_width should be IntImmNode.";
+      }
+    }
+    PrimExpr total = 1;
+    for (Stmt s = loop; s.as<For>().has_value(); s = s.as<For>().value()->body)
+      total = total * s.as<For>().value()->extent;
+    PrimExpr denom = args.thread_bounds->extent * vec;
+    while (!analyzer->CanProve(floormod(total, denom) == 0) && vec > 1) {
+      vec >>= 1;
+      denom = args.thread_bounds->extent * vec;
+    }
+    if (vec < 1)
+      vec = 1;
+    Fragment loop_layout;
+    if (read_src) {
+      loop_layout = ComputeLoopLayoutFromBuffer(
+          read_src.value(), C.indice_map[read_src.value()], args.layout_map,
+          args.thread_bounds, C.loop_vars);
+    } else {
+      For remapped = loop; // 简化处理
+      loop_layout = PlanLoopPartition(remapped, vec, args.thread_bounds);
+    }
+
+    Optional<PrimExpr> pred;
+    if (plan.dynamic && plan.condition.defined()) {
+      pred = plan.condition;
+    }
+    DLOG(INFO) << "[AtomicAddInferLayout] vec=" << vec
+               << " loop_layout=" << loop_layout->DebugOutput();
+    return {loop_layout, pred};
+  };
+
+  auto ret = AtomicAddInferLayout(transformed_loop,
+                                  {T.target, T.thread_bounds, T.layout_map,
+                                   analyzer, false, T.buffer_remap});
+  Fragment loop_layout = ret.loop_layout;
+  LOG(INFO) << loop_layout->DebugOutput();
+  auto thread_loop =
+      PartitionLoop(transformed_loop, T.thread_var, analyzer, loop_layout);
+  LOG(INFO) << thread_loop;
+  auto vectorized_thread_loop =
+      VectorizeAtomicAdd(thread_loop, GetArchInt(target));
+  LOG(INFO) << vectorized_thread_loop;
+  return vectorized_thread_loop;
 }
 
 TIR_REGISTER_TL_OP(AtomicAdd, atomicadd)
