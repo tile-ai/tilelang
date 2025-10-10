@@ -9,7 +9,6 @@ import tilelang.language as T
 from tilelang.layout import make_swizzled_layout
 import itertools
 import argparse
-from typing import Optional
 
 
 def get_configs():
@@ -193,7 +192,7 @@ def ref_program(query: torch.Tensor,
                 key: torch.Tensor,
                 value: torch.Tensor,
                 sinks: torch.Tensor,
-                sliding_window: Optional[int] = None,
+                sliding_window: int | None = None,
                 dtype: torch.dtype = torch.float16) -> torch.Tensor:
 
     query = query.transpose(1, 2).contiguous().unsqueeze(
@@ -306,8 +305,8 @@ def main(batch: int = 1,
 
         latency = do_bench(
             lambda: ref_program(Q, K, V, sinks, window_size, dtype=torch_dtype), warmup=500)
-        print("Ref: {:.2f} ms".format(latency))
-        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Ref: {latency:.2f} ms")
+        print(f"Ref: {total_flops / latency * 1e-9:.2f} TFlops")
         latency = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500)
         print(f"Tilelang: {latency:.2f} ms")
         print(f"Tilelang: {total_flops / latency * 1e-9:.2f} TFlops")

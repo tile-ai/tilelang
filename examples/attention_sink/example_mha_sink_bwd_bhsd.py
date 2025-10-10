@@ -6,7 +6,6 @@ import tilelang
 from tilelang.profiler import do_bench
 import tilelang.language as T
 import argparse
-from typing import Optional
 
 
 def get_bwd_configs():
@@ -401,7 +400,7 @@ def ref_program(query: torch.Tensor,
                 key: torch.Tensor,
                 value: torch.Tensor,
                 sinks: torch.Tensor,
-                sliding_window: Optional[int] = None,
+                sliding_window: int | None = None,
                 dtype: torch.dtype = torch.float16) -> torch.Tensor:
 
     query = query.transpose(1, 2).contiguous().unsqueeze(

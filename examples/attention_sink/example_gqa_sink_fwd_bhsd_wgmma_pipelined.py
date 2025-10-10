@@ -13,7 +13,6 @@ import argparse
 import triton
 import triton.language as tl
 from triton.tools.tensor_descriptor import TensorDescriptor
-from typing import Optional
 
 
 def get_configs():
@@ -213,7 +212,7 @@ def ref_program(query: torch.Tensor,
                 key: torch.Tensor,
                 value: torch.Tensor,
                 sinks: torch.Tensor,
-                sliding_window: Optional[int] = None,
+                sliding_window: int | None = None,
                 dtype: torch.dtype = torch.float16) -> torch.Tensor:
 
     key = key.transpose(1, 2).contiguous()
