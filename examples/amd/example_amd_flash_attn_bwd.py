@@ -483,12 +483,12 @@ def main(batch: int = 1,
     bwd_prep = flashattn_bwd_preprocess(batch, heads, seq_len, dim)
     delta_tl = bwd_prep(o_tl, dO)
 
-    print("\n开始FlashAttention-V2反向传播自动调优...")
+    print("\nStarting FlashAttention-V2 backward pass autotuning...")
     bwd_kernel = flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups)
     if bwd_kernel is None or bwd_kernel.config is None:
-        print("反向传播自动调优失败。")
+        print("Backward pass autotuning failed.")
         return
-    print(f"自动调优完成。最佳反向传播配置: {bwd_kernel.config}")
+    print(f"Autotuning completed. Best backward pass configuration: {bwd_kernel.config}")
 
     dQ_accum = torch.zeros_like(q, dtype=torch.float32)
     dK_tl = torch.zeros_like(k, dtype=torch.float32)
