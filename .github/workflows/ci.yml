@@ -19,8 +19,6 @@ concurrency:
 
 env:
   CMAKE_CONFIGURE_OPTIONS: "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" # to be updated
-  CMAKE_C_COMPILER_LAUNCHER: "ccache"
-  CMAKE_CXX_COMPILER_LAUNCHER: "ccache"
   PYTHONUNBUFFERED: "1"
   FORCE_COLOR: "1"
   CLICOLOR_FORCE: "1"
@@ -99,17 +97,42 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           update-environment: true
-          cache: pip
-          cache-dependency-path: |
-            pyproject.toml
-            **/requirements*.txt
 
-      - name: Set up venv cache
+      # Our self-hosted runners may have slow internet access to download/upload caches from GitHub.
+      # So we implement our own caching mechanism to cache the venv directory.
+      - name: Setup venv cache (self-hosted runners)
+        if: startsWith(matrix.runner.name, 'self-hosted')
+        id: venv-cache-self-hosted
+        run: |
+          CI_VENV_CACHE_DIR="${{ runner.tool_cache }}/.ci-venv-cache"
+          mkdir -p "${CI_VENV_CACHE_DIR}"
+
+          # Cleanup old caches (keep only modified within last 7 days)
+          find "${CI_VENV_CACHE_DIR}/" -type f -name "venv-*.tar.gz" -mtime +7 -exec rm -f {} +
+
+          # Restore cache if exists
+          CACHE_KEY="venv-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ matrix.runner.name }}-${{ matrix.runner.toolkit }}-${{ hashFiles('**/requirements*.txt') }}"
+          CI_VENV_CACHE_FILE="${CI_VENV_CACHE_DIR}/${CACHE_KEY}.tar.gz"
+          if [[ -f "${CI_VENV_CACHE_FILE}" ]]; then
+            echo "::group::Restoring venv cache from ${CI_VENV_CACHE_FILE}"
+            tar -xvzf "${CI_VENV_CACHE_FILE}" -C "${{ github.workspace }}"
+            echo "::endgroup::"
+            echo "cache-hit=true" >> "${GITHUB_OUTPUT}"
+            echo "cache-key=${CACHE_KEY}" >> "${GITHUB_OUTPUT}"
+            echo "cache-path=${CI_VENV_CACHE_FILE}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "No cache found at ${CI_VENV_CACHE_FILE}"
+            echo "cache-hit=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      # The GitHub-hosted runners have fast internet access to cache storage,
+      # so we can use the actions/cache action to cache the venv directory.
+      - name: Setup venv cache (GitHub-hosted runners)
         id: venv-cache
         uses: actions/cache@v4
         with:
@@ -168,17 +191,19 @@ jobs:
 
       - name: Setup venv
         id: setup-venv
-        if: steps.venv-cache.outputs.cache-hit != 'true'
+        if: |
+          (startsWith(matrix.runner.name, 'self-hosted') && steps.venv-cache-self-hosted.outputs.cache-hit != 'true') ||
+          (!startsWith(matrix.runner.name, 'self-hosted') && steps.venv-cache.outputs.cache-hit != 'true')
         run: |
           python -m venv venv
           source venv/bin/activate
           python -m pip install --upgrade pip setuptools uv wheel
           uv pip install -r requirements-build.txt -r requirements-test.txt
-          if [[ "${{ matrix.runner.toolkit }}" == *"CUDA"* ]]; then
+          if [[ "${{ matrix.runner.toolkit }}" == "CUDA"* ]]; then
             uv pip install flash-attn==2.5.8
-          elif [[ "${{ matrix.runner.toolkit }}" == *"ROCm"* ]]; then
+          elif [[ "${{ matrix.runner.toolkit }}" == "ROCm"* ]]; then
             uv pip install -r requirements-rocm.txt
-          elif [[ "${{ matrix.runner.toolkit }}" == *"Metal"* ]]; then
+          elif [[ "${{ matrix.runner.toolkit }}" == "Metal"* ]]; then
             # Currently no extra dependency for metal
             :
           else
@@ -186,7 +211,11 @@ jobs:
             exit 1
           fi
 
+      # Do not use ccache on self-hosted runners, as it will download/upload caches which is slow.
+      # Self-hosted runners usually have more CPU power to compile without ccache.
       - name: Setup ccache
+        id: setup-ccache
+        if: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
         uses: hendrikmuhs/ccache-action@v1
         with:
           create-symlink: true
@@ -195,6 +224,16 @@ jobs:
       - name: Run format check
         id: format-check
         run: |
+          if [[ "${{ matrix.runner.name }}" != "self-hosted"* ]]; then
+            echo "Setting up ccache for GitHub-hosted runner: ${{ matrix.runner.name }}"
+            export CMAKE_C_COMPILER_LAUNCHER="ccache"
+            export CMAKE_CXX_COMPILER_LAUNCHER="ccache"
+            echo "CMAKE_C_COMPILER_LAUNCHER=${CMAKE_C_COMPILER_LAUNCHER}" | tee -a "${GITHUB_ENV}"
+            echo "CMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER}" | tee -a "${GITHUB_ENV}"
+          else
+            echo "Skipping ccache setup on self-hosted runner: ${{ matrix.runner.name }}"
+          fi
+
           source venv/bin/activate
           mkdir -p build
           # Run cmake to create the build directory with compile_commands.json
@@ -211,7 +250,7 @@ jobs:
           fi
           rm -rf build
 
-      - name: Install Project (wheel form)
+      - name: Install project (wheel form)
         run: |
           source venv/bin/activate
           uv pip install --no-build-isolation -v .
@@ -253,3 +292,28 @@ jobs:
           cd testing/python
           unset PYTHONPATH
           python -m pytest -k metal -v -r fE --durations=0 --cache-clear --timeout=3600
+
+      # Save the venv cache for self-hosted runners if it was a cache miss.
+      # See steps.venv-cache-self-hosted for more details.
+      - name: Save venv cache (self-hosted runners)
+        if: success() && startsWith(matrix.runner.name, 'self-hosted') && steps.venv-cache-self-hosted.outputs.cache-hit != 'true'
+        run: |
+          CI_VENV_CACHE_FILE="${{ steps.venv-cache-self-hosted.outputs.cache-path }}"
+          CI_VENV_CACHE_DIR="$(dirname "${CI_VENV_CACHE_FILE}")"
+          if [[ -f "${CI_VENV_CACHE_FILE}" ]]; then
+            echo "Cache file already exists at ${CI_VENV_CACHE_FILE}, skipping save."
+            exit 0
+          fi
+          TEMP_FILE="$(mktemp -t ci-venv-cache-XXXXXXX.tar.gz)"
+          # echo "::Saving cache to ${TEMP_FILE}"
+          echo "::group::Saving venv cache to ${TEMP_FILE}"
+          tar -cvzf "${TEMP_FILE}" -C "${{ github.workspace }}" venv .cache
+          echo "::endgroup::"
+          echo "Cache archive created at ${TEMP_FILE} (size: $(du -h "${TEMP_FILE}"))"
+          # Move temp file to final location atomically
+          echo "Moving cache to ${CI_VENV_CACHE_FILE}"
+          mkdir -p "${CI_VENV_CACHE_DIR}"
+          LOCAL_TEMP_FILE="${CI_VENV_CACHE_DIR}/$(basename "${TEMP_FILE}")"
+          mv -f "${TEMP_FILE}" "${LOCAL_TEMP_FILE}"
+          mv -f "${LOCAL_TEMP_FILE}" "${CI_VENV_CACHE_FILE}"
+          echo "Cache saved successfully."
