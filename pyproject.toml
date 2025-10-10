@@ -39,7 +39,7 @@ select = [
     # Pyflakes
     "F",
     # pyupgrade
-    "UP", "FA102",
+    "UP", "FA",
     # flake8-bugbear
     "B",
     # flake8-simplify
@@ -58,6 +58,8 @@ ignore = [
     "E501",
     # key in dict.keys()
     "SIM118",
+    # open file w.o. ctx manager
+    "SIM115",
     # memory leaks
     "B019",
     # No such file or directory
