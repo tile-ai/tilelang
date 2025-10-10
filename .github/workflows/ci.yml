@@ -23,10 +23,10 @@ env:
   FORCE_COLOR: "1"
   CLICOLOR_FORCE: "1"
   UV_INDEX_STRATEGY: "unsafe-best-match"
-  XDG_CACHE_HOME: "${{ github.workspace }}/.cache"  # to be updated
-  PIP_CACHE_DIR: "${{ github.workspace }}/.cache/pip"  # to be updated
-  UV_CACHE_DIR: "${{ github.workspace }}/.cache/uv"  # to be updated
-  PRE_COMMIT_HOME: "${{ github.workspace }}/.cache/pip/.pre-commit"  # to be updated
+  XDG_CACHE_HOME: "${{ github.workspace }}/.cache" # to be updated
+  PIP_CACHE_DIR: "${{ github.workspace }}/.cache/pip" # to be updated
+  UV_CACHE_DIR: "${{ github.workspace }}/.cache/uv" # to be updated
+  PRE_COMMIT_HOME: "${{ github.workspace }}/.cache/pip/.pre-commit" # to be updated
 
 jobs:
   lint:
@@ -43,7 +43,7 @@ jobs:
         id: setup-py38
         uses: actions/setup-python@v6
         with:
-          python-version: "3.8"  # use lowest supported version for linting
+          python-version: "3.8" # use lowest supported version for linting
           update-environment: false
 
       - name: Check AST with Python 3.8
@@ -58,7 +58,7 @@ jobs:
           cache: pip
           cache-dependency-path: |
             pyproject.toml
-            **/requirements*.txt
+            requirements*.txt
             .pre-commit-config.yaml
 
       - name: Pre-commit Lint
@@ -124,7 +124,7 @@ jobs:
         with:
           create-symlink: true
           key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ matrix.runner.name }}-${{ matrix.runner.toolkit }}
-          evict-old-files: '7d'
+          evict-old-files: "7d"
 
       - name: Set environment (CUDA)
         if: contains(matrix.runner.toolkit, 'CUDA')
@@ -182,11 +182,16 @@ jobs:
           activate-environment: true
           # Do not use cache for self-hosted runners, as it will download/upload caches which is slow.
           enable-cache: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
+          prune-cache: ${{ !startsWith(matrix.runner.name, 'self-hosted') }}
           # Use runner tool_cache for self-hosted runners
           cache-local-path: ${{ env.UV_CACHE_DIR }}
           ignore-nothing-to-cache: true
           # Extra cache key to upload/download caches on GitHub-hosted runners
           cache-suffix: uv-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ matrix.runner.name }}-${{ matrix.runner.toolkit }}
+          cache-dependency-glob: |
+            pyproject.toml
+            requirements*.txt
+            .pre-commit-config.yaml
 
       - name: Setup venv
         id: setup-venv
