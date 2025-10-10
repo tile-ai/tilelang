@@ -1,0 +1,243 @@
+name: CI
+on:
+  pull_request:
+    types:
+      - labeled
+      - unlabeled
+      - opened
+      - synchronize
+      - reopened
+  # Allow to trigger the workflow manually
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CMAKE_CONFIGURE_OPTIONS: "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" # to be updated
+  CMAKE_C_COMPILER_LAUNCHER: "ccache"
+  CMAKE_CXX_COMPILER_LAUNCHER: "ccache"
+  PYTHONUNBUFFERED: "1"
+  FORCE_COLOR: "1"
+  CLICOLOR_FORCE: "1"
+  XDG_CACHE_HOME: "${{ github.workspace }}/.cache"
+  PIP_CACHE_DIR: "${{ github.workspace }}/.cache/pip"
+  UV_CACHE_DIR: "${{ github.workspace }}/.cache/uv"
+  PRE_COMMIT_HOME: "${{ github.workspace }}/.cache/pip/.pre-commit"
+
+jobs:
+  lint:
+    name: Quick Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          update-environment: true
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            **/requirements*.txt
+            .pre-commit-config.yaml
+
+      - name: Pre-commit Lint
+        run: |
+          if ! pipx run pre-commit run --all-files --color=always --show-diff-on-failure; then
+            echo "::error::Pre-commit checks failed. Please run 'pre-commit install' and 'pre-commit run --all-files' locally to see the issues."
+            exit 1
+          fi
+
+  tests:
+    name: Test for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }} on ${{ matrix.runner.name }}
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    needs: [lint]
+    runs-on: ${{ matrix.runner.tags }}
+    strategy:
+      matrix:
+        runner:
+          - tags: [self-hosted, nvidia]
+            name: self-hosted-nvidia
+            toolkit: CUDA-12.8
+          - tags: [self-hosted, amd, gpu]
+            name: self-hosted-amd
+            toolkit: ROCm-6.3
+          - tags: [macos-latest]
+            name: macos-latest
+            toolkit: Metal
+        python-version:
+          - "3.12"
+      fail-fast: false
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          update-environment: true
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            **/requirements*.txt
+
+      - name: Set up venv cache
+        uses: actions/cache@v4
+        id: venv-cache
+        with:
+          path: |
+            venv
+            .cache
+          key: venv-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ matrix.runner.name }}-${{ matrix.runner.toolkit }}-${{ hashFiles('**/requirements*.txt') }}
+
+      - name: Set environment (CUDA)
+        if: contains(matrix.runner.toolkit, 'CUDA')
+        run: |
+          TOOLKIT="${{ matrix.runner.toolkit }}"
+          CUDA_VERSION="${TOOLKIT##*-}"
+          CUDA_VERSION_MAJMIN="$(echo ${CUDA_VERSION} | cut -d '.' -f-2)"
+          CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
+          export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}"
+          export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
+          export CMAKE_CONFIGURE_OPTIONS="${CMAKE_CONFIGURE_OPTIONS} -DUSE_CUDA=ON"
+
+          echo "USE_CUDA=ON" | tee -a "${GITHUB_ENV}"
+          echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
+          echo "CUDA_VERSION_MAJMIN=${CUDA_VERSION_MAJMIN}" | tee -a "${GITHUB_ENV}"
+          echo "CUDA_VERSION_MAJMIN_NODOT=${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
+          echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
+          echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
+          echo "CMAKE_CONFIGURE_OPTIONS=${CMAKE_CONFIGURE_OPTIONS}" | tee -a "${GITHUB_ENV}"
+          echo "\$ $(which nvcc) --version" && nvcc --version
+
+      - name: Set environment (ROCm)
+        if: contains(matrix.runner.toolkit, 'ROCm')
+        run: |
+          TOOLKIT="${{ matrix.runner.toolkit }}"
+          ROCM_VERSION="${TOOLKIT##*-}"
+          ROCM_VERSION_MAJMIN="$(echo ${ROCM_VERSION} | cut -d '.' -f-2)"
+          ROCM_VERSION_MAJMIN_NODOT="${ROCM_VERSION_MAJMIN//./}"
+          export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/rocm${ROCM_VERSION_MAJMIN}"
+          export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
+          export CMAKE_CONFIGURE_OPTIONS="${CMAKE_CONFIGURE_OPTIONS} -DUSE_ROCM=ON"
+
+          echo "USE_ROCM=ON" | tee -a "${GITHUB_ENV}"
+          echo "ROCM_VERSION=${ROCM_VERSION}" | tee -a "${GITHUB_ENV}"
+          echo "ROCM_VERSION_MAJMIN=${ROCM_VERSION_MAJMIN}" | tee -a "${GITHUB_ENV}"
+          echo "ROCM_VERSION_MAJMIN_NODOT=${ROCM_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
+          echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
+          echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
+          echo "CMAKE_CONFIGURE_OPTIONS=${CMAKE_CONFIGURE_OPTIONS}" | tee -a "${GITHUB_ENV}"
+          echo "\$ $(which hipcc) --version" && hipcc --version
+
+      - name: Set environment (Metal)
+        if: contains(matrix.runner.toolkit, 'Metal')
+        run: |
+          export CMAKE_CONFIGURE_OPTIONS="${CMAKE_CONFIGURE_OPTIONS} -DUSE_METAL=ON"
+
+          echo "USE_METAL=ON" | tee -a "${GITHUB_ENV}"
+          echo "CMAKE_CONFIGURE_OPTIONS=${CMAKE_CONFIGURE_OPTIONS}" | tee -a "${GITHUB_ENV}"
+
+      - name: Setup venv
+        id: setup-venv
+        if: steps.venv-cache.outputs.cache-hit != 'true'
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          python -m pip install --upgrade pip setuptools uv wheel
+          uv pip install -r requirements-build.txt -r requirements-test.txt
+          if [[ "${{ matrix.runner.toolkit }}" == *"CUDA"* ]]; then
+            uv pip install flash-attn==2.5.8
+          elif [[ "${{ matrix.runner.toolkit }}" == *"ROCm"* ]]; then
+            uv pip install -r requirements-rocm.txt
+          elif [[ "${{ matrix.runner.toolkit }}" == *"Metal"* ]]; then
+            # Currently no extra dependency for metal
+            :
+          else
+            echo "::error::Unknown toolkit: ${{ matrix.runner.toolkit }}"
+            exit 1
+          fi
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          create-symlink: true
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ matrix.runner.name }}-${{ matrix.runner.toolkit }}
+
+      - name: Run format check
+        id: format-check
+        run: |
+          source venv/bin/activate
+          mkdir -p build
+          # Run cmake to create the build directory with compile_commands.json
+          pushd build
+          cmake .. ${CMAKE_CONFIGURE_OPTIONS}
+          popd
+          if ! output=$(./format.sh 2>&1); then
+            echo "------------------------------------"
+            echo "message:"
+            echo "$output"
+            printf '%s\n' "$output" | grep "Please review and stage the changes."
+            echo "------------------------------------"
+            exit 1
+          fi
+          rm -rf build
+
+      - name: Install Project (wheel form)
+        run: |
+          source venv/bin/activate
+          uv pip install --no-build-isolation -v .
+
+      - name: Run examples
+        if: contains(matrix.runner.toolkit, 'CUDA')
+        run: |
+          source venv/bin/activate
+          cd examples
+          unset PYTHONPATH
+          python -m pytest -n 4 **/test*.py -v -r fE --durations=0 --cache-clear
+
+      # NVIDIA CUDA tests
+      - name: Run tests for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }}
+        id: cuda-tests
+        if: contains(matrix.runner.toolkit, 'CUDA')
+        run: |
+          source venv/bin/activate
+          cd testing/python
+          unset PYTHONPATH
+          python -m pytest -n 4 -v -r fE --durations=0 --cache-clear --timeout=3600
+
+      # AMD ROCm tests
+      - name: Run tests for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }}
+        id: rocm-tests
+        if: contains(matrix.runner.toolkit, 'ROCm')
+        run: |
+          source venv/bin/activate
+          cd testing/python/amd
+          unset PYTHONPATH
+          python -m pytest -v --cache-clear test_tilelang_test_amd.py
+
+      # Apple Metal tests
+      - name: Run tests for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }}
+        id: metal-tests
+        if: contains(matrix.runner.toolkit, 'Metal')
+        run: |
+          source venv/bin/activate
+          cd testing/python
+          unset PYTHONPATH
+          python -m pytest -k metal -v -r fE --durations=0 --cache-clear --timeout=3600
