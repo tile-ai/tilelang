@@ -1,3 +1,4 @@
+from tilelang.jit.adapter.cython.adapter import CythonKernelAdapter
 from .compile import (
     make_prim_func_generator,
     generate_arg_parser,
@@ -22,13 +23,14 @@ import cffi
 from tilelang.utils.target import AVALIABLE_TARGETS, determine_target
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.wrapper import TLWrapper
+from tilelang.cache import _kernel_cache_instance as kernel_cache
 from dataclasses import dataclass
 import tilelang
 from tilelang import tvm
 from tvm.target import Target
 import logging
-import ctypes
 import inspect
+from .types import Tune
 
 logger = logging.getLogger(__name__)
 
@@ -52,19 +54,64 @@ _T = TypeVar("_T")
 @dataclass(slots=True)
 class JITKernel(Generic[_P, _T]):
     lib_path: str
-    lib: JITLib | ctypes.CDLL
+    lib: JITLib
     lib_call: Callable
     source: str
     wrapped_source: str
-    func: JITFunc[_P, _T]
+    jitfunc: JITFunc[_P, _T]
+
+    @classmethod
+    def from_func_libpath(cls, func: JITFunc[_P, _T], lib_path: str):
+        pass
 
     def __call__(self, *args: _P.args, **kws: _P.kwargs) -> _T:
-        const_args, dyn_args = self.func.parse_args(*args, **kws)
-        assert const_args == self.func.const_args, "Const args do not match"
+        const_args, dyn_args = self.jitfunc.parse_args(*args, **kws)
+        assert const_args == self.jitfunc.const_args, "Const args do not match"
         return self.lib_call(*dyn_args)
 
 
-def compile(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
+def compile_compat(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
+    tl_kernel = kernel_cache.cached(
+        func.prim_func,
+        func.out_idx,
+        *func.global_allocs,
+        target=func.target,
+        target_host=func.target_host,
+        execution_backend="cython",
+        verbose=verbose,
+        pass_configs=func.pass_configs,
+        compile_flags=func.compile_flags,
+    )
+    adaptor: CythonKernelAdapter = tl_kernel.adapter
+    lib_path=adaptor.lib_generator.libpath
+    source = adaptor.kernel_global_source
+    wrapped_source = adaptor.wrapped_source
+
+    ffi = cffi.FFI()
+    ffi.cdef(func.get_cffi_sig())
+    ffi.cdef("int init();")
+    ffi.cdef("const char * get_last_error();")
+    lib: JITLib = ffi.dlopen(lib_path)
+
+    result = lib.init()
+    if result != 0:
+        error_msg = lib.get_last_error().decode("utf-8")
+        error_msg += f"\n{wrapped_source}"
+        raise RuntimeError(f"Initialization failed: {error_msg}")
+
+    lib_call = func.generate_global_alloc_wrapper(lib.call)
+
+    return JITKernel(
+        lib_path=adaptor.lib_generator.libpath,
+        lib=lib,
+        lib_call=lib_call,
+        source=source,
+        wrapped_source=wrapped_source,
+        jitfunc=func,
+    )
+
+
+def compile_uncached(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
     func.generate_global_alloc_wrapper(None)  # test the wrapper generation
 
     mod = tvm.IRModule({func.prim_func.attrs["global_symbol"]: func.prim_func})
@@ -104,13 +151,17 @@ def compile(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
     lib_call = func.generate_global_alloc_wrapper(lib.call)
 
     return JITKernel(
-        func=func,
+        jitfunc=func,
         source=artifact.kernel_source,
         wrapped_source=wrapped_source,
         lib_call=lib_call,
         lib_path=lib_path,
         lib=lib,
     )
+
+
+def compile(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
+    return compile_compat(func, verbose)
 
 
 class JITDispatcher(Generic[_P, _T]):
@@ -145,10 +196,8 @@ class JITDispatcher(Generic[_P, _T]):
             self._jit_func_gen_lazy = make_prim_func_generator(self.func)
         return self._jit_func_gen_lazy
 
-    def partial(self, *args: _P.args, **kws: _P.kwargs) -> JITFunc[_P, _T]:
-        const_args, _ = self.parse_args(*args, **kws)
-        if const_args in self.jit_funcs:
-            return self.jit_funcs[const_args]
+    def _partial_notune(self, __const_args__, *args: _P.args, **kws: _P.kwargs):
+        const_args = __const_args__
         builder = DSLBuilder(
             target=self.target,
             target_host=self.target_host,
@@ -162,6 +211,14 @@ class JITDispatcher(Generic[_P, _T]):
         set_current_builder()
         self.jit_funcs[const_args] = builder.get()
         return builder.get()
+
+    def partial(self, *args: _P.args, **kws: _P.kwargs) -> JITFunc[_P, _T]:
+        const_args, _ = self.parse_args(*args, **kws)
+        if const_args in self.jit_funcs:
+            return self.jit_funcs[const_args]
+        if any(map(lambda x: isinstance(x, Tune), const_args)):
+            raise NotImplementedError("Autotune is not implemented")
+        return self._partial_notune(const_args, *args, **kws)
 
     def compiled(self, *args: _P.args, **kws: _P.kwargs) -> JITKernel[_P, _T]:
         const_args, _ = self.parse_args(*args, **kws)

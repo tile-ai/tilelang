@@ -79,9 +79,14 @@ from .logical import any_of, all_of  # noqa: F401
 from .builtin import *  # noqa: F401
 
 from .utils import index_to_coordinates  # noqa: F401
+from .dtypes import (
+    AnyDType, # noqa: F401
+    get_tvm_dtype, # noqa: F401
+    get_torch_dtype, # noqa: F401
+)
 
 
-def symbolic(name: str, dtype: str = "int32"):
+def symbolic(name: str, dtype: AnyDType = "int32"):
     """
     Create a TIR symbolic variable.
 
@@ -92,6 +97,7 @@ def symbolic(name: str, dtype: str = "int32"):
     Returns:
         tir.Var: A TIR variable with the given name and dtype for use in TIR/TensorIR kernels.
     """
+    dtype = get_tvm_dtype(dtype)
     return tir.Var(name, dtype)
 
 

@@ -16,9 +16,10 @@ with the appropriate memory scope.
 
 from tilelang import tvm as tvm
 from tvm.script import tir as T
+from tilelang.language.dtypes import get_tvm_dtype, AnyDType
 
 
-def alloc_shared(shape, dtype, scope="shared.dyn"):
+def alloc_shared(shape, dtype: AnyDType, scope="shared.dyn"):
     """Allocate a shared memory buffer for inter-thread communication.
 
     Args:
@@ -29,14 +30,15 @@ def alloc_shared(shape, dtype, scope="shared.dyn"):
     Returns:
         T.Buffer: A TVM buffer object allocated in shared memory
     """
-    if dtype == "bool":
+    dtype = get_tvm_dtype(dtype)
+    if dtype == tvm.DataType("bool"):
         # lei: This is a hack to handle bool type.
         # Because tilelang's merge smem pass cannot merge bool type currently.
         scope = "shared"
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_local(shape, dtype, scope="local"):
+def alloc_local(shape, dtype: AnyDType, scope="local"):
     """Allocate a local memory buffer for thread-private storage.
 
     Args:
@@ -47,10 +49,11 @@ def alloc_local(shape, dtype, scope="local"):
     Returns:
         T.Buffer: A TVM buffer object allocated in local memory
     """
+    dtype = get_tvm_dtype(dtype)
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_fragment(shape, dtype, scope="local.fragment"):
+def alloc_fragment(shape, dtype: AnyDType, scope="local.fragment"):
     """Allocate a fragment memory buffer for specialized operations.
 
     Args:
@@ -61,10 +64,11 @@ def alloc_fragment(shape, dtype, scope="local.fragment"):
     Returns:
         T.Buffer: A TVM buffer object allocated in fragment memory
     """
+    dtype = get_tvm_dtype(dtype)
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_var(dtype, scope="local.var"):
+def alloc_var(dtype: AnyDType, scope="local.var"):
     """Allocate a single-element variable buffer.
 
     Args:
@@ -74,6 +78,7 @@ def alloc_var(dtype, scope="local.var"):
     Returns:
         T.Buffer: A TVM buffer object allocated as a single-element variable
     """
+    dtype = get_tvm_dtype(dtype)
     return T.alloc_buffer([1], dtype, scope=scope)
 
 
@@ -89,7 +94,7 @@ def alloc_barrier(arrive_count: int):
     return T.alloc_buffer([arrive_count], "uint64", scope="shared.barrier")
 
 
-def alloc_tmem(shape, dtype):
+def alloc_tmem(shape, dtype: AnyDType):
     """
     Allocate a Tensor Memory (TMEM) buffer for use with 5th generation Tensor Core operations (e.g., TCGEN5.MMA).
 
@@ -114,11 +119,12 @@ def alloc_tmem(shape, dtype):
         - The buffer returned should be used according to TMEM access restrictions and deallocated appropriately.
     """
 
+    dtype = get_tvm_dtype(dtype)
     assert len(shape) == 2, "shape must be a 2D tensor for TMEM allocation"
     return T.alloc_buffer(shape, dtype, scope="shared.tmem")
 
 
-def alloc_reducer(shape, dtype, op="sum", replication=None):
+def alloc_reducer(shape, dtype: AnyDType, op="sum", replication=None):
     """
     Allocate a reducer buffer.
 
@@ -149,16 +155,18 @@ def alloc_reducer(shape, dtype, op="sum", replication=None):
         replication = "none"
     assert replication in ["all", "none"]
 
+    dtype = get_tvm_dtype(dtype)
     reducer = T.alloc_buffer(shape, dtype, scope="local.fragment")
     TL.block_attr({"reducer_info": {reducer.data: {"rep": replication, "op": op}}})
 
     return reducer
 
 
-def alloc_descriptor(dtype="uint64", scope="local.descriptor"):
+def alloc_descriptor(dtype: AnyDType="uint64", scope="local.descriptor"):
     """Allocate a descriptor buffer for wgmma and utcmma.
 
     Returns:
         T.Buffer: A TVM buffer object allocated as a descriptor
     """
+    dtype = get_tvm_dtype(dtype)
     return T.alloc_buffer([1], dtype, scope=scope)

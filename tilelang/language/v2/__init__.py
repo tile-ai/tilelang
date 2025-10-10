@@ -52,6 +52,14 @@ from tilelang.language.customize import (
 from tilelang.language.logical import any_of, all_of  # noqa: F401
 from tilelang.language.builtin import *  # noqa: F401
 from tilelang.language.utils import index_to_coordinates  # noqa: F401
+from tilelang.language.dtypes import (
+    AnyDType, # noqa: F401
+    get_cffi_dtype,  # noqa: F401
+    get_ctypes_dtype,  # noqa: F401
+    get_tvm_dtype,  # noqa: F401
+    get_torch_dtype,  # noqa: F401
+    get_tvm_ptr_type,  # noqa: F401
+)
 
 from .types import (
     DynSchema,  # noqa: F401
@@ -68,9 +76,6 @@ from .types import (
     BufferLike,  # noqa: F401
     empty,  # noqa: F401
     MakeEmpty,  # noqa: F401
-    cvt_dtype,  # noqa: F401
-    cvt_tvm_dtype_to_torch,  # noqa: F401
-    get_ptr_type,  # noqa: F401
 )
 from .compile import (
     current_builder,  # noqa: F401

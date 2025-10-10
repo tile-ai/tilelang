@@ -12,11 +12,13 @@ from .types import (
     ConstSchema,
     MakeEmpty,
     BufferLike,
-    cvt_dtype,
-    cvt_tvm_dtype_to_torch,
-    get_ptr_type,
-    cvt_tvm_dtype_to_cffi,
-    cvt_tvm_dtype_to_ctypes,
+)
+from tilelang.language.dtypes import (
+    get_tvm_dtype,
+    get_torch_dtype,
+    get_tvm_ptr_type,
+    get_cffi_dtype,
+    get_ctypes_dtype
 )
 import threading
 import ctypes
@@ -37,6 +39,7 @@ from typing import (
 )
 from tvm.script.ir_builder import IRBuilder
 from tvm.script.ir_builder import tir as tb
+from tvm import DataType
 from tvm.target import Target
 from contextlib import contextmanager
 import ast
@@ -156,16 +159,37 @@ def get_current_stream_functor():
         return lambda: 0
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
+class BufferSchema:
+    name: Optional[str]
+    shape: Tuple[int | tir.PrimExpr, ...]
+    stride: Tuple[int | tir.PrimExpr, ...]
+    dtype: DataType
+    arg_idx: Optional[int] = None
+    device: Optional[torch.device] = None
+
+    @classmethod
+    def from_buffer(self, buffer: BufferLike) -> BufferSchema:
+        return BufferSchema(
+            name=buffer.buffer.name,
+            shape=buffer.shape,
+            stride=buffer.stride,
+            dtype=buffer.dtype,
+            arg_idx=buffer.arg_idx,
+            device=buffer.device,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class JITFunc(Generic[_P, _T]):
     '''
     JITFunc is the IR generation directly from user source
-        It stores all keys used in JITKernel
+        It stores all keys used in JITKernel, every state is kept simple for pickle
     '''
     target: Target
     target_host: Target
-    global_allocs: List[BufferLike]
-    outs: List[BufferLike]
+    global_allocs: List[BufferSchema]
+    outs: List[BufferSchema]
     pass_configs: Dict[str, Any]
     compile_flags: List[str]
     prim_func: tir.PrimFunc
@@ -173,8 +197,8 @@ class JITFunc(Generic[_P, _T]):
     const_args: Tuple
 
     @property
-    def out_idx(self) -> Tuple[int]:
-        return tuple(i.arg_idx for i in self.outs)
+    def out_idx(self) -> List[int]:
+        return [i.arg_idx for i in self.outs]
 
     def find_arg(self, var: tir.Var) -> int:
         for i, p in enumerate(self.prim_func.params):
@@ -193,7 +217,7 @@ class JITFunc(Generic[_P, _T]):
         params = []
         for x in self.prim_func.params:
             if isinstance(x, tir.Var):
-                params.append(cvt_tvm_dtype_to_ctypes(x.dtype))
+                params.append(get_ctypes_dtype(x.dtype))
             else:
                 raise RuntimeError(f"Unsupported argument type: {type(x)}")
         params.append(ctypes.c_void_p)
@@ -203,7 +227,7 @@ class JITFunc(Generic[_P, _T]):
         params = []
         for x in self.prim_func.params:
             if isinstance(x, tir.Var):
-                cffi_type = cvt_tvm_dtype_to_cffi(x.dtype)
+                cffi_type = get_cffi_dtype(x.dtype)
                 params.append(f"{cffi_type} {x.name}")
             else:
                 raise RuntimeError(f"Unsupported argument type: {type(x)}")
@@ -225,7 +249,7 @@ class JITFunc(Generic[_P, _T]):
         for allocs in self.global_allocs:
             shape_args = []
             for i, expr in enumerate(allocs.shape):
-                name = f"__{allocs.buffer.name}_shape_{i}"
+                name = f"__{allocs.name}_shape_{i}"
                 if isinstance(expr, tir.Var):
                     idx = self.find_arg(expr)
                     shape_args.append(call_args[idx])
@@ -237,9 +261,9 @@ class JITFunc(Generic[_P, _T]):
                     shape_args.append(name)
                 else:
                     raise RuntimeError(f"Unsupported shape expression type: {type(expr)}")
-            dtype_name = f"__{allocs.buffer.name}_dtype"
-            device_name = f"__{allocs.buffer.name}_device"
-            closure[dtype_name] = cvt_tvm_dtype_to_torch(allocs.dtype)
+            dtype_name = f"__{allocs.name}_dtype"
+            device_name = f"__{allocs.name}_device"
+            closure[dtype_name] = get_torch_dtype(allocs.dtype)
             closure[device_name] = allocs.device or torch.device("cuda")
             arg_name = call_args[allocs.arg_idx]
             tensor_name = f"{arg_name}_tensor"
@@ -304,10 +328,10 @@ class DSLBuilder:
             pass_configs=self.pass_configs,
             compile_flags=self.compile_flags,
             prim_func=self.builder.get(),
-            global_allocs=self.global_allocs,
+            global_allocs=[BufferSchema.from_buffer(buf) for buf in self.global_allocs],
             arg_parser=self.arg_parser,
             const_args=self.const_args,
-            outs=self.outs,
+            outs=[BufferSchema.from_buffer(buf) for buf in self.outs],
         )
 
     @contextmanager
@@ -343,7 +367,7 @@ class DSLBuilder:
             self.new_arg(name, var)
         self.pending_args.clear()
 
-    def new_arg(self, name: str, arg: tir.Var | tir.Buffer) -> Tuple[int, Any]:
+    def new_arg(self, name: str, arg: tir.Var | tir.Buffer) -> Tuple[int, tir.Var]:
         idx = self.arg_idx
         self.arg_idx += 1
         self._params.append(arg)
@@ -358,15 +382,15 @@ class DSLBuilder:
             for i, dim in enumerate(shape_schema):
                 if isinstance(dim, DynSchema):
                     var_name = dim.name or f"{name_hint}_{i}"
-                    shape[i] = self.get_param(var_name, cvt_dtype(int), new=False)
+                    shape[i] = self.get_param(var_name, get_tvm_dtype(int), new=False)
             return tuple(shape)
 
     def arg(self, name: str, expr: Any, annot: Any) -> Any:
         if isinstance(annot, DynSchema):
-            return self.get_param(annot.name or name, ty=cvt_dtype(annot.ty))
+            return self.get_param(annot.name or name, ty=get_tvm_dtype(annot.ty))
         elif isinstance(annot, StridedTensorSchema):
             assert isinstance(expr, torch.Tensor), "Expected a tensor argument"
-            ptr = tir.Var(f"{name}_handle", get_ptr_type(expr.dtype))
+            ptr = tir.Var(f"{name}_handle", get_tvm_ptr_type(expr.dtype))
             if annot.shape is None:
                 shape = tuple(expr.shape)
                 stride = tuple(expr.stride())
@@ -378,7 +402,7 @@ class DSLBuilder:
                 name=name,
                 shape=shape,
                 strides=stride,
-                dtype=cvt_dtype(expr.dtype),
+                dtype=get_tvm_dtype(expr.dtype),
                 data=ptr,
                 scope="global",
             )
@@ -399,12 +423,12 @@ class DSLBuilder:
 
     def bind(self, name: str, expr: Any, annot: Any = None) -> Any:
         if isinstance(expr, MakeEmpty):
-            ptr = tir.Var(f"{name}_handle", get_ptr_type(expr.dtype))
+            ptr = tir.Var(f"{name}_handle", get_tvm_ptr_type(expr.dtype))
             buffer = tir.decl_buffer(
                 name=name,
                 shape=expr.shape,
                 strides=expr.stride,
-                dtype=cvt_dtype(expr.dtype),
+                dtype=get_tvm_dtype(expr.dtype),
                 data=ptr,
                 scope="global",
             )
@@ -420,7 +444,11 @@ class DSLBuilder:
             )
             self.global_allocs.append(result)
             return result
-        elif isinstance(expr, (tir.Var, tir.IntImm, tir.FloatImm)):  # fast shortcut
+        elif isinstance(expr, (tir.Var, tir.IntImm, tir.FloatImm, tir.Buffer)):  # fast shortcut
+            IRBuilder.name(name, expr)
+            return expr
+        elif isinstance(expr, BufferLike):
+            IRBuilder.name(name, expr.buffer)
             return expr
         elif isinstance(expr, tir.PrimExpr):
             var = tir.Var(name=name, dtype=expr.dtype)
