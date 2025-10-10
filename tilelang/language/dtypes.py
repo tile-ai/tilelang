@@ -4,6 +4,8 @@ import torch
 import ctypes
 from typing import Any
 
+class VoidPtr: ...
+
 AnyDType = ir.Type | str | type | torch.dtype | tvm.DataType
 
 _dtype_torch2tvm = {
@@ -36,39 +38,62 @@ _dtype_torch2tvm = {
 _dtype_tvm2torch = {tvm.DataType(v): k for k, v in _dtype_torch2tvm.items()}
 
 _dtype_tvm2ctype = {
-    tvm.DataType("bool"): ctypes.c_bool,
-    tvm.DataType("int8"): ctypes.c_int8,
-    tvm.DataType("int16"): ctypes.c_int16,
-    tvm.DataType("int32"): ctypes.c_int32,
-    tvm.DataType("int64"): ctypes.c_int64,
-    tvm.DataType("uint8"): ctypes.c_uint8,
-    tvm.DataType("uint16"): ctypes.c_uint16,
-    tvm.DataType("uint32"): ctypes.c_uint32,
-    tvm.DataType("uint64"): ctypes.c_uint64,
+    tvm.DataType("bool"):
+        ctypes.c_bool,
+    tvm.DataType("int8"):
+        ctypes.c_int8,
+    tvm.DataType("int16"):
+        ctypes.c_int16,
+    tvm.DataType("int32"):
+        ctypes.c_int32,
+    tvm.DataType("int64"):
+        ctypes.c_int64,
+    tvm.DataType("uint8"):
+        ctypes.c_uint8,
+    tvm.DataType("uint16"):
+        ctypes.c_uint16,
+    tvm.DataType("uint32"):
+        ctypes.c_uint32,
+    tvm.DataType("uint64"):
+        ctypes.c_uint64,
     # tvm.DataType("float16"): ctypes.c_uint16,
     # tvm.DataType("bfloat16"): ctypes.c_uint16,
-    tvm.DataType("float32"): ctypes.c_float,
-    tvm.DataType("float64"): ctypes.c_double,
+    tvm.DataType("float32"):
+        ctypes.c_float,
+    tvm.DataType("float64"):
+        ctypes.c_double,
     # tvm.DataType("float8_e4m3fn"): ctypes.c_uint8,
     # tvm.DataType("float8_e4m3fnuz"): ctypes.c_uint8,
     # tvm.DataType("float8_e5m2"): ctypes.c_uint8,
     # tvm.DataType("float8_e5m2fnuz"): ctypes.c_uint8,
     # tvm.DataType("float8_e8m0fnu"): ctypes.c_uint8,
-    tvm.DataType("handle"): ctypes.c_void_p,
+    tvm.DataType("handle"):
+        ctypes.c_void_p,
 }
 
 _dtype_tvm2cffi = {
-    tvm.DataType("bool"): "bool",
-    tvm.DataType("int8"): "char",
-    tvm.DataType("int16"): "short",
-    tvm.DataType("int32"): "int",
-    tvm.DataType("int64"): "long long",
-    tvm.DataType("uint8"): "unsigned char",
-    tvm.DataType("uint16"): "unsigned short",
-    tvm.DataType("uint32"): "unsigned int",
-    tvm.DataType("uint64"): "unsigned long long",
-    tvm.DataType("float32"): "float",
-    tvm.DataType("float64"): "double",
+    tvm.DataType("bool"):
+        "bool",
+    tvm.DataType("int8"):
+        "char",
+    tvm.DataType("int16"):
+        "short",
+    tvm.DataType("int32"):
+        "int",
+    tvm.DataType("int64"):
+        "long long",
+    tvm.DataType("uint8"):
+        "unsigned char",
+    tvm.DataType("uint16"):
+        "unsigned short",
+    tvm.DataType("uint32"):
+        "unsigned int",
+    tvm.DataType("uint64"):
+        "unsigned long long",
+    tvm.DataType("float32"):
+        "float",
+    tvm.DataType("float64"):
+        "double",
     # tvm.DataType("float16"): 'uint16_t',
     # tvm.DataType("bfloat16"): 'uint16_t',
     # tvm.DataType("float8_e4m3fn"): 'uint8_t',
@@ -76,11 +101,14 @@ _dtype_tvm2cffi = {
     # tvm.DataType("float8_e5m2"): ctypes.c_uint8,
     # tvm.DataType("float8_e5m2fnuz"): ctypes.c_uint8,
     # tvm.DataType("float8_e8m0fnu"): ctypes.c_uint8,
-    tvm.DataType("handle"): "long",
+    tvm.DataType("handle"):
+        "long",
 }
 
 
 def get_tvm_dtype(ty: AnyDType) -> tvm.DataType:
+    if ty == VoidPtr:
+        return get_tvm_ptr_type()
     if isinstance(ty, (ir.Type, tvm.DataType)):
         return ty
     if isinstance(ty, str):
@@ -106,8 +134,7 @@ def get_cffi_dtype(ty: AnyDType) -> str:
     return _dtype_tvm2cffi[ty]
 
 
-def get_tvm_ptr_type(
-    ty: ir.Type | str | type | torch.dtype, scope: str = "global"
-) -> ir.PointerType:
+def get_tvm_ptr_type(ty: ir.Type | str | type | torch.dtype = "void",
+                     scope: str = "global") -> ir.PointerType:
     ty = get_tvm_dtype(ty)
     return ir.PointerType(ir.PrimType(ty), scope)

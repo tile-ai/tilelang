@@ -1,5 +1,5 @@
 import ast
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Literal
 
 
 class QuoteVisitor(ast.NodeTransformer):
@@ -127,15 +127,9 @@ class DSLMutator(ast.NodeTransformer):
             else:
                 arg_stmt = quote1(f'{name} = __tl.arg("{name}", {name})')
             stmts.append(arg_stmt)
-        node.body = quote(
-            "with __tl.builder:\n"
-            "  with __tl.prim_func():\n"
-            f'    __tl.func_name("{node.name}")\n'
-            "    pass",
-            passes=[stmts + node.body],
-        )
-        node.decorator_list.pop()
-        return quote1(f"def __closure(__tl):\n  pass\n  return {node.name}\n", passes=[node])
+        node.decorator_list.pop(0)
+        node.body = stmts + node.body
+        return quote1(f'def __closure(__tl):\n  pass\n  return {node.name}\n', passes=[node])
 
     def visit_BoolOp(self, node: ast.BoolOp):
         node = self.generic_visit(node)
@@ -171,6 +165,13 @@ class DSLMutator(ast.NodeTransformer):
         for i in reversed(range(len(splited) - 1)):
             last = quote_expr("__tl.logical_and(left, lambda: right)", left=splited[i], right=last)
         return last
+
+    def visit_IfExp(self, node: ast.IfExp) -> ast.Expr:
+        return quote_expr(
+            '__tl.ifexp(cond, lambda: then, lambda: otherwise)',
+            cond=node.test,
+            then=node.body,
+            otherwise=node.orelse)
 
     def visit_Return(self, node: ast.Return):
         return quote("return __tl.ret(value)", value=node.value)

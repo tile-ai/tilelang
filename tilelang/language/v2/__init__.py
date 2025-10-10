@@ -53,15 +53,15 @@ from tilelang.language.logical import any_of, all_of  # noqa: F401
 from tilelang.language.builtin import *  # noqa: F401
 from tilelang.language.utils import index_to_coordinates  # noqa: F401
 from tilelang.language.dtypes import (
-    AnyDType, # noqa: F401
+    AnyDType,  # noqa: F401
     get_cffi_dtype,  # noqa: F401
     get_ctypes_dtype,  # noqa: F401
     get_tvm_dtype,  # noqa: F401
     get_torch_dtype,  # noqa: F401
     get_tvm_ptr_type,  # noqa: F401
 )
-
-from .types import (
+from tilelang.language.proxy import make_tensor
+from .lang import (
     DynSchema,  # noqa: F401
     ConstSchema,  # noqa: F401
     TensorSchema,  # noqa: F401
@@ -70,6 +70,7 @@ from .types import (
     tune,  # noqa: F401
     Tune,  # noqa: F401
     dyn,  # noqa: F401
+    ptr, # noqa: F401
     const,  # noqa: F401
     StridedTensor,  # noqa: F401
     Tensor,  # noqa: F401
@@ -78,7 +79,6 @@ from .types import (
     MakeEmpty,  # noqa: F401
 )
 from .compile import (
-    current_builder,  # noqa: F401
     set_pass_configs,  # noqa: F401
     get_pass_configs,  # noqa: F401
     set_compile_flags,  # noqa: F401
@@ -89,4 +89,4 @@ from .compile import (
     get_params,  # noqa: F401
     get_global_allocs,  # noqa: F401
 )
-from .jit import jit, JITFunc, JITDispatcher, compile  # noqa: F401
+from .jit import jit, JITFunc, JITDispatcher, compile, macro  # noqa: F401

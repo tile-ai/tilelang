@@ -6,20 +6,17 @@ from tvm import tir
 import linecache
 import io
 from .ast_rewrite import DSLMutator
-from .types import (
+from .lang import (
     DynSchema,
     StridedTensorSchema,
     ConstSchema,
     MakeEmpty,
     BufferLike,
+    Place,
+    ptr as ptr_dtype
 )
-from tilelang.language.dtypes import (
-    get_tvm_dtype,
-    get_torch_dtype,
-    get_tvm_ptr_type,
-    get_cffi_dtype,
-    get_ctypes_dtype
-)
+from tilelang.language.dtypes import (get_tvm_dtype, get_torch_dtype, get_tvm_ptr_type,
+                                      get_cffi_dtype, get_ctypes_dtype)
 import threading
 import ctypes
 from typing import (
@@ -166,7 +163,7 @@ class BufferSchema:
     stride: Tuple[int | tir.PrimExpr, ...]
     dtype: DataType
     arg_idx: Optional[int] = None
-    device: Optional[torch.device] = None
+    # device: Optional[torch.device] = None
 
     @classmethod
     def from_buffer(self, buffer: BufferLike) -> BufferSchema:
@@ -176,7 +173,7 @@ class BufferSchema:
             stride=buffer.stride,
             dtype=buffer.dtype,
             arg_idx=buffer.arg_idx,
-            device=buffer.device,
+            # device=buffer.device,
         )
 
 
@@ -264,7 +261,8 @@ class JITFunc(Generic[_P, _T]):
             dtype_name = f"__{allocs.name}_dtype"
             device_name = f"__{allocs.name}_device"
             closure[dtype_name] = get_torch_dtype(allocs.dtype)
-            closure[device_name] = allocs.device or torch.device("cuda")
+            # closure[device_name] = allocs.device or torch.device("cuda")
+            closure[device_name] = torch.device('cuda')
             arg_name = call_args[allocs.arg_idx]
             tensor_name = f"{arg_name}_tensor"
             stmts.append(f"{tensor_name} = __tl_empty(" + ",".join(shape_args) +
@@ -298,6 +296,29 @@ class JITFunc(Generic[_P, _T]):
         return self.arg_parser(*args, **kws)
 
 
+_thread_local_storage = threading.local()
+
+
+@dataclass(frozen=True, slots=True)
+class MacroGuard:
+    builder: DSLBuilder
+
+    def __enter__(self):
+        self.builder._macro_depth += 1
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.builder._macro_depth -= 1
+
+
+@dataclass(frozen=True, slots=True)
+class ConstIfFrame:
+    cond: bool
+    def __enter__(self):
+        pass
+    def __exit__(self, exc_type, exc_value, traceback):
+        pass
+
+
 @dataclass
 class DSLBuilder:
     # base pass_config or compile_flags
@@ -307,7 +328,6 @@ class DSLBuilder:
     const_args: Tuple
     pass_configs: Dict[str, Any] = field(default_factory=dict)
     compile_flags: List[str] = field(default_factory=list)
-    default_device: Optional[torch.device] = None
 
     global_allocs: List[BufferLike] = field(default_factory=list)
     outs: List[BufferLike] = field(default_factory=list)
@@ -320,6 +340,31 @@ class DSLBuilder:
     frames: List[Any] = field(default_factory=list)
     builder: IRBuilder = field(default_factory=IRBuilder)
     _params: List[tir.Var] = field(default_factory=list)
+
+    _shortcut_expr_depth: int = 0
+    _macro_depth: int = 0
+
+    def __enter__(self):
+        assert not hasattr(_thread_local_storage, "builder")
+        _thread_local_storage.dslbuilder = self
+        self.builder.__enter__()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.builder.__exit__(exc_type, exc_value, traceback)
+        del _thread_local_storage.dslbuilder
+
+    def macro(self) -> MacroGuard:
+        assert self._shortcut_expr_depth == 0, \
+            "It is not supported to use macro inside shortcut expression, " \
+            "don't use macro in `M if xxx else M`, `M and M`, `M or M`, " \
+            "please use an if statement instead"
+        return MacroGuard(self)
+
+    @staticmethod
+    def current() -> DSLBuilder:
+        assert hasattr(_thread_local_storage,
+                       "dslbuilder"), "Access DSLBuilder in non dsl builder scope"
+        return _thread_local_storage.dslbuilder
 
     def get(self) -> JITFunc:
         return JITFunc(
@@ -386,10 +431,12 @@ class DSLBuilder:
             return tuple(shape)
 
     def arg(self, name: str, expr: Any, annot: Any) -> Any:
+        if self._macro_depth > 0:
+            return expr
         if isinstance(annot, DynSchema):
             return self.get_param(annot.name or name, ty=get_tvm_dtype(annot.ty))
         elif isinstance(annot, StridedTensorSchema):
-            assert isinstance(expr, torch.Tensor), "Expected a tensor argument"
+            assert isinstance(expr, torch.Tensor | Place), "Expected a tensor argument"
             ptr = tir.Var(f"{name}_handle", get_tvm_ptr_type(expr.dtype))
             if annot.shape is None:
                 shape = tuple(expr.shape)
@@ -408,14 +455,12 @@ class DSLBuilder:
             )
             _, arg = self.new_arg(name, buffer)
             self.flush_pending_vars()
-            if self.default_device is None:
-                self.default_device = expr.device
             return BufferLike(
                 buffer=arg,
                 shape=shape,
                 stride=stride,
                 dtype=arg.dtype,
-                device=expr.device,
+                # device=expr.device,
             )
         else:
             assert not isinstance(expr, torch.Tensor), "Tensor argument must be annotated"
@@ -440,7 +485,6 @@ class DSLBuilder:
                 stride=expr.stride,
                 dtype=arg.dtype,
                 arg_idx=arg_idx,
-                device=expr.device or self.default_device,
             )
             self.global_allocs.append(result)
             return result
@@ -462,6 +506,8 @@ class DSLBuilder:
             tb.evaluate(expr)
 
     def ret(self, val: Any = None) -> Any:
+        if self._macro_depth > 0:
+            return val
         if isinstance(val, BufferLike):
             val = (val,)
         for v in val:
@@ -478,41 +524,79 @@ class DSLBuilder:
             raise NotImplementedError()
 
     def ctx_if(self, cond: bool | tir.PrimExpr):
-        return self.with_frame(tb.If(cond))
+        if isinstance(cond, tir.PrimExpr):
+            return self.with_frame(tb.If(cond))
+        else:
+            return self.with_frame(ConstIfFrame(cond))
 
     def ctx_then(self):
-        with self.with_frame(tb.Then()):
-            yield
+        if isinstance(self.frames[-1], ConstIfFrame):
+            if self.frames[-1].cond:
+                yield
+        else:
+            with self.with_frame(tb.Then()):
+                yield
 
     def ctx_else(self):
-        with self.with_frame(tb.Else()):
-            yield
+        if isinstance(self.frames[-1], ConstIfFrame):
+            if not self.frames[-1].cond:
+                yield
+        else:
+            with self.with_frame(tb.Else()):
+                yield
 
     def ctx_for(self, var_names, for_range):
         if isinstance(for_range, tb.frame.ForFrame):
             with self.with_frame(for_range):
                 if len(for_range.vars) > 1:
-                    results = []
                     for name, var in zip(var_names, for_range.vars):
-                        v = tir.Var(name, var.dtype)
-                        self.push_frame(tb.let(v, var))
-                        results.append(v)
-                    yield tuple(results)
+                        IRBuilder.name(name, var)
+                    yield tuple(for_range.vars)
                 else:
-                    v = tir.Var(var_names, for_range.vars[0].dtype)
-                    self.push_frame(tb.let(v, for_range.vars[0]))
-                    yield v
+                    IRBuilder.name(var_names, for_range.vars[0])
+                    yield for_range.vars[0]
         else:
-            return for_range
+            for item in for_range:
+                yield item
 
     def ctx(self, ctx):
         return ctx
 
     def logical_and(self, val, rclosure) -> bool:
-        return (tir.And(val, rclosure()) if isinstance(val, tir.PrimExpr) else (val or rclosure()))
+        if isinstance(val, tir.PrimExpr):
+            if isinstance(val, tir.IntImm) and not val.value:
+                res = tir.IntImm('bool', False)
+            self._shortcut_expr_depth += 1
+            res = tir.And(val, rclosure())
+            self._shortcut_expr_depth -= 1
+        else:
+            res = val and rclosure()
+        return res
 
     def logical_or(self, val, rclosure) -> bool:
-        return (tir.Or(val, rclosure()) if isinstance(val, tir.PrimExpr) else (val or rclosure()))
+        if isinstance(val, tir.PrimExpr):
+            if isinstance(val, tir.IntImm) and val.value:
+                res = tir.IntImm('bool', True)
+            self._shortcut_expr_depth += 1
+            res = tir.Or(val, rclosure())
+            self._shortcut_expr_depth -= 1
+        else:
+            res = val or rclosure()
+        return res
+
+    def ifexp(self, cond, tclosure, fclosure):
+        self._shortcut_expr_depth += 1
+        if isinstance(cond, tir.PrimExpr):
+            if isinstance(cond, tir.IntImm):
+                return tclosure() if cond.value else fclosure()
+            self._shortcut_expr_depth += 1
+            res = tir.IfThenElse(cond, tclosure(), fclosure())
+            self._shortcut_expr_depth -= 1
+            return res
+        else:
+            res = tclosure() if cond else fclosure()
+        self._shortcut_expr_depth -= 1
+        return res
 
 
 def _remove_leading_ident(source: str):
@@ -523,7 +607,7 @@ def _remove_leading_ident(source: str):
     return "\n".join([line[ident_size:] if len(line) >= ident_size else line for line in lines])
 
 
-def make_prim_func_generator(func):
+def make_ir_generator(func):
     source = inspect.getsource(func)
     source = _remove_leading_ident(source)
     tree = ast.parse(source)
@@ -538,51 +622,64 @@ def make_prim_func_generator(func):
     exec(compiled, func.__globals__, locs)
     fn = locs["__closure"]
     fn.__tl_code__ = source
+    fn.__name__ = func.__name__
     return fn
 
 
-_thread_local_storage = threading.local()
+def make_prim_func_generator(func):
+    gen = make_ir_generator(func)
+    name = func.__name__
+
+    def inner(builder: DSLBuilder, *args, **kws):
+        with builder, tb.prim_func():
+            tb.func_name(name)
+            return gen(builder)(*args, **kws)
+    inner.__tl_code__ = gen.__tl_code__
+    return inner
 
 
-def set_current_builder(builder=None):
-    _thread_local_storage.builder = builder
+def make_macro_generator(func):
+    gen = make_ir_generator(func)
 
-
-def current_builder() -> DSLBuilder:
-    return _thread_local_storage.builder
+    def inner(*args, **kws):
+        builder = DSLBuilder.current()
+        with builder.macro():
+            return gen(builder)(*args, **kws)
+    inner.__tl_code__ = gen.__tl_code__
+    return inner
 
 
 def set_pass_configs(configs: Dict[str, Any]):
-    current_builder().pass_configs.update(configs)
+    DSLBuilder.current().pass_configs.update(configs)
 
 
 def get_pass_configs() -> Dict[str, Any]:
-    return current_builder().pass_configs
+    return DSLBuilder.current().pass_configs
 
 
 def set_compile_flags(flags: List[str]):
-    current_builder().compile_flags = flags
+    DSLBuilder.current().compile_flags = flags
 
 
 def add_compile_flags(flags: List[str]):
-    current_builder().compile_flags.extend(flags)
+    DSLBuilder.current().compile_flags.extend(flags)
 
 
 def get_compile_flags() -> List[str]:
-    return current_builder().compile_flags
+    return DSLBuilder.current().compile_flags
 
 
 def get_target_host() -> Target:
-    return current_builder().target_host
+    return DSLBuilder.current().target_host
 
 
 def get_target() -> Target:
-    return current_builder().target
+    return DSLBuilder.current().target
 
 
 def get_params() -> List[tir.Var]:
-    return current_builder()._params
+    return DSLBuilder.current()._params
 
 
 def get_global_allocs() -> List[BufferLike]:
-    return current_builder().global_allocs
+    return DSLBuilder.current().global_allocs

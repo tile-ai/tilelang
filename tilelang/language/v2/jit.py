@@ -1,12 +1,6 @@
 from tilelang.jit.adapter.cython.adapter import CythonKernelAdapter
-from .compile import (
-    make_prim_func_generator,
-    generate_arg_parser,
-    DSLBuilder,
-    JITFunc,
-    JITPyFunc,
-    set_current_builder,
-)
+from .compile import (make_prim_func_generator, generate_arg_parser, DSLBuilder, JITFunc, JITPyFunc,
+                      make_macro_generator)
 from typing import (
     Callable,
     Protocol,
@@ -30,7 +24,7 @@ from tilelang import tvm
 from tvm.target import Target
 import logging
 import inspect
-from .types import Tune
+from .lang import Tune
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +77,7 @@ def compile_compat(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
         compile_flags=func.compile_flags,
     )
     adaptor: CythonKernelAdapter = tl_kernel.adapter
-    lib_path=adaptor.lib_generator.libpath
+    lib_path = adaptor.lib_generator.libpath
     source = adaptor.kernel_global_source
     wrapped_source = adaptor.wrapped_source
 
@@ -189,6 +183,7 @@ class JITDispatcher(Generic[_P, _T]):
         self.kernels = {}
         self.parse_args = generate_arg_parser(func.__name__, func)
         self._jit_func_gen_lazy = None
+        self._locked = False
 
     @property
     def jit_func_gen(self) -> JITPyFunc[_P, None]:
@@ -206,25 +201,29 @@ class JITDispatcher(Generic[_P, _T]):
             pass_configs=self.pass_configs,
             compile_flags=self.compile_flags,
         )
-        set_current_builder(builder)
-        self.jit_func_gen(builder)(*args, **kws)
-        set_current_builder()
-        self.jit_funcs[const_args] = builder.get()
-        return builder.get()
+        self.jit_func_gen(builder, *args, **kws)
+        jitfunc = builder.get()
+        self.jit_funcs[const_args] = jitfunc
+        return jitfunc
+
+    def tune(self, *args: _P.args, **kws: _P.kwargs) -> JITFunc[_P, _T]:
+        const_args, _ = self.parse_args(*args, **kws)
 
     def partial(self, *args: _P.args, **kws: _P.kwargs) -> JITFunc[_P, _T]:
         const_args, _ = self.parse_args(*args, **kws)
         if const_args in self.jit_funcs:
             return self.jit_funcs[const_args]
+        assert not self._locked, "JITDispatcher is locked, cannot create new JITFunc"
         if any(map(lambda x: isinstance(x, Tune), const_args)):
-            raise NotImplementedError("Autotune is not implemented")
+            return self.tune(*args, **kws)
         return self._partial_notune(const_args, *args, **kws)
 
-    def compiled(self, *args: _P.args, **kws: _P.kwargs) -> JITKernel[_P, _T]:
+    def compile(self, *args: _P.args, **kws: _P.kwargs) -> JITKernel[_P, _T]:
         const_args, _ = self.parse_args(*args, **kws)
         kernel = self.kernels.get(const_args, None)
         if kernel is not None:
             return kernel
+        assert not self._locked, "JITDispatcher is locked, cannot create new JITKernel"
         func = self.partial(*args, **kws)
         kernel = compile(func)
         self.kernels[const_args] = kernel
@@ -236,11 +235,31 @@ class JITDispatcher(Generic[_P, _T]):
         kernel = self.kernel_calls.get(const_args, None)
         if kernel is not None:
             return kernel(*dyn_args)
-        kernel = self.compiled(*args, **kws)
+        kernel = self.compile(*args, **kws)
         return kernel.lib_call(*dyn_args)
 
     def __repr__(self):
-        return f"JITGen(func={self.func}, target={self.target}, target_host={self.target_host}, verbose={self.verbose}, pass_configs={self.pass_configs}, compile_flags={self.compile_flags})"
+        return self.jit_func_gen.__tl_code__
+    def __str__(self):
+        return self.jit_func_gen.__tl_code__
+
+    def lock(self):
+        self._locked = True
+
+
+class JITMacro(Generic[_P, _T]):
+    def __init__(self, func: Callable[_P, _T]):
+        self.func = func
+    def __call__(self, *args: _P.args, **kws: _P.kwargs) -> _T:
+        return self.func(*args, **kws)
+    def __str__(self):
+        return self.func.__tl_code__
+    def __repr__(self):
+        return self.func.__tl_code__
+
+
+def macro(func: Callable[_P, _T]) -> JITMacro[_P, _T]:
+    return JITMacro(make_macro_generator(func))
 
 
 @overload
