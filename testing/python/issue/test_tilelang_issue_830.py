@@ -1,3 +1,8 @@
+# yapf: disable
+# ruff: noqa
+
+# This testfile can't be formatted by yapf & ruff
+
 import tilelang
 import tilelang.testing
 import tilelang.language as T
