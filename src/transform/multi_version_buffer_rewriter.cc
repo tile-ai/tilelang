@@ -142,32 +142,31 @@ private:
   Array<Buffer> GetVersionedBuffers(const Array<Stmt> &seq_stmt,
                                     const Array<Buffer> &scoped_buffers) {
     Array<Stmt> pipeline_stmts;
-    std::function<void(const Stmt &)> collect_stmts =
-        [&](const Stmt &stmt) {
-          if (const auto *seq = stmt.as<SeqStmtNode>()) {
-            for (const Stmt &s : seq->seq) {
-              collect_stmts(s);
-            }
-            return;
-          }
-          if (const auto *let = stmt.as<LetStmtNode>()) {
-            collect_stmts(let->body);
-            return;
-          }
-          if (const auto *attr = stmt.as<AttrStmtNode>()) {
-            collect_stmts(attr->body);
-            return;
-          }
-          if (const auto *block_realize = stmt.as<BlockRealizeNode>()) {
-            collect_stmts(block_realize->block->body);
-            return;
-          }
-          if (const auto *block = stmt.as<BlockNode>()) {
-            collect_stmts(block->body);
-            return;
-          }
-          pipeline_stmts.push_back(stmt);
-        };
+    std::function<void(const Stmt &)> collect_stmts = [&](const Stmt &stmt) {
+      if (const auto *seq = stmt.as<SeqStmtNode>()) {
+        for (const Stmt &s : seq->seq) {
+          collect_stmts(s);
+        }
+        return;
+      }
+      if (const auto *let = stmt.as<LetStmtNode>()) {
+        collect_stmts(let->body);
+        return;
+      }
+      if (const auto *attr = stmt.as<AttrStmtNode>()) {
+        collect_stmts(attr->body);
+        return;
+      }
+      if (const auto *block_realize = stmt.as<BlockRealizeNode>()) {
+        collect_stmts(block_realize->block->body);
+        return;
+      }
+      if (const auto *block = stmt.as<BlockNode>()) {
+        collect_stmts(block->body);
+        return;
+      }
+      pipeline_stmts.push_back(stmt);
+    };
     for (const Stmt &stmt : seq_stmt) {
       collect_stmts(stmt);
     }

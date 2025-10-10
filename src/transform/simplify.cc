@@ -373,7 +373,8 @@ private:
       bool used = UsesVar(
           body, [&](const VarNode *var) { return var == op->var.get(); });
       ICHECK(!used) << "Let binding of BufferLoad is expected to be unused "
-                       "before removal " << op->var << " : " << op->value << " .";
+                       "before removal "
+                    << op->var << " : " << op->value << " .";
       return body;
     }
 
