@@ -253,7 +253,7 @@ jobs:
         run: |
           cd examples
           unset PYTHONPATH
-          uv run --no-project -m -- pytest -n 4 **/test*.py -v -r fE --durations=0 --cache-clear
+          uv run --no-project -m -- pytest **/test*.py -v -r fE --durations=0 --cache-clear
 
       # NVIDIA CUDA tests
       - name: Run CUDA tests for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }}
@@ -262,7 +262,7 @@ jobs:
         run: |
           cd testing/python
           unset PYTHONPATH
-          uv run --no-project -m -- pytest -n 4 -v -r fE --durations=0 --cache-clear --timeout=3600
+          uv run --no-project -m -- pytest -v -r fE --durations=0 --cache-clear --timeout=3600
 
       # AMD ROCm tests
       - name: Run ROCm tests for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }}
