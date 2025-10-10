@@ -41,11 +41,12 @@ namespace tl {
 namespace tir = tvm::tir;
 
 class HostDeviceSplitter : public tir::StmtMutator {
- public:
-  explicit HostDeviceSplitter(IRModule* device_mod, std::function<GlobalVar()> var_supply)
+public:
+  explicit HostDeviceSplitter(IRModule *device_mod,
+                              std::function<GlobalVar()> var_supply)
       : device_mod_(device_mod), var_supply_(std::move(var_supply)) {}
 
-  tir::Stmt VisitStmt_(const tir::AttrStmtNode* op) final {
+  tir::Stmt VisitStmt_(const tir::AttrStmtNode *op) final {
     if (op->attr_key == tvm::attr::kTarget) {
       found_device_region_ = true;
       auto device_target = op->node.as<tvm::Target>().value().WithoutHost();
@@ -60,26 +61,29 @@ class HostDeviceSplitter : public tir::StmtMutator {
 
   bool found_device_region() const { return found_device_region_; }
 
- private:
+private:
   bool found_device_region_{false};
 
   tir::Stmt SplitDeviceFunc(tir::Stmt body, tvm::Target device_target) {
     auto [params, buffers_to_declare] =
         [&]() -> std::tuple<Array<tir::Var>, Array<tir::Buffer>> {
-      tir::VarUseDefAnalyzer use_def(/*defined_vars=*/{}, /*visit_thread_extent=*/true);
+      tir::VarUseDefAnalyzer use_def(/*defined_vars=*/{},
+                                     /*visit_thread_extent=*/true);
       use_def(body);
 
       // Sort first by variable type, then by variable name
-      std::vector<tir::Var> params{use_def.undefined_.begin(), use_def.undefined_.end()};
-      std::sort(params.begin(), params.end(), [](const tir::Var& a, const tir::Var& b) {
-        auto sort_key = [](const tir::Var& var) {
-          return std::tuple{
-              !var->dtype.is_handle(),
-              var->name_hint,
-          };
-        };
-        return sort_key(a) < sort_key(b);
-      });
+      std::vector<tir::Var> params{use_def.undefined_.begin(),
+                                   use_def.undefined_.end()};
+      std::sort(params.begin(), params.end(),
+                [](const tir::Var &a, const tir::Var &b) {
+                  auto sort_key = [](const tir::Var &var) {
+                    return std::tuple{
+                        !var->dtype.is_handle(),
+                        var->name_hint,
+                    };
+                  };
+                  return sort_key(a) < sort_key(b);
+                });
       return {params, use_def.undefined_buffers_};
     }();
 
@@ -104,39 +108,40 @@ class HostDeviceSplitter : public tir::StmtMutator {
       body = tir::DeclBuffer(buf, std::move(body));
     }
     tir::PrimFunc device_func(params, body, kernel_ret_type);
-    device_func = WithAttrs(
-        std::move(device_func),
-        {{tvm::attr::kTarget, device_target},
-         {tir::attr::kNoAlias, true},
-         {tir::attr::kIsGlobalFunc, true}});
+    device_func =
+        WithAttrs(std::move(device_func), {{tvm::attr::kTarget, device_target},
+                                           {tir::attr::kNoAlias, true},
+                                           {tir::attr::kIsGlobalFunc, true}});
 
     GlobalVar kernel_symbol_global = var_supply_();
     (*device_mod_)->Add(kernel_symbol_global, device_func);
-    Array<PrimExpr> args = params.Map([](const tir::Var& var) -> PrimExpr { return var; });
+    Array<PrimExpr> args =
+        params.Map([](const tir::Var &var) -> PrimExpr { return var; });
 
     if (can_propagate_errors) {
       tir::Var kernel_error_code("kernel_error_code", success->dtype);
       tir::Call kernel_call(success->dtype, kernel_symbol_global, args);
       tir::AssertStmt assert_success(
-          kernel_error_code == success, tir::StringImm("Error executing compute kernel"),
-          tir::Evaluate(0));
+          kernel_error_code == success,
+          tir::StringImm("Error executing compute kernel"), tir::Evaluate(0));
       tir::LetStmt let_check(kernel_error_code, kernel_call, assert_success);
 
       return let_check;
 
     } else {
-      return tir::Evaluate(tir::Call(DataType::Void(), kernel_symbol_global, args));
+      return tir::Evaluate(
+          tir::Call(DataType::Void(), kernel_symbol_global, args));
     }
   }
 
   // target ir module
-  IRModule* device_mod_;
+  IRModule *device_mod_;
   // Generate new GlobalVar for the kernel
   std::function<GlobalVar()> var_supply_;
 };
 
-tir::PrimFunc SplitHostDevice(tir::PrimFunc func, IRModule* device_mod,
-                         std::function<GlobalVar()> var_supply) {
+tir::PrimFunc SplitHostDevice(tir::PrimFunc func, IRModule *device_mod,
+                              std::function<GlobalVar()> var_supply) {
   HostDeviceSplitter splitter(device_mod, std::move(var_supply));
 
   if (auto body = splitter(func->body); !body.same_as(func->body)) {
@@ -144,7 +149,8 @@ tir::PrimFunc SplitHostDevice(tir::PrimFunc func, IRModule* device_mod,
   } else if (!splitter.found_device_region()) {
     if (auto target = func->GetAttr<Target>(tvm::attr::kTarget)) {
       auto device_target = target.value().WithoutHost();
-      if (device_target.defined() && func->HasNonzeroAttr(tir::attr::kIsEntryFunc) &&
+      if (device_target.defined() &&
+          func->HasNonzeroAttr(tir::attr::kIsEntryFunc) &&
           tir::is_no_op(func->body)) {
         if (auto forced = splitter.ForceSplit(func->body, device_target);
             !forced.same_as(func->body)) {
@@ -166,7 +172,7 @@ tvm::transform::Pass SplitHostDevice() {
     IRModule device_mod = IRModule(Map<GlobalVar, BaseFunc>({}));
     IRModule updates = IRModule(Map<GlobalVar, BaseFunc>({}));
 
-    for (const auto& [gvar, base_func] : mod->functions) {
+    for (const auto &[gvar, base_func] : mod->functions) {
       if (auto opt = base_func.as<tir::PrimFunc>()) {
         tir::PrimFunc func = opt.value();
 
@@ -177,7 +183,8 @@ tvm::transform::Pass SplitHostDevice() {
           return global_var_supply->FreshGlobal(kernel_name, false);
         };
 
-        func = ::tvm::tl::SplitHostDevice(std::move(func), &device_mod, var_supply);
+        func = ::tvm::tl::SplitHostDevice(std::move(func), &device_mod,
+                                          var_supply);
         if (!func.same_as(base_func)) {
           updates->Add(gvar, func);
         }
@@ -189,7 +196,8 @@ tvm::transform::Pass SplitHostDevice() {
     return tir::transform::ConvertSSA()(mod);
   };
 
-  return tvm::transform::CreateModulePass(pass_func, 0, "tl.SplitHostDevice", {});
+  return tvm::transform::CreateModulePass(pass_func, 0, "tl.SplitHostDevice",
+                                          {});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK({
@@ -197,6 +205,6 @@ TVM_FFI_STATIC_INIT_BLOCK({
   refl::GlobalDef().def("tl.transform.SplitHostDevice", SplitHostDevice);
 });
 
-}  // namespace transform
-}  // namespace tl
-}  // namespace tvm
+} // namespace transform
+} // namespace tl
+} // namespace tvm
