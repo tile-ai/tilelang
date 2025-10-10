@@ -16,11 +16,11 @@ def test_example_tilelang_block_sparse_attn():
 
 
 def test_example_tilelang_sparse_gqa_decode_varlen_indice():
-    example_tilelang_sparse_gqa_decode_varlen_indice.main()
+    example_tilelang_sparse_gqa_decode_varlen_indice.main(batch=1, max_cache_seqlen=2048)
 
 
 def test_example_tilelang_sparse_gqa_decode_varlen_mask():
-    example_tilelang_sparse_gqa_decode_varlen_mask.main()
+    example_tilelang_sparse_gqa_decode_varlen_mask.main(batch=1, max_cache_seqlen=2048)
 
 
 def test_example_triton_sparse_gqa_decode_varlen_indice():
