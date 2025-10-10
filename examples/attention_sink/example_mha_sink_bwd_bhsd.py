@@ -312,8 +312,8 @@ def flashattn_bwd(
                 T.copy(dsT_cast, dsT_shared)
                 T.clear(dq)
                 T.gemm(dsT_shared, K_shared, dq, transpose_A=True)
-                for i, j in T.Parallel(block_N, dim):
-                    T.atomic_add(dQ[bz, bx, k * block_N + i, j], dq[i, j])
+                T.atomic_add(dQ[bz, bx, k * block_N:(k + 1) * block_N, :], dq)
+
             T.copy(dv, dv_shared)
             T.copy(dk, dk_shared)
             T.copy(dv_shared, dV[bz, bx, by * block_M:(by + 1) * block_M, :])
