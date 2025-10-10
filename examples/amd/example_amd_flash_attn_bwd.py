@@ -443,6 +443,7 @@ def benchmark_function(func, *args, warmup=10, repeat=100):
 
     return np.median(times)
 
+
 def main(batch: int = 1,
          heads: int = 8,
          seq_len: int = 4096,
