@@ -90,8 +90,9 @@ private:
       std::string func_name = le_pos == std::string::npos
                                   ? func_name_with_template
                                   : func_name_with_template.substr(0, le_pos);
-      if (func_name == "tl::utcmma_gemm_ts" ||
-          func_name == "tl::utcmma_gemm_ss") {
+      // TODO(lei): refactor to use identical ops.
+      if (func_name == "tl::tcgen5mma_gemm_ts" ||
+          func_name == "tl::tcgen5mma_gemm_ss") {
         // TCGEN5MMA
         auto get_buf_from_access_ptr_call =
             [&](const PrimExpr &expr) -> Buffer {

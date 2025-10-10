@@ -8,6 +8,7 @@ import tilelang.language as T
 from tilelang.layout import make_swizzled_layout
 import itertools
 import argparse
+from typing import Optional
 
 
 def get_configs():
@@ -17,9 +18,11 @@ def get_configs():
 
 @autotune(configs=get_configs(), warmup=500, rep=100)
 @tilelang.jit(
-    out_idx=[3], pass_configs={
+    out_idx=[3],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+    compile_flags=["-O3", "-DENABLE_BF16"])
 def flashattn(
         batch,
         heads,
@@ -27,17 +30,20 @@ def flashattn(
         seq_kv,
         dim,
         window_size=None,  # None for full attention
+        sm_scale=None,
         block_M=64,
         block_N=64,
         num_stages=1,
-        threads=128):
+        threads=128,
+        dtype: str = "float16"):
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
 
-    scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
+    if sm_scale is None:
+        sm_scale = (1.0 / dim)**0.5
+    scale = sm_scale * 1.44269504  # log2(e)
     q_shape = [batch, heads, seq_q, dim]
     kv_shape = [batch, heads, seq_kv, dim]
-    dtype = "float16"
     accum_dtype = "float"
 
     past_len = seq_kv - seq_q
@@ -186,7 +192,8 @@ def ref_program(query: torch.Tensor,
                 key: torch.Tensor,
                 value: torch.Tensor,
                 sinks: torch.Tensor,
-                sliding_window: int | None = None) -> torch.Tensor:
+                sliding_window: Optional[int] = None,
+                dtype: torch.dtype = torch.float16) -> torch.Tensor:
 
     query = query.transpose(1, 2).contiguous().unsqueeze(
         3)  # align with the original function's interface
@@ -225,15 +232,21 @@ def ref_program(query: torch.Tensor,
     output = torch.einsum("bhmqk,bkhmd->bqhmd", scores, value.float())
 
     output = output.reshape(batch_size, num_queries, num_key_value_heads * num_key_value_groups,
-                            head_dim).to(torch.float16)
+                            head_dim).to(dtype)
     return output.transpose(1, 2).contiguous()
 
 
-def gen_inputs(B, H, Sq, Skv, D) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    query = torch.randn([B, H, Sq, D], dtype=torch.float16, device='cuda')
-    key = torch.randn([B, H, Skv, D], dtype=torch.float16, device='cuda')
-    value = torch.randn([B, H, Skv, D], dtype=torch.float16, device='cuda')
-    sinks = torch.zeros([H], dtype=torch.float16, device='cuda')
+def gen_inputs(
+        B,
+        H,
+        Sq,
+        Skv,
+        D,
+        dtype=torch.float16) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    query = torch.randn([B, H, Sq, D], dtype=dtype, device='cuda')
+    key = torch.randn([B, H, Skv, D], dtype=dtype, device='cuda')
+    value = torch.randn([B, H, Skv, D], dtype=dtype, device='cuda')
+    sinks = torch.randn([H], dtype=dtype, device='cuda')
     return query, key, value, sinks
 
 
@@ -243,7 +256,9 @@ def main(batch: int = 1,
          seq_kv: int = 256,
          dim: int = 128,
          window_size: int | None = None,
+         dtype: str = "float16",
          tune: bool = False):
+    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
     if window_size is not None:
         print('Using sliding window attention.')
         assert window_size <= seq_q
@@ -255,7 +270,7 @@ def main(batch: int = 1,
     total_flops = 2 * flops_per_matmul
 
     if tune:
-        kernel = flashattn(batch, heads, seq_q, seq_kv, dim, window_size)
+        kernel = flashattn(batch, heads, seq_q, seq_kv, dim, window_size, dtype=dtype)
         print(f"Best latency: {kernel.latency}")
         print(f"Best TFlops: {total_flops / kernel.latency * 1e-9}")
         print(f"Best config: {kernel.config}")
@@ -276,15 +291,20 @@ def main(batch: int = 1,
             block_M=block_M,
             block_N=block_N,
             num_stages=num_stages,
-            threads=threads)
+            threads=threads,
+            dtype=dtype)
 
-        Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim)
+        Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim, dtype=torch_dtype)
 
         torch.testing.assert_close(
-            kernel(Q, K, V, sinks), ref_program(Q, K, V, sinks, window_size), rtol=1e-2, atol=1e-2)
+            kernel(Q, K, V, sinks),
+            ref_program(Q, K, V, sinks, window_size, dtype=torch_dtype),
+            rtol=1e-2,
+            atol=1e-2)
         print("All checks passed.✅")
 
-        latency = do_bench(lambda: ref_program(Q, K, V, sinks, window_size), warmup=500)
+        latency = do_bench(
+            lambda: ref_program(Q, K, V, sinks, window_size, dtype=torch_dtype), warmup=500)
         print("Ref: {:.2f} ms".format(latency))
         print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
         latency = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500)
@@ -304,6 +324,9 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help='window size (default: None, which means full attention)')
+    parser.add_argument(
+        '--dtype', type=str, default="float16", help="dtype, can be float16 or bfloat16")
     parser.add_argument('--tune', action='store_true', help='tune')
     args = parser.parse_args()
-    main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.window_size, args.tune)
+    main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.window_size, args.dtype,
+         args.tune)

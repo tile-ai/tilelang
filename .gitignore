@@ -92,3 +92,6 @@ tilelang/jit/adapter/cython/.cycache
 
 # cache directory for clangd
 .cache/
+
+# claude
+**/.claude

@@ -32,6 +32,92 @@
 namespace tvm::tl {
 namespace codegen {
 
+namespace ptx {
+
+/*!
+ * \brief PTX data type.
+ * \note
+ * PTX fundamental data types:
+ * https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#fundamental-types
+ * PTX matrix data types:
+ * https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-data-types
+ */
+enum class DataType : int {
+  kInt4 = 0,
+  kUInt4 = 1,
+  kInt8 = 2,
+  kUInt8 = 3,
+  kInt16 = 4,
+  kUInt16 = 5,
+  kInt32 = 6,
+  kUInt32 = 7,
+  kInt64 = 8,
+  kUInt64 = 9,
+  kFloat8_e4m3 = 10,
+  kFloat8_e5m2 = 11,
+  kFloat16 = 12,
+  kBFloat16 = 13,
+  kFloat16x2 = 14,
+  kFloat32 = 15,
+  kTensorFloat32 = 16,
+  kFloat64 = 17,
+  kBit1 = 18,
+  kBit8 = 19,
+  kBit16 = 20,
+  kBit32 = 21,
+  kBit64 = 22
+};
+
+/*!
+ * \brief Print ptx data type from string.
+ */
+DataType DTypeFromString(const std::string str);
+
+/*!
+ * \brief Print ptx data type from enum.
+ */
+std::string DTypeEnumToString(const DataType &dtype);
+
+/*!
+ * \brief Print ptx data type from string.
+ */
+std::string DTypeEnumToString(const std::string &dtype);
+
+/*!
+ * \brief Parse MMA shape from string.
+ */
+std::tuple<int, int, int> ParseMMAShape(const std::string &str);
+} // namespace ptx
+
+/*!
+ * \brief Replace patterns with replacement strings.
+ * \note should use std::format instead when codebase is ported to C++20.
+ */
+class Replacer {
+public:
+  void register_rule(const std::string &pattern,
+                     const std::string &replacement) {
+    _rules.emplace_back(pattern, replacement);
+  }
+  std::string rewrite(std::string str) {
+    for (auto &&rule : _rules) {
+      auto [pattern, replacement] = rule;
+      size_t len = pattern.size();
+      size_t new_len = replacement.size();
+      size_t pos = str.find(pattern);
+      while (pos != std::string::npos) {
+        str = str.replace(pos, len, replacement);
+        pos = str.find(pattern, pos + new_len);
+      }
+    }
+    return str;
+  }
+  void empty_rules() { _rules.clear(); }
+
+private:
+  std::vector<std::pair<std::string, std::string>> _rules;
+};
+
 /*!
  * \brief Print MMA assembly string given parameters.
  * \param shape The shape string mMnNkK
@@ -64,6 +150,28 @@ PrintMMAAssembly(const std::string &shape, const std::string &A_layout,
                  const std::string &metadata_offset,
                  const std::string &sparsity_selector,
                  const std::string &bit_op, bool sparse, bool saturate);
+
+/*!
+ * \brief Print WGMMA assembly string given parameters.
+ * \param shape The shape string mMnNkK
+ * \param A_layout The layout of multiplicand A, can be either "row" or "col".
+ * \param B_layout The layout of multiplicand B, can be either "row" or "col".
+ * \param A_dtype The data type of multiplicand A.
+ * \param B_dtype The data type of multiplicand B.
+ * \param C_dtype The data type of multiplicand C.
+ */
+std::string
+PrintWGMMAAssembly(const std::string &shape, const bool &a_is_k_major,
+                   const bool &b_is_k_major, const std::string &A_dtype,
+                   const std::string &B_dtype, const std::string &C_dtype,
+                   const std::string &a_desc, const std::string &A_offset,
+                   const std::string &b_desc, const std::string &B_offset,
+                   const std::string &c_ptr, const std::string &c_offset,
+                   const bool &scale_out, const bool &scale_in_a,
+                   const bool &scale_in_b, const bool &a_is_shared,
+                   const std::string &metadata,
+                   const std::string &metadata_offset,
+                   const std::string &sparsity_selector, bool sparse);
 
 /*!
  * \brief Print ldmatrix assembly string given parameters.

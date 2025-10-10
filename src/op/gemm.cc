@@ -109,7 +109,7 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
  * @param vmap Mapping from access pointer vars to Buffer objects used to
  *   resolve the Buffer corresponding to each pointer argument.
  *
- * @note If `kPack` is provided it must be 1 or 2; otherwise the constructor
+ * @note If `kPack` is provided it must be 1; otherwise the constructor
  *       fails with an ICHECK (runtime assertion). No other validation is
  *       performed here.
  */
@@ -128,7 +128,7 @@ Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
   node->N = args[6].as<IntImm>().value()->value;
   node->K = args[7].as<IntImm>().value()->value;
   node->policy = GemmWarpPolicy(args[8].as<IntImm>().value()->value);
-  node->clear_accum = args[9].as<Bool>().value();
+  node->clear_accum = args[9].as<PrimExpr>().value();
   node->stride_A = args[10].as<IntImm>().value()->value;
   node->stride_B = args[11].as<IntImm>().value()->value;
   node->offset_A = args[12].as<IntImm>().value()->value;
@@ -286,7 +286,8 @@ std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
     }
 
     ICHECK(m_warp * n_warp == num_warps)
-        << "m_warp * n_warp must equal num_warps";
+        << "m_warp * n_warp must equal num_warps, m_warp: " << m_warp
+        << ", n_warp: " << n_warp << ", num_warps: " << num_warps;
 
     // Store the computed values in the object's member variables
     this->m_warp = m_warp;
@@ -370,6 +371,10 @@ std::pair<int, int> GemmWarpPolicyNode::ComputeWarpPartition(
   } else {
     ICHECK(0) << "Unknown GemmWarpPolicy";
   }
+  ICHECK(m_warp * n_warp == num_warps)
+      << "m_warp * n_warp must equal num_warps, m_warp: " << m_warp
+      << ", n_warp: " << n_warp << ", num_warps: " << num_warps;
+
   // Store the computed values in the object's member variables
   this->m_warp = m_warp;
   this->n_warp = n_warp;
@@ -588,7 +593,10 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   ss << op_name << "<" << M << ", " << N << ", " << K << ", ";
   ss << warp_m << ", " << warp_n << ", ";
   ss << trans_A << ", " << trans_B;
-  ss << ", " << clear_accum;
+  auto clear_accum_bool = clear_accum.as<Bool>();
+  ICHECK(clear_accum_bool.has_value())
+      << "clear_accum must be a constant Bool type, got " << clear_accum;
+  ss << ", " << bool(clear_accum_bool.value());
   if (TargetIsCuda(T.target) && (GetArchInt(T.target) >= 75)) {
     ss << ", " << stride_A << ", " << stride_B;
     ss << ", " << offset_A << ", " << offset_B;
@@ -651,7 +659,6 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
   GemmInst gemm_inst = GetGemmInst(block_size, T.target);
   auto [warp_m, warp_n] =
       policy->ComputeWarpPartition(M, N, block_size, T.target, gemm_inst);
-
   if (TargetIsVolta(T.target)) {
     ICHECK(C.scope() == "local.fragment")
         << "Volta gemm only supports C in local.fragment scope, got "
@@ -663,7 +670,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       int dim_A = A->shape.size();
       results.Set(A, makeGemmVoltaABLayout(*as_const_int(A->shape[dim_A - 2]),
                                            *as_const_int(A->shape[dim_A - 1]),
-                                           true, trans_A ? 1 : 2));
+                                           true, !trans_A));
     } else if (A.scope() == "local.fragment") {
       ICHECK(trans_A == false);
       auto fragment = makeGemmVoltaFragmentA(M, N, K, M / warp_m, N / warp_n);
@@ -676,7 +683,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     int dim_B = B->shape.size();
     results.Set(B, makeGemmVoltaABLayout(*as_const_int(B->shape[dim_B - 2]),
                                          *as_const_int(B->shape[dim_B - 1]),
-                                         false, trans_B ? 2 : 1));
+                                         false, trans_B));
   } else if (TargetIsAmpere(T.target) || TargetIsTuring(T.target) ||
              TargetIsSM120(T.target) ||
              (TargetIsSm100(T.target) && gemm_inst == GemmInst::kMMA)) {
@@ -693,7 +700,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       const int64_t mat_continuous = *as_const_int(A->shape[dim_A - 1]);
       results.Set(A,
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   A->dtype.bits(), trans_A ? 1 : 2));
+                                   A->dtype.bits(), !trans_A));
     } else if (A.scope() == "local.fragment") {
       auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
                                         A->dtype.bits(), trans_A);
@@ -707,7 +714,7 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
       results.Set(B,
                   makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                   B->dtype.bits(), trans_B ? 2 : 1));
+                                   B->dtype.bits(), trans_B));
     } else if (B.scope() == "local.fragment") {
       auto fragment =
           makeGemmFragmentB(M, N, K, M / warp_m, N / warp_n, trans_B);
@@ -734,9 +741,9 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       auto ABLayout =
           gemm_inst == GemmInst::kWGMMA
               ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                       A->dtype.bits(), trans_A ? 1 : 2)
+                                       A->dtype.bits(), !trans_A)
               : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                 A->dtype.bits(), trans_A ? 1 : 2);
+                                 A->dtype.bits(), !trans_A);
       results.Set(A, ABLayout);
     } else {
       auto fragment = makeGemmFragmentA(M, N, K, M / warp_m, N / warp_n,
@@ -749,12 +756,13 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
       const int64_t mat_continuous = *as_const_int(B->shape[dim_B - 1]);
       const int64_t continuity =
           trans_B ? mat_continuous : mat_continuous / warp_n;
+
       auto ABLayout =
           gemm_inst == GemmInst::kWGMMA
               ? makeGemmABLayoutHopper(mat_stride, mat_continuous, continuity,
-                                       B->dtype.bits(), trans_B ? 2 : 1)
+                                       B->dtype.bits(), trans_B)
               : makeGemmABLayout(mat_stride, mat_continuous, mat_continuous,
-                                 B->dtype.bits(), trans_B ? 2 : 1);
+                                 B->dtype.bits(), trans_B);
       results.Set(B, ABLayout);
     } else {
       auto fragment =

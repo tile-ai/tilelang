@@ -119,6 +119,8 @@ private:
                {BufferLoad(new_buffer, {0}), PrimExpr(count)});
       init_mbarrier_calls_.push_back(Evaluate(call));
     }
+    if (init_mbarrier_calls_.empty())
+      return block;
 
     Array<Stmt> new_body;
     PrimExpr condition;
@@ -127,8 +129,11 @@ private:
     } else {
       condition = EQ(thread_var_->var, 0);
     }
-    new_body.push_back(
-        IfThenElse(condition, SeqStmt(init_mbarrier_calls_), Stmt()));
+    new_body.push_back(IfThenElse(condition,
+                                  init_mbarrier_calls_.size() == 1
+                                      ? init_mbarrier_calls_.back()
+                                      : SeqStmt(init_mbarrier_calls_),
+                                  Stmt()));
     new_body.push_back(
         Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
                       {StringImm("shared")})));
