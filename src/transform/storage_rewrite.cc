@@ -674,7 +674,8 @@ private:
   bool IsSpecialTaggedMemory(const StorageScope &scope) {
     return !scope.tag.empty() && scope.tag != ".dyn" &&
            scope.tag != ".barrier" && scope.tag != ".workspace" &&
-           scope.tag != ".vtcm" && scope.tag != ".var";
+           scope.tag != ".vtcm" && scope.tag != ".var" &&
+           scope.tag != ".descriptor";
   }
 
   // Allocate entry of node.
@@ -844,7 +845,8 @@ private:
     // allocate with element type.
     ICHECK_NE(e->const_nbits, 0U);
     MemoryInfo info;
-    if (e->scope.tag != ".barrier" && e->scope.tag != ".var") {
+    if (e->scope.tag != ".barrier" && e->scope.tag != ".var" &&
+        e->scope.tag != ".descriptor") {
       info = GetMemoryInfo(e->scope.to_string());
     }
     uint64_t total_bits = e->const_nbits;
@@ -1789,8 +1791,8 @@ public:
     PrimExpr last_extent = extents[extents.size() - 1];
     extents.Set(extents.size() - 1,
                 last_extent / make_const(last_extent.dtype(), info.factor()));
-    LOG(INFO) << "Allocate with " << new_buffer_var << " and "
-              << info.new_element_dtype << " extents: " << extents;
+    DLOG(INFO) << "Allocate with " << new_buffer_var << " and "
+               << info.new_element_dtype << " extents: " << extents;
     return Allocate(new_buffer_var, info.new_element_dtype, extents,
                     op->condition, op->body);
   }

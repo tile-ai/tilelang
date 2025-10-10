@@ -6,11 +6,13 @@ import tilelang
 from tilelang.autotuner import autotune
 from tilelang.profiler import do_bench
 import tilelang.language as T
+from tilelang.layout import make_swizzled_layout
 import itertools
 import argparse
 import triton
 import triton.language as tl
 from triton.tools.tensor_descriptor import TensorDescriptor
+from typing import Optional
 
 
 def get_configs():
@@ -24,9 +26,11 @@ def get_configs():
     rep=100,
 )
 @tilelang.jit(
-    out_idx=[3], pass_configs={
+    out_idx=[3],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+    compile_flags=["-O3", "-DENABLE_BF16"])
 def flashattn(
     batch,
     heads,
@@ -35,20 +39,24 @@ def flashattn(
     dim,
     groups=1,
     window_size=None,  # None for full attention
+    sm_scale=None,
     block_M=128,
     block_N=128,
     num_stages=2,
     threads=256,
+    dtype: str = "float16",
 ):
 
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
 
-    scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
+    if sm_scale is None:
+        sm_scale = (1.0 / dim)**0.5
+    scale = sm_scale * 1.44269504  # log2(e)
+
     head_kv = heads // groups
     q_shape = [batch, heads, seq_q, dim]
     kv_shape = [batch, head_kv, seq_kv, dim]
-    dtype = "float16"
     accum_dtype = "float"
 
     past_len = seq_kv - seq_q
@@ -152,6 +160,13 @@ def flashattn(
             logsum = T.alloc_fragment([block_M], accum_dtype)
             sinks = T.alloc_fragment([block_M], dtype)
 
+            T.annotate_layout({
+                Q_shared: make_swizzled_layout(Q_shared),
+                K_shared: make_swizzled_layout(K_shared),
+                V_shared: make_swizzled_layout(V_shared),
+                O_shared: make_swizzled_layout(O_shared),
+            })
+
             T.copy(Q[bz, by, bx * block_M:(bx + 1) * block_M, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
@@ -197,7 +212,8 @@ def ref_program(query: torch.Tensor,
                 key: torch.Tensor,
                 value: torch.Tensor,
                 sinks: torch.Tensor,
-                sliding_window: int | None = None) -> torch.Tensor:
+                sliding_window: Optional[int] = None,
+                dtype: torch.dtype = torch.float16) -> torch.Tensor:
 
     key = key.transpose(1, 2).contiguous()
     value = value.transpose(1, 2).contiguous()
@@ -235,7 +251,7 @@ def ref_program(query: torch.Tensor,
     output = torch.einsum("bhmqk,bkhmd->bqhmd", scores, value.float())
 
     output = output.reshape(batch_size, num_queries, num_key_value_heads * num_key_value_groups,
-                            head_dim).to(torch.float16)
+                            head_dim).to(dtype)
     return output.transpose(1, 2).contiguous()
 
 
@@ -355,12 +371,18 @@ def triton_program(Q, K, V, Sinks, window_size: int | None = None) -> torch.Tens
     return o
 
 
-def gen_inputs(B, H, Sq, Skv, D,
-               groups) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    query = torch.randn([B, H, Sq, D], dtype=torch.float16, device='cuda')
-    key = torch.randn([B, H // groups, Skv, D], dtype=torch.float16, device='cuda')
-    value = torch.randn([B, H // groups, Skv, D], dtype=torch.float16, device='cuda')
-    sinks = torch.randn([H], dtype=torch.float16, device='cuda')
+def gen_inputs(
+        B,
+        H,
+        Sq,
+        Skv,
+        D,
+        groups,
+        dtype=torch.float16) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    query = torch.randn([B, H, Sq, D], dtype=dtype, device='cuda')
+    key = torch.randn([B, H // groups, Skv, D], dtype=dtype, device='cuda')
+    value = torch.randn([B, H // groups, Skv, D], dtype=dtype, device='cuda')
+    sinks = torch.randn([H], dtype=dtype, device='cuda')
     return query, key, value, sinks
 
 
@@ -372,8 +394,10 @@ def main(
     dim: int = 128,
     groups: int = 8,
     window_size: int | None = None,
+    dtype: str = "float16",
     tune: bool = False,
 ):
+    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
     if window_size is not None:
         print('Using sliding window attention.')
         assert window_size <= seq_q
@@ -385,7 +409,7 @@ def main(
     total_flops = 2 * flops_per_matmul
 
     if tune:
-        kernel = flashattn(batch, heads, seq_q, seq_kv, dim, groups, window_size)
+        kernel = flashattn(batch, heads, seq_q, seq_kv, dim, groups, window_size, dtype=dtype)
         print(f"Best latency: {kernel.latency}")
         print(f"Best TFlops: {total_flops / kernel.latency * 1e-9}")
         print(f"Best config: {kernel.config}")
@@ -407,17 +431,21 @@ def main(
             block_M=block_M,
             block_N=block_N,
             num_stages=num_stages,
-            threads=threads)
+            threads=threads,
+            dtype=dtype)
 
-        Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim, groups)
+        Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim, groups, dtype=torch_dtype)
 
         torch.testing.assert_close(
-            kernel(Q, K, V, sinks), ref_program(Q, K, V, sinks, window_size), rtol=1e-2, atol=1e-2)
+            kernel(Q, K, V, sinks),
+            ref_program(Q, K, V, sinks, window_size, dtype=torch_dtype),
+            rtol=1e-2,
+            atol=1e-2)
         print("All checks passed.✅")
 
         if torch.allclose(
                 triton_program(Q, K, V, sinks, window_size),
-                ref_program(Q, K, V, sinks, window_size),
+                ref_program(Q, K, V, sinks, window_size, dtype=torch_dtype),
                 rtol=1e-2,
                 atol=1e-2):
             print("Checks for triton passed.✅")
@@ -425,22 +453,24 @@ def main(
             print("Checks for triton failed.❌")
 
         # Benchmark triton
-        latency = do_bench(lambda: triton_program(Q, K, V, sinks, window_size), warmup=500)
-        print("Triton: {:.2f} ms".format(latency))
-        print("Triton: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        latency_triton = do_bench(lambda: triton_program(Q, K, V, sinks, window_size), warmup=500)
+        print("Triton: {:.2f} ms".format(latency_triton))
+        print("Triton: {:.2f} TFlops".format(total_flops / latency_triton * 1e-9))
 
         # Benchmark tilelang
-        latency = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500)
-        print("Tilelang: {:.2f} ms".format(latency))
-        print("Tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        latency_tilelang = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500)
+        print("Tilelang: {:.2f} ms".format(latency_tilelang))
+        print("Tilelang: {:.2f} TFlops".format(total_flops / latency_tilelang * 1e-9))
+
+        print("Speedup: {:.2f}x".format(latency_triton / latency_tilelang))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=1, help='batch size')
     parser.add_argument('--heads', type=int, default=64, help='heads')
-    parser.add_argument('--seq_q', type=int, default=4096, help='sequence length of query')
-    parser.add_argument('--seq_kv', type=int, default=4096, help='sequence length of key/value')
+    parser.add_argument('--seq_q', type=int, default=2048, help='sequence length of query')
+    parser.add_argument('--seq_kv', type=int, default=2048, help='sequence length of key/value')
     parser.add_argument('--dim', type=int, default=128, help='dim')
     parser.add_argument('--groups', type=int, default=8, help='groups')
     parser.add_argument(
@@ -448,7 +478,9 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help='window size (default: None, which means full attention)')
+    parser.add_argument(
+        '--dtype', type=str, default="float16", help="dtype, can be float16 or bfloat16")
     parser.add_argument('--tune', action='store_true', help='tune configs')
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.groups, args.window_size,
-         args.tune)
+         args.dtype, args.tune)

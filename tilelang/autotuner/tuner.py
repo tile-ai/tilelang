@@ -465,13 +465,24 @@ class AutoTuner:
         futures = []
         future_to_index = {}
 
-        def device_wrapper(func, device, **config_arg):
-            torch.cuda.set_device(device)
-            return func(**config_arg)
+        def cuda_device_wrapper(func, device):
+
+            def inner(**config_arg):
+                torch.cuda.set_device(device)
+                return func(**config_arg)
+
+            return inner
 
         for i, config_arg in enumerate(config_args):
+            compile_func = self.jit_compile
+
+            if torch.cuda.is_available():
+                device = torch.cuda.current_device()
+
+                compile_func = cuda_device_wrapper(self.jit_compile, device)
+
             future = pool.submit(
-                functools.partial(device_wrapper, self.jit_compile, torch.cuda.current_device()),
+                compile_func,
                 **config_arg,
             )
             futures.append(future)
@@ -543,7 +554,7 @@ class AutoTuner:
             func=best_kernel.prim_func,
             kernel=best_kernel)
 
-        if self.compile_args.execution_backend == "dlpack":
+        if self.compile_args.execution_backend in ("dlpack", "torch"):
             logger.warning("DLPack backend does not support cache saving to disk.")
         else:
             with self._lock:

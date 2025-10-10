@@ -11,8 +11,19 @@ import math
     out_idx=[8], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
-def mla_decode_tilelang(batch, h_q, h_kv, max_seqlen_pad, dv, dpe, block_N, block_H, num_split,
-                        block_size, softmax_scale):
+def mla_decode_tilelang(batch,
+                        h_q,
+                        h_kv,
+                        max_seqlen_pad,
+                        dv,
+                        dpe,
+                        block_N,
+                        block_H,
+                        num_split,
+                        block_size,
+                        softmax_scale=None):
+    if softmax_scale is None:
+        softmax_scale = (dv + dpe)**-0.5
     scale = float(softmax_scale * 1.44269504)  # log2(e)
     dtype = "float16"
     accum_dtype = "float"
@@ -322,7 +333,7 @@ def run_tilelang_mla(q, block_table, blocked_k, max_seqlen_pad, block_size, b, s
     num_kv_splits = 1
     BLOCK_N = 64
     BLOCK_H = min(64, h_q // h_kv)
-    softmax_scale = (d + dv)**-0.5
+    softmax_scale = d**-0.5
 
     out_partial = torch.empty(b, h_q, num_kv_splits, dv, dtype=dtype, device=q.device)
     glse = torch.empty(b, h_q, num_kv_splits, dtype=dtype, device=q.device)
@@ -379,7 +390,7 @@ if __name__ == "__main__":
     max_seqlen = cache_seqlens.max().item()
     max_seqlen_pad = math.ceil(max_seqlen / 256) * 256
 
-    total_flops = s_q * total_seqlens * h_q * (d + dv) * 2
+    total_flops = s_q * total_seqlens * h_q * d * 2
 
     q = torch.randn(b, s_q, h_q, d, dtype=dtype, device=device)
     block_table = torch.arange(

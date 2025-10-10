@@ -260,7 +260,7 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
       std::stringstream ss;
 
       auto thread_offset = T.thread_bounds->min;
-      if (TargetIsHopper(T.target)) {
+      if (TargetIsHopper(T.target) || TargetIsSm100(T.target)) {
         auto all_threads = T.thread_bounds->extent;
         ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
            << reducing_threads << ", " << (*scale) << ", " << thread_offset
