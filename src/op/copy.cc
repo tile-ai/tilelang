@@ -1571,6 +1571,9 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     global_coords.Set(0, global_coords[0] + instruction_dim * loop_var);
     for (auto coord : global_coords)
       args.push_back(coord);
+    int need_reduce = 0;
+    if (!is_load)
+      args.push_back(need_reduce);
     args.push_back(this->eviction_policy);
     tma_copy = For(loop_var, 0, loop_extent, ForKind::kUnrolled,
                    Evaluate(Call(DataType::Handle(), op, args)));
@@ -1580,6 +1583,9 @@ Stmt CopyNode::LowerBulkCopy(const LowerArgs &T, arith::Analyzer *analyzer,
     args.push_back(shared_addr);
     for (auto coord : global_coords)
       args.push_back(coord);
+    int need_reduce = 0;
+    if (!is_load)
+      args.push_back(need_reduce);
     args.push_back(this->eviction_policy);
     tma_copy = Evaluate(Call(DataType::Handle(), op, args));
   }
@@ -1654,10 +1660,11 @@ Stmt CopyNode::LowerBulkCopy1D(const LowerArgs &T, arith::Analyzer *analyzer,
              {shared_addr, global_addr, 0,
               elements * shared_tensor->dtype.bytes(), this->eviction_policy}));
   } else {
+    int need_reduce = 0;
     tma_copy = Evaluate(
         Call(DataType::Handle(), tma_store(),
              {global_addr, shared_addr, elements * shared_tensor->dtype.bytes(),
-              this->eviction_policy}));
+              need_reduce, this->eviction_policy}));
   }
   tma_copy = IfThenElse(EQ(T.thread_var, T.thread_bounds->min), tma_copy);
   return tma_copy;

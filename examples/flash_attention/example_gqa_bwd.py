@@ -114,32 +114,44 @@ def flashattn_bwd_preprocess(batch, heads, seq_len, dim_v):
 
 
 def make_dq_layout(dQ):
-    # atomicAdd can not be vectorized, so we need to reorder dq to match the 8x8 gemm fragment
-    return T.Layout(dQ.shape,
-                    lambda b, l, h, d: [b, l // 8, h, d // 8, (d % 2), 4 * (l % 8) + (d % 8) // 2])
+    # bshd -> bhld to use tma reduction instruction
+    return T.Layout(dQ.shape, lambda b, l, h, d: [b, h, l, d])
 
 
 @tilelang.jit(
-    out_idx=[1], pass_configs={
+    out_idx=[3, 4, 5], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     })
-def flashattn_bwd_postprocess(batch, heads, seq_len, dim_qk):
+def flashattn_bwd_postprocess(batch, heads, head_kv, seq_len, dim_qk, dim_v):
     dtype = "float16"
     accum_dtype = "float"
-    shape = [batch, seq_len, heads, dim_qk]
+    q_shape = [batch, seq_len, heads, dim_qk]
+    k_shape = [batch, seq_len, head_kv, dim_qk]
+    v_shape = [batch, seq_len, head_kv, dim_v]
     blk = 64
 
     @T.prim_func
     def flash_bwd_post(
-            dQ: T.Tensor(shape, accum_dtype),  # type: ignore
-            dQ_out: T.Tensor(shape, dtype),  # type: ignore
+            dQ: T.Tensor(q_shape, accum_dtype),  # type: ignore
+            dK: T.Tensor(k_shape, accum_dtype),  # type: ignore
+            dV: T.Tensor(v_shape, accum_dtype),  # type: ignore
+            dQ_out: T.Tensor(q_shape, dtype),  # type: ignore
+            dK_out: T.Tensor(k_shape, dtype),  # type: ignore
+            dV_out: T.Tensor(v_shape, dtype),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(seq_len, blk), heads, batch, threads=128) as (bx, by, bz):
             T.annotate_layout({dQ: make_dq_layout(dQ)})
-            T.copy(
-                dQ[bz, bx * blk:(bx + 1) * blk, by, :],
-                dQ_out[bz, bx * blk:(bx + 1) * blk, by, :],
-            )
+            T.copy(dQ[bz, bx * blk:(bx + 1) * blk, by, :], dQ_out[bz, bx * blk:(bx + 1) * blk,
+                                                                  by, :])
+        with T.Kernel(T.ceildiv(seq_len, blk), head_kv, batch, threads=128) as (bx, by, bz):
+            T.annotate_layout({
+                dK: make_dq_layout(dK),
+                dV: make_dq_layout(dV),
+            })
+            T.copy(dK[bz, bx * blk:(bx + 1) * blk, by, :], dK_out[bz, bx * blk:(bx + 1) * blk,
+                                                                  by, :])
+            T.copy(dV[bz, bx * blk:(bx + 1) * blk, by, :], dV_out[bz, bx * blk:(bx + 1) * blk,
+                                                                  by, :])
 
     return flash_bwd_post
 
@@ -196,9 +208,12 @@ def flashattn_bwd_atomic_add(batch,
             dq = T.alloc_fragment([block_N, dim_qk], accum_dtype)
             dk_shared = T.alloc_shared([block_M, dim_qk], accum_dtype)
             dv_shared = T.alloc_shared([block_M, dim_v], accum_dtype)
+            dq_shared = T.alloc_shared([block_N, dim_qk], accum_dtype)
 
             T.annotate_layout({
                 dQ: make_dq_layout(dQ),
+                dK: make_dq_layout(dK),
+                dV: make_dq_layout(dV),
                 K_shared: tilelang.layout.make_swizzled_layout(K_shared),
             })
 
@@ -234,12 +249,14 @@ def flashattn_bwd_atomic_add(batch,
                 T.copy(dsT_cast, dsT_shared)
                 T.clear(dq)
                 T.gemm(dsT_shared, K_shared, dq, transpose_A=True)
-                for i, j in T.Parallel(block_N, dim_qk):
-                    T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
+                T.copy(dq, dq_shared)
+                T.atomic_add(dQ[bz, k * block_N:(k + 1) * block_N, bx, :], dq_shared, use_tma=True)
             T.copy(dv, dv_shared)
-            T.atomic_add(dV[bz, by * block_M:(by + 1) * block_M, bx // groups, :], dv_shared)
+            T.atomic_add(
+                dV[bz, by * block_M:(by + 1) * block_M, bx // groups, :], dv_shared, use_tma=True)
             T.copy(dk, dk_shared)
-            T.atomic_add(dK[bz, by * block_M:(by + 1) * block_M, bx // groups, :], dk_shared)
+            T.atomic_add(
+                dK[bz, by * block_M:(by + 1) * block_M, bx // groups, :], dk_shared, use_tma=True)
 
     return flash_bwd
 
@@ -381,7 +398,7 @@ class _attention(torch.autograd.Function):
         block_M = 128
         block_N = 32
         mod_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD_V)
-        mod_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD_QK)
+        mod_post = flashattn_bwd_postprocess(BATCH, H, HEAD_KV, N_CTX, D_HEAD_QK, D_HEAD_V)
         delta = mod_prep(o, do)
 
         if ctx.use_atomic:
@@ -404,9 +421,7 @@ class _attention(torch.autograd.Function):
             dk = torch.zeros(shape_k, dtype=torch.float32, device=q.device)
             dv = torch.zeros(shape_v, dtype=torch.float32, device=q.device)
             kernel(q, k, v, do, lse, delta, dq, dk, dv)
-            dq = mod_post(dq)
-            dk = dk.to(torch.float16)
-            dv = dv.to(torch.float16)
+            dq, dk, dv = mod_post(dq, dk, dv)
         else:
             kernel = flashattn_bwd_split(
                 BATCH,
