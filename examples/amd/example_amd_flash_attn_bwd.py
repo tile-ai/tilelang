@@ -354,11 +354,9 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
 
                 T.copy(p_cast, ds_shared)
                 T.clear(dq)
-                T.gemm(ds_shared, K_shared, dq, transpose_A=True, policy=T.GemmWarpPolicy.FullRow)
-
-                for i, j in T.Parallel(block_N, dim):
-                    if k * block_N + i < seq_len:
-                        T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
+                T.gemm(dsT_shared, K_shared, dq, transpose_A=True)
+                for i, j in T.Parallel(block_N, dim_qk):
+                    T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
 
             for i, j in T.Parallel(block_M, dim):
                 T.atomic_add(dV[bz, by * block_M + i, bx // groups, j], dv[i, j])

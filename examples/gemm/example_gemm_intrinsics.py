@@ -162,8 +162,7 @@ def ref_program(A, B):
     return A @ B.T
 
 
-def main():
-    M, N, K = 16384, 16384, 16384
+def main(M=4096, N=4096, K=4096):
     in_dtype, out_dtype, accum_dtype = "float16", "float16", "float32"
     kernel = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
     src_code = kernel.get_kernel_source()
@@ -183,4 +182,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(M=4096, N=4096, K=4096)

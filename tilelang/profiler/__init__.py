@@ -1,6 +1,6 @@
 """The profiler and convert to torch utils"""
 
-from typing import List, Optional, Callable, Any
+from typing import List, Optional, Callable, Any, Literal
 from functools import partial
 import torch
 from contextlib import suppress
@@ -223,6 +223,9 @@ class Profiler:
         n_warmup: int = 1,
         n_repeat: int = 1,
         input_tensors: List[torch.Tensor] = None,
+        backend: Literal["event", "cupti"] = "event",
+        quantiles: Optional[List[float]] = None,
+        return_mode: Literal["min", "max", "mean", "median"] = "mean",
     ) -> float:
         """Benchmarks the execution time of a given function.
 
@@ -251,6 +254,9 @@ class Profiler:
                 rep=rep,
                 _n_warmup=n_warmup,
                 _n_repeat=n_repeat,
+                quantiles=quantiles,
+                backend=backend,
+                return_mode=return_mode,
             )
         elif profiler == "tvm":
             assert func is not None, "func should not be None"

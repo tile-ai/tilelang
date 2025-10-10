@@ -10,6 +10,7 @@
  */
 
 #include "copy.h"
+#include "../layout/tcgen05_layout.h"
 #include "../target/utils.h"
 #include "../transform/common/loop_fusion_utils.h"
 #include "../transform/common/loop_parallel_transform_utils.h"
@@ -404,6 +405,71 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
       pass_ctx->GetConfig<bool>(kDisableTMALower, false).value();
   auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma,
                                T.layout_map, T.analyzer, T.buffer_oob);
+
+  // Handle tensor memory (tmem) layout inference
+  if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
+    // Tensor memory copy
+    // TODO (mzw) Add support for tcgen05.st/cp (in conj. with LowerTmemCopy)
+    ICHECK(copy_inst == CopyInst::kTMemLoad)
+        << "Only support tensor memory copy from shared.tmem to local.fragment "
+           "currently";
+    LayoutMap results;
+    if (!T.layout_map.count(dst) && T.layout_map.count(src)) {
+      // Use the default layout (32dp32b) if not specified
+      // NOTE (mzw) We will check the layout in LowerTmemCopy(), so don't
+      // worry for tmem-incompatible layout
+      Layout src_layout = T.layout_map[src];
+      Array<IterVar> logical_coords = MakeIterVars();
+      Array<PrimExpr> logical_coords_var = {logical_coords[0]->var,
+                                            logical_coords[1]->var};
+      Array<PrimExpr> phy_indices = src_layout->Forward(logical_coords_var);
+
+      // Tmem physical coord range analysis
+      auto analyzer = std::make_shared<arith::Analyzer>();
+      for (const auto &iv : logical_coords)
+        analyzer->Bind(iv->var, iv->dom);
+      arith::ConstIntBound phy_row_bounds =
+          analyzer->const_int_bound(phy_indices[0]);
+      arith::ConstIntBound phy_col_bounds =
+          analyzer->const_int_bound(phy_indices[1]);
+      Range row_dom = Range((int)(phy_row_bounds->min_value),
+                            (int)(phy_row_bounds->max_value + 1));
+      Range col_dom = Range((int)(phy_col_bounds->min_value),
+                            (int)(phy_col_bounds->max_value + 1));
+
+      constexpr int WARP_SIZE = 32; // Set to 32 since only sm100 is supported
+      constexpr int WARPGROUP_SIZE = 4 * WARP_SIZE;
+      ICHECK(is_const_int(T.thread_bounds->extent))
+          << "Tensor memory copy requires thread_bounds->extent (num_threads) "
+             "to be constant integers";
+      int num_threads = *as_const_int(T.thread_bounds->extent);
+      ICHECK(num_threads % WARPGROUP_SIZE == 0)
+          << "Tensor memory copy requires thread bounds to be aligned to "
+             "warpgroups, but found "
+          << "thread range = " << T.thread_bounds;
+
+      for (int num_useful_wgs = num_threads / WARPGROUP_SIZE;
+           num_useful_wgs >= 1; --num_useful_wgs) {
+        int num_useful_threads = num_useful_wgs * WARPGROUP_SIZE;
+        Tcgen05Meta meta = getTcgen05Meta_32dp32b();
+        auto [is_success, tmem_coord2frag, num_chunks_each_wg] =
+            expandTcgen05Layout(
+                meta, phy_col_bounds->max_value - phy_col_bounds->min_value + 1,
+                num_useful_threads, row_dom, col_dom);
+        if (!is_success) {
+          continue;
+        }
+        Fragment logical_coord2frag =
+            Fragment(logical_coords, tmem_coord2frag->Forward(phy_indices),
+                     tmem_coord2frag->ForwardThread(phy_indices, std::nullopt),
+                     make_itervar("rep", 1));
+        results.Set(dst, logical_coord2frag->BindThreadRange(T.thread_bounds));
+        break;
+      }
+    }
+    return results;
+  }
+
   if (copy_inst == CopyInst::kBulkLoad || copy_inst == CopyInst::kBulkStore) {
     // if can apply swizzling, we skip layout inference
     // for bulk load/store, we can directly apply the layout of normal copy
@@ -632,14 +698,45 @@ bool CopyNode::CheckSTSMCopy(Target target) const {
 }
 
 /**
+ * @brief Determine whether this copy can use tensor memory load (tcgen05.ld).
+ *
+ * Returns true when the target supports tensor memory and the source buffer is
+ * in `shared.tmem` scope while the destination buffer is in `local.fragment`.
+ *
+ * @param target The compilation target to query for tensor memory support.
+ * @return true if the copy may be lowered to a tcgen05.ld instruction; false
+ * otherwise.
+ */
+bool CopyNode::CheckTMemLoad(Target target) const {
+  return TargetHasTmem(target) && src.scope() == "shared.tmem" &&
+         dst.scope() == "local.fragment";
+}
+
+/**
+ * @brief Determine whether this copy can use tensor memory store (tcgen05.st).
+ *
+ * Returns true when the target supports tensor memory and the source buffer is
+ * in `local.fragment` scope while the destination buffer is in `shared.tmem`.
+ *
+ * @param target The compilation target to query for tensor memory support.
+ * @return true if the copy may be lowered to a tcgen05.st instruction; false
+ * otherwise.
+ */
+bool CopyNode::CheckTMemStore(Target target) const {
+  return TargetHasTmem(target) && src.scope() == "local.fragment" &&
+         dst.scope() == "shared.tmem";
+}
+
+/**
  * @brief Selects the most specific copy instruction supported for the given
  * target and buffers.
  *
  * Determines which specialized copy lowering to use (TMA bulk load/store, LDSM,
- * STSM) based on target capabilities and the memory scopes of the
- * source/destination buffers. If TMA lowering is disabled via the flag,
- * BulkLoad/BulkStore are not selected. The selection priority is: BulkLoad,
- * BulkStore, LDSM, STSM, then Normal (fallback).
+ * STSM, TMem load/store) based on target capabilities and the memory scopes of
+ * the source/destination buffers. If TMA lowering is disabled via the flag,
+ * BulkLoad/BulkStore are not selected. The selection priority is: TMemLoad,
+ * TMemStore, BulkLoad1D, BulkStore1D, BulkLoad, BulkStore, LDSM, STSM, then
+ * Normal (fallback).
  *
  * @param target The compilation target used to query hardware capabilities.
  * @param disable_tma_lower If true, prevents selecting TMA-based bulk
@@ -654,6 +751,7 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
   // when tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER is True,
   // we will not use tma for bulk load/store
 
+  // Check tensor memory operations first (highest priority for SM100/Blackwell)
   // 1d tma access can not support out of bound access
   if (!disable_tma_lower && !buffer_oob &&
       CheckBulkLoad1D(target, layout_map, analyzer)) {
@@ -669,6 +767,10 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
     return CopyInst::kLDSM;
   } else if (CheckSTSMCopy(target)) {
     return CopyInst::kSTSM;
+  } else if (CheckTMemLoad(target)) {
+    return CopyInst::kTMemLoad;
+  } else if (CheckTMemStore(target)) {
+    return CopyInst::kTMemStore;
   } else {
     return CopyInst::kNormal;
   }
@@ -688,14 +790,19 @@ CopyInst CopyNode::GetCopyInst(Target target, bool disable_tma_lower,
  */
 Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Target target = T.target;
+
   using namespace tvm::transform;
   PassContext pass_ctx = PassContext::Current();
   bool disable_tma_lower =
       pass_ctx->GetConfig<bool>(kDisableTMALower, false).value();
   auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma,
                                T.layout_map, analyzer);
-  if (copy_inst == CopyInst::kBulkLoad1D ||
-      copy_inst == CopyInst::kBulkStore1D) {
+  if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
+    auto tmem_copy = LowerTmemCopy(T, analyzer);
+    ICHECK(tmem_copy.defined()) << "Failed to lower tensor memory copy";
+    return tmem_copy;
+  } else if (copy_inst == CopyInst::kBulkLoad1D ||
+             copy_inst == CopyInst::kBulkStore1D) {
     auto bulk_copy = LowerBulkCopy1D(T, analyzer, copy_inst);
     ICHECK(bulk_copy.defined()) << "Failed to lower bulk load 1d";
     return bulk_copy;
@@ -973,6 +1080,206 @@ Stmt CopyNode::LowerLDSMCopy(const LowerArgs &T, arith::Analyzer *analyzer,
         Substitute(for_node->body, {{thread_var, thread_var_with_offset}});
   }
   return for_node;
+}
+
+/**
+ * @brief Lower tensor memory copy operations (tcgen05.ld/st/cp).
+ *
+ * Handles copy operations involving shared.tmem buffers (tensor memory on
+ * SM100/Blackwell). Supports three types of tensor memory copies:
+ * - tcgen05.ld: tensor memory -> register (local.fragment)
+ * - tcgen05.st: register (local.fragment) -> tensor memory
+ * - tcgen05.cp: shared memory -> tensor memory
+ *
+ * The function validates buffer scopes, extracts 2D loop structure, performs
+ * layout compatibility checks, selects an appropriate TCGEN05 instruction
+ * variant based on data width and thread count, and emits the corresponding PTX
+ * intrinsic call.
+ *
+ * Currently only tcgen05.ld is fully supported; st/cp will trigger an ICHECK
+ * failure.
+ *
+ * @param T Lowering context (target, thread bounds, layout maps, buffer
+ * remaps).
+ * @param analyzer Arithmetic analyzer for proving bounds and simplifying
+ * expressions.
+ * @return Stmt The lowered tensor memory copy statement, or an empty Stmt if
+ * this copy does not involve tensor memory.
+ */
+Stmt CopyNode::LowerTmemCopy(const LowerArgs &T,
+                             arith::Analyzer *analyzer) const {
+  if (src.scope() != "shared.tmem" && dst.scope() != "shared.tmem") {
+    return Stmt();
+  }
+  ICHECK(TargetHasTmem(T.target)) << "Target " << T.target->ToDebugString()
+                                  << " does not support tensor memory copy";
+
+  // Decide copy type
+  bool is_ld = false; // tcgen05.ld (tensor memory -> register)
+  bool is_st = false; // tcgen05.st (register -> tensor memory)
+  bool is_cp = false; // tcgen05.cp (shared memory -> tensor memory)
+  if (src.scope() == "shared.tmem" && dst.scope() == "local.fragment") {
+    is_ld = true;
+  } else if (src.scope() == "local.fragment" && dst.scope() == "shared.tmem") {
+    is_st = true;
+  } else if (src.scope() == "shared.dyn" && dst.scope() == "shared.tmem") {
+    is_cp = true;
+  } else {
+    ICHECK(0) << "Unsupported tensor memory copy: "
+              << "src scope = " << src.scope()
+              << ", dst scope = " << dst.scope();
+  }
+  // Currently tcgen05.cp is not supported
+  // TODO (mzw) Support tcgen05.cp
+  ICHECK(!is_cp)
+      << "Copy from shared memory to tensor memory is not supported yet";
+  // Currently tcgen05.st is not supported
+  // TODO (mzw) Support tcgen05.st
+  ICHECK(!is_st) << "Copy from register to tensor memory is not supported yet";
+
+  // Extract loop variables and ranges
+  Array<IterVar> loop_vars = MakeIterVars();
+  ICHECK(loop_vars.size() == 2) << "Only support 2D tensor memory copy, got "
+                                << loop_vars.size() << " dimensions";
+  for (const auto &iv : loop_vars)
+    analyzer->Bind(iv->var, iv->dom);
+  PrimExpr src_predicate = MakePredicate(analyzer, loop_vars, src->shape, 0);
+  PrimExpr dst_predicate = MakePredicate(analyzer, loop_vars, dst->shape, 1);
+  ICHECK(!src_predicate.defined() && !dst_predicate.defined())
+      << "Tensor memory copy does not support predicates, got " << src_predicate
+      << " and " << dst_predicate;
+  ICHECK(is_const_int(loop_vars[0]->dom->min) &&
+         is_const_int(loop_vars[0]->dom->extent) &&
+         is_const_int(loop_vars[1]->dom->min) &&
+         is_const_int(loop_vars[1]->dom->extent))
+      << "Tensor memory copy requires loop bounds to be constant integers";
+  int64_t logical_row_min = *as_const_int(loop_vars[0]->dom->min);
+  int64_t logical_row_extent = *as_const_int(loop_vars[0]->dom->extent);
+  int64_t logical_col_min = *as_const_int(loop_vars[1]->dom->min);
+  int64_t logical_col_extent = *as_const_int(loop_vars[1]->dom->extent);
+
+  // Extract thread bounds
+  constexpr int WARP_SIZE = 32; // Set to 32 since only sm100 is supported
+  constexpr int WARPGROUP_SIZE = 4 * WARP_SIZE;
+  ICHECK(is_const_int(T.thread_bounds->extent))
+      << "Tensor memory copy requires thread_bounds->extent (num_threads) to "
+         "be constant integers";
+  int num_threads = *as_const_int(T.thread_bounds->extent);
+  ICHECK(analyzer->CanProveEqual(FloorMod(T.thread_bounds->min, WARPGROUP_SIZE),
+                                 0) &&
+         num_threads % WARPGROUP_SIZE == 0)
+      << "Tensor memory copy requires thread bounds to be aligned to "
+         "warpgroups, but found "
+      << "thread range = " << T.thread_bounds;
+
+  // TODO (mzw) Buffer remap for shared.dyn when is_cp is true?
+
+  // Retrieve layout
+  ICHECK(T.layout_map.count(src))
+      << "Source buffer " << src->name << " does not have a layout specified";
+  ICHECK(T.layout_map.count(dst)) << "Destination buffer " << dst->name
+                                  << " does not have a layout specified";
+  Layout src_layout = T.layout_map[src];
+  Fragment dst_layout = Downcast<Fragment>(T.layout_map[dst]);
+
+  // Check layout
+  Array<PrimExpr> logical_indices = MakeIndices(loop_vars, 0);
+  Array<PrimExpr> phy_indices =
+      src_layout->Forward(logical_indices); // "phy" for "physical"
+
+  // Analyse the range of tmem_phy_row and tmem_phy_col
+  arith::ConstIntBound phy_row_bounds =
+      analyzer->const_int_bound(phy_indices[0]);
+  arith::ConstIntBound phy_col_bounds =
+      analyzer->const_int_bound(phy_indices[1]);
+  int tmem_phy_row_min = phy_row_bounds->min_value;
+  int tmem_phy_row_max = phy_row_bounds->max_value;
+  int tmem_phy_col_min = phy_col_bounds->min_value;
+  int tmem_phy_col_max = phy_col_bounds->max_value;
+  int tmem_phy_row_extent = tmem_phy_row_max - tmem_phy_row_min + 1;
+  int tmem_phy_col_extent = tmem_phy_col_max - tmem_phy_col_min + 1;
+  Range row_dom = Range(tmem_phy_row_min, tmem_phy_row_max + 1);
+  Range col_dom = Range(tmem_phy_col_min, tmem_phy_col_max + 1);
+
+  bool have_succeeded = false;
+  Stmt body;
+
+  auto try_tcgen05_instruction = [&](Tcgen05Meta meta) {
+    if (have_succeeded) {
+      return;
+    }
+    if (tmem_phy_row_min != 0 || tmem_phy_row_max != 127) {
+      return;
+    }
+    if (tmem_phy_col_min % meta.width != 0 ||
+        (tmem_phy_col_max + 1) % meta.width != 0) {
+      return;
+    }
+
+    for (int num_useful_wgs = num_threads / WARPGROUP_SIZE; num_useful_wgs >= 1;
+         num_useful_wgs--) {
+      int num_useful_threads = num_useful_wgs * WARPGROUP_SIZE;
+      auto [is_success, target_frag, num_chunks_each_wg] = expandTcgen05Layout(
+          meta, tmem_phy_col_extent, num_useful_threads, row_dom, col_dom);
+      if (!is_success) {
+        continue;
+      }
+
+      PrimExpr target_thread =
+          target_frag->ForwardThread(phy_indices, std::nullopt);
+      PrimExpr dst_thread =
+          dst_layout->ForwardThread(logical_indices, std::nullopt);
+      if (!analyzer->CanProveEqual(target_thread, dst_thread)) {
+        continue;
+      }
+      PrimExpr target_reg = target_frag->Forward(phy_indices)[0];
+      PrimExpr dst_reg = dst_layout->Forward(logical_indices)[0];
+      if (!analyzer->CanProveEqual(target_reg, dst_reg)) {
+        continue;
+      }
+
+      // All checks passed, we can use this instruction
+      PrimExpr relative_wg_idx =
+          FloorDiv(Sub(T.thread_var, T.thread_bounds->min), WARPGROUP_SIZE);
+      PrimExpr col_offset =
+          num_useful_threads == WARPGROUP_SIZE
+              ? PrimExpr(0)
+              : relative_wg_idx * (num_chunks_each_wg * meta.width);
+      have_succeeded = true;
+      Array<PrimExpr> args;
+      args.push_back(StringImm(meta.intrinsics_name + "<" +
+                               std::to_string(num_chunks_each_wg) + ">"));
+      args.push_back(
+          BufferLoad(src, {(int)logical_row_min,
+                           (int)logical_col_min})); // Will be translated later
+                                                    // in lower_shared_tmem pass
+      args.push_back(col_offset);
+      args.push_back(dst.access_ptr(2, DataType::Handle(), 1, 0,
+                                    PrimExpr(tmem_phy_col_extent)));
+
+      Stmt call =
+          Evaluate(Call(DataType::Handle(), builtin::call_extern(), args));
+      if (num_useful_threads != num_threads) {
+        body =
+            IfThenElse(T.thread_var < T.thread_bounds->min + num_useful_threads,
+                       call, // No-op for unused threads
+                       Stmt());
+      } else {
+        body = call;
+      }
+      break;
+    }
+  };
+
+  try_tcgen05_instruction(getTcgen05Meta_32dp32b());
+  try_tcgen05_instruction(getTcgen05Meta_32dp64b());
+  try_tcgen05_instruction(getTcgen05Meta_32dp128b());
+  try_tcgen05_instruction(getTcgen05Meta_32dp256b());
+
+  ICHECK(have_succeeded) << "Failed to find a suitable instruction for "
+                            "tcgen05.ld. Check your layout.";
+
+  return body;
 }
 
 /**

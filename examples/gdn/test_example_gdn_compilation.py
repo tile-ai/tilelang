@@ -1,10 +1,8 @@
 import tilelang.testing
 import torch
 
-tilelang.disable_cache()
-
 B = 1
-S = 32768
+S = 1024  # small but for test only.
 H = 32
 DK = 128
 DV = 128
@@ -26,7 +24,7 @@ num_stages = 1
 
 
 def test_example_wy_fast_compilation():
-    from example_wy_fast import tilelang_recompute_w_u_fwd, prepare_input, prepare_output
+    from example_wy_fast import tilelang_recompute_w_u_fwd, prepare_input
     K, V, Beta, G, A = prepare_input(
         B,
         S,
@@ -37,7 +35,6 @@ def test_example_wy_fast_compilation():
         getattr(torch, input_dtype),
         getattr(torch, output_dtype),
         gate_dtype=getattr(torch, gate_dtype))
-    W_tilelang, U_tilelang = prepare_output(B, S, H, DK, DV, getattr(torch, output_dtype))
     # tilelang
     block_S = chunk_size
     kernel = tilelang_recompute_w_u_fwd(
@@ -97,13 +94,12 @@ def test_example_wy_fast_bwd_split_compilation():
 
 
 def test_example_chunk_o_compilation():
-    from example_chunk_o import tilelang_chunk_fwd_o, prepare_input, prepare_output
+    from example_chunk_o import tilelang_chunk_fwd_o, prepare_input
     Q, K, V, HIDDEN, G = prepare_input(B, S, H, DK, DV, chunk_size, getattr(torch, input_dtype),
                                        getattr(torch, output_dtype), getattr(torch, accum_dtype),
                                        getattr(torch, gate_dtype))
     scale = 1.0 / DK**0.5
     block_S = chunk_size
-    O_tilelang = prepare_output(B, S, H, DK, DV, chunk_size, getattr(torch, output_dtype))
     kernel = tilelang_chunk_fwd_o(B, S, H, DK, DV, input_dtype, output_dtype, accum_dtype,
                                   gate_dtype, chunk_size, scale, use_g, block_S, block_DK, block_DV,
                                   threads, num_stages)
@@ -111,16 +107,13 @@ def test_example_chunk_o_compilation():
 
 
 def test_example_chunk_o_bwd_compilation():
-    from example_chunk_o_bwd import tilelang_chunk_o_bwd_dqkwg, prepare_input, prepare_output
+    from example_chunk_o_bwd import tilelang_chunk_o_bwd_dqkwg, prepare_input
     Q, K, V, h, G, dO, dh, dv, W = prepare_input(B, S, H, DK, DV, chunk_size,
                                                  getattr(torch, input_dtype),
                                                  getattr(torch, output_dtype),
                                                  getattr(torch, accum_dtype),
                                                  getattr(torch, gate_dtype),
                                                  getattr(torch, state_dtype))
-    dq_tilelang, dk_tilelang, dw_tilelang, dg_tilelang = prepare_output(
-        B, S, H, DK, DV, chunk_size, getattr(torch, output_dtype), getattr(torch, gate_dtype),
-        getattr(torch, state_dtype), block_DK)
     kernel = tilelang_chunk_o_bwd_dqkwg(B, S, H, DK, DV, input_dtype, output_dtype, accum_dtype,
                                         gate_dtype, state_dtype, chunk_size, 1.0, use_g, True,
                                         block_DK, block_DV, threads, num_stages)
@@ -131,10 +124,9 @@ def test_example_chunk_o_bwd_compilation():
 
 
 def test_example_chunk_scaled_dot_kkt_compilation():
-    from example_chunk_scaled_dot_kkt import tilelang_chunk_scaled_dot_kkt_fwd, prepare_input, prepare_output
+    from example_chunk_scaled_dot_kkt import tilelang_chunk_scaled_dot_kkt_fwd, prepare_input
     K, Beta, G = prepare_input(B, S, H, DK, getattr(torch, input_dtype),
                                getattr(torch, output_dtype), getattr(torch, accum_dtype))
-    A_tilelang = prepare_output(B, S, H, chunk_size, getattr(torch, output_dtype))
     block_S = chunk_size
     kernel = tilelang_chunk_scaled_dot_kkt_fwd(B, S, H, DK, chunk_size, input_dtype, output_dtype,
                                                accum_dtype, use_g, block_S, block_DK, threads,
@@ -164,15 +156,12 @@ def test_example_cumsum_compilation():
 
 
 def test_example_chunk_delta_h_compilation():
-    from example_chunk_delta_h import tilelang_chunk_gated_delta_rule_fwd_h, prepare_input, prepare_output
+    from example_chunk_delta_h import tilelang_chunk_gated_delta_rule_fwd_h, prepare_input
     K, W, U, G, initial_state = prepare_input(B, S, H, DK, DV, chunk_size,
                                               getattr(torch, input_dtype),
                                               getattr(torch, output_dtype),
                                               getattr(torch, accum_dtype),
                                               getattr(torch, gate_dtype))
-    h_tilelang, final_state_tilelang, V_new_tilelang = prepare_output(B, S, H, DK, DV, chunk_size,
-                                                                      getattr(torch, output_dtype),
-                                                                      getattr(torch, state_dtype))
     kernel = tilelang_chunk_gated_delta_rule_fwd_h(B, S, H, DK, DV, input_dtype, output_dtype,
                                                    accum_dtype, gate_dtype, state_dtype, chunk_size,
                                                    use_g, use_initial_state, store_final_state,
@@ -183,17 +172,13 @@ def test_example_chunk_delta_h_compilation():
 
 
 def test_example_chunk_delta_bwd_compilation():
-    from example_chunk_delta_bwd import tilelang_chunk_gated_delta_rule_bwd_dhu, prepare_input, prepare_output
+    from example_chunk_delta_bwd import tilelang_chunk_gated_delta_rule_bwd_dhu, prepare_input
     Q, K, W, G, h0, dht, dO, dv = prepare_input(B, S, H, DK, DV, chunk_size,
                                                 getattr(torch, input_dtype),
                                                 getattr(torch, output_dtype),
                                                 getattr(torch, accum_dtype),
                                                 getattr(torch, gate_dtype),
                                                 getattr(torch, state_dtype))
-    dh_tilelang, dh0_tilelang, dv2_tilelang = prepare_output(B, S, H, DK, DV, chunk_size,
-                                                             getattr(torch, output_dtype),
-                                                             getattr(torch, gate_dtype),
-                                                             getattr(torch, state_dtype))
     kernel = tilelang_chunk_gated_delta_rule_bwd_dhu(B, S, H, DK, DV, input_dtype, output_dtype,
                                                      accum_dtype, gate_dtype, state_dtype,
                                                      chunk_size, 1.0, use_g, use_initial_state,

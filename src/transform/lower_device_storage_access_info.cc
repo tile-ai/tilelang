@@ -45,7 +45,7 @@ public:
   Stmt VisitStmt_(const AllocateNode *op) final {
     auto scope = StorageScope::Create(GetPtrStorageScope(op->buffer_var));
     if (!scope.tag.empty() && scope.tag != ".dyn" && scope.tag != ".var" &&
-        scope.tag != ".barrier") {
+        scope.tag != ".barrier" && scope.tag != ".descriptor") {
       auto info = GetMemoryInfo(GetPtrStorageScope(op->buffer_var));
       ICHECK(info.defined())
           << "Cannot find memory info of " << scope.to_string();
