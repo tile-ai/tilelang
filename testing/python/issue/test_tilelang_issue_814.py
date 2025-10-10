@@ -3,8 +3,8 @@ import tilelang.testing
 import tilelang.language as T
 import torch
 
-
-def test_tmp_var(N, block_N, dtype="float"):
+@tilelang.jit
+def _tmp_var_kernel(N, block_N, dtype="float"):
 
     @T.prim_func
     def kernel(
@@ -22,22 +22,14 @@ def test_tmp_var(N, block_N, dtype="float"):
 
 
 def run_tmp_var_test(N=1024, block_N=128):
-    func = test_tmp_var(N, block_N)
-    jit_kernel = tilelang.compile(
-        func,
-        out_idx=[0, 1],
-        target="cuda",
-        pass_configs={
-            tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True
-        })
+    kernel = _tmp_var_kernel(N, block_N)
 
     a = torch.randn(N, device="cuda", dtype=torch.float)
     b = torch.empty(N, device="cuda", dtype=torch.float)
 
     a_ref = a.clone()
 
-    jit_kernel(a, b)
+    kernel(a, b)
 
     # Reference computation
     tmp_ref = torch.maximum(a_ref, torch.tensor(1.0, dtype=torch.float, device="cuda"))
