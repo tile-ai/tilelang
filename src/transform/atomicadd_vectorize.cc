@@ -33,7 +33,6 @@ AtomicAddVectorizePlanner::Plan(const For &node, int compute_capability) {
     }
   });
 
-  LOG(INFO) << vectorize_size_max; // 4
   if (vectorize_size_max <= 1) {
     return {1, dynamic_, condition_};
   }
@@ -238,7 +237,6 @@ For VectorizeAtomicAdd(const For &for_node, int compute_capability) {
   AtomicAddVectorizePlanner planner;
   res = planner.Plan(for_node, compute_capability);
   int vectorize_hint = res.vector_size;
-  LOG(INFO) << vectorize_hint;
   if (vectorize_hint == 1)
     return for_node;
   auto rewriter = AtomicAddVectorizeRewriter(res);

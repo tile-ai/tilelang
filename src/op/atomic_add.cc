@@ -226,6 +226,34 @@ PrimExpr AtomicAddNode::MakePredicate(arith::Analyzer *analyzer,
   }
 }
 
+/**
+ * @brief Build a SIMT-style loop nest that performs element-wise atomic
+ * additions from src to dst.
+ *
+ * Constructs a nested loop (parallelized per iter var) that loads a value from
+ * the source buffer, optionally casts it to the destination dtype, and performs
+ * an extern atomic add into the destination buffer address. For scalar
+ * (zero-dimensional) operations a trivial serial For with a single BufferStore
+ * is returned.
+ *
+ * The method:
+ * - Creates iter vars for all non-singleton extents and binds them into the
+ * provided analyzer.
+ * - Validates loop variable counts against src/dst ranges (ICHECK on mismatch).
+ * - Computes indexed accesses and emits optional bound predicates;
+ * out-of-bounds accesses are masked to zero when predicates are uncertain.
+ * - Emits an extern `call_extern("AtomicAdd", address_of(dst_value),
+ * src_value)` call wrapped in an Evaluate statement.
+ * - Wraps the body with a parallel For at each loop level. If `coalesced_width`
+ * is defined it is attached as the "coalesced_width" annotation on each loop.
+ *
+ * Note: This function mutates the analyzer binding state by binding loop
+ * variables and may fail via ICHECK if internal assumptions about shapes are
+ * violated.
+ *
+ * @return A nested For loop (parallel loops) implementing the atomic-add
+ * kernel. For scalar cases a serial For of extent 1 is returned.
+ */
 For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.empty();
@@ -287,70 +315,6 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 }
 
 /**
- * @brief Lower the atomic-add top-level operator into a parallel, vectorized
- * TIR loop.
- *
- * Constructs a SIMT-style loop for the atomic-add, fuses parallel loops, runs
- * layout inference at multiple levels, partitions the root loop by the provided
- * thread variable, vectorizes the thread loop, and returns the final
- * (optionally predicate-guarded) statement.
- *
- * The lowering pipeline:
- *  - Build the SIMT loop via MakeSIMTLoop.
- *  - Fuse parallel loops into a single For and wrap as a ParallelOp.
- *  - Run layout inference at kCommon, kStrict, and kFree levels using fields
- * from `T`.
- *  - Obtain the loop layout, partition the root loop with PartitionLoop by
- * `T.thread_var`.
- *  - Vectorize the partitioned thread loop via VectorizeLoop.
- *  - If the ParallelOp produced a predicate for `T.thread_var`, return an
- * IfThenElse that guards the vectorized loop with that predicate; otherwise
- * return the vectorized loop.
- *
- * @param T Lowering context whose fields are used:
- *   - T.target: target architecture for layout inference and lowering
- * decisions.
- *   - T.thread_var: the Var used to partition the outer loop for thread-level
- * parallelism.
- *   - T.thread_bounds: bounds associated with the thread dimension (used during
- * partitioning).
- *   - T.layout_map, T.buffer_remap: layout and buffer remapping inputs used
- * during InferLayout.
- * @param analyzer Analyzer used for symbolic reasoning during partitioning and
- * folding (omitted from detailed param docs as a common analysis utility).
- * @return Stmt A lowered TIR statement representing the parallelized and
- * vectorized atomic-add.
- */
-Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
-  Target target = T.target;
-  auto simt_loop = MakeSIMTLoop(analyzer);
-  auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
-  auto par_op = ParallelOp(fused_loop);
-
-  std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
-                                    InferLevel::kFree};
-  for (auto level : levels) {
-    (par_op)->InferLayout({T.target, T.thread_bounds, T.layout_map, analyzer,
-                           false, T.buffer_remap},
-                          level);
-  }
-  auto loop_layout = par_op->GetLoopLayout();
-  Var thread_var = T.thread_var;
-  Range thread_bounds = T.thread_bounds;
-  auto thread_loop =
-      PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer, loop_layout);
-  auto vectorized_thread_loop = VectorizeAtomicAdd(
-      thread_loop, thread_var, thread_bounds, GetArchInt(target));
-
-  if (par_op->GetPredicate(T.thread_var).defined()) {
-    return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
-                      vectorized_thread_loop);
-  }
-
-  return vectorized_thread_loop;
-}
-
-/**
  * @brief Infer and return the layout map for the atomic add operator.
  *
  * Constructs a cached ParallelOp (by building the SIMT loop) if not already
@@ -391,6 +355,41 @@ LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
   return par_op_->InferLayout(T, level);
 }
 
+/**
+ * @brief Lower the atomic-add top-level operator into a parallel, vectorized
+ * TIR loop.
+ *
+ * Constructs a SIMT-style loop for the atomic-add, fuses parallel loops, runs
+ * layout inference at multiple levels, partitions the root loop by the provided
+ * thread variable, vectorizes the thread loop, and returns the final
+ * (optionally predicate-guarded) statement.
+ *
+ * The lowering pipeline:
+ *  - Build the SIMT loop via MakeSIMTLoop.
+ *  - Fuse parallel loops into a single For and wrap as a ParallelOp.
+ *  - Run layout inference at kCommon, kStrict, and kFree levels using fields
+ * from `T`.
+ *  - Obtain the loop layout, partition the root loop with PartitionLoop by
+ * `T.thread_var`.
+ *  - Vectorize the partitioned thread loop via VectorizeLoop.
+ *  - If the ParallelOp produced a predicate for `T.thread_var`, return an
+ * IfThenElse that guards the vectorized loop with that predicate; otherwise
+ * return the vectorized loop.
+ *
+ * @param T Lowering context whose fields are used:
+ *   - T.target: target architecture for layout inference and lowering
+ * decisions.
+ *   - T.thread_var: the Var used to partition the outer loop for thread-level
+ * parallelism.
+ *   - T.thread_bounds: bounds associated with the thread dimension (used during
+ * partitioning).
+ *   - T.layout_map, T.buffer_remap: layout and buffer remapping inputs used
+ * during InferLayout.
+ * @param analyzer Analyzer used for symbolic reasoning during partitioning and
+ * folding (omitted from detailed param docs as a common analysis utility).
+ * @return Stmt A lowered TIR statement representing the parallelized and
+ * vectorized atomic-add.
+ */
 Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Target target = T.target;
   auto simt_loop = MakeSIMTLoop(analyzer);
@@ -510,7 +509,7 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           read_src.value(), C.indice_map[read_src.value()], args.layout_map,
           args.thread_bounds, C.loop_vars);
     } else {
-      For remapped = loop; // 简化处理
+      For remapped = loop;
       loop_layout = PlanLoopPartition(remapped, vec, args.thread_bounds);
     }
 
@@ -527,13 +526,10 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                                   {T.target, T.thread_bounds, T.layout_map,
                                    analyzer, false, T.buffer_remap});
   Fragment loop_layout = ret.loop_layout;
-  LOG(INFO) << loop_layout->DebugOutput();
   auto thread_loop =
       PartitionLoop(transformed_loop, T.thread_var, analyzer, loop_layout);
-  LOG(INFO) << thread_loop;
   auto vectorized_thread_loop =
       VectorizeAtomicAdd(thread_loop, GetArchInt(target));
-  LOG(INFO) << vectorized_thread_loop;
   return vectorized_thread_loop;
 }
 
