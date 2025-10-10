@@ -12,6 +12,7 @@
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
 
+#include <optional>
 #include <utility>
 
 #include "arith/ir_mutator_with_analyzer.h"
@@ -335,15 +336,36 @@ private:
     // passes (Layout rewrite, FlattenBuffer) substitute them with vector lanes
     // that our layout can't handle. Force-inline (by dropping the let) whenever
     // the alias spans more than 2 dims or carries vector lanes.
-    if (const auto *load = value.as<BufferLoadNode>()) {
-      if (load->dtype.lanes() > 1 ||
-          static_cast<int>(load->indices.size()) > 2) {
-        remove_buffer_alias = true;
+    auto get_ranges = [&](const PrimExpr &expr) -> Array<Range> {
+      Array<Range> ranges;
+      if (const auto *load = expr.as<BufferLoadNode>()) {
+        for (const PrimExpr &index : load->indices) {
+          if (const auto *ramp = index.as<RampNode>()) {
+            ranges.push_back(Range::FromMinExtent(ramp->base, ramp->lanes));
+          } else {
+            ranges.push_back(Range::FromMinExtent(index, Integer(1)));
+          }
+        }
+      } else if (const auto *region = expr.as<BufferRegionNode>()) {
+        for (const Range &range : region->region) {
+          ranges.push_back(range);
+        }
       }
-    } else if (const auto *region = value.as<BufferRegionNode>()) {
-      if (region->buffer->dtype.lanes() > 1 ||
-          static_cast<int>(region->region.size()) > 2) {
-        remove_buffer_alias = true;
+      return ranges;
+    };
+    Array<Range> ranges = get_ranges(value);
+    if (!ranges.empty()) {
+      int non_unit_dims = 0;
+      for (const Range &range : ranges) {
+        PrimExpr extent = analyzer_->Simplify(range->extent);
+        if (is_const_int(extent, 1) || analyzer_->CanProveEqual(extent, 1)) {
+          continue;
+        }
+        ++non_unit_dims;
+        if (non_unit_dims > 1) {
+          remove_buffer_alias = true;
+          break;
+        }
       }
     }
     if (remove_buffer_alias) {
@@ -351,7 +373,7 @@ private:
       bool used = UsesVar(
           body, [&](const VarNode *var) { return var == op->var.get(); });
       ICHECK(!used) << "Let binding of BufferLoad is expected to be unused "
-                       "before removal";
+                       "before removal " << op->var << " : " << op->value << " .";
       return body;
     }
 
