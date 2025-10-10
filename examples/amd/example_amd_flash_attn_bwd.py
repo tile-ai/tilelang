@@ -570,7 +570,7 @@ def main(batch: int = 1,
     print(f"Speedup: {speedup:.2f}x")
 
     print("\n=== Verification Results Summary ===")
-    print(f"Forward output: Passed")
+    print("Forward output: Passed")
     print(f"dQ: {'Passed' if dq_close else 'Failed'} (Max diff: {dq_max_diff:.6f})")
     print(f"dK: {'Passed' if dk_close else 'Failed'} (Max diff: {dk_max_diff:.6f})")
     print(f"dV: {'Passed' if dv_close else 'Failed'} (Max diff: {dv_max_diff:.6f})")
