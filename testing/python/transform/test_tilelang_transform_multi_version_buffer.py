@@ -105,5 +105,34 @@ def test_multi_version_buffer():
     _check(before, after)
 
 
+def test_multi_version_buffer_with_let():
+
+    @T.prim_func
+    def before(scales: T.Tensor((4,), "float32")):
+        with T.block("root"):
+            shared = T.alloc_buffer((8,), "float32", scope="shared.dyn")
+            accum = T.alloc_buffer((8,), "float32", scope="local")
+            for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
+                value: T.float32 = scales[k]
+                for i in T.serial(8):
+                    shared[i] = value
+                for i in T.serial(8):
+                    accum[i] = accum[i] + shared[i]
+
+    @T.prim_func
+    def after(scales: T.Tensor((4,), "float32")):
+        with T.block("root"):
+            shared = T.alloc_buffer((2, 8), "float32", scope="shared.dyn")
+            accum = T.alloc_buffer((8,), "float32", scope="local")
+            for k in T.serial(4, annotations={"num_stages": T.int32(2)}):
+                value: T.float32 = scales[k]
+                for i in T.serial(8):
+                    shared[k % 2, i] = value
+                for i in T.serial(8):
+                    accum[i] = accum[i] + shared[k % 2, i]
+
+    _check(before, after)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

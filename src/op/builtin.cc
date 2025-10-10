@@ -25,6 +25,7 @@ TVM_REGISTER_PASS_CONFIG_OPTION(kConfigIndexBitwidth, Integer);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableDynamicTailSplit, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDynamicAlignment, Integer);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableAggressiveSharedMemoryMerge, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kForceLetInline, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableFastMath, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableFastMath, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kPtxasRegisterUsageLevel, Integer);

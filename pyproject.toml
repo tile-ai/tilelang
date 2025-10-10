@@ -24,6 +24,11 @@ skip = [
     ".venv"
 ]
 
+[tool.ruff]
+target-version = "py38"
+line-length = 100
+output-format = "full"
+
 [tool.ruff.lint]
 select = [
     # pycodestyle
@@ -48,10 +53,14 @@ ignore = [
     "E741",
     # line too long
     "E501",
+    # if-else-block instead of ternary
+    "SIM108",
     # key in dict.keys()
     "SIM118",
     # memory leaks
     "B019",
+    # zip without explicit strict
+    "B905",
     # No such file or directory
     "E902",
 ]
