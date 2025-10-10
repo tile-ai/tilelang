@@ -1,5 +1,5 @@
+from __future__ import annotations
 from tvm.tir import Buffer
-from typing import List, Optional
 from functools import reduce
 from tvm import IRModule
 from tvm.tir import PrimFunc
@@ -85,7 +85,7 @@ def get_buffer_elems(buffer: Buffer) -> int:
     return reduce(lambda x, y: x * y, buffer.shape)
 
 
-def array_reduce(array: List[int]) -> int:
+def array_reduce(array: list[int]) -> int:
     """
     Reduce an array of integers to a single integer.
 
@@ -121,7 +121,7 @@ def retrieve_func_from_module(ir_module: IRModule) -> PrimFunc:
     return func
 
 
-def get_buffer_region_from_load(buffer_load: tir.BufferLoad) -> Optional[tir.BufferRegion]:
+def get_buffer_region_from_load(buffer_load: tir.BufferLoad) -> tir.BufferRegion | None:
     """
     Get the buffer region from a buffer load.
 

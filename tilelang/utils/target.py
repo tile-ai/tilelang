@@ -1,5 +1,6 @@
+from __future__ import annotations
 from platform import mac_ver
-from typing import Literal, Union
+from typing import Literal
 from tilelang import tvm as tvm
 from tilelang import _ffi_api
 from tvm.target import Target
@@ -51,8 +52,8 @@ def check_metal_availability() -> bool:
     return arch == 'arm64'
 
 
-def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
-                     return_object: bool = False) -> Union[str, Target]:
+def determine_target(target: str | Target | Literal["auto"] = "auto",
+                     return_object: bool = False) -> str | Target:
     """
     Determine the appropriate target for compilation (CUDA, HIP, or manual selection).
 
@@ -69,7 +70,7 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
         AssertionError: If the target is invalid.
     """
 
-    return_var: Union[str, Target] = target
+    return_var: str | Target = target
 
     if target == "auto":
         target = tvm.target.Target.current(allow_none=True)

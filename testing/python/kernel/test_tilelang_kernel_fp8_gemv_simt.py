@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 import torch.backends
 import tilelang.testing
@@ -7,7 +8,6 @@ import tilelang.language as T
 from tilelang import JITKernel
 from tilelang.transform.simplify import apply_simplify
 from tilelang.utils.tensor import map_torch_type
-from typing import Optional
 
 tilelang.testing.set_random_seed(0)
 
@@ -22,8 +22,8 @@ def gemv_simt(
     trans_A: bool,
     trans_B: bool,
     with_bias: bool = False,
-    n_partition: Optional[int] = 4,
-    reduce_thread: Optional[int] = 32,
+    n_partition: int | None = 4,
+    reduce_thread: int | None = 32,
 ):
     assert n_partition is not None, "n_partition must be provided"
     assert reduce_thread is not None, (

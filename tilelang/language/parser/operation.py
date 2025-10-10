@@ -17,8 +17,7 @@
 # This file is modified from the original version,
 # which is part of the TVM project (https://tvm.apache.org/).
 """The tir expression operation registration"""
-
-from typing import Type
+from __future__ import annotations
 
 from tvm import tir
 from tvm.ffi.runtime_ctypes import DataType, DataTypeCode
@@ -28,7 +27,7 @@ from tvm.tir.expr import FloatImm
 from tvm.script.parser._core import OpMethod, doc, register_op
 
 
-def _register_expr_op(ty: Type):  # pylint: disable=invalid-name
+def _register_expr_op(ty: type):  # pylint: disable=invalid-name
     ty._dispatch_type = ty  # pylint: disable=protected-access
 
     def _and(a, b):
@@ -115,7 +114,7 @@ def _register_expr_op(ty: Type):  # pylint: disable=invalid-name
     def _ge(a, b):
         return _auto_broadcast(a, b, tir.GE)
 
-    def r(op: Type, i: int, m: OpMethod):  # pylint: disable=invalid-name
+    def r(op: type, i: int, m: OpMethod):  # pylint: disable=invalid-name
         register_op(ty, op, i)(m)
 
     for i in [0, 1]:

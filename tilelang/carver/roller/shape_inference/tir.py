@@ -1,4 +1,5 @@
-from typing import Dict, List, Tuple, Set, Mapping
+from __future__ import annotations
+from typing import Mapping
 from tvm.tir.schedule.schedule import BlockRV
 from tvm.ir import structural_equal
 from tvm import arith, tir
@@ -15,7 +16,7 @@ class Statement:
 
         self.reverse_bound_inference = {}
 
-    def make_reverse(self, input_name: str, input_iter: List[tir.PrimExpr]):
+    def make_reverse(self, input_name: str, input_iter: list[tir.PrimExpr]):
         if len(self.block_analyzer.get_reduce_axis(self.block)) > 0:
             return None
         if len(self.dependent_region[input_name]) != 1:
@@ -89,7 +90,7 @@ class DependencyAnalysis:
         This is a workaround for the issue that we have two same ops' fuse case.
         See https://github.com/apache/tvm/issues/16433
         """
-        _names: Set = set()
+        _names: set = set()
         name2dep: Mapping = {}
         for dep in deps:
             output_buffer = dep.block_analyzer.get_output_buffers(dep.block)[0]
@@ -168,7 +169,7 @@ class DependencyAnalysis:
 
 class InputShapeInference:
 
-    def __init__(self, deps: List[Statement]):
+    def __init__(self, deps: list[Statement]):
         self.deps = deps
         self.target_mapping = {}
         self.buffer_mapping = {}
@@ -179,7 +180,7 @@ class InputShapeInference:
         self.dep_analysis = DependencyAnalysis(self.deps)
         self.dep_analysis.analyze()
 
-    def construct_dependency_target(self, targets: Tuple[str]):
+    def construct_dependency_target(self, targets: tuple[str]):
         if targets in self.target_mapping:
             return self.target_mapping[targets]
         # should be buffer name instead of block name
@@ -242,8 +243,8 @@ class InputShapeInference:
         return input_vars, mapping
 
     def infer(self,
-              shape: Dict[str, List[arith.ConstIntBound]],
-              rstep: Dict[str, int] = None,
+              shape: dict[str, list[arith.ConstIntBound]],
+              rstep: dict[str, int] = None,
               targets=None):
         if rstep is None:
             rstep = {}
@@ -354,7 +355,7 @@ def walk_indice(expr):
         raise Exception(f"Unhandled node type in walk_indice(): {expr}")
 
 
-def _extract_dependent_region(block_analyzer, block: BlockRV) -> Dict[str, List[tir.PrimExpr]]:
+def _extract_dependent_region(block_analyzer, block: BlockRV) -> dict[str, list[tir.PrimExpr]]:
     input_buffers = block_analyzer.get_input_buffers(block)
     dependent_region = {buffer.name: [] for buffer in input_buffers}
 

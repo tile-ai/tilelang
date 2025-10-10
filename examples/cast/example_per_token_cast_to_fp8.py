@@ -1,7 +1,7 @@
+from __future__ import annotations
 import torch
 import tilelang
 import tilelang.language as T
-from typing import Tuple
 from tilelang.utils.tensor import torch_assert_close
 
 tilelang.disable_cache()
@@ -66,7 +66,7 @@ def ceil_div(x: int, y: int) -> int:
     return (x + y - 1) // y
 
 
-def ref_program(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def ref_program(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     # this function don't support cpu tensor
     assert x.dim() == 2
     m, n = x.shape

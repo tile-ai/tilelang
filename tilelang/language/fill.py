@@ -1,12 +1,12 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
 from tvm import tir
-from typing import Union
 from tilelang.language import has_let_value, get_let_value
 from tilelang.utils.language import get_buffer_region_from_load
 
 
-def fill(buffer: Union[tir.Buffer, tir.BufferRegion], value: tir.PrimExpr):
+def fill(buffer: tir.Buffer | tir.BufferRegion, value: tir.PrimExpr):
     """Fill a buffer or buffer region with a specified value.
 
     Args:
@@ -21,7 +21,7 @@ def fill(buffer: Union[tir.Buffer, tir.BufferRegion], value: tir.PrimExpr):
     return tir.call_intrin("handle", tir.op.Op.get("tl.fill"), buffer, value)
 
 
-def clear(buffer: Union[tir.Buffer, tir.Var]):
+def clear(buffer: tir.Buffer | tir.Var):
     """Clear a buffer by filling it with zeros.
 
     Args:

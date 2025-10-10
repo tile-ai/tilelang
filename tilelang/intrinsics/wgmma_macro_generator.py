@@ -1,6 +1,7 @@
+from __future__ import annotations
 import tilelang.language as T
 from enum import IntEnum
-from typing import Optional, Callable
+from typing import Callable
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm import DataType
 from tvm.tir import PrimExpr, Buffer, Var, IndexMap
@@ -86,8 +87,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         chunk: int = 16,
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
-        is_m_first: Optional[bool] = False,
-        thread_var: Optional[Var] = None,
+        is_m_first: bool | None = False,
+        thread_var: Var | None = None,
     ):
         super().__init__(a_dtype, b_dtype, accum_dtype, a_transposed, b_transposed, block_row_warps,
                          block_col_warps, warp_row_tiles, warp_col_tiles, chunk, reduce_k,

@@ -1,3 +1,4 @@
+from __future__ import annotations
 import argparse
 import itertools
 import tilelang
@@ -5,7 +6,6 @@ import tilelang.language as T
 from tilelang.engine.param import KernelParam
 from tilelang.utils.tensor import get_tensor_supply, TensorSupplyType
 import torch
-from typing import List
 
 DEFAULT_BLOCK_M = 128
 DEFAULT_BLOCK_N = 128
@@ -70,7 +70,7 @@ def ref_program(A, B, BlockMask, block_M, block_N, block_K):
     return ref_c
 
 
-def supply_program(params: List[KernelParam]):
+def supply_program(params: list[KernelParam]):
     input_tensors = []
 
     for p in params:

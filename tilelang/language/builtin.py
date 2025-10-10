@@ -1,11 +1,12 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
 from tilelang import tvm as tvm
 from tilelang.language import ptx_arrive_barrier, evaluate
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.utils.target import check_hip_availability
 from tvm import tir
-from typing import Union, Any
+from typing import Any
 from tvm.tir import PrimExpr, Var, Call, Buffer, BufferLoad
 
 _IS_HIP_AVAILABLE = check_hip_availability()
@@ -169,7 +170,7 @@ def disable_warp_group_reg_alloc():
     return no_set_max_nreg()
 
 
-def mbarrier_wait_parity(mbarrier: Union[int, PrimExpr, tir.Call], parity: Union[int, Var]):
+def mbarrier_wait_parity(mbarrier: int | PrimExpr | tir.Call, parity: int | Var):
     """Wait for memory barrier parity condition.
 
     Args:
@@ -219,7 +220,7 @@ def mbarrier_wait_parity(mbarrier: Union[int, PrimExpr, tir.Call], parity: Union
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
 
 
-def mbarrier_arrive(mbarrier: Union[int, PrimExpr, tir.Call]):
+def mbarrier_arrive(mbarrier: int | PrimExpr | tir.Call):
     """Arrive at memory barrier.
 
     Args:
@@ -262,7 +263,7 @@ def wait_wgmma(id: int):
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait_wgmma"), id)
 
 
-def barrier_wait(barrier_id: Union[int, PrimExpr, tir.Call], parity: Union[int, Var, None] = None):
+def barrier_wait(barrier_id: int | PrimExpr | tir.Call, parity: int | Var | None = None):
     """Wait for a memory barrier to complete.
 
     Args:
@@ -277,7 +278,7 @@ def barrier_wait(barrier_id: Union[int, PrimExpr, tir.Call], parity: Union[int, 
     return mbarrier_wait_parity(barrier_id, parity)
 
 
-def barrier_arrive(barrier_id: Union[int, PrimExpr, tir.Call]):
+def barrier_arrive(barrier_id: int | PrimExpr | tir.Call):
     """Arrive at a memory barrier.
 
     Args:
@@ -287,7 +288,7 @@ def barrier_arrive(barrier_id: Union[int, PrimExpr, tir.Call]):
     return mbarrier_arrive(barrier_id)
 
 
-def shfl_xor(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
+def shfl_xor(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
     """Perform a shuffle operation with XOR offset.
 
     Args:
@@ -304,7 +305,7 @@ def shfl_xor(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr,
         return tir.call_extern(value.dtype, "__shfl_xor_sync", 0xffffffff, value, offset)
 
 
-def shfl_down(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
+def shfl_down(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
     """Perform a shuffle operation with down offset.
 
     Args:
@@ -317,7 +318,7 @@ def shfl_down(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr
         return tir.call_extern(value.dtype, "__shfl_down_sync", 0xffffffff, value, offset)
 
 
-def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
+def shfl_up(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
     """Perform a shuffle operation with up offset.
 
     Args:
@@ -422,7 +423,7 @@ def loop_break():
     return tir.call_intrin("handle", tir.op.Op.get("tl.loop_break"))
 
 
-def cp_async_barrier_noinc(barrier_id: Union[int, PrimExpr, tir.Call]):
+def cp_async_barrier_noinc(barrier_id: int | PrimExpr | tir.Call):
     """Perform a ptx async copy barrier using cp.async.mbarrier.arrive.noinc.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier_id)

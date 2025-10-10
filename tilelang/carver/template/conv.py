@@ -1,8 +1,8 @@
+from __future__ import annotations
 from dataclasses import dataclass
 from .base import BaseTemplate
 from tvm import te, tir
 from ..roller import Hint
-from typing import List
 from ..utils import get_roller_hints_from_func
 
 
@@ -44,7 +44,7 @@ class ConvTemplate(BaseTemplate):
     accum_dtype: str = "float16"  # Data type for accumulation
     with_bias: bool = False  # Whether to add a bias term
 
-    def get_hardware_aware_configs(self, arch=None, topk=10) -> List[Hint]:
+    def get_hardware_aware_configs(self, arch=None, topk=10) -> list[Hint]:
         """
         Retrieves optimized hardware-aware configurations.
 

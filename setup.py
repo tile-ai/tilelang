@@ -1,3 +1,4 @@
+from __future__ import annotations
 import fcntl
 import functools
 import hashlib
@@ -6,7 +7,6 @@ import shutil
 from setuptools import setup, find_packages, Extension
 from setuptools.command.build_py import build_py
 from setuptools.command.sdist import sdist
-from typing import List, Optional
 import re
 import tarfile
 from io import BytesIO
@@ -121,7 +121,7 @@ def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)
 
 
-def get_requirements(file_path: str = "requirements.txt") -> List[str]:
+def get_requirements(file_path: str = "requirements.txt") -> list[str]:
     """Get Python package dependencies from requirements.txt."""
     with open(get_path(file_path)) as f:
         requirements = f.read().strip().split("\n")
@@ -243,7 +243,7 @@ def get_cplus_compiler():
 
 
 @functools.lru_cache(maxsize=None)
-def get_cython_compiler() -> Optional[str]:
+def get_cython_compiler() -> str | None:
     """Return the path to the Cython compiler.
 
     Returns
