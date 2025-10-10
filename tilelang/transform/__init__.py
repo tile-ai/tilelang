@@ -282,6 +282,17 @@ def AnnotateDeviceRegions():
     return _ffi_api.AnnotateDeviceRegions()  # type: ignore
 
 
+def SplitHostDevice():
+    """Split host/device functions even for empty kernels.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.SplitHostDevice()  # type: ignore
+
+
 def VectorizeLoop(enable_vectorize: bool = True):
     """VectorizeLoop
 
