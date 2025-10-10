@@ -52,9 +52,9 @@ Before contributing to TileLang, please follow the instructions below to setup.
 2. Setup a development environment:
 
     ```bash
-    uv venv --seed venv  # use `python3 -m venv venv` if you don't have `uv`
+    uv venv --seed .venv  # use `python3 -m venv .venv` if you don't have `uv`
 
-    source venv/bin/activate
+    source .venv/bin/activate
     python3 -m pip install --upgrade pip setuptools wheel "build[uv]"
     uv pip install --requirements requirements-dev.txt
     ```
