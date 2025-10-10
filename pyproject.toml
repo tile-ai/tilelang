@@ -26,6 +26,8 @@ skip = [
 
 [tool.ruff]
 target-version = "py38"
+line-length = 100
+output-format = "full"
 
 exclude = [
     "3rdparty",
@@ -56,12 +58,16 @@ ignore = [
     "E741",
     # line too long
     "E501",
+    # if-else-block instead of ternary
+    "SIM108",
     # key in dict.keys()
     "SIM118",
     # open file w.o. ctx manager
     "SIM115",
     # memory leaks
     "B019",
+    # zip without explicit strict
+    "B905",
     # No such file or directory
     "E902",
 ]

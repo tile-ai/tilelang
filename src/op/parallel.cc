@@ -215,9 +215,9 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     return {};
   if (level == InferLevel::kStrict) {
     LayoutMap results;
-    // Deduce buffers that shoule be complicated replicated.
+    // Deduce buffers that should be complicated replicated.
     // For example:
-    // for i in T.Parllel(m):
+    // for i in T.Parallel(m):
     //   fragment[0] = x[i]
     // then fragment[0] must be replicated on all threads.
     for (const auto &[buffer, indices] : indice_map_) {

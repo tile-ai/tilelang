@@ -2210,7 +2210,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
   DataType element_dtype = op->buffer->dtype;
 
   int lanes = op->dtype.lanes();
-  // delcare type.
+  // declare type.
   if (value_dtype.lanes() == element_dtype.lanes()) {
     std::string ref = GetBufferRef(op->dtype, op->buffer.get(), index);
     HandleVolatileLoads(ref, op, os);

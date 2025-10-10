@@ -56,7 +56,7 @@ else()
 
   # Set default build type to RelWithDebInfo if not provided
   if(NOT CMAKE_BUILD_TYPE)
-  # Set default build type to Release if not provided
+    # Set default build type to Release if not provided
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
     message(STATUS "Setting default build type to ${CMAKE_BUILD_TYPE}")
   endif()
@@ -199,7 +199,7 @@ if(USE_CUDA)
   set(CUDA_MAJOR_VERSION ${CUDAToolkit_VERSION_MAJOR})
   message(STATUS "Setting CUDA_MAJOR_VERSION=${CUDA_MAJOR_VERSION}")
   add_compile_definitions(CUDA_MAJOR_VERSION=${CUDA_MAJOR_VERSION})
-  
+
   list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
 endif(USE_CUDA)
 

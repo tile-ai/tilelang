@@ -65,7 +65,7 @@ class LibraryGenerator:
         verbose = self.verbose
         if is_cuda_target(target):
             from tilelang.env import CUTLASS_INCLUDE_DIR
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
+            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
             target_arch = get_target_arch(get_target_compute_version(target))
             libpath = src.name.replace(".cu", ".so")
 
@@ -112,7 +112,7 @@ class LibraryGenerator:
 
         elif is_hip_target(target):
             from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)
+            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cpp", ".so")
             rocm_path = find_rocm_path()
             arch = get_rocm_arch(rocm_path)
@@ -129,7 +129,7 @@ class LibraryGenerator:
             ]
         elif is_cpu_target(target):
             from tilelang.contrib.cc import get_cplus_compiler
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)
+            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cpp", ".so")
 
             command = [get_cplus_compiler(), "-std=c++17", "-fPIC", "-shared", src.name]
@@ -229,7 +229,7 @@ class PyLibraryGenerator(LibraryGenerator):
         verbose = self.verbose
         if is_cuda_target(target):
             from tilelang.env import (CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH)
-            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)
+            src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cu", ".cubin")
 
             project_root = osp.join(osp.dirname(__file__), "..", "..")
