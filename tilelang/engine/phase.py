@@ -90,7 +90,7 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Inject assumes to speedup tvm prover
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
-    mod = tir.transform.Simplify()(mod)
+    mod = tilelang.transform.Simplify()(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
     # Infer memory layouts for fragments and shared memory
