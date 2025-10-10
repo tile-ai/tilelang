@@ -24,6 +24,7 @@ env:
   PYTHONUNBUFFERED: "1"
   FORCE_COLOR: "1"
   CLICOLOR_FORCE: "1"
+  UV_INDEX_STRATEGY: "unsafe-best-match"
   XDG_CACHE_HOME: "${{ github.workspace }}/.cache"
   PIP_CACHE_DIR: "${{ github.workspace }}/.cache/pip"
   UV_CACHE_DIR: "${{ github.workspace }}/.cache/uv"
@@ -59,7 +60,7 @@ jobs:
           fi
 
   tests:
-    name: Test for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }} on ${{ matrix.runner.name }}
+    name: Test for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }} (on ${{ matrix.runner.name }})
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     needs: [lint]
     runs-on: ${{ matrix.runner.tags }}
