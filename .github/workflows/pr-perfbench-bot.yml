@@ -42,8 +42,7 @@ jobs:
       - name: Install original version
         run: |
           echo "Check files to be deleted!"
-          git clean -dxn | grep -v 'tll/' | xargs -I {} echo {}
-          git clean -dxn | grep -v 'tll/' | xargs -I {} rm -rf {}
+          git clean -dxf -e tll/
           echo "Delete files completed!"
           git checkout main
           python -m venv tl
