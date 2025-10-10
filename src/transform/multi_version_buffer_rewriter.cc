@@ -156,11 +156,30 @@ private:
     std::unordered_set<const BufferNode *> consumer_used, producer_used;
     std::unordered_map<const BufferNode *, size_t> first_write_index;
     std::unordered_map<const BufferNode *, size_t> last_read_index;
+    auto is_copy_stage = [&](size_t idx) {
+      bool has_shared_write = false;
+      for (const BufferRegion &wr : writes[idx]) {
+        auto scope = wr->buffer.scope();
+        if (scope == "shared" || scope == "shared.dyn") {
+          has_shared_write = true;
+          break;
+        }
+      }
+      if (!has_shared_write)
+        return false;
+      for (const BufferRegion &rd : reads[idx]) {
+        if (rd->buffer.scope() == "global") {
+          return true;
+        }
+      }
+      return false;
+    };
     for (size_t i = 0; i < seq_stmt.size(); i++) {
-      // Warp-specialized lowering may tag stages as kBoth, so treat them as
-      // producing and consuming to keep the liveness information intact.
-      bool is_producer = roles[i] == Role::kProducer || roles[i] == Role::kBoth;
-      bool is_consumer = roles[i] == Role::kConsumer || roles[i] == Role::kBoth;
+      bool copy_stage = is_copy_stage(i);
+      bool is_producer = roles[i] == Role::kProducer ||
+                         (roles[i] == Role::kBoth && copy_stage);
+      bool is_consumer = roles[i] == Role::kConsumer ||
+                         (roles[i] == Role::kBoth && !copy_stage);
       if (is_producer) {
         for (BufferRegion br : writes[i]) {
           producer_used.insert(br->buffer.get());
@@ -194,6 +213,8 @@ private:
       auto it_r = last_read_index.find(buffer.get());
       if (it_w != first_write_index.end() && it_r != last_read_index.end() &&
           it_w->second < it_r->second) {
+        if (!is_copy_stage(it_w->second))
+          continue;
         versioned_buffers.push_back(buffer);
       }
     }
