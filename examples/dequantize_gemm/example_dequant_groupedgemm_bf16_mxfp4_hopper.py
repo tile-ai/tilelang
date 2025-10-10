@@ -4,7 +4,7 @@ from tilelang.quantize import _tir_u8_to_f4_to_bf16
 from tilelang import tvm as tvm
 from tvm import DataType
 import torch
-from utils import torch_convert_bit_twiddling, assert_similar
+from dequantize_utils import torch_convert_bit_twiddling, assert_similar
 from tilelang.autotuner import set_autotune_inputs
 
 

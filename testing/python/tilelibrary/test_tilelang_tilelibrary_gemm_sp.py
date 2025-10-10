@@ -2,7 +2,7 @@ import torch
 import tilelang
 import tilelang.testing
 
-from tilelang.utils.sparse import compress
+from tilelang.utils.sparse import compress, randn_semi_sparse
 from tilelang.layout import make_metadata_layout
 
 tilelang.disable_cache()
@@ -153,38 +153,6 @@ def matmul_sp_sm80(
     return main
 
 
-def generate_sparse_tensor_float32(M: int, K: int, dtype: torch.dtype, device='cpu', trans_A=False):
-    elem, group = SPARSITY_MAP[dtype]
-    if K % group != 0:
-        raise ValueError(
-            f"Last dimension must be divisible by {group} for {elem}:{group} sparsity.")
-
-    if trans_A:
-        full_tensor = torch.randn(K * M, dtype=torch.float32, device=device).view(K, M)
-        mask = torch.zeros_like(full_tensor, dtype=torch.bool)
-        for j in range(M):
-            for i in range(0, K, group):
-                flat_idx = torch.randint(0, group, (elem,), dtype=torch.int64)
-                for k in range(1, len(flat_idx)):
-                    while flat_idx[k] in flat_idx[:k]:
-                        flat_idx[k] = torch.randint(0, group, (1,), dtype=torch.int64)
-                for idx in flat_idx:
-                    mask[i + idx, j] = True
-    else:
-        full_tensor = torch.randn((M, K), dtype=torch.float32, device=device).view(M, K)
-        mask = torch.zeros_like(full_tensor, dtype=torch.bool)
-        for i in range(M):
-            for j in range(0, K, group):
-                flat_idx = torch.randint(0, group, (elem,), dtype=torch.int64)
-                for k in range(1, len(flat_idx)):
-                    while flat_idx[k] in flat_idx[:k]:
-                        flat_idx[k] = torch.randint(0, group, (1,), dtype=torch.int64)
-                for idx in flat_idx:
-                    mask[i, j + idx] = True
-
-    return full_tensor * mask
-
-
 def normalize(tensor, max_range=100.0):
     assert max_range <= 448.0
     max_v = tensor.abs().max().clamp(1e-4)
@@ -214,16 +182,15 @@ def run_gemm_sp(
         kernel,
         out_idx=[-1],
     )
-    A = generate_sparse_tensor_float32(
-        M, K, dtype=STR_TO_TYPE[in_dtype], device='cuda', trans_A=trans_A)
+    A = randn_semi_sparse(M, K, dtype=STR_TO_TYPE[in_dtype], device='cuda', transposed=trans_A)
     if trans_B:
         B = torch.randn((N, K), device='cuda', dtype=torch.float32)
     else:
         B = torch.randn((K, N), device='cuda', dtype=torch.float32)
 
     if "float8" in in_dtype or "int8" in in_dtype:
-        A = normalize(A)
-        B = normalize(B)
+        A = normalize(A.float())
+        B = normalize(B.float())
 
     A = A.to(STR_TO_TYPE[in_dtype])
     B = B.to(STR_TO_TYPE[in_dtype])

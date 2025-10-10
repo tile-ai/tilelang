@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 import tilelang
-from tilelang.autotuner import *
 import tilelang.language as T
 from einops import rearrange, einsum
 import argparse
@@ -9,6 +8,24 @@ import argparse
 tilelang.disable_cache()
 
 
+def get_configs():
+    import itertools
+    BLOCK_N = [16, 32, 64, 128]
+    BLOCK_H = [16, 32, 64, 128]
+    num_split = [1, 2, 4, 8, 16, 32]
+    threads = [128, 256]
+
+    _configs = list(itertools.product(BLOCK_N, BLOCK_H, num_split, threads))
+
+    return [{
+        "block_N": c[0],
+        "block_H": c[1],
+        "num_split": c[2],
+        "threads": c[3],
+    } for c in _configs]
+
+
+@tilelang.autotune(configs=get_configs())
 @tilelang.jit(
     out_idx=[6], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
@@ -273,16 +290,16 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=1, help='batch size')
+    parser.add_argument('--batch', type=int, default=128, help='batch size')
     parser.add_argument('--heads', type=int, default=128, help='q heads number')
     parser.add_argument('--kv_heads', type=int, default=1, help='kv heads number')
-    parser.add_argument('--kv_ctx', type=int, default=1024, help='kv context length')
+    parser.add_argument('--kv_ctx', type=int, default=8192, help='kv context length')
     parser.add_argument('--dim', type=int, default=512, help='head dim')
     parser.add_argument('--pe_dim', type=int, default=64, help='pe head dim')
-    parser.add_argument('--auto_tune', action='store_true', help='auto tune')
+    parser.add_argument('--autotune', action='store_true', help='auto tune')
     args = parser.parse_args()
     batch, heads, kv_heads, kv_ctx, dim, pe_dim = args.batch, args.heads, args.kv_heads, args.kv_ctx, args.dim, args.pe_dim
-    enable_autotune = args.auto_tune
+    enable_autotune = args.autotune
 
     qk_flops = 2 * batch * heads * kv_ctx * (dim + pe_dim)
     pv_flops = 2 * batch * heads * kv_ctx * dim
@@ -290,9 +307,22 @@ if __name__ == "__main__":
     BLOCK_N = 32
     BLOCK_H = 64
     num_split = 4
+    threads = 128
 
-    kernel = flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H,
-                             num_split)
+    if enable_autotune:
+        kernel = flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim)
+    else:
+        kernel = flashmla_decode(
+            batch,
+            heads,
+            kv_heads,
+            kv_ctx,
+            dim,
+            pe_dim,
+            BLOCK_N,
+            BLOCK_H,
+            num_split,
+            threads=threads)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     input_tensors = profiler._get_inputs()
     tilelang_output = kernel(*input_tensors)
@@ -303,35 +333,3 @@ if __name__ == "__main__":
     latency = profiler.do_bench(warmup=500)
     print(f"Latency: {latency} ms")
     print(f"TFlops: {total_flops / latency * 1e-9} TFlops")
-
-    # Enable Auto Tuning
-
-
-    def get_configs():
-        import itertools
-        BLOCK_N = [16, 32, 64, 128]
-        BLOCK_H = [16, 32, 64, 128]
-        num_split = [1, 2, 4, 8, 16, 32]
-        thread_num = [128, 256]
-
-        _configs = list(itertools.product(BLOCK_N, BLOCK_H, num_split, thread_num))
-
-        return [{
-            "block_N": c[0],
-            "block_H": c[1],
-            "num_split": c[2],
-            "thread_num": c[3],
-        } for c in _configs]
-
-    def wrapped_kernel(block_N=None, block_H=None, num_split=None, thread_num=None):
-        return flashmla_decode(batch, heads, kv_heads, kv_ctx, dim, pe_dim, block_N, block_H,
-                               num_split, thread_num)
-
-    if enable_autotune:
-        autotuner = AutoTuner.from_kernel(kernel=wrapped_kernel, configs=get_configs())
-        tune_result = autotuner.run(warmup=3, rep=20)
-        best_latency = tune_result.latency
-        best_config = tune_result.config
-        print(f"Best latency: {best_latency} ms")
-        print(f"Best TFlops: {total_flops / best_latency * 1e-9} TFlops")
-        print(f"Best config: {best_config}")

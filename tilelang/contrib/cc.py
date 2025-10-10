@@ -19,6 +19,7 @@ import functools
 import os
 import shutil
 import subprocess
+import platform
 
 # pylint: disable=invalid-name
 import sys
@@ -87,6 +88,10 @@ def get_cplus_compiler():
             if os.path.isfile(cc_path) and os.access(cc_path, os.X_OK):
                 return cc_path
     return None
+
+
+def is_darwin():
+    return platform.system() == 'Darwin'
 
 
 def create_shared(output, objects, options=None, cc=None, cwd=None, ccache_env=None):

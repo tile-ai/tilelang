@@ -69,7 +69,7 @@ def flashattn(
     @T.macro
     def MMA1(
         V: T.Tensor(kv_shape, dtype),
-        V_shared: T.SharedBuffer([block_M, dim], dtype),
+        V_shared: T.SharedBuffer([block_N, dim], dtype),
         acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
         acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
         k: T.int32,

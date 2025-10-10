@@ -6,7 +6,7 @@ from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.utils.target import check_hip_availability
 from tvm import tir
 from typing import Union, Any
-from tvm.tir import PrimExpr, Var, Call
+from tvm.tir import PrimExpr, Var, Call, Buffer, BufferLoad
 
 _IS_HIP_AVAILABLE = check_hip_availability()
 
@@ -330,10 +330,15 @@ def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, 
         return tir.call_extern(value.dtype, "__shfl_up_sync", 0xffffffff, value, offset)
 
 
-def sync_threads():
+def sync_threads(barrier_id: int = None, arrive_count: int = None):
     """Synchronize all threads in a block.
     """
-    return tir.op.tvm_storage_sync("shared")
+    args = []
+    if barrier_id is not None:
+        args.append(barrier_id)
+    if arrive_count is not None:
+        args.append(arrive_count)
+    return tir.call_intrin("int32", "tir.tvm_storage_sync", "shared", *args)
 
 
 def sync_global():
@@ -350,6 +355,71 @@ def sync_grid():
     """Synchronize all threads in a grid.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"))
+
+
+def initialize_descriptor(descriptor: Buffer,
+                          start_address: PrimExpr,
+                          layout_type_: int = 0,
+                          leading_byte_offset: int = 0,
+                          stride_byte_offset: int = 0) -> PrimExpr:
+    """
+    Initialize a memory descriptor with the given parameters.
+
+    Parameters:
+        descriptor (Buffer): The memory descriptor to initialize.
+        start_address (PrimExpr): The starting address of the memory region.
+        layout_type_ (int, optional): Layout type identifier. Defaults to 0.
+        leading_byte_offset (int, optional): Leading byte offset. Defaults to 0.
+        stride_byte_offset (int, optional): Stride byte offset. Defaults to 0.
+
+    Returns:
+        PrimExpr: A handle representing the initialized descriptor.
+    """
+
+    if not isinstance(descriptor, (BufferLoad, Buffer)):
+        raise TypeError("Descriptor must be a tvm.tir.Buffer or tvm.tir.BufferLoad.")
+
+    if isinstance(descriptor, Buffer) and len(descriptor.shape) != 1 or descriptor.shape[0] != 1:
+        raise ValueError("Descriptor must be a 1D buffer of size 1.")
+
+    descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(
+        descriptor, [0])
+
+    return evaluate(
+        tir.call_intrin("handle", tir.op.Op.get("tl.initialize_descriptor"), descriptor,
+                        start_address, layout_type_, int(leading_byte_offset),
+                        int(stride_byte_offset)))
+
+
+def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimExpr:
+    """
+    Increase the offset of a memory descriptor.
+
+    Parameters:
+        descriptor (PrimExpr): The memory descriptor to modify.
+        offset (PrimExpr): The offset value to increase.
+
+    Returns:
+        PrimExpr: A handle representing the modified descriptor.
+    """
+    if not isinstance(descriptor, (BufferLoad, Buffer)):
+        raise TypeError("Descriptor must be a tvm.tir.Buffer or tvm.tir.BufferLoad.")
+
+    if isinstance(descriptor, Buffer) and len(descriptor.shape) != 1 or descriptor.shape[0] != 1:
+        raise ValueError("Descriptor must be a 1D buffer of size 1.")
+
+    descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(
+        descriptor, [0])
+
+    return evaluate(
+        tir.call_intrin("handle", tir.op.Op.get("tl.increase_descriptor_offset"), descriptor,
+                        offset))
+
+
+def loop_break():
+    """Break out of the innermost loop.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.loop_break"))
 
 
 def cp_async_barrier_noinc(barrier_id: Union[int, PrimExpr, tir.Call]):

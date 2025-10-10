@@ -6,7 +6,7 @@ import tilelang
 import tilelang.language as T
 
 from tilelang.layout import make_metadata_layout
-from tilelang.utils.sparse import compress
+from tilelang.utils.sparse import compress, randn_semi_sparse
 from tilelang.contrib import nvcc
 from triton.testing import do_bench
 
@@ -58,14 +58,6 @@ default_config = {  # take best config from autotune script
         }
     }
 }
-
-
-def generate_sparse_tensor(M: int, K: int, dtype=torch.float16, device='cuda'):
-    elem, group = 2, 4
-    full_tensor = torch.randn((M, K), dtype=dtype, device=device).view(M, -1, group)
-    indice = full_tensor.topk(elem, dim=-1).indices
-    full_tensor.scatter_(-1, indice, 0)
-    return full_tensor.view(M, K)
 
 
 @tilelang.jit(out_idx=[-1])
@@ -130,7 +122,7 @@ def main():
     kernel = matmul_sp_fp16(args.m, args.n, args.k, args.accum_dtype,
                             **default_config[args.cfg][args.accum_dtype])
 
-    a = generate_sparse_tensor(args.m, args.k, device='cuda', dtype=torch.half)
+    a = randn_semi_sparse(args.m, args.k, device='cuda', dtype=torch.half)
     b = torch.randn(args.k, args.n, device='cuda', dtype=torch.half)
 
     a_sparse, e = compress(
