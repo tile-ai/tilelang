@@ -1,4 +1,3 @@
-
 # General information about the project.
 project = "Tile Language <br>"
 author = "Tile Lang Contributors"

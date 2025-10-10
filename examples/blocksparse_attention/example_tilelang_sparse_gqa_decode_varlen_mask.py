@@ -359,7 +359,9 @@ def debug(name, expect, actual, atol=1e-3, rtol=1e-3):
         # print(expect[3, 28])
         # print(actual[3, 28])
         diff = (expect - actual).abs()
-        print(f"all_close={all_close}, max={diff.max().item()}, min={diff.min().item()}, mean={diff.mean().item()}")
+        print(
+            f"all_close={all_close}, max={diff.max().item()}, min={diff.min().item()}, mean={diff.mean().item()}"
+        )
         max_indices = torch.nonzero(diff == diff.max().item())
         first_index = tuple(max_indices[0].tolist())
         print(f"Index: {first_index}, expect: {expect[first_index]}, actual: {actual[first_index]}")
