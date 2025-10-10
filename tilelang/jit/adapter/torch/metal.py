@@ -1,5 +1,5 @@
 from functools import wraps
-from typing import Callable, Optional, Union
+from typing import Callable, Optional, Union, List
 
 import torch
 from tvm import tir
@@ -14,8 +14,8 @@ class MetalKernelAdapter(BaseKernelAdapter):
 
     def __init__(
         self,
-        params: list[KernelParam],
-        result_idx: list[int],
+        params: List[KernelParam],
+        result_idx: List[int],
         #  target: Union[str, Target],
         func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
         #  host_mod: Optional[tvm.IRModule] = None,

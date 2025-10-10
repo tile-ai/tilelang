@@ -333,13 +333,14 @@ def ref_sparse_mla_bwd_interface(q, kv, o, do, indices, lse, sm_scale=None, is_c
 
 def test_sparse_mla_bwd(B=1,
                         S=4096,
-                        SKV=32768,
+                        SKV=8192,
                         H=64,
                         HKV=1,
                         DQKV=576,
                         DV=512,
                         topk=2048,
-                        dtype=torch.bfloat16):
+                        dtype=torch.bfloat16,
+                        check_correctness=True):
     # Prepare data
     q = torch.randn((B, S, H, DQKV), dtype=dtype, device='cuda').requires_grad_(True)
     kv = torch.randn((B, SKV, HKV, DQKV), dtype=dtype, device='cuda').requires_grad_(True)
@@ -359,7 +360,7 @@ def test_sparse_mla_bwd(B=1,
     tl_dq, tl_dkv = sparse_mla_bwd(q, kv, tl_out, do, indices, tl_lse)
     ref_dq, ref_dkv = ref_sparse_mla_bwd_interface(q, kv, None, do, indices, None)
 
-    if SKV <= 4096:
+    if check_correctness:
         assert_tensors_similar(tl_dq, ref_dq, eps=1e-4, name="dq")
         assert_tensors_similar(tl_dkv, ref_dkv, eps=1e-4, name="dkv")
         print("assert_tensors_similar passed")
@@ -385,4 +386,13 @@ def test_sparse_mla_bwd(B=1,
 
 if __name__ == "__main__":
     test_sparse_mla_bwd(
-        B=1, S=4096, SKV=4096, H=64, HKV=1, DQKV=576, DV=512, topk=2048, dtype=torch.bfloat16)
+        B=1,
+        S=4096,
+        SKV=8192,
+        H=64,
+        HKV=1,
+        DQKV=576,
+        DV=512,
+        topk=2048,
+        dtype=torch.bfloat16,
+        check_correctness=True)

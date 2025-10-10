@@ -35,39 +35,12 @@ namespace codegen {
 // PTX related data structures and functions.
 namespace ptx {
 
-/*!
- * \brief PTX data type.
- * \note
- * PTX fundamental data types:
- * https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#fundamental-types
- * PTX matrix data types:
- * https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-data-types
- */
-enum class DataType : int {
-  kInt4 = 0,
-  kUInt4 = 1,
-  kInt8 = 2,
-  kUInt8 = 3,
-  kInt16 = 4,
-  kUInt16 = 5,
-  kInt32 = 6,
-  kUInt32 = 7,
-  kInt64 = 8,
-  kUInt64 = 9,
-  kFloat8_e4m3 = 10,
-  kFloat8_e5m2 = 11,
-  kFloat16 = 12,
-  kBFloat16 = 13,
-  kFloat16x2 = 14,
-  kFloat32 = 15,
-  kTensorFloat32 = 16,
-  kFloat64 = 17,
-  kBit1 = 18,
-  kBit8 = 19,
-  kBit16 = 20,
-  kBit32 = 21,
-  kBit64 = 22
-};
+static const char *enum_to_str[] = {
+    "kInt4",        "kUInt4",         "kInt8",    "kUInt8",    "kInt16",
+    "kUInt16",      "kInt32",         "kUInt32",  "kInt64",    "kUInt64",
+    "kFloat8_e4m3", "kFloat8_e5m2",   "kFloat16", "kBFloat16", "kFloat16x2",
+    "kFloat32",     "kTensorFloat32", "kFloat64", "kBit1",     "kBit8",
+    "kBit16",       "kBit32",         "kBit64"};
 
 static const char *dtype_str[] = {
     ".s4",   ".u4",  ".s8",   ".u8",   ".s16", ".u16",  ".s32",   ".u32",
@@ -80,7 +53,7 @@ static const uint32_t num_bits[] = {4,  4,  8, 8, 16, 16, 32, 32,
 /*!
  * \brief Create PTX data type from string.
  */
-inline DataType DTypeFromString(const std::string str) {
+DataType DTypeFromString(const std::string str) {
   if (str == "int4" || str == ".s4") {
     return DataType::kInt4;
   } else if (str == "uint4" || str == ".u4") {
@@ -132,6 +105,15 @@ inline DataType DTypeFromString(const std::string str) {
   }
 }
 
+std::string DTypeEnumToString(const ptx::DataType &dtype) {
+  return "tl::DataType::" + std::string(enum_to_str[static_cast<int>(dtype)]);
+}
+
+std::string DTypeEnumToString(const std::string &dtype) {
+  return "tl::DataType::" +
+         std::string(enum_to_str[static_cast<int>(DTypeFromString(dtype))]);
+}
+
 /*!
  * \brief Get the string representation of given PTX data type.
  */
@@ -146,10 +128,18 @@ inline uint32_t DTypeBits(DataType dtype) {
   return num_bits[static_cast<int>(dtype)];
 }
 
+inline bool DTypeIsInteger(DataType dtype) {
+  return dtype == DataType::kInt4 || dtype == DataType::kInt8 ||
+         dtype == DataType::kInt16 || dtype == DataType::kInt32 ||
+         dtype == DataType::kInt64 || dtype == DataType::kUInt4 ||
+         dtype == DataType::kUInt8 || dtype == DataType::kUInt16 ||
+         dtype == DataType::kUInt32 || dtype == DataType::kUInt64;
+}
+
 /*!
  * \brief Extract the value m, n, k from string m*n*k*
  */
-inline std::tuple<int, int, int> ParseMMAShape(const std::string &str) {
+std::tuple<int, int, int> ParseMMAShape(const std::string &str) {
   size_t pos_m = str.find('m'), pos_n = str.find('n'), pos_k = str.find('k');
   CHECK(pos_m != str.npos && pos_n != str.npos && pos_k != str.npos)
       << "Cannot parse MMA shape " << str;
@@ -174,6 +164,17 @@ LayoutType LayoutTypeFromString(const std::string &str) {
     return LayoutType::kColumnMajor;
   } else {
     LOG(FATAL) << "Unrecognized layout type " << str;
+  }
+}
+
+/*!
+ * \brief Parse layout type from bool.
+ */
+LayoutType LayoutTypeFromBool(const bool &layout) {
+  if (layout) {
+    return LayoutType::kRowMajor;
+  } else {
+    return LayoutType::kColumnMajor;
   }
 }
 
@@ -255,6 +256,450 @@ const MMAConfig valid_mma_configs[] = {
     MMAConfig(16, 8, 32, DataType::kFloat8_e5m2, false, false),
     MMAConfig(16, 8, 64, DataType::kFloat8_e5m2, false, true),
 };
+
+struct WGMMAConfig {
+  explicit WGMMAConfig(int m, int n, int k, DataType dtype_a, DataType dtype_b,
+                       DataType dtype_c, bool sparse)
+      : m(m), n(n), k(k), dtype_a(dtype_a), dtype_b(dtype_b), dtype_c(dtype_c),
+        sparse(sparse) {}
+  int m, n, k;
+  DataType dtype_a, dtype_b, dtype_c;
+  bool sparse;
+  inline bool operator==(const WGMMAConfig &other) {
+    return m == other.m && n == other.n && k == other.k &&
+           dtype_a == other.dtype_a && dtype_b == other.dtype_b &&
+           dtype_c == other.dtype_c && sparse == other.sparse;
+  }
+};
+
+const WGMMAConfig valid_wgmma_configs[] = {
+    // Dense FP16 configurations
+    WGMMAConfig(64, 8, 16, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 16, 16, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 32, 16, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 64, 16, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 96, 16, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 128, 16, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 192, 16, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 256, 16, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat16, false),
+
+    // Dense FP16 to FP32 accumulation
+    WGMMAConfig(64, 8, 16, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 16, 16, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 32, 16, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 64, 16, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 96, 16, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 128, 16, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 192, 16, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 256, 16, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat32, false),
+
+    // Dense BFloat16 configurations
+    WGMMAConfig(64, 8, 16, DataType::kBFloat16, DataType::kBFloat16,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 16, 16, DataType::kBFloat16, DataType::kBFloat16,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 32, 16, DataType::kBFloat16, DataType::kBFloat16,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 64, 16, DataType::kBFloat16, DataType::kBFloat16,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 96, 16, DataType::kBFloat16, DataType::kBFloat16,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 128, 16, DataType::kBFloat16, DataType::kBFloat16,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 192, 16, DataType::kBFloat16, DataType::kBFloat16,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 256, 16, DataType::kBFloat16, DataType::kBFloat16,
+                DataType::kFloat32, false),
+
+    // Dense TF32 configurations
+    WGMMAConfig(64, 8, 8, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 16, 8, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 32, 8, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 64, 8, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 96, 8, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 128, 8, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 192, 8, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 256, 8, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 24, 8, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 40, 8, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, false),
+
+    // Dense INT8 configurations
+    WGMMAConfig(64, 8, 32, DataType::kInt8, DataType::kInt8, DataType::kInt32,
+                false),
+    WGMMAConfig(64, 16, 32, DataType::kInt8, DataType::kInt8, DataType::kInt32,
+                false),
+    WGMMAConfig(64, 32, 32, DataType::kInt8, DataType::kInt8, DataType::kInt32,
+                false),
+    WGMMAConfig(64, 64, 32, DataType::kInt8, DataType::kInt8, DataType::kInt32,
+                false),
+    WGMMAConfig(64, 96, 32, DataType::kInt8, DataType::kInt8, DataType::kInt32,
+                false),
+    WGMMAConfig(64, 128, 32, DataType::kInt8, DataType::kInt8, DataType::kInt32,
+                false),
+    WGMMAConfig(64, 192, 32, DataType::kInt8, DataType::kInt8, DataType::kInt32,
+                false),
+    WGMMAConfig(64, 256, 32, DataType::kInt8, DataType::kInt8, DataType::kInt32,
+                false),
+
+    // Dense UINT8 configurations
+    WGMMAConfig(64, 8, 32, DataType::kUInt8, DataType::kUInt8, DataType::kInt32,
+                false),
+    WGMMAConfig(64, 16, 32, DataType::kUInt8, DataType::kUInt8,
+                DataType::kInt32, false),
+    WGMMAConfig(64, 32, 32, DataType::kUInt8, DataType::kUInt8,
+                DataType::kInt32, false),
+    WGMMAConfig(64, 64, 32, DataType::kUInt8, DataType::kUInt8,
+                DataType::kInt32, false),
+    WGMMAConfig(64, 96, 32, DataType::kUInt8, DataType::kUInt8,
+                DataType::kInt32, false),
+    WGMMAConfig(64, 128, 32, DataType::kUInt8, DataType::kUInt8,
+                DataType::kInt32, false),
+    WGMMAConfig(64, 192, 32, DataType::kUInt8, DataType::kUInt8,
+                DataType::kInt32, false),
+    WGMMAConfig(64, 256, 32, DataType::kUInt8, DataType::kUInt8,
+                DataType::kInt32, false),
+
+    // Dense INT4 configurations
+    WGMMAConfig(64, 8, 64, DataType::kInt4, DataType::kInt4, DataType::kInt32,
+                false),
+    WGMMAConfig(64, 16, 64, DataType::kInt4, DataType::kInt4, DataType::kInt32,
+                false),
+    WGMMAConfig(64, 32, 64, DataType::kInt4, DataType::kInt4, DataType::kInt32,
+                false),
+    WGMMAConfig(64, 64, 64, DataType::kInt4, DataType::kInt4, DataType::kInt32,
+                false),
+    WGMMAConfig(64, 96, 64, DataType::kInt4, DataType::kInt4, DataType::kInt32,
+                false),
+    WGMMAConfig(64, 128, 64, DataType::kInt4, DataType::kInt4, DataType::kInt32,
+                false),
+    WGMMAConfig(64, 192, 64, DataType::kInt4, DataType::kInt4, DataType::kInt32,
+                false),
+    WGMMAConfig(64, 256, 64, DataType::kInt4, DataType::kInt4, DataType::kInt32,
+                false),
+
+    // Dense UINT4 configurations
+    WGMMAConfig(64, 8, 64, DataType::kUInt4, DataType::kUInt4, DataType::kInt32,
+                false),
+    WGMMAConfig(64, 16, 64, DataType::kUInt4, DataType::kUInt4,
+                DataType::kInt32, false),
+    WGMMAConfig(64, 32, 64, DataType::kUInt4, DataType::kUInt4,
+                DataType::kInt32, false),
+    WGMMAConfig(64, 64, 64, DataType::kUInt4, DataType::kUInt4,
+                DataType::kInt32, false),
+    WGMMAConfig(64, 96, 64, DataType::kUInt4, DataType::kUInt4,
+                DataType::kInt32, false),
+    WGMMAConfig(64, 128, 64, DataType::kUInt4, DataType::kUInt4,
+                DataType::kInt32, false),
+    WGMMAConfig(64, 192, 64, DataType::kUInt4, DataType::kUInt4,
+                DataType::kInt32, false),
+    WGMMAConfig(64, 256, 64, DataType::kUInt4, DataType::kUInt4,
+                DataType::kInt32, false),
+
+    // Dense FP8 E4M3 configurations
+    WGMMAConfig(64, 8, 32, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 16, 32, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 32, 32, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 64, 32, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 96, 32, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 128, 32, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 192, 32, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 256, 32, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 8, 32, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 16, 32, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 32, 32, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 64, 32, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 96, 32, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 128, 32, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 192, 32, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 256, 32, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat32, false),
+
+    // Dense FP8 E5M2 configurations
+    WGMMAConfig(64, 8, 32, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 16, 32, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 32, 32, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 64, 32, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 96, 32, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 128, 32, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 192, 32, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 256, 32, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat16, false),
+    WGMMAConfig(64, 8, 32, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 16, 32, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 32, 32, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 64, 32, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 96, 32, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 128, 32, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 192, 32, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat32, false),
+    WGMMAConfig(64, 256, 32, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat32, false),
+
+    // Sparse FP16 configurations (k doubled for sparsity)
+    WGMMAConfig(64, 8, 32, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 16, 32, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 32, 32, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 64, 32, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 96, 32, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 128, 32, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 192, 32, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 256, 32, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat16, true),
+
+    // Sparse FP16 to FP32 accumulation
+    WGMMAConfig(64, 8, 32, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 16, 32, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 32, 32, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 64, 32, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 96, 32, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 128, 32, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 192, 32, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 256, 32, DataType::kFloat16, DataType::kFloat16,
+                DataType::kFloat32, true),
+
+    // Sparse BFloat16 configurations
+    WGMMAConfig(64, 8, 32, DataType::kBFloat16, DataType::kBFloat16,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 16, 32, DataType::kBFloat16, DataType::kBFloat16,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 32, 32, DataType::kBFloat16, DataType::kBFloat16,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 64, 32, DataType::kBFloat16, DataType::kBFloat16,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 96, 32, DataType::kBFloat16, DataType::kBFloat16,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 128, 32, DataType::kBFloat16, DataType::kBFloat16,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 192, 32, DataType::kBFloat16, DataType::kBFloat16,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 256, 32, DataType::kBFloat16, DataType::kBFloat16,
+                DataType::kFloat32, true),
+
+    // Sparse TF32 configurations
+    WGMMAConfig(64, 8, 16, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 16, 16, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 32, 16, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 64, 16, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 96, 16, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 128, 16, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 192, 16, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 256, 16, DataType::kTensorFloat32, DataType::kTensorFloat32,
+                DataType::kFloat32, true),
+
+    // Sparse INT8 configurations
+    WGMMAConfig(64, 8, 64, DataType::kInt8, DataType::kInt8, DataType::kInt32,
+                true),
+    WGMMAConfig(64, 16, 64, DataType::kInt8, DataType::kInt8, DataType::kInt32,
+                true),
+    WGMMAConfig(64, 32, 64, DataType::kInt8, DataType::kInt8, DataType::kInt32,
+                true),
+    WGMMAConfig(64, 64, 64, DataType::kInt8, DataType::kInt8, DataType::kInt32,
+                true),
+    WGMMAConfig(64, 96, 64, DataType::kInt8, DataType::kInt8, DataType::kInt32,
+                true),
+    WGMMAConfig(64, 128, 64, DataType::kInt8, DataType::kInt8, DataType::kInt32,
+                true),
+    WGMMAConfig(64, 192, 64, DataType::kInt8, DataType::kInt8, DataType::kInt32,
+                true),
+    WGMMAConfig(64, 256, 64, DataType::kInt8, DataType::kInt8, DataType::kInt32,
+                true),
+
+    // Sparse UINT8 configurations
+    WGMMAConfig(64, 8, 64, DataType::kUInt8, DataType::kUInt8, DataType::kInt32,
+                true),
+    WGMMAConfig(64, 16, 64, DataType::kUInt8, DataType::kUInt8,
+                DataType::kInt32, true),
+    WGMMAConfig(64, 32, 64, DataType::kUInt8, DataType::kUInt8,
+                DataType::kInt32, true),
+    WGMMAConfig(64, 64, 64, DataType::kUInt8, DataType::kUInt8,
+                DataType::kInt32, true),
+    WGMMAConfig(64, 96, 64, DataType::kUInt8, DataType::kUInt8,
+                DataType::kInt32, true),
+    WGMMAConfig(64, 128, 64, DataType::kUInt8, DataType::kUInt8,
+                DataType::kInt32, true),
+    WGMMAConfig(64, 192, 64, DataType::kUInt8, DataType::kUInt8,
+                DataType::kInt32, true),
+    WGMMAConfig(64, 256, 64, DataType::kUInt8, DataType::kUInt8,
+                DataType::kInt32, true),
+
+    // Sparse INT4 configurations
+    WGMMAConfig(64, 8, 128, DataType::kInt4, DataType::kInt4, DataType::kInt32,
+                true),
+    WGMMAConfig(64, 16, 128, DataType::kInt4, DataType::kInt4, DataType::kInt32,
+                true),
+    WGMMAConfig(64, 32, 128, DataType::kInt4, DataType::kInt4, DataType::kInt32,
+                true),
+    WGMMAConfig(64, 64, 128, DataType::kInt4, DataType::kInt4, DataType::kInt32,
+                true),
+    WGMMAConfig(64, 96, 128, DataType::kInt4, DataType::kInt4, DataType::kInt32,
+                true),
+    WGMMAConfig(64, 128, 128, DataType::kInt4, DataType::kInt4,
+                DataType::kInt32, true),
+    WGMMAConfig(64, 192, 128, DataType::kInt4, DataType::kInt4,
+                DataType::kInt32, true),
+    WGMMAConfig(64, 256, 128, DataType::kInt4, DataType::kInt4,
+                DataType::kInt32, true),
+
+    // Sparse UINT4 configurations
+    WGMMAConfig(64, 8, 128, DataType::kUInt4, DataType::kUInt4,
+                DataType::kInt32, true),
+    WGMMAConfig(64, 16, 128, DataType::kUInt4, DataType::kUInt4,
+                DataType::kInt32, true),
+    WGMMAConfig(64, 32, 128, DataType::kUInt4, DataType::kUInt4,
+                DataType::kInt32, true),
+    WGMMAConfig(64, 64, 128, DataType::kUInt4, DataType::kUInt4,
+                DataType::kInt32, true),
+    WGMMAConfig(64, 96, 128, DataType::kUInt4, DataType::kUInt4,
+                DataType::kInt32, true),
+    WGMMAConfig(64, 128, 128, DataType::kUInt4, DataType::kUInt4,
+                DataType::kInt32, true),
+    WGMMAConfig(64, 192, 128, DataType::kUInt4, DataType::kUInt4,
+                DataType::kInt32, true),
+    WGMMAConfig(64, 256, 128, DataType::kUInt4, DataType::kUInt4,
+                DataType::kInt32, true),
+
+    // Sparse FP8 E4M3 configurations
+    WGMMAConfig(64, 8, 64, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 16, 64, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 32, 64, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 64, 64, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 96, 64, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 128, 64, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 192, 64, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 256, 64, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 8, 64, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 16, 64, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 32, 64, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 64, 64, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 96, 64, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 128, 64, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 192, 64, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 256, 64, DataType::kFloat8_e4m3, DataType::kFloat8_e4m3,
+                DataType::kFloat32, true),
+
+    // Sparse FP8 E5M2 configurations
+    WGMMAConfig(64, 8, 64, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 16, 64, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 32, 64, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 64, 64, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 96, 64, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 128, 64, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 192, 64, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 256, 64, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat16, true),
+    WGMMAConfig(64, 8, 64, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 16, 64, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 32, 64, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 64, 64, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 96, 64, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 128, 64, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 192, 64, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat32, true),
+    WGMMAConfig(64, 256, 64, DataType::kFloat8_e5m2, DataType::kFloat8_e5m2,
+                DataType::kFloat32, true)};
 
 /*!
  * \brief Check whether the multiplicand data type and accumulator data type is
@@ -393,6 +838,27 @@ void CheckMMAConfigValidity(int m, int n, int k, LayoutType layout_a,
   CHECK(match) << "Cannot find matched MMA configurations.";
 }
 
+void CheckWGMMAConfigValidity(int m, int n, int k, LayoutType layout_a,
+                              LayoutType layout_b, DataType dtype_a,
+                              DataType dtype_b, DataType dtype_c, bool sparse) {
+  // Same DataType Compatibility as MMA
+  CheckMMADTypeCompatible(dtype_a, dtype_b, dtype_c);
+
+  // Check if configuration exists in valid_wgmma_configs
+  WGMMAConfig config(m, n, k, dtype_a, dtype_b, dtype_c, sparse);
+  bool match = false;
+  for (const WGMMAConfig &valid_config : valid_wgmma_configs) {
+    if (config == valid_config) {
+      match = true;
+      break;
+    }
+  }
+  CHECK(match) << "Cannot find matched WGMMA configurations for m " << m
+               << " n " << n << " k " << k << " dtype_a "
+               << DTypeToString(dtype_a) << " dtype_b "
+               << DTypeToString(dtype_b) << " dtype_c "
+               << DTypeToString(dtype_c) << " sparse " << sparse;
+}
 /*!
  * \brief Fragment attributes
  */
@@ -438,35 +904,6 @@ inline FragAttrs GetFragAttrs(DataType dtype) {
 }
 
 }; // namespace ptx
-
-/*!
- * \brief Replace patterns with replacement strings.
- * \note should use std::format instead when codebase is ported to C++20.
- */
-class Replacer {
-public:
-  void register_rule(const std::string &pattern,
-                     const std::string &replacement) {
-    _rules.emplace_back(pattern, replacement);
-  }
-  std::string rewrite(std::string str) {
-    for (auto &&rule : _rules) {
-      auto [pattern, replacement] = rule;
-      size_t len = pattern.size();
-      size_t new_len = replacement.size();
-      size_t pos = str.find(pattern);
-      while (pos != std::string::npos) {
-        str = str.replace(pos, len, replacement);
-        pos = str.find(pattern, pos + new_len);
-      }
-    }
-    return str;
-  }
-  void empty_rules() { _rules.clear(); }
-
-private:
-  std::vector<std::pair<std::string, std::string>> _rules;
-};
 
 /*!
  * \brief Get the number of MMA computations for given shape and datatype.
@@ -566,6 +1003,123 @@ GetMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
   return std::make_tuple(templates.str(), inputs.str(), outputs.str());
 }
 
+inline std::tuple<std::string, std::string, std::string, std::string>
+GetWGMMAOperands(int m, int n, int k, ptx::DataType dtype_a,
+                 ptx::DataType dtype_b, ptx::DataType dtype_c, bool sparse,
+                 bool a_is_shared) {
+  std::stringstream templates, inputs, outputs, predicate;
+  const ptx::FragAttrs frag_attr_a = ptx::GetFragAttrs(dtype_a),
+                       frag_attr_b = ptx::GetFragAttrs(dtype_b),
+                       frag_attr_c = ptx::GetFragAttrs(dtype_c);
+  constexpr uint32_t warp_size = 32;
+  const uint32_t threads =
+      4 * warp_size / GetNumMMAComputations(m, n, k, dtype_a);
+  const int num_operands_a = (m * k) * ptx::DTypeBits(dtype_a) /
+                             frag_attr_a.size / threads / (sparse ? 2 : 1),
+            num_operands_c =
+                (m * n) * ptx::DTypeBits(dtype_c) / frag_attr_c.size / threads;
+  const bool support_ldmatrix_transposed =
+      ptx::DTypeBits(dtype_a) == 16 && ptx::DTypeBits(dtype_b) == 16;
+  const bool support_scale_input =
+      !ptx::DTypeIsInteger(dtype_a) || !ptx::DTypeIsInteger(dtype_b);
+
+  // generate templates;
+  int arg_counter = 0;
+  templates << "{"
+            << "%" << arg_counter++;
+  for (int i = 1; i < num_operands_c; ++i) {
+    templates << ", %" << arg_counter++;
+  }
+  if (!a_is_shared) {
+    templates << "}, {"
+              << "%" << arg_counter++;
+    for (int i = 1; i < num_operands_a; ++i) {
+      templates << ", %" << arg_counter++;
+    }
+    templates << "}";
+  } else {
+    templates << "}, %" << arg_counter++;
+  }
+
+  // desc_b
+  templates << ", "
+            << "%" << arg_counter++;
+
+  // scale_out
+  predicate << "%" << arg_counter++;
+  templates << ", "
+            << "p";
+
+  // scale_in_a
+  if (support_scale_input) {
+    templates << ", "
+              << "%" << arg_counter++;
+    // scale_in_b
+    templates << ", "
+              << "%" << arg_counter++;
+  }
+  if (support_ldmatrix_transposed) {
+    if (a_is_shared) {
+      // trans_a
+      templates << ", "
+                << "%" << arg_counter++;
+    }
+    // trans_b
+    templates << ", "
+              << "%" << arg_counter++;
+  }
+  // templates of metadata and sparse selector for sparse mma.
+  if (sparse) {
+    LOG(FATAL) << "Sparse WGMMA is not supported yet.";
+  }
+
+  // generate inputs
+  if (a_is_shared) {
+    inputs << "\"l\"(uint64_t((desc_a) + (A_offset)))";
+  } else {
+    for (int i = 0; i < num_operands_a; ++i) {
+      if (i != 0) {
+        inputs << ", ";
+      }
+      inputs << "\"" << frag_attr_a.reg_type << "\"((" << frag_attr_a.ptr_type
+             << "((A)))[" << i << "])";
+    }
+  }
+  inputs << ", \"l\"(uint64_t((desc_b) + (B_offset)))";
+
+  // input of metadata for sparse mma.
+  if (sparse) {
+    inputs << ", \"r\"(((unsigned *)((E)))[0])";
+  }
+
+  inputs << ", \"r\"(int32_t((scale_out)))";
+  // scale_in_a
+  if (support_scale_input) {
+    inputs << ", \"n\"(int32_t((scale_in_a)))";
+    // scale_in_b
+    inputs << ", \"n\"(int32_t((scale_in_b)))";
+  }
+  if (support_ldmatrix_transposed) {
+    if (a_is_shared) {
+      // trans_a
+      inputs << ", \"n\"(int32_t((trans_a)))";
+    }
+    // trans_b
+    inputs << ", \"n\"(int32_t((trans_b)))";
+  }
+  // generate outputs
+  for (int i = 0; i < num_operands_c; ++i) {
+    if (i != 0) {
+      outputs << ",";
+    }
+    outputs << "\"+" << frag_attr_c.reg_type << "\"((" << frag_attr_c.ptr_type
+            << "((D)))[" << i << "])";
+  }
+
+  return std::make_tuple(templates.str(), inputs.str(), outputs.str(),
+                         predicate.str());
+}
+
 std::string
 PrintMMAAssembly(const std::string &shape, const std::string &A_layout,
                  const std::string &B_layout, const std::string &A_dtype,
@@ -627,6 +1181,81 @@ PrintMMAAssembly(const std::string &shape, const std::string &A_layout,
   replacer.register_rule("D", c_ptr + " + " + c_elem_offset);
   replacer.register_rule("E", metadata + " + " + metadata_offset);
   replacer.register_rule("F", sparsity_selector);
+  asm_code = replacer.rewrite(asm_code);
+  return asm_code;
+}
+
+std::string
+PrintWGMMAAssembly(const std::string &shape, const bool &a_is_k_major,
+                   const bool &b_is_k_major, const std::string &A_dtype,
+                   const std::string &B_dtype, const std::string &C_dtype,
+                   const std::string &a_desc, const std::string &A_offset,
+                   const std::string &b_desc, const std::string &B_offset,
+                   const std::string &c_ptr, const std::string &c_offset,
+                   const bool &scale_out, const bool &scale_in_a,
+                   const bool &scale_in_b, const bool &a_is_shared,
+                   const std::string &metadata,
+                   const std::string &metadata_offset,
+                   const std::string &sparsity_selector, bool sparse) {
+  ptx::DataType dtype_a = ptx::DTypeFromString(A_dtype),
+                dtype_b = ptx::DTypeFromString(B_dtype),
+                dtype_c = ptx::DTypeFromString(C_dtype);
+  if (dtype_a == ptx::DataType::kFloat32) {
+    dtype_a = ptx::DataType::kTensorFloat32;
+  }
+  if (dtype_b == ptx::DataType::kFloat32) {
+    dtype_b = ptx::DataType::kTensorFloat32;
+  }
+
+  ptx::LayoutType layout_a = ptx::LayoutTypeFromBool(!a_is_k_major),
+                  layout_b = ptx::LayoutTypeFromBool(b_is_k_major);
+  auto [m, n, k] = ptx::ParseMMAShape(shape);
+  CheckWGMMAConfigValidity(m, n, k, layout_a, layout_b, dtype_a, dtype_b,
+                           dtype_c, sparse);
+  std::string asm_code = R"(
+  {
+    __asm__ __volatile__(
+      "{.reg .pred p;\n"
+      "setp.ne.b32 p, {predicate}, 0;\n"
+      "wgmma.mma_async{.sparse}.sync.aligned{.shape}{.dtype}{.atype}{.btype}"
+      "{templates};\n}"
+      : {outputs}
+      : {inputs});
+  }
+)";
+  auto [templates_str, inputs_str, outputs_str, predicate_str] =
+      GetWGMMAOperands(m, n, k, dtype_a, dtype_b, dtype_c, sparse, a_is_shared);
+
+  // replace patterns
+  Replacer replacer;
+  replacer.register_rule("{.sparse}", sparse ? ".sp" : "");
+  replacer.register_rule("{.shape}", "." + shape);
+  replacer.register_rule("{.atype}", ptx::DTypeToString(dtype_a));
+  replacer.register_rule("{.btype}", ptx::DTypeToString(dtype_b));
+  replacer.register_rule("{.dtype}", ptx::DTypeToString(dtype_c));
+  replacer.register_rule("{templates}", templates_str);
+  replacer.register_rule("{outputs}", outputs_str);
+  replacer.register_rule("{inputs}", inputs_str);
+  replacer.register_rule("{predicate}", predicate_str);
+  asm_code = replacer.rewrite(asm_code);
+  replacer.empty_rules();
+  if (a_is_shared) {
+    replacer.register_rule("(desc_a)", a_desc);
+    replacer.register_rule("(A_offset)", A_offset);
+  } else {
+    replacer.register_rule("(A)", a_desc + " + " + A_offset);
+  }
+  replacer.register_rule("(desc_b)", b_desc);
+  replacer.register_rule("(B_offset)", B_offset);
+  replacer.register_rule("(C)", c_ptr + " + " + c_offset);
+  replacer.register_rule("(D)", c_ptr + " + " + c_offset);
+  replacer.register_rule("(E)", metadata + " + " + metadata_offset);
+  replacer.register_rule("(F)", sparsity_selector);
+  replacer.register_rule("(scale_out)", scale_out ? "1" : "0");
+  replacer.register_rule("(scale_in_a)", scale_in_a ? "1" : "-1");
+  replacer.register_rule("(scale_in_b)", scale_in_b ? "1" : "-1");
+  replacer.register_rule("(trans_a)", a_is_k_major ? "0" : "1");
+  replacer.register_rule("(trans_b)", b_is_k_major ? "0" : "1");
   asm_code = replacer.rewrite(asm_code);
   return asm_code;
 }

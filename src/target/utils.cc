@@ -57,7 +57,7 @@ bool TargetIsSm100(Target target) {
   if (!TargetIsCuda(target))
     return false;
   int arch = GetArchInt(target);
-  return arch >= 100 & arch <= 103;
+  return arch >= 100 & arch <= 110;
 }
 
 bool TargetIsSM120(Target target) {

@@ -10,4 +10,4 @@ furo
 uvicorn
 myst-parser
 sphinx-autoapi == 3.6.0
-astroid
+astroid < 4
