@@ -34,6 +34,7 @@ repos:
       - id: clang-format
         exclude: |
           (?ix)(
+            ^.+\.(cu|cuh)$|
             ^.+\.json$
           )
   - repo: https://github.com/astral-sh/ruff-pre-commit
