@@ -61,6 +61,12 @@ def should_enable_aggressive_merge(pass_ctx: Optional[PassContext] = None,
     return enable_aggressive_merge
 
 
+def should_force_let_inline(pass_ctx: Optional[PassContext] = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    return bool(pass_ctx and pass_ctx.config.get(tilelang.PassConfigKey.TL_FORCE_LET_INLINE, False))
+
+
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
     """
@@ -85,6 +91,9 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     """
     mod = tir.transform.BindTarget(target)(mod)
 
+    if should_force_let_inline():
+        # Force-let inline whenever the pass config requests it.
+        mod = tilelang.transform.LetInline()(mod)
     # Add wrapper for single buf store
     mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)
     # Inject assumes to speedup tvm prover

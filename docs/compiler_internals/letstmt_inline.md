@@ -1,10 +1,10 @@
 # LetStmt Inlining in TileLang
 
-This document explains how `LetStmt` inlining works in TileLang's simplification pass, which is an important optimization that affects code generation and performance.
+This document explains how `LetStmt` inlining works in TileLang's simplification pipeline, which is an important optimization that affects code generation and performance.
 
 ## Overview
 
-A `LetStmt` (Let Statement) is a temporary variable binding in the IR (Intermediate Representation). During compilation, TileLang's simplifier may choose to inline these temporary variables to simplify the code. However, not all `LetStmt` nodes can be safely inlined.
+A `LetStmt` (Let Statement) is a temporary variable binding in the IR (Intermediate Representation). During compilation, TileLang's simplifier may choose to inline these temporary variables to simplify the code. TileLang also provides a standalone `LetInline` pass that performs eager substitution before the main legalization pipeline. However, not all `LetStmt` nodes can be safely inlined.
 
 ## When Does LetStmt Get Inlined?
 
@@ -12,13 +12,13 @@ The inlining logic is implemented in `src/transform/simplify.cc`. A `LetStmt` wi
 
 ### 1. The value satisfies `CanInlineLetStmt`
 
-The `CanInlineLetStmt` function (lines 315-326) returns `true` when:
+The `CanInlineLetStmt` helper returns `true` when:
 
-- **The value is a constant**: `is_const_number(op->value)` returns true
-- **The value is a variable**: `op->value.as<VarNode>()` is not null
+- **The value is a constant** (`is_const_number(op->value)` returns true)
+- **The value is a variable** (`op->value.as<VarNode>()` returns a node)
 - **The value is an integer expression without side effects**:
   - The value has `int` dtype
-  - The side effect level is `kPure` or lower (no side effects)
+  - The side effect level is `kPure` or lower (no observable side effects)
 
 ```cpp
 bool CanInlineLetStmt(const LetStmtNode *op) {
@@ -44,7 +44,7 @@ This protection exists because:
 - If a variable used in a buffer definition is inlined, later references to that buffer would fail to find the variable definition
 - This would cause compilation errors or incorrect behavior
 
-The check is performed at line 357:
+The mutator checks this before dropping the binding:
 
 ```cpp
 bool used_in_buffer_def = used_in_buffer_def_.count(op->var.get());
@@ -74,7 +74,7 @@ Therefore, `stride` is added to `used_in_buffer_def_` and will **not** be inline
 
 ## How Variables Are Collected
 
-The `CollectVarsUsedInBufferDefinition` function (lines 168-206) traverses all `BufferLoad` and `BufferStore` nodes and collects variables used in their buffer definitions:
+The `CollectVarsUsedInBufferDefinition` helper traverses all `BufferLoad` and `BufferStore` nodes and collects variables used in their buffer definitions:
 
 ```cpp
 void VisitBuffer(const Buffer &buf) {
@@ -125,12 +125,29 @@ for i in T.Parallel(block_N):
 
 If this causes issues (e.g., `A[idx]` being read twice with different values due to the first write), it indicates a potential problem with the inlining heuristic or the code pattern.
 
+## Controlling Let Inlining via Pass Config
+
+TileLang exposes an explicit pass configuration key, `tilelang.PassConfigKey.TL_FORCE_LET_INLINE` (`"tl.force_let_inline"`), that allows users to force the eager `LetInline` pass to run before the legalization pipeline begins. When enabled, the pipeline invokes `tilelang.transform.LetInline()` at the start of `LowerAndLegalize` (see `tilelang/engine/phase.py`). This knob is useful when debugging LetStmt-related issues or when deterministic inlining behavior is desired across different environments.
+
+```python
+from tilelang import transform
+from tilelang.engine.phase import LowerAndLegalize
+
+with transform.PassContext(
+    config={transform.PassConfigKey.TL_FORCE_LET_INLINE: True}
+):
+    lowered_mod = LowerAndLegalize(input_mod, target)
+```
+
+If the flag is left unset (the default), the eager pass is only applied when downstream transforms opt in (for example, by calling `_Simplify(..., inline_let=True)` inside Tile operators). The guard in `tilelang/engine/phase.py` ensures the eager pass is only triggered when the user explicitly requests it.
+
 ## Summary
 
 The LetStmt inlining mechanism is a **conservative optimization** that:
 1. Aggressively inlines simple, pure integer expressions to simplify the IR
 2. Protects variables used in buffer definitions to avoid breaking buffer access
 3. Helps reduce IR complexity and improve code generation
+4. Can be forced through `TL_FORCE_LET_INLINE` when deterministic eager inlining is required
 
 Understanding when inlining happens is crucial for:
 - Debugging compilation issues
@@ -140,5 +157,7 @@ Understanding when inlining happens is crucial for:
 
 ## Related Files
 
-- `src/transform/simplify.cc`: Main implementation
-- `testing/python/issue/test_tilelang_issue_814.py`: Test case for temporary variable handling
+- `src/transform/simplify.cc`: Main Simplify implementation
+- `src/transform/frontend_legalize.cc`: Standalone LetInline pass
+- `tilelang/engine/phase.py`: Pipeline integration for eager LetInlining
+- `testing/python/transform/test_tilelang_transform_let_inline.py`: Regression coverage for the pass

@@ -72,6 +72,14 @@ static constexpr const char *kDisableThreadStorageSync =
     "tl.disable_thread_storage_sync";
 
 /*!
+ * \brief Force inline Let bindings during simplification.
+ *
+ * kForceLetInline = "tl.force_let_inline"
+ *
+ */
+static constexpr const char *kForceLetInline = "tl.force_let_inline";
+
+/*!
  * \brief The size of the vectorized dimension in buffer, designed by user
  *
  * For example, if the vectorized dimension is 128 bits and the dtype of buffer
