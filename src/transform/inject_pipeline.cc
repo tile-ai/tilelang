@@ -26,6 +26,7 @@
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/transform.h>
 
+#include <functional>
 #include <unordered_set>
 #include <utility>
 
@@ -845,7 +846,8 @@ private:
     // Step 2: Find the body and buffer allocations of the pipeline. The body
     // can be direct child of the for-loop. If the for-loop has BlockRealize as
     // its child, the pipeline body will be the child of the block.
-    Stmt pipeline_body{nullptr};
+    Stmt pipeline_body_root{nullptr};
+    bool pipeline_body_from_block = false;
     Array<Buffer> pipeline_allocs;
     if (const auto *realize = for_node->body.as<BlockRealizeNode>()) {
       const auto &block = realize->block;
@@ -853,16 +855,68 @@ private:
         ICHECK(buffer->IsInstance<BufferNode>());
         buffer_data_to_buffer_.Set(buffer->data, buffer);
       }
-      pipeline_body = block->body;
+      pipeline_body_root = block->body;
       pipeline_allocs = block->alloc_buffers;
+      pipeline_body_from_block = true;
     } else {
-      pipeline_body = for_node->body;
+      pipeline_body_root = for_node->body;
     }
 
-    const SeqStmtNode *pipeline_body_seq = pipeline_body.as<SeqStmtNode>();
-    CHECK(pipeline_body_seq) << "ValueError: The body of the software pipeline "
-                                "should be SeqStmt, got "
-                             << pipeline_body->GetTypeKey();
+    const SeqStmtNode *pipeline_body_seq = nullptr;
+    std::vector<std::function<Stmt(Stmt)>> rewrap_fns;
+    auto append_attr_wrapper = [&rewrap_fns](const AttrStmtNode *attr) {
+      ObjectRef node = attr->node;
+      String attr_key = attr->attr_key;
+      PrimExpr value = attr->value;
+      Span span = attr->span;
+      rewrap_fns.emplace_back(
+          [node = std::move(node), attr_key = std::move(attr_key),
+           value = std::move(value), span](Stmt body) -> Stmt {
+            return AttrStmt(node, attr_key, value, body, span);
+          });
+    };
+    {
+      Stmt current = pipeline_body_root;
+      while (true) {
+        if (const auto *seq_stmt = current.as<SeqStmtNode>()) {
+          pipeline_body_seq = seq_stmt;
+          break;
+        }
+        if (const auto *if_then_else = current.as<IfThenElseNode>()) {
+          ICHECK(!if_then_else->else_case.defined())
+              << "InjectSoftwarePipeline: Can't handle the body of the loop "
+                 "because the IfThenElse node has an else branch";
+          PrimExpr condition = if_then_else->condition;
+          Span span = if_then_else->span;
+          rewrap_fns.emplace_back(
+              [condition = std::move(condition), span](Stmt body) -> Stmt {
+                return IfThenElse(condition, body, Stmt(), span);
+              });
+          current = if_then_else->then_case;
+          continue;
+        }
+        if (const auto *let_stmt = current.as<LetStmtNode>()) {
+          Var var = let_stmt->var;
+          PrimExpr value = let_stmt->value;
+          Span span = let_stmt->span;
+          rewrap_fns.emplace_back([var = std::move(var),
+                                   value = std::move(value),
+                                   span](Stmt body) -> Stmt {
+            return LetStmt(var, value, body, span);
+          });
+          current = let_stmt->body;
+          continue;
+        }
+        if (const auto *attr = current.as<AttrStmtNode>()) {
+          append_attr_wrapper(attr);
+          current = attr->body;
+          continue;
+        }
+        LOG(FATAL) << "ValueError: The body of the software pipeline should be "
+                   << "SeqStmt, got " << current->GetTypeKey();
+      }
+    }
+    ICHECK(pipeline_body_seq != nullptr);
 
     // Step 3: Blockize the components of the pipeline. Each child of the
     // pipelined loop will be converted into a block.
@@ -934,6 +988,27 @@ private:
     Stmt pipeline = PipelineRewriter(buffer_data_to_buffer_, pipeline_allocs,
                                      GetRef<For>(op), pipeline_info)
                         .BuildPipeline();
+    auto apply_wrappers = [&](Stmt stmt) {
+      for (auto it = rewrap_fns.rbegin(); it != rewrap_fns.rend(); ++it) {
+        stmt = (*it)(stmt);
+      }
+      return stmt;
+    };
+    if (!rewrap_fns.empty()) {
+      if (pipeline_body_from_block) {
+        BlockRealize pipeline_realize = Downcast<BlockRealize>(pipeline);
+        Block pipeline_block = pipeline_realize->block;
+        {
+          BlockNode *block_node = pipeline_block.CopyOnWrite();
+          block_node->body = apply_wrappers(block_node->body);
+        }
+        pipeline = BlockRealize(pipeline_realize->iter_values,
+                                pipeline_realize->predicate, pipeline_block,
+                                pipeline_realize->span);
+      } else {
+        pipeline = apply_wrappers(pipeline);
+      }
+    }
 
     if (const auto *realize = op->body.as<BlockRealizeNode>()) {
       const auto &block = realize->block;

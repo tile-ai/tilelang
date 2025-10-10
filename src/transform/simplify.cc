@@ -5,12 +5,14 @@
  */
 
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/tir/analysis.h>
 #include <tvm/tir/buffer.h>
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 #include <tvm/tir/utils.h>
 
+#include <optional>
 #include <utility>
 
 #include "arith/ir_mutator_with_analyzer.h"
@@ -327,31 +329,63 @@ private:
 
   Stmt VisitStmt_(const LetStmtNode *op) override {
     PrimExpr value = this->VisitExpr(op->value);
+    bool remove_buffer_alias = false;
+    // TileLang emits aliases like `X_shared = buffer[0:128, 0:32]` to annotate
+    // fragment types. TVM currently reinterprets vectorized/shared accesses as
+    // Let-bound BufferLoad/BufferRegion nodes. If these bindings survive, later
+    // passes (Layout rewrite, FlattenBuffer) substitute them with vector lanes
+    // that our layout can't handle. Force-inline (by dropping the let) whenever
+    // the alias spans more than 2 dims or carries vector lanes.
+    auto get_ranges = [&](const PrimExpr &expr) -> Array<Range> {
+      Array<Range> ranges;
+      if (const auto *load = expr.as<BufferLoadNode>()) {
+        for (const PrimExpr &index : load->indices) {
+          if (const auto *ramp = index.as<RampNode>()) {
+            ranges.push_back(Range::FromMinExtent(ramp->base, ramp->lanes));
+          } else {
+            ranges.push_back(Range::FromMinExtent(index, Integer(1)));
+          }
+        }
+      } else if (const auto *region = expr.as<BufferRegionNode>()) {
+        for (const Range &range : region->region) {
+          ranges.push_back(range);
+        }
+      }
+      return ranges;
+    };
+    Array<Range> ranges = get_ranges(value);
+    if (!ranges.empty()) {
+      int non_unit_dims = 0;
+      for (const Range &range : ranges) {
+        PrimExpr extent = analyzer_->Simplify(range->extent);
+        if (is_const_int(extent, 1) || analyzer_->CanProveEqual(extent, 1)) {
+          continue;
+        }
+        ++non_unit_dims;
+        if (non_unit_dims > 1) {
+          remove_buffer_alias = true;
+          break;
+        }
+      }
+    }
+    if (remove_buffer_alias) {
+      Stmt body = this->VisitStmt(op->body);
+      bool used = UsesVar(
+          body, [&](const VarNode *var) { return var == op->var.get(); });
+      ICHECK(!used) << "Let binding of BufferLoad is expected to be unused "
+                       "before removal "
+                    << op->var << " : " << op->value << " .";
+      return body;
+    }
+
     bool can_inline = CanInlineLetStmt(op);
     if (can_inline) {
-      // It is usually fine to discard the let binding because the
-      // call to simplify will always inline the var.
-      //
-      // The exception is when the variable is used in a Buffer's
-      // definition, as these are not updated by the simplification.
-      // After DeclBuffer is required prior to use of a buffer,
-      // simplifying can update the buffer definition as well.  The
-      // buffer can only be updated at its point of definition,
-      // because the points of use may occur within contexts that
-      // allow for additional simplifications (e.g. a buffer of shape
-      // [i,j] whose first use occurs within "if i==1" should not have
-      // its shape simplified to [1,j]).
       analyzer_->Bind(op->var, value);
     } else if (SideEffect(op->value) <= CallEffectKind::kPure) {
-      // Even if we aren't replacing all occurrences, they may be
-      // necessary for proving conditional statements.
       non_inlined_bindings_.Set(op->var, value);
     }
     Stmt body = this->VisitStmt(op->body);
 
-    // TODO(Lunderberg): Update the Buffer object as part of
-    // DeclBuffer updates, which will first require
-    // https://github.com/apache/tvm/pull/14778.
     bool used_in_buffer_def = used_in_buffer_def_.count(op->var.get());
 
     if (can_inline && !used_in_buffer_def) {

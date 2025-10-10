@@ -37,6 +37,13 @@ deeplearning_operators/deepseek_mla
 
 :::{toctree}
 :maxdepth: 1
+:caption: COMPILER INTERNALS
+
+compiler_internals/letstmt_inline
+:::
+
+:::{toctree}
+:maxdepth: 1
 :caption: API Reference
 
 autoapi/tilelang/index
