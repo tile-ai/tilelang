@@ -1,14 +1,18 @@
-name: Reminder Bot
+name: PR Reminder Bot
+
 on:
   pull_request_target:
-    types: [opened]
+    types:
+      - opened
+
 jobs:
-  pr_reminder:
+  remind:
     runs-on: ubuntu-latest
     steps:
       - name: Remind
         uses: actions/github-script@v8
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             github.rest.issues.createComment({
               owner: context.repo.owner,
@@ -19,5 +23,3 @@ jobs:
                 'We appreciate you taking this step! Our team will review your contribution, and we look forward to your awesome work!\n\n' +
                 '🚀'
             })
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
