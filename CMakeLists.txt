@@ -165,6 +165,7 @@ if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
 endif()
 
 python_add_library(cython_wrapper MODULE "${CMAKE_BINARY_DIR}/cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
+install(TARGETS cython_wrapper LIBRARY DESTINATION tilelang)
 
 # let libtilelang to search tvm/tvm_runtime in same dir
 if(APPLE)
@@ -175,13 +176,12 @@ else()
   set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN")
 endif()
 
-install(TARGETS cython_wrapper LIBRARY DESTINATION "${CMAKE_CURRENT_SOURCE_DIR}/tilelang")
-install(TARGETS tvm tvm_runtime tilelang_module tilelang LIBRARY DESTINATION "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/lib")
+install(TARGETS tvm tvm_runtime tilelang_module tilelang LIBRARY DESTINATION tilelang/lib)
 
 # Copy tvm cython ext for wheels
 # TODO: not necessary for editable builds
 if(TVM_BUILD_FROM_SOURCE)
   add_dependencies(tilelang tvm_cython)
-  # install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/tvm/python/tvm/ffi/core.abi3.so" DESTINATION tilelang/3rdparty/tvm/python/tvm/ffi/)
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/tvm/python/tvm/ffi/core.abi3.so" DESTINATION tilelang/3rdparty/tvm/python/tvm/ffi/)
 endif()
 

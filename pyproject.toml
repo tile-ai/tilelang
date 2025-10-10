@@ -56,9 +56,6 @@ build-backend = "scikit_build_core.build"
 [tool.scikit-build]
 wheel.py-api = "cp38"
 cmake.version = ">=3.26.1"
-build-dir = "build"
-
-editable.rebuild = true
 
 # Include backend and git info in version
 metadata.version.provider = "version_provider"
