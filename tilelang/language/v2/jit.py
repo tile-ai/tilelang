@@ -55,15 +55,13 @@ class JITKernel(Generic[_P, _T]):
     lib: JITLib | ctypes.CDLL
     lib_call: Callable
     source: str
+    wrapped_source: str
     func: JITFunc[_P, _T]
 
     def __call__(self, *args: _P.args, **kws: _P.kwargs) -> _T:
         const_args, dyn_args = self.func.parse_args(*args, **kws)
         assert const_args == self.func.const_args, "Const args do not match"
         return self.lib_call(*dyn_args)
-
-    def get_source(self) -> str:
-        return self.source
 
 
 def compile(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
@@ -107,7 +105,8 @@ def compile(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
 
     return JITKernel(
         func=func,
-        source=wrapped_source,
+        source=artifact.kernel_source,
+        wrapped_source=wrapped_source,
         lib_call=lib_call,
         lib_path=lib_path,
         lib=lib,

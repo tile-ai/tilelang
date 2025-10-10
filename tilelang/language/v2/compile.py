@@ -11,7 +11,7 @@ from .types import (
     StridedTensorSchema,
     ConstSchema,
     MakeEmpty,
-    Buffer_,
+    BufferLike,
     cvt_dtype,
     cvt_tvm_dtype_to_torch,
     get_ptr_type,
@@ -158,10 +158,14 @@ def get_current_stream_functor():
 
 @dataclass(slots=True)
 class JITFunc(Generic[_P, _T]):
+    '''
+    JITFunc is the IR generation directly from user source
+        It stores all keys used in JITKernel
+    '''
     target: Target
     target_host: Target
-    global_allocs: List[Buffer_]
-    outs: List[Buffer_]
+    global_allocs: List[BufferLike]
+    outs: List[BufferLike]
     pass_configs: Dict[str, Any]
     compile_flags: List[str]
     prim_func: tir.PrimFunc
@@ -281,8 +285,8 @@ class DSLBuilder:
     compile_flags: List[str] = field(default_factory=list)
     default_device: Optional[torch.device] = None
 
-    global_allocs: List[Buffer_] = field(default_factory=list)
-    outs: List[Buffer_] = field(default_factory=list)
+    global_allocs: List[BufferLike] = field(default_factory=list)
+    outs: List[BufferLike] = field(default_factory=list)
 
     # used to store pending shape args, making handle arg first
     pending_args: List[(str, tir.Var)] = field(default_factory=list)
@@ -382,7 +386,7 @@ class DSLBuilder:
             self.flush_pending_vars()
             if self.default_device is None:
                 self.default_device = expr.device
-            return Buffer_(
+            return BufferLike(
                 buffer=arg,
                 shape=shape,
                 stride=stride,
@@ -406,7 +410,7 @@ class DSLBuilder:
             )
             arg_idx, arg = self.new_arg(name, buffer)
             self.flush_pending_vars()
-            result = Buffer_(
+            result = BufferLike(
                 buffer=arg,
                 shape=expr.shape,
                 stride=expr.stride,
@@ -430,16 +434,16 @@ class DSLBuilder:
             tb.evaluate(expr)
 
     def ret(self, val: Any = None) -> Any:
-        if isinstance(val, Buffer_):
+        if isinstance(val, BufferLike):
             val = (val,)
         for v in val:
-            assert isinstance(v, Buffer_), "Expected a buffer to return"
+            assert isinstance(v, BufferLike), "Expected a buffer to return"
             assert v.arg_idx is not None, "Expected a make_empty buffer to return"
             self.outs.append(v)
 
     def assign(self, lval: Any, slice: Any, rval: Any) -> Any:
         if isinstance(slice, (tir.PrimExpr, int)):
-            if isinstance(lval, Buffer_):
+            if isinstance(lval, BufferLike):
                 lval = lval.buffer
             tb.buffer_store(lval, rval, slice)
         else:
@@ -552,5 +556,5 @@ def get_params() -> List[tir.Var]:
     return current_builder()._params
 
 
-def get_global_allocs() -> List[Buffer_]:
+def get_global_allocs() -> List[BufferLike]:
     return current_builder().global_allocs

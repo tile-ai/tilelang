@@ -86,7 +86,7 @@ else:
 
 
 @dataclass(frozen=True, slots=True)
-class Buffer_:
+class BufferLike:
     buffer: tir.Buffer
     shape: Tuple[int | tir.PrimExpr, ...]
     stride: Tuple[int | tir.PrimExpr, ...]

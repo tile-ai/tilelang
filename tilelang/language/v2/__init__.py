@@ -65,7 +65,7 @@ from .types import (
     const,  # noqa: F401
     StridedTensor,  # noqa: F401
     Tensor,  # noqa: F401
-    Buffer_,  # noqa: F401
+    BufferLike,  # noqa: F401
     empty,  # noqa: F401
     MakeEmpty,  # noqa: F401
     cvt_dtype,  # noqa: F401
