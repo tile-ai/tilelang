@@ -54,6 +54,11 @@ class suppress_stdout_stderr:
         self.errnull_file.close()
 
 
+IS_CUDA = torch.cuda.is_available()
+device = 'cuda:0' if IS_CUDA else 'mps:0'
+Event = torch.cuda.Event if IS_CUDA else torch.mps.Event
+
+
 def do_bench(
     fn: Callable,
     warmup: float = 25,
@@ -92,7 +97,7 @@ def do_bench(
 
     # Initial function call and synchronization
     fn()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Create L2 cache flush buffer (256 MB)
     # Fast flush uses int32 (4 bytes), regular uses int8 (1 byte)
@@ -108,7 +113,8 @@ def do_bench(
         cache.zero_()
         fn()
     end_event.record()
-    torch.cuda.synchronize()
+    start_event.synchronize()
+    end_event.synchronize()
     estimate_ms = start_event.elapsed_time(end_event) / 5
 
     # Calculate warmup and repeat counts (minimum 1 iteration each)

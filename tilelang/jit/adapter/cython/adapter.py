@@ -21,11 +21,11 @@ from tvm.relax import TensorType
 from tilelang.jit.adapter.base import BaseKernelAdapter
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.jit.adapter.libgen import LibraryGenerator
-from tilelang.jit.adapter.utils import is_cuda_target, is_hip_target, is_cpu_target
+from tilelang.jit.adapter.utils import is_cuda_target, is_hip_target, is_cpu_target, is_metal_target
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.utils.tensor import map_torch_type
-from tilelang.contrib.cc import get_cplus_compiler
+from tilelang.contrib.cc import get_cplus_compiler, is_darwin
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +153,9 @@ with open(cython_wrapper_path, "r") as f:
                     os.system(f"{cython} {cython_wrapper_path} --cplus -o {source_path}")
                     python_include_path = sysconfig.get_path("include")
                     cc = get_cplus_compiler()
-                    command = f"{cc} -shared -pthread -fPIC -fwrapv -O2 -Wall -fno-strict-aliasing -I{python_include_path} {source_path} -o {temp_path}"
+                    dynamic_flag = '-Wl,-undefined,dynamic_lookup' if is_darwin(
+                    ) else '-Wl,--unresolved-symbols=ignore-all'
+                    command = f"{cc} -shared -pthread -fPIC -fwrapv -O2 -Wall -fno-strict-aliasing {dynamic_flag} -I{python_include_path} {source_path} -o {temp_path}"
                     os.system(command)
 
                     # rename the temp file to the library file
@@ -450,6 +452,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
             device = torch.device("cuda")
         elif is_cpu_target(self.target):
             device = torch.device("cpu")
+        elif is_metal_target(self.target):
+            device = torch.device("mps")
         else:
             raise ValueError(f"Unsupported target: {self.target}")
 

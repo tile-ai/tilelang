@@ -1061,6 +1061,88 @@ def ptx_mma_sp(
     )
 
 
+def ptx_wgmma_ss(
+    dtype,
+    wgmma_prefix,
+    a_is_k_major,
+    b_is_k_major,
+    a_dtype_abbrv,
+    b_dtype_abbrv,
+    accum_dtype_abbrv,
+    A_desc,
+    A_offset,
+    B_desc,
+    B_offset,
+    C_data,
+    C_offset,
+    scale_out,
+    scale_in_a,
+    scale_in_b,
+):
+    """TVM intrinsic for ptx tensor core wmma instructions
+    https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions-for-wmma
+    """
+    return call_intrin(
+        dtype,
+        _tvm_op.Op.get("tl.ptx_wgmma_ss"),
+        wgmma_prefix,
+        a_is_k_major,
+        b_is_k_major,
+        a_dtype_abbrv,
+        b_dtype_abbrv,
+        accum_dtype_abbrv,
+        A_desc,
+        A_offset,
+        B_desc,
+        B_offset,
+        C_data,
+        C_offset,
+        scale_out,
+        scale_in_a,
+        scale_in_b,
+    )
+
+
+def ptx_wgmma_rs(
+    dtype,
+    wgmma_prefix,
+    a_is_k_major,
+    b_is_k_major,
+    a_dtype_abbrv,
+    b_dtype_abbrv,
+    accum_dtype_abbrv,
+    A_buf,
+    A_offset,
+    B_desc,
+    B_offset,
+    C_data,
+    C_offset,
+    scale_out,
+    scale_in_a,
+    scale_in_b,
+):
+
+    return call_intrin(
+        dtype,
+        _tvm_op.Op.get("tl.ptx_wgmma_rs"),
+        wgmma_prefix,
+        a_is_k_major,
+        b_is_k_major,
+        a_dtype_abbrv,
+        b_dtype_abbrv,
+        accum_dtype_abbrv,
+        A_buf,
+        A_offset,
+        B_desc,
+        B_offset,
+        C_data,
+        C_offset,
+        scale_out,
+        scale_in_a,
+        scale_in_b,
+    )
+
+
 def mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """TVM intrinsic for storing the result of PTX MMA into a destination pointer
 

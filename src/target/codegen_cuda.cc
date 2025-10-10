@@ -1068,7 +1068,7 @@ std::string CodeGenTileLangCUDA::GetBufferRef(DataType t,
   if (scope.empty()) {
     scope = GetPtrStorageScope(buffer->data);
   }
-  if (scope == "local.var") {
+  if (scope == "local.var" || scope == "local.descriptor") {
     os << vid;
     return os.str();
   }
@@ -1533,6 +1533,105 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         b_ref, b_offset, c_ref, c_offset, metadata, metadata_offset,
         sparse_selector, "", true, saturate);
     this->stream << asm_code;
+  } else if (op->op.same_as(tl::ptx_wgmma_ss())) {
+    // arg 0: dtype
+    // arg 1: shape
+    // arg 2: A_layout
+    // arg 3: B_layout
+    // arg 4: A_dtype
+    // arg 5: B_dtype
+    // arg 6: C_dtype
+    // arg 7: multiplicand_a
+    // arg 8: multiplicand_b
+    // arg 9: accumulator
+    // arg 10: saturate
+    ICHECK_EQ(op->args.size(), 15U) << "ptx_wgmma_ss args is " << op->args;
+    std::string shape = Downcast<StringImm>(op->args[0])->value;
+    bool a_is_k_major = Downcast<Bool>(op->args[1])->value;
+    bool b_is_k_major = Downcast<Bool>(op->args[2])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
+    std::string a_desc = this->PrintExpr(op->args[6]);
+    std::string A_offset = this->PrintExpr(op->args[7]);
+    std::string b_desc = this->PrintExpr(op->args[8]);
+    std::string B_offset = this->PrintExpr(op->args[9]);
+    std::string c_ref = this->PrintExpr(op->args[10]);
+    std::string c_offset = this->PrintExpr(op->args[11]);
+    bool scale_out = Downcast<Bool>(op->args[12])->value;
+    bool scale_in_a = Downcast<Bool>(op->args[13])->value;
+    bool scale_in_b = Downcast<Bool>(op->args[14])->value;
+
+    const bool a_is_shared = true;
+    this->PrintIndent();
+    std::string asm_code = PrintWGMMAAssembly(
+        shape, a_is_k_major, b_is_k_major, A_dtype, B_dtype, C_dtype, a_desc,
+        A_offset, b_desc, B_offset, c_ref, c_offset, scale_out, scale_in_a,
+        scale_in_b, a_is_shared, "", "", "", false);
+    auto [m, n, k] = tl::codegen::ptx::ParseMMAShape(shape);
+    std::string wgmma_asm_code =
+        "tl::wgmma_ss<(AType), (BType), (CType), (M), (N), (K), (tnspA), "
+        "(tnspB), (scaleA), (scaleB)>(uint64_t((desc_a) + (A_offset)), "
+        "uint64_t((desc_b) + (B_offset)), ((uint32_t*)((C))), (scale_out));\n";
+    // replace patterns
+    tl::codegen::Replacer replacer;
+    replacer.register_rule("(AType)",
+                           tl::codegen::ptx::DTypeEnumToString(A_dtype));
+    replacer.register_rule("(BType)",
+                           tl::codegen::ptx::DTypeEnumToString(B_dtype));
+    replacer.register_rule("(CType)",
+                           tl::codegen::ptx::DTypeEnumToString(C_dtype));
+    replacer.register_rule("(M)", std::to_string(m));
+    replacer.register_rule("(N)", std::to_string(n));
+    replacer.register_rule("(K)", std::to_string(k));
+    replacer.register_rule("(tnspA)", a_is_k_major ? "false" : "true");
+    replacer.register_rule("(tnspB)", b_is_k_major ? "false" : "true");
+    replacer.register_rule("(scaleA)", scale_in_a ? "1" : "-1");
+    replacer.register_rule("(scaleB)", scale_in_b ? "1" : "-1");
+    replacer.register_rule("(desc_a)", a_desc);
+    replacer.register_rule("(A_offset)", A_offset);
+    replacer.register_rule("(desc_b)", b_desc);
+    replacer.register_rule("(B_offset)", B_offset);
+    replacer.register_rule("(C)", c_ref + " + " + c_offset);
+    replacer.register_rule("(scale_out)", scale_out ? "true" : "false");
+    wgmma_asm_code = replacer.rewrite(wgmma_asm_code);
+    this->stream << wgmma_asm_code;
+  } else if (op->op.same_as(tl::ptx_wgmma_rs())) {
+    // arg 0: dtype
+    // arg 1: shape
+    // arg 2: A_layout
+    // arg 3: B_layout
+    // arg 4: A_dtype
+    // arg 5: B_dtype
+    // arg 6: C_dtype
+    // arg 7: multiplicand_a
+    // arg 8: multiplicand_b
+    // arg 9: accumulator
+    // arg 10: saturate
+    ICHECK_EQ(op->args.size(), 15U) << "ptx_wgmma_rs args is " << op->args;
+    std::string shape = Downcast<StringImm>(op->args[0])->value;
+    bool A_layout = Downcast<Bool>(op->args[1])->value;
+    bool B_layout = Downcast<Bool>(op->args[2])->value;
+    std::string A_dtype = Downcast<StringImm>(op->args[3])->value;
+    std::string B_dtype = Downcast<StringImm>(op->args[4])->value;
+    std::string C_dtype = Downcast<StringImm>(op->args[5])->value;
+    std::string a_ref = this->PrintExpr(op->args[6]);
+    std::string A_offset = this->PrintExpr(op->args[7]);
+    std::string b_desc = this->PrintExpr(op->args[8]);
+    std::string B_offset = this->PrintExpr(op->args[9]);
+    std::string c_ref = this->PrintExpr(op->args[10]);
+    std::string c_offset = this->PrintExpr(op->args[11]);
+    bool scale_out = Downcast<Bool>(op->args[12])->value;
+    bool scale_in_a = Downcast<Bool>(op->args[13])->value;
+    bool scale_in_b = Downcast<Bool>(op->args[14])->value;
+
+    const bool a_is_shared = false;
+    this->PrintIndent();
+    std::string asm_code = PrintWGMMAAssembly(
+        shape, A_layout, B_layout, A_dtype, B_dtype, C_dtype, a_ref, A_offset,
+        b_desc, B_offset, c_ref, c_offset, scale_out, scale_in_a, scale_in_b,
+        a_is_shared, "", "", "", false);
+    this->stream << asm_code;
   } else if (op->op.same_as(builtin::ptx_ldmatrix())) {
     // arg 0: whether the matrix is loaded in column major format or not.
     // arg 1: number of matrices to load.
@@ -1857,6 +1956,27 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                           op->args, true, os);
   } else if (op->op.same_as(tl::tl_shuffle_elect())) {
     os << "tl::tl_shuffle_elect<" << PrintExpr(op->args[0]) << ">()";
+  } else if (op->op.same_as(tl::initialize_descriptor())) {
+    ICHECK(op->args.size() == 5)
+        << "tl_initialize_descriptor expects 5 arguments but got "
+        << op->args.size();
+    auto descriptor = op->args[0];
+    auto start_address = op->args[1];
+    auto layout_type = op->args[2];
+    auto leading_byte_offset = op->args[3];
+    auto stride_byte_offset = op->args[4];
+    os << "tl::initialize_descriptor<" << PrintExpr(layout_type) << ", "
+       << PrintExpr(leading_byte_offset) << ", "
+       << PrintExpr(stride_byte_offset) << ">(" << PrintExpr(descriptor) << ", "
+       << PrintExpr(start_address) << ")";
+  } else if (op->op.same_as(tl::increase_descriptor_offset())) {
+    ICHECK(op->args.size() == 2)
+        << "tl_increase_descriptor_offset expects 2 arguments but got "
+        << op->args.size();
+    auto descriptor = op->args[0];
+    auto offset = op->args[1];
+    os << "tl::increase_descriptor_offset<int>(" << PrintExpr(descriptor)
+       << ", " << PrintExpr(offset) << ")";
   } else if (op->op.same_as(tl::__exp())) {
     CUDAFastMath math_func;
     std::string func_name = math_func(op->dtype, "exp");
@@ -1999,6 +2119,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
           << "Accumulator only support half, float and int type for now";
     }
     PrintWmmaScope(scope, op->dtype, buffer, stream);
+  } else if (scope == "local.descriptor") {
+    stream << "tl::GmmaDescriptor " << vid << ";\n";
   } else {
     PrintStorageScope(scope, stream);
     PrintType(op->dtype, stream);
@@ -2032,7 +2154,7 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
     } else if (scope == "local.var") {
       stream << ' ' << vid << " = " << PrintExpr(tir::make_const(op->dtype, 0))
              << ";\n";
-    } else {
+    } else if (scope != "local.descriptor") {
       ICHECK(false) << "Unsupported scope: " << scope;
     }
   }

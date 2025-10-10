@@ -13,6 +13,7 @@ Tile Language (**tile-lang**) is a concise domain-specific language designed to 
 <img src=./images/MatmulExample.png />
 
 ## Latest News
+- 10/07/2025 🍎: Added Apple Metal Device support, check out [Pull Request #799](https://github.com/tile-ai/tilelang/pull/799) for details.
 - 09/29/2025  🎉: Thrilled to announce that ​​AscendC​​ and ​Ascend​NPU IR​​ backends targeting Huawei Ascend chips are now supported!
 Check out the preview here:
 🔗 [link](https://github.com/tile-ai/tilelang-ascend).

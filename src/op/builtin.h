@@ -217,12 +217,34 @@ TVM_DLL const Op &mbarrier_wait_parity();
 TVM_DLL const Op &mbarrier_expect_tx();
 
 /*!
+ * \brief tvm intrinsic for ptx tensor core wgmma instructions.
+ *
+ *  void ptx_wgmma_ss(StringImm accum_dtype, StringImm wgmma_prefix, bool
+ * a_is_k_major, bool b_is_k_major, StringImm a_dtype_abbrv, StringImm
+ * b_dtype_abbrv, StringImm accum_dtype_abbrv, Var A_descriptor, PrimExpr
+ * A_offset, Var B_descriptor, Var B_offset, Var C_data, Var C_offset, bool
+ * scale_out, bool scale_in_a, bool scale_in_b);
+ */
+TVM_DLL const Op &ptx_wgmma_ss();
+
+/*!
+ * \brief tvm intrinsics for ptx tensor core wgmma instructions.
+ *
+ *  void ptx_wgmma_rs(StringImm accum_dtype, StringImm wgmma_prefix, bool
+ * a_is_k_major, bool b_is_k_major, StringImm a_dtype_abbrv, StringImm
+ * b_dtype_abbrv, StringImm accum_dtype_abbrv, Var A_descriptor, PrimExpr
+ * A_offset, Var B_descriptor, Var B_offset, Var C_data, Var C_offset, bool
+ * scale_out, bool scale_in_a, bool scale_in_b);
+ */
+TVM_DLL const Op &ptx_wgmma_rs();
+
+/*!
  * \brief tvm intrinsics for initializing tensor memory
  *
  * ptx_init_tensor_memory(tmem_buffer, num_cols)
  *
  */
-const Op &ptx_init_tensor_memory();
+TVM_DLL const Op &ptx_init_tensor_memory();
 
 /*!
  * \brief tvm intrinsics for deallocating tensor memory
@@ -230,7 +252,7 @@ const Op &ptx_init_tensor_memory();
  * tmem_deallocate(tmem_buffer)
  *
  */
-const Op &ptx_deallocate_tensor_memory();
+TVM_DLL const Op &ptx_deallocate_tensor_memory();
 
 /*!
  * \brief tvm intrinsics for ldmatrix
@@ -397,6 +419,24 @@ TVM_DLL const Op &tl_gemm_sp();
  *  This op is used to represent a shuffle elect operation in tilelang.
  */
 TVM_DLL const Op &tl_shuffle_elect();
+
+/*!
+ * \brief tilelang intrinsic for initializing a descriptor buffer for
+ * wgmma/utcmma.
+ *
+ *  This op is used to represent a descriptor initialization operation in
+ * tilelang.
+ */
+TVM_DLL const Op &initialize_descriptor();
+
+/*!
+ * \brief tilelang intrinsic for setting the start address of a descriptor
+ * buffer for wgmma/utcmma.
+ *
+ *  This op is used to represent a descriptor start address setting operation in
+ * tilelang.
+ */
+TVM_DLL const Op &increase_descriptor_offset();
 
 } // namespace tl
 } // namespace tvm
