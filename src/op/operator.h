@@ -11,6 +11,7 @@
 #include <tvm/ir/op.h>
 #include <tvm/target/target.h>
 #include <tvm/tir/buffer.h>
+#include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 #include <tvm/tir/stmt.h>
 

@@ -134,12 +134,13 @@ def AddWrapperForSingleBufStore():
                     # Validate fragment buffer indices - only index 0 is supported
                     buffer_indices = collect_buffer_indices(statement)
                     for buffer, indices in buffer_indices.items():
-                        if buffer.scope() == "local.fragment":
-                            for index in indices:
-                                if isinstance(index, IntImm) and index != 0:
-                                    raise ValueError(
-                                        f"Fragment buffer access with non-zero index [{index}] is not supported. "
-                                        "Only fragment[0] access is allowed.")
+                        if buffer.scope() != "local.fragment":
+                            continue
+                        for index in indices:
+                            if isinstance(index, IntImm) and index != 0:
+                                raise ValueError(
+                                    f"Fragment buffer access with non-zero index [{index}] is not supported. "
+                                    "Only fragment[0] access is allowed.")
 
                     # Wrap fragment[0] access with T.Parallel loop
                     return For(Var("_", "int32"), 0, 1, ForKind.PARALLEL, statement)

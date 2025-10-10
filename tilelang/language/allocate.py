@@ -153,3 +153,12 @@ def alloc_reducer(shape, dtype, op="sum", replication=None):
     TL.block_attr({"reducer_info": {reducer.data: {"rep": replication, "op": op}}})
 
     return reducer
+
+
+def alloc_descriptor(dtype="uint64", scope="local.descriptor"):
+    """Allocate a descriptor buffer for wgmma and utcmma.
+
+    Returns:
+        T.Buffer: A TVM buffer object allocated as a descriptor
+    """
+    return T.alloc_buffer([1], dtype, scope=scope)

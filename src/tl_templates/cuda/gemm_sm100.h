@@ -370,13 +370,15 @@ using tl_mma::gemm_ss;
 // }
 
 template <int M, int N, int K, int AtomM, int AtomN, int AtomK, bool trans_A,
-          bool trans_B, typename C_type, typename A_type, typename B_type>
+          bool trans_B, typename C_type, typename A_type, typename B_type,
+          typename Barrier_type>
 TL_DEVICE void tcgen5mma_gemm_ss(A_type *pA, B_type *pB, uint32_t accum,
-                                 uint64_t *umma_bar_ptr, bool clear_accum) {
+                                 Barrier_type *umma_bar_ptr, bool clear_accum) {
   using MMA =
       cute::tl_tcgen5mma::GemmTensorOp<M, N, K, AtomM, AtomN, AtomK, trans_A,
                                        trans_B, A_type, B_type, C_type>;
-  MMA::body_ss(pA, pB, accum, umma_bar_ptr, clear_accum);
+  MMA::body_ss(pA, pB, accum, reinterpret_cast<uint64_t *>(umma_bar_ptr),
+               clear_accum);
 }
 
 } // namespace tl

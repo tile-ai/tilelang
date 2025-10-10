@@ -5,6 +5,7 @@
 #endif
 
 #include "atomic.h"
+#include <cute/arch/util.hpp>
 #include <cutlass/fast_math.h>
 #include <cutlass/numeric_types.h>
 #include <math_constants.h>
@@ -12,6 +13,8 @@
 using cutlass::bfloat16_t;
 using cutlass::half_t;
 using cutlass::tfloat32_t;
+
+using cute::cast_smem_ptr_to_uint;
 
 using int4_t = int4;
 
@@ -166,6 +169,101 @@ TL_DEVICE /**
 }
 
 namespace tl {
+/*!
+ * \brief PTX data type.
+ * \note
+ * PTX fundamental data types:
+ * https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#fundamental-types
+ * PTX matrix data types:
+ * https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-data-types
+ */
+enum class DataType : int {
+  kInt4 = 0,
+  kUInt4 = 1,
+  kInt8 = 2,
+  kUInt8 = 3,
+  kInt16 = 4,
+  kUInt16 = 5,
+  kInt32 = 6,
+  kUInt32 = 7,
+  kInt64 = 8,
+  kUInt64 = 9,
+  kFloat8_e4m3 = 10,
+  kFloat8_e5m2 = 11,
+  kFloat16 = 12,
+  kBFloat16 = 13,
+  kFloat16x2 = 14,
+  kFloat32 = 15,
+  kTensorFloat32 = 16,
+  kFloat64 = 17,
+  kBit1 = 18,
+  kBit8 = 19,
+  kBit16 = 20,
+  kBit32 = 21,
+  kBit64 = 22
+};
+
+union GmmaDescriptor {
+  CUTE_HOST_DEVICE constexpr GmmaDescriptor() noexcept : desc_(0) {}
+  CUTE_HOST_DEVICE constexpr GmmaDescriptor(uint64_t desc) noexcept
+      : desc_(desc) {}
+  CUTE_HOST_DEVICE constexpr GmmaDescriptor(GmmaDescriptor const &t) noexcept
+      : desc_(t.desc_) {}
+  CUTE_HOST_DEVICE constexpr GmmaDescriptor(GmmaDescriptor &&t) noexcept
+      : desc_(t.desc_) {}
+
+  CUTE_HOST_DEVICE constexpr GmmaDescriptor &
+  operator=(GmmaDescriptor const &t) noexcept {
+    desc_ = t.desc_;
+    return *this;
+  }
+
+  CUTE_HOST_DEVICE constexpr GmmaDescriptor &
+  operator=(GmmaDescriptor &&t) noexcept {
+    desc_ = t.desc_;
+    return *this;
+  }
+
+  uint64_t desc_;
+  uint32_t reg32_[2];
+  uint16_t reg16_[4];
+
+  // Bitfield implementation avoids the need for shifts in assignment
+  struct {
+    // start_address, bit [0,14), 4LSB not included
+    uint16_t start_address_ : 14, : 2; // 14 bits [0,14), 2 bits unused
+    // leading dimension byte offset, bit [16,30), 4LSB not included
+    // For N: This is the stride from the first col to the second col of the 8x2
+    // brick in INTERLEAVED
+    //   Unused for all SWIZZLE_* layouts (and assumed to be 1)
+    // For T: This is the stride from the first 8 rows to the next 8 rows.
+    uint16_t leading_byte_offset_ : 14, : 2; // 14 bits [0,14), 2 bits unused
+    // stride dimension byte offset, bit [32,46), 4LSB not included
+    // For N: This is the stride from the first 8 rows to the next 8 rows.
+    // For T: This is the stride fro mthe first 8 cols to the next 8 cols.
+    uint16_t stride_byte_offset_ : 14, : 2; // 14 bits [0,14), 2 bits unused
+    // base_offset, bit [49,52)
+    // Valid only for SWIZZLE_128B and SWIZZLE_64B
+    uint8_t : 1,
+        base_offset_ : 3, : 4; // 1 bit unused, 3 bits [1,4), 4 bits unused
+    // layout type, bit [62,64)
+    // SWIZZLE_NONE = 0, SWIZZLE_32B = 3, SWIZZLE_64B = 2, SWIZZLE_128B = 1
+    uint8_t : 6, layout_type_ : 2; // 6 bits unused, 2 bits [6,8)
+  } bitfield;
+
+  // Decay to a uint64_t
+  CUTE_HOST_DEVICE constexpr operator uint64_t() const noexcept {
+    return desc_;
+  }
+  template <typename T>
+  CUTE_HOST_DEVICE constexpr GmmaDescriptor operator+(const T &offset) const {
+    GmmaDescriptor ret;
+    ret.reg32_[0] = reg32_[0] + uint32_t(offset);
+    ret.reg32_[1] = reg32_[1];
+    return ret;
+  }
+};
+
 // Any
 template <typename T> TL_DEVICE bool Any(T *a, int size) {
   for (int i = 0; i < size; i++) {
@@ -201,6 +299,25 @@ template <int barrier_id = 0, int thread_count = 0>
 TL_DEVICE void __sync_thread_partial() {
   asm volatile("bar.sync %0, %1;" : : "r"(barrier_id), "r"(thread_count));
 }
+
+template <int layout_type = 0, int leading_byte_offset = 0,
+          int stride_byte_offset = 0, typename T>
+TL_DEVICE void initialize_descriptor(GmmaDescriptor &descriptor,
+                                     T *start_address) {
+  descriptor.bitfield.start_address_ =
+      cute::cast_smem_ptr_to_uint(start_address) >> 4;
+  descriptor.bitfield.layout_type_ = layout_type;
+  descriptor.bitfield.base_offset_ = 0;
+  descriptor.bitfield.leading_byte_offset_ = leading_byte_offset;
+  descriptor.bitfield.stride_byte_offset_ = stride_byte_offset;
+}
+
+template <typename T>
+TL_DEVICE void increase_descriptor_offset(GmmaDescriptor &descriptor,
+                                          T offset) {
+  descriptor.reg32_[0] += (offset >> 4);
+}
+
 } // namespace tl
 
 namespace cutlass {

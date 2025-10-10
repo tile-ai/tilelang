@@ -38,9 +38,6 @@ def parallel_nsa_fwd_kernel(q, k, v, o_slc, o_swa, lse_slc, lse_swa, scale, bloc
     v += (bos * H + i_h) * V
     block_indices += (bos + i_t) * H * S + i_h * S
 
-    # if USE_BLOCK_COUNTS:
-    #     NS = tl.load(block_counts + (bos + i_t) * H + i_h)
-    # else:
     NS = S
 
     p_q = tl.make_block_ptr(q + (bos + i_t) * HQ * K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK),
@@ -452,7 +449,12 @@ def get_configs():
 
 
 @tilelang.autotune(configs=get_configs(),)
-@tilelang.jit
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    })
 def tilelang_sparse_attention(batch,
                               heads,
                               seq_len,
