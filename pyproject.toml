@@ -26,8 +26,11 @@ skip = [
 
 [tool.ruff]
 target-version = "py38"
-line-length = 100
-output-format = "full"
+
+exclude = [
+    "3rdparty",
+    "examples/deepseek_v32/inference",
+]
 
 [tool.ruff.lint]
 select = [
@@ -60,6 +63,3 @@ ignore = [
     # No such file or directory
     "E902",
 ]
-[tool.ruff.lint.per-file-ignores]
-"3rdparty/**/*" = ["ALL"]
-"examples/deepseek_v32/inference/**/*" = ["ALL"]
