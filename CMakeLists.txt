@@ -111,6 +111,7 @@ elseif(USE_CUDA)
     src/target/rt_mod_cuda.cc
   )
   list(APPEND TILE_LANG_SRCS ${TILE_LANG_CUDA_SRCS})
+
   list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 

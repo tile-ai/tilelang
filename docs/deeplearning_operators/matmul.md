@@ -8,7 +8,7 @@
 :class: myclass1 myclass2
 :name: a-tip-reference
 
-   This document is still **experimental** and may be incomplete.  
+   This document is still **experimental** and may be incomplete.
    Suggestions and improvements are highly encouraged—please submit a PR!
 :::
 
@@ -256,4 +256,4 @@ For more advanced usage—including partial lowering, explicitly controlling thr
 * [BitBLAS](https://github.com/tile-ai/bitblas)
 * [Triton](https://github.com/openai/triton)
 * [Cutlass](https://github.com/NVIDIA/cutlass)
-* [PyCUDA](https://documen.tician.de/pycuda/)
+* [PyCUDA](https://documen.tician.de/pycuda/)  <!-- codespell:ignore -->
