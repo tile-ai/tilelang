@@ -934,10 +934,10 @@
          {"float8_e4m3fnuzx8", "long"},
          {"float32x16", "float32x16"}};
      std::string call_mfma_code = R"({
-     *((({C_dtype}*){c_ref}) + {c_bias}) = {mfma_buildin}(*((({A_dtype}*){a_ref}) + {a_bias}),
-                   *((({B_dtype}*){b_ref}) + {b_bias}),
-                   *((({C_dtype}*){c_ref}) + {c_bias}), 0, 0, 0);
-   })";
+      *((({C_dtype}*){c_ref}) + {c_bias}) = {mfma_buildin}(*((({A_dtype}*){a_ref}) + {a_bias}),
+                    *((({B_dtype}*){b_ref}) + {b_bias}),
+                    *((({C_dtype}*){c_ref}) + {c_bias}), 0, 0, 0);
+    })";
      std::string mfma_buildin = "__builtin_amdgcn_mfma_" + prefix;
      Replacer replacer;
  
