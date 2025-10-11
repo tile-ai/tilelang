@@ -4,7 +4,10 @@ import torch
 import ctypes
 from typing import Any
 
-class VoidPtr: ...
+
+class VoidPtr:
+    ...
+
 
 AnyDType = ir.Type | str | type | torch.dtype | tvm.DataType
 

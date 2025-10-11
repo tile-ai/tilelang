@@ -2,19 +2,13 @@ from __future__ import annotations
 import inspect
 import torch
 from dataclasses import dataclass, field
+from tilelang.language.kernel import KernelLaunchFrame
 from tvm import tir
 import linecache
 import io
 from .ast_rewrite import DSLMutator
-from .lang import (
-    DynSchema,
-    StridedTensorSchema,
-    ConstSchema,
-    MakeEmpty,
-    BufferLike,
-    Place,
-    ptr as ptr_dtype
-)
+from .lang import (DynSchema, StridedTensorSchema, ConstSchema, MakeEmpty, BufferLike, Place, ptr as
+                   ptr_dtype)
 from tilelang.language.dtypes import (get_tvm_dtype, get_torch_dtype, get_tvm_ptr_type,
                                       get_cffi_dtype, get_ctypes_dtype)
 import threading
@@ -53,7 +47,15 @@ class JITPyFunc(Protocol[_P, _T]):
     __tl_code__: str
 
 
-def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITPyFunc[_P, Tuple[Tuple, Tuple]]:
+@dataclass(frozen=True, slots=True)
+class JITArgParser(Generic[_P, _T]):
+    parser: JITPyFunc[_P, Tuple[Tuple, Tuple]]
+    const_arg_names: List[str]
+    dyn_arg_names: List[str]
+    sig: inspect.Signature
+
+
+def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITArgParser:
     func_args = []
     code_parse_arg = []
     default_dict = {}
@@ -93,7 +95,7 @@ def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITPyFunc[_P, T
             if schema.shape is not None:
                 code_parse_arg.append(
                     ", ".join([f"{name}__shape_{i}" for i in range(len(schema.stride))]) +
-                    f" = {name}.shape")
+                    f", = {name}.shape")
                 # code_parse_arg.append(f'{name}__shape_ = {name}.shape')
                 for i, dim in enumerate(schema.shape):
                     if isinstance(dim, DynSchema):
@@ -106,7 +108,7 @@ def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITPyFunc[_P, T
             if schema.stride is not None:
                 code_parse_arg.append(
                     ", ".join([f"{name}__stride_{i}" for i in range(len(schema.stride))]) +
-                    f" = {name}.stride()")
+                    f", = {name}.stride()")
                 for i, dim in enumerate(schema.stride):
                     if isinstance(dim, DynSchema):
                         var_name = dim.name or f"{name}__stride_{i}"
@@ -139,7 +141,7 @@ def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITPyFunc[_P, T
     exec(code, {}, locs)
     fn = locs["parse_args"](**closure)
     fn.__tl_code__ = source
-    return fn
+    return JITArgParser(fn, tup_const, tup_dyn, sig)
 
 
 def get_current_stream_functor():
@@ -179,9 +181,8 @@ class BufferSchema:
 
 @dataclass(frozen=True, slots=True)
 class JITFunc(Generic[_P, _T]):
-    '''
-    JITFunc is the IR generation directly from user source
-        It stores all keys used in JITKernel, every state is kept simple for pickle
+    '''JITFunc is the IR generated from the kernel source
+    It stores all information required to compile the kernel
     '''
     target: Target
     target_host: Target
@@ -189,9 +190,9 @@ class JITFunc(Generic[_P, _T]):
     outs: List[BufferSchema]
     pass_configs: Dict[str, Any]
     compile_flags: List[str]
-    prim_func: tir.PrimFunc
     arg_parser: Callable[_P, Tuple[Tuple, Tuple]]
-    const_args: Tuple
+    const_args: Tuple[Any, ...]
+    prim_func: tir.PrimFunc
 
     @property
     def out_idx(self) -> List[int]:
@@ -261,12 +262,11 @@ class JITFunc(Generic[_P, _T]):
             dtype_name = f"__{allocs.name}_dtype"
             device_name = f"__{allocs.name}_device"
             closure[dtype_name] = get_torch_dtype(allocs.dtype)
-            # closure[device_name] = allocs.device or torch.device("cuda")
-            closure[device_name] = torch.device('cuda')
+            closure[device_name] = lambda: torch.device("cuda")
             arg_name = call_args[allocs.arg_idx]
             tensor_name = f"{arg_name}_tensor"
             stmts.append(f"{tensor_name} = __tl_empty(" + ",".join(shape_args) +
-                         f", dtype={dtype_name}, device={device_name})")
+                         f", dtype={dtype_name}, device={device_name}())")
             stmts.append(f"{arg_name} = {tensor_name}.data_ptr()")
         for out in self.outs:
             arg_name = call_args[out.arg_idx]
@@ -295,6 +295,25 @@ class JITFunc(Generic[_P, _T]):
     def parse_args(self, *args: _P.args, **kws: _P.kwargs) -> Tuple[Tuple, Tuple]:
         return self.arg_parser(*args, **kws)
 
+    def repr_indent(self, ident: int = 0) -> str:
+        ident_str = " " * ident
+        prim_func = str(self.prim_func.script())
+        return (
+            f"JITFunc(\n"
+            f"{ident_str}  target={repr(self.target)},\n"
+            f"{ident_str}  target_host={repr(self.target_host)},\n"
+            f"{ident_str}  global_allocs={repr(self.global_allocs)},\n"
+            f"{ident_str}  outs={repr(self.outs)},\n"
+            f"{ident_str}  pass_configs={repr(self.pass_configs)},\n"
+            f"{ident_str}  compile_flags={repr(self.compile_flags)},\n"
+            f"{ident_str}  arg_parser={repr(self.arg_parser)},\n"
+            f"{ident_str}  const_args={repr(self.const_args)},\n"
+            f"{ident_str}  prim_func={repr(prim_func)},\n"
+            f"{ident_str})"
+        )
+
+    def __repr__(self):
+        return self.repr_indent()
 
 _thread_local_storage = threading.local()
 
@@ -313,8 +332,10 @@ class MacroGuard:
 @dataclass(frozen=True, slots=True)
 class ConstIfFrame:
     cond: bool
+
     def __enter__(self):
         pass
+
     def __exit__(self, exc_type, exc_value, traceback):
         pass
 
@@ -560,7 +581,10 @@ class DSLBuilder:
                 yield item
 
     def ctx(self, ctx):
-        return ctx
+        if isinstance(ctx, KernelLaunchFrame):
+            return self.with_frame(ctx)
+        else:
+            return ctx
 
     def logical_and(self, val, rclosure) -> bool:
         if isinstance(val, tir.PrimExpr):
@@ -631,9 +655,10 @@ def make_prim_func_generator(func):
     name = func.__name__
 
     def inner(builder: DSLBuilder, *args, **kws):
-        with builder, tb.prim_func():
-            tb.func_name(name)
+        with builder, builder.prim_func():
+            builder.func_name(name)
             return gen(builder)(*args, **kws)
+
     inner.__tl_code__ = gen.__tl_code__
     return inner
 
@@ -645,6 +670,7 @@ def make_macro_generator(func):
         builder = DSLBuilder.current()
         with builder.macro():
             return gen(builder)(*args, **kws)
+
     inner.__tl_code__ = gen.__tl_code__
     return inner
 

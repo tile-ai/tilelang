@@ -134,9 +134,9 @@ class Tune[_T]:
     def __hash__(self) -> int:
         return self.data.__hash__()
     def __eq__(self, rhs) -> bool:
-        return self.data.__eq__(rhs)
+        return self.data.__eq__(rhs.data)
     def __ne__(self, rhs) -> bool:
-        return self.data.__ne__(rhs)
+        return self.data.__ne__(rhs.data)
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,13 +150,18 @@ class TuneMany[_T]:
         return self.data is not rhs.data
 
 
-def tune(params: Iterable[_T]) -> Tune[_T] | TuneMany[_T]:
+def tune(params: Iterable[_T], tune_many_threshold: int = 10) -> Tune[_T] | TuneMany[_T]:
     params = tuple(params)
     assert len(params) > 0, "Expected a non-empty parameter candidates"
-    if len(params) > 8:
+    if len(params) > tune_many_threshold:
         return TuneMany(params)
     else:
         return Tune(params)
+
+
+class empty_data_ptr:
+    def __repr__(self):
+        return "empty_data_ptr()"
 
 
 @dataclass
@@ -167,13 +172,13 @@ class Place:
     device: torch.device
 
     def data_ptr(self):
-        raise RuntimeError("Trying to call kernel on a place holder.")
+        return empty_data_ptr()
 
     def stride(self) -> Tuple[int, ...]:
         return self.strides
 
 
-def place(shape: Tuple[int, ...], dtype: AnyDType, strides: Optional[Tuple[int, ...]] = None, device: Optional[torch.device] = None) -> Place:
+def place(*shape: Tuple[int, ...], dtype: AnyDType, strides: Optional[Tuple[int, ...]] = None, device: Optional[torch.device] = None) -> Place:
     if strides is None:
         prod = 1
         strides = [0 for _ in range(len(shape))]

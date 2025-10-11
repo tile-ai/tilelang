@@ -62,6 +62,7 @@ from tilelang.language.dtypes import (
 )
 from tilelang.language.proxy import make_tensor
 from .lang import (
+    empty_data_ptr,  # noqa: F401
     DynSchema,  # noqa: F401
     ConstSchema,  # noqa: F401
     TensorSchema,  # noqa: F401
@@ -70,13 +71,14 @@ from .lang import (
     tune,  # noqa: F401
     Tune,  # noqa: F401
     dyn,  # noqa: F401
-    ptr, # noqa: F401
+    ptr,  # noqa: F401
     const,  # noqa: F401
     StridedTensor,  # noqa: F401
     Tensor,  # noqa: F401
     BufferLike,  # noqa: F401
     empty,  # noqa: F401
     MakeEmpty,  # noqa: F401
+    place,  # noqa: F401
 )
 from .compile import (
     set_pass_configs,  # noqa: F401
