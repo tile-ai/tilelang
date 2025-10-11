@@ -7,8 +7,7 @@ from tvm import tir
 import linecache
 import io
 from .ast_rewrite import DSLMutator, OpKind
-from .lang import (DynSchema, StridedTensorSchema, ConstSchema, MakeEmpty, BufferLike, Place, ptr as
-                   ptr_dtype)
+from .lang import (DynSchema, StridedTensorSchema, ConstSchema, MakeEmpty, BufferLike, Place)
 from tilelang.language.dtypes import (get_tvm_dtype, get_torch_dtype, get_tvm_ptr_type,
                                       get_cffi_dtype, get_ctypes_dtype)
 import threading
