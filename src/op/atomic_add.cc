@@ -79,7 +79,9 @@ AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) {
   }
   std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
   std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
-  node->use_tma = Downcast<IntImm>(args[2]);
+  if (args.size() >= 3) {
+    node->use_tma = Downcast<IntImm>(args[2]);
+  }
   if (args.size() >= 4) {
     node->coalesced_width = Downcast<IntImm>(args[3]);
   }
@@ -381,7 +383,7 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     int eviction_policy = 0;
     auto body = Evaluate(Call(DataType::Handle(), tma_store(),
                               {address_of_src, address_of_dst,
-                               div(src_size * src->dtype.bits(), 8),
+                               ceildiv(src_size * src->dtype.bits(), 8),
                                need_reduce, eviction_policy}));
     return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), body);
   }
