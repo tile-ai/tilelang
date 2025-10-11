@@ -11,7 +11,7 @@ ROOT = Path(__file__).parent
 base_version = (ROOT / 'VERSION').read_text().strip()
 
 
-def _read_cmake_bool(i: str | None, default =False):
+def _read_cmake_bool(i: str | None, default=False):
     if i is None:
         return default
     return i.lower() not in ('0', 'false', 'off', 'no', 'n', '')
@@ -21,10 +21,10 @@ def get_git_commit_id() -> Optional[str]:
     """Get the current git commit hash by running git in the current file's directory."""
 
     r = subprocess.run(['git', 'rev-parse', 'HEAD'],
-                                    cwd=ROOT,
-                                    stdout=subprocess.PIPE,
-                                    stderr=subprocess.PIPE,
-                                    encoding='utf-8').strip()
+                       cwd=ROOT,
+                       stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE,
+                       encoding='utf-8').strip()
     if r.returncode == 0:
         return r.stdout
     else:
