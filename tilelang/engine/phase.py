@@ -136,7 +136,6 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.transform.WarpSpecialized()(mod)
         mod = tilelang.transform.InjectTmaBarrier()(mod)
         mod = tilelang.transform.AnnotateWarpGroupRegAlloc()(mod)
-        mod = tilelang.transform.LegalizeBlockAccess()(mod)
         # if tma is not enabled, we can also do pipeline planning
         # to get better performance with async copy
         mod = tilelang.transform.PipelinePlanning()(mod)
@@ -151,9 +150,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     else:
         mod = tilelang.transform.IfStmtBinding()(mod)
         mod = tir.transform.PlanAndUpdateBufferAllocationLocation()(mod)
-        mod = tilelang.transform.LegalizeBlockAccess()(mod)
         mod = tilelang.transform.PipelinePlanning()(mod)
-        print("before InjectSoftwarePipeline ", mod)
         mod = tilelang.transform.InjectSoftwarePipeline()(mod)
         mod = tilelang.transform.MergeIfStmt()(mod)
         if allow_fence_proxy(target=target):

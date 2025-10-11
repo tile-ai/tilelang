@@ -245,9 +245,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             # TODO(lei): inject warpgroup_fence_operand for C_local_buf
             desc_a = T.alloc_descriptor()
             desc_b = T.alloc_descriptor()
-            T.initialize_descriptor(desc_a, A_buf.access_ptr("w"), a_swizzle_mode,
+            T.initialize_descriptor(desc_a, A_buf.access_ptr("r"), a_swizzle_mode,
                                     int(a_leading_byte_offset >> 4), int(a_stride_byte_offset >> 4))
-            T.initialize_descriptor(desc_b, B_buf.access_ptr("w"), b_swizzle_mode,
+            T.initialize_descriptor(desc_b, B_buf.access_ptr("r"), b_swizzle_mode,
                                     int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
             T.warpgroup_arrive()
             for ki in T.serial(0, (k_dim // micro_size_k)):
