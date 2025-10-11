@@ -36,9 +36,13 @@ def _find_cuda_home() -> str:
                 cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
 
             # NVIDIA HPC SDK pattern
-            if "hpc_sdk" in nvcc_path.lower():
+            elif "hpc_sdk" in nvcc_path.lower():
                 # Navigate up from compilers/bin/nvcc to compilers directory
-                cuda_home = os.path.dirname(os.path.dirname(os.path.dirname(nvcc_path)))
+                cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
+
+            # Generic fallback for non-standard or symlinked installs
+            else:
+                cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
 
         else:
             # Guess #3
@@ -53,7 +57,7 @@ def _find_cuda_home() -> str:
                     cuda_home = '/opt/nvidia/hpc_sdk/Linux_x86_64'
 
             # Validate found path
-            if not os.path.exists(cuda_home):
+            if cuda_home is None or not os.path.exists(cuda_home):
                 cuda_home = None
 
     return cuda_home if cuda_home is not None else ""
