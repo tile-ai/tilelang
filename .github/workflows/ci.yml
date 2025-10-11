@@ -242,6 +242,22 @@ jobs:
             exit 1
           fi
 
+      - name: Enable core dump generation (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo sysctl -w kernel.core_pattern="core.${{ matrix.python-version }}.${{ matrix.runner.toolkit }}.%P"
+          sudo sysctl -w kernel.core_uses_pid=0
+          sudo sysctl -w fs.suid_dumpable=1
+          sysctl kernel.core_pattern kernel.core_uses_pid fs.suid_dumpable
+
+      - name: Enable core dump generation (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          sudo sysctl -w kern.corefile="core.${{ matrix.python-version }}.${{ matrix.runner.toolkit }}.%P"
+          sudo sysctl -w kern.coredump=1
+          sudo sysctl -w kern.sugid_coredump=1
+          sysctl kern.corefile kern.coredump kern.sugid_coredump
+
       - name: Install project (wheel form)
         env:
           UV_NO_BUILD_ISOLATION: "1"
@@ -282,3 +298,12 @@ jobs:
           cd testing/python
           unset PYTHONPATH
           uv run --no-project -m -- pytest -k metal -v -r fE --durations=0 --cache-clear --timeout=3600
+
+      - name: List generated files
+        if: ${{ !cancelled() }}
+        run: |
+          find . -type f -name '*.py[cod]' -delete
+          find . -depth -type d -name "__pycache__" -exec rm -r "{}" +
+          if git status --ignored --porcelain | grep -qvE '/$'; then
+            ls -alh $(git status --ignored --porcelain | grep -vE '/$' | grep -oE '\S+$')
+          fi
