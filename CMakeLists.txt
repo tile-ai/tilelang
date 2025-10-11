@@ -110,13 +110,10 @@ endif()
 # Resolve compile warnings in tvm
 add_compile_definitions(DMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>)
 
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  target_compile_definitions(tilelang PRIVATE "TVM_LOG_DEBUG")
-  target_compile_definitions(tilelang_objs PRIVATE "TVM_LOG_DEBUG")
-  target_compile_definitions(tilelang_static PRIVATE "TVM_LOG_DEBUG")
-endif()
-
 add_library(tilelang_objs OBJECT ${TILE_LANG_SRCS})
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  target_compile_definitions(tilelang_objs PRIVATE "TVM_LOG_DEBUG")
+endif()
 
 target_include_directories(tilelang_objs PRIVATE ${TILE_LANG_INCLUDES})
 
@@ -128,7 +125,6 @@ if(APPLE)
   # FIXME: libtilelang should only link against tvm runtime
   target_link_libraries(tilelang PUBLIC tvm)
 endif()
-
 # Build cython extension
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})
 
@@ -143,7 +139,7 @@ add_custom_command(
   VERBATIM)
 
 if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
-  set(USE_SABI "USE_SABI ${SKBUILD_SABI_VERSION}")
+  set(USE_SABI USE_SABI ${SKBUILD_SABI_VERSION})
 endif()
 
 python_add_library(cython_wrapper MODULE "${CMAKE_BINARY_DIR}/cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)

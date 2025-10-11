@@ -5,6 +5,8 @@ rm -rf dist
 python -mpip install -U pip
 python -mpip install -U build wheel auditwheel patchelf
 
+export NO_VERSION_LABEL=1
+
 python -m build --sdist -o dist
 python -m build --wheel -o raw_dist
 

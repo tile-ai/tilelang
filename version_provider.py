@@ -24,9 +24,9 @@ def get_git_commit_id() -> Optional[str]:
                        cwd=ROOT,
                        stdout=subprocess.PIPE,
                        stderr=subprocess.PIPE,
-                       encoding='utf-8').strip()
+                       encoding='utf-8')
     if r.returncode == 0:
-        return r.stdout
+        return r.stdout.strip()
     else:
         return 'unknown'
 
