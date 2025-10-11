@@ -1529,5 +1529,20 @@ std::string PrintWaitBarrierAsm(const std::string &barrier) {
   return predicated_asm_code;
 }
 
+std::string GetMMARegisterType(const ptx::DataType &dtype) {
+  switch (dtype) {
+  case ptx::DataType::kInt32:
+    return "unsigned";
+  case ptx::DataType::kUInt32:
+    return "unsigned";
+  case ptx::DataType::kFloat32:
+    return "float";
+  case ptx::DataType::kFloat64:
+    return "double";
+  default:
+    return "unsigned";
+  }
+}
+
 } // namespace codegen
 } // namespace tvm::tl

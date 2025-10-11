@@ -269,6 +269,11 @@ std::string PrintArriveBarrierExpectTxAsm(const std::string &barrier,
  */
 std::string PrintWaitBarrierAsm(const std::string &barrier);
 
+/*!
+ * \brief Return the register-level C++ type used by MMA fragments.
+ */
+std::string GetMMARegisterType(const ptx::DataType &dtype);
+
 } // namespace codegen
 } // namespace tvm::tl
 

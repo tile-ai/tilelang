@@ -292,53 +292,56 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         assert k_dim >= micro_size_k, f"k_dim must be greater than or equal to {micro_size_k}, got k_dim: {k_dim}"
 
         elems_in_bytes = DataType(self.a_dtype).bits // 8
-
         b_is_k_major = self.b_transposed
 
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
+        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none(
+        ) else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
 
         b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim *
                                                                                elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (8 * 8 *
-                                                                                  elems_in_bytes)
+        b_stride_byte_offset = (8 * k_dim *
+                                elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else
+                                                                      (8 * 8 * elems_in_bytes))
         if not b_swizzle_mode.is_none():
             # swizzle mode doesn't require LBO/SBO to be 1
             # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
             if b_is_k_major:
                 b_leading_byte_offset = 16
+                b_stride_byte_offset = 8 * b_swizzle_mode.swizzle_byte_size()
             else:
                 # MN Major
                 # LBO represents the distance between two atoms along the N dimension
                 # SBO represents the distance between two atoms along the K dimension
-                b_n_axis_atoms = n_dim // (b_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
+                b_n_axis_atoms = n_dim // b_swizzle_atom_elems
                 if b_n_axis_atoms <= 1:
                     b_leading_byte_offset = 0
                 else:
-                    b_leading_byte_offset = 8 * b_swizzle_mode.swizzle_atom_size() * (
-                        b_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
-
+                    b_leading_byte_offset = 8 * 8 * elems_in_bytes * k_dim
                 if b_n_axis_atoms <= 1:
                     b_stride_byte_offset = 8 * elems_in_bytes * n_dim
                 else:
-                    b_stride_byte_offset = 8 * elems_in_bytes * (
-                        b_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
+                    b_stride_byte_offset = 8 * elems_in_bytes * b_swizzle_atom_elems
+
+        bk_atom_size = max(b_swizzle_atom_elems // micro_size_k, 1)
 
         @T.macro
         def _warp_mma(A_buf, B_buf, C_local_buf):
             desc_b = T.alloc_descriptor()
-            T.initialize_descriptor(desc_b, B_buf.access_ptr("w"), b_swizzle_mode,
+            T.initialize_descriptor(desc_b, B_buf.access_ptr("r"), b_swizzle_mode,
                                     int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+            T.warpgroup_arrive()
             for ki in T.serial(0, (k_dim // micro_size_k)):
                 for i in T.serial(m_dim // 64):
-                    k_dim_offset = ki * micro_size_k
                     A_offset = ki * warp_rows * local_size_a + i * local_size_a
-                    B_offset = k_dim_offset if b_is_k_major else k_dim_offset * B_buf.shape[-1]
+                    B_offset = (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems + (
+                        ki % bk_atom_size
+                    ) * micro_size_k if b_is_k_major else ki * b_swizzle_atom_elems * micro_size_k
                     C_offset = i * warp_cols * local_size_out  # 4 warps as an unit
                     T.ptx_wgmma_rs(
                         accum_dtype,
                         wgmma_prefix,
-                        self.a_transposed,
-                        not self.b_transposed,
+                        self.b_transposed,
                         a_dtype_abbrv,
                         b_dtype_abbrv,
                         accum_dtype_abbrv,
@@ -352,6 +355,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                         scale_in_a,
                         scale_in_b,
                     )
+            T.warpgroup_commit_batch()
+            T.warpgroup_wait(0)
 
         return _warp_mma(A_buf, B_buf, C_local_buf)
 
