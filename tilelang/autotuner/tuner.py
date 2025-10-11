@@ -30,7 +30,7 @@ from tilelang.autotuner.param import CompileArgs, ProfileArgs, AutotuneResult
 from tilelang.autotuner.capture import get_autotune_inputs
 from tilelang.utils.target import determine_target
 from tilelang.jit.param import _P, _RProg
-from tilelang.version import __version__
+from tilelang import __version__
 
 
 class TimeoutException(Exception):

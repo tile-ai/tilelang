@@ -12,49 +12,39 @@ env:
 jobs:
   format-check:
     runs-on: [self-hosted, nvidia]
-
     permissions:
       contents: write
+    env:
+      UV_INDEX_URL: https://mirrors.bfsu.edu.cn/pypi/web/simple
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v5
       with:
         fetch-depth: 0
+        submodules: recursive
 
-    - name: Set up Python
-      uses: actions/setup-python@v6
+    - name: Install python via uv
+      uses: astral-sh/setup-uv@v6
       with:
+        enable-cache: false
+        cache-local-path: ${{ runner.tool_cache }}/uv
+        activate-environment: true
         python-version: ${{ env.PYTHON_VERSION }}
 
     - name: Ensure venv (local & persistent)
       run: |
-        set -e
-        REQS_HASH=$(sha256sum requirements-test.txt 2>/dev/null | awk '{print $1}' || echo "no_requirements")
-        MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
-
-        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
-          echo "venv exists and hash matches – reuse it"
-        else
-          echo "venv stale or missing – recreating"
-          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
-          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
-          # shellcheck source=/dev/null
-          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-          python -m pip install --upgrade pip --no-user
-          [[ -f requirements-test.txt ]] && \
-            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
-          pip install flash_attn==2.5.8 --no-user --no-build-isolation
-          touch "$MARKER"
-        fi
+        [[ -f requirements-test.txt ]] && \
+          uv pip install -r requirements-test.txt --no-build-isolation
+        uv pip install flash_attn==2.5.8 --no-build-isolation
 
     - name: Run format check
       run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        git submodule update --init --recursive
+        set -ex
         mkdir -p build
         # run cmake to create the build directory with compile_commands.json
-        cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_CUDA=ON; cd ..
+        uv pip install cmake
+        cd build; USE_CUDA=1 cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON; cd ..
         if ! output=$(./format.sh 2>&1); then
           echo "------------------------------------"
           echo "message:"
@@ -70,56 +60,41 @@ jobs:
     needs: format-check
     permissions:
       contents: read
+    env:
+      UV_INDEX_URL: https://mirrors.bfsu.edu.cn/pypi/web/simple
     steps:
     - name: Checkout repository
       uses: actions/checkout@v5
       with:
         fetch-depth: 0
+        submodules: recursive
         repository: ${{ github.event.pull_request.head.repo.full_name }}
         ref: ${{ github.event.pull_request.head.ref }}
 
-    - name: Set up Python
-      uses: actions/setup-python@v6
+    - name: Install python via uv
+      uses: astral-sh/setup-uv@v6
       with:
+        enable-cache: false
+        cache-local-path: ${{ runner.tool_cache }}/uv
+        activate-environment: true
         python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Ensure venv (local & persistent)
+    - name: Setup venv
       run: |
-        set -e
-        REQS_HASH=$(cat requirements-test.txt 2>/dev/null || true)
-        MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
-
-        if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
-          echo "venv exists and hash matches – reuse it"
-        else
-          echo "venv stale or missing – recreating"
-          rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
-          python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
-          source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-          python -m pip install --upgrade pip --no-user
-          [[ -f requirements-test.txt ]] && \
-            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
-          # flash attention usually requires no isolation build
-          pip install flash_attn==2.5.8 --no-user --no-build-isolation
-          pip install . --no-user
-          touch "$MARKER"
-        fi
+        [[ -f requirements-test.txt ]] && \
+          uv pip install -r requirements-test.txt --no-build-isolation
+        uv pip install flash_attn==2.5.8 --no-build-isolation
 
     - name: Install project (wheel form)
       run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        pip install . --no-user -v
+        uv pip install .
 
     - name: Run examples
       run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd examples
-        unset PYTHONPATH
         python -m pytest -n 4 **/test*.py -v -r fE --durations=0 --cache-clear
 
     - name: Run tests
       run: |
-        source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd testing/python
-        unset PYTHONPATH
         python -m pytest -n 4 -v -r fE --durations=0 --cache-clear --timeout=3600

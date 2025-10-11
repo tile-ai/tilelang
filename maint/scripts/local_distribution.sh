@@ -1,15 +1,11 @@
-# if dist and build directories exist, remove them
-if [ -d dist ]; then
-    rm -r dist
-fi
+set -eux
 
-python -m build --wheel -o dist
+rm -rf dist
 
-python setup.py sdist --formats=gztar,zip 
+python -mpip install -U pip
+python -mpip install -U build wheel
 
-if [ $? -ne 0 ]; then
-    echo "Error: Failed to build the wheel."
-    exit 1
-else
-    echo "Wheel built successfully."
-fi
+NO_VERSION_LABEL=1 python -m build --sdist
+python -m build --wheel
+
+echo "Wheel built successfully."

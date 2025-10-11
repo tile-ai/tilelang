@@ -81,12 +81,12 @@ jobs:
         python-version: ${{ env.PYTHON_VERSION }}
 
     - name: Ensure venv (local & persistent)
-      run: uv pip install -r requirements-test.txt -r requirements-build.txt
+      run: uv pip install -r requirements-test.txt
 
     - name: Build wheel
       run: |
         source .venv/bin/activate
-        uv pip install -v --no-build-isolation .
+        uv pip install -v .
 
     - name: Run metal test
       run: |

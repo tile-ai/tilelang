@@ -51,9 +51,9 @@ jobs:
     - name: Run format check
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        git submodule update --init --recursive
+        git submodule update --init --recursive --checkout
         mkdir -p build
-        cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_ROCM=ON; cd ..
+        cd build; USE_ROCM=1 cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON; cd ..
         if ! output=$(./format.sh 2>&1); then
           echo "------------------------------------"
           echo "message:"
@@ -73,7 +73,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v5
       with:
-        fetch-depth: 0
+        fetch-depth: 1
         repository: ${{ github.event.pull_request.head.repo.full_name }}
         ref: ${{ github.event.pull_request.head.ref }}
 
@@ -111,6 +111,7 @@ jobs:
       run: |
         echo "Installing project (wheel form)"
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+        git submodule update --init --recursive --checkout --recommend-shallow
         USE_ROCM=True pip install . --no-user
 
     - name: Run tests
