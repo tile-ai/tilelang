@@ -24,16 +24,17 @@ set(USE_METAL OFF)
 set(PREBUILD_CYTHON ON)
 # Configs end
 
-find_package(TVM REQUIRED)
+include(cmake/load_tvm.cmake)
 
-if(NOT TVM_FOUND)
-  if(EXISTS ${TVM_SOURCE}/cmake/config.cmake)
-    include(${TVM_SOURCE}/cmake/config.cmake)
-    set(TVM_BUILD_FROM_SOURCE TRUE)
-  else()
-    message(FATAL_ERROR "Nor prebuilt tvm provided or submodule checkout-ed.")
-  endif()
+if(EXISTS ${TVM_SOURCE}/cmake/config.cmake)
+  include(${TVM_SOURCE}/cmake/config.cmake)
+  add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
+else()
+  message(FATAL_ERROR "Nor tvm provided or submodule checkout-ed.")
 endif()
+
+# Include directories for TileLang
+set(TILE_LANG_INCLUDES ${TVM_INCLUDES})
 
 # Collect source files
 file(GLOB TILE_LANG_SRCS
@@ -48,15 +49,6 @@ file(GLOB TILE_LANG_SRCS
   src/target/codegen_webgpu.cc
   # intrin_rule doesn't have system dependency
   src/target/intrin_rule*.cc
-)
-
-# Include directories for TileLang
-set(TILE_LANG_INCLUDES
-  ${TVM_SOURCE}/include
-  ${TVM_SOURCE}/ffi/include
-  ${TVM_SOURCE}/src
-  ${TVM_SOURCE}/3rdparty/dlpack/include
-  ${TVM_SOURCE}/3rdparty/dmlc-core/include
 )
 
 # Backend-specific checks and configs
@@ -115,19 +107,8 @@ elseif(USE_CUDA)
   list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 
-
-if(WITH_TOOLCHAIN_VERSION)
-  message(STATUS "Write toolchain version ${TOOLCHAIN_VERSION} to ${CMAKE_CURRENT_SOURCE_DIR}/_toolchain_version.txt")
-  write_file("${CMAKE_CURRENT_SOURCE_DIR}/_toolchain_version.txt" "${TOOLCHAIN_VERSION}")
-endif()
-
 # Resolve compile warnings in tvm
 add_compile_definitions(DMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>)
-
-# Build tvm after all configs have been populated
-if(TVM_BUILD_FROM_SOURCE)
-  add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
-endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   target_compile_definitions(tilelang PRIVATE "TVM_LOG_DEBUG")
@@ -144,6 +125,7 @@ add_library(tilelang_module SHARED $<TARGET_OBJECTS:tilelang_objs>)
 target_link_libraries(tilelang PUBLIC tvm_runtime)
 target_link_libraries(tilelang_module PUBLIC tvm)
 if(APPLE)
+  # FIXME: libtilelang should only link against tvm runtime
   target_link_libraries(tilelang PUBLIC tvm)
 endif()
 
@@ -161,7 +143,7 @@ add_custom_command(
   VERBATIM)
 
 if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
-  set(USE_SABI USE_SABI ${SKBUILD_SABI_VERSION})
+  set(USE_SABI "USE_SABI ${SKBUILD_SABI_VERSION}")
 endif()
 
 python_add_library(cython_wrapper MODULE "${CMAKE_BINARY_DIR}/cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
@@ -184,4 +166,3 @@ if(TVM_BUILD_FROM_SOURCE)
   add_dependencies(tilelang tvm_cython)
   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/tvm/python/tvm/ffi/core.abi3.so" DESTINATION tilelang/3rdparty/tvm/python/tvm/ffi/)
 endif()
-
