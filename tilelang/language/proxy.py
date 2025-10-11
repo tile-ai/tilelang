@@ -8,6 +8,7 @@ from tvm import tir
 from tvm.tir import Var, PrimExpr
 from tvm.script.ir_builder.tir import buffer, handle, match_buffer
 from tilelang.utils import deprecated
+from .dtypes import get_tvm_dtype
 
 
 class BufferProxy:
@@ -295,6 +296,8 @@ def ptr(dtype: Optional[str] = None,
     res : PrimExpr
         The new tir.Var with type handle or casted expression with type handle.
     """
+    if dtype is not None:
+        dtype = get_tvm_dtype(dtype)
     return handle(dtype=dtype, storage_scope=storage_scope, is_size_var=is_size_var)
 
 
@@ -302,4 +305,5 @@ def make_tensor(ptr: Var,
                 shape: tuple[PrimExpr, ...],
                 dtype: str = "float32",
                 strides: tuple[PrimExpr, ...] = None) -> tir.Buffer:
+    dtype = get_tvm_dtype(dtype)
     return Tensor.from_ptr(ptr, shape, dtype, strides)

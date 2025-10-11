@@ -5,6 +5,7 @@ from tvm.ir.base import Span
 from tvm.runtime import const
 from tvm.tir.expr import IntImm, PrimExprWithOp
 import tvm.tir.op as _tvm_op
+from tilelang.language.dtypes import get_tvm_dtype_str
 
 
 def call_packed(*args, span=None):
@@ -141,6 +142,7 @@ def call_intrin(dtype, func_name, *args, span=None):
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.call_intrin(dtype, func_name, *args, span=span)
 
 
@@ -166,6 +168,7 @@ def call_pure_extern(dtype, func_name, *args, span=None):
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.call_pure_extern(dtype, func_name, *args, span=span)
 
 
@@ -191,6 +194,7 @@ def call_extern(dtype, func_name, *args, span=None):
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.call_extern(dtype, func_name, *args, span=span)
 
 
@@ -216,6 +220,7 @@ def call_llvm_intrin(dtype, name, *args, span=None):
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.call_llvm_intrin(dtype, name, *args, span=span)
 
 
@@ -241,6 +246,7 @@ def call_llvm_pure_intrin(dtype, name, *args, span=None):
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.call_llvm_pure_intrin(dtype, name, *args, span=span)
 
 
@@ -278,6 +284,7 @@ def tvm_stack_alloca(dtype_str, num):
     call : PrimExpr
         The call expression.
     """
+    dtype_str = get_tvm_dtype_str(dtype_str)
     return _tvm_op.tvm_stack_alloca(dtype_str, num)
 
 
@@ -432,6 +439,7 @@ def tvm_struct_get(arr, index, field, dtype):
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.tvm_struct_get(arr, index, field, dtype)
 
 
@@ -644,6 +652,7 @@ def type_annotation(dtype):
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.type_annotation(dtype)
 
 
@@ -941,6 +950,10 @@ def ptx_mma(
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
+    A_dtype = get_tvm_dtype_str(A_dtype)
+    B_dtype = get_tvm_dtype_str(B_dtype)
+    C_dtype = get_tvm_dtype_str(C_dtype)
     return _tvm_op.ptx_mma(
         dtype,
         shape,
@@ -1040,6 +1053,10 @@ def ptx_mma_sp(
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
+    A_dtype = get_tvm_dtype_str(A_dtype)
+    B_dtype = get_tvm_dtype_str(B_dtype)
+    C_dtype = get_tvm_dtype_str(C_dtype)
     return _tvm_op.ptx_mma_sp(
         dtype,
         shape,
@@ -1082,6 +1099,7 @@ def ptx_wgmma_ss(
     """TVM intrinsic for ptx tensor core wmma instructions
     https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions-for-wmma
     """
+    dtype = get_tvm_dtype_str(dtype)
     return call_intrin(
         dtype,
         _tvm_op.Op.get("tl.ptx_wgmma_ss"),
@@ -1121,7 +1139,7 @@ def ptx_wgmma_rs(
     scale_in_a,
     scale_in_b,
 ):
-
+    dtype = get_tvm_dtype_str(dtype)
     return call_intrin(
         dtype,
         _tvm_op.Op.get("tl.ptx_wgmma_rs"),
@@ -1174,6 +1192,7 @@ def mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride)
 
 
@@ -1199,6 +1218,7 @@ def mma_fill(dtype, local_size, local_ptr, offset):
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.mma_fill(dtype, local_size, local_ptr, offset)
 
 
@@ -1237,6 +1257,7 @@ def ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr, sme
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.ptx_ldmatrix(dtype, trans, num, type, local_ptr, local_offset, smem_ptr,
                                 smem_offset)
 
@@ -1270,6 +1291,7 @@ def ptx_cp_async(dtype, shared_ptr, shared_offset, global_ptr, global_offset, by
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.ptx_cp_async(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes)
 
 
@@ -1306,6 +1328,7 @@ def ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offse
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offset,
                                      bytes, barrier_id)
 
@@ -1403,6 +1426,10 @@ def tvm_mfma(
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
+    A_dtype = get_tvm_dtype_str(A_dtype)
+    B_dtype = get_tvm_dtype_str(B_dtype)
+    C_dtype = get_tvm_dtype_str(C_dtype)
     return call_intrin(
         dtype,
         _tvm_op.Op.get("tl.tvm_mfma"),
@@ -1452,6 +1479,7 @@ def tvm_mfma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return call_intrin(
         dtype,
         _tvm_op.Op.get("tl.tvm_mfma_store"),
@@ -1528,6 +1556,10 @@ def tvm_rdna_wmma(
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
+    A_dtype = get_tvm_dtype_str(A_dtype)
+    B_dtype = get_tvm_dtype_str(B_dtype)
+    C_dtype = get_tvm_dtype_str(C_dtype)
     return call_intrin(
         dtype,
         _tvm_op.Op.get("tl.tvm_rdna_wmma"),
@@ -1577,6 +1609,10 @@ def tvm_rdna_wmma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
+    A_dtype = get_tvm_dtype_str(A_dtype)
+    B_dtype = get_tvm_dtype_str(B_dtype)
+    C_dtype = get_tvm_dtype_str(C_dtype)
     return call_intrin(
         dtype,
         _tvm_op.Op.get("tl.tvm_rdna_wmma_store"),
@@ -1714,6 +1750,7 @@ def vectorlow(dtype, vec):
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.vectorlow(dtype, vec)
 
 
@@ -1733,6 +1770,7 @@ def vectorhigh(dtype, vec):
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.vectorhigh(dtype, vec)
 
 
@@ -1752,6 +1790,7 @@ def vectorcombine(dtype, vec1, vec2):
     call : PrimExpr
         The call expression.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.vectorcombine(dtype, vec1, vec2)
 
 
@@ -1873,6 +1912,7 @@ def max_value(dtype: str, span: Optional[Span] = None) -> Any:
     value : tvm.Expr
         The maximum value of dtype.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.max_value(dtype, span)
 
 
@@ -1892,6 +1932,7 @@ def infinity(dtype: str, span: Optional[Span] = None) -> Any:
     value : tvm.Expr
         The infinity value of dtype.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.infinity(dtype, span)
 
 
@@ -1914,6 +1955,7 @@ def reinterpret(dtype, value, span: Optional[Span] = None) -> Any:
     value : tvm.Expr
         The reinterpret cast value of dtype.
     """
+    dtype = get_tvm_dtype_str(dtype)
     return _tvm_op.reinterpret(dtype, value, span)
 
 
