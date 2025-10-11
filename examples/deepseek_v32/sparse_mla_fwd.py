@@ -174,7 +174,15 @@ def sparse_mla_fwd(
     return main
 
 
-def sparse_mla_fwd_interface(q, kv, indices, sm_scale=None, return_p_sum: bool = False, d_v=512, block_I=64, num_stages=2, threads=256):
+def sparse_mla_fwd_interface(q,
+                             kv,
+                             indices,
+                             sm_scale=None,
+                             return_p_sum: bool = False,
+                             d_v=512,
+                             block_I=64,
+                             num_stages=2,
+                             threads=256):
     is_casual = True
     assert return_p_sum == False, "This kernel file is for fwd only"
     assert q.is_contiguous() and kv.is_contiguous() and indices.is_contiguous()
@@ -190,7 +198,17 @@ def sparse_mla_fwd_interface(q, kv, indices, sm_scale=None, return_p_sum: bool =
     _, _, _, topk = indices.shape
     assert indices.shape == (batch, seq_len, kv_group, topk)
 
-    kernel = sparse_mla_fwd(heads, dim, tail_dim, topk, kv_group, sm_scale, is_casual, block_I=block_I, num_stages=num_stages, threads=threads)
+    kernel = sparse_mla_fwd(
+        heads,
+        dim,
+        tail_dim,
+        topk,
+        kv_group,
+        sm_scale,
+        is_casual,
+        block_I=block_I,
+        num_stages=num_stages,
+        threads=threads)
     out, lse = kernel(q, kv, indices)
     return out, lse
 
@@ -256,7 +274,8 @@ def test_sparse_mla_fwd(B=1,
                 i_i = torch.randperm(max(1, t))[:topk]
                 indices[b, t, h, :len(i_i)] = i_i
 
-    tl_out, tl_lse = sparse_mla_fwd_interface(q, kv, indices, block_I=block_I, num_stages=num_stages, threads=threads)
+    tl_out, tl_lse = sparse_mla_fwd_interface(
+        q, kv, indices, block_I=block_I, num_stages=num_stages, threads=threads)
 
     if check_correctness:
         # otherwise may cause out of memory
@@ -265,7 +284,8 @@ def test_sparse_mla_fwd(B=1,
         print("assert_tensors_similar passed")
 
     def fn():
-        return sparse_mla_fwd_interface(q, kv, indices, block_I=block_I, num_stages=num_stages, threads=threads)
+        return sparse_mla_fwd_interface(
+            q, kv, indices, block_I=block_I, num_stages=num_stages, threads=threads)
 
     from tilelang.profiler import do_bench
 
