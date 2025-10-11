@@ -16,7 +16,7 @@ jobs:
   perfbench:
     name: Benchmark between PR and main
     if: |
-      github.event_name == 'pull_request' &&
+      github.event.issue.pull_request &&
       (contains(github.event.comment.body, '/performance-report') || contains(github.event.comment.body, '/perf'))
     runs-on: [self-hosted, nvidia]
     steps:
