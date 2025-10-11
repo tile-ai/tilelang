@@ -1,6 +1,6 @@
 # Attention Sink
 
-We compare with an optimized version of the official Triton implementation at [here](https://github.com/openai/gpt-oss/blob/main/gpt_oss/triton/attention.py).
+We compare with an optimized version of the official Triton implementation [here](https://github.com/openai/gpt-oss/blob/main/gpt_oss/triton/attention.py).
 
 
 ## Algorithm
@@ -25,22 +25,22 @@ where $P_{b, h, q}$ is the proportion of $sink_h$ in the softmax in the $b$-th b
 
 ### Results
 
-- dtype=float16
+- dtype=bfloat16
 - batch_size=1, heads=64, kv_heads=8 (the setting of GPT-OSS-120B)
 - Full attention is adopted.
 
 | SEQ_LEN | headdim | Triton TFLOPs | TileLang TFLOPs      | Speedup |
 |---------|---------|---------------|----------------------|---------|
-| 2048    |   64    | 231.55        | **277.07**           | 1.20x   |
-| 2048    |  128    | 313.55        | **393.98**           | 1.26x   |
+| 2048    |   64    | 232.98        | **281.89**           | 1.21x   |
+| 2048    |  128    | 321.55        | **417.98**           | 1.30x   |
 |         |         |               |                      |         |
-| 4096    |   64    | 272.17        | **337.30**           | 1.24x   |
-| 4096    |  128    | 356.35        | **461.54**           | 1.30x   |
+| 4096    |   64    | 280.70        | **349.47**           | 1.25x   |
+| 4096    |  128    | 369.61        | **497.13**           | 1.35x   |
 |         |         |               |                      |         |
-| 8192    |   64    | 289.93        | **353.81**           | 1.22x   |
-| 8192    |  128    | 392.18        | **482.50**           | 1.23x   |
+| 8192    |   64    | 299.04        | **385.56**           | 1.29x   |
+| 8192    |  128    | 399.39        | **507.93**           | 1.27x   |
 |         |         |               |                      |         |
-| 16384   |   64    | 299.52        | **377.44**           | 1.26x   |
-| 16384   |  128    | 404.64        | **519.02**           | 1.28x   |
+| 16384   |   64    | 309.46        | **400.62**           | 1.29x   |
+| 16384   |  128    | 418.99        | **549.11**           | 1.31x   |
 
-> The backward performance will be further optimized via fine-grained manual pipelining of FA3 in the tilelang kernel.
+> The backward performance will be further optimized in the future.

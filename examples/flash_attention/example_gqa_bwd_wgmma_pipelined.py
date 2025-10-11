@@ -245,8 +245,7 @@ def flashattn_bwd_atomic_add(batch,
                 T.gemm(dsT_shared, K_shared, dq, transpose_A=True, wg_wait=1)
                 T.wait_wgmma(0)
                 for i, j in T.Parallel(block_N, dim_qk):
-                    if k * block_N + i < seq_len:
-                        T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
+                    T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
             T.copy(dv, dv_shared)
             T.atomic_add(dV[bz, by * block_M:(by + 1) * block_M, bx // groups, :], dv_shared)
             T.copy(dk, dk_shared)
@@ -362,8 +361,7 @@ def flashattn_bwd_split(batch,
                 T.gemm(dsT_shared, K_shared, dq, transpose_A=True, wg_wait=1)
                 T.wait_wgmma(0)
                 for i, j in T.Parallel(block_N, dim_qk):
-                    if k * block_N + i < seq_len:
-                        T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
+                    T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
 
             T.copy(dv, dv_shared)
             T.copy(dv_shared, dV[bx % groups, bz, by * block_M:(by + 1) * block_M, bx // groups, :])

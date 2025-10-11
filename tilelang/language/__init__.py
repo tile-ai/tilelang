@@ -7,6 +7,7 @@ from typing import Optional, Callable, Dict
 # TODO(lei): remove this import once the
 # upstream tir script is fully compatible
 from tvm.script.parser.tir import *
+from . import overrides as _overrides  # noqa: F401
 from .tir import (
     prim_func,  # noqa: F401
 )

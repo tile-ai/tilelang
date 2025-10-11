@@ -66,6 +66,9 @@ class PassConfigKey(str, Enum):
     optimization in cases where manual synchronization is preferred or when
     synchronization is not needed. Default: False"""
 
+    TL_FORCE_LET_INLINE = "tl.force_let_inline"
+    """Force TileLang to inline let bindings during simplification. Default: False"""
+
     # TIR related configs
     TIR_ENABLE_EQUIV_TERMS_IN_CSE = "tir.enable_equiv_terms_in_cse_tir"
     """Enable equivalent terms in TIR Common Subexpression Elimination. Default: True"""

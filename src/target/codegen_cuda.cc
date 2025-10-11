@@ -1374,6 +1374,15 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::tma_store_arrive");
   } else if (op->op.same_as(tl::tma_store_wait())) {
     print_extern_call_stmt("tl::tma_store_wait<0>");
+  } else if (op->op.same_as(tl::warpgroup_arrive())) {
+    print_extern_call_stmt("tl::warpgroup_arrive");
+  } else if (op->op.same_as(tl::warpgroup_commit_batch())) {
+    print_extern_call_stmt("tl::warpgroup_commit_batch");
+  } else if (op->op.same_as(tl::warpgroup_wait())) {
+    this->PrintIndent();
+    int num_mma = Downcast<IntImm>(op->args[0])->value;
+    this->stream << "tl::warpgroup_wait<" << std::to_string(num_mma)
+                 << ">();\n";
   } else if (op->op.same_as(tl::set_max_nreg())) {
     this->PrintIndent();
     int nreg = Downcast<IntImm>(op->args[0])->value;
@@ -2210,7 +2219,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const BufferLoadNode *op,
   DataType element_dtype = op->buffer->dtype;
 
   int lanes = op->dtype.lanes();
-  // delcare type.
+  // declare type.
   if (value_dtype.lanes() == element_dtype.lanes()) {
     std::string ref = GetBufferRef(op->dtype, op->buffer.get(), index);
     HandleVolatileLoads(ref, op, os);
