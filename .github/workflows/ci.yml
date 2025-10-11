@@ -242,16 +242,16 @@ jobs:
             exit 1
           fi
 
-      - name: Enable core dump generation (Linux)
-        if: runner.os == 'Linux'
+      - name: Enable core dump generation (Linux / GitHub-hosted runners)
+        if: ${{ runner.os == 'Linux' && !startsWith(matrix.runner.name, 'self-hosted') }}
         run: |
           sudo sysctl -w kernel.core_pattern="core.${{ matrix.python-version }}.${{ matrix.runner.toolkit }}.%P"
           sudo sysctl -w kernel.core_uses_pid=0
           sudo sysctl -w fs.suid_dumpable=1
           sysctl kernel.core_pattern kernel.core_uses_pid fs.suid_dumpable
 
-      - name: Enable core dump generation (macOS)
-        if: runner.os == 'macOS'
+      - name: Enable core dump generation (macOS / GitHub-hosted runners)
+        if: ${{ runner.os == 'macOS' && !startsWith(matrix.runner.name, 'self-hosted') }}
         run: |
           sudo sysctl -w kern.corefile="core.${{ matrix.python-version }}.${{ matrix.runner.toolkit }}.%P"
           sudo sysctl -w kern.coredump=1
