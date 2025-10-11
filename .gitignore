@@ -2,6 +2,7 @@
 *.slo
 *.lo
 *.o
+*.so
 *.obj
 *.pyc
 

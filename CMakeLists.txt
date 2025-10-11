@@ -28,7 +28,6 @@ include(cmake/load_tvm.cmake)
 
 if(EXISTS ${TVM_SOURCE}/cmake/config.cmake)
   include(${TVM_SOURCE}/cmake/config.cmake)
-  add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
 else()
   message(FATAL_ERROR "Nor tvm provided or submodule checkout-ed.")
 endif()
@@ -107,6 +106,9 @@ elseif(USE_CUDA)
   list(APPEND TILE_LANG_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
 endif()
 
+# Include tvm after configs have been populated
+add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
+
 # Resolve compile warnings in tvm
 add_compile_definitions(DMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>)
 
@@ -143,7 +145,8 @@ if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
 endif()
 
 python_add_library(cython_wrapper MODULE "${CMAKE_BINARY_DIR}/cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
-install(TARGETS cython_wrapper LIBRARY DESTINATION tilelang)
+# Install to soruce dir to support editable install
+install(TARGETS cython_wrapper LIBRARY DESTINATION "${CMAKE_CURRENT_SOURCE_DIR}/tilelang")
 
 # let libtilelang to search tvm/tvm_runtime in same dir
 if(APPLE)
