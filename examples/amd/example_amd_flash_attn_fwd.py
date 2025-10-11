@@ -34,7 +34,7 @@ def get_configs():
     block_N = [32, 64, 128, 256]
     threads = [128, 256, 512]
     num_split_q = [64, 128, 256]
-    num_stages = [0]
+    num_stages = [0, 1]
     enable_rasterization = [True]
     k_pack = [2]
     panel_size = [7, 8]
@@ -60,18 +60,6 @@ def get_configs():
             "qk_coalesced_width": qkw,
             "v_coalesced_width": vw,
         })
-    valid_configs.append({
-        'block_M': 64,
-        'block_N': 64,
-        'num_split_q': 64,
-        'threads': 256,
-        'num_stages': 1,
-        'enable_rasterization': True,
-        'k_pack': 2,
-        'panel_size': 64,
-        'qk_coalesced_width': 8,
-        'v_coalesced_width': 8,
-    })
     return valid_configs
 
 
@@ -95,7 +83,7 @@ def fast_flashattn(
     qk_coalesced_width: int,
     v_coalesced_width: int,
 ):
-    scale = (1.0 / dim)**0.5 * 1.44269504
+    scale = (1.0 / dim)**0.5
     head_kv = heads // groups
     q_shape = [batch, seq_len, heads, dim]
     kv_shape = [batch, seq_len, head_kv, dim]
@@ -185,7 +173,7 @@ def fast_flashattn(
                     T.reduce_max(acc_s, m_i, dim=1, clear=False)
 
                     for i in T.Parallel(block_M):
-                        sf = T.exp2(m_prev[i] * scale - m_i[i] * scale)
+                        sf = T.exp(m_prev[i] * scale - m_i[i] * scale)
                         l_i[i] *= sf
                         scale_factor[i] = sf
 
@@ -193,7 +181,7 @@ def fast_flashattn(
                         acc_o[i, j] *= scale_factor[i]
 
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.exp2(acc_s[i, j] * scale - m_i[i] * scale)
+                        acc_s[i, j] = T.exp(acc_s[i, j] * scale - m_i[i] * scale)
 
                     T.reduce_sum(acc_s, row_sum, dim=1)
                     for i in T.Parallel(block_M):
