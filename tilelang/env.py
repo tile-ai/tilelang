@@ -57,7 +57,7 @@ def _find_cuda_home() -> str:
                     cuda_home = '/opt/nvidia/hpc_sdk/Linux_x86_64'
 
             # Validate found path
-            if not os.path.exists(cuda_home):
+            if cuda_home is None or not os.path.exists(cuda_home):
                 cuda_home = None
 
     return cuda_home if cuda_home is not None else ""
