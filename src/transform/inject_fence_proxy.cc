@@ -94,16 +94,6 @@ bool IsAsyncIntrinsic(const CallNode *call) {
     return true;
   }
 
-  // External calls default to async to stay conservative
-  if (call->op.same_as(builtin::call_extern()) ||
-      call->op.same_as(builtin::call_pure_extern()) ||
-      call->op.same_as(builtin::tvm_call_packed()) ||
-      call->op.same_as(builtin::tvm_call_packed_lowered()) ||
-      call->op.same_as(builtin::tvm_call_trace_packed()) ||
-      call->op.same_as(builtin::tvm_call_trace_packed_lowered())) {
-    return true;
-  }
-
   return false;
 }
 
