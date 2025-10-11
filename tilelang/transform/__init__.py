@@ -25,6 +25,17 @@ def ClusterPlanning():
     return _ffi_api.ClusterPlanning()  # type: ignore
 
 
+def LegalizeBlockAccess():
+    """Populate block reads/writes via access analysis.
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.LegalizeBlockAccess()  # type: ignore
+
+
 def PipelinePlanning():
     """infer the fragment/shared memory layout
 

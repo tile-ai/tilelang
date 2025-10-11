@@ -243,8 +243,16 @@ public:
     // number of versions need to maintain for each buffer.
     std::unordered_map<Buffer, BufferAccessInfo, ObjectPtrHash, ObjectPtrEqual>
         infos = GetBufferAccessInfo();
+    LOG(INFO) << "buffer_infos:";
+    for (const auto &kv : infos) {
+      const Buffer &buffer = kv.first;
+      const BufferAccessInfo &info = kv.second;
+      LOG(INFO) << "  buffer=" << buffer->name << " def=" << info.def
+                << " use=" << info.use;
+    }
     for (const Buffer &buffer : pipeline_allocs_) {
       int num_versions = ComputeBufferVersions(buffer, infos.at(buffer));
+      LOG(INFO) << "Get num_versions " << num_versions;
       if (num_versions > 1) {
         buffer_remap_.Set(buffer, RewriteAllocBuffer(buffer, num_versions));
       }
