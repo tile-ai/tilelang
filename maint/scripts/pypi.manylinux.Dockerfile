@@ -1,14 +1,14 @@
-FROM pytorch/manylinux-builder:cuda12.1
+FROM pytorch/manylinux2_28-builder:cuda12.1 AS builder_amd64
+FROM pytorch/manylinuxaarch64-builder:cuda12.4 AS builder_arm64
+
+FROM builder_${TARGETARCH}
 
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Etc/UTC
 
 RUN set -eux; \
-    yum -y update && yum install -y \
-        zlib-devel openssl-devel \
-        libedit-devel libxml2-devel \
-        bzip2 bzip2-devel xz xz-devel \
-        epel-release
+    yum install -y python3-pip; \
+    pip3 install uv
 
 RUN set -eux; \
     conda create -n py38 python=3.8 -y && \
