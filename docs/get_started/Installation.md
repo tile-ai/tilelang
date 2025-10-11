@@ -213,7 +213,9 @@ so `--no-build-isolation` and similar configs are not necessary.
 
 ### Build-time environment variables
 `USE_CUDA`: If to enable CUDA support, default: `ON` on Linux, set to `OFF` to build a CPU version. By default, we'll use `/usr/local/cuda` for building tilelang. Set `CUDAToolkit_ROOT` to use different cuda toolkit.
+
 `USE_ROCM`: If to enable ROCm support, default: `OFF`. If your ROCm SDK does not located in `/opt/rocm`, set `USE_ROCM=<rocm_sdk>` to enable build ROCm against custom sdk path.
+
 `USE_METAL`: If to enable Metal support, default: `ON` on Darwin.
 
 `TVM_ROOT`: TVM source root to use.
@@ -227,7 +229,7 @@ $ python -mbuild -w
 Successfully built tilelang-0.1.6.post1+cu116.git0d4a74be-cp38-abi3-linux_x86_64.whl
 ```
 
-`<sdk>={cuda,rocm,metal}`. Specifically, when `<sdk>=cuda` and `CUDA_VERSION` is provided via env,
+where `<sdk>={cuda,rocm,metal}`. Specifically, when `<sdk>=cuda` and `CUDA_VERSION` is provided via env,
 `<sdk>=cu<cuda_major><cuda_minor>`, similar with this part in pytorch.
 Set `NO_TOOLCHAIN_VERSION=ON` to disable this.
 
