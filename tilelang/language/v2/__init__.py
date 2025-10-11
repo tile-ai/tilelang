@@ -1,3 +1,10 @@
+from tilelang.language import (
+    annotate_layout,
+    annotate_padding,
+    annotate_l2_hit_ratio,  # noqa: F401
+    import_source,  # noqa: F401
+    use_swizzle,  # noqa: F401
+)
 from tilelang.language.tir.ir import *  # noqa: F401
 from tilelang.layout import Layout, Fragment  # noqa: F401
 from tilelang.language.parallel import Parallel  # noqa: F401

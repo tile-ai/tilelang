@@ -6,7 +6,7 @@ from tilelang.language.kernel import KernelLaunchFrame
 from tvm import tir
 import linecache
 import io
-from .ast_rewrite import DSLMutator
+from .ast_rewrite import DSLMutator, OpKind
 from .lang import (DynSchema, StridedTensorSchema, ConstSchema, MakeEmpty, BufferLike, Place, ptr as
                    ptr_dtype)
 from tilelang.language.dtypes import (get_tvm_dtype, get_torch_dtype, get_tvm_ptr_type,
@@ -339,6 +339,43 @@ class ConstIfFrame:
     def __exit__(self, exc_type, exc_value, traceback):
         pass
 
+_interp_op_func = {
+    'add': lambda lval, rval: lval + rval,
+    'sub': lambda lval, rval: lval - rval,
+    'mul': lambda lval, rval: lval * rval,
+    'matmul': lambda lval, rval: lval @ rval,
+    'div': lambda lval, rval: lval / rval,
+    'mod': lambda lval, rval: lval % rval,
+    'pow': lambda lval, rval: lval ** rval,
+    'lshift': lambda lval, rval: lval << rval,
+    'rshift': lambda lval, rval: lval >> rval,
+    'or': lambda lval, rval: lval | rval,
+    'xor': lambda lval, rval: lval ^ rval,
+    'and': lambda lval, rval: lval & rval,
+    'floor_div': lambda lval, rval: lval // rval,
+}
+
+def _interp_op(op: OpKind, lval: Any, rval: Any) -> Any:
+    return _interp_op_func[op](lval, rval)
+
+def _interp_aug_assign(op: OpKind, lval: Any, slice: Any, rval: Any) -> Any:
+    if op == 'add': lval[slice] += rval
+    elif op == 'sub': lval[slice] -= rval
+    elif op == 'mul': lval[slice] *= rval
+    elif op == 'matmul': lval[slice] @= rval
+    elif op == 'div': lval[slice] /= rval
+    elif op == 'mod': lval[slice] %= rval
+    elif op == 'pow': lval[slice] **= rval
+    elif op == 'lshift': lval[slice] <<= rval
+    elif op == 'rshift': lval[slice] >>= rval
+    elif op == 'or': lval[slice] |= rval
+    elif op == 'xor': lval[slice] ^= rval
+    elif op == 'and': lval[slice] &= rval
+    elif op == 'floor_div': lval[slice] //= rval
+    else: raise ValueError(f"Unsupported op: {op}")
+
+
+class _empty: ...
 
 @dataclass
 class DSLBuilder:
@@ -509,8 +546,10 @@ class DSLBuilder:
             )
             self.global_allocs.append(result)
             return result
-        elif isinstance(expr, (tir.Var, tir.IntImm, tir.FloatImm, tir.Buffer)):  # fast shortcut
+        elif isinstance(expr, (tir.Var, tir.Buffer)):  # fast shortcut
             IRBuilder.name(name, expr)
+            return expr
+        elif isinstance(expr, (tir.IntImm, tir.FloatImm)):
             return expr
         elif isinstance(expr, BufferLike):
             IRBuilder.name(name, expr.buffer)
@@ -537,12 +576,28 @@ class DSLBuilder:
             self.outs.append(v)
 
     def assign(self, lval: Any, slice: Any, rval: Any) -> Any:
-        if isinstance(slice, (tir.PrimExpr, int)):
-            if isinstance(lval, BufferLike):
-                lval = lval.buffer
+        if isinstance(lval, tir.Buffer):
             tb.buffer_store(lval, rval, slice)
+        elif isinstance(lval, BufferLike):
+            tb.buffer_store(lval.buffer, rval, slice)
         else:
-            raise NotImplementedError()
+            lval[slice] = rval
+
+    def aug_assign(self, *args) -> Any:
+        if len(args) == 3:
+            op, lval, rval = args
+            if isinstance(lval, (tir.Buffer, BufferLike)):
+                sl = slice(None)
+                tb.buffer_store(lval, _interp_op(op, lval[sl], rval), sl)
+                return lval
+            else:
+                return _interp_op(op, lval, rval)
+        elif len(args) == 4:
+            op, lval, sl, rval = args
+            if isinstance(lval, tir.Buffer):
+                tb.buffer_store(lval, _interp_op(op, lval[sl], rval), sl)
+            else:
+                _interp_aug_assign(op, lval, sl, rval)
 
     def ctx_if(self, cond: bool | tir.PrimExpr):
         if isinstance(cond, tir.PrimExpr):

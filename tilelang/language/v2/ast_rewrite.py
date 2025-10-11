@@ -36,6 +36,23 @@ def quote_expr(expr: str, **kws) -> List[ast.AST]:
     assert isinstance(res, ast.Expr)
     return res.value
 
+OpKind = Literal['add', 'sub', 'mul', 'matmul', 'div', 'mod', 'pow', 'lshift', 'rshift', 'or', 'xor', 'and', 'floor_div']
+
+_aug_assign_op_map = {
+    ast.Add: 'add',
+    ast.Sub: 'sub',
+    ast.Mult: 'mul',
+    ast.MatMult: 'matmul',
+    ast.Div: 'div',
+    ast.Mod: 'mod',
+    ast.Pow: 'pow',
+    ast.LShift: 'lshift',
+    ast.RShift: 'rshift',
+    ast.BitOr: 'or',
+    ast.BitXor: 'xor',
+    ast.BitAnd: 'and',
+    ast.FloorDiv: 'floor_div'
+}
 
 class DSLMutator(ast.NodeTransformer):
 
@@ -111,6 +128,22 @@ class DSLMutator(ast.NodeTransformer):
             stmts.extend(self._emit_assign_target(target, rval))
             rval = target
         return stmts
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> List[ast.AST]:
+        node = self.generic_visit(node)
+        target, rval = node.target, node.value
+        op = _aug_assign_op_map[type(node.op)]
+        if isinstance(target, ast.Name):
+            return quote(f"name = __tl.aug_assign('{op}', '{target.id}', value)", name=target, value=rval)
+        elif isinstance(target, ast.Subscript):
+            return quote(
+                f"__tl.aug_assign('{op}', lval, slice, value)",
+                lval=target.value,
+                slice=target.slice,
+                value=rval,
+            )
+        else:
+            return node
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
         node = self.generic_visit(node)

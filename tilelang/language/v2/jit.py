@@ -101,6 +101,17 @@ class JITKernel(Generic[_P, _T]):
     def get_kernel_source(self) -> str:
         return self.source
 
+    def bench(self, *args: _P.args, _config: Optional[BenchConfig] = None, **kws: _P.kwargs) -> float:
+        _config = _config or BenchConfig.default()
+        timeout = _config.get('timeout', None)
+        if 'timeout' in _config:
+            del _config['timeout']
+        if timeout is not None:
+            latency = run_with_timeout(lambda: do_bench(lambda: self(*args, **kws), **_config), timeout)
+        else:
+            latency = do_bench(lambda: self(*args, **kws), **_config)
+        return latency
+
 
 def compile_compab(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
     tl_kernel = kernel_cache.cached(
@@ -303,7 +314,7 @@ def get_tqdm(*args, **kws):
         from tqdm import tqdm
     return tqdm(*args, **kws)
 
-class AutoTuneConfig(TypedDict):
+class BenchConfig(TypedDict):
     warmup: float# target warmup time in milliseconds
     rep: float # target benchmark time in milliseconds
     fast_flush: bool # Use faster L2 cache flush with int32 vs int8 (default: True)
@@ -330,7 +341,7 @@ class AutoTuner:
     configs: List[CallArgs]
     kernels: List[JITKernel | Exception]
 
-    tune_cfg: AutoTuneConfig = field(default_factory=AutoTuneConfig.default)
+    tune_cfg: BenchConfig = field(default_factory=BenchConfig.default)
 
     def run_one(self, ker: JITKernel, cfg: CallArgs) -> Record:
 
@@ -344,16 +355,8 @@ class AutoTuner:
         if isinstance(ker, Exception):
             return record(_status='Compile Error', _error=repr(ker))
 
-        def bench_fn():
-            ker(*cfg.args, **cfg.kwargs)
-        cfg_without_timeout = self.tune_cfg.copy()
-        if 'timeout' in cfg_without_timeout:
-            del cfg_without_timeout['timeout']
         try:
-            if timeout := self.tune_cfg.get('timeout', None):
-                latency = run_with_timeout(lambda: do_bench(bench_fn, **cfg_without_timeout), timeout)
-            else:
-                latency = do_bench(bench_fn, **cfg_without_timeout)
+            latency = ker.bench(*cfg.args, _config=self.tune_cfg, **cfg.kwargs)
             return record(_status='Success', latency=latency, _error='')
         except AssertionError as e:
             return record(_status='Output Error', _error=repr(e))
@@ -391,7 +394,7 @@ class JITDispatcher(Generic[_P, _T]):
                  verbose: bool = False,
                  pass_configs: Dict[str, Any] = None,
                  compile_flags: List[str] = None,
-                 tune_cfg: Optional[Dict[str, Any] | AutoTuneConfig] = None
+                 tune_cfg: Optional[Dict[str, Any] | BenchConfig] = None
                  ):
         self.func = func
         self.target_host = target_host
@@ -406,7 +409,7 @@ class JITDispatcher(Generic[_P, _T]):
         self.kernel_calls = {}
         self.kernels = {}
         self.tune_cache = {}
-        self.tune_cfg = tune_cfg or AutoTuneConfig.default()
+        self.tune_cfg = tune_cfg or BenchConfig.default()
         self._arg_parser = generate_arg_parser(func.__name__, func)
         self.parse_args = self._arg_parser.parser
         self._jit_func_gen_lazy = None
@@ -442,7 +445,7 @@ class JITDispatcher(Generic[_P, _T]):
             record['_error'] = repr(kernel)
             return record
 
-    def tune_configs(self, configs: Iterable[AnyCallArgs], max_workers: Optional[int]=None, **tune_cfg: Unpack[AutoTuneConfig]) -> AutoTuneResult:
+    def tune_configs(self, configs: Iterable[AnyCallArgs], max_workers: Optional[int]=None, **tune_cfg: Unpack[BenchConfig]) -> AutoTuneResult:
         configs = [CallArgs.from_anycallarg(cfg) for cfg in configs]
         kernels = self.par_compile(configs, max_workers=max_workers)
         tune_cfg = copy.copy(self.tune_cfg)
@@ -612,21 +615,15 @@ class JITDispatcher(Generic[_P, _T]):
         pool.shutdown()
         return results
 
+    def bench(self, *args: _P.args, _config: Optional[BenchConfig] = None, **kws: _P.kwargs) -> float:
+        kernel = self.compile(*args, **kws)
+        return kernel.bench(*args, _config=_config, **kws)
+
     def __call__(self, *args: _P.args, **kws: _P.kwargs) -> _T:
-        try:
-            const_args, dyn_args = self.parse_args(*args, **kws)
-        except Exception as e:
-            call_args = CallArgs.from_call(*args, **kws)
-            logger.error(f'Parse args error\nTarget: {self.repr_config(call_args)}\nParser:\n{self._arg_parser.parser.__tl_code__}', exc_info=True)
-            raise e
-        try:
-            kernel = self.kernel_calls.get(const_args, None)
-            if kernel is not None:
-                return kernel(*dyn_args)
-        except Exception as e:
-            call_args = CallArgs.from_call(*args, **kws)
-            logger.error(f'Kernel call error\nTarget: {self.repr_config(call_args, replace_with_place=False)}\nKernel:\n{kernel.__tl_code__}', exc_info=True)
-            raise e
+        const_args, dyn_args = self.parse_args(*args, **kws)
+        kernel = self.kernel_calls.get(const_args, None)
+        if kernel is not None:
+            return kernel(*dyn_args)
         kernel = self.compile(*args, **kws)
         return kernel.lib_call(*dyn_args)
 
@@ -684,6 +681,7 @@ def jit(
     verbose: bool = False,
     pass_configs: Dict[str, Any] = None,
     compile_flags: List[str] = None,
+    tune_cfg: Optional[Dict[str, Any] | BenchConfig] = None,
 ) -> Callable[[Callable[_P, _T]], JITDispatcher[_P, _T]]:
     if inspect.isfunction(target):
         return JITDispatcher(
@@ -693,6 +691,7 @@ def jit(
             verbose=False,
             pass_configs=None,
             compile_flags=None,
+            tune_cfg=tune_cfg
         )
 
     def wrapper(func):
@@ -703,6 +702,7 @@ def jit(
             verbose=verbose,
             pass_configs=pass_configs,
             compile_flags=compile_flags,
+            tune_cfg=tune_cfg
         )
 
     return wrapper
