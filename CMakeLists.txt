@@ -145,8 +145,8 @@ if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
 endif()
 
 python_add_library(cython_wrapper MODULE "${CMAKE_BINARY_DIR}/cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
-# Install to soruce dir to support editable install
-install(TARGETS cython_wrapper LIBRARY DESTINATION "${CMAKE_CURRENT_SOURCE_DIR}/tilelang")
+# Install to site dir to support direct import
+install(TARGETS cython_wrapper LIBRARY DESTINATION .)
 
 # let libtilelang to search tvm/tvm_runtime in same dir
 if(APPLE)

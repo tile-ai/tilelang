@@ -22,7 +22,8 @@ from tilelang.utils.tensor import map_torch_type
 logger = logging.getLogger(__name__)
 
 try:
-    from tilelang.cython_wrapper import CythonKernelWrapper
+    # Load cython_wrapper.api3.so in env.py
+    from cython_wrapper import CythonKernelWrapper
 except ImportError:
     # TODO: tolerance a build without cython backend
     raise

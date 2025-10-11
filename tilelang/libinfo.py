@@ -4,7 +4,7 @@ import os
 from .env import TL_LIBS
 
 
-def find_lib_path(name: str, optional=False):
+def find_lib_path(name: str, py_ext=False):
     """Find tile lang library
 
     Parameters
@@ -15,7 +15,9 @@ def find_lib_path(name: str, optional=False):
     optional: boolean
         Whether the library is required
     """
-    if sys.platform.startswith("linux") or sys.platform.startswith("freebsd"):
+    if py_ext:
+        lib_name = f"{name}.abi3.so"
+    elif sys.platform.startswith("linux") or sys.platform.startswith("freebsd"):
         lib_name = f"lib{name}.so"
     elif sys.platform.startswith("win32"):
         lib_name = f"{name}.dll"
