@@ -12,7 +12,6 @@ env:
 
 jobs:
   format-check:
-    if: false
     runs-on: [self-hosted, amd, gpu]
 
     permissions:

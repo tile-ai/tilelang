@@ -1,11 +1,11 @@
 name: Dist
-on: [pull_request]
+on: [workflow_dispatch]
 
 env:
   PYTHON_VERSION: '3.12'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -66,13 +66,8 @@ jobs:
     - name: Repair wheel on Linux
       id: repair
       run: |
-        uv pip install auditwheel patchelf
-        auditwheel repair \
-            -L /lib \
-            --exclude libcuda.so.1 --exclude /usr/local/cuda\* \
-            --exclude /opt/amdgpu\* --exclude /opt/rocm\* \
-            dist/*.whl
-        echo "whl_name=$(ls wheelhouse)" >> $GITHUB_OUTPUT
+        sh maint/scripts/pypi_distribution.sh
+        echo "whl_name=$(ls dist | grep whl | head -n1)" >> $GITHUB_OUTPUT
 
     - uses: actions/upload-artifact@v4
       with:
