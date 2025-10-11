@@ -36,7 +36,9 @@ def quote_expr(expr: str, **kws) -> List[ast.AST]:
     assert isinstance(res, ast.Expr)
     return res.value
 
-OpKind = Literal['add', 'sub', 'mul', 'matmul', 'div', 'mod', 'pow', 'lshift', 'rshift', 'or', 'xor', 'and', 'floor_div']
+
+OpKind = Literal['add', 'sub', 'mul', 'matmul', 'div', 'mod', 'pow', 'lshift', 'rshift', 'or',
+                 'xor', 'and', 'floor_div']
 
 _aug_assign_op_map = {
     ast.Add: 'add',
@@ -53,6 +55,7 @@ _aug_assign_op_map = {
     ast.BitAnd: 'and',
     ast.FloorDiv: 'floor_div'
 }
+
 
 class DSLMutator(ast.NodeTransformer):
 
@@ -134,7 +137,8 @@ class DSLMutator(ast.NodeTransformer):
         target, rval = node.target, node.value
         op = _aug_assign_op_map[type(node.op)]
         if isinstance(target, ast.Name):
-            return quote(f"name = __tl.aug_assign('{op}', '{target.id}', value)", name=target, value=rval)
+            return quote(
+                f"name = __tl.aug_assign('{op}', '{target.id}', value)", name=target, value=rval)
         elif isinstance(target, ast.Subscript):
             return quote(
                 f"__tl.aug_assign('{op}', lval, slice, value)",

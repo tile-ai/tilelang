@@ -298,22 +298,21 @@ class JITFunc(Generic[_P, _T]):
     def repr_indent(self, ident: int = 0) -> str:
         ident_str = " " * ident
         prim_func = str(self.prim_func.script())
-        return (
-            f"JITFunc(\n"
-            f"{ident_str}  target={repr(self.target)},\n"
-            f"{ident_str}  target_host={repr(self.target_host)},\n"
-            f"{ident_str}  global_allocs={repr(self.global_allocs)},\n"
-            f"{ident_str}  outs={repr(self.outs)},\n"
-            f"{ident_str}  pass_configs={repr(self.pass_configs)},\n"
-            f"{ident_str}  compile_flags={repr(self.compile_flags)},\n"
-            f"{ident_str}  arg_parser={repr(self.arg_parser)},\n"
-            f"{ident_str}  const_args={repr(self.const_args)},\n"
-            f"{ident_str}  prim_func={repr(prim_func)},\n"
-            f"{ident_str})"
-        )
+        return (f"JITFunc(\n"
+                f"{ident_str}  target={repr(self.target)},\n"
+                f"{ident_str}  target_host={repr(self.target_host)},\n"
+                f"{ident_str}  global_allocs={repr(self.global_allocs)},\n"
+                f"{ident_str}  outs={repr(self.outs)},\n"
+                f"{ident_str}  pass_configs={repr(self.pass_configs)},\n"
+                f"{ident_str}  compile_flags={repr(self.compile_flags)},\n"
+                f"{ident_str}  arg_parser={repr(self.arg_parser)},\n"
+                f"{ident_str}  const_args={repr(self.const_args)},\n"
+                f"{ident_str}  prim_func={repr(prim_func)},\n"
+                f"{ident_str})")
 
     def __repr__(self):
         return self.repr_indent()
+
 
 _thread_local_storage = threading.local()
 
@@ -339,6 +338,7 @@ class ConstIfFrame:
     def __exit__(self, exc_type, exc_value, traceback):
         pass
 
+
 _interp_op_func = {
     'add': lambda lval, rval: lval + rval,
     'sub': lambda lval, rval: lval - rval,
@@ -346,7 +346,7 @@ _interp_op_func = {
     'matmul': lambda lval, rval: lval @ rval,
     'div': lambda lval, rval: lval / rval,
     'mod': lambda lval, rval: lval % rval,
-    'pow': lambda lval, rval: lval ** rval,
+    'pow': lambda lval, rval: lval**rval,
     'lshift': lambda lval, rval: lval << rval,
     'rshift': lambda lval, rval: lval >> rval,
     'or': lambda lval, rval: lval | rval,
@@ -355,27 +355,45 @@ _interp_op_func = {
     'floor_div': lambda lval, rval: lval // rval,
 }
 
+
 def _interp_op(op: OpKind, lval: Any, rval: Any) -> Any:
     return _interp_op_func[op](lval, rval)
 
+
 def _interp_aug_assign(op: OpKind, lval: Any, slice: Any, rval: Any) -> Any:
-    if op == 'add': lval[slice] += rval
-    elif op == 'sub': lval[slice] -= rval
-    elif op == 'mul': lval[slice] *= rval
-    elif op == 'matmul': lval[slice] @= rval
-    elif op == 'div': lval[slice] /= rval
-    elif op == 'mod': lval[slice] %= rval
-    elif op == 'pow': lval[slice] **= rval
-    elif op == 'lshift': lval[slice] <<= rval
-    elif op == 'rshift': lval[slice] >>= rval
-    elif op == 'or': lval[slice] |= rval
-    elif op == 'xor': lval[slice] ^= rval
-    elif op == 'and': lval[slice] &= rval
-    elif op == 'floor_div': lval[slice] //= rval
-    else: raise ValueError(f"Unsupported op: {op}")
+    if op == 'add':
+        lval[slice] += rval
+    elif op == 'sub':
+        lval[slice] -= rval
+    elif op == 'mul':
+        lval[slice] *= rval
+    elif op == 'matmul':
+        lval[slice] @= rval
+    elif op == 'div':
+        lval[slice] /= rval
+    elif op == 'mod':
+        lval[slice] %= rval
+    elif op == 'pow':
+        lval[slice] **= rval
+    elif op == 'lshift':
+        lval[slice] <<= rval
+    elif op == 'rshift':
+        lval[slice] >>= rval
+    elif op == 'or':
+        lval[slice] |= rval
+    elif op == 'xor':
+        lval[slice] ^= rval
+    elif op == 'and':
+        lval[slice] &= rval
+    elif op == 'floor_div':
+        lval[slice] //= rval
+    else:
+        raise ValueError(f"Unsupported op: {op}")
 
 
-class _empty: ...
+class _empty:
+    ...
+
 
 @dataclass
 class DSLBuilder:

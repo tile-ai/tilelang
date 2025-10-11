@@ -84,16 +84,14 @@ class JITKernel(Generic[_P, _T]):
         return self.lib_call(*dyn_args)
 
     def __repr__(self):
-        return (
-            "JITKernel(\n"
-            f"  lib_path={repr(self.lib_path)},\n"
-            f"  lib={repr(self.lib)},\n"
-            f"  lib_call={self.lib_call},\n"
-            f"  source={repr(self.source)},\n"
-            f"  wrapped_source={repr(self.wrapped_source)},\n"
-            f"  jitfunc={self.jitfunc.repr_indent(2)},\n"
-            ")"
-        )
+        return ("JITKernel(\n"
+                f"  lib_path={repr(self.lib_path)},\n"
+                f"  lib={repr(self.lib)},\n"
+                f"  lib_call={self.lib_call},\n"
+                f"  source={repr(self.source)},\n"
+                f"  wrapped_source={repr(self.wrapped_source)},\n"
+                f"  jitfunc={self.jitfunc.repr_indent(2)},\n"
+                ")")
 
     def get_host_source(self) -> str:
         return self.wrapped_source
@@ -101,13 +99,17 @@ class JITKernel(Generic[_P, _T]):
     def get_kernel_source(self) -> str:
         return self.source
 
-    def bench(self, *args: _P.args, _config: Optional[BenchConfig] = None, **kws: _P.kwargs) -> float:
+    def bench(self,
+              *args: _P.args,
+              _config: Optional[BenchConfig] = None,
+              **kws: _P.kwargs) -> float:
         _config = _config or BenchConfig.default()
         timeout = _config.get('timeout', None)
         if 'timeout' in _config:
             del _config['timeout']
         if timeout is not None:
-            latency = run_with_timeout(lambda: do_bench(lambda: self(*args, **kws), **_config), timeout)
+            latency = run_with_timeout(lambda: do_bench(lambda: self(*args, **kws), **_config),
+                                       timeout)
         else:
             latency = do_bench(lambda: self(*args, **kws), **_config)
         return latency
@@ -244,7 +246,10 @@ class CallArgs:
 AnyCallArgs = CallArgs | Tuple[Any, ...] | Dict[str, Any]
 
 
-def repr_config(call_args: CallArgs, fn_name: Optional[str] = "CallArgs", replace_with_place: bool = True, indent: int = 0) -> str:
+def repr_config(call_args: CallArgs,
+                fn_name: Optional[str] = "CallArgs",
+                replace_with_place: bool = True,
+                indent: int = 0) -> str:
     args = []
     for arg in call_args.args:
         if replace_with_place and isinstance(arg, (torch.Tensor, Place)):
@@ -263,7 +268,8 @@ def repr_config(call_args: CallArgs, fn_name: Optional[str] = "CallArgs", replac
                 args.append(f"{name}=tl.place({shape}, dtype={repr(arg.dtype)})")
             else:
                 strides = ", ".join(map(repr, arg.stride()))
-                args.append(f"{name}=tl.place({shape}, dtype={repr(arg.dtype)}, strides={repr(strides)})")
+                args.append(
+                    f"{name}=tl.place({shape}, dtype={repr(arg.dtype)}, strides={repr(strides)})")
         else:
             args.append(repr(arg))
     if len(fn_name) + sum(map(len, args)) > 60:
@@ -292,15 +298,14 @@ class AutoTuneResult:
         return pd.DataFrame(self.records)
 
     def __repr__(self):
-        return (
-            'AutoTuneResult(\n'
-            f'  name={self.name},\n'
-            f'  best_latency={self.best_latency},\n'
-            f'  best={repr(self.best)},\n'
-            f'  best_args={repr_config(self.best_args, fn_name=self.name, indent=2)},\n'
-            f'  records=<{len(self.records)} records>,\n'
-            ')'
-        )
+        return ('AutoTuneResult(\n'
+                f'  name={self.name},\n'
+                f'  best_latency={self.best_latency},\n'
+                f'  best={repr(self.best)},\n'
+                f'  best_args={repr_config(self.best_args, fn_name=self.name, indent=2)},\n'
+                f'  records=<{len(self.records)} records>,\n'
+                ')')
+
 
 def get_tqdm(*args, **kws):
     try:
@@ -314,24 +319,20 @@ def get_tqdm(*args, **kws):
         from tqdm import tqdm
     return tqdm(*args, **kws)
 
+
 class BenchConfig(TypedDict):
-    warmup: float# target warmup time in milliseconds
-    rep: float # target benchmark time in milliseconds
-    fast_flush: bool # Use faster L2 cache flush with int32 vs int8 (default: True)
-    backend: Literal["event", "cupti"] # Profiler backend - "event" (CUDA events) or "cupti" (default: "event")
+    warmup: float  # target warmup time in milliseconds
+    rep: float  # target benchmark time in milliseconds
+    fast_flush: bool  # Use faster L2 cache flush with int32 vs int8 (default: True)
+    backend: Literal[
+        "event", "cupti"]  # Profiler backend - "event" (CUDA events) or "cupti" (default: "event")
     return_mode: Literal["min", "max", "mean", "median"]
     timeout: Optional[float]
 
     @classmethod
     def default(cls):
         return cls(
-            warmup=25,
-            rep=100,
-            fast_flush=True,
-            backend="cupti",
-            return_mode="mean",
-            timeout=None
-        )
+            warmup=25, rep=100, fast_flush=True, backend="cupti", return_mode="mean", timeout=None)
 
 
 @dataclass(slots=True)
@@ -371,10 +372,7 @@ class AutoTuner:
         best_record = None
         best_args = None
         progress_bar = get_tqdm(
-            zip(self.kernels, self.configs),
-            total=len(self.kernels),
-            desc=f'tune: {self.name}'
-        )
+            zip(self.kernels, self.configs), total=len(self.kernels), desc=f'tune: {self.name}')
         for ker, cfg in progress_bar:
             record = self.run_one(ker, cfg)
             if best_record is None or record['latency'] > best_latency:
@@ -382,7 +380,12 @@ class AutoTuner:
                 best_record = record
                 best_args = cfg
             records.append(record)
-        return AutoTuneResult(name=self.name, records=records, best_latency=best_latency, best=best_record, best_args=best_args)
+        return AutoTuneResult(
+            name=self.name,
+            records=records,
+            best_latency=best_latency,
+            best=best_record,
+            best_args=best_args)
 
 
 class JITDispatcher(Generic[_P, _T]):
@@ -394,8 +397,7 @@ class JITDispatcher(Generic[_P, _T]):
                  verbose: bool = False,
                  pass_configs: Dict[str, Any] = None,
                  compile_flags: List[str] = None,
-                 tune_cfg: Optional[Dict[str, Any] | BenchConfig] = None
-                 ):
+                 tune_cfg: Optional[Dict[str, Any] | BenchConfig] = None):
         self.func = func
         self.target_host = target_host
         if isinstance(target, str):
@@ -445,7 +447,10 @@ class JITDispatcher(Generic[_P, _T]):
             record['_error'] = repr(kernel)
             return record
 
-    def tune_configs(self, configs: Iterable[AnyCallArgs], max_workers: Optional[int]=None, **tune_cfg: Unpack[BenchConfig]) -> AutoTuneResult:
+    def tune_configs(self,
+                     configs: Iterable[AnyCallArgs],
+                     max_workers: Optional[int] = None,
+                     **tune_cfg: Unpack[BenchConfig]) -> AutoTuneResult:
         configs = [CallArgs.from_anycallarg(cfg) for cfg in configs]
         kernels = self.par_compile(configs, max_workers=max_workers)
         tune_cfg = copy.copy(self.tune_cfg)
@@ -455,8 +460,7 @@ class JITDispatcher(Generic[_P, _T]):
             arg_parser=self._arg_parser,
             configs=configs,
             kernels=kernels,
-            tune_cfg=tune_cfg
-        )
+            tune_cfg=tune_cfg)
         result = tuner.run()
         return result
 
@@ -473,16 +477,12 @@ class JITDispatcher(Generic[_P, _T]):
         configs = self.get_tune_configs(*args, **kws)
         kernels = self.par_compile(configs)
         tuner = AutoTuner(
-            name=self.func.__name__,
-            arg_parser=self._arg_parser,
-            configs=configs,
-            kernels=kernels
-        )
+            name=self.func.__name__, arg_parser=self._arg_parser, configs=configs, kernels=kernels)
         result = tuner.run()
         self.tune_cache[const_args] = result
         return result
 
-    def repr_config(self, config: AnyCallArgs, replace_with_place: bool=True) -> str:
+    def repr_config(self, config: AnyCallArgs, replace_with_place: bool = True) -> str:
         """Print the config in pretty format"""
         cfg = CallArgs.from_anycallarg(config)
         return repr_config(cfg, fn_name=self.func.__name__, replace_with_place=replace_with_place)
@@ -601,21 +601,25 @@ class JITDispatcher(Generic[_P, _T]):
 
         logger.debug(f"Add {len(configs)} configs into thread pool")
 
-        progress_bar = get_tqdm(as_completed(futures), total=len(futures), desc=f'par_compile: {self.func.__name__}')
+        progress_bar = get_tqdm(
+            as_completed(futures), total=len(futures), desc=f'par_compile: {self.func.__name__}')
         for future in progress_bar:
             idx = future_to_idx[future]
             try:
                 results[idx] = future.result()
             except Exception as e:
                 logger.error(
-                    f"Compiling failed for config {self.repr_config(configs[idx])} with error {repr(e)}", exc_info=True
-                )
+                    f"Compiling failed for config {self.repr_config(configs[idx])} with error {repr(e)}",
+                    exc_info=True)
                 results[idx] = e
 
         pool.shutdown()
         return results
 
-    def bench(self, *args: _P.args, _config: Optional[BenchConfig] = None, **kws: _P.kwargs) -> float:
+    def bench(self,
+              *args: _P.args,
+              _config: Optional[BenchConfig] = None,
+              **kws: _P.kwargs) -> float:
         kernel = self.compile(*args, **kws)
         return kernel.bench(*args, _config=_config, **kws)
 
@@ -691,8 +695,7 @@ def jit(
             verbose=False,
             pass_configs=None,
             compile_flags=None,
-            tune_cfg=tune_cfg
-        )
+            tune_cfg=tune_cfg)
 
     def wrapper(func):
         return JITDispatcher(
@@ -702,7 +705,6 @@ def jit(
             verbose=verbose,
             pass_configs=pass_configs,
             compile_flags=compile_flags,
-            tune_cfg=tune_cfg
-        )
+            tune_cfg=tune_cfg)
 
     return wrapper

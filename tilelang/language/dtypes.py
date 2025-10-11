@@ -110,7 +110,8 @@ _dtype_tvm2cffi = {
 
 
 def get_tvm_dtype(ty: AnyDType) -> tvm.DataType:
-    if ty is None: return ty
+    if ty is None:
+        return ty
     if ty == VoidPtr:
         return get_tvm_ptr_type()
     if isinstance(ty, (ir.Type, tvm.DataType)):
@@ -118,6 +119,7 @@ def get_tvm_dtype(ty: AnyDType) -> tvm.DataType:
     if isinstance(ty, str):
         return tvm.DataType(ty)
     return tvm.DataType(_dtype_torch2tvm[ty])
+
 
 def get_tvm_dtype_str(ty: AnyDType) -> str:
     if isinstance(ty, str):
