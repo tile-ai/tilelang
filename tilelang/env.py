@@ -34,12 +34,10 @@ def _find_cuda_home() -> str:
             # Standard CUDA pattern
             if "cuda" in nvcc_path.lower():
                 cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
-
             # NVIDIA HPC SDK pattern
             elif "hpc_sdk" in nvcc_path.lower():
-                # Navigate up from compilers/bin/nvcc to compilers directory
-                cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
-
+                # Navigate to the root directory of nvhpc
+                cuda_home = os.path.dirname(os.path.dirname(os.path.dirname(nvcc_path)))
             # Generic fallback for non-standard or symlinked installs
             else:
                 cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
