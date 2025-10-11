@@ -927,8 +927,8 @@ private:
       original_order.push_back(MakeBlock(child, buffer_data_to_buffer_));
     };
     for (size_t i = 0; i < pipeline_body_seq->seq.size(); i++) {
-      const auto *nested_block_realize =
-          pipeline_body_seq->seq[i].as<BlockRealizeNode>();
+      const Stmt &child = pipeline_body_seq->seq[i];
+      const auto *nested_block_realize = child.as<BlockRealizeNode>();
       if (nested_block_realize && is_one(nested_block_realize->predicate) &&
           nested_block_realize->block->body->IsInstance<SeqStmtNode>()) {
         const Block &nested_pipeline_block = nested_block_realize->block;
@@ -938,13 +938,8 @@ private:
           pipeline_allocs.push_back(buffer);
           buffer_data_to_buffer_.Set(buffer->data, buffer);
         }
-        const auto *nested_seq = nested_pipeline_block->body.as<SeqStmtNode>();
-        for (size_t j = 0; j < nested_seq->seq.size(); j++) {
-          f_add_child(nested_seq->seq[j]);
-        }
-      } else {
-        f_add_child(pipeline_body_seq->seq[i]);
       }
+      f_add_child(child);
     }
 
     auto pipeline_stages = Downcast<Array<Integer>>(

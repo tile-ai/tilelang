@@ -242,12 +242,14 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         @T.macro
         def _warp_mma(A_buf, B_buf, C_local_buf):
+            # TODO(lei): inject warpgroup_fence_operand for C_local_buf
             desc_a = T.alloc_descriptor()
             desc_b = T.alloc_descriptor()
             T.initialize_descriptor(desc_a, A_buf.access_ptr("w"), a_swizzle_mode,
                                     int(a_leading_byte_offset >> 4), int(a_stride_byte_offset >> 4))
             T.initialize_descriptor(desc_b, B_buf.access_ptr("w"), b_swizzle_mode,
                                     int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+            T.warpgroup_arrive()
             for ki in T.serial(0, (k_dim // micro_size_k)):
                 for i in T.serial(m_dim // 64):
                     A_offset = (ki % ak_atom_size) * micro_size_k + i * 64 * a_swizzle_atom_elems + (
@@ -262,6 +264,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                                    (A_offset * elems_in_bytes) >> 4, desc_b.data,
                                    (B_offset * elems_in_bytes) >> 4, C_local_buf.data, C_offset,
                                    scale_out, scale_in_a, scale_in_b)
+            T.warpgroup_commit_batch()
+            T.warpgroup_wait(0)
 
         return _warp_mma(A_buf, B_buf, C_local_buf)
 

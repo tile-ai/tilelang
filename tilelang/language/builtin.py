@@ -249,6 +249,37 @@ def mbarrier_expect_tx(*args):
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_expect_tx"), *args)
 
 
+def warpgroup_arrive():
+    """Signal warpgroup readiness for subsequent WGMMA operations.
+
+    Returns:
+        tir.Call: A handle to the warpgroup arrive operation.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.warpgroup_arrive"))
+
+
+def warpgroup_commit_batch():
+    """Commit the current warpgroup batch for WGMMA operations.
+
+    Returns:
+        tir.Call: A handle to the warpgroup commit batch operation.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.warpgroup_commit_batch"))
+
+
+def warpgroup_wait(num_mma: int):
+    """Wait for completion of the specified warpgroup batch.
+
+    Args:
+        num_mma: int
+            Identifier of the warpgroup MMA batch to wait on.
+
+    Returns:
+        tir.Call: A handle to the warpgroup wait operation.
+    """
+    return tir.call_intrin("handle", tir.op.Op.get("tl.warpgroup_wait"), num_mma)
+
+
 def wait_wgmma(id: int):
     """Wait for WGMMA (Warp Group Matrix Multiply-Accumulate) operations to complete.
 

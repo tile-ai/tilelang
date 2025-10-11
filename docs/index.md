@@ -40,6 +40,7 @@ deeplearning_operators/deepseek_mla
 :caption: COMPILER INTERNALS
 
 compiler_internals/letstmt_inline
+compiler_internals/inject_fence_proxy
 :::
 
 :::{toctree}
