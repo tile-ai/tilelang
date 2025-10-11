@@ -206,7 +206,7 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                             acc_o[i, j] = acc_o[i, j] * scores_scale[i]
 
                         T.copy(acc_s, acc_s_cast)
-                        T.mbarrier_wait_parity(mbarrier=bi % 2 + 2, parity=(((bi & 3) >> 1)))
+                        T.mbarrier_wait_parity(mbarrier=bi % 2 + 2, parity=((bi & 3) >> 1))
                         T.gemm(
                             acc_s_cast,
                             V_shared[bi % 2, :, :],

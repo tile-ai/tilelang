@@ -1,9 +1,10 @@
+from __future__ import annotations
 import contextlib
 import gc
 import os
 import sys
 from collections import UserList
-from typing import Any, Dict, List, Optional, Tuple, TypedDict, TypeVar
+from typing import Any, TypedDict, TypeVar
 
 import pytest
 import torch
@@ -33,8 +34,8 @@ _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 
 
-def _read_prompts(filename: str) -> List[str]:
-    with open(filename, "r") as f:
+def _read_prompts(filename: str) -> list[str]:
+    with open(filename) as f:
         prompts = f.readlines()
         return prompts
 
@@ -63,7 +64,7 @@ class _ImageAssets(_ImageAssetsBase):
             ImageAsset("cherry_blossom"),
         ])
 
-    def prompts(self, prompts: _ImageAssetPrompts) -> List[str]:
+    def prompts(self, prompts: _ImageAssetPrompts) -> list[str]:
         """
         Convenience method to define the prompt for each test image.
 
@@ -106,7 +107,7 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
 
 
 @pytest.fixture
-def example_prompts() -> List[str]:
+def example_prompts() -> list[str]:
     prompts = []
     for filename in _TEST_PROMPTS:
         prompts += _read_prompts(filename)
@@ -114,7 +115,7 @@ def example_prompts() -> List[str]:
 
 
 @pytest.fixture
-def example_long_prompts() -> List[str]:
+def example_long_prompts() -> list[str]:
     prompts = []
     for filename in _LONG_PROMPTS:
         prompts += _read_prompts(filename)
@@ -148,7 +149,7 @@ class HfRunner:
         model_name: str,
         dtype: str = "half",
         *,
-        model_kwargs: Optional[Dict[str, Any]] = None,
+        model_kwargs: dict[str, Any] | None = None,
         is_embedding_model: bool = False,
         is_vision_model: bool = False,
         is_sparseml_model: bool = False,
@@ -212,16 +213,16 @@ class HfRunner:
 
     def generate(
         self,
-        prompts: List[str],
-        images: Optional[List[Image.Image]] = None,
+        prompts: list[str],
+        images: list[Image.Image] | None = None,
         **kwargs: Any,
-    ) -> List[Tuple[List[List[int]], List[str]]]:
+    ) -> list[tuple[list[list[int]], list[str]]]:
         if images:
             assert len(prompts) == len(images)
 
-        outputs: List[Tuple[List[List[int]], List[str]]] = []
+        outputs: list[tuple[list[list[int]], list[str]]] = []
         for i, prompt in enumerate(prompts):
-            processor_kwargs: Dict[str, Any] = {
+            processor_kwargs: dict[str, Any] = {
                 "text": prompt,
                 "return_tensors": "pt",
             }
@@ -246,11 +247,11 @@ class HfRunner:
 
     def generate_greedy(
         self,
-        prompts: List[str],
+        prompts: list[str],
         max_tokens: int,
-        images: Optional[List[Image.Image]] = None,
+        images: list[Image.Image] | None = None,
         **kwargs: Any,
-    ) -> List[Tuple[List[int], str]]:
+    ) -> list[tuple[list[int], str]]:
         outputs = self.generate(
             prompts,
             do_sample=False,
@@ -263,10 +264,10 @@ class HfRunner:
 
     def generate_beam_search(
         self,
-        prompts: List[str],
+        prompts: list[str],
         beam_width: int,
         max_tokens: int,
-    ) -> List[Tuple[List[List[int]], List[str]]]:
+    ) -> list[tuple[list[list[int]], list[str]]]:
         outputs = self.generate(
             prompts,
             do_sample=False,
@@ -283,14 +284,14 @@ class HfRunner:
 
     def generate_greedy_logprobs(
         self,
-        prompts: List[str],
+        prompts: list[str],
         max_tokens: int,
-        images: Optional[List[Image.Image]] = None,
+        images: list[Image.Image] | None = None,
         **kwargs: Any,
-    ) -> List[List[torch.Tensor]]:
-        all_logprobs: List[List[torch.Tensor]] = []
+    ) -> list[list[torch.Tensor]]:
+        all_logprobs: list[list[torch.Tensor]] = []
         for i, prompt in enumerate(prompts):
-            processor_kwargs: Dict[str, Any] = {
+            processor_kwargs: dict[str, Any] = {
                 "text": prompt,
                 "return_tensors": "pt",
             }
@@ -308,7 +309,7 @@ class HfRunner:
                 return_dict_in_generate=True,
                 **kwargs,
             )
-            seq_logprobs: List[torch.Tensor] = []
+            seq_logprobs: list[torch.Tensor] = []
             for hidden_states in output.hidden_states:
                 last_hidden_states = hidden_states[-1][0]
                 logits = torch.matmul(
@@ -324,18 +325,18 @@ class HfRunner:
 
     def generate_greedy_logprobs_limit(
         self,
-        prompts: List[str],
+        prompts: list[str],
         max_tokens: int,
         num_logprobs: int,
-        images: Optional[List[Image.Image]] = None,
+        images: list[Image.Image] | None = None,
         **kwargs: Any,
-    ) -> List[Tuple[List[int], str, List[Dict[int, float]]]]:
-        all_logprobs: List[List[Dict[int, float]]] = []
-        all_output_ids: List[List[int]] = []
-        all_output_strs: List[str] = []
+    ) -> list[tuple[list[int], str, list[dict[int, float]]]]:
+        all_logprobs: list[list[dict[int, float]]] = []
+        all_output_ids: list[list[int]] = []
+        all_output_strs: list[str] = []
 
         for i, prompt in enumerate(prompts):
-            processor_kwargs: Dict[str, Any] = {
+            processor_kwargs: dict[str, Any] = {
                 "text": prompt,
                 "return_tensors": "pt",
             }
@@ -355,7 +356,7 @@ class HfRunner:
                 **kwargs,
             )
 
-            seq_logprobs: List[torch.Tensor] = []
+            seq_logprobs: list[torch.Tensor] = []
             for _, hidden_states in enumerate(output.hidden_states):
                 last_hidden_states = hidden_states[-1][0]
                 logits = torch.matmul(
@@ -368,7 +369,7 @@ class HfRunner:
                 seq_logprobs.append(logprobs)
 
             # convert to dict
-            seq_logprobs_lst: List[Dict[int, float]] = []
+            seq_logprobs_lst: list[dict[int, float]] = []
             for tok_idx, tok_logprobs in enumerate(seq_logprobs):
                 # drop prompt logprobs
                 if tok_idx == 0:
@@ -392,7 +393,7 @@ class HfRunner:
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]
 
-    def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
+    def encode(self, prompts: list[str]) -> list[list[torch.Tensor]]:
         return self.model.encode(prompts)
 
     def __enter__(self):
@@ -413,7 +414,7 @@ class VllmRunner:
     def __init__(
         self,
         model_name: str,
-        tokenizer_name: Optional[str] = None,
+        tokenizer_name: str | None = None,
         # Use smaller max model length, otherwise bigger model cannot run due
         # to kv cache size limit.
         max_model_len: int = 1024,
@@ -443,10 +444,10 @@ class VllmRunner:
 
     def generate(
         self,
-        prompts: List[str],
+        prompts: list[str],
         sampling_params: SamplingParams,
-        images: Optional[List[Image.Image]] = None,
-    ) -> List[Tuple[List[List[int]], List[str]]]:
+        images: list[Image.Image] | None = None,
+    ) -> list[tuple[list[list[int]], list[str]]]:
         if images is not None:
             assert len(prompts) == len(images)
 
@@ -457,12 +458,12 @@ class VllmRunner:
 
         req_outputs = self.model.generate(inputs, sampling_params=sampling_params)
 
-        outputs: List[Tuple[List[List[int]], List[str]]] = []
+        outputs: list[tuple[list[list[int]], list[str]]] = []
         for req_output in req_outputs:
             prompt_str = req_output.prompt
             prompt_ids = req_output.prompt_token_ids
-            req_sample_output_ids: List[List[int]] = []
-            req_sample_output_strs: List[str] = []
+            req_sample_output_ids: list[list[int]] = []
+            req_sample_output_strs: list[str] = []
             for sample in req_output.outputs:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
@@ -473,10 +474,10 @@ class VllmRunner:
 
     def generate_w_logprobs(
         self,
-        prompts: List[str],
+        prompts: list[str],
         sampling_params: SamplingParams,
-        images: Optional[List[Image.Image]] = None,
-    ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
+        images: list[Image.Image] | None = None,
+    ) -> list[tuple[list[int], str, SampleLogprobs | None]]:
         assert sampling_params.logprobs is not None
 
         if images is not None:
@@ -488,7 +489,7 @@ class VllmRunner:
                 inputs[i]["multi_modal_data"] = {"image": image}
 
         req_outputs = self.model.generate(inputs, sampling_params=sampling_params)
-        outputs: List[Tuple[List[int], str, Optional[SampleLogprobs]]] = []
+        outputs: list[tuple[list[int], str, SampleLogprobs | None]] = []
         for req_output in req_outputs:
             for sample in req_output.outputs:
                 output_str = sample.text
@@ -499,21 +500,21 @@ class VllmRunner:
 
     def generate_greedy(
         self,
-        prompts: List[str],
+        prompts: list[str],
         max_tokens: int,
-        images: Optional[List[Image.Image]] = None,
-    ) -> List[Tuple[List[int], str]]:
+        images: list[Image.Image] | None = None,
+    ) -> list[tuple[list[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts, greedy_params, images=images)
         return [(output_ids[0], output_str[0]) for output_ids, output_str in outputs]
 
     def generate_greedy_logprobs(
         self,
-        prompts: List[str],
+        prompts: list[str],
         max_tokens: int,
         num_logprobs: int,
-        images: Optional[List[Image.Image]] = None,
-    ) -> List[Tuple[List[int], str, Optional[SampleLogprobs]]]:
+        images: list[Image.Image] | None = None,
+    ) -> list[tuple[list[int], str, SampleLogprobs | None]]:
         greedy_logprobs_params = SamplingParams(
             temperature=0.0, max_tokens=max_tokens, logprobs=num_logprobs)
         outputs = self.generate_w_logprobs(prompts, greedy_logprobs_params, images=images)
@@ -523,10 +524,10 @@ class VllmRunner:
 
     def generate_beam_search(
         self,
-        prompts: List[str],
+        prompts: list[str],
         beam_width: int,
         max_tokens: int,
-    ) -> List[Tuple[List[List[int]], List[str]]]:
+    ) -> list[tuple[list[list[int]], list[str]]]:
         beam_search_params = SamplingParams(
             n=beam_width,
             use_beam_search=True,
@@ -536,7 +537,7 @@ class VllmRunner:
         outputs = self.generate(prompts, beam_search_params)
         return outputs
 
-    def encode(self, prompts: List[str]) -> List[List[float]]:
+    def encode(self, prompts: list[str]) -> list[list[float]]:
         req_outputs = self.model.encode(prompts)
         outputs = []
         for req_output in req_outputs:

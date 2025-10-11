@@ -1,7 +1,7 @@
+from __future__ import annotations
 import tvm
 from tvm.target import Target
 from .arch_base import TileDevice
-from typing import List, Union
 
 
 def is_cdna_arch(arch: TileDevice) -> bool:
@@ -10,7 +10,7 @@ def is_cdna_arch(arch: TileDevice) -> bool:
 
 class CDNA(TileDevice):
 
-    def __init__(self, target: Union[Target, str]):
+    def __init__(self, target: Target | str):
         if isinstance(target, str):
             target = tvm.target.Target(target)
         self.target = target
@@ -27,9 +27,9 @@ class CDNA(TileDevice):
         self.max_smem_usage: int = 2 * self.smem_cap
         self.sm_partition: int = 4
         self.l2_cache_size_bytes: int = target.l2_cache_size_bytes
-        self.transaction_size: List[int] = [32, 128]  # in bytes
+        self.transaction_size: list[int] = [32, 128]  # in bytes
 
-        self.bandwidth: List[int] = [1300, 14000]
+        self.bandwidth: list[int] = [1300, 14000]
 
 
 __all__ = [

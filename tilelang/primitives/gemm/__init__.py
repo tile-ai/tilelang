@@ -1,4 +1,5 @@
-from typing import Optional
+from __future__ import annotations
+
 from tvm import tir
 from tilelang.utils import is_local, is_fragment, is_shared
 from tilelang.primitives.gemm.base import GemmWarpPolicy
@@ -12,11 +13,11 @@ def gemm(
     C: tir.Buffer,
     transpose_A: bool = False,
     transpose_B: bool = False,
-    block_row_warps: Optional[int] = None,
-    block_col_warps: Optional[int] = None,
-    warp_row_tiles: Optional[int] = None,
-    warp_col_tiles: Optional[int] = None,
-    chunk: Optional[int] = None,
+    block_row_warps: int | None = None,
+    block_col_warps: int | None = None,
+    warp_row_tiles: int | None = None,
+    warp_col_tiles: int | None = None,
+    chunk: int | None = None,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     k_pack: int = 1,
 ):

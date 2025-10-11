@@ -54,7 +54,7 @@ def compile_hip(code,
     if target_format not in ["hsaco"]:
         raise ValueError("target_format must be hsaco")
     temp_code = temp.relpath("my_kernel.cc")
-    temp_target = temp.relpath("my_kernel.%s" % target_format)
+    temp_target = temp.relpath(f"my_kernel.{target_format}")
 
     with open(temp_code, "w") as out_file:
         out_file.write(code)

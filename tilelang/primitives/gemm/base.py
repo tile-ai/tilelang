@@ -1,7 +1,7 @@
+from __future__ import annotations
 from enum import IntEnum
 from dataclasses import dataclass
 
-from typing import Optional
 from tvm import tir
 
 
@@ -161,7 +161,7 @@ class GemmWarpPolicy(IntEnum):
         return m_warp, n_warp
 
     @classmethod
-    def from_warp_partition(cls, m_warp: int, n_warp: int) -> 'GemmWarpPolicy':
+    def from_warp_partition(cls, m_warp: int, n_warp: int) -> GemmWarpPolicy:
         """
         Determine the warp policy based on the given warp partitioning.
 
@@ -197,11 +197,11 @@ class GemmBaseParams:
 
     transpose_A: bool = False
     transpose_B: bool = False
-    block_row_warps: Optional[int] = None
-    block_col_warps: Optional[int] = None
-    warp_row_tiles: Optional[int] = None
-    warp_col_tiles: Optional[int] = None
-    chunk: Optional[int] = None
+    block_row_warps: int | None = None
+    block_col_warps: int | None = None
+    warp_row_tiles: int | None = None
+    warp_col_tiles: int | None = None
+    chunk: int | None = None
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     k_pack: int = 1
 
@@ -226,7 +226,7 @@ class GemmBaseParams:
             "k_pack": self.k_pack,
         }
 
-    def infer_block_partition(self, threads: Optional[int]) -> None:
+    def infer_block_partition(self, threads: int | None) -> None:
         """
         Infer and set block partition parameters (e.g., block_row_warps,
         block_col_warps, warp_row_tiles, warp_col_tiles, chunk) based on the

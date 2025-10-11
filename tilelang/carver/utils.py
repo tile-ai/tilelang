@@ -1,4 +1,4 @@
-from typing import List, Optional, Union
+from __future__ import annotations
 from tvm import tir, IRModule
 from tvm.tir import PrimFunc
 from .arch import TileDevice
@@ -26,11 +26,11 @@ def get_rasterization_code(pannel_width: int = 8) -> str:
     """
 
 
-def get_roller_hints_from_func(func_or_module: Union[tir.PrimFunc, IRModule],
+def get_roller_hints_from_func(func_or_module: tir.PrimFunc | IRModule,
                                arch: TileDevice,
                                topk: int = 10,
                                tensorcore_only: bool = False,
-                               allow_gemv: bool = False) -> Optional[List[Hint]]:
+                               allow_gemv: bool = False) -> list[Hint] | None:
     func = None
     if isinstance(func_or_module, tir.PrimFunc):
         func = func_or_module
@@ -69,11 +69,10 @@ def get_roller_hints_from_func(func_or_module: Union[tir.PrimFunc, IRModule],
     return roller_hints
 
 
-def get_roller_hints_from_output_nodes(
-        output_nodes: List[OutputNode],
-        arch: TileDevice,
-        topk: int = 10,
-        extra_tags: Optional[List[str]] = None) -> Optional[List[Hint]]:
+def get_roller_hints_from_output_nodes(output_nodes: list[OutputNode],
+                                       arch: TileDevice,
+                                       topk: int = 10,
+                                       extra_tags: list[str] | None = None) -> list[Hint] | None:
     assert isinstance(output_nodes, list), "The input should be a list of functions."
 
     lints = []

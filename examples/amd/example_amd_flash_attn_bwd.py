@@ -243,7 +243,7 @@ class _attention(torch.autograd.Function):
                 return x.contiguous()
             return x
 
-        do, q, k, v, o = [maybe_contiguous(x) for x in (do, q, k, v, o)]
+        do, q, k, v, o = (maybe_contiguous(x) for x in (do, q, k, v, o))
         block_M = 64
         block_N = 32
         mod_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD_V)
@@ -342,11 +342,11 @@ def main(BATCH: int = 1,
     from tilelang.profiler import do_bench
 
     latency = do_bench(run, warmup=500)
-    print("torch: {:.2f} ms".format(latency))
-    print("torch: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"torch: {latency:.2f} ms")
+    print(f"torch: {total_flops / latency * 1e-9:.2f} TFlops")
     latency = do_bench(run1, warmup=500)
-    print("tilelang: {:.2f} ms".format(latency))
-    print("tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"tilelang: {latency:.2f} ms")
+    print(f"tilelang: {total_flops / latency * 1e-9:.2f} TFlops")
 
 
 if __name__ == "__main__":

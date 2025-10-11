@@ -1,6 +1,6 @@
+from __future__ import annotations
 import os
 import subprocess
-from typing import Union
 
 # Get the absolute path of the current Python script's directory
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -21,11 +21,11 @@ else:
 
 # Read and store the version information from the VERSION file
 # Use 'strip()' to remove any leading/trailing whitespace or newline characters
-with open(version_file_path, "r") as version_file:
+with open(version_file_path) as version_file:
     __version__ = version_file.read().strip()
 
 
-def get_git_commit_id() -> Union[str, None]:
+def get_git_commit_id() -> str | None:
     """Get the current git commit hash by running git in the current file's directory."""
     try:
         return subprocess.check_output(['git', 'rev-parse', 'HEAD'],

@@ -1,11 +1,11 @@
 # Adapted from tilelang/examples/flash_attention/example_mha_bwd_bhsd.py
+from __future__ import annotations
 
 import torch
 import tilelang
 from tilelang.profiler import do_bench
 import tilelang.language as T
 import argparse
-from typing import Optional
 
 
 def get_bwd_configs():
@@ -400,7 +400,7 @@ def ref_program(query: torch.Tensor,
                 key: torch.Tensor,
                 value: torch.Tensor,
                 sinks: torch.Tensor,
-                sliding_window: Optional[int] = None,
+                sliding_window: int | None = None,
                 dtype: torch.dtype = torch.float16) -> torch.Tensor:
 
     query = query.transpose(1, 2).contiguous().unsqueeze(
@@ -507,11 +507,11 @@ def main(BATCH: int = 1,
         O.backward(dO, retain_graph=True)
 
     latency = do_bench(torch_bwd, warmup=500)
-    print("torch: {:.2f} ms".format(latency))
-    print("torch: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"torch: {latency:.2f} ms")
+    print(f"torch: {total_flops / latency * 1e-9:.2f} TFlops")
     latency = do_bench(tl_bwd, warmup=500)
-    print("tilelang: {:.2f} ms".format(latency))
-    print("tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"tilelang: {latency:.2f} ms")
+    print(f"tilelang: {total_flops / latency * 1e-9:.2f} TFlops")
 
 
 if __name__ == "__main__":

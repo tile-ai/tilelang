@@ -1,3 +1,4 @@
+from __future__ import annotations
 import ctypes
 import importlib
 import logging
@@ -5,7 +6,7 @@ import os
 import os.path as osp
 import subprocess
 import tempfile
-from typing import Any, Dict, Optional, List
+from typing import Any
 
 from tvm.target import Target
 
@@ -29,21 +30,21 @@ except ImportError:
     is_nvrtc_available = False
 
 
-class LibraryGenerator(object):
-    srcpath: Optional[str] = None
-    libpath: Optional[str] = None
-    lib_code: Optional[str] = None
-    pass_configs: Optional[Dict[str, Any]] = None
-    compile_flags: Optional[List[str]] = None
+class LibraryGenerator:
+    srcpath: str | None = None
+    libpath: str | None = None
+    lib_code: str | None = None
+    pass_configs: dict[str, Any] | None = None
+    compile_flags: list[str] | None = None
 
     def __init__(self, target: Target, verbose: bool = False):
         self.target = target
         self.verbose = verbose
 
-    def assign_pass_configs(self, pass_configs: Optional[Dict[str, Any]] = None):
+    def assign_pass_configs(self, pass_configs: dict[str, Any] | None = None):
         self.pass_configs = pass_configs
 
-    def assign_compile_flags(self, compile_flags: Optional[List[str]] = None):
+    def assign_compile_flags(self, compile_flags: list[str] | None = None):
         if compile_flags is None:
             compile_flags = []
         self.compile_flags = compile_flags
@@ -52,7 +53,7 @@ class LibraryGenerator(object):
         self.lib_code = lib_code
 
     # Assume currently we only support CUDA compilation
-    def load_lib(self, lib_path: Optional[str] = None):
+    def load_lib(self, lib_path: str | None = None):
         if lib_path is None:
             lib_path = self.libpath
         else:
@@ -185,7 +186,7 @@ class LibraryGenerator(object):
 
 
 class PyLibraryGenerator(LibraryGenerator):
-    host_func: Optional[str] = None
+    host_func: str | None = None
     culib = None
     pymodule = None
 
@@ -206,7 +207,7 @@ class PyLibraryGenerator(LibraryGenerator):
     def update_host_func(self, host_func: str):
         self.host_func = host_func
 
-    def load_lib(self, lib_path: Optional[str] = None):
+    def load_lib(self, lib_path: str | None = None):
         if lib_path is None:
             lib_path = self.libpath
 

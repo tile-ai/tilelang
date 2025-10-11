@@ -1,17 +1,17 @@
+from __future__ import annotations
 from dataclasses import dataclass
 from .base import BaseTemplate
 from tvm import te
 from ..arch import TileDevice
 from ..roller import Hint
 from ..roller import PrimFuncNode, OutputNode, Edge
-from typing import List
 from ..utils import get_roller_hints_from_output_nodes, get_tensorized_func_and_tags
 
 
 @dataclass
 class FlashAttentionTemplate(BaseTemplate):
 
-    _output_nodes: List[OutputNode] = None
+    _output_nodes: list[OutputNode] = None
 
     # Operation-related configuration parameters
     batch_size: int = 1
@@ -26,7 +26,7 @@ class FlashAttentionTemplate(BaseTemplate):
     out_dtype: str = "float16"
     accum_dtype: str = "float16"
 
-    def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> List[Hint]:
+    def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> list[Hint]:
         """
         Retrieves optimized hardware-aware configurations.
 

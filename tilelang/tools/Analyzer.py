@@ -1,9 +1,9 @@
+from __future__ import annotations
 import numpy as np
 from dataclasses import dataclass
 from tilelang import tvm
 from tvm.tir.stmt_functor import ir_transform
 import logging
-from typing import Optional
 # Configuration for different hardware architectures.
 # Each entry contains: (cores per SM, default clock (GHz), FLOPs per cycle, max SM count)
 ARCH_CONFIGS = {"80": (128, 1.41, 2, 108), "86": (128, 1.70, 2, 84), "89": (128, 2.52, 2, 128)}
@@ -168,7 +168,7 @@ class Analyzer:
             AnalysisResult: The calculated performance metrics.
         """
 
-        def get_peak_tflops(device) -> Optional[float]:
+        def get_peak_tflops(device) -> float | None:
             """
             Get the peak TFLOPS for the target device.
             Args:

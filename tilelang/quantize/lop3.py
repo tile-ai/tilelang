@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-from typing import Dict, Literal
+from __future__ import annotations
+from typing import Literal
 
 decode_i4_to_f16 = """
 template <typename T1, typename T2, bool isSigned = false>
@@ -1096,7 +1097,7 @@ def get_lop3_intrin_group(
     with_zeros: bool = False,
     zeros_mode: Literal["original", "rescale", "quantized"] = "original",
     storage_scope: str = "local",
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """
     This function is used to get the intrinsic group of the LOP3 operation to avoid the overhead of fast decoding.
     LOP3 is a type of logic operation that takes three inputs. The intrinsic group refers to the set of
@@ -1186,9 +1187,9 @@ def get_lop3_intrin_group(
     elif out_dtype == "int4":
         d4f = "i4s"
     else:
-        raise ValueError("Unsupported target dtype: {}".format(target_dtype))
+        raise ValueError(f"Unsupported target dtype: {target_dtype}")
     source_symbol = "u" if source_format == "uint" else "s"
-    func_name = "decode_i{}{}_to_{}".format(source_bit, source_symbol, d4f)
+    func_name = f"decode_i{source_bit}{source_symbol}_to_{d4f}"
     if with_scaling:
         func_name += "_scale"
     if with_zeros:

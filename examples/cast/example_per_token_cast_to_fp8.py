@@ -1,7 +1,7 @@
+from __future__ import annotations
 import torch
 import tilelang
 import tilelang.language as T
-from typing import Tuple
 from tilelang.utils.tensor import torch_assert_close
 
 tilelang.disable_cache()
@@ -66,7 +66,7 @@ def ceil_div(x: int, y: int) -> int:
     return (x + y - 1) // y
 
 
-def ref_program(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def ref_program(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     # this function don't support cpu tensor
     assert x.dim() == 2
     m, n = x.shape
@@ -100,9 +100,9 @@ def main():
     print("All checks pass.")
 
     latency = profiler.do_bench(ref_program, warmup=500)
-    print("Ref: {:.2f} ms".format(latency))
+    print(f"Ref: {latency:.2f} ms")
     latency = profiler.do_bench()
-    print("Tile-lang: {:.2f} ms".format(latency))
+    print(f"Tile-lang: {latency:.2f} ms")
 
     from tilelang.profiler import do_bench
     from example_triton_cast_to_fp8 import per_token_group_quant_fp8
@@ -114,7 +114,7 @@ def main():
 
     x_fp8_triton, x_amax_triton = run_triton()
     latency = do_bench(run_triton)
-    print("Triton: {:.2f} ms".format(latency))
+    print(f"Triton: {latency:.2f} ms")
 
 
 if __name__ == "__main__":

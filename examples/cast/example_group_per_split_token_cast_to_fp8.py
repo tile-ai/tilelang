@@ -1,7 +1,7 @@
+from __future__ import annotations
 import torch
 import tilelang
 import tilelang.language as T
-from typing import Tuple
 from tilelang.utils.tensor import torch_assert_close
 
 # support bfloat16, float, float16
@@ -134,7 +134,7 @@ def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
     return aligned_x.squeeze(0) if remove_dim else aligned_x
 
 
-def ref_per_token_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def ref_per_token_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     # this function don't support cpu tensor
     assert x.dim() == 2
     m, n = x.shape
@@ -147,7 +147,7 @@ def ref_per_token_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tens
     return x_fp8, (x_amax / 448.0).view(m, -1)
 
 def ref_program(x: torch.Tensor, batch_sizes: torch.Tensor) -> \
-        Tuple[torch.Tensor, torch.Tensor]:
+        tuple[torch.Tensor, torch.Tensor]:
     # assert x.shape[0] == batch_sizes.sum()
     M_max = ceil_div(batch_sizes.max(), 128) * 128
     split_x = torch.split(x, batch_sizes.tolist(), dim=0)
@@ -199,10 +199,10 @@ def main():
         return x_fp8_torch_, x_amax_torch_
 
     latency = do_bench(run_tilelang)
-    print("Tile-lang: {:.2f} ms".format(latency))
+    print(f"Tile-lang: {latency:.2f} ms")
 
     latency = do_bench(run_torch)
-    print("Torch: {:.2f} ms".format(latency))
+    print(f"Torch: {latency:.2f} ms")
 
 
 if __name__ == "__main__":

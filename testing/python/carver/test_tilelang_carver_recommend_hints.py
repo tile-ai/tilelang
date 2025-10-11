@@ -1,11 +1,11 @@
+from __future__ import annotations
 import tilelang.testing
 from tilelang import carver
 from tilelang.carver.arch import auto_infer_current_arch
-from typing import List
 
 
 def run_general_reduction_recommend_hints(structure: str = "SSR",
-                                          shape: List[int] = None,
+                                          shape: list[int] = None,
                                           dtype: str = "float16",
                                           topk: int = 20):
     arch = auto_infer_current_arch()
@@ -28,7 +28,7 @@ def test_general_reduction_recommend_hints():
     run_general_reduction_recommend_hints("SRS", [1024, 1024, 1024], "float16")
 
 
-def run_elementwise_recommend_hints(shape: List[int] = None,
+def run_elementwise_recommend_hints(shape: list[int] = None,
                                     dtype: str = "float16",
                                     topk: int = 20):
     arch = auto_infer_current_arch()

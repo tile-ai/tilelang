@@ -1,13 +1,13 @@
+from __future__ import annotations
 import math
 import torch
 import torch.nn as nn
-from typing import Dict, Tuple, Optional
 
 
 # Reference code in PyTorch
 class ExpertTorch(nn.Module):
 
-    def __init__(self, config: Dict, d_expert: Optional[int] = None):
+    def __init__(self, config: dict, d_expert: int | None = None):
         super().__init__()
         self.config = config
         self.act_fn = nn.SiLU()
@@ -26,7 +26,7 @@ class ExpertTorch(nn.Module):
 
 class MoEGateTorch(nn.Module):
 
-    def __init__(self, config: Dict):
+    def __init__(self, config: dict):
         super().__init__()
         self.top_k: int = config["n_experts_per_token"]
         self.num_experts: int = config["n_routed_experts"]
@@ -34,7 +34,7 @@ class MoEGateTorch(nn.Module):
 
         self.W_g = nn.Linear(self.d_hidden, self.num_experts, bias=False)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         logits = self.W_g(x)
         scores = logits.softmax(dim=-1)
         topk_scores, topk_indices = torch.topk(scores, k=self.top_k, dim=-1, sorted=False)
@@ -44,7 +44,7 @@ class MoEGateTorch(nn.Module):
 
 class MoETorch(nn.Module):
 
-    def __init__(self, config: Dict):
+    def __init__(self, config: dict):
         super().__init__()
         self.config = config
         self.experts = nn.ModuleList(
@@ -97,7 +97,7 @@ class MoETorch(nn.Module):
         return expert_cache
 
 
-def ref_kernel(data: Tuple[torch.Tensor, Dict, Dict]) -> torch.Tensor:
+def ref_kernel(data: tuple[torch.Tensor, dict, dict]) -> torch.Tensor:
     """
     Reference implementation of DeepSeek-style Mixture of Experts using PyTorch.
 
@@ -142,7 +142,7 @@ def ref_kernel(data: Tuple[torch.Tensor, Dict, Dict]) -> torch.Tensor:
 
 def generate_input(dhidden: int, dexpert: int, nroutedexperts: int, nsharedexperts: int,
                    nexpertspertoken: int, bs: int, seqlen: int,
-                   seed: int) -> Tuple[torch.Tensor, Dict, Dict]:
+                   seed: int) -> tuple[torch.Tensor, dict, dict]:
 
     # Really dumb but for now _ isn't parsing correctly.
     d_hidden = dhidden

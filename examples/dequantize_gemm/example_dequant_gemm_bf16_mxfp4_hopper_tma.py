@@ -550,8 +550,8 @@ def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False,
             profiler.assert_allclose(ref_program_simple, rtol=0.01, atol=0.01)
     print("All checks pass.")
     latency = profiler.do_bench(warmup=500)
-    print("Tile-lang: {:.2f} ms".format(latency))
-    print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"Tile-lang: {latency:.2f} ms")
+    print(f"Tile-lang: {total_flops / latency * 1e-9:.2f} TFlops")
 
 
 if __name__ == "__main__":

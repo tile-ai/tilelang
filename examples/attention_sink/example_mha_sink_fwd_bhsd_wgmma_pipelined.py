@@ -1,5 +1,6 @@
 # Modified from tilelang/examples/flash_attention/example_mha_fwd_bhsd_wgmma_pipelined.py
 # Optimized for Hopper architecture, with a benchmark to compare with official Triton impl
+from __future__ import annotations
 
 import torch
 import tilelang
@@ -12,7 +13,6 @@ import argparse
 import triton
 import triton.language as tl
 from triton.tools.tensor_descriptor import TensorDescriptor
-from typing import Optional
 
 
 def get_configs():
@@ -205,7 +205,7 @@ def ref_program(query: torch.Tensor,
                 key: torch.Tensor,
                 value: torch.Tensor,
                 sinks: torch.Tensor,
-                sliding_window: Optional[int] = None,
+                sliding_window: int | None = None,
                 dtype: torch.dtype = torch.float16) -> torch.Tensor:
 
     query = query.transpose(1, 2).contiguous().unsqueeze(
@@ -439,11 +439,11 @@ def main(batch: int = 1,
             print("Checks for triton failed.❌")
 
         latency = do_bench(lambda: triton_program(Q, K, V, sinks, window_size), warmup=500)
-        print("Triton: {:.2f} ms".format(latency))
-        print("Triton: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Triton: {latency:.2f} ms")
+        print(f"Triton: {total_flops / latency * 1e-9:.2f} TFlops")
         latency = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500)
-        print("Tilelang: {:.2f} ms".format(latency))
-        print("Tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Tilelang: {latency:.2f} ms")
+        print(f"Tilelang: {total_flops / latency * 1e-9:.2f} TFlops")
 
 
 if __name__ == "__main__":

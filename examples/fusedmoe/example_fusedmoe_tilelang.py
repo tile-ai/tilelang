@@ -1,7 +1,7 @@
+from __future__ import annotations
 import math
 import torch
 import torch.nn as nn
-from typing import Dict, Tuple, Optional
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner import *
@@ -271,11 +271,11 @@ def moe_forward_tilelang_routed(d_hidden,
 class Expert(nn.Module):
 
     def __init__(self,
-                 config: Dict,
+                 config: dict,
                  gate: torch.Tensor,
                  up: torch.Tensor,
                  down: torch.Tensor,
-                 d_expert: Optional[int] = None):
+                 d_expert: int | None = None):
         super().__init__()
         self.config = config
         self.act_fn = nn.SiLU()
@@ -295,7 +295,7 @@ class Expert(nn.Module):
 
 class MoEGate(nn.Module):
 
-    def __init__(self, config: Dict, weights: Dict):
+    def __init__(self, config: dict, weights: dict):
         super().__init__()
         self.top_k: int = config["n_experts_per_token"]
         self.num_experts: int = config["n_routed_experts"]
@@ -303,7 +303,7 @@ class MoEGate(nn.Module):
 
         self.W_g_weight = weights['router.weight'].t()
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         logits = x @ self.W_g_weight
         scores = logits.softmax(dim=-1)
         topk_scores, topk_indices = torch.topk(scores, k=self.top_k, dim=-1, sorted=False)
@@ -314,10 +314,10 @@ class MoEGate(nn.Module):
 class MoE(nn.Module):
 
     def __init__(self,
-                 config: Dict,
+                 config: dict,
                  shared_kernel: tilelang.JITKernel,
                  routed_kernel: tilelang.JITKernel,
-                 weights: Dict,
+                 weights: dict,
                  padding_M: int = 128):
         super().__init__()
         self.config = config
@@ -475,7 +475,7 @@ class MoE(nn.Module):
         return shared_output + routed_output
 
 
-def custom_kernel(data: Tuple[torch.Tensor, Dict, Dict]) -> torch.Tensor:
+def custom_kernel(data: tuple[torch.Tensor, dict, dict]) -> torch.Tensor:
     """
     DeepSeek-style Mixture of Experts using Tilelang.
 

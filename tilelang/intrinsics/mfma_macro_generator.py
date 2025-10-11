@@ -1,17 +1,16 @@
+from __future__ import annotations
 from tilelang import tvm as tvm
 import tilelang.language as T
-from typing import Tuple
 from tvm import DataType
 from tvm.tir import PrimExpr
 from tvm.runtime import convert
-from typing import Optional
 from .utils import (
     mfma_store_index_map,)
 
 lift = convert
 
 
-class MatrixCoreIntrinEmitter(object):
+class MatrixCoreIntrinEmitter:
     """
     To eliminate Python syntax within TIR Macro.
     """
@@ -51,9 +50,9 @@ class MatrixCoreIntrinEmitter(object):
         chunk: int = 16,
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
-        k_pack: Optional[int] = None,
-        is_m_first: Optional[bool] = False,
-        b_preshuffle: Optional[bool] = False,
+        k_pack: int | None = None,
+        is_m_first: bool | None = False,
+        b_preshuffle: bool | None = False,
     ):
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
@@ -135,15 +134,15 @@ class MatrixCoreIntrinEmitter(object):
         self.micro_size_y = n_dim
         self.micro_size_k = k_dim
 
-    def _initialize_k_pack(self, k_pack: Optional[int] = None):
+    def _initialize_k_pack(self, k_pack: int | None = None):
         if k_pack is not None:
             self.k_pack = k_pack
 
-    def _initialize_is_m_first(self, is_m_first: Optional[bool] = False):
+    def _initialize_is_m_first(self, is_m_first: bool | None = False):
         if is_m_first is not None:
             self.is_m_first = is_m_first
 
-    def _initialize_b_preshuffle(self, b_preshuffle: Optional[bool] = False):
+    def _initialize_b_preshuffle(self, b_preshuffle: bool | None = False):
         if b_preshuffle is not None:
             self.b_preshuffle = b_preshuffle
 
@@ -203,7 +202,7 @@ class MatrixCoreIntrinEmitter(object):
 
     def extract_thread_binding(self,
                                thread_id,
-                               is_m_first=None) -> Tuple[PrimExpr, PrimExpr, PrimExpr]:
+                               is_m_first=None) -> tuple[PrimExpr, PrimExpr, PrimExpr]:
         '''
             is_m_first: True if the thread binding is in the form of (tx, warp_n, warp_m)
             which represents [warp_size, block_row_warps (split n), block_col_warps (split m)]
@@ -418,10 +417,10 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
         chunk: int = 16,
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
-        k_pack: Optional[int] = None,
-        is_m_first: Optional[bool] = False,
-        a_preshuffle: Optional[bool] = False,
-        b_preshuffle: Optional[bool] = False,
+        k_pack: int | None = None,
+        is_m_first: bool | None = False,
+        a_preshuffle: bool | None = False,
+        b_preshuffle: bool | None = False,
     ):
 
         self.a_dtype = a_dtype

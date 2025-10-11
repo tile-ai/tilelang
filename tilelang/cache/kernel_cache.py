@@ -1,4 +1,5 @@
 """The cache utils with class and database persistence - KernelCache Class"""
+from __future__ import annotations
 
 import json
 import logging
@@ -7,7 +8,7 @@ import shutil
 import threading
 import uuid
 from hashlib import sha256
-from typing import Callable, List, Literal, Optional, Union
+from typing import Callable, Literal
 
 import cloudpickle
 from tvm.target import Target
@@ -67,13 +68,13 @@ class KernelCache:
     def _generate_key(
         self,
         func: Callable,
-        out_idx: List[int],
+        out_idx: list[int],
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         args=None,
-        target: Union[str, Target] = "auto",
-        target_host: Union[str, Target] = None,
+        target: str | Target = "auto",
+        target_host: str | Target = None,
         pass_configs: dict = None,
-        compile_flags: Optional[Union[List[str], str]] = None,
+        compile_flags: list[str] | str | None = None,
     ) -> str:
         """
         Generates a unique hash key for caching compiled kernels.
@@ -112,14 +113,14 @@ class KernelCache:
     def cached(
         self,
         func: PrimFunc = None,
-        out_idx: List[int] = None,
+        out_idx: list[int] = None,
         *args,
-        target: Union[str, Target] = "auto",
-        target_host: Union[str, Target] = None,
+        target: str | Target = "auto",
+        target_host: str | Target = None,
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         verbose: bool = False,
         pass_configs: dict = None,
-        compile_flags: Optional[Union[List[str], str]] = None,
+        compile_flags: list[str] | str | None = None,
     ) -> JITKernel:
         """
         Caches and reuses compiled kernels to avoid redundant compilation.
@@ -322,15 +323,15 @@ class KernelCache:
     def _load_kernel_from_disk(
         self,
         key: str,
-        target: Union[str, Target] = "auto",
-        target_host: Union[str, Target] = None,
-        out_idx: List[int] = None,
+        target: str | Target = "auto",
+        target_host: str | Target = None,
+        out_idx: list[int] = None,
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         pass_configs: dict = None,
-        compile_flags: Optional[Union[List[str], str]] = None,
+        compile_flags: list[str] | str | None = None,
         func: Callable = None,
         verbose: bool = False,
-    ) -> Optional[JITKernel]:
+    ) -> JITKernel | None:
         """
         Loads a previously compiled kernel from disk cache.
 
@@ -355,15 +356,15 @@ class KernelCache:
         if not all([os.path.exists(file) for file in (kernel_lib_path, params_path)]):
             return None
 
-        kernel_global_source: Optional[str] = None
-        kernel_params: Optional[List[KernelParam]] = None
+        kernel_global_source: str | None = None
+        kernel_params: list[KernelParam] | None = None
 
         # Load the kernel source file (optional)
         try:
             if verbose:
                 self.logger.debug(
                     f"Loading wrapped kernel source code from file: {wrapped_kernel_path}")
-            with open(wrapped_kernel_path, "r") as f:
+            with open(wrapped_kernel_path) as f:
                 kernel_global_source = f.read()
         except Exception as e:
             self.logger.error(f"Error loading wrapped kernel source code from disk: {e}")

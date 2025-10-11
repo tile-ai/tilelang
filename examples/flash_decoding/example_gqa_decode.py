@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 import torch.nn.functional as F
 import tilelang
@@ -7,7 +8,6 @@ from einops import rearrange, einsum
 import argparse
 import itertools
 from functools import lru_cache
-from typing import Tuple, Dict
 
 torch.random.manual_seed(0)
 
@@ -31,7 +31,7 @@ def get_configs():
 
 
 @lru_cache(maxsize=1)
-def get_heuristic_config() -> Tuple[Dict, int]:
+def get_heuristic_config() -> tuple[dict, int]:
     # Get CUDA device properties
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available")
@@ -473,11 +473,11 @@ def main(batch: int = 1,
 
         print("All checks pass.")
         latency = profiler.do_bench(ref_program, warmup=500)
-        print("Ref: {:.2f} ms".format(latency))
-        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Ref: {latency:.2f} ms")
+        print(f"Ref: {total_flops / latency * 1e-9:.2f} TFlops")
         latency = profiler.do_bench(warmup=500)
-        print("Tile-lang: {:.2f} ms".format(latency))
-        print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Tile-lang: {latency:.2f} ms")
+        print(f"Tile-lang: {total_flops / latency * 1e-9:.2f} TFlops")
     else:
         kernel = flashattn(batch, heads, groups, kv_seqlen, dim)
         best_latency = kernel.latency

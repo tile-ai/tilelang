@@ -1,17 +1,16 @@
 """Wrapping Layouts."""
 # pylint: disable=invalid-name, unsupported-binary-operation
+from __future__ import annotations
 
-from typing import Optional
 import tvm
 import tilelang.language as T
 import warnings
 
 from tilelang.contrib import nvcc
-from typing import List
 from math import prod
 
 
-def decompose_col_major(index_1d: int, basis: List[int]) -> List[int]:
+def decompose_col_major(index_1d: int, basis: list[int]) -> list[int]:
     res = []
     for x in basis:
         res.append(index_1d % x)
@@ -136,7 +135,7 @@ def _make_metadata_layout_sm8x_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str):
 def make_metadata_layout(buffer: tvm.tir.Buffer,
                          mma_dtype: str = "float16",
                          backend: str = 'cutlass',
-                         arch: Optional[str] = None,
+                         arch: str | None = None,
                          **extra_args):
     if arch is None:
         arch = nvcc.get_target_compute_version()
