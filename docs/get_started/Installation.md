@@ -219,7 +219,7 @@ so `--no-build-isolation` and similar configs are not necessary.
 `TVM_ROOT`: TVM source root to use.
 
 `NO_VERSION_LABEL` and `NO_TOOLCHAIN_VERSION`:
-When building tilelang, we'll try to embed SDK and vesion information into package version as below,
+When building tilelang, we'll try to embed SDK and version information into package version as below,
 where local version label could look like `<sdk>.git<git_hash>`. Set `NO_VERSION_LABEL=ON` to disable this behavior.
 ```
 $ python -mbuild -w
