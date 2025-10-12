@@ -1,6 +1,8 @@
 name: Dist
 on:
-  pull_request:
+  schedule:
+    # gemini said this is 6:00 china time
+    - cron: '0 22 * * *'
   release:
     types: [ published ]
 
@@ -25,8 +27,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       CUDA_VERSION: ${{ matrix.cuda_version }}
-      NO_GIT_VERSION: ${{ github.event_name != 'release' }}
-      NO_TOOLCHAIN_VERSION: ${{ github.event_name != 'release' }}
+      NO_VERSION_LABEL: ${{ github.event_name != 'release' }}
 
     steps:
     - name: Checkout repository
