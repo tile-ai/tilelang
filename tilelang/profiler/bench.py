@@ -5,6 +5,7 @@ import sys
 from typing import Callable, List, Literal, Optional, Union
 
 import torch
+from packaging import version
 
 
 class suppress_stdout_stderr:
@@ -97,7 +98,10 @@ def do_bench(
 
     # Initial function call and synchronization
     fn()
-    torch.accelerator.synchronize()
+    if version.parse(torch.__version__) < version.parse("2.6.0"):
+        torch.cuda.synchronize()
+    else:
+        torch.accelerator.synchronize()
 
     # Create L2 cache flush buffer (256 MB)
     # Fast flush uses int32 (4 bytes), regular uses int8 (1 byte)
