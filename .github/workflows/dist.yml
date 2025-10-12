@@ -3,21 +3,6 @@ on:
   pull_request:
   release:
     types: [ published ]
-  workflow_dispatch:
-    inputs:
-      cuda_version:
-        description: 'CUDA Version to build, format: xx.y'
-        required: false
-      git_version:
-        description: 'Include git commit in package version'
-        required: false
-        type: boolean
-        default: true
-      toolchain_version:
-        description: 'Include toolchain information in package version'
-        required: false
-        type: boolean
-        default: true
 
 env:
   PYTHON_VERSION: '3.12'
@@ -33,15 +18,15 @@ jobs:
         os: [ubuntu-22.04, ubuntu-22.04-arm, macos-14]
         include:
         - os: ubuntu-22.04
-          CUDA_VERSION: 12.1
+          cuda_version: 12.1
         - os: ubuntu-22.04-arm
-          CUDA_VERSION: 12.8
+          cuda_version: 12.8
       fail-fast: true
     runs-on: ${{ matrix.os }}
     env:
-      CUDA_VERSION: ${{ inputs.cuda_version || matrix.CUDA_VERSION }}
-      NO_GIT_VERSION: ${{ github.event_name != 'release' && ! inputs.git_version }}
-      NO_TOOLCHAIN_VERSION: ${{ github.event_name != 'release' && ! inputs.toolchain_version }}
+      CUDA_VERSION: ${{ matrix.cuda_version }}
+      NO_GIT_VERSION: ${{ github.event_name != 'release' }}
+      NO_TOOLCHAIN_VERSION: ${{ github.event_name != 'release' }}
 
     steps:
     - name: Checkout repository
