@@ -30,25 +30,19 @@ jobs:
         fetch-depth: 1
         submodules: recursive
 
-      - name: Set up QEMU
-        if: runner.os == 'Linux'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: all
+    - name: Build wheels
+      uses: pypa/cibuildwheel@v3.2
+      with:
+        output-dir: wheelhouse
+        config-file: "{package}/pyproject.toml"
 
-      - name: Build wheels
-        uses: pypa/cibuildwheel@v3.2
-        env:
-          CIBW_BUILD: cp312-*
-          CIBW_ARCHS: auto64
-          CIBW_ARCHS_MACOS: auto64 niversal2
-        with:
-          package-dir: .
-          output-dir: wheelhouse
-          config-file: "{package}/pyproject.toml"
+    # just for now to list all files
+    - name: List wheels
+      id: ls-whl
+      run: echo "whl_name=$(ls wheelhouse | head -n1)" >> $GITHUB_OUTPUT
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-${{ env.PYTHON_VERSION }}-${{ runner.os }}-${{ runner.arch }}
-          path: wheelhouse/*.whl
-          if-no-files-found: error
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.ls-whl.outputs.whl_name }}.zip
+        path: wheelhouse/${{ steps.repair.outputs.whl_name }}
+        compression-level: 0
