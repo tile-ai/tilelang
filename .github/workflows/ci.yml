@@ -265,8 +265,15 @@ jobs:
         run: |
           uv pip install --no-build-isolation -v .
 
+      - name: Run examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
+        if: contains(matrix.runner.toolkit, 'CUDA')
+        run: |
+          cd examples
+          unset PYTHONPATH
+          uv run --no-project -m -- pytest **/test*.py -v -r fE --durations=0 --cache-clear
+
       # NVIDIA CUDA tests
-      - name: Run CUDA tests for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }}
+      - name: Run CUDA tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         id: cuda-tests
         if: contains(matrix.runner.toolkit, 'CUDA')
         run: |
@@ -275,7 +282,7 @@ jobs:
           uv run --no-project -m -- pytest -v -r fE --durations=0 --cache-clear --timeout=3600
 
       # AMD ROCm tests
-      - name: Run ROCm tests for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }}
+      - name: Run ROCm tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         id: rocm-tests
         if: contains(matrix.runner.toolkit, 'ROCm')
         run: |
@@ -284,7 +291,7 @@ jobs:
           uv run --no-project -m -- pytest -v --cache-clear test_tilelang_test_amd.py
 
       # Apple Metal tests
-      - name: Run Metal tests for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }}
+      - name: Run Metal tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         id: metal-tests
         if: contains(matrix.runner.toolkit, 'Metal')
         run: |
@@ -300,10 +307,3 @@ jobs:
           if git status --ignored --porcelain | grep -qvE '/$'; then
             ls -alh $(git status --ignored --porcelain | grep -vE '/$' | grep -oE '\S+$')
           fi
-
-      - name: Run examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
-        if: contains(matrix.runner.toolkit, 'CUDA')
-        run: |
-          cd examples
-          unset PYTHONPATH
-          uv run --no-project -m -- pytest **/test*.py -v -r fE --durations=0 --cache-clear
