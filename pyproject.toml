@@ -132,3 +132,50 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "3rdparty/**/*" = ["ALL"]
 "examples/deepseek_v32/inference/**/*" = ["ALL"]
+
+[tool.cibuildwheel]
+archs = ["auto64"]
+# wait for tvm fix
+build = "cp312-*"
+
+[tool.cibuildwheel.macos]
+archs = ["arm64"]
+
+[tool.cibuildwheel.linux]
+# Pin to glibc 2.17 for x86 and 2.28 for aarch64 for now
+manylinux-x86_64-image = "manylinux2014"
+manylinux-aarch64-image = "manylinux_2_28"
+skip = "*-musllinux*"
+environment-pass = ["CUDA_VERSION"]
+repair-wheel-command = [
+  """
+auditwheel repair --exclude libcuda.so.1 --exclude /usr/local/cuda\\* -w {dest_dir} {wheel}""",
+#   "pipx run abi3audit --strict --report {wheel}",
+]
+
+# Install CUDA runtime and stub driver library
+# manylinux_2_28 uses gcc 14, which needs CUDA 12.8
+before-all = """
+set -eux
+
+case "$(uname -m)" in
+"x86_64")
+    yum-config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
+    ;;
+"aarch64")
+    dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/sbsa/cuda-rhel8.repo
+    ;;
+*)
+    exit 1
+    ;;
+esac
+
+# Assume CUDA_VERSION=xx.y
+v=${CUDA_VERSION:0:4}
+v=${v/./-}
+yum install -y cuda-minimal-build-${v} cuda-driver-devel-${v} cuda-nvrtc-devel-${v}
+"""
+
+[tool.cibuildwheel.linux.environment]
+# Equlivant to `source /opt/rh/gcc-toolset-12/enable`, safe when gcc-toolset-12 is not installed
+PATH = "/usr/local/cuda/bin:$PATH"
