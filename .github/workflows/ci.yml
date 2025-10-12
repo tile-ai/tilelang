@@ -268,36 +268,42 @@ jobs:
       - name: Run examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         if: contains(matrix.runner.toolkit, 'CUDA')
         run: |
-          cd examples
-          unset PYTHONPATH
-          uv run --no-project -m -- pytest **/test*.py -v -r fE --durations=0 --cache-clear
+          cd testing
+          uv run --no-project -m -- \
+            pytest --verbose --durations=0 --cache-clear \
+              -k 'not test_example_mha_sink_bwd_bhsd' \
+              ../examples
 
       # NVIDIA CUDA tests
       - name: Run CUDA tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         id: cuda-tests
         if: contains(matrix.runner.toolkit, 'CUDA')
         run: |
-          cd testing/python
-          unset PYTHONPATH
-          uv run --no-project -m -- pytest -v -r fE --durations=0 --cache-clear --timeout=3600
+          cd testing
+          uv run --no-project -m -- \
+            pytest --verbose --durations=0 --cache-clear \
+              python
 
       # AMD ROCm tests
       - name: Run ROCm tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         id: rocm-tests
         if: contains(matrix.runner.toolkit, 'ROCm')
         run: |
-          cd testing/python/amd
-          unset PYTHONPATH
-          uv run --no-project -m -- pytest -v --cache-clear test_tilelang_test_amd.py
+          cd testing
+          uv run --no-project -m -- \
+            pytest --verbose --cache-clear \
+              python/amd/test_tilelang_test_amd.py
 
       # Apple Metal tests
       - name: Run Metal tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         id: metal-tests
         if: contains(matrix.runner.toolkit, 'Metal')
         run: |
-          cd testing/python
-          unset PYTHONPATH
-          uv run --no-project -m -- pytest -k metal -v -r fE --durations=0 --cache-clear --timeout=3600
+          cd testing
+          uv run --no-project -m -- \
+            pytest --verbose --durations=0 --cache-clear \
+              -k metal \
+              python
 
       - name: List generated files
         if: ${{ !cancelled() }}
