@@ -50,5 +50,5 @@ jobs:
     - uses: actions/upload-artifact@v4
       with:
         name: ${{ steps.ls-whl.outputs.whl_name }}.zip
-        path: wheelhouse/${{ steps.repair.outputs.whl_name }}
+        path: wheelhouse/${{ steps.ls-whl.outputs.whl_name }}
         compression-level: 0
