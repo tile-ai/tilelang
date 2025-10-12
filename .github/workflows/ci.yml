@@ -71,7 +71,7 @@ jobs:
 
   tests:
     name: Test for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }} (on ${{ matrix.runner.name }})
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     needs: [lint]
     runs-on: ${{ matrix.runner.tags }}
     strategy:
@@ -88,8 +88,8 @@ jobs:
             toolkit: Metal
         python-version:
           - "3.12"
-      fail-fast: false
-    timeout-minutes: 90
+      fail-fast: true
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repository

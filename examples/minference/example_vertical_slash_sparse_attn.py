@@ -540,7 +540,7 @@ def sum_all_diagonal_matrix(mat: torch.tensor):
     return sum_diags[:, :, 1:]
 
 
-def main(argv=None):
+def main(args=None):
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--batch", type=int, default=1)
@@ -550,7 +550,7 @@ def main(argv=None):
     parser.add_argument("--vertical_size", type=int, default=1000)
     parser.add_argument("--slash_size", type=int, default=200)
 
-    args = parser.parse_args(argv)
+    args = parser.parse_args(args)
 
     BATCH, N_HEADS, SEQ_LEN, D_HEAD = args.batch, args.heads, args.seq_len, args.head_dim
 
