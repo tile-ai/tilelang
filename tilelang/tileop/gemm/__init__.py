@@ -29,7 +29,8 @@ def gemm_py_lower(gemm_py, layout_map, target, thread_bounds, thread_var):
 class GemmInst(IntEnum):
     MMA = 0
     WGMMMA = 1
-    MFMA = 2
+    TCGEN5MMA = 2
+    MFMA = 3
 
     def is_mma(self) -> bool:
         return self == GemmInst.MMA
@@ -37,8 +38,14 @@ class GemmInst(IntEnum):
     def is_wgmma(self) -> bool:
         return self == GemmInst.WGMMMA
 
+    def is_tcgen5mma(self) -> bool:
+        return self == GemmInst.TCGEN5MMA
+
     def is_mfma(self) -> bool:
         return self == GemmInst.MFMA
+
+    def __repr__(self) -> str:
+        return self.name
 
 
 @tvm.ffi.register_object("tl.GemmPy")
@@ -114,6 +121,8 @@ class GemmPy(Node, Scriptable):
             return GemmMMA
         elif gemm_inst.is_wgmma():
             return GemmWGMMA
+        elif gemm_inst.is_tcgen5mma():
+            raise NotImplementedError("TCGEN5MMA is not implemented")
         elif gemm_inst.is_mfma():
             raise NotImplementedError("MFMA is not implemented")
         else:

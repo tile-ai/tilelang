@@ -13,11 +13,79 @@
 
 #include "../target/utils.h"
 #include "tvm/ffi/string.h"
+#include <vector>
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
+
+struct TCGEN5MMAMeta {
+  int atom_m, atom_n, atom_k;
+};
+
+// Return {is_success, meta}
+static inline std::pair<bool, TCGEN5MMAMeta>
+GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
+// TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
+#define FAIL                                                                   \
+  return {                                                                     \
+    false, TCGEN5MMAMeta { 0, 0, 0 }                                           \
+  }
+#define SUCCESS(atom_m, atom_n, atom_k)                                        \
+  return {                                                                     \
+    true, TCGEN5MMAMeta { atom_m, atom_n, atom_k }                             \
+  }
+  std::vector<int> ws_valid_atom_ns = {256, 128, 64};
+  if ((ab_dtype.is_bfloat16() || ab_dtype.is_float16()) &&
+      (c_dtype.is_float() && c_dtype.bits() == 32)) {
+    if (K % 16 != 0)
+      FAIL;
+    if (M % 128 == 0) {
+      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
+        if (N % atom_n == 0)
+          SUCCESS(128, atom_n, 16);
+      FAIL;
+    } else if (M % 64 == 0) {
+      for (int atom_n : ws_valid_atom_ns)
+        if (N % atom_n == 0)
+          SUCCESS(64, atom_n, 16);
+      FAIL;
+    } else if (M % 32 == 0) {
+      for (int atom_n : ws_valid_atom_ns)
+        if (N % atom_n == 0)
+          SUCCESS(32, atom_n, 16);
+      FAIL;
+    } else {
+      FAIL;
+    }
+  } else if ((ab_dtype.is_float8_e4m3fn() || ab_dtype.is_float8_e5m2()) &&
+             (c_dtype.is_float() && c_dtype.bits() == 32)) {
+    if (K % 32 != 0)
+      FAIL;
+    if (M % 128 == 0) {
+      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
+        if (N % atom_n == 0)
+          SUCCESS(128, atom_n, 32);
+      FAIL;
+    } else if (M % 64 == 0) {
+      for (int atom_n : ws_valid_atom_ns)
+        if (N % atom_n == 0)
+          SUCCESS(64, atom_n, 32);
+      FAIL;
+    } else if (M % 32 == 0) {
+      for (int atom_n : ws_valid_atom_ns)
+        if (N % atom_n == 0)
+          SUCCESS(32, atom_n, 32);
+      FAIL;
+    } else {
+      FAIL;
+    }
+  }
+  FAIL;
+#undef FAIL
+#undef SUCCESS
+}
 
 /**
  * @brief Construct a Gemm operator from serialized TL arguments and a buffer
@@ -92,16 +160,37 @@ TileOperator GemmPyNode::Clone() const {
   return GemmPy(op);
 }
 
-GemmInst GemmPyNode::GetGemmInst(int block_size, Target target) const {
+bool GemmPyNode::AllowTCGEN5MMA(Target target) const {
+  return TargetIsSm100(target) &&
+         ((A.scope() == "shared.dyn" || A.scope() == "shared" ||
+           A.scope() == "shared.tmem") &&
+          (B.scope() == "shared.dyn" || B.scope() == "shared") &&
+          C.scope() == "shared.tmem") &&
+         GetTCGEN5MMAMeta(M, N, K, A->dtype, C->dtype).first;
+}
+
+bool GemmPyNode::AllowWGMMA(int block_size, Target target) const {
+  tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
+
   int warp_size = TargetGetWarpSize(target);
   int num_warps = block_size / warp_size;
-  bool allow_wgmma = TargetIsHopper(target) && (this->M >= 64) &&
-                     (num_warps % 4 == 0) && CheckWGMMA();
-  if (allow_wgmma) {
+  return !ctxt->GetConfig(kDisableWGMMA, Optional<Bool>()).value_or(false) &&
+         TargetIsHopper(target) && (this->M >= 64) && (num_warps % 4 == 0) &&
+         CheckWGMMA();
+}
+
+GemmInst GemmPyNode::GetGemmInst(int block_size, Target target) const {
+  bool allow_tcgen5mma = AllowTCGEN5MMA(target);
+  bool allow_wgmma = AllowWGMMA(block_size, target);
+  if (allow_tcgen5mma) {
+    return GemmInst::kTCGEN5MMA;
+  } else if (allow_wgmma) {
     return GemmInst::kWGMMA;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
-  } else if (TargetIsCuda(target)) {
+  } else if (TargetIsVolta(target) || TargetIsAmpere(target) ||
+             TargetIsTuring(target) || TargetIsHopper(target) ||
+             TargetIsSm100(target)) {
     return GemmInst::kMMA;
   } else {
     ICHECK(0) << "Unsupported target for gemm: " << target->str();
