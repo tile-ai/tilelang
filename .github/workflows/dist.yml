@@ -20,9 +20,9 @@ jobs:
         os: [ubuntu-22.04, ubuntu-22.04-arm, macos-14]
         include:
         - os: ubuntu-22.04
-          cuda_version: 12.1
+          cuda_version: "12.1"
         - os: ubuntu-22.04-arm
-          cuda_version: 12.8
+          cuda_version: "12.8"
       fail-fast: true
     runs-on: ${{ matrix.os }}
     env:
