@@ -265,13 +265,6 @@ jobs:
         run: |
           uv pip install --no-build-isolation -v .
 
-      - name: Run examples
-        if: contains(matrix.runner.toolkit, 'CUDA')
-        run: |
-          cd examples
-          unset PYTHONPATH
-          uv run --no-project -m -- pytest **/test*.py -v -r fE --durations=0 --cache-clear
-
       # NVIDIA CUDA tests
       - name: Run CUDA tests for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }}
         id: cuda-tests
@@ -307,3 +300,10 @@ jobs:
           if git status --ignored --porcelain | grep -qvE '/$'; then
             ls -alh $(git status --ignored --porcelain | grep -vE '/$' | grep -oE '\S+$')
           fi
+
+      - name: Run examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
+        if: contains(matrix.runner.toolkit, 'CUDA')
+        run: |
+          cd examples
+          unset PYTHONPATH
+          uv run --no-project -m -- pytest **/test*.py -v -r fE --durations=0 --cache-clear
