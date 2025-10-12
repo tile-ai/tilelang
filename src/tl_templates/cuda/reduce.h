@@ -68,6 +68,74 @@ struct AllReduce {
   }
 };
 
+template <int threads, bool reverse = false> struct CumSum1D {
+  static_assert(threads == 1024 or threads == 512 or threads == 256 or
+                threads == 128 or threads == 64 or threads == 32);
+  template <typename T, int SEG = 32>
+  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
+                            int N) {
+    if (N <= 0)
+      return;
+
+    constexpr unsigned MASK = 0xffffffff;
+    const int tid = threadIdx.x;
+    const int lane = tid % SEG;
+
+    if (tid >= SEG)
+      return;
+
+    T carry = (T)0;
+
+    if (reverse) {
+      const int num_segments = (N + SEG - 1) / SEG;
+      for (int seg = num_segments - 1; seg >= 0; --seg) {
+        const int idx = seg * SEG + lane;
+        T val = (idx < N) ? src[idx] : (T)0;
+
+#pragma unroll
+        for (int off = 1; off < SEG; off <<= 1) {
+          T n = (T)__shfl_down_sync(MASK, val, off);
+          if (lane < SEG - off)
+            val += n;
+        }
+
+        val += carry;
+
+        if (idx < N)
+          dst[idx] = val;
+
+        T segSum = (T)__shfl_sync(MASK, val, 0);
+        if (lane == 0)
+          carry = segSum;
+        carry = (T)__shfl_sync(MASK, carry, 0);
+      }
+    } else {
+      const int num_segments = (N + SEG - 1) / SEG;
+      for (int seg = 0; seg < num_segments; ++seg) {
+        const int idx = seg * SEG + lane;
+        T val = (idx < N) ? src[idx] : (T)0;
+
+#pragma unroll
+        for (int off = 1; off < SEG; off <<= 1) {
+          T n = (T)__shfl_up_sync(MASK, val, off);
+          if (lane >= off)
+            val += n;
+        }
+
+        val += carry;
+
+        if (idx < N)
+          dst[idx] = val;
+
+        T segSum = (T)__shfl_sync(MASK, val, SEG - 1);
+        if (lane == SEG - 1)
+          carry = segSum;
+        carry = (T)__shfl_sync(MASK, carry, SEG - 1);
+      }
+    }
+  }
+};
+
 template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
                 threads == 128 or threads == 64 or threads == 32);

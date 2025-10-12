@@ -80,7 +80,10 @@ AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) {
   std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
   std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
   if (args.size() >= 3) {
-    node->coalesced_width = Downcast<IntImm>(args[2]);
+    node->use_tma = Downcast<IntImm>(args[2]);
+  }
+  if (args.size() >= 4) {
+    node->coalesced_width = Downcast<IntImm>(args[3]);
   }
   data_ = std::move(node);
 }
@@ -167,6 +170,18 @@ Array<PrimExpr> AtomicAddNode::MakeIndices(const Array<IterVar> &ivs,
       << "idx = " << idx << ", ivs.size() = " << ivs.size()
       << "src name = " << src->name << ", dst name = " << dst->name;
   return indices;
+}
+
+std::pair<Array<PrimExpr>, PrimExpr>
+AtomicAddNode::ReturnIndicesAndSize(int src_dst) const {
+  Array<PrimExpr> indices;
+  Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
+  PrimExpr size = 1;
+  for (size_t i = 0; i < ranges.size(); i++) {
+    indices.push_back(ranges[i]->min);
+    size *= ranges[i]->extent;
+  }
+  return {indices, size};
 }
 
 /**
@@ -350,6 +365,28 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
  */
 Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Target target = T.target;
+  if (use_tma->value != 0) {
+    Array<PrimExpr> src_indices, dst_indices;
+    PrimExpr src_size, dst_size;
+    std::tie(src_indices, src_size) = ReturnIndicesAndSize(0);
+    std::tie(dst_indices, dst_size) = ReturnIndicesAndSize(1);
+    ICHECK(analyzer->CanProveEqual(src_size, dst_size))
+        << "src_size = " << src_size << ", dst_size = " << dst_size;
+    BufferLoad src_node = BufferLoad(src, src_indices);
+    BufferLoad dst_node = BufferLoad(dst, dst_indices);
+    Call address_of_src =
+        Call(DataType::Handle(), builtin::address_of(), {src_node});
+    Call address_of_dst =
+        Call(DataType::Handle(), builtin::address_of(), {dst_node});
+
+    int need_reduce = 1;
+    int eviction_policy = 0;
+    auto body = Evaluate(Call(DataType::Handle(), tma_store(),
+                              {address_of_src, address_of_dst,
+                               ceildiv(src_size * src->dtype.bits(), 8),
+                               need_reduce, eviction_policy}));
+    return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), body);
+  }
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
   auto par_op = ParallelOp(fused_loop);

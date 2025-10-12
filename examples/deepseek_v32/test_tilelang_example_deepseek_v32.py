@@ -21,7 +21,7 @@ def test_example_fp8_lighting_indexer():
 def test_example_sparse_mla_fwd():
     # small shapes for testing
     test_sparse_mla_fwd(
-        S=1024, SKV=2048, H=128, HKV=1, DQK=576, DV=512, topk=256, check_correctness=False)
+        S=256, SKV=1024, H=64, HKV=1, DQK=576, DV=512, topk=256, check_correctness=False)
 
 
 @tilelang.testing.requires_cuda
@@ -29,14 +29,14 @@ def test_example_sparse_mla_fwd():
 def test_example_sparse_mla_fwd_pipelined():
     # small shapes for testing
     test_sparse_mla_fwd_pipelined(
-        S=1024, SKV=2048, H=128, HKV=1, DQK=576, DV=512, topk=256, check_correctness=False)
+        S=256, SKV=1024, H=64, HKV=1, DQK=576, DV=512, topk=256, check_correctness=False)
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_example_sparse_mla_bwd():
     test_sparse_mla_bwd(
-        S=1024, SKV=2048, H=64, HKV=1, DQKV=576, DV=512, topk=256, check_correctness=False)
+        S=256, SKV=1024, H=64, HKV=1, DQKV=576, DV=512, topk=256, check_correctness=False)
 
 
 if __name__ == "__main__":

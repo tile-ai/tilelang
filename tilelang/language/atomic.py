@@ -116,7 +116,8 @@ def atomic_min(dst: Buffer,
 def atomic_add(dst: Buffer,
                value: PrimExpr,
                memory_order: Optional[str] = None,
-               return_prev: bool = False) -> PrimExpr:
+               return_prev: bool = False,
+               use_tma: bool = False) -> PrimExpr:
     """
     Atomically add `value` into `dst`, returning a handle to the operation.
 
@@ -225,7 +226,7 @@ def atomic_add(dst: Buffer,
         raise NotImplementedError(
             "return_prev is not supported for tile-region-based atomic operations")
 
-    return T.call_intrin("handle", op.Op.get("tl.atomicadd"), value, dst)
+    return T.call_intrin("handle", op.Op.get("tl.atomicadd"), value, dst, use_tma)
 
 
 def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> PrimExpr:
