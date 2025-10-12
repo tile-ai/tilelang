@@ -136,7 +136,7 @@ ignore = [
 [tool.cibuildwheel]
 archs = ["auto64"]
 # wait for tvm fix
-build = "cp312-*"
+build = "cp38-*"
 
 [tool.cibuildwheel.macos]
 archs = ["arm64"]
@@ -148,9 +148,8 @@ manylinux-aarch64-image = "manylinux_2_28"
 skip = "*-musllinux*"
 environment-pass = ["CUDA_VERSION"]
 repair-wheel-command = [
-  """
-auditwheel repair --exclude libcuda.so.1 --exclude /usr/local/cuda\\* -w {dest_dir} {wheel}""",
-#   "pipx run abi3audit --strict --report {wheel}",
+  "auditwheel repair --exclude libcuda.so.1 --exclude /usr/local/cuda\\* -w {dest_dir} {wheel}",
+  "pipx run abi3audit --strict --report {wheel}",
 ]
 
 # Install CUDA runtime and stub driver library
@@ -171,7 +170,8 @@ case "$(uname -m)" in
 esac
 
 # Assume CUDA_VERSION=xx.y
-v=${CUDA_VERSION:0:4}
+v=${CUDA_VERSION:-12.4}
+v=${v:0:4}
 v=${v/./-}
 yum install -y cuda-minimal-build-${v} cuda-driver-devel-${v} cuda-nvrtc-devel-${v}
 """
