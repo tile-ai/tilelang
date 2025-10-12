@@ -45,7 +45,9 @@ def dynamic_metadata(
         if _read_cmake_bool(os.environ.get('NO_TOOLCHAIN_VERSION')):
             pass
         elif platform.system() == 'Darwin':
-            backend = 'metal'
+            # only on macosx_11_0_arm64, not necessary
+            # backend = 'metal'
+            pass
         elif _read_cmake_bool(os.environ.get('USE_ROCM', '')):
             backend = 'rocm'
         elif 'USE_CUDA' in os.environ and not _read_cmake_bool(os.environ.get('USE_CUDA')):
@@ -62,7 +64,9 @@ def dynamic_metadata(
         if backend:
             exts.append(backend)
 
-        if git_hash := get_git_commit_id():
+        if _read_cmake_bool(os.environ.get('NO_GIT_VERSION')):
+            pass
+        elif git_hash := get_git_commit_id():
             exts.append(f'git{git_hash[:8]}')
 
         if exts:
