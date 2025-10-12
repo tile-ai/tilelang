@@ -16,19 +16,16 @@ template <class> inline constexpr bool always_false_v = false;
 
 namespace detail {
 
-template <bool IsMnMajor>
-struct MajorValue {
+template <bool IsMnMajor> struct MajorValue {
   static constexpr auto value =
       IsMnMajor ? cute::SM90::GMMA::Major::MN : cute::SM90::GMMA::Major::K;
 };
 
-template <int Scale>
-struct ScaleInValue {
+template <int Scale> struct ScaleInValue {
   static_assert(Scale == 1 || Scale == -1,
                 "tl::wgmma requires scale factors of +1 or -1.");
-  static constexpr auto value =
-      Scale == 1 ? cute::SM90::GMMA::ScaleIn::One
-                 : cute::SM90::GMMA::ScaleIn::Neg;
+  static constexpr auto value = Scale == 1 ? cute::SM90::GMMA::ScaleIn::One
+                                           : cute::SM90::GMMA::ScaleIn::Neg;
 };
 
 template <int Scale>
@@ -63,14 +60,14 @@ template <class Impl> struct CallWgmmaRS {
   static constexpr int kCRegs = std::extent_v<typename Impl::CRegisters>;
   static_assert(sizeof(AReg) == sizeof(uint32_t),
                 "tl::wgmma_rs expects 32-bit register operands for A.");
-  static_assert(sizeof(CReg) == sizeof(uint32_t) || sizeof(CReg) == sizeof(float),
+  static_assert(sizeof(CReg) == sizeof(uint32_t) ||
+                    sizeof(CReg) == sizeof(float),
                 "tl::wgmma_rs expects 32-bit accumulator registers.");
 
   template <size_t... AIdx, size_t... CIdx>
-  TL_DEVICE static void Run(const AReg *a, uint64_t desc_b, CReg *c,
-                            cute::SM90::GMMA::ScaleOut scale,
-                            std::index_sequence<AIdx...>,
-                            std::index_sequence<CIdx...>) {
+  TL_DEVICE static void
+  Run(const AReg *a, uint64_t desc_b, CReg *c, cute::SM90::GMMA::ScaleOut scale,
+      std::index_sequence<AIdx...>, std::index_sequence<CIdx...>) {
     Impl::fma(a[AIdx]..., desc_b, c[CIdx]..., scale);
   }
 
@@ -113,14 +110,15 @@ struct WgmmaRSImpl {
   template <bool tnspA, bool tnspB, int scaleA, int scaleB>                    \
   struct WgmmaSSImpl<DataType::AType, DataType::BType, DataType::CType, M, N,  \
                      K, tnspA, tnspB, scaleA, scaleB> {                        \
-    static_assert(detail::IsValidScale<scaleA>,                                 \
+    static_assert(detail::IsValidScale<scaleA>,                                \
                   "tl::wgmma_ss: invalid scaleA");                             \
-    static_assert(detail::IsValidScale<scaleB>,                                 \
+    static_assert(detail::IsValidScale<scaleB>,                                \
                   "tl::wgmma_ss: invalid scaleB");                             \
-    using Impl = cute::SM90::GMMA::ImplName<                                    \
-        detail::MajorValue<tnspA>::value, detail::MajorValue<tnspB>::value,    \
-        detail::ScaleInValue<scaleA>::value,                                   \
-        detail::ScaleInValue<scaleB>::value>;                                  \
+    using Impl =                                                               \
+        cute::SM90::GMMA::ImplName<detail::MajorValue<tnspA>::value,           \
+                                   detail::MajorValue<tnspB>::value,           \
+                                   detail::ScaleInValue<scaleA>::value,        \
+                                   detail::ScaleInValue<scaleB>::value>;       \
     TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b,            \
                                   uint32_t *c, bool scale_out) {               \
       detail::CallWgmmaSS<Impl>::exec(desc_a, desc_b, c, scale_out);           \
@@ -130,14 +128,14 @@ struct WgmmaRSImpl {
 #define TL_WGMMA_DEFINE_SS_TN(AType, BType, CType, M, N, K, ImplName)          \
   template <int scaleA, int scaleB>                                            \
   struct WgmmaSSImpl<DataType::AType, DataType::BType, DataType::CType, M, N,  \
-                     K, false, false, scaleA, scaleB> {                         \
-    static_assert(detail::IsValidScale<scaleA>,                                 \
+                     K, false, false, scaleA, scaleB> {                        \
+    static_assert(detail::IsValidScale<scaleA>,                                \
                   "tl::wgmma_ss: invalid scaleA");                             \
-    static_assert(detail::IsValidScale<scaleB>,                                 \
+    static_assert(detail::IsValidScale<scaleB>,                                \
                   "tl::wgmma_ss: invalid scaleB");                             \
-    using Impl = cute::SM90::GMMA::ImplName<                                    \
-        detail::ScaleInValue<scaleA>::value,                                   \
-        detail::ScaleInValue<scaleB>::value>;                                  \
+    using Impl =                                                               \
+        cute::SM90::GMMA::ImplName<detail::ScaleInValue<scaleA>::value,        \
+                                   detail::ScaleInValue<scaleB>::value>;       \
     TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b,            \
                                   uint32_t *c, bool scale_out) {               \
       detail::CallWgmmaSS<Impl>::exec(desc_a, desc_b, c, scale_out);           \
@@ -148,14 +146,14 @@ struct WgmmaRSImpl {
                                           ImplName)                            \
   template <int scaleA, int scaleB>                                            \
   struct WgmmaSSImpl<DataType::AType, DataType::BType, DataType::CType, M, N,  \
-                     K, false, false, scaleA, scaleB> {                         \
-    static_assert(detail::IsValidScale<scaleA>,                                 \
+                     K, false, false, scaleA, scaleB> {                        \
+    static_assert(detail::IsValidScale<scaleA>,                                \
                   "tl::wgmma_ss: invalid scaleA");                             \
-    static_assert(detail::IsValidScale<scaleB>,                                 \
+    static_assert(detail::IsValidScale<scaleB>,                                \
                   "tl::wgmma_ss: invalid scaleB");                             \
     static_assert(scaleA == 1 && scaleB == 1,                                  \
-                  "tl::wgmma_ss: only +1 scaling supported for this WGMMA");  \
-    using Impl = cute::SM90::GMMA::ImplName;                                    \
+                  "tl::wgmma_ss: only +1 scaling supported for this WGMMA");   \
+    using Impl = cute::SM90::GMMA::ImplName;                                   \
     TL_DEVICE static void execute(uint64_t desc_a, uint64_t desc_b,            \
                                   uint32_t *c, bool scale_out) {               \
       detail::CallWgmmaSS<Impl>::exec(desc_a, desc_b, c, scale_out);           \
@@ -167,14 +165,15 @@ struct WgmmaRSImpl {
   struct WgmmaRSImpl<DataType::AType, DataType::BType, DataType::CType, M, N,  \
                      K, tnspA, tnspB, scaleA, scaleB> {                        \
     static_assert(!tnspA, "tl::wgmma_rs: operand A must be K-major");          \
-    static_assert(detail::IsValidScale<scaleA>,                                 \
+    static_assert(detail::IsValidScale<scaleA>,                                \
                   "tl::wgmma_rs: invalid scaleA");                             \
-    static_assert(detail::IsValidScale<scaleB>,                                 \
+    static_assert(detail::IsValidScale<scaleB>,                                \
                   "tl::wgmma_rs: invalid scaleB");                             \
-    using Impl = cute::SM90::GMMA::ImplName<                                    \
-        detail::MajorValue<tnspA>::value, detail::MajorValue<tnspB>::value,    \
-        detail::ScaleInValue<scaleA>::value,                                   \
-        detail::ScaleInValue<scaleB>::value>;                                  \
+    using Impl =                                                               \
+        cute::SM90::GMMA::ImplName<detail::MajorValue<tnspA>::value,           \
+                                   detail::MajorValue<tnspB>::value,           \
+                                   detail::ScaleInValue<scaleA>::value,        \
+                                   detail::ScaleInValue<scaleB>::value>;       \
     TL_DEVICE static void execute(const uint32_t *a, uint64_t desc_b,          \
                                   uint32_t *c, bool scale_out) {               \
       detail::CallWgmmaRS<Impl>::exec(a, desc_b, c, scale_out);                \
@@ -184,14 +183,14 @@ struct WgmmaRSImpl {
 #define TL_WGMMA_DEFINE_RS_TN(AType, BType, CType, M, N, K, ImplName)          \
   template <int scaleA, int scaleB>                                            \
   struct WgmmaRSImpl<DataType::AType, DataType::BType, DataType::CType, M, N,  \
-                     K, false, false, scaleA, scaleB> {                       \
-    static_assert(detail::IsValidScale<scaleA>,                                 \
+                     K, false, false, scaleA, scaleB> {                        \
+    static_assert(detail::IsValidScale<scaleA>,                                \
                   "tl::wgmma_rs: invalid scaleA");                             \
-    static_assert(detail::IsValidScale<scaleB>,                                 \
+    static_assert(detail::IsValidScale<scaleB>,                                \
                   "tl::wgmma_rs: invalid scaleB");                             \
-    using Impl = cute::SM90::GMMA::ImplName<                                    \
-        detail::ScaleInValue<scaleA>::value,                                   \
-        detail::ScaleInValue<scaleB>::value>;                                  \
+    using Impl =                                                               \
+        cute::SM90::GMMA::ImplName<detail::ScaleInValue<scaleA>::value,        \
+                                   detail::ScaleInValue<scaleB>::value>;       \
     TL_DEVICE static void execute(const uint32_t *a, uint64_t desc_b,          \
                                   uint32_t *c, bool scale_out) {               \
       detail::CallWgmmaRS<Impl>::exec(a, desc_b, c, scale_out);                \
@@ -202,14 +201,14 @@ struct WgmmaRSImpl {
                                           ImplName)                            \
   template <int scaleA, int scaleB>                                            \
   struct WgmmaRSImpl<DataType::AType, DataType::BType, DataType::CType, M, N,  \
-                     K, false, false, scaleA, scaleB> {                       \
-    static_assert(detail::IsValidScale<scaleA>,                                 \
+                     K, false, false, scaleA, scaleB> {                        \
+    static_assert(detail::IsValidScale<scaleA>,                                \
                   "tl::wgmma_rs: invalid scaleA");                             \
-    static_assert(detail::IsValidScale<scaleB>,                                 \
+    static_assert(detail::IsValidScale<scaleB>,                                \
                   "tl::wgmma_rs: invalid scaleB");                             \
     static_assert(scaleA == 1 && scaleB == 1,                                  \
-                  "tl::wgmma_rs: only +1 scaling supported for this WGMMA");  \
-    using Impl = cute::SM90::GMMA::ImplName;                                    \
+                  "tl::wgmma_rs: only +1 scaling supported for this WGMMA");   \
+    using Impl = cute::SM90::GMMA::ImplName;                                   \
     TL_DEVICE static void execute(const uint32_t *a, uint64_t desc_b,          \
                                   uint32_t *c, bool scale_out) {               \
       detail::CallWgmmaRS<Impl>::exec(a, desc_b, c, scale_out);                \

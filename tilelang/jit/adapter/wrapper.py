@@ -695,9 +695,7 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                     "type": "ctypes.c_void_p",
                 })
             elif isinstance(param, tvm.tir.Var):
-                function_args.append(
-                    {"name": param.name, "type": self._lookup_type(param.dtype)}
-                )
+                function_args.append({"name": param.name, "type": self._lookup_type(param.dtype)})
             else:
                 raise ValueError(
                     f"Parameter {param} is not in the buffer map of the primary function.")

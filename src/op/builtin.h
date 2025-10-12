@@ -359,6 +359,14 @@ TVM_DLL const Op &warpgroup_commit_batch();
 TVM_DLL const Op &warpgroup_wait();
 
 /*!
+ * \brief Fence accumulator operand registers for upcoming WGMMA operations
+ *
+ * warpgroup_fence_operand(dtype, ptr, offset, num_regs)
+ *
+ */
+TVM_DLL const Op &warpgroup_fence_operand();
+
+/*!
  * \brief Wait the previous wgmma to finish
  *
  * wait_wgmma(num_mma)

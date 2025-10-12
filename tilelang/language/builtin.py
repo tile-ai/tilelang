@@ -4,7 +4,8 @@ from tilelang import tvm as tvm
 from tilelang.language import ptx_arrive_barrier, evaluate
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.utils.target import check_hip_availability
-from tvm import tir
+from tvm import DataType, tir
+from tvm.runtime import convert
 from typing import Union, Any
 from tvm.tir import PrimExpr, Var, Call, Buffer, BufferLoad
 
@@ -278,6 +279,66 @@ def warpgroup_wait(num_mma: int):
         tir.Call: A handle to the warpgroup wait operation.
     """
     return tir.call_intrin("handle", tir.op.Op.get("tl.warpgroup_wait"), num_mma)
+
+
+def warpgroup_fence_operand(buffer_or_ptr: Union[Buffer, PrimExpr],
+                            offset: Union[int, PrimExpr] = 0,
+                            num_regs: Union[int, PrimExpr, None] = None,
+                            dtype: Union[str, None] = None):
+    """Insert a warpgroup fence for the destination accumulator registers.
+
+    This prevents NVCC from sinking uses of accumulator fragments past the corresponding
+    WGMMA operations by issuing an empty inline assembly barrier on every register.
+
+    Args:
+        buffer_or_ptr: Union[Buffer, PrimExpr]
+            Either a buffer representing the accumulator fragment or a pointer expression.
+        offset: Union[int, PrimExpr]
+            Element offset from the start of the accumulator fragment.
+        num_regs: Union[int, PrimExpr, None]
+            Number of 32-bit registers to fence. If None and a Buffer is provided, it will be
+            derived from the buffer shape and dtype.
+        dtype: Optional[str]
+            Data type string of the accumulator elements. Required when passing a pointer.
+
+    Returns:
+        tir.Call: A handle to the warpgroup fence operation.
+    """
+    if isinstance(buffer_or_ptr, BufferLoad):
+        raise TypeError("Expected a buffer handle or pointer expression, got BufferLoad.")
+
+    if isinstance(buffer_or_ptr, Buffer):
+        data_ptr = buffer_or_ptr.data
+        inferred_dtype = buffer_or_ptr.dtype
+        if dtype is not None and dtype != inferred_dtype:
+            raise ValueError(f"dtype mismatch: provided {dtype}, buffer uses {inferred_dtype}.")
+        dtype = inferred_dtype
+        if num_regs is None:
+            total_elems = 1
+            for dim in buffer_or_ptr.shape:
+                if isinstance(dim, tir.IntImm):
+                    total_elems *= int(dim)
+                else:
+                    raise ValueError(
+                        "warpgroup_fence_operand requires num_regs when buffer shape is symbolic.")
+            bits_per_elem = DataType(dtype).bits
+            num_regs = (total_elems * bits_per_elem + 31) // 32
+    else:
+        data_ptr = buffer_or_ptr
+        if dtype is None:
+            raise ValueError("dtype must be provided when passing a pointer expression.")
+        if num_regs is None:
+            raise ValueError("num_regs must be provided when passing a pointer expression.")
+
+    return evaluate(
+        tir.call_intrin(
+            "handle",
+            tir.op.Op.get("tl.warpgroup_fence_operand"),
+            dtype,
+            data_ptr,
+            convert(offset),
+            convert(num_regs),
+        ))
 
 
 def wait_wgmma(id: int):
