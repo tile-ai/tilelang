@@ -71,6 +71,75 @@ def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype="float32", sc
     torch.testing.assert_close(tilelang_res, ref_res, atol=1e-3, rtol=1e-3)
 
 
+def cumsum_smem_test_1d(N, block_N, reverse=False, dtype="float32"):
+    import tilelang.language as T
+
+    @T.prim_func
+    def cumsum(
+            A: T.Tensor((N,), dtype),
+            B: T.Tensor((N,), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
+            A_shared = T.alloc_shared((block_N,), dtype)
+
+            T.copy(A[bx * block_N], A_shared)
+            T.cumsum(src=A_shared, dim=0, reverse=reverse)
+            T.copy(A_shared, B[bx * block_N])
+
+    return cumsum
+
+
+def cumsum_fragment_test_1d(N, block_N, reverse=False, dtype="float32"):
+    import tilelang.language as T
+
+    @T.prim_func
+    def cumsum(
+            A: T.Tensor((N,), dtype),
+            B: T.Tensor((N,), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
+            A_shared = T.alloc_shared((block_N,), dtype)
+            A_fragment = T.alloc_fragment((block_N,), dtype)
+
+            T.copy(A[bx * block_N], A_shared)
+            T.copy(A_shared, A_fragment)
+            T.cumsum(src=A_fragment, dim=0, reverse=reverse)
+            T.copy(A_fragment, B[bx * block_N])
+
+    return cumsum
+
+
+def run_cumsum_1d(N, block_N, reverse=False, dtype="float32", scope="smem"):
+    if scope == "smem":
+        program = cumsum_smem_test_1d(N, block_N, reverse, dtype)
+    elif scope == "fragment":
+        program = cumsum_fragment_test_1d(N, block_N, reverse, dtype)
+    else:
+        raise ValueError(f"Unknown scope {scope}")
+
+    jit_kernel = tl.compile(program, out_idx=-1)
+    A = torch.randn(N, dtype=getattr(torch, dtype)).cuda()
+
+    def ref_program(A):
+        ref_b = torch.empty_like(A)
+        num_blocks = (N + block_N - 1) // block_N
+        for j in range(num_blocks):
+            start = j * block_N
+            end = min(start + block_N, N)
+            chunk = A[start:end]
+            if reverse:
+                chunk = torch.flip(chunk, dims=[0])
+            chunk = chunk.cumsum(dim=0)
+            if reverse:
+                chunk = torch.flip(chunk, dims=[0])
+            ref_b[start:end] = chunk
+        return ref_b
+
+    tilelang_res = jit_kernel(A)
+    ref_res = ref_program(A)
+    torch.testing.assert_close(tilelang_res, ref_res, atol=1e-3, rtol=1e-3)
+
+
 def test_cumsum_smem():
     # Test different sizes
     run_cumsum(1024, 1024, 128, 128)
@@ -90,6 +159,16 @@ def test_cumsum_fragment():
     # Test different dtypes
     run_cumsum(256, 256, 128, 128, dtype="float32", scope="fragment")
     run_cumsum(256, 256, 128, 128, dtype="float32", scope="fragment")
+
+
+def test_cumsum_smem_1d():
+    run_cumsum_1d(1024, 128)
+    run_cumsum_1d(1024, 128, reverse=True)
+
+
+def test_cumsum_fragment_1d():
+    run_cumsum_1d(1024, 128, scope="fragment")
+    run_cumsum_1d(1024, 128, reverse=True, scope="fragment")
 
 
 if __name__ == "__main__":

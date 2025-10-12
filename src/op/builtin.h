@@ -335,6 +335,30 @@ TVM_DLL const Op &set_max_nreg();
 TVM_DLL const Op &no_set_max_nreg();
 
 /*!
+ * \brief Arrive at a warpgroup fence for WGMMA sequences
+ *
+ * warpgroup_arrive()
+ *
+ */
+TVM_DLL const Op &warpgroup_arrive();
+
+/*!
+ * \brief Commit the current warpgroup batch for WGMMA sequences
+ *
+ * warpgroup_commit_batch()
+ *
+ */
+TVM_DLL const Op &warpgroup_commit_batch();
+
+/*!
+ * \brief Wait for the warpgroup batch identified by num_mma
+ *
+ * warpgroup_wait(num_mma)
+ *
+ */
+TVM_DLL const Op &warpgroup_wait();
+
+/*!
  * \brief Wait the previous wgmma to finish
  *
  * wait_wgmma(num_mma)
