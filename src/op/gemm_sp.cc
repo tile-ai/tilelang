@@ -305,7 +305,6 @@ TIR_REGISTER_TL_OP(GemmSP, gemm_sp)
 
 TVM_FFI_STATIC_INIT_BLOCK({
   GemmSPNode::RegisterReflection();
-  GemmSPWarpPolicyNode::RegisterReflection();
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.GemmSPWarpPolicyComputeWarpPartition",
                         [](GemmSPWarpPolicy policy, int M, int N, int block_size,

@@ -18,6 +18,9 @@ using namespace tir;
 
 class GemmSPWarpPolicyNode : public GemmWarpPolicyNode {
 public:
+  static constexpr const char *_type_key = "tl.GemmSPWarpPolicy";
+  TVM_DECLARE_FINAL_OBJECT_INFO(GemmSPWarpPolicyNode, GemmWarpPolicyNode);
+
   std::pair<int, int> ComputeWarpPartition(int M, int N, int block_size,
                                            Target target, bool use_wgmma,
                                            int bits) const;

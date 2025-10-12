@@ -31,7 +31,7 @@ public:
   int policy_type;
 
   static constexpr const char *_type_key = "tl.GemmWarpPolicy";
-  TVM_DECLARE_FINAL_OBJECT_INFO(GemmWarpPolicyNode, Object);
+  TVM_DECLARE_BASE_OBJECT_INFO(GemmWarpPolicyNode, Object);
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
