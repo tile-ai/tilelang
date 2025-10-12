@@ -1698,7 +1698,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         "(tnspB), (scaleA), (scaleB)>(reinterpret_cast<const "
         "uint32_t*>((A_ptr) + (A_offset)), "
         "uint64_t((desc_b) + (B_offset)), "
-        "reinterpret_cast<(CRegType)*>((C_ptr) + (C_offset)), "
+        "reinterpret_cast<uint32_t*>((C_ptr) + (C_offset)), "
         "(scale_out));\n";
 
     tl::codegen::Replacer replacer;
@@ -1715,8 +1715,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     replacer.register_rule("(tnspB)", b_is_k_major ? "false" : "true");
     replacer.register_rule("(scaleA)", scale_in_a ? "1" : "-1");
     replacer.register_rule("(scaleB)", scale_in_b ? "1" : "-1");
-    replacer.register_rule("(CRegType)",
-                           tl::codegen::GetMMARegisterType(dtype_c_enum));
     replacer.register_rule("(A_ptr)", a_ref);
     replacer.register_rule("(A_offset)", A_offset);
     replacer.register_rule("(desc_b)", b_desc);
