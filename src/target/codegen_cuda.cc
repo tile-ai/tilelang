@@ -1544,6 +1544,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                            tl::codegen::GetMMARegisterType(dtype_a_enum));
     replacer.register_rule("(BRegType)",
                            tl::codegen::GetMMARegisterType(dtype_b_enum));
+    replacer.register_rule("(CRegType)",
+                           tl::codegen::GetMMARegisterType(dtype_c_enum));
     replacer.register_rule("(A_ptr)", a_ref);
     replacer.register_rule("(A_offset)", a_bias);
     replacer.register_rule("(B_ptr)", b_ref);
