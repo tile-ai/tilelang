@@ -1,6 +1,7 @@
+from __future__ import annotations
 import tilelang
 from tilelang import language as T
-from typing import Optional, Callable, Any
+from typing import Callable, Any
 import torch
 from tilelang import DataType
 from tilelang.quantize import (
@@ -54,7 +55,7 @@ def dequantize_gemv(
     dp4a_size = 4
     use_dp4a = in_dtype == "int8" and accum_dtype == "int32"
 
-    import_source: Optional[str] = None
+    import_source: str | None = None
     func_name: str = ""
     if fast_decoding is True:
         # Lazy import to decrease the startup time

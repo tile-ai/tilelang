@@ -216,7 +216,7 @@ class BitLinearBitBLAS(nn.Module):
 # Naive BitLinear from HuggingFace
 class BitLinear(nn.Linear):
     def __init__(self, *kargs, weight_bits=1, input_bits=8, **kwargs):
-        super(BitLinear, self).__init__(*kargs, **kwargs)
+        super().__init__(*kargs, **kwargs)
         """
         RMSNorm is placed outside BitLinear
         """

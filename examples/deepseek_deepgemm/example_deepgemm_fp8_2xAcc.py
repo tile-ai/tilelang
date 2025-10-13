@@ -1,4 +1,4 @@
-from typing import Tuple
+from __future__ import annotations
 
 import torch
 import tilelang.testing
@@ -87,7 +87,7 @@ def ceildiv(a, b):
     return (a + b - 1) // b
 
 
-def per_token_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def per_token_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     assert x.dim() == 2 and x.size(1) % 128 == 0
     m, n = x.shape
     x_view = x.view(m, -1, 128)
@@ -97,7 +97,7 @@ def per_token_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     ).view(m, -1)
 
 
-def per_block_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def per_block_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     assert x.dim() == 2
     m, n = x.shape
     x_padded = torch.zeros(

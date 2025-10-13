@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 import torch.nn.functional as F
 import tilelang
@@ -7,7 +8,6 @@ from einops import rearrange, einsum
 import argparse
 import itertools
 from functools import lru_cache
-from typing import Tuple, Dict
 
 torch.random.manual_seed(0)
 
@@ -28,7 +28,7 @@ def get_configs():
 
 
 @lru_cache(maxsize=1)
-def get_heuristic_config() -> Tuple[Dict, int]:
+def get_heuristic_config() -> tuple[dict, int]:
     # Get CUDA device properties
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available")

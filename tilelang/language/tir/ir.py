@@ -1,13 +1,14 @@
+from __future__ import annotations
 import tvm.script.ir_builder.tir.ir as _ir
 from tvm.script.ir_builder.tir import frame
 from tvm.tir import PrimExpr
-from typing import Any, Dict
+from typing import Any
 import tilelang.language.tir.op as _tir_op
 import functools
 
 
 def serial(
-    start: PrimExpr, stop: PrimExpr = None, *, annotations: Dict[str, Any] = None
+    start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any] = None
 ) -> frame.ForFrame:
     """The serial For statement.
 
@@ -31,7 +32,7 @@ def serial(
 
 
 def parallel(
-    start: PrimExpr, stop: PrimExpr = None, *, annotations: Dict[str, Any] = None
+    start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any] = None
 ) -> frame.ForFrame:
     """The parallel For statement.
 
@@ -55,7 +56,7 @@ def parallel(
 
 
 def vectorized(
-    start: PrimExpr, stop: PrimExpr = None, *, annotations: Dict[str, Any] = None
+    start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any] = None
 ) -> frame.ForFrame:
     """The vectorized For statement.
 
@@ -79,7 +80,7 @@ def vectorized(
 
 
 def unroll(
-    start: PrimExpr, stop: PrimExpr = None, *, annotations: Dict[str, Any] = None
+    start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any] = None
 ) -> frame.ForFrame:
     """The unrolled For statement.
 
@@ -107,7 +108,7 @@ def thread_binding(
     stop: PrimExpr = None,
     thread: str = None,
     *,
-    annotations: Dict[str, Any] = None,
+    annotations: dict[str, Any] = None,
 ) -> frame.ForFrame:
     """The thread-binding For statement.
 

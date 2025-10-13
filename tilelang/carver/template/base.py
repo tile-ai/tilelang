@@ -1,4 +1,5 @@
 # Import necessary modules and classes
+from __future__ import annotations
 from abc import ABC, abstractmethod  # For defining abstract base classes
 from dataclasses import dataclass, field  # For defining data classes
 from ..arch import (  # Import architecture-related utilities and classes
@@ -10,7 +11,6 @@ from ..arch import (  # Import architecture-related utilities and classes
 )
 from ..roller.hint import Hint  # Import the Hint class
 from ..roller.node import OutputNode  # Import the OutputNode class
-from typing import List  # For type hinting
 from tvm.tir import PrimFunc  # Import PrimFunc for handling tensor IR functions
 
 
@@ -29,10 +29,10 @@ class BaseTemplate(ABC):
     _func: PrimFunc = field(default=None, init=False, repr=False)
 
     # The outputs nodes associated with this template, initially None
-    _output_nodes: List[OutputNode] = field(default=None, init=False, repr=False)
+    _output_nodes: list[OutputNode] = field(default=None, init=False, repr=False)
 
     @abstractmethod
-    def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> List[Hint]:
+    def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> list[Hint]:
         """
         Abstract method that must be implemented by subclasses.
         It should return a list of hardware-aware configurations (hints)
@@ -47,7 +47,7 @@ class BaseTemplate(ABC):
         """
         pass
 
-    def with_arch(self, arch: TileDevice) -> "BaseTemplate":
+    def with_arch(self, arch: TileDevice) -> BaseTemplate:
         """
         Sets the architecture for this template and returns itself.
 
@@ -115,7 +115,7 @@ class BaseTemplate(ABC):
         """
         raise NotImplementedError("initialize_function is not implemented")
 
-    def set_function(self, func: PrimFunc) -> "BaseTemplate":
+    def set_function(self, func: PrimFunc) -> BaseTemplate:
         """
         Sets the function for this template and returns itself.
 
@@ -128,7 +128,7 @@ class BaseTemplate(ABC):
         self._func = func
         return self
 
-    def set_output_nodes(self, output_nodes: List[OutputNode]) -> "BaseTemplate":
+    def set_output_nodes(self, output_nodes: list[OutputNode]) -> BaseTemplate:
         """
         Sets the output nodes for this template and returns itself.
 
@@ -141,7 +141,7 @@ class BaseTemplate(ABC):
         self._output_nodes = output_nodes
         return self
 
-    def recommend_hints(self, topk: int = 10) -> List[Hint]:
+    def recommend_hints(self, topk: int = 10) -> list[Hint]:
         """
         Provides a list of recommended hardware-aware configurations.
 
@@ -164,7 +164,7 @@ class BaseTemplate(ABC):
         return self._arch
 
     @property
-    def output_nodes(self) -> List[OutputNode]:
+    def output_nodes(self) -> list[OutputNode]:
         """
         Returns the output nodes associated with this template.
 

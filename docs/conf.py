@@ -2,7 +2,7 @@
 # General information about the project.
 project = "Tile Language <br>"
 author = "Tile Lang Contributors"
-copyright = "2025-2025, %s" % author
+copyright = f"2025-2025, {author}"
 
 # Version information.
 with open("../VERSION") as f:

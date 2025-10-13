@@ -1,10 +1,10 @@
 # Import necessary modules
+from __future__ import annotations
 from dataclasses import dataclass  # Used for defining data classes
 from .base import BaseTemplate  # Importing the base class for templates
 from tvm import te  # Importing TVM's tensor expression module
 from ..arch import TileDevice  # Importing TileDevice for hardware-specific configurations
 from ..roller import Hint  # Importing Hint for optimization hints
-from typing import List  # Importing List type hint
 from ..utils import get_roller_hints_from_func  # Function to obtain optimization hints
 
 
@@ -19,10 +19,10 @@ class ElementwiseTemplate(BaseTemplate):
     """
 
     # OP Related Config
-    shape: List[int] = None  # Shape of the tensor
+    shape: list[int] = None  # Shape of the tensor
     dtype: str = "float16"  # Data type of the tensor
 
-    def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> List[Hint]:
+    def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> list[Hint]:
         """
         Retrieves hardware-aware optimization configurations.
 

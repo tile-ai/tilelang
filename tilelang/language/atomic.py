@@ -1,11 +1,11 @@
 # Copyright (c) Tile-AI Corporation.
 # Licensed under the MIT License.
 """Atomic operations for tilelang."""
+from __future__ import annotations
 
 import tilelang.language as T
 from tvm import ir, tir
 from tvm.tir import PrimExpr, Buffer, BufferRegion, Var, op
-from typing import Optional
 from tilelang.language.utils import (
     buffer_to_tile_region,
     buffer_region_to_tile_region,
@@ -24,7 +24,7 @@ _MEMORY_ORDER_ID_MAP = {
 
 
 def atomic_max(
-    dst: Buffer, value: PrimExpr, memory_order: Optional[str] = None, return_prev: bool = False
+    dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False
 ) -> PrimExpr:
     """
     Perform an atomic maximum on the value stored at dst with an optional memory-order.
@@ -69,7 +69,7 @@ def atomic_max(
 
 
 def atomic_min(
-    dst: Buffer, value: PrimExpr, memory_order: Optional[str] = None, return_prev: bool = False
+    dst: Buffer, value: PrimExpr, memory_order: str | None = None, return_prev: bool = False
 ) -> PrimExpr:
     """
     Atomically update the value at dst to the minimum of its current value and value.
@@ -118,7 +118,7 @@ def atomic_min(
 def atomic_add(
     dst: Buffer,
     value: PrimExpr,
-    memory_order: Optional[str] = None,
+    memory_order: str | None = None,
     return_prev: bool = False,
     use_tma: bool = False,
 ) -> PrimExpr:

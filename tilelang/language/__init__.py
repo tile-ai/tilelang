@@ -1,4 +1,5 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
 from typing import Optional, Callable, Dict
 
@@ -109,7 +110,7 @@ def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
     )
 
 
-def annotate_layout(layout_map: Dict):
+def annotate_layout(layout_map: dict):
     """Annotate the layout of the buffer
 
     Args:
@@ -150,7 +151,7 @@ def annotate_layout(layout_map: Dict):
     return block_attr({"layout_map": _layout_map})
 
 
-def annotate_padding(padding_map: Dict):
+def annotate_padding(padding_map: dict):
     """Annotate the padding of the buffer
 
     Args:
@@ -187,7 +188,7 @@ def annotate_padding(padding_map: Dict):
     return block_attr({"padding_map": _padding_map})
 
 
-def annotate_l2_hit_ratio(l2_hit_ratio_map: Dict):
+def annotate_l2_hit_ratio(l2_hit_ratio_map: dict):
     """Annotate the L2 hit ratio of the buffer, detailed explanation please refer to:
     https://docs.nvidia.com/cuda/cuda-c-programming-guide/#l2-policy-for-persisting-accesses
 
@@ -204,6 +205,6 @@ def annotate_l2_hit_ratio(l2_hit_ratio_map: Dict):
     return block_attr({"l2_hit_ratio_map": _l2_hit_ratio_map})
 
 
-def import_source(source: Optional[str] = None):
+def import_source(source: str | None = None):
     # source is the source code to be imported
     return block_attr({"pragma_import_c": source}) if source is not None else None

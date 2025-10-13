@@ -1,4 +1,5 @@
 # Modified from tilelang/examples/flash_attention/example_mha_fwd_bhsd.py
+from __future__ import annotations
 
 import torch
 import tilelang
@@ -8,7 +9,6 @@ import tilelang.language as T
 from tilelang.layout import make_swizzled_layout
 import itertools
 import argparse
-from typing import Optional
 
 
 def get_configs():
@@ -202,7 +202,7 @@ def ref_program(
     key: torch.Tensor,
     value: torch.Tensor,
     sinks: torch.Tensor,
-    sliding_window: Optional[int] = None,
+    sliding_window: int | None = None,
     dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     query = (

@@ -1,3 +1,4 @@
+from __future__ import annotations
 import sys
 import os
 import pathlib
@@ -6,7 +7,6 @@ import shutil
 import glob
 import site
 from dataclasses import dataclass
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +164,7 @@ class EnvVar:
 
     key: str  # Environment variable name (e.g. "TILELANG_PRINT_ON_COMPILATION")
     default: str  # Default value if the environment variable is not set
-    _forced_value: Optional[str] = None  # Temporary runtime override (mainly for tests/debugging)
+    _forced_value: str | None = None  # Temporary runtime override (mainly for tests/debugging)
 
     def get(self):
         if self._forced_value is not None:

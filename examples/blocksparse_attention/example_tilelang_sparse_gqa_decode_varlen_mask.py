@@ -203,7 +203,7 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
 
 class SparseFlashAttn(torch.nn.Module):
     def __init__(self, batch, heads, heads_kv, dim, dim_v, block_size):
-        super(SparseFlashAttn, self).__init__()
+        super().__init__()
         self.batch = batch
         self.heads = heads
         self.heads_kv = heads_kv

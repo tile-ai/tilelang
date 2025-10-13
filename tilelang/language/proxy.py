@@ -1,7 +1,7 @@
 """The language interface for tl programs."""
 
 from __future__ import annotations
-from typing import Any, Optional, Sequence, SupportsIndex, TYPE_CHECKING, Tuple, Union
+from typing import Any, Sequence, SupportsIndex, TYPE_CHECKING
 from typing_extensions import Self
 
 from tvm import tir
@@ -148,7 +148,7 @@ class TensorProxy(BaseTensorProxy):
     """
 
     @staticmethod
-    def _construct_strides(shape: Tuple[Any]):
+    def _construct_strides(shape: tuple[Any]):
         s, strides = 1, [1]
         for dim in shape[:0:-1]:
             s *= dim
@@ -156,7 +156,7 @@ class TensorProxy(BaseTensorProxy):
         return tuple(reversed(strides))
 
     def __call__(
-        self, shape: Union[Tuple[Any], PrimExpr, int], dtype: str = "float32", data=None, scope=None
+        self, shape: tuple[Any] | PrimExpr | int, dtype: str = "float32", data=None, scope=None
     ) -> tir.Buffer:
         if isinstance(shape, (int, PrimExpr)):
             shape = (shape,)
@@ -176,7 +176,7 @@ class StridedTensorProxy(BaseTensorProxy):
     """
 
     def __call__(
-        self, shape: Tuple[Any], strides: Tuple[Any], dtype: str = "float32", scope=None
+        self, shape: tuple[Any], strides: tuple[Any], dtype: str = "float32", scope=None
     ) -> tir.Buffer:
         if len(shape) != len(strides):
             raise ValueError("Invalid shape/strides' dimensions")
@@ -271,7 +271,7 @@ else:
 
 
 def ptr(
-    dtype: Optional[str] = None, storage_scope: str = "global", *, is_size_var: bool = False
+    dtype: str | None = None, storage_scope: str = "global", *, is_size_var: bool = False
 ) -> Var:
     """Create a TIR var that represents a pointer.
 

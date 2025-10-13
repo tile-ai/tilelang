@@ -1,5 +1,6 @@
+from __future__ import annotations
 import threading
-from typing import List, Any, Optional
+from typing import Any
 
 # Use thread local to store the stack
 # This is to avoid the cross-thread interference
@@ -86,7 +87,7 @@ def _get_current_stack() -> CaptureStack:
 class AutotuneInputsCapture:
     __slots__ = "tensors"
 
-    def __init__(self, tensors: List[Any]):
+    def __init__(self, tensors: list[Any]):
         self.tensors = tensors
 
     def __enter__(self) -> None:
@@ -117,7 +118,7 @@ def set_autotune_inputs(*args) -> AutotuneInputsCapture:
     return AutotuneInputsCapture(tensors)
 
 
-def get_autotune_inputs() -> Optional[List[Any]]:
+def get_autotune_inputs() -> list[Any] | None:
     """
     Get the current autotune inputs from the stack.
     """
