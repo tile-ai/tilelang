@@ -11,6 +11,7 @@ from tilelang import _ffi_api
 # Register the Layout class as a TVM object under the name "tl.Layout"
 @tvm.ffi.register_object("tl.Layout")
 class Layout(Node):
+
     def __init__(self, shape, forward_fn):
         """
         Initialize a Layout object.

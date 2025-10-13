@@ -35,10 +35,7 @@ def main(args):
             args.hf_path,
             use_flash_attention_2=True,
             torch_dtype=torch.float16,
-        )
-        .cuda()
-        .half()
-    )
+        ).cuda().half())
     with torch.no_grad():
         model._post_process_weights()
     tokenizer = BitnetTokenizer.from_pretrained(args.hf_path, use_fast=False)

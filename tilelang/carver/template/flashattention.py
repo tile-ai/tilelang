@@ -92,8 +92,8 @@ class FlashAttentionTemplate(BaseTemplate):
                 A_indices = [b, i, k]
                 B_indices = [b, j, k]
                 return te.sum(
-                    A[tuple(A_indices)].astype(accum_dtype)
-                    * B[tuple(B_indices)].astype(accum_dtype),
+                    A[tuple(A_indices)].astype(accum_dtype) *
+                    B[tuple(B_indices)].astype(accum_dtype),
                     axis=k,
                 )
 

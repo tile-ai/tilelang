@@ -76,9 +76,9 @@ def tl_matmul_simt(
 
     @T.prim_func
     def main(
-        A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, in_dtype),
-        C: T.Tensor(C_shape, out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor(C_shape, out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
@@ -107,15 +107,13 @@ def tl_matmul_simt(
                 for ki in T.serial(block_K // micro_size_k):
                     for i in T.serial(local_size_a):
                         for mk in T.vectorized(micro_size_k):
-                            A_local[i, mk] = A_shared[
-                                warp_m * local_size_a + i, ki * micro_size_k + mk
-                            ]
+                            A_local[i, mk] = A_shared[warp_m * local_size_a + i,
+                                                      ki * micro_size_k + mk]
 
                     for i in T.serial(local_size_b):
                         for mk in T.vectorized(micro_size_k):
-                            B_local[i, mk] = B_shared[
-                                warp_n * local_size_b + i, ki * micro_size_k + mk
-                            ]
+                            B_local[i, mk] = B_shared[warp_n * local_size_b + i,
+                                                      ki * micro_size_k + mk]
 
                     for i, j in T.grid(local_size_a, local_size_b):
                         for mk in T.serial(micro_size_k // dp4a_size):
@@ -128,9 +126,8 @@ def tl_matmul_simt(
                             else:
                                 for dp4a_idx in T.serial(dp4a_size):
                                     C_local[i * local_size_b + j] += (
-                                        A_local[i, mk * dp4a_size + dp4a_idx]
-                                        * B_local[j, mk * dp4a_size + dp4a_idx]
-                                    )
+                                        A_local[i, mk * dp4a_size + dp4a_idx] *
+                                        B_local[j, mk * dp4a_size + dp4a_idx])
 
             for i, j in T.grid(local_size_a, local_size_b):
                 C[

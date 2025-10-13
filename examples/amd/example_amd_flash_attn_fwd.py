@@ -10,11 +10,9 @@ from functools import partial
 
 def ref_program(Q, K, V, is_causal, groups=1):
     assert Q.size(2) == K.size(2) * groups, (
-        f"Q heads {Q.size(2)} K heads {K.size(2)} groups {groups}"
-    )
+        f"Q heads {Q.size(2)} K heads {K.size(2)} groups {groups}")
     assert Q.size(2) == V.size(2) * groups, (
-        f"Q heads {Q.size(2)} V heads {V.size(2)} groups {groups}"
-    )
+        f"Q heads {Q.size(2)} V heads {V.size(2)} groups {groups}")
     dim = Q.size(-1)
     K = K.repeat_interleave(groups, dim=2)
     V = V.repeat_interleave(groups, dim=2)
@@ -46,45 +44,41 @@ def get_configs():
     valid_configs = []
 
     for m, n, s, t, stages, r, k, p, qkw, vw in itertools.product(
-        block_M,
-        block_N,
-        num_split_q,
-        threads,
-        num_stages,
-        enable_rasterization,
-        k_pack,
-        panel_size,
-        qk_coalesced_width,
-        v_coalesced_width,
+            block_M,
+            block_N,
+            num_split_q,
+            threads,
+            num_stages,
+            enable_rasterization,
+            k_pack,
+            panel_size,
+            qk_coalesced_width,
+            v_coalesced_width,
     ):
-        valid_configs.append(
-            {
-                "block_M": m,
-                "block_N": n,
-                "num_split_q": s,
-                "threads": t,
-                "num_stages": stages,
-                "enable_rasterization": r,
-                "k_pack": k,
-                "panel_size": p,
-                "qk_coalesced_width": qkw,
-                "v_coalesced_width": vw,
-            }
-        )
-    valid_configs.append(
-        {
-            "block_M": 64,
-            "block_N": 64,
-            "num_split_q": 64,
-            "threads": 256,
-            "num_stages": 1,
-            "enable_rasterization": True,
-            "k_pack": 2,
-            "panel_size": 64,
-            "qk_coalesced_width": 8,
-            "v_coalesced_width": 8,
-        }
-    )
+        valid_configs.append({
+            "block_M": m,
+            "block_N": n,
+            "num_split_q": s,
+            "threads": t,
+            "num_stages": stages,
+            "enable_rasterization": r,
+            "k_pack": k,
+            "panel_size": p,
+            "qk_coalesced_width": qkw,
+            "v_coalesced_width": vw,
+        })
+    valid_configs.append({
+        "block_M": 64,
+        "block_N": 64,
+        "num_split_q": 64,
+        "threads": 256,
+        "num_stages": 1,
+        "enable_rasterization": True,
+        "k_pack": 2,
+        "panel_size": 64,
+        "qk_coalesced_width": 8,
+        "v_coalesced_width": 8,
+    })
     return valid_configs
 
 
@@ -108,7 +102,7 @@ def fast_flashattn(
     qk_coalesced_width: int,
     v_coalesced_width: int,
 ):
-    scale = (1.0 / dim) ** 0.5 * 1.44269504
+    scale = (1.0 / dim)**0.5 * 1.44269504
     head_kv = heads // groups
     q_shape = [batch, seq_len, heads, dim]
     kv_shape = [batch, seq_len, head_kv, dim]
@@ -120,10 +114,10 @@ def fast_flashattn(
 
     @T.prim_func
     def main(
-        Q: T.Tensor(q_shape, dtype),
-        K: T.Tensor(kv_shape, dtype),
-        V: T.Tensor(kv_shape, dtype),
-        Output: T.Tensor(q_shape, dtype),
+            Q: T.Tensor(q_shape, dtype),
+            K: T.Tensor(kv_shape, dtype),
+            V: T.Tensor(kv_shape, dtype),
+            Output: T.Tensor(q_shape, dtype),
     ):
         with T.Kernel(num_split_q, batch * heads, threads=threads) as (b_split, byz_combined):
             T.use_swizzle(panel_size, enable=enable_rasterization)
@@ -158,16 +152,14 @@ def fast_flashattn(
                 scale_factor = T.alloc_fragment([block_M], accum_dtype)
 
                 T.copy(
-                    Q[bz, q_block_offset : q_block_offset + block_M, by, :],
+                    Q[bz, q_block_offset:q_block_offset + block_M, by, :],
                     Q_shared,
                     coalesced_width=vec_size,
                 )
 
                 loop_end_k = (
-                    T.ceildiv(q_block_offset + block_M, block_N)
-                    if is_causal
-                    else T.ceildiv(seq_len, block_N)
-                )
+                    T.ceildiv(q_block_offset +
+                              block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N))
 
                 row_sum = T.alloc_fragment([block_M], accum_dtype)
 
@@ -175,21 +167,20 @@ def fast_flashattn(
                     kv_idx = k * block_N
 
                     T.copy(
-                        K[bz, kv_idx : kv_idx + block_N, by // groups, :],
+                        K[bz, kv_idx:kv_idx + block_N, by // groups, :],
                         K_shared,
                         coalesced_width=vec_size,
                     )
                     T.copy(
-                        V[bz, kv_idx : kv_idx + block_N, by // groups, :],
+                        V[bz, kv_idx:kv_idx + block_N, by // groups, :],
                         V_shared,
                         coalesced_width=v_vec_size,
                     )
 
                     if is_causal:
                         for i, j in T.Parallel(block_M, block_N):
-                            acc_s[i, j] = T.if_then_else(
-                                q_block_offset + i >= kv_idx + j, 0, -T.infinity(acc_s.dtype)
-                            )
+                            acc_s[i, j] = T.if_then_else(q_block_offset + i >= kv_idx + j, 0,
+                                                         -T.infinity(acc_s.dtype))
                     else:
                         T.clear(acc_s)
                     T.gemm(

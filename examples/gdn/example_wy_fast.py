@@ -76,13 +76,13 @@ def tilelang_recompute_w_u_fwd(
 
     @T.prim_func
     def kernel(
-        K: T.Tensor(K_shape, dtype=input_dtype),
-        V: T.Tensor(V_shape, dtype=input_dtype),
-        Beta: T.Tensor(Beta_shape, dtype=input_dtype),
-        G: T.Tensor(G_shape, dtype=gate_dtype),
-        A: T.Tensor(A_shape, dtype=output_dtype),
-        W: T.Tensor(K_shape, dtype=output_dtype),
-        U: T.Tensor(V_shape, dtype=output_dtype),
+            K: T.Tensor(K_shape, dtype=input_dtype),
+            V: T.Tensor(V_shape, dtype=input_dtype),
+            Beta: T.Tensor(Beta_shape, dtype=input_dtype),
+            G: T.Tensor(G_shape, dtype=gate_dtype),
+            A: T.Tensor(A_shape, dtype=output_dtype),
+            W: T.Tensor(K_shape, dtype=output_dtype),
+            U: T.Tensor(V_shape, dtype=output_dtype),
     ):
         with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
             bb, bh = bbh // H, bbh % H
@@ -98,32 +98,30 @@ def tilelang_recompute_w_u_fwd(
             W_Beta_shared = T.alloc_shared((block_S, block_DK), dtype=input_dtype)
             U_Beta_shared = T.alloc_shared((block_S, block_DV), dtype=input_dtype)
 
-            T.annotate_layout(
-                {
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    V_shared: tilelang.layout.make_swizzled_layout(V_shared),
-                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                    W_shared: tilelang.layout.make_swizzled_layout(W_shared),
-                    U_shared: tilelang.layout.make_swizzled_layout(U_shared),
-                    W_Beta_shared: tilelang.layout.make_swizzled_layout(W_Beta_shared),
-                    U_Beta_shared: tilelang.layout.make_swizzled_layout(U_Beta_shared),
-                }
-            )
+            T.annotate_layout({
+                K_shared: tilelang.layout.make_swizzled_layout(K_shared),
+                V_shared: tilelang.layout.make_swizzled_layout(V_shared),
+                A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                W_shared: tilelang.layout.make_swizzled_layout(W_shared),
+                U_shared: tilelang.layout.make_swizzled_layout(U_shared),
+                W_Beta_shared: tilelang.layout.make_swizzled_layout(W_Beta_shared),
+                U_Beta_shared: tilelang.layout.make_swizzled_layout(U_Beta_shared),
+            })
 
             T.disable_warp_group_reg_alloc()
             for i_s in T.Parallel(block_S):
                 Beta_shared[i_s] = Beta[bb, bs * block_S + i_s, bh]
                 G_shared[i_s] = T.exp(G[bb, bs * block_S + i_s, bh])
 
-            T.copy(A[bb, bs * block_S : (bs + 1) * block_S, bh, :], A_shared)
+            T.copy(A[bb, bs * block_S:(bs + 1) * block_S, bh, :], A_shared)
 
             for i_v in T.Pipelined(T.ceildiv(DV, block_DV), num_stages=num_stages):
                 T.copy(
                     V[
                         bb,
-                        bs * block_S : (bs + 1) * block_S,
+                        bs * block_S:(bs + 1) * block_S,
                         bh,
-                        i_v * block_DV : (i_v + 1) * block_DV,
+                        i_v * block_DV:(i_v + 1) * block_DV,
                     ],
                     V_shared,
                 )
@@ -136,9 +134,9 @@ def tilelang_recompute_w_u_fwd(
                     U_shared,
                     U[
                         bb,
-                        bs * block_S : (bs + 1) * block_S,
+                        bs * block_S:(bs + 1) * block_S,
                         bh,
-                        i_v * block_DV : (i_v + 1) * block_DV,
+                        i_v * block_DV:(i_v + 1) * block_DV,
                     ],
                 )
 
@@ -146,16 +144,15 @@ def tilelang_recompute_w_u_fwd(
                 T.copy(
                     K[
                         bb,
-                        bs * block_S : (bs + 1) * block_S,
+                        bs * block_S:(bs + 1) * block_S,
                         bh,
-                        i_k * block_DK : (i_k + 1) * block_DK,
+                        i_k * block_DK:(i_k + 1) * block_DK,
                     ],
                     K_shared,
                 )
                 for i_s, i_k2 in T.Parallel(block_S, block_DK):
                     W_Beta_shared[i_s, i_k2] = (
-                        K_shared[i_s, i_k2] * Beta_shared[i_s] * G_shared[i_s]
-                    )
+                        K_shared[i_s, i_k2] * Beta_shared[i_s] * G_shared[i_s])
                 T.gemm(A_shared, W_Beta_shared, W_fragment, clear_accum=True)
                 # First copy to smem, then copy to gmem to reduce U2RU instructions
                 T.copy(W_fragment, W_shared)
@@ -163,9 +160,9 @@ def tilelang_recompute_w_u_fwd(
                     W_shared,
                     W[
                         bb,
-                        bs * block_S : (bs + 1) * block_S,
+                        bs * block_S:(bs + 1) * block_S,
                         bh,
-                        i_k * block_DK : (i_k + 1) * block_DK,
+                        i_k * block_DK:(i_k + 1) * block_DK,
                     ],
                 )
 

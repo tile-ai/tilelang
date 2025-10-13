@@ -78,17 +78,11 @@ def _split_kernel(
 
     q_ptr += batch_idx * stride_q_b + head_idx_q * stride_q_h
     k_cache_ptr += (
-        batch_idx * stride_k_b
-        + head_idx_kv * stride_k_h
-        + offs_n[None, :] * stride_k_s
-        + offs_d[:, None] * stride_k_d
-    )
+        batch_idx * stride_k_b + head_idx_kv * stride_k_h + offs_n[None, :] * stride_k_s +
+        offs_d[:, None] * stride_k_d)
     v_cache_ptr += (
-        batch_idx * stride_v_b
-        + head_idx_kv * stride_v_h
-        + offs_n[:, None] * stride_v_s
-        + offs_d[None, :] * stride_v_d
-    )
+        batch_idx * stride_v_b + head_idx_kv * stride_v_h + offs_n[:, None] * stride_v_s +
+        offs_d[None, :] * stride_v_d)
     mask_ptr += batch_idx * stride_mask_b + head_idx_kv * stride_mask_h
 
     q = tl.load(
@@ -126,18 +120,13 @@ def _split_kernel(
     acc = acc.to(o_partial_ptr.dtype.element_ty)
 
     lse_partial_ptr += (
-        batch_idx * stride_lse_b
-        + (head_idx_q + offs_h) * stride_lse_h
-        + split_idx * stride_lse_split
-    )
+        batch_idx * stride_lse_b + (head_idx_q + offs_h) * stride_lse_h +
+        split_idx * stride_lse_split)
     tl.store(lse_partial_ptr, m_i, mask=offs_h < gqa_group_size)
 
     o_partial_ptr += (
-        batch_idx * stride_o_b
-        + (head_idx_q + offs_h[:, None]) * stride_o_h
-        + split_idx * stride_o_split
-        + offs_d[None, :] * stride_o_d
-    )
+        batch_idx * stride_o_b + (head_idx_q + offs_h[:, None]) * stride_o_h +
+        split_idx * stride_o_split + offs_d[None, :] * stride_o_d)
     tl.store(o_partial_ptr, acc, mask=offs_h[:, None] < gqa_group_size)
 
 
@@ -175,8 +164,7 @@ def _merge_kernel(
     offs_d = tl.arange(0, BLOCK_D)
 
     lse_offsets = (
-        lse_partial_ptr + batch_idx * lse_partial_stride_b + head_idx * lse_partial_stride_h
-    )
+        lse_partial_ptr + batch_idx * lse_partial_stride_b + head_idx * lse_partial_stride_h)
     lse = tl.load(
         lse_offsets + offs_splits * lse_partial_stride_split,
         mask=offs_splits < num_splits,
@@ -187,9 +175,8 @@ def _merge_kernel(
 
     o_offsets = o_partial_ptr + batch_idx * o_partial_stride_b + head_idx * o_partial_stride_h
     o_partial = tl.load(
-        o_offsets
-        + offs_splits[:, None] * o_partial_stride_split
-        + offs_d[None, :] * o_partial_stride_d,
+        o_offsets + offs_splits[:, None] * o_partial_stride_split +
+        offs_d[None, :] * o_partial_stride_d,
         mask=offs_splits[:, None] < num_splits,
     )
     sumexp_normalized_splitk = tl.exp(lse - lse_max)
@@ -226,9 +213,8 @@ def block_sparse_flash_decode_gqa_mask_triton(
     num_m_blocks = 1 * (heads // heads_kv + block_H - 1) // block_H
     num_n_blocks = max_selected_blocks
 
-    size_one_kv_head = (
-        max_selected_blocks * block_size * (dim + dim_v) * 2
-    )  # kv_seqlen * (dim + dim_v) * 2
+    size_one_kv_head = (max_selected_blocks * block_size * (dim + dim_v) * 2
+                       )  # kv_seqlen * (dim + dim_v) * 2
     total_mblocks = batch * heads_kv * num_m_blocks
     num_sm = 64
     # num_sm = self.num_sm
@@ -313,9 +299,8 @@ def block_sparse_flash_decode_gqa_mask_triton(
     return output
 
 
-def ref_program_torch(
-    query, key, value, block_mask, cache_seqlens, max_cache_seqlen, num_blocks, block_size
-):
+def ref_program_torch(query, key, value, block_mask, cache_seqlens, max_cache_seqlen, num_blocks,
+                      block_size):
     batch, heads, dim = query.shape
     heads_kv = key.shape[2]
 
@@ -325,12 +310,12 @@ def ref_program_torch(
     value = rearrange(value, "b n h d -> b h n d")  # [batch_size, heads_kv, seqlen_kv, dim]
 
     query = rearrange(
-        query, "b (h g) d -> b g h d", g=num_head_groups
-    )  # [batch_size, num_head_groups, heads_kv, dim]
+        query, "b (h g) d -> b g h d",
+        g=num_head_groups)  # [batch_size, num_head_groups, heads_kv, dim]
 
     scores = einsum(
-        query, key, "b g h d, b h s d -> b g h s"
-    )  # [batch_size, num_head_groups, heads_kv, seqlen_kv]
+        query, key,
+        "b g h d, b h s d -> b g h s")  # [batch_size, num_head_groups, heads_kv, seqlen_kv]
 
     sparse_mask = torch.zeros_like(scores)
     # Assign mask values
@@ -338,7 +323,7 @@ def ref_program_torch(
         for h in range(heads_kv):
             for idx in range(num_blocks):
                 if block_mask[b, h, idx]:
-                    sparse_mask[b, :, h, idx * block_size : (idx + 1) * block_size] = 1
+                    sparse_mask[b, :, h, idx * block_size:(idx + 1) * block_size] = 1
 
     scores = scores.masked_fill(sparse_mask == 0, float("-inf"))
 
@@ -348,12 +333,10 @@ def ref_program_torch(
     pad_mask = pad_mask[:, None, None, :]
     scores = scores.masked_fill(pad_mask, float("-inf"))
     attention = F.softmax(
-        scores / scale, dim=-1
-    )  # [batch_size, num_head_groups, heads_kv, seqlen_kv]
+        scores / scale, dim=-1)  # [batch_size, num_head_groups, heads_kv, seqlen_kv]
 
-    out = einsum(
-        attention, value, "b g h s, b h s d -> b g h d"
-    )  # [batch_size, num_head_groups, heads_kv, dim]
+    out = einsum(attention, value,
+                 "b g h s, b h s d -> b g h d")  # [batch_size, num_head_groups, heads_kv, dim]
     out = rearrange(out, "b g h d -> b (h g) d")  # [batch_size, heads, dim]
     return out
 
@@ -423,9 +406,8 @@ def main(
                 perm = torch.randperm(max_valid_block, device="cuda")[:valid_num_block]
                 block_mask[b, h, perm] = True
 
-    ref = ref_program_torch(
-        Q, K, V, block_mask, cache_seqlens, max_cache_seqlen, num_blocks, block_size
-    )
+    ref = ref_program_torch(Q, K, V, block_mask, cache_seqlens, max_cache_seqlen, num_blocks,
+                            block_size)
 
     triton_out = block_sparse_flash_decode_gqa_mask_triton(
         Q,
@@ -438,9 +420,8 @@ def main(
     )
 
     # print("max difference: ", torch.max(torch.abs(ref - triton_out)))
-    assert torch.allclose(ref, triton_out, atol=1e-2), (
-        "Output mismatch between Triton and reference implementation"
-    )
+    assert torch.allclose(
+        ref, triton_out, atol=1e-2), ("Output mismatch between Triton and reference implementation")
     print("Passed the ref test!")
 
     # Measure performance
@@ -487,8 +468,7 @@ if __name__ == "__main__":
     parser.add_argument("--heads", type=int, default=32, help="heads")
     parser.add_argument("--heads_kv", type=int, default=8, help="heads_kv")
     parser.add_argument(
-        "--max_cache_seqlen", type=int, default=8192, help="kvcache sequence length"
-    )
+        "--max_cache_seqlen", type=int, default=8192, help="kvcache sequence length")
     parser.add_argument("--dim", type=int, default=128, help="dim")
     parser.add_argument("--dim_v", type=int, default=128, help="dim_v")
     parser.add_argument("--sparse_ratio", type=float, default=0.8, help="sparse ratio")

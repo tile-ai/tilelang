@@ -59,17 +59,15 @@ def naive_nsa(
             Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
     """
     if scale is None:
-        scale = k.shape[-1] ** -0.5
+        scale = k.shape[-1]**-0.5
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
         if head_first:
             raise RuntimeError(
-                "Sequences with variable lengths are not supported for head-first mode"
-            )
+                "Sequences with variable lengths are not supported for head-first mode")
     if head_first:
-        q, k, v, block_indices = map(
-            lambda x: rearrange(x, "b h t d -> b t h d"), (q, k, v, block_indices)
-        )
+        q, k, v, block_indices = map(lambda x: rearrange(x, "b h t d -> b t h d"),
+                                     (q, k, v, block_indices))
         g_slc, g_swa = map(lambda x: rearrange(x, "b h t -> b t h"), (g_slc, g_swa))
         if isinstance(block_counts, torch.Tensor):
             block_counts = rearrange(block_counts, "b h t -> b t h")
@@ -91,8 +89,8 @@ def naive_nsa(
         varlen = False
         B, T = q.shape[:2]
         cu_seqlens = torch.cat(
-            [block_indices.new_tensor(range(0, B * T, T)), block_indices.new_tensor([B * T])]
-        )
+            [block_indices.new_tensor(range(0, B * T, T)),
+             block_indices.new_tensor([B * T])])
 
     for i in range(len(cu_seqlens) - 1):
         if not varlen:
@@ -111,11 +109,11 @@ def naive_nsa(
         else:
             T = cu_seqlens[i + 1] - cu_seqlens[i]
             q_b, k_b, v_b, g_slc_b, g_swa_b, i_b = map(
-                lambda x: x[0][cu_seqlens[i] : cu_seqlens[i + 1]],
+                lambda x: x[0][cu_seqlens[i]:cu_seqlens[i + 1]],
                 (q, k, v, g_slc, g_swa, block_indices),
             )
             if isinstance(block_counts, torch.Tensor):
-                s_b = block_counts[0][cu_seqlens[i] : cu_seqlens[i + 1]]
+                s_b = block_counts[0][cu_seqlens[i]:cu_seqlens[i + 1]]
             else:
                 s_b = block_counts
 
@@ -139,41 +137,33 @@ def naive_nsa(
             # [S*BS, HQ, -1]
             k_i_slc, v_i_slc = map(
                 lambda x: x.gather(
-                    0, i_i.clamp(0, T - 1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])
-                ),
+                    0,
+                    i_i.clamp(0, T - 1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])),
                 (k_b, v_b),
             )
             # [S*BS, HQ]
             attn_slc = (
-                torch.einsum("h d, n h d -> n h", q_i, k_i_slc)
-                .masked_fill(
+                torch.einsum("h d, n h d -> n h", q_i, k_i_slc).masked_fill(
                     torch.logical_or(i_i < 0, i_i > i_q)
                     | (c >= s_i if block_counts is not None else False),
                     float("-inf"),
-                )
-                .softmax(0)
-            )
+                ).softmax(0))
             if not varlen:
-                o_slc[i, i_q] = torch.einsum(
-                    "n h, n h v -> h v", attn_slc, v_i_slc
-                ) * g_slc_i.unsqueeze(-1)
+                o_slc[i, i_q] = torch.einsum("n h, n h v -> h v", attn_slc,
+                                             v_i_slc) * g_slc_i.unsqueeze(-1)
             else:
-                o_slc[0][cu_seqlens[i] + i_q] = torch.einsum(
-                    "n h, n h v -> h v", attn_slc, v_i_slc
-                ) * g_slc_i.unsqueeze(-1)
+                o_slc[0][cu_seqlens[i] + i_q] = torch.einsum("n h, n h v -> h v", attn_slc,
+                                                             v_i_slc) * g_slc_i.unsqueeze(-1)
             if window_size > 0:
-                k_i_swa, v_i_swa = map(
-                    lambda x: x[max(0, i_q - window_size + 1) : i_q + 1], (k_b, v_b)
-                )
+                k_i_swa, v_i_swa = map(lambda x: x[max(0, i_q - window_size + 1):i_q + 1],
+                                       (k_b, v_b))
                 attn_swa = torch.einsum("h d, n h d -> n h", q_i, k_i_swa).softmax(0)
                 if not varlen:
-                    o_swa[i, i_q] = torch.einsum(
-                        "n h, n h v -> h v", attn_swa, v_i_swa
-                    ) * g_swa_i.unsqueeze(-1)
+                    o_swa[i, i_q] = torch.einsum("n h, n h v -> h v", attn_swa,
+                                                 v_i_swa) * g_swa_i.unsqueeze(-1)
                 else:
-                    o_swa[0][cu_seqlens[i] + i_q] = torch.einsum(
-                        "n h, n h v -> h v", attn_swa, v_i_swa
-                    ) * g_swa_i.unsqueeze(-1)
+                    o_swa[0][cu_seqlens[i] + i_q] = torch.einsum("n h, n h v -> h v", attn_swa,
+                                                                 v_i_swa) * g_swa_i.unsqueeze(-1)
 
     if head_first:
         o_slc = rearrange(o_slc, "b t h d -> b h t d")
@@ -211,7 +201,7 @@ def naive_nsa_simple(
         o (torch.Tensor):
             Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
     """
-    scale = k.shape[-1] ** -0.5
+    scale = k.shape[-1]**-0.5
 
     dtype = q.dtype
     HQ = q.shape[2]
@@ -289,7 +279,7 @@ def naive_nsa_simple_inference(
         o (torch.Tensor):
             Outputs of shape `[B, 1, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
     """
-    scale = k.shape[-1] ** -0.5
+    scale = k.shape[-1]**-0.5
 
     dtype = q.dtype
     HQ = q.shape[2]

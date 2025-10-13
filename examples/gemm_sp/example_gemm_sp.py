@@ -78,10 +78,10 @@ def matmul_sp_fp16(
 
     @T.prim_func
     def gemm_sp_fp16(
-        A_sparse: T.Tensor((M, K // 2), "float16"),
-        E: T.Tensor((M, K // e_factor), e_dtype),
-        B: T.Tensor((K, N), "float16"),
-        C: T.Tensor((M, N), accum_dtype),
+            A_sparse: T.Tensor((M, K // 2), "float16"),
+            E: T.Tensor((M, K // e_factor), e_dtype),
+            B: T.Tensor((K, N), "float16"),
+            C: T.Tensor((M, N), accum_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K // 2), "float16")
@@ -93,16 +93,18 @@ def matmul_sp_fp16(
             T.clear(C_local)
             T.disable_warp_group_reg_alloc()
             T.use_swizzle(panel_size=10, enable=enable_rasterization)
-            T.annotate_layout(
-                {
-                    E: make_metadata_layout(
-                        E, mma_dtype="float16", backend="cutlass", block_k=block_K, arch=arch
-                    ),
-                    E_shared: make_metadata_layout(
-                        E_shared, mma_dtype="float16", backend="cutlass", block_k=block_K, arch=arch
-                    ),
-                }
-            )
+            T.annotate_layout({
+                E:
+                    make_metadata_layout(
+                        E, mma_dtype="float16", backend="cutlass", block_k=block_K, arch=arch),
+                E_shared:
+                    make_metadata_layout(
+                        E_shared,
+                        mma_dtype="float16",
+                        backend="cutlass",
+                        block_k=block_K,
+                        arch=arch),
+            })
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
                 T.copy(E[by * block_M, k * block_K // e_factor], E_shared)
@@ -129,9 +131,8 @@ def main():
     )
     parser.add_argument("--cfg", type=str, choices=["4090", "h20"], required=True)
     args = parser.parse_args()
-    kernel = matmul_sp_fp16(
-        args.m, args.n, args.k, args.accum_dtype, **default_config[args.cfg][args.accum_dtype]
-    )
+    kernel = matmul_sp_fp16(args.m, args.n, args.k, args.accum_dtype,
+                            **default_config[args.cfg][args.accum_dtype])
 
     a = randn_semi_sparse(args.m, args.k, device="cuda", dtype=torch.half)
     b = torch.randn(args.k, args.n, device="cuda", dtype=torch.half)

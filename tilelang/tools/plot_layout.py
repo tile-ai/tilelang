@@ -102,9 +102,12 @@ def plot_layout(
 
             color = colors[thread_ids[0]]  # Select color based on thread ID
             # Create a rectangle patch for visualization
-            rect = patches.Rectangle(
-                (j, i), 1, 1, linewidth=0.5, edgecolor="black", facecolor=color
-            )
+            rect = patches.Rectangle((j, i),
+                                     1,
+                                     1,
+                                     linewidth=0.5,
+                                     edgecolor="black",
+                                     facecolor=color)
             ax.add_patch(rect)  # Add the rectangle to the plot
 
             # Add text annotations inside the rectangles

@@ -8,13 +8,14 @@ def modify(
     with_B: bool = False,
     with_bias: bool = False,
 ):
+
     @T.prim_func
     def main(
-        A: T.Tensor((64, 64)),
-        B: T.Tensor((64, 64)),
-        C: T.Tensor((64, 64)),
-        D: T.Tensor((64, 64)),
-        bias: T.Tensor((64, 64)),
+            A: T.Tensor((64, 64)),
+            B: T.Tensor((64, 64)),
+            C: T.Tensor((64, 64)),
+            D: T.Tensor((64, 64)),
+            bias: T.Tensor((64, 64)),
     ):
         if with_B:
             if with_bias:
@@ -41,6 +42,7 @@ def test_modify(with_B=False, with_bias=False):
 
 
 def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+
     @T.prim_func
     def main(
         a: T.handle,

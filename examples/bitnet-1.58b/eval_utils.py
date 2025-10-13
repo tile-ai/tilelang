@@ -46,6 +46,7 @@ def get_test_dataset(dataset_name, tokenizer, seqlen=2048):
 
 
 class LMEvalAdaptor(BaseLM):
+
     def __init__(self, model_name, model, tokenizer, batch_size=1, max_length=-1):
         super().__init__()
 
@@ -138,5 +139,4 @@ class LMEvalAdaptor(BaseLM):
 
     def _model_generate(self, context, max_length, eos_token_id):
         return self.model.generate(
-            context, max_length=max_length, eos_token_id=eos_token_id, do_sample=False
-        )
+            context, max_length=max_length, eos_token_id=eos_token_id, do_sample=False)

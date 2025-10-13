@@ -6,6 +6,7 @@ import tilelang.language as T
 
 
 def merge_if_test():
+
     @T.prim_func
     def main():
         A = T.alloc_fragment((1,), "float16")

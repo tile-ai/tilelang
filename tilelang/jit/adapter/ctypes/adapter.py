@@ -175,21 +175,15 @@ class CtypesKernelAdapter(BaseKernelAdapter):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, shape in enumerate(buffer.shape):
-                    if (
-                        isinstance(shape, tir.Var)
-                        and (shape not in dynamic_symbolic_map)
-                        and (shape not in params)
-                    ):
+                    if (isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map) and
+                        (shape not in params)):
                         dynamic_symbolic_map[shape] = (0, i, j)
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, stride in enumerate(buffer.strides):
-                    if (
-                        isinstance(stride, tir.Var)
-                        and (stride not in dynamic_symbolic_map)
-                        and (stride not in params)
-                    ):
+                    if (isinstance(stride, tir.Var) and (stride not in dynamic_symbolic_map) and
+                        (stride not in params)):
                         dynamic_symbolic_map[stride] = (1, i, j)
         return dynamic_symbolic_map
 
@@ -204,9 +198,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         ctypes_args.append(ctypes.c_void_p(stream))
         self.lib.call(*ctypes_args)
 
-    def _wrap_forward_from_prebuild_lib(
-        self, *ins: list[torch.Tensor], stream: int | None = None
-    ):
+    def _wrap_forward_from_prebuild_lib(self, *ins: list[torch.Tensor], stream: int | None = None):
         """High-level wrapper for kernel execution.
 
         Handles:

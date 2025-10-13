@@ -80,8 +80,7 @@ def gemm(
             return shape
         else:
             raise ValueError(
-                f"Unsupported retrieve_shape argument type: {type(object)} for buffer {object}"
-            )
+                f"Unsupported retrieve_shape argument type: {type(object)} for buffer {object}")
 
     def retrieve_stride(object: tir.Buffer | tir.BufferRegion) -> list[int]:
         if isinstance(object, tir.Buffer):
@@ -109,8 +108,7 @@ def gemm(
             return strides
         else:
             raise ValueError(
-                f"Unsupported retrieve_stride argument type: {type(object)} for buffer {object}"
-            )
+                f"Unsupported retrieve_stride argument type: {type(object)} for buffer {object}")
 
     A_shape = retrieve_shape(A)
     B_shape = retrieve_shape(B)
@@ -141,9 +139,7 @@ def gemm(
     stride_a = A_stride[-2]
     stride_b = B_stride[-2]
 
-    def retrieve_ptr(
-        object: tir.Buffer | tir.BufferRegion, access_type: str = "r"
-    ) -> tir.PrimExpr:
+    def retrieve_ptr(object: tir.Buffer | tir.BufferRegion, access_type: str = "r") -> tir.PrimExpr:
         if isinstance(object, tir.Buffer):
             return object.access_ptr(access_type)
         elif isinstance(object, tir.BufferRegion):
@@ -178,8 +174,7 @@ def gemm(
             return buffer.access_ptr(access_mask=access_type, offset=offset)
         else:
             raise ValueError(
-                f"Unsupported retrieve_ptr argument type: {type(object)} for buffer {object}"
-            )
+                f"Unsupported retrieve_ptr argument type: {type(object)} for buffer {object}")
 
     def retrieve_offset(object: tir.Buffer | tir.BufferRegion) -> tir.PrimExpr:
         """Retrieve the offset of the buffer or buffer region."""
@@ -199,8 +194,7 @@ def gemm(
             return indices
         else:
             raise ValueError(
-                f"Unsupported retrieve_offset argument type: {type(object)} for buffer {object}"
-            )
+                f"Unsupported retrieve_offset argument type: {type(object)} for buffer {object}")
 
     A_offset = retrieve_offset(A)
     B_offset = retrieve_offset(B)
@@ -308,8 +302,7 @@ def gemm_v2(
             return shape
         else:
             raise ValueError(
-                f"Unsupported retrieve_shape argument type: {type(object)} for buffer {object}"
-            )
+                f"Unsupported retrieve_shape argument type: {type(object)} for buffer {object}")
 
     def retrieve_stride(object: tir.Buffer | tir.BufferRegion) -> list[int]:
         if isinstance(object, tir.Buffer):
@@ -337,8 +330,7 @@ def gemm_v2(
             return strides
         else:
             raise ValueError(
-                f"Unsupported retrieve_stride argument type: {type(object)} for buffer {object}"
-            )
+                f"Unsupported retrieve_stride argument type: {type(object)} for buffer {object}")
 
     A_shape = retrieve_shape(A)
     B_shape = retrieve_shape(B)
@@ -369,9 +361,7 @@ def gemm_v2(
     stride_a = A_stride[-2]
     stride_b = B_stride[-2]
 
-    def retrieve_ptr(
-        object: tir.Buffer | tir.BufferRegion, access_type: str = "r"
-    ) -> tir.PrimExpr:
+    def retrieve_ptr(object: tir.Buffer | tir.BufferRegion, access_type: str = "r") -> tir.PrimExpr:
         if isinstance(object, tir.Buffer):
             return object.access_ptr(access_type)
         elif isinstance(object, tir.BufferRegion):
@@ -406,8 +396,7 @@ def gemm_v2(
             return buffer.access_ptr(access_mask=access_type, offset=offset)
         else:
             raise ValueError(
-                f"Unsupported retrieve_ptr argument type: {type(object)} for buffer {object}"
-            )
+                f"Unsupported retrieve_ptr argument type: {type(object)} for buffer {object}")
 
     def retrieve_offset(object: tir.Buffer | tir.BufferRegion) -> tir.PrimExpr:
         """Retrieve the offset of the buffer or buffer region."""
@@ -427,8 +416,7 @@ def gemm_v2(
             return indices
         else:
             raise ValueError(
-                f"Unsupported retrieve_offset argument type: {type(object)} for buffer {object}"
-            )
+                f"Unsupported retrieve_offset argument type: {type(object)} for buffer {object}")
 
     A_offset = retrieve_offset(A)
     B_offset = retrieve_offset(B)

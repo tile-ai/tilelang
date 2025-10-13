@@ -18,12 +18,10 @@ from reference import naive_nsa
 from einops import rearrange
 
 
-@triton.heuristics(
-    {
-        "USE_OFFSETS": lambda args: args["offsets"] is not None,
-        "USE_BLOCK_COUNTS": lambda args: isinstance(args["block_counts"], torch.Tensor),
-    }
-)
+@triton.heuristics({
+    "USE_OFFSETS": lambda args: args["offsets"] is not None,
+    "USE_BLOCK_COUNTS": lambda args: isinstance(args["block_counts"], torch.Tensor),
+})
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1]],
     key=["BS", "BK", "BV"],
@@ -70,17 +68,15 @@ def parallel_nsa_fwd_kernel(
     # else:
     NS = S
 
-    p_q = tl.make_block_ptr(
-        q + (bos + i_t) * HQ * K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0)
-    )
+    p_q = tl.make_block_ptr(q + (bos + i_t) * HQ * K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK),
+                            (1, 0))
     # the Q block is kept in the shared memory throughout the whole kernel
     # [G, BK]
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_q = (b_q * scale).to(b_q.dtype)
 
-    p_o_slc = tl.make_block_ptr(
-        o_slc + (bos + i_t) * HQ * V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0)
-    )
+    p_o_slc = tl.make_block_ptr(o_slc + (bos + i_t) * HQ * V, (HQ, V), (V, 1), (i_h * G, i_v * BV),
+                                (G, BV), (1, 0))
     p_lse_slc = lse_slc + (bos + i_t) * HQ + i_h * G + tl.arange(0, G)
     # [G, BV]
     b_o_slc = tl.zeros([G, BV], dtype=tl.float32)
@@ -118,6 +114,7 @@ def parallel_nsa_fwd_kernel(
 
 
 class ParallelNSAFunction(torch.autograd.Function):
+
     @staticmethod
     @contiguous
     @autocast_custom_fwd
@@ -131,8 +128,7 @@ class ParallelNSAFunction(torch.autograd.Function):
         token_indices = prepare_token_indices(offsets) if offsets is not None else None
 
         o, lse = parallel_nsa_fwd(
-            q=q, k=k, v=v, block_indices=block_indices, block_size=block_size, scale=scale
-        )
+            q=q, k=k, v=v, block_indices=block_indices, block_size=block_size, scale=scale)
         ctx.save_for_backward(q, k, v, o, lse)
         ctx.block_indices = block_indices
         ctx.block_size = block_size
@@ -275,12 +271,10 @@ def parallel_nsa_bwd_kernel_dkv(
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    p_k = tl.make_block_ptr(
-        k + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_s * BS, 0), (BS, BK), (1, 0)
-    )
-    p_v = tl.make_block_ptr(
-        v + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_s * BS, i_v * BV), (BS, BV), (1, 0)
-    )
+    p_k = tl.make_block_ptr(k + (bos * H + i_h) * K, (T, K), (H * K, 1), (i_s * BS, 0), (BS, BK),
+                            (1, 0))
+    p_v = tl.make_block_ptr(v + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_s * BS, i_v * BV),
+                            (BS, BV), (1, 0))
     p_dk = tl.make_block_ptr(
         dk + (i_v * B * T * H + bos * H + i_h) * K,
         (T, K),
@@ -289,9 +283,8 @@ def parallel_nsa_bwd_kernel_dkv(
         (BS, BK),
         (1, 0),
     )
-    p_dv = tl.make_block_ptr(
-        dv + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_s * BS, i_v * BV), (BS, BV), (1, 0)
-    )
+    p_dv = tl.make_block_ptr(dv + (bos * H + i_h) * V, (T, V), (H * V, 1), (i_s * BS, i_v * BV),
+                             (BS, BV), (1, 0))
 
     # [BS, BK]
     b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -303,16 +296,14 @@ def parallel_nsa_bwd_kernel_dkv(
     for i in range(i_s * BS, T):
         b_m_slc = tl.load(block_mask + (bos + i) * H * M + i_h * M + i_s)
         if b_m_slc:
-            p_q = tl.make_block_ptr(
-                q + (bos + i) * HQ * K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0)
-            )
+            p_q = tl.make_block_ptr(q + (bos + i) * HQ * K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK),
+                                    (1, 0))
             # [G, BK]
             b_q = tl.load(p_q, boundary_check=(0, 1))
             b_q = (b_q * scale).to(b_q.dtype)
 
-            p_do_slc = tl.make_block_ptr(
-                do_slc + (bos + i) * HQ * V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0)
-            )
+            p_do_slc = tl.make_block_ptr(do_slc + (bos + i) * HQ * V, (HQ, V), (V, 1),
+                                         (i_h * G, i_v * BV), (G, BV), (1, 0))
             p_lse_slc = lse_slc + (bos + i) * HQ + i_h * G + tl.arange(0, G)
             p_delta_slc = delta_slc + (bos + i) * HQ + i_h * G + tl.arange(0, G)
             # [G, BV]
@@ -336,9 +327,8 @@ def parallel_nsa_bwd_kernel_dkv(
         if WS > 0:
             o_s = i_s * BS + tl.arange(0, BS)
             if max(i_s * BS, i - WS + 1) < min((i_s + 1) * BS, i + 1):
-                p_q = tl.make_block_ptr(
-                    q + (bos + i) * HQ * K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0)
-                )
+                p_q = tl.make_block_ptr(q + (bos + i) * HQ * K, (HQ, K), (K, 1), (i_h * G, 0),
+                                        (G, BK), (1, 0))
                 # [G, BK]
                 b_q = tl.load(p_q, boundary_check=(0, 1))
                 b_q = (b_q * scale).to(b_q.dtype)
@@ -376,8 +366,7 @@ def parallel_nsa_bwd_kernel_dkv(
 
 
 @triton.heuristics(
-    {"USE_BLOCK_COUNTS": lambda args: isinstance(args["block_counts"], torch.Tensor)}
-)
+    {"USE_BLOCK_COUNTS": lambda args: isinstance(args["block_counts"], torch.Tensor)})
 @triton.jit
 def parallel_nsa_kernel_mask(
     block_indices,
@@ -406,12 +395,10 @@ def parallel_nsa_kernel_mask(
         )
 
 
-@triton.heuristics(
-    {
-        "USE_OFFSETS": lambda args: args["offsets"] is not None,
-        "USE_BLOCK_COUNTS": lambda args: isinstance(args["block_counts"], torch.Tensor),
-    }
-)
+@triton.heuristics({
+    "USE_OFFSETS": lambda args: args["offsets"] is not None,
+    "USE_BLOCK_COUNTS": lambda args: isinstance(args["block_counts"], torch.Tensor),
+})
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8]],
     key=["BS", "BK", "BV"],
@@ -560,12 +547,10 @@ def parallel_nsa_bwd_kernel_dq(
         tl.store(p_dq, (b_dq_slc + b_dq_swa).to(p_dq.dtype.element_ty), boundary_check=(0, 1))
 
 
-@triton.heuristics(
-    {
-        "USE_OFFSETS": lambda args: args["offsets"] is not None,
-        "USE_BLOCK_COUNTS": lambda args: isinstance(args["block_counts"], torch.Tensor),
-    }
-)
+@triton.heuristics({
+    "USE_OFFSETS": lambda args: args["offsets"] is not None,
+    "USE_BLOCK_COUNTS": lambda args: isinstance(args["block_counts"], torch.Tensor),
+})
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8]],
     key=["BS", "BK", "BV"],
@@ -620,17 +605,15 @@ def parallel_nsa_fwd_kernel(
     else:
         NS = S
 
-    p_q = tl.make_block_ptr(
-        q + (bos + i_t) * HQ * K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0)
-    )
+    p_q = tl.make_block_ptr(q + (bos + i_t) * HQ * K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK),
+                            (1, 0))
     # the Q block is kept in the shared memory throughout the whole kernel
     # [G, BK]
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_q = (b_q * scale).to(b_q.dtype)
 
-    p_o_slc = tl.make_block_ptr(
-        o_slc + (bos + i_t) * HQ * V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0)
-    )
+    p_o_slc = tl.make_block_ptr(o_slc + (bos + i_t) * HQ * V, (HQ, V), (V, 1), (i_h * G, i_v * BV),
+                                (G, BV), (1, 0))
     p_lse_slc = lse_slc + (bos + i_t) * HQ + i_h * G + tl.arange(0, G)
     # [G, BV]
     b_o_slc = tl.zeros([G, BV], dtype=tl.float32)
@@ -667,9 +650,8 @@ def parallel_nsa_fwd_kernel(
     tl.store(p_lse_slc, b_m_slc.to(p_lse_slc.dtype.element_ty))
 
     if WS > 0:
-        p_o_swa = tl.make_block_ptr(
-            o_swa + (bos + i_t) * HQ * V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0)
-        )
+        p_o_swa = tl.make_block_ptr(o_swa + (bos + i_t) * HQ * V, (HQ, V), (V, 1),
+                                    (i_h * G, i_v * BV), (G, BV), (1, 0))
         p_lse_swa = lse_swa + (bos + i_t) * HQ + i_h * G + tl.arange(0, G)
         # [G, BV]
         b_o_swa = tl.zeros([G, BV], dtype=tl.float32)
@@ -868,6 +850,7 @@ def parallel_nsa_bwd(
 
 @torch.compile
 class ParallelNSAFunction(torch.autograd.Function):
+
     @staticmethod
     @contiguous
     @autocast_custom_fwd
@@ -981,13 +964,12 @@ def parallel_nsa(
             Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
     """
     if scale is None:
-        scale = k.shape[-1] ** -0.5
+        scale = k.shape[-1]**-0.5
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     if head_first:
-        q, k, v, block_indices = map(
-            lambda x: rearrange(x, "b h t d -> b t h d"), (q, k, v, block_indices)
-        )
+        q, k, v, block_indices = map(lambda x: rearrange(x, "b h t d -> b t h d"),
+                                     (q, k, v, block_indices))
         g_slc, g_swa = map(lambda x: rearrange(x, "b h t -> b t h"), (g_slc, g_swa))
         if isinstance(block_counts, torch.Tensor):
             block_counts = rearrange(block_counts, "b h t -> b t h")
@@ -997,9 +979,8 @@ def parallel_nsa(
         block_indices = block_indices[:, :, :, :block_counts]
         block_counts = None
 
-    o_slc, o_swa = ParallelNSAFunction.apply(
-        q, k, v, block_indices, block_counts, block_size, window_size, scale, cu_seqlens
-    )
+    o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size,
+                                             window_size, scale, cu_seqlens)
     if window_size > 0:
         o = torch.addcmul(o_slc * g_slc.unsqueeze(-1), o_swa, g_swa.unsqueeze(-1))
     else:
@@ -1024,7 +1005,7 @@ if __name__ == "__main__":
         for t in range(T):
             for h in range(H):
                 i_i = torch.randperm(max(1, (t // block_size)))[:S]
-                block_indices[b, t, h, : len(i_i)] = i_i
+                block_indices[b, t, h, :len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
 
     block_counts = torch.randint(1, S + 1, (B, T, H), device="cuda")

@@ -78,10 +78,10 @@ def tilelang_chunk_scaled_dot_kkt_fwd(
 
     @T.prim_func
     def kernel(
-        K: T.Tensor(K_shape, dtype=input_dtype),
-        Beta: T.Tensor(Beta_shape, dtype=input_dtype),
-        G: T.Tensor(G_shape, dtype=accum_dtype),
-        A: T.Tensor(output_shape, dtype=output_dtype),
+            K: T.Tensor(K_shape, dtype=input_dtype),
+            Beta: T.Tensor(Beta_shape, dtype=input_dtype),
+            G: T.Tensor(G_shape, dtype=accum_dtype),
+            A: T.Tensor(output_shape, dtype=output_dtype),
     ):
         with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
             bb, bh = bbh // H, bbh % H
@@ -96,12 +96,10 @@ def tilelang_chunk_scaled_dot_kkt_fwd(
             G_shared = T.alloc_shared((block_S,), dtype=accum_dtype, scope="shared")
             G_diff_local = T.alloc_fragment((block_S, block_S), dtype=accum_dtype)
 
-            T.annotate_layout(
-                {
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                }
-            )
+            T.annotate_layout({
+                K_shared: tilelang.layout.make_swizzled_layout(K_shared),
+                A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+            })
 
             T.fill(A_fragment, 0)
             T.disable_warp_group_reg_alloc()
@@ -112,9 +110,9 @@ def tilelang_chunk_scaled_dot_kkt_fwd(
                 T.copy(
                     K[
                         bb,
-                        bs * block_S : (bs + 1) * block_S,
+                        bs * block_S:(bs + 1) * block_S,
                         bh,
-                        i_k * block_DK : (i_k + 1) * block_DK,
+                        i_k * block_DK:(i_k + 1) * block_DK,
                     ],
                     K_shared,
                 )
@@ -131,8 +129,7 @@ def tilelang_chunk_scaled_dot_kkt_fwd(
                     with T.If(G_diff_local[i_s1, i_s2] <= 0 and i_s1 > i_s2):
                         with T.Then():
                             A_fragment[i_s1, i_s2] = A_fragment[i_s1, i_s2] * T.exp(
-                                G_diff_local[i_s1, i_s2]
-                            )
+                                G_diff_local[i_s1, i_s2])
                         with T.Else():
                             A_fragment[i_s1, i_s2] = 0
             else:
@@ -142,7 +139,7 @@ def tilelang_chunk_scaled_dot_kkt_fwd(
                             A_fragment[i_s1, i_s2] = 0
 
             T.copy(A_fragment, A_shared)
-            T.copy(A_shared, A[bb, bs * block_S : (bs + 1) * block_S, bh, :])
+            T.copy(A_shared, A[bb, bs * block_S:(bs + 1) * block_S, bh, :])
 
     return kernel
 
@@ -176,12 +173,10 @@ def run_test(
     # reference
     if use_g:
         A_ref = chunk_scaled_dot_kkt_fwd(
-            K, Beta, G, chunk_size=chunk_size, output_dtype=getattr(torch, output_dtype)
-        )
+            K, Beta, G, chunk_size=chunk_size, output_dtype=getattr(torch, output_dtype))
     else:
         A_ref = chunk_scaled_dot_kkt_fwd(
-            K, Beta, None, chunk_size=chunk_size, output_dtype=getattr(torch, output_dtype)
-        )
+            K, Beta, None, chunk_size=chunk_size, output_dtype=getattr(torch, output_dtype))
 
     # tilelang
     block_S = chunk_size

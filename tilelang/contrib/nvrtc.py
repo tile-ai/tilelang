@@ -46,8 +46,7 @@ def compile_cuda(
         # If None, then it will use `tvm.target.Target.current().arch`.
         # Target arch could be a str like "80", "90", "90a", etc.
         major, minor = parse_compute_version(
-            get_target_compute_version(Target.current(allow_none=True))
-        )
+            get_target_compute_version(Target.current(allow_none=True)))
         arch = major * 10 + minor
     prefix = "compute" if target_format == "ptx" else "sm"
     suffix = "a" if arch >= 90 else ""
@@ -84,8 +83,7 @@ def compile_cuda(
         if verbose:
             result, log_size = nvrtc.nvrtcGetProgramLogSize(program)
             assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, (
-                f"Failed to get program log size: {result}"
-            )
+                f"Failed to get program log size: {result}")
             log_bytes = bytes(log_size)
             result = nvrtc.nvrtcGetProgramLog(program, log_bytes)[0]
             assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get program log: {result}"
@@ -110,7 +108,6 @@ def compile_cuda(
 
     # Destroy handler
     assert nvrtc.nvrtcDestroyProgram(program)[0] == nvrtc.nvrtcResult.NVRTC_SUCCESS, (
-        f"Failed to destroy program: {result}"
-    )
+        f"Failed to destroy program: {result}")
 
     return result_bytes

@@ -17,16 +17,17 @@ def group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m):
 
     @T.prim_func
     def group_per_split_token_cast(
-        X: T.Tensor((M, N), dtype),
-        batch_sizes: T.Tensor((BG,), "int32"),
-        X_fp8: T.Tensor((BG, M_max, N), "float8_e4m3"),
-        X_amax: T.Tensor((BG, M_max, T.ceildiv(N, group_size)), accum_dtype),
+            X: T.Tensor((M, N), dtype),
+            batch_sizes: T.Tensor((BG,), "int32"),
+            X_fp8: T.Tensor((BG, M_max, N), "float8_e4m3"),
+            X_amax: T.Tensor((BG, M_max, T.ceildiv(N, group_size)), accum_dtype),
     ):
-        with T.Kernel(T.ceildiv(M_max, blk_m), T.ceildiv(N, group_size), BG, threads=128) as (
-            bx,
-            by,
-            bz,
-        ):
+        with T.Kernel(
+                T.ceildiv(M_max, blk_m), T.ceildiv(N, group_size), BG, threads=128) as (
+                    bx,
+                    by,
+                    bz,
+                ):
             row = bx
             row_g_id = by
             bg = bz
@@ -37,14 +38,13 @@ def group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m):
             y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), "float8_e4m3")
             row_offset = T.alloc_fragment((1,), "int32")
 
-            T.annotate_layout(
-                {
-                    y_local: T.Fragment(
+            T.annotate_layout({
+                y_local:
+                    T.Fragment(
                         y_local.shape,
                         forward_thread_fn=lambda i, j: (i // (blk_m // 4)) * 32 + j % 32,
                     ),
-                }
-            )
+            })
 
             row_offset[0] = 0
             for i in T.serial(bg):
@@ -52,32 +52,30 @@ def group_per_split_token_cast_to_fp8(M, M_max, N, BG, blk_m):
 
             T.copy(
                 X[
-                    row_offset[0] + row * blk_m : row_offset[0] + (row + 1) * blk_m,
-                    row_g_id * group_size : (row_g_id + 1) * group_size,
+                    row_offset[0] + row * blk_m:row_offset[0] + (row + 1) * blk_m,
+                    row_g_id * group_size:(row_g_id + 1) * group_size,
                 ],
                 y_local,
             )
             T.reduce_absmax(y_local, y_amax_local, dim=1)
             for i in T.Parallel(blk_m):
                 y_amax_local[i] = T.max(y_amax_local[i], 1e-4)
-                y_s_local[i] = T.if_then_else(
-                    row * blk_m + i < batch_sizes[bg], y_amax_local[i] / fp8_max, 0
-                )
+                y_s_local[i] = T.if_then_else(row * blk_m + i < batch_sizes[bg],
+                                              y_amax_local[i] / fp8_max, 0)
             for i, j in T.Parallel(blk_m, group_size):
                 y_q_local[i, j] = T.clamp(y_local[i, j] / y_s_local[i], fp8_min, fp8_max)
             T.copy(y_q_local, y_q_local_fp8)
             for i, j in T.Parallel(blk_m, group_size):
-                y_q_local_fp8[i, j] = T.if_then_else(
-                    row * blk_m + i < batch_sizes[bg], y_q_local[i, j], 0
-                )
+                y_q_local_fp8[i, j] = T.if_then_else(row * blk_m + i < batch_sizes[bg],
+                                                     y_q_local[i, j], 0)
             for i in T.Parallel(blk_m):
                 X_amax[bg, row * blk_m + i, row_g_id] = y_s_local[i]
             T.copy(
                 y_q_local_fp8,
                 X_fp8[
                     bg,
-                    row * blk_m : (row + 1) * blk_m,
-                    row_g_id * group_size : (row_g_id + 1) * group_size,
+                    row * blk_m:(row + 1) * blk_m,
+                    row_g_id * group_size:(row_g_id + 1) * group_size,
                 ],
             )
 
@@ -147,8 +145,7 @@ def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
 
     # Normal layout requires transposing
     aligned_x = torch.transpose(
-        torch.empty((b, n, aligned_m), device=x.device, dtype=x.dtype), 1, 2
-    )
+        torch.empty((b, n, aligned_m), device=x.device, dtype=x.dtype), 1, 2)
     aligned_x[:, :m, :] = x
     aligned_x = aligned_x[:, :m, :]
     return aligned_x.squeeze(0) if remove_dim else aligned_x

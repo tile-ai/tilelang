@@ -11,7 +11,7 @@ tilelang.disable_cache()
 
 @tilelang.jit(out_idx=[6])
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split):
-    scale = (1.0 / (dim + pe_dim)) ** 0.5 * 1.44269504  # log2(e)
+    scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     dtype = "float16"
     accum_dtype = "float"
     kv_group_num = heads // kv_head_num
@@ -21,11 +21,11 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
     @T.macro
     def flash_attn(
-        Q: T.Tensor([batch, heads, dim], dtype),
-        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        Output: T.Tensor([batch, heads, dim], dtype),
+            Q: T.Tensor([batch, heads, dim], dtype),
+            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+            Output: T.Tensor([batch, heads, dim], dtype),
     ):
         with T.Kernel(heads // min(block_H, kv_group_num), batch, threads=256) as (hid, bid):
             # smem_sQ
@@ -83,12 +83,10 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
             cur_kv_head = hid // (kv_group_num // block_H)
 
-            T.annotate_layout(
-                {
-                    O_shared_l: tilelang.layout.make_swizzled_layout(O_shared_l),
-                    O_shared_r: tilelang.layout.make_swizzled_layout(O_shared_r),
-                }
-            )
+            T.annotate_layout({
+                O_shared_l: tilelang.layout.make_swizzled_layout(O_shared_l),
+                O_shared_r: tilelang.layout.make_swizzled_layout(O_shared_r),
+            })
 
             # barriers_Q
             q_shared_ready_barrier = T.alloc_barrier(arrive_count=256)
@@ -112,9 +110,9 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
             tx = T.get_thread_binding()
 
-            T.copy(Q[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :h_dim], Q_shared_l)
-            T.copy(Q[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, h_dim:], Q_shared_r)
-            T.copy(Q_pe[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :], Q_pe_shared)
+            T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :h_dim], Q_shared_l)
+            T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, h_dim:], Q_shared_r)
+            T.copy(Q_pe[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :], Q_pe_shared)
             T.barrier_arrive(q_shared_ready_barrier)
             T.barrier_wait(q_shared_ready_barrier, 0)
 
@@ -127,13 +125,13 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.fill(acc_o_l, 0)
                 T.fill(logsum_0, 0)
 
-                T.copy(KV[bid, block_N : 2 * block_N, cur_kv_head, :h_dim], KV_shared_1_l)
+                T.copy(KV[bid, block_N:2 * block_N, cur_kv_head, :h_dim], KV_shared_1_l)
                 T.barrier_arrive(kv_shared_1_l_is_ready)
 
-                T.copy(KV[bid, block_N : 2 * block_N, cur_kv_head, h_dim:], KV_shared_1_r)
+                T.copy(KV[bid, block_N:2 * block_N, cur_kv_head, h_dim:], KV_shared_1_r)
                 T.barrier_arrive(kv_shared_1_r_is_ready)
 
-                T.copy(K_pe[bid, block_N : 2 * block_N, cur_kv_head, :], K_pe_shared_1)
+                T.copy(K_pe[bid, block_N:2 * block_N, cur_kv_head, :], K_pe_shared_1)
                 T.barrier_arrive(kv_shared_1_pe_is_ready)
 
                 for k in T.serial(loop_range):
@@ -165,9 +163,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     for i, j in T.Parallel(block_H, block_N):
                         acc_s_0[i, j] = T.exp2(acc_s_0[i, j] * scale - scores_max[i] * scale)
                     for i in T.Parallel(block_H):
-                        scores_scale_0[i] = T.exp2(
-                            scores_max_prev_0[i] * scale - scores_max[i] * scale
-                        )
+                        scores_scale_0[i] = T.exp2(scores_max_prev_0[i] * scale -
+                                                   scores_max[i] * scale)
 
                     T.reduce_sum(acc_s_0, scores_sum_0, dim=1)
 
@@ -190,7 +187,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         T.copy(
                             KV[
                                 bid,
-                                (2 * k + 2) * block_N : (2 * k + 3) * block_N,
+                                (2 * k + 2) * block_N:(2 * k + 3) * block_N,
                                 cur_kv_head,
                                 :h_dim,
                             ],
@@ -218,7 +215,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         T.copy(
                             KV[
                                 bid,
-                                (2 * k + 3) * block_N : (2 * k + 4) * block_N,
+                                (2 * k + 3) * block_N:(2 * k + 4) * block_N,
                                 cur_kv_head,
                                 :h_dim,
                             ],
@@ -227,9 +224,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         T.barrier_arrive(kv_shared_1_l_is_ready)
 
                         T.copy(
-                            K_pe[
-                                bid, (2 * k + 3) * block_N : (2 * k + 4) * block_N, cur_kv_head, :
-                            ],
+                            K_pe[bid, (2 * k + 3) * block_N:(2 * k + 4) * block_N, cur_kv_head, :],
                             K_pe_shared_1,
                         )
                         T.barrier_arrive(kv_shared_1_pe_is_ready)
@@ -240,9 +235,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 for i, j in T.Parallel(block_H, h_dim):
                     acc_o_l[i, j] /= logsum[i]
                 T.copy(acc_o_l, O_shared_l)
-                T.copy(
-                    O_shared_l, Output[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :h_dim]
-                )
+                T.copy(O_shared_l, Output[bid,
+                                          hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :h_dim])
 
             else:
                 T.copy(Q_pe_shared, Q_pe_local_1)
@@ -285,9 +279,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     T.copy(scores_max_1, scores_max)
 
                     for i in T.Parallel(block_H):
-                        scores_scale_1[i] = T.exp2(
-                            scores_max_prev_1[i] * scale - scores_max[i] * scale
-                        )
+                        scores_scale_1[i] = T.exp2(scores_max_prev_1[i] * scale -
+                                                   scores_max[i] * scale)
 
                     # Step 8.
                     for i, j in T.Parallel(block_H, block_N):
@@ -301,8 +294,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
                     for i in T.Parallel(block_H):
                         logsum_1[i] = (
-                            logsum_1[i] * scores_scale_1[i] * scores_scale_0[i] + scores_sum_1[i]
-                        )
+                            logsum_1[i] * scores_scale_1[i] * scores_scale_0[i] + scores_sum_1[i])
 
                     T.barrier_arrive(scale_1_ready_barrier)
 
@@ -316,7 +308,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         T.copy(
                             KV[
                                 bid,
-                                (2 * k + 3) * block_N : (2 * k + 4) * block_N,
+                                (2 * k + 3) * block_N:(2 * k + 4) * block_N,
                                 cur_kv_head,
                                 h_dim:,
                             ],
@@ -332,7 +324,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         T.copy(
                             KV[
                                 bid,
-                                (2 * k + 2) * block_N : (2 * k + 3) * block_N,
+                                (2 * k + 2) * block_N:(2 * k + 3) * block_N,
                                 cur_kv_head,
                                 h_dim:,
                             ],
@@ -341,9 +333,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         T.barrier_arrive(kv_shared_0_r_is_ready)
 
                         T.copy(
-                            K_pe[
-                                bid, (2 * k + 2) * block_N : (2 * k + 3) * block_N, cur_kv_head, :
-                            ],
+                            K_pe[bid, (2 * k + 2) * block_N:(2 * k + 3) * block_N, cur_kv_head, :],
                             K_pe_shared_0,
                         )
                         T.barrier_arrive(kv_shared_0_pe_is_ready)
@@ -355,19 +345,18 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 for i, j in T.Parallel(block_H, h_dim):
                     acc_o_r[i, j] /= logsum[i]
                 T.copy(acc_o_r, O_shared_r)
-                T.copy(
-                    O_shared_r, Output[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, h_dim:]
-                )
+                T.copy(O_shared_r, Output[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H,
+                                          h_dim:])
 
     @T.prim_func
     def main_no_split(
-        Q: T.Tensor([batch, heads, dim], dtype),
-        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        glse: T.Tensor([batch, heads, num_split], dtype),
-        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-        Output: T.Tensor([batch, heads, dim], dtype),
+            Q: T.Tensor([batch, heads, dim], dtype),
+            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+            glse: T.Tensor([batch, heads, num_split], dtype),
+            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+            Output: T.Tensor([batch, heads, dim], dtype),
     ):
         flash_attn(Q, Q_pe, KV, K_pe, Output)
 
@@ -389,14 +378,13 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     dim = q.shape[-1]
     pe_dim = q_pe.shape[-1]
     num_head_groups = q.shape[1] // kv.shape[2]
-    scale = (dim + pe_dim) ** 0.5
+    scale = (dim + pe_dim)**0.5
     q = rearrange(
-        q, "b (h g) d -> b g h d", g=num_head_groups
-    )  # [batch_size, num_head_groups, groups, dim]
+        q, "b (h g) d -> b g h d", g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
 
     q_pe = rearrange(
-        q_pe, "b (h g) d -> b g h d", g=num_head_groups
-    )  # [batch_size, num_head_groups, groups, pe_dim]
+        q_pe, "b (h g) d -> b g h d",
+        g=num_head_groups)  # [batch_size, num_head_groups, groups, pe_dim]
 
     kv = rearrange(kv, "b n h d -> b h n d")  # [batch_size, groups, seqlen_kv, dim]
 
@@ -406,16 +394,14 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     key = torch.concat([kv, k_pe], dim=-1)
 
     scores = einsum(
-        query, key, "b g h d, b h s d -> b g h s"
-    )  # [batch_size, num_head_groups, groups, seqlen_kv]
+        query, key,
+        "b g h d, b h s d -> b g h s")  # [batch_size, num_head_groups, groups, seqlen_kv]
 
     attention = F.softmax(
-        scores / scale, dim=-1
-    )  # [batch_size, num_head_groups, groups, seqlen_kv]
+        scores / scale, dim=-1)  # [batch_size, num_head_groups, groups, seqlen_kv]
 
-    out = einsum(
-        attention, kv, "b g h s, b h s d -> b g h d"
-    )  # [batch_size, num_head_groups, groups, dim]
+    out = einsum(attention, kv,
+                 "b g h s, b h s d -> b g h d")  # [batch_size, num_head_groups, groups, dim]
     out = rearrange(out, "b g h d -> b (h g) d")  # [batch_size, heads, dim]
     return out
 

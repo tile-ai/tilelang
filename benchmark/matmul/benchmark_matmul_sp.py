@@ -70,8 +70,7 @@ def get_configs(M, N, K):
             thread_num,
             policy,
             enable_rasterization,
-        )
-    )
+        ))
 
     configs = [
         {
@@ -82,8 +81,7 @@ def get_configs(M, N, K):
             "thread_num": c[4],
             "policy": c[5],
             "enable_rasterization": c[6],  # keep param name for backward-compat
-        }
-        for c in _configs
+        } for c in _configs
     ]
     return configs
 
@@ -128,9 +126,7 @@ def matmul_sp(M, N, K, accum_dtype):
         warmup=3,
         rep=20,
     )
-    @jit(
-        out_idx=[2],
-    )
+    @jit(out_idx=[2],)
     def kernel(
         block_M=None,
         block_N=None,
@@ -170,10 +166,10 @@ def matmul_sp(M, N, K, accum_dtype):
 
         @T.prim_func
         def main(
-            A_sparse: T.Tensor((M, K // 2), dtype),
-            E: T.Tensor((M, K // e_factor), e_dtype),
-            B: T.Tensor((K, N), dtype),
-            C: T.Tensor((M, N), accum_dtype),
+                A_sparse: T.Tensor((M, K // 2), dtype),
+                E: T.Tensor((M, K // e_factor), e_dtype),
+                B: T.Tensor((K, N), dtype),
+                C: T.Tensor((M, N), accum_dtype),
         ):
             """
             The compiled TVM function for block-level matrix multiplication.
@@ -187,10 +183,11 @@ def matmul_sp(M, N, K, accum_dtype):
             """
             # Bind x-dimension to block index in N,
             #     y-dimension to block index in M.
-            with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (
-                bx,
-                by,
-            ):
+            with T.Kernel(
+                    T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (
+                        bx,
+                        by,
+                    ):
                 # Allocate shared memory for A sub-block of shape (block_M, block_K)
                 A_shared = T.alloc_shared((block_M, block_K // 2), dtype)
                 # Allocate shared memory for B sub-block of shape (block_N, block_K)
@@ -207,16 +204,14 @@ def matmul_sp(M, N, K, accum_dtype):
                 T.disable_warp_group_reg_alloc()
 
                 T.use_swizzle(panel_size=10, enable=enable_rasterization)
-                T.annotate_layout(
-                    {
-                        E: make_metadata_layout(
-                            E, mma_dtype="float16", backend="cutlass", block_k=block_K
-                        ),
-                        E_shared: make_metadata_layout(
-                            E_shared, mma_dtype="float16", backend="cutlass", block_k=block_K
-                        ),
-                    }
-                )
+                T.annotate_layout({
+                    E:
+                        make_metadata_layout(
+                            E, mma_dtype="float16", backend="cutlass", block_k=block_K),
+                    E_shared:
+                        make_metadata_layout(
+                            E_shared, mma_dtype="float16", backend="cutlass", block_k=block_K),
+                })
                 # Loop over sub-blocks in K dimension, pipelined by num_stages
                 for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                     # Load a sub-block of A from global memory into A_shared

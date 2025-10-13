@@ -192,9 +192,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
             error_msg = adapter.lib.get_last_error().decode("utf-8")
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
-        adapter.cython_wrapper = CythonKernelWrapper(
-            adapter.result_idx, adapter.params, adapter.lib
-        )
+        adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params,
+                                                     adapter.lib)
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_buffer_dtype_map(adapter.buffer_dtype_map)
         adapter.cython_wrapper.set_static_shape_map(adapter.static_shape_map)
@@ -221,21 +220,15 @@ class CythonKernelAdapter(BaseKernelAdapter):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, shape in enumerate(buffer.shape):
-                    if (
-                        isinstance(shape, tir.Var)
-                        and (shape not in dynamic_symbolic_map)
-                        and (shape not in params)
-                    ):
+                    if (isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map) and
+                        (shape not in params)):
                         dynamic_symbolic_map[shape] = (0, i, j)
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, stride in enumerate(buffer.strides):
-                    if (
-                        isinstance(stride, tir.Var)
-                        and (stride not in dynamic_symbolic_map)
-                        and (stride not in params)
-                    ):
+                    if (isinstance(stride, tir.Var) and (stride not in dynamic_symbolic_map) and
+                        (stride not in params)):
                         dynamic_symbolic_map[stride] = (1, i, j)
         return dynamic_symbolic_map
 
@@ -272,9 +265,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
     def _process_static_buffer_infos(
         self,
     ) -> tuple[
-        dict[tir.Var, tuple[int, list[tuple[int, int]]]],
-        dict[tir.Var, tuple[int, list[tuple[int, int]]]],
-        list[tuple[tir.Var]],
+            dict[tir.Var, tuple[int, list[tuple[int, int]]]],
+            dict[tir.Var, tuple[int, list[tuple[int, int]]]],
+            list[tuple[tir.Var]],
     ]:
         """Extract information about static shapes from the TIR function.
 
@@ -354,9 +347,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 skip_tensor_validation: Whether to skip tensor attributes validation which
                 includes shape, dtype, device, etc.
             """
-            return self.cython_wrapper.forward(
-                [*args], stream=stream, skip_tensor_validation=skip_tensor_validation
-            )
+            return self.cython_wrapper.forward([*args],
+                                               stream=stream,
+                                               skip_tensor_validation=skip_tensor_validation)
 
         return lambda_forward
 

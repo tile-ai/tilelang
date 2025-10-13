@@ -33,15 +33,12 @@ def get_configs():
         threads=[128, 256, 512],
         split=[1, 2],
     )
-    return [
-        {k: v for k, v in zip(iter_params, values)}
-        for values in itertools.product(*iter_params.values())
-    ]
+    return [{
+        k: v for k, v in zip(iter_params, values)
+    } for values in itertools.product(*iter_params.values())]
 
 
-@tilelang.autotune(
-    configs=get_configs(),
-)
+@tilelang.autotune(configs=get_configs(),)
 @tilelang.jit(
     out_idx=[-1],
     pass_configs={
@@ -196,8 +193,7 @@ def matmul(
                 for v in T.vectorized(0, local_size):
                     index = i * threads * local_size + tx * local_size + v
                     B_dequantize_shared[index // block_K, index % block_K] = (
-                        B_dequantize_local_thread[v]
-                    )
+                        B_dequantize_local_thread[v])
 
         return fast_dequant_bf16_fp4_twiddling
 
@@ -222,9 +218,8 @@ def matmul(
         assert in_dtype in ["fp4"]
         assert out_dtype in ["bfloat16"]
 
-        def _tir_u8_to_f4_to_bf16(
-            nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale: tir.PrimExpr, dtype: str
-        ):
+        def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr,
+                                  scale: tir.PrimExpr, dtype: str):
             """
             Convert a 4-bit FP4 value packed in a uint8 byte into a bfloat16 value.
 
@@ -263,10 +258,8 @@ def matmul(
             m_f4 = f4 & tir.const(1, "uint16")
             val_bf16 = tir.reinterpret(
                 "bfloat16",
-                (
-                    (((s << tir.const(8, "uint16")) | e_bf16) << tir.const(7, "uint16"))
-                    | (m_f4 << tir.const(6, "uint16"))
-                ).astype("uint16"),
+                ((((s << tir.const(8, "uint16")) | e_bf16) << tir.const(7, "uint16"))
+                 | (m_f4 << tir.const(6, "uint16"))).astype("uint16"),
             )
             return val_bf16
 
@@ -304,9 +297,9 @@ def matmul(
 
     @T.prim_func
     def main(
-        A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, storage_dtype),
-        C: T.Tensor((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, storage_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         """
         Kernel entry for the tiled, pipelined matmul used by the generated prim_func.
@@ -339,11 +332,9 @@ def matmul(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
 
-            T.annotate_layout(
-                {
-                    C_shared: tilelang.layout.make_swizzled_layout(C_shared),
-                }
-            )
+            T.annotate_layout({
+                C_shared: tilelang.layout.make_swizzled_layout(C_shared),
+            })
 
             T.clear(C_local)
             for k in T.Pipelined(K // block_K, num_stages=num_stages):
@@ -358,9 +349,7 @@ def matmul(
                 T.gemm(A_shared, B_dequantize_shared, C_local, transpose_B=True)
 
             T.copy(C_local, C_shared)
-            T.copy(
-                C_shared, C[by * block_M : (by + 1) * block_M, bx * block_N : (bx + 1) * block_N]
-            )
+            T.copy(C_shared, C[by * block_M:(by + 1) * block_M, bx * block_N:(bx + 1) * block_N])
 
     return main
 
@@ -426,8 +415,7 @@ def main(m=256, n=256, k=256, fast_dequant=True, tune=False):
     total_flops = 2 * m * n * k
     if tune:
         kernel = matmul(
-            m, n, k, "bfloat16", "bfloat16", "float32", num_bits=4, fast_dequant=fast_dequant
-        )
+            m, n, k, "bfloat16", "bfloat16", "float32", num_bits=4, fast_dequant=fast_dequant)
     else:
         kernel = matmul(
             m,

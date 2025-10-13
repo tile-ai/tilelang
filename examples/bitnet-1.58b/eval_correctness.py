@@ -78,10 +78,7 @@ def main():
             model_path,
             use_flash_attention_2=False,
             torch_dtype=torch.float16,
-        )
-        .cuda()
-        .half()
-    )
+        ).cuda().half())
 
     tokenizer = BitnetTokenizer.from_pretrained(model_path, use_fast=False)
     input_id = tokenizer("Hello")["input_ids"]

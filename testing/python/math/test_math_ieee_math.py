@@ -24,10 +24,10 @@ def run_ieee_math_test(
 
         @T.prim_func
         def main_func(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M, N), dtype),
-            C: T.Tensor((M, N), dtype),
-            D: T.Tensor((M, N), dtype),
+                A: T.Tensor((M, N), dtype),
+                B: T.Tensor((M, N), dtype),
+                C: T.Tensor((M, N), dtype),
+                D: T.Tensor((M, N), dtype),
         ):
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
                 for i, j in T.Parallel(block_M, block_N):
@@ -44,9 +44,9 @@ def run_ieee_math_test(
 
         @T.prim_func
         def main_func(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M, N), dtype),
-            C: T.Tensor((M, N), dtype),
+                A: T.Tensor((M, N), dtype),
+                B: T.Tensor((M, N), dtype),
+                C: T.Tensor((M, N), dtype),
         ):
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
                 for i, j in T.Parallel(block_M, block_N):
@@ -62,14 +62,14 @@ def run_ieee_math_test(
 
         @T.prim_func
         def main_func(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M, N), dtype),
+                A: T.Tensor((M, N), dtype),
+                B: T.Tensor((M, N), dtype),
         ):
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
                 for i, j in T.Parallel(block_M, block_N):
-                    B[by * block_M + i, bx * block_N + j] = mathop_func(
-                        A[by * block_M + i, bx * block_N + j], rounding_mode
-                    )
+                    B[by * block_M + i,
+                      bx * block_N + j] = mathop_func(A[by * block_M + i, bx * block_N + j],
+                                                      rounding_mode)
 
         out_idx = [1]
         num_inputs = 1
@@ -199,8 +199,8 @@ def test_ieee_frsqrt_rn_only():
 
     @T.prim_func
     def main(
-        A: T.Tensor((128, 128), "float32"),
-        B: T.Tensor((128, 128), "float32"),
+            A: T.Tensor((128, 128), "float32"),
+            B: T.Tensor((128, 128), "float32"),
     ):
         with T.Kernel(T.ceildiv(128, 32), T.ceildiv(128, 32), threads=128) as (bx, by):
             for i, j in T.Parallel(32, 32):

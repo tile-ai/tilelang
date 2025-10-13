@@ -28,9 +28,9 @@ def matmul(
 
     @T.prim_func
     def main(
-        A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, in_dtype),
-        C: T.Tensor((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -138,9 +138,9 @@ def matmu_jit_kernel(
 
     @T.prim_func
     def main(
-        A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, in_dtype),
-        C: T.Tensor((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -290,9 +290,8 @@ def run_cython_kernel_do_bench(
 
 
 def test_cython_kernel_do_bench():
-    run_cython_kernel_do_bench(
-        512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2
-    )
+    run_cython_kernel_do_bench(512, 1024, 768, False, False, "float16", "float16", "float16", 128,
+                               256, 32, 2)
 
 
 def run_cython_kernel_multi_stream(
@@ -348,9 +347,8 @@ def run_cython_kernel_multi_stream(
 
 
 def test_cython_kernel_multi_stream():
-    run_cython_kernel_multi_stream(
-        512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2
-    )
+    run_cython_kernel_multi_stream(512, 1024, 768, False, False, "float16", "float16", "float16",
+                                   128, 256, 32, 2)
 
 
 def run_cython_dynamic_shape(
@@ -408,14 +406,12 @@ def run_cython_dynamic_shape(
 
     tensor_ref_c = torch.matmul(tensor_a.to(torch.float), tensor_b.to(torch.float)).to(out_dtype)
     tilelang.testing.torch_assert_close(
-        tensor_c, tensor_ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05
-    )
+        tensor_c, tensor_ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
 def test_cython_dynamic_shape():
     run_cython_dynamic_shape(
-        T.symbolic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2
-    )
+        T.symbolic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
 
     run_cython_dynamic_shape(
         T.symbolic("m"),
@@ -503,14 +499,12 @@ def run_cython_dynamic_shape_with_out_idx(
     tensor_ref_c = torch.matmul(tensor_a.to(torch.float), tensor_b.to(torch.float)).to(out_dtype)
 
     tilelang.testing.torch_assert_close(
-        tensor_c, tensor_ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05
-    )
+        tensor_c, tensor_ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
 def test_cython_dynamic_shape_with_out_idx():
     run_cython_dynamic_shape_with_out_idx(
-        T.symbolic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2
-    )
+        T.symbolic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
 
 
 def matmul_int_variable(
@@ -535,10 +529,10 @@ def matmul_int_variable(
 
     @T.prim_func
     def main(
-        A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, in_dtype),
-        C: T.Tensor((M, N), out_dtype),
-        offset: T.int32,
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
+            offset: T.int32,
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -607,9 +601,8 @@ def run_matmul_int_variable(
 
 
 def test_matmul_int_variable():
-    run_matmul_int_variable(
-        1024, 1024, 1024, 128, 128, 32, False, False, "float16", "float16", "float32", 0, 128
-    )
+    run_matmul_int_variable(1024, 1024, 1024, 128, 128, 32, False, False, "float16", "float16",
+                            "float32", 0, 128)
 
 
 def matmul_float_variable(
@@ -634,10 +627,10 @@ def matmul_float_variable(
 
     @T.prim_func
     def main(
-        A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, in_dtype),
-        C: T.Tensor((M, N), out_dtype),
-        offset: T.float32,
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
+            offset: T.float32,
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -706,9 +699,8 @@ def run_matmul_float_variable(
 
 
 def test_matmul_float_variable():
-    run_matmul_float_variable(
-        1024, 1024, 1024, 128, 128, 32, False, False, "float16", "float16", "float32", 0, 128
-    )
+    run_matmul_float_variable(1024, 1024, 1024, 128, 128, 32, False, False, "float16", "float16",
+                              "float32", 0, 128)
 
 
 if __name__ == "__main__":

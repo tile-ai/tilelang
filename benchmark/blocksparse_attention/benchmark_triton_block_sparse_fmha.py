@@ -15,9 +15,10 @@ def get_sparse_attn_mask_from_topk(x, topk, use_dense_for_last_block=False):
     bsz, num_head, downsample_len, _ = x.shape
     # N_CTX = downsample_len * BLOCK
     sparse_index = torch.topk(x, topk, dim=-1).indices
-    dense_mask = torch.full(
-        [bsz, num_head, downsample_len, downsample_len], False, dtype=torch.bool, device=x.device
-    )
+    dense_mask = torch.full([bsz, num_head, downsample_len, downsample_len],
+                            False,
+                            dtype=torch.bool,
+                            device=x.device)
     dense_mask.scatter_(-1, sparse_index, True)
     if use_dense_for_last_block:
         dense_mask[:, :, -2:, :] = True
@@ -70,9 +71,8 @@ def _fwd_kernel_inner(
 
         # the following is needed only when LAST_K_BLOCK or BLOCK_M < BLOCK_N
         if LAST_K_BLOCK:
-            qk += tl.where(
-                offs_m[:, None] + past_len >= (start_n + offs_n[None, :]), 0, float("-inf")
-            )
+            qk += tl.where(offs_m[:, None] + past_len >= (start_n + offs_n[None, :]), 0,
+                           float("-inf"))
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
@@ -191,11 +191,8 @@ def _fwd_kernel(
     acc = acc.to(Out.dtype.element_ty)
 
     off_o = (
-        off_z * stride_oz
-        + off_h * stride_oh
-        + offs_m[:, None] * stride_om
-        + offs_d[None, :] * stride_od
-    )
+        off_z * stride_oz + off_h * stride_oh + offs_m[:, None] * stride_om +
+        offs_d[None, :] * stride_od)
     out_ptrs = Out + off_o
     tl.store(out_ptrs, acc, mask=offs_m[:, None] < N_CTX)
 
@@ -257,6 +254,7 @@ def _forward(
 
 
 class _sparse_attention(torch.autograd.Function):
+
     @staticmethod
     def forward(ctx, q, k, v, block_sparse_dense, sm_scale):
         # shape constraints
@@ -289,9 +287,9 @@ def benchmark_topk_sparse_attention():
         # Create sparse mask (downsampled to block level)
         downsample_factor = BLOCK
         downsample_len = math.ceil(SEQ_LEN / downsample_factor)
-        x_ds = torch.randn(
-            [BATCH, N_HEADS, downsample_len, downsample_len], device="cuda", dtype=torch.bfloat16
-        )
+        x_ds = torch.randn([BATCH, N_HEADS, downsample_len, downsample_len],
+                           device="cuda",
+                           dtype=torch.bfloat16)
         x_ds[:, :, :, 0] = 100
         block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
 

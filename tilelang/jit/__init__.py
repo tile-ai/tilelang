@@ -78,8 +78,7 @@ def compile(
 
     if is_metal_target(target):
         assert execution_backend == "torch", (
-            'Currently metal target only support `tl.jit(execution_backend="torch")`'
-        )
+            'Currently metal target only support `tl.jit(execution_backend="torch")`')
 
     return cached(
         func=func,
@@ -171,16 +170,19 @@ class _JitImplementation:
     # This tells the type checker what the *wrapper* function will return.
     # this is for linting, please do not remove it.
     @overload
-    def __call__(self, func: Callable[_P, _RProg]) -> Callable[_P, tuple[_RProg, Kernel]]: ...
+    def __call__(self, func: Callable[_P, _RProg]) -> Callable[_P, tuple[_RProg, Kernel]]:
+        ...
 
     @overload
-    def __call__(self, func: Callable[_P, _RProg]) -> Callable[_P, Kernel]: ...
+    def __call__(self, func: Callable[_P, _RProg]) -> Callable[_P, Kernel]:
+        ...
 
     # Actual implementation of __call__
     def __call__(
-        self,
-        func: Callable[_P, _RProg],  # func is Union[Callable[_P, _RProg], PrimFunc] in original
+            self,
+            func: Callable[_P, _RProg],  # func is Union[Callable[_P, _RProg], PrimFunc] in original
     ) -> Callable[_P, Any]:
+
         @functools.wraps(func)
         def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> Any:
             # Separate out the tuning parameters from the user's kwargs

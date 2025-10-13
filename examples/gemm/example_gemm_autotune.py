@@ -90,8 +90,7 @@ def get_configs(M, N, K, with_roller=False, topk=20):
                 num_stages,
                 thread_num,
                 enable_rasterization,
-            )
-        )
+            ))
 
         configs = [
             {
@@ -101,13 +100,13 @@ def get_configs(M, N, K, with_roller=False, topk=20):
                 "num_stages": c[3],
                 "thread_num": c[4],
                 "enable_rasteration": c[5],  # keep param name for backward-compat
-            }
-            for c in _configs
+            } for c in _configs
         ]
     return configs
 
 
 def get_best_config(M, N, K, with_roller=False):
+
     def kernel(
         block_M=None,
         block_N=None,
@@ -121,14 +120,15 @@ def get_best_config(M, N, K, with_roller=False):
 
         @T.prim_func
         def main(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((M, N), dtype),
+                A: T.Tensor((M, K), dtype),
+                B: T.Tensor((N, K), dtype),
+                C: T.Tensor((M, N), dtype),
         ):
-            with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (
-                bx,
-                by,
-            ):
+            with T.Kernel(
+                    T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (
+                        bx,
+                        by,
+                    ):
                 A_shared = T.alloc_shared((block_M, block_K), dtype)
                 B_shared = T.alloc_shared((block_N, block_K), dtype)
                 C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -150,17 +150,15 @@ def get_best_config(M, N, K, with_roller=False):
         return main
 
     autotuner = (
-        AutoTuner.from_kernel(kernel=kernel, configs=get_configs(M, N, K, with_roller))
-        .set_compile_args(
-            out_idx=[-1],
-            target="auto",
-        )
-        .set_profile_args(
-            supply_type=tl.TensorSupplyType.Integer,
-            ref_prog=ref_program,
-            skip_check=False,
-        )
-    )
+        AutoTuner.from_kernel(kernel=kernel,
+                              configs=get_configs(M, N, K, with_roller)).set_compile_args(
+                                  out_idx=[-1],
+                                  target="auto",
+                              ).set_profile_args(
+                                  supply_type=tl.TensorSupplyType.Integer,
+                                  ref_prog=ref_program,
+                                  skip_check=False,
+                              ))
     return autotuner.run(warmup=3, rep=20)
 
 
@@ -215,11 +213,12 @@ def matmul(
     dtype="float16",
     accum_dtype="float",
 ):
+
     @T.prim_func
     def gemm_autotune(
-        A: T.Tensor((M, K), dtype),
-        B: T.Tensor((N, K), dtype),
-        C: T.Tensor((M, N), dtype),
+            A: T.Tensor((M, K), dtype),
+            B: T.Tensor((N, K), dtype),
+            C: T.Tensor((M, N), dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)

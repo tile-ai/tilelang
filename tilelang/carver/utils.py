@@ -47,8 +47,7 @@ def get_roller_hints_from_func(
     if tensorcore_only:
         try:
             tensorized_func, tags = get_tensorized_func_and_tags(
-                func, arch.target, allow_gemv=allow_gemv
-            )
+                func, arch.target, allow_gemv=allow_gemv)
         except Exception as e_msg:
             logger.debug("Get tensorized func and tags failed: ", e_msg)
             tags = None
@@ -62,8 +61,7 @@ def get_roller_hints_from_func(
         tensorized_func = None
         try:
             tensorized_func, tags = get_tensorized_func_and_tags(
-                func, arch.target, allow_gemv=allow_gemv
-            )
+                func, arch.target, allow_gemv=allow_gemv)
         except Exception as e_msg:
             logger.debug("Get tensorized func and tags failed: ", e_msg)
             tags = None
@@ -86,9 +84,8 @@ def get_roller_hints_from_output_nodes(
         policy = TensorCorePolicy.from_output_nodes(output_nodes, arch=arch, tags=None)
         lints = policy.emit_config(topk)
     except Exception as e_msg:
-        logger.debug(
-            f"Generate hints from output nodes failed: {e_msg}", "fallback to default policy"
-        )
+        logger.debug(f"Generate hints from output nodes failed: {e_msg}",
+                     "fallback to default policy")
 
     if len(lints) == 0:
         policy = DefaultPolicy.from_output_nodes(output_nodes, arch=arch, tags=None)
@@ -100,7 +97,6 @@ def retrieve_func_from_module(ir_module: IRModule) -> PrimFunc:
     if not isinstance(ir_module, IRModule):
         raise ValueError("Not supported type: ", type(ir_module))
     assert len(ir_module.get_global_vars()) == 1, (
-        "The optimized module should only have one global variable for default schedule."
-    )
+        "The optimized module should only have one global variable for default schedule.")
     func = list(ir_module.functions.values())[0]
     return func

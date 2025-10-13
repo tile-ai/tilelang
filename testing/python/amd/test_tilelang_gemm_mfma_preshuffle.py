@@ -52,21 +52,18 @@ def tl_matmul(
 
     A_shape = (K, M) if a_transposed else (M, K)
     if b_preshuffle:
-        B_shape = (
-            (N // micro_size_y, K // pack_size_k, micro_size_y, pack_size_k)
-            if b_transposed
-            else (K // pack_size_k, N // micro_size_y, pack_size_k, micro_size_y)
-        )
+        B_shape = ((N // micro_size_y, K // pack_size_k, micro_size_y,
+                    pack_size_k) if b_transposed else
+                   (K // pack_size_k, N // micro_size_y, pack_size_k, micro_size_y))
     else:
         B_shape = (N, K) if b_transposed else (K, N)
 
     A_shared_shape = (block_K, block_M) if a_transposed else (block_M, block_K)
     if b_preshuffle:
-        B_shared_shape = (
-            (block_N // micro_size_y, block_K // pack_size_k, micro_size_y, pack_size_k)
-            if b_transposed
-            else (block_K // pack_size_k, block_N // micro_size_y, pack_size_k, micro_size_y)
-        )
+        B_shared_shape = ((block_N // micro_size_y, block_K // pack_size_k, micro_size_y,
+                           pack_size_k) if b_transposed else
+                          (block_K // pack_size_k, block_N // micro_size_y, pack_size_k,
+                           micro_size_y))
     else:
         B_shared_shape = (block_N, block_K) if b_transposed else (block_K, block_N)
 
@@ -96,9 +93,9 @@ def tl_matmul(
 
     @T.prim_func
     def main(
-        A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, in_dtype),
-        C: T.Tensor((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, in_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
@@ -107,11 +104,9 @@ def tl_matmul(
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
 
-            T.annotate_layout(
-                {
-                    A_shared: make_swizzle_layout(A_shared),
-                }
-            )
+            T.annotate_layout({
+                A_shared: make_swizzle_layout(A_shared),
+            })
 
             num_ko = K // block_K
             num_ki = block_K // (k_pack * micro_size_k)
@@ -132,10 +127,10 @@ def tl_matmul(
                 if b_g2l_load is False:
                     if b_transposed:
                         for j, k, jj, kk in T.Parallel(
-                            block_N // micro_size_y,
-                            block_K // pack_size_k,
-                            micro_size_y,
-                            pack_size_k,
+                                block_N // micro_size_y,
+                                block_K // pack_size_k,
+                                micro_size_y,
+                                pack_size_k,
                         ):
                             B_shared[j, k, jj, kk] = B[
                                 bx * block_N // micro_size_y + j,
@@ -145,10 +140,10 @@ def tl_matmul(
                             ]
                     else:
                         for k, j, kk, jj in T.Parallel(
-                            block_K // pack_size_k,
-                            block_N // micro_size_y,
-                            pack_size_k,
-                            micro_size_y,
+                                block_K // pack_size_k,
+                                block_N // micro_size_y,
+                                pack_size_k,
+                                micro_size_y,
                         ):
                             B_shared[k, j, kk, jj] = B[
                                 ko * block_K // pack_size_k + k,
@@ -191,10 +186,10 @@ def tl_matmul(
 
 
 def shuffle_weight(
-    x: torch.Tensor,
-    layout=(16, 32),
-    k_pack=1,
-    is_transpose=False,
+        x: torch.Tensor,
+        layout=(16, 32),
+        k_pack=1,
+        is_transpose=False,
 ) -> torch.Tensor:
     IN, IK = layout
     BK = IK * k_pack
@@ -269,19 +264,16 @@ def assert_tl_matmul_correctness(
 
     if a_transposed and b_transposed:
         # Get Reference Result
-        ref_c = torch.matmul(A.T.to(torch.float32), B.T.to(torch.float32)).to(
-            getattr(torch, out_dtype)
-        )
+        ref_c = torch.matmul(A.T.to(torch.float32),
+                             B.T.to(torch.float32)).to(getattr(torch, out_dtype))
     elif a_transposed and not b_transposed:
         # Get Reference Result
-        ref_c = torch.matmul(A.Tto(torch.float32), B.to(torch.float32)).to(
-            getattr(torch, out_dtype)
-        )
+        ref_c = torch.matmul(A.Tto(torch.float32),
+                             B.to(torch.float32)).to(getattr(torch, out_dtype))
     elif not a_transposed and b_transposed:
         # Get Reference Result
-        ref_c = torch.matmul(A.to(torch.float32), B.T.to(torch.float32)).to(
-            getattr(torch, out_dtype)
-        )
+        ref_c = torch.matmul(A.to(torch.float32),
+                             B.T.to(torch.float32)).to(getattr(torch, out_dtype))
     else:
         # Get Reference Result
         ref_c = torch.matmul(A.to(torch.float32), B.to(torch.float32)).to(getattr(torch, out_dtype))
@@ -295,18 +287,14 @@ def assert_tl_matmul_correctness(
 @tilelang.testing.requires_rocm
 def test_assert_tl_matmul():
     assert_tl_matmul_correctness(
-        256, 256, 256, "int8", "int32", accum_dtype="int32", b_preshuffle=True
-    )
+        256, 256, 256, "int8", "int32", accum_dtype="int32", b_preshuffle=True)
     assert_tl_matmul_correctness(
-        256, 256, 256, "int8", "int32", accum_dtype="int32", b_preshuffle=True
-    )
+        256, 256, 256, "int8", "int32", accum_dtype="int32", b_preshuffle=True)
     assert_tl_matmul_correctness(
-        256, 256, 256, "int8", "int32", b_transposed=False, accum_dtype="int32", b_preshuffle=True
-    )
+        256, 256, 256, "int8", "int32", b_transposed=False, accum_dtype="int32", b_preshuffle=True)
 
     assert_tl_matmul_correctness(
-        256, 256, 512, "int8", "int32", accum_dtype="int32", k_pack=2, b_preshuffle=True
-    )
+        256, 256, 512, "int8", "int32", accum_dtype="int32", k_pack=2, b_preshuffle=True)
     assert_tl_matmul_correctness(
         256,
         256,

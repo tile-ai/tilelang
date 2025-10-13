@@ -18,12 +18,10 @@ from reference import naive_nsa
 from einops import rearrange
 
 
-@triton.heuristics(
-    {
-        "USE_OFFSETS": lambda args: args["offsets"] is not None,
-        "USE_BLOCK_COUNTS": lambda args: isinstance(args["block_counts"], torch.Tensor),
-    }
-)
+@triton.heuristics({
+    "USE_OFFSETS": lambda args: args["offsets"] is not None,
+    "USE_BLOCK_COUNTS": lambda args: isinstance(args["block_counts"], torch.Tensor),
+})
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8]],
     key=["BS", "BK", "BV"],
@@ -78,17 +76,15 @@ def parallel_nsa_fwd_kernel(
     else:
         NS = S
 
-    p_q = tl.make_block_ptr(
-        q + (bos + i_t) * HQ * K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK), (1, 0)
-    )
+    p_q = tl.make_block_ptr(q + (bos + i_t) * HQ * K, (HQ, K), (K, 1), (i_h * G, 0), (G, BK),
+                            (1, 0))
     # the Q block is kept in the shared memory throughout the whole kernel
     # [G, BK]
     b_q = tl.load(p_q, boundary_check=(0, 1))
     b_q = (b_q * scale).to(b_q.dtype)
 
-    p_o_slc = tl.make_block_ptr(
-        o_slc + (bos + i_t) * HQ * V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0)
-    )
+    p_o_slc = tl.make_block_ptr(o_slc + (bos + i_t) * HQ * V, (HQ, V), (V, 1), (i_h * G, i_v * BV),
+                                (G, BV), (1, 0))
     p_lse_slc = lse_slc + (bos + i_t) * HQ + i_h * G + tl.arange(0, G)
     # [G, BV]
     b_o_slc = tl.zeros([G, BV], dtype=tl.float32)
@@ -125,9 +121,8 @@ def parallel_nsa_fwd_kernel(
     tl.store(p_lse_slc, b_m_slc.to(p_lse_slc.dtype.element_ty))
 
     if WS > 0:
-        p_o_swa = tl.make_block_ptr(
-            o_swa + (bos + i_t) * HQ * V, (HQ, V), (V, 1), (i_h * G, i_v * BV), (G, BV), (1, 0)
-        )
+        p_o_swa = tl.make_block_ptr(o_swa + (bos + i_t) * HQ * V, (HQ, V), (V, 1),
+                                    (i_h * G, i_v * BV), (G, BV), (1, 0))
         p_lse_swa = lse_swa + (bos + i_t) * HQ + i_h * G + tl.arange(0, G)
         # [G, BV]
         b_o_swa = tl.zeros([G, BV], dtype=tl.float32)
@@ -225,6 +220,7 @@ def parallel_nsa_fwd(
 
 @torch.compile
 class ParallelNSAFunction(torch.autograd.Function):
+
     @staticmethod
     @contiguous
     @autocast_custom_fwd
@@ -313,13 +309,12 @@ def parallel_nsa(
             Outputs of shape `[B, T, HQ, V]` if `head_first=False` else `[B, HQ, T, V]`.
     """
     if scale is None:
-        scale = k.shape[-1] ** -0.5
+        scale = k.shape[-1]**-0.5
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     if head_first:
-        q, k, v, block_indices = map(
-            lambda x: rearrange(x, "b h t d -> b t h d"), (q, k, v, block_indices)
-        )
+        q, k, v, block_indices = map(lambda x: rearrange(x, "b h t d -> b t h d"),
+                                     (q, k, v, block_indices))
         g_slc, g_swa = map(lambda x: rearrange(x, "b h t -> b t h"), (g_slc, g_swa))
         if isinstance(block_counts, torch.Tensor):
             block_counts = rearrange(block_counts, "b h t -> b t h")
@@ -329,9 +324,8 @@ def parallel_nsa(
         block_indices = block_indices[:, :, :, :block_counts]
         block_counts = None
 
-    o_slc, o_swa = ParallelNSAFunction.apply(
-        q, k, v, block_indices, block_counts, block_size, window_size, scale, cu_seqlens
-    )
+    o_slc, o_swa = ParallelNSAFunction.apply(q, k, v, block_indices, block_counts, block_size,
+                                             window_size, scale, cu_seqlens)
     if window_size > 0:
         o = torch.addcmul(o_slc * g_slc.unsqueeze(-1), o_swa, g_swa.unsqueeze(-1))
     else:
@@ -349,40 +343,31 @@ if __name__ == "__main__":
         torch.cat(
             [
                 torch.tensor([0], dtype=torch.long),
-                torch.arange(16, T)[torch.randperm(T - 1)[: N - 1]],
+                torch.arange(16, T)[torch.randperm(T - 1)[:N - 1]],
                 torch.tensor([T], dtype=torch.long),
             ],
             0,
-        )
-        .cuda()
-        .sort()[0]
-    )
+        ).cuda().sort()[0])
     # offsets.shape is [N+1]
     # seq-first required for inputs with variable lengths
     perm_q = torch.randperm(T, device="cuda")
     perm_k = torch.randperm(T, device="cuda")
     perm_v = torch.randperm(T, device="cuda")
     q = (
-        torch.linspace(0, 1, steps=T, dtype=dtype, device="cuda")[perm_q]
-        .view(1, T, 1, 1)
-        .expand(1, T, HQ, D)
-        .clone()
-        .requires_grad_(True)
-    )
+        torch.linspace(0, 1, steps=T, dtype=dtype,
+                       device="cuda")[perm_q].view(1, T, 1,
+                                                   1).expand(1, T, HQ,
+                                                             D).clone().requires_grad_(True))
     k = (
-        torch.linspace(0, 1, steps=T, dtype=dtype, device="cuda")[perm_k]
-        .view(1, T, 1, 1)
-        .expand(1, T, H, D)
-        .clone()
-        .requires_grad_(True)
-    )
+        torch.linspace(0, 1, steps=T, dtype=dtype,
+                       device="cuda")[perm_k].view(1, T, 1,
+                                                   1).expand(1, T, H,
+                                                             D).clone().requires_grad_(True))
     v = (
-        torch.linspace(0, 1, steps=T, dtype=dtype, device="cuda")[perm_v]
-        .view(1, T, 1, 1)
-        .expand(1, T, H, D)
-        .clone()
-        .requires_grad_(True)
-    )
+        torch.linspace(0, 1, steps=T, dtype=dtype,
+                       device="cuda")[perm_v].view(1, T, 1,
+                                                   1).expand(1, T, H,
+                                                             D).clone().requires_grad_(True))
     g_slc = torch.rand((1, T, HQ), dtype=dtype, device="cuda").requires_grad_(True)
     g_swa = torch.rand((1, T, HQ), dtype=dtype, device="cuda").requires_grad_(True)
     do = torch.randn((1, T, HQ, D), dtype=dtype, device="cuda")
@@ -393,7 +378,7 @@ if __name__ == "__main__":
         _, t = token_indices[i]
         for h in range(H):
             i_i = torch.randperm(max(1, triton.cdiv(t, block_size)))[:S]
-            block_indices[0, i, h, : len(i_i)] = i_i
+            block_indices[0, i, h, :len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
     block_counts = torch.randint(1, S + 1, (1, T, H), device="cuda")
 

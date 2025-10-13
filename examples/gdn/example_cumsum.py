@@ -46,35 +46,35 @@ def tilelang_chunk_local_cumsum_scalar(
     use_fragment=False,
 ):
     G_shape = (B, H, S) if head_first else (B, S, H)
-    assert chunk_size == 2 ** (chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
+    assert chunk_size == 2**(chunk_size.bit_length() - 1), "chunk_size must be a power of 2"
     assert chunk_size == block_S, "chunk_size must be equal to block_S"
 
     @T.prim_func
     def kernel(
-        G: T.Tensor(G_shape, dtype=input_dtype),
-        G_new: T.Tensor(G_shape, dtype=output_dtype),
+            G: T.Tensor(G_shape, dtype=input_dtype),
+            G_new: T.Tensor(G_shape, dtype=output_dtype),
     ):
         with T.Kernel(T.ceildiv(S, block_S), B * H, threads=threads) as (bs, bbh):
             bb, bh = bbh // H, bbh % H
             G_shared = T.alloc_shared((1, block_S), dtype=output_dtype, scope="shared")
             if head_first:
-                T.copy(G[bb, bh, bs * block_S : (bs + 1) * block_S], G_shared)
+                T.copy(G[bb, bh, bs * block_S:(bs + 1) * block_S], G_shared)
             else:
-                T.copy(G[bb, bs * block_S : (bs + 1) * block_S, bh], G_shared)
+                T.copy(G[bb, bs * block_S:(bs + 1) * block_S, bh], G_shared)
             if use_fragment:
                 G_fragment = T.alloc_fragment((1, block_S), dtype=output_dtype, scope="shared")
                 T.copy(G_shared, G_fragment)
                 T.cumsum(G_fragment, dim=1, reverse=reverse)
                 if head_first:
-                    T.copy(G_fragment, G_new[bb, bh, bs * block_S : (bs + 1) * block_S])
+                    T.copy(G_fragment, G_new[bb, bh, bs * block_S:(bs + 1) * block_S])
                 else:
-                    T.copy(G_fragment, G_new[bb, bs * block_S : (bs + 1) * block_S, bh])
+                    T.copy(G_fragment, G_new[bb, bs * block_S:(bs + 1) * block_S, bh])
             else:
                 T.cumsum(G_shared, dim=1, reverse=reverse)
                 if head_first:
-                    T.copy(G_shared, G_new[bb, bh, bs * block_S : (bs + 1) * block_S])
+                    T.copy(G_shared, G_new[bb, bh, bs * block_S:(bs + 1) * block_S])
                 else:
-                    T.copy(G_shared, G_new[bb, bs * block_S : (bs + 1) * block_S, bh])
+                    T.copy(G_shared, G_new[bb, bs * block_S:(bs + 1) * block_S, bh])
 
     return kernel
 

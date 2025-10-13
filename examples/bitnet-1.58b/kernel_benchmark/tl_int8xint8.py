@@ -6,8 +6,7 @@ from tvm import tl as TL
 import tvm.tl.language as T
 from bitblas.tl.utils import get_swizzle_layout
 from bitblas.tl.mma_macro_generator import (
-    TensorCoreIntrinEmitter,
-)
+    TensorCoreIntrinEmitter,)
 from bitblas.base import simplify_prim_func
 
 torch.manual_seed(0)
@@ -102,9 +101,9 @@ def tl_matmul(
 
     @T.prim_func
     def main(
-        A: T.Buffer(A_shape, in_dtype),
-        B: T.Buffer(B_shape, in_dtype),
-        C: T.Buffer((M, N), out_dtype),
+            A: T.Buffer(A_shape, in_dtype),
+            B: T.Buffer(B_shape, in_dtype),
+            C: T.Buffer((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
@@ -116,12 +115,10 @@ def tl_matmul(
 
             thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
 
-            T.annotate_layout(
-                {
-                    A_shared: make_swizzle_layout(A_shared),
-                    B_shared: make_swizzle_layout(B_shared),
-                }
-            )
+            T.annotate_layout({
+                A_shared: make_swizzle_layout(A_shared),
+                B_shared: make_swizzle_layout(B_shared),
+            })
 
             # Improve L2 Cache
             T.use_swizzle(panel_size=10)

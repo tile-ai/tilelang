@@ -11,7 +11,7 @@ def flash_split_ref(Q, Q_pe, KV, K_pe):
     block_N = 64
     seqlen_kv = KV.size(1)
 
-    scale = (1.0 / (dim + pe_dim)) ** 0.5 * 1.44269504  # log2(e)
+    scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     acc_s = torch.empty((batch, nheads, block_N), device="cuda", dtype=torch.float)
     acc_s_cast = torch.empty((batch, nheads, block_N), device="cuda", dtype=torch.float16)
     acc_o = torch.empty((batch, nheads, dim), device="cuda", dtype=torch.float)
@@ -40,8 +40,8 @@ def flash_split_ref(Q, Q_pe, KV, K_pe):
                 Q_,
                 KV_[
                     :,
-                    (seqlen_kv // num_split) * ks + i * block_N : (seqlen_kv // num_split) * ks
-                    + (i + 1) * block_N,
+                    (seqlen_kv // num_split) * ks + i * block_N:(seqlen_kv // num_split) * ks +
+                    (i + 1) * block_N,
                     :,
                     :,
                 ],
@@ -51,8 +51,8 @@ def flash_split_ref(Q, Q_pe, KV, K_pe):
                 Q_pe_,
                 K_pe_[
                     :,
-                    (seqlen_kv // num_split) * ks + i * block_N : (seqlen_kv // num_split) * ks
-                    + (i + 1) * block_N,
+                    (seqlen_kv // num_split) * ks + i * block_N:(seqlen_kv // num_split) * ks +
+                    (i + 1) * block_N,
                     :,
                     :,
                 ],
@@ -68,8 +68,8 @@ def flash_split_ref(Q, Q_pe, KV, K_pe):
                 acc_s_cast,
                 KV_[
                     :,
-                    (seqlen_kv // num_split) * ks + i * block_N : (seqlen_kv // num_split) * ks
-                    + (i + 1) * block_N,
+                    (seqlen_kv // num_split) * ks + i * block_N:(seqlen_kv // num_split) * ks +
+                    (i + 1) * block_N,
                     :,
                     :,
                 ],

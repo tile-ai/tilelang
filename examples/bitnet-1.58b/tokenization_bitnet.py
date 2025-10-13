@@ -38,10 +38,12 @@ VOCAB_FILES_NAMES = {"vocab_file": "tokenizer.model"}
 
 PRETRAINED_VOCAB_FILES_MAP = {
     "vocab_file": {
-        "hf-internal-testing/llama-tokenizer": "https://huggingface.co/hf-internal-testing/llama-tokenizer/resolve/main/tokenizer.model",
+        "hf-internal-testing/llama-tokenizer":
+            "https://huggingface.co/hf-internal-testing/llama-tokenizer/resolve/main/tokenizer.model",
     },
     "tokenizer_file": {
-        "hf-internal-testing/llama-tokenizer": "https://huggingface.co/hf-internal-testing/llama-tokenizer/resolve/main/tokenizer_config.json",
+        "hf-internal-testing/llama-tokenizer":
+            "https://huggingface.co/hf-internal-testing/llama-tokenizer/resolve/main/tokenizer_config.json",
     },
 }
 PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {
@@ -160,24 +162,16 @@ class BitnetTokenizer(PreTrainedTokenizer):
         self.sp_model_kwargs = {} if sp_model_kwargs is None else sp_model_kwargs
         bos_token = (
             AddedToken(bos_token, normalized=False, special=True)
-            if isinstance(bos_token, str)
-            else bos_token
-        )
+            if isinstance(bos_token, str) else bos_token)
         eos_token = (
             AddedToken(eos_token, normalized=False, special=True)
-            if isinstance(eos_token, str)
-            else eos_token
-        )
+            if isinstance(eos_token, str) else eos_token)
         unk_token = (
             AddedToken(unk_token, normalized=False, special=True)
-            if isinstance(unk_token, str)
-            else unk_token
-        )
+            if isinstance(unk_token, str) else unk_token)
         pad_token = (
             AddedToken(pad_token, normalized=False, special=True)
-            if isinstance(pad_token, str)
-            else pad_token
-        )
+            if isinstance(pad_token, str) else pad_token)
 
         if legacy is None:
             logger.warning_once(
@@ -185,8 +179,7 @@ class BitnetTokenizer(PreTrainedTokenizer):
                 " expected, and simply means that the `legacy` (previous) behavior will be used so nothing changes for you."
                 " If you want to use the new behaviour, set `legacy=False`. This should only be set if you understand what it"
                 " means, and thoroughly read the reason why this was added as explained in"
-                " https://github.com/huggingface/transformers/pull/24565"
-            )
+                " https://github.com/huggingface/transformers/pull/24565")
             legacy = True
 
         self.legacy = legacy
@@ -227,8 +220,7 @@ class BitnetTokenizer(PreTrainedTokenizer):
         with open(self.vocab_file, "rb") as f:
             sp_model = f.read()
             model_pb2 = import_protobuf(
-                f"The new behaviour of {self.__class__.__name__} (with `self.legacy = False`)"
-            )
+                f"The new behaviour of {self.__class__.__name__} (with `self.legacy = False`)")
             model = model_pb2.ModelProto.FromString(sp_model)
             normalizer_spec = model_pb2.NormalizerSpec()
             normalizer_spec.add_dummy_prefix = False
@@ -274,11 +266,8 @@ class BitnetTokenizer(PreTrainedTokenizer):
 
         tokens = super().tokenize(text, **kwargs)
 
-        if (
-            len(tokens) > 1
-            and tokens[0] == SPIECE_UNDERLINE
-            and tokens[1] in self.all_special_tokens
-        ):
+        if (len(tokens) > 1 and tokens[0] == SPIECE_UNDERLINE and
+                tokens[1] in self.all_special_tokens):
             tokens = tokens[1:]
         return tokens
 
@@ -300,7 +289,7 @@ class BitnetTokenizer(PreTrainedTokenizer):
         # 1. Encode string + prefix ex: "<unk> Hey"
         tokens = self.sp_model.encode(self.unk_token + text, out_type=str)
         # 2. Remove self.unk_token from ['<','unk','>', '▁Hey']
-        return tokens[self.unk_token_length :] if len(tokens) >= self.unk_token_length else tokens
+        return tokens[self.unk_token_length:] if len(tokens) >= self.unk_token_length else tokens
 
     def _convert_token_to_id(self, token):
         """Converts a token (str) in an id using the vocab."""
@@ -354,8 +343,7 @@ class BitnetTokenizer(PreTrainedTokenizer):
         )
 
         if os.path.abspath(self.vocab_file) != os.path.abspath(out_vocab_file) and os.path.isfile(
-            self.vocab_file
-        ):
+                self.vocab_file):
             copyfile(self.vocab_file, out_vocab_file)
         elif not os.path.isfile(self.vocab_file):
             with open(out_vocab_file, "wb") as fi:
@@ -398,26 +386,19 @@ class BitnetTokenizer(PreTrainedTokenizer):
         """
         if already_has_special_tokens:
             return super().get_special_tokens_mask(
-                token_ids_0=token_ids_0, token_ids_1=token_ids_1, already_has_special_tokens=True
-            )
+                token_ids_0=token_ids_0, token_ids_1=token_ids_1, already_has_special_tokens=True)
 
         bos_token_id = [1] if self.add_bos_token else []
         eos_token_id = [1] if self.add_eos_token else []
 
         if token_ids_1 is None:
             return bos_token_id + ([0] * len(token_ids_0)) + eos_token_id
-        return (
-            bos_token_id
-            + ([0] * len(token_ids_0))
-            + eos_token_id
-            + bos_token_id
-            + ([0] * len(token_ids_1))
-            + eos_token_id
-        )
+        return (bos_token_id + ([0] * len(token_ids_0)) + eos_token_id + bos_token_id +
+                ([0] * len(token_ids_1)) + eos_token_id)
 
-    def create_token_type_ids_from_sequences(
-        self, token_ids_0: list[int], token_ids_1: list[int] | None = None
-    ) -> list[int]:
+    def create_token_type_ids_from_sequences(self,
+                                             token_ids_0: list[int],
+                                             token_ids_1: list[int] | None = None) -> list[int]:
         """
         Creates a mask from the two sequences passed to be used in a sequence-pair classification task. An ALBERT
         sequence pair mask has the following format:
@@ -500,11 +481,9 @@ class BitnetTokenizer(PreTrainedTokenizer):
             "{% elif message['role'] == 'assistant' %}"
             "{{ ' '  + content.strip() + ' ' + eos_token }}"
             "{% endif %}"
-            "{% endfor %}"
-        )
-        template = template.replace(
-            "USE_DEFAULT_PROMPT", "true" if self.use_default_system_prompt else "false"
-        )
+            "{% endfor %}")
+        template = template.replace("USE_DEFAULT_PROMPT",
+                                    "true" if self.use_default_system_prompt else "false")
         default_message = DEFAULT_SYSTEM_PROMPT.replace("\n", "\\n").replace("'", "\\'")
         template = template.replace("DEFAULT_SYSTEM_MESSAGE", default_message)
 

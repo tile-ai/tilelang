@@ -118,8 +118,7 @@ class JITKernel:
             from tilelang.contrib.cc import get_cplus_compiler
 
             assert get_cplus_compiler() is not None, (
-                "Cython backend requires a C++ compiler, please install or use other backends."
-            )
+                "Cython backend requires a C++ compiler, please install or use other backends.")
 
         if from_database:
             return
@@ -204,9 +203,8 @@ class JITKernel:
         """
         return self.torch_function(*args, **kwds)
 
-    def _compile_and_create_adapter(
-        self, tilelang_func: PrimFunc, out_idx: list[int]
-    ) -> BaseKernelAdapter:
+    def _compile_and_create_adapter(self, tilelang_func: PrimFunc,
+                                    out_idx: list[int]) -> BaseKernelAdapter:
         """
         Compiles the given TileLang PrimFunc using TVM and creates a kernel adapter.
 
@@ -250,8 +248,7 @@ class JITKernel:
             assert tvm.runtime.enabled("llvm"), "DLPack backend requires LLVM runtime."
             assert artifact.rt_mod is not None, "DLPack backend requires a runtime module."
             adapter = TorchDLPackKernelAdapter(
-                artifact.rt_mod, params=artifact.params, result_idx=out_idx
-            )
+                artifact.rt_mod, params=artifact.params, result_idx=out_idx)
         elif execution_backend == "ctypes":
             adapter = CtypesKernelAdapter(
                 params=artifact.params,
@@ -385,9 +382,8 @@ class JITKernel:
         """
         return cls(func=tilelang_func, **kwargs)
 
-    def get_profiler(
-        self, tensor_supply_type: TensorSupplyType = TensorSupplyType.Auto
-    ) -> Profiler:
+    def get_profiler(self,
+                     tensor_supply_type: TensorSupplyType = TensorSupplyType.Auto) -> Profiler:
         """
         Creates a profiler to benchmark the compiled runtime module.
 
@@ -401,9 +397,8 @@ class JITKernel:
         Profiler
             A Profiler instance for benchmarking the runtime module.
         """
-        return Profiler(self.params, self.out_idx, tensor_supply_type).with_default_adapter(
-            self.adapter
-        )
+        return Profiler(self.params, self.out_idx,
+                        tensor_supply_type).with_default_adapter(self.adapter)
 
     def get_kernel_source(self) -> str:
         """
@@ -427,9 +422,8 @@ class JITKernel:
     def run_once(self, func: Callable | None = None) -> None:
         return self.get_profiler().run_once(func)
 
-    def update_tuner_result(
-        self, latency: float, config: dict[str, Any], ref_latency: float
-    ) -> JITKernel:
+    def update_tuner_result(self, latency: float, config: dict[str, Any],
+                            ref_latency: float) -> JITKernel:
         """
         Updates the tuning results for this kernel.
 

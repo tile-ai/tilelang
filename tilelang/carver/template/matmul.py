@@ -66,9 +66,8 @@ class MatmulTemplate(BaseTemplate):
         M, N, K = self.M, self.N, self.K
 
         # Ensure M, N, K are valid positive integers
-        assert isinstance(M, int) and isinstance(N, int) and isinstance(K, int), (
-            "Only Support Integer M, N, K"
-        )
+        assert isinstance(M, int) and isinstance(N, int) and isinstance(
+            K, int), ("Only Support Integer M, N, K")
         assert M > 0 and N > 0 and K > 0, "M, N, K should be positive"
 
         # Load configuration parameters

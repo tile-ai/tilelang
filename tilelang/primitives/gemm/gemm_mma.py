@@ -52,18 +52,14 @@ class GemmPrimitiveMMA(GemmBaseParams):
 
             if a_is_fragment:
                 # Annotate layout for A_local if it is a fragment.
-                T.annotate_layout(
-                    {
-                        A_local: mma_emitter.make_mma_load_layout(A_local, "A"),
-                    }
-                )
+                T.annotate_layout({
+                    A_local: mma_emitter.make_mma_load_layout(A_local, "A"),
+                })
             if c_is_fragment:
                 # Annotate layout for C_local if it is a fragment.
-                T.annotate_layout(
-                    {
-                        C_local: mma_emitter.make_mma_store_layout(C_local),
-                    }
-                )
+                T.annotate_layout({
+                    C_local: mma_emitter.make_mma_store_layout(C_local),
+                })
 
             # Make default swizzle layout for shared memory
             # T.annotate_layout({
@@ -148,11 +144,9 @@ class GemmPrimitiveMMA(GemmBaseParams):
 
             if c_is_fragment:
                 # Annotate layout for C_local if it is a fragment.
-                T.annotate_layout(
-                    {
-                        C_local: mma_emitter.make_mma_store_layout(C_local),
-                    }
-                )
+                T.annotate_layout({
+                    C_local: mma_emitter.make_mma_store_layout(C_local),
+                })
 
             for ki in T.serial(0, (block_K // micro_size_k)):
                 # Load A into fragment

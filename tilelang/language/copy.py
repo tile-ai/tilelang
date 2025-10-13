@@ -53,12 +53,8 @@ def copy(
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
     # Combine the nested if statements into a single if statement as suggested by SIM102
-    if (
-        src_extent is None
-        and dst_extent is None
-        and isinstance(src, tir.BufferLoad)
-        and isinstance(dst, tir.BufferLoad)
-    ):
+    if (src_extent is None and dst_extent is None and isinstance(src, tir.BufferLoad) and
+            isinstance(dst, tir.BufferLoad)):
         # check if the case is like this:
         # copy(buffer_a[i], buffer_b[i]) where both are BufferLoad nodes
         # In this case, lower it to a simple BufferStore: buffer_b[i] = buffer_a[i]
@@ -93,9 +89,8 @@ def copy(
         eviction_policy = 0
     else:
         eviction_policy = {"evict_normal": 0, "evict_first": 1, "evict_last": 2}[eviction_policy]
-    return tir.call_intrin(
-        "handle", tir.op.Op.get("tl.copy"), src, dst, coalesced_width, disable_tma, eviction_policy
-    )
+    return tir.call_intrin("handle", tir.op.Op.get("tl.copy"), src, dst, coalesced_width,
+                           disable_tma, eviction_policy)
 
 
 def c2d_im2col(

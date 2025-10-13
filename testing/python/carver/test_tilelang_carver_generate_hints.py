@@ -31,8 +31,7 @@ def run_general_matmul_emit_configs(M, N, K, topk: int = 20):
     tensorized_func, tags = carver.utils.get_tensorized_func_and_tags(func, arch.target)
     print(tags)
     policy = carver.TensorCorePolicy.from_prim_func(
-        func=tensorized_func, arch=arch, tags=tags, name="matmul_0"
-    )
+        func=tensorized_func, arch=arch, tags=tags, name="matmul_0")
 
     hints = policy.emit_config(topk=topk)
 

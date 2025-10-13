@@ -91,6 +91,7 @@ def is_tensorcore_supported_precision(in_dtype: str, accum_dtype: str, arch: Til
 
 
 class TensorInstruction:
+
     def __init__(
         self,
         name: str,
@@ -102,6 +103,7 @@ class TensorInstruction:
 
 
 class CUDA(TileDevice):
+
     def __init__(self, target: Target | str):
         if isinstance(target, str):
             target = tvm.target.Target(target)

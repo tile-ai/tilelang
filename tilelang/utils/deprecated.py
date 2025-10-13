@@ -3,8 +3,8 @@ def deprecated_warning(method_name: str, new_method_name: str, phaseout_version:
     import warnings  # pylint: disable=import-outside-toplevel, import-error
 
     warnings.warn(
-        f"{method_name} is deprecated, use {new_method_name} instead"
-        + (f" and will be removed in {phaseout_version}" if phaseout_version else ""),
+        f"{method_name} is deprecated, use {new_method_name} instead" +
+        (f" and will be removed in {phaseout_version}" if phaseout_version else ""),
         DeprecationWarning,
         stacklevel=2,
     )
@@ -29,6 +29,7 @@ def deprecated(
     import functools  # pylint: disable=import-outside-toplevel
 
     def _deprecate(func):
+
         @functools.wraps(func)
         def _wrapper(*args, **kwargs):
             deprecated_warning(method_name, new_method_name, phaseout_version)

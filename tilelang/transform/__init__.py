@@ -99,7 +99,8 @@ def LowerHopperIntrin():
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.LowerHopperIntrin() if hasattr(_ffi_api, "LowerHopperIntrin") else lambda f: f  # type: ignore
+    return _ffi_api.LowerHopperIntrin() if hasattr(
+        _ffi_api, "LowerHopperIntrin") else lambda f: f  # type: ignore
 
 
 def WarpSpecializedPipeline():
@@ -377,7 +378,8 @@ def MergeSharedMemoryAllocations(enable_aggressive_merge: bool = False, align_by
     fpass : tvm.transform.Pass
         The result pass
     """
-    return _ffi_api.MergeSharedMemoryAllocations(enable_aggressive_merge, align_bytes)  # type: ignore
+    return _ffi_api.MergeSharedMemoryAllocations(enable_aggressive_merge,
+                                                 align_bytes)  # type: ignore
 
 
 def LowerL2Persistent():

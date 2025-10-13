@@ -12,6 +12,7 @@ from tilelang.engine.param import KernelParam
 
 
 class MetalKernelAdapter(BaseKernelAdapter):
+
     def __init__(
         self,
         params: list[KernelParam],

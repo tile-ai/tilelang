@@ -81,20 +81,12 @@ class ConvTemplate(BaseTemplate):
             self.D,
             self.P,
         )
-        assert (
-            isinstance(N, int)
-            and isinstance(C, int)
-            and isinstance(H, int)
-            and isinstance(W, int)
-            and isinstance(F, int)
-            and isinstance(K, int)
-            and isinstance(S, int)
-            and isinstance(D, int)
-            and isinstance(P, int)
-        ), "Only Support Integer Params"
-        assert (
-            N > 0 and C > 0 and H > 0 and W > 0 and F > 0 and K > 0 and S > 0 and D > 0 and P > 0
-        ), "Params should be positive"
+        assert (isinstance(N, int) and isinstance(C, int) and isinstance(H, int) and
+                isinstance(W, int) and isinstance(F, int) and isinstance(K, int) and
+                isinstance(S, int) and isinstance(D, int) and
+                isinstance(P, int)), "Only Support Integer Params"
+        assert (N > 0 and C > 0 and H > 0 and W > 0 and F > 0 and K > 0 and S > 0 and D > 0 and
+                P > 0), "Params should be positive"
 
         # Load configuration parameters
         in_dtype, out_dtype, accum_dtype = self.in_dtype, self.out_dtype, self.accum_dtype

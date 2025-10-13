@@ -408,8 +408,7 @@ def initialize_descriptor(
         raise ValueError("Descriptor must be a 1D buffer of size 1.")
 
     descriptor = (
-        descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(descriptor, [0])
-    )
+        descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(descriptor, [0]))
 
     return evaluate(
         tir.call_intrin(
@@ -420,8 +419,7 @@ def initialize_descriptor(
             layout_type_,
             int(leading_byte_offset),
             int(stride_byte_offset),
-        )
-    )
+        ))
 
 
 def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimExpr:
@@ -442,14 +440,11 @@ def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimEx
         raise ValueError("Descriptor must be a 1D buffer of size 1.")
 
     descriptor = (
-        descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(descriptor, [0])
-    )
+        descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(descriptor, [0]))
 
     return evaluate(
-        tir.call_intrin(
-            "handle", tir.op.Op.get("tl.increase_descriptor_offset"), descriptor, offset
-        )
-    )
+        tir.call_intrin("handle", tir.op.Op.get("tl.increase_descriptor_offset"), descriptor,
+                        offset))
 
 
 def loop_break():

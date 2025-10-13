@@ -94,12 +94,15 @@ def get_annotated_mod(
 
     # Define dispatch dictionary for different model types
     dispatch = {
-        "device": lambda m: tir.transform.Filter(_is_device_call)(m),
-        "host": lambda m: tir.transform.Filter(_is_host_call)(m),
-        "all": lambda m: (
-            tir.transform.Filter(_is_device_call)(m),
-            tir.transform.Filter(_is_host_call)(m),
-        ),
+        "device":
+            lambda m: tir.transform.Filter(_is_device_call)(m),
+        "host":
+            lambda m: tir.transform.Filter(_is_host_call)(m),
+        "all":
+            lambda m: (
+                tir.transform.Filter(_is_device_call)(m),
+                tir.transform.Filter(_is_host_call)(m),
+            ),
     }
 
     return dispatch[model_type](mod)
@@ -162,7 +165,7 @@ def pythonic_expr(expr: tvm.tir.PrimExpr, dtype_map: dict[str, str] | None = Non
                 s = f"({dtype_map[node.dtype]}){value_str}"
             p = PRECEDENCE.get(type(node), ATOMIC_PRECEDENCE)
         elif isinstance(
-            node,
+                node,
             (
                 tvm.tir.Mul,
                 tvm.tir.FloorDiv,

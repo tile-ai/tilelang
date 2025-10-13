@@ -29,10 +29,10 @@ def chunk_retention_fwd_kernel(
 
     @T.prim_func
     def chunk_retention_fwd(
-        Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-        K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-        V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
-        O: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore
+            Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+            K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+            V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
+            O: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore
     ):
         with T.Kernel(NV, NK, B * H) as (i_v, i_k, i_bh):
             i_b = i_bh // H
@@ -50,32 +50,26 @@ def chunk_retention_fwd_kernel(
             o = T.alloc_fragment([chunk_size, BV], accum_dtype)
             T.clear(h)
 
-            T.annotate_layout(
-                {
-                    q: tl.layout.make_swizzled_layout(q),
-                    k: tl.layout.make_swizzled_layout(k),
-                    v: tl.layout.make_swizzled_layout(v),
-                    h_shared: tl.layout.make_swizzled_layout(h_shared),
-                    s_shared: tl.layout.make_swizzled_layout(s_shared),
-                }
-            )
+            T.annotate_layout({
+                q: tl.layout.make_swizzled_layout(q),
+                k: tl.layout.make_swizzled_layout(k),
+                v: tl.layout.make_swizzled_layout(v),
+                h_shared: tl.layout.make_swizzled_layout(h_shared),
+                s_shared: tl.layout.make_swizzled_layout(s_shared),
+            })
             T.use_swizzle(10)
 
             for i in T.Pipelined(0, NT):
                 for row, col in T.Parallel(chunk_size, BK):
                     q[row, col] = Q[i_b, i * chunk_size + row, i_h, i_k * BK + col] * scale
-                T.copy(
-                    K[i_b, i * chunk_size : (i + 1) * chunk_size, i_h, i_k * BK : (i_k + 1) * BK], k
-                )
-                T.copy(
-                    V[i_b, i * chunk_size : (i + 1) * chunk_size, i_h, i_v * BV : (i_v + 1) * BV], v
-                )
+                T.copy(K[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_k * BK:(i_k + 1) * BK], k)
+                T.copy(V[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_v * BV:(i_v + 1) * BV], v)
 
                 T.gemm(q, k, s, clear_accum=True, transpose_B=True)
                 for row, col in T.Parallel(chunk_size, chunk_size):
-                    s_shared[row, col] = T.if_then_else(
-                        row >= col, s[row, col] * T.exp2((row - col) * log_decay), 0
-                    )
+                    s_shared[row,
+                             col] = T.if_then_else(row >= col, s[row, col] * T.exp2(
+                                 (row - col) * log_decay), 0)
 
                 T.copy(h, h_shared)
                 T.gemm(q, h_shared, o, clear_accum=True)
@@ -92,9 +86,9 @@ def chunk_retention_fwd_kernel(
                     O[
                         i_k,
                         i_b,
-                        i * chunk_size : (i + 1) * chunk_size,
+                        i * chunk_size:(i + 1) * chunk_size,
                         i_h,
-                        i_v * BV : (i_v + 1) * BV,
+                        i_v * BV:(i_v + 1) * BV,
                     ],
                 )
                 T.gemm(k, v, h, transpose_A=True)

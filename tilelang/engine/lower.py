@@ -24,11 +24,8 @@ def is_cpu_device_backend(target: Target):
 
 def has_device_kernel_launch(attrs) -> bool:
     """Check if the attributes indicate a device kernel launch."""
-    return bool(
-        attrs
-        and "calling_conv" in attrs
-        and attrs["calling_conv"] == CallingConv.DEVICE_KERNEL_LAUNCH
-    )
+    return bool(attrs and "calling_conv" in attrs and
+                attrs["calling_conv"] == CallingConv.DEVICE_KERNEL_LAUNCH)
 
 
 def is_device_call_c_device(func: tir.PrimFunc):
@@ -75,8 +72,7 @@ def tilelang_callback_cuda_compile(code, target):
 
     # printing out number of registers
     debug_option = (
-        "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage"
-    )
+        "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage")
     ptx = nvcc.compile_cuda(
         code,
         format,
@@ -176,12 +172,10 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
     device_mod = tir.transform.Simplify()(device_mod)
     if target.kind.name == "cuda":
         device_mod = tvm.ffi.get_global_func("target.build.tilelang_cuda_without_compile")(
-            device_mod, target
-        )
+            device_mod, target)
     elif target.kind.name == "hip":
         device_mod = tvm.ffi.get_global_func("target.build.tilelang_hip_without_compile")(
-            device_mod, target
-        )
+            device_mod, target)
     elif target.kind.name == "c":
         device_mod = tvm.ffi.get_global_func("target.build.tilelang_cpp")(device_mod, target)
     elif target.kind.name == "llvm":
@@ -240,15 +234,12 @@ def lower(
 
     codegen_mod = (
         device_codegen(device_mod, target)
-        if enable_device_compile
-        else device_codegen_without_compile(device_mod, target)
-    )
+        if enable_device_compile else device_codegen_without_compile(device_mod, target))
 
     if enable_host_codegen:
         host_mod = host_codegen(host_mod, target_host)
         host_mod.import_module(codegen_mod)
         return CompiledArtifact(
-            host_mod, device_mod, params, codegen_mod.get_source(), rt_mod=host_mod
-        )
+            host_mod, device_mod, params, codegen_mod.get_source(), rt_mod=host_mod)
 
     return CompiledArtifact(host_mod, device_mod, params, codegen_mod.get_source())

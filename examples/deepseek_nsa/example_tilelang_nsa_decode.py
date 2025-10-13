@@ -19,17 +19,17 @@ tilelang.testing.set_random_seed(42)
     },
 )
 def native_sparse_attention(
-    batch,
-    heads,
-    seq_len,  # Length of K/V sequences (context window size)
-    dim,  # Embedding dimension per head
-    scale=None,
-    block_size=64,  # Tile size for attention computation
-    groups=1,  # Grouped query attention (GQA) groups
-    selected_blocks=16,  # Number of blocks to select per attention head
+        batch,
+        heads,
+        seq_len,  # Length of K/V sequences (context window size)
+        dim,  # Embedding dimension per head
+        scale=None,
+        block_size=64,  # Tile size for attention computation
+        groups=1,  # Grouped query attention (GQA) groups
+        selected_blocks=16,  # Number of blocks to select per attention head
 ):
     if scale is None:
-        scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
+        scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     head_kv = heads // groups
     # Modified shapes for inference (q has seq_len=1)a
     q_shape = [batch, 1, heads, dim]  # Changed seq_len to 1
@@ -54,11 +54,12 @@ def native_sparse_attention(
 
     @T.prim_func
     def native_sparse_attention(
-        Q: T.Tensor(q_shape, dtype),  # [batch, 1, heads, dim]
-        K: T.Tensor(kv_shape, dtype),  # [batch, seq_len, head_kv, dim]
-        V: T.Tensor(kv_shape, dtype),  # Same shape as K
-        BlockIndices: T.Tensor(block_indices_shape, block_indices_dtype),  # Selected block indices
-        Output: T.Tensor(q_shape, dtype),  # Output attention tensor
+            Q: T.Tensor(q_shape, dtype),  # [batch, 1, heads, dim]
+            K: T.Tensor(kv_shape, dtype),  # [batch, seq_len, head_kv, dim]
+            V: T.Tensor(kv_shape, dtype),  # Same shape as K
+            BlockIndices: T.Tensor(block_indices_shape,
+                                   block_indices_dtype),  # Selected block indices
+            Output: T.Tensor(q_shape, dtype),  # Output attention tensor
     ):
         with T.Kernel(1, NV, batch * head_kv, threads=threads) as (bx, by, bz):
             # Shared memory allocations for tile storage
@@ -82,7 +83,7 @@ def native_sparse_attention(
 
             NS = S
             # Copy Q for the single position
-            T.copy(Q[i_b, 0, i_h * G : (i_h + 1) * G, :], Q_shared)  # Changed i_t to 0
+            T.copy(Q[i_b, 0, i_h * G:(i_h + 1) * G, :], Q_shared)  # Changed i_t to 0
 
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
@@ -93,13 +94,16 @@ def native_sparse_attention(
                 i_s = BlockIndices[i_b, 0, i_h, i] * BS  # Get block offset
                 if i_s >= 0:  # Skip invalid/padding blocks
                     # Load current key block to shared memory
-                    T.copy(K[i_b, i_s : i_s + BS, i_h, :], K_shared)
+                    T.copy(K[i_b, i_s:i_s + BS, i_h, :], K_shared)
 
                     # Compute QK^T attention scores
                     T.clear(acc_s)
                     T.gemm(
-                        Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow
-                    )
+                        Q_shared,
+                        K_shared,
+                        acc_s,
+                        transpose_B=True,
+                        policy=T.GemmWarpPolicy.FullRow)
 
                     # Online softmax with numerical stability
                     # 1. Compute max for scaling
@@ -119,16 +123,15 @@ def native_sparse_attention(
                     T.copy(acc_s, acc_s_cast)
 
                     # Accumulate attention-weighted values
-                    T.copy(V[i_b, i_s : i_s + BS, i_h, i_v * BV : (i_v + 1) * BV], V_shared)
+                    T.copy(V[i_b, i_s:i_s + BS, i_h, i_v * BV:(i_v + 1) * BV], V_shared)
                     T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
             # Final normalization and output
             for i, j in T.Parallel(G, BV):
                 acc_o[i, j] /= logsum[i]  # Normalize by logsum
             T.copy(acc_o, O_shared)
-            T.copy(
-                O_shared, Output[i_b, 0, i_h * G : (i_h + 1) * G, i_v * BV : (i_v + 1) * BV]
-            )  # Changed i_t to 0
+            T.copy(O_shared, Output[i_b, 0, i_h * G:(i_h + 1) * G,
+                                    i_v * BV:(i_v + 1) * BV])  # Changed i_t to 0
 
     return native_sparse_attention
 
@@ -159,7 +162,7 @@ def main():
         for t in range(SEQ_LEN_Q):
             for h in range(H):
                 i_i = torch.randperm(max(1, (t // block_size)))[:S]
-                block_indices[b, t, h, : len(i_i)] = i_i
+                block_indices[b, t, h, :len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
     block_counts = torch.randint(1, S + 1, (B, SEQ_LEN_Q, H), device="cuda")
 

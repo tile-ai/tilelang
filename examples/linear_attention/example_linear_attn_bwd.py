@@ -9,7 +9,10 @@ from fla.ops.linear_attn import fused_chunk_linear_attn  # We compare with FLA
 
 @tl.jit(
     out_idx=[4, 5, 6],
-    pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True},
+    pass_configs={
+        "tl.disable_tma_lower": True,
+        "tl.disable_warp_specialized": True
+    },
 )
 def chunk_linear_attn_bwd_kernel(
     B,
@@ -33,13 +36,13 @@ def chunk_linear_attn_bwd_kernel(
 
     @T.prim_func
     def chunk_linear_attn_bwd(
-        Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-        K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-        V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
-        dO: T.Tensor([B, S, H, DV], dtype),  # type: ignore
-        dQ: T.Tensor([NV, B, S, H, DK], dtype),  # type: ignore
-        dK: T.Tensor([NV, B, S, H, DK], dtype),  # type: ignore
-        dV: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore
+            Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+            K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+            V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
+            dO: T.Tensor([B, S, H, DV], dtype),  # type: ignore
+            dQ: T.Tensor([NV, B, S, H, DK], dtype),  # type: ignore
+            dK: T.Tensor([NV, B, S, H, DK], dtype),  # type: ignore
+            dV: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore
     ):
         with T.Kernel(NV, NK, B * H) as (i_v, i_k, i_bh):
             i_b = i_bh // H
@@ -61,29 +64,23 @@ def chunk_linear_attn_bwd_kernel(
             T.clear(h)
             T.clear(dh)
 
-            T.annotate_layout(
-                {
-                    ds_shared: tl.layout.make_swizzled_layout(ds_shared),
-                    q: tl.layout.make_swizzled_layout(q),
-                    k: tl.layout.make_swizzled_layout(k),
-                    v: tl.layout.make_swizzled_layout(v),
-                    do: tl.layout.make_swizzled_layout(do),
-                    h_shared: tl.layout.make_swizzled_layout(h_shared),
-                    dh_shared: tl.layout.make_swizzled_layout(dh_shared),
-                }
-            )
+            T.annotate_layout({
+                ds_shared: tl.layout.make_swizzled_layout(ds_shared),
+                q: tl.layout.make_swizzled_layout(q),
+                k: tl.layout.make_swizzled_layout(k),
+                v: tl.layout.make_swizzled_layout(v),
+                do: tl.layout.make_swizzled_layout(do),
+                h_shared: tl.layout.make_swizzled_layout(h_shared),
+                dh_shared: tl.layout.make_swizzled_layout(dh_shared),
+            })
             T.use_swizzle(10)
 
             # Calculate dQ
             for i in T.Pipelined(0, NT, num_stages=1):
+                T.copy(K[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_k * BK:(i_k + 1) * BK], k)
+                T.copy(V[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_v * BV:(i_v + 1) * BV], v)
                 T.copy(
-                    K[i_b, i * chunk_size : (i + 1) * chunk_size, i_h, i_k * BK : (i_k + 1) * BK], k
-                )
-                T.copy(
-                    V[i_b, i * chunk_size : (i + 1) * chunk_size, i_h, i_v * BV : (i_v + 1) * BV], v
-                )
-                T.copy(
-                    dO[i_b, i * chunk_size : (i + 1) * chunk_size, i_h, i_v * BV : (i_v + 1) * BV],
+                    dO[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_v * BV:(i_v + 1) * BV],
                     do,
                 )
 
@@ -102,9 +99,9 @@ def chunk_linear_attn_bwd_kernel(
                     dQ[
                         i_v,
                         i_b,
-                        i * chunk_size : (i + 1) * chunk_size,
+                        i * chunk_size:(i + 1) * chunk_size,
                         i_h,
-                        i_k * BK : (i_k + 1) * BK,
+                        i_k * BK:(i_k + 1) * BK,
                     ],
                 )
 
@@ -116,27 +113,27 @@ def chunk_linear_attn_bwd_kernel(
                 T.copy(
                     K[
                         i_b,
-                        start * chunk_size : (start + 1) * chunk_size,
+                        start * chunk_size:(start + 1) * chunk_size,
                         i_h,
-                        i_k * BK : (i_k + 1) * BK,
+                        i_k * BK:(i_k + 1) * BK,
                     ],
                     k,
                 )
                 T.copy(
                     V[
                         i_b,
-                        start * chunk_size : (start + 1) * chunk_size,
+                        start * chunk_size:(start + 1) * chunk_size,
                         i_h,
-                        i_v * BV : (i_v + 1) * BV,
+                        i_v * BV:(i_v + 1) * BV,
                     ],
                     v,
                 )
                 T.copy(
                     dO[
                         i_b,
-                        start * chunk_size : (start + 1) * chunk_size,
+                        start * chunk_size:(start + 1) * chunk_size,
                         i_h,
-                        i_v * BV : (i_v + 1) * BV,
+                        i_v * BV:(i_v + 1) * BV,
                     ],
                     do,
                 )
@@ -166,9 +163,9 @@ def chunk_linear_attn_bwd_kernel(
                     dK[
                         i_v,
                         i_b,
-                        start * chunk_size : (start + 1) * chunk_size,
+                        start * chunk_size:(start + 1) * chunk_size,
                         i_h,
-                        i_k * BK : (i_k + 1) * BK,
+                        i_k * BK:(i_k + 1) * BK,
                     ],
                 )
                 T.copy(
@@ -176,9 +173,9 @@ def chunk_linear_attn_bwd_kernel(
                     dV[
                         i_k,
                         i_b,
-                        start * chunk_size : (start + 1) * chunk_size,
+                        start * chunk_size:(start + 1) * chunk_size,
                         i_h,
-                        i_v * BV : (i_v + 1) * BV,
+                        i_v * BV:(i_v + 1) * BV,
                     ],
                 )
 

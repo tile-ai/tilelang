@@ -176,6 +176,7 @@ KERNEL_LAUNCH_FUNC_PY = """
 
 
 class BaseWrapper(ABC):
+
     @abstractmethod
     def wrap(self, *args, **kwargs):
         raise NotImplementedError
@@ -252,18 +253,15 @@ class TLCUDASourceWrapper:
         for param in self.prim_func.params:
             if param in self.prim_func.buffer_map:
                 buffer = self.prim_func.buffer_map[param]
-                function_args.append(
-                    {
-                        "name": buffer.data.name,
-                        "type": self._TYPE_MAP[buffer.dtype] + "* __restrict__",
-                    }
-                )
+                function_args.append({
+                    "name": buffer.data.name,
+                    "type": self._TYPE_MAP[buffer.dtype] + "* __restrict__",
+                })
             elif isinstance(param, tvm.tir.Var):
                 function_args.append({"name": param.name, "type": self._TYPE_MAP[param.dtype]})
             else:
                 raise ValueError(
-                    f"Parameter {param} is not in the buffer map of the primary function."
-                )
+                    f"Parameter {param} is not in the buffer map of the primary function.")
         # Add dynamic symbols as integer arguments
         for dyn_sym in dynamic_symbolic_set:
             if dyn_sym not in [arg["name"] for arg in function_args]:
@@ -344,9 +342,8 @@ class TLCUDASourceWrapper:
             kernel_launch_code += init_l2_persistent_map
 
             if self.use_cooperative_groups[function_name]:
-                args_list = func_call_args(
-                    declaration, function_args, function_params, desc_name_map, desc_name_var_map
-                )
+                args_list = func_call_args(declaration, function_args, function_params,
+                                           desc_name_map, desc_name_var_map)
                 assert len(function_params) == len(args_list), (
                     f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
                 )
@@ -355,12 +352,10 @@ class TLCUDASourceWrapper:
                 kernel_launch_code += call_args
                 # Using cudaLaunchCooperativeKernel to launch the kernel
                 kernel_launch_code += "\tTILELANG_CHECK(cudaLaunchCooperativeKernel((void*){}, {}, {}, {}, {}, stream));\n".format(
-                    function_name, grid_str, block_str, function_name + "_args", smem_str
-                )
+                    function_name, grid_str, block_str, function_name + "_args", smem_str)
             else:
-                args_list = func_call_args(
-                    declaration, function_args, function_params, desc_name_map, desc_name_var_map
-                )
+                args_list = func_call_args(declaration, function_args, function_params,
+                                           desc_name_map, desc_name_var_map)
                 assert len(function_params) == len(args_list), (
                     f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
                 )
@@ -370,9 +365,8 @@ class TLCUDASourceWrapper:
             if has_l2_persistent_map:
                 kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE
 
-        init_tma_descriptor_args = self.generate_tma_descriptor_args(
-            desc_name_map, desc_name_var_map
-        )
+        init_tma_descriptor_args = self.generate_tma_descriptor_args(desc_name_map,
+                                                                     desc_name_var_map)
         kernel_launch_code = init_tma_descriptor_args + kernel_launch_code
 
         # Wrap the kernel dispatch logic in an external C function
@@ -383,9 +377,8 @@ class TLCUDASourceWrapper:
         if function_name not in self.l2_persistent_map:
             return ""
         init_l2_persistent_map = ""
-        for buffer_name, (hit_ratio, size_in_bytes) in self.l2_persistent_map[
-            function_name
-        ].items():
+        for buffer_name, (hit_ratio,
+                          size_in_bytes) in self.l2_persistent_map[function_name].items():
             # get persisting_l2_cache_max_size
             from tilelang.carver.arch.driver import get_persisting_l2_cache_max_size
 
@@ -396,32 +389,27 @@ class TLCUDASourceWrapper:
                 # as size_in_bytes maybe a symbolic expression
                 num_bytes = persisting_l2_cache_max_size
             init_l2_persistent_map += L2_PERSISTENT_MAP_INIT_FUNC.format(
-                buffer_name, float(hit_ratio), self._pythonic_expr(num_bytes)
-            )
+                buffer_name, float(hit_ratio), self._pythonic_expr(num_bytes))
 
         return init_l2_persistent_map
 
-    def generate_tma_descriptor_args(
-        self, desc_name_map: dict[str, str], desc_name_var_map: dict[str, tvm.tir.Var]
-    ) -> str:
+    def generate_tma_descriptor_args(self, desc_name_map: dict[str, str],
+                                     desc_name_var_map: dict[str, tvm.tir.Var]) -> str:
         tma_descripter_init = ""
         if self.tma_descriptor_args is None:
             return tma_descripter_init
         for handle_name, _ in desc_name_map.items():
             assert handle_name in desc_name_var_map, (
-                f"Handle name {handle_name} not found in desc_name_var_map"
-            )
+                f"Handle name {handle_name} not found in desc_name_var_map")
             desc_var = desc_name_var_map[handle_name]
 
             assert desc_var in self.tma_descriptor_args, (
-                f"TMA descriptor {desc_var} not found in {self.tma_descriptor_args}"
-            )
+                f"TMA descriptor {desc_var} not found in {self.tma_descriptor_args}")
             args = self.tma_descriptor_args[desc_var]
             # Skip __tvm_tensormap_create_tiled
             if len(args) < 3:
                 raise ValueError(
-                    f"TMA descriptor args too short: {len(args)} elements, expected at least 3"
-                )
+                    f"TMA descriptor args too short: {len(args)} elements, expected at least 3")
             _, dtype, tensor_rank, globalAddress, *remaining_args = args[1:]
             dtype = self._pythonic_expr(dtype)
             tensor_rank = int(self._pythonic_expr(tensor_rank))
@@ -433,16 +421,14 @@ class TLCUDASourceWrapper:
             # Calculate required length for remaining_args
             expected_args_len = 4 * tensor_rank + 4  # 4 groups of tensor_rank size + 4 parameters
             if len(remaining_args) < expected_args_len:
-                raise ValueError(
-                    f"Insufficient remaining args: got {len(remaining_args)}, "
-                    f"expected {expected_args_len} for tensor_rank {tensor_rank}"
-                )
+                raise ValueError(f"Insufficient remaining args: got {len(remaining_args)}, "
+                                 f"expected {expected_args_len} for tensor_rank {tensor_rank}")
 
             # Extract dimensions and strides using list slicing
             global_dim = remaining_args[:tensor_rank]
-            global_stride = remaining_args[tensor_rank : 2 * tensor_rank]
-            box_dim = remaining_args[2 * tensor_rank : 3 * tensor_rank]
-            element_strides = remaining_args[3 * tensor_rank : 4 * tensor_rank]
+            global_stride = remaining_args[tensor_rank:2 * tensor_rank]
+            box_dim = remaining_args[2 * tensor_rank:3 * tensor_rank]
+            element_strides = remaining_args[3 * tensor_rank:4 * tensor_rank]
 
             global_dim = [self._pythonic_expr(i) for i in global_dim]
             global_stride = [self._pythonic_expr(i) for i in global_stride]
@@ -451,9 +437,8 @@ class TLCUDASourceWrapper:
 
             # Extract remaining parameters
             try:
-                interleave, swizzle, l2Promotion, oobFill = remaining_args[
-                    4 * tensor_rank : 4 * tensor_rank + 4
-                ]
+                interleave, swizzle, l2Promotion, oobFill = remaining_args[4 * tensor_rank:4 *
+                                                                           tensor_rank + 4]
                 interleave = self._pythonic_expr(interleave)
                 swizzle = self._pythonic_expr(swizzle)
                 l2Promotion = self._pythonic_expr(l2Promotion)
@@ -485,9 +470,8 @@ class TLCUDASourceWrapper:
                 device_mod, host_mod = get_annotated_mod(self.mod, self.target)
             self.device_mod = device_mod
             self.host_mod = host_mod
-        assert len(self.device_mod.functions) >= 1, (
-            "Device module should have at least one function."
-        )
+        assert len(
+            self.device_mod.functions) >= 1, ("Device module should have at least one function.")
         assert len(self.host_mod.functions) == 1, "Only support one function in host module."
 
         block_info_map = {}
@@ -576,8 +560,7 @@ class TLCUDASourceWrapper:
             if dynamic_smem_buf is not None:
                 # Format the cudaFuncSetAttribute call for dynamic shared memory
                 call_str += PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY.format(
-                    function_name, dynamic_smem_buf
-                )
+                    function_name, dynamic_smem_buf)
         # Format the initialization function using the call_str
         init_funcs = PREDEF_INIT_FUNC.format(call_str)
         return init_funcs
@@ -597,8 +580,7 @@ class TLCUDASourceWrapper:
             if (function_name not in self.block_info) or (function_name not in self.grid_info):
                 continue
             assert function_name in self.device_mod, (
-                f"Function {function_name} not found in device module"
-            )
+                f"Function {function_name} not found in device module")
             device_func = self.device_mod[function_name]
             kernel_params_cnt = len(device_func.params)
             function_params: list[str] = None
@@ -606,9 +588,8 @@ class TLCUDASourceWrapper:
             def visitor(node, fn=function_name, param_cnt=kernel_params_cnt):
                 nonlocal function_params
                 if isinstance(node, tvm.tir.Call):
-                    if not (
-                        hasattr(node, "op") and node.op == tvm.ir.Op.get("tir.tvm_call_packed")
-                    ):
+                    if not (hasattr(node, "op") and
+                            node.op == tvm.ir.Op.get("tir.tvm_call_packed")):
                         return
                     args = node.args
                     if not args or args[0] != fn:
@@ -617,7 +598,7 @@ class TLCUDASourceWrapper:
                         raise AssertionError(
                             "tvm_call_packed should have at least 1 argument and match device function parameters"
                         )
-                    function_params = args[1 : 1 + param_cnt]
+                    function_params = args[1:1 + param_cnt]
 
             post_order_visit(self.host_func.body, visitor)
             assert function_params is not None, "function_params should not be None"
@@ -722,18 +703,15 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         for param in self.prim_func.params:
             if param in self.prim_func.buffer_map:
                 buffer = self.prim_func.buffer_map[param]
-                function_args.append(
-                    {
-                        "name": buffer.data.name,
-                        "type": "ctypes.c_void_p",
-                    }
-                )
+                function_args.append({
+                    "name": buffer.data.name,
+                    "type": "ctypes.c_void_p",
+                })
             elif isinstance(param, tvm.tir.Var):
                 function_args.append({"name": param.name, "type": self._TYPE_MAP[param.dtype]})
             else:
                 raise ValueError(
-                    f"Parameter {param} is not in the buffer map of the primary function."
-                )
+                    f"Parameter {param} is not in the buffer map of the primary function.")
         # Add dynamic symbols as integer arguments
         for dyn_sym in dynamic_symbolic_set:
             if dyn_sym not in [arg["name"] for arg in function_args]:
@@ -764,14 +742,10 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             for i, match in enumerate(matches):
                 for arg in function_args:
                     if arg["name"] == match:
-                        call_args.append(
-                            (
-                                f"{match}.data_ptr()"
-                                if arg["type"] == "ctypes.c_void_p"
-                                else match,
-                                arg["type"],
-                            )
-                        )
+                        call_args.append((
+                            f"{match}.data_ptr()" if arg["type"] == "ctypes.c_void_p" else match,
+                            arg["type"],
+                        ))
                     elif maybe_desc(arg["name"], matches, i):
                         call_args.append((match, "None"))
             return call_args
@@ -801,25 +775,23 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             arg_types = ", ".join([arg[1] for arg in call_args])
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             kernel_launch_code += self.generate_tma_descriptor_args(
-                desc_name_map
-            ) + KERNEL_LAUNCH_FUNC_PY.format(
-                function_name,
-                self._pythonic_expr(grid_info[0]),
-                self._pythonic_expr(grid_info[1]),
-                self._pythonic_expr(grid_info[2]),
-                self._pythonic_expr(block_info[0]),
-                self._pythonic_expr(block_info[1]),
-                self._pythonic_expr(block_info[2]),
-                smem_str,
-                arg_names,
-                arg_types,
-                device_index,
-            )
+                desc_name_map) + KERNEL_LAUNCH_FUNC_PY.format(
+                    function_name,
+                    self._pythonic_expr(grid_info[0]),
+                    self._pythonic_expr(grid_info[1]),
+                    self._pythonic_expr(grid_info[2]),
+                    self._pythonic_expr(block_info[0]),
+                    self._pythonic_expr(block_info[1]),
+                    self._pythonic_expr(block_info[2]),
+                    smem_str,
+                    arg_names,
+                    arg_types,
+                    device_index,
+                )
 
         # Wrap the kernel dispatch logic in an external C function
         host_func = PREDEF_HOST_FUNC_PY.format(
-            repr(list(function_informations.keys())), def_args, kernel_launch_code
-        )
+            repr(list(function_informations.keys())), def_args, kernel_launch_code)
         return host_func
 
     def generate_tma_descriptor_args(self, desc_name_map: dict[str, str]) -> str:
@@ -830,14 +802,12 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
         for handle_name, name in desc_name_map.items():
             desc_name = name + "_desc"
             assert desc_name in self.tma_descriptor_args, (
-                f"TMA descriptor {desc_name} not found in {self.tma_descriptor_args}"
-            )
+                f"TMA descriptor {desc_name} not found in {self.tma_descriptor_args}")
             args = self.tma_descriptor_args[desc_name]
             # Skip __tvm_tensormap_create_tiled
             if len(args) < 3:
                 raise ValueError(
-                    f"TMA descriptor args too short: {len(args)} elements, expected at least 3"
-                )
+                    f"TMA descriptor args too short: {len(args)} elements, expected at least 3")
             _, dtype, tensor_rank, globalAddress, *remaining_args = args[1:]
 
             tensor_rank = int(tensor_rank)
@@ -849,16 +819,14 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             # 4 groups of tensor_rank size + 4 parameters
             expected_args_len = 4 * tensor_rank + 4
             if len(remaining_args) < expected_args_len:
-                raise ValueError(
-                    f"Insufficient remaining args: got {len(remaining_args)}, "
-                    f"expected {expected_args_len} for tensor_rank {tensor_rank}"
-                )
+                raise ValueError(f"Insufficient remaining args: got {len(remaining_args)}, "
+                                 f"expected {expected_args_len} for tensor_rank {tensor_rank}")
 
             # Extract dimensions and strides using list slicing
             global_dim = remaining_args[:tensor_rank]
-            global_stride = remaining_args[tensor_rank : 2 * tensor_rank]
-            box_dim = remaining_args[2 * tensor_rank : 3 * tensor_rank]
-            element_strides = remaining_args[3 * tensor_rank : 4 * tensor_rank]
+            global_stride = remaining_args[tensor_rank:2 * tensor_rank]
+            box_dim = remaining_args[2 * tensor_rank:3 * tensor_rank]
+            element_strides = remaining_args[3 * tensor_rank:4 * tensor_rank]
 
             global_dim = [str(i) for i in global_dim]
             global_stride = [str(i) for i in global_stride]
@@ -867,9 +835,8 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
 
             # Extract remaining parameters
             try:
-                interleave, swizzle, l2Promotion, oobFill = remaining_args[
-                    4 * tensor_rank : 4 * tensor_rank + 4
-                ]
+                interleave, swizzle, l2Promotion, oobFill = remaining_args[4 * tensor_rank:4 *
+                                                                           tensor_rank + 4]
             except ValueError as e:
                 raise ValueError(
                     "Failed to unpack the final 4 TMA parameters (interleave, swizzle, l2Promotion, oobFill)"
@@ -961,8 +928,7 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
             if dynamic_smem_buf is not None:
                 # Format the cudaFuncSetAttribute call for dynamic shared memory
                 call_str += PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY_HIP.format(
-                    function_name, dynamic_smem_buf
-                )
+                    function_name, dynamic_smem_buf)
         # Format the initialization function using the call_str
         init_funcs = PREDEF_INIT_FUNC.format(call_str)
         return init_funcs
@@ -1032,18 +998,15 @@ class TLCPUSourceWrapper:
         for param in self.prim_func.params:
             if param in self.prim_func.buffer_map:
                 buffer = self.prim_func.buffer_map[param]
-                function_args.append(
-                    {
-                        "name": buffer.name,
-                        "type": self._TYPE_MAP[buffer.dtype] + "*",
-                    }
-                )
+                function_args.append({
+                    "name": buffer.name,
+                    "type": self._TYPE_MAP[buffer.dtype] + "*",
+                })
             elif isinstance(param, tvm.tir.Var):
                 function_args.append({"name": param.name, "type": self._TYPE_MAP[param.dtype]})
             else:
                 raise ValueError(
-                    f"Parameter {param} is not in the buffer map of the primary function."
-                )
+                    f"Parameter {param} is not in the buffer map of the primary function.")
         # Add dynamic symbols as integer arguments
         for dyn_sym in dynamic_symbolic_set:
             function_args.append({"name": dyn_sym, "type": "int"})
@@ -1143,6 +1106,7 @@ class TLCPUSourceWrapper:
 
 
 class TLMetalSourceWrapper:
+
     def __init__(
         self,
         scheduled_ir_module: IRModule,
@@ -1220,6 +1184,7 @@ class TLWrapper(BaseWrapper):
 
 
 class TLPyWrapper(TLWrapper):
+
     def __init__(self, target: Target):
         super().__init__(target)
 

@@ -25,9 +25,8 @@ import argparse
         "-DNDEBUG",
     ],
 )
-def flashattn(
-    batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split, softmax_scale
-):
+def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split,
+              softmax_scale):
     sm_scale = float(softmax_scale * 1.44269504)  # log2(e)
     dtype = "float16"
     accum_dtype = "float"
@@ -37,11 +36,11 @@ def flashattn(
 
     @T.macro
     def flash_attn(
-        Q: T.Tensor([batch, heads, dim], dtype),
-        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        Output: T.Tensor([batch, heads, dim], dtype),
+            Q: T.Tensor([batch, heads, dim], dtype),
+            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+            Output: T.Tensor([batch, heads, dim], dtype),
     ):
         with T.Kernel(heads // min(block_H, kv_group_num), batch, threads=384) as (hid, bid):
             Q_shared_l = T.alloc_shared([block_H, dim // 2], dtype)
@@ -82,13 +81,9 @@ def flashattn(
 
             tx = T.get_thread_binding()
 
-            T.copy(
-                Q[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, 0 : dim // 2], Q_shared_l
-            )
-            T.copy(
-                Q[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, dim // 2 : dim], Q_shared_r
-            )
-            T.copy(Q_pe[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :], Q_tail_shared)
+            T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, 0:dim // 2], Q_shared_l)
+            T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, dim // 2:dim], Q_shared_r)
+            T.copy(Q_pe[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :], Q_tail_shared)
 
             T.barrier_arrive(bar_q)
 
@@ -175,7 +170,7 @@ def flashattn(
                 T.copy(acc_o_l, O_shared_l)
                 T.copy(
                     O_shared_l,
-                    Output[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, 0 : dim // 2],
+                    Output[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, 0:dim // 2],
                 )
 
             elif tx >= 128 and tx < 256:
@@ -208,7 +203,7 @@ def flashattn(
                 T.copy(acc_o_r, O_shared_r)
                 T.copy(
                     O_shared_r,
-                    Output[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, dim // 2 : dim],
+                    Output[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, dim // 2:dim],
                 )
 
             elif tx >= 256:
@@ -222,27 +217,25 @@ def flashattn(
                         with T.attr("default", "async_scope", 1):
                             for u in T.serial(4):
                                 for v in T.vectorized(8):
-                                    KV_shared_0_l[
-                                        r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v
-                                    ] = KV[
-                                        bid,
-                                        kv_indices,
-                                        cur_kv_head,
-                                        64 * u + (tx - 256) % 8 * 8 + v,
-                                    ]
-                                    KV_shared_0_r[
-                                        r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v
-                                    ] = KV[
-                                        bid,
-                                        kv_indices,
-                                        cur_kv_head,
-                                        dim // 2 + 64 * u + (tx - 256) % 8 * 8 + v,
-                                    ]
+                                    KV_shared_0_l[r * 16 + (tx - 256) // 8,
+                                                  64 * u + (tx - 256) % 8 * 8 + v] = KV[
+                                                      bid,
+                                                      kv_indices,
+                                                      cur_kv_head,
+                                                      64 * u + (tx - 256) % 8 * 8 + v,
+                                                  ]
+                                    KV_shared_0_r[r * 16 + (tx - 256) // 8,
+                                                  64 * u + (tx - 256) % 8 * 8 + v] = KV[
+                                                      bid,
+                                                      kv_indices,
+                                                      cur_kv_head,
+                                                      dim // 2 + 64 * u + (tx - 256) % 8 * 8 + v,
+                                                  ]
                         with T.attr("default", "async_scope", 1):
                             for v in T.vectorized(8):
-                                K_tail_shared_0[
-                                    r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v
-                                ] = K_pe[bid, kv_indices, cur_kv_head, (tx - 256) % 8 * 8 + v]
+                                K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 +
+                                                v] = K_pe[bid, kv_indices, cur_kv_head,
+                                                          (tx - 256) % 8 * 8 + v]
                     T.cp_async_barrier_noinc(bar_k_0_ready[0])
 
                     # Buffer 1
@@ -252,43 +245,42 @@ def flashattn(
                         with T.attr("default", "async_scope", 1):
                             for u in T.serial(4):
                                 for v in T.vectorized(8):
-                                    KV_shared_1_l[
-                                        r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v
-                                    ] = KV[
-                                        bid,
-                                        kv_indices,
-                                        cur_kv_head,
-                                        64 * u + (tx - 256) % 8 * 8 + v,
-                                    ]
-                                    KV_shared_1_r[
-                                        r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v
-                                    ] = KV[
-                                        bid,
-                                        kv_indices,
-                                        cur_kv_head,
-                                        dim // 2 + 64 * u + (tx - 256) % 8 * 8 + v,
-                                    ]
+                                    KV_shared_1_l[r * 16 + (tx - 256) // 8,
+                                                  64 * u + (tx - 256) % 8 * 8 + v] = KV[
+                                                      bid,
+                                                      kv_indices,
+                                                      cur_kv_head,
+                                                      64 * u + (tx - 256) % 8 * 8 + v,
+                                                  ]
+                                    KV_shared_1_r[r * 16 + (tx - 256) // 8,
+                                                  64 * u + (tx - 256) % 8 * 8 + v] = KV[
+                                                      bid,
+                                                      kv_indices,
+                                                      cur_kv_head,
+                                                      dim // 2 + 64 * u + (tx - 256) % 8 * 8 + v,
+                                                  ]
                         with T.attr("default", "async_scope", 1):
                             for v in T.vectorized(8):
-                                K_tail_shared_1[
-                                    r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v
-                                ] = K_pe[bid, kv_indices, cur_kv_head, (tx - 256) % 8 * 8 + v]
+                                K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 +
+                                                v] = K_pe[bid, kv_indices, cur_kv_head,
+                                                          (tx - 256) % 8 * 8 + v]
                     T.cp_async_barrier_noinc(bar_k_1_ready[0])
 
     @T.macro
     def flash_attn_split(
-        Q: T.Tensor([batch, heads, dim], dtype),
-        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        glse: T.Tensor([batch, heads, num_split], dtype),
-        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+            Q: T.Tensor([batch, heads, dim], dtype),
+            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+            glse: T.Tensor([batch, heads, num_split], dtype),
+            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
     ):
-        with T.Kernel(batch, heads // min(block_H, kv_group_num), num_split, threads=384) as (
-            bid,
-            hid,
-            bz,
-        ):
+        with T.Kernel(
+                batch, heads // min(block_H, kv_group_num), num_split, threads=384) as (
+                    bid,
+                    hid,
+                    bz,
+                ):
             Q_shared_l = T.alloc_shared([block_H, dim // 2], dtype)
             Q_shared_r = T.alloc_shared([block_H, dim // 2], dtype)
             Q_tail_shared = T.alloc_shared([block_H, pe_dim], dtype)
@@ -327,13 +319,9 @@ def flashattn(
 
             tx = T.get_thread_binding()
 
-            T.copy(
-                Q[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, 0 : dim // 2], Q_shared_l
-            )
-            T.copy(
-                Q[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, dim // 2 : dim], Q_shared_r
-            )
-            T.copy(Q_pe[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, :], Q_tail_shared)
+            T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, 0:dim // 2], Q_shared_l)
+            T.copy(Q[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, dim // 2:dim], Q_shared_r)
+            T.copy(Q_pe[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, :], Q_tail_shared)
 
             T.barrier_arrive(bar_q)
 
@@ -420,11 +408,10 @@ def flashattn(
                 T.copy(acc_o_l, O_shared_l)
                 T.copy(
                     O_shared_l,
-                    Output_partial[
-                        bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, bz, 0 : dim // 2
-                    ],
+                    Output_partial[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, bz,
+                                   0:dim // 2],
                 )
-                T.copy(sumexp, glse[bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, bz])
+                T.copy(sumexp, glse[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, bz])
 
             elif tx >= 128 and tx < 256:
                 T.set_max_nreg(168, 1)
@@ -456,9 +443,8 @@ def flashattn(
                 T.copy(acc_o_r, O_shared_r)
                 T.copy(
                     O_shared_r,
-                    Output_partial[
-                        bid, hid * VALID_BLOCK_H : (hid + 1) * VALID_BLOCK_H, bz, dim // 2 : dim
-                    ],
+                    Output_partial[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, bz,
+                                   dim // 2:dim],
                 )
 
             elif tx >= 256:
@@ -468,78 +454,66 @@ def flashattn(
                     # Buffer 0
                     T.barrier_wait(bar_k_0_free[0], ((i_i & 1) ^ 1))
                     for r in T.serial(4):
-                        kv_indices = (
-                            (seqlen_kv // num_split) * bz
-                            + (i_i * 2) * block_N
-                            + r * 16
-                            + (tx - 256) // 8
-                        )
+                        kv_indices = ((seqlen_kv // num_split) * bz + (i_i * 2) * block_N + r * 16 +
+                                      (tx - 256) // 8)
                         with T.attr("default", "async_scope", 1):
                             for u in T.serial(4):
                                 for v in T.vectorized(8):
-                                    KV_shared_0_l[
-                                        r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v
-                                    ] = KV[
-                                        bid,
-                                        kv_indices,
-                                        cur_kv_head,
-                                        64 * u + (tx - 256) % 8 * 8 + v,
-                                    ]
-                                    KV_shared_0_r[
-                                        r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v
-                                    ] = KV[
-                                        bid,
-                                        kv_indices,
-                                        cur_kv_head,
-                                        dim // 2 + 64 * u + (tx - 256) % 8 * 8 + v,
-                                    ]
+                                    KV_shared_0_l[r * 16 + (tx - 256) // 8,
+                                                  64 * u + (tx - 256) % 8 * 8 + v] = KV[
+                                                      bid,
+                                                      kv_indices,
+                                                      cur_kv_head,
+                                                      64 * u + (tx - 256) % 8 * 8 + v,
+                                                  ]
+                                    KV_shared_0_r[r * 16 + (tx - 256) // 8,
+                                                  64 * u + (tx - 256) % 8 * 8 + v] = KV[
+                                                      bid,
+                                                      kv_indices,
+                                                      cur_kv_head,
+                                                      dim // 2 + 64 * u + (tx - 256) % 8 * 8 + v,
+                                                  ]
                         with T.attr("default", "async_scope", 1):
                             for v in T.vectorized(8):
-                                K_tail_shared_0[
-                                    r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v
-                                ] = K_pe[bid, kv_indices, cur_kv_head, (tx - 256) % 8 * 8 + v]
+                                K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 +
+                                                v] = K_pe[bid, kv_indices, cur_kv_head,
+                                                          (tx - 256) % 8 * 8 + v]
                     T.cp_async_barrier_noinc(bar_k_0_ready[0])
 
                     # Buffer 1
                     T.barrier_wait(bar_k_1_free[0], ((i_i & 1) ^ 1))
                     for r in T.serial(4):
-                        kv_indices = (
-                            (seqlen_kv // num_split) * bz
-                            + (i_i * 2 + 1) * block_N
-                            + r * 16
-                            + (tx - 256) // 8
-                        )
+                        kv_indices = ((seqlen_kv // num_split) * bz + (i_i * 2 + 1) * block_N +
+                                      r * 16 + (tx - 256) // 8)
                         with T.attr("default", "async_scope", 1):
                             for u in T.serial(4):
                                 for v in T.vectorized(8):
-                                    KV_shared_1_l[
-                                        r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v
-                                    ] = KV[
-                                        bid,
-                                        kv_indices,
-                                        cur_kv_head,
-                                        64 * u + (tx - 256) % 8 * 8 + v,
-                                    ]
-                                    KV_shared_1_r[
-                                        r * 16 + (tx - 256) // 8, 64 * u + (tx - 256) % 8 * 8 + v
-                                    ] = KV[
-                                        bid,
-                                        kv_indices,
-                                        cur_kv_head,
-                                        dim // 2 + 64 * u + (tx - 256) % 8 * 8 + v,
-                                    ]
+                                    KV_shared_1_l[r * 16 + (tx - 256) // 8,
+                                                  64 * u + (tx - 256) % 8 * 8 + v] = KV[
+                                                      bid,
+                                                      kv_indices,
+                                                      cur_kv_head,
+                                                      64 * u + (tx - 256) % 8 * 8 + v,
+                                                  ]
+                                    KV_shared_1_r[r * 16 + (tx - 256) // 8,
+                                                  64 * u + (tx - 256) % 8 * 8 + v] = KV[
+                                                      bid,
+                                                      kv_indices,
+                                                      cur_kv_head,
+                                                      dim // 2 + 64 * u + (tx - 256) % 8 * 8 + v,
+                                                  ]
                         with T.attr("default", "async_scope", 1):
                             for v in T.vectorized(8):
-                                K_tail_shared_1[
-                                    r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 + v
-                                ] = K_pe[bid, kv_indices, cur_kv_head, (tx - 256) % 8 * 8 + v]
+                                K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 +
+                                                v] = K_pe[bid, kv_indices, cur_kv_head,
+                                                          (tx - 256) % 8 * 8 + v]
                     T.cp_async_barrier_noinc(bar_k_1_ready[0])
 
     @T.macro
     def combine(
-        glse: T.Tensor([batch, heads, num_split], dtype),
-        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-        Output: T.Tensor([batch, heads, dim], dtype),
+            glse: T.Tensor([batch, heads, num_split], dtype),
+            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+            Output: T.Tensor([batch, heads, dim], dtype),
     ):
         with T.Kernel(heads, batch, threads=128) as (hid, bz):
             po_local = T.alloc_fragment([dim], dtype)
@@ -549,13 +523,9 @@ def flashattn(
             lse_max_local = T.alloc_local([1], accum_dtype)
             scale_local = T.alloc_local([1], accum_dtype)
 
-            T.annotate_layout(
-                {
-                    lse_logsum_local: T.Fragment(
-                        lse_logsum_local.shape, forward_thread_fn=lambda i: i
-                    ),
-                }
-            )
+            T.annotate_layout({
+                lse_logsum_local: T.Fragment(lse_logsum_local.shape, forward_thread_fn=lambda i: i),
+            })
 
             T.clear(lse_logsum_local)
             T.clear(o_accum_local)
@@ -578,26 +548,26 @@ def flashattn(
 
     @T.prim_func
     def main_split(
-        Q: T.Tensor([batch, heads, dim], dtype),
-        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        glse: T.Tensor([batch, heads, num_split], dtype),
-        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-        Output: T.Tensor([batch, heads, dim], dtype),
+            Q: T.Tensor([batch, heads, dim], dtype),
+            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+            glse: T.Tensor([batch, heads, num_split], dtype),
+            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+            Output: T.Tensor([batch, heads, dim], dtype),
     ):
         flash_attn_split(Q, Q_pe, KV, K_pe, glse, Output_partial)
         combine(glse, Output_partial, Output)
 
     @T.prim_func
     def main_no_split(
-        Q: T.Tensor([batch, heads, dim], dtype),
-        Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
-        KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
-        K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
-        glse: T.Tensor([batch, heads, num_split], dtype),
-        Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
-        Output: T.Tensor([batch, heads, dim], dtype),
+            Q: T.Tensor([batch, heads, dim], dtype),
+            Q_pe: T.Tensor([batch, heads, pe_dim], dtype),
+            KV: T.Tensor([batch, seqlen_kv, kv_head_num, dim], dtype),
+            K_pe: T.Tensor([batch, seqlen_kv, kv_head_num, pe_dim], dtype),
+            glse: T.Tensor([batch, heads, num_split], dtype),
+            Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
+            Output: T.Tensor([batch, heads, dim], dtype),
     ):
         flash_attn(Q, Q_pe, KV, K_pe, Output)
 
@@ -622,14 +592,13 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     dim = q.shape[-1]
     pe_dim = q_pe.shape[-1]
     num_head_groups = q.shape[1] // kv.shape[2]
-    scale = (dim + pe_dim) ** 0.5
+    scale = (dim + pe_dim)**0.5
     q = rearrange(
-        q, "b (h g) d -> b g h d", g=num_head_groups
-    )  # [batch_size, num_head_groups, groups, dim]
+        q, "b (h g) d -> b g h d", g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
 
     q_pe = rearrange(
-        q_pe, "b (h g) d -> b g h d", g=num_head_groups
-    )  # [batch_size, num_head_groups, groups, pe_dim]
+        q_pe, "b (h g) d -> b g h d",
+        g=num_head_groups)  # [batch_size, num_head_groups, groups, pe_dim]
 
     kv = rearrange(kv, "b n h d -> b h n d")  # [batch_size, groups, seqlen_kv, dim]
 
@@ -639,16 +608,14 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     key = torch.concat([kv, k_pe], dim=-1)
 
     scores = einsum(
-        query, key, "b g h d, b h s d -> b g h s"
-    )  # [batch_size, num_head_groups, groups, seqlen_kv]
+        query, key,
+        "b g h d, b h s d -> b g h s")  # [batch_size, num_head_groups, groups, seqlen_kv]
 
     attention = F.softmax(
-        scores / scale, dim=-1
-    )  # [batch_size, num_head_groups, groups, seqlen_kv]
+        scores / scale, dim=-1)  # [batch_size, num_head_groups, groups, seqlen_kv]
 
-    out = einsum(
-        attention, kv, "b g h s, b h s d -> b g h d"
-    )  # [batch_size, num_head_groups, groups, dim]
+    out = einsum(attention, kv,
+                 "b g h s, b h s d -> b g h d")  # [batch_size, num_head_groups, groups, dim]
     out = rearrange(out, "b g h d -> b (h g) d")  # [batch_size, heads, dim]
     return out
 
@@ -667,11 +634,10 @@ def main(
     BLOCK_N = 64
     BLOCK_H = min(64, heads // kv_heads)
     num_split = 1
-    softmax_scale = (dim + pe_dim) ** -0.5
+    softmax_scale = (dim + pe_dim)**-0.5
 
-    kernel = flashattn(
-        batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split, softmax_scale
-    )
+    kernel = flashattn(batch, heads, kv_heads, kv_ctx, dim, pe_dim, BLOCK_N, BLOCK_H, num_split,
+                       softmax_scale)
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     profiler.assert_allclose(ref_program, rtol=1e-4, atol=1e-4)
     latency = profiler.do_bench(warmup=500)

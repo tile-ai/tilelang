@@ -9,6 +9,7 @@ def is_cdna_arch(arch: TileDevice) -> bool:
 
 
 class CDNA(TileDevice):
+
     def __init__(self, target: Target | str):
         if isinstance(target, str):
             target = tvm.target.Target(target)

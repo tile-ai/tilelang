@@ -90,18 +90,19 @@ def tilelang_chunk_fwd_o(
 
     @T.prim_func
     def kernel(
-        Q: T.Tensor(Q_shape, dtype=input_dtype),
-        K: T.Tensor(K_shape, dtype=input_dtype),
-        V: T.Tensor(V_shape, dtype=input_dtype),
-        HIDDEN: T.Tensor(H_shape, dtype=input_dtype),
-        G: T.Tensor(G_shape, dtype=gate_dtype),
-        O: T.Tensor(O_shape, dtype=output_dtype),
+            Q: T.Tensor(Q_shape, dtype=input_dtype),
+            K: T.Tensor(K_shape, dtype=input_dtype),
+            V: T.Tensor(V_shape, dtype=input_dtype),
+            HIDDEN: T.Tensor(H_shape, dtype=input_dtype),
+            G: T.Tensor(G_shape, dtype=gate_dtype),
+            O: T.Tensor(O_shape, dtype=output_dtype),
     ):
-        with T.Kernel(T.ceildiv(DV, block_DV), T.ceildiv(S, block_S), B * H, threads=threads) as (
-            bv,
-            bs,
-            bbh,
-        ):
+        with T.Kernel(
+                T.ceildiv(DV, block_DV), T.ceildiv(S, block_S), B * H, threads=threads) as (
+                    bv,
+                    bs,
+                    bbh,
+                ):
             bb, bh = bbh // H, bbh % H
             Q_shared = T.alloc_shared((block_S, block_DK), dtype=input_dtype)
             K_shared = T.alloc_shared((block_S, block_DK), dtype=input_dtype)
@@ -114,16 +115,14 @@ def tilelang_chunk_fwd_o(
             G_shared = T.alloc_shared((block_S,), dtype=gate_dtype, scope="shared")
             G_diff_local = T.alloc_fragment((block_S, block_S), dtype=gate_dtype)
 
-            T.annotate_layout(
-                {
-                    Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
-                    K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                    V_shared: tilelang.layout.make_swizzled_layout(V_shared),
-                    H_shared: tilelang.layout.make_swizzled_layout(H_shared),
-                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                    O_shared: tilelang.layout.make_swizzled_layout(O_shared),
-                }
-            )
+            T.annotate_layout({
+                Q_shared: tilelang.layout.make_swizzled_layout(Q_shared),
+                K_shared: tilelang.layout.make_swizzled_layout(K_shared),
+                V_shared: tilelang.layout.make_swizzled_layout(V_shared),
+                H_shared: tilelang.layout.make_swizzled_layout(H_shared),
+                A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                O_shared: tilelang.layout.make_swizzled_layout(O_shared),
+            })
 
             T.clear(A_fragment)
             T.clear(O_fragment)
@@ -132,18 +131,18 @@ def tilelang_chunk_fwd_o(
                 T.copy(
                     Q[
                         bb,
-                        bs * block_S : (bs + 1) * block_S,
+                        bs * block_S:(bs + 1) * block_S,
                         bh,
-                        i_k * block_DK : (i_k + 1) * block_DK,
+                        i_k * block_DK:(i_k + 1) * block_DK,
                     ],
                     Q_shared,
                 )
                 T.copy(
                     K[
                         bb,
-                        bs * block_S : (bs + 1) * block_S,
+                        bs * block_S:(bs + 1) * block_S,
                         bh,
-                        i_k * block_DK : (i_k + 1) * block_DK,
+                        i_k * block_DK:(i_k + 1) * block_DK,
                     ],
                     K_shared,
                 )
@@ -152,8 +151,8 @@ def tilelang_chunk_fwd_o(
                         bb,
                         bs,
                         bh,
-                        i_k * block_DK : (i_k + 1) * block_DK,
-                        bv * block_DV : (bv + 1) * block_DV,
+                        i_k * block_DK:(i_k + 1) * block_DK,
+                        bv * block_DV:(bv + 1) * block_DV,
                     ],
                     H_shared,
                 )
@@ -172,8 +171,7 @@ def tilelang_chunk_fwd_o(
                     with T.If(G_diff_local[i_s1, i_s2] <= 0):
                         with T.Then():
                             A_fragment[i_s1, i_s2] = A_fragment[i_s1, i_s2] * T.exp(
-                                G_diff_local[i_s1, i_s2]
-                            )
+                                G_diff_local[i_s1, i_s2])
                         with T.Else():
                             A_fragment[i_s1, i_s2] = 0
 
@@ -183,7 +181,7 @@ def tilelang_chunk_fwd_o(
                         A_fragment[i_s1, i_s2] = 0
 
             T.copy(
-                V[bb, bs * block_S : (bs + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV],
+                V[bb, bs * block_S:(bs + 1) * block_S, bh, bv * block_DV:(bv + 1) * block_DV],
                 V_shared,
             )
             T.copy(A_fragment, A_shared)
@@ -195,7 +193,7 @@ def tilelang_chunk_fwd_o(
             T.copy(O_fragment, O_shared)
             T.copy(
                 O_shared,
-                O[bb, bs * block_S : (bs + 1) * block_S, bh, bv * block_DV : (bv + 1) * block_DV],
+                O[bb, bs * block_S:(bs + 1) * block_S, bh, bv * block_DV:(bv + 1) * block_DV],
             )
 
     return kernel

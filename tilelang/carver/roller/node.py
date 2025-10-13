@@ -31,6 +31,7 @@ def pre_order_traverse(block_analyzer, blocks, func):
 
 
 class BlockAnalyzer:
+
     def __init__(self, sch) -> None:
         self.sch: tir.Schedule = sch
         self.block_infos: list[BlockInfo] = normalize_prim_func(self.sch)
@@ -91,6 +92,7 @@ class Edge:
 
 
 class Node:
+
     def __init__(self, tags: dict | None = None, name: str = "Node") -> None:
         self.name = name
         if tags is None:
@@ -175,6 +177,7 @@ class Node:
 
 
 class PlaceHolderNode(Node):
+
     def __init__(self, name=""):
         super().__init__(name="PlaceHolder_" + name)
 
@@ -186,9 +189,11 @@ class PlaceHolderNode(Node):
 
 
 class PrimFuncNode(Node):
-    def __init__(
-        self, prim_func: PrimFunc, tags: dict | None = None, name: str = "PrimFuncNode"
-    ) -> None:
+
+    def __init__(self,
+                 prim_func: PrimFunc,
+                 tags: dict | None = None,
+                 name: str = "PrimFuncNode") -> None:
         super().__init__(tags, name=name)
         self.prim_func = self._specialize_func(prim_func)
         self.sch: tir.Schedule = tir.Schedule(self.prim_func)
@@ -335,8 +340,7 @@ class PrimFuncNode(Node):
         shape = {
             self.block_analyzer.get_output_buffers(block)[0].name: [
                 tvm.arith.ConstIntBound(0, val - 1) for val in tile
-            ]
-            for block in self.schedule_stages
+            ] for block in self.schedule_stages
         }
         return self.ana.infer(shape, rstep, targets)
 
@@ -376,7 +380,7 @@ class PrimFuncNode(Node):
             propagate_shape = shapes[arg.name]
             buffer_shape = args[i].shape
             if len(buffer_shape) > len(propagate_shape):
-                buffer_shape = buffer_shape[-len(propagate_shape) :]
+                buffer_shape = buffer_shape[-len(propagate_shape):]
             trimmed_shape = [
                 self.extent_wrapper(j) for j in list(map(min, zip(propagate_shape, buffer_shape)))
             ]
@@ -396,9 +400,7 @@ class PrimFuncNode(Node):
             results.append(trimmed_shape)
         return results
 
-    def propagate_reduction_inputs(
-        self, shape, rstep: dict | None = None
-    ) -> dict[str, list[int]]:
+    def propagate_reduction_inputs(self, shape, rstep: dict | None = None) -> dict[str, list[int]]:
         if rstep is None:
             rstep = {}
         if self.reduction_block is None:
@@ -424,8 +426,7 @@ class PrimFuncNode(Node):
         wmma_m, wmma_n, wmma_k = [16, 16, 16]  # just for testing, any number is ok
 
         output_buffer_shape = (
-            self.block_analyzer.sch.get(self.reduction_block).writes[0].buffer.shape
-        )
+            self.block_analyzer.sch.get(self.reduction_block).writes[0].buffer.shape)
         valid_region = []
         for region in output_buffer_shape:
             if region.value == 1:
@@ -438,8 +439,7 @@ class PrimFuncNode(Node):
         def get_cl_shapes(c_ax_m, c_ax_n, num_nvalid_regions):
             spatial_dim = self.get_space_dim()
             assert len(valid_region) == len(spatial_dim), (
-                f" {valid_region} mismatch with {spatial_dim}"
-            )
+                f" {valid_region} mismatch with {spatial_dim}")
             cl_shapes = [1] * len(spatial_dim)
             cl_shapes[c_ax_m - num_nvalid_regions] = wmma_m
             cl_shapes[c_ax_n - num_nvalid_regions] = wmma_n
@@ -467,11 +467,9 @@ class PrimFuncNode(Node):
         shapes, _ = self.propagate(shape, rstep)
 
         def is_broadcast_pattern(buffer, output_buffer):
-            return (
-                buffer in self.args
-                and len(shapes[output_buffer.name]) > len(shapes[buffer.name])
-                and np.prod(shapes[output_buffer.name]) > np.prod(shapes[buffer.name])
-            )
+            return (buffer in self.args and
+                    len(shapes[output_buffer.name]) > len(shapes[buffer.name]) and
+                    np.prod(shapes[output_buffer.name]) > np.prod(shapes[buffer.name]))
 
         def is_after_reduce_stage(block):
             if not self.reduction_block:
@@ -493,9 +491,8 @@ class PrimFuncNode(Node):
             output_buffer = self.block_analyzer.get_output_buffers(block)[0]
             for buffer in self.block_analyzer.get_input_buffers(block):
                 cache = buffer.name not in cached_tensor and (
-                    is_broadcast_pattern(buffer, output_buffer)
-                    or self.block_analyzer.get_block_info(block).is_reduction()
-                )
+                    is_broadcast_pattern(buffer, output_buffer) or
+                    self.block_analyzer.get_block_info(block).is_reduction())
                 if not cache:
                     continue
                 cached_tensor.append(buffer.name)
@@ -504,8 +501,7 @@ class PrimFuncNode(Node):
 
                 if buffer.name in stride_map:
                     num_elem = stride_map[buffer.name].compute_elements_from_shape(
-                        shapes[buffer.name]
-                    )
+                        shapes[buffer.name])
                 else:
                     num_elem = np.prod(shapes[buffer.name])
                 buffer_len = num_elem * int((tvm.DataType(buffer.dtype).bits + 7) // 8)
@@ -518,6 +514,7 @@ class PrimFuncNode(Node):
 
 
 class OutputNode(Node):
+
     def __init__(self, node, id=0):
         super().__init__(name="OutputNode")
         # connect node and output node
@@ -580,9 +577,9 @@ def find_topo_sort_priority(output_node_list) -> list[Node]:
         if node in visited:
             return
         visited.add(node)
-        ordered_input_nodes = sorted(
-            [edge.src_node for edge in node.inputs], key=lambda n: topo_layer[n], reverse=True
-        )
+        ordered_input_nodes = sorted([edge.src_node for edge in node.inputs],
+                                     key=lambda n: topo_layer[n],
+                                     reverse=True)
         for n in ordered_input_nodes:
             topo_sort_dfs(n, visited, topo_order)
         topo_order.append(node)
@@ -595,6 +592,7 @@ def find_topo_sort_priority(output_node_list) -> list[Node]:
 
 
 def find_topo_sort(output_node_list) -> list[Node]:
+
     def topo_sort_dfs(node, visited, topo_order):
         if node in visited:
             return

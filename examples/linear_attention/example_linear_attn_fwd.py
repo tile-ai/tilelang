@@ -8,8 +8,11 @@ from fla.ops.linear_attn import fused_chunk_linear_attn  # We compare with FLA
 
 
 @tl.jit(
-    out_idx=[3, 4], pass_configs={"tl.disable_tma_lower": True, "tl.disable_warp_specialized": True}
-)
+    out_idx=[3, 4],
+    pass_configs={
+        "tl.disable_tma_lower": True,
+        "tl.disable_warp_specialized": True
+    })
 def chunk_linear_attn_fwd_kernel(
     B,
     S,
@@ -32,11 +35,11 @@ def chunk_linear_attn_fwd_kernel(
 
     @T.prim_func
     def chunk_linear_attn_fwd(
-        Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-        K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
-        V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
-        O: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore
-        final_state: T.Tensor([B, H, DK, DV], accum_dtype),
+            Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+            K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
+            V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
+            O: T.Tensor([NK, B, S, H, DV], dtype),  # type: ignore
+            final_state: T.Tensor([B, H, DK, DV], accum_dtype),
     ):  # type: ignore
         with T.Kernel(NV, NK, B * H) as (i_v, i_k, i_bh):
             i_b = i_bh // H
@@ -52,26 +55,20 @@ def chunk_linear_attn_fwd_kernel(
             o = T.alloc_fragment([chunk_size, BV], accum_dtype)
             T.clear(h)
 
-            T.annotate_layout(
-                {
-                    q: tl.layout.make_swizzled_layout(q),
-                    k: tl.layout.make_swizzled_layout(k),
-                    v: tl.layout.make_swizzled_layout(v),
-                    h_shared: tl.layout.make_swizzled_layout(h_shared),
-                    s_shared: tl.layout.make_swizzled_layout(s_shared),
-                }
-            )
+            T.annotate_layout({
+                q: tl.layout.make_swizzled_layout(q),
+                k: tl.layout.make_swizzled_layout(k),
+                v: tl.layout.make_swizzled_layout(v),
+                h_shared: tl.layout.make_swizzled_layout(h_shared),
+                s_shared: tl.layout.make_swizzled_layout(s_shared),
+            })
             T.use_swizzle(10)
 
             for i in T.Pipelined(0, NT, num_stages=2):
                 for row, col in T.Parallel(chunk_size, BK):
                     q[row, col] = Q[i_b, i * chunk_size + row, i_h, i_k * BK + col] * scale
-                T.copy(
-                    K[i_b, i * chunk_size : (i + 1) * chunk_size, i_h, i_k * BK : (i_k + 1) * BK], k
-                )
-                T.copy(
-                    V[i_b, i * chunk_size : (i + 1) * chunk_size, i_h, i_v * BV : (i_v + 1) * BV], v
-                )
+                T.copy(K[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_k * BK:(i_k + 1) * BK], k)
+                T.copy(V[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_v * BV:(i_v + 1) * BV], v)
 
                 T.gemm(q, k, s, clear_accum=True, transpose_B=True)
                 for row, col in T.Parallel(chunk_size, chunk_size):
@@ -86,14 +83,14 @@ def chunk_linear_attn_fwd_kernel(
                     O[
                         i_k,
                         i_b,
-                        i * chunk_size : (i + 1) * chunk_size,
+                        i * chunk_size:(i + 1) * chunk_size,
                         i_h,
-                        i_v * BV : (i_v + 1) * BV,
+                        i_v * BV:(i_v + 1) * BV,
                     ],
                 )
 
             # Output final state
-            T.copy(h, final_state[i_b, i_h, i_k * BK : (i_k + 1) * BK, i_v * BV : (i_v + 1) * BV])
+            T.copy(h, final_state[i_b, i_h, i_k * BK:(i_k + 1) * BK, i_v * BV:(i_v + 1) * BV])
 
     return chunk_linear_attn_fwd
 

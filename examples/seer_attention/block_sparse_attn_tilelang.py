@@ -10,9 +10,10 @@ def get_sparse_attn_mask_from_topk(x, topk, use_dense_for_last_block=False):
     bsz, num_head, downsample_len, _ = x.shape
     # N_CTX = downsample_len * BLOCK
     sparse_index = torch.topk(x, topk, dim=-1).indices
-    dense_mask = torch.full(
-        [bsz, num_head, downsample_len, downsample_len], False, dtype=torch.bool, device=x.device
-    )
+    dense_mask = torch.full([bsz, num_head, downsample_len, downsample_len],
+                            False,
+                            dtype=torch.bool,
+                            device=x.device)
     dense_mask.scatter_(-1, sparse_index, True)
     if use_dense_for_last_block:
         dense_mask[:, :, -2:, :] = True
@@ -39,7 +40,7 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
     block_N = 64
     num_stages = 0
     threads = 128
-    scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
+    scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     q_shape = [batch, heads, seq_q, dim]
     kv_shape = [batch, heads, seq_kv, dim]
     block_mask_shape = [batch, heads, downsample_len, downsample_len]
@@ -49,15 +50,16 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
     block_mask_dtype = "int8"
 
     def kernel_func(block_M, block_N, num_stages, threads):
+
         @T.macro
         def Softmax(
-            acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
-            acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
-            scores_max: T.FragmentBuffer([block_M], accum_dtype),
-            scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
-            scores_scale: T.FragmentBuffer([block_M], accum_dtype),
-            scores_sum: T.FragmentBuffer([block_M], accum_dtype),
-            logsum: T.FragmentBuffer([block_M], accum_dtype),
+                acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
+                acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
+                scores_max: T.FragmentBuffer([block_M], accum_dtype),
+                scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
+                scores_scale: T.FragmentBuffer([block_M], accum_dtype),
+                scores_sum: T.FragmentBuffer([block_M], accum_dtype),
+                logsum: T.FragmentBuffer([block_M], accum_dtype),
         ):
             T.copy(scores_max, scores_max_prev)
             T.fill(scores_max, -T.infinity(accum_dtype))
@@ -81,19 +83,19 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
 
         @T.macro
         def Rescale(
-            acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
-            scores_scale: T.FragmentBuffer([block_M], accum_dtype),
+                acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
+                scores_scale: T.FragmentBuffer([block_M], accum_dtype),
         ):
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] *= scores_scale[i]
 
         @T.prim_func
         def main(
-            Q: T.Tensor(q_shape, dtype),
-            K: T.Tensor(kv_shape, dtype),
-            V: T.Tensor(kv_shape, dtype),
-            BlockSparseMask: T.Tensor(block_mask_shape, block_mask_dtype),
-            Output: T.Tensor(q_shape, dtype),
+                Q: T.Tensor(q_shape, dtype),
+                K: T.Tensor(kv_shape, dtype),
+                V: T.Tensor(kv_shape, dtype),
+                BlockSparseMask: T.Tensor(block_mask_shape, block_mask_dtype),
+                Output: T.Tensor(q_shape, dtype),
         ):
             with T.Kernel(T.ceildiv(seq_q, block_M), heads, batch, threads=threads) as (bx, by, bz):
                 Q_shared = T.alloc_shared([block_M, dim], dtype)
@@ -110,7 +112,7 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
                 logsum = T.alloc_fragment([block_M], accum_dtype)
                 block_mask = T.alloc_local([downsample_len], block_mask_dtype)
 
-                T.copy(Q[bz, by, bx * block_M : (bx + 1) * block_M, :], Q_shared)
+                T.copy(Q[bz, by, bx * block_M:(bx + 1) * block_M, :], Q_shared)
                 T.fill(acc_o, 0)
                 T.fill(logsum, 0)
                 T.fill(scores_max, -T.infinity(accum_dtype))
@@ -122,7 +124,7 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
 
                 for k in T.Pipelined(loop_range, num_stages=num_stages):
                     if block_mask[k] != 0:
-                        T.copy(K[bz, by, k * block_N : (k + 1) * block_N, :], K_shared)
+                        T.copy(K[bz, by, k * block_N:(k + 1) * block_N, :], K_shared)
                         if is_causal:
                             past_len = seq_kv - seq_q
                             for i, j in T.Parallel(block_M, block_N):
@@ -151,14 +153,14 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
                             logsum,
                         )
                         Rescale(acc_o, scores_scale)
-                        T.copy(V[bz, by, k * block_N : (k + 1) * block_N, :], V_shared)
+                        T.copy(V[bz, by, k * block_N:(k + 1) * block_N, :], V_shared)
                         T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
                 for i, j in T.Parallel(block_M, dim):
                     acc_o[i, j] /= logsum[i]
 
                 T.copy(acc_o, O_shared)
-                T.copy(O_shared, Output[bz, by, bx * block_M : (bx + 1) * block_M, :])
+                T.copy(O_shared, Output[bz, by, bx * block_M:(bx + 1) * block_M, :])
 
         return main
 
@@ -182,16 +184,15 @@ def test_topk_sparse_attention():
     # Create sparse mask (downsampled to block level)
     downsample_factor = BLOCK
     downsample_len = math.ceil(SEQ_LEN / downsample_factor)
-    x_ds = torch.randn(
-        [BATCH, N_HEADS, downsample_len, downsample_len], device="cuda", dtype=torch.float16
-    )
+    x_ds = torch.randn([BATCH, N_HEADS, downsample_len, downsample_len],
+                       device="cuda",
+                       dtype=torch.float16)
     x_ds[:, :, :, 0] = 100
     block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
 
     # Run tilelang kernel
     kernel = blocksparse_flashattn(
-        BATCH, N_HEADS, SEQ_LEN, SEQ_LEN, D_HEAD, downsample_len, is_causal=True
-    )
+        BATCH, N_HEADS, SEQ_LEN, SEQ_LEN, D_HEAD, downsample_len, is_causal=True)
     tilelang_output = kernel(q, k, v, block_mask.to(torch.int8))
 
     # Compute reference
@@ -210,9 +211,9 @@ def test_topk_sparse_attention():
     print("tilelang_output", tilelang_output)
 
     # Verify accuracy
-    assert torch.allclose(tilelang_output, ref_output, atol=1e-2, rtol=1e-2), (
-        "TileLang output doesn't match reference"
-    )
+    assert torch.allclose(
+        tilelang_output, ref_output, atol=1e-2,
+        rtol=1e-2), ("TileLang output doesn't match reference")
     print("Pass topk sparse attention test with qlen == klen")
 
 
@@ -233,15 +234,13 @@ def test_topk_sparse_attention_qlen_lt_klen():
     downsample_factor = BLOCK
     downsample_len = math.ceil(K_LEN / downsample_factor)  # number of blocks along one dimension
     x_ds = torch.randn(
-        BATCH, N_HEADS, downsample_len, downsample_len, device="cuda", dtype=torch.float16
-    )
+        BATCH, N_HEADS, downsample_len, downsample_len, device="cuda", dtype=torch.float16)
     # Force the first column to be high so that the first block is always selected.
     x_ds[:, :, :, 0] = 100
     block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
 
     kernel = blocksparse_flashattn(
-        BATCH, N_HEADS, Q_LEN, K_LEN, D_HEAD, downsample_len, is_causal=True
-    )
+        BATCH, N_HEADS, Q_LEN, K_LEN, D_HEAD, downsample_len, is_causal=True)
     print(kernel.get_kernel_source())
     tilelang_output = kernel(q, k, v, block_mask.to(torch.int8))
 

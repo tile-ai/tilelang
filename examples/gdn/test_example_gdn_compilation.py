@@ -117,8 +117,7 @@ def test_example_wy_fast_bwd_split_compilation():
         num_stages,
     )
     dA_tilelang, dk_tilelang, dv_tilelang, dbeta_tilelang, dg_tilelang = kernel(
-        K, V, Beta, G, A, dw, du
-    )
+        K, V, Beta, G, A, dw, du)
     torch.cuda.synchronize()
     kernel_split = tilelang_wy_fast_bwd_split(
         B,
@@ -156,8 +155,7 @@ def test_example_wy_fast_bwd_split_compilation():
 
     dbeta_tilelang = dbeta_tilelang_k + dbeta_tilelang
     dg_tilelang = (
-        dg_tilelang + dg_tilelang_A_positive.sum(dim=-1) - dg_tilelang_A_negative.sum(dim=-1)
-    )
+        dg_tilelang + dg_tilelang_A_positive.sum(dim=-1) - dg_tilelang_A_negative.sum(dim=-1))
 
 
 def test_example_chunk_o_compilation():
@@ -235,7 +233,8 @@ def test_example_chunk_o_bwd_compilation():
         threads,
         num_stages,
     )
-    dq_tilelang, dk_tilelang, dw_tilelang, dg_tilelang = kernel(Q, K, V, h, G, dO, dh, dv, W)  # noqa: F841
+    dq_tilelang, dk_tilelang, dw_tilelang, dg_tilelang = kernel(Q, K, V, h, G, dO, dh, dv,
+                                                                W)  # noqa: F841
     if use_g:
         dg_tilelang = dg_tilelang.sum(dim=0)
 
@@ -333,7 +332,8 @@ def test_example_chunk_delta_h_compilation():
         threads,
         num_stages,
     )
-    h_tilelang, final_state_tilelang, V_new_tilelang = kernel(K, W, U, G, initial_state)  # noqa: F841
+    h_tilelang, final_state_tilelang, V_new_tilelang = kernel(K, W, U, G,
+                                                              initial_state)  # noqa: F841
 
 
 def test_example_chunk_delta_bwd_compilation():

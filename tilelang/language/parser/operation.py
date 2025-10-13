@@ -19,7 +19,6 @@
 """The tir expression operation registration"""
 from __future__ import annotations
 
-
 from tvm import tir
 from tvm.ffi.runtime_ctypes import DataType, DataTypeCode
 from tvm.tir import IntImm
@@ -60,10 +59,8 @@ def _register_expr_op(ty: type):  # pylint: disable=invalid-name
     def _auto_broadcast(a, b, op):
         if isinstance(a, int):
             if hasattr(b, "dtype"):
-                if (
-                    DataType(b.dtype).type_code == DataTypeCode.INT
-                    or DataType(b.dtype).type_code == DataTypeCode.UINT
-                ):
+                if (DataType(b.dtype).type_code == DataTypeCode.INT or
+                        DataType(b.dtype).type_code == DataTypeCode.UINT):
                     a = IntImm(_get_type_str(b.dtype), a)
                 elif DataType(b.dtype).type_code == DataTypeCode.FLOAT:
                     a = FloatImm(_get_type_str(b.dtype), a)
@@ -79,10 +76,8 @@ def _register_expr_op(ty: type):  # pylint: disable=invalid-name
 
         assert isinstance(a, tir.PrimExpr), "Operand should be a PrimExpr."
         if isinstance(b, int):
-            if (
-                DataType(a.dtype).type_code == DataTypeCode.INT
-                or DataType(a.dtype).type_code == DataTypeCode.UINT
-            ):
+            if (DataType(a.dtype).type_code == DataTypeCode.INT or
+                    DataType(a.dtype).type_code == DataTypeCode.UINT):
                 b = IntImm(_get_type_str(a.dtype), b)
             elif DataType(a.dtype).type_code == DataTypeCode.FLOAT:
                 b = FloatImm(_get_type_str(a.dtype), b)

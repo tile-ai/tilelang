@@ -17,9 +17,12 @@ from tvm.base import py_str
 from tvm.contrib import utils
 
 
-def compile_cuda(
-    code, target_format="ptx", arch=None, options=None, path_target=None, verbose=False
-):
+def compile_cuda(code,
+                 target_format="ptx",
+                 arch=None,
+                 options=None,
+                 path_target=None,
+                 verbose=False):
     """Compile cuda code with NVCC from env.
 
     Parameters
@@ -290,10 +293,8 @@ def get_target_compute_version(target=None):
     if tvm.cuda(0).exist:
         return tvm.cuda(0).compute_version
 
-    raise ValueError(
-        "No CUDA architecture was specified or GPU detected."
-        "Try specifying it by adding '-arch=sm_xx' to your target."
-    )
+    raise ValueError("No CUDA architecture was specified or GPU detected."
+                     "Try specifying it by adding '-arch=sm_xx' to your target.")
 
 
 def parse_compute_version(compute_version) -> tuple[int, int]:

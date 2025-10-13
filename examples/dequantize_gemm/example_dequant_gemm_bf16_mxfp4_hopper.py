@@ -7,9 +7,8 @@ import torch
 from dequantize_utils import torch_convert_bit_twiddling, torch_convert
 
 
-def _tir_u8_to_f4_to_bf16(
-    nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale: tir.PrimExpr, dtype: str
-):
+def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, scale: tir.PrimExpr,
+                          dtype: str):
     """
     Convert a 4-bit field packed in a uint8 into a bfloat16 value, applying an exponent scale.
 
@@ -46,10 +45,8 @@ def _tir_u8_to_f4_to_bf16(
     m_f4 = f4 & tir.const(1, "uint16")
     val_bf16 = tir.reinterpret(
         "bfloat16",
-        (
-            (((s << tir.const(8, "uint16")) | e_bf16) << tir.const(7, "uint16"))
-            | (m_f4 << tir.const(6, "uint16"))
-        ).astype("uint16"),
+        ((((s << tir.const(8, "uint16")) | e_bf16) << tir.const(7, "uint16"))
+         | (m_f4 << tir.const(6, "uint16"))).astype("uint16"),
     )
     return val_bf16
 
@@ -79,18 +76,13 @@ def get_configs():
         threads=[128, 256, 512],
         split=[1, 2],
     )
-    return [
-        {k: v for k, v in zip(iter_params, values)}
-        for values in itertools.product(*iter_params.values())
-    ]
+    return [{
+        k: v for k, v in zip(iter_params, values)
+    } for values in itertools.product(*iter_params.values())]
 
 
-@tilelang.autotune(
-    configs=get_configs(),
-)
-@tilelang.jit(
-    out_idx=[-1],
-)
+@tilelang.autotune(configs=get_configs(),)
+@tilelang.jit(out_idx=[-1],)
 def matmul(
     M,
     N,
@@ -267,8 +259,7 @@ def matmul(
                 for v in T.vectorized(0, local_size):
                     index = i * threads * local_size + tx * local_size + v
                     B_dequantize_shared[index // block_K, index % block_K] = (
-                        B_dequantize_local_thread[v]
-                    )
+                        B_dequantize_local_thread[v])
 
         return fast_dequant_bf16_fp4_twiddling
 
@@ -316,23 +307,22 @@ def matmul(
                     B_local[i, j // num_elems_per_byte],
                     j % num_elems_per_byte,
                     Scale[
-                        bx * block_N + i, k * block_K // scale_size + j // scale_size
-                    ],  # Scale is the exponential part, within the representation of uint8
+                        bx * block_N + i, k * block_K // scale_size + j //
+                        scale_size],  # Scale is the exponential part, within the representation of uint8
                     dtype=out_dtype,
                 ) * T.shift_left(
-                    1, (Scale[bx * block_N + i, k * block_K // scale_size + j // scale_size])
-                )
+                    1, (Scale[bx * block_N + i, k * block_K // scale_size + j // scale_size]))
             T.copy(B_dequantize_local, B_dequantize_shared)
 
         return simple_dequant_bf16_fp4
 
     @T.prim_func
     def main(
-        A: T.Tensor(A_shape, in_dtype),
-        B: T.Tensor(B_shape, storage_dtype),
-        Scale: T.Tensor(Scale_shape, storage_dtype),
-        Bias: T.Tensor(Bias_shape, out_dtype),
-        C: T.Tensor((M, N), out_dtype),
+            A: T.Tensor(A_shape, in_dtype),
+            B: T.Tensor(B_shape, storage_dtype),
+            Scale: T.Tensor(Scale_shape, storage_dtype),
+            Bias: T.Tensor(Bias_shape, out_dtype),
+            C: T.Tensor((M, N), out_dtype),
     ):
         """
         Tiled, pipelined kernel entry that multiplies A with a quantized B (with per-block Scale) producing C.
@@ -353,27 +343,23 @@ def matmul(
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
             C_shared = T.alloc_shared((block_M, block_N), out_dtype)
 
-            T.annotate_layout(
-                {
-                    A_shared: tilelang.layout.make_swizzled_layout(A_shared),
-                    B_shared: tilelang.layout.make_swizzled_layout(B_shared),
-                    C_shared: tilelang.layout.make_swizzled_layout(C_shared),
-                }
-            )
+            T.annotate_layout({
+                A_shared: tilelang.layout.make_swizzled_layout(A_shared),
+                B_shared: tilelang.layout.make_swizzled_layout(B_shared),
+                C_shared: tilelang.layout.make_swizzled_layout(C_shared),
+            })
 
             if with_bias:
-                T.annotate_layout(
-                    {
-                        Bias_shared: tilelang.layout.make_swizzled_layout(Bias_shared),
-                    }
-                )
+                T.annotate_layout({
+                    Bias_shared: tilelang.layout.make_swizzled_layout(Bias_shared),
+                })
 
             if threads == 512:
                 T.disable_warp_group_reg_alloc()
 
             if with_bias:
                 T.copy(
-                    Bias[by * block_M : (by + 1) * block_M, bx * block_N : (bx + 1) * block_N],
+                    Bias[by * block_M:(by + 1) * block_M, bx * block_N:(bx + 1) * block_N],
                     Bias_shared,
                 )
                 T.copy(Bias_shared, C_local)
@@ -390,9 +376,7 @@ def matmul(
                 T.gemm(A_shared, B_dequantize_shared, C_local, transpose_B=True)
 
             T.copy(C_local, C_shared)
-            T.copy(
-                C_shared, C[by * block_M : (by + 1) * block_M, bx * block_N : (bx + 1) * block_N]
-            )
+            T.copy(C_shared, C[by * block_M:(by + 1) * block_M, bx * block_N:(bx + 1) * block_N])
 
     return main
 
@@ -413,7 +397,7 @@ def ref_program_twiddling(A, qB, Scale, Bias=None):
     """
     dtypeC = "bfloat16"
     B = torch_convert_bit_twiddling(qB)
-    B *= 2 ** (Scale[:, (torch.arange(B.shape[1], device=B.device) // 32)])
+    B *= 2**(Scale[:, (torch.arange(B.shape[1], device=B.device) // 32)])
     C = torch.matmul(A.to(torch.float), B.T.to(torch.float))
     C = C.to(torch.__getattribute__(dtypeC))
     return C
@@ -436,7 +420,7 @@ def ref_program_twiddling_with_bias(A, qB, Scale, Bias):
     """
     dtypeC = "bfloat16"
     B = torch_convert_bit_twiddling(qB)
-    B *= 2 ** (Scale[:, (torch.arange(B.shape[1], device=B.device) // 32)])
+    B *= 2**(Scale[:, (torch.arange(B.shape[1], device=B.device) // 32)])
     C = torch.matmul(A.to(torch.float), B.T.to(torch.float)) + Bias
     C = C.to(torch.__getattribute__(dtypeC))
     return C
@@ -460,7 +444,7 @@ def ref_program_simple(A, qB, Scale, Bias=None):
     """
     dtypeC = "bfloat16"
     B = torch_convert(qB)
-    B *= 2 ** (Scale[:, (torch.arange(B.shape[1], device=B.device) // 32)])
+    B *= 2**(Scale[:, (torch.arange(B.shape[1], device=B.device) // 32)])
     C = torch.matmul(A.to(torch.float), B.T.to(torch.float))
     C = C.to(torch.__getattribute__(dtypeC))
     return C
@@ -488,7 +472,7 @@ def ref_program_simple_with_bias(A, qB, Scale, Bias):
     """
     dtypeC = "bfloat16"
     B = torch_convert(qB)
-    B *= 2 ** (Scale[:, (torch.arange(B.shape[1], device=B.device) // 32)])
+    B *= 2**(Scale[:, (torch.arange(B.shape[1], device=B.device) // 32)])
     C = torch.matmul(A.to(torch.float), B.T.to(torch.float)) + Bias
     C = C.to(torch.__getattribute__(dtypeC))
     return C

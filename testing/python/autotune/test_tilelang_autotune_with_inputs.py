@@ -38,15 +38,12 @@ def get_configs():
         thread_num=[128],
         enable_rasterization=[False],
     )
-    return [
-        {k: v for k, v in zip(iter_params, values)}
-        for values in itertools.product(*iter_params.values())
-    ]
+    return [{
+        k: v for k, v in zip(iter_params, values)
+    } for values in itertools.product(*iter_params.values())]
 
 
-@tilelang.autotune(
-    configs=get_configs(),
-)
+@tilelang.autotune(configs=get_configs(),)
 @tilelang.jit(out_idx=[-1])
 def matmul(
     M,
@@ -64,9 +61,9 @@ def matmul(
 
     @T.prim_func
     def main(
-        A: T.Tensor((M, K), dtype),
-        B: T.Tensor((N, K), dtype),
-        C: T.Tensor((M, N), dtype),
+            A: T.Tensor((M, K), dtype),
+            B: T.Tensor((N, K), dtype),
+            C: T.Tensor((M, N), dtype),
     ):
         """
         The compiled TVM function for block-level matrix multiplication.

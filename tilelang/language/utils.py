@@ -68,9 +68,8 @@ def buffer_load_to_tile_region(load: BufferLoad, access_type: str, extents: list
     return region(load, access_type, *extents)
 
 
-def buffer_region_to_tile_region(
-    buffer_region: tir.BufferRegion, access_type: str, extents: list[tir.PrimExpr]
-):
+def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: str,
+                                 extents: list[tir.PrimExpr]):
     """Convert a buffer region to a tile region descriptor.
 
     Args:

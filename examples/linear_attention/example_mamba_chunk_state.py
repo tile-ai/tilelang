@@ -42,15 +42,13 @@ def ref_program(B, x, dt, dA_cumsum):
     x = rearrange(x, "b (c l) h p -> b c l h p", l=chunk_size)
     B = rearrange(B, "b (c l) ... -> b c l ...", l=chunk_size)
     decay_states = torch.exp(dA_cumsum[:, :, :, -1:] - dA_cumsum)
-    return torch.einsum(
-        "bclhn,bhcl,bhcl,bclhp->bchpn", B.to(x.dtype), decay_states.to(x.dtype), dt.to(x.dtype), x
-    )
+    return torch.einsum("bclhn,bhcl,bhcl,bclhp->bchpn", B.to(x.dtype), decay_states.to(x.dtype),
+                        dt.to(x.dtype), x)
 
 
 def get_configs():
     iter_params = dict(
-        block_M=[64, 128], block_N=[32, 64, 128], block_K=[32, 64], num_stages=[1, 2, 3, 4, 5]
-    )
+        block_M=[64, 128], block_N=[32, 64, 128], block_K=[32, 64], num_stages=[1, 2, 3, 4, 5])
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
 
 
@@ -77,17 +75,17 @@ def chunk_state_fwd(
 
     @T.prim_func
     def main(
-        B: T.Tensor((batch, seqlen, ngroups, dstate), dtype),
-        x: T.Tensor((batch, seqlen, nheads, headdim), dtype),
-        dt: T.Tensor((batch, nheads, nchunks, chunk_size), dtype),
-        dA_cumsum: T.Tensor((batch, nheads, nchunks, chunk_size), dtype),
-        Output: T.Tensor((batch, nchunks, nheads, headdim, dstate), dtype),
+            B: T.Tensor((batch, seqlen, ngroups, dstate), dtype),
+            x: T.Tensor((batch, seqlen, nheads, headdim), dtype),
+            dt: T.Tensor((batch, nheads, nchunks, chunk_size), dtype),
+            dA_cumsum: T.Tensor((batch, nheads, nchunks, chunk_size), dtype),
+            Output: T.Tensor((batch, nchunks, nheads, headdim, dstate), dtype),
     ):
         with T.Kernel(
-            nheads,
-            T.ceildiv(headdim, block_M) * T.ceildiv(dstate, block_N),
-            batch * nchunks,
-            threads=threads,
+                nheads,
+                T.ceildiv(headdim, block_M) * T.ceildiv(dstate, block_N),
+                batch * nchunks,
+                threads=threads,
         ) as (bz, bx, by):
             x_shared = T.alloc_shared((block_K, block_M), dtype)
             x_local = T.alloc_fragment((block_K, block_M), dtype)
@@ -109,12 +107,10 @@ def chunk_state_fwd(
             m_idx = bx // T.ceildiv(dstate, block_N)
             n_idx = bx % T.ceildiv(dstate, block_N)
 
-            T.annotate_layout(
-                {
-                    x_shared: tilelang.layout.make_swizzled_layout(x_shared),
-                    acc_o_shared: tilelang.layout.make_swizzled_layout(acc_o_shared),
-                }
-            )
+            T.annotate_layout({
+                x_shared: tilelang.layout.make_swizzled_layout(x_shared),
+                acc_o_shared: tilelang.layout.make_swizzled_layout(acc_o_shared),
+            })
 
             dA_cs_last[0] = dA_cumsum[batch_idx, bz, chunk_idx, chunk_size - 1]
             T.clear(acc_o)
@@ -122,18 +118,18 @@ def chunk_state_fwd(
                 T.copy(
                     x[
                         batch_idx,
-                        chunk_idx * chunk_size + k * block_K : chunk_idx * chunk_size
-                        + (k + 1) * block_K,
+                        chunk_idx * chunk_size + k * block_K:chunk_idx * chunk_size +
+                        (k + 1) * block_K,
                         bz,
-                        m_idx * block_M : (m_idx + 1) * block_M,
+                        m_idx * block_M:(m_idx + 1) * block_M,
                     ],
                     x_shared,
                 )
                 T.copy(
-                    dA_cumsum[batch_idx, bz, chunk_idx, k * block_K : (k + 1) * block_K],
+                    dA_cumsum[batch_idx, bz, chunk_idx, k * block_K:(k + 1) * block_K],
                     dA_cumsum_shared,
                 )
-                T.copy(dt[batch_idx, bz, chunk_idx, k * block_K : (k + 1) * block_K], dt_shared)
+                T.copy(dt[batch_idx, bz, chunk_idx, k * block_K:(k + 1) * block_K], dt_shared)
                 T.copy(dA_cumsum_shared, dA_cumsum_local)
                 T.copy(dt_shared, dt_local)
                 for i in T.Parallel(block_K):
@@ -144,10 +140,10 @@ def chunk_state_fwd(
                 T.copy(
                     B[
                         batch_idx,
-                        chunk_idx * chunk_size + k * block_K : chunk_idx * chunk_size
-                        + (k + 1) * block_K,
+                        chunk_idx * chunk_size + k * block_K:chunk_idx * chunk_size +
+                        (k + 1) * block_K,
                         bz // (nheads // ngroups),
-                        n_idx * block_N : (n_idx + 1) * block_N,
+                        n_idx * block_N:(n_idx + 1) * block_N,
                     ],
                     B_shared,
                 )
@@ -159,8 +155,8 @@ def chunk_state_fwd(
                     batch_idx,
                     chunk_idx,
                     bz,
-                    m_idx * block_M : (m_idx + 1) * block_M,
-                    n_idx * block_N : (n_idx + 1) * block_N,
+                    m_idx * block_M:(m_idx + 1) * block_M,
+                    n_idx * block_N:(n_idx + 1) * block_N,
                 ],
             )
 

@@ -30,9 +30,8 @@ def hadamard(b, n, dtype):
 
     block_round = int(math.log2(warps))
 
-    exchange_round = (
-        n * elem_size // 32768 if n * elem_size > 32768 else 1
-    )  # Suppose we use 32KB shared memory at most
+    exchange_round = (n * elem_size // 32768 if n * elem_size > 32768 else 1
+                     )  # Suppose we use 32KB shared memory at most
     thread_elem_in_smem = thread_elem // exchange_round if exchange_round > 1 else thread_elem
 
     # debug log
@@ -42,9 +41,8 @@ def hadamard(b, n, dtype):
     # print(f'{exchange_round=}')
 
     @T.macro
-    def warp_shfl(
-        local: T.Tensor((thread_elem,), dtype), buf: T.Tensor((thread_elem,), dtype), round: int
-    ):
+    def warp_shfl(local: T.Tensor((thread_elem,), dtype), buf: T.Tensor((thread_elem,), dtype),
+                  round: int):
         tx = T.get_thread_binding(0)
         for i in T.serial(round):
             tx_stride = 1 << i
@@ -83,11 +81,9 @@ def hadamard(b, n, dtype):
                     chunkbase = j * chunksize
                     for k in T.serial(chunksize // 2):
                         local[chunkbase + k] = (
-                            local[chunkbase + k] + local[chunkbase + k + chunksize // 2]
-                        )
+                            local[chunkbase + k] + local[chunkbase + k + chunksize // 2])
                         local[chunkbase + k + chunksize // 2] = (
-                            local[chunkbase + k] - 2 * local[chunkbase + k + chunksize // 2]
-                        )
+                            local[chunkbase + k] - 2 * local[chunkbase + k + chunksize // 2])
 
             # 3. Hadamard inside warp, n<=512
             # In warp level, we rely on warp shuffle to exchange data inside each warp, without using shared memory
@@ -138,8 +134,7 @@ def ref_program(x: torch.Tensor):
     dim = x.shape[-1]
     assert is_pow_of_2(dim)
     return F.linear(
-        x, torch.tensor(scipy.linalg.hadamard(dim, dtype=float), dtype=x.dtype, device=x.device)
-    )
+        x, torch.tensor(scipy.linalg.hadamard(dim, dtype=float), dtype=x.dtype, device=x.device))
 
 
 def main():

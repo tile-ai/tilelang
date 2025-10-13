@@ -41,7 +41,7 @@ def flashattn(
     num_stages=0,
     threads=128,
 ):
-    scale = (1.0 / dim) ** 0.5 * 1.44269504  # log2(e)
+    scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     head_kv = heads // groups
     q_shape = [batch, seq_len, heads, dim]
     kv_shape = [batch, seq_len, head_kv, dim]
@@ -59,12 +59,11 @@ def flashattn(
         by: T.int32,
         bz: T.int32,
     ):
-        T.copy(K[bz, k * block_N : (k + 1) * block_N, by // groups, :], K_shared)
+        T.copy(K[bz, k * block_N:(k + 1) * block_N, by // groups, :], K_shared)
         if is_causal:
             for i, j in T.Parallel(block_M, block_N):
-                acc_s[i, j] = T.if_then_else(
-                    bx * block_M + i >= k * block_N + j, 0, -T.infinity(acc_s.dtype)
-                )
+                acc_s[i, j] = T.if_then_else(bx * block_M + i >= k * block_N + j, 0,
+                                             -T.infinity(acc_s.dtype))
         else:
             T.clear(acc_s)
         T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -79,18 +78,18 @@ def flashattn(
         by: T.int32,
         bz: T.int32,
     ):
-        T.copy(V[bz, k * block_N : (k + 1) * block_N, by // groups, :], V_shared)
+        T.copy(V[bz, k * block_N:(k + 1) * block_N, by // groups, :], V_shared)
         T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
     @T.macro
     def Softmax(
-        acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
-        acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
-        scores_max: T.FragmentBuffer([block_M], accum_dtype),
-        scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
-        scores_scale: T.FragmentBuffer([block_M], accum_dtype),
-        scores_sum: T.FragmentBuffer([block_M], accum_dtype),
-        logsum: T.FragmentBuffer([block_M], accum_dtype),
+            acc_s: T.FragmentBuffer([block_M, block_N], accum_dtype),
+            acc_s_cast: T.FragmentBuffer([block_M, block_N], dtype),
+            scores_max: T.FragmentBuffer([block_M], accum_dtype),
+            scores_max_prev: T.FragmentBuffer([block_M], accum_dtype),
+            scores_scale: T.FragmentBuffer([block_M], accum_dtype),
+            scores_sum: T.FragmentBuffer([block_M], accum_dtype),
+            logsum: T.FragmentBuffer([block_M], accum_dtype),
     ):
         T.copy(scores_max, scores_max_prev)
         T.fill(scores_max, -T.infinity(accum_dtype))
@@ -114,18 +113,18 @@ def flashattn(
 
     @T.macro
     def Rescale(
-        acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
-        scores_scale: T.FragmentBuffer([block_M], accum_dtype),
+            acc_o: T.FragmentBuffer([block_M, dim], accum_dtype),
+            scores_scale: T.FragmentBuffer([block_M], accum_dtype),
     ):
         for i, j in T.Parallel(block_M, dim):
             acc_o[i, j] *= scores_scale[i]
 
     @T.prim_func
     def main(
-        Q: T.Tensor(q_shape, dtype),
-        K: T.Tensor(kv_shape, dtype),
-        V: T.Tensor(kv_shape, dtype),
-        Output: T.Tensor(q_shape, dtype),
+            Q: T.Tensor(q_shape, dtype),
+            K: T.Tensor(kv_shape, dtype),
+            V: T.Tensor(kv_shape, dtype),
+            Output: T.Tensor(q_shape, dtype),
     ):
         with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
@@ -141,34 +140,31 @@ def flashattn(
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
 
-            T.copy(Q[bz, bx * block_M : (bx + 1) * block_M, by, :], Q_shared)
+            T.copy(Q[bz, bx * block_M:(bx + 1) * block_M, by, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
 
             loop_range = (
-                T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N))
-                if is_causal
-                else T.ceildiv(seq_len, block_N)
-            )
+                T.min(T.ceildiv(seq_len, block_N), T.ceildiv(
+                    (bx + 1) * block_M, block_N)) if is_causal else T.ceildiv(seq_len, block_N))
 
             for k in T.Pipelined(
-                loop_range,
-                num_stages=num_stages,
-                order=[-1, 0, 3, 1, -1, 2],
-                stage=[-1, 0, 0, 1, -1, 1],
-                group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]],
+                    loop_range,
+                    num_stages=num_stages,
+                    order=[-1, 0, 3, 1, -1, 2],
+                    stage=[-1, 0, 0, 1, -1, 1],
+                    group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]],
             ):
                 MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
-                Softmax(
-                    acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum, logsum
-                )
+                Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum,
+                        logsum)
                 Rescale(acc_o, scores_scale)
                 MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
             for i, j in T.Parallel(block_M, dim):
                 acc_o[i, j] /= logsum[i]
             T.copy(acc_o, O_shared)
-            T.copy(O_shared, Output[bz, bx * block_M : (bx + 1) * block_M, by, :])
+            T.copy(O_shared, Output[bz, bx * block_M:(bx + 1) * block_M, by, :])
 
     return main
 
@@ -179,11 +175,9 @@ def ref_program(Q, K, V, is_causal, groups=1):
     # V: [B, T, HV, D]
     # HQ = HKV * groups
     assert Q.size(2) == K.size(2) * groups, (
-        f"Q.size(2): {Q.size(2)}, K.size(2): {K.size(2)}, groups: {groups}"
-    )
+        f"Q.size(2): {Q.size(2)}, K.size(2): {K.size(2)}, groups: {groups}")
     assert Q.size(2) == V.size(2) * groups, (
-        f"Q.size(2): {Q.size(2)}, V.size(2): {V.size(2)}, groups: {groups}"
-    )
+        f"Q.size(2): {Q.size(2)}, V.size(2): {V.size(2)}, groups: {groups}")
 
     dim = Q.size(-1)
     K = K.repeat_interleave(groups, dim=2)

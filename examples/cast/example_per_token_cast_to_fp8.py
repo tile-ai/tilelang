@@ -16,9 +16,9 @@ def per_token_cast_to_fp8(M, N, blk_m):
 
     @T.prim_func
     def per_token_cast(
-        X: T.Tensor((M, N), dtype),
-        X_fp8: T.Tensor((M, N), "float8_e4m3"),
-        X_amax: T.Tensor((M, T.ceildiv(N, group_size)), dtype),
+            X: T.Tensor((M, N), dtype),
+            X_fp8: T.Tensor((M, N), "float8_e4m3"),
+            X_amax: T.Tensor((M, T.ceildiv(N, group_size)), dtype),
     ):
         with T.Kernel(T.ceildiv(M, blk_m), T.ceildiv(N, group_size), threads=128) as (bx, by):
             row = bx
@@ -29,19 +29,18 @@ def per_token_cast_to_fp8(M, N, blk_m):
             y_q_local = T.alloc_fragment((blk_m, group_size), dtype)
             y_q_local_fp8 = T.alloc_fragment((blk_m, group_size), "float8_e4m3")
 
-            T.annotate_layout(
-                {
-                    y_local: T.Fragment(
+            T.annotate_layout({
+                y_local:
+                    T.Fragment(
                         y_local.shape,
                         forward_thread_fn=lambda i, j: (i // (blk_m // 4)) * 32 + j % 32,
                     ),
-                }
-            )
+            })
 
             T.copy(
                 X[
-                    row * blk_m : (row + 1) * blk_m,
-                    row_g_id * group_size : (row_g_id + 1) * group_size,
+                    row * blk_m:(row + 1) * blk_m,
+                    row_g_id * group_size:(row_g_id + 1) * group_size,
                 ],
                 y_local,
             )
@@ -57,8 +56,8 @@ def per_token_cast_to_fp8(M, N, blk_m):
             T.copy(
                 y_q_local_fp8,
                 X_fp8[
-                    row * blk_m : (row + 1) * blk_m,
-                    row_g_id * group_size : (row_g_id + 1) * group_size,
+                    row * blk_m:(row + 1) * blk_m,
+                    row_g_id * group_size:(row_g_id + 1) * group_size,
                 ],
             )
 
@@ -122,8 +121,7 @@ def main():
 
     def run_triton():
         x_fp8_triton_, x_amax_triton_ = per_token_group_quant_fp8(
-            x, 128, 1e-4, dtype=torch.float8_e4m3fn, column_major_scales=False
-        )
+            x, 128, 1e-4, dtype=torch.float8_e4m3fn, column_major_scales=False)
         return x_fp8_triton_, x_amax_triton_
 
     x_fp8_triton, x_amax_triton = run_triton()

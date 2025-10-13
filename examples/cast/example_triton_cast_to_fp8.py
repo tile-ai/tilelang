@@ -129,8 +129,7 @@ def per_token_group_quant_fp8(
         scaling factor for quantization.
     """
     assert x.shape[-1] % group_size == 0, (
-        f"the last dimension of `x` {x.shape[-1]} must be divisible by `group_size` {group_size}"
-    )
+        f"the last dimension of `x` {x.shape[-1]} must be divisible by `group_size` {group_size}")
     assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
     finfo = torch.finfo(dtype)

@@ -47,14 +47,12 @@ class DefaultPolicy:
         return cls(arch, tags)._init_with_prim_func(func, name)
 
     @classmethod
-    def from_output_nodes(
-        cls, nodes: list[OutputNode], arch: TileDevice, tags: dict | None = None
-    ):
+    def from_output_nodes(cls, nodes: list[OutputNode], arch: TileDevice, tags: dict | None = None):
         return cls(arch, tags)._init_with_output_nodes(nodes)
 
-    def _init_with_prim_func(
-        self, func: tvm.tir.PrimFunc, name: str = "PrimFuncNode"
-    ) -> DefaultPolicy:
+    def _init_with_prim_func(self,
+                             func: tvm.tir.PrimFunc,
+                             name: str = "PrimFuncNode") -> DefaultPolicy:
         if func is not None and isinstance(func, tvm.tir.PrimFunc):
             self.func = func
             self.prim_func_node = PrimFuncNode(self.func, tags=self.tags, name=name)
@@ -66,10 +64,8 @@ class DefaultPolicy:
 
     def _init_with_output_nodes(self, output_nodes: list[OutputNode]):
         self.ordered_nodes = list(
-            filter(
-                lambda n: not n.is_placeholder() and not n.is_output(), find_topo_sort(output_nodes)
-            )
-        )
+            filter(lambda n: not n.is_placeholder() and not n.is_output(),
+                   find_topo_sort(output_nodes)))
         for node in self.ordered_nodes:
             node.update_tags(self.tags)
 
@@ -109,14 +105,13 @@ class DefaultPolicy:
 
     def dfs_smem_tile(self, init_tile, rstep_map) -> Iterable[TileDict]:
         _steps = [get_all_factors(n) for n in self.output_nodes[0].get_space_dim()]
-        steps = [step[step.index(t) :] for step, t in zip(_steps, init_tile)]
+        steps = [step[step.index(t):] for step, t in zip(_steps, init_tile)]
         for i in range(len(steps)):
             added = list(
                 filter(
                     lambda s: s < steps[i][-1] and s > steps[i][0] and s not in steps[i],
                     [2, 4, 8, 16, 32],
-                )
-            )
+                ))
             steps[i].extend(added)
             steps[i] = sorted(steps[i])
         visited_tiles = {}
@@ -313,8 +308,7 @@ class DefaultPolicy:
             shape = node.propagate_inputs(tile, rstep=rstep)
             for i, input_buffer in enumerate(node.input_buffers):
                 read_transaction_elements = self.arch.transaction_size[1] // (
-                    (node.get_buffer_dtype(input_buffer).bits + 7) // 8
-                )
+                    (node.get_buffer_dtype(input_buffer).bits + 7) // 8)
                 score += sim(
                     int(coalesced_factor(shape[i], input_buffer.shape)),
                     read_transaction_elements,
@@ -370,9 +364,7 @@ class DefaultPolicy:
                 all_steps[k] = list(filter(lambda x: x % rstep[k] == 0, all_steps[k]))
 
             def _score(rstep_id):
-                rstep = {
-                    k.var.name: all_steps[k.var.name][rstep_id[k.var.name]] for k in node.raxis
-                }
+                rstep = {k.var.name: all_steps[k.var.name][rstep_id[k.var.name]] for k in node.raxis}
                 score = 0
                 shape = node.propagate_inputs(td.get_tile(node), rstep=rstep)
                 for i, input_buffer in enumerate(node.input_buffers):
@@ -410,9 +402,7 @@ class DefaultPolicy:
                     break
                 else:
                     cur_rstep_id = new_rstep_id
-            rstep = {
-                k.var.name: all_steps[k.var.name][cur_rstep_id[k.var.name]] for k in node.raxis
-            }
+            rstep = {k.var.name: all_steps[k.var.name][cur_rstep_id[k.var.name]] for k in node.raxis}
             return rstep
 
         for node in self.ordered_nodes:
@@ -448,11 +438,8 @@ class DefaultPolicy:
                     nbytes = (edge.src_node.get_dtype().bits + 7) // 8
                     read_transaction_elements = self.arch.transaction_size[1] // nbytes
                     traffic += (
-                        coalesced_tensor_shape(
-                            input_shapes[i], edge.src_node.get_shape(), read_transaction_elements
-                        )
-                        * nbytes
-                    )
+                        coalesced_tensor_shape(input_shapes[i], edge.src_node.get_shape(),
+                                               read_transaction_elements) * nbytes)
             for edge in node.outputs:
                 if edge.dst_node.is_output():
                     nbytes = (edge.src_node.get_dtype().bits + 7) // 8
@@ -462,9 +449,7 @@ class DefaultPolicy:
                             output_shapes[edge.src_id],
                             node.get_shape(edge.src_id),
                             write_transaction_elements,
-                        )
-                        * nbytes
-                    )
+                        ) * nbytes)
 
         return traffic, op_tile_map
 
@@ -574,8 +559,7 @@ class DefaultPolicy:
         tensor_strides_map = {}
         for node in self.ordered_nodes:
             output_strides_map[node], tensor_strides_map[node] = self.compute_node_stride_map(
-                node, td
-            )
+                node, td)
         td.output_strides_map, td.tensor_strides_map = output_strides_map, tensor_strides_map
 
     def compute_tile_dict(self, output_tile: list[int], rstep_map) -> TileDict:
@@ -605,15 +589,9 @@ class DefaultPolicy:
         output_shape = self.output_nodes[0].get_space_dim()
         td.grid_size = int(np.prod([(y + x - 1) // x for x, y in zip(output_tile, output_shape)]))
         # estimated reg usage
-        reg_usage = int(
-            2
-            * max(
-                [
-                    np.prod(td.get_tile(node)) * node.get_dtype().bits / 32
-                    for node in self.ordered_nodes
-                ]
-            )
-        )
+        reg_usage = int(2 * max([
+            np.prod(td.get_tile(node)) * node.get_dtype().bits / 32 for node in self.ordered_nodes
+        ]))
         if reg_usage > self.arch.reg_cap:
             td.valid = False
             return td
@@ -638,16 +616,13 @@ class DefaultPolicy:
         for node in self.ordered_nodes:
             if np.prod(td.get_tile(node)) == 0:
                 return False
-            node_grid_size = np.prod(
-                [(y + x - 1) // x for x, y in zip(td.get_tile(node), node.get_space_dim())]
-            )
+            node_grid_size = np.prod([
+                (y + x - 1) // x for x, y in zip(td.get_tile(node), node.get_space_dim())
+            ])
             if node_grid_size != td.grid_size:
                 return False
-            if (
-                hasattr(node, "reduce_op")
-                and node.reduce_op is not None
-                and len(node.reduce_op.axis) == len(td.output_tile)
-            ):
+            if (hasattr(node, "reduce_op") and node.reduce_op is not None and
+                    len(node.reduce_op.axis) == len(td.output_tile)):
                 for i, tile_extent in enumerate(td.output_tile):
                     if node.reduce_op.axis[i].dom.extent % tile_extent:
                         return False
@@ -672,8 +647,7 @@ class DefaultPolicy:
         max_block_size = functools.reduce(math.gcd, node_space_sizes)
 
         if max_block_size < self.arch.warp_size * self.arch.sm_partition and max_block_size == min(
-            node_space_sizes
-        ):
+                node_space_sizes):
             node_reduce_sizes = [
                 int(np.prod(list(td.get_rstep(node).values()))) for node in self.ordered_nodes
             ]
@@ -683,14 +657,12 @@ class DefaultPolicy:
                 filter(
                     lambda x: x % max_block_size == 0 and x <= 1024,
                     get_all_factors(max_possible_size),
-                )
-            )
+                ))
             possible_block_sizes = list(
                 filter(  # either be a factor of space or cover fully cover the space
                     lambda x: all([x % s == 0 or s % x == 0 for s in node_space_sizes]),
                     possible_block_sizes,
-                )
-            )
+                ))
             factor_ordered = sorted(possible_block_sizes, key=self.score_block_size)
             return factor_ordered
         else:
@@ -856,11 +828,8 @@ class DefaultPolicy:
         vectorize_result = {}
         for tensor, shape in shapes.items():
             for v in vectorize_sizes:
-                if (
-                    is_shape_aligned(shape, block_size * v)
-                    and is_cont(shape, v)
-                    and is_type_allowed(dtypes[tensor], v)
-                ):
+                if (is_shape_aligned(shape, block_size * v) and is_cont(shape, v) and
+                        is_type_allowed(dtypes[tensor], v)):
                     vectorize_result[tensor] = v
                     break
         return vectorize_result

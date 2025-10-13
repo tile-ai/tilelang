@@ -14,6 +14,7 @@ def check_hopper():
 
 
 def ref_program(stride, padding, dilation):
+
     def main(A, B):
         A = A.permute(0, 3, 1, 2)  # N, H, W, C -> N, C, H, W
         B = B.permute(3, 2, 0, 1)  # H, W, C, F -> F, C, H, W
@@ -39,8 +40,7 @@ def get_configs():
             num_stages,
             thread_num,
             enable_rasterization,
-        )
-    )
+        ))
 
     configs = [
         {
@@ -50,8 +50,7 @@ def get_configs():
             "num_stages": c[3],
             "thread_num": c[4],
             "enable_rasteration": c[5],  # keep param name for backward-compat
-        }
-        for c in _configs
+        } for c in _configs
     ]
     return configs
 
@@ -123,13 +122,13 @@ def convolution(
 
     @T.prim_func
     def main(
-        data: T.Tensor((N, H, W, C), dtype),
-        kernel: T.Tensor((KH, KW, C, F), dtype),
-        out: T.Tensor((N, OH, OW, F), dtype),
+            data: T.Tensor((N, H, W, C), dtype),
+            kernel: T.Tensor((KH, KW, C, F), dtype),
+            out: T.Tensor((N, OH, OW, F), dtype),
     ):
         with T.Kernel(
-            T.ceildiv(F, block_N), T.ceildiv(N * OH * OW, block_M), threads=thread_num
-        ) as (bx, by):
+                T.ceildiv(F, block_N), T.ceildiv(N * OH * OW, block_M),
+                threads=thread_num) as (bx, by):
             data_shared = T.alloc_shared((block_M, block_K), dtype)
             kernel_shared = T.alloc_shared((block_K, block_N), dtype)
             out_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -139,11 +138,9 @@ def convolution(
             out_flat = T.Tensor((N * OH * OW, F), dtype, out.data)
 
             if is_hopper:
-                T.annotate_layout(
-                    {
-                        out_shared: tilelang.layout.make_swizzled_layout(out_shared),
-                    }
-                )
+                T.annotate_layout({
+                    out_shared: tilelang.layout.make_swizzled_layout(out_shared),
+                })
 
             T.clear(out_local)
             for k_iter in T.Pipelined(T.ceildiv(KH * KW * C, block_K), num_stages=num_stages):
@@ -155,15 +152,10 @@ def convolution(
                         m = by * block_M + i
                         access_h = m % (OH * OW) // OW * S + k // (KW * C) * D - P
                         access_w = m % OW * S + k // C % KW * D - P
-                        in_bound = (
-                            (access_h >= 0)
-                            and (access_w >= 0)
-                            and (access_h < H)
-                            and (access_w < W)
-                        )
+                        in_bound = ((access_h >= 0) and (access_w >= 0) and (access_h < H) and
+                                    (access_w < W))
                         data_shared[i, j] = T.if_then_else(
-                            in_bound, data[m // (OH * OW), access_h, access_w, k % C], 0
-                        )
+                            in_bound, data[m // (OH * OW), access_h, access_w, k % C], 0)
                 T.copy(kernel_flat[k_iter * block_K, bx * block_N], kernel_shared)
                 T.gemm(data_shared, kernel_shared, out_local)
 

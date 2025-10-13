@@ -6,6 +6,7 @@ import tilelang.language as T
 
 
 def debug_print_buffer(M=16, N=16, dtype="float16"):
+
     @T.prim_func
     def program(Q: T.Tensor((M, N), dtype)):
         with T.Kernel(4, 4, 2, threads=128 * 2) as (bx, by, bz):

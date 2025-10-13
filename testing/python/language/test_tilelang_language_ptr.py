@@ -7,6 +7,7 @@ from tilelang.utils import map_torch_type
 
 
 def matmul_test(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="float"):
+
     @T.prim_func
     def main(
         a_ptr: T.ptr,

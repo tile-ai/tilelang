@@ -25,9 +25,9 @@ def print_var(var: tir.PrimExpr, msg: str = "") -> tir.PrimExpr:
 
 
 @macro
-def print_var_with_condition(
-    condition: tir.PrimExpr, var: tir.PrimExpr, msg: str = ""
-) -> tir.PrimExpr:
+def print_var_with_condition(condition: tir.PrimExpr,
+                             var: tir.PrimExpr,
+                             msg: str = "") -> tir.PrimExpr:
     """
     Conditionally prints a TIR primitive expression (PrimExpr) if a given condition is True.
 
@@ -43,9 +43,10 @@ def print_var_with_condition(
 
 
 @macro
-def print_global_buffer_with_condition(
-    condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = ""
-) -> tir.PrimExpr:
+def print_global_buffer_with_condition(condition: tir.PrimExpr,
+                                       buffer: tir.Buffer,
+                                       elems: int,
+                                       msg: str = "") -> tir.PrimExpr:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
     """
@@ -53,17 +54,17 @@ def print_global_buffer_with_condition(
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.shape)
-            tir.call_extern(
-                "handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords]
-            )
+            tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i,
+                            buffer[coords])
     else:
         tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
 @macro
-def print_shared_buffer_with_condition(
-    condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = ""
-) -> tir.PrimExpr:
+def print_shared_buffer_with_condition(condition: tir.PrimExpr,
+                                       buffer: tir.Buffer,
+                                       elems: int,
+                                       msg: str = "") -> tir.PrimExpr:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
 
@@ -79,15 +80,15 @@ def print_shared_buffer_with_condition(
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.shape)
-            tir.call_extern(
-                "handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords]
-            )
+            tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i,
+                            buffer[coords])
 
 
 @macro
-def print_fragment_buffer_with_condition(
-    condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = ""
-) -> tir.PrimExpr:
+def print_fragment_buffer_with_condition(condition: tir.PrimExpr,
+                                         buffer: tir.Buffer,
+                                         elems: int,
+                                         msg: str = "") -> tir.PrimExpr:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
 
@@ -109,9 +110,10 @@ def print_fragment_buffer_with_condition(
 
 
 @macro
-def print_local_buffer_with_condition(
-    condition: tir.PrimExpr, buffer: tir.Buffer, elems: int, msg: str = ""
-) -> tir.PrimExpr:
+def print_local_buffer_with_condition(condition: tir.PrimExpr,
+                                      buffer: tir.Buffer,
+                                      elems: int,
+                                      msg: str = "") -> tir.PrimExpr:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
 
@@ -127,9 +129,8 @@ def print_local_buffer_with_condition(
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.shape)
-            tir.call_extern(
-                "handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords]
-            )
+            tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i,
+                            buffer[coords])
 
 
 def print(obj: Any, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> tir.PrimExpr:
@@ -212,5 +213,4 @@ def print(obj: Any, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> 
     else:
         # Unsupported object type.
         raise ValueError(
-            f"Unexpected type: {type(obj)}. Supported types are tir.Buffer and tir.PrimExpr."
-        )
+            f"Unexpected type: {type(obj)}. Supported types are tir.Buffer and tir.PrimExpr.")

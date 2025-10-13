@@ -6,6 +6,7 @@ from tvm import arith, tir
 
 
 class Statement:
+
     def __init__(self, block_analyzer, block: BlockRV):
         self.block_analyzer = block_analyzer
         self.block = block
@@ -77,6 +78,7 @@ class TensorDepNode:
 
 
 class DependencyAnalysis:
+
     def __init__(self, deps):
         self.deps = deps
         # issue: duplicate name when we have two same ops.
@@ -112,8 +114,7 @@ class DependencyAnalysis:
     def traverse_dependencies(self, compute):
         if isinstance(compute, Statement):
             node = self.get_or_create_node(
-                compute.block_analyzer.get_output_buffers(compute.block)[0].name
-            )
+                compute.block_analyzer.get_output_buffers(compute.block)[0].name)
             # Loop through input tensors
             for input_buffer in compute.block_analyzer.get_input_buffers(compute.block):
                 # Get the input node
@@ -167,6 +168,7 @@ class DependencyAnalysis:
 
 
 class InputShapeInference:
+
     def __init__(self, deps: list[Statement]):
         self.deps = deps
         self.target_mapping = {}
@@ -260,8 +262,7 @@ class InputShapeInference:
             # assume the dom.min is always 0, maybe we can extend the IterInfo to include the min value.
             if ax.var.name in rstep:
                 bound = arith.ConstIntBound(
-                    int(ax.dom.min), int(ax.dom.min + min(ax.dom.extent, rstep[ax.var.name]) - 1)
-                )
+                    int(ax.dom.min), int(ax.dom.min + min(ax.dom.extent, rstep[ax.var.name]) - 1))
             else:
                 bound = arith.ConstIntBound(int(ax.dom.min), int(ax.dom.min + ax.dom.extent - 1))
             ana.update(ax.var, bound, True)
@@ -321,6 +322,7 @@ class InputShapeInference:
 
 
 def region_exist_in_list(a, list) -> bool:
+
     def expr_is_same(a, b) -> bool:
         if isinstance(a, tir.IntImm) and isinstance(b, tir.IntImm):
             return a.value == b.value

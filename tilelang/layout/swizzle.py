@@ -19,9 +19,9 @@ def make_swizzled_layout(buffer: tvm.tir.Buffer, k_major: bool = True, allow_pad
 
 
 # for WGMMA Intrinsics
-def make_wgmma_swizzled_layout(
-    buffer: tvm.tir.Buffer, continuity: int = None, k_major: bool = True
-):
+def make_wgmma_swizzled_layout(buffer: tvm.tir.Buffer,
+                               continuity: int = None,
+                               k_major: bool = True):
     assert len(buffer.shape) == 2
     if continuity is None:
         continuity = int(buffer.shape[1])

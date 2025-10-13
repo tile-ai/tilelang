@@ -8,8 +8,8 @@ def reshape_test(N, M, dtype):
 
     @T.prim_func
     def main(
-        A: T.Tensor((N,), dtype),
-        B: T.Tensor((N // M, M), dtype),
+            A: T.Tensor((N,), dtype),
+            B: T.Tensor((N // M, M), dtype),
     ):
         with T.Kernel(1) as _:
             A_reshaped = T.reshape(A, [N // M, M])
@@ -49,8 +49,8 @@ def reshape_test_smem_1d_2_2d(N, M, dtype):
 
     @T.prim_func
     def main(
-        A: T.Tensor((N,), dtype),
-        B: T.Tensor((N // M, M), dtype),
+            A: T.Tensor((N,), dtype),
+            B: T.Tensor((N // M, M), dtype),
     ):
         with T.Kernel(1) as _:
             A_shared = T.alloc_shared((N,), dtype)
@@ -93,8 +93,8 @@ def reshape_test_smem_2d_2_1d(N, M, dtype):
 
     @T.prim_func
     def main(
-        A: T.Tensor((N // M, M), dtype),
-        B: T.Tensor((N,), dtype),
+            A: T.Tensor((N // M, M), dtype),
+            B: T.Tensor((N,), dtype),
     ):
         with T.Kernel(1) as _:
             A_shared = T.alloc_shared((N // M, M), dtype)

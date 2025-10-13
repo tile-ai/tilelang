@@ -77,18 +77,15 @@ class LibraryGenerator:
                     "TL_ENABLE_FAST_MATH",
                     "0.1.7",
                 )
-                enable_fast_math = not self.pass_configs.get(
-                    PassConfigKey.TL_DISABLE_FAST_MATH, True
-                )
+                enable_fast_math = not self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH,
+                                                             True)
             else:
                 enable_fast_math = self.pass_configs.get(PassConfigKey.TL_ENABLE_FAST_MATH, False)
 
-            ptxas_usage_level = self.pass_configs.get(
-                PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None
-            )
+            ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL,
+                                                      None)
             verbose_ptxas_output = self.pass_configs.get(
-                PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False
-            )
+                PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
 
             command = [
                 get_nvcc_compiler(),
@@ -198,11 +195,9 @@ class PyLibraryGenerator(LibraryGenerator):
 
     def __init__(self, target: Target, verbose: bool = False):
         if not is_nvrtc_available:
-            raise ImportError(
-                "cuda-python is not available, nvrtc backend cannot be used. "
-                "Please install cuda-python via `pip install cuda-python` "
-                "if you want to use the nvrtc backend."
-            )
+            raise ImportError("cuda-python is not available, nvrtc backend cannot be used. "
+                              "Please install cuda-python via `pip install cuda-python` "
+                              "if you want to use the nvrtc backend.")
         super().__init__(target, verbose)
 
     @staticmethod
@@ -230,8 +225,7 @@ class PyLibraryGenerator(LibraryGenerator):
             torch.cuda.synchronize()
 
         result, self.culib = cuda.cuLibraryLoadFromFile(
-            bytes(lib_path, "utf-8"), [], [], 0, [], [], 0
-        )
+            bytes(lib_path, "utf-8"), [], [], 0, [], [], 0)
         assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to load library: {lib_path}"
 
     def compile_lib(self, timeout: float = None):
@@ -259,15 +253,12 @@ class PyLibraryGenerator(LibraryGenerator):
             options = [f"-I{tl_template_path}", f"-I{cutlass_path}", f"-I{cuda_home}/include"]
             if self.compile_flags:
                 options += [
-                    item
-                    for flag in self.compile_flags
-                    for item in flag.split()
+                    item for flag in self.compile_flags for item in flag.split()
                     if item not in options
                 ]
 
             cubin_bytes = compile_cuda(
-                self.lib_code, target_format="cubin", options=options, verbose=verbose
-            )
+                self.lib_code, target_format="cubin", options=options, verbose=verbose)
             with open(libpath, "wb") as f:
                 f.write(cubin_bytes)
 

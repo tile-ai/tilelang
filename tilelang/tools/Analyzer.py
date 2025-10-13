@@ -130,8 +130,7 @@ class Analyzer:
                         thread_tag = iter_var.thread_tag
                         if thread_tag in self.block_counts:
                             extent = (
-                                stmt.value.value if hasattr(stmt.value, "value") else stmt.value
-                            )
+                                stmt.value.value if hasattr(stmt.value, "value") else stmt.value)
                             self.block_counts[thread_tag] = extent
                 elif isinstance(stmt, tvm.tir.For):
                     # Push loop extent onto the stack

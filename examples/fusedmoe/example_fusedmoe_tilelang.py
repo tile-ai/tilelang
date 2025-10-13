@@ -37,17 +37,17 @@ def moe_forward_tilelang_shared(
 
     @T.prim_func
     def kernel_shared(
-        input: T.Tensor(input_shape, dtype),  # type: ignore
-        shared_W_gate: T.Tensor(shared_W_gate_shape, dtype),  # type: ignore
-        shared_W_up: T.Tensor(shared_W_up_shape, dtype),  # type: ignore
-        shared_W_down: T.Tensor(shared_W_down_shape, dtype),  # type: ignore
-        up_logits: T.Tensor((num_tokens, dexpert), dtype),  # type: ignore
-        output: T.Tensor(input_shape, dtype),  # type: ignore
+            input: T.Tensor(input_shape, dtype),  # type: ignore
+            shared_W_gate: T.Tensor(shared_W_gate_shape, dtype),  # type: ignore
+            shared_W_up: T.Tensor(shared_W_up_shape, dtype),  # type: ignore
+            shared_W_down: T.Tensor(shared_W_down_shape, dtype),  # type: ignore
+            up_logits: T.Tensor((num_tokens, dexpert), dtype),  # type: ignore
+            output: T.Tensor(input_shape, dtype),  # type: ignore
     ):
         # Step 1: Compute gate and up logits
         with T.Kernel(
-            T.ceildiv(num_tokens, block_token), T.ceildiv(dexpert, block_dexpert), threads=threads
-        ) as (bx, by):
+                T.ceildiv(num_tokens, block_token), T.ceildiv(dexpert, block_dexpert),
+                threads=threads) as (bx, by):
             # Split the block to shared experts and routed experts
             input_shared = T.alloc_fragment((block_token, block_dhidden), dtype=dtype)
             W_gate_shared = T.alloc_shared((block_dexpert, block_dhidden), dtype=dtype)
@@ -72,16 +72,15 @@ def moe_forward_tilelang_shared(
             # Fuse with SiLU and element-wise product
             for i, j in T.Parallel(block_token, block_dexpert):
                 gate_logits_local[i, j] = gate_logits_local[i, j] * (
-                    1.0 / (1.0 + T.exp2(-gate_logits_local[i, j] * scale))
-                )
+                    1.0 / (1.0 + T.exp2(-gate_logits_local[i, j] * scale)))
                 up_logits_local[i, j] = up_logits_local[i, j] * gate_logits_local[i, j]
 
             T.copy(up_logits_local, up_logits[bx * block_token, by * block_dexpert])
 
         # Step 2: Compute down logits
         with T.Kernel(
-            T.ceildiv(num_tokens, block_token), T.ceildiv(dhidden, block_dhidden), threads=threads
-        ) as (bx, by):
+                T.ceildiv(num_tokens, block_token), T.ceildiv(dhidden, block_dhidden),
+                threads=threads) as (bx, by):
             up_logits_shared = T.alloc_fragment((block_token, block_dexpert), dtype=dtype)
             W_down_shared = T.alloc_shared((block_dhidden, block_dexpert), dtype=dtype)
             output_local = T.alloc_fragment((block_token, block_dhidden), dtype=accum_type)
@@ -140,17 +139,17 @@ def moe_forward_tilelang_routed(
 
     @T.prim_func
     def kernel(
-        input: T.Tensor(input_shape, dtype),  # type: ignore
-        routed_expert_gate: T.Tensor(routed_expert_gate_shape, dtype),  # type: ignore
-        routed_expert_up: T.Tensor(routed_expert_up_shape, dtype),  # type: ignore
-        routed_expert_down: T.Tensor(routed_expert_down_shape, dtype),  # type: ignore
-        routed_expert_weights: T.Tensor(routed_expert_weights_shape, dtype),  # type: ignore
-        group_sizes: T.Tensor(group_sizes_shape, "int32"),  # type: ignore
-        group_offsets: T.Tensor(group_sizes_shape, "int32"),  # type: ignore
-        group_padded_offsets: T.Tensor(group_sizes_shape, "int32"),  # type: ignore
-        group_idx_for_bx: T.Tensor((M,), "int32"),  # type: ignore
-        up_logits: T.Tensor(intermediate_shape, dtype),  # type: ignore
-        output: T.Tensor(input_shape, dtype),  # type: ignore
+            input: T.Tensor(input_shape, dtype),  # type: ignore
+            routed_expert_gate: T.Tensor(routed_expert_gate_shape, dtype),  # type: ignore
+            routed_expert_up: T.Tensor(routed_expert_up_shape, dtype),  # type: ignore
+            routed_expert_down: T.Tensor(routed_expert_down_shape, dtype),  # type: ignore
+            routed_expert_weights: T.Tensor(routed_expert_weights_shape, dtype),  # type: ignore
+            group_sizes: T.Tensor(group_sizes_shape, "int32"),  # type: ignore
+            group_offsets: T.Tensor(group_sizes_shape, "int32"),  # type: ignore
+            group_padded_offsets: T.Tensor(group_sizes_shape, "int32"),  # type: ignore
+            group_idx_for_bx: T.Tensor((M,), "int32"),  # type: ignore
+            up_logits: T.Tensor(intermediate_shape, dtype),  # type: ignore
+            output: T.Tensor(input_shape, dtype),  # type: ignore
     ):
         # Step 1: Compute gate and up logits
         with T.Kernel(M, T.ceildiv(dexpert, block_dexpert), threads=threads) as (bx, by):
@@ -172,10 +171,8 @@ def moe_forward_tilelang_routed(
 
             cur_group_size[0] = group_sizes[cur_group_idx[0]]
             m_start = (
-                m_start_padded
-                - group_padded_offsets[cur_group_idx[0]]
-                + group_offsets[cur_group_idx[0]]
-            )
+                m_start_padded - group_padded_offsets[cur_group_idx[0]] +
+                group_offsets[cur_group_idx[0]])
             actual_rows = T.max(
                 0,
                 T.min(
@@ -189,17 +186,15 @@ def moe_forward_tilelang_routed(
 
             for k in T.Pipelined(T.ceildiv(dhidden, block_dhidden), num_stages=num_stages):
                 T.copy(
-                    input[
-                        m_start : m_start + block_token, k * block_dhidden : (k + 1) * block_dhidden
-                    ],
+                    input[m_start:m_start + block_token, k * block_dhidden:(k + 1) * block_dhidden],
                     input_shared,
                     coalesced_width=coalesced_width,
                 )
                 T.copy(
                     routed_expert_gate[
                         cur_group_idx[0],
-                        by * block_dexpert : (by + 1) * block_dexpert,
-                        k * block_dhidden : (k + 1) * block_dhidden,
+                        by * block_dexpert:(by + 1) * block_dexpert,
+                        k * block_dhidden:(k + 1) * block_dhidden,
                     ],
                     routed_expert_gate_shared,
                     coalesced_width=coalesced_width,
@@ -214,8 +209,8 @@ def moe_forward_tilelang_routed(
                 T.copy(
                     routed_expert_up[
                         cur_group_idx[0],
-                        by * block_dexpert : (by + 1) * block_dexpert,
-                        k * block_dhidden : (k + 1) * block_dhidden,
+                        by * block_dexpert:(by + 1) * block_dexpert,
+                        k * block_dhidden:(k + 1) * block_dhidden,
                     ],
                     routed_expert_up_shared,
                     coalesced_width=coalesced_width,
@@ -230,8 +225,7 @@ def moe_forward_tilelang_routed(
 
             for i, j in T.Parallel(block_token, block_dexpert):
                 gate_logits_local[i, j] = gate_logits_local[i, j] * (
-                    1.0 / (1.0 + T.exp2(-gate_logits_local[i, j] * scale))
-                )
+                    1.0 / (1.0 + T.exp2(-gate_logits_local[i, j] * scale)))
                 up_logits_local[i, j] = up_logits_local[i, j] * gate_logits_local[i, j]
 
             for i, j in T.Parallel(block_token, block_dexpert):
@@ -255,10 +249,8 @@ def moe_forward_tilelang_routed(
 
             cur_group_size[0] = group_sizes[cur_group_idx[0]]
             m_start = (
-                m_start_padded
-                - group_padded_offsets[cur_group_idx[0]]
-                + group_offsets[cur_group_idx[0]]
-            )
+                m_start_padded - group_padded_offsets[cur_group_idx[0]] +
+                group_offsets[cur_group_idx[0]])
             actual_rows = T.max(
                 0,
                 T.min(
@@ -271,17 +263,16 @@ def moe_forward_tilelang_routed(
 
             for k in T.Pipelined(T.ceildiv(dexpert, block_dexpert), num_stages=num_stages):
                 T.copy(
-                    up_logits[
-                        m_start : m_start + block_token, k * block_dexpert : (k + 1) * block_dexpert
-                    ],
+                    up_logits[m_start:m_start + block_token,
+                              k * block_dexpert:(k + 1) * block_dexpert],
                     up_logits_shared,
                     coalesced_width=coalesced_width,
                 )
                 T.copy(
                     routed_expert_down[
                         cur_group_idx[0],
-                        by * block_dhidden : (by + 1) * block_dhidden,
-                        k * block_dexpert : (k + 1) * block_dexpert,
+                        by * block_dhidden:(by + 1) * block_dhidden,
+                        k * block_dexpert:(k + 1) * block_dexpert,
                     ],
                     routed_expert_down_shared,
                     coalesced_width=coalesced_width,
@@ -297,13 +288,13 @@ def moe_forward_tilelang_routed(
             for i, j in T.Parallel(block_token, block_dhidden):
                 with T.If(i < actual_rows), T.Then():
                     output[m_start + i, by * block_dhidden + j] = (
-                        output_local[i, j] * routed_expert_weights[m_start + i]
-                    )
+                        output_local[i, j] * routed_expert_weights[m_start + i])
 
     return kernel
 
 
 class Expert(nn.Module):
+
     def __init__(
         self,
         config: dict,
@@ -330,6 +321,7 @@ class Expert(nn.Module):
 
 
 class MoEGate(nn.Module):
+
     def __init__(self, config: dict, weights: dict):
         super().__init__()
         self.top_k: int = config["n_experts_per_token"]
@@ -347,6 +339,7 @@ class MoEGate(nn.Module):
 
 
 class MoE(nn.Module):
+
     def __init__(
         self,
         config: dict,
@@ -360,17 +353,14 @@ class MoE(nn.Module):
         self.shared_kernel = shared_kernel
         self.routed_kernel = routed_kernel
         self.padding_M = padding_M
-        self.experts = nn.ModuleList(
-            [
-                Expert(
-                    config,
-                    gate=weights[f"experts.{i}.0.weight"],
-                    up=weights[f"experts.{i}.1.weight"],
-                    down=weights[f"experts.{i}.2.weight"],
-                )
-                for i in range(config["n_routed_experts"])
-            ]
-        )
+        self.experts = nn.ModuleList([
+            Expert(
+                config,
+                gate=weights[f"experts.{i}.0.weight"],
+                up=weights[f"experts.{i}.1.weight"],
+                down=weights[f"experts.{i}.2.weight"],
+            ) for i in range(config["n_routed_experts"])
+        ])
         self.device = torch.device("cuda")
         self.gating_network = MoEGate(config, weights).to(self.device)
         shared_expert_dim = config["d_expert"] * config["n_shared_experts"]
@@ -386,15 +376,12 @@ class MoE(nn.Module):
             dtype=torch.float16,
             device=self.device,
         )
-        self.stacked_expert_w_gate = torch.stack(
-            [expert.W_gate_weight for expert in self.experts], dim=0
-        )
-        self.stacked_expert_w_up = torch.stack(
-            [expert.W_up_weight for expert in self.experts], dim=0
-        )
-        self.stacked_expert_w_down = torch.stack(
-            [expert.W_down_weight for expert in self.experts], dim=0
-        )
+        self.stacked_expert_w_gate = torch.stack([expert.W_gate_weight for expert in self.experts],
+                                                 dim=0)
+        self.stacked_expert_w_up = torch.stack([expert.W_up_weight for expert in self.experts],
+                                               dim=0)
+        self.stacked_expert_w_down = torch.stack([expert.W_down_weight for expert in self.experts],
+                                                 dim=0)
         self.stacked_expert_tokens = torch.empty(
             (
                 config["batch_size"] * config["seq_len"] * config["n_experts_per_token"],
@@ -472,31 +459,23 @@ class MoE(nn.Module):
             self.stacked_expert_tokens[start_idx:end_idx] = expert_tokens
             self.stacked_expert_tokens_idxs[start_idx:end_idx, 0] = exp_token_idxs
             self.stacked_expert_weights[start_idx:end_idx] = flat_expert_weights[
-                idxs[start_idx:end_idx]
-            ]
+                idxs[start_idx:end_idx]]
 
         group_sizes = torch.tensor(counts, dtype=torch.int32, device=self.device)
         group_offset = torch.tensor(
-            tokens_per_expert - counts, dtype=torch.int32, device=self.device
-        )
+            tokens_per_expert - counts, dtype=torch.int32, device=self.device)
 
         group_padded_offsets = [0 for _ in range(len(group_sizes))]
         for i in range(1, len(group_sizes)):
             group_padded_offsets[i] = (
-                group_padded_offsets[i - 1]
-                + math.ceil((counts[i - 1] + 1) / self.padding_M) * self.padding_M
-            )
+                group_padded_offsets[i - 1] + math.ceil(
+                    (counts[i - 1] + 1) / self.padding_M) * self.padding_M)
 
         block_token = 128
         M = (
-            math.ceil(
-                self.config["batch_size"]
-                * self.config["seq_len"]
-                * self.config["n_experts_per_token"]
-                / block_token
-            )
-            + self.config["n_routed_experts"]
-        )
+            math.ceil(self.config["batch_size"] * self.config["seq_len"] *
+                      self.config["n_experts_per_token"] / block_token) +
+            self.config["n_routed_experts"])
         group_idx_for_bx = [0 for _ in range(M)]
 
         for bx in range(M):
@@ -506,8 +485,7 @@ class MoE(nn.Module):
                     group_idx_for_bx[bx] = i
 
         group_padded_offsets = torch.tensor(
-            group_padded_offsets, dtype=torch.int32, device=self.device
-        )
+            group_padded_offsets, dtype=torch.int32, device=self.device)
         group_idx_for_bx = torch.tensor(group_idx_for_bx, dtype=torch.int32, device=self.device)
 
         # Multi-stream execution

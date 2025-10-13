@@ -129,15 +129,9 @@ def tl_topk_impl(topk, in_dtype="float32", out_dtype="int32"):
                     if s * BLOCK_SIZE + tx < l_num_input:
                         l_bin_id32 = T.Cast(
                             "int32",
-                            (
-                                (
-                                    convert_to_uint32(
-                                        input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]
-                                    )
-                                    >> (24 - round * 8)
-                                )
-                                & 0xFF
-                            ),
+                            ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]])
+                              >> (24 - round * 8))
+                             & 0xFF),
                         )
                         T.atomic_add(s_histogram[l_bin_id32], 1)
                 T.sync_threads()
@@ -167,35 +161,26 @@ def tl_topk_impl(topk, in_dtype="float32", out_dtype="int32"):
                     if s * BLOCK_SIZE + tx < l_num_input:
                         l_bin_id32 = T.Cast(
                             "int32",
-                            (
-                                (
-                                    convert_to_uint32(
-                                        input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]]
-                                    )
-                                    >> (24 - round * 8)
-                                )
-                                & 0xFF
-                            ),
+                            ((convert_to_uint32(input[bx, s_input_idx[r_idx, s * BLOCK_SIZE + tx]])
+                              >> (24 - round * 8))
+                             & 0xFF),
                         )
                         if l_bin_id32 > l_threshold_bin_id:
                             pos = (
-                                T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True)
-                                + l_start_pos
-                            )
+                                T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True) +
+                                l_start_pos)
                             index[bx, pos] = s_input_idx[r_idx, s * BLOCK_SIZE + tx]
                         elif l_bin_id32 == l_threshold_bin_id and l_new_topk > 0:
                             if round == 3:
                                 l_out_pos = (
-                                    T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True)
-                                    + l_start_pos
-                                )
+                                    T.atomic_add(s_histogram[l_bin_id32 + 1], 1, return_prev=True) +
+                                    l_start_pos)
                                 if l_out_pos < topk:
                                     index[bx, l_out_pos] = s_input_idx[r_idx, s * BLOCK_SIZE + tx]
                             else:
                                 pos = T.atomic_add(s_num_input[r_idx ^ 1], 1, return_prev=True)
-                                s_input_idx[r_idx ^ 1, pos] = s_input_idx[
-                                    r_idx, s * BLOCK_SIZE + tx
-                                ]
+                                s_input_idx[r_idx ^ 1, pos] = s_input_idx[r_idx,
+                                                                          s * BLOCK_SIZE + tx]
 
     return tl_topk_kernel
 
