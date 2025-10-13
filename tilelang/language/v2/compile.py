@@ -8,7 +8,7 @@ from tvm import tir
 import linecache
 import io
 from .ast_rewrite import DSLMutator, OpKind
-from .lang import (DynSchema, StridedTensorSchema, ConstSchema, MakeEmpty, Place, _param)
+from .lang import (DynSchema, StridedTensorSchema, ConstSchema, MakeEmpty, Place, _param, TensorV2)
 from tilelang.language.dtypes import (get_tvm_dtype, get_torch_dtype, get_tvm_ptr_type,
                                       get_cffi_dtype, get_ctypes_dtype)
 from tilelang.language.tir import assume as tl_assume
@@ -50,12 +50,13 @@ class JITPyFunc(Protocol[_P, _T]):
     __tl_code__: str
 
 
-@dataclass(frozen=True, slots=True)
-class JITArgParser(Generic[_P, _T]):
-    parser: JITPyFunc[_P, Tuple[Tuple, Tuple]]
+class JITArgParser(Protocol[_P, _T]):
     const_arg_names: List[str]
     dyn_arg_names: List[str]
-    sig: inspect.Signature
+    signature: inspect.Signature
+    __tl_code__: str
+    def __call__(self, *args: _P.args, **kws: _P.kwargs) -> Tuple[Tuple, Tuple]:
+        ...
 
 
 def disk_compile(source, name):
@@ -92,6 +93,7 @@ def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITArgParser:
     sig = inspect.signature(func)
     type_hints = get_type_hints(func)
 
+    prev_device = None
     for param in sig.parameters.values():
         name = param.name
         schema = type_hints.get(name, ConstSchema())
@@ -107,8 +109,13 @@ def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITArgParser:
         elif isinstance(schema, StridedTensorSchema):
             tup_dyn.append(f"{name}.data_ptr()")
             tup_const.append(f"{name}.dtype")
-            code_parse_arg.append(
-                f'assert {name}.device != __device_cpu__, "Expected a non cpu tensor"')
+            if prev_device is None:
+                code_parse_arg.append(f'__device__ = {name}.device')
+                code_parse_arg.append('assert __device__ != __device_cpu__, "Expected a non cpu tensor"')
+                prev_device = '__device__'
+            else:
+                code_parse_arg.append(
+                    f'assert {name}.device == {prev_device}, "All tensor arguments must be on the same device"')
             if schema.shape is not None:
                 code_parse_arg.append(
                     ", ".join([f"{name}__shape_{i}" for i in range(len(schema.stride))]) +
@@ -136,9 +143,12 @@ def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITArgParser:
                 tup_const.append(f"{name}.stride()")
         else:
             tup_const.append(name)
+    if prev_device is None:
+        code_parse_arg.append('__device__ = __get_device_cuda()')
 
     closure = {
         "__device_cpu__": torch.device("cpu"),
+        "__get_device_cuda": lambda: torch.device("cuda"),
         **default_dict,
     }
 
@@ -147,7 +157,7 @@ def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITArgParser:
     source += f"  def {fn_name}(" + ", ".join(func_args) + ", __stream__=None" + "):\n"
     source += "    " + "\n    ".join(code_parse_arg) + "\n"
     source += "    __const_args__ = (" + ", ".join(tup_const) + ")\n"
-    source += "    __dyn_args__ = (" + ", ".join(tup_dyn) + ", __stream__)\n"
+    source += "    __dyn_args__ = (" + ", ".join(tup_dyn) + ", __stream__, __device__)\n"
     source += "    return __const_args__, __dyn_args__\n"
     source += f"  return {fn_name}\n"
 
@@ -156,7 +166,10 @@ def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITArgParser:
     exec(code, {}, locs)
     fn = locs["parse_args"](**closure)
     fn.__tl_code__ = source
-    return JITArgParser(fn, tup_const, tup_dyn, sig)
+    fn.const_arg_names = tup_const
+    fn.dyn_arg_names = tup_dyn
+    fn.signature = sig
+    return fn
 
 
 def get_current_stream_functor():
@@ -183,7 +196,7 @@ class BufferSchema:
     # device: Optional[torch.device] = None
 
     @classmethod
-    def from_buffer(self, buffer: tir.Buffer) -> BufferSchema:
+    def from_buffer(self, buffer: TensorV2) -> BufferSchema:
         if not hasattr(buffer, "arg_idx"):
             raise RuntimeError("Trying to return a local buffer")
         return BufferSchema(
@@ -276,13 +289,11 @@ class JITFunc(Generic[_P, _T]):
                 else:
                     raise RuntimeError(f"Unsupported shape expression type: {type(expr)}")
             dtype_name = f"__{allocs.name}_dtype"
-            device_name = f"__{allocs.name}_device"
             closure[dtype_name] = get_torch_dtype(allocs.dtype)
-            closure[device_name] = lambda: torch.device("cuda")
             arg_name = call_args[allocs.arg_idx]
             tensor_name = f"{arg_name}_tensor"
             stmts.append(f"{tensor_name} = __tl_empty(" + ",".join(shape_args) +
-                         f", dtype={dtype_name}, device={device_name}())")
+                         f", dtype={dtype_name}, device=__device__)")
             stmts.append(f"{arg_name} = {tensor_name}.data_ptr()")
         for out in self.outs:
             arg_name = call_args[out.arg_idx]
@@ -294,7 +305,7 @@ class JITFunc(Generic[_P, _T]):
 
         source = ""
         source += "def __closure(" + ", ".join(closure.keys()) + "):\n"
-        source += "  def wrapper(" + ", ".join(func_args) + ", __stream__):\n"
+        source += "  def wrapper(" + ", ".join(func_args) + ", __stream__, __device__):\n"
         source += "    " + "\n    ".join(stmts) + "\n"
         source += "    return " + ",".join(returns) + "\n"
         source += "  return wrapper"
@@ -411,8 +422,8 @@ class DSLBuilder:
     pass_configs: Dict[str, Any] = field(default_factory=dict)
     compile_flags: List[str] = field(default_factory=list)
 
-    global_allocs: List[tir.Buffer] = field(default_factory=list)
-    outs: List[tir.Buffer] = field(default_factory=list)
+    global_allocs: List[TensorV2] = field(default_factory=list)
+    outs: List[TensorV2] = field(default_factory=list)
 
     # used to store pending shape args, making handle arg first
     pending_args: List[(str, tir.Var)] = field(default_factory=list)
@@ -492,17 +503,17 @@ class DSLBuilder:
             var = tir.Var(name, ty)
             self.var_map[name] = var
             if new:
-                self.new_arg(name, var)
+                self._new_arg(name, var)
             else:
                 self.pending_args.append((name, var))
         return self.var_map[name]
 
     def flush_pending_vars(self):
         for name, var in self.pending_args:
-            self.new_arg(name, var)
+            self._new_arg(name, var)
         self.pending_args.clear()
 
-    def new_arg(self, name: str, arg: tir.Var | tir.Buffer) -> Tuple[int, tir.Var]:
+    def _new_arg(self, name: str, arg: tir.Var | tir.Buffer) -> Tuple[int, tir.Var]:
         idx = self.arg_idx
         self.arg_idx += 1
         self._params.append(arg)
@@ -543,9 +554,9 @@ class DSLBuilder:
                 data=ptr,
                 scope="global",
             )
-            _, arg = self.new_arg(name, buffer)
+            _, arg = self._new_arg(name, buffer)
             self.flush_pending_vars()
-            return buffer
+            return TensorV2(buffer)
         else:
             assert not isinstance(expr, torch.Tensor), "Tensor argument must be annotated"
             return expr
@@ -587,13 +598,17 @@ class DSLBuilder:
                 data=ptr,
                 scope="global",
             )
-            arg_idx, arg = self.new_arg(name, buffer)
+            arg_idx, arg = self._new_arg(name, buffer)
             self.flush_pending_vars()
             arg.arg_idx = arg_idx
             self.global_allocs.append(arg)
-            return arg
-        elif isinstance(expr, (tir.Var, tir.Buffer)):  # fast shortcut
+            return TensorV2(buffer, arg_idx)
+        elif isinstance(expr, tir.Var):
             IRBuilder.name(name, expr)
+            return expr
+        elif isinstance(expr, (tir.Buffer, TensorV2)):  # fast shortcut
+            buf = expr.buffer if isinstance(expr, TensorV2) else expr
+            IRBuilder.name(name, buf)
             return expr
         elif isinstance(expr, (tir.IntImm, tir.FloatImm)):
             return expr
@@ -613,32 +628,35 @@ class DSLBuilder:
             return val
         if self.is_inside_device_code():
             raise RuntimeError("ret is not supported in device code")
-        if isinstance(val, tir.Buffer):
+        if not isinstance(val, tuple):
             val = (val,)
         for v in val:
-            assert isinstance(v, tir.Buffer), "Expected a buffer to return"
-            assert v.arg_idx is not None, "Expected a make_empty buffer to return"
+            assert isinstance(v, TensorV2), "Expected a buffer to return"
+            assert v.arg_idx is not None, "Expected a global alloc to return"
             self.outs.append(v)
 
     def assign(self, lval: Any, slice: Any, rval: Any) -> Any:
-        if isinstance(lval, tir.Buffer):
-            tb.buffer_store(lval, rval, slice)
+        if isinstance(lval, (tir.Buffer, TensorV2)):
+            buf = lval.buffer if isinstance(lval, TensorV2) else lval
+            tb.buffer_store(buf, rval, slice)
         else:
             lval[slice] = rval
 
     def aug_assign(self, *args) -> Any:
         if len(args) == 3:
             op, lval, rval = args
-            if isinstance(lval, tir.Buffer):
+            if isinstance(lval, (tir.Buffer, TensorV2)):
+                buf = lval.buffer if isinstance(lval, TensorV2) else lval
                 sl = slice(None)
-                tb.buffer_store(lval, _interp_op(op, lval[sl], rval), sl)
+                tb.buffer_store(buf, _interp_op(op, lval[sl], rval), sl)
                 return lval
             else:
                 return _interp_op(op, lval, rval)
         elif len(args) == 4:
             op, lval, sl, rval = args
-            if isinstance(lval, tir.Buffer):
-                tb.buffer_store(lval, _interp_op(op, lval[sl], rval), sl)
+            if isinstance(lval, (tir.Buffer, TensorV2)):
+                buf = lval.buffer if isinstance(lval, TensorV2) else lval
+                tb.buffer_store(buf, _interp_op(op, lval[sl], rval), sl)
             else:
                 _interp_aug_assign(op, lval, sl, rval)
 
@@ -729,6 +747,14 @@ class DSLBuilder:
         if self.is_inside_device_code():
             raise RuntimeError("break is not supported in device code")
         return True
+
+    def ctx_assert(self, expr, msg=None):
+        if isinstance(expr, (tir.IntImm, tir.FloatImm)):
+            assert expr.value, msg
+        elif isinstance(expr, tir.PrimExpr):
+            raise NotImplementedError("tir assertion is not supported yet")
+        else:
+            assert expr, msg
 
 
 def _remove_leading_ident(source: str):

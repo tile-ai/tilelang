@@ -5,6 +5,26 @@ import sys
 from typing import Callable, List, Literal, Optional, Union
 
 import torch
+import signal
+
+class TimeoutException(Exception):
+    pass
+
+
+def timeout_handler(signum, frame):
+    raise TimeoutException("Operation timed out")
+
+
+def run_with_timeout(func, timeout, *args, **kwargs):
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(timeout)
+    try:
+        result = func(*args, **kwargs)
+    except Exception as e:
+        raise e
+    finally:
+        signal.alarm(0)
+    return result
 
 
 class suppress_stdout_stderr:
@@ -60,15 +80,16 @@ Event = torch.cuda.Event if IS_CUDA else torch.mps.Event
 
 
 def do_bench(
-    fn: Callable,
+    bench_fn: Callable,
     warmup: float = 25,
     rep: float = 100,
     _n_warmup: int = 0,
     _n_repeat: int = 0,
     quantiles: Optional[List[float]] = None,
     fast_flush: bool = True,
-    backend: Literal["event", "cupti"] = "event",
+    backend: Literal["event", "cupti"] = "cupti",
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
+    timeout: Optional[int] = None
 ) -> Union[float, List[float]]:
     """Benchmark the runtime of a PyTorch function with L2 cache management.
 
@@ -96,6 +117,12 @@ def do_bench(
         f"Invalid return_mode: {return_mode}"
 
     # Initial function call and synchronization
+    def fn():
+        if timeout is not None:
+            run_with_timeout(bench_fn, timeout)
+        else:
+            bench_fn()
+
     fn()
     torch.accelerator.synchronize()
 

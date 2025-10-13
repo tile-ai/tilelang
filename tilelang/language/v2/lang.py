@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ast import ParamSpec
 from dataclasses import dataclass
 from tilelang import tvm
 from tilelang.language.dtypes import VoidPtr
@@ -9,7 +10,6 @@ from typing import (
     Tuple,
     TypeVar,
     Iterable,
-    Annotated,
     Any,
     Generic,
     Optional,
@@ -66,29 +66,73 @@ _Shapes = TypeVarTuple("_Shapes")
 
 Schema = StridedTensorSchema | TensorSchema | DynSchema | ConstSchema
 
+@dataclass(frozen=True, slots=True)
+class _param:
+    data: Any
+def _as_value(v):
+    if isinstance(v, tir.expr.ConstExpr):
+        return v.value
+    return v
+def _as_value_tup(v):
+    return tuple(map(lambda x: _as_value(x), v))
+def _as_param_tup(v):
+    return tuple(map(lambda x: _param(_as_value(x)), v))
+
+
+@dataclass(frozen=True, slots=True)
+class TensorV2:
+    buffer: tir.Buffer
+    arg_idx: Optional[int] = None
+
+    @property
+    def name(self) -> str:
+        return self.buffer.name
+    @property
+    def shape(self) -> Tuple[int | tir.Var, ...]:
+        return _as_value_tup(self.buffer.shape)
+    @property
+    def strides(self) -> Tuple[int | tir.Var, ...]:
+        return _as_value_tup(self.buffer.strides)
+    @property
+    def dtype(self) -> tvm.DataType:
+        return self.buffer.dtype
+
+    def shape_params(self) -> Tuple[int | tir.Var, ...]:
+        return _as_param_tup(self.buffer.shape)
+    def stride_params(self) -> Tuple[int | tir.Var, ...]:
+        return _as_param_tup(self.buffer.strides)
+    def params(self) -> Tuple[*Tuple[int | tir.Var, ...], tvm.DataType]:
+        return *self.shape_params(), self.dtype
+    def all_params(self) -> Tuple[Tuple[int | tir.Var, ...], Tuple[int | tir.Var, ...], tvm.DataType]:
+        return self.shape_params(), self.stride_params(), self.dtype
+
+    def __getitem__(self, idx):
+        return self.buffer.__getitem__(idx)
+
 if TYPE_CHECKING:
 
     class dyn[_T](tir.Var):
         dtype: tvm.DataType
 
-    _Shape = TypeVarTuple("_Shape", bound=int)
-    _Stride = TypeVar("_Stride", Tuple[int | dyn[int], ...])
-    class BaseTensor(Generic[*_Shape, _Stride], tir.Buffer):
-        shape: Tuple[tir.PrimExpr, ...]
-        strides: Tuple[tir.PrimExpr, ...]
+    _Shape = TypeVarTuple("_Shape")
+    _Stride = TypeVar("_Stride", Tuple[int, ...])
+    class _BaseTensor(Generic[*_Shape, _Stride], tir.Buffer):
+        name: str
+        shape: Tuple[*_Shape]
+        strides: _Stride
         dtype: tvm.DataType
         arg_idx: Optional[int] = None
 
-        def get_shape(self) -> Tuple[*_Shape]: ...
-        def get_strides(self) -> _Stride: ...
+        def shape_params(self) -> Tuple[*_Shape] : ...
+        def stride_params(self) -> _Stride : ...
         def params(self) -> Tuple[*_Shape, tvm.DataType] : ...
         def all_params(self) -> Tuple[Tuple[*_Shape], _Stride, tvm.DataType]: ...
 
-    _ShapeTup = TypeVar('_Shape', Tuple[int | dyn[int], ...])
-    class StridedTensor(Generic[_ShapeTup, _Stride], BaseTensor[*_ShapeTup, _Stride]):
+    _ShapeTup = TypeVar('_Shape', Tuple[Any, ...])
+    class StridedTensor(Generic[_ShapeTup, _Stride], _BaseTensor[*_ShapeTup, _Stride]):
         pass
 
-    class Tensor(BaseTensor[*_Shapes, Tuple[int | dyn[int], ...]]):
+    class Tensor(_BaseTensor[*_Shapes, Tuple[Any, ...]]):
         pass
 
     ptr = dyn[VoidPtr]
@@ -188,34 +232,7 @@ def place(*shape: Tuple[int, ...], dtype: AnyDType, strides: Optional[Tuple[int,
 
 _tvm_patched = False
 
-
-@dataclass(frozen=True, slots=True)
-class _param:
-    data: Any
-
 def _apply_tvm_patches():
-    def _as_value(v):
-        if isinstance(v, tir.expr.ConstExpr):
-            return v.value
-        return v
-    def _as_value_tup(v):
-        return tuple(map(lambda x: _as_value(x), v))
-    def _as_param_tup(v):
-        return tuple(map(lambda x: _param(_as_value(x)), v))
-    def __buf_params(self):
-        return _as_param_tup((*self.shape, self.dtype))
-    def __buf_all_params(self):
-        return _as_param_tup(self.shape), _as_param_tup(self.strides), _param(_as_value(self.dtype))
-    def __buf_get_shape(self):
-        return _as_value_tup(self.shape)
-    def __buf_get_strides(self):
-        return _as_value_tup(self.strides)
-
-    tir.Buffer.params = __buf_params
-    tir.Buffer.all_params = __buf_all_params
-    tir.Buffer.get_shape = __buf_get_shape
-    tir.Buffer.get_strides = __buf_get_strides
-
     def __array_eq(self, rhs):
         if isinstance(rhs, tuple):
             return tuple(self) == rhs

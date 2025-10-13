@@ -127,9 +127,11 @@ class DSLMutator(ast.NodeTransformer):
         )
 
     def visit_Continue(self, node: ast.Continue):
+        node = self.generic_visit(node)
         return quote("if __tb.ctx_continue(): continue", span=node)
 
     def visit_Break(self, node: ast.Break):
+        node = self.generic_visit(node)
         return quote("if __tb.ctx_break(): break", span=node)
 
     def _emit_assign_target(self, target: ast.expr, rval: ast.expr) -> List[ast.AST]:
@@ -272,6 +274,7 @@ class DSLMutator(ast.NodeTransformer):
         return last
 
     def visit_IfExp(self, node: ast.IfExp) -> ast.Expr:
+        node = self.generic_visit(node)
         return quote_expr(
             '__tb.ifexp(cond, lambda: then, lambda: otherwise)',
             cond=node.test,
@@ -280,6 +283,7 @@ class DSLMutator(ast.NodeTransformer):
             span=node)
 
     def visit_Return(self, node: ast.Return):
+        node = self.generic_visit(node)
         return quote("return __tb.ret(value)", value=node.value, span=node)
 
     def visit_With(self, node: ast.With):
@@ -287,3 +291,7 @@ class DSLMutator(ast.NodeTransformer):
         for expr in node.items:
             expr.context_expr = quote_expr("__tb.ctx(e)", e=expr.context_expr, span=expr)
         return node
+
+    def visit_Assert(self, node: ast.Assert):
+        node = self.generic_visit(node)
+        return quote("__tb.ctx_assert(cond, msg)", cond=node.test, msg=node.msg, span=node)
