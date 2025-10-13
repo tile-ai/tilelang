@@ -1,7 +1,7 @@
 import torch
 
 IS_CUDA = torch.cuda.is_available()
-IS_MPS = torch.mps.is_available()
+IS_MPS = torch.backends.mps.is_available()
 
 
 def get_current_device():
