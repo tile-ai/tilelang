@@ -94,6 +94,11 @@ target-version = "py38"
 line-length = 100
 output-format = "full"
 
+exclude = [
+    "3rdparty",
+    "examples/deepseek_v32/inference",
+]
+
 [tool.ruff.lint]
 select = [
     # pycodestyle
@@ -101,7 +106,7 @@ select = [
     # Pyflakes
     "F",
     # pyupgrade
-    # "UP",
+    "UP", "FA",
     # flake8-bugbear
     "B",
     # flake8-simplify
@@ -122,6 +127,8 @@ ignore = [
     "SIM108",
     # key in dict.keys()
     "SIM118",
+    # open file w.o. ctx manager
+    "SIM115",
     # memory leaks
     "B019",
     # zip without explicit strict
@@ -129,10 +136,6 @@ ignore = [
     # No such file or directory
     "E902",
 ]
-[tool.ruff.lint.per-file-ignores]
-"3rdparty/**/*" = ["ALL"]
-"examples/deepseek_v32/inference/**/*" = ["ALL"]
-
 [tool.cibuildwheel]
 archs = ["auto64"]
 # wait for tvm fix
