@@ -16,7 +16,7 @@ from tvm.tir import PrimFunc
 from tilelang.engine.param import KernelParam
 from tilelang import env
 from tilelang.jit import JITKernel
-from tilelang.version import __version__
+from tilelang import __version__
 
 KERNEL_PATH = "kernel.cu"
 WRAPPED_KERNEL_PATH = "wrapped_kernel.cu"

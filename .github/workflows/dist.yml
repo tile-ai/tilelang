@@ -1,0 +1,61 @@
+name: Dist
+on:
+  schedule:
+    # gemini said this is 6:00 china time
+    - cron: '0 22 * * *'
+  release:
+    types: [ published ]
+
+env:
+  PYTHON_VERSION: '3.12'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-wheels:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-16]
+        include:
+        - os: ubuntu-22.04
+          cuda_version: "12.1"
+        - os: ubuntu-22.04-arm
+          cuda_version: "12.8"
+      fail-fast: true
+    runs-on: ${{ matrix.os }}
+    env:
+      CUDA_VERSION: ${{ matrix.cuda_version }}
+      NO_VERSION_LABEL: ${{ github.event_name != 'release' }}
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+        submodules: recursive
+
+    - name: ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      if: startsWith(matrix.os, 'macos')
+      with:
+        create-symlink: true
+        key: ${{ github.job }}-${{ matrix.os }}
+
+    - name: Build wheels
+      uses: pypa/cibuildwheel@v3.2
+      with:
+        output-dir: wheelhouse
+        config-file: "{package}/pyproject.toml"
+
+    # just for now to list all files
+    - name: List wheels
+      id: ls-whl
+      run: echo "whl_name=$(ls wheelhouse | head -n1)" >> $GITHUB_OUTPUT
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.ls-whl.outputs.whl_name }}.zip
+        path: wheelhouse/${{ steps.ls-whl.outputs.whl_name }}
+        compression-level: 0
