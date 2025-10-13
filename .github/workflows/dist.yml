@@ -30,9 +30,13 @@ concurrency:
 
 jobs:
   build-wheels:
+    name: Build wheels for Python ${{ matrix.python-version }} on ${{ matrix.target.runner }} with ${{ matrix.target.toolkit }}
     strategy:
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26]
+        target:
+          - { runner: ubuntu-24.04, toolkit: "CUDA-12.1" }
+          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8" }
+          - { runner: macos-26, toolkit: "Metal" }
         python-version:
           - "3.8"
           # TVM is built with Python 3.8 Limited API, it should work with all Python >= 3.8.
@@ -42,16 +46,10 @@ jobs:
           # - "3.12"
           # - "3.13"
           # - "3.14"
-        include:
-          - os: ubuntu-24.04
-            cuda-version: "12.1"
-          - os: ubuntu-24.04-arm
-            cuda-version: "12.8"
       fail-fast: true
     timeout-minutes: 60
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.target.runner }}
     env:
-      CUDA_VERSION: ${{ matrix.cuda-version || '' }}
       NO_VERSION_LABEL: ${{ github.event_name == 'release' && 'OFF' || 'ON' }}
 
     steps:
@@ -67,7 +65,7 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1
         with:
           create-symlink: true
-          key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ matrix.cuda-version || 'nocuda' }}
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ matrix.target.toolkit }}
           evict-old-files: "7d"
 
       - name: Set CIBW_BUILD
@@ -76,6 +74,12 @@ jobs:
           PYTHON_VERSION_MAJMIN="$(echo "${PYTHON_VERSION}" | cut -d '.' -f-2)"
           PYTHON_VERSION_MAJMIN_NODOT="${PYTHON_VERSION_MAJMIN//./}"
           echo "CIBW_BUILD=cp${PYTHON_VERSION_MAJMIN_NODOT}-*" | tee -a "${GITHUB_ENV}"
+
+          if [[ "${{ matrix.target.toolkit }}" == "CUDA-"* ]]; then
+            CUDA_VERSION="${{ matrix.target.toolkit }}"
+            CUDA_VERSION="${CUDA_VERSION#CUDA-}"
+            echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
+          fi
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.2
@@ -87,7 +91,7 @@ jobs:
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.python-version }}-${{ runner.os }}-${{ matrix.cuda-version || 'nocuda' }}
+          name: wheels-${{ matrix.python-version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
           path: wheelhouse/*.whl
           if-no-files-found: error
 
