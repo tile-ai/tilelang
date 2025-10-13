@@ -145,6 +145,11 @@ jobs:
           echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
           echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
           echo "CLANG_TIDY_CMAKE_OPTIONS=${CLANG_TIDY_CMAKE_OPTIONS}" | tee -a "${GITHUB_ENV}"
+
+          if [[ ! -x "$(command -v nvcc)" ]]; then
+            export PATH="/usr/local/cuda/bin:${PATH}"
+            echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
+          fi
           if [[ -x "$(command -v nvcc)" ]]; then
             echo "\$ $(command -v nvcc) --version" && nvcc --version
           else
@@ -169,6 +174,11 @@ jobs:
           echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
           echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
           echo "CLANG_TIDY_CMAKE_OPTIONS=${CLANG_TIDY_CMAKE_OPTIONS}" | tee -a "${GITHUB_ENV}"
+
+          if [[ ! -x "$(command -v hipcc)" ]]; then
+            export PATH="/opt/rocm/bin:${PATH}"
+            echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
+          fi
           if [[ -x "$(command -v hipcc)" ]]; then
             echo "\$ $(command -v hipcc) --version" && hipcc --version
           else
