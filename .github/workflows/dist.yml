@@ -34,6 +34,7 @@ jobs:
           - os: ubuntu-24.04-arm
             cuda-version: "12.8"
       fail-fast: true
+    timeout-minutes: 60
     runs-on: ${{ matrix.os }}
     env:
       CUDA_VERSION: ${{ matrix.cuda-version || '' }}
@@ -65,17 +66,36 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.2
         with:
+          package-dir: .
           output-dir: wheelhouse
           config-file: "{package}/pyproject.toml"
 
-      # just for now to list all files
-      - name: List wheels
-        id: ls-whl
-        run: echo "whl_name=$(ls wheelhouse | head -n1)" >> $GITHUB_OUTPUT
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.python-version }}-${{ runner.os }}-${{ matrix.cuda-version || 'nocuda' }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  list-artifacts:
+    name: List artifacts
+    runs-on: ubuntu-latest
+    needs: [build-wheels]
+    timeout-minutes: 15
+    steps:
+      - name: Download built wheels
+        uses: actions/download-artifact@v5
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: List distributions
+        run: ls -lh dist/*
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.ls-whl.outputs.whl_name }}.zip
-          path: wheelhouse/${{ steps.ls-whl.outputs.whl_name }}
-          compression-level: 0
+          name: artifacts
+          path: dist/*
+          if-no-files-found: error
