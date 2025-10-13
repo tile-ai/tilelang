@@ -319,7 +319,7 @@ jobs:
       - name: List generated files
         if: ${{ !cancelled() }}
         run: |
-          find . -type f -name '*.py[cod]' -delete
+          find . -type f -name '*.py[co]' -delete
           find . -depth -type d -name "__pycache__" -exec rm -r "{}" +
           if git status --ignored --porcelain | grep -qvE '/$'; then
             ls -alh $(git status --ignored --porcelain | grep -vE '/$' | grep -oE '\S+$')
