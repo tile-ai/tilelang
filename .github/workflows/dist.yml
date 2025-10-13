@@ -3,6 +3,20 @@ on:
   schedule:
     # gemini said this is 6:00 china time
     - cron: "0 22 * * *"
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - setup.py
+      - setup.cfg
+      - pyproject.toml
+      - MANIFEST.in
+      - CMakeLists.txt
+      - version_provider.py
+      - .github/workflows/dist.yml
   release:
     types:
       - published
