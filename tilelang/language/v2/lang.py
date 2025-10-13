@@ -216,10 +216,10 @@ class Tune(Generic[_T]):
         return self.data.__hash__()
 
     def __eq__(self, rhs) -> bool:
-        return self.data.__eq__(rhs.data)
+        return isinstance(rhs, Tune) and self.data == rhs.data
 
     def __ne__(self, rhs) -> bool:
-        return self.data.__ne__(rhs.data)
+        return isinstance(rhs, Tune) and self.data == rhs.data
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,10 +230,10 @@ class TuneMany(Generic[_T]):
         return id(self.data)
 
     def __eq__(self, rhs) -> bool:
-        return self.data is rhs.data
+        return isinstance(rhs, TuneMany) and self.data is rhs.data
 
     def __ne__(self, rhs) -> bool:
-        return self.data is not rhs.data
+        return isinstance(rhs, TuneMany) and self.data is not rhs.data
 
 
 def tune(params: Iterable[_T], tune_many_threshold: int = 10) -> Tune[_T] | TuneMany[_T]:

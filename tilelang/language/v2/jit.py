@@ -12,7 +12,7 @@ from .compile import (
 from typing import (Callable, Iterable, Protocol, Union, Tuple, List, Dict, Any, overload,
                     ParamSpec, TypeVar, Generic, TypedDict, Optional, Literal)
 import cffi
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tilelang.utils.target import AVALIABLE_TARGETS, determine_target
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.wrapper import TLWrapper
@@ -180,7 +180,7 @@ def compile(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
 
 
 def _par_compile_in_pool(pool: ThreadPoolExecutor,
-                         func: Iterable[JITFunc[_P, _T]],
+                         funcs: Iterable[JITFunc[_P, _T]],
                          verbose=False,
                          raise_error=True) -> List[JITKernel[_P, _T] | Exception]:
 
@@ -194,9 +194,17 @@ def _par_compile_in_pool(pool: ThreadPoolExecutor,
             if raise_error:
                 raise e
             return e
-
-    futures = [pool.submit(do_compile, func, verbose) for func in func]
-    return [future.result() for future in get_tqdm(futures, desc='Compilation')]
+    fut2idx = {}
+    futures = []
+    result = [None for _ in range(len(funcs))]
+    for i, func in enumerate(funcs):
+        future = pool.submit(do_compile, func, verbose)
+        fut2idx[future] = i
+        futures.append(future)
+    for fut in get_tqdm(as_completed(futures), total=len(futures), desc='Parallel Compiling'):
+        idx = fut2idx[fut]
+        result[idx] = fut.result()
+    return result
 
 
 def par_compile(func: Iterable[JITFunc[_P, _T]],
@@ -281,8 +289,8 @@ def repr_config(call_args: CallArgs,
                 args.append(
                     f"{name}=tl.place({shape}, dtype={repr(arg.dtype)}, strides={repr(strides)})")
         else:
-            args.append(repr(arg))
-    if len(fn_name) + sum(map(len, args)) > 60:
+            args.append(f'{name}={repr(arg)}')
+    if len(fn_name) + sum(map(len, args)) > 80:
         indent = ' ' * indent
         return fn_name + f"(\n{indent}  " + f",\n{indent}  ".join(args) + f"\n{indent})"
     else:
@@ -313,8 +321,8 @@ class AutoTuneResult:
                 f'  name={self.name},\n'
                 f'  num_errors={self.num_errors},\n'
                 f'  best_latency={self.best_latency},\n'
-                f'  best={repr(self.best)},\n'
                 f'  best_args={repr_config(self.best_args, fn_name=self.name, indent=2)},\n'
+                f'  best={repr(self.best)},\n'
                 f'  records=<{len(self.records)} records>,\n'
                 ')')
 
@@ -385,7 +393,8 @@ class AutoTuner:
         records = []
         best_latency, best, best_args = None, None, None
         num_errors = 0
-        for cfg, ker in zip(self.configs, self.kernels):
+        progress_bar = get_tqdm(zip(self.configs, self.kernels), total=len(self.configs), desc="Benchmarking")
+        for cfg, ker in progress_bar:
             const_args, dyn_args = self.arg_parser(*cfg.args, **cfg.kwargs)  # type: ignore
             record = {k: v for k, v in zip(self.arg_parser.const_arg_names, const_args)}
 
@@ -481,9 +490,10 @@ class JITDispatcher(Generic[_P, _T]):
     def tune_configs(self,
                      configs: Iterable[AnyCallArgs],
                      max_workers: Optional[int] = None,
+                     raise_error=True,
                      _config: Optional[Dict[str, Any]] = None) -> AutoTuneResult:
         configs = [CallArgs.from_anycallarg(cfg) for cfg in configs]
-        kernels = self.par_compile(configs, max_workers=max_workers)
+        kernels = self.par_compile(configs, max_workers=max_workers, raise_error=raise_error)
         tune_cfg = copy.copy(self.tune_cfg)
         tune_cfg.update(_config or {})
         tuner = AutoTuner(
@@ -497,7 +507,6 @@ class JITDispatcher(Generic[_P, _T]):
 
     def tune(self,
              *args: _P.args,
-             _config: Optional[Dict[str, Any]] = None,
              **kws: _P.kwargs) -> AutoTuneResult:
         """Tune with the given args, return the tune result
 
@@ -505,11 +514,21 @@ class JITDispatcher(Generic[_P, _T]):
 
         Returns: a object represents the tune result
         """
+        def get_kw_arg(k, default):
+            if k in kws:
+                v = kws[k]
+                del kws[k]
+                return v
+            else:
+                return default
+        raise_error = get_kw_arg('_raise_error', True)
+        _config = get_kw_arg('_config', None)
+        max_workers = get_kw_arg('_max_workers', None)
         const_args, _ = self.arg_parser(*args, **kws)
         if const_args in self.tune_cache:
             return self.tune_cache[const_args]
         configs = self.get_tune_configs(*args, **kws)
-        result = self.tune_configs(configs, _config=_config)
+        result = self.tune_configs(configs, max_workers=max_workers, _config=_config, raise_error=raise_error)
         self.tune_cache[const_args] = result
         return result
 
@@ -529,6 +548,7 @@ class JITDispatcher(Generic[_P, _T]):
         if const_args in self.jit_funcs:
             return self.jit_funcs[const_args]
         if has_tune(const_args):
+            raise NotImplementedError("Please manually use ker.tune to run autotuner")
             result = self.tune(*args, **kws)
             assert not has_tune(result.best_args.args)
             assert not has_tune(result.best_args.kwargs.values())
@@ -562,10 +582,6 @@ class JITDispatcher(Generic[_P, _T]):
         Returns:
             return list of (args, kws) to call kernel(*args, **kws)
         """
-        binded_sigs = self.arg_parser.signature.bind(*args, **kws)
-        binded_sigs.apply_defaults()
-        args = binded_sigs.args
-        kws = binded_sigs.kwargs
 
         def arg_to_tup(arg):
             if isinstance(arg, (Tune, TuneMany)):
@@ -610,7 +626,7 @@ class JITDispatcher(Generic[_P, _T]):
         configs = [CallArgs.from_anycallarg(cfg) for cfg in configs]
         jitfuncs = []
         logger.info(f'Elaborate {len(configs)} configs')
-        for cfg in get_tqdm(configs, desc='Elaboration'):
+        for cfg in get_tqdm(configs, desc='Elaborating'):
             try:
                 jitfunc = self.partial(*cfg.args, **cfg.kwargs)
             except Exception as e:
