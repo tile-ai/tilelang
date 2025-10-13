@@ -231,9 +231,32 @@ Fragment FragmentNode::BindThreadRange(Range thread_range) const {
 
 Layout LayoutNode::Inverse() const {
   arith::Analyzer analyzer;
+  auto collect_symbolic = [&](const Array<PrimExpr> &shape) {
+    Array<PrimExpr> symbolic_dims;
+    for (const auto &dim : shape) {
+      if (!as_const_int(dim)) {
+        symbolic_dims.push_back(dim);
+      }
+    }
+    return symbolic_dims;
+  };
+  Array<PrimExpr> symbolic_dims = collect_symbolic(input_size_);
+  Array<PrimExpr> output_shape = OutputShape();
+  symbolic_dims.insert(symbolic_dims.end(), output_shape.begin(),
+                       output_shape.end());
+  symbolic_dims = collect_symbolic(symbolic_dims);
+  bool is_static_shape = symbolic_dims.empty();
+  auto level = is_static_shape ? arith::IterMapLevel::Bijective
+                               : arith::IterMapLevel::NoCheck;
+  if (!is_static_shape) {
+    // Runtime guards keep dynamic tails safe, so we allow NoCheck here and
+    // warn.
+    LOG(WARNING) << "Layout::Inverse on symbolic layout, falling back to "
+                    "NoCheck; symbolic dims: "
+                 << symbolic_dims;
+  }
   arith::IterMapResult res =
-      arith::DetectIterMap(forward_index_, getVarMap(), 1,
-                           arith::IterMapLevel::Bijective, &analyzer);
+      arith::DetectIterMap(forward_index_, getVarMap(), 1, level, &analyzer);
   ICHECK(res->errors.empty())
       << "Layout " << DebugOutput() << " has errors: " << res->errors;
 
@@ -242,6 +265,10 @@ Layout LayoutNode::Inverse() const {
   for (size_t i = 0; i < OutputDim(); i++) {
     outputs.push_back(InputPlaceholder(i));
   }
+  LOG(INFO) << "forward_index_ " << forward_index_;
+  LOG(INFO) << "res->indices " << res->indices;
+  LOG(INFO) << "res->indices.size " << res->indices.size();
+  LOG(INFO) << "outputs.size " << outputs.size();
 
   auto inv = arith::InverseAffineIterMap(res->indices, outputs);
 

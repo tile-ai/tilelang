@@ -111,6 +111,9 @@ public:
 private:
   Stmt VisitStmt_(const ForNode *node) final {
     if (node->kind == ForKind::kSerial) {
+      if (as_const_int(node->extent) == nullptr) {
+        return StmtExprMutator::VisitStmt_(node);
+      }
       For new_for = GetRef<For>(node);
       auto for_ptr = new_for.CopyOnWrite();
       for_ptr->annotations.Set(tir::attr::pragma_unroll_explicit, Bool(false));
@@ -127,22 +130,20 @@ public:
 
   Fragment Partition(const For &op, int num_thread, int vectorize_size) {
     this->VisitStmt(op);
-    int loop_size_full = 1;
-    PrimExpr flattened = 0;
+    ICHECK(!loop_vars_.empty());
+    DataType dtype = loop_vars_[0]->var.dtype();
+    PrimExpr flattened = make_const(dtype, 0);
+    PrimExpr vector_extent = make_const(dtype, vectorize_size);
+    PrimExpr thread_extent_const = make_const(dtype, num_thread);
     for (size_t i = 0; i < loop_vars_.size(); i++) {
-      auto ext_ptr = as_const_int(loop_vars_[i]->dom->extent);
-      ICHECK(ext_ptr)
-          << "Loop partitioner only works with constant loop sizes, but got "
-          << loop_vars_[i]->dom->extent;
-      int extent = *ext_ptr;
-      loop_size_full *= extent;
+      PrimExpr extent = loop_vars_[i]->dom->extent;
       flattened = flattened * extent + loop_vars_[i]->var;
     }
-    ICHECK(loop_size_full % vectorize_size == 0);
-    PrimExpr access_idx = FloorDiv(flattened, vectorize_size);
-    PrimExpr thd = FloorMod(access_idx, num_thread);
-    PrimExpr idx = FloorDiv(access_idx, num_thread) * vectorize_size +
-                   FloorMod(flattened, vectorize_size);
+    PrimExpr access_idx = FloorDiv(flattened, vector_extent);
+    PrimExpr thd = FloorMod(access_idx, thread_extent_const);
+    PrimExpr idx = FloorDiv(access_idx, thread_extent_const) * vector_extent +
+                   FloorMod(flattened, vector_extent);
+
     auto fragment = Fragment(loop_vars_, {idx}, {thd}, {});
     if (has_fragment_) {
       // for fragment buffer, we don't need to replicate the loop layout
