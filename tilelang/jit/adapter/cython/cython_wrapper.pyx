@@ -107,9 +107,19 @@ cdef class CythonKernelWrapper:
             if not isinstance(tensor, torch.Tensor):
                 # otherwise, maybe torch.data_ptr() for T.ptr inputs
                 continue
+
+            # Check ndim
+            if tensor.dim() != len(shape_list):
+                raise ValueError(
+                    f"Static shape mismatch for parameter {param}: "
+                    f"expected {len(shape_list)} dimensions, "
+                    f"got {tensor.dim()}"
+                )
+                
+            # Check each dimension
             for shape_idx, expected_shape in shape_list:
                 actual_shape = tensor.shape[shape_idx]
-                if actual_shape != expected_shape:
+                if expected_shape != -1 and actual_shape != expected_shape:
                     raise ValueError(
                         f"Static shape mismatch for parameter {param}: "
                         f"expected {expected_shape} at index {shape_idx}, "

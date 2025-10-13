@@ -278,6 +278,8 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 for j, s in enumerate(buffer.shape):
                     if isinstance(s, tir.IntImm):
                         static_shape.append((j, s.value))
+                    elif isinstance(s, tir.Var):
+                        static_shape.append((j, -1))  # -1 for symbolic
                 for j, s in enumerate(buffer.strides):
                     if isinstance(s, tir.IntImm):
                         static_strides.append((j, s.value))
