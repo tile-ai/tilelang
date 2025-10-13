@@ -1,26 +1,15 @@
-# lint requirements
--r requirements-lint.txt
-# build requirements
+# Requirements to run local build with `--no-build-isolation` or other developments
+
+Cython>=3.0.0
+build
 cmake>=3.26
-# runtime requirements
-cffi
-cpplint
-Cython
-docutils
-dtlib
-numpy>=1.23.5
-pytest>=6.2.4
-pytest_xdist>=2.2.1
-packaging>=21.0
-PyYAML
-tqdm>=4.62.3
-typing_extensions>=4.10.0
-requests
-cloudpickle
-ml_dtypes
-psutil
-scipy
+packaging
+setuptools>=61
 torch
-tabulate
 wheel
-setuptools
+tox
+ninja
+
+auditwheel; platform_system == 'Linux'
+patchelf; platform_system == 'Linux'
+delocate; platform_system == 'Darwin'
