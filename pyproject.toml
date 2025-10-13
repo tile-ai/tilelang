@@ -150,7 +150,6 @@ repair-wheel-command = [
     "auditwheel repair --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
     "pipx run abi3audit --strict --report {wheel}",
 ]
-# Equlivant to `source /opt/rh/gcc-toolset-12/enable`, safe when gcc-toolset-12 is not installed
 environment.PATH = "/usr/local/cuda/bin:$PATH"
 # Install CUDA runtime and stub driver library
 # manylinux_2_28 uses gcc 14, which needs CUDA 12.8
@@ -169,7 +168,7 @@ case "$(uname -m)" in
         ;;
 esac
 
-cudaver="$(echo ${CUDA_VERSION:-"12.4"} | cut -d '.' -f-2)"
+cudaver="$(echo "${CUDA_VERSION:-"12.4"}" | cut -d '.' -f-2)"
 v="${cudaver//./-}"
 yum install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-devel-${v}"
 """
