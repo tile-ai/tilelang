@@ -19,12 +19,12 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       with:
         fetch-depth: 0
 
     - name: Set up Python
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ env.PYTHON_VERSION }}
 
@@ -71,14 +71,14 @@ jobs:
       contents: read
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       with:
         fetch-depth: 0
         repository: ${{ github.event.pull_request.head.repo.full_name }}
         ref: ${{ github.event.pull_request.head.ref }}
 
     - name: Set up Python
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ env.PYTHON_VERSION }}
 
@@ -119,4 +119,4 @@ jobs:
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
         cd testing/python/amd
         unset PYTHONPATH
-        python -m pytest -v test_tilelang_test_amd.py
+        python -m pytest -v --cache-clear test_tilelang_test_amd.py

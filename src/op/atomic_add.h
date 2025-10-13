@@ -20,6 +20,7 @@ public:
   Buffer src, dst; ///< Source and destination buffers
   Array<Range> src_range,
       dst_range;          ///< Access ranges for source and destination
+  IntImm use_tma;         ///< Whether to use TMA for memory operations
   IntImm coalesced_width; ///< Width for memory coalescing optimization
 
   mutable ParallelOp par_op_; ///< Associated parallel operation
@@ -39,6 +40,7 @@ public:
         .def_ro("dst", &AtomicAddNode::dst)
         .def_ro("src_range", &AtomicAddNode::src_range)
         .def_ro("dst_range", &AtomicAddNode::dst_range)
+        .def_ro("use_tma", &AtomicAddNode::use_tma)
         .def_ro("coalesced_width", &AtomicAddNode::coalesced_width);
   }
 
@@ -46,6 +48,7 @@ public:
     return equal(src, other->src) && equal(dst, other->dst) &&
            equal(src_range, other->src_range) &&
            equal(dst_range, other->dst_range) &&
+           equal(use_tma, other->use_tma) &&
            equal(coalesced_width, other->coalesced_width);
   }
 
@@ -54,6 +57,7 @@ public:
     hash_reduce(dst);
     hash_reduce(src_range);
     hash_reduce(dst_range);
+    hash_reduce(use_tma);
     hash_reduce(coalesced_width);
   }
 
@@ -67,6 +71,8 @@ protected:
   Array<IterVar> MakeIterVars() const;
   /// Generate buffer indices from iteration variables
   Array<PrimExpr> MakeIndices(const Array<IterVar> &ivs, int src_dst) const;
+  /// Return buffer indices and size
+  std::pair<Array<PrimExpr>, PrimExpr> ReturnIndicesAndSize(int src_dst) const;
   /// Create boundary predicate for memory safety
   PrimExpr MakePredicate(arith::Analyzer *analyzer, const Array<IterVar> &ivs,
                          Array<PrimExpr> extents, int src_dst) const;

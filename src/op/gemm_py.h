@@ -105,10 +105,10 @@ public:
 
   TileOperator Clone() const;
 
-private:
   // Target GEMM instruction
   GemmInst GetGemmInst(int block_size, Target target) const;
 
+private:
   mutable bool completed_ = false;
 };
 

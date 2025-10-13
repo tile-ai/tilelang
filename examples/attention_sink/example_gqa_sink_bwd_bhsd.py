@@ -5,43 +5,50 @@ import tilelang
 from tilelang.profiler import do_bench
 import tilelang.language as T
 import argparse
+from typing import Optional
 
 
 def get_bwd_configs():
     sm_major, sm_minor = torch.cuda.get_device_capability()
     sm_version = sm_major * 10 + sm_minor
     if sm_version == 80:
-        return 64, 64, 1, 128
+        return 64, 32, 1, 128
     elif sm_version == 90:
-        return 128, 128, 2, 256
+        return 128, 32, 2, 256
     else:
         raise ValueError(f"Unsupported SM version: {sm_version}")
 
 
 @tilelang.jit(
-    out_idx=[3, 4], pass_configs={
+    out_idx=[3, 4],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+    compile_flags=["-O3", "-DENABLE_BF16"])
 def flashattn_fwd(
         batch,
         heads,
         seq_len,
         dim,
         groups=1,
-        window_size=None,  # None for full attention,
-        block_M=128,
-        block_N=128,
-        num_stages=2,
-        threads=256):
+        window_size=None,  # None for full attention
+        sm_scale=None,
+        block_M=64,
+        block_N=64,
+        num_stages=1,
+        threads=128,
+        dtype: str = "float16"):
 
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
 
-    scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
+    if sm_scale is None:
+        sm_scale = (1.0 / dim)**0.5
+    scale = sm_scale * 1.44269504  # log2(e)
+
     head_kv = heads // groups
     q_shape = [batch, heads, seq_len, dim]
     kv_shape = [batch, head_kv, seq_len, dim]
-    dtype = "float16"
     accum_dtype = "float"
 
     @T.prim_func
@@ -133,11 +140,12 @@ def flashattn_fwd(
 
 
 @tilelang.jit(
-    out_idx=[2], pass_configs={
+    out_idx=[2],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
-def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
-    dtype = "float16"
+    },
+    compile_flags=["-O3", "-DENABLE_BF16"])
+def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: str = "float16"):
     accum_dtype = "float"
     shape = [batch, heads, seq_len, dim]
     blk = 32
@@ -172,11 +180,12 @@ def make_dq_layout(dQ):
 
 
 @tilelang.jit(
-    out_idx=[1], pass_configs={
+    out_idx=[1],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
-def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
-    dtype = "float16"
+    },
+    compile_flags=["-O3", "-DENABLE_BF16"])
+def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = "float16"):
     accum_dtype = "float"
     shape = [batch, heads, seq_len, dim]
     blk = 64
@@ -196,16 +205,26 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
     return flash_bwd_post
 
 
-@tilelang.jit(pass_configs={
-    tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-})
-def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None):  # None for full attention
-    sm_scale = (1.0 / dim)**0.5
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    },
+    compile_flags=["-O3", "-DENABLE_BF16"])
+def flashattn_bwd(batch,
+                  heads,
+                  seq_len,
+                  dim,
+                  groups,
+                  window_size=None,
+                  sm_scale=None,
+                  dtype="float16"):  # None for full attention
+    if sm_scale is None:
+        sm_scale = (1.0 / dim)**0.5
     scale = sm_scale * 1.44269504  # log2(e)
+
     head_kv = heads // groups
     q_shape = [batch, heads, seq_len, dim]
     kv_shape = [batch, head_kv, seq_len, dim]
-    dtype = "float16"
     accum_dtype = "float"
 
     block_M, block_N, num_stages, threads = get_bwd_configs()
@@ -222,8 +241,8 @@ def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None):  # None
             lse: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
             Delta: T.Tensor([batch, heads, seq_len], accum_dtype),  # type: ignore
             dQ: T.Tensor(q_shape, accum_dtype),  # type: ignore
-            dK: T.Tensor(kv_shape, dtype),  # type: ignore
-            dV: T.Tensor(kv_shape, dtype),  # type: ignore
+            dK: T.Tensor(kv_shape, accum_dtype),  # type: ignore
+            dV: T.Tensor(kv_shape, accum_dtype),  # type: ignore
     ):
         with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=threads) as (bx, by, bz):
             K_shared = T.alloc_shared([block_M, dim], dtype)
@@ -240,8 +259,8 @@ def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None):  # None
             dv = T.alloc_fragment([block_M, dim], accum_dtype)
             dk = T.alloc_fragment([block_M, dim], accum_dtype)
             dq = T.alloc_fragment([block_N, dim], accum_dtype)
-            dv_shared = T.alloc_shared([block_M, dim], dtype)
-            dk_shared = T.alloc_shared([block_M, dim], dtype)
+            dv_shared = T.alloc_shared([block_M, dim], accum_dtype)
+            dk_shared = T.alloc_shared([block_M, dim], accum_dtype)
 
             T.annotate_layout({
                 dQ: make_dq_layout(dQ),
@@ -281,7 +300,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None):  # None
                 T.clear(dsT)
                 T.gemm(V_shared, do, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.copy(qkT, qkT_cast)
-                T.gemm(qkT_cast, B=do, C=dv, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(qkT_cast, do, dv, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(Delta[bz, bx, k * block_N:(k + 1) * block_N], delta)
 
@@ -292,21 +311,18 @@ def flashattn_bwd(batch, heads, seq_len, dim, groups, window_size=None):  # None
                 T.copy(dsT_cast, dsT_shared)
                 T.clear(dq)
                 T.gemm(dsT_shared, K_shared, dq, transpose_A=True)
-                for i, j in T.Parallel(block_N, dim):
-                    if k * block_N + i < seq_len:
-                        T.atomic_add(dQ[bz, bx, k * block_N + i, j], dq[i, j])
+                T.atomic_add(dQ[bz, bx, k * block_N:(k + 1) * block_N, :], dq)
 
-            for i, j in T.Parallel(block_M, dim):
-                T.atomic_add(dV[bz, bx // groups, by * block_M + i, j], dv[i, j])
-            for i, j in T.Parallel(block_M, dim):
-                T.atomic_add(dK[bz, bx // groups, by * block_M + i, j], dk[i, j])
+            T.copy(dv, dv_shared)
+            T.atomic_add(dV[bz, bx // groups, by * block_M:(by + 1) * block_M, :], dv_shared)
+            T.copy(dk, dk_shared)
+            T.atomic_add(dK[bz, bx // groups, by * block_M:(by + 1) * block_M, :], dk_shared)
 
     return flash_bwd
 
 
 @tilelang.jit(out_idx=-1)
-def flashattn_bwd_dsink(batch, heads, seq_len, block=256):
-    dtype = "float16"
+def flashattn_bwd_dsink(batch, heads, seq_len, block=256, dtype: str = "float16"):
     accum_dtype = "float"
     shape = [batch, heads, seq_len]
 
@@ -338,8 +354,16 @@ class _attention(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, sinks, window_size, groups):
+
+        def maybe_contiguous(x):
+            if x.stride(-1) != 1:
+                return x.contiguous()
+            return x
+
+        q, k, v, sinks = [maybe_contiguous(x) for x in (q, k, v, sinks)]
         BATCH, H, N_CTX, D_HEAD = q.shape
-        kernel = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, groups, window_size)
+        dtype = "float16" if q.dtype == torch.float16 else "bfloat16"
+        kernel = flashattn_fwd(BATCH, H, N_CTX, D_HEAD, groups, window_size, dtype=dtype)
         o, lse = kernel(q, k, v, sinks)
         ctx.save_for_backward(q, k, v, sinks, o, lse)
         ctx.window_size = window_size
@@ -351,27 +375,22 @@ class _attention(torch.autograd.Function):
         q, k, v, sinks, o, lse = ctx.saved_tensors
         BATCH, H, N_CTX, D_HEAD = q.shape
         groups = ctx.groups
+        dtype = "float16" if q.dtype == torch.float16 else "bfloat16"
 
-        def maybe_contiguous(x):
-            if x.stride(-1) != 1:
-                return x.contiguous()
-            return x
-
-        do, q, k, v, sinks, o = [maybe_contiguous(x) for x in (do, q, k, v, sinks, o)]
-        kernel_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD)
-        kernel_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD)
+        kernel_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD, dtype=dtype)
+        kernel_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD, dtype=dtype)
         delta = kernel_prep(o, do)
-        kernel = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, groups, ctx.window_size)
+        kernel = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, groups, ctx.window_size, dtype=dtype)
         q_shape = [BATCH, H, N_CTX, D_HEAD]
         head_kv = H // groups
         kv_shape = [BATCH, head_kv, N_CTX, D_HEAD]
         dq = torch.zeros(q_shape, dtype=torch.float32, device=q.device)  # acc for atomicAdd
-        dk = torch.zeros(kv_shape, dtype=torch.float16, device=q.device)
-        dv = torch.zeros(kv_shape, dtype=torch.float16, device=q.device)
+        dk = torch.zeros(kv_shape, dtype=torch.float32, device=q.device)
+        dv = torch.zeros(kv_shape, dtype=torch.float32, device=q.device)
         kernel(q, k, v, do, lse, delta, dq, dk, dv)
         dq = kernel_post(dq)
 
-        kernel_dsink = flashattn_bwd_dsink(BATCH, H, N_CTX)
+        kernel_dsink = flashattn_bwd_dsink(BATCH, H, N_CTX, dtype=dtype)
         dsinks = kernel_dsink(sinks, delta, lse).sum(0).sum(1)
         return dq, dk, dv, dsinks, None, None
 
@@ -385,7 +404,8 @@ def ref_program(query: torch.Tensor,
                 key: torch.Tensor,
                 value: torch.Tensor,
                 sinks: torch.Tensor,
-                sliding_window: int | None = None) -> torch.Tensor:
+                sliding_window: Optional[int] = None,
+                dtype: torch.dtype = torch.float16) -> torch.Tensor:
 
     key = key.transpose(1, 2).contiguous()
     value = value.transpose(1, 2).contiguous()
@@ -423,7 +443,7 @@ def ref_program(query: torch.Tensor,
     output = torch.einsum("bhmqk,bkhmd->bqhmd", scores, value.float())
 
     output = output.reshape(batch_size, num_queries, num_key_value_heads * num_key_value_groups,
-                            head_dim).to(torch.float16)
+                            head_dim).to(dtype)
     return output.transpose(1, 2).contiguous()
 
 
@@ -432,7 +452,9 @@ def main(BATCH: int = 1,
          N_CTX: int = 512,
          D_HEAD: int = 64,
          groups: int = 2,
-         window_size: int | None = None):
+         window_size: int | None = None,
+         dtype: str = "float16"):
+    torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
     if window_size is not None:
         print('Using sliding window attention.')
         assert window_size <= N_CTX
@@ -443,14 +465,11 @@ def main(BATCH: int = 1,
         flops_per_matmul = 2.0 * BATCH * H * N_CTX * N_CTX * D_HEAD * 0.5
     total_flops = 5 * flops_per_matmul
 
-    Q = (
-        torch.empty(BATCH, H, N_CTX, D_HEAD, dtype=torch.float16,
-                    device="cuda").normal_().requires_grad_())
-    K = torch.empty(
-        BATCH, H // groups, N_CTX, D_HEAD, dtype=torch.float16,
-        device="cuda").normal_().requires_grad_()
-    V = torch.empty_like(K).normal_().requires_grad_()
-    sinks = torch.randn(H, dtype=torch.float16, device="cuda").requires_grad_()
+    Q = (torch.randn(BATCH, H, N_CTX, D_HEAD, dtype=torch_dtype, device="cuda").requires_grad_())
+    K = torch.randn(
+        BATCH, H // groups, N_CTX, D_HEAD, dtype=torch_dtype, device="cuda").requires_grad_()
+    V = torch.randn_like(K).requires_grad_()
+    sinks = torch.randn(H, dtype=torch_dtype, device="cuda").requires_grad_()
     dO = torch.randn_like(Q)
 
     O = attention(Q, K, V, sinks, window_size, groups)
@@ -460,7 +479,7 @@ def main(BATCH: int = 1,
     dV, V.grad = V.grad.clone(), None
     dsinks, sinks.grad = sinks.grad.clone(), None
 
-    O_ref = ref_program(Q, K, V, sinks, window_size)
+    O_ref = ref_program(Q, K, V, sinks, window_size, dtype=torch_dtype)
     O_ref.backward(dO, retain_graph=True)
     dQ_ref, Q.grad = Q.grad.clone(), None
     dK_ref, K.grad = K.grad.clone(), None
@@ -468,11 +487,20 @@ def main(BATCH: int = 1,
     dsinks_ref, sinks.grad = sinks.grad.clone(), None
 
     # Checks
-    assert torch.allclose(O, O_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dV, dV_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dK, dK_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dQ, dQ_ref, rtol=1e-2, atol=1e-2)
-    assert torch.allclose(dsinks, dsinks_ref, rtol=1e-2, atol=1e-2), f'{dsinks=}, {dsinks_ref=}'
+    rtol, atol = {
+        "float16": (1e-2, 1e-2),
+        "bfloat16": (2e-2, 2e-2),
+    }[dtype]
+    assert torch.allclose(O, O_ref, rtol=rtol, atol=atol), f'O max err: {(O-O_ref).abs().max()}'
+    assert torch.allclose(
+        dV, dV_ref, rtol=rtol, atol=atol), f'dV max err: {(dV-dV_ref).abs().max()}'
+    assert torch.allclose(
+        dK, dK_ref, rtol=rtol, atol=atol), f'dK max err: {(dK-dK_ref).abs().max()}'
+    assert torch.allclose(
+        dQ, dQ_ref, rtol=rtol, atol=atol), f'dq max err: {(dQ-dQ_ref).abs().max()}'
+    assert torch.allclose(
+        dsinks, dsinks_ref, rtol=rtol,
+        atol=atol), f'dsinks max err: {(dsinks-dsinks_ref).abs().max()}'
 
     print("All checks passed for tilelang kernels.✅")
 
@@ -495,7 +523,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=1, help='Batch size')
     parser.add_argument('--h', type=int, default=64, help='Number of heads')
-    parser.add_argument('--n_ctx', type=int, default=1024, help='Context size')
+    parser.add_argument('--n_ctx', type=int, default=4096, help='Context size')
     parser.add_argument('--d_head', type=int, default=128, help='Head dimension')
     parser.add_argument('--groups', type=int, default=8, help='Groups')
     parser.add_argument(
@@ -503,5 +531,7 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help='window size (default: None, which means full attention)')
+    parser.add_argument(
+        '--dtype', type=str, default="float16", help="dtype, can be float16 or bfloat16")
     args = parser.parse_args()
-    main(args.batch, args.h, args.n_ctx, args.d_head, args.groups, args.window_size)
+    main(args.batch, args.h, args.n_ctx, args.d_head, args.groups, args.window_size, args.dtype)

@@ -9,6 +9,18 @@ from tvm.ffi import register_object
 from tilelang import _ffi_api
 import threading
 
+# Ensure single-dimension kernel bindings can be unpacked like iterables.
+# especially for issue https://github.com/tile-ai/tilelang/issues/830
+if not hasattr(Var, "__iter__"):
+
+    def _var_iter(self):
+        yield self
+
+    Var.__iter__ = _var_iter  # type: ignore[attr-defined]
+
+if not hasattr(Var, "__len__"):
+    Var.__len__ = lambda self: 1  # type: ignore[attr-defined]
+
 
 class FrameStack:
     """
@@ -68,6 +80,17 @@ def _get_current_stack() -> FrameStack:
     return _local.kernel_launch_frame_stack
 
 
+def _normalize_bindings(bindings: List[Var]) -> Union[Var, List[Var]]:
+    """
+    Return a bare Var when we only have a single binding so that users may write either
+    `with T.Kernel(...) as pid:` or `with T.Kernel(...) as (pid,)`.
+    Otherwise, keep the list semantics for multi-dimensional launches.
+    """
+    if len(bindings) == 1:
+        return bindings[0]
+    return bindings
+
+
 @register_object("tl.KernelLaunchFrame")
 class KernelLaunchFrame(TIRFrame):
     """
@@ -83,9 +106,6 @@ class KernelLaunchFrame(TIRFrame):
         """
         super().__enter__()
         _get_current_stack().push(self)
-        # If we have exactly 5 frames, return the single iter_var.var.
-        if len(self.frames) == 5:
-            return self.frames[0].iter_var.var
 
         last_block_frame = self.frames[-1]
         assert isinstance(last_block_frame,
@@ -95,11 +115,11 @@ class KernelLaunchFrame(TIRFrame):
 
         if maybe_cpu:
             # CPU kernel frame, return a list of for frame items.
-            return [frame.vars[0] for frame in self.frames[0:-1]]
+            return _normalize_bindings([frame.vars[0] for frame in self.frames[0:-1]])
         else:
             # Otherwise, return a list of iter_var.var objects (excluding the last 4 frames).
             # As 4 frames for threadIdx.x, threadIdx.y, threadIdx.z and block frame with attributes
-            return [frame.iter_var.var for frame in self.frames[0:-4]]
+            return _normalize_bindings([frame.iter_var.var for frame in self.frames[0:-4]])
 
     def __exit__(self, ptype, value, trace):
         """
@@ -234,6 +254,31 @@ def Kernel(
     -------
     res : Tuple[frame.LaunchThreadFrame]
         The result LaunchThreadFrame.
+
+    Examples
+    --------
+    Create a 1-D CUDA kernel launch and unpack the single block index:
+
+    .. code-block:: python
+
+        with T.Kernel(T.ceildiv(N, 128), threads=128) as bx:
+            # bx is the blockIdx.x binding (also iterable as (bx,))
+            ...
+
+    Launch a 2-D grid while requesting two thread dimensions:
+
+    .. code-block:: python
+
+        with T.Kernel(grid_x, grid_y, threads=(64, 2)) as (bx, by):
+            tx, ty = T.get_thread_bindings()
+            ...
+
+    Emit a CPU kernel where thread bindings are skipped:
+
+    .. code-block:: python
+
+        with T.Kernel(loop_extent, is_cpu=True) as (i,):
+            ...
     """
     attrs: dict = {}
 

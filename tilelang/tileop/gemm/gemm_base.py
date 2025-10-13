@@ -5,6 +5,7 @@ from tvm import tir
 from tilelang.utils.language import is_shared, is_fragment
 from tilelang.ir import GemmWarpPolicy
 from tvm.ir.base import Node
+from tvm.ir import PrimExpr
 
 
 @dataclass
@@ -103,7 +104,7 @@ class GemmBase(object):
         return self.gemm_node.offset_B
 
     @property
-    def clear_accum(self) -> bool:
+    def clear_accum(self) -> PrimExpr:
         return self.gemm_node.clear_accum
 
     @property
