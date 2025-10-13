@@ -9,6 +9,9 @@ from typing import (
     Tuple,
     TypeVar,
     Iterable,
+    Annotated,
+    Any,
+    Generic,
     Optional,
     TypeVarTuple,
     TYPE_CHECKING,
@@ -42,7 +45,7 @@ class StridedTensorSchema:
         if isinstance(params, tuple):
             shape, stride = params
             return StridedTensorSchema(shape=shape, stride=stride)
-        return StridedTensorSchema(shape=params, stride=self.stride)
+        raise SyntaxError("Expected a tuple of (shape, stride)")
 
 
 class TensorSchema(StridedTensorSchema):
@@ -58,26 +61,6 @@ class TensorSchema(StridedTensorSchema):
                 dyn_flag = True
         return TensorSchema(shape=params, stride=stride)
 
-
-@dataclass(frozen=True, slots=True)
-class BufferLike:
-    buffer: tir.Buffer
-    shape: Tuple[int | tir.PrimExpr, ...]
-    stride: Tuple[int | tir.PrimExpr, ...]
-    dtype: tvm.DataType
-    arg_idx: Optional[int] = None
-    # device: Optional[Device] = None
-
-    def offset_of(self, indices) -> tir.IntImm:
-        return self.buffer.offset_of(indices)
-
-    def __getitem__(self, indices):
-        return self.buffer.__getitem__(indices)
-
-# @dataclass(frozen=True, slots=True)
-# class DeviceSchema:
-#     pass
-
 _T = TypeVar("_T")
 _Shapes = TypeVarTuple("_Shapes")
 
@@ -88,13 +71,24 @@ if TYPE_CHECKING:
     class dyn[_T](tir.Var):
         dtype: tvm.DataType
 
-    class StridedTensor[_Shape, _Stride]:
-        shape: _Shape
-        stride: _Stride
+    _Shape = TypeVarTuple("_Shape", bound=int)
+    _Stride = TypeVar("_Stride", Tuple[int | dyn[int], ...])
+    class BaseTensor(Generic[*_Shape, _Stride], tir.Buffer):
+        shape: Tuple[tir.PrimExpr, ...]
+        strides: Tuple[tir.PrimExpr, ...]
         dtype: tvm.DataType
-        # device: Device
+        arg_idx: Optional[int] = None
 
-    class Tensor[*_Shapes](StridedTensor[Tuple[*_Shapes], Tuple[int | dyn[int], ...]]):
+        def get_shape(self) -> Tuple[*_Shape]: ...
+        def get_strides(self) -> _Stride: ...
+        def params(self) -> Tuple[*_Shape, tvm.DataType] : ...
+        def all_params(self) -> Tuple[Tuple[*_Shape], _Stride, tvm.DataType]: ...
+
+    _ShapeTup = TypeVar('_Shape', Tuple[int | dyn[int], ...])
+    class StridedTensor(Generic[_ShapeTup, _Stride], BaseTensor[*_ShapeTup, _Stride]):
+        pass
+
+    class Tensor(BaseTensor[*_Shapes, Tuple[int | dyn[int], ...]]):
         pass
 
     ptr = dyn[VoidPtr]
@@ -190,3 +184,75 @@ def place(*shape: Tuple[int, ...], dtype: AnyDType, strides: Optional[Tuple[int,
         device = torch.cuda.current_device()
     return Place(shape=shape, strides=strides, dtype=dtype, device=device)
 
+# monkey patches
+
+_tvm_patched = False
+
+
+@dataclass(frozen=True, slots=True)
+class _param:
+    data: Any
+
+def _apply_tvm_patches():
+    def _as_value(v):
+        if isinstance(v, tir.expr.ConstExpr):
+            return v.value
+        return v
+    def _as_value_tup(v):
+        return tuple(map(lambda x: _as_value(x), v))
+    def _as_param_tup(v):
+        return tuple(map(lambda x: _param(_as_value(x)), v))
+    def __buf_params(self):
+        return _as_param_tup((*self.shape, self.dtype))
+    def __buf_all_params(self):
+        return _as_param_tup(self.shape), _as_param_tup(self.strides), _param(_as_value(self.dtype))
+    def __buf_get_shape(self):
+        return _as_value_tup(self.shape)
+    def __buf_get_strides(self):
+        return _as_value_tup(self.strides)
+
+    tir.Buffer.params = __buf_params
+    tir.Buffer.all_params = __buf_all_params
+    tir.Buffer.get_shape = __buf_get_shape
+    tir.Buffer.get_strides = __buf_get_strides
+
+    def __array_eq(self, rhs):
+        if isinstance(rhs, tuple):
+            return tuple(self) == rhs
+        if isinstance(rhs, list):
+            return list(self) == rhs
+        if isinstance(rhs, tvm.ffi.container.Array):
+            return tvm.core.Object.__eq__(self, rhs)
+
+    def __array_ne(self, rhs):
+        if isinstance(rhs, tuple):
+            return tuple(self) != rhs
+        if isinstance(rhs, list):
+            return list(self) != rhs
+        if isinstance(rhs, tvm.ffi.container.Array):
+            return tvm.core.Object.__ne__(self, rhs)
+
+    def __array_req(self, lhs):
+        if isinstance(lhs, tuple):
+            return tuple(self) == lhs
+        if isinstance(lhs, list):
+            return list(self) == lhs
+        if isinstance(lhs, tvm.ffi.container.Array):
+            return tvm.core.Object.__eq__(self, lhs)
+
+    def __array_rne(self, rhs):
+        if isinstance(rhs, tuple):
+            return tuple(self) != rhs
+        if isinstance(rhs, list):
+            return list(self) != rhs
+        if isinstance(rhs, tvm.ffi.container.Array):
+            return tvm.core.Object.__ne__(self, rhs)
+
+    tvm.ffi.container.Array.__eq__ = __array_eq
+    tvm.ffi.container.Array.__ne__ = __array_ne
+    tvm.ffi.container.Array.__req__ = __array_req
+    tvm.ffi.container.Array.__rne__ = __array_rne
+
+if not _tvm_patched:
+    _tvm_patched = True
+    _apply_tvm_patches()

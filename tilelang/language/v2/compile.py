@@ -1,4 +1,5 @@
 from __future__ import annotations
+from hashlib import sha256
 import inspect
 import torch
 from dataclasses import dataclass, field
@@ -7,9 +8,10 @@ from tvm import tir
 import linecache
 import io
 from .ast_rewrite import DSLMutator, OpKind
-from .lang import (DynSchema, StridedTensorSchema, ConstSchema, MakeEmpty, BufferLike, Place)
+from .lang import (DynSchema, StridedTensorSchema, ConstSchema, MakeEmpty, Place, _param)
 from tilelang.language.dtypes import (get_tvm_dtype, get_torch_dtype, get_tvm_ptr_type,
                                       get_cffi_dtype, get_ctypes_dtype)
+from tilelang.language.tir import assume as tl_assume
 from tilelang.transform.pass_config import PassConfigKey
 import threading
 import ctypes
@@ -30,6 +32,7 @@ from typing import (
 )
 from tvm.script.ir_builder import IRBuilder
 from tvm.script.ir_builder import tir as tb
+import tilelang.env as env
 from tvm import DataType
 from tvm.target import Target
 from contextlib import contextmanager
@@ -53,6 +56,20 @@ class JITArgParser(Generic[_P, _T]):
     const_arg_names: List[str]
     dyn_arg_names: List[str]
     sig: inspect.Signature
+
+
+def disk_compile(source, name):
+    cache_dir = env.TILELANG_CACHE_DIR
+    if cache_dir is not None:
+        import os
+        save_dir = os.path.join(cache_dir, "py-cache")
+        os.makedirs(save_dir, exist_ok=True)
+        hash_sfx = sha256(source.encode('utf-8')).hexdigest()[:8]
+        path = os.path.join(save_dir, f"{name}.{hash_sfx}.py")
+        with open(path, 'w') as f:
+            f.write(source)
+    linecache.cache[path] = (len(source), None, source.splitlines(), path)
+    return compile(source, path, "exec")
 
 
 def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITArgParser:
@@ -135,9 +152,7 @@ def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITArgParser:
     source += f"  return {fn_name}\n"
 
     locs = {}
-    line_cache_name = f"{fn_name}_{id(source)}"
-    linecache.cache[line_cache_name] = (len(source), None, source.splitlines(), line_cache_name)
-    code = compile(source, line_cache_name, "exec")
+    code = disk_compile(source, fn_name)
     exec(code, {}, locs)
     fn = locs["parse_args"](**closure)
     fn.__tl_code__ = source
@@ -168,14 +183,15 @@ class BufferSchema:
     # device: Optional[torch.device] = None
 
     @classmethod
-    def from_buffer(self, buffer: BufferLike) -> BufferSchema:
+    def from_buffer(self, buffer: tir.Buffer) -> BufferSchema:
+        if not hasattr(buffer, "arg_idx"):
+            raise RuntimeError("Trying to return a local buffer")
         return BufferSchema(
-            name=buffer.buffer.name,
+            name=buffer.name,
             shape=buffer.shape,
-            stride=buffer.stride,
+            stride=buffer.strides,
             dtype=buffer.dtype,
             arg_idx=buffer.arg_idx,
-            # device=buffer.device,
         )
 
 
@@ -284,9 +300,7 @@ class JITFunc(Generic[_P, _T]):
         source += "  return wrapper"
 
         locs = {}
-        line_cache_name = f"<tl_torch_wrapper_{id(source)}>"
-        linecache.cache[line_cache_name] = (len(source), None, source.splitlines(), line_cache_name)
-        code = compile(source, line_cache_name, "exec")
+        code = disk_compile(source, func.__name__ + ".wrapper")
         exec(code, {}, locs)
         fn = locs["__closure"](**closure)
         fn.__tl_code__ = source
@@ -307,7 +321,7 @@ class JITFunc(Generic[_P, _T]):
                 f"{ident_str}  compile_flags={repr(self.compile_flags)},\n"
                 f"{ident_str}  arg_parser={repr(self.arg_parser)},\n"
                 f"{ident_str}  const_args={repr(self.const_args)},\n"
-                f"{ident_str}  prim_func={repr(prim_func)},\n"
+                f"{ident_str}  prim_func=r'''{prim_func}''',\n"
                 f"{ident_str})")
 
     def __repr__(self):
@@ -391,18 +405,14 @@ def _interp_aug_assign(op: OpKind, lval: Any, slice: Any, rval: Any) -> Any:
         raise ValueError(f"Unsupported op: {op}")
 
 
-class _empty:
-    ...
-
-
 @dataclass
 class DSLBuilder:
     # base pass_config or compile_flags
     pass_configs: Dict[str, Any] = field(default_factory=dict)
     compile_flags: List[str] = field(default_factory=list)
 
-    global_allocs: List[BufferLike] = field(default_factory=list)
-    outs: List[BufferLike] = field(default_factory=list)
+    global_allocs: List[tir.Buffer] = field(default_factory=list)
+    outs: List[tir.Buffer] = field(default_factory=list)
 
     # used to store pending shape args, making handle arg first
     pending_args: List[(str, tir.Var)] = field(default_factory=list)
@@ -412,6 +422,9 @@ class DSLBuilder:
     frames: List[Any] = field(default_factory=list)
     builder: IRBuilder = field(default_factory=IRBuilder)
     _params: List[tir.Var] = field(default_factory=list)
+
+    # used to bind tensor params, check whether shapes, strides are different
+    _param_bind_map: Dict[str, Any] = field(default_factory=dict)
 
     _shortcut_expr_depth: int = 0
     _macro_depth: int = 0
@@ -448,6 +461,13 @@ class DSLBuilder:
         return self.pass_configs
     def get_compile_flags(self) -> List[str]:
         return self.compile_flags
+
+    def is_inside_device_code(self) -> bool:
+        num_tvm_frames = 0
+        for frame in self.frames:
+            if not isinstance(frame, ConstIfFrame):
+                num_tvm_frames += 1
+        return num_tvm_frames > 1 # ignore prim_func frame
 
     @contextmanager
     def with_frame(self, frame: ContextManager):
@@ -525,19 +545,39 @@ class DSLBuilder:
             )
             _, arg = self.new_arg(name, buffer)
             self.flush_pending_vars()
-            return BufferLike(
-                buffer=arg,
-                shape=shape,
-                stride=stride,
-                dtype=arg.dtype,
-                # device=expr.device,
-            )
+            return buffer
         else:
             assert not isinstance(expr, torch.Tensor), "Tensor argument must be annotated"
             return expr
 
     def bind(self, name: str, expr: Any, annot: Any = None) -> Any:
-        if isinstance(expr, MakeEmpty):
+        if isinstance(expr, _param):
+            if name not in self._param_bind_map:
+                self._param_bind_map[name] = expr.data
+            old_val = self._param_bind_map[name]
+            if isinstance(old_val, tir.Var) and isinstance(expr.data, tir.Var):
+                tl_assume(old_val == expr.data)
+                return old_val
+            elif isinstance(old_val, tir.Var) and isinstance(expr.data, (tir.PrimExpr, int, float)):
+                tl_assume(old_val == expr.data)
+                self._param_bind_map[name] = expr.data
+            elif isinstance(old_val, (tir.PrimExpr, int, float)) and isinstance(expr.data, tir.Var):
+                tl_assume(old_val == expr.data)
+                self._param_bind_map[name] = expr.data
+            elif isinstance(old_val, (tir.PrimExpr, int, float)) and isinstance(expr.data, (tir.PrimExpr, int, float)):
+                if isinstance(old_val, (int, float, tir.IntImm)) and isinstance(expr.data, (int, float, tir.IntImm)):
+                    if old_val != expr.data:
+                        raise RuntimeError(f"Param binding failed for '{name}', new binding {expr.data} is not compatible with old binding {old_val}")
+                else:
+                    tl_assume(old_val == expr.data)
+                self._param_bind_map[name] = expr.data
+            return self._param_bind_map[name]
+        elif isinstance(expr, MakeEmpty):
+            if self.is_inside_device_code(): # 1 is prim_func scope
+                raise RuntimeError(
+                    "Trying to allocate an empty buffer in device code"
+                    f"frames: {self.frames}"
+                )
             ptr = tir.Var(f"{name}_handle", get_tvm_ptr_type(expr.dtype))
             buffer = tir.decl_buffer(
                 name=name,
@@ -549,22 +589,13 @@ class DSLBuilder:
             )
             arg_idx, arg = self.new_arg(name, buffer)
             self.flush_pending_vars()
-            result = BufferLike(
-                buffer=arg,
-                shape=expr.shape,
-                stride=expr.stride,
-                dtype=arg.dtype,
-                arg_idx=arg_idx,
-            )
-            self.global_allocs.append(result)
-            return result
+            arg.arg_idx = arg_idx
+            self.global_allocs.append(arg)
+            return arg
         elif isinstance(expr, (tir.Var, tir.Buffer)):  # fast shortcut
             IRBuilder.name(name, expr)
             return expr
         elif isinstance(expr, (tir.IntImm, tir.FloatImm)):
-            return expr
-        elif isinstance(expr, BufferLike):
-            IRBuilder.name(name, expr.buffer)
             return expr
         elif isinstance(expr, tir.PrimExpr):
             var = tir.Var(name=name, dtype=expr.dtype)
@@ -580,25 +611,25 @@ class DSLBuilder:
     def ret(self, val: Any = None) -> Any:
         if self._macro_depth > 0:
             return val
-        if isinstance(val, BufferLike):
+        if self.is_inside_device_code():
+            raise RuntimeError("ret is not supported in device code")
+        if isinstance(val, tir.Buffer):
             val = (val,)
         for v in val:
-            assert isinstance(v, BufferLike), "Expected a buffer to return"
+            assert isinstance(v, tir.Buffer), "Expected a buffer to return"
             assert v.arg_idx is not None, "Expected a make_empty buffer to return"
             self.outs.append(v)
 
     def assign(self, lval: Any, slice: Any, rval: Any) -> Any:
         if isinstance(lval, tir.Buffer):
             tb.buffer_store(lval, rval, slice)
-        elif isinstance(lval, BufferLike):
-            tb.buffer_store(lval.buffer, rval, slice)
         else:
             lval[slice] = rval
 
     def aug_assign(self, *args) -> Any:
         if len(args) == 3:
             op, lval, rval = args
-            if isinstance(lval, (tir.Buffer, BufferLike)):
+            if isinstance(lval, tir.Buffer):
                 sl = slice(None)
                 tb.buffer_store(lval, _interp_op(op, lval[sl], rval), sl)
                 return lval
@@ -689,6 +720,16 @@ class DSLBuilder:
         self._shortcut_expr_depth -= 1
         return res
 
+    def ctx_continue(self):
+        if self.is_inside_device_code():
+            raise RuntimeError("continue is not supported in device code")
+        return True
+
+    def ctx_break(self):
+        if self.is_inside_device_code():
+            raise RuntimeError("break is not supported in device code")
+        return True
+
 
 def _remove_leading_ident(source: str):
     lines = source.splitlines()
@@ -696,7 +737,6 @@ def _remove_leading_ident(source: str):
         return source
     ident_size = len(lines[0]) - len(lines[0].lstrip())
     return "\n".join([line[ident_size:] if len(line) >= ident_size else line for line in lines])
-
 
 
 def make_ir_generator(func):
@@ -764,17 +804,6 @@ def get_compile_flags() -> List[str]:
     return DSLBuilder.current().compile_flags
 
 
-def get_target_host() -> Target:
-    return DSLBuilder.current().target_host
-
-
-def get_target() -> Target:
-    return DSLBuilder.current().target
-
-
 def get_params() -> List[tir.Var]:
     return DSLBuilder.current()._params
 
-
-def get_global_allocs() -> List[BufferLike]:
-    return DSLBuilder.current().global_allocs

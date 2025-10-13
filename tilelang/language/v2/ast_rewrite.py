@@ -126,28 +126,11 @@ class DSLMutator(ast.NodeTransformer):
             span=node,
         )
 
-    # def _emit_assign_tuple(self, targets: List[ast.expr], rval: ast.expr) -> List[ast.AST]:
-    #     tmp_names = [self.get_tmp() for _ in range(len(targets))]
-    #     unpack = quote1(",".join(tmp_names) + ", = value", value=rval)
-    #     stmts = [unpack]
-    #     for i, target in enumerate(targets):
-    #         stmts.extend(
-    #             self._emit_assign_target(target, ast.Name(id=tmp_names[i], ctx=ast.Load())))
-    #     return stmts
+    def visit_Continue(self, node: ast.Continue):
+        return quote("if __tb.ctx_continue(): continue", span=node)
 
-    # def _emit_assign_target(self, target: ast.expr, rval: ast.expr) -> List[ast.AST]:
-    #     if isinstance(target, ast.Name):
-    #         return quote(f"name = __tb.bind('{target.id}', value)", name=target, value=rval)
-    #     elif isinstance(target, ast.Subscript):
-    #         return quote(
-    #             "__tb.assign(lval, slice, value)",
-    #             lval=target.value,
-    #             slice=target.slice,
-    #             value=rval,
-    #         )
-    #     elif isinstance(target, ast.Tuple):
-    #         return self._emit_assign_tuple(target.elts, rval)
-
+    def visit_Break(self, node: ast.Break):
+        return quote("if __tb.ctx_break(): break", span=node)
 
     def _emit_assign_target(self, target: ast.expr, rval: ast.expr) -> List[ast.AST]:
         if isinstance(target, ast.Name):
