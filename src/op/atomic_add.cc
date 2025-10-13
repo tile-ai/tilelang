@@ -55,9 +55,6 @@ AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) {
   }
   std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
   std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
-  if (args.size() >= 3) {
-    node->coalesced_width = Downcast<IntImm>(args[2]);
-  }
   data_ = std::move(node);
 }
 
@@ -483,7 +480,7 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           read_src.value(), C.indice_map[read_src.value()], args.layout_map,
           args.thread_bounds, C.loop_vars);
     } else {
-      For remapped = loop;
+      const For& remapped = loop;
       loop_layout = PlanLoopPartition(remapped, vec, args.thread_bounds);
     }
 
