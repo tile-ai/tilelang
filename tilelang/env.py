@@ -30,17 +30,34 @@ def _find_cuda_home() -> str:
     if cuda_home is None:
         # Guess #2
         nvcc_path = shutil.which("nvcc")
-        if nvcc_path is not None and "cuda" in nvcc_path.lower():
-            cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
+        if nvcc_path is not None:
+            # Standard CUDA pattern
+            if "cuda" in nvcc_path.lower():
+                cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
+            # NVIDIA HPC SDK pattern
+            elif "hpc_sdk" in nvcc_path.lower():
+                # Navigate to the root directory of nvhpc
+                cuda_home = os.path.dirname(os.path.dirname(os.path.dirname(nvcc_path)))
+            # Generic fallback for non-standard or symlinked installs
+            else:
+                cuda_home = os.path.dirname(os.path.dirname(nvcc_path))
+
         else:
             # Guess #3
             if sys.platform == 'win32':
                 cuda_homes = glob.glob('C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*.*')
                 cuda_home = '' if len(cuda_homes) == 0 else cuda_homes[0]
             else:
-                cuda_home = '/usr/local/cuda'
-            if not os.path.exists(cuda_home):
+                # Linux/macOS
+                if os.path.exists('/usr/local/cuda'):
+                    cuda_home = '/usr/local/cuda'
+                elif os.path.exists('/opt/nvidia/hpc_sdk/Linux_x86_64'):
+                    cuda_home = '/opt/nvidia/hpc_sdk/Linux_x86_64'
+
+            # Validate found path
+            if cuda_home is None or not os.path.exists(cuda_home):
                 cuda_home = None
+
     return cuda_home if cuda_home is not None else ""
 
 
