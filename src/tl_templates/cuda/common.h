@@ -17,6 +17,8 @@ using cutlass::tfloat32_t;
 using cute::cast_smem_ptr_to_uint;
 
 using int4_t = int4;
+using fp8_e4_t = cute::float_e4m3_t;
+using fp8_e5_t = cute::float_e5m2_t;
 
 #define hexp cutlass::fast_exp
 #define hlog cutlass::fast_log
