@@ -148,7 +148,9 @@ jobs:
 
           if [[ ! -x "$(command -v nvcc)" ]]; then
             export PATH="/usr/local/cuda/bin:${PATH}"
+            export LD_LIBRARY_PATH="/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
             echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
+            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" | tee -a "${GITHUB_ENV}"
           fi
           if [[ -x "$(command -v nvcc)" ]]; then
             echo "\$ $(command -v nvcc) --version" && nvcc --version
@@ -177,7 +179,9 @@ jobs:
 
           if [[ ! -x "$(command -v hipcc)" ]]; then
             export PATH="/opt/rocm/bin:${PATH}"
+            export LD_LIBRARY_PATH="/opt/rocm/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
             echo "PATH=${PATH}" | tee -a "${GITHUB_ENV}"
+            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" | tee -a "${GITHUB_ENV}"
           fi
           if [[ -x "$(command -v hipcc)" ]]; then
             echo "\$ $(command -v hipcc) --version" && hipcc --version
