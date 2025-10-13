@@ -219,22 +219,22 @@ TIR_DEFINE_TL_BUILTIN(warpgroup_wait)
                                Integer(CallEffectKind::kOpaque));
 
 TIR_DEFINE_TL_BUILTIN(get_lane_idx)
-    .set_num_inputs(0)
+    .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 
 TIR_DEFINE_TL_BUILTIN(get_warp_idx_sync)
-    .set_num_inputs(0)
+    .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 
 TIR_DEFINE_TL_BUILTIN(get_warp_idx)
-    .set_num_inputs(0)
+    .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 
 TIR_DEFINE_TL_BUILTIN(get_warp_group_idx)
-    .set_num_inputs(0)
+    .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
 
