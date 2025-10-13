@@ -46,7 +46,9 @@ jobs:
           fetch-depth: 1
           submodules: recursive
 
-      - name: Setup ccache
+      # NB: CIBW builds wheels in containers on Linux
+      - name: Setup ccache (macOS only)
+        if: runner.os == 'macOS'
         uses: hendrikmuhs/ccache-action@v1
         with:
           create-symlink: true
