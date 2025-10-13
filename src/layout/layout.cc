@@ -265,10 +265,6 @@ Layout LayoutNode::Inverse() const {
   for (size_t i = 0; i < OutputDim(); i++) {
     outputs.push_back(InputPlaceholder(i));
   }
-  LOG(INFO) << "forward_index_ " << forward_index_;
-  LOG(INFO) << "res->indices " << res->indices;
-  LOG(INFO) << "res->indices.size " << res->indices.size();
-  LOG(INFO) << "outputs.size " << outputs.size();
 
   auto inv = arith::InverseAffineIterMap(res->indices, outputs);
 

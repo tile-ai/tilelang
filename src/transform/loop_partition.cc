@@ -77,15 +77,44 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   Stmt body = std::move(op);
   auto inv_loop = loop_layout->Inverse();
   auto indices = inv_loop->Forward(Array<PrimExpr>(vars.begin(), vars.end()));
+  arith::Analyzer guard_analyzer;
+  for (int i = 0; i < new_loop_depth; i++) {
+    guard_analyzer.Bind(vars[i],
+                        Range::FromMinExtent(make_zero(vars[i]->dtype),
+                                             inv_loop->InputShape()[i]));
+  }
+  Range thread_range = loop_layout->ThreadRange().defined()
+                           ? loop_layout->ThreadRange()
+                           : Range::FromMinExtent(make_zero(thread_var->dtype),
+                                                  loop_layout->ThreadExtent());
+  guard_analyzer.Bind(thread_var, thread_range);
+  PrimExpr guard = const_true();
+  bool need_guard = false;
   for (int i = 0; i < old_loop_depth; i++) {
     const ForNode *loop = body.as<ForNode>();
     ICHECK(loop != nullptr);
     vmap.Set(loop->loop_var, indices[i]);
+    PrimExpr min = loop->min;
+    PrimExpr extent = loop->extent;
+    PrimExpr lower_cond = guard_analyzer.Simplify(GE(indices[i], min));
+    if (!guard_analyzer.CanProve(lower_cond)) {
+      guard = guard_analyzer.Simplify(logical_and(guard, lower_cond));
+      need_guard = true;
+    }
+    PrimExpr upper_cond = guard_analyzer.Simplify(LT(indices[i], min + extent));
+    if (!guard_analyzer.CanProve(upper_cond)) {
+      guard = guard_analyzer.Simplify(logical_and(guard, upper_cond));
+      need_guard = true;
+    }
     body = loop->body;
   }
 
   // substitute and re-construct the serial loop
   body = Substitute(body, vmap);
+  if (need_guard) {
+    guard = guard_analyzer.Simplify(guard);
+    body = IfThenElse(guard, body);
+  }
   for (int i = new_loop_depth - 1; i >= 0; i--) {
     body = For(vars[i], make_zero(vars[i]->dtype), inv_loop->InputShape()[i],
                ForKind::kSerial, body);
