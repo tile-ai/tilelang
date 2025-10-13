@@ -194,6 +194,7 @@ def _par_compile_in_pool(pool: ThreadPoolExecutor,
             if raise_error:
                 raise e
             return e
+
     fut2idx = {}
     futures = []
     result = [None for _ in range(len(funcs))]
@@ -393,7 +394,8 @@ class AutoTuner:
         records = []
         best_latency, best, best_args = None, None, None
         num_errors = 0
-        progress_bar = get_tqdm(zip(self.configs, self.kernels), total=len(self.configs), desc="Benchmarking")
+        progress_bar = get_tqdm(
+            zip(self.configs, self.kernels), total=len(self.configs), desc="Benchmarking")
         for cfg, ker in progress_bar:
             const_args, dyn_args = self.arg_parser(*cfg.args, **cfg.kwargs)  # type: ignore
             record = {k: v for k, v in zip(self.arg_parser.const_arg_names, const_args)}
@@ -505,15 +507,14 @@ class JITDispatcher(Generic[_P, _T]):
         result = tuner.run()
         return result
 
-    def tune(self,
-             *args: _P.args,
-             **kws: _P.kwargs) -> AutoTuneResult:
+    def tune(self, *args: _P.args, **kws: _P.kwargs) -> AutoTuneResult:
         """Tune with the given args, return the tune result
 
         Args: the same as the decorated tilelang kernel
 
         Returns: a object represents the tune result
         """
+
         def get_kw_arg(k, default):
             if k in kws:
                 v = kws[k]
@@ -521,6 +522,7 @@ class JITDispatcher(Generic[_P, _T]):
                 return v
             else:
                 return default
+
         raise_error = get_kw_arg('_raise_error', True)
         _config = get_kw_arg('_config', None)
         max_workers = get_kw_arg('_max_workers', None)
@@ -528,7 +530,8 @@ class JITDispatcher(Generic[_P, _T]):
         if const_args in self.tune_cache:
             return self.tune_cache[const_args]
         configs = self.get_tune_configs(*args, **kws)
-        result = self.tune_configs(configs, max_workers=max_workers, _config=_config, raise_error=raise_error)
+        result = self.tune_configs(
+            configs, max_workers=max_workers, _config=_config, raise_error=raise_error)
         self.tune_cache[const_args] = result
         return result
 
