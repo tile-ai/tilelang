@@ -280,6 +280,97 @@ def warpgroup_wait(num_mma: int):
     return tir.call_intrin("handle", tir.op.Op.get("tl.warpgroup_wait"), num_mma)
 
 
+def get_lane_idx() -> PrimExpr:
+    """Return the canonical lane index of the calling thread within its warp.
+
+    Example
+    -------
+    >>> lane = T.get_lane_idx()
+    >>> T.store(dst, lane, lane)
+
+    Implementation Notes
+    --------------------
+    Lowers to the CUDA helper `tl::get_lane_idx()` from
+    `src/tl_templates/cuda/intrin.h`, which forwards to
+    `cutlass::canonical_lane_idx()` so each thread reads its lane within the warp.
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.get_lane_idx"))
+
+
+def get_warp_idx_sync() -> PrimExpr:
+    """Return the canonical warp index, assuming the warp's threads are converged.
+
+    Example
+    -------
+    >>> warp = T.get_warp_idx_sync()
+    >>> T.evaluate(warp)
+
+    Implementation Notes
+    --------------------
+    Emits `tl::get_warp_idx_sync()` which uses
+    `cutlass::canonical_warp_idx_sync()` under the hood, broadcasting the warp
+    id via `__shfl_sync` so every lane receives the same canonical value.
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.get_warp_idx_sync"))
+
+
+def get_warp_idx() -> PrimExpr:
+    """Return the canonical warp index without synchronizing the warp.
+
+    Example
+    -------
+    >>> warp = T.get_warp_idx()
+    >>> T.if_then_else(warp == 0, do_something, do_other)
+
+    Implementation Notes
+    --------------------
+    Lowers to `tl::get_warp_idx()` whose CUDA implementation calls
+    `cutlass::canonical_warp_idx()` so no extra warp synchronization is needed.
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.get_warp_idx"))
+
+
+def get_warp_group_idx() -> PrimExpr:
+    """Return the canonical warp group index for the calling thread.
+
+    Example
+    -------
+    >>> group = T.get_warp_group_idx()
+    >>> T.evaluate(group)
+
+    Implementation Notes
+    --------------------
+    Generates `tl::get_warp_group_idx()` which leverages
+    `cutlass::canonical_warp_group_idx()` to compute the warp-group ordering
+    defined by CUTLASS on Hopper-class GPUs.
+    """
+    return tir.call_intrin("int32", tir.op.Op.get("tl.get_warp_group_idx"))
+
+
+def shuffle_elect(thread_extent: int) -> PrimExpr:
+    """Elect exactly one lane within a logical thread group.
+
+    Parameters
+    ----------
+    thread_extent : int
+        Size (in threads) of the group in which a single lane should be elected.
+        Passing 0 elects a single lane in the entire thread block.
+
+    Example
+    -------
+    >>> is_leader = T.shuffle_elect(64)
+    >>> T.if_then_else(is_leader, do_leader_work(), T.evaluate(0))
+
+    Implementation Notes
+    --------------------
+    Lowered to the CUDA helper `tl::tl_shuffle_elect<thread_extent>()` defined in
+    `src/tl_templates/cuda/intrin.h`, which relies on
+    `cutlass::canonical_warp_idx_sync()` and `cute::elect_one_sync()` (or
+    `__shfl_sync`) to pick one lane per group.
+    """
+    return tir.call_intrin("bool", tir.op.Op.get("tl.tl_shuffle_elect"), thread_extent)
+
+
 def wait_wgmma(id: int):
     """Wait for WGMMA (Warp Group Matrix Multiply-Accumulate) operations to complete.
 

@@ -1968,6 +1968,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     enable_sparse_gemm_ = true;
     this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
                           op->args, true, os);
+  } else if (op->op.same_as(tl::get_lane_idx())) {
+    os << "tl::get_lane_idx()";
+  } else if (op->op.same_as(tl::get_warp_idx_sync())) {
+    os << "tl::get_warp_idx_sync()";
+  } else if (op->op.same_as(tl::get_warp_idx())) {
+    os << "tl::get_warp_idx()";
+  } else if (op->op.same_as(tl::get_warp_group_idx())) {
+    os << "tl::get_warp_group_idx()";
   } else if (op->op.same_as(tl::tl_shuffle_elect())) {
     os << "tl::tl_shuffle_elect<" << PrintExpr(op->args[0]) << ">()";
   } else if (op->op.same_as(tl::initialize_descriptor())) {

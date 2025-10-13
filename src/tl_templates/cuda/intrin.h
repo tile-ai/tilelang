@@ -1,12 +1,26 @@
 #pragma once
 
+#include "common.h"
+#include "cutlass/cutlass.h"
+
 #if __CUDA_ARCH_LIST__ >= 900
 #include "cute/arch/cluster_sm90.hpp"
 #include "cute/arch/mma_sm90_gmma.hpp"
-#include "cutlass/cutlass.h"
+#endif
 
 namespace tl {
 
+TL_DEVICE int get_lane_idx() { return cutlass::canonical_lane_idx(); }
+
+TL_DEVICE int get_warp_idx_sync() { return cutlass::canonical_warp_idx_sync(); }
+
+TL_DEVICE int get_warp_idx() { return cutlass::canonical_warp_idx(); }
+
+TL_DEVICE int get_warp_group_idx() {
+  return cutlass::canonical_warp_group_idx();
+}
+
+#if __CUDA_ARCH_LIST__ >= 900
 TL_DEVICE void warpgroup_arrive() { cute::warpgroup_arrive(); }
 TL_DEVICE void warpgroup_commit_batch() { cute::warpgroup_commit_batch(); }
 
@@ -61,5 +75,6 @@ template <uint32_t RegCount> TL_DEVICE void warpgroup_reg_alloc() {
 template <uint32_t RegCount> TL_DEVICE void warpgroup_reg_dealloc() {
   asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" : : "n"(RegCount));
 }
-} // namespace tl
 #endif
+
+} // namespace tl
