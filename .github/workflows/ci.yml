@@ -95,7 +95,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           submodules: recursive
 
       - name: Set environment (self-hosted runners)
@@ -201,7 +201,7 @@ jobs:
           PIP_NO_BUILD_ISOLATION: "1"
         run: |
           uv pip install --upgrade pip setuptools wheel
-          uv pip install -r requirements-build.txt -r requirements-test.txt
+          uv pip install -r requirements-test.txt
           if [[ "${{ matrix.runner.toolkit }}" == "CUDA"* ]]; then
             uv pip install flash-attn==2.5.8
           elif [[ "${{ matrix.runner.toolkit }}" == "ROCm"* ]]; then
@@ -259,11 +259,8 @@ jobs:
           sysctl kern.corefile kern.coredump kern.sugid_coredump
 
       - name: Install project (wheel form)
-        env:
-          UV_NO_BUILD_ISOLATION: "1"
-          PIP_NO_BUILD_ISOLATION: "1"
         run: |
-          uv pip install --no-build-isolation -v .
+          uv pip install -v .
 
       - name: Run examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         if: contains(matrix.runner.toolkit, 'CUDA')
