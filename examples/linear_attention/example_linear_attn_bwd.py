@@ -9,8 +9,7 @@ from einops import rearrange
 from typing import Optional, Tuple
 
 
-@tl.jit(
-    pass_configs={
+@tl.jit(pass_configs={
     tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
     tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
 })
@@ -93,8 +92,9 @@ def tl_fused_chunk_bwd_kernel(
                 for row, col in T.Parallel(chunk_size, BK):
                     dq[row, col] *= scale
                 T.copy(dq, dq_shared)
-                T.atomic_add(dQ[i_b, i * chunk_size:(i + 1) * chunk_size, i_h,
-                           i_k * BK:(i_k + 1) * BK], dq_shared)
+                T.atomic_add(
+                    dQ[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_k * BK:(i_k + 1) * BK],
+                    dq_shared)
 
             # Calculate dK, dV (reversely)
             for i in T.Pipelined(1, NT + 1, num_stages=1):
@@ -132,12 +132,15 @@ def tl_fused_chunk_bwd_kernel(
                 T.gemm(q, do, dh, transpose_A=True)
 
                 T.copy(dk, dk_shared)
-                T.atomic_add(dK[i_b, start * chunk_size:(start + 1) * chunk_size, i_h,
-                           i_k * BK:(i_k + 1) * BK], dk_shared)
+                T.atomic_add(
+                    dK[i_b, start * chunk_size:(start + 1) * chunk_size, i_h,
+                       i_k * BK:(i_k + 1) * BK], dk_shared)
                 T.copy(dv, dv_shared)
-                T.atomic_add(dV[i_b, start * chunk_size:(start + 1) * chunk_size, i_h,
-                           i_v * BV:(i_v + 1) * BV], dv_shared)
+                T.atomic_add(
+                    dV[i_b, start * chunk_size:(start + 1) * chunk_size, i_h,
+                       i_v * BV:(i_v + 1) * BV], dv_shared)
                 #TODO: consider using vectorized atomic add or tma reduce for sm90
+
     return main
 
 
@@ -151,15 +154,13 @@ def tl_fused_chunk_bwd(Q, K, V, dO):
     return dQ.to(torch.float16), dK.to(torch.float16), dV.to(torch.float16)
 
 
-def ref_program(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    scale: Optional[float] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
+def ref_program(q: torch.Tensor,
+                k: torch.Tensor,
+                v: torch.Tensor,
+                scale: Optional[float] = None) -> Tuple[torch.Tensor, torch.Tensor]:
     q, k, v = q.float(), k.float(), v.float()
     if scale is None:
-        scale = q.shape[-1] ** -0.5
+        scale = q.shape[-1]**-0.5
     chunk_size = 64
     q = rearrange(q, 'b (n c) h d -> b h n c d', c=chunk_size) * scale
     k = rearrange(k, 'b (n c) h d -> b h n c d', c=chunk_size)
@@ -169,11 +170,9 @@ def ref_program(
     h = kv[:, :, -1, :, :]
     kv = torch.cat([torch.zeros_like(kv[:, :, :1]), kv[:, :, :-1]], dim=2)
     inter = q @ kv
-    intra = ((
-        q @ k.transpose(-1, -2)).masked_fill_(
+    intra = ((q @ k.transpose(-1, -2)).masked_fill_(
         torch.triu(torch.ones(chunk_size, chunk_size, dtype=bool, device=q.device), diagonal=1),
-        0
-    )) @ v
+        0)) @ v
     o = inter + intra
     return rearrange(o, 'b h n c d -> b (n c) h d'), h
 
@@ -191,16 +190,20 @@ def main(B=1, S=1024, H=16, D=128):
     dq, dk, dv = tl_fused_chunk_bwd(q, k, v, do)
     o_ref, _ = ref_program(q, k, v)
     o_ref.backward(do, retain_graph=True)
-    
-    assert torch.allclose(dq, q.grad, atol=1e-2, rtol=1e-2), f'dq max err: {(dq - q.grad).abs().max()}'
-    assert torch.allclose(dk, k.grad, atol=1e-2, rtol=1e-2), f'dk max err: {(dk - k.grad).abs().max()}'
-    assert torch.allclose(dv, v.grad, atol=1e-2, rtol=1e-2), f'dv max err: {(dv - v.grad).abs().max()}'
+
+    assert torch.allclose(
+        dq, q.grad, atol=1e-2, rtol=1e-2), f'dq max err: {(dq - q.grad).abs().max()}'
+    assert torch.allclose(
+        dk, k.grad, atol=1e-2, rtol=1e-2), f'dk max err: {(dk - k.grad).abs().max()}'
+    assert torch.allclose(
+        dv, v.grad, atol=1e-2, rtol=1e-2), f'dv max err: {(dv - v.grad).abs().max()}'
     print('Passed all tests!✅')
 
     # Benchmark
     q.grad = k.grad = v.grad = None
     o_ref, _ = fused_chunk_linear_attn(q, k, v, output_final_state=True, normalize=False)
-    t1 = do_bench(lambda: o_ref.backward(do, retain_graph=True), warmup=25, rep=100, backend='cupti')
+    t1 = do_bench(
+        lambda: o_ref.backward(do, retain_graph=True), warmup=25, rep=100, backend='cupti')
     t2 = do_bench(lambda: tl_fused_chunk_bwd(q, k, v, do), warmup=25, rep=100, backend='cupti')
     print(f'Triton latency: {t1:.3f} ms')
     print(f'TileLang latency: {t2:.3f} ms')

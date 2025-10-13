@@ -9,10 +9,12 @@ from einops import rearrange
 from typing import Optional, Tuple
 
 
-@tl.jit(out_idx=[4], pass_configs={
-    tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-})
+@tl.jit(
+    out_idx=[4],
+    pass_configs={
+        tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    })
 def tl_fused_chunk_fwd_kernel(
     B,
     S,
@@ -63,7 +65,7 @@ def tl_fused_chunk_fwd_kernel(
                     q[row, col] = Q[i_b, i * chunk_size + row, i_h, i_k * BK + col] * scale
                 T.copy(K[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_k * BK:(i_k + 1) * BK], k)
                 T.copy(V[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_v * BV:(i_v + 1) * BV], v)
-                
+
                 T.gemm(q, k, s, clear_accum=True, transpose_B=True)
                 for row, col in T.Parallel(chunk_size, chunk_size):
                     s_shared[row, col] = T.if_then_else(row >= col, s[row, col], 0)
@@ -73,8 +75,9 @@ def tl_fused_chunk_fwd_kernel(
                 T.gemm(k, v, h, transpose_A=True)
                 T.gemm(q, h_shared, o)
                 T.copy(o, o_shared)
-                T.atomic_add(O[i_b, i * chunk_size:(i + 1) * chunk_size, i_h,
-                         i_v * BV:(i_v + 1) * BV], o_shared)
+                T.atomic_add(
+                    O[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_v * BV:(i_v + 1) * BV],
+                    o_shared)
                 #TODO: consider using vectorized atomic add or tma reduce for sm90
 
             # Output final state
@@ -91,15 +94,13 @@ def tl_fused_chunk_fwd(q, k, v):
     return o, h
 
 
-def ref_program(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    scale: Optional[float] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
+def ref_program(q: torch.Tensor,
+                k: torch.Tensor,
+                v: torch.Tensor,
+                scale: Optional[float] = None) -> Tuple[torch.Tensor, torch.Tensor]:
     q, k, v = q.float(), k.float(), v.float()
     if scale is None:
-        scale = q.shape[-1] ** -0.5
+        scale = q.shape[-1]**-0.5
     chunk_size = 64
     q = rearrange(q, 'b (n c) h d -> b h n c d', c=chunk_size) * scale
     k = rearrange(k, 'b (n c) h d -> b h n c d', c=chunk_size)
@@ -109,11 +110,9 @@ def ref_program(
     h = kv[:, :, -1, :, :]
     kv = torch.cat([torch.zeros_like(kv[:, :, :1]), kv[:, :, :-1]], dim=2)
     inter = q @ kv
-    intra = ((
-        q @ k.transpose(-1, -2)).masked_fill_(
+    intra = ((q @ k.transpose(-1, -2)).masked_fill_(
         torch.triu(torch.ones(chunk_size, chunk_size, dtype=bool, device=q.device), diagonal=1),
-        0
-    )) @ v
+        0)) @ v
     o = inter + intra
     return rearrange(o, 'b h n c d -> b (n c) h d'), h
 
