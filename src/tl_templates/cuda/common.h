@@ -146,12 +146,12 @@ TL_DEVICE fp8_e4_8_t make_fp8_e4_8_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
 }
 
 // Pack sixteen fp8_e4_t values.
-TL_DEVICE fp8_e5_16_t make_fp8_e5_16_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
+TL_DEVICE fp8_e4_16_t make_fp8_e4_16_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
                                        fp8_e4_t x3, fp8_e4_t x4, fp8_e4_t x5,
                                        fp8_e4_t x6, fp8_e4_t x7, fp8_e4_t y0,
                                        fp8_e4_t y1, fp8_e4_t y2, fp8_e4_t y3,
-                                       fp8_e4_t y4, fp8_e4_t y5, fp8_e5_t y6,
-                                       fp8_e5_t y7) {
+                                       fp8_e4_t y4, fp8_e4_t y5, fp8_e4_t y6,
+                                       fp8_e4_t y7) {
   fp8_e4_16_t result;
   result.x = make_fp8_e4_8_t(x0, x1, x2, x3, x4, x5, x6, x7);
   result.y = make_fp8_e4_8_t(y0, y1, y2, y3, y4, y5, y6, y7);
