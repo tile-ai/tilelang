@@ -1,7 +1,7 @@
 """The language interface for tl programs."""
 from __future__ import annotations
 
-from typing import Optional, Callable, Dict
+from typing import Callable
 
 # from .parser import *
 # now is fully compatible with the upstream

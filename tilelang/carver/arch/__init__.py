@@ -4,7 +4,6 @@ from .cuda import *
 from .cpu import *
 from .cdna import *
 from .metal import *
-from typing import Union
 from tvm.target import Target
 import torch
 

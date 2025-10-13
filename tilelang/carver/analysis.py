@@ -297,3 +297,14 @@ def get_coalesced_veclen(block_stmt: tir.Block, target_bits: int = 128) -> int:
     for buffer in buffers:
         max_dtype_bits = max(max_dtype_bits, DataType(buffer.dtype).bits)
     return target_bits // max_dtype_bits
+
+
+__all__ = [
+    BlockInfo,
+    IterInfo,
+    collect_block_iter_vars_used_in_access_region,
+    collect_vars_used_in_prim_expr,
+    detect_dominant_read,
+    is_broadcast_epilogue,
+    normalize_prim_func,
+]

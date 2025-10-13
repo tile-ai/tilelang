@@ -163,3 +163,11 @@ def try_inline_contiguous_spatial(
     if spatial_blocks:
         results.extend(try_inline(sch, spatial_blocks))
     return results
+
+
+__all__ = [
+    get_block,
+    get_output_blocks,
+    try_inline,
+    try_inline_contiguous_spatial,
+]
