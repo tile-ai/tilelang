@@ -21,7 +21,7 @@ jobs:
         os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26]
         python-version:
           - "3.8"
-          # Wait for tvm fix
+          # TVM is built with Python 3.8 Limited API, it should work with all Python >= 3.8.
           # - "3.9"
           # - "3.10"
           # - "3.11"
