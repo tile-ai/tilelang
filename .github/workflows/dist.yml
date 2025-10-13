@@ -47,7 +47,7 @@ jobs:
           # - "3.13"
           # - "3.14"
       fail-fast: true
-    timeout-minutes: 60
+    timeout-minutes: 120
     runs-on: ${{ matrix.target.runner }}
     env:
       NO_VERSION_LABEL: ${{ github.event_name == 'release' && 'OFF' || 'ON' }}
