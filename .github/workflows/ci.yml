@@ -95,7 +95,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           submodules: recursive
 
       - name: Set environment (self-hosted runners)
@@ -196,9 +196,6 @@ jobs:
 
       - name: Setup venv
         id: setup-venv
-        env:
-          UV_NO_BUILD_ISOLATION: "1"
-          PIP_NO_BUILD_ISOLATION: "1"
         run: |
           uv pip install --upgrade pip setuptools wheel
           uv pip install -r requirements-test.txt
