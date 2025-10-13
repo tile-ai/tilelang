@@ -1,11 +1,8 @@
 # runtime requirements
-Cython>=3.0.0
 numpy>=1.23.5
 tqdm>=4.62.3
 typing_extensions>=4.10.0
 cloudpickle
-# mldtypes should be greater than 0.5.1
-# if you want to enable fp4
 ml_dtypes
 psutil
 torch

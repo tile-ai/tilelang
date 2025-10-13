@@ -1,45 +1,10 @@
-"""Library information. This is a standalone file that can be used to get various info.
-Modified from: https://github.com/mlc-ai/mlc-llm/blob/main/python/mlc_llm/libinfo.py
-"""
-
-#! pylint: disable=protected-access
-import os
 import sys
+import os
 
-TILELANG_LIBRARY_PATH = os.environ.get("TILELANG_LIBRARY_PATH", None)
-
-
-def get_env_paths(env_var, splitter):
-    """Get path in env variable"""
-    if os.environ.get(env_var, None):
-        return [p.strip() for p in os.environ[env_var].split(splitter)]
-    return []
+from .env import TL_LIBS
 
 
-def get_dll_directories():
-    """Get extra tile lang dll directories"""
-    curr_dir = os.path.dirname(os.path.realpath(os.path.expanduser(__file__)))
-    source_dir = os.path.abspath(os.path.join(curr_dir, ".."))
-    dll_path = [
-        curr_dir,
-        os.path.join(source_dir, "build"),  # local build
-        os.path.join(source_dir, "build", "Release"),
-        os.path.join(curr_dir, "lib"),  # pypi build
-    ]
-    if TILELANG_LIBRARY_PATH:
-        dll_path.append(TILELANG_LIBRARY_PATH)
-    if "CONDA_PREFIX" in os.environ:
-        dll_path.append(os.path.join(os.environ["CONDA_PREFIX"], "lib"))
-    if sys.platform.startswith("linux") or sys.platform.startswith("freebsd"):
-        dll_path.extend(get_env_paths("LD_LIBRARY_PATH", ":"))
-    elif sys.platform.startswith("darwin"):
-        dll_path.extend(get_env_paths("DYLD_LIBRARY_PATH", ":"))
-    elif sys.platform.startswith("win32"):
-        dll_path.extend(get_env_paths("PATH", ";"))
-    return [os.path.abspath(p) for p in dll_path if os.path.isdir(p)]
-
-
-def find_lib_path(name, optional=False):
+def find_lib_path(name: str, py_ext=False):
     """Find tile lang library
 
     Parameters
@@ -50,7 +15,9 @@ def find_lib_path(name, optional=False):
     optional: boolean
         Whether the library is required
     """
-    if sys.platform.startswith("linux") or sys.platform.startswith("freebsd"):
+    if py_ext:
+        lib_name = f"{name}.abi3.so"
+    elif sys.platform.startswith("linux") or sys.platform.startswith("freebsd"):
         lib_name = f"lib{name}.so"
     elif sys.platform.startswith("win32"):
         lib_name = f"{name}.dll"
@@ -59,11 +26,11 @@ def find_lib_path(name, optional=False):
     else:
         lib_name = f"lib{name}.so"
 
-    dll_paths = get_dll_directories()
-    lib_dll_path = [os.path.join(p, lib_name) for p in dll_paths]
-    lib_found = [p for p in lib_dll_path if os.path.exists(p) and os.path.isfile(p)]
-    if not lib_found and not optional:
+    for lib_root in TL_LIBS:
+        lib_dll_path = os.path.join(lib_root, lib_name)
+        if os.path.exists(lib_dll_path) and os.path.isfile(lib_dll_path):
+            return lib_dll_path
+    else:
         message = (f"Cannot find libraries: {lib_name}\n" + "List of candidates:\n" +
-                   "\n".join(lib_dll_path))
+                   "\n".join(TL_LIBS))
         raise RuntimeError(message)
-    return lib_found

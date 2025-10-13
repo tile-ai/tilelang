@@ -13,6 +13,7 @@
 #include "../target/utils.h"
 #include "../transform/atomicadd_vectorize.h"
 #include "../transform/common/loop_fusion_utils.h"
+#include "../transform/common/loop_parallel_transform_utils.h"
 #include "../transform/loop_partition.h"
 #include "builtin.h"
 
@@ -20,31 +21,6 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
-
-/**
- * @brief Extracts a numeric architecture identifier from a Target's "arch"
- * attribute.
- *
- * Reads the Target's "arch" string (must be defined) and, if it has the form
- * "sm_<N>", parses and returns N as an integer. For any other arch string,
- * returns 0.
- *
- * @param target Target whose "arch" attribute will be inspected (ICHECKs that
- * the attribute is defined).
- * @return int Parsed integer suffix when the arch is "sm_<N>", otherwise 0.
- */
-static int GetArchInt(Target target) {
-  int arch_int = 0;
-  auto s = target->GetAttr<String>("arch");
-  ICHECK(s.defined());
-  std::string arch = s.value();
-  if (arch.rfind("sm_", 0) == 0) {
-    arch_int = std::stoi(arch.substr(3));
-  } else {
-    arch_int = 0;
-  }
-  return arch_int;
-}
 
 /**
  * @brief Construct an AtomicAdd operator from call arguments and a buffer map.
@@ -329,6 +305,47 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 }
 
 /**
+ * @brief Infer and return the layout map for the atomic add operator.
+ *
+ * Constructs a cached ParallelOp (by building the SIMT loop) if not already
+ * present, validates that local.fragment layouts for src and dst match when
+ * both are provided, and then delegates layout inference to the underlying
+ * ParallelOp.
+ *
+ * @param T Layout inference inputs, including an optional mapping of buffers to
+ * layouts.
+ * @param level Inference strictness level.
+ * @return LayoutMap The inferred layout mapping for buffers used by this
+ * operator.
+ *
+ * @note This method mutates the AtomicAddNode by creating and storing a
+ * ParallelOp on first invocation.
+ * @throws If both src and dst have layouts in `local.fragment` and their
+ * fragment layouts differ, an ICHECK failure is raised with diagnostic output.
+ */
+LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
+                                     InferLevel level) const {
+  if (!par_op_.defined()) {
+    arith::Analyzer analyzer;
+    par_op_ = ParallelOp(MakeSIMTLoop(&analyzer));
+  }
+  if (T.layout_map.count(src) && T.layout_map.count(dst)) {
+    if (src.scope() == "local.fragment" && dst.scope() == "local.fragment") {
+      const FragmentNode *src_layout = T.layout_map[src].as<FragmentNode>();
+      const FragmentNode *dst_layout = T.layout_map[dst].as<FragmentNode>();
+      if (src_layout && dst_layout) {
+        ICHECK(src_layout->IsEqual(dst_layout, true))
+            << "Get different layout for " << src << " and " << dst
+            << "\nLHS = " << src_layout->DebugOutput()
+            << "\nRHS = " << dst_layout->DebugOutput()
+            << "\nYou may need to use a shared memory to transform the layout";
+      }
+    }
+  }
+  return par_op_->InferLayout(T, level);
+}
+
+/**
  * @brief Lower the atomic-add top-level operator into a parallel, vectorized
  * TIR loop.
  *
@@ -389,70 +406,142 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
-  auto par_op = ParallelOp(fused_loop);
+  auto transformed_loop =
+      Downcast<For>(ParallelLoopTransformer::Substitute(fused_loop));
 
-  std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
-                                    InferLevel::kFree};
-  for (auto level : levels) {
-    (par_op)->InferLayout({T.target, T.thread_bounds, T.layout_map, analyzer,
-                           false, T.buffer_remap},
-                          level);
-  }
-  auto loop_layout = par_op->GetLoopLayout();
-  Var thread_var = T.thread_var;
-  Range thread_bounds = T.thread_bounds;
-  auto thread_loop =
-      PartitionLoop(par_op->GetRoot(), T.thread_var, analyzer, loop_layout);
-  auto vectorized_thread_loop = VectorizeAtomicAdd(
-      thread_loop, thread_var, thread_bounds, GetArchInt(target));
+  auto GetArchInt = [&](const Target &tgt) -> int {
+    int arch_int = 0;
+    if (auto s = tgt->GetAttr<String>("arch")) {
+      std::string arch = s.value();
+      if (arch.rfind("sm_", 0) == 0)
+        arch_int = std::stoi(arch.substr(3));
+    }
+    return arch_int;
+  };
 
-  if (par_op->GetPredicate(T.thread_var).defined()) {
-    return IfThenElse(par_op->GetPredicate(T.thread_var).value(),
-                      vectorized_thread_loop);
-  }
-
-  return vectorized_thread_loop;
-}
-
-/**
- * @brief Infer and return the layout map for the atomic add operator.
- *
- * Constructs a cached ParallelOp (by building the SIMT loop) if not already
- * present, validates that local.fragment layouts for src and dst match when
- * both are provided, and then delegates layout inference to the underlying
- * ParallelOp.
- *
- * @param T Layout inference inputs, including an optional mapping of buffers to
- * layouts.
- * @param level Inference strictness level.
- * @return LayoutMap The inferred layout mapping for buffers used by this
- * operator.
- *
- * @note This method mutates the AtomicAddNode by creating and storing a
- * ParallelOp on first invocation.
- * @throws If both src and dst have layouts in `local.fragment` and their
- * fragment layouts differ, an ICHECK failure is raised with diagnostic output.
- */
-LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
-                                     InferLevel level) const {
-  if (!par_op_.defined()) {
+  struct AtomicLoopNestCollector : tir::StmtExprVisitor {
+    Array<IterVar> loop_vars;
+    Map<Buffer, Array<PrimExpr>> indice_map;
+    std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual> writes;
     arith::Analyzer analyzer;
-    par_op_ = ParallelOp(MakeSIMTLoop(&analyzer));
-  }
-  if (T.layout_map.count(src) && T.layout_map.count(dst)) {
-    if (src.scope() == "local.fragment" && dst.scope() == "local.fragment") {
-      const FragmentNode *src_layout = T.layout_map[src].as<FragmentNode>();
-      const FragmentNode *dst_layout = T.layout_map[dst].as<FragmentNode>();
-      if (src_layout && dst_layout) {
-        ICHECK(src_layout->IsEqual(dst_layout, true))
-            << "Get different layout for " << src << " and " << dst
-            << "\nLHS = " << src_layout->DebugOutput()
-            << "\nRHS = " << dst_layout->DebugOutput()
-            << "\nYou may need to use a shared memory to transform the layout";
+
+    void Run(const Stmt &s) { StmtExprVisitor::VisitStmt(s); }
+
+    void VisitStmt_(const ForNode *op) final {
+      if (op->kind == ForKind::kParallel) {
+        loop_vars.push_back(IterVar(Range(op->min, op->extent), op->loop_var,
+                                    IterVarType::kDataPar));
+      }
+      analyzer.Bind(op->loop_var, Range::FromMinExtent(op->min, op->extent));
+      StmtExprVisitor::VisitStmt_(op);
+    }
+    void VisitStmt_(const BufferStoreNode *op) final {
+      if (op->buffer.scope() == "local.fragment") {
+        indice_map.Set(op->buffer, op->indices);
+        writes.insert(op->buffer);
+      }
+      StmtExprVisitor::VisitStmt_(op);
+    }
+    void VisitExpr_(const BufferLoadNode *op) final {
+      if (op->buffer.scope() == "local.fragment") {
+        indice_map.Set(op->buffer, op->indices);
+      }
+      StmtExprVisitor::VisitExpr_(op);
+    }
+  };
+
+  auto ComputeLoopLayoutFromBuffer =
+      [&](const Buffer &buf, const Array<PrimExpr> &indices,
+          const LayoutMap &layout_map, const Range &thread_bounds,
+          const Array<IterVar> &loop_vars) -> Fragment {
+    Fragment src = layout_map[buf].as<Fragment>().value();
+    Var rep;
+    auto rep_iter =
+        IterVar(Range(0, src->ReplicateExtent()), rep, IterVarType::kDataPar);
+    PrimExpr fth = src->ForwardThread(indices, rep);
+    fth = analyzer->Simplify(fth);
+    Fragment out = Fragment(loop_vars, /*forward_index=*/{}, fth, rep_iter)
+                       ->BindThreadRange(thread_bounds);
+    return out;
+  };
+
+  struct AtomicInferResult {
+    Fragment loop_layout;
+    Optional<PrimExpr> predicate;
+  };
+
+  auto AtomicAddInferLayout =
+      [&](const For &loop, const LayoutInferArgs &args) -> AtomicInferResult {
+    AtomicLoopNestCollector C;
+    C.Run(loop);
+    Optional<Buffer> read_src;
+    int best_rank = -1;
+    for (auto kv : C.indice_map) {
+      const Buffer &buf = kv.first;
+      if (buf.scope() != "local.fragment")
+        continue;
+      if (!args.layout_map.count(buf))
+        continue;
+      int rank = static_cast<int>(kv.second.size());
+      if (rank > best_rank) {
+        best_rank = rank;
+        read_src = buf;
       }
     }
-  }
-  return par_op_->InferLayout(T, level);
+    AtomicAddVectorizePlanner planner;
+    int sm = GetArchInt(target);
+    auto plan = planner.Plan(loop, sm);
+    int vec = std::max(plan.vector_size, 1);
+    if (auto cw = loop->annotations.Get("coalesced_width")) {
+      if (const auto *imm = cw->as<IntImmNode>()) {
+        int expected = imm->value;
+        ICHECK_GT(expected, 0);
+        ICHECK(vec % expected == 0)
+            << "vector_size " << vec << " not divisible by coalesced_width "
+            << expected;
+        vec = expected;
+      } else {
+        LOG(FATAL) << "coalesced_width should be IntImmNode.";
+      }
+    }
+    PrimExpr total = 1;
+    for (Stmt s = loop; s.as<For>().has_value(); s = s.as<For>().value()->body)
+      total = total * s.as<For>().value()->extent;
+    PrimExpr denom = args.thread_bounds->extent * vec;
+    while (!analyzer->CanProve(floormod(total, denom) == 0) && vec > 1) {
+      vec >>= 1;
+      denom = args.thread_bounds->extent * vec;
+    }
+    if (vec < 1)
+      vec = 1;
+    Fragment loop_layout;
+    if (read_src) {
+      loop_layout = ComputeLoopLayoutFromBuffer(
+          read_src.value(), C.indice_map[read_src.value()], args.layout_map,
+          args.thread_bounds, C.loop_vars);
+    } else {
+      const For &remapped = loop;
+      loop_layout = PlanLoopPartition(remapped, vec, args.thread_bounds);
+    }
+
+    Optional<PrimExpr> pred;
+    if (plan.dynamic && plan.condition.defined()) {
+      pred = plan.condition;
+    }
+    DLOG(INFO) << "[AtomicAddInferLayout] vec=" << vec
+               << " loop_layout=" << loop_layout->DebugOutput();
+    return {loop_layout, pred};
+  };
+
+  auto ret = AtomicAddInferLayout(transformed_loop,
+                                  {T.target, T.thread_bounds, T.layout_map,
+                                   analyzer, false, T.buffer_remap});
+  Fragment loop_layout = ret.loop_layout;
+  auto thread_loop =
+      PartitionLoop(transformed_loop, T.thread_var, analyzer, loop_layout);
+  auto vectorized_thread_loop =
+      VectorizeAtomicAdd(thread_loop, GetArchInt(target));
+  return vectorized_thread_loop;
 }
 
 TIR_REGISTER_TL_OP(AtomicAdd, atomicadd)
