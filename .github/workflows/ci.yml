@@ -269,10 +269,13 @@ jobs:
         if: contains(matrix.runner.toolkit, 'CUDA')
         run: |
           cd testing
-          uv run --no-project -m -- \
-            pytest --verbose --durations=0 --cache-clear \
-              -k 'not (test_example_mha_sink_bwd_bhsd or test_example_gqa_sink_bwd_bhsd)' \
-              ../examples
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
+          )
+          "${PYTEST[@]}" --numprocesses=2 \
+            -k 'not (test_example_mha_sink_bwd_bhsd or test_example_gqa_sink_bwd_bhsd)' \
+            ../examples
 
       # NVIDIA CUDA tests
       - name: Run CUDA tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
@@ -280,9 +283,12 @@ jobs:
         if: contains(matrix.runner.toolkit, 'CUDA')
         run: |
           cd testing
-          uv run --no-project -m -- \
-            pytest --verbose --durations=0 --cache-clear \
-              python
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
+          )
+          "${PYTEST[@]}" --numprocesses=4 \
+            ./python
 
       # AMD ROCm tests
       - name: Run ROCm tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
@@ -290,9 +296,12 @@ jobs:
         if: contains(matrix.runner.toolkit, 'ROCm')
         run: |
           cd testing
-          uv run --no-project -m -- \
-            pytest --verbose --cache-clear \
-              python/amd/test_tilelang_test_amd.py
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
+          )
+          "${PYTEST[@]}" --numprocesses=4 \
+            ./python/amd/test_tilelang_test_amd.py
 
       # Apple Metal tests
       - name: Run Metal tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
@@ -300,10 +309,13 @@ jobs:
         if: contains(matrix.runner.toolkit, 'Metal')
         run: |
           cd testing
-          uv run --no-project -m -- \
-            pytest --verbose --durations=0 --cache-clear \
-              -k metal \
-              python
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
+          )
+          "${PYTEST[@]}" --numprocesses=4 \
+            -k metal \
+            ./python
 
       - name: List generated files
         if: ${{ !cancelled() }}
