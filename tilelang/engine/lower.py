@@ -138,7 +138,7 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
     host_mod = tir.transform.BF16StorageLegalize()(host_mod)
     host_mod = tir.transform.LowerTVMBuiltin()(host_mod)
     host_mod = tir.transform.LowerCustomDatatypes()(host_mod)
-    host_mod = tir.transform.LowerIntrin()(host_mod)
+    host_mod = tilelang.transform.LowerIntrin()(host_mod)
     host_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(host_mod)
     host_mod = tir.transform.CombineContextCall()(host_mod)
     if target_host.kind.name == "llvm":
@@ -152,7 +152,7 @@ def host_codegen(host_mod: tvm.IRModule, target_host: Target) -> tvm.IRModule:
 
 def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
-    device_mod = tir.transform.LowerIntrin()(device_mod)
+    device_mod = tilelang.transform.LowerIntrin()(device_mod)
     device_mod = tir.transform.Simplify()(device_mod)
 
     if target.kind.name == "cuda":
@@ -167,7 +167,7 @@ def device_codegen(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
 
 def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> tvm.IRModule:
     device_mod = tilelang.transform.LowerDeviceStorageAccessInfo()(device_mod)
-    device_mod = tir.transform.LowerIntrin()(device_mod)
+    device_mod = tilelang.transform.LowerIntrin()(device_mod)
     device_mod = tir.transform.Simplify()(device_mod)
     if target.kind.name == "cuda":
         device_mod = tvm.ffi.get_global_func("target.build.tilelang_cuda_without_compile")(

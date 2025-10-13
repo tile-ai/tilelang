@@ -30,7 +30,7 @@ class BaseKernelAdapter(ABC):
             result_idx = [result_idx]
         elif isinstance(result_idx, list):
             for i, idx in enumerate(result_idx):
-                if idx >= len(params) or idx <= -len(params):
+                if idx >= len(params) or idx < -len(params):
                     raise ValueError(
                         f"result_idx should be an integer between {-len(params) - 1} and {len(params) - 1}"
                     )
