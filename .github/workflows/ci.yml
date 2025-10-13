@@ -274,7 +274,6 @@ jobs:
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
           "${PYTEST[@]}" --maxfail=3 --numprocesses=2 \
-            -k 'not (test_example_mha_sink_bwd_bhsd or test_example_gqa_sink_bwd_bhsd)' \
             ../examples
 
       # NVIDIA CUDA tests
