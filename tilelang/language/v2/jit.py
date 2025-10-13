@@ -1,5 +1,4 @@
 from __future__ import annotations
-import functools
 from tilelang.jit.adapter.cython.adapter import CythonKernelAdapter
 from .compile import (
     make_prim_func_generator,
@@ -11,9 +10,9 @@ from .compile import (
     make_macro_generator,
 )
 from typing import (Callable, Iterable, Protocol, Union, Tuple, List, Dict, Any, overload,
-                    ParamSpec, TypeVar, Generic, TypedDict, Optional, Unpack, Literal)
+                    ParamSpec, TypeVar, Generic, TypedDict, Optional, Literal)
 import cffi
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from tilelang.utils.target import AVALIABLE_TARGETS, determine_target
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.wrapper import TLWrapper
@@ -29,7 +28,6 @@ import inspect
 import itertools
 import torch
 import copy
-import signal
 from .lang import Tune, TuneMany, Place
 
 logger = logging.getLogger(__name__)
@@ -181,7 +179,11 @@ def compile(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
     return _compile_compat(func, verbose)
 
 
-def _par_compile_in_pool(pool: ThreadPoolExecutor, func: Iterable[JITFunc[_P, _T]], verbose=False, raise_error=True) -> List[JITKernel[_P, _T] | Exception]:
+def _par_compile_in_pool(pool: ThreadPoolExecutor,
+                         func: Iterable[JITFunc[_P, _T]],
+                         verbose=False,
+                         raise_error=True) -> List[JITKernel[_P, _T] | Exception]:
+
     def do_compile(func, verbose):
         try:
             if isinstance(func, Exception):
@@ -192,13 +194,19 @@ def _par_compile_in_pool(pool: ThreadPoolExecutor, func: Iterable[JITFunc[_P, _T
             if raise_error:
                 raise e
             return e
+
     futures = [pool.submit(do_compile, func, verbose) for func in func]
     return [future.result() for future in get_tqdm(futures, desc='Compilation')]
 
 
-def par_compile(func: Iterable[JITFunc[_P, _T]], verbose=False, max_workers=None, raise_error=True, pool: ThreadPoolExecutor = None) -> List[JITKernel[_P, _T] | Exception]:
+def par_compile(func: Iterable[JITFunc[_P, _T]],
+                verbose=False,
+                max_workers=None,
+                raise_error=True,
+                pool: ThreadPoolExecutor = None) -> List[JITKernel[_P, _T] | Exception]:
     if pool is None:
-        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='tilelang-par-compile') as pool:
+        with ThreadPoolExecutor(
+                max_workers=max_workers, thread_name_prefix='tilelang-par-compile') as pool:
             return _par_compile_in_pool(pool, func, verbose, raise_error)
     else:
         return _par_compile_in_pool(pool, func, verbose, raise_error)
@@ -243,6 +251,7 @@ class CallArgs:
         for k, v in self.kwargs.items():
             res[k] = v
         return res
+
 
 AnyCallArgs = CallArgs | Tuple[Any, ...] | Dict[str, Any]
 
@@ -333,8 +342,8 @@ class BenchConfig(TypedDict):
     timeout: Optional[float]
 
 
-def collect_run_record(func: Callable, args: AnyCallArgs, raise_error: bool=True) -> Record:
-    call_args = CallArgs.from_anycallarg(args)
+def collect_run_record(func: Callable, arg: AnyCallArgs, raise_error: bool = True) -> Record:
+    call_args = CallArgs.from_anycallarg(arg)
     record = call_args._to_record()
     try:
         result = func(*call_args.args, **call_args.kwargs)
@@ -354,8 +363,8 @@ def collect_run_record(func: Callable, args: AnyCallArgs, raise_error: bool=True
 def run_with_args(func: Callable, args: Iterable[AnyCallArgs], raise_error: bool = True):
     num_errors = 0
     records = []
-    for args in args:
-        res = collect_run_record(func, args, raise_error)
+    for arg in args:
+        res = collect_run_record(func, arg, raise_error)
         records.append(res)
         if res['_status'] == 'Error':
             num_errors += 1
@@ -377,29 +386,31 @@ class AutoTuner:
         best_latency, best, best_args = None, None, None
         num_errors = 0
         for cfg, ker in zip(self.configs, self.kernels):
-            const_args, dyn_args = self.arg_parser(*cfg.args, **cfg.kwargs) # type: ignore
+            const_args, dyn_args = self.arg_parser(*cfg.args, **cfg.kwargs)  # type: ignore
             record = {k: v for k, v in zip(self.arg_parser.const_arg_names, const_args)}
-            def add_record(status, latency=float('inf'), error=''):
-                record.update({
-                    'latency': latency,
-                    '_status': status,
-                    '_error': error,
-                })
-                records.append(record)
-                
+
+            def add_record(record, records, status, latency=float('inf'), error=''):
+                record.update(
+                    {  # ignore: B023
+                        'latency': latency,
+                        '_status': status,
+                        '_error': error,
+                    })
+                records.append(record)  # ignore: B023
+
             if isinstance(ker, Exception):
-                add_record('Error', error=repr(ker))
+                add_record(record, records, 'Error', error=repr(ker))
                 num_errors += 1
                 continue
             try:
-                latency = ker.bench(*cfg.args, **cfg.kwargs, _config=self.bench_cfg) # type: ignore
-                add_record('Success', latency=float(latency))
+                latency = ker.bench(*cfg.args, **cfg.kwargs, _config=self.bench_cfg)  # type: ignore
+                add_record(record, records, 'Success', latency=float(latency))
                 if best_latency is None or latency < best_latency:
                     best_latency = latency
                     best = record
                     best_args = cfg
             except Exception as e:
-                add_record('Error', error=repr(e))
+                add_record(record, records, 'Error', error=repr(e))
                 num_errors += 1
                 logger.warning(f'Got error when benchmarking: {repr(e)}', exc_info=True)
         return AutoTuneResult(
@@ -484,7 +495,10 @@ class JITDispatcher(Generic[_P, _T]):
         result = tuner.run()
         return result
 
-    def tune(self, *args: _P.args, _config: Optional[Dict[str, Any]] = None, **kws: _P.kwargs) -> AutoTuneResult:
+    def tune(self,
+             *args: _P.args,
+             _config: Optional[Dict[str, Any]] = None,
+             **kws: _P.kwargs) -> AutoTuneResult:
         """Tune with the given args, return the tune result
 
         Args: the same as the decorated tilelang kernel
@@ -541,7 +555,7 @@ class JITDispatcher(Generic[_P, _T]):
         return kernel
 
     def get_tune_configs(self, *args: _P.args, **kws: _P.kwargs) -> List[CallArgs]:
-        """Get producted tune config in list
+        """Get all tune config in list
 
         Args: the same as the decorated tilelang kernel
 

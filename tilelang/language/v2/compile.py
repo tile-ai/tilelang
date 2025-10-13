@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from tilelang.language.kernel import KernelLaunchFrame
 from tvm import tir
 import linecache
-import io
 from .ast_rewrite import DSLMutator, OpKind
 from .lang import (DynSchema, StridedTensorSchema, ConstSchema, MakeEmpty, Place, _param, TensorV2)
 from tilelang.language.dtypes import (get_tvm_dtype, get_torch_dtype, get_tvm_ptr_type,
@@ -55,6 +54,7 @@ class JITArgParser(Protocol[_P, _T]):
     dyn_arg_names: List[str]
     signature: inspect.Signature
     __tl_code__: str
+
     def __call__(self, *args: _P.args, **kws: _P.kwargs) -> Tuple[Tuple, Tuple]:
         ...
 
@@ -111,11 +111,13 @@ def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITArgParser:
             tup_const.append(f"{name}.dtype")
             if prev_device is None:
                 code_parse_arg.append(f'__device__ = {name}.device')
-                code_parse_arg.append('assert __device__ != __device_cpu__, "Expected a non cpu tensor"')
+                code_parse_arg.append(
+                    'assert __device__ != __device_cpu__, "Expected a non cpu tensor"')
                 prev_device = '__device__'
             else:
                 code_parse_arg.append(
-                    f'assert {name}.device == {prev_device}, "All tensor arguments must be on the same device"')
+                    f'assert {name}.device == {prev_device}, "All tensor arguments must be on the same device"'
+                )
             if schema.shape is not None:
                 code_parse_arg.append(
                     ", ".join([f"{name}__shape_{i}" for i in range(len(schema.stride))]) +
@@ -464,12 +466,16 @@ class DSLBuilder:
 
     def get_global_allocs(self) -> List[BufferSchema]:
         return [BufferSchema.from_buffer(buf) for buf in self.global_allocs]
+
     def get_outs(self) -> List[BufferSchema]:
         return [BufferSchema.from_buffer(buf) for buf in self.outs]
+
     def get(self) -> tir.PrimFunc:
         return self.builder.get()
+
     def get_pass_configs(self) -> Dict[PassConfigKey, Any]:
         return self.pass_configs
+
     def get_compile_flags(self) -> List[str]:
         return self.compile_flags
 
@@ -478,7 +484,7 @@ class DSLBuilder:
         for frame in self.frames:
             if not isinstance(frame, ConstIfFrame):
                 num_tvm_frames += 1
-        return num_tvm_frames > 1 # ignore prim_func frame
+        return num_tvm_frames > 1  # ignore prim_func frame
 
     @contextmanager
     def with_frame(self, frame: ContextManager):
@@ -569,26 +575,27 @@ class DSLBuilder:
             if isinstance(old_val, tir.Var) and isinstance(expr.data, tir.Var):
                 tl_assume(old_val == expr.data)
                 return old_val
-            elif isinstance(old_val, tir.Var) and isinstance(expr.data, (tir.PrimExpr, int, float)):
+            elif isinstance(old_val, tir.Var) and isinstance(
+                    expr.data, (tir.PrimExpr, int, float)) or isinstance(
+                        old_val, (tir.PrimExpr, int, float)) and isinstance(expr.data, tir.Var):
                 tl_assume(old_val == expr.data)
                 self._param_bind_map[name] = expr.data
-            elif isinstance(old_val, (tir.PrimExpr, int, float)) and isinstance(expr.data, tir.Var):
-                tl_assume(old_val == expr.data)
-                self._param_bind_map[name] = expr.data
-            elif isinstance(old_val, (tir.PrimExpr, int, float)) and isinstance(expr.data, (tir.PrimExpr, int, float)):
-                if isinstance(old_val, (int, float, tir.IntImm)) and isinstance(expr.data, (int, float, tir.IntImm)):
+            elif isinstance(old_val, (tir.PrimExpr, int, float)) and isinstance(
+                    expr.data, (tir.PrimExpr, int, float)):
+                if isinstance(old_val, (int, float, tir.IntImm)) and isinstance(
+                        expr.data, (int, float, tir.IntImm)):
                     if old_val != expr.data:
-                        raise RuntimeError(f"Param binding failed for '{name}', new binding {expr.data} is not compatible with old binding {old_val}")
+                        raise RuntimeError(
+                            f"Param binding failed for '{name}', new binding {expr.data} is not compatible with old binding {old_val}"
+                        )
                 else:
                     tl_assume(old_val == expr.data)
                 self._param_bind_map[name] = expr.data
             return self._param_bind_map[name]
         elif isinstance(expr, MakeEmpty):
-            if self.is_inside_device_code(): # 1 is prim_func scope
-                raise RuntimeError(
-                    "Trying to allocate an empty buffer in device code"
-                    f"frames: {self.frames}"
-                )
+            if self.is_inside_device_code():  # 1 is prim_func scope
+                raise RuntimeError("Trying to allocate an empty buffer in device code"
+                                   f"frames: {self.frames}")
             ptr = tir.Var(f"{name}_handle", get_tvm_ptr_type(expr.dtype))
             buffer = tir.decl_buffer(
                 name=name,
@@ -832,4 +839,3 @@ def get_compile_flags() -> List[str]:
 
 def get_params() -> List[tir.Var]:
     return DSLBuilder.current()._params
-

@@ -7,6 +7,7 @@ from typing import Callable, List, Literal, Optional, Union
 import torch
 import signal
 
+
 class TimeoutException(Exception):
     pass
 
@@ -79,18 +80,16 @@ device = 'cuda:0' if IS_CUDA else 'mps:0'
 Event = torch.cuda.Event if IS_CUDA else torch.mps.Event
 
 
-def do_bench(
-    bench_fn: Callable,
-    warmup: float = 25,
-    rep: float = 100,
-    _n_warmup: int = 0,
-    _n_repeat: int = 0,
-    quantiles: Optional[List[float]] = None,
-    fast_flush: bool = True,
-    backend: Literal["event", "cupti"] = "cupti",
-    return_mode: Literal["min", "max", "mean", "median"] = "mean",
-    timeout: Optional[int] = None
-) -> Union[float, List[float]]:
+def do_bench(bench_fn: Callable,
+             warmup: float = 25,
+             rep: float = 100,
+             _n_warmup: int = 0,
+             _n_repeat: int = 0,
+             quantiles: Optional[List[float]] = None,
+             fast_flush: bool = True,
+             backend: Literal["event", "cupti"] = "cupti",
+             return_mode: Literal["min", "max", "mean", "median"] = "mean",
+             timeout: Optional[int] = None) -> Union[float, List[float]]:
     """Benchmark the runtime of a PyTorch function with L2 cache management.
 
     This function provides accurate GPU kernel timing by:

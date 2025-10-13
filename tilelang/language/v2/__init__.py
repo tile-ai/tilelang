@@ -30,4 +30,4 @@ from .jit import (
     par_compile,  # noqa: F401
     macro  # noqa: F401
 )
-from .v1 import * # noqa: F401
+from .v1 import *  # noqa: F401
