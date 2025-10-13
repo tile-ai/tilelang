@@ -46,7 +46,7 @@ def _merge_two_bounds(x: arith.ConstIntBound, y: arith.ConstIntBound):
     return arith.ConstIntBound(min(x.min_value, y.min_value), max(x.max_value, y.max_value))
 
 
-class TensorDepNode(object):
+class TensorDepNode:
     """
     For tensor dependency analysis.
     """
@@ -75,7 +75,7 @@ class TensorDepNode(object):
         return self.name
 
 
-class DependencyAnalysis(object):
+class DependencyAnalysis:
     def __init__(self, deps):
         self.deps = deps
         # issue: duplicate name when we have two same ops.

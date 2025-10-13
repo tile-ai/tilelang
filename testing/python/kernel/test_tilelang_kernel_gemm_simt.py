@@ -104,7 +104,7 @@ def tl_matmul_simt(
                 for j, k in T.Parallel(block_N, block_K):
                     B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
 
-                for ki in T.serial((block_K // micro_size_k)):
+                for ki in T.serial(block_K // micro_size_k):
                     for i in T.serial(local_size_a):
                         for mk in T.vectorized(micro_size_k):
                             A_local[i, mk] = A_shared[

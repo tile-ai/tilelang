@@ -398,13 +398,11 @@ def ref_program_fa(
 
 def debug(name, expect, actual, atol=1e-3, rtol=1e-3):
     all_close = torch.allclose(expect, actual, atol=atol, rtol=rtol)
-    print(name + "  all_close={}".format(all_close))
+    print(name + f"  all_close={all_close}")
     if not all_close:
         diff = (expect - actual).abs()
         print(
-            "all_close={}, max={}, min={}, mean={}".format(
-                all_close, diff.max().item(), diff.min().item(), diff.mean().item()
-            )
+            f"all_close={all_close}, max={diff.max().item()}, min={diff.min().item()}, mean={diff.mean().item()}"
         )
         max_indices = torch.nonzero(diff == diff.max().item())
         first_index = tuple(max_indices[0].tolist())

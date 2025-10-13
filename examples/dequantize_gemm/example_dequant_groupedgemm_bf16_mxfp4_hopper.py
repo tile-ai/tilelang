@@ -508,8 +508,8 @@ def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False,
     latency = tilelang.profiler.do_bench(
         lambda: kernel(A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids), warmup=100
     )
-    print("Tilelang: {:.2f} ms".format(latency))
-    print("Tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"Tilelang: {latency:.2f} ms")
+    print(f"Tilelang: {total_flops / latency * 1e-9:.2f} TFlops")
 
     diff = (output - ref_output).abs()
     max_val = diff.max()

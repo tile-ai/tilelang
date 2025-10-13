@@ -510,5 +510,5 @@ if __name__ == "__main__":
         dtype,
     )
 
-    print("Tile-lang: {:.2f} ms".format(latency))
-    print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"Tile-lang: {latency:.2f} ms")
+    print(f"Tile-lang: {total_flops / latency * 1e-9:.2f} TFlops")

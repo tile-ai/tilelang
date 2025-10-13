@@ -183,7 +183,7 @@ class BaseWrapper(ABC):
 logger = logging.getLogger(__name__)
 
 
-class TLCUDASourceWrapper(object):
+class TLCUDASourceWrapper:
     _TYPE_MAP = {
         "float32": "float",
         "float16": "half_t",
@@ -336,16 +336,8 @@ class TLCUDASourceWrapper(object):
             # Identify the start of the function body to insert arguments
             index = code.index("{", index)
 
-            block_str = "dim3({}, {}, {})".format(
-                self._pythonic_expr(block_info[0]),
-                self._pythonic_expr(block_info[1]),
-                self._pythonic_expr(block_info[2]),
-            )
-            grid_str = "dim3({}, {}, {})".format(
-                self._pythonic_expr(grid_info[0]),
-                self._pythonic_expr(grid_info[1]),
-                self._pythonic_expr(grid_info[2]),
-            )
+            block_str = f"dim3({self._pythonic_expr(block_info[0])}, {self._pythonic_expr(block_info[1])}, {self._pythonic_expr(block_info[2])})"
+            grid_str = f"dim3({self._pythonic_expr(grid_info[0])}, {self._pythonic_expr(grid_info[1])}, {self._pythonic_expr(grid_info[2])})"
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             init_l2_persistent_map = self.generate_l2_persistent_map(function_name)
             kernel_launch_code += init_l2_persistent_map
@@ -372,10 +364,8 @@ class TLCUDASourceWrapper(object):
                     f"Function {function_name} has {len(function_params)} parameters, but {len(args_list)} arguments"
                 )
                 call_args = ", ".join(args_list)
-                kernel_launch_code += "\t{}<<<{}, {}, {}, stream>>>({});\n".format(
-                    function_name, grid_str, block_str, smem_str, call_args
-                )
-                kernel_launch_code += '\tTILELANG_CHECK_LAST_ERROR("{}");\n'.format(function_name)
+                kernel_launch_code += f"\t{function_name}<<<{grid_str}, {block_str}, {smem_str}, stream>>>({call_args});\n"
+                kernel_launch_code += f'\tTILELANG_CHECK_LAST_ERROR("{function_name}");\n'
             if has_l2_persistent_map:
                 kernel_launch_code += L2_PERSISTENT_MAP_RESET_HANDLE
 
@@ -980,7 +970,7 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
         return {"name": "stream=hipStreamDefault", "type": "hipStream_t"}
 
 
-class TLCPUSourceWrapper(object):
+class TLCPUSourceWrapper:
     _TYPE_MAP = {
         "float32": "float",
         "float16": "half",
@@ -1082,7 +1072,7 @@ class TLCPUSourceWrapper(object):
             index = code.index("{", index)
 
             call_args = ", ".join(func_call_args(declaration, function_args))
-            _call_str += "{}({})".format(function_name, call_args)
+            _call_str += f"{function_name}({call_args})"
 
         # Wrap the kernel dispatch logic in an external C function
         host_func = self.CALL_PREFIX.format(def_args, _call_str)
@@ -1151,7 +1141,7 @@ class TLCPUSourceWrapper(object):
             raise ValueError("Cannot find primary function in the module.")
 
 
-class TLMetalSourceWrapper(object):
+class TLMetalSourceWrapper:
     def __init__(
         self,
         scheduled_ir_module: IRModule,

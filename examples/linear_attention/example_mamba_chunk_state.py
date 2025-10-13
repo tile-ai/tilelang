@@ -41,7 +41,7 @@ def ref_program(B, x, dt, dA_cumsum):
         B = F.pad(B, (0, 0, 0, 0, 0, nchunks * chunk_size - seqlen))
     x = rearrange(x, "b (c l) h p -> b c l h p", l=chunk_size)
     B = rearrange(B, "b (c l) ... -> b c l ...", l=chunk_size)
-    decay_states = torch.exp((dA_cumsum[:, :, :, -1:] - dA_cumsum))
+    decay_states = torch.exp(dA_cumsum[:, :, :, -1:] - dA_cumsum)
     return torch.einsum(
         "bclhn,bhcl,bhcl,bclhp->bchpn", B.to(x.dtype), decay_states.to(x.dtype), dt.to(x.dtype), x
     )
@@ -208,11 +208,11 @@ if __name__ == "__main__":
         profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")
         latency = profiler.do_bench(ref_program, warmup=500)
-        print("Ref: {:.2f} ms".format(latency))
-        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Ref: {latency:.2f} ms")
+        print(f"Ref: {total_flops / latency * 1e-9:.2f} TFlops")
         latency = profiler.do_bench(warmup=500)
-        print("Tile-lang: {:.2f} ms".format(latency))
-        print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Tile-lang: {latency:.2f} ms")
+        print(f"Tile-lang: {total_flops / latency * 1e-9:.2f} TFlops")
     else:
         best_result = chunk_state_fwd(batch, seq_len, chunk_size, groups, heads, dim, dstate)
         best_latency = best_result.latency

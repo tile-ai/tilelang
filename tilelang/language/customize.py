@@ -3,15 +3,6 @@
 import tilelang.language as T
 from tvm.tir import PrimExpr, Buffer, op
 from typing import List, Union
-from .atomic import (
-    atomic_max,
-    atomic_min,
-    atomic_add,
-    atomic_addx2,
-    atomic_addx4,
-    atomic_load,
-    atomic_store,
-)  # noqa: F401
 
 
 def dp4a(A: Buffer, B: Buffer, C: Buffer) -> PrimExpr:

@@ -150,7 +150,7 @@ class IntrinInfo:
         return self.weight_transform_kind >= 1
 
 
-class Hint(object):
+class Hint:
     """
     Central configuration class for managing various parameters of computational tasks.
     """

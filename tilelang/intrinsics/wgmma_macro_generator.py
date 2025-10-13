@@ -481,9 +481,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(j, i)
         )
 
-        assert is_fragment(local_buf), "local_buf must be a fragment, but got {}".format(
-            local_buf.scope()
-        )
+        assert is_fragment(local_buf), f"local_buf must be a fragment, but got {local_buf.scope()}"
 
         micro_size_s, micro_size_r = self.micro_size_x, self.micro_size_k
 

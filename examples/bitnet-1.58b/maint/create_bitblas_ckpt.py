@@ -90,7 +90,7 @@ def main():
 
     # load quant config
     quant_config_path = cached_file(model_name_or_path, "quantize_config.json")
-    with open(quant_config_path, "r") as f:
+    with open(quant_config_path) as f:
         quant_config = json.load(f)
     print("quant config:")
     print(quant_config)
