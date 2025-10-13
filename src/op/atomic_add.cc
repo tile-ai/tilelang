@@ -55,6 +55,12 @@ AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) {
   }
   std::tie(node->src, node->dst) = std::tie(bf[0], bf[1]);
   std::tie(node->src_range, node->dst_range) = std::tie(rgs[0], rgs[1]);
+  if (args.size() >= 3) {
+    node->use_tma = Downcast<IntImm>(args[2]);
+  }
+  if (args.size() >= 4) {
+    node->coalesced_width = Downcast<IntImm>(args[3]);
+  }
   data_ = std::move(node);
 }
 
