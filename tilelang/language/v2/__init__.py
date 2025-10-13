@@ -1,6 +1,6 @@
 from tilelang.language import (
-    annotate_layout,
-    annotate_padding,
+    annotate_layout,  # noqa: F401
+    annotate_padding,  # noqa: F401
     annotate_l2_hit_ratio,  # noqa: F401
     import_source,  # noqa: F401
     use_swizzle,  # noqa: F401
@@ -67,7 +67,7 @@ from tilelang.language.dtypes import (
     get_torch_dtype,  # noqa: F401
     get_tvm_ptr_type,  # noqa: F401
 )
-from tilelang.language.proxy import make_tensor
+from tilelang.language.proxy import make_tensor  # noqa: F401
 from .lang import (
     empty_data_ptr,  # noqa: F401
     DynSchema,  # noqa: F401
@@ -98,4 +98,11 @@ from .compile import (
     get_params,  # noqa: F401
     get_global_allocs,  # noqa: F401
 )
-from .jit import jit, JITFunc, JITDispatcher, compile, macro  # noqa: F401
+from .jit import (
+    jit,  # noqa: F401
+    JITFunc,  # noqa: F401
+    JITDispatcher,  # noqa: F401
+    compile,  # noqa: F401
+    par_compile,  # noqa: F401
+    macro  # noqa: F401
+)

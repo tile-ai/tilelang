@@ -1,12 +1,33 @@
 import ast
-from typing import Dict, Optional, List, Any, Literal
+from typing import Dict, Optional, List, Any, Literal, Tuple
 
+_span_attrs = ['lineno', 'col_offset', 'end_lineno', 'end_col_offset']
+
+def ast_has_span(ast: ast.AST) -> bool:
+    return all(hasattr(ast, attr) for attr in _span_attrs)
+
+def ast_get_span(ast: ast.AST) -> Tuple[int, int, int, int]:
+    if not ast_has_span(ast):
+        return None
+    return tuple(getattr(ast, attr) for attr in _span_attrs)
+
+def ast_set_span(ast: ast.AST, span: Tuple[int, int, int, int]):
+    if not ast_has_span(ast):
+        return
+    for attr, value in zip(_span_attrs, span):
+        setattr(ast, attr, value)
 
 class QuoteVisitor(ast.NodeTransformer):
 
-    def __init__(self, names: Dict[str, ast.AST], passes: Optional[List[Any]] = None):
+    def __init__(self, names: Dict[str, ast.AST], passes: Optional[List[Any]] = None, span=None):
         self.names = names
         self.passes = passes or []
+        self.span = span
+
+    def generic_visit(self, node: ast.AST):
+        if self.span is not None:
+            ast_set_span(node, self.span)
+        return super().generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> Any:
         if node.id in self.names:
@@ -21,7 +42,9 @@ class QuoteVisitor(ast.NodeTransformer):
 
 def quote(expr: str, *, passes: Optional[List[Any]] = None, span=None, **kws) -> List[ast.AST]:
     tree = ast.parse(expr)
-    tree = QuoteVisitor(kws, passes).visit(tree)
+    if isinstance(span, ast.AST):
+        span = ast_get_span(span)
+    tree = QuoteVisitor(kws, passes, span).visit(tree)
     return tree.body
 
 
@@ -63,25 +86,26 @@ class DSLMutator(ast.NodeTransformer):
         self.tmp_counter = 0
 
     def get_tmp(self) -> str:
-        name = f"__tmp_{self.tmp_counter}"
+        name = f"__{self.tmp_counter}"
         self.tmp_counter += 1
         return name
 
     def visit_If(self, node: ast.If):
         node = self.generic_visit(node)
         return quote(
-            "with __tl.ctx_if(cond):\n"
-            "  for _ in __tl.ctx_then():\n"
+            "with __tb.ctx_if(cond):\n"
+            "  for _ in __tb.ctx_then():\n"
             "    pass\n"
-            "  for _ in __tl.ctx_else():\n"
+            "  for _ in __tb.ctx_else():\n"
             "    pass\n",
             cond=node.test,
             passes=[node.body, node.orelse],
+            span=node,
         )
 
     def visit_Expr(self, node: ast.Expr):
         node = self.generic_visit(node)
-        return quote("__tl.eval(value)", value=node.value)
+        return quote("__tb.eval(value)", value=node.value, span=node)
 
     def _parse_names(self, target: ast.expr):
         if isinstance(target, ast.Name):
@@ -95,33 +119,88 @@ class DSLMutator(ast.NodeTransformer):
         node = self.generic_visit(node)
         names = self._parse_names(node.target)
         return quote(
-            f"for target in __tl.ctx_for({names}, range):\n  pass",
+            f"for target in __tb.ctx_for({names}, range):\n  pass",
             target=node.target,
             range=node.iter,
             passes=[node.body],
+            span=node,
         )
 
-    def _emit_assign_tuple(self, targets: List[ast.expr], rval: ast.expr) -> List[ast.AST]:
-        tmp_names = [self.get_tmp() for _ in range(len(targets))]
-        unpack = quote1(",".join(tmp_names) + ", = value", value=rval)
-        stmts = [unpack]
-        for i, target in enumerate(targets):
-            stmts.extend(
-                self._emit_assign_target(target, ast.Name(id=tmp_names[i], ctx=ast.Load())))
-        return stmts
+    # def _emit_assign_tuple(self, targets: List[ast.expr], rval: ast.expr) -> List[ast.AST]:
+    #     tmp_names = [self.get_tmp() for _ in range(len(targets))]
+    #     unpack = quote1(",".join(tmp_names) + ", = value", value=rval)
+    #     stmts = [unpack]
+    #     for i, target in enumerate(targets):
+    #         stmts.extend(
+    #             self._emit_assign_target(target, ast.Name(id=tmp_names[i], ctx=ast.Load())))
+    #     return stmts
+
+    # def _emit_assign_target(self, target: ast.expr, rval: ast.expr) -> List[ast.AST]:
+    #     if isinstance(target, ast.Name):
+    #         return quote(f"name = __tb.bind('{target.id}', value)", name=target, value=rval)
+    #     elif isinstance(target, ast.Subscript):
+    #         return quote(
+    #             "__tb.assign(lval, slice, value)",
+    #             lval=target.value,
+    #             slice=target.slice,
+    #             value=rval,
+    #         )
+    #     elif isinstance(target, ast.Tuple):
+    #         return self._emit_assign_tuple(target.elts, rval)
+
 
     def _emit_assign_target(self, target: ast.expr, rval: ast.expr) -> List[ast.AST]:
         if isinstance(target, ast.Name):
-            return quote(f"name = __tl.bind('{target.id}', value)", name=target, value=rval)
+            return quote(f"name = __tb.bind('{target.id}', value)", name=target, value=rval, span=target)
         elif isinstance(target, ast.Subscript):
             return quote(
-                "__tl.assign(lval, slice, value)",
+                "__tb.assign(lval, slice, value)",
                 lval=target.value,
                 slice=target.slice,
                 value=rval,
+                span=target,
             )
-        elif isinstance(target, ast.Tuple):
-            return self._emit_assign_tuple(target.elts, rval)
+        else:
+            unpacked = []
+            def _visit_target(target: ast.expr) -> str:
+                if isinstance(target, ast.Name):
+                    tmp = self.get_tmp()
+                    unpacked.append((tmp, target))
+                    res = ast.Name(id=tmp, ctx=target.ctx)
+                    ast_set_span(res, ast_get_span(target))
+                    return res
+                elif isinstance(target, ast.Subscript):
+                    tmp = self.get_tmp()
+                    unpacked.append((tmp, target))
+                    res = ast.Name(id=tmp, ctx=target.ctx)
+                    ast_set_span(res, ast_get_span(target))
+                    return res
+                elif isinstance(target, ast.Tuple):
+                    elts = [_visit_target(elt) for elt in target.elts]
+                    res = ast.Tuple(elts=elts, ctx=target.ctx)
+                    ast_set_span(res, ast_get_span(target))
+                    return res
+            unpack_stmt = ast.Assign(targets=[_visit_target(target)], value=rval)
+            ast_set_span(unpack_stmt, ast_get_span(target))
+            stmts = [unpack_stmt]
+            bind_lvals = []
+            bind_rvals = []
+            def flush_binds():
+                if bind_lvals:
+                    stmts.append(quote1(f'{", ".join(bind_lvals)}, = {", ".join(bind_rvals)},', span=target))
+                    bind_lvals.clear()
+                    bind_rvals.clear()
+            for tmp, target in unpacked:
+                if isinstance(target, ast.Name):
+                    bind_lvals.append(target.id)
+                    bind_rvals.append(f'__tb.bind("{target.id}", {tmp})')
+                elif isinstance(target, ast.Subscript):
+                    flush_binds()
+                    stmts.append(quote1(f'__tb.assign(lval, slice, {tmp})', lval=target.value, slice=target.slice, span=target))
+                else:
+                    raise NotImplementedError(f'Unsupported target: {target}')
+            flush_binds()
+            return stmts
 
     def visit_Assign(self, node: ast.Assign) -> List[ast.AST]:
         node = self.generic_visit(node)
@@ -138,13 +217,14 @@ class DSLMutator(ast.NodeTransformer):
         op = _aug_assign_op_map[type(node.op)]
         if isinstance(target, ast.Name):
             return quote(
-                f"name = __tl.aug_assign('{op}', '{target.id}', value)", name=target, value=rval)
+                f"name = __tb.aug_assign('{op}', '{target.id}', value)", name=target, value=rval, span=node)
         elif isinstance(target, ast.Subscript):
             return quote(
-                f"__tl.aug_assign('{op}', lval, slice, value)",
+                f"__tb.aug_assign('{op}', lval, slice, value)",
                 lval=target.value,
                 slice=target.slice,
                 value=rval,
+                span=node,
             )
         else:
             return node
@@ -160,13 +240,13 @@ class DSLMutator(ast.NodeTransformer):
             name = arg.arg
             if arg.annotation is not None:
                 arg_stmt = quote1(
-                    f'{name} = __tl.arg("{name}", {name}, annot)', annot=arg.annotation)
+                    f'{name} = __tb.arg("{name}", {name}, annot)', annot=arg.annotation, span=arg)
             else:
-                arg_stmt = quote1(f'{name} = __tl.arg("{name}", {name})')
+                arg_stmt = quote1(f'{name} = __tb.arg("{name}", {name})', span=arg)
             stmts.append(arg_stmt)
         node.decorator_list.pop(0)
         node.body = stmts + node.body
-        return quote1(f'def __closure(__tl):\n  pass\n  return {node.name}\n', passes=[node])
+        return quote1(f'def __closure(__tb):\n  pass\n  return {node.name}\n', passes=[node], span=node)
 
     def visit_BoolOp(self, node: ast.BoolOp):
         node = self.generic_visit(node)
@@ -174,18 +254,20 @@ class DSLMutator(ast.NodeTransformer):
             last = node.values[-1]
             for i in reversed(range(len(node.values) - 1)):
                 last = quote_expr(
-                    expr="__tl.logical_and(left, lambda: right)",
+                    expr="__tb.logical_and(left, lambda: right)",
                     left=node.values[i],
                     right=last,
+                    span=node,
                 )
             return last
         elif isinstance(node.op, ast.Or):
             last = node.values[-1]
             for i in reversed(range(len(node.values) - 1)):
                 last = quote_expr(
-                    "__tl.logical_or(left, lambda: right)",
+                    "__tb.logical_or(left, lambda: right)",
                     left=node.values[i],
                     right=last,
+                    span=node,
                 )
             return last
         else:
@@ -196,25 +278,29 @@ class DSLMutator(ast.NodeTransformer):
         left = node.left
         splited = []
         for op, comp in zip(node.ops, node.comparators):
-            splited.append(ast.Compare(left=left, ops=[op], comparators=[comp]))
+            cmp = ast.Compare(left=left, ops=[op], comparators=[comp])
+            ast_set_span(cmp, ast_get_span(node))
+            splited.append(cmp)
             left = comp
         last = splited[-1]
         for i in reversed(range(len(splited) - 1)):
-            last = quote_expr("__tl.logical_and(left, lambda: right)", left=splited[i], right=last)
+            last = quote_expr(
+                "__tb.logical_and(left, lambda: right)", left=splited[i], right=last, span=node)
         return last
 
     def visit_IfExp(self, node: ast.IfExp) -> ast.Expr:
         return quote_expr(
-            '__tl.ifexp(cond, lambda: then, lambda: otherwise)',
+            '__tb.ifexp(cond, lambda: then, lambda: otherwise)',
             cond=node.test,
             then=node.body,
-            otherwise=node.orelse)
+            otherwise=node.orelse,
+            span=node)
 
     def visit_Return(self, node: ast.Return):
-        return quote("return __tl.ret(value)", value=node.value)
+        return quote("return __tb.ret(value)", value=node.value, span=node)
 
     def visit_With(self, node: ast.With):
         node = self.generic_visit(node)
         for expr in node.items:
-            expr.context_expr = quote_expr("__tl.ctx(e)", e=expr.context_expr)
+            expr.context_expr = quote_expr("__tb.ctx(e)", e=expr.context_expr, span=expr)
         return node

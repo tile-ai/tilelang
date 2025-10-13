@@ -7,10 +7,10 @@ from tvm import tir
 import linecache
 import io
 from .ast_rewrite import DSLMutator, OpKind
-from .lang import (DynSchema, StridedTensorSchema, ConstSchema, MakeEmpty, BufferLike, Place, ptr as
-                   ptr_dtype)
+from .lang import (DynSchema, StridedTensorSchema, ConstSchema, MakeEmpty, BufferLike, Place)
 from tilelang.language.dtypes import (get_tvm_dtype, get_torch_dtype, get_tvm_ptr_type,
                                       get_cffi_dtype, get_ctypes_dtype)
+from tilelang.transform.pass_config import PassConfigKey
 import threading
 import ctypes
 from typing import (
@@ -136,7 +136,7 @@ def generate_arg_parser(fn_name: str, func: Callable[_P, _T]) -> JITArgParser:
 
     locs = {}
     line_cache_name = f"{fn_name}_{id(source)}"
-    linecache.updatecache(line_cache_name, io.StringIO(source))
+    linecache.cache[line_cache_name] = (len(source), None, source.splitlines(), line_cache_name)
     code = compile(source, line_cache_name, "exec")
     exec(code, {}, locs)
     fn = locs["parse_args"](**closure)
@@ -188,7 +188,7 @@ class JITFunc(Generic[_P, _T]):
     target_host: Target
     global_allocs: List[BufferSchema]
     outs: List[BufferSchema]
-    pass_configs: Dict[str, Any]
+    pass_configs: Dict[PassConfigKey, Any]
     compile_flags: List[str]
     arg_parser: Callable[_P, Tuple[Tuple, Tuple]]
     const_args: Tuple[Any, ...]
@@ -285,7 +285,7 @@ class JITFunc(Generic[_P, _T]):
 
         locs = {}
         line_cache_name = f"<tl_torch_wrapper_{id(source)}>"
-        linecache.updatecache(line_cache_name, io.StringIO(source))
+        linecache.cache[line_cache_name] = (len(source), None, source.splitlines(), line_cache_name)
         code = compile(source, line_cache_name, "exec")
         exec(code, {}, locs)
         fn = locs["__closure"](**closure)
@@ -398,10 +398,6 @@ class _empty:
 @dataclass
 class DSLBuilder:
     # base pass_config or compile_flags
-    target: Target
-    target_host: Target
-    arg_parser: Optional[Callable]
-    const_args: Tuple
     pass_configs: Dict[str, Any] = field(default_factory=dict)
     compile_flags: List[str] = field(default_factory=list)
 
@@ -442,18 +438,16 @@ class DSLBuilder:
                        "dslbuilder"), "Access DSLBuilder in non dsl builder scope"
         return _thread_local_storage.dslbuilder
 
-    def get(self) -> JITFunc:
-        return JITFunc(
-            target=self.target,
-            target_host=self.target_host,
-            pass_configs=self.pass_configs,
-            compile_flags=self.compile_flags,
-            prim_func=self.builder.get(),
-            global_allocs=[BufferSchema.from_buffer(buf) for buf in self.global_allocs],
-            arg_parser=self.arg_parser,
-            const_args=self.const_args,
-            outs=[BufferSchema.from_buffer(buf) for buf in self.outs],
-        )
+    def get_global_allocs(self) -> List[BufferSchema]:
+        return [BufferSchema.from_buffer(buf) for buf in self.global_allocs]
+    def get_outs(self) -> List[BufferSchema]:
+        return [BufferSchema.from_buffer(buf) for buf in self.outs]
+    def get(self) -> tir.PrimFunc:
+        return self.builder.get()
+    def get_pass_configs(self) -> Dict[PassConfigKey, Any]:
+        return self.pass_configs
+    def get_compile_flags(self) -> List[str]:
+        return self.compile_flags
 
     @contextmanager
     def with_frame(self, frame: ContextManager):
@@ -704,21 +698,23 @@ def _remove_leading_ident(source: str):
     return "\n".join([line[ident_size:] if len(line) >= ident_size else line for line in lines])
 
 
+
 def make_ir_generator(func):
+    _, start = inspect.getsourcelines(func)
+    filename = inspect.getsourcefile(func) or inspect.getfile(func)
     source = inspect.getsource(func)
     source = _remove_leading_ident(source)
-    tree = ast.parse(source)
+    tree = ast.parse(source, filename=filename)
+    ast.increment_lineno(tree, start - 1)
     tree = DSLMutator().visit(tree)
     tree = ast.fix_missing_locations(tree)
-    source = ast.unparse(tree)
-    # print(source) to show the generated code
-    line_cache_name = f"<{func.__name__}_{id(source)}>"
-    linecache.updatecache(line_cache_name, io.StringIO(source))
-    compiled = compile(source, filename=line_cache_name, mode="exec")
+    tl_source = ast.unparse(tree)
+    linecache.cache[filename] = (len(source), None, source.splitlines(), filename)
+    compiled = compile(tree, filename=filename, mode="exec")
     locs = {}
     exec(compiled, func.__globals__, locs)
     fn = locs["__closure"]
-    fn.__tl_code__ = source
+    fn.__tl_code__ = tl_source
     fn.__name__ = func.__name__
     return fn
 
@@ -748,11 +744,11 @@ def make_macro_generator(func):
     return inner
 
 
-def set_pass_configs(configs: Dict[str, Any]):
+def set_pass_configs(configs: Dict[PassConfigKey, Any]):
     DSLBuilder.current().pass_configs.update(configs)
 
 
-def get_pass_configs() -> Dict[str, Any]:
+def get_pass_configs() -> Dict[PassConfigKey, Any]:
     return DSLBuilder.current().pass_configs
 
 

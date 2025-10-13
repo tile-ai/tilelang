@@ -17,6 +17,7 @@ from tilelang.utils.target import AVALIABLE_TARGETS, determine_target
 from tilelang.jit.adapter.libgen import LibraryGenerator
 from tilelang.jit.adapter.wrapper import TLWrapper
 from tilelang.cache import _kernel_cache_instance as kernel_cache
+from tilelang.transform.pass_config import PassConfigKey
 from tilelang.profiler import do_bench
 from dataclasses import dataclass, field
 import tilelang
@@ -115,7 +116,7 @@ class JITKernel(Generic[_P, _T]):
         return latency
 
 
-def compile_compab(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
+def _compile_compat(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
     tl_kernel = kernel_cache.cached(
         func.prim_func,
         func.out_idx,
@@ -156,8 +157,8 @@ def compile_compab(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
     )
 
 
-# more simpler version of compile, not used due to compability
-def compile_ng(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
+# more simpler version of compile, not used due to compatibility
+def _compile_ng(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
     func.generate_global_alloc_wrapper(None)  # test the wrapper generation
 
     mod = tvm.IRModule({func.prim_func.attrs["global_symbol"]: func.prim_func})
@@ -207,7 +208,30 @@ def compile_ng(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
 
 
 def compile(func: JITFunc[_P, _T], verbose=False) -> JITKernel[_P, _T]:
-    return compile_compab(func, verbose)
+    return _compile_compat(func, verbose)
+
+
+def _par_compile_in_pool(pool: ThreadPoolExecutor, func: Iterable[JITFunc[_P, _T]], verbose=False, raise_error=True) -> List[JITKernel[_P, _T] | Exception]:
+    def do_compile(func, verbose):
+        try:
+            if isinstance(func, Exception):
+                return func
+            return _compile_compat(func, verbose)
+        except Exception as e:
+            logger.error(f'Compilation Error: {repr(e)}', exc_info=True)
+            if raise_error:
+                raise e
+            return e
+    futures = [pool.submit(do_compile, func, verbose) for func in func]
+    return [future.result() for future in get_tqdm(futures, desc='Compilation')]
+
+
+def par_compile(func: Iterable[JITFunc[_P, _T]], verbose=False, max_workers=None, raise_error=False, pool: ThreadPoolExecutor = None) -> List[JITKernel[_P, _T] | Exception]:
+    if pool is None:
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix='tilelang-par-compile') as pool:
+            return _par_compile_in_pool(pool, func, verbose, raise_error)
+    else:
+        return _par_compile_in_pool(pool, func, verbose, raise_error)
 
 
 def has_tune(x: Iterable[Any]):
@@ -423,18 +447,24 @@ class JITDispatcher(Generic[_P, _T]):
             self._jit_func_gen_lazy = make_prim_func_generator(self.func)
         return self._jit_func_gen_lazy
 
-    def _partial_notune(self, __const_args__, *args: _P.args, **kws: _P.kwargs):
+    def _partial_impl(self, __const_args__, *args: _P.args, **kws: _P.kwargs):
         const_args = __const_args__
         builder = DSLBuilder(
-            target=self.target,
-            target_host=self.target_host,
-            arg_parser=self.parse_args,
-            const_args=const_args,
             pass_configs=self.pass_configs,
             compile_flags=self.compile_flags,
         )
         self.jit_func_gen(builder, *args, **kws)
-        jitfunc = builder.get()
+        jitfunc = JITFunc(
+            target=self.target,
+            target_host=self.target_host,
+            pass_configs=builder.get_pass_configs(),
+            compile_flags=builder.get_compile_flags(),
+            prim_func=builder.get(),
+            global_allocs=builder.get_global_allocs(),
+            arg_parser=self.parse_args,
+            const_args=const_args,
+            outs=builder.get_outs(),
+        )
         self.jit_funcs[const_args] = jitfunc
         return jitfunc
 
@@ -503,7 +533,7 @@ class JITDispatcher(Generic[_P, _T]):
             assert not has_tune(result.best_args.kwargs.values())
             return self.partial(*result.best_args.args, **result.best_args.kwargs)
         assert not self._locked, "JITDispatcher is locked, cannot create new JITFunc"
-        return self._partial_notune(const_args, *args, **kws)
+        return self._partial_impl(const_args, *args, **kws)
 
     def compile(self, *args: _P.args, **kws: _P.kwargs) -> JITKernel[_P, _T]:
         """Compile a kernel with given args
@@ -563,7 +593,9 @@ class JITDispatcher(Generic[_P, _T]):
 
     def par_compile(self,
                     configs: Iterable[AnyCallArgs],
-                    max_workers: int = None) -> List[JITKernel[_P, _T] | Exception]:
+                    max_workers: int = None,
+                    raise_error=False,
+                    pool: ThreadPoolExecutor = None) -> List[JITKernel[_P, _T] | Exception]:
         """Compile multiple config in parallel
 
         This function compiles the config in parallel, and return the compiled kernels
@@ -574,47 +606,24 @@ class JITDispatcher(Generic[_P, _T]):
         Returns:
             A list of all JITKernel
         """
-        pool = ThreadPoolExecutor(max_workers, thread_name_prefix='tilelang-par-compile')
         configs = [CallArgs.from_anycallarg(cfg) for cfg in configs]
-
-        if torch.cuda.is_available():
-            device = torch.cuda.current_device()
-
-            def compile_with_device(args: CallArgs):
-                torch.cuda.set_device(device)
-                return self.compile(*args.args, **args.kwargs)
-        else:
-
-            def compile_with_device(args: CallArgs):
-                return self.compile(*args.args, **args.kwargs)
-
-        futures = []
-        future_to_idx = {}
-        results = [... for _ in range(len(configs))]
-
-        logger.debug(f"Add {len(configs)} configs into thread pool")
-
-        for i, args in enumerate(configs):
-            future = pool.submit(compile_with_device, args)
-            futures.append(future)
-            future_to_idx[future] = i
-
-        logger.debug(f"Add {len(configs)} configs into thread pool")
-
-        progress_bar = get_tqdm(
-            as_completed(futures), total=len(futures), desc=f'par_compile: {self.func.__name__}')
-        for future in progress_bar:
-            idx = future_to_idx[future]
+        jitfuncs = []
+        logger.info(f'Elaborate {len(configs)} configs')
+        for cfg in get_tqdm(configs, desc='Elaboration'):
             try:
-                results[idx] = future.result()
+                jitfunc = self.partial(*cfg.args, **cfg.kwargs)
             except Exception as e:
-                logger.error(
-                    f"Compiling failed for config {self.repr_config(configs[idx])} with error {repr(e)}",
-                    exc_info=True)
-                results[idx] = e
-
-        pool.shutdown()
-        return results
+                logger.error(f'Elaboration Error: {repr(e)}', exc_info=True)
+                if raise_error:
+                    raise e
+                jitfunc = e
+            jitfuncs.append(jitfunc)
+        kernels = par_compile(jitfuncs, max_workers=max_workers, raise_error=raise_error, pool=pool)
+        if not raise_error:
+            num_error = sum(map(lambda x: isinstance(x, Exception), kernels))
+            if num_error > 0:
+                logger.warning(f'{num_error} compilation errors occurred')
+        return kernels
 
     def bench(self,
               *args: _P.args,
@@ -673,7 +682,7 @@ def jit(
     target: Union[str, Target] = "auto",
     target_host: Union[str, Target] = None,
     verbose: bool = False,
-    pass_configs: Dict[str, Any] = None,
+    pass_configs: Dict[PassConfigKey, Any] = None,
     compile_flags: List[str] = None,
 ) -> Callable[[Callable[_P, _T]], JITDispatcher[_P, _T]]:
     ...

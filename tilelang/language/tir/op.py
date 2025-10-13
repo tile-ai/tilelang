@@ -1610,9 +1610,6 @@ def tvm_rdna_wmma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
         The call expression.
     """
     dtype = get_tvm_dtype_str(dtype)
-    A_dtype = get_tvm_dtype_str(A_dtype)
-    B_dtype = get_tvm_dtype_str(B_dtype)
-    C_dtype = get_tvm_dtype_str(C_dtype)
     return call_intrin(
         dtype,
         _tvm_op.Op.get("tl.tvm_rdna_wmma_store"),
