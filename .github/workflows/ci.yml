@@ -145,7 +145,11 @@ jobs:
           echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
           echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
           echo "CLANG_TIDY_CMAKE_OPTIONS=${CLANG_TIDY_CMAKE_OPTIONS}" | tee -a "${GITHUB_ENV}"
-          echo "\$ $(which nvcc) --version" && nvcc --version
+          if [[ -x "$(command -v nvcc)" ]]; then
+            echo "\$ $(command -v nvcc) --version" && nvcc --version
+          else
+            echo "::warning::nvcc not found in PATH!"
+          fi
 
       - name: Set environment (ROCm)
         if: contains(matrix.runner.toolkit, 'ROCm')
@@ -165,7 +169,11 @@ jobs:
           echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
           echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
           echo "CLANG_TIDY_CMAKE_OPTIONS=${CLANG_TIDY_CMAKE_OPTIONS}" | tee -a "${GITHUB_ENV}"
-          echo "\$ $(which hipcc) --version" && hipcc --version
+          if [[ -x "$(command -v hipcc)" ]]; then
+            echo "\$ $(command -v hipcc) --version" && hipcc --version
+          else
+            echo "::warning::hipcc not found in PATH!"
+          fi
 
       - name: Set environment (Metal)
         if: contains(matrix.runner.toolkit, 'Metal')
