@@ -67,3 +67,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "3rdparty/**/*" = ["ALL"]
 "examples/deepseek_v32/inference/**/*" = ["ALL"]
+
+[tool.pytest.ini_options]
+verbosity_assertions = 3
+filterwarnings = ["always"]
