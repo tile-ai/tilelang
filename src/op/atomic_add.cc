@@ -148,6 +148,18 @@ Array<PrimExpr> AtomicAddNode::MakeIndices(const Array<IterVar> &ivs,
   return indices;
 }
 
+std::pair<Array<PrimExpr>, PrimExpr>
+AtomicAddNode::ReturnIndicesAndSize(int src_dst) const {
+  Array<PrimExpr> indices;
+  Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
+  PrimExpr size = 1;
+  for (size_t i = 0; i < ranges.size(); i++) {
+    indices.push_back(ranges[i]->min);
+    size *= ranges[i]->extent;
+  }
+  return {indices, size};
+}
+
 /**
  * @brief Build a combined bound-check predicate for indexed access.
  *
@@ -370,6 +382,28 @@ LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
  */
 Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   Target target = T.target;
+  if (use_tma->value != 0) {
+    Array<PrimExpr> src_indices, dst_indices;
+    PrimExpr src_size, dst_size;
+    std::tie(src_indices, src_size) = ReturnIndicesAndSize(0);
+    std::tie(dst_indices, dst_size) = ReturnIndicesAndSize(1);
+    ICHECK(analyzer->CanProveEqual(src_size, dst_size))
+        << "src_size = " << src_size << ", dst_size = " << dst_size;
+    BufferLoad src_node = BufferLoad(src, src_indices);
+    BufferLoad dst_node = BufferLoad(dst, dst_indices);
+    Call address_of_src =
+        Call(DataType::Handle(), builtin::address_of(), {src_node});
+    Call address_of_dst =
+        Call(DataType::Handle(), builtin::address_of(), {dst_node});
+
+    int need_reduce = 1;
+    int eviction_policy = 0;
+    auto body = Evaluate(Call(DataType::Handle(), tma_store(),
+                              {address_of_src, address_of_dst,
+                               ceildiv(src_size * src->dtype.bits(), 8),
+                               need_reduce, eviction_policy}));
+    return IfThenElse(EQ(T.thread_var, T.thread_bounds->min), body);
+  }
   auto simt_loop = MakeSIMTLoop(analyzer);
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
   auto transformed_loop =
@@ -486,7 +520,7 @@ Stmt AtomicAddNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
           read_src.value(), C.indice_map[read_src.value()], args.layout_map,
           args.thread_bounds, C.loop_vars);
     } else {
-      const For& remapped = loop;
+      const For &remapped = loop;
       loop_layout = PlanLoopPartition(remapped, vec, args.thread_bounds);
     }
 
