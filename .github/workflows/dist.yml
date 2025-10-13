@@ -36,8 +36,8 @@ jobs:
       fail-fast: true
     runs-on: ${{ matrix.os }}
     env:
-      CUDA_VERSION: ${{ matrix.cuda-version }}
-      NO_VERSION_LABEL: ${{ github.event_name != 'release' }}
+      CUDA_VERSION: ${{ matrix.cuda-version || '' }}
+      NO_VERSION_LABEL: ${{ github.event_name == 'release' && 'OFF' || 'ON' }}
 
     steps:
       - name: Checkout repository

@@ -147,7 +147,7 @@ environment-pass = ["CUDA_VERSION"]
 
 [tool.cibuildwheel.linux]
 repair-wheel-command = [
-    "auditwheel repair --exclude libcuda.so.1 --exclude /usr/local/cuda\\* -w {dest_dir} {wheel}",
+    "auditwheel repair --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
     "pipx run abi3audit --strict --report {wheel}",
 ]
 # Equlivant to `source /opt/rh/gcc-toolset-12/enable`, safe when gcc-toolset-12 is not installed
@@ -158,20 +158,18 @@ before-all = """
 set -eux
 
 case "$(uname -m)" in
-"x86_64")
-    yum-config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
-    ;;
-"aarch64")
-    dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/sbsa/cuda-rhel8.repo
-    ;;
-*)
-    exit 1
-    ;;
+    "x86_64")
+        yum-config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
+        ;;
+    "aarch64")
+        dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/sbsa/cuda-rhel8.repo
+        ;;
+    *)
+        exit 1
+        ;;
 esac
 
-# Assume CUDA_VERSION=xx.y
-v=${CUDA_VERSION:-12.4}
-v=${v:0:4}
-v=${v/./-}
-yum install -y cuda-minimal-build-${v} cuda-driver-devel-${v} cuda-nvrtc-devel-${v}
+cudaver="$(echo ${CUDA_VERSION:-"12.4"} | cut -d '.' -f-2)"
+v="${cudaver//./-}"
+yum install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-devel-${v}"
 """
