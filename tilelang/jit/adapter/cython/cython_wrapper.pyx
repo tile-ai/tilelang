@@ -149,9 +149,7 @@ cdef class CythonKernelWrapper:
         for tensor in inputs:
             if isinstance(tensor, torch.Tensor):
                 return tensor.device
-        raise ValueError(
-            "Unable to determine output tensor device: expected at least one torch.Tensor input"
-        )
+        return torch.cuda.current_device()
 
     cpdef forward(self, list inputs, int64_t stream = -1, bint skip_tensor_validation = False):
         # Validate input dimensions and prepare for kernel execution

@@ -11,10 +11,10 @@ export PYTHONPATH=$ROOT_DIR:$PYTHONPATH
 
 # Run pytest in parallel (4 workers) for all tests in the examples directory
 cd examples
-python -m pytest -n 4 .
+python -m pytest -n 4 . --verbose --color=yes --durations=0 --showlocals --cache-clear
 cd ..
 
 # Run pytest in parallel (4 workers) for all tests in the testing/python directory
 cd testing/python
-python -m pytest -n 4 .
+python -m pytest -n 4 . --verbose --color=yes --durations=0 --showlocals --cache-clear
 cd ..
