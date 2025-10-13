@@ -18,13 +18,20 @@ jobs:
   build-wheels:
     strategy:
       matrix:
-        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-26]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26]
         python-version:
-          - "3.12"
+          - "3.8"
+          # Wait for tvm fix
+          # - "3.9"
+          # - "3.10"
+          # - "3.11"
+          # - "3.12"
+          # - "3.13"
+          # - "3.14"
         include:
-          - os: ubuntu-22.04
+          - os: ubuntu-24.04
             cuda-version: "12.1"
-          - os: ubuntu-22.04-arm
+          - os: ubuntu-24.04-arm
             cuda-version: "12.8"
       fail-fast: true
     runs-on: ${{ matrix.os }}
@@ -45,6 +52,13 @@ jobs:
           create-symlink: true
           key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ matrix.cuda-version || 'nocuda' }}
           evict-old-files: "7d"
+
+      - name: Set CIBW_BUILD
+        run: |
+          PYTHON_VERSION="${{ matrix.python-version }}"
+          PYTHON_VERSION_MAJMIN="$(echo "${PYTHON_VERSION}" | cut -d '.' -f-2)"
+          PYTHON_VERSION_MAJMIN_NODOT="${PYTHON_VERSION_MAJMIN//./}"
+          echo "CIBW_BUILD=cp${PYTHON_VERSION_MAJMIN_NODOT}-*" | tee -a "${GITHUB_ENV}"
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.2

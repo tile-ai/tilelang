@@ -139,8 +139,6 @@ filterwarnings = ["always"]
 
 [tool.cibuildwheel]
 archs = ["auto64"]
-# wait for tvm fix
-build = "cp38-*"
 # Pin to glibc 2.17 for x86 and 2.28 for aarch64 for now
 manylinux-x86_64-image = "manylinux2014"
 manylinux-aarch64-image = "manylinux_2_28"
