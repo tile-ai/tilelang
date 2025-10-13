@@ -5,6 +5,7 @@ on:
     - cron: '0 22 * * *'
   release:
     types: [ published ]
+  pull_request:
 
 env:
   PYTHON_VERSION: '3.12'
@@ -35,6 +36,13 @@ jobs:
       with:
         fetch-depth: 1
         submodules: recursive
+
+    - name: ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+      if: startsWith(matrix.os, 'macos')
+      with:
+        create-symlink: true
+        key: ${{ github.job }}-${{ matrix.os }}
 
     - name: Build wheels
       uses: pypa/cibuildwheel@v3.2
