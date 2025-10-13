@@ -2,7 +2,6 @@
 
 
 class Block:
-
     def __init__(self, start, end, is_free):
         self.start = start
         self.end = end
@@ -21,7 +20,6 @@ class Block:
 
 
 class BestFit:
-
     def __init__(self, align=32):
         self.limit = 0
         self.list = []
@@ -31,8 +29,11 @@ class BestFit:
         size = (size + self.align - 1) // self.align * self.align
         found = None
         for block in self.list:
-            if block.is_free and block.size() >= size and (not found or
-                                                           found.size() > block.size()):
+            if (
+                block.is_free
+                and block.size() >= size
+                and (not found or found.size() > block.size())
+            ):
                 found = block
         if found:
             found.is_free = False
@@ -40,7 +41,8 @@ class BestFit:
             if remain != 0:
                 found.end -= remain
                 self.list.insert(
-                    self.list.index(found) + 1, Block(found.end, found.end + remain, True))
+                    self.list.index(found) + 1, Block(found.end, found.end + remain, True)
+                )
             return found
         elif len(self.list) > 0 and self.list[-1].is_free:
             add = size - self.list[-1].size()

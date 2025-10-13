@@ -14,6 +14,7 @@ print(tilelang.__file__)
 # sys.path.insert(0, "/home/tzj/flash-linear-attention")
 try:
     import fla
+
     print(fla.__file__)
     from fla.ops.common.chunk_o import chunk_bwd_dqkwg
 except ImportError:
@@ -94,7 +95,9 @@ def prepare_output(
     state_dtype,
     block_DK,
 ):
-    assert DK == 32 and block_DK == 32 or DK > 32 and block_DK >= 64, "When DK > 32, block_DK must be >= 64"
+    assert DK == 32 and block_DK == 32 or DK > 32 and block_DK >= 64, (
+        "When DK > 32, block_DK must be >= 64"
+    )
     NK = math.ceil(DK / block_DK)
     dq = torch.empty(B, S, H, DK, dtype=output_dtype).cuda()
     dk = torch.empty(B, S, H, DK, dtype=output_dtype).cuda()
@@ -114,8 +117,9 @@ def prepare_output(
     out_idx=[-4, -3, -2, -1],
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True
-    })
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    },
+)
 def tilelang_chunk_o_bwd_dqkwg(
     # task config
     B,
@@ -159,25 +163,27 @@ def tilelang_chunk_o_bwd_dqkwg(
 
     @T.prim_func
     def kernel(
-            # input
-            Q: T.Tensor(Q_shape, dtype=input_dtype),
-            K: T.Tensor(K_shape, dtype=input_dtype),
-            V: T.Tensor(V_shape, dtype=input_dtype),
-            h: T.Tensor(h_shape, dtype=input_dtype),
-            G: T.Tensor(G_shape, dtype=gate_dtype),
-            dO: T.Tensor(dO_shape, dtype=input_dtype),
-            dh: T.Tensor(dh_shape, dtype=input_dtype),
-            dv: T.Tensor(dv_shape, dtype=input_dtype),
-            W: T.Tensor(W_shape, dtype=input_dtype),
-            # output
-            dq: T.Tensor(dq_shape, dtype=output_dtype),
-            dk: T.Tensor(dk_shape, dtype=output_dtype),
-            dw: T.Tensor(dw_shape, dtype=output_dtype),
-            dg: T.Tensor(dg_shape, dtype=gate_dtype),
+        # input
+        Q: T.Tensor(Q_shape, dtype=input_dtype),
+        K: T.Tensor(K_shape, dtype=input_dtype),
+        V: T.Tensor(V_shape, dtype=input_dtype),
+        h: T.Tensor(h_shape, dtype=input_dtype),
+        G: T.Tensor(G_shape, dtype=gate_dtype),
+        dO: T.Tensor(dO_shape, dtype=input_dtype),
+        dh: T.Tensor(dh_shape, dtype=input_dtype),
+        dv: T.Tensor(dv_shape, dtype=input_dtype),
+        W: T.Tensor(W_shape, dtype=input_dtype),
+        # output
+        dq: T.Tensor(dq_shape, dtype=output_dtype),
+        dk: T.Tensor(dk_shape, dtype=output_dtype),
+        dw: T.Tensor(dw_shape, dtype=output_dtype),
+        dg: T.Tensor(dg_shape, dtype=gate_dtype),
     ):
-        with T.Kernel(
-                T.ceildiv(DK, block_DK), T.ceildiv(S, block_S), B * H,
-                threads=threads) as (bk, bs, bbh):
+        with T.Kernel(T.ceildiv(DK, block_DK), T.ceildiv(S, block_S), B * H, threads=threads) as (
+            bk,
+            bs,
+            bbh,
+        ):
             bb, bh = bbh // H, bbh % H
 
             V_shared = T.alloc_shared((block_S, block_DV), dtype=input_dtype)
@@ -216,15 +222,17 @@ def tilelang_chunk_o_bwd_dqkwg(
 
             T.use_swizzle(10)
 
-            T.annotate_layout({
-                V_shared: tilelang.layout.make_swizzled_layout(V_shared),
-                dO_shared: tilelang.layout.make_swizzled_layout(dO_shared),
-                h_shared: tilelang.layout.make_swizzled_layout(h_shared),
-                dh_shared: tilelang.layout.make_swizzled_layout(dh_shared),
-                dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                q_shared: tilelang.layout.make_swizzled_layout(q_shared),
-                k_shared: tilelang.layout.make_swizzled_layout(k_shared),
-            })
+            T.annotate_layout(
+                {
+                    V_shared: tilelang.layout.make_swizzled_layout(V_shared),
+                    dO_shared: tilelang.layout.make_swizzled_layout(dO_shared),
+                    h_shared: tilelang.layout.make_swizzled_layout(h_shared),
+                    dh_shared: tilelang.layout.make_swizzled_layout(dh_shared),
+                    dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
+                    q_shared: tilelang.layout.make_swizzled_layout(q_shared),
+                    k_shared: tilelang.layout.make_swizzled_layout(k_shared),
+                }
+            )
 
             T.clear(dg_last_local)
             T.clear(G_last_local)
@@ -240,17 +248,43 @@ def tilelang_chunk_o_bwd_dqkwg(
 
             for i_v in T.Pipelined(T.ceildiv(DV, block_DV), num_stages=num_stages):
                 T.copy(
-                    V[bb, bs * block_S:(bs + 1) * block_S, bh, i_v * block_DV:(i_v + 1) * block_DV],
-                    V_shared)
+                    V[
+                        bb,
+                        bs * block_S : (bs + 1) * block_S,
+                        bh,
+                        i_v * block_DV : (i_v + 1) * block_DV,
+                    ],
+                    V_shared,
+                )
                 T.copy(
-                    dO[bb, bs * block_S:(bs + 1) * block_S, bh,
-                       i_v * block_DV:(i_v + 1) * block_DV], dO_shared)
+                    dO[
+                        bb,
+                        bs * block_S : (bs + 1) * block_S,
+                        bh,
+                        i_v * block_DV : (i_v + 1) * block_DV,
+                    ],
+                    dO_shared,
+                )
                 T.copy(
-                    h[bb, bs, bh, bk * block_DK:(bk + 1) * block_DK,
-                      i_v * block_DV:(i_v + 1) * block_DV], h_shared)
+                    h[
+                        bb,
+                        bs,
+                        bh,
+                        bk * block_DK : (bk + 1) * block_DK,
+                        i_v * block_DV : (i_v + 1) * block_DV,
+                    ],
+                    h_shared,
+                )
                 T.copy(
-                    dh[bb, bs, bh, bk * block_DK:(bk + 1) * block_DK,
-                       i_v * block_DV:(i_v + 1) * block_DV], dh_shared)
+                    dh[
+                        bb,
+                        bs,
+                        bh,
+                        bk * block_DK : (bk + 1) * block_DK,
+                        i_v * block_DV : (i_v + 1) * block_DV,
+                    ],
+                    dh_shared,
+                )
 
                 if use_g:
                     T.clear(dg_last_fragment_scalar)
@@ -269,21 +303,37 @@ def tilelang_chunk_o_bwd_dqkwg(
 
                 if use_dw:
                     T.copy(
-                        dv[bb, bs * block_S:(bs + 1) * block_S, bh,
-                           i_v * block_DV:(i_v + 1) * block_DV], dv_shared)
+                        dv[
+                            bb,
+                            bs * block_S : (bs + 1) * block_S,
+                            bh,
+                            i_v * block_DV : (i_v + 1) * block_DV,
+                        ],
+                        dv_shared,
+                    )
                     T.gemm(dv_shared, h_shared, dw_fragment, transpose_B=True)
 
             if use_dw:
                 for i_s, i_k in T.Parallel(block_S, block_DK):
                     dw_fragment[i_s, i_k] = -dw_fragment[i_s, i_k]
                 T.copy(
-                    dw_fragment, dw[bb, bs * block_S:(bs + 1) * block_S, bh,
-                                    bk * block_DK:(bk + 1) * block_DK])
+                    dw_fragment,
+                    dw[
+                        bb,
+                        bs * block_S : (bs + 1) * block_S,
+                        bh,
+                        bk * block_DK : (bk + 1) * block_DK,
+                    ],
+                )
 
-            T.copy(Q[bb, bs * block_S:(bs + 1) * block_S, bh, bk * block_DK:(bk + 1) * block_DK],
-                   q_shared)
-            T.copy(K[bb, bs * block_S:(bs + 1) * block_S, bh, bk * block_DK:(bk + 1) * block_DK],
-                   k_shared)
+            T.copy(
+                Q[bb, bs * block_S : (bs + 1) * block_S, bh, bk * block_DK : (bk + 1) * block_DK],
+                q_shared,
+            )
+            T.copy(
+                K[bb, bs * block_S : (bs + 1) * block_S, bh, bk * block_DK : (bk + 1) * block_DK],
+                k_shared,
+            )
             T.copy(q_shared, q_fragment)
             T.copy(k_shared, k_fragment)
 
@@ -297,8 +347,9 @@ def tilelang_chunk_o_bwd_dqkwg(
                 dg_last_local[0] = dg_last_local[0] * T.exp(G[bb, bs * block_S + block_S - 1, bh])
 
                 for i_s, i_k in T.Parallel(block_S, block_DK):
-                    dq_fragment[i_s, i_k] = dq_fragment[i_s, i_k] * T.exp(G[bb, bs * block_S + i_s,
-                                                                            bh]) * scale
+                    dq_fragment[i_s, i_k] = (
+                        dq_fragment[i_s, i_k] * T.exp(G[bb, bs * block_S + i_s, bh]) * scale
+                    )
                 T.clear(dg_fragment_reduce_tmp)
                 for i_s, i_k in T.Parallel(block_S, block_DK):
                     dg_fragment_reduce_tmp[i_s, i_k] = dq_fragment[i_s, i_k] * q_shared[i_s, i_k]
@@ -309,7 +360,8 @@ def tilelang_chunk_o_bwd_dqkwg(
                     with T.If(G_last_local[0] - G[bb, bs * block_S + i_s, bh] <= 0):
                         with T.Then():
                             dk_fragment[i_s, i_k] = dk_fragment[i_s, i_k] * T.exp(
-                                G_last_local[0] - G[bb, bs * block_S + i_s, bh])
+                                G_last_local[0] - G[bb, bs * block_S + i_s, bh]
+                            )
                         with T.Else():
                             dk_fragment[i_s, i_k] = 0
                 T.clear(dg_fragment_reduce_tmp)
@@ -328,12 +380,18 @@ def tilelang_chunk_o_bwd_dqkwg(
                 dg_last_local[1] = dg_last_fragment_scalar_2[0]
 
                 for i_s1, i_s2 in T.Parallel(block_S, block_S):
-                    with T.If(i_s1 >= i_s2 and
-                              G[bb, bs * block_S + i_s1, bh] - G[bb, bs * block_S + i_s2, bh] <= 0):
+                    with T.If(
+                        i_s1 >= i_s2
+                        and G[bb, bs * block_S + i_s1, bh] - G[bb, bs * block_S + i_s2, bh] <= 0
+                    ):
                         with T.Then():
-                            ds_fragment[i_s1, i_s2] = ds_fragment[
-                                i_s1, i_s2] * T.exp(G[bb, bs * block_S + i_s1, bh] -
-                                                    G[bb, bs * block_S + i_s2, bh]) * scale
+                            ds_fragment[i_s1, i_s2] = (
+                                ds_fragment[i_s1, i_s2]
+                                * T.exp(
+                                    G[bb, bs * block_S + i_s1, bh] - G[bb, bs * block_S + i_s2, bh]
+                                )
+                                * scale
+                            )
                         with T.Else():
                             ds_fragment[i_s1, i_s2] = 0
 
@@ -341,8 +399,9 @@ def tilelang_chunk_o_bwd_dqkwg(
                 T.clear(ds_fragment_positive_transpose)
                 T.gemm(q_shared, k_shared, ds_fragment_positive, transpose_B=True)
                 for i_s1, i_s2 in T.Parallel(block_S, block_S):
-                    ds_fragment_positive[
-                        i_s1, i_s2] = ds_fragment[i_s1, i_s2] * ds_fragment_positive[i_s1, i_s2]
+                    ds_fragment_positive[i_s1, i_s2] = (
+                        ds_fragment[i_s1, i_s2] * ds_fragment_positive[i_s1, i_s2]
+                    )
 
                 # FIXME: The reduce_sum statement with clear=True will cause an error of warp specialized pass
                 T.reduce_sum(ds_fragment_positive, dg_fragment, dim=1, clear=False)
@@ -366,15 +425,28 @@ def tilelang_chunk_o_bwd_dqkwg(
                 for i_s in T.Parallel(block_S):
                     with T.If(i_s >= block_S - 1):  # noqa: SIM117
                         with T.Then():
-                            dg_fragment_final[
-                                i_s] = dg_fragment_final[i_s] + dg_last_local[0] + dg_last_local[1]
+                            dg_fragment_final[i_s] = (
+                                dg_fragment_final[i_s] + dg_last_local[0] + dg_last_local[1]
+                            )
 
                 T.copy(
-                    dq_fragment, dq[bb, bs * block_S:(bs + 1) * block_S, bh,
-                                    bk * block_DK:(bk + 1) * block_DK])
+                    dq_fragment,
+                    dq[
+                        bb,
+                        bs * block_S : (bs + 1) * block_S,
+                        bh,
+                        bk * block_DK : (bk + 1) * block_DK,
+                    ],
+                )
                 T.copy(
-                    dk_fragment, dk[bb, bs * block_S:(bs + 1) * block_S, bh,
-                                    bk * block_DK:(bk + 1) * block_DK])
+                    dk_fragment,
+                    dk[
+                        bb,
+                        bs * block_S : (bs + 1) * block_S,
+                        bh,
+                        bk * block_DK : (bk + 1) * block_DK,
+                    ],
+                )
                 for i_s in T.Parallel(block_S):
                     dg[bk, bb, bs * block_S + i_s, bh] = dg_fragment_final[i_s]
 
@@ -391,11 +463,23 @@ def tilelang_chunk_o_bwd_dqkwg(
                     dq_fragment[i_s, i_k] = dq_fragment[i_s, i_k] * scale
                     dk_fragment[i_s, i_k] = dk_fragment[i_s, i_k] + dk_fragment_2[i_s, i_k] * scale
                 T.copy(
-                    dq_fragment, dq[bb, bs * block_S:(bs + 1) * block_S, bh,
-                                    bk * block_DK:(bk + 1) * block_DK])
+                    dq_fragment,
+                    dq[
+                        bb,
+                        bs * block_S : (bs + 1) * block_S,
+                        bh,
+                        bk * block_DK : (bk + 1) * block_DK,
+                    ],
+                )
                 T.copy(
-                    dk_fragment, dk[bb, bs * block_S:(bs + 1) * block_S, bh,
-                                    bk * block_DK:(bk + 1) * block_DK])
+                    dk_fragment,
+                    dk[
+                        bb,
+                        bs * block_S : (bs + 1) * block_S,
+                        bh,
+                        bk * block_DK : (bk + 1) * block_DK,
+                    ],
+                )
 
     return kernel
 
@@ -445,32 +529,75 @@ def run_test(
     threads=256,
     num_stages=0,
 ):
-    Q, K, V, h, G, dO, dh, dv, W = prepare_input(B, S, H, DK, DV, chunk_size,
-                                                 getattr(torch, input_dtype),
-                                                 getattr(torch, output_dtype),
-                                                 getattr(torch, accum_dtype),
-                                                 getattr(torch, gate_dtype),
-                                                 getattr(torch, state_dtype))
-    dq_ref, dk_ref, dw_ref, dg_ref = prepare_output(B, S, H, DK, DV, chunk_size,
-                                                    getattr(torch, output_dtype),
-                                                    getattr(torch, gate_dtype),
-                                                    getattr(torch, state_dtype), block_DK)
+    Q, K, V, h, G, dO, dh, dv, W = prepare_input(
+        B,
+        S,
+        H,
+        DK,
+        DV,
+        chunk_size,
+        getattr(torch, input_dtype),
+        getattr(torch, output_dtype),
+        getattr(torch, accum_dtype),
+        getattr(torch, gate_dtype),
+        getattr(torch, state_dtype),
+    )
+    dq_ref, dk_ref, dw_ref, dg_ref = prepare_output(
+        B,
+        S,
+        H,
+        DK,
+        DV,
+        chunk_size,
+        getattr(torch, output_dtype),
+        getattr(torch, gate_dtype),
+        getattr(torch, state_dtype),
+        block_DK,
+    )
     dq_tilelang, dk_tilelang, dw_tilelang, dg_tilelang = prepare_output(
-        B, S, H, DK, DV, chunk_size, getattr(torch, output_dtype), getattr(torch, gate_dtype),
-        getattr(torch, state_dtype), block_DK)
+        B,
+        S,
+        H,
+        DK,
+        DV,
+        chunk_size,
+        getattr(torch, output_dtype),
+        getattr(torch, gate_dtype),
+        getattr(torch, state_dtype),
+        block_DK,
+    )
 
     # ref
     if use_g:
         dq_ref, dk_ref, dw_ref, dg_ref = chunk_bwd_dqkwg(
-            Q, K, V, G, dO, h, dh, dv, W, chunk_size=chunk_size, scale=scale)
+            Q, K, V, G, dO, h, dh, dv, W, chunk_size=chunk_size, scale=scale
+        )
     else:
         dq_ref, dk_ref, dw_ref, dg_ref = chunk_bwd_dqkwg(
-            Q, K, V, None, dO, h, dh, dv, W, chunk_size=chunk_size, scale=scale)
+            Q, K, V, None, dO, h, dh, dv, W, chunk_size=chunk_size, scale=scale
+        )
 
     # tilelang
-    kernel = tilelang_chunk_o_bwd_dqkwg(B, S, H, DK, DV, input_dtype, output_dtype, accum_dtype,
-                                        gate_dtype, state_dtype, chunk_size, scale, use_g, use_dw,
-                                        block_DK, block_DV, threads, num_stages)
+    kernel = tilelang_chunk_o_bwd_dqkwg(
+        B,
+        S,
+        H,
+        DK,
+        DV,
+        input_dtype,
+        output_dtype,
+        accum_dtype,
+        gate_dtype,
+        state_dtype,
+        chunk_size,
+        scale,
+        use_g,
+        use_dw,
+        block_DK,
+        block_DV,
+        threads,
+        num_stages,
+    )
     print(kernel.get_kernel_source())
     dq_tilelang, dk_tilelang, dw_tilelang, dg_tilelang = kernel(Q, K, V, h, G, dO, dh, dv, W)
 

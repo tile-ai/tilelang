@@ -70,7 +70,6 @@ def get_annotated_mod(
     target_host: Optional[Union[str, Target]] = None,
     model_type: Literal["device", "host", "all"] = "all",
 ) -> Union[IRModule, tuple[IRModule, IRModule]]:
-
     # Validate model_type early
     if model_type not in {"device", "host", "all"}:
         raise ValueError(f"Invalid model type: {model_type}")
@@ -95,13 +94,12 @@ def get_annotated_mod(
 
     # Define dispatch dictionary for different model types
     dispatch = {
-        "device":
-            lambda m: tir.transform.Filter(_is_device_call)(m),
-        "host":
-            lambda m: tir.transform.Filter(_is_host_call)(m),
-        "all":
-            lambda m: (tir.transform.Filter(_is_device_call)(m), tir.transform.Filter(_is_host_call)
-                       (m)),
+        "device": lambda m: tir.transform.Filter(_is_device_call)(m),
+        "host": lambda m: tir.transform.Filter(_is_host_call)(m),
+        "all": lambda m: (
+            tir.transform.Filter(_is_device_call)(m),
+            tir.transform.Filter(_is_host_call)(m),
+        ),
     }
 
     return dispatch[model_type](mod)
@@ -164,9 +162,23 @@ def pythonic_expr(expr: tvm.tir.PrimExpr, dtype_map: Optional[Dict[str, str]] = 
                 s = f"({dtype_map[node.dtype]}){value_str}"
             p = PRECEDENCE.get(type(node), ATOMIC_PRECEDENCE)
         elif isinstance(
-                node,
-            (tvm.tir.Mul, tvm.tir.FloorDiv, tvm.tir.Add, tvm.tir.Sub, tvm.tir.FloorMod, tvm.tir.LT,
-             tvm.tir.LE, tvm.tir.GT, tvm.tir.GE, tvm.tir.EQ, tvm.tir.NE, tvm.tir.And, tvm.tir.Or)):
+            node,
+            (
+                tvm.tir.Mul,
+                tvm.tir.FloorDiv,
+                tvm.tir.Add,
+                tvm.tir.Sub,
+                tvm.tir.FloorMod,
+                tvm.tir.LT,
+                tvm.tir.LE,
+                tvm.tir.GT,
+                tvm.tir.GE,
+                tvm.tir.EQ,
+                tvm.tir.NE,
+                tvm.tir.And,
+                tvm.tir.Or,
+            ),
+        ):
             op_map = {
                 tvm.tir.Mul: "*",
                 tvm.tir.FloorDiv: "/",

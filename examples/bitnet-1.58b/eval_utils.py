@@ -15,19 +15,20 @@ def set_seed(seed):
 
 def get_test_dataset(dataset_name, tokenizer, seqlen=2048):
     if dataset_name == "wikitext2":
-        testdata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test')
-        testdata = "".join(testdata['text']).split('\n')
+        testdata = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+        testdata = "".join(testdata["text"]).split("\n")
     elif dataset_name == "c4":
         testdata = load_dataset(
-            'allenai/c4',
-            data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'},
-            split='validation')['text']
+            "allenai/c4",
+            data_files={"validation": "en/c4-validation.00000-of-00008.json.gz"},
+            split="validation",
+        )["text"]
     else:
         raise NotImplementedError
 
     testdata = [item for item in testdata if item != ""]
     tokenized_text = [
-        tokenizer(item, add_special_tokens=False)['input_ids'] + [tokenizer.eos_token_id]
+        tokenizer(item, add_special_tokens=False)["input_ids"] + [tokenizer.eos_token_id]
         for item in testdata
     ]
 
@@ -45,7 +46,6 @@ def get_test_dataset(dataset_name, tokenizer, seqlen=2048):
 
 
 class LMEvalAdaptor(BaseLM):
-
     def __init__(self, model_name, model, tokenizer, batch_size=1, max_length=-1):
         super().__init__()
 
@@ -138,4 +138,5 @@ class LMEvalAdaptor(BaseLM):
 
     def _model_generate(self, context, max_length, eos_token_id):
         return self.model.generate(
-            context, max_length=max_length, eos_token_id=eos_token_id, do_sample=False)
+            context, max_length=max_length, eos_token_id=eos_token_id, do_sample=False
+        )

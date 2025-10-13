@@ -1,6 +1,7 @@
 """The language interface for tl programs."""
 
 from typing import Optional, Callable, Dict
+
 # from .parser import *
 # now is fully compatible with the upstream
 # tir script
@@ -100,9 +101,12 @@ def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
     # If order is row, use rasterization2DRow, otherwise use rasterization2DColumn
     # The panel size is the number of threads in a warp
     # Use to improve the L2 Cache Locality
-    device_func = ("rasterization2DRow" if order == "row" else "rasterization2DColumn")
-    return attr(None, "threadblock_swizzle_pattern",
-                f"tl::{device_func}<{panel_size}>") if enable else None
+    device_func = "rasterization2DRow" if order == "row" else "rasterization2DColumn"
+    return (
+        attr(None, "threadblock_swizzle_pattern", f"tl::{device_func}<{panel_size}>")
+        if enable
+        else None
+    )
 
 
 def annotate_layout(layout_map: Dict):

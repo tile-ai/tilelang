@@ -13,9 +13,11 @@ from tilelang.layout import (
     make_linear_layout,
 )
 from tvm.runtime import convert
-from tilelang.intrinsics.mma_layout import (shared_16x8_to_mma_32x4_layout_sr_a,
-                                            shared_16x16_to_mma_32x8_layout_sr_a,
-                                            shared_16x32_to_mma_32x16_layout_sr_a)
+from tilelang.intrinsics.mma_layout import (
+    shared_16x8_to_mma_32x4_layout_sr_a,
+    shared_16x16_to_mma_32x8_layout_sr_a,
+    shared_16x32_to_mma_32x16_layout_sr_a,
+)
 
 lift = convert
 
@@ -89,9 +91,22 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         is_m_first: Optional[bool] = False,
         thread_var: Optional[Var] = None,
     ):
-        super().__init__(a_dtype, b_dtype, accum_dtype, a_transposed, b_transposed, block_row_warps,
-                         block_col_warps, warp_row_tiles, warp_col_tiles, chunk, reduce_k,
-                         num_elems_per_byte, is_m_first, thread_var)
+        super().__init__(
+            a_dtype,
+            b_dtype,
+            accum_dtype,
+            a_transposed,
+            b_transposed,
+            block_row_warps,
+            block_col_warps,
+            warp_row_tiles,
+            warp_col_tiles,
+            chunk,
+            reduce_k,
+            num_elems_per_byte,
+            is_m_first,
+            thread_var,
+        )
         self._initialize_wgmma_prefix(self.n_dim)
 
     def _assign_a_shared_layout(self, layout: Layout):
@@ -112,9 +127,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         warp_row_tiles = self.warp_row_tiles
         warp_col_tiles = self.warp_col_tiles
         assert warp_row_tiles >= 16, f"warp_row_tiles must be greater than 16, got {warp_row_tiles}"
-        assert warp_row_tiles % 16 == 0, f"warp_row_tiles must be divisible by 16, got {warp_row_tiles}"
+        assert warp_row_tiles % 16 == 0, (
+            f"warp_row_tiles must be divisible by 16, got {warp_row_tiles}"
+        )
         assert warp_col_tiles >= 8, f"warp_col_tiles must be greater than 8, got {warp_col_tiles}"
-        assert warp_col_tiles % 8 == 0, f"warp_col_tiles must be divisible by 8, got {warp_col_tiles}"
+        assert warp_col_tiles % 8 == 0, (
+            f"warp_col_tiles must be divisible by 8, got {warp_col_tiles}"
+        )
 
         # four warps per block
         self.warp_rows = warp_row_tiles // m_dim
@@ -144,12 +163,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         else:
             raise ValueError(f"Unsupported swizzle mode: {layout}")
 
-    def wgmma(self,
-              A_buf: Buffer,
-              B_buf: Buffer,
-              C_local_buf: Buffer,
-              clear_accum: PrimExpr = False):
-
+    def wgmma(
+        self, A_buf: Buffer, B_buf: Buffer, C_local_buf: Buffer, clear_accum: PrimExpr = False
+    ):
         if is_fragment(A_buf):
             return self.wgmma_rs(A_buf, B_buf, C_local_buf, clear_accum)
 
@@ -167,7 +183,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         scale_in_a = 1
         scale_in_b = 1
 
-        assert k_dim >= micro_size_k, f"k_dim must be greater than or equal to {micro_size_k}, got k_dim: {k_dim}"
+        assert k_dim >= micro_size_k, (
+            f"k_dim must be greater than or equal to {micro_size_k}, got k_dim: {k_dim}"
+        )
 
         a_is_k_major = not self.a_transposed
         b_is_k_major = self.b_transposed
@@ -179,14 +197,19 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         elems_in_bytes = elems_in_bits // 8
 
         a_swizzle_atom_elems = a_swizzle_mode.swizzle_byte_size() // elems_in_bytes
-        b_swizzle_atom_elems = n_dim if b_swizzle_mode.is_none(
-        ) else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
+        b_swizzle_atom_elems = (
+            n_dim
+            if b_swizzle_mode.is_none()
+            else b_swizzle_mode.swizzle_byte_size() // elems_in_bytes
+        )
 
         # by default, we utilize non-swizzle layout offset
-        a_leading_byte_offset = (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim *
-                                                                               elems_in_bytes)
-        a_stride_byte_offset = (8 * k_dim * elems_in_bytes) if a_is_k_major else (8 * 8 *
-                                                                                  elems_in_bytes)
+        a_leading_byte_offset = (
+            (8 * 8 * elems_in_bytes) if a_is_k_major else (8 * m_dim * elems_in_bytes)
+        )
+        a_stride_byte_offset = (
+            (8 * k_dim * elems_in_bytes) if a_is_k_major else (8 * 8 * elems_in_bytes)
+        )
 
         if not a_swizzle_mode.is_none():
             # swizzle mode doesn't require LBO/SBO to be 1
@@ -202,19 +225,25 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 if a_m_axis_atoms <= 1:
                     a_leading_byte_offset = 0
                 else:
-                    a_leading_byte_offset = 8 * a_swizzle_mode.swizzle_atom_size() * (
-                        a_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
+                    a_leading_byte_offset = (
+                        8
+                        * a_swizzle_mode.swizzle_atom_size()
+                        * (a_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
+                    )
 
                 if a_m_axis_atoms <= 1:
                     a_stride_byte_offset = 8 * elems_in_bytes * m_dim
                 else:
                     a_stride_byte_offset = 8 * elems_in_bytes * a_swizzle_atom_elems
 
-        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim *
-                                                                               elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim *
-                                elems_in_bytes) if b_is_k_major else (0 if n_dim == 8 else
-                                                                      (8 * 8 * elems_in_bytes))
+        b_leading_byte_offset = (
+            (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim * elems_in_bytes)
+        )
+        b_stride_byte_offset = (
+            (8 * k_dim * elems_in_bytes)
+            if b_is_k_major
+            else (0 if n_dim == 8 else (8 * 8 * elems_in_bytes))
+        )
         if not b_swizzle_mode.is_none():
             # swizzle mode doesn't require LBO/SBO to be 1
             # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
@@ -245,35 +274,63 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             # TODO(lei): inject warpgroup_fence_operand for C_local_buf
             desc_a = T.alloc_descriptor()
             desc_b = T.alloc_descriptor()
-            T.initialize_descriptor(desc_a, A_buf.access_ptr("r"), a_swizzle_mode,
-                                    int(a_leading_byte_offset >> 4), int(a_stride_byte_offset >> 4))
-            T.initialize_descriptor(desc_b, B_buf.access_ptr("r"), b_swizzle_mode,
-                                    int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+            T.initialize_descriptor(
+                desc_a,
+                A_buf.access_ptr("r"),
+                a_swizzle_mode,
+                int(a_leading_byte_offset >> 4),
+                int(a_stride_byte_offset >> 4),
+            )
+            T.initialize_descriptor(
+                desc_b,
+                B_buf.access_ptr("r"),
+                b_swizzle_mode,
+                int(b_leading_byte_offset >> 4),
+                int(b_stride_byte_offset >> 4),
+            )
             T.warpgroup_arrive()
             for ki in T.serial(0, (k_dim // micro_size_k)):
                 for i in T.serial(m_dim // 64):
-                    A_offset = (ki % ak_atom_size) * micro_size_k + i * 64 * a_swizzle_atom_elems + (
-                        ki // ak_atom_size
-                    ) * m_dim * a_swizzle_atom_elems if a_is_k_major else i * 64 * k_dim + ki * a_swizzle_atom_elems * micro_size_k
-                    B_offset = (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems + (
-                        ki % bk_atom_size
-                    ) * micro_size_k if b_is_k_major else ki * b_swizzle_atom_elems * micro_size_k
+                    A_offset = (
+                        (ki % ak_atom_size) * micro_size_k
+                        + i * 64 * a_swizzle_atom_elems
+                        + (ki // ak_atom_size) * m_dim * a_swizzle_atom_elems
+                        if a_is_k_major
+                        else i * 64 * k_dim + ki * a_swizzle_atom_elems * micro_size_k
+                    )
+                    B_offset = (
+                        (ki // bk_atom_size) * n_dim * b_swizzle_atom_elems
+                        + (ki % bk_atom_size) * micro_size_k
+                        if b_is_k_major
+                        else ki * b_swizzle_atom_elems * micro_size_k
+                    )
                     C_offset = i * warp_cols * local_size_out  # 4 warps as an unit
-                    T.ptx_wgmma_ss(accum_dtype, wgmma_prefix, a_is_k_major, b_is_k_major,
-                                   a_dtype_abbrv, b_dtype_abbrv, accum_dtype_abbrv, desc_a.data,
-                                   (A_offset * elems_in_bytes) >> 4, desc_b.data,
-                                   (B_offset * elems_in_bytes) >> 4, C_local_buf.data, C_offset,
-                                   scale_out, scale_in_a, scale_in_b)
+                    T.ptx_wgmma_ss(
+                        accum_dtype,
+                        wgmma_prefix,
+                        a_is_k_major,
+                        b_is_k_major,
+                        a_dtype_abbrv,
+                        b_dtype_abbrv,
+                        accum_dtype_abbrv,
+                        desc_a.data,
+                        (A_offset * elems_in_bytes) >> 4,
+                        desc_b.data,
+                        (B_offset * elems_in_bytes) >> 4,
+                        C_local_buf.data,
+                        C_offset,
+                        scale_out,
+                        scale_in_a,
+                        scale_in_b,
+                    )
             T.warpgroup_commit_batch()
             T.warpgroup_wait(0)
 
         return _warp_mma(A_buf, B_buf, C_local_buf)
 
-    def wgmma_rs(self,
-                 A_buf: Buffer,
-                 B_buf: Buffer,
-                 C_local_buf: Buffer,
-                 clear_accum: PrimExpr = False):
+    def wgmma_rs(
+        self, A_buf: Buffer, B_buf: Buffer, C_local_buf: Buffer, clear_accum: PrimExpr = False
+    ):
         local_size_a = self.local_size_a
         local_size_out = self.local_size_out
         a_dtype_abbrv = self.a_dtype_abbrv
@@ -289,7 +346,9 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         scale_in_a = 1
         scale_in_b = 1
 
-        assert k_dim >= micro_size_k, f"k_dim must be greater than or equal to {micro_size_k}, got k_dim: {k_dim}"
+        assert k_dim >= micro_size_k, (
+            f"k_dim must be greater than or equal to {micro_size_k}, got k_dim: {k_dim}"
+        )
 
         elems_in_bytes = DataType(self.a_dtype).bits // 8
 
@@ -297,10 +356,12 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
         b_swizzle_mode = self._determinate_swizzle_mode(B_buf, self.b_shared_layout)
 
-        b_leading_byte_offset = (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim *
-                                                                               elems_in_bytes)
-        b_stride_byte_offset = (8 * k_dim * elems_in_bytes) if b_is_k_major else (8 * 8 *
-                                                                                  elems_in_bytes)
+        b_leading_byte_offset = (
+            (8 * 8 * elems_in_bytes) if b_is_k_major else (8 * n_dim * elems_in_bytes)
+        )
+        b_stride_byte_offset = (
+            (8 * k_dim * elems_in_bytes) if b_is_k_major else (8 * 8 * elems_in_bytes)
+        )
         if not b_swizzle_mode.is_none():
             # swizzle mode doesn't require LBO/SBO to be 1
             # https://docs.nvidia.com/cuda/parallel-thread-execution/#asynchronous-warpgroup-level-leading-dimension-byte-offset
@@ -314,20 +375,29 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 if b_n_axis_atoms <= 1:
                     b_leading_byte_offset = 0
                 else:
-                    b_leading_byte_offset = 8 * b_swizzle_mode.swizzle_atom_size() * (
-                        b_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
+                    b_leading_byte_offset = (
+                        8
+                        * b_swizzle_mode.swizzle_atom_size()
+                        * (b_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
+                    )
 
                 if b_n_axis_atoms <= 1:
                     b_stride_byte_offset = 8 * elems_in_bytes * n_dim
                 else:
-                    b_stride_byte_offset = 8 * elems_in_bytes * (
-                        b_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
+                    b_stride_byte_offset = (
+                        8 * elems_in_bytes * (b_swizzle_mode.swizzle_byte_size() // elems_in_bytes)
+                    )
 
         @T.macro
         def _warp_mma(A_buf, B_buf, C_local_buf):
             desc_b = T.alloc_descriptor()
-            T.initialize_descriptor(desc_b, B_buf.access_ptr("w"), b_swizzle_mode,
-                                    int(b_leading_byte_offset >> 4), int(b_stride_byte_offset >> 4))
+            T.initialize_descriptor(
+                desc_b,
+                B_buf.access_ptr("w"),
+                b_swizzle_mode,
+                int(b_leading_byte_offset >> 4),
+                int(b_stride_byte_offset >> 4),
+            )
             for ki in T.serial(0, (k_dim // micro_size_k)):
                 for i in T.serial(m_dim // 64):
                     k_dim_offset = ki * micro_size_k
@@ -378,6 +448,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             If `local_buf` is not detected to be a fragment buffer.
         """
         from tilelang.utils import is_fragment
+
         assert matrix in ["A"], "matrix should be A for WGMMA"
         dtype = self.a_dtype
         dtype_bits = DataType(dtype).bits
@@ -406,11 +477,13 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         # the layout of mma.sync is row.col.
         # so the b matrix expected a transposed basic layout
         transform_func: Callable = None
-        transform_func = transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(
-            j, i)
+        transform_func = (
+            transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(j, i)
+        )
 
         assert is_fragment(local_buf), "local_buf must be a fragment, but got {}".format(
-            local_buf.scope())
+            local_buf.scope()
+        )
 
         micro_size_s, micro_size_r = self.micro_size_x, self.micro_size_k
 
@@ -450,20 +523,20 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         replicate = block_col_warps
 
         if is_sr_axis_order:
-            warp_fragment = base_fragment.repeat([block_s, 1],
-                                                 repeat_on_thread=True,
-                                                 lower_dim_first=False).replicate(replicate)
-            block_fragment = warp_fragment.repeat([warp_s, warp_r],
-                                                  repeat_on_thread=False,
-                                                  lower_dim_first=False)
+            warp_fragment = base_fragment.repeat(
+                [block_s, 1], repeat_on_thread=True, lower_dim_first=False
+            ).replicate(replicate)
+            block_fragment = warp_fragment.repeat(
+                [warp_s, warp_r], repeat_on_thread=False, lower_dim_first=False
+            )
         else:
             # rs condition, transposed_a matrix
-            warp_fragment = base_fragment.repeat([1, block_s],
-                                                 repeat_on_thread=True,
-                                                 lower_dim_first=False).replicate(replicate)
-            block_fragment = warp_fragment.repeat([warp_r, warp_s],
-                                                  repeat_on_thread=False,
-                                                  lower_dim_first=True)
+            warp_fragment = base_fragment.repeat(
+                [1, block_s], repeat_on_thread=True, lower_dim_first=False
+            ).replicate(replicate)
+            block_fragment = warp_fragment.repeat(
+                [warp_r, warp_s], repeat_on_thread=False, lower_dim_first=True
+            )
 
         return block_fragment
 

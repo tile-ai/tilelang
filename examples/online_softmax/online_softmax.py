@@ -20,8 +20,8 @@ def softmax_kernel(
 
     @T.prim_func
     def main(
-            X: T.Tensor([M, N], dtype),
-            Y: T.Tensor([M, N], dtype),
+        X: T.Tensor([M, N], dtype),
+        Y: T.Tensor([M, N], dtype),
     ):
         with T.Kernel(M, threads=128) as (i_m):
             x = T.alloc_fragment([BN], dtype)
@@ -33,7 +33,7 @@ def softmax_kernel(
             T.fill(lse, -T.infinity(accum_dtype))
 
             for i_n in T.Pipelined(0, NN):
-                T.copy(X[i_m, i_n * BN:(i_n + 1) * BN], x)
+                T.copy(X[i_m, i_n * BN : (i_n + 1) * BN], x)
 
                 T.reduce_max(x, max_x, dim=0, clear=True)
 
@@ -45,12 +45,12 @@ def softmax_kernel(
                 lse[0] = max_x[0] * scale + T.log2(T.exp2(lse[0] - max_x[0] * scale) + sum_exp_x[0])
 
             for i_n in T.Pipelined(0, NN):
-                T.copy(X[i_m, i_n * BN:(i_n + 1) * BN], x)
+                T.copy(X[i_m, i_n * BN : (i_n + 1) * BN], x)
 
                 for j in T.Parallel(BN):
                     y[j] = T.exp2(x[j] * scale - lse[0])
 
-                T.copy(y, Y[i_m, i_n * BN:(i_n + 1) * BN])
+                T.copy(y, Y[i_m, i_n * BN : (i_n + 1) * BN])
 
     return main
 
@@ -69,4 +69,4 @@ t1 = do_bench(lambda: X.softmax(dim=1), warmup=25, rep=100)
 t2 = do_bench(lambda: kernel(X), warmup=25, rep=100)
 print(f"torch latency: {t1:.3f} ms")
 print(f"TileLang latency: {t2:.3f} ms")
-print(f"Speedup: {t1/t2:.3f}x")
+print(f"Speedup: {t1 / t2:.3f}x")

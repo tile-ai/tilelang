@@ -9,7 +9,7 @@ from .mma_layout import (
     ldmatrix_32x16_to_shared_16x32_layout_b,
     mma_store_32x8_to_shared_16x16_layout,
 )
-from .mfma_layout import (thread_id_shared_access_64x4_to_16x16_layout_C_n_m)
+from .mfma_layout import thread_id_shared_access_64x4_to_16x16_layout_C_n_m
 
 from .mma_layout import get_swizzle_layout  # noqa: F401
 from .mma_layout import make_mma_swizzle_layout  # noqa: F401

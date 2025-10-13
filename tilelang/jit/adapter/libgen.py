@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from tilelang.jit.adapter.nvrtc import is_nvrtc_available
+
     if is_nvrtc_available:
         import cuda.bindings.driver as cuda
         from tilelang.contrib.nvrtc import compile_cuda
@@ -64,6 +65,7 @@ class LibraryGenerator(object):
         verbose = self.verbose
         if is_cuda_target(target):
             from tilelang.env import CUTLASS_INCLUDE_DIR
+
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
             target_arch = get_target_arch(get_target_compute_version(target))
             libpath = src.name.replace(".cu", ".so")
@@ -74,15 +76,18 @@ class LibraryGenerator(object):
                     "TL_ENABLE_FAST_MATH",
                     "0.1.7",
                 )
-                enable_fast_math = not self.pass_configs.get(PassConfigKey.TL_DISABLE_FAST_MATH,
-                                                             True)
+                enable_fast_math = not self.pass_configs.get(
+                    PassConfigKey.TL_DISABLE_FAST_MATH, True
+                )
             else:
                 enable_fast_math = self.pass_configs.get(PassConfigKey.TL_ENABLE_FAST_MATH, False)
 
-            ptxas_usage_level = self.pass_configs.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL,
-                                                      None)
+            ptxas_usage_level = self.pass_configs.get(
+                PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None
+            )
             verbose_ptxas_output = self.pass_configs.get(
-                PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False)
+                PassConfigKey.TL_ENABLE_PTXAS_VERBOSE_OUTPUT, False
+            )
 
             command = [
                 get_nvcc_compiler(),
@@ -111,6 +116,7 @@ class LibraryGenerator(object):
 
         elif is_hip_target(target):
             from tilelang.env import COMPOSABLE_KERNEL_INCLUDE_DIR
+
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cpp", ".so")
             rocm_path = find_rocm_path()
@@ -128,6 +134,7 @@ class LibraryGenerator(object):
             ]
         elif is_cpu_target(target):
             from tilelang.contrib.cc import get_cplus_compiler
+
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cpp", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cpp", ".so")
 
@@ -160,8 +167,7 @@ class LibraryGenerator(object):
             raise RuntimeError(f"Compile kernel failed because of {e}") from e
 
         if ret.returncode != 0:
-            raise RuntimeError(f"Compilation Failed! {command}"
-                               f"\n {self.lib_code}")
+            raise RuntimeError(f"Compilation Failed! {command}\n {self.lib_code}")
 
         self.srcpath = src.name
         self.libpath = libpath
@@ -191,9 +197,11 @@ class PyLibraryGenerator(LibraryGenerator):
 
     def __init__(self, target: Target, verbose: bool = False):
         if not is_nvrtc_available:
-            raise ImportError("cuda-python is not available, nvrtc backend cannot be used. "
-                              "Please install cuda-python via `pip install cuda-python` "
-                              "if you want to use the nvrtc backend.")
+            raise ImportError(
+                "cuda-python is not available, nvrtc backend cannot be used. "
+                "Please install cuda-python via `pip install cuda-python` "
+                "if you want to use the nvrtc backend."
+            )
         super().__init__(target, verbose)
 
     @staticmethod
@@ -217,17 +225,20 @@ class PyLibraryGenerator(LibraryGenerator):
         ctx = cuda.cuCtxGetCurrent()[1]
         if cuda.cuCtxGetApiVersion(ctx)[0] != cuda.CUresult.CUDA_SUCCESS:
             import torch
+
             torch.cuda.synchronize()
 
         result, self.culib = cuda.cuLibraryLoadFromFile(
-            bytes(lib_path, "utf-8"), [], [], 0, [], [], 0)
+            bytes(lib_path, "utf-8"), [], [], 0, [], [], 0
+        )
         assert result == cuda.CUresult.CUDA_SUCCESS, f"Failed to load library: {lib_path}"
 
     def compile_lib(self, timeout: float = None):
         target = self.target
         verbose = self.verbose
         if is_cuda_target(target):
-            from tilelang.env import (CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH)
+            from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH
+
             src = tempfile.NamedTemporaryFile(mode="w", suffix=".cu", delete=False)  # noqa: SIM115
             libpath = src.name.replace(".cu", ".cubin")
 
@@ -247,12 +258,15 @@ class PyLibraryGenerator(LibraryGenerator):
             options = [f"-I{tl_template_path}", f"-I{cutlass_path}", f"-I{cuda_home}/include"]
             if self.compile_flags:
                 options += [
-                    item for flag in self.compile_flags for item in flag.split()
+                    item
+                    for flag in self.compile_flags
+                    for item in flag.split()
                     if item not in options
                 ]
 
             cubin_bytes = compile_cuda(
-                self.lib_code, target_format="cubin", options=options, verbose=verbose)
+                self.lib_code, target_format="cubin", options=options, verbose=verbose
+            )
             with open(libpath, "wb") as f:
                 f.write(cubin_bytes)
 

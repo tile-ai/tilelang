@@ -14,6 +14,7 @@ class KernelParam:
     Represents parameters for a kernel operation, storing dtype and shape information.
     Used to describe tensor or scalar parameters in TVM/PyTorch interop.
     """
+
     dtype: torch.dtype  # PyTorch data type of the parameter
     shape: List[Union[int, Var]]  # List of dimensions, can be integers or TVM variables
 
@@ -109,9 +110,11 @@ class CompiledArtifact:
     Represents a compiled kernel artifact containing both host and device code.
     Stores all necessary components for kernel execution in the TVM runtime.
     """
+
     host_mod: tvm.IRModule  # Host-side TVM IR module for managing kernel execution
     device_mod: tvm.IRModule  # Device-side TVM IR module containing the actual kernel code
     params: List[KernelParam]  # List of parameters (tensors/scalars) used by the kernel
     kernel_source: str  # Raw source code of the generated kernel
-    rt_mod: Optional[
-        tvm.runtime.Module] = None  # Runtime module for execution, may be lazily initialized
+    rt_mod: Optional[tvm.runtime.Module] = (
+        None  # Runtime module for execution, may be lazily initialized
+    )

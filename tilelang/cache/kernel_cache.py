@@ -159,21 +159,32 @@ class KernelCache:
         with self._lock:
             # First check in-memory cache
             if key in self._memory_cache:
-                self.logger.warning("Found kernel in memory cache. For better performance," \
-                                    " consider using `@tilelang.jit` instead of direct kernel caching.")
+                self.logger.warning(
+                    "Found kernel in memory cache. For better performance,"
+                    " consider using `@tilelang.jit` instead of direct kernel caching."
+                )
                 return self._memory_cache[key]
 
             if verbose:
                 self.logger.debug(f"Checking disk cache for kernel {func.attrs['global_symbol']}")
 
             # Then check disk cache
-            kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
-                                                 execution_backend, pass_configs, compile_flags,
-                                                 func, verbose)
+            kernel = self._load_kernel_from_disk(
+                key,
+                target,
+                target_host,
+                out_idx,
+                execution_backend,
+                pass_configs,
+                compile_flags,
+                func,
+                verbose,
+            )
             if kernel is not None:
                 if verbose:
                     self.logger.debug(
-                        f"Found kernel in disk cache for {func.attrs['global_symbol']}")
+                        f"Found kernel in disk cache for {func.attrs['global_symbol']}"
+                    )
                 # Populate memory cache with disk result
                 self._memory_cache[key] = kernel
                 return kernel
@@ -238,11 +249,9 @@ class KernelCache:
         # Use atomic POSIX replace, so other processes cannot see a partial write
         os.replace(temp_path, path)
 
-    def _save_kernel_to_disk(self,
-                             key: str,
-                             kernel: JITKernel,
-                             func: Callable = None,
-                             verbose: bool = False):
+    def _save_kernel_to_disk(
+        self, key: str, kernel: JITKernel, func: Callable = None, verbose: bool = False
+    ):
         """
         Persists a compiled kernel to disk cache.
 
@@ -268,8 +277,9 @@ class KernelCache:
             if verbose:
                 self.logger.debug(f"Saving kernel source code to file: {kernel_path}")
             if kernel.kernel_source is not None:
-                KernelCache._safe_write_file(kernel_path, "w",
-                                             lambda file: file.write(kernel.kernel_source))
+                KernelCache._safe_write_file(
+                    kernel_path, "w", lambda file: file.write(kernel.kernel_source)
+                )
         except Exception as e:
             self.logger.error(f"Error saving kernel source code to disk: {e}")
 
@@ -278,24 +288,31 @@ class KernelCache:
             wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
             if verbose:
                 self.logger.debug(
-                    f"Saving wrapped kernel source code to file: {wrapped_kernel_path}")
+                    f"Saving wrapped kernel source code to file: {wrapped_kernel_path}"
+                )
             KernelCache._safe_write_file(
-                wrapped_kernel_path, "w",
-                lambda file: file.write(kernel.adapter.get_kernel_source()))
+                wrapped_kernel_path,
+                "w",
+                lambda file: file.write(kernel.adapter.get_kernel_source()),
+            )
         except Exception as e:
             self.logger.error(f"Error saving wrapped kernel source code to disk: {e}")
 
         # Save the kernel library
         try:
             # Save CUBIN or SO file
-            kernel_lib_path = KERNEL_CUBIN_PATH if self.execution_backend == "nvrtc" else KERNEL_LIB_PATH
+            kernel_lib_path = (
+                KERNEL_CUBIN_PATH if self.execution_backend == "nvrtc" else KERNEL_LIB_PATH
+            )
             kernel_lib_path = os.path.join(cache_path, kernel_lib_path)
             src_lib_path = kernel.adapter.libpath
             if verbose:
                 self.logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
             KernelCache._safe_write_file(
-                kernel_lib_path, "wb",
-                lambda file: file.write(KernelCache._load_binary(src_lib_path)))
+                kernel_lib_path,
+                "wb",
+                lambda file: file.write(KernelCache._load_binary(src_lib_path)),
+            )
 
             # Save an extra Python file for NVRTC
             if self.execution_backend == "nvrtc":
@@ -304,8 +321,10 @@ class KernelCache:
                 if verbose:
                     self.logger.debug(f"Saving kernel nvrtc python code to file: {kernel_py_path}")
                 KernelCache._safe_write_file(
-                    kernel_py_path, "wb",
-                    lambda file: file.write(KernelCache._load_binary(src_lib_path)))
+                    kernel_py_path,
+                    "wb",
+                    lambda file: file.write(KernelCache._load_binary(src_lib_path)),
+                )
         except Exception as e:
             self.logger.error(f"Error saving kernel library to disk: {e}")
 
@@ -314,8 +333,9 @@ class KernelCache:
             params_path = os.path.join(cache_path, PARAMS_PATH)
             if verbose:
                 self.logger.debug(f"Saving kernel parameters to disk: {params_path}")
-            KernelCache._safe_write_file(params_path, "wb",
-                                         lambda file: cloudpickle.dump(kernel.params, file))
+            KernelCache._safe_write_file(
+                params_path, "wb", lambda file: cloudpickle.dump(kernel.params, file)
+            )
         except Exception as e:
             self.logger.error(f"Error saving kernel parameters to disk: {e}")
 
@@ -350,7 +370,8 @@ class KernelCache:
         cache_path = self._get_cache_path(key)
         wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
         kernel_lib_path = os.path.join(
-            cache_path, KERNEL_CUBIN_PATH if self.execution_backend == "nvrtc" else KERNEL_LIB_PATH)
+            cache_path, KERNEL_CUBIN_PATH if self.execution_backend == "nvrtc" else KERNEL_LIB_PATH
+        )
         params_path = os.path.join(cache_path, PARAMS_PATH)
         if not all([os.path.exists(file) for file in (kernel_lib_path, params_path)]):
             return None
@@ -362,7 +383,8 @@ class KernelCache:
         try:
             if verbose:
                 self.logger.debug(
-                    f"Loading wrapped kernel source code from file: {wrapped_kernel_path}")
+                    f"Loading wrapped kernel source code from file: {wrapped_kernel_path}"
+                )
             with open(wrapped_kernel_path, "r") as f:
                 kernel_global_source = f.read()
         except Exception as e:

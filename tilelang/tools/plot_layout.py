@@ -1,11 +1,13 @@
 import tilelang.language as T
 
 
-def plot_layout(layout: T.Layout,
-                save_directory="./tmp",
-                name: str = "layout",
-                colormap: str = "RdPu",
-                verbose: bool = False) -> None:
+def plot_layout(
+    layout: T.Layout,
+    save_directory="./tmp",
+    name: str = "layout",
+    colormap: str = "RdPu",
+    verbose: bool = False,
+) -> None:
     """
     Plot the layout of a buffer.
 
@@ -100,12 +102,9 @@ def plot_layout(layout: T.Layout,
 
             color = colors[thread_ids[0]]  # Select color based on thread ID
             # Create a rectangle patch for visualization
-            rect = patches.Rectangle((j, i),
-                                     1,
-                                     1,
-                                     linewidth=0.5,
-                                     edgecolor='black',
-                                     facecolor=color)
+            rect = patches.Rectangle(
+                (j, i), 1, 1, linewidth=0.5, edgecolor="black", facecolor=color
+            )
             ax.add_patch(rect)  # Add the rectangle to the plot
 
             # Add text annotations inside the rectangles
@@ -125,24 +124,26 @@ def plot_layout(layout: T.Layout,
                 j + 0.5,
                 i + 0.3,
                 thread_str,
-                ha='center',
-                va='center',
-                color='black',
-                fontsize=thread_fontsize)
+                ha="center",
+                va="center",
+                color="black",
+                fontsize=thread_fontsize,
+            )
             # Add local ID text with original font size
             ax.text(
                 j + 0.5,
                 i + 0.7,
                 f"L{local_id}",
-                ha='center',
-                va='center',
-                color='black',
-                fontsize=font_size)
+                ha="center",
+                va="center",
+                color="black",
+                fontsize=font_size,
+            )
 
     # Add row labels to the left side of the plot
     for i in range(nrows):
         text = f"row {i}"
-        ax.text(-0.75, i + 0.5, text, ha='center', va='center', color='black', fontsize=font_size)
+        ax.text(-0.75, i + 0.5, text, ha="center", va="center", color="black", fontsize=font_size)
 
     # Add column labels at the top of the plot
     for j in range(ncols):
@@ -151,11 +152,12 @@ def plot_layout(layout: T.Layout,
             j + 0.5,
             -0.5,
             text,
-            ha='center',
-            va='center',
-            color='black',
+            ha="center",
+            va="center",
+            color="black",
             fontsize=font_size,
-            rotation=45)
+            rotation=45,
+        )
 
     # Set the plot limits
     ax.set_xlim(0, ncols)
@@ -172,8 +174,8 @@ def plot_layout(layout: T.Layout,
     legend_y = 1.0 + (1.7 / fig_height)  # Adjust y position based on figure height
 
     legend_patches = [
-        patches.Patch(color='black', label="T: Thread ID"),
-        patches.Patch(color='black', label="L: Local ID")
+        patches.Patch(color="black", label="T: Thread ID"),
+        patches.Patch(color="black", label="L: Local ID"),
     ]
     ax.legend(
         handles=legend_patches,
@@ -181,7 +183,8 @@ def plot_layout(layout: T.Layout,
         fontsize=font_size - 4,
         frameon=False,
         bbox_to_anchor=(legend_x, legend_y),  # Dynamic position
-        ncols=2)
+        ncols=2,
+    )
 
     # Create the output directory if it does not exist
     tmp_directory = pathlib.Path(save_directory)

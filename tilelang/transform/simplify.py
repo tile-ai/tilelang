@@ -27,8 +27,9 @@ def Simplify(simplify_arguments: bool = False):
     return _ffi_api.Simplify(simplify_arguments)  # type: ignore
 
 
-def _Simplify(stmt: Union[PrimFunc, IRModule],
-              inline_let: bool = False) -> Union[PrimFunc, IRModule]:
+def _Simplify(
+    stmt: Union[PrimFunc, IRModule], inline_let: bool = False
+) -> Union[PrimFunc, IRModule]:
     if isinstance(stmt, PrimFunc):
         if inline_let:
             mod = LetInline()(IRModule.from_expr(stmt))
@@ -51,7 +52,6 @@ def _Simplify(stmt: Union[PrimFunc, IRModule],
 
 # Decorator to simplify the output of a function
 def simplify_prim_func(func: Callable) -> Callable:
-
     def wrapper(*args, **kwargs):
         stmt: Union[PrimFunc, IRModule] = (func)(*args, **kwargs)
         return _Simplify(stmt)
@@ -59,7 +59,8 @@ def simplify_prim_func(func: Callable) -> Callable:
     return wrapper
 
 
-def apply_simplify(stmt: Union[PrimFunc, IRModule],
-                   inline_let: bool = False) -> Union[PrimFunc, IRModule]:
+def apply_simplify(
+    stmt: Union[PrimFunc, IRModule], inline_let: bool = False
+) -> Union[PrimFunc, IRModule]:
     """Apply Simplify pass to a PrimFunc or IRModule."""
     return _Simplify(stmt, inline_let)

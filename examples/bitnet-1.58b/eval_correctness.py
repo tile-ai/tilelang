@@ -47,8 +47,8 @@ def generate_text(model, tokenizer, prompt, max_length=100):
 
 
 def profile(model, input_data):
-
     import numpy as np
+
     model = model.cuda()
     model.eval()
 
@@ -69,18 +69,22 @@ def profile(model, input_data):
     return np.mean(times)
 
 
-model_path = '1bitLLM/bitnet_b1_58-3B'
+model_path = "1bitLLM/bitnet_b1_58-3B"
 
 
 def main():
-    model = BitnetForCausalLM.from_pretrained(
-        model_path,
-        use_flash_attention_2=False,
-        torch_dtype=torch.float16,
-    ).cuda().half()
+    model = (
+        BitnetForCausalLM.from_pretrained(
+            model_path,
+            use_flash_attention_2=False,
+            torch_dtype=torch.float16,
+        )
+        .cuda()
+        .half()
+    )
 
     tokenizer = BitnetTokenizer.from_pretrained(model_path, use_fast=False)
-    input_id = tokenizer("Hello")['input_ids']
+    input_id = tokenizer("Hello")["input_ids"]
     input_id = torch.tensor(input_id).unsqueeze(0).cuda()
 
     print("original model generated text:")
@@ -91,5 +95,5 @@ def main():
     print(generate_text(model, tokenizer, "Hello", max_length=100))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

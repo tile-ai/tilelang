@@ -6,11 +6,11 @@ from tilelang.utils.sparse import compress, randn_semi_sparse
 from tilelang.layout import make_metadata_layout
 
 tilelang.disable_cache()
-torch.set_printoptions(threshold=float('inf'), edgeitems=float('inf'), linewidth=10000)
+torch.set_printoptions(threshold=float("inf"), edgeitems=float("inf"), linewidth=10000)
 torch.manual_seed(42)
 
 STR_TO_TYPE = {
-    'float32': torch.float32,
+    "float32": torch.float32,
     "float16": torch.float16,
     "bfloat16": torch.bfloat16,
     "float8_e4m3": torch.float8_e4m3fn,
@@ -52,28 +52,30 @@ def matmul_sp_sm90(
 
     @T.prim_func
     def main(
-            A_sparse: T.Tensor(A_sparse_shape, in_dtype),
-            E: T.Tensor((M, K // E_factor), 'uint8'),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A_sparse: T.Tensor(A_sparse_shape, in_dtype),
+        E: T.Tensor((M, K // E_factor), "uint8"),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
-            E_shared = T.alloc_shared((block_M, block_K // E_factor), 'uint8')
+            E_shared = T.alloc_shared((block_M, block_K // E_factor), "uint8")
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-            T.annotate_layout({
-                E:
-                    make_metadata_layout(
-                        E, mma_dtype="float16", arch="9.0", backend="cutlass", block_k=block_K),
-                E_shared:
-                    make_metadata_layout(
+            T.annotate_layout(
+                {
+                    E: make_metadata_layout(
+                        E, mma_dtype="float16", arch="9.0", backend="cutlass", block_k=block_K
+                    ),
+                    E_shared: make_metadata_layout(
                         E_shared,
                         mma_dtype="float16",
                         arch="9.0",
                         backend="cutlass",
-                        block_k=block_K),
-            })
+                        block_k=block_K,
+                    ),
+                }
+            )
             T.disable_warp_group_reg_alloc()
             T.clear(C_local)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
@@ -118,24 +120,26 @@ def matmul_sp_sm80(
 
     @T.prim_func
     def main(
-            A_sparse: T.Tensor(A_sparse_shape, in_dtype),
-            E: T.Tensor((M, K // E_factor), 'int32' if is_8_bit else 'int16'),
-            B: T.Tensor(B_shape, in_dtype),
-            C: T.Tensor((M, N), out_dtype),
+        A_sparse: T.Tensor(A_sparse_shape, in_dtype),
+        E: T.Tensor((M, K // E_factor), "int32" if is_8_bit else "int16"),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
-            E_shared = T.alloc_shared((block_M, block_K // E_factor),
-                                      'int32' if is_8_bit else 'int16')
+            E_shared = T.alloc_shared(
+                (block_M, block_K // E_factor), "int32" if is_8_bit else "int16"
+            )
             C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
-            T.annotate_layout({
-                E:
-                    make_metadata_layout(E, mma_dtype="float16", backend="cutlass", arch="8.0"),
-                E_shared:
-                    make_metadata_layout(
-                        E_shared, mma_dtype="float16", backend="cutlass", arch="8.0"),
-            })
+            T.annotate_layout(
+                {
+                    E: make_metadata_layout(E, mma_dtype="float16", backend="cutlass", arch="8.0"),
+                    E_shared: make_metadata_layout(
+                        E_shared, mma_dtype="float16", backend="cutlass", arch="8.0"
+                    ),
+                }
+            )
             T.clear(C_frag)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(E[by * block_M, k * block_K // E_factor], E_shared)
@@ -182,11 +186,11 @@ def run_gemm_sp(
         kernel,
         out_idx=[-1],
     )
-    A = randn_semi_sparse(M, K, dtype=STR_TO_TYPE[in_dtype], device='cuda', transposed=trans_A)
+    A = randn_semi_sparse(M, K, dtype=STR_TO_TYPE[in_dtype], device="cuda", transposed=trans_A)
     if trans_B:
-        B = torch.randn((N, K), device='cuda', dtype=torch.float32)
+        B = torch.randn((N, K), device="cuda", dtype=torch.float32)
     else:
-        B = torch.randn((K, N), device='cuda', dtype=torch.float32)
+        B = torch.randn((K, N), device="cuda", dtype=torch.float32)
 
     if "float8" in in_dtype or "int8" in in_dtype:
         A = normalize(A.float())
@@ -210,7 +214,7 @@ def run_gemm_sp(
         return torch.matmul(A, B).to(STR_TO_TYPE[out_dtype])
 
     C = _matmul(A, B)
-    if 'float8' in in_dtype:
+    if "float8" in in_dtype:
         diff = calc_diff(C_sp, C)
         assert diff < 1e-3, f"{diff=}"
     else:
@@ -319,15 +323,19 @@ def test_gemm_sp_sm90():
     run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 128, 256, 0, 128)
     run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 128, 256, 2, 128)
 
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, False,
-                     True)
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, True,
-                     False)
-    run_gemm_sp_sm90(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, True,
-                     True)
+    run_gemm_sp_sm90(
+        512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, False, True
+    )
+    run_gemm_sp_sm90(
+        512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, True, False
+    )
+    run_gemm_sp_sm90(
+        512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, True, True
+    )
 
-    run_gemm_sp_sm90(512, 1024, 768, "float8_e4m3", "float16", "float16", 64, 64, 64, 2, 128, False,
-                     True)
+    run_gemm_sp_sm90(
+        512, 1024, 768, "float8_e4m3", "float16", "float16", 64, 64, 64, 2, 128, False, True
+    )
     run_gemm_sp_sm90(512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 2, 128, False, True)
 
 
@@ -339,12 +347,15 @@ def test_gemm_sp_sm80():
     run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 32)
     run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128)
 
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 32, 32, 64, 0, 32, False,
-                     True)
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 32, False,
-                     True)
-    run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, False,
-                     True)
+    run_gemm_sp_sm80(
+        512, 1024, 768, "float16", "float32", "float32", 32, 32, 64, 0, 32, False, True
+    )
+    run_gemm_sp_sm80(
+        512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 32, False, True
+    )
+    run_gemm_sp_sm80(
+        512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 0, 128, False, True
+    )
 
     run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 1, 128)
     run_gemm_sp_sm80(512, 1024, 768, "float16", "float32", "float32", 64, 64, 64, 2, 128)

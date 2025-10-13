@@ -15,8 +15,8 @@ class suppress_stdout_stderr:
 
     def __enter__(self):
         # Open null device files
-        self.outnull_file = open(os.devnull, 'w')
-        self.errnull_file = open(os.devnull, 'w')
+        self.outnull_file = open(os.devnull, "w")
+        self.errnull_file = open(os.devnull, "w")
 
         # Save original file descriptors
         self.old_stdout_fileno_undup = sys.stdout.fileno()
@@ -55,7 +55,7 @@ class suppress_stdout_stderr:
 
 
 IS_CUDA = torch.cuda.is_available()
-device = 'cuda:0' if IS_CUDA else 'mps:0'
+device = "cuda:0" if IS_CUDA else "mps:0"
 Event = torch.cuda.Event if IS_CUDA else torch.mps.Event
 
 
@@ -92,8 +92,7 @@ def do_bench(
     Returns:
         Runtime in milliseconds (float) or list of quantile values if quantiles specified
     """
-    assert return_mode in ["min", "max", "mean", "median"], \
-        f"Invalid return_mode: {return_mode}"
+    assert return_mode in ["min", "max", "mean", "median"], f"Invalid return_mode: {return_mode}"
 
     # Initial function call and synchronization
     fn()

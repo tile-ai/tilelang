@@ -68,8 +68,9 @@ def buffer_load_to_tile_region(load: BufferLoad, access_type: str, extents: List
     return region(load, access_type, *extents)
 
 
-def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: str,
-                                 extents: List[tir.PrimExpr]):
+def buffer_region_to_tile_region(
+    buffer_region: tir.BufferRegion, access_type: str, extents: List[tir.PrimExpr]
+):
     """Convert a buffer region to a tile region descriptor.
 
     Args:
@@ -81,9 +82,9 @@ def buffer_region_to_tile_region(buffer_region: tir.BufferRegion, access_type: s
     """
     mins = [x.min for x in buffer_region.region]
     region_extents = [x.extent for x in buffer_region.region]
-    assert len(region_extents) >= len(
-        extents
-    ), f"region_extents must be >= extents, region_extents = {region_extents}, extents = {extents}"
+    assert len(region_extents) >= len(extents), (
+        f"region_extents must be >= extents, region_extents = {region_extents}, extents = {extents}"
+    )
 
     return region(T.BufferLoad(buffer_region.buffer, mins), access_type, *region_extents)
 

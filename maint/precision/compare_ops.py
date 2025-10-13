@@ -39,7 +39,7 @@ OP_NAMES: Dict[int, str] = {
     6: "sqrt",
     7: "tanh",
     8: "rsqrt",
-    9: "inv_sqrt"
+    9: "inv_sqrt",
 }
 
 # Block sizes for kernels
@@ -52,7 +52,8 @@ TILELANG_THREADS = 128
 def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Precision comparison tool for various CUDA implementations")
+        description="Precision comparison tool for various CUDA implementations"
+    )
     parser.add_argument("--n", type=int, default=1000000, help="Number of elements to test")
     parser.add_argument("--low", type=float, default=-4.0, help="Lower bound for random values")
     parser.add_argument("--high", type=float, default=4.0, help="Upper bound for random values")
@@ -69,7 +70,7 @@ def initialize_cuda() -> torch.nn.Module:
     return load(
         name="cuda_ops",
         sources=["cuda_ops.cu"],
-        extra_cuda_cflags=[]  # No fast_math flags
+        extra_cuda_cflags=[],  # No fast_math flags
     )
 
 
@@ -151,8 +152,9 @@ def triton_unary_kernel(x_ptr, out_ptr, n_elements, op_id: tl.constexpr, BLOCK_S
 
 
 @triton.jit
-def triton_libdevice_unary_kernel(x_ptr, out_ptr, n_elements, op_id: tl.constexpr,
-                                  BLOCK_SIZE: tl.constexpr):
+def triton_libdevice_unary_kernel(
+    x_ptr, out_ptr, n_elements, op_id: tl.constexpr, BLOCK_SIZE: tl.constexpr
+):
     """LibDevice Triton kernel for unary operations."""
     pid = tl.program_id(0)
     block_start = pid * BLOCK_SIZE
@@ -190,13 +192,12 @@ def make_tilelang_unary_kernel(M: int, N: int, op_id: int, use_fastmath: bool = 
 
     @T.prim_func
     def tilelang_unary_kernel(
-            A: T.Tensor((M, N), "float32"),
-            B: T.Tensor((M, N), "float32"),
+        A: T.Tensor((M, N), "float32"),
+        B: T.Tensor((M, N), "float32"),
     ):
         with T.Kernel(
-                T.ceildiv(N, TILELANG_BLOCK_N),
-                T.ceildiv(M, TILELANG_BLOCK_M),
-                threads=TILELANG_THREADS) as (bx, by):
+            T.ceildiv(N, TILELANG_BLOCK_N), T.ceildiv(M, TILELANG_BLOCK_M), threads=TILELANG_THREADS
+        ) as (bx, by):
             for i, j in T.Parallel(TILELANG_BLOCK_M, TILELANG_BLOCK_N):
                 row = by * TILELANG_BLOCK_M + i
                 col = bx * TILELANG_BLOCK_N + j
@@ -231,14 +232,13 @@ def make_tilelang_binary_kernel(M: int, N: int):
 
     @T.prim_func
     def tilelang_binary_kernel(
-            A: T.Tensor((M, N), "float32"),
-            B: T.Tensor((M, N), "float32"),
-            C: T.Tensor((M, N), "float32"),
+        A: T.Tensor((M, N), "float32"),
+        B: T.Tensor((M, N), "float32"),
+        C: T.Tensor((M, N), "float32"),
     ):
         with T.Kernel(
-                T.ceildiv(N, TILELANG_BLOCK_N),
-                T.ceildiv(M, TILELANG_BLOCK_M),
-                threads=TILELANG_THREADS) as (bx, by):
+            T.ceildiv(N, TILELANG_BLOCK_N), T.ceildiv(M, TILELANG_BLOCK_M), threads=TILELANG_THREADS
+        ) as (bx, by):
             for i, j in T.Parallel(TILELANG_BLOCK_M, TILELANG_BLOCK_N):
                 row = by * TILELANG_BLOCK_M + i
                 col = bx * TILELANG_BLOCK_N + j
@@ -249,10 +249,9 @@ def make_tilelang_binary_kernel(M: int, N: int):
     return tilelang_binary_kernel
 
 
-def tilelang_op(x: torch.Tensor,
-                op_id: int,
-                y: Optional[torch.Tensor] = None,
-                use_fastmath: bool = False) -> torch.Tensor:
+def tilelang_op(
+    x: torch.Tensor, op_id: int, y: Optional[torch.Tensor] = None, use_fastmath: bool = False
+) -> torch.Tensor:
     """TileLang operation interface."""
     assert x.is_cuda
 
@@ -274,7 +273,8 @@ def tilelang_op(x: torch.Tensor,
             target="cuda",
             pass_configs={
                 tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: use_fastmath,
-            })
+            },
+        )
         out = kernel(x, y)
     else:  # Unary operation
         kernel_func = make_tilelang_unary_kernel(M, N, op_id, use_fastmath)
@@ -284,7 +284,8 @@ def tilelang_op(x: torch.Tensor,
             target="cuda",
             pass_configs={
                 tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: use_fastmath,
-            })
+            },
+        )
         out = kernel(x)
 
     # Restore original shape
@@ -295,7 +296,7 @@ def triton_op(x: torch.Tensor, op_id: int, y: Optional[torch.Tensor] = None) -> 
     """Standard Triton operation interface."""
     assert x.is_cuda
     out = torch.empty_like(x)
-    grid = lambda meta: ((x.numel() + meta['BLOCK_SIZE'] - 1) // meta['BLOCK_SIZE'],)
+    grid = lambda meta: ((x.numel() + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
 
     if op_id == 0:  # Division - binary operation
         assert y is not None, "Division operation requires second operand"
@@ -306,13 +307,13 @@ def triton_op(x: torch.Tensor, op_id: int, y: Optional[torch.Tensor] = None) -> 
     return out
 
 
-def triton_libdevice_op(x: torch.Tensor,
-                        op_id: int,
-                        y: Optional[torch.Tensor] = None) -> torch.Tensor:
+def triton_libdevice_op(
+    x: torch.Tensor, op_id: int, y: Optional[torch.Tensor] = None
+) -> torch.Tensor:
     """LibDevice Triton operation interface."""
     assert x.is_cuda
     out = torch.empty_like(x)
-    grid = lambda meta: ((x.numel() + meta['BLOCK_SIZE'] - 1) // meta['BLOCK_SIZE'],)
+    grid = lambda meta: ((x.numel() + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
 
     if op_id == 0:  # Division - binary operation
         assert y is not None, "Division operation requires second operand"
@@ -323,9 +324,9 @@ def triton_libdevice_op(x: torch.Tensor,
     return out
 
 
-def get_pytorch_reference(x: torch.Tensor,
-                          op_id: int,
-                          y: Optional[torch.Tensor] = None) -> torch.Tensor:
+def get_pytorch_reference(
+    x: torch.Tensor, op_id: int, y: Optional[torch.Tensor] = None
+) -> torch.Tensor:
     """Get PyTorch reference implementation for the given operation."""
     if op_id == 0:
         assert y is not None, "Division requires second operand"
@@ -364,8 +365,10 @@ def summarize_error(tag: str, output: Optional[torch.Tensor], reference: torch.T
 
     abs_err = (output_double - reference_double).abs()
     rel_err = abs_err / (reference_double.abs().clamp_min(1e-30))
-    print(f"{tag:<32} max abs: {abs_err.max():.3e}, mean abs: {abs_err.mean():.3e}, "
-          f"max rel: {rel_err.max():.3e}, mean rel: {rel_err.mean():.3e}")
+    print(
+        f"{tag:<32} max abs: {abs_err.max():.3e}, mean abs: {abs_err.mean():.3e}, "
+        f"max rel: {rel_err.max():.3e}, mean rel: {rel_err.mean():.3e}"
+    )
 
 
 # Precision comparison function
@@ -429,8 +432,9 @@ def compare(op_id: int, x: torch.Tensor, y: Optional[torch.Tensor] = None) -> No
         summarize_error(tag, output, ref_double)
 
 
-def generate_test_data(op_id: int, n: int, device: torch.device, low: float,
-                       high: float) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+def generate_test_data(
+    op_id: int, n: int, device: torch.device, low: float, high: float
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Generate appropriate test data for each operation."""
     if op_id == 0:  # Division
         x = torch.empty(n, device=device).uniform_(low, high)

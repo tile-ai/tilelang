@@ -108,8 +108,9 @@ class KernelLaunchFrame(TIRFrame):
         _get_current_stack().push(self)
 
         last_block_frame = self.frames[-1]
-        assert isinstance(last_block_frame,
-                          BlockFrame), f"Last frame must be a block frame, got {last_block_frame}"
+        assert isinstance(last_block_frame, BlockFrame), (
+            f"Last frame must be a block frame, got {last_block_frame}"
+        )
 
         maybe_cpu = last_block_frame.annotations.get("tilelang.is_cpu_kernel_frame", False)
 
@@ -304,56 +305,48 @@ def Kernel(
 
 
 def get_thread_binding(dim: int = 0) -> Var:
-    """Returns the thread binding for the given dimension.
-    """
+    """Returns the thread binding for the given dimension."""
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_thread_binding(dim)
 
 
 def get_thread_bindings() -> List[Var]:
-    """Returns all three thread bindings.
-    """
+    """Returns all three thread bindings."""
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_thread_bindings()
 
 
 def get_block_binding(dim: int = 0) -> Var:
-    """Returns the block binding for the given dimension.
-    """
+    """Returns the block binding for the given dimension."""
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_block_binding(dim)
 
 
 def get_block_bindings() -> List[Var]:
-    """Returns all three block bindings.
-    """
+    """Returns all three block bindings."""
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_block_bindings()
 
 
 def get_thread_extent(dim: int = 0) -> int:
-    """Returns the thread extent for the given dimension.
-    """
+    """Returns the thread extent for the given dimension."""
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_thread_extent(dim)
 
 
 def get_thread_extents() -> List[int]:
-    """Returns all three thread extents.
-    """
+    """Returns all three thread extents."""
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_thread_extents()
 
 
 def get_block_extent(dim: int = 0) -> int:
-    """Returns the block extent for the given dimension.
-    """
+    """Returns the block extent for the given dimension."""
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_block_extent(dim)
 
 
 def get_block_extents() -> List[int]:
-    """Returns all three block extents.
-    """
+    """Returns all three block extents."""
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_block_extents()

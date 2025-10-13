@@ -9,7 +9,6 @@ from ..utils import get_roller_hints_from_func
 
 @dataclass
 class GeneralReductionTemplate(BaseTemplate):
-
     # OP Related Config
     structure: Union[str, List[str]] = None
     shape: List[int] = None
@@ -17,7 +16,8 @@ class GeneralReductionTemplate(BaseTemplate):
 
     def get_hardware_aware_configs(self, arch: TileDevice = None, topk: int = 10) -> List[Hint]:
         roller_hints = get_roller_hints_from_func(
-            self._func, arch=arch, topk=topk, allow_gemv=False)
+            self._func, arch=arch, topk=topk, allow_gemv=False
+        )
         return roller_hints
 
     def initialize_function(self) -> None:
@@ -38,9 +38,9 @@ class GeneralReductionTemplate(BaseTemplate):
         spatial_axes = []
         reduce_axes = []
         for i, axis_type in enumerate(self.structure):
-            if axis_type.upper() == 'S':
+            if axis_type.upper() == "S":
                 spatial_axes.append((i, self.shape[i]))
-            elif axis_type.upper() == 'R':
+            elif axis_type.upper() == "R":
                 reduce_axes.append((i, self.shape[i]))
             else:
                 raise ValueError(f"Unrecognized axis type '{axis_type}', only 'S'/'R' allowed.")
@@ -90,7 +90,7 @@ class GeneralReductionTemplate(BaseTemplate):
 
             # Walk through the structure in order
             for axis_type in self.structure:
-                if axis_type.upper() == 'S':
+                if axis_type.upper() == "S":
                     # use the next spatial_indices item
                     full_index.append(spatial_indices[spatial_iter])
                     spatial_iter += 1

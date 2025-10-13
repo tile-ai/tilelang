@@ -41,7 +41,8 @@ def clear(buffer: Union[tir.Buffer, tir.Var]):
             region = get_buffer_region_from_load(buffer_region)
             if region is None:
                 raise ValueError(
-                    f"Invalid buffer region: {buffer_region}, type: {type(buffer_region)}")
+                    f"Invalid buffer region: {buffer_region}, type: {type(buffer_region)}"
+                )
             return fill(region, 0)
         else:
             raise ValueError(f"Invalid buffer region: {buffer_region}, type: {type(buffer_region)}")

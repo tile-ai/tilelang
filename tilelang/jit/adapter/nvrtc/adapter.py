@@ -25,18 +25,19 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
     pymodule = None
     kernels = {}
 
-    def __init__(self,
-                 params: List[KernelParam],
-                 result_idx: List[int],
-                 target: Union[str, Target],
-                 func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-                 host_mod: Optional[tvm.IRModule] = None,
-                 device_mod: Optional[tvm.IRModule] = None,
-                 kernel_global_source: Optional[str] = None,
-                 verbose: bool = False,
-                 pass_configs: Optional[Dict[str, Any]] = None,
-                 compile_flags: Optional[List[str]] = None):
-
+    def __init__(
+        self,
+        params: List[KernelParam],
+        result_idx: List[int],
+        target: Union[str, Target],
+        func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+        host_mod: Optional[tvm.IRModule] = None,
+        device_mod: Optional[tvm.IRModule] = None,
+        kernel_global_source: Optional[str] = None,
+        verbose: bool = False,
+        pass_configs: Optional[Dict[str, Any]] = None,
+        compile_flags: Optional[List[str]] = None,
+    ):
         check_nvrtc_available()
 
         self.params = params
@@ -90,16 +91,18 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         self._post_init()
 
     @classmethod
-    def from_database(cls,
-                      params: List[KernelParam],
-                      result_idx: List[int],
-                      target: str,
-                      func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-                      kernel_global_source: str,
-                      kernel_lib_path: str,
-                      verbose: bool = False,
-                      pass_configs: Optional[Dict[str, Any]] = None,
-                      compile_flags: Optional[List[str]] = None):
+    def from_database(
+        cls,
+        params: List[KernelParam],
+        result_idx: List[int],
+        target: str,
+        func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+        kernel_global_source: str,
+        kernel_lib_path: str,
+        verbose: bool = False,
+        pass_configs: Optional[Dict[str, Any]] = None,
+        compile_flags: Optional[List[str]] = None,
+    ):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
@@ -176,13 +179,12 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         return self.kernel_global_source
 
     def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):
-        """Low-level function to call the compiled CUDA kernel.
-        """
+        """Low-level function to call the compiled CUDA kernel."""
         return self.pymodule.call(self.kernels, *args, stream=stream)
 
-    def _wrap_forward_from_prebuild_lib(self,
-                                        *ins: List[torch.Tensor],
-                                        stream: Optional[int] = None):
+    def _wrap_forward_from_prebuild_lib(
+        self, *ins: List[torch.Tensor], stream: Optional[int] = None
+    ):
         """High-level wrapper for kernel execution.
 
         Handles:

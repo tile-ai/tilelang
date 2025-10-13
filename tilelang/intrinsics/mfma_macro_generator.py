@@ -6,7 +6,8 @@ from tvm.tir import PrimExpr
 from tvm.runtime import convert
 from typing import Optional
 from .utils import (
-    mfma_store_index_map,)
+    mfma_store_index_map,
+)
 
 lift = convert
 
@@ -78,7 +79,7 @@ class MatrixCoreIntrinEmitter(object):
         self.warp_rows = warp_row_tiles // self.micro_size_x
         self.warp_cols = warp_col_tiles // self.micro_size_y
         self.reduce_k = reduce_k
-        self.threads = (self.WARP_SIZE * (block_row_warps * block_col_warps) * reduce_k)
+        self.threads = self.WARP_SIZE * (block_row_warps * block_col_warps) * reduce_k
         self.num_elems_per_byte = num_elems_per_byte
 
     def _initialize_k_dim(self, a_dtype="float16"):
@@ -108,12 +109,9 @@ class MatrixCoreIntrinEmitter(object):
     def _initialize_mfma_prefix(self, k_dim=16):
         in_dtype, out_dtype = self.a_dtype, self.accum_dtype
         M_DIM, N_DIM = self.M_DIM, self.N_DIM
-        out_dtype_abbrv = {
-            "float16": "f16",
-            "float32": "f32",
-            "int8": "i8",
-            "int32": "i32"
-        }[out_dtype]
+        out_dtype_abbrv = {"float16": "f16", "float32": "f32", "int8": "i8", "int32": "i32"}[
+            out_dtype
+        ]
 
         in_dtype_abbrv = {
             "float16": "f16",
@@ -173,42 +171,98 @@ class MatrixCoreIntrinEmitter(object):
             index_map = shared_16x4_to_local_64x1_layout_A
             reverse_index_map = thread_id_shared_access_64x1_to_16x4_layout_A
             if is_b:
-                index_map = shared_16x4_to_local_64x1_layout_A if transposed else shared_4x16_to_local_64x1_layout_B
-                reverse_index_map = thread_id_shared_access_64x1_to_16x4_layout_A if transposed else thread_id_shared_access_64x1_to_4x16_layout_B
+                index_map = (
+                    shared_16x4_to_local_64x1_layout_A
+                    if transposed
+                    else shared_4x16_to_local_64x1_layout_B
+                )
+                reverse_index_map = (
+                    thread_id_shared_access_64x1_to_16x4_layout_A
+                    if transposed
+                    else thread_id_shared_access_64x1_to_4x16_layout_B
+                )
         elif k_dim == 16:
-            index_map = shared_16x16_to_local_64x4_layout_B if transposed else shared_16x16_to_local_64x4_layout_A
-            reverse_index_map = thread_id_shared_access_64x4_to_16x16_layout_B if transposed else thread_id_shared_access_64x4_to_16x16_layout_A
+            index_map = (
+                shared_16x16_to_local_64x4_layout_B
+                if transposed
+                else shared_16x16_to_local_64x4_layout_A
+            )
+            reverse_index_map = (
+                thread_id_shared_access_64x4_to_16x16_layout_B
+                if transposed
+                else thread_id_shared_access_64x4_to_16x16_layout_A
+            )
 
             if is_b:
-                index_map = shared_16x16_to_local_64x4_layout_A if transposed else shared_16x16_to_local_64x4_layout_B
-                reverse_index_map = thread_id_shared_access_64x4_to_16x16_layout_A if transposed else thread_id_shared_access_64x4_to_16x16_layout_B
+                index_map = (
+                    shared_16x16_to_local_64x4_layout_A
+                    if transposed
+                    else shared_16x16_to_local_64x4_layout_B
+                )
+                reverse_index_map = (
+                    thread_id_shared_access_64x4_to_16x16_layout_A
+                    if transposed
+                    else thread_id_shared_access_64x4_to_16x16_layout_B
+                )
         elif k_dim == 32:
-            index_map = shared_16x32_to_local_64x8_layout_B if transposed else shared_16x32_to_local_64x8_layout_A
-            reverse_index_map = thread_id_shared_access_64x8_to_16x32_layout_B if transposed else thread_id_shared_access_64x8_to_16x32_layout_A
+            index_map = (
+                shared_16x32_to_local_64x8_layout_B
+                if transposed
+                else shared_16x32_to_local_64x8_layout_A
+            )
+            reverse_index_map = (
+                thread_id_shared_access_64x8_to_16x32_layout_B
+                if transposed
+                else thread_id_shared_access_64x8_to_16x32_layout_A
+            )
 
             if is_b:
-                index_map = shared_16x32_to_local_64x8_layout_A if transposed else shared_16x32_to_local_64x8_layout_B
-                reverse_index_map = thread_id_shared_access_64x8_to_16x32_layout_A if transposed else thread_id_shared_access_64x8_to_16x32_layout_B
+                index_map = (
+                    shared_16x32_to_local_64x8_layout_A
+                    if transposed
+                    else shared_16x32_to_local_64x8_layout_B
+                )
+                reverse_index_map = (
+                    thread_id_shared_access_64x8_to_16x32_layout_A
+                    if transposed
+                    else thread_id_shared_access_64x8_to_16x32_layout_B
+                )
         elif k_dim == 64:
-            index_map = shared_16x64_to_local_64x16_layout_B if transposed else shared_16x64_to_local_64x16_layout_A
-            reverse_index_map = thread_id_shared_access_64x16_to_16x64_layout_B if transposed else thread_id_shared_access_64x16_to_16x64_layout_A
+            index_map = (
+                shared_16x64_to_local_64x16_layout_B
+                if transposed
+                else shared_16x64_to_local_64x16_layout_A
+            )
+            reverse_index_map = (
+                thread_id_shared_access_64x16_to_16x64_layout_B
+                if transposed
+                else thread_id_shared_access_64x16_to_16x64_layout_A
+            )
 
             if is_b:
-                index_map = shared_16x64_to_local_64x16_layout_A if transposed else shared_16x64_to_local_64x16_layout_B
-                reverse_index_map = thread_id_shared_access_64x16_to_16x64_layout_A if transposed else thread_id_shared_access_64x16_to_16x64_layout_B
+                index_map = (
+                    shared_16x64_to_local_64x16_layout_A
+                    if transposed
+                    else shared_16x64_to_local_64x16_layout_B
+                )
+                reverse_index_map = (
+                    thread_id_shared_access_64x16_to_16x64_layout_A
+                    if transposed
+                    else thread_id_shared_access_64x16_to_16x64_layout_B
+                )
         else:
             raise ValueError("k_dim must be 4 or 16 or 32 or 64 currently")
 
         return index_map, reverse_index_map
 
-    def extract_thread_binding(self,
-                               thread_id,
-                               is_m_first=None) -> Tuple[PrimExpr, PrimExpr, PrimExpr]:
-        '''
-            is_m_first: True if the thread binding is in the form of (tx, warp_n, warp_m)
-            which represents [warp_size, block_row_warps (split n), block_col_warps (split m)]
-            Otherwise, it is in the form of [warp_size, block_col_warps (split m), block_row_warps (split n)]
-        '''
+    def extract_thread_binding(
+        self, thread_id, is_m_first=None
+    ) -> Tuple[PrimExpr, PrimExpr, PrimExpr]:
+        """
+        is_m_first: True if the thread binding is in the form of (tx, warp_n, warp_m)
+        which represents [warp_size, block_row_warps (split n), block_col_warps (split m)]
+        Otherwise, it is in the form of [warp_size, block_col_warps (split m), block_row_warps (split n)]
+        """
         WARP_SIZE = self.WARP_SIZE
         block_row_warps = self.block_row_warps
         block_col_warps = self.block_col_warps
@@ -218,16 +272,18 @@ class MatrixCoreIntrinEmitter(object):
             is_m_first = self.is_m_first
 
         if is_m_first:
-            lane_id, warp_n, warp_m = thread_id % WARP_SIZE, (
-                thread_id //
-                WARP_SIZE) % block_col_warps, (thread_id //
-                                               (WARP_SIZE * block_col_warps)) % block_row_warps,
+            lane_id, warp_n, warp_m = (
+                thread_id % WARP_SIZE,
+                (thread_id // WARP_SIZE) % block_col_warps,
+                (thread_id // (WARP_SIZE * block_col_warps)) % block_row_warps,
+            )
             return lane_id, warp_n, warp_m
         else:
-            lane_id, warp_m, warp_n = thread_id % WARP_SIZE, (
-                thread_id //
-                WARP_SIZE) % block_row_warps, (thread_id //
-                                               (WARP_SIZE * block_row_warps)) % block_col_warps,
+            lane_id, warp_m, warp_n = (
+                thread_id % WARP_SIZE,
+                (thread_id // WARP_SIZE) % block_row_warps,
+                (thread_id // (WARP_SIZE * block_row_warps)) % block_col_warps,
+            )
             return lane_id, warp_n, warp_m
 
     def ldmatrix_a(self, A_local_buf, A_shared_buf, ki, rk=0):
@@ -256,18 +312,24 @@ class MatrixCoreIntrinEmitter(object):
                 for i in T.serial(warp_rows):
                     for local_id in T.vectorized(k_pack * local_size_a):
                         row, col = T.meta_var(reverse_index_map(tx, local_id))
-                        l, r = (rk * chunk + ki * (k_pack * micro_size_k),
-                                warp_m * warp_row_tiles + i * micro_size_x)
-                        A_local_buf[i * k_pack * local_size_a + local_id] = A_shared_buf[l + row,
-                                                                                         r + col]
+                        l, r = (
+                            rk * chunk + ki * (k_pack * micro_size_k),
+                            warp_m * warp_row_tiles + i * micro_size_x,
+                        )
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_shared_buf[
+                            l + row, r + col
+                        ]
             else:
                 for i in T.serial(warp_rows):
                     for local_id in T.vectorized(k_pack * local_size_a):
                         row, col = T.meta_var(reverse_index_map(tx, local_id))
-                        l, r = (warp_m * warp_row_tiles + i * micro_size_x,
-                                rk * chunk + ki * (k_pack * micro_size_k))
-                        A_local_buf[i * k_pack * local_size_a + local_id] = A_shared_buf[l + row,
-                                                                                         r + col]
+                        l, r = (
+                            warp_m * warp_row_tiles + i * micro_size_x,
+                            rk * chunk + ki * (k_pack * micro_size_k),
+                        )
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_shared_buf[
+                            l + row, r + col
+                        ]
 
         return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
 
@@ -301,8 +363,9 @@ class MatrixCoreIntrinEmitter(object):
                             warp_n * warp_col_tiles + j * micro_size_y,
                             rk * chunk + ki * (k_pack * micro_size_k),
                         )
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[l + row,
-                                                                                         r + col]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[
+                            l + row, r + col
+                        ]
 
             else:
                 for j in T.serial(warp_cols):
@@ -312,8 +375,9 @@ class MatrixCoreIntrinEmitter(object):
                             rk * chunk + ki * (k_pack * micro_size_k),
                             warp_n * warp_col_tiles + j * micro_size_y,
                         )
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[l + row,
-                                                                                         r + col]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[
+                            l + row, r + col
+                        ]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
@@ -377,14 +441,18 @@ class MatrixCoreIntrinEmitter(object):
                 for local_id in T.vectorized(local_size_out):
                     row, col = T.meta_var(mfma_store_index_map(tx, local_id))
                     if C_buf_dims == 2:
-                        C_buf[(warp_m * warp_rows + i) * M_DIM + row,
-                              (warp_n * warp_cols + j) * N_DIM +
-                              col] = C_local_buf[i * (warp_cols * local_size_out) +
-                                                 j * local_size_out + local_id]
+                        C_buf[
+                            (warp_m * warp_rows + i) * M_DIM + row,
+                            (warp_n * warp_cols + j) * N_DIM + col,
+                        ] = C_local_buf[
+                            i * (warp_cols * local_size_out) + j * local_size_out + local_id
+                        ]
                     else:
-                        C_buf[warp_m * warp_rows + i, warp_n * warp_cols + j, row,
-                              col] = C_local_buf[i * warp_cols * local_size_out +
-                                                 j * local_size_out + local_id]
+                        C_buf[warp_m * warp_rows + i, warp_n * warp_cols + j, row, col] = (
+                            C_local_buf[
+                                i * warp_cols * local_size_out + j * local_size_out + local_id
+                            ]
+                        )
 
         @T.macro
         def _warp_stmatrix_global(C_local_buf, C_buf, thread_binding):
@@ -392,18 +460,19 @@ class MatrixCoreIntrinEmitter(object):
             for i, j in T.grid(warp_rows, warp_cols):
                 for local_id in T.vectorized(local_size_out):
                     row, col = T.meta_var(mfma_store_index_map(tx, local_id))
-                    C_buf[(pid_m * BLOCK_M + warp_m * warp_rows + i) * M_DIM + row,
-                          (pid_n * BLOCK_N + warp_n * warp_cols + j) * N_DIM +
-                          col] = C_local_buf[i * warp_cols * local_size_out + j * local_size_out +
-                                             local_id]
+                    C_buf[
+                        (pid_m * BLOCK_M + warp_m * warp_rows + i) * M_DIM + row,
+                        (pid_n * BLOCK_N + warp_n * warp_cols + j) * N_DIM + col,
+                    ] = C_local_buf[i * warp_cols * local_size_out + j * local_size_out + local_id]
 
-        return _warp_stmatrix_global(C_local_buf, C_buf,
-                                     thread_binding) if is_global else _warp_stmatrix_shared(
-                                         C_local_buf, C_buf, thread_binding)
+        return (
+            _warp_stmatrix_global(C_local_buf, C_buf, thread_binding)
+            if is_global
+            else _warp_stmatrix_shared(C_local_buf, C_buf, thread_binding)
+        )
 
 
 class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
-
     def __init__(
         self,
         a_dtype: str = "float16",
@@ -423,7 +492,6 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
         a_preshuffle: Optional[bool] = False,
         b_preshuffle: Optional[bool] = False,
     ):
-
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
         self.accum_dtype = accum_dtype
@@ -447,7 +515,7 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
         self.warp_rows = warp_row_tiles // self.micro_size_x
         self.warp_cols = warp_col_tiles // self.micro_size_y
         self.reduce_k = reduce_k
-        self.threads = (self.WARP_SIZE * (block_row_warps * block_col_warps) * reduce_k)
+        self.threads = self.WARP_SIZE * (block_row_warps * block_col_warps) * reduce_k
         self.num_elems_per_byte = num_elems_per_byte
 
     def _initialize_preshuffle(self, a_preshuffle: bool, b_preshuffle: bool):
@@ -516,20 +584,24 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
                             rk * (chunk // micro_size_k) + ki,
                             warp_m * warp_rows + i,
                         )
-                        A_local_buf[i * k_pack * local_size_a + local_id] = A_shared_buf[l, r, row,
-                                                                                         col]
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_shared_buf[
+                            l, r, row, col
+                        ]
             else:
                 print(self.a_preshuffle)
                 for i in T.serial(warp_rows):
                     for local_id in T.vectorized(k_pack * local_size_a):
                         row, col = T.meta_var(reverse_index_map(tx, local_id))
                         l, r = (warp_m * warp_rows + i, rk * (chunk // micro_size_k) + ki)
-                        A_local_buf[i * k_pack * local_size_a + local_id] = A_shared_buf[l, r, row,
-                                                                                         col]
+                        A_local_buf[i * k_pack * local_size_a + local_id] = A_shared_buf[
+                            l, r, row, col
+                        ]
 
-        return _warp_ldmatrix_a_global(A_local_buf, A_buf, ki, thread_binding,
-                                       rk) if is_global else _warp_ldmatrix_a_shared(
-                                           A_local_buf, A_buf, ki, thread_binding, rk)
+        return (
+            _warp_ldmatrix_a_global(A_local_buf, A_buf, ki, thread_binding, rk)
+            if is_global
+            else _warp_ldmatrix_a_shared(A_local_buf, A_buf, ki, thread_binding, rk)
+        )
 
     def ldmatrix_b(self, B_local_buf, B_buf, ki, rk=0, pid_m=None, pid_n=None):
         warp_cols = self.warp_cols
@@ -591,8 +663,9 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
                             warp_n * warp_cols + j,
                             rk * (chunk // micro_size_k) + ki,
                         )
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[l, r, row,
-                                                                                         col]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[
+                            l, r, row, col
+                        ]
             else:
                 for j in T.serial(warp_cols):
                     for local_id in T.vectorized(k_pack * local_size_b):
@@ -601,9 +674,12 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
                             rk * (chunk // micro_size_k) + ki,
                             warp_n * warp_cols + j,
                         )
-                        B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[l, r, row,
-                                                                                         col]
+                        B_local_buf[j * k_pack * local_size_b + local_id] = B_shared_buf[
+                            l, r, row, col
+                        ]
 
-        return _warp_ldmatrix_b_global(B_local_buf, B_buf, ki, thread_binding,
-                                       rk) if is_global else _warp_ldmatrix_b_shared(
-                                           B_local_buf, B_buf, ki, thread_binding, rk)
+        return (
+            _warp_ldmatrix_b_global(B_local_buf, B_buf, ki, thread_binding, rk)
+            if is_global
+            else _warp_ldmatrix_b_shared(B_local_buf, B_buf, ki, thread_binding, rk)
+        )

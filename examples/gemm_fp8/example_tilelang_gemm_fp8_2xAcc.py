@@ -13,9 +13,9 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype, accum_dtype="float"):
 
     @T.prim_func
     def gemm_fp8_2xAcc(
-            A: T.Tensor((M, K), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((M, N), accum_dtype),
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((M, N), accum_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
@@ -59,14 +59,14 @@ def test_gemm_fp8(M, N, K, dtype):
 
     kernel = matmul(M, N, K, 128, 128, 64, dtype)
 
-    a = torch.rand(M, K, dtype=torch.float16, device='cuda')
+    a = torch.rand(M, K, dtype=torch.float16, device="cuda")
     a = (100 * (2 * a - 1)).to(dtype=torch_dtype)
-    b = torch.rand(N, K, dtype=torch.float16, device='cuda')
+    b = torch.rand(N, K, dtype=torch.float16, device="cuda")
     b = (100 * (2 * b - 1)).to(dtype=torch_dtype)
 
     c = kernel(a, b)
 
-    ref_c = (a.float() @ b.float().T)
+    ref_c = a.float() @ b.float().T
 
     diff = calc_diff(c, ref_c)
     print(f"diff: {diff}")
@@ -74,8 +74,8 @@ def test_gemm_fp8(M, N, K, dtype):
 
 
 def main():
-    test_gemm_fp8(1024, 1024, 8192, 'float8_e4m3')
-    test_gemm_fp8(1024, 1024, 8192, 'float8_e5m2')
+    test_gemm_fp8(1024, 1024, 8192, "float8_e4m3")
+    test_gemm_fp8(1024, 1024, 8192, "float8_e5m2")
 
 
 if __name__ == "__main__":

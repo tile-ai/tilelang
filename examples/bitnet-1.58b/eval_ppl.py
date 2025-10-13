@@ -15,9 +15,9 @@ from tqdm import tqdm
 torch.set_grad_enabled(False)
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--seed', default=0, type=int)
-parser.add_argument('--hf_path', default='1bitLLM/bitnet_b1_58-3B', type=str)
-parser.add_argument('--seqlen', default=2048, type=int)
+parser.add_argument("--seed", default=0, type=int)
+parser.add_argument("--hf_path", default="1bitLLM/bitnet_b1_58-3B", type=str)
+parser.add_argument("--seqlen", default=2048, type=int)
 
 
 def calulate_loss(model, input, loss_fct):
@@ -29,12 +29,16 @@ def calulate_loss(model, input, loss_fct):
 
 
 def main(args):
-    datasets = ['c4', 'wikitext2']
-    model = BitnetForCausalLM.from_pretrained(
-        args.hf_path,
-        use_flash_attention_2=True,
-        torch_dtype=torch.float16,
-    ).cuda().half()
+    datasets = ["c4", "wikitext2"]
+    model = (
+        BitnetForCausalLM.from_pretrained(
+            args.hf_path,
+            use_flash_attention_2=True,
+            torch_dtype=torch.float16,
+        )
+        .cuda()
+        .half()
+    )
     with torch.no_grad():
         model._post_process_weights()
     tokenizer = BitnetTokenizer.from_pretrained(args.hf_path, use_fast=False)
@@ -48,9 +52,9 @@ def main(args):
         for ii in progress:
             input = torch.Tensor(testdata[ii]).long().cuda().view(1, -1)
             loss = calulate_loss(model, input, loss_fct)
-            count += (input.size(-1) - 1)
+            count += input.size(-1) - 1
             acc_loss += loss.item()
-            progress.set_description(f"avg_loss = {acc_loss/ count / math.log(2)}")
+            progress.set_description(f"avg_loss = {acc_loss / count / math.log(2)}")
 
         avg_loss = acc_loss / count / math.log(2)
         ppl.append(2**avg_loss)
@@ -60,7 +64,7 @@ def main(args):
     print("Avg PPL:", sum(ppl) / len(ppl))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     torch.set_grad_enabled(False)
     args = parser.parse_args()
     random.seed(args.seed)

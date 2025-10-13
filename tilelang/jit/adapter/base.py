@@ -6,7 +6,6 @@ from tilelang.engine.param import KernelParam
 
 
 class BaseKernelAdapter(ABC):
-
     func: Optional[Callable] = None
 
     def __init__(self, mod, params: List[KernelParam], result_idx: List[int]) -> None:

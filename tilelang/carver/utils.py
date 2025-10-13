@@ -26,11 +26,13 @@ def get_rasterization_code(pannel_width: int = 8) -> str:
     """
 
 
-def get_roller_hints_from_func(func_or_module: Union[tir.PrimFunc, IRModule],
-                               arch: TileDevice,
-                               topk: int = 10,
-                               tensorcore_only: bool = False,
-                               allow_gemv: bool = False) -> Optional[List[Hint]]:
+def get_roller_hints_from_func(
+    func_or_module: Union[tir.PrimFunc, IRModule],
+    arch: TileDevice,
+    topk: int = 10,
+    tensorcore_only: bool = False,
+    allow_gemv: bool = False,
+) -> Optional[List[Hint]]:
     func = None
     if isinstance(func_or_module, tir.PrimFunc):
         func = func_or_module
@@ -45,7 +47,8 @@ def get_roller_hints_from_func(func_or_module: Union[tir.PrimFunc, IRModule],
     if tensorcore_only:
         try:
             tensorized_func, tags = get_tensorized_func_and_tags(
-                func, arch.target, allow_gemv=allow_gemv)
+                func, arch.target, allow_gemv=allow_gemv
+            )
         except Exception as e_msg:
             logger.debug("Get tensorized func and tags failed: ", e_msg)
             tags = None
@@ -59,7 +62,8 @@ def get_roller_hints_from_func(func_or_module: Union[tir.PrimFunc, IRModule],
         tensorized_func = None
         try:
             tensorized_func, tags = get_tensorized_func_and_tags(
-                func, arch.target, allow_gemv=allow_gemv)
+                func, arch.target, allow_gemv=allow_gemv
+            )
         except Exception as e_msg:
             logger.debug("Get tensorized func and tags failed: ", e_msg)
             tags = None
@@ -70,10 +74,11 @@ def get_roller_hints_from_func(func_or_module: Union[tir.PrimFunc, IRModule],
 
 
 def get_roller_hints_from_output_nodes(
-        output_nodes: List[OutputNode],
-        arch: TileDevice,
-        topk: int = 10,
-        extra_tags: Optional[List[str]] = None) -> Optional[List[Hint]]:
+    output_nodes: List[OutputNode],
+    arch: TileDevice,
+    topk: int = 10,
+    extra_tags: Optional[List[str]] = None,
+) -> Optional[List[Hint]]:
     assert isinstance(output_nodes, list), "The input should be a list of functions."
 
     lints = []
@@ -81,8 +86,9 @@ def get_roller_hints_from_output_nodes(
         policy = TensorCorePolicy.from_output_nodes(output_nodes, arch=arch, tags=None)
         lints = policy.emit_config(topk)
     except Exception as e_msg:
-        logger.debug(f"Generate hints from output nodes failed: {e_msg}",
-                     "fallback to default policy")
+        logger.debug(
+            f"Generate hints from output nodes failed: {e_msg}", "fallback to default policy"
+        )
 
     if len(lints) == 0:
         policy = DefaultPolicy.from_output_nodes(output_nodes, arch=arch, tags=None)
@@ -94,6 +100,7 @@ def retrieve_func_from_module(ir_module: IRModule) -> PrimFunc:
     if not isinstance(ir_module, IRModule):
         raise ValueError("Not supported type: ", type(ir_module))
     assert len(ir_module.get_global_vars()) == 1, (
-        "The optimized module should only have one global variable for default schedule.")
+        "The optimized module should only have one global variable for default schedule."
+    )
     func = list(ir_module.functions.values())[0]
     return func

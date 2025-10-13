@@ -116,7 +116,8 @@ def retrieve_func_from_module(ir_module: IRModule) -> PrimFunc:
     if not isinstance(ir_module, IRModule):
         raise ValueError("Not supported type: ", type(ir_module))
     assert len(ir_module.get_global_vars()) == 1, (
-        "The optimized module should only have one global variable for default schedule.")
+        "The optimized module should only have one global variable for default schedule."
+    )
     func = list(ir_module.functions.values())[0]
     return func
 

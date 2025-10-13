@@ -1,7 +1,8 @@
 from .gemm_base import GemmBase
 from tilelang.layout import make_swizzled_layout
 from tilelang.intrinsics.mma_macro_generator import (
-    TensorCoreIntrinEmitter,)
+    TensorCoreIntrinEmitter,
+)
 from tilelang.utils.language import is_shared, is_fragment
 from tilelang import tvm as tvm
 from tvm.target import Target
@@ -11,10 +12,10 @@ from tilelang.transform.simplify import _Simplify
 
 
 class GemmMMA(GemmBase):
-
     def infer_layout(self, target: Target, thread_nums: int):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target,
-                                                            False)
+        m_warp, n_warp = self.policy.compute_warp_partition(
+            self.M, self.N, thread_nums, target, False
+        )
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -55,11 +56,13 @@ class GemmMMA(GemmBase):
             }
         else:
             raise ValueError(
-                f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+                f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}"
+            )
 
     def lower(self, layout_map: dict, target: Target, thread_nums: int, thread_var: tir.Var):
-        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target,
-                                                            False)
+        m_warp, n_warp = self.policy.compute_warp_partition(
+            self.M, self.N, thread_nums, target, False
+        )
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = TensorCoreIntrinEmitter(
@@ -87,7 +90,9 @@ class GemmMMA(GemmBase):
         B_shared = self.B
         C_local = self.C
 
-        assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
+        assert block_K >= micro_size_k, (
+            f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
+        )
 
         if self.is_gemm_ss():
 
@@ -135,7 +140,6 @@ class GemmMMA(GemmBase):
                 A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
-
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
                         A_local,
@@ -164,7 +168,6 @@ class GemmMMA(GemmBase):
                 B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
-
                     # Load B into fragment
                     mma_emitter.ldmatrix_b(
                         B_local,
@@ -199,7 +202,8 @@ class GemmMMA(GemmBase):
             return _Simplify(_gemm_rsr, inline_let=True)
         else:
             raise ValueError(
-                f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+                f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}"
+            )
 
     def is_gemm_ss(self) -> bool:
         return is_shared(self.A) and is_shared(self.B)

@@ -76,7 +76,9 @@ def compile(
     target = Target(determine_target(target))
 
     if is_metal_target(target):
-        assert execution_backend == 'torch', 'Currently metal target only support `tl.jit(execution_backend="torch")`'
+        assert execution_backend == "torch", (
+            'Currently metal target only support `tl.jit(execution_backend="torch")`'
+        )
 
     return cached(
         func=func,
@@ -91,7 +93,6 @@ def compile(
 
 
 class _JitImplementation:
-
     out_idx: Optional[Union[List[int], int]]
     target: Union[str, Target]
     target_host: Union[str, Target]
@@ -101,15 +102,17 @@ class _JitImplementation:
     debug_root_path: Optional[str]
     compile_flags: Optional[Union[List[str], str]]
 
-    def __init__(self,
-                 out_idx: Any = None,
-                 target: Union[str, Target] = "auto",
-                 target_host: Union[str, Target] = None,
-                 execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
-                 verbose: bool = False,
-                 pass_configs: Optional[Dict[str, Any]] = None,
-                 debug_root_path: Optional[str] = None,
-                 compile_flags: Optional[Union[List[str], str]] = None):
+    def __init__(
+        self,
+        out_idx: Any = None,
+        target: Union[str, Target] = "auto",
+        target_host: Union[str, Target] = None,
+        execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
+        verbose: bool = False,
+        pass_configs: Optional[Dict[str, Any]] = None,
+        debug_root_path: Optional[str] = None,
+        compile_flags: Optional[Union[List[str], str]] = None,
+    ):
         """
         Initializes the JIT compiler decorator.
 
@@ -167,34 +170,31 @@ class _JitImplementation:
     # This tells the type checker what the *wrapper* function will return.
     # this is for linting, please do not remove it.
     @overload
-    def __call__(self, func: Callable[_P, _RProg]) -> Callable[_P, Tuple[_RProg, Kernel]]:
-        ...
+    def __call__(self, func: Callable[_P, _RProg]) -> Callable[_P, Tuple[_RProg, Kernel]]: ...
 
     @overload
-    def __call__(self, func: Callable[_P, _RProg]) -> Callable[_P, Kernel]:
-        ...
+    def __call__(self, func: Callable[_P, _RProg]) -> Callable[_P, Kernel]: ...
 
     # Actual implementation of __call__
     def __call__(
         self,
-        func: Callable[_P, _RProg]  # func is Union[Callable[_P, _RProg], PrimFunc] in original
+        func: Callable[_P, _RProg],  # func is Union[Callable[_P, _RProg], PrimFunc] in original
     ) -> Callable[_P, Any]:
-
         @functools.wraps(func)
         def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> Any:
             # Separate out the tuning parameters from the user's kwargs
-            tune_params = kwargs.pop('__tune_params', {})
+            tune_params = kwargs.pop("__tune_params", {})
             # Whether to return the compile arguments (out_idx, target, target_host, etc.) for autotuner cache
-            return_compile_arguments = kwargs.pop('__return_compile_arguments', False)
+            return_compile_arguments = kwargs.pop("__return_compile_arguments", False)
             if return_compile_arguments:
                 compile_args = {
-                    'out_idx': self.out_idx,
-                    'execution_backend': self.execution_backend,
-                    'target': self.target,
-                    'target_host': self.target_host,
-                    'verbose': self.verbose,
-                    'pass_configs': self.pass_configs,
-                    'compile_flags': self.compile_flags,
+                    "out_idx": self.out_idx,
+                    "execution_backend": self.execution_backend,
+                    "target": self.target,
+                    "target_host": self.target_host,
+                    "verbose": self.verbose,
+                    "pass_configs": self.pass_configs,
+                    "compile_flags": self.compile_flags,
                 }
                 return compile_args
 
@@ -225,13 +225,13 @@ class _JitImplementation:
                 )
 
                 if self.debug_root_path:
-                    func_name = getattr(func, '__name__', 'jit_kernel')  # Use func for name
-                    kernel_file = f'tilelang_jit_kernel_{func_name}.c'
-                    program_file = f'tilelang_jit_program_{func_name}.py'
+                    func_name = getattr(func, "__name__", "jit_kernel")  # Use func for name
+                    kernel_file = f"tilelang_jit_kernel_{func_name}.c"
+                    program_file = f"tilelang_jit_program_{func_name}.py"
                     makedirs(self.debug_root_path, exist_ok=True)
-                    with open(path.join(self.debug_root_path, kernel_file), 'w') as f:
+                    with open(path.join(self.debug_root_path, kernel_file), "w") as f:
                         print(kernel_result.get_kernel_source(), file=f)
-                    with open(path.join(self.debug_root_path, program_file), 'w') as f:
+                    with open(path.join(self.debug_root_path, program_file), "w") as f:
                         print(program_result.script(), file=f)
 
                 self._kernel_cache[key] = kernel_result
@@ -242,16 +242,17 @@ class _JitImplementation:
 
 
 def jit(  # This is the new public interface
-        func: Union[Callable[_P, _RProg], PrimFunc, None] = None,
-        *,  # Indicates subsequent arguments are keyword-only
-        out_idx: Any = None,
-        target: Union[str, Target] = "auto",
-        target_host: Union[str, Target] = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
-        verbose: bool = False,
-        pass_configs: Optional[Dict[str, Any]] = None,
-        debug_root_path: Optional[str] = None,
-        compile_flags: Optional[Union[List[str], str]] = None):
+    func: Union[Callable[_P, _RProg], PrimFunc, None] = None,
+    *,  # Indicates subsequent arguments are keyword-only
+    out_idx: Any = None,
+    target: Union[str, Target] = "auto",
+    target_host: Union[str, Target] = None,
+    execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
+    verbose: bool = False,
+    pass_configs: Optional[Dict[str, Any]] = None,
+    debug_root_path: Optional[str] = None,
+    compile_flags: Optional[Union[List[str], str]] = None,
+):
     """
     Just-In-Time (JIT) compiler decorator for TileLang functions.
 
@@ -297,7 +298,8 @@ def jit(  # This is the new public interface
             verbose=verbose,
             pass_configs=pass_configs,
             debug_root_path=debug_root_path,
-            compile_flags=compile_flags)
+            compile_flags=compile_flags,
+        )
         return default_decorator(func)
     elif isinstance(func, PrimFunc):
         raise ValueError("Use tilelang.jit to decorate prim_func is not supported yet.")
@@ -313,5 +315,6 @@ def jit(  # This is the new public interface
             verbose=verbose,
             pass_configs=pass_configs,
             debug_root_path=debug_root_path,
-            compile_flags=compile_flags)
+            compile_flags=compile_flags,
+        )
         return configured_decorator

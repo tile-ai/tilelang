@@ -34,7 +34,8 @@ def cached(
         execution_backend=execution_backend,
         verbose=verbose,
         pass_configs=pass_configs,
-        compile_flags=compile_flags)
+        compile_flags=compile_flags,
+    )
 
 
 def clear_cache():

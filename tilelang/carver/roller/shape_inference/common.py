@@ -4,10 +4,10 @@ from typing import Dict, List
 from tvm import arith
 
 
-class Statement():
-
-    def __init__(self, output: str, dependent_region: dict, var_map: OrderedDict,
-                 range_map: OrderedDict):
+class Statement:
+    def __init__(
+        self, output: str, dependent_region: dict, var_map: OrderedDict, range_map: OrderedDict
+    ):
         self.output = output
         self.dependent_region = dependent_region
         self.var_map = var_map
@@ -18,8 +18,7 @@ def _merge_two_bounds(x: arith.ConstIntBound, y: arith.ConstIntBound):
     return arith.ConstIntBound(min(x.min_value, y.min_value), max(x.max_value, y.max_value))
 
 
-class InputShapeInference():
-
+class InputShapeInference:
     def __init__(self, deps: List[Statement]):
         self.deps = deps
 

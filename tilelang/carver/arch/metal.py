@@ -7,7 +7,6 @@ def is_metal_arch(arch: TileDevice) -> bool:
 
 
 class METAL(TileDevice):
-
     def __init__(self, target: Target | str):
         if isinstance(target, str):
             target = Target(target)
@@ -15,6 +14,6 @@ class METAL(TileDevice):
 
 
 __all__ = [
-    'is_metal_arch',
-    'METAL',
+    "is_metal_arch",
+    "METAL",
 ]

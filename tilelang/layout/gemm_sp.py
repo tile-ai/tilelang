@@ -133,24 +133,27 @@ def _make_metadata_layout_sm8x_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str):
     return T.Layout(buffer.shape, ColumnMajorInterleaved)
 
 
-def make_metadata_layout(buffer: tvm.tir.Buffer,
-                         mma_dtype: str = "float16",
-                         backend: str = 'cutlass',
-                         arch: Optional[str] = None,
-                         **extra_args):
+def make_metadata_layout(
+    buffer: tvm.tir.Buffer,
+    mma_dtype: str = "float16",
+    backend: str = "cutlass",
+    arch: Optional[str] = None,
+    **extra_args,
+):
     if arch is None:
         arch = nvcc.get_target_compute_version()
 
     compute_version = nvcc.parse_compute_version(arch)
 
     if compute_version >= (9, 0):
-        if backend == 'cutlass':
+        if backend == "cutlass":
             return _make_metadata_layout_sm90_cutlass(
-                buffer=buffer, mma_dtype=mma_dtype, **extra_args)
+                buffer=buffer, mma_dtype=mma_dtype, **extra_args
+            )
         else:
             raise NotImplementedError(f"Arch {arch}, Unsupported backend: {backend}")
     elif compute_version >= (8, 0):
-        if backend == 'cutlass':
+        if backend == "cutlass":
             return _make_metadata_layout_sm8x_cutlass(buffer=buffer, mma_dtype=mma_dtype)
         else:
             raise NotImplementedError(f"Arch {arch}, Unsupported backend: {backend}")

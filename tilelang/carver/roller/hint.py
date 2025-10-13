@@ -1,4 +1,5 @@
 """Hint definition for schedule"""
+
 from tvm import DataType
 from typing import Dict, List, Tuple
 from . import PrimFuncNode
@@ -61,7 +62,7 @@ class Stride:
             strided_elem = original_shape
         else:
             assert self.ax < len(shape)
-            strided_elem = np.prod(shape[0:self.ax + 1]) * self.stride
+            strided_elem = np.prod(shape[0 : self.ax + 1]) * self.stride
             assert strided_elem >= original_shape
         return int(strided_elem)
 
@@ -125,7 +126,9 @@ class IntrinInfo:
         self.weight_transform_kind = weight_transform_kind
 
     def __repr__(self) -> str:
-        return f"<IntrinInfo, {self.in_dtype}, {self.out_dtype}, {self.trans_b}, {self.propagate_b}>"
+        return (
+            f"<IntrinInfo, {self.in_dtype}, {self.out_dtype}, {self.trans_b}, {self.propagate_b}>"
+        )
 
     def is_input_8bit(self) -> bool:
         return DataType(self.in_dtype).bits == 8

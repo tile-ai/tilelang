@@ -8,8 +8,8 @@ def reshape_test(N, M, dtype):
 
     @T.prim_func
     def main(
-            A: T.Tensor((N,), dtype),
-            B: T.Tensor((N // M, M), dtype),
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N // M, M), dtype),
     ):
         with T.Kernel(1) as _:
             A_reshaped = T.reshape(A, [N // M, M])
@@ -28,7 +28,8 @@ def run_reshape(N, M, dtype):
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     profiler = jit_kernel.get_profiler()
 
     def ref_program(A):
@@ -48,8 +49,8 @@ def reshape_test_smem_1d_2_2d(N, M, dtype):
 
     @T.prim_func
     def main(
-            A: T.Tensor((N,), dtype),
-            B: T.Tensor((N // M, M), dtype),
+        A: T.Tensor((N,), dtype),
+        B: T.Tensor((N // M, M), dtype),
     ):
         with T.Kernel(1) as _:
             A_shared = T.alloc_shared((N,), dtype)
@@ -72,7 +73,8 @@ def run_reshape_smem_1d_2_2d(N, M, dtype):
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     profiler = jit_kernel.get_profiler()
 
     def ref_program(A):
@@ -91,8 +93,8 @@ def reshape_test_smem_2d_2_1d(N, M, dtype):
 
     @T.prim_func
     def main(
-            A: T.Tensor((N // M, M), dtype),
-            B: T.Tensor((N,), dtype),
+        A: T.Tensor((N // M, M), dtype),
+        B: T.Tensor((N,), dtype),
     ):
         with T.Kernel(1) as _:
             A_shared = T.alloc_shared((N // M, M), dtype)
@@ -115,7 +117,8 @@ def run_reshape_smem_2d_2_1d(N, M, dtype):
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     profiler = jit_kernel.get_profiler()
 
     def ref_program(A):

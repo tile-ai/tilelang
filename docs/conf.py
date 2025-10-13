@@ -22,27 +22,27 @@ extensions = [
     "autoapi.extension",
 ]
 
-autoapi_type = 'python'
-autoapi_dirs = ['../tilelang']
+autoapi_type = "python"
+autoapi_dirs = ["../tilelang"]
 
 autoapi_options = [
-    'members',
-    'undoc-members',
-    'show-inheritance',
-    'show-module-summary',
-    'special-members',
+    "members",
+    "undoc-members",
+    "show-inheritance",
+    "show-module-summary",
+    "special-members",
 ]
 autoapi_keep_files = False  # Useful for debugging the generated rst files
 
 autoapi_generate_api_docs = True
 
-autodoc_typehints = 'description'
+autodoc_typehints = "description"
 
 autoapi_ignore = ["*language/ast*", "*version*", "*libinfo*", "*parser*"]
 
 source_suffix = {
-    '.rst': 'restructuredtext',
-    '.md': 'markdown',
+    ".rst": "restructuredtext",
+    ".md": "markdown",
 }
 
 myst_enable_extensions = [

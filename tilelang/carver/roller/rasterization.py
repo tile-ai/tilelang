@@ -4,7 +4,6 @@ from typing import List
 
 
 class Rasterization:
-
     panel_width_ = None
 
     def __init__(self) -> None:
@@ -20,7 +19,6 @@ class Rasterization:
 
 
 class NoRasterization(Rasterization):
-
     def __init__(self) -> None:
         super().__init__()
 

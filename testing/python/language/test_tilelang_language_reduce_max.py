@@ -8,8 +8,8 @@ def reduce_max_test(M, N, dtype="float16"):
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M,), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M,), dtype),
     ):
         with T.Kernel(1) as _:
             A_local = T.alloc_fragment((M, N), dtype)
@@ -52,8 +52,8 @@ def reduce_max_test_clear(M, N, dtype="float16"):
 
     @T.prim_func
     def main(
-            A: T.Tensor((M, N), dtype),
-            B: T.Tensor((M,), dtype),
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M,), dtype),
     ):
         with T.Kernel(1, threads=32) as _:
             A_local = T.alloc_fragment((M, N), dtype)
@@ -76,6 +76,7 @@ def run_reduce_max_clear(M, N, dtype="float16"):
         return A.max(dim=1).values
 
     import torch
+
     dummp_A = torch.randn((M, N), dtype=getattr(torch, dtype)).cuda()
     ref_out = ref_program(dummp_A)
     tl_out = jit_kernel(dummp_A)

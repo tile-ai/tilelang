@@ -48,11 +48,12 @@ def check_metal_availability() -> bool:
     if not mac_release:
         return False
     # todo: check torch version?
-    return arch == 'arm64'
+    return arch == "arm64"
 
 
-def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
-                     return_object: bool = False) -> Union[str, Target]:
+def determine_target(
+    target: Union[str, Target, Literal["auto"]] = "auto", return_object: bool = False
+) -> Union[str, Target]:
     """
     Determine the appropriate target for compilation (CUDA, HIP, or manual selection).
 
@@ -90,8 +91,9 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
             raise ValueError("No CUDA or HIP or MPS available on this system.")
     else:
         # Validate the target if it's not "auto"
-        assert isinstance(
-            target, Target) or target in AVALIABLE_TARGETS, f"Target {target} is not supported"
+        assert isinstance(target, Target) or target in AVALIABLE_TARGETS, (
+            f"Target {target} is not supported"
+        )
         return_var = target
 
     if return_object:

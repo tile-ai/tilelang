@@ -20,12 +20,11 @@ def naive_gemv(
     dtype: str = "float16",
     accum_dtype: str = "float",
 ):
-
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N)) as bn:
             tn = T.get_thread_binding(0)  # tn = threadIdx.x
@@ -38,8 +37,9 @@ def naive_gemv(
                     A_shared[tk] = A[bk * BLOCK_K + tk]
                     B_shared[tn, tk] = B[bn * BLOCK_N + tn, bk * BLOCK_K + tk]
                 for tk in T.serial(BLOCK_K):
-                    C_reg[0] += A_shared[tk].astype(accum_dtype) * B_shared[tn,
-                                                                            tk].astype(accum_dtype)
+                    C_reg[0] += A_shared[tk].astype(accum_dtype) * B_shared[tn, tk].astype(
+                        accum_dtype
+                    )
             C[bn * BLOCK_N + tn] = C_reg[0]
 
     return main
@@ -54,12 +54,11 @@ def naive_splitk_gemv(
     dtype: str = "float16",
     accum_dtype: str = "float",
 ):
-
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, BLOCK_K)) as bn:
             tn = T.get_thread_binding(0)
@@ -95,9 +94,9 @@ def splitk_gemv(
 
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, reduce_threads)) as bn:
             tn = T.get_thread_binding(0)
@@ -136,9 +135,9 @@ def splitk_gemv_vectorized(
 
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, reduce_threads)) as bn:
             tn = T.get_thread_binding(0)
@@ -177,9 +176,9 @@ def splitk_gemv_vectorized_tvm(
 
     @T.prim_func
     def main(
-            A: T.Tensor((K,), dtype),
-            B: T.Tensor((N, K), dtype),
-            C: T.Tensor((N,), dtype),
+        A: T.Tensor((K,), dtype),
+        B: T.Tensor((N, K), dtype),
+        C: T.Tensor((N,), dtype),
     ):
         with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, reduce_threads)) as bn:
             tn = T.get_thread_binding(0)
@@ -197,9 +196,9 @@ def splitk_gemv_vectorized_tvm(
                     C_accum[0] += A_local[k].astype(accum_dtype) * B_local[k].astype(accum_dtype)
             C_reduced = T.alloc_local((1,), accum_dtype)
             with T.attr(
-                    T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
-                    "reduce_scope",
-                    T.reinterpret(T.uint64(0), dtype="handle"),
+                T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
+                "reduce_scope",
+                T.reinterpret(T.uint64(0), dtype="handle"),
             ):
                 T.evaluate(
                     T.tvm_thread_allreduce(
@@ -209,7 +208,8 @@ def splitk_gemv_vectorized_tvm(
                         C_reduced[0],
                         tk,
                         dtype="handle",
-                    ))
+                    )
+                )
 
             C[bn * BLOCK_N + tn] = C_reduced[0]
 
@@ -217,7 +217,6 @@ def splitk_gemv_vectorized_tvm(
 
 
 def get_best_config(N, K):
-
     def get_configs():
         iter_params = dict(BLOCK_N=[2, 4, 8, 32, 64, 128], reduce_threads=[4, 8, 32])
         return [
@@ -245,9 +244,9 @@ def get_best_config(N, K):
 
         @T.prim_func
         def main(
-                A: T.Tensor((K,), dtype),
-                B: T.Tensor((N, K), dtype),
-                C: T.Tensor((N,), dtype),
+            A: T.Tensor((K,), dtype),
+            B: T.Tensor((N, K), dtype),
+            C: T.Tensor((N,), dtype),
         ):
             with T.Kernel(T.ceildiv(N, BLOCK_N), threads=(BLOCK_N, reduce_threads)) as bn:
                 tn = T.get_thread_binding(0)
@@ -263,12 +262,13 @@ def get_best_config(N, K):
                         B_local[k] = B[bn * BLOCK_N + tn, bk * BLOCK_K + tk * TILE_K + k]
                     for k in T.serial(TILE_K):
                         C_accum[0] += A_local[k].astype(accum_dtype) * B_local[k].astype(
-                            accum_dtype)
+                            accum_dtype
+                        )
                 C_reduced = T.alloc_local((1,), accum_dtype)
                 with T.attr(
-                        T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
-                        "reduce_scope",
-                        T.reinterpret(T.uint64(0), dtype="handle"),
+                    T.comm_reducer(lambda x, y: x + y, [T.Cast(accum_dtype, 0)]),
+                    "reduce_scope",
+                    T.reinterpret(T.uint64(0), dtype="handle"),
                 ):
                     T.evaluate(
                         T.tvm_thread_allreduce(
@@ -278,7 +278,8 @@ def get_best_config(N, K):
                             C_reduced[0],
                             tk,
                             dtype="handle",
-                        ))
+                        )
+                    )
 
                 C[bn * BLOCK_N + tn] = C_reduced[0]
 

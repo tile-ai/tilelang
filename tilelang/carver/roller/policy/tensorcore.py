@@ -1,4 +1,5 @@
 """Policy for tensorcore schedule"""
+
 import tvm
 from typing import Dict, List, Tuple, Optional
 import numpy as np
@@ -13,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 
 class TensorCorePolicy(DefaultPolicy):
-
     # this is the trick for wmma.
     # However, for int8 mma, the wmma_k should be 32.
     wmma_k: int = 16
@@ -70,9 +70,9 @@ class TensorCorePolicy(DefaultPolicy):
         A_high_ax = min(A_ax_m, A_ax_k)
         B_high_ax = min(B_ax_n, B_ax_k)
         C_high_ax = min(C_ax_m, C_ax_n)
-        A_stride = Stride(stride=np.prod(AS_shape[A_high_ax + 1:]) + offset, ax=A_high_ax)
-        B_stride = Stride(stride=np.prod(BS_shape[B_high_ax + 1:]) + offset, ax=B_high_ax)
-        C_stride = Stride(stride=np.prod(CS_shape[C_high_ax + 1:]) + offset, ax=C_high_ax)
+        A_stride = Stride(stride=np.prod(AS_shape[A_high_ax + 1 :]) + offset, ax=A_high_ax)
+        B_stride = Stride(stride=np.prod(BS_shape[B_high_ax + 1 :]) + offset, ax=B_high_ax)
+        C_stride = Stride(stride=np.prod(CS_shape[C_high_ax + 1 :]) + offset, ax=C_high_ax)
         return A_stride, B_stride, C_stride
 
     def infer_node_smem_usage(self, td: TileDict, node: PrimFuncNode):
@@ -87,7 +87,8 @@ class TensorCorePolicy(DefaultPolicy):
         target_transaction = self.arch.transaction_size[0] * 2
         # 512 bytes // type bits
         reduce_input_dtype = node.get_buffer_dtype(
-            node.block_analyzer.get_input_buffers(node.reduction_block)[0])
+            node.block_analyzer.get_input_buffers(node.reduction_block)[0]
+        )
         basic = (target_transaction * 8) // reduce_input_dtype.bits
 
         result = {}
@@ -95,7 +96,7 @@ class TensorCorePolicy(DefaultPolicy):
             iter_name = iter_info.var.name
             iter_dom = iter_info.dom.extent
             if iter_dom % 16 > 0:
-                result[iter_name] = (16 if iter_dom < basic else basic)  # for the case of padding
+                result[iter_name] = 16 if iter_dom < basic else basic  # for the case of padding
             elif iter_dom % basic == 0:
                 result[iter_name] = basic
             else:
@@ -114,7 +115,6 @@ class TensorCorePolicy(DefaultPolicy):
             return False
 
         if _check_small_tile(td):
-
             smem_limit = min(self.arch.max_smem_usage // td.block_per_SM, self.arch.smem_cap)
             rstep_map = td.rstep_map.copy()
 
@@ -127,8 +127,9 @@ class TensorCorePolicy(DefaultPolicy):
                     return rstep
 
                 def _shared_memory_usage(td: TileDict):
-                    return node.footprint(td.output_tile, new_rstep_map,
-                                          td.tensor_strides_map[node])
+                    return node.footprint(
+                        td.output_tile, new_rstep_map, td.tensor_strides_map[node]
+                    )
 
                 def _score(rstep_id):
                     rstep = {
@@ -209,7 +210,8 @@ class TensorCorePolicy(DefaultPolicy):
             return {
                 k.var.name: [
                     x * self.wmma_k for x in get_all_factors(int(k.dom.extent) // self.wmma_k)
-                ] for k in node.raxis
+                ]
+                for k in node.raxis
             }
 
     def check_tile_shape_isvalid(self, td: TileDict):
@@ -242,8 +244,9 @@ class TensorCorePolicy(DefaultPolicy):
             return super().compute_node_stride_map(node, td)
         use_layout = self._can_implement_layout(node, td)
 
-        AS_stride, BS_stride, C_stride = self._compute_tc_strides(node, td.get_tile(node),
-                                                                  td.get_rstep(node))
+        AS_stride, BS_stride, C_stride = self._compute_tc_strides(
+            node, td.get_tile(node), td.get_rstep(node)
+        )
         A_stride, B_stride, _ = self._compute_tc_strides(node, td.get_tile(node))
         tensor_strides = {}
         output_strides = {
@@ -348,7 +351,8 @@ class TensorCorePolicy(DefaultPolicy):
             for node in self.ordered_nodes:
                 for buffer in node.input_buffers:
                     overall_gmem_size_in_bytes += (
-                        int(np.prod(buffer.shape)) * tvm.DataType(buffer.dtype).bits // 8)
+                        int(np.prod(buffer.shape)) * tvm.DataType(buffer.dtype).bits // 8
+                    )
             return overall_gmem_size_in_bytes < self.arch.l2_cache_size_bytes
 
         conditions.append(_check_memory_size())

@@ -40,17 +40,19 @@ class CtypesKernelAdapter(BaseKernelAdapter):
     param_dtypes: Optional[List[torch.dtype]] = None  # Cache for parameter dtypes
     param_shapes: Optional[List[List]] = None  # Cache for parameter shapes
 
-    def __init__(self,
-                 params: List[TensorType],
-                 result_idx: List[int],
-                 target: str,
-                 func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-                 host_mod: Optional[tvm.IRModule] = None,
-                 device_mod: Optional[tvm.IRModule] = None,
-                 kernel_global_source: Optional[str] = None,
-                 verbose: bool = False,
-                 pass_configs: Optional[Dict[str, Any]] = None,
-                 compile_flags: Optional[List[str]] = None):
+    def __init__(
+        self,
+        params: List[TensorType],
+        result_idx: List[int],
+        target: str,
+        func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+        host_mod: Optional[tvm.IRModule] = None,
+        device_mod: Optional[tvm.IRModule] = None,
+        kernel_global_source: Optional[str] = None,
+        verbose: bool = False,
+        pass_configs: Optional[Dict[str, Any]] = None,
+        compile_flags: Optional[List[str]] = None,
+    ):
         """Initialize the adapter with the given TIR function or module.
 
         Args:
@@ -106,16 +108,18 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         self._post_init()
 
     @classmethod
-    def from_database(cls,
-                      params: List[TensorType],
-                      result_idx: List[int],
-                      target: str,
-                      func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-                      kernel_global_source: str,
-                      kernel_lib_path: str,
-                      verbose: bool = False,
-                      pass_configs: Optional[Dict[str, Any]] = None,
-                      compile_flags: Optional[List[str]] = None):
+    def from_database(
+        cls,
+        params: List[TensorType],
+        result_idx: List[int],
+        target: str,
+        func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+        kernel_global_source: str,
+        kernel_lib_path: str,
+        verbose: bool = False,
+        pass_configs: Optional[Dict[str, Any]] = None,
+        compile_flags: Optional[List[str]] = None,
+    ):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
@@ -170,15 +174,21 @@ class CtypesKernelAdapter(BaseKernelAdapter):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, shape in enumerate(buffer.shape):
-                    if (isinstance(shape, tir.Var) and (shape not in dynamic_symbolic_map) and
-                        (shape not in params)):
+                    if (
+                        isinstance(shape, tir.Var)
+                        and (shape not in dynamic_symbolic_map)
+                        and (shape not in params)
+                    ):
                         dynamic_symbolic_map[shape] = (0, i, j)
         for i, param in enumerate(params):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 for j, stride in enumerate(buffer.strides):
-                    if (isinstance(stride, tir.Var) and (stride not in dynamic_symbolic_map) and
-                        (stride not in params)):
+                    if (
+                        isinstance(stride, tir.Var)
+                        and (stride not in dynamic_symbolic_map)
+                        and (stride not in params)
+                    ):
                         dynamic_symbolic_map[stride] = (1, i, j)
         return dynamic_symbolic_map
 
@@ -193,9 +203,9 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         ctypes_args.append(ctypes.c_void_p(stream))
         self.lib.call(*ctypes_args)
 
-    def _wrap_forward_from_prebuild_lib(self,
-                                        *ins: List[torch.Tensor],
-                                        stream: Optional[int] = None):
+    def _wrap_forward_from_prebuild_lib(
+        self, *ins: List[torch.Tensor], stream: Optional[int] = None
+    ):
         """High-level wrapper for kernel execution.
 
         Handles:
@@ -285,7 +295,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
     @property
     def is_dynamic(self):
         """Indicates whether the kernel handles dynamic shapes."""
-        return (self.dynamic_symbolic_map is not None and len(self.dynamic_symbolic_map) > 0)
+        return self.dynamic_symbolic_map is not None and len(self.dynamic_symbolic_map) > 0
 
     def get_kernel_source(self, kernel_only: bool = False):
         """Returns the source code of the compiled kernel."""

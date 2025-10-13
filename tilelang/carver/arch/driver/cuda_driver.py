@@ -73,12 +73,11 @@ class cudaDeviceProp(ctypes.Structure):
         ("multiGpuBoardGroupID", ctypes.c_int),
         ("reserved2", ctypes.c_int * 2),
         ("reserved1", ctypes.c_int * 1),
-        ("reserved", ctypes.c_int * 60)
+        ("reserved", ctypes.c_int * 60),
     ]
 
 
 def get_cuda_device_properties(device_id: int = 0) -> Optional[cudaDeviceProp]:
-
     if sys.platform == "win32":
         libcudart = ctypes.windll.LoadLibrary("cudart64_110.dll")
     else:
