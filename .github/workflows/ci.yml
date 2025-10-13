@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  CMAKE_CONFIGURE_OPTIONS: "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" # to be updated
+  CLANG_TIDY_CMAKE_OPTIONS: "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" # to be updated
   PYTHONDEVMODE: "1"
   PYTHONUNBUFFERED: "1"
   FORCE_COLOR: "1"
@@ -136,7 +136,7 @@ jobs:
           CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
           export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}"
           export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
-          export CMAKE_CONFIGURE_OPTIONS="${CMAKE_CONFIGURE_OPTIONS} -DUSE_CUDA=ON"
+          export CLANG_TIDY_CMAKE_OPTIONS="${CLANG_TIDY_CMAKE_OPTIONS} -DUSE_CUDA=ON"
 
           echo "USE_CUDA=ON" | tee -a "${GITHUB_ENV}"
           echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
@@ -144,7 +144,7 @@ jobs:
           echo "CUDA_VERSION_MAJMIN_NODOT=${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
           echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
           echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
-          echo "CMAKE_CONFIGURE_OPTIONS=${CMAKE_CONFIGURE_OPTIONS}" | tee -a "${GITHUB_ENV}"
+          echo "CLANG_TIDY_CMAKE_OPTIONS=${CLANG_TIDY_CMAKE_OPTIONS}" | tee -a "${GITHUB_ENV}"
           echo "\$ $(which nvcc) --version" && nvcc --version
 
       - name: Set environment (ROCm)
@@ -156,7 +156,7 @@ jobs:
           ROCM_VERSION_MAJMIN_NODOT="${ROCM_VERSION_MAJMIN//./}"
           export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/rocm${ROCM_VERSION_MAJMIN}"
           export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
-          export CMAKE_CONFIGURE_OPTIONS="${CMAKE_CONFIGURE_OPTIONS} -DUSE_ROCM=ON"
+          export CLANG_TIDY_CMAKE_OPTIONS="${CLANG_TIDY_CMAKE_OPTIONS} -DUSE_ROCM=ON"
 
           echo "USE_ROCM=ON" | tee -a "${GITHUB_ENV}"
           echo "ROCM_VERSION=${ROCM_VERSION}" | tee -a "${GITHUB_ENV}"
@@ -164,16 +164,16 @@ jobs:
           echo "ROCM_VERSION_MAJMIN_NODOT=${ROCM_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
           echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
           echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
-          echo "CMAKE_CONFIGURE_OPTIONS=${CMAKE_CONFIGURE_OPTIONS}" | tee -a "${GITHUB_ENV}"
+          echo "CLANG_TIDY_CMAKE_OPTIONS=${CLANG_TIDY_CMAKE_OPTIONS}" | tee -a "${GITHUB_ENV}"
           echo "\$ $(which hipcc) --version" && hipcc --version
 
       - name: Set environment (Metal)
         if: contains(matrix.runner.toolkit, 'Metal')
         run: |
-          export CMAKE_CONFIGURE_OPTIONS="${CMAKE_CONFIGURE_OPTIONS} -DUSE_METAL=ON"
+          export CLANG_TIDY_CMAKE_OPTIONS="${CLANG_TIDY_CMAKE_OPTIONS} -DUSE_METAL=ON"
 
           echo "USE_METAL=ON" | tee -a "${GITHUB_ENV}"
-          echo "CMAKE_CONFIGURE_OPTIONS=${CMAKE_CONFIGURE_OPTIONS}" | tee -a "${GITHUB_ENV}"
+          echo "CLANG_TIDY_CMAKE_OPTIONS=${CLANG_TIDY_CMAKE_OPTIONS}" | tee -a "${GITHUB_ENV}"
 
       - name: Setup Python and uv with caching
         id: setup-uv
@@ -232,7 +232,7 @@ jobs:
           # Run cmake to create the build directory with compile_commands.json
           (
             cd build
-            cmake .. ${CMAKE_CONFIGURE_OPTIONS}
+            cmake .. ${CLANG_TIDY_CMAKE_OPTIONS}  # no quotes here
           )
           rc=0
           bash format.sh || rc="$?"
