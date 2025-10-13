@@ -5,7 +5,6 @@ on:
     - cron: '0 22 * * *'
   release:
     types: [ published ]
-  pull_request:
 
 env:
   PYTHON_VERSION: '3.12'
