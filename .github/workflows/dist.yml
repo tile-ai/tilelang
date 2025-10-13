@@ -34,9 +34,9 @@ jobs:
     strategy:
       matrix:
         target:
-          - { runner: ubuntu-24.04, toolkit: "CUDA-12.1" }
+          - { runner: ubuntu-latest, toolkit: "CUDA-12.1" }
           - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8" }
-          - { runner: macos-26, toolkit: "Metal" }
+          - { runner: macos-latest, toolkit: "Metal" }
         python-version:
           - "3.8"
           # TVM is built with Python 3.8 Limited API, it should work with all Python >= 3.8.
@@ -46,7 +46,7 @@ jobs:
           # - "3.12"
           # - "3.13"
           # - "3.14"
-      fail-fast: true
+      fail-fast: false
     timeout-minutes: 120
     runs-on: ${{ matrix.target.runner }}
     env:
