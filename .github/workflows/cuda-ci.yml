@@ -1,4 +1,4 @@
-name: CI Test on Metal
+name: CI
 on: [pull_request]
 
 concurrency:
@@ -11,8 +11,7 @@ env:
 
 jobs:
   format-check:
-    runs-on: [macos-latest]
-
+    runs-on: [self-hosted, nvidia]
     permissions:
       contents: write
 
@@ -24,10 +23,10 @@ jobs:
         submodules: recursive
 
     - name: Install python via uv
-      uses: astral-sh/setup-uv@v7
+      uses: astral-sh/setup-uv@v6
       with:
-        enable-cache: true
-        ignore-nothing-to-cache: true
+        enable-cache: false
+        cache-local-path: ${{ runner.tool_cache }}/uv
         activate-environment: true
         python-version: ${{ env.PYTHON_VERSION }}
 
@@ -35,61 +34,63 @@ jobs:
       run: |
         [[ -f requirements-test.txt ]] && \
           uv pip install -r requirements-test.txt --no-build-isolation
+        uv pip install flash_attn==2.5.8 --no-build-isolation
 
     - name: Run format check
       run: |
         set -ex
         mkdir -p build
         # run cmake to create the build directory with compile_commands.json
-        cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_METAL=ON; cd ..
+        uv pip install cmake
+        cd build; USE_CUDA=1 cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON; cd ..
         if ! output=$(./format.sh 2>&1); then
           echo "------------------------------------"
           echo "message:"
           echo "$output"
-          printf '%s\n' "$output"
+          printf '%s\n' "$output" | grep "Please review and stage the changes."
           echo "------------------------------------"
           exit 1
         fi
+        rm -rf build
 
-  build-test-metal:
-    runs-on: [macos-latest]
+  build-test-nvidia:
+    runs-on: [self-hosted, nvidia]
     needs: format-check
     permissions:
       contents: read
-    env:
-      CMAKE_C_COMPILER_LAUNCHER: ccache
-      CMAKE_CXX_COMPILER_LAUNCHER: ccache
     steps:
     - name: Checkout repository
       uses: actions/checkout@v5
       with:
-        fetch-depth: 1
+        fetch-depth: 0
         submodules: recursive
-
-    - name: ccache
-      uses: hendrikmuhs/ccache-action@v1.2
-      with:
-        create-symlink: true
-        key: ${{ github.job }}-${{ matrix.os }}
+        repository: ${{ github.event.pull_request.head.repo.full_name }}
+        ref: ${{ github.event.pull_request.head.ref }}
 
     - name: Install python via uv
-      uses: astral-sh/setup-uv@v7
+      uses: astral-sh/setup-uv@v6
       with:
-        enable-cache: true
-        ignore-nothing-to-cache: true
+        enable-cache: false
+        cache-local-path: ${{ runner.tool_cache }}/uv
         activate-environment: true
         python-version: ${{ env.PYTHON_VERSION }}
 
-    - name: Ensure venv (local & persistent)
-      run: uv pip install -r requirements-test.txt -r requirements-build.txt
-
-    - name: Build wheel
+    - name: Setup venv
       run: |
-        source .venv/bin/activate
-        uv pip install -v --no-build-isolation .
+        [[ -f requirements-test.txt ]] && \
+          uv pip install -r requirements-test.txt --no-build-isolation
+        uv pip install flash_attn==2.5.8 --no-build-isolation
 
-    - name: Run metal test
+    - name: Install project (wheel form)
+      run: |
+        uv pip install .
+
+    - name: Run examples
+      run: |
+        cd examples
+        python -m pytest -n 4 **/test*.py -v -r fE --durations=0 --cache-clear
+
+    - name: Run tests
       run: |
         cd testing/python
-        unset PYTHONPATH
-        python -m pytest -k metal -v -r fE --durations=0 --cache-clear --timeout=3600
+        python -m pytest -n 4 -v -r fE --durations=0 --cache-clear --timeout=3600

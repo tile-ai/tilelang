@@ -72,6 +72,14 @@ static constexpr const char *kDisableThreadStorageSync =
     "tl.disable_thread_storage_sync";
 
 /*!
+ * \brief Force inline Let bindings during simplification.
+ *
+ * kForceLetInline = "tl.force_let_inline"
+ *
+ */
+static constexpr const char *kForceLetInline = "tl.force_let_inline";
+
+/*!
  * \brief The size of the vectorized dimension in buffer, designed by user
  *
  * For example, if the vectorized dimension is 128 bits and the dtype of buffer
@@ -325,6 +333,30 @@ TVM_DLL const Op &set_max_nreg();
  *
  */
 TVM_DLL const Op &no_set_max_nreg();
+
+/*!
+ * \brief Arrive at a warpgroup fence for WGMMA sequences
+ *
+ * warpgroup_arrive()
+ *
+ */
+TVM_DLL const Op &warpgroup_arrive();
+
+/*!
+ * \brief Commit the current warpgroup batch for WGMMA sequences
+ *
+ * warpgroup_commit_batch()
+ *
+ */
+TVM_DLL const Op &warpgroup_commit_batch();
+
+/*!
+ * \brief Wait for the warpgroup batch identified by num_mma
+ *
+ * warpgroup_wait(num_mma)
+ *
+ */
+TVM_DLL const Op &warpgroup_wait();
 
 /*!
  * \brief Wait the previous wgmma to finish

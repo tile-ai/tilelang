@@ -15,7 +15,7 @@ Key implementation differences between Hopper and MI300X architectures include:
    # Original shared memory allocation
    Q_shared = T.alloc_shared([block_H, dim], dtype)
    Q_pe_shared = T.alloc_shared([block_H, pe_dim], dtype)
-   
+
    # Optimized register allocation
    Q_local = T.alloc_fragment([block_H, dim], dtype)
    Q_pe_local = T.alloc_fragment([block_H, pe_dim], dtype)
@@ -47,5 +47,6 @@ Notably, TileLang achieves performance parity with hand-optimized assembly kerne
    - Improve compute-to-memory access ratios
    - Enhance parallelism through dimension-wise task distribution
 
-## Acknowledgement
+## Acknowledgment
+
 We would like to express our sincere gratitude to the AMD ROCm and Composable Kernel team for their outstanding contributions. We have learned a great deal from the ROCm software stack.

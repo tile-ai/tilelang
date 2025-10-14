@@ -1,0 +1,55 @@
+name: Documentation
+
+on:
+  pull_request_target:
+    types:
+      - closed
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  docs:
+    name: Build and Publish Docs
+    if: |
+      (github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, nvidia]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      - name: Build docs
+        run: |
+          bash -ex maint/scripts/build_docs.sh
+
+      - name: Push built docs to another repo
+        run: |
+          # Hide sensitive info in logs
+          echo "::add-mask::${{ secrets.TARGET_TOKEN }}"
+          echo "::add-mask::${{ secrets.TARGET_REPO }}"
+          TARGET_REPO_URL="https://github.com/${{ secrets.TARGET_REPO }}.git"
+
+          git clone "${TARGET_REPO_URL}" -b main target_repo
+          cd target_repo
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          find . -mindepth 1 -maxdepth 1 ! -name ".github" ! -name "." ! -name ".git" -exec rm -rf {} +
+          cp -r ../docs/_build/html/* ./
+          git add .
+          if [[ -n "$(git status --porcelain)" ]]; then
+            # If there are changes, commit and push
+            git commit -m "Update docs"
+            git push "https://github-actions[bot]:${{ secrets.TARGET_TOKEN }}@${TARGET_REPO_URL##*://}" main
+          else
+            echo "No changes detected, skipping commit and push."
+          fi

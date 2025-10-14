@@ -97,7 +97,7 @@ def do_bench(
 
     # Initial function call and synchronization
     fn()
-    torch.accelerator.synchronize()
+    torch.cuda.synchronize()
 
     # Create L2 cache flush buffer (256 MB)
     # Fast flush uses int32 (4 bytes), regular uses int8 (1 byte)

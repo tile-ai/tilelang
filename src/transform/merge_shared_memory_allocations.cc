@@ -194,14 +194,19 @@ public:
     const VarNode *buf = op->buffer->data.get();
     auto it = alloc_info_.find(buf);
     if (it != alloc_info_.end() && it->second.alloc) {
-      ICHECK_LT(it->second.level, scope_.size())
+      // Allow buffer access at the same level or deeper scope
+      // Changed from < to <= to handle cases where buffer is accessed
+      // in expressions at the same scope level where it's allocated
+      ICHECK_LE(it->second.level, scope_.size())
           << "Load memory in places other than store.";
       if (IsAppropriateSharedMemory(GetRef<Var>(buf))) {
         auto enable_aggressive_merge = enable_aggressive_merge_;
         if (enable_aggressive_merge) {
           scope_[scope_.size() - 1].touched.push_back(buf);
         } else {
-          scope_[it->second.level].touched.push_back(buf);
+          // When accessing at the same level, use that level
+          size_t access_level = std::min(it->second.level, scope_.size() - 1);
+          scope_[access_level].touched.push_back(buf);
         }
       }
     }
@@ -211,13 +216,16 @@ public:
     // Directly reference to the variable count as a read.
     auto it = alloc_info_.find(buf);
     if (it != alloc_info_.end() && it->second.alloc) {
-      ICHECK_LT(it->second.level, scope_.size());
+      // Allow buffer access at the same level or deeper scope
+      ICHECK_LE(it->second.level, scope_.size());
       if (IsAppropriateSharedMemory(GetRef<Var>(buf))) {
         auto enable_aggressive_merge = enable_aggressive_merge_;
         if (enable_aggressive_merge) {
           scope_[scope_.size() - 1].touched.push_back(buf);
         } else {
-          scope_[it->second.level].touched.push_back(buf);
+          // When accessing at the same level, use that level
+          size_t access_level = std::min(it->second.level, scope_.size() - 1);
+          scope_[access_level].touched.push_back(buf);
         }
       }
     }

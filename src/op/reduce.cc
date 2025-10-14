@@ -420,12 +420,23 @@ Stmt CumSumOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     ICHECK(this->dst.scope() == "shared.dyn" || this->dst.scope() == "shared");
     std::stringstream ss;
     auto threads = T.thread_bounds->extent;
-    ss << "tl::CumSum2D<" << threads << ", " << dim << ", "
-       << (reverse ? "true" : "false") << ">::run";
-    Array<PrimExpr> args = {StringImm(ss.str()), src.access_ptr(1),
-                            dst.access_ptr(3)};
-    for (int i = 0; i < src->shape.size(); i++) {
-      args.push_back(src->shape[i]);
+    Array<PrimExpr> args;
+    int ndim = static_cast<int>(src->shape.size());
+    if (ndim == 1) {
+      ICHECK_EQ(dim, 0) << "Cumulative sum over a 1D buffer only supports dim "
+                           "= 0.";
+      ss << "tl::CumSum1D<" << threads << ", " << (reverse ? "true" : "false")
+         << ">::run";
+      args = {StringImm(ss.str()), src.access_ptr(1), dst.access_ptr(3),
+              src->shape[0]};
+    } else if (ndim == 2) {
+      ss << "tl::CumSum2D<" << threads << ", " << dim << ", "
+         << (reverse ? "true" : "false") << ">::run";
+      args = {StringImm(ss.str()), src.access_ptr(1), dst.access_ptr(3),
+              src->shape[0], src->shape[1]};
+    } else {
+      LOG(FATAL) << "CumSum currently supports only 1D or 2D buffers, got "
+                 << ndim << "D.";
     }
     return Evaluate(Call(dst->dtype, builtin::call_extern(), args));
   } else {

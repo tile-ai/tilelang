@@ -53,5 +53,175 @@ def test_lower_fence_proxy():
     _check(before, after)
 
 
+def test_async_to_generic_no_double_fence():
+
+    @T.prim_func
+    def before():
+        with T.Kernel(8):
+            A_shared = T.decl_buffer((1024,), "uint8", scope="shared.dyn")
+            B_shared = T.decl_buffer((1024,), "uint8", scope="shared.dyn")
+            T.ptx_cp_async("uint8", A_shared.data, 0, B_shared.data, 0, 16)
+            T.fence_proxy_async()
+            T.call_extern("handle", "generic_op")
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.InjectFenceProxy()(mod)
+
+    def _count_fences(stmt):
+        count = 0
+
+        def visit(node):
+            nonlocal count
+            if isinstance(node, tir.Evaluate):
+                call = node.value
+                if isinstance(call, tir.Call):
+                    op = call.op
+                    name = getattr(op, "name", None)
+                    if name == "tl.fence_proxy_async":
+                        count += 1
+
+        tir.stmt_functor.post_order_visit(stmt, visit)
+        return count
+
+    assert _count_fences(mod["main"].body) == 1
+
+
+def test_proxy_hint_override():
+
+    @T.prim_func
+    def before():
+        with T.Kernel(8):
+            T.evaluate(T.call_extern("handle", "custom_async"))
+            with T.attr("proxy_scope", "tl.proxy_hint", "neutral"):
+                T.evaluate(T.call_extern("handle", "custom_generic"))
+            T.evaluate(T.call_extern("handle", "custom_async_tail"))
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.InjectFenceProxy()(mod)
+
+    def _has_fence(stmt):
+        result = False
+
+        def visit(node):
+            nonlocal result
+            if isinstance(node, tir.Evaluate):
+                call = node.value
+                if isinstance(call, tir.Call):
+                    op = call.op
+                    name = getattr(op, "name", None)
+                    if name == "tl.fence_proxy_async":
+                        result = True
+
+        tir.stmt_functor.post_order_visit(stmt, visit)
+        return result
+
+    assert not _has_fence(mod["main"].body)
+
+
+def test_tma_store_sync_injection():
+
+    @T.prim_func
+    def before():
+        with T.Kernel(8):
+            A_global = T.decl_buffer((128,), "float16", scope="global")
+            T.evaluate(T.call_intrin("handle", tir.op.Op.get("tl.tma_store"), A_global.data))
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.InjectFenceProxy()(mod)
+
+    arrives = 0
+    waits = 0
+
+    def visit(node):
+        nonlocal arrives, waits
+        if isinstance(node, tir.Evaluate):
+            call = node.value
+            if isinstance(call, tir.Call):
+                name = getattr(call.op, "name", None)
+                if name == "tl.tma_store_arrive":
+                    arrives += 1
+                elif name in ("tl.tma_store_wait", "tl.tma_store_wait<0>"):
+                    waits += 1
+
+    tir.stmt_functor.post_order_visit(mod["main"].body, visit)
+    assert arrives == 1
+    assert waits == 1
+
+
+def test_wgmma_marked_async():
+
+    @T.prim_func
+    def before():
+        with T.Kernel(1):
+            A_shared = T.decl_buffer((1,), "float16", scope="shared")
+            desc_a = T.decl_buffer((1,), "uint64", scope="local.descriptor")
+            desc_b = T.decl_buffer((1,), "uint64", scope="local.descriptor")
+            C_local = T.decl_buffer((32,), "float16", scope="local")
+            A_shared[0] = T.float16(0)
+            T.warpgroup_arrive()
+            T.ptx_wgmma_ss("float16", "m64n64k16", T.bool(True), T.bool(True), "fp16", "fp16",
+                           "fp16", desc_a.data, T.int32(0), desc_b.data, T.int32(0), C_local.data,
+                           T.int32(0), T.bool(True), 1, 1)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.InjectFenceProxy()(mod)
+
+    order = []
+
+    def visit(node):
+        if isinstance(node, tir.Evaluate):
+            call = node.value
+            if isinstance(call, tir.Call):
+                order.append(getattr(call.op, "name", ""))
+
+    tir.stmt_functor.post_order_visit(mod["main"].body, visit)
+
+    assert "tl.ptx_wgmma_ss" in order
+    assert "tl.fence_proxy_async" in order
+    assert order.index("tl.fence_proxy_async") < order.index("tl.ptx_wgmma_ss")
+
+
+def test_wgmma_after_descriptor():
+
+    @T.prim_func
+    def before():
+        with T.Kernel(1):
+            desc_a = T.decl_buffer((1,), "uint64", scope="local.descriptor")
+            desc_b = T.decl_buffer((1,), "uint64", scope="local.descriptor")
+            C_local = T.decl_buffer((32,), "float16", scope="local")
+            T.initialize_descriptor(desc_a, T.uint64(0), 2, 1, 32)
+            T.initialize_descriptor(desc_b, T.uint64(0), 2, 1, 32)
+            T.warpgroup_arrive()
+            T.ptx_wgmma_ss("float16", "m64n64k16", T.bool(True), T.bool(True), "fp16", "fp16",
+                           "fp16", desc_a.data, T.int32(0), desc_b.data, T.int32(0), C_local.data,
+                           T.int32(0), T.bool(True), 1, 1)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tir.transform.BindTarget(auto_target)(mod)
+    mod = tl.transform.InjectFenceProxy()(mod)
+
+    fence_count = 0
+    order = []
+
+    def visit(node):
+        nonlocal fence_count
+        if isinstance(node, tir.Evaluate):
+            call = node.value
+            if isinstance(call, tir.Call):
+                name = getattr(call.op, "name", "")
+                order.append(name)
+                if name == "tl.fence_proxy_async":
+                    fence_count += 1
+
+    tir.stmt_functor.post_order_visit(mod["main"].body, visit)
+    assert fence_count >= 1
+    assert "tl.warpgroup_arrive" in order
+    assert order.index("tl.fence_proxy_async") < order.index("tl.warpgroup_arrive")
+
+
 if __name__ == "__main__":
-    test_lower_fence_proxy()
+    tilelang.testing.main()

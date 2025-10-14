@@ -61,6 +61,12 @@ def should_enable_aggressive_merge(pass_ctx: Optional[PassContext] = None,
     return enable_aggressive_merge
 
 
+def should_force_let_inline(pass_ctx: Optional[PassContext] = None) -> bool:
+    if pass_ctx is None:
+        pass_ctx = tilelang.transform.get_pass_context()
+    return bool(pass_ctx and pass_ctx.config.get(tilelang.PassConfigKey.TL_FORCE_LET_INLINE, False))
+
+
 def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     # Bind the target device information to the module
     """
@@ -85,14 +91,15 @@ def LowerAndLegalize(mod: IRModule, target: Target) -> IRModule:
     """
     mod = tir.transform.BindTarget(target)(mod)
 
-    # Inline let expressions and statements
-    mod = tilelang.transform.LetInline()(mod)
+    if should_force_let_inline():
+        # Force-let inline whenever the pass config requests it.
+        mod = tilelang.transform.LetInline()(mod)
     # Add wrapper for single buf store
     mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)
     # Inject assumes to speedup tvm prover
     mod = tilelang.transform.InjectAssumes()(mod)
     # Simplify the IR expressions
-    mod = tir.transform.Simplify()(mod)
+    mod = tilelang.transform.Simplify()(mod)
     # Set layouts for reducers
     mod = tilelang.transform.LayoutReducer()(mod)
     # Infer memory layouts for fragments and shared memory
@@ -150,6 +157,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
             # in hopper device, wgmma is an async proxy
             # so we need to inject a fence proxy before it
             mod = tilelang.transform.InjectFenceProxy()(mod)
+
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tir.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
@@ -186,7 +194,7 @@ def OptimizeForTarget(mod: IRModule, target: Target) -> IRModule:
     if allow_global_thread_synchronization():
         mod = tilelang.transform.ThreadSync("global")(mod)
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
-    mod = tir.transform.SplitHostDevice()(mod)
+    mod = tilelang.transform.SplitHostDevice()(mod)
     # MergeSharedMemoryAllocations must be applied after SplitHostDevice
     # because the merged allocation site is at the beginning of each device function
     enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)

@@ -14,7 +14,10 @@ insert_final_newline = true
 indent_size = 4
 
 [*.{cpp,hpp,cxx,cc,c,h,cu,cuh}]
-indent_size = 4
+indent_size = 2
+
+[{*.cmake,CMakeLists.txt}]
+indent_size = 2
 
 [*.{yaml,yml}]
 indent_size = 2

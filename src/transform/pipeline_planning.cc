@@ -2,10 +2,12 @@
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/builtin.h>
+#include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
 #include "../op/builtin.h"
+#include <unordered_map>
 #include <utility>
 
 #include "../target/utils.h"
@@ -204,10 +206,20 @@ private:
   void VisitExpr_(const CallNode *op) final {
     auto args = op->args;
     if (op->op.same_as(builtin::address_of())) {
-      const BufferLoad load = Downcast<BufferLoad>(op->args[0]);
-      const BufferRegion buffer_region = BufferRegion::FullRegion(load->buffer);
-      // because we only care about the buffer itself instead of indices
-      reads_.push_back(buffer_region);
+      BufferRegion buffer_region;
+      if (const auto *load = op->args[0].as<BufferLoadNode>()) {
+        buffer_region = BufferRegion::FullRegion(load->buffer);
+      } else if (const auto *var_node = op->args[0].as<VarNode>()) {
+        Var data_var = GetRef<Var>(var_node);
+        auto it = buffer_data_to_buffer_.find(data_var);
+        if (it != buffer_data_to_buffer_.end()) {
+          buffer_region = BufferRegion::FullRegion((*it).second);
+        }
+      }
+      if (buffer_region.defined()) {
+        // because we only care about the buffer itself instead of indices
+        reads_.push_back(buffer_region);
+      }
     } else if (op->op.same_as(builtin::tvm_access_ptr())) {
       const VarNode *buffer_var = op->args[1].as<VarNode>();
       ICHECK(buffer_var);
@@ -398,38 +410,49 @@ private:
     if (!num_stages_anno)
       return StmtExprMutator::VisitStmt_(loop);
     int num_stages = num_stages_anno->as<IntImmNode>()->value;
-    Stmt pipeline_body{nullptr};
+    Stmt pipeline_body_root{nullptr};
     if (const auto *realize = loop->body.as<BlockRealizeNode>()) {
       const auto &block = realize->block;
       for (const auto &buffer : block->alloc_buffers) {
         ICHECK(buffer->IsInstance<BufferNode>());
         buffer_data_to_buffer_.Set(buffer->data, buffer);
       }
-      if (const auto *seq_stmt = block->body.as<SeqStmtNode>()) {
-        pipeline_body = block->body;
-      } else if (const auto *if_then_else = block->body.as<IfThenElseNode>()) {
-        // should assert else case is nullptr
-        ICHECK(!if_then_else->else_case.defined())
-            << "Pipeline_Planning: Can't handle the body of the loop because "
-               "it is not a SeqStmt";
-        pipeline_body = if_then_else->then_case;
-      } else {
-        LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
-                      "because it is not a SeqStmt or IfThenElse";
-      }
+      pipeline_body_root = block->body;
     } else {
-      pipeline_body = loop->body;
+      pipeline_body_root = loop->body;
     }
-    const SeqStmtNode *pipeline_body_seq = pipeline_body.as<SeqStmtNode>();
-    CHECK(pipeline_body_seq)
-        << "ValueError: The body of the software pipeline "
-           "should be SeqStmt, got "
-        << pipeline_body->GetTypeKey() << " " << pipeline_body;
+    const SeqStmtNode *pipeline_body_seq = nullptr;
+    {
+      Stmt current = pipeline_body_root;
+      while (true) {
+        if (const auto *seq_stmt = current.as<SeqStmtNode>()) {
+          pipeline_body_seq = seq_stmt;
+          break;
+        }
+        if (const auto *if_then_else = current.as<IfThenElseNode>()) {
+          ICHECK(!if_then_else->else_case.defined())
+              << "Pipeline_Planning: Can't handle the body of the loop because "
+                 "the IfThenElse node has an else branch";
+          current = if_then_else->then_case;
+          continue;
+        }
+        if (const auto *let_stmt = current.as<LetStmtNode>()) {
+          current = let_stmt->body;
+          continue;
+        }
+        LOG(FATAL) << "Pipeline_Planning: Can't handle the body of the loop "
+                   << "because it is not a SeqStmt, IfThenElse without else, "
+                   << "or LetStmt wrapping them, but got "
+                   << current->GetTypeKey();
+      }
+    }
+    ICHECK(pipeline_body_seq != nullptr);
+
     CHECK(num_stages >= 1);
     CHECK(loop->kind == ForKind::kSerial);
 
     AsyncDependencyChainBuilder chain_builder(buffer_data_to_buffer_);
-    chain_builder(pipeline_body);
+    chain_builder(pipeline_body_root);
 
     std::vector<PipelineStageInfo> pipeline_stage_infos;
     for (size_t i = 0; i < pipeline_body_seq->size(); i++) {

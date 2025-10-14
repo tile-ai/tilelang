@@ -160,6 +160,29 @@ def cumsum(src: tir.Buffer, dst: Optional[tir.Buffer] = None, dim: int = 0, reve
 
     Negative `dim` indices are normalized (Python-style). If `dst` is None, the operation is performed in-place into `src`. Raises ValueError when `dim` is out of bounds for `src.shape`. When `src.scope() == "local.fragment"`, this delegates to `cumsum_fragment`; otherwise it emits the `tl.cumsum` intrinsic.
 
+    Examples:
+        A 1D inclusive scan that writes the result into a separate shared-memory buffer:
+
+        >>> import tilelang.language as T
+        >>> @T.prim_func
+        ... def kernel(A: T.Tensor((128,), "float32"), B: T.Tensor((128,), "float32")):
+        ...     with T.Kernel(1, threads=128):
+        ...         A_shared = T.alloc_shared((128,), "float32")
+        ...         T.copy(A, A_shared)
+        ...         T.cumsum(src=A_shared, dst=A_shared, dim=0)
+        ...         T.copy(A_shared, B)
+
+        A 2D prefix sum along the last dimension with reverse accumulation:
+
+        >>> import tilelang.language as T
+        >>> @T.prim_func
+        ... def kernel2d(A: T.Tensor((64, 64), "float16"), B: T.Tensor((64, 64), "float16")):
+        ...     with T.Kernel(1, 1, threads=256):
+        ...         tile = T.alloc_shared((64, 64), "float16")
+        ...         T.copy(A, tile)
+        ...         T.cumsum(src=tile, dim=1, reverse=True)
+        ...         T.copy(tile, B)
+
     Returns:
         tir.Call: A handle to the emitted cumulative-sum operation.
     """

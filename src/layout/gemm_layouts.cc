@@ -588,7 +588,7 @@ Layout makeGemmVoltaABLayout(int stride, int continuous, bool is_a,
 
 // ref:
 // https://github.com/nvidia/cutlass/blob/ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e/include/cutlass/layout/tensor_op_multiplicand_sm75.h#L54
-// Althought the four settings (T or NT) used distinct layouts in CUTLASS, they
+// Although the four settings (T or NT) used distinct layouts in CUTLASS, they
 // appeared to result in the same mem layout
 Layout makeTensorOpMultiplicand(int mat_stride, int mat_continuous,
                                 int elementsize, int crosswise) {

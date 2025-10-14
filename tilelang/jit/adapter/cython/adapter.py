@@ -1,15 +1,8 @@
 """The profiler and convert to torch utils"""
 
 import ctypes
-import fcntl
-import hashlib
 import logging
-import site
-import sys
-import sysconfig
 import torch
-import os
-from pathlib import Path
 
 from typing import List, Optional, Union, Callable, Dict, Tuple, Any
 from tilelang import tvm as tvm
@@ -25,155 +18,15 @@ from tilelang.jit.adapter.utils import is_cuda_target, is_hip_target, is_cpu_tar
 from tilelang.utils.target import determine_target
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.utils.tensor import map_torch_type
-from tilelang.contrib.cc import get_cplus_compiler, is_darwin
 
 logger = logging.getLogger(__name__)
 
-
-def get_cython_compiler() -> Optional[str]:
-    """Return the path to the Cython compiler.
-
-    Returns
-    -------
-    out: Optional[str]
-        The path to the Cython compiler, or None if none was found.
-    """
-
-    cython_names = ["cython", "cython3"]
-
-    # Check system PATH
-    dirs_in_path = list(os.get_exec_path())
-
-    # Add user site-packages bin directory
-    user_base = site.getuserbase()
-    if user_base:
-        user_bin = os.path.join(user_base, "bin")
-        if os.path.exists(user_bin):
-            dirs_in_path = [user_bin] + dirs_in_path
-
-    # If in a virtual environment, add its bin directory
-    if sys.prefix != sys.base_prefix:
-        venv_bin = os.path.join(sys.prefix, "bin")
-        if os.path.exists(venv_bin):
-            dirs_in_path = [venv_bin] + dirs_in_path
-
-    for cython_name in cython_names:
-        for d in dirs_in_path:
-            cython_path = os.path.join(d, cython_name)
-            if os.path.isfile(cython_path) and os.access(cython_path, os.X_OK):
-                return cython_path
-    return None
-
-
-# Add cache management functions at module level
-def get_cache_dir() -> Path:
-    """Get the cache directory for the current Python version."""
-    py_version = f"py{sys.version_info.major}{sys.version_info.minor}"
-    # current directory
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    cache_dir = Path(current_dir) / ".cycache" / py_version
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
-
-
-def get_cached_lib(source_code: str) -> Tuple[Optional[ctypes.CDLL], Path]:
-    """Try to load cached library or return None if not found."""
-    code_hash = hashlib.sha256(source_code.encode()).hexdigest()
-    cache_path = get_cache_dir() / f"{code_hash}.so"
-    lock_file = cache_path.with_suffix('.lock')
-    with open(lock_file, 'w') as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            if cache_path.exists():
-                try:
-                    if cache_path.stat().st_size > 1024:
-                        return ctypes.CDLL(str(cache_path)), cache_path
-                    else:
-                        cache_path.unlink()  # remove the incomplete file
-                except Exception as e:
-                    logger.error(f"Failed to load cached library: {e}")
-                    return None, cache_path
-            return None, cache_path
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-
-
-# read the cython_wrapper.pyx file
-current_dir = os.path.dirname(os.path.abspath(__file__))
-cython_wrapper_path = os.path.join(current_dir, "cython_wrapper.pyx")
-
-with open(cython_wrapper_path, "r") as f:
-    cython_wrapper_code = f.read()
-    cache_dir = get_cache_dir()
-    source_path = cache_dir / "cython_wrapper.cpp"
-    library_path = cache_dir / "cython_wrapper.so"
-    md5_path = cache_dir / "md5.txt"
-    code_hash = hashlib.sha256(cython_wrapper_code.encode()).hexdigest()
-    cache_path = cache_dir / f"{code_hash}.so"
-    lock_file = cache_path.with_suffix('.lock')
-
-    # Check if cached version exists and is valid
-    need_compile = True
-    if md5_path.exists() and library_path.exists():
-        with open(md5_path, "r") as f:
-            cached_hash = f.read().strip()
-            if cached_hash == code_hash:
-                logger.debug("Cython JIT adapter is up to date, no need to compile...")
-                need_compile = False
-            else:
-                logger.info("Cython JIT adapter is out of date, need to recompile...")
-    else:
-        logger.info("No cached version found for Cython JIT adapter, need to compile...")
-
-    if need_compile:
-        logger.info("Waiting for lock to compile Cython JIT adapter...")
-        with open(lock_file, 'w') as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                # After acquiring the lock, check again if the file has been compiled by another process
-                if md5_path.exists() and library_path.exists():
-                    with open(md5_path, "r") as f:
-                        cached_hash = f.read().strip()
-                        if cached_hash == code_hash:
-                            logger.info(
-                                "Another process has already compiled the file, using it...")
-                            need_compile = False
-
-                if need_compile:
-                    logger.info("Compiling Cython JIT adapter...")
-                    temp_path = cache_dir / f"temp_{code_hash}.so"
-
-                    with open(md5_path, "w") as f:
-                        f.write(code_hash)
-
-                    # compile the cython_wrapper.pyx file into .cpp
-                    cython = get_cython_compiler()
-                    if cython is None:
-                        raise Exception("Cython is not installed, please install it first.")
-                    os.system(f"{cython} {cython_wrapper_path} --cplus -o {source_path}")
-                    python_include_path = sysconfig.get_path("include")
-                    cc = get_cplus_compiler()
-                    dynamic_flag = '-Wl,-undefined,dynamic_lookup' if is_darwin(
-                    ) else '-Wl,--unresolved-symbols=ignore-all'
-                    command = f"{cc} -shared -pthread -fPIC -fwrapv -O2 -Wall -fno-strict-aliasing {dynamic_flag} -I{python_include_path} {source_path} -o {temp_path}"
-                    os.system(command)
-
-                    # rename the temp file to the library file
-                    temp_path.rename(library_path)
-            except Exception as e:
-                if 'temp_path' in locals() and temp_path.exists():
-                    temp_path.unlink()
-                raise Exception(f"Failed to compile Cython JIT adapter: {e}") from e
-            finally:
-                if lock_file.exists():
-                    lock_file.unlink()
-
-    # add the .so file to the sys.path
-    cache_dir_str = str(cache_dir)
-    if cache_dir_str not in sys.path:
-        sys.path.append(cache_dir_str)
-
-from cython_wrapper import CythonKernelWrapper
+try:
+    # Load cython_wrapper.api3.so in env.py
+    from cython_wrapper import CythonKernelWrapper
+except ImportError:
+    # TODO: tolerance a build without cython backend
+    raise
 
 
 class CythonKernelAdapter(BaseKernelAdapter):

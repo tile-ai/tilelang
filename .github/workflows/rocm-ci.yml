@@ -31,7 +31,7 @@ jobs:
     - name: Ensure venv (local & persistent)
       run: |
         set -e
-        REQS_HASH=$(sha256sum requirements-test.txt 2>/dev/null | awk '{print $1}' || echo "no_requirements")
+        REQS_HASH=$(sha256sum requirements-rocm.txt 2>/dev/null | awk '{print $1}' || echo "no_requirements")
         MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
 
         if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
@@ -43,17 +43,17 @@ jobs:
           # shellcheck source=/dev/null
           source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
           python -m pip install --upgrade pip --no-user
-          [[ -f requirements-test.txt ]] && \
-            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-test.txt --no-user
+          [[ -f requirements-rocm.txt ]] && \
+            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-rocm.txt --no-user
           touch "$MARKER"
         fi
 
     - name: Run format check
       run: |
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
-        git submodule update --init --recursive
+        git submodule update --init --recursive --checkout
         mkdir -p build
-        cd build; cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DUSE_ROCM=ON; cd ..
+        cd build; USE_ROCM=1 cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON; cd ..
         if ! output=$(./format.sh 2>&1); then
           echo "------------------------------------"
           echo "message:"
@@ -73,7 +73,7 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v5
       with:
-        fetch-depth: 0
+        fetch-depth: 1
         repository: ${{ github.event.pull_request.head.repo.full_name }}
         ref: ${{ github.event.pull_request.head.ref }}
 
@@ -84,26 +84,21 @@ jobs:
 
     - name: Ensure venv (local & persistent)
       run: |
-        echo "Running on AMD GPU"
         set -e
-        REQS_HASH=$(sha256sum requirements-rocm.txt | cut -d ' ' -f 1)
+        REQS_HASH=$(sha256sum requirements-rocm.txt 2>/dev/null | awk '{print $1}' || echo "no_requirements")
         MARKER="${{ runner.tool_cache }}/.venv_marker_${{ env.PYTHON_VERSION }}_${REQS_HASH:0:8}"
 
-        echo "Installing requirements"
         if [[ -f "$MARKER" ]] && [[ -f "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate" ]]; then
           echo "venv exists and hash matches – reuse it"
         else
           echo "venv stale or missing – recreating"
           rm -rf "${{ runner.tool_cache }}/${{ env.VENV_DIR }}" "$MARKER"
           python -m venv "${{ runner.tool_cache }}/${{ env.VENV_DIR }}"
+          # shellcheck source=/dev/null
           source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
           python -m pip install --upgrade pip --no-user
-          if [[ -f requirements-rocm.txt ]]; then
-            pip install --pre torch torchvision torchaudio --index-url ${{ env.PYTORCH_INDEX_URL }}
-            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-rocm.txt
-          fi
-
-          USE_ROCM=True pip install . --no-user
+          [[ -f requirements-rocm.txt ]] && \
+            PIP_NO_BUILD_ISOLATION=1 pip install -r requirements-rocm.txt --no-user
           touch "$MARKER"
         fi
 
@@ -111,6 +106,7 @@ jobs:
       run: |
         echo "Installing project (wheel form)"
         source "${{ runner.tool_cache }}/${{ env.VENV_DIR }}/bin/activate"
+        git submodule update --init --recursive --checkout --recommend-shallow
         USE_ROCM=True pip install . --no-user
 
     - name: Run tests

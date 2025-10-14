@@ -2,9 +2,18 @@
 
 #if __CUDA_ARCH_LIST__ >= 900
 #include "cute/arch/cluster_sm90.hpp"
+#include "cute/arch/mma_sm90_gmma.hpp"
 #include "cutlass/cutlass.h"
 
 namespace tl {
+
+TL_DEVICE void warpgroup_arrive() { cute::warpgroup_arrive(); }
+TL_DEVICE void warpgroup_commit_batch() { cute::warpgroup_commit_batch(); }
+
+template <int NumMma> TL_DEVICE void warpgroup_wait() {
+  cute::warpgroup_wait<NumMma>();
+}
+
 // Template parameter:
 //   thread_extent: the logical size (in number of threads) of each "group"
 //                  within which we want to elect exactly ONE representative
