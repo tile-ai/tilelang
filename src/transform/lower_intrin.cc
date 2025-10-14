@@ -28,7 +28,6 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/transform.h>
 
-#include <functional>
 #include <limits>
 #include <unordered_set>
 
@@ -37,7 +36,6 @@
 
 namespace tvm {
 namespace tl {
-
 using namespace tir;
 
 class IntrinInjecter : public tvm::arith::IRMutatorWithAnalyzer {
@@ -110,38 +108,8 @@ public:
     const DataType &dtype = op->dtype;
     ICHECK(dtype.is_int() || dtype.is_uint());
 
-    auto is_ceildiv_numerator = [&]() {
-      std::vector<std::pair<PrimExpr, int>> terms;
-      std::function<void(const PrimExpr &, int)> collect =
-          [&](const PrimExpr &expr, int sign) {
-            if (const auto *add = expr.as<AddNode>()) {
-              collect(add->a, sign);
-              collect(add->b, sign);
-            } else if (const auto *sub = expr.as<SubNode>()) {
-              collect(sub->a, sign);
-              collect(sub->b, -sign);
-            } else {
-              terms.emplace_back(expr, sign);
-            }
-          };
-      collect(op->a, 1);
-      int den_coeff = 0;
-      int64_t const_term = 0;
-      for (const auto &term : terms) {
-        const PrimExpr &expr = term.first;
-        int sign = term.second;
-        if (const auto *imm = expr.as<IntImmNode>()) {
-          const_term += static_cast<int64_t>(sign) * imm->value;
-        } else if (analyzer_->CanProveEqual(expr, op->b)) {
-          den_coeff += sign;
-        }
-      }
-      return den_coeff == 1 && const_term == -1;
-    }();
-
-    if (support_bitwise_op_ && !is_ceildiv_numerator &&
-        is_const_power_of_two_integer(op->b, &shift) &&
-        analyzer_->CanProveGreaterEqual(op->a, 0)) {
+    // lower (a + 31) // 512 to (a + 31) >> 5
+    if (support_bitwise_op_ && is_const_power_of_two_integer(op->b, &shift)) {
       // lower to right shift if possible.
       return op->a >> make_const(dtype, shift);
     }
@@ -192,8 +160,9 @@ public:
         //     == truncdiv(a + b*c, b) - c
         IntImm min(op->a->dtype.element_of(), const_int_bound->min_value);
         PrimExpr ceildiv = truncdiv((op->b - 1) - min, op->b);
-        PrimExpr offset_numerator =
-            analyzer_->Simplify(op->a + op->b * ceildiv);
+        // Skip analyzer simplification so we preserve straightforward div
+        // expressions.
+        PrimExpr offset_numerator = op->a + op->b * ceildiv;
         return truncdiv(offset_numerator, op->b) - ceildiv;
       }
 
@@ -429,9 +398,9 @@ Stmt LowerIntrinStmt(Stmt stmt, const std::string &target) {
 }
 
 namespace transform {
-using namespace tir::transform;
 
-tvm::transform::Pass LowerIntrin() {
+tir::transform::Pass LowerIntrin() {
+  using namespace tir::transform;
   auto pass_func = [](PrimFunc f, IRModule m, PassContext ctx) {
     auto *n = f.CopyOnWrite();
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
