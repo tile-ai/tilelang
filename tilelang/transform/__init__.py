@@ -438,6 +438,12 @@ def LowerThreadAllreduce():
     return _ffi_api.LowerThreadAllreduce()  # type: ignore
 
 
+def LowerIntrin():
+    """LowerIntrin
+    """
+    return _ffi_api.LowerIntrin()  # type: ignore
+
+
 def LowerDeviceKernelLaunch():
     """
     Create and return a transform pass that lowers device kernel launch constructs to target-specific IR.
