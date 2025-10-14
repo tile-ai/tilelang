@@ -433,9 +433,6 @@ def get_data(m, n, k, qk, scale_size, topk, E, block_M):
     expert_ids = torch.tensor(expert_ids, dtype=torch.int32, device='cuda')  # （padding_M,）
     padding_M = sorted_token_ids.shape[0]  # padding_M: token number after padding
 
-    print(f'{sorted_token_ids=}')
-    print(f'{expert_ids=}')
-
     return A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, padding_M
 
 
@@ -469,8 +466,13 @@ def main(m=256, n=256, k=256, scale_size=32, fast_dequant=True, with_bias=False,
             scale_size=scale_size,
             fast_dequant=fast_dequant,
             with_bias=with_bias,
+            block_M=block_M,
+            block_N=block_N,
+            block_K=block_K,
+            num_stages=num_stages,
+            threads=threads,
+            split=split,
         )
-        print(f'Best config: {kernel.config}')
 
     output = kernel(
         A,
