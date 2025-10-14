@@ -101,6 +101,15 @@ jobs:
       - name: Set environment (self-hosted runners)
         if: startsWith(matrix.runner.name, 'self-hosted')
         run: |
+          # Hide sensitive data in logs for self-hosted runners
+          if [[ -n "${{ secrets.SECRET_PATH_PREFIXES }}" ]]; then
+            echo "::add-mask::${{ secrets.SECRET_PATH_PREFIXES }}"
+            # Colon separated list of secrets to mask
+            for secret in $(echo "${{ secrets.SECRET_PATH_PREFIXES }}" | tr ':' '\n'); do
+              echo "::add-mask::${secret}"
+            done
+          fi
+
           # Use runner tool_cache as cache root for self-hosted runners to avoid internet connection
           # issues and to share cache between jobs.
           export XDG_CACHE_HOME="${{ runner.tool_cache }}/.ci-cache-${{ github.workflow }}"
