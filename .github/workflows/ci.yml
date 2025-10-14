@@ -229,11 +229,11 @@ jobs:
         id: setup-venv
         run: |
           uv pip install --upgrade pip setuptools wheel
-          uv pip install -r requirements-test.txt
+          uv pip install -v -r requirements-test.txt
           if [[ "${{ matrix.runner.toolkit }}" == "CUDA"* ]]; then
-            uv pip install --no-build-isolation flash-attn==2.5.8
+            uv pip install --no-build-isolation -v flash-attn==2.5.8
           elif [[ "${{ matrix.runner.toolkit }}" == "ROCm"* ]]; then
-            uv pip install -r requirements-rocm.txt
+            uv pip install -v -r requirements-rocm.txt
           elif [[ "${{ matrix.runner.toolkit }}" == "Metal"* ]]; then
             # Currently no extra dependency for metal
             :
