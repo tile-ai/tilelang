@@ -1106,7 +1106,6 @@ def ptx_wgmma_ss(
 def ptx_wgmma_rs(
     dtype,
     wgmma_prefix,
-    a_is_k_major,
     b_is_k_major,
     a_dtype_abbrv,
     b_dtype_abbrv,
@@ -1126,7 +1125,6 @@ def ptx_wgmma_rs(
         dtype,
         _tvm_op.Op.get("tl.ptx_wgmma_rs"),
         wgmma_prefix,
-        a_is_k_major,
         b_is_k_major,
         a_dtype_abbrv,
         b_dtype_abbrv,

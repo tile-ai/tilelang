@@ -223,6 +223,7 @@ def gemm_v2(
     clear_accum: bool = False,
     k_pack: int = 1,
     wg_wait: int = 0,
+    mbar: Optional[tir.Buffer] = None,
 ):
     """Perform a General Matrix Multiplication (GEMM) operation.
 
@@ -239,6 +240,7 @@ def gemm_v2(
         clear_accum (bool, optional): Whether to clear accumulator before computation. Defaults to False.
         k_pack (int, optional): Number of k dimensions packed into a single warp. Defaults to 1.
         wg_wait (int, optional): Warp group wait count. Defaults to 0.
+        mbar (tir.Buffer, optional): mbarrier for TCGEN5MMA synchronization
 
     Returns:
         tir.Call: A handle to the GEMM operation
@@ -263,6 +265,7 @@ def gemm_v2(
     A = legalize_arguments(A)
     B = legalize_arguments(B)
     C = legalize_arguments(C)
+    mbar = legalize_arguments(mbar) if mbar is not None else None
 
     def retrieve_shape(object: Union[tir.Buffer, tir.BufferRegion]) -> List[int]:
         if isinstance(object, tir.Buffer):
@@ -406,6 +409,8 @@ def gemm_v2(
     Aptr = retrieve_ptr(A, "r")
     Bptr = retrieve_ptr(B, "r")
     Cptr = retrieve_ptr(C, "rw")
+    mbarptr = retrieve_ptr(mbar, "rw") if mbar is not None else tir.const(0, "uint32")
+    C_coords = [r.min for r in C.region] if isinstance(C, tir.BufferRegion) else [0, 0]
     return tir.call_intrin(
         "handle",
         tir.op.Op.get("tl.gemm_py"),
@@ -425,4 +430,7 @@ def gemm_v2(
         offset_b,
         k_pack,
         wg_wait,
+        mbarptr,
+        C_coords[0],
+        C_coords[1],
     )

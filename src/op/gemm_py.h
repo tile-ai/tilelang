@@ -19,6 +19,8 @@ using namespace tir;
 class GemmPyNode : public TileOperatorNode {
 public:
   bool CheckWGMMA() const;
+  bool AllowTCGEN5MMA(Target target) const;
+  bool AllowWGMMA(int block_size, Target target) const;
   tir::Buffer A, B, C;
   // pointer to the A, B, C
   PrimExpr Aptr, Bptr, Cptr;

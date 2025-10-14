@@ -582,6 +582,8 @@ Stmt GemmNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   if (A.scope() == "local.fragment") {
     ICHECK(B.scope() != "local.fragment");
+    ICHECK(!trans_A)
+        << "gemm_rs requires the A operand to be in non-transposed layout.";
     op_name = "tl::gemm_rs";
   } else if (B.scope() == "local.fragment") {
     op_name = "tl::gemm_sr";
