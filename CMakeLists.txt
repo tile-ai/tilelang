@@ -75,6 +75,8 @@ if(USE_METAL)
     src/target/rt_mod_metal.cc
   )
   list(APPEND TILE_LANG_SRCS ${TILE_LANG_METAL_SRCS})
+  # FIXME: CIBW failed with backtrace, why???
+  set(TVM_FFI_USE_LIBBACKTRACE OFF)
 elseif(USE_ROCM)
   set(CMAKE_HIP_STANDARD 17)
   include(${TVM_SOURCE}/cmake/utils/FindROCM.cmake)

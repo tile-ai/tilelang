@@ -38,6 +38,7 @@ dependencies = [
     "ml_dtypes",
     "psutil",
     "torch",
+    "torch>=2.7; platform_system == 'Darwin'"
 ]
 
 [project.optional-dependencies]
