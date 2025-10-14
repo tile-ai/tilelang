@@ -361,7 +361,15 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
       PrimExpr loop_var_to_thread =
           src_layout->ForwardThread(indice_map_[buffer], rep);
       loop_var_to_thread = analyzer_.Simplify(loop_var_to_thread);
-
+      PostOrderVisit(loop_var_to_thread, [&](const ObjectRef &objref) {
+        if (auto opt_var = objref.as<Var>();
+            opt_var && inner_vars_.count(*opt_var)) {
+          std::ostringstream oss;
+          oss << "loop_var_to_thread = " << loop_var_to_thread
+              << "contains inner var" << *opt_var;
+          throw LayoutConflictException(oss.str());
+        }
+      });
       result = Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter)
                    ->BindThreadRange(T.thread_bounds);
     }
