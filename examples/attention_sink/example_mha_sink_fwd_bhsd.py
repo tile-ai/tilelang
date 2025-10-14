@@ -1,4 +1,5 @@
 # Modified from tilelang/examples/flash_attention/example_mha_fwd_bhsd.py
+from __future__ import annotations
 
 import torch
 import tilelang
@@ -8,7 +9,6 @@ import tilelang.language as T
 from tilelang.layout import make_swizzled_layout
 import itertools
 import argparse
-from typing import Optional
 
 
 def get_configs():
@@ -22,20 +22,22 @@ def get_configs():
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
-    compile_flags=["-O3", "-DENABLE_BF16"])
+    compile_flags=["-O3", "-DENABLE_BF16"],
+)
 def flashattn(
-        batch,
-        heads,
-        seq_q,
-        seq_kv,
-        dim,
-        window_size=None,  # None for full attention
-        sm_scale=None,
-        block_M=64,
-        block_N=64,
-        num_stages=1,
-        threads=128,
-        dtype: str = "float16"):
+    batch,
+    heads,
+    seq_q,
+    seq_kv,
+    dim,
+    window_size=None,  # None for full attention
+    sm_scale=None,
+    block_M=64,
+    block_N=64,
+    num_stages=1,
+    threads=128,
+    dtype: str = "float16",
+):
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
 
@@ -164,7 +166,7 @@ def flashattn(
             end = T.min(
                 T.ceildiv(seq_kv, block_N), T.ceildiv((bx + 1) * block_M + past_len, block_N))
 
-            start = T.alloc_local([1], 'int32')
+            start = T.alloc_local([1], "int32")
             if window_size is not None:
                 start[0] = T.max(0, (bx * block_M + past_len - window_size) // block_N)
             else:
@@ -188,15 +190,16 @@ def flashattn(
 
 
 # Modified from https://github.com/openai/gpt-oss/blob/main/gpt_oss/triton/attention.py
-def ref_program(query: torch.Tensor,
-                key: torch.Tensor,
-                value: torch.Tensor,
-                sinks: torch.Tensor,
-                sliding_window: Optional[int] = None,
-                dtype: torch.dtype = torch.float16) -> torch.Tensor:
-
-    query = query.transpose(1, 2).contiguous().unsqueeze(
-        3)  # align with the original function's interface
+def ref_program(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    sinks: torch.Tensor,
+    sliding_window: int | None = None,
+    dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    query = (query.transpose(1, 2).contiguous().unsqueeze(3)
+            )  # align with the original function's interface
     key = key.transpose(1, 2).contiguous()
     value = value.transpose(1, 2).contiguous()
 
@@ -243,29 +246,31 @@ def gen_inputs(
         Skv,
         D,
         dtype=torch.float16) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    query = torch.randn([B, H, Sq, D], dtype=dtype, device='cuda')
-    key = torch.randn([B, H, Skv, D], dtype=dtype, device='cuda')
-    value = torch.randn([B, H, Skv, D], dtype=dtype, device='cuda')
-    sinks = torch.randn([H], dtype=dtype, device='cuda')
+    query = torch.randn([B, H, Sq, D], dtype=dtype, device="cuda")
+    key = torch.randn([B, H, Skv, D], dtype=dtype, device="cuda")
+    value = torch.randn([B, H, Skv, D], dtype=dtype, device="cuda")
+    sinks = torch.randn([H], dtype=dtype, device="cuda")
     return query, key, value, sinks
 
 
-def main(batch: int = 1,
-         heads: int = 1,
-         seq_q: int = 256,
-         seq_kv: int = 256,
-         dim: int = 128,
-         window_size: int | None = None,
-         dtype: str = "float16",
-         tune: bool = False):
+def main(
+    batch: int = 1,
+    heads: int = 1,
+    seq_q: int = 256,
+    seq_kv: int = 256,
+    dim: int = 128,
+    window_size: int | None = None,
+    dtype: str = "float16",
+    tune: bool = False,
+):
     torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
     if window_size is not None:
-        print('Using sliding window attention.')
+        print("Using sliding window attention.")
         assert window_size <= seq_q
-        flops_per_matmul = 2.0 * batch * heads * min(
-            window_size, seq_kv // 2) * seq_q * dim  # just a rough estimation
+        flops_per_matmul = (2.0 * batch * heads * min(window_size, seq_kv // 2) * seq_q * dim
+                           )  # just a rough estimation
     else:
-        print('Using full attention.')
+        print("Using full attention.")
         flops_per_matmul = 2.0 * batch * heads * seq_q * seq_kv * dim * 0.5
     total_flops = 2 * flops_per_matmul
 
@@ -292,7 +297,8 @@ def main(batch: int = 1,
             block_N=block_N,
             num_stages=num_stages,
             threads=threads,
-            dtype=dtype)
+            dtype=dtype,
+        )
 
         Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim, dtype=torch_dtype)
 
@@ -300,33 +306,43 @@ def main(batch: int = 1,
             kernel(Q, K, V, sinks),
             ref_program(Q, K, V, sinks, window_size, dtype=torch_dtype),
             rtol=1e-2,
-            atol=1e-2)
+            atol=1e-2,
+        )
         print("All checks passed.✅")
 
         latency = do_bench(
             lambda: ref_program(Q, K, V, sinks, window_size, dtype=torch_dtype), warmup=500)
-        print("Ref: {:.2f} ms".format(latency))
-        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Ref: {latency:.2f} ms")
+        print(f"Ref: {total_flops / latency * 1e-9:.2f} TFlops")
         latency = do_bench(lambda: kernel(Q, K, V, sinks), warmup=500)
-        print("Tilelang: {:.2f} ms".format(latency))
-        print("Tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Tilelang: {latency:.2f} ms")
+        print(f"Tilelang: {total_flops / latency * 1e-9:.2f} TFlops")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=8, help='batch size')
-    parser.add_argument('--heads', type=int, default=32, help='heads')
-    parser.add_argument('--seq_q', type=int, default=4096, help='sequence length of query')
-    parser.add_argument('--seq_kv', type=int, default=4096, help='sequence length of key/value')
-    parser.add_argument('--dim', type=int, default=128, help='dim')
+    parser.add_argument("--batch", type=int, default=8, help="batch size")
+    parser.add_argument("--heads", type=int, default=32, help="heads")
+    parser.add_argument("--seq_q", type=int, default=4096, help="sequence length of query")
+    parser.add_argument("--seq_kv", type=int, default=4096, help="sequence length of key/value")
+    parser.add_argument("--dim", type=int, default=128, help="dim")
     parser.add_argument(
-        '--window_size',
+        "--window_size",
         type=int,
         default=None,
-        help='window size (default: None, which means full attention)')
+        help="window size (default: None, which means full attention)",
+    )
     parser.add_argument(
-        '--dtype', type=str, default="float16", help="dtype, can be float16 or bfloat16")
-    parser.add_argument('--tune', action='store_true', help='tune')
+        "--dtype", type=str, default="float16", help="dtype, can be float16 or bfloat16")
+    parser.add_argument("--tune", action="store_true", help="tune")
     args = parser.parse_args()
-    main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.window_size, args.dtype,
-         args.tune)
+    main(
+        args.batch,
+        args.heads,
+        args.seq_q,
+        args.seq_kv,
+        args.dim,
+        args.window_size,
+        args.dtype,
+        args.tune,
+    )

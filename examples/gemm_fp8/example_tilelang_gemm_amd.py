@@ -17,9 +17,9 @@ def supply_prog(args):
     a_param, b_param = args
     M, K = a_param.shape
     N, _ = b_param.shape
-    a = (torch.randn(M, K, dtype=torch.float16, device='cuda') *
+    a = (torch.randn(M, K, dtype=torch.float16, device="cuda") *
          0.01).to(dtype=torch.float8_e4m3fnuz)
-    b = (torch.randn(N, K, dtype=torch.float16, device='cuda') *
+    b = (torch.randn(N, K, dtype=torch.float16, device="cuda") *
          0.01).to(dtype=torch.float8_e4m3fnuz)
     return [a, b]
 
@@ -55,7 +55,8 @@ def get_configs():
     cache_input_tensors=True,
     ref_prog=ref_program,
     manual_check_prog=manual_check_prog,
-    supply_prog=supply_prog)
+    supply_prog=supply_prog,
+)
 @tilelang.jit(out_idx=[-1])
 def fp8_matmul(M, N, K, block_M, block_N, block_K, num_stages, num_threads, k_pack, gemm_type):
     dtype = "float8_e4m3fnuz"
@@ -68,7 +69,10 @@ def fp8_matmul(M, N, K, block_M, block_N, block_K, num_stages, num_threads, k_pa
             C: T.Tensor((M, N), accum_dtype),
     ):
         with T.Kernel(
-                T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (bx, by):
+                T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (
+                    bx,
+                    by,
+                ):
             A_local = T.alloc_fragment((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_N, block_K), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -83,7 +87,8 @@ def fp8_matmul(M, N, K, block_M, block_N, block_K, num_stages, num_threads, k_pa
                     C_local,
                     transpose_B=True,
                     k_pack=k_pack,
-                    policy=T.GemmWarpPolicy.FullRow)
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
 
             T.copy(C_local, C[by * block_M, bx * block_N])
 
@@ -94,7 +99,10 @@ def fp8_matmul(M, N, K, block_M, block_N, block_K, num_stages, num_threads, k_pa
             C: T.Tensor((M, N), accum_dtype),
     ):
         with T.Kernel(
-                T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (bx, by):
+                T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=num_threads) as (
+                    bx,
+                    by,
+                ):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             B_shared = T.alloc_shared((block_N, block_K), dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -109,7 +117,8 @@ def fp8_matmul(M, N, K, block_M, block_N, block_K, num_stages, num_threads, k_pa
                     C_local,
                     transpose_B=True,
                     k_pack=k_pack,
-                    policy=T.GemmWarpPolicy.FullRow)
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
 
             T.copy(C_local, C[by * block_M, bx * block_N])
 
@@ -123,9 +132,9 @@ def fp8_matmul(M, N, K, block_M, block_N, block_K, num_stages, num_threads, k_pa
 
 def test_gemm_fp8(M, N, K):
     kernel = fp8_matmul(M, N, K)
-    a = (torch.randn(M, K, dtype=torch.float16, device='cuda') *
+    a = (torch.randn(M, K, dtype=torch.float16, device="cuda") *
          0.01).to(dtype=torch.float8_e4m3fnuz)
-    b = (torch.randn(N, K, dtype=torch.float16, device='cuda') *
+    b = (torch.randn(N, K, dtype=torch.float16, device="cuda") *
          0.01).to(dtype=torch.float8_e4m3fnuz)
     c = kernel(a, b)
     ref_c = ref_program(a, b)

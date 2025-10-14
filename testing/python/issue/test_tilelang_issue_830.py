@@ -56,7 +56,8 @@ def _empty_kernel_with_binding_variants(use_tuple_binding: bool = False):
             print(pid)
             pass
 
-    return kernel_with_tuple_kernel_binding if use_tuple_binding else kernel_with_scalar_kernel_binding
+    return (kernel_with_tuple_kernel_binding
+            if use_tuple_binding else kernel_with_scalar_kernel_binding)
 
 
 def test_empty_kernel_with_binding_variants():

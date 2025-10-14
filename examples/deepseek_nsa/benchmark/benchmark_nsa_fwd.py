@@ -15,20 +15,41 @@ from fla.utils import autocast_custom_fwd, contiguous
 
 
 @triton.heuristics({
-    'USE_OFFSETS': lambda args: args['offsets'] is not None,
-    'USE_BLOCK_COUNTS': lambda args: isinstance(args['block_counts'], torch.Tensor),
+    "USE_OFFSETS": lambda args: args["offsets"] is not None,
+    "USE_BLOCK_COUNTS": lambda args: isinstance(args["block_counts"], torch.Tensor),
 })
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1]],
-    key=['BS', 'BK', 'BV'],
+    key=["BS", "BK", "BV"],
 )
 @triton.jit
-def parallel_nsa_fwd_kernel(q, k, v, o_slc, o_swa, lse_slc, lse_swa, scale, block_indices,
-                            block_counts, offsets, token_indices, T, H: tl.constexpr,
-                            HQ: tl.constexpr, G: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
-                            S: tl.constexpr, BS: tl.constexpr, WS: tl.constexpr, BK: tl.constexpr,
-                            BV: tl.constexpr, USE_OFFSETS: tl.constexpr,
-                            USE_BLOCK_COUNTS: tl.constexpr):
+def parallel_nsa_fwd_kernel(
+    q,
+    k,
+    v,
+    o_slc,
+    o_swa,
+    lse_slc,
+    lse_swa,
+    scale,
+    block_indices,
+    block_counts,
+    offsets,
+    token_indices,
+    T,
+    H: tl.constexpr,
+    HQ: tl.constexpr,
+    G: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    S: tl.constexpr,
+    BS: tl.constexpr,
+    WS: tl.constexpr,
+    BK: tl.constexpr,
+    BV: tl.constexpr,
+    USE_OFFSETS: tl.constexpr,
+    USE_BLOCK_COUNTS: tl.constexpr,
+):
     i_t, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
 
@@ -53,7 +74,7 @@ def parallel_nsa_fwd_kernel(q, k, v, o_slc, o_swa, lse_slc, lse_swa, scale, bloc
     # [G, BV]
     b_o_slc = tl.zeros([G, BV], dtype=tl.float32)
 
-    b_m_slc = tl.full([G], float('-inf'), dtype=tl.float32)
+    b_m_slc = tl.full([G], float("-inf"), dtype=tl.float32)
     b_acc_slc = tl.zeros([G], dtype=tl.float32)
     for i in range(NS):
         i_s = tl.load(block_indices + i).to(tl.int32) * BS
@@ -66,7 +87,7 @@ def parallel_nsa_fwd_kernel(q, k, v, o_slc, o_swa, lse_slc, lse_swa, scale, bloc
             b_v_slc = tl.load(p_v_slc, boundary_check=(0, 1))
             # [G, BS]
             b_s_slc = tl.dot(b_q, b_k_slc)
-            b_s_slc = tl.where((i_t >= (i_s + tl.arange(0, BS)))[None, :], b_s_slc, float('-inf'))
+            b_s_slc = tl.where((i_t >= (i_s + tl.arange(0, BS)))[None, :], b_s_slc, float("-inf"))
 
             # [G]
             b_m_slc, b_mp_slc = tl.maximum(b_m_slc, tl.max(b_s_slc, 1)), b_m_slc
@@ -195,7 +216,8 @@ class ParallelNSAFunction(torch.autograd.Function):
             window_size=window_size,
             scale=scale,
             offsets=offsets,
-            token_indices=token_indices)
+            token_indices=token_indices,
+        )
         ctx.save_for_backward(q, k, v, o_slc, lse_slc, o_swa, lse_swa)
         ctx.block_indices = block_indices
         ctx.block_counts = block_counts
@@ -207,18 +229,20 @@ class ParallelNSAFunction(torch.autograd.Function):
         return o_slc.to(q.dtype), o_swa.to(q.dtype) if o_swa is not None else o_swa
 
 
-def parallel_nsa(q: torch.Tensor,
-                 k: torch.Tensor,
-                 v: torch.Tensor,
-                 g_slc: torch.Tensor,
-                 g_swa: torch.Tensor,
-                 block_indices: torch.LongTensor,
-                 block_counts: Optional[Union[torch.LongTensor, int]] = None,
-                 block_size: int = 64,
-                 window_size: int = 0,
-                 scale: Optional[float] = None,
-                 cu_seqlens: Optional[torch.LongTensor] = None,
-                 head_first: bool = False) -> torch.Tensor:
+def parallel_nsa(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g_slc: torch.Tensor,
+    g_swa: torch.Tensor,
+    block_indices: torch.LongTensor,
+    block_counts: Optional[Union[torch.LongTensor, int]] = None,
+    block_size: int = 64,
+    window_size: int = 0,
+    scale: Optional[float] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    head_first: bool = False,
+) -> torch.Tensor:
     r"""
     Args:
         q (torch.Tensor):
@@ -262,11 +286,11 @@ def parallel_nsa(q: torch.Tensor,
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     if head_first:
-        q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'),
+        q, k, v, block_indices = map(lambda x: rearrange(x, "b h t d -> b t h d"),
                                      (q, k, v, block_indices))
-        g_slc, g_swa = map(lambda x: rearrange(x, 'b h t -> b t h'), (g_slc, g_swa))
+        g_slc, g_swa = map(lambda x: rearrange(x, "b h t -> b t h"), (g_slc, g_swa))
         if isinstance(block_counts, torch.Tensor):
-            block_counts = rearrange(block_counts, 'b h t -> b t h')
+            block_counts = rearrange(block_counts, "b h t -> b t h")
     assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
 
     if isinstance(block_counts, int):
@@ -280,22 +304,24 @@ def parallel_nsa(q: torch.Tensor,
     else:
         o = o_slc * g_slc.unsqueeze(-1)
     if head_first:
-        o = rearrange(o, 'b t h d -> b h t d')
+        o = rearrange(o, "b t h d -> b h t d")
     return o
 
 
-def naive_nsa(q: torch.Tensor,
-              k: torch.Tensor,
-              v: torch.Tensor,
-              g_slc: torch.Tensor,
-              g_swa: torch.Tensor,
-              block_indices: torch.LongTensor,
-              block_counts: Optional[Union[torch.LongTensor, int]] = None,
-              block_size: int = 64,
-              window_size: int = 0,
-              scale: Optional[float] = None,
-              cu_seqlens: Optional[torch.LongTensor] = None,
-              head_first: bool = False) -> torch.Tensor:
+def naive_nsa(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g_slc: torch.Tensor,
+    g_swa: torch.Tensor,
+    block_indices: torch.LongTensor,
+    block_counts: Optional[Union[torch.LongTensor, int]] = None,
+    block_size: int = 64,
+    window_size: int = 0,
+    scale: Optional[float] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    head_first: bool = False,
+) -> torch.Tensor:
     r"""
     Args:
         q (torch.Tensor):
@@ -342,19 +368,19 @@ def naive_nsa(q: torch.Tensor,
             raise RuntimeError(
                 "Sequences with variable lengths are not supported for head-first mode")
     if head_first:
-        q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'),
+        q, k, v, block_indices = map(lambda x: rearrange(x, "b h t d -> b t h d"),
                                      (q, k, v, block_indices))
-        g_slc, g_swa = map(lambda x: rearrange(x, 'b h t -> b t h'), (g_slc, g_swa))
+        g_slc, g_swa = map(lambda x: rearrange(x, "b h t -> b t h"), (g_slc, g_swa))
         if isinstance(block_counts, torch.Tensor):
-            block_counts = rearrange(block_counts, 'b h t -> b t h')
+            block_counts = rearrange(block_counts, "b h t -> b t h")
 
     dtype = q.dtype
     G = q.shape[2] // k.shape[2]
     BS = block_size
     S = block_indices.shape[-1]
-    k, v, block_indices = (repeat(x, 'b t h d -> b t (h g) d', g=G) for x in (k, v, block_indices))
+    k, v, block_indices = (repeat(x, "b t h d -> b t (h g) d", g=G) for x in (k, v, block_indices))
     if isinstance(block_counts, torch.Tensor):
-        block_counts = repeat(block_counts, 'b t h -> b t (h g)', g=G)
+        block_counts = repeat(block_counts, "b t h -> b t (h g)", g=G)
     c = torch.arange(S).repeat_interleave(BS).unsqueeze(1).expand(-1, q.shape[2]).to(q.device)
     q, k, v = map(lambda x: x.float(), (q, k, v))
 
@@ -370,8 +396,14 @@ def naive_nsa(q: torch.Tensor,
 
     for i in range(len(cu_seqlens) - 1):
         if not varlen:
-            q_b, k_b, v_b, g_slc_b, g_swa_b, i_b = q[i], k[i], v[i], g_slc[i], g_swa[
-                i], block_indices[i]
+            q_b, k_b, v_b, g_slc_b, g_swa_b, i_b = (
+                q[i],
+                k[i],
+                v[i],
+                g_slc[i],
+                g_swa[i],
+                block_indices[i],
+            )
             if isinstance(block_counts, torch.Tensor):
                 s_b = block_counts[i]
             else:
@@ -380,7 +412,8 @@ def naive_nsa(q: torch.Tensor,
             T = cu_seqlens[i + 1] - cu_seqlens[i]
             q_b, k_b, v_b, g_slc_b, g_swa_b, i_b = map(
                 lambda x: x[0][cu_seqlens[i]:cu_seqlens[i + 1]],
-                (q, k, v, g_slc, g_swa, block_indices))
+                (q, k, v, g_slc, g_swa, block_indices),
+            )
             if isinstance(block_counts, torch.Tensor):
                 s_b = block_counts[0][cu_seqlens[i]:cu_seqlens[i + 1]]
             else:
@@ -407,37 +440,43 @@ def naive_nsa(q: torch.Tensor,
             k_i_slc, v_i_slc = map(
                 lambda x: x.gather(
                     0,
-                    i_i.clamp(0, T - 1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])), (k_b, v_b))
+                    i_i.clamp(0, T - 1).unsqueeze(-1).expand(*i_i.shape, x.shape[-1])),
+                (k_b, v_b),
+            )
             # [S*BS, HQ]
-            attn_slc = torch.einsum('h d, n h d -> n h', q_i, k_i_slc).masked_fill(
-                torch.logical_or(i_i < 0, i_i > i_q) |
-                (c >= s_i if block_counts is not None else False), float('-inf')).softmax(0)
+            attn_slc = (
+                torch.einsum("h d, n h d -> n h", q_i, k_i_slc).masked_fill(
+                    torch.logical_or(i_i < 0, i_i > i_q)
+                    | (c >= s_i if block_counts is not None else False),
+                    float("-inf"),
+                ).softmax(0))
             if not varlen:
-                o_slc[i, i_q] = torch.einsum('n h, n h v -> h v', attn_slc,
+                o_slc[i, i_q] = torch.einsum("n h, n h v -> h v", attn_slc,
                                              v_i_slc) * g_slc_i.unsqueeze(-1)
             else:
-                o_slc[0][cu_seqlens[i] + i_q] = torch.einsum('n h, n h v -> h v', attn_slc,
+                o_slc[0][cu_seqlens[i] + i_q] = torch.einsum("n h, n h v -> h v", attn_slc,
                                                              v_i_slc) * g_slc_i.unsqueeze(-1)
             if window_size > 0:
                 k_i_swa, v_i_swa = map(lambda x: x[max(0, i_q - window_size + 1):i_q + 1],
                                        (k_b, v_b))
-                attn_swa = torch.einsum('h d, n h d -> n h', q_i, k_i_swa).softmax(0)
+                attn_swa = torch.einsum("h d, n h d -> n h", q_i, k_i_swa).softmax(0)
                 if not varlen:
-                    o_swa[i, i_q] = torch.einsum('n h, n h v -> h v', attn_swa,
+                    o_swa[i, i_q] = torch.einsum("n h, n h v -> h v", attn_swa,
                                                  v_i_swa) * g_swa_i.unsqueeze(-1)
                 else:
-                    o_swa[0][cu_seqlens[i] + i_q] = torch.einsum('n h, n h v -> h v', attn_swa,
+                    o_swa[0][cu_seqlens[i] + i_q] = torch.einsum("n h, n h v -> h v", attn_swa,
                                                                  v_i_swa) * g_swa_i.unsqueeze(-1)
 
     if head_first:
-        o_slc = rearrange(o_slc, 'b t h d -> b h t d')
-        o_swa = rearrange(o_swa, 'b t h d -> b h t d')
+        o_slc = rearrange(o_slc, "b t h d -> b h t d")
+        o_swa = rearrange(o_swa, "b t h d -> b h t d")
 
     return o_slc.to(dtype) + o_swa.to(dtype) if o_swa is not None else o_slc.to(dtype)
 
 
 def get_configs():
     import itertools
+
     iter_params = dict(
         block_T=[128, 256, 512],
         num_stages=[0, 1, 2, 4, 5],
@@ -455,18 +494,20 @@ def get_configs():
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     })
-def tilelang_sparse_attention(batch,
-                              heads,
-                              seq_len,
-                              dim,
-                              is_causal,
-                              scale=None,
-                              block_size=64,
-                              groups=1,
-                              selected_blocks=16,
-                              block_T=128,
-                              num_stages=2,
-                              threads=32):
+def tilelang_sparse_attention(
+    batch,
+    heads,
+    seq_len,
+    dim,
+    is_causal,
+    scale=None,
+    block_size=64,
+    groups=1,
+    selected_blocks=16,
+    block_T=128,
+    num_stages=2,
+    threads=32,
+):
     if scale is None:
         scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     else:
@@ -580,7 +621,7 @@ def generate_block_indices(batch, seq_len, heads, selected_blocks, block_size):
     block_indices = torch.full((batch, seq_len, heads, selected_blocks),
                                seq_len,
                                dtype=torch.long,
-                               device='cuda')
+                               device="cuda")
 
     for b in range(batch):
         for t in range(seq_len):
@@ -591,18 +632,20 @@ def generate_block_indices(batch, seq_len, heads, selected_blocks, block_size):
     return block_indices.sort(-1)[0]
 
 
-def benchmark_nsa(batch_size,
-                  seq_len,
-                  heads,
-                  head_query,
-                  dim,
-                  selected_blocks,
-                  block_size,
-                  dtype,
-                  scale,
-                  warmup=10,
-                  iterations=100,
-                  validate=False):
+def benchmark_nsa(
+    batch_size,
+    seq_len,
+    heads,
+    head_query,
+    dim,
+    selected_blocks,
+    block_size,
+    dtype,
+    scale,
+    warmup=10,
+    iterations=100,
+    validate=False,
+):
     """Benchmark the TileLang Sparse Attention implementation."""
 
     # Set random seed for reproducibility
@@ -628,10 +671,10 @@ def benchmark_nsa(batch_size,
     print(f"Profiler latency: {profiler_latency} ms")
 
     # Create input tensors
-    Q = torch.randn((batch_size, seq_len, head_query, dim), dtype=dtype, device='cuda')
-    K = torch.randn((batch_size, seq_len, heads, dim), dtype=dtype, device='cuda')
-    V = torch.randn((batch_size, seq_len, heads, dim), dtype=dtype, device='cuda')
-    out = torch.empty((batch_size, seq_len, head_query, dim), dtype=dtype, device='cuda')
+    Q = torch.randn((batch_size, seq_len, head_query, dim), dtype=dtype, device="cuda")
+    K = torch.randn((batch_size, seq_len, heads, dim), dtype=dtype, device="cuda")
+    V = torch.randn((batch_size, seq_len, heads, dim), dtype=dtype, device="cuda")
+    out = torch.empty((batch_size, seq_len, head_query, dim), dtype=dtype, device="cuda")
 
     # Generate block indices
     block_indices = generate_block_indices(batch_size, seq_len, heads, selected_blocks,
@@ -666,10 +709,10 @@ def benchmark_nsa(batch_size,
 
     # Validate result against reference if requested
     if validate:
-        g_slc = torch.ones((batch_size, seq_len, head_query), dtype=dtype, device='cuda')
-        g_swa = torch.ones((batch_size, seq_len, head_query), dtype=dtype, device='cuda')
+        g_slc = torch.ones((batch_size, seq_len, head_query), dtype=dtype, device="cuda")
+        g_swa = torch.ones((batch_size, seq_len, head_query), dtype=dtype, device="cuda")
         block_counts = torch.randint(
-            1, selected_blocks + 1, (batch_size, seq_len, heads), device='cuda')
+            1, selected_blocks + 1, (batch_size, seq_len, heads), device="cuda")
 
         ref = naive_nsa(
             q=Q,
@@ -700,22 +743,24 @@ def benchmark_nsa(batch_size,
         "head_query": head_query,
         "dim": dim,
         "selected_blocks": selected_blocks,
-        "block_size": block_size
+        "block_size": block_size,
     }
 
 
-def benchmark_triton_nsa(batch_size,
-                         seq_len,
-                         heads,
-                         head_query,
-                         dim,
-                         selected_blocks,
-                         block_size,
-                         dtype,
-                         scale,
-                         warmup=10,
-                         iterations=100,
-                         validate=False):
+def benchmark_triton_nsa(
+    batch_size,
+    seq_len,
+    heads,
+    head_query,
+    dim,
+    selected_blocks,
+    block_size,
+    dtype,
+    scale,
+    warmup=10,
+    iterations=100,
+    validate=False,
+):
     """Benchmark the Triton-based TileLang Sparse Attention implementation."""
 
     # Set random seed for reproducibility
@@ -723,18 +768,18 @@ def benchmark_triton_nsa(batch_size,
     torch.random.manual_seed(0)
 
     # Create input tensors
-    Q = torch.randn((batch_size, seq_len, head_query, dim), dtype=dtype, device='cuda')
-    K = torch.randn((batch_size, seq_len, heads, dim), dtype=dtype, device='cuda')
-    V = torch.randn((batch_size, seq_len, heads, dim), dtype=dtype, device='cuda')
-    g_slc = torch.ones((batch_size, seq_len, head_query), dtype=dtype, device='cuda')
-    g_swa = torch.ones((batch_size, seq_len, head_query), dtype=dtype, device='cuda')
+    Q = torch.randn((batch_size, seq_len, head_query, dim), dtype=dtype, device="cuda")
+    K = torch.randn((batch_size, seq_len, heads, dim), dtype=dtype, device="cuda")
+    V = torch.randn((batch_size, seq_len, heads, dim), dtype=dtype, device="cuda")
+    g_slc = torch.ones((batch_size, seq_len, head_query), dtype=dtype, device="cuda")
+    g_swa = torch.ones((batch_size, seq_len, head_query), dtype=dtype, device="cuda")
 
     # Generate block indices
     block_indices = generate_block_indices(batch_size, seq_len, heads, selected_blocks, block_size)
     block_counts = torch.randint(
-        1, selected_blocks + 1, (batch_size, seq_len, heads), device='cuda')
-    o_slc = torch.empty((batch_size, seq_len, head_query, dim), dtype=dtype, device='cuda')
-    lse_slc = torch.empty((batch_size, seq_len, head_query), dtype=torch.float, device='cuda')
+        1, selected_blocks + 1, (batch_size, seq_len, heads), device="cuda")
+    o_slc = torch.empty((batch_size, seq_len, head_query, dim), dtype=dtype, device="cuda")
+    lse_slc = torch.empty((batch_size, seq_len, head_query), dtype=torch.float, device="cuda")
 
     # Warmup
     for _ in range(warmup):
@@ -750,7 +795,8 @@ def benchmark_triton_nsa(batch_size,
             block_counts=block_counts,
             block_size=block_size,
             window_size=0,
-            scale=scale)
+            scale=scale,
+        )
 
     # Synchronize before timing
     torch.cuda.synchronize()
@@ -770,7 +816,8 @@ def benchmark_triton_nsa(batch_size,
             block_counts=block_counts,
             block_size=block_size,
             window_size=0,
-            scale=scale)
+            scale=scale,
+        )
     torch.cuda.synchronize()
     end_time = time.time()
 
@@ -815,11 +862,11 @@ def benchmark_triton_nsa(batch_size,
         "head_query": head_query,
         "dim": dim,
         "selected_blocks": selected_blocks,
-        "block_size": block_size
+        "block_size": block_size,
     }
 
 
-def run_benchmark_suite(impl='all'):
+def run_benchmark_suite(impl="all"):
     """Run a suite of benchmarks with different configurations."""
 
     # Define configurations to benchmark
@@ -832,9 +879,8 @@ def run_benchmark_suite(impl='all'):
             "head_query": 8 * 16,
             "dim": 64,
             "selected_blocks": 8,
-            "block_size": 32
+            "block_size": 32,
         },
-
         # Medium model config
         {
             "batch_size": 2,
@@ -843,9 +889,8 @@ def run_benchmark_suite(impl='all'):
             "head_query": 16 * 16,
             "dim": 64,
             "selected_blocks": 16,
-            "block_size": 64
+            "block_size": 64,
         },
-
         # Large model config
         {
             "batch_size": 1,
@@ -854,7 +899,7 @@ def run_benchmark_suite(impl='all'):
             "head_query": 32 * 16,
             "dim": 128,
             "selected_blocks": 32,
-            "block_size": 128
+            "block_size": 128,
         },
     ]
 
@@ -862,7 +907,7 @@ def run_benchmark_suite(impl='all'):
     for config in configs:
         print(f"Running benchmark with config: {config}")
 
-        if impl in ['all', 'tilelang']:
+        if impl in ["all", "tilelang"]:
             print("Benchmarking TileLang implementation:")
             result = benchmark_nsa(
                 batch_size=config["batch_size"],
@@ -874,12 +919,13 @@ def run_benchmark_suite(impl='all'):
                 block_size=config["block_size"],
                 dtype=torch.float16,
                 scale=0.1,
-                validate=False)
+                validate=False,
+            )
             results.append({"impl": "tilelang", **result})
             print(f"Average time: {result['avg_time_ms']:.2f} ms")
             print(f"Performance: {result['tflops']:.2f} TFLOPs")
 
-        if impl in ['all', 'triton']:
+        if impl in ["all", "triton"]:
             print("Benchmarking Triton implementation:")
             result = benchmark_triton_nsa(
                 batch_size=config["batch_size"],
@@ -891,12 +937,13 @@ def run_benchmark_suite(impl='all'):
                 block_size=config["block_size"],
                 dtype=torch.float16,
                 scale=0.1,
-                validate=False)
+                validate=False,
+            )
             results.append({"impl": "triton", **result})
             print(f"Average time: {result['avg_time_ms']:.2f} ms")
             print(f"Performance: {result['tflops']:.2f} TFLOPs")
 
-        if impl in ['all']:
+        if impl in ["all"]:
             # Print comparison if both implementations were run
             tilelang_result = next(
                 r for r in results if r["impl"] == "tilelang" and
@@ -933,7 +980,8 @@ if __name__ == "__main__":
         type=str,
         default="all",
         choices=["tilelang", "triton", "all"],
-        help="Implementation to benchmark (tilelang, triton, or all)")
+        help="Implementation to benchmark (tilelang, triton, or all)",
+    )
 
     args = parser.parse_args()
 
@@ -963,7 +1011,8 @@ if __name__ == "__main__":
                 scale=args.scale,
                 warmup=args.warmup,
                 iterations=args.iterations,
-                validate=args.validate)
+                validate=args.validate,
+            )
             print("\nBenchmark Results (TileLang):")
             print(
                 f"Configuration: batch={args.batch}, seq_len={args.seq_len}, heads={args.heads}, " +
@@ -986,7 +1035,8 @@ if __name__ == "__main__":
                 scale=args.scale,
                 warmup=args.warmup,
                 iterations=args.iterations,
-                validate=args.validate)
+                validate=args.validate,
+            )
             print("\nBenchmark Results (Triton):")
             print(
                 f"Configuration: batch={args.batch}, seq_len={args.seq_len}, heads={args.heads}, " +

@@ -36,7 +36,8 @@ def get_configs():
         block_K=[32],
         num_stages=[0, 1],
         thread_num=[128],
-        enable_rasterization=[False])
+        enable_rasterization=[False],
+    )
     return [{
         k: v for k, v in zip(iter_params, values)
     } for values in itertools.product(*iter_params.values())]
@@ -44,16 +45,17 @@ def get_configs():
 
 @tilelang.autotune(configs=get_configs(),)
 @tilelang.jit(out_idx=[-1])
-def matmul(M,
-           N,
-           K,
-           block_M=128,
-           block_N=128,
-           block_K=32,
-           num_stages=0,
-           thread_num=128,
-           enable_rasterization=False):
-
+def matmul(
+    M,
+    N,
+    K,
+    block_M=128,
+    block_N=128,
+    block_K=32,
+    num_stages=0,
+    thread_num=128,
+    enable_rasterization=False,
+):
     dtype = "float16"
     accum_dtype = "float"
 
@@ -76,7 +78,6 @@ def matmul(M,
         # Bind x-dimension to block index in N,
         #     y-dimension to block index in M.
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
-
             # Allocate shared memory for A sub-block of shape (block_M, block_K)
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             # Allocate shared memory for B sub-block of shape (block_N, block_K)
@@ -118,6 +119,7 @@ def matmul(M,
 
 def run_autotune(M: int, N: int, K: int):
     import torch
+
     a = torch.randn(M, K, dtype=torch.float16).cuda()
     b = torch.randn(N, K, dtype=torch.float16).cuda()
 

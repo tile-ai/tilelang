@@ -186,21 +186,21 @@ def bitnet_158_int8xint2_prefill(
             C: T.Buffer((M, N), out_dtype),
     ):
         """
-            GPU kernel entry that performs a blocked, pipelined matrix multiplication A @ B.T writing into C.
+        GPU kernel entry that performs a blocked, pipelined matrix multiplication A @ B.T writing into C.
 
-            This kernel:
-            - Loads tiles of A and a compressed/interleaved representation of B from global memory into shared memory.
-            - Decodes B's packed low-precision format (storage_dtype, e.g., 2-bit packed) into element values of `in_dtype` in shared memory via an external decode routine.
-            - Uses Warp/MMA tiled fragments and an INT4/INT2-capable MMA emitter to compute accumulation across K in a pipelined fashion with configurable stages.
-            - Writes accumulated tile results from shared memory back to global C with the expected block/micro-tile indexing.
+        This kernel:
+        - Loads tiles of A and a compressed/interleaved representation of B from global memory into shared memory.
+        - Decodes B's packed low-precision format (storage_dtype, e.g., 2-bit packed) into element values of `in_dtype` in shared memory via an external decode routine.
+        - Uses Warp/MMA tiled fragments and an INT4/INT2-capable MMA emitter to compute accumulation across K in a pipelined fashion with configurable stages.
+        - Writes accumulated tile results from shared memory back to global C with the expected block/micro-tile indexing.
 
-            Parameters:
-                A: Input matrix buffer of shape A_shape and element type `in_dtype`. Represents the MxK activations.
-                B: Compressed/interleaved weight buffer of shape B_shape and storage type `storage_dtype`. Must contain B in the packed low-precision layout expected by the decode routine used by this kernel.
-                C: Output buffer of shape (M, N) and type `out_dtype`; receives the resulting matrix (accumulated values are produced in `accum_dtype` and stored into C).
+        Parameters:
+            A: Input matrix buffer of shape A_shape and element type `in_dtype`. Represents the MxK activations.
+            B: Compressed/interleaved weight buffer of shape B_shape and storage type `storage_dtype`. Must contain B in the packed low-precision layout expected by the decode routine used by this kernel.
+            C: Output buffer of shape (M, N) and type `out_dtype`; receives the resulting matrix (accumulated values are produced in `accum_dtype` and stored into C).
 
-            Side effects:
-                Writes results into C. Calls external device decode functions to expand B from its packed representation into shared memory before computation.
+        Side effects:
+            Writes results into C. Calls external device decode functions to expand B from its packed representation into shared memory before computation.
         """
         with T.Kernel(
                 T.ceildiv(N, block_N),
@@ -208,7 +208,6 @@ def bitnet_158_int8xint2_prefill(
                 threads=threads,
                 prelude=decode_i2s_to_i8s,
         ) as (bx, by):
-
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
             B_shared = T.alloc_shared(B_shared_shape, storage_dtype, scope=shared_scope)
             B_dequantize_shared = T.alloc_shared(
@@ -234,7 +233,6 @@ def bitnet_158_int8xint2_prefill(
             T.clear(C_frag)
 
             for ko in T.Pipelined((K // block_K), num_stages=stage):
-
                 # Load A into shared memory
                 for i, k in T.Parallel(block_M, block_K):
                     A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
@@ -260,12 +258,11 @@ def bitnet_158_int8xint2_prefill(
                     )
 
                     for v in T.vectorized(0, local_size):
-                        index = (i * threads * local_size + thread_bindings * local_size + v)
+                        index = i * threads * local_size + thread_bindings * local_size + v
                         vi, vj = T.index_to_coordinates(index, B_dequantize_shared_shape)
                         B_dequantize_shared[vi, vj] = B_dequantize_local[v]
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
-
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
                         A_frag,

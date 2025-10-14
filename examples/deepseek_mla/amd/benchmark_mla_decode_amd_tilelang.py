@@ -10,6 +10,7 @@ tilelang.disable_cache()
 
 def get_configs():
     import itertools
+
     BLOCK_N = [16, 32, 64, 128]
     BLOCK_H = [16, 32, 64, 128]
     num_split = [1, 2, 4, 8, 16, 32]
@@ -27,9 +28,11 @@ def get_configs():
 
 @tilelang.autotune(configs=get_configs())
 @tilelang.jit(
-    out_idx=[6], pass_configs={
+    out_idx=[6],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def flashmla_decode(batch,
                     heads,
                     kv_head_num,
@@ -89,7 +92,8 @@ def flashmla_decode(batch,
                     K_pe_shared,
                     acc_s,
                     transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullRow)
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -119,8 +123,11 @@ def flashmla_decode(batch,
             Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
     ):
         with T.Kernel(
-                batch, heads // min(block_H, kv_group_num), num_split,
-                threads=threads) as (bx, by, bz):
+                batch, heads // min(block_H, kv_group_num), num_split, threads=threads) as (
+                    bx,
+                    by,
+                    bz,
+                ):
             Q_local = T.alloc_fragment([block_H, dim], dtype)
             Q_pe_local = T.alloc_fragment([block_H, pe_dim], dtype)
             KV_shared = T.alloc_shared([block_N, dim], dtype)
@@ -155,7 +162,8 @@ def flashmla_decode(batch,
                     K_pe_shared,
                     acc_s,
                     transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullRow)
+                    policy=T.GemmWarpPolicy.FullRow,
+                )
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -262,43 +270,50 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     num_head_groups = q.shape[1] // kv.shape[2]
     scale = (dim + pe_dim)**0.5
     q = rearrange(
-        q, 'b (h g) d -> b g h d', g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
+        q, "b (h g) d -> b g h d", g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
 
     q_pe = rearrange(
-        q_pe, 'b (h g) d -> b g h d',
+        q_pe, "b (h g) d -> b g h d",
         g=num_head_groups)  # [batch_size, num_head_groups, groups, pe_dim]
 
-    kv = rearrange(kv, 'b n h d -> b h n d')  # [batch_size, groups, seqlen_kv, dim]
+    kv = rearrange(kv, "b n h d -> b h n d")  # [batch_size, groups, seqlen_kv, dim]
 
-    k_pe = rearrange(k_pe, 'b n h d -> b h n d')  # [batch_size, num_head_groups, groups, pe_dim]
+    k_pe = rearrange(k_pe, "b n h d -> b h n d")  # [batch_size, num_head_groups, groups, pe_dim]
 
     query = torch.concat([q, q_pe], dim=-1)
     key = torch.concat([kv, k_pe], dim=-1)
 
     scores = einsum(
         query, key,
-        'b g h d, b h s d -> b g h s')  # [batch_size, num_head_groups, groups, seqlen_kv]
+        "b g h d, b h s d -> b g h s")  # [batch_size, num_head_groups, groups, seqlen_kv]
 
     attention = F.softmax(
         scores / scale, dim=-1)  # [batch_size, num_head_groups, groups, seqlen_kv]
 
     out = einsum(attention, kv,
-                 'b g h s, b h s d -> b g h d')  # [batch_size, num_head_groups, groups, dim]
-    out = rearrange(out, 'b g h d -> b (h g) d')  # [batch_size, heads, dim]
+                 "b g h s, b h s d -> b g h d")  # [batch_size, num_head_groups, groups, dim]
+    out = rearrange(out, "b g h d -> b (h g) d")  # [batch_size, heads, dim]
     return out
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=128, help='batch size')
-    parser.add_argument('--heads', type=int, default=128, help='q heads number')
-    parser.add_argument('--kv_heads', type=int, default=1, help='kv heads number')
-    parser.add_argument('--kv_ctx', type=int, default=8192, help='kv context length')
-    parser.add_argument('--dim', type=int, default=512, help='head dim')
-    parser.add_argument('--pe_dim', type=int, default=64, help='pe head dim')
-    parser.add_argument('--autotune', action='store_true', help='auto tune')
+    parser.add_argument("--batch", type=int, default=128, help="batch size")
+    parser.add_argument("--heads", type=int, default=128, help="q heads number")
+    parser.add_argument("--kv_heads", type=int, default=1, help="kv heads number")
+    parser.add_argument("--kv_ctx", type=int, default=8192, help="kv context length")
+    parser.add_argument("--dim", type=int, default=512, help="head dim")
+    parser.add_argument("--pe_dim", type=int, default=64, help="pe head dim")
+    parser.add_argument("--autotune", action="store_true", help="auto tune")
     args = parser.parse_args()
-    batch, heads, kv_heads, kv_ctx, dim, pe_dim = args.batch, args.heads, args.kv_heads, args.kv_ctx, args.dim, args.pe_dim
+    batch, heads, kv_heads, kv_ctx, dim, pe_dim = (
+        args.batch,
+        args.heads,
+        args.kv_heads,
+        args.kv_ctx,
+        args.dim,
+        args.pe_dim,
+    )
     enable_autotune = args.autotune
 
     qk_flops = 2 * batch * heads * kv_ctx * (dim + pe_dim)
@@ -322,7 +337,8 @@ if __name__ == "__main__":
             BLOCK_N,
             BLOCK_H,
             num_split,
-            threads=threads)
+            threads=threads,
+        )
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)
     input_tensors = profiler._get_inputs()
     tilelang_output = kernel(*input_tensors)

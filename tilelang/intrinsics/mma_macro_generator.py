@@ -1,5 +1,6 @@
+from __future__ import annotations
 import tilelang.language as T
-from typing import Union, Tuple, Optional, Literal, Callable
+from typing import Literal, Callable
 from tilelang.common import TransformKind
 from tvm import DataType
 from tvm.tir import PrimExpr, IndexMap, Buffer, Var
@@ -25,7 +26,7 @@ from tilelang.intrinsics.mma_layout import (
 lift = convert
 
 
-class TensorCoreIntrinEmitter(object):
+class TensorCoreIntrinEmitter:
     """
     To eliminate Python syntax within TIR Macro.
     """
@@ -62,8 +63,8 @@ class TensorCoreIntrinEmitter(object):
         chunk: int = 16,
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
-        is_m_first: Optional[bool] = False,
-        thread_var: Optional[Var] = None,
+        is_m_first: bool | None = False,
+        thread_var: Var | None = None,
     ):
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
@@ -125,9 +126,11 @@ class TensorCoreIntrinEmitter(object):
         warp_row_tiles = self.warp_row_tiles
         warp_col_tiles = self.warp_col_tiles
         assert warp_row_tiles >= 16, f"warp_row_tiles must be greater than 16, got {warp_row_tiles}"
-        assert warp_row_tiles % 16 == 0, f"warp_row_tiles must be divisible by 16, got {warp_row_tiles}"
+        assert warp_row_tiles % 16 == 0, (
+            f"warp_row_tiles must be divisible by 16, got {warp_row_tiles}")
         assert warp_col_tiles >= 8, f"warp_col_tiles must be greater than 8, got {warp_col_tiles}"
-        assert warp_col_tiles % 8 == 0, f"warp_col_tiles must be divisible by 8, got {warp_col_tiles}"
+        assert warp_col_tiles % 8 == 0, (
+            f"warp_col_tiles must be divisible by 8, got {warp_col_tiles}")
 
         self.warp_rows = warp_row_tiles // m_dim
 
@@ -144,7 +147,7 @@ class TensorCoreIntrinEmitter(object):
         self.micro_size_x = m_dim
         self.micro_size_k = k_dim
 
-    def _initialize_is_m_first(self, is_m_first: Optional[bool] = False):
+    def _initialize_is_m_first(self, is_m_first: bool | None = False):
         if is_m_first is not None:
             self.is_m_first = is_m_first
 
@@ -167,7 +170,7 @@ class TensorCoreIntrinEmitter(object):
     def extract_thread_binding(
             self,
             thread_id: PrimExpr,
-            is_m_first: Optional[bool] = None) -> Tuple[PrimExpr, PrimExpr, PrimExpr]:
+            is_m_first: bool | None = None) -> tuple[PrimExpr, PrimExpr, PrimExpr]:
         """
         is_m_first: True if the thread binding is in the form of (tx, warp_n, warp_m)
         which represents [warp_size, block_row_warps (split n), block_col_warps (split m)]
@@ -200,7 +203,7 @@ class TensorCoreIntrinEmitter(object):
                    A_local_buf: Buffer,
                    A_shared_buf: Buffer,
                    ki: PrimExpr,
-                   rk: Optional[PrimExpr] = 0):
+                   rk: PrimExpr | None = 0):
         warp_row_tiles = self.warp_row_tiles
         warp_rows = self.warp_rows
         chunk = self.chunk
@@ -264,7 +267,7 @@ class TensorCoreIntrinEmitter(object):
                    B_local_buf: Buffer,
                    B_shared_buf: Buffer,
                    ki: PrimExpr,
-                   rk: Optional[PrimExpr] = 0):
+                   rk: PrimExpr | None = 0):
         warp_col_tiles = self.warp_col_tiles
         warp_cols = self.warp_cols
         chunk = self.chunk
@@ -274,7 +277,7 @@ class TensorCoreIntrinEmitter(object):
         b_dtype = self.b_dtype
         b_transposed = self.b_transposed
         thread_binding = self.get_thread_binding()
-        replicate_b = (self.n_dim == 16)
+        replicate_b = self.n_dim == 16
         # ldmatrix cannot be used for int8 + trans case.
         ldmatrix_available = not (DataType(b_dtype).bits != 16 and not b_transposed)
 
@@ -309,8 +312,8 @@ class TensorCoreIntrinEmitter(object):
                 )
 
                 if ldmatrix_available:
-                    B_shared_buf_elem = B_shared_buf[wi, wk] if b_transposed else B_shared_buf[wk,
-                                                                                               wi]
+                    B_shared_buf_elem = (
+                        B_shared_buf[wi, wk] if b_transposed else B_shared_buf[wk, wi])
 
                     T.ptx_ldmatrix(
                         b_dtype,
@@ -332,11 +335,13 @@ class TensorCoreIntrinEmitter(object):
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 
-    def mma(self,
-            A_local_buf: Buffer,
-            B_local_buf: Buffer,
-            C_local_buf: Buffer,
-            k_inner: Optional[PrimExpr] = 0):
+    def mma(
+        self,
+        A_local_buf: Buffer,
+        B_local_buf: Buffer,
+        C_local_buf: Buffer,
+        k_inner: PrimExpr | None = 0,
+    ):
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         local_size_a = self.local_size_a
@@ -347,7 +352,7 @@ class TensorCoreIntrinEmitter(object):
         accum_dtype = self.accum_dtype
         accum_dtype_abbrv = self.accum_dtype_abbrv
         mma_prefix = self.mma_prefix
-        replicate_b = (self.n_dim == 16)
+        replicate_b = self.n_dim == 16
 
         a_is_fragment = is_fragment(A_local_buf)
         b_is_fragment = is_fragment(B_local_buf)
@@ -423,14 +428,15 @@ class TensorCoreIntrinEmitter(object):
                         local_id = local_id_o * 2 + local_id_i
                         row, col = T.meta_var(mma_store_index_map(tx, local_id))
                         if C_buf_dims == 2:
-                            C_buf[(warp_m * warp_rows + i) * M_DIM + row,
-                                  (warp_n * warp_cols + j) * n_dim +
-                                  col] = C_local_buf[i * (warp_cols * local_size_out) +
-                                                     j * local_size_out + local_id]
+                            C_buf[
+                                (warp_m * warp_rows + i) * M_DIM + row,
+                                (warp_n * warp_cols + j) * n_dim + col,
+                            ] = C_local_buf[i * (warp_cols * local_size_out) + j * local_size_out +
+                                            local_id]
                         else:
-                            C_buf[warp_m * warp_rows + i, warp_n * warp_cols + j, row,
-                                  col] = C_local_buf[i * (warp_cols * local_size_out) +
-                                                     j * local_size_out + local_id]
+                            C_buf[warp_m * warp_rows + i, warp_n * warp_cols + j, row, col] = (
+                                C_local_buf[i * (warp_cols * local_size_out) + j * local_size_out +
+                                            local_id])
 
         @T.macro
         def _warp_stmatrix_global(C_local_buf, C_buf, thread_binding):
@@ -474,6 +480,7 @@ class TensorCoreIntrinEmitter(object):
             If `local_buf` is not detected to be a fragment buffer.
         """
         from tilelang.utils import is_fragment
+
         assert matrix in ["A", "B"], "matrix should be either A or B"
         matrix_is_a: bool = matrix == "A"
         matrix_is_b: bool = matrix == "B"
@@ -510,16 +517,15 @@ class TensorCoreIntrinEmitter(object):
         # so the b matrix expected a transposed basic layout
         transform_func: Callable = None
         if matrix_is_a:
-            transform_func = transform_func_sr_a if is_sr_axis_order else lambda i, j: transform_func_sr_a(
-                j, i)
+            transform_func = (transform_func_sr_a
+                              if is_sr_axis_order else lambda i, j: transform_func_sr_a(j, i))
         elif matrix_is_b:
-            transform_func = transform_func_sr_b if is_sr_axis_order else lambda i, j: transform_func_sr_b(
-                j, i)
+            transform_func = (transform_func_sr_b
+                              if is_sr_axis_order else lambda i, j: transform_func_sr_b(j, i))
         else:
             raise ValueError(f"Unsupported matrix {matrix}")
 
-        assert is_fragment(local_buf), "local_buf must be a fragment, but got {}".format(
-            local_buf.scope())
+        assert is_fragment(local_buf), f"local_buf must be a fragment, but got {local_buf.scope()}"
 
         if matrix_is_a:
             micro_size_s, micro_size_r = self.micro_size_x, self.micro_size_k
@@ -684,9 +690,9 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         chunk: int = 16,
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
-        is_m_first: Optional[bool] = False,
-        transform_kind_a: Union[int, TransformKind] = 0,
-        transform_kind_b: Union[int, TransformKind] = 0,
+        is_m_first: bool | None = False,
+        transform_kind_a: int | TransformKind = 0,
+        transform_kind_b: int | TransformKind = 0,
     ):
         super().__init__(
             a_dtype=a_dtype,
@@ -846,10 +852,11 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                             warp_m * warp_rows + j,
                             rk * (chunk // micro_size_k) + ki,
                         )
-                        rii, rjj = (tx * local_size_a +
-                                    local_id) // micro_size_k, (tx * local_size_a + local_id) % (
-                                        micro_size_k)
-                        A_local_buf[j * local_size_a + local_id] = (A_shared_buf[ri, rj, rii, rjj])
+                        rii, rjj = (
+                            (tx * local_size_a + local_id) // micro_size_k,
+                            (tx * local_size_a + local_id) % (micro_size_k),
+                        )
+                        A_local_buf[j * local_size_a + local_id] = A_shared_buf[ri, rj, rii, rjj]
             else:
                 raise ValueError("Unsupported TransformKind for Input A")
 
@@ -958,12 +965,14 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
                             warp_n * warp_cols + j,
                             rk * (chunk // micro_size_k) + ki,
                         )
-                        rii, rjj = (tx * local_size_dequantize +
-                                    local_id) // (micro_size_k // num_elems_per_byte), (
-                                        tx * local_size_dequantize + local_id) % (
-                                            micro_size_k // num_elems_per_byte)
-                        B_local_buf[j * local_size_dequantize + local_id] = (
-                            B_shared_buf[ri, rj, rii, rjj])
+                        rii, rjj = (
+                            (tx * local_size_dequantize + local_id) //
+                            (micro_size_k // num_elems_per_byte),
+                            (tx * local_size_dequantize + local_id) %
+                            (micro_size_k // num_elems_per_byte),
+                        )
+                        B_local_buf[j * local_size_dequantize + local_id] = B_shared_buf[ri, rj,
+                                                                                         rii, rjj]
             else:
                 raise ValueError("Unsupported TransformKind for Input B")
 
@@ -1127,7 +1136,6 @@ class INT4TensorCoreIntrinEmitter(TensorCoreIntrinEmitter):
 class INT4TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitterWithLadderTransform):
 
     def mma(self, A_local_buf, B_local_buf, C_local_buf):
-
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         local_size_a = self.local_size_a

@@ -1,3 +1,4 @@
+from __future__ import annotations
 import argparse
 import itertools
 import tilelang
@@ -5,7 +6,6 @@ import tilelang.language as T
 from tilelang.engine.param import KernelParam
 from tilelang.utils.tensor import get_tensor_supply, TensorSupplyType
 import torch
-from typing import List
 
 DEFAULT_BLOCK_M = 128
 DEFAULT_BLOCK_N = 128
@@ -61,16 +61,15 @@ def ref_program(A, B, BlockMask, block_M, block_N, block_K):
             accu = torch.zeros((block_M, block_N), dtype=torch.float32, device=A.device)
             for k in range(K // block_K):
                 if BlockMask[i, j, k]:
-                    accu += (
-                        A[i * block_M:(i + 1) * block_M, k * block_K:(k + 1) * block_K].to(
-                            torch.float32) @ B[k * block_K:(k + 1) * block_K,
-                                               j * block_N:(j + 1) * block_N].to(torch.float32))
+                    accu += A[i * block_M:(i + 1) * block_M, k * block_K:(k + 1) * block_K].to(
+                        torch.float32) @ B[k * block_K:(k + 1) * block_K,
+                                           j * block_N:(j + 1) * block_N].to(torch.float32)
             ref_c[i * block_M:(i + 1) * block_M,
                   j * block_N:(j + 1) * block_N] = accu.to(torch.float16)
     return ref_c
 
 
-def supply_program(params: List[KernelParam]):
+def supply_program(params: list[KernelParam]):
     input_tensors = []
 
     for p in params:
@@ -91,18 +90,19 @@ def supply_program(params: List[KernelParam]):
 
 @tilelang.autotune(configs=get_configs(),)
 @tilelang.jit(out_idx=[-1])
-def blocksparse_matmul(M,
-                       N,
-                       K,
-                       block_M,
-                       block_N,
-                       block_K,
-                       num_stages,
-                       thread_num,
-                       enable_rasteration,
-                       dtype="float16",
-                       accum_dtype="float"):
-
+def blocksparse_matmul(
+    M,
+    N,
+    K,
+    block_M,
+    block_N,
+    block_K,
+    num_stages,
+    thread_num,
+    enable_rasteration,
+    dtype="float16",
+    accum_dtype="float",
+):
     block_mask_shape = (M // block_M, N // block_N, K // block_K)
 
     @T.prim_func
@@ -134,7 +134,6 @@ def blocksparse_matmul(M,
 
 
 def main():
-
     # Initialize input matrices A and B on the GPU with half precision
     a = torch.randn(M, K).cuda().half()
     b = torch.randn(K, N).cuda().half()
@@ -147,8 +146,11 @@ def main():
 
         best_config = kernel.config
         best_latency = kernel.latency
-        block_M, block_N, block_K = best_config["block_M"], best_config["block_N"], best_config[
-            "block_K"]
+        block_M, block_N, block_K = (
+            best_config["block_M"],
+            best_config["block_N"],
+            best_config["block_K"],
+        )
 
         print(f"Best Config: {best_config}")
         print(f"Sparsity Ratio: {sparsity}")
@@ -163,7 +165,8 @@ def main():
             block_K=DEFAULT_BLOCK_K,
             num_stages=DEFAULT_NUM_STAGES,
             thread_num=DEFAULT_THREAD_NUM,
-            enable_rasteration=DEFAULT_ENABLE_RASTERIZATION)
+            enable_rasteration=DEFAULT_ENABLE_RASTERIZATION,
+        )
         block_M, block_N, block_K = DEFAULT_BLOCK_M, DEFAULT_BLOCK_N, DEFAULT_BLOCK_K
         print(f"Using default kernel with block size ({block_M}, {block_N}, {block_K})")
 

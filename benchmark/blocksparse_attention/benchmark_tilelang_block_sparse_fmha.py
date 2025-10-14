@@ -129,7 +129,11 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
                 Output: T.Tensor(shape, dtype),
         ):
             with T.Kernel(
-                    T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
+                    T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (
+                        bx,
+                        by,
+                        bz,
+                    ):
                 Q_shared = T.alloc_shared([block_M, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
@@ -159,8 +163,15 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
                 for k in T.Pipelined(loop_range, num_stages=num_stages):
                     if block_mask[k]:
                         MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
-                        Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale,
-                                scores_sum, logsum)
+                        Softmax(
+                            acc_s,
+                            acc_s_cast,
+                            scores_max,
+                            scores_max_prev,
+                            scores_scale,
+                            scores_sum,
+                            logsum,
+                        )
                         Rescale(acc_o, scores_scale)
                         MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
                 for i, j in T.Parallel(block_M, dim):
@@ -175,21 +186,21 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
 
 def benchmark_topk_sparse_attention():
     from benchmark_configs import configs
+
     torch.manual_seed(0)
 
     # Config
     for BATCH, N_HEADS, SEQ_LEN, D_HEAD, TOPK, BLOCK in configs:
-
         # Create inputs
-        q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
-        k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
-        v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
+        q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+        k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+        v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
 
         # Create sparse mask (downsampled to block level)
         downsample_factor = BLOCK
         downsample_len = math.ceil(SEQ_LEN / downsample_factor)
         x_ds = torch.randn([BATCH, N_HEADS, downsample_len, downsample_len],
-                           device='cuda',
+                           device="cuda",
                            dtype=torch.bfloat16)
         x_ds[:, :, :, 0] = 100
         block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)

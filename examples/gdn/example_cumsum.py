@@ -10,6 +10,7 @@ import sys  # noqa: F401
 # sys.path.insert(0, "/home/tzj/flash-linear-attention")
 try:
     import fla
+
     print(fla.__file__)
     from fla.ops.utils.cumsum import chunk_local_cumsum_scalar
 except ImportError:
@@ -25,8 +26,9 @@ tilelang.disable_cache()
     out_idx=[-1],
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True
-    })
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    },
+)
 def tilelang_chunk_local_cumsum_scalar(
     # task config
     B,
@@ -119,7 +121,8 @@ def run_test(
         chunk_size=chunk_size,
         reverse=reverse,
         head_first=head_first,
-        output_dtype=getattr(torch, output_dtype))
+        output_dtype=getattr(torch, output_dtype),
+    )
 
     # tilelang cumsum
     block_S = chunk_size
@@ -164,7 +167,8 @@ def main():
         input_dtype="float32",
         output_dtype="float32",
         threads=256,
-        use_fragment=False)
+        use_fragment=False,
+    )
 
 
 if __name__ == "__main__":

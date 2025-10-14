@@ -30,8 +30,15 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
         sid: T.int32,
     ):
         T.copy(
-            K[bid, (seqlen_kv // num_split) * sid + k * block_N:(seqlen_kv // num_split) * sid +
-              (k + 1) * block_N, hid, :], K_shared)
+            K[
+                bid,
+                (seqlen_kv // num_split) * sid + k * block_N:(seqlen_kv // num_split) * sid +
+                (k + 1) * block_N,
+                hid,
+                :,
+            ],
+            K_shared,
+        )
         # TODO: Handle causal split case
         if is_causal:
             for i, j in T.Parallel(block_M, block_N):
@@ -53,8 +60,15 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
         sid: T.int32,
     ):
         T.copy(
-            V[bid, (seqlen_kv // num_split) * sid + k * block_N:(seqlen_kv // num_split) * sid +
-              (k + 1) * block_N, hid, :], V_shared)
+            V[
+                bid,
+                (seqlen_kv // num_split) * sid + k * block_N:(seqlen_kv // num_split) * sid +
+                (k + 1) * block_N,
+                hid,
+                :,
+            ],
+            V_shared,
+        )
         T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
 
     @T.macro
@@ -104,8 +118,11 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
             Output_partial: T.Tensor(part_shape, dtype),
     ):
         with T.Kernel(
-                T.ceildiv(seqlen_q, block_M), heads * batch, num_split,
-                threads=128) as (bx, by, bz):
+                T.ceildiv(seqlen_q, block_M), heads * batch, num_split, threads=128) as (
+                    bx,
+                    by,
+                    bz,
+                ):
             Q_shared = T.alloc_shared([block_M, dim], dtype)
             K_shared = T.alloc_shared([block_N, dim], dtype)
             V_shared = T.alloc_shared([block_N, dim], dtype)
@@ -152,7 +169,8 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
             T.copy(
                 O_shared,
                 Output_partial[bid, mid * block_M:(mid + 1) * block_M, hid, sid, :],
-                disable_tma=True)
+                disable_tma=True,
+            )
 
     @T.macro
     def combine(
@@ -179,12 +197,15 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
 
             T.clear(lse_logsum_local)
             T.clear(o_accum_local)
-            T.copy(glse[
-                bz,
-                by,
-                :,
-                bx * block_M:(bx + 1) * block_M,
-            ], lse_local)
+            T.copy(
+                glse[
+                    bz,
+                    by,
+                    :,
+                    bx * block_M:(bx + 1) * block_M,
+                ],
+                lse_local,
+            )
             T.reduce_max(lse_local, lse_max_local, dim=0, clear=False)
             for k in T.Pipelined(num_split):
                 T.copy(lse_local[k, :], lse_local_split)
@@ -196,7 +217,8 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
                 T.copy(
                     Output_partial[bz, bx * block_M:(bx + 1) * block_M, by, k, :],
                     po_shared,
-                    disable_tma=True)
+                    disable_tma=True,
+                )
                 T.copy(po_shared, po_local)
                 for i in T.Parallel(block_M):
                     lse_local_split[i] = lse_local[k, i]
@@ -225,10 +247,10 @@ def flashattn(batch, heads, seqlen_q, seqlen_kv, dim, is_causal, block_M, block_
 def ref_program(Q, K, V, glse, Output_partial, causal):
     assert causal is False
     dim = Q.size(-1)
-    scores = torch.einsum('bqhd,bkhd->bhqk', Q, K)
+    scores = torch.einsum("bqhd,bkhd->bhqk", Q, K)
     scores = scores / torch.sqrt(torch.tensor(dim, dtype=scores.dtype))
     attention_weights = F.softmax(scores, dim=-1)
-    output = torch.einsum('bhqk,bkhd->bqhd', attention_weights, V)
+    output = torch.einsum("bhqk,bkhd->bqhd", attention_weights, V)
     return output
 
 
@@ -273,14 +295,21 @@ def flash_split_ref(Q, K, V, causal):
     for ks in range(num_split):
         acc_o.fill_(0)
         logsum.fill_(0)
-        scores_max.fill_(float('-inf'))
-        scores_max_prev.fill_(float('-inf'))
+        scores_max.fill_(float("-inf"))
+        scores_max_prev.fill_(float("-inf"))
         for i in range(int((seqlen_kv // num_split) / block_N)):
             acc_s.fill_(0)
-            acc_s = torch.einsum('bqhd,bkhd->bhqk', Q_,
-                                 K[:, (seqlen_kv // num_split) * ks +
-                                   i * block_N:(seqlen_kv // num_split) * ks +
-                                   (i + 1) * block_N, :, :])  # [batch, seqlen, nheads, block_N]
+            acc_s = torch.einsum(
+                "bqhd,bkhd->bhqk",
+                Q_,
+                K[
+                    :,
+                    (seqlen_kv // num_split) * ks + i * block_N:(seqlen_kv // num_split) * ks +
+                    (i + 1) * block_N,
+                    :,
+                    :,
+                ],
+            )  # [batch, seqlen, nheads, block_N]
             scores_max_prev = scores_max
             scores_max = acc_s.max(dim=-1, keepdim=False).values  # [blockM]
             scores_scale = torch.exp2(scores_max_prev - scores_max)
@@ -288,9 +317,16 @@ def flash_split_ref(Q, K, V, causal):
             acc_s = torch.exp2(acc_s - scores_max[:, :, :, None])
             acc_s_cast = acc_s.to(torch.float16)
             acc_o += torch.einsum(
-                'bhqk,bkhd->bqhd', acc_s_cast,
-                V[:, (seqlen_kv // num_split) * ks + i * block_N:(seqlen_kv // num_split) * ks +
-                  (i + 1) * block_N, :, :])
+                "bhqk,bkhd->bqhd",
+                acc_s_cast,
+                V[
+                    :,
+                    (seqlen_kv // num_split) * ks + i * block_N:(seqlen_kv // num_split) * ks +
+                    (i + 1) * block_N,
+                    :,
+                    :,
+                ],
+            )
             scores_sum = acc_s.sum(dim=-1, keepdim=False)
             logsum = logsum * scores_scale + scores_sum
         acc_o /= logsum[:, :, :, None].transpose(1, 2)
@@ -318,11 +354,11 @@ def main():
     print("All checks passed!")
 
     latency = profiler.do_bench(ref_fn, warmup=500)
-    print("{:.2f} ms".format(latency))
-    print("{:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"{latency:.2f} ms")
+    print(f"{total_flops / latency * 1e-9:.2f} TFlops")
     latency = profiler.do_bench(n_warmup=10, n_repeat=10)
-    print("{:.4f} ms".format(latency))
-    print("{:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"{latency:.4f} ms")
+    print(f"{total_flops / latency * 1e-9:.2f} TFlops")
 
 
 if __name__ == "__main__":

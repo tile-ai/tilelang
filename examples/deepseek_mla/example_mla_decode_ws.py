@@ -13,10 +13,16 @@ import argparse
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
     compile_flags=[
-        "-O3", "-Wno-deprecated-declarations", "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__", "-U__CUDA_NO_HALF2_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "--expt-relaxed-constexpr", "--expt-extended-lambda",
-        "--ptxas-options=-v,--register-usage-level=10", "-DNDEBUG"
+        "-O3",
+        "-Wno-deprecated-declarations",
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_HALF2_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "--expt-relaxed-constexpr",
+        "--expt-extended-lambda",
+        "--ptxas-options=-v,--register-usage-level=10",
+        "-DNDEBUG",
     ],
 )
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H, num_split,
@@ -84,7 +90,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             if tx < 128:
                 T.set_max_nreg(240, 1)
                 T.fill(sumexp, 0)
-                T.fill(m_i, -2**30)  # avoid -inf - inf to cause nan
+                T.fill(m_i, -(2**30))  # avoid -inf - inf to cause nan
                 T.fill(acc_o_l, 0)
                 T.barrier_wait(bar_q, 0)
 
@@ -162,8 +168,10 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 for h_i in T.Parallel(block_H):
                     sumexp[h_i] = T.log2(sumexp[h_i]) + m_i[h_i] * sm_scale
                 T.copy(acc_o_l, O_shared_l)
-                T.copy(O_shared_l, Output[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H,
-                                          0:dim // 2])
+                T.copy(
+                    O_shared_l,
+                    Output[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, 0:dim // 2],
+                )
 
             elif tx >= 128 and tx < 256:
                 T.set_max_nreg(168, 1)
@@ -193,8 +201,10 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     acc_o_r[h_i, d_i] /= sum_exp_shared[h_i]
 
                 T.copy(acc_o_r, O_shared_r)
-                T.copy(O_shared_r, Output[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H,
-                                          dim // 2:dim])
+                T.copy(
+                    O_shared_r,
+                    Output[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, dim // 2:dim],
+                )
 
             elif tx >= 256:
                 # producer
@@ -208,13 +218,19 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                             for u in T.serial(4):
                                 for v in T.vectorized(8):
                                     KV_shared_0_l[r * 16 + (tx - 256) // 8,
-                                                  64 * u + (tx - 256) % 8 * 8 +
-                                                  v] = KV[bid, kv_indices, cur_kv_head,
-                                                          64 * u + (tx - 256) % 8 * 8 + v]
+                                                  64 * u + (tx - 256) % 8 * 8 + v] = KV[
+                                                      bid,
+                                                      kv_indices,
+                                                      cur_kv_head,
+                                                      64 * u + (tx - 256) % 8 * 8 + v,
+                                                  ]
                                     KV_shared_0_r[r * 16 + (tx - 256) // 8,
-                                                  64 * u + (tx - 256) % 8 * 8 +
-                                                  v] = KV[bid, kv_indices, cur_kv_head, dim // 2 +
-                                                          64 * u + (tx - 256) % 8 * 8 + v]
+                                                  64 * u + (tx - 256) % 8 * 8 + v] = KV[
+                                                      bid,
+                                                      kv_indices,
+                                                      cur_kv_head,
+                                                      dim // 2 + 64 * u + (tx - 256) % 8 * 8 + v,
+                                                  ]
                         with T.attr("default", "async_scope", 1):
                             for v in T.vectorized(8):
                                 K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 +
@@ -230,13 +246,19 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                             for u in T.serial(4):
                                 for v in T.vectorized(8):
                                     KV_shared_1_l[r * 16 + (tx - 256) // 8,
-                                                  64 * u + (tx - 256) % 8 * 8 +
-                                                  v] = KV[bid, kv_indices, cur_kv_head,
-                                                          64 * u + (tx - 256) % 8 * 8 + v]
+                                                  64 * u + (tx - 256) % 8 * 8 + v] = KV[
+                                                      bid,
+                                                      kv_indices,
+                                                      cur_kv_head,
+                                                      64 * u + (tx - 256) % 8 * 8 + v,
+                                                  ]
                                     KV_shared_1_r[r * 16 + (tx - 256) // 8,
-                                                  64 * u + (tx - 256) % 8 * 8 +
-                                                  v] = KV[bid, kv_indices, cur_kv_head, dim // 2 +
-                                                          64 * u + (tx - 256) % 8 * 8 + v]
+                                                  64 * u + (tx - 256) % 8 * 8 + v] = KV[
+                                                      bid,
+                                                      kv_indices,
+                                                      cur_kv_head,
+                                                      dim // 2 + 64 * u + (tx - 256) % 8 * 8 + v,
+                                                  ]
                         with T.attr("default", "async_scope", 1):
                             for v in T.vectorized(8):
                                 K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 +
@@ -254,8 +276,11 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             Output_partial: T.Tensor([batch, heads, num_split, dim], dtype),
     ):
         with T.Kernel(
-                batch, heads // min(block_H, kv_group_num), num_split,
-                threads=384) as (bid, hid, bz):
+                batch, heads // min(block_H, kv_group_num), num_split, threads=384) as (
+                    bid,
+                    hid,
+                    bz,
+                ):
             Q_shared_l = T.alloc_shared([block_H, dim // 2], dtype)
             Q_shared_r = T.alloc_shared([block_H, dim // 2], dtype)
             Q_tail_shared = T.alloc_shared([block_H, pe_dim], dtype)
@@ -303,7 +328,7 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
             if tx < 128:
                 T.set_max_nreg(240, 1)
                 T.fill(sumexp, 0)
-                T.fill(m_i, -2**30)  # avoid -inf - inf to cause nan
+                T.fill(m_i, -(2**30))  # avoid -inf - inf to cause nan
                 T.fill(acc_o_l, 0)
                 T.barrier_wait(bar_q, 0)
 
@@ -382,8 +407,10 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     sumexp[h_i] = T.log2(sumexp[h_i]) + m_i[h_i] * sm_scale
                 T.copy(acc_o_l, O_shared_l)
                 T.copy(
-                    O_shared_l, Output_partial[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H,
-                                               bz, 0:dim // 2])
+                    O_shared_l,
+                    Output_partial[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, bz,
+                                   0:dim // 2],
+                )
                 T.copy(sumexp, glse[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, bz])
 
             elif tx >= 128 and tx < 256:
@@ -415,8 +442,10 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
                 T.copy(acc_o_r, O_shared_r)
                 T.copy(
-                    O_shared_r, Output_partial[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H,
-                                               bz, dim // 2:dim])
+                    O_shared_r,
+                    Output_partial[bid, hid * VALID_BLOCK_H:(hid + 1) * VALID_BLOCK_H, bz,
+                                   dim // 2:dim],
+                )
 
             elif tx >= 256:
                 # producer
@@ -425,19 +454,25 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     # Buffer 0
                     T.barrier_wait(bar_k_0_free[0], ((i_i & 1) ^ 1))
                     for r in T.serial(4):
-                        kv_indices = (seqlen_kv // num_split) * bz + (
-                            i_i * 2) * block_N + r * 16 + (tx - 256) // 8
+                        kv_indices = ((seqlen_kv // num_split) * bz + (i_i * 2) * block_N + r * 16 +
+                                      (tx - 256) // 8)
                         with T.attr("default", "async_scope", 1):
                             for u in T.serial(4):
                                 for v in T.vectorized(8):
                                     KV_shared_0_l[r * 16 + (tx - 256) // 8,
-                                                  64 * u + (tx - 256) % 8 * 8 +
-                                                  v] = KV[bid, kv_indices, cur_kv_head,
-                                                          64 * u + (tx - 256) % 8 * 8 + v]
+                                                  64 * u + (tx - 256) % 8 * 8 + v] = KV[
+                                                      bid,
+                                                      kv_indices,
+                                                      cur_kv_head,
+                                                      64 * u + (tx - 256) % 8 * 8 + v,
+                                                  ]
                                     KV_shared_0_r[r * 16 + (tx - 256) // 8,
-                                                  64 * u + (tx - 256) % 8 * 8 +
-                                                  v] = KV[bid, kv_indices, cur_kv_head, dim // 2 +
-                                                          64 * u + (tx - 256) % 8 * 8 + v]
+                                                  64 * u + (tx - 256) % 8 * 8 + v] = KV[
+                                                      bid,
+                                                      kv_indices,
+                                                      cur_kv_head,
+                                                      dim // 2 + 64 * u + (tx - 256) % 8 * 8 + v,
+                                                  ]
                         with T.attr("default", "async_scope", 1):
                             for v in T.vectorized(8):
                                 K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 +
@@ -448,19 +483,25 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     # Buffer 1
                     T.barrier_wait(bar_k_1_free[0], ((i_i & 1) ^ 1))
                     for r in T.serial(4):
-                        kv_indices = (seqlen_kv // num_split) * bz + (
-                            i_i * 2 + 1) * block_N + r * 16 + (tx - 256) // 8
+                        kv_indices = ((seqlen_kv // num_split) * bz + (i_i * 2 + 1) * block_N +
+                                      r * 16 + (tx - 256) // 8)
                         with T.attr("default", "async_scope", 1):
                             for u in T.serial(4):
                                 for v in T.vectorized(8):
                                     KV_shared_1_l[r * 16 + (tx - 256) // 8,
-                                                  64 * u + (tx - 256) % 8 * 8 +
-                                                  v] = KV[bid, kv_indices, cur_kv_head,
-                                                          64 * u + (tx - 256) % 8 * 8 + v]
+                                                  64 * u + (tx - 256) % 8 * 8 + v] = KV[
+                                                      bid,
+                                                      kv_indices,
+                                                      cur_kv_head,
+                                                      64 * u + (tx - 256) % 8 * 8 + v,
+                                                  ]
                                     KV_shared_1_r[r * 16 + (tx - 256) // 8,
-                                                  64 * u + (tx - 256) % 8 * 8 +
-                                                  v] = KV[bid, kv_indices, cur_kv_head, dim // 2 +
-                                                          64 * u + (tx - 256) % 8 * 8 + v]
+                                                  64 * u + (tx - 256) % 8 * 8 + v] = KV[
+                                                      bid,
+                                                      kv_indices,
+                                                      cur_kv_head,
+                                                      dim // 2 + 64 * u + (tx - 256) % 8 * 8 + v,
+                                                  ]
                         with T.attr("default", "async_scope", 1):
                             for v in T.vectorized(8):
                                 K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 +
@@ -553,29 +594,29 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     num_head_groups = q.shape[1] // kv.shape[2]
     scale = (dim + pe_dim)**0.5
     q = rearrange(
-        q, 'b (h g) d -> b g h d', g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
+        q, "b (h g) d -> b g h d", g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
 
     q_pe = rearrange(
-        q_pe, 'b (h g) d -> b g h d',
+        q_pe, "b (h g) d -> b g h d",
         g=num_head_groups)  # [batch_size, num_head_groups, groups, pe_dim]
 
-    kv = rearrange(kv, 'b n h d -> b h n d')  # [batch_size, groups, seqlen_kv, dim]
+    kv = rearrange(kv, "b n h d -> b h n d")  # [batch_size, groups, seqlen_kv, dim]
 
-    k_pe = rearrange(k_pe, 'b n h d -> b h n d')  # [batch_size, num_head_groups, groups, pe_dim]
+    k_pe = rearrange(k_pe, "b n h d -> b h n d")  # [batch_size, num_head_groups, groups, pe_dim]
 
     query = torch.concat([q, q_pe], dim=-1)
     key = torch.concat([kv, k_pe], dim=-1)
 
     scores = einsum(
         query, key,
-        'b g h d, b h s d -> b g h s')  # [batch_size, num_head_groups, groups, seqlen_kv]
+        "b g h d, b h s d -> b g h s")  # [batch_size, num_head_groups, groups, seqlen_kv]
 
     attention = F.softmax(
         scores / scale, dim=-1)  # [batch_size, num_head_groups, groups, seqlen_kv]
 
     out = einsum(attention, kv,
-                 'b g h s, b h s d -> b g h d')  # [batch_size, num_head_groups, groups, dim]
-    out = rearrange(out, 'b g h d -> b (h g) d')  # [batch_size, heads, dim]
+                 "b g h s, b h s d -> b g h d")  # [batch_size, num_head_groups, groups, dim]
+    out = rearrange(out, "b g h d -> b (h g) d")  # [batch_size, heads, dim]
     return out
 
 
@@ -606,12 +647,19 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=132, help='batch size')
-    parser.add_argument('--heads', type=int, default=128, help='q heads number')
-    parser.add_argument('--kv_heads', type=int, default=1, help='kv heads number')
-    parser.add_argument('--kv_ctx', type=int, default=8192, help='kv context length')
-    parser.add_argument('--dim', type=int, default=512, help='head dim')
-    parser.add_argument('--pe_dim', type=int, default=64, help='pe head dim')
+    parser.add_argument("--batch", type=int, default=132, help="batch size")
+    parser.add_argument("--heads", type=int, default=128, help="q heads number")
+    parser.add_argument("--kv_heads", type=int, default=1, help="kv heads number")
+    parser.add_argument("--kv_ctx", type=int, default=8192, help="kv context length")
+    parser.add_argument("--dim", type=int, default=512, help="head dim")
+    parser.add_argument("--pe_dim", type=int, default=64, help="pe head dim")
     args = parser.parse_args()
-    batch, heads, kv_heads, kv_ctx, dim, pe_dim = args.batch, args.heads, args.kv_heads, args.kv_ctx, args.dim, args.pe_dim
+    batch, heads, kv_heads, kv_ctx, dim, pe_dim = (
+        args.batch,
+        args.heads,
+        args.kv_heads,
+        args.kv_ctx,
+        args.dim,
+        args.pe_dim,
+    )
     main(batch, heads, kv_heads, kv_ctx, dim, pe_dim)

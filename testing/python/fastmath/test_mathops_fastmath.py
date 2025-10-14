@@ -7,16 +7,16 @@ import re
 
 def get_mathop_lines(source, mathop_name):
     """Extract lines containing the mathop from CUDA source for debugging"""
-    lines = source.split('\n')
+    lines = source.split("\n")
     relevant_lines = []
     for i, line in enumerate(lines):
-        if mathop_name in line and ('(' in line):
+        if mathop_name in line and ("(" in line):
             # Include some context
             start = max(0, i - 1)
             end = min(len(lines), i + 2)
             relevant_lines.extend([f"{j}: {lines[j]}" for j in range(start, end)])
             relevant_lines.append("---")
-    return '\n'.join(relevant_lines[-10:])  # Show last 10 lines to avoid too much output
+    return "\n".join(relevant_lines[-10:])  # Show last 10 lines to avoid too much output
 
 
 def check_fastmath_usage(source, mathop_name, expect_fastmath=False):
@@ -80,7 +80,8 @@ def run_single_arg_mathop_test(mathop_name,
         target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        })
+        },
+    )
 
     source_no_fastmath = kernel_no_fastmath.get_kernel_source()
 
@@ -123,7 +124,8 @@ def run_two_arg_mathop_test(mathop_name,
         target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        })
+        },
+    )
 
     # Test with FAST_MATH enabled
     kernel_fastmath = tilelang.compile(
@@ -132,7 +134,8 @@ def run_two_arg_mathop_test(mathop_name,
         target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        })
+        },
+    )
 
     source_no_fastmath = kernel_no_fastmath.get_kernel_source()
     source_fastmath = kernel_fastmath.get_kernel_source()
@@ -184,7 +187,8 @@ def run_abs_test():
         target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
-        })
+        },
+    )
 
     source = kernel.get_kernel_source()
     print("\n=== Testing abs (maps to fabs) ===")
@@ -227,14 +231,15 @@ def run_fastmath_mathop_test(mathop_name,
         target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        })
+        },
+    )
 
     source_fastmath = kernel_fastmath.get_kernel_source()
 
     print(f"\n=== Testing {mathop_name} (fastmath version) ===")
     print("FAST_MATH=True:")
     # Strip the __ prefix for checking in the CUDA source
-    cuda_mathop_name = mathop_name.lstrip('_')
+    cuda_mathop_name = mathop_name.lstrip("_")
     check_fastmath_usage(source_fastmath, cuda_mathop_name, expect_fastmath=True)
 
     # Test numerical correctness

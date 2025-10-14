@@ -7,9 +7,11 @@ import argparse
 
 
 @tilelang.jit(
-    out_idx=[3, 4], pass_configs={
+    out_idx=[3, 4],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
     scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
     shape = [batch, heads, seq_len, dim]
@@ -83,9 +85,11 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
 
 
 @tilelang.jit(
-    out_idx=[2], pass_configs={
+    out_idx=[2],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim):
     dtype = "float16"
     accum_dtype = "float"
@@ -122,9 +126,11 @@ def make_dq_layout(dQ):
 
 
 @tilelang.jit(
-    out_idx=[1], pass_configs={
+    out_idx=[1],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def flashattn_bwd_postprocess(batch, heads, seq_len, dim):
     dtype = "float16"
     accum_dtype = "float"
@@ -281,15 +287,15 @@ attention = _attention.apply
 
 def ref_program(Q, K, V, is_causal):
     dim = Q.size(-1)
-    scores = torch.einsum('bhqd,bhkd->bhqk', Q, K)
+    scores = torch.einsum("bhqd,bhkd->bhqk", Q, K)
     scores = scores / torch.sqrt(torch.tensor(dim, dtype=scores.dtype))
     if is_causal:
         seq_len = Q.size(2)
         mask = torch.tril(torch.ones(seq_len, seq_len, device=scores.device))
         mask = mask.unsqueeze(0).unsqueeze(0)
-        scores = scores.masked_fill(mask == 0, float('-inf'))
+        scores = scores.masked_fill(mask == 0, float("-inf"))
     attention_weights = F.softmax(scores, dim=-1)
-    output = torch.einsum('bhqk,bhkd->bhqd', attention_weights, V)
+    output = torch.einsum("bhqk,bhkd->bhqd", attention_weights, V)
     return output
 
 
@@ -338,19 +344,19 @@ def main(
     from tilelang.profiler import do_bench
 
     latency = do_bench(run, warmup=500)
-    print("torch: {:.2f} ms".format(latency))
-    print("torch: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"torch: {latency:.2f} ms")
+    print(f"torch: {total_flops / latency * 1e-9:.2f} TFlops")
     latency = do_bench(run1, warmup=500)
-    print("tilelang: {:.2f} ms".format(latency))
-    print("tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"tilelang: {latency:.2f} ms")
+    print(f"tilelang: {total_flops / latency * 1e-9:.2f} TFlops")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=8, help='Batch size')
-    parser.add_argument('--h', type=int, default=32, help='Number of heads')
-    parser.add_argument('--n_ctx', type=int, default=1024, help='Context size')
-    parser.add_argument('--d_head', type=int, default=64, help='Head dimension')
-    parser.add_argument('--causal', type=bool, default=False, help='Causal flag')
+    parser.add_argument("--batch", type=int, default=8, help="Batch size")
+    parser.add_argument("--h", type=int, default=32, help="Number of heads")
+    parser.add_argument("--n_ctx", type=int, default=1024, help="Context size")
+    parser.add_argument("--d_head", type=int, default=64, help="Head dimension")
+    parser.add_argument("--causal", type=bool, default=False, help="Causal flag")
     args = parser.parse_args()
     main(args.batch, args.h, args.n_ctx, args.d_head, args.causal)

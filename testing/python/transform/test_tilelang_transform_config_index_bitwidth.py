@@ -105,7 +105,11 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
                 Output: T.Tensor(shape, dtype),
         ):
             with T.Kernel(
-                    T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
+                    T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (
+                        bx,
+                        by,
+                        bz,
+                    ):
                 Q_shared = T.alloc_shared([block_M, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
@@ -134,8 +138,15 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
 
                 for k in T.Pipelined(loop_range, num_stages=num_stages):
                     MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
-                    Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale,
-                            scores_sum, logsum)
+                    Softmax(
+                        acc_s,
+                        acc_s_cast,
+                        scores_max,
+                        scores_max_prev,
+                        scores_scale,
+                        scores_sum,
+                        logsum,
+                    )
                     Rescale(acc_o, scores_scale)
                     MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
                 for i, j in T.Parallel(block_M, dim):

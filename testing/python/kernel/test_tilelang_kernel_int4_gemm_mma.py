@@ -96,7 +96,6 @@ def tl_matmul(
             C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
@@ -115,7 +114,6 @@ def tl_matmul(
             T.clear(C_local)
 
             for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=stage):
-
                 # Load A into shared memory
                 for i, k in T.Parallel(block_M, block_K):
                     A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
@@ -125,7 +123,6 @@ def tl_matmul(
                     B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
-
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
                         A_local,
@@ -168,7 +165,8 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
         out_idx=[2],
         pass_configs={
             tilelang.PassConfigKey.TL_DEBUG_MERGE_SHARED_MEMORY_ALLOCATIONS: True,
-        })
+        },
+    )
     print(kernel.get_kernel_source())
     profiler = kernel.get_profiler()
 
@@ -290,7 +288,6 @@ def tl_matmul_weight_only_transform(
             C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
@@ -309,7 +306,6 @@ def tl_matmul_weight_only_transform(
             T.clear(C_local)
 
             for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=stage):
-
                 # Load A into shared memory
                 for i, k in T.Parallel(block_M, block_K):
                     A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
@@ -317,11 +313,14 @@ def tl_matmul_weight_only_transform(
                 # Load B into shared memory
                 for j, k, jj, kk in T.Parallel(block_N // micro_size_y, block_K // micro_size_k,
                                                micro_size_y, micro_size_k):
-                    B_shared[j, k, jj, kk] = B[bx * (block_N // micro_size_y) + j,
-                                               ko * (block_K // micro_size_k) + k, jj, kk]
+                    B_shared[j, k, jj, kk] = B[
+                        bx * (block_N // micro_size_y) + j,
+                        ko * (block_K // micro_size_k) + k,
+                        jj,
+                        kk,
+                    ]
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
-
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
                         A_local,
@@ -359,6 +358,7 @@ def tl_matmul_weight_only_transform(
 
 def assert_tl_matmul_weight_only_transform_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     import bitblas
+
     matmul = tl_matmul_weight_only_transform(M, N, K, in_dtype, out_dtype, accum_dtype)
     kernel = tilelang.compile(matmul, out_idx=[2])
     profiler = kernel.get_profiler()

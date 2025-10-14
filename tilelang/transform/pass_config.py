@@ -5,6 +5,7 @@ from enum import Enum
 
 class PassConfigKey(str, Enum):
     """Pass configuration keys for TileLang compiler."""
+
     # TileLang specific configs
     TL_SIMPLIFY = "tl.Simplify"
     """Enable/disable TileLang simplification passes. Default: True"""

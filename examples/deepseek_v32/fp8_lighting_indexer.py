@@ -122,7 +122,6 @@ def mqa_attn_return_logits(
             CuSeqLenKE: T.Tensor([seq_len], index_dtype),  # type: ignore
     ):
         with T.Kernel(T.ceildiv(seq_len, block_Q), threads=threads) as bx:
-
             index_q_shared = T.alloc_shared([block_Q * heads, index_dim], dtype)
             index_k_shared = T.alloc_shared([block_N, index_dim], dtype)
             index_k_scale_fragment = T.alloc_fragment([block_N], accum_dtype)
@@ -173,8 +172,8 @@ def mqa_attn_return_logits(
                 T.reduce_sum(s_reshaped, logits, dim=-1, clear=True)
 
                 for bq_i, bn_i in T.Parallel(block_Q, block_N):
-                    Logits[seq_len_i + bq_i, cu_k_s_min[0] + nbn_i * block_N + bn_i] = (
-                        logits[bn_i, bq_i])
+                    Logits[seq_len_i + bq_i, cu_k_s_min[0] + nbn_i * block_N + bn_i] = logits[bn_i,
+                                                                                              bq_i]
 
     return mqa_attn_return_logits_kernel
 
@@ -240,20 +239,25 @@ def mqa_attn_return_logits_interface(q,
     return logits
 
 
-def ref_fp8_mqa_logits(q: torch.Tensor, kv: torch.Tensor, weights: torch.Tensor,
-                       cu_seqlen_ks: torch.Tensor, cu_seqlen_ke: torch.Tensor):
+def ref_fp8_mqa_logits(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    weights: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+):
     k = kv
     q = q.float()
     k = k.float()
 
     seq_len_kv = kv.shape[0]
-    mask_lo = torch.arange(0, seq_len_kv, device='cuda')[None, :] >= cu_seqlen_ks[:, None]
-    mask_hi = torch.arange(0, seq_len_kv, device='cuda')[None, :] < cu_seqlen_ke[:, None]
+    mask_lo = torch.arange(0, seq_len_kv, device="cuda")[None, :] >= cu_seqlen_ks[:, None]
+    mask_hi = torch.arange(0, seq_len_kv, device="cuda")[None, :] < cu_seqlen_ke[:, None]
     mask = mask_lo & mask_hi
 
-    score = torch.einsum('mhd,nd->hmn', q, k)
+    score = torch.einsum("mhd,nd->hmn", q, k)
     logits = (score.relu() * weights.unsqueeze(-1).transpose(0, 1)).sum(dim=0)
-    logits = logits.masked_fill(~mask, float('-inf'))
+    logits = logits.masked_fill(~mask, float("-inf"))
 
     cost = mask.sum()
     return logits, cost
@@ -290,7 +294,8 @@ def test_fp8_lighting_indexer(S=4096, SKV=8192, H=32, HKV=1, D=64, kv_stride=1):
             kv_scales=kv_scales,
             weights=weights,
             cu_seqlen_ks=ks,
-            cu_seqlen_ke=ke)
+            cu_seqlen_ke=ke,
+        )
 
     with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
         logits_fn()

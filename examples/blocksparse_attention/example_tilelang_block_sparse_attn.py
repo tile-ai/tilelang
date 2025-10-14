@@ -30,9 +30,11 @@ def get_sparse_attn_mask_from_threshold(x, threshold, use_dense_for_last_block=F
 
 
 @tilelang.jit(
-    out_idx=[4], pass_configs={
+    out_idx=[4],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal):
     block_M = 64
     block_N = 64
@@ -128,7 +130,11 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
                 Output: T.Tensor(shape, dtype),
         ):
             with T.Kernel(
-                    T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (bx, by, bz):
+                    T.ceildiv(seq_len, block_M), heads, batch, threads=threads) as (
+                        bx,
+                        by,
+                        bz,
+                    ):
                 Q_shared = T.alloc_shared([block_M, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
@@ -158,8 +164,15 @@ def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal)
                 for k in T.Pipelined(loop_range, num_stages=num_stages):
                     if block_mask[k] != 0:
                         MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
-                        Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale,
-                                scores_sum, logsum)
+                        Softmax(
+                            acc_s,
+                            acc_s_cast,
+                            scores_max,
+                            scores_max_prev,
+                            scores_scale,
+                            scores_sum,
+                            logsum,
+                        )
                         Rescale(acc_o, scores_scale)
                         MMA1(V, V_shared, acc_s_cast, acc_o, k, by, bz)
                 for i, j in T.Parallel(block_M, dim):
@@ -180,9 +193,9 @@ def test_topk_sparse_attention():
     torch.manual_seed(0)
 
     # Create inputs
-    q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
-    k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
-    v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
+    q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
 
     sm_scale = 1.0 / (D_HEAD**0.5)
 
@@ -190,7 +203,7 @@ def test_topk_sparse_attention():
     downsample_factor = BLOCK
     downsample_len = math.ceil(SEQ_LEN / downsample_factor)
     x_ds = torch.randn([BATCH, N_HEADS, downsample_len, downsample_len],
-                       device='cuda',
+                       device="cuda",
                        dtype=torch.bfloat16)
     x_ds[:, :, :, 0] = 100
     block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
@@ -202,15 +215,15 @@ def test_topk_sparse_attention():
 
     # Compute reference
     # Expand block mask to full attention matrix
-    full_mask = torch.kron(block_mask.float(), torch.ones(BLOCK, BLOCK, device='cuda'))
+    full_mask = torch.kron(block_mask.float(), torch.ones(BLOCK, BLOCK, device="cuda"))
     full_mask = full_mask[..., :SEQ_LEN, :SEQ_LEN].bool()
     full_mask = full_mask & torch.tril(torch.ones_like(full_mask))  # Apply causal
 
     # PyTorch reference implementation
-    attn = torch.einsum('bhsd,bhtd->bhst', q, k) * sm_scale
-    attn = attn.masked_fill(~full_mask, float('-inf'))
+    attn = torch.einsum("bhsd,bhtd->bhst", q, k) * sm_scale
+    attn = attn.masked_fill(~full_mask, float("-inf"))
     attn = F.softmax(attn, dim=-1)
-    ref_output = torch.einsum('bhst,bhtd->bhsd', attn, v)
+    ref_output = torch.einsum("bhst,bhtd->bhsd", attn, v)
 
     print("ref_output", ref_output)
     print("tilelang_output", tilelang_output)

@@ -1,6 +1,6 @@
+from __future__ import annotations
 import ctypes
 import sys
-from typing import Optional
 
 
 class cudaDeviceProp(ctypes.Structure):
@@ -73,12 +73,11 @@ class cudaDeviceProp(ctypes.Structure):
         ("multiGpuBoardGroupID", ctypes.c_int),
         ("reserved2", ctypes.c_int * 2),
         ("reserved1", ctypes.c_int * 1),
-        ("reserved", ctypes.c_int * 60)
+        ("reserved", ctypes.c_int * 60),
     ]
 
 
-def get_cuda_device_properties(device_id: int = 0) -> Optional[cudaDeviceProp]:
-
+def get_cuda_device_properties(device_id: int = 0) -> cudaDeviceProp | None:
     if sys.platform == "win32":
         libcudart = ctypes.windll.LoadLibrary("cudart64_110.dll")
     else:
@@ -95,7 +94,7 @@ def get_cuda_device_properties(device_id: int = 0) -> Optional[cudaDeviceProp]:
         raise RuntimeError(f"cudaGetDeviceProperties failed with error {ret}")
 
 
-def get_device_name(device_id: int = 0) -> Optional[str]:
+def get_device_name(device_id: int = 0) -> str | None:
     prop = get_cuda_device_properties(device_id)
     if prop:
         return prop.name.decode()
@@ -103,7 +102,7 @@ def get_device_name(device_id: int = 0) -> Optional[str]:
         raise RuntimeError("Failed to get device properties.")
 
 
-def get_shared_memory_per_block(device_id: int = 0, format: str = "bytes") -> Optional[int]:
+def get_shared_memory_per_block(device_id: int = 0, format: str = "bytes") -> int | None:
     assert format in ["bytes", "kb", "mb"], "Invalid format. Must be one of: bytes, kb, mb"
     prop = get_cuda_device_properties(device_id)
     if prop:
@@ -143,7 +142,7 @@ def get_device_attribute(attr: int, device_id: int = 0) -> int:
         return None
 
 
-def get_max_dynamic_shared_size_bytes(device_id: int = 0, format: str = "bytes") -> Optional[int]:
+def get_max_dynamic_shared_size_bytes(device_id: int = 0, format: str = "bytes") -> int | None:
     """
     Get the maximum dynamic shared memory size in bytes, kilobytes, or megabytes.
     """

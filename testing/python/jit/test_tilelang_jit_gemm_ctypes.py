@@ -208,6 +208,7 @@ def run_gemm_jit_kernel(
 
     def ref_program(A, B):
         import torch
+
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         C = C.to(out_dtype)
         return C
@@ -235,19 +236,21 @@ def test_gemm_jit_kernel():
     )
 
 
-def run_ctypes_kernel_do_bench(M,
-                               N,
-                               K,
-                               trans_A,
-                               trans_B,
-                               in_dtype,
-                               out_dtype,
-                               dtypeAccum,
-                               block_M,
-                               block_N,
-                               block_K,
-                               num_stages=3,
-                               num_threads=128):
+def run_ctypes_kernel_do_bench(
+    M,
+    N,
+    K,
+    trans_A,
+    trans_B,
+    in_dtype,
+    out_dtype,
+    dtypeAccum,
+    block_M,
+    block_N,
+    block_K,
+    num_stages=3,
+    num_threads=128,
+):
     program = matmul(
         M,
         N,
@@ -284,19 +287,21 @@ def test_ctypes_kernel_do_bench():
                                256, 32, 2)
 
 
-def run_ctypes_kernel_multi_stream(M,
-                                   N,
-                                   K,
-                                   trans_A,
-                                   trans_B,
-                                   in_dtype,
-                                   out_dtype,
-                                   dtypeAccum,
-                                   block_M,
-                                   block_N,
-                                   block_K,
-                                   num_stages=3,
-                                   num_threads=128):
+def run_ctypes_kernel_multi_stream(
+    M,
+    N,
+    K,
+    trans_A,
+    trans_B,
+    in_dtype,
+    out_dtype,
+    dtypeAccum,
+    block_M,
+    block_N,
+    block_K,
+    num_stages=3,
+    num_threads=128,
+):
     program = matmul(
         M,
         N,
@@ -337,19 +342,21 @@ def test_ctypes_kernel_multi_stream():
                                    128, 256, 32, 2)
 
 
-def run_ctypes_dynamic_shape(M,
-                             N,
-                             K,
-                             trans_A,
-                             trans_B,
-                             in_dtype,
-                             out_dtype,
-                             dtypeAccum,
-                             block_M,
-                             block_N,
-                             block_K,
-                             num_stages=3,
-                             num_threads=128):
+def run_ctypes_dynamic_shape(
+    M,
+    N,
+    K,
+    trans_A,
+    trans_B,
+    in_dtype,
+    out_dtype,
+    dtypeAccum,
+    block_M,
+    block_N,
+    block_K,
+    num_stages=3,
+    num_threads=128,
+):
     program = matmul(
         M,
         N,
@@ -398,12 +405,34 @@ def test_ctypes_dynamic_shape():
         T.symbolic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
 
     run_ctypes_dynamic_shape(
-        T.symbolic("m"), T.symbolic("n"), 768, False, False, "float16", "float16", "float16", 128,
-        256, 32, 2)
+        T.symbolic("m"),
+        T.symbolic("n"),
+        768,
+        False,
+        False,
+        "float16",
+        "float16",
+        "float16",
+        128,
+        256,
+        32,
+        2,
+    )
 
     run_ctypes_dynamic_shape(
-        T.symbolic("m"), T.symbolic("n"), T.symbolic("k"), False, False, "float16", "float16",
-        "float16", 128, 256, 32, 2)
+        T.symbolic("m"),
+        T.symbolic("n"),
+        T.symbolic("k"),
+        False,
+        False,
+        "float16",
+        "float16",
+        "float16",
+        128,
+        256,
+        32,
+        2,
+    )
 
 
 if __name__ == "__main__":

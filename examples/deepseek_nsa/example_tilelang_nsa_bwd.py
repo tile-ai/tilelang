@@ -7,6 +7,7 @@ import torch
 import triton
 
 import fla
+
 if parse(fla.__version__) < parse("0.2.1"):
     from fla.ops.common.utils import prepare_token_indices
 else:
@@ -34,7 +35,6 @@ def tilelang_kernel_fwd(
     groups=1,
     selected_blocks=16,
 ):
-
     from tilelang import language as T
 
     if scale is None:
@@ -487,9 +487,11 @@ def tilelang_kernel_bwd_dqkv(
 
 
 @tilelang.jit(
-    out_idx=[2], pass_configs={
+    out_idx=[2],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def tilelang_kernel_preprocess(
     batch,
     heads,
@@ -527,9 +529,11 @@ def tilelang_kernel_preprocess(
 
 
 @tilelang.jit(
-    out_idx=[2], pass_configs={
+    out_idx=[2],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def tilelang_kernel_block_mask(
     batch,
     heads,
@@ -782,7 +786,7 @@ def parallel_nsa(
         g_slc, g_swa = map(lambda x: rearrange(x, "b h t -> b t h"), (g_slc, g_swa))
         if isinstance(block_counts, torch.Tensor):
             block_counts = rearrange(block_counts, "b h t -> b t h")
-    assert (q.shape[2] % (k.shape[2] * 16) == 0), "Group size must be a multiple of 16 in NSA"
+    assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
 
     if isinstance(block_counts, int):
         block_indices = block_indices[:, :, :, :block_counts]

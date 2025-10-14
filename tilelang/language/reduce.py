@@ -1,7 +1,7 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
 from tvm import tir
-from typing import Optional
 from tilelang.language import copy, macro, alloc_shared
 
 
@@ -27,10 +27,10 @@ def reduce(buffer: tir.Buffer, out: tir.Buffer, reduce_type: str, dim: int, clea
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
     expected_shapes = [
         buffer.shape[:dim] + buffer.shape[dim + 1:],
-        buffer.shape[:dim] + [1] + buffer.shape[dim + 1:]
+        buffer.shape[:dim] + [1] + buffer.shape[dim + 1:],
     ]
     if list(out.shape) not in expected_shapes:
-        expected_shapes_str = ' or '.join(map(str, expected_shapes))
+        expected_shapes_str = " or ".join(map(str, expected_shapes))
         raise ValueError(
             f"Invalid reduce output shape, buffer shape is {buffer.shape}, dim is {dim}, "
             f"output shape is {out.shape}, expected shapes are {expected_shapes_str}")
@@ -154,7 +154,7 @@ def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -
     copy(cumsum_smem, dst)
 
 
-def cumsum(src: tir.Buffer, dst: Optional[tir.Buffer] = None, dim: int = 0, reverse: bool = False):
+def cumsum(src: tir.Buffer, dst: tir.Buffer | None = None, dim: int = 0, reverse: bool = False):
     """
     Compute the cumulative sum of `src` along `dim`, writing results to `dst`.
 

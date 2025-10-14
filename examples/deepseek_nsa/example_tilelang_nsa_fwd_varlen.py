@@ -8,6 +8,7 @@ from tilelang import language as T
 import tilelang.testing
 
 import fla
+
 if parse(fla.__version__) < parse("0.2.1"):
     from fla.ops.common.utils import prepare_token_indices
 else:
@@ -190,11 +191,15 @@ def parallel_nsa_fwd(
 
     o_slc = torch.empty(B, C_SEQ_LEN, HQ, V, dtype=v.dtype, device=q.device)
     kernel(
-        q.view(C_SEQ_LEN, HQ, D), k.view(C_SEQ_LEN, H, D), v.view(C_SEQ_LEN, H, D),
+        q.view(C_SEQ_LEN, HQ, D),
+        k.view(C_SEQ_LEN, H, D),
+        v.view(C_SEQ_LEN, H, D),
         o_slc.view(C_SEQ_LEN, HQ, V),
         block_indices.to(torch.int32).view(C_SEQ_LEN, H, S),
-        block_counts.to(torch.int32).view(C_SEQ_LEN, H), offsets.to(torch.int32),
-        token_indices.to(torch.int32))
+        block_counts.to(torch.int32).view(C_SEQ_LEN, H),
+        offsets.to(torch.int32),
+        token_indices.to(torch.int32),
+    )
     return o_slc
 
 
@@ -221,22 +226,25 @@ class ParallelNSAFunction(torch.autograd.Function):
             window_size=window_size,
             scale=scale,
             offsets=offsets,
-            token_indices=token_indices)
+            token_indices=token_indices,
+        )
         return o_slc.to(q.dtype)
 
 
-def parallel_nsa(q: torch.Tensor,
-                 k: torch.Tensor,
-                 v: torch.Tensor,
-                 g_slc: torch.Tensor,
-                 g_swa: torch.Tensor,
-                 block_indices: torch.LongTensor,
-                 block_counts: Optional[Union[torch.LongTensor, int]] = None,
-                 block_size: int = 64,
-                 window_size: int = 0,
-                 scale: Optional[float] = None,
-                 cu_seqlens: Optional[torch.LongTensor] = None,
-                 head_first: bool = False) -> torch.Tensor:
+def parallel_nsa(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g_slc: torch.Tensor,
+    g_swa: torch.Tensor,
+    block_indices: torch.LongTensor,
+    block_counts: Optional[Union[torch.LongTensor, int]] = None,
+    block_size: int = 64,
+    window_size: int = 0,
+    scale: Optional[float] = None,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    head_first: bool = False,
+) -> torch.Tensor:
     r"""
     Args:
         q (torch.Tensor):
@@ -280,11 +288,11 @@ def parallel_nsa(q: torch.Tensor,
     if cu_seqlens is not None:
         assert q.shape[0] == 1, "batch size must be 1 when cu_seqlens are provided"
     if head_first:
-        q, k, v, block_indices = map(lambda x: rearrange(x, 'b h t d -> b t h d'),
+        q, k, v, block_indices = map(lambda x: rearrange(x, "b h t d -> b t h d"),
                                      (q, k, v, block_indices))
-        g_slc, g_swa = map(lambda x: rearrange(x, 'b h t -> b t h'), (g_slc, g_swa))
+        g_slc, g_swa = map(lambda x: rearrange(x, "b h t -> b t h"), (g_slc, g_swa))
         if isinstance(block_counts, torch.Tensor):
-            block_counts = rearrange(block_counts, 'b h t -> b t h')
+            block_counts = rearrange(block_counts, "b h t -> b t h")
     assert q.shape[2] % (k.shape[2] * 16) == 0, "Group size must be a multiple of 16 in NSA"
 
     if isinstance(block_counts, int):
@@ -298,7 +306,7 @@ def parallel_nsa(q: torch.Tensor,
     else:
         o = o_slc * g_slc.unsqueeze(-1)
     if head_first:
-        o = rearrange(o, 'b t h d -> b h t d')
+        o = rearrange(o, "b t h d -> b h t d")
     return o
 
 
@@ -306,41 +314,48 @@ if __name__ == "__main__":
     N, C_SEQ_LEN, H, HQ, D, S, block_size, dtype = 2, 64, 1, 16, 64, 1, 32, torch.float16
     torch.manual_seed(42)
     # randomly split the sequence into N segments
-    offsets = torch.cat([
-        torch.tensor([0], dtype=torch.long),
-        torch.arange(16, C_SEQ_LEN)[torch.randperm(C_SEQ_LEN - 1)[:N - 1]],
-        torch.tensor([C_SEQ_LEN], dtype=torch.long)
-    ], 0).cuda().sort()[0]
+    offsets = (
+        torch.cat(
+            [
+                torch.tensor([0], dtype=torch.long),
+                torch.arange(16, C_SEQ_LEN)[torch.randperm(C_SEQ_LEN - 1)[:N - 1]],
+                torch.tensor([C_SEQ_LEN], dtype=torch.long),
+            ],
+            0,
+        ).cuda().sort()[0])
 
     # seq-first required for inputs with variable lengths
-    perm_q = torch.randperm(C_SEQ_LEN, device='cuda')
-    perm_k = torch.randperm(C_SEQ_LEN, device='cuda')
-    perm_v = torch.randperm(C_SEQ_LEN, device='cuda')
-    q = torch.linspace(
-        0, 1, steps=C_SEQ_LEN, dtype=dtype,
-        device='cuda')[perm_q].view(1, C_SEQ_LEN, 1, 1).expand(1, C_SEQ_LEN, HQ,
-                                                               D).clone().requires_grad_(True)
-    k = torch.linspace(
-        0, 1, steps=C_SEQ_LEN, dtype=dtype,
-        device='cuda')[perm_k].view(1, C_SEQ_LEN, 1, 1).expand(1, C_SEQ_LEN, H,
-                                                               D).clone().requires_grad_(True)
-    v = torch.linspace(
-        0, 1, steps=C_SEQ_LEN, dtype=dtype,
-        device='cuda')[perm_v].view(1, C_SEQ_LEN, 1, 1).expand(1, C_SEQ_LEN, H,
-                                                               D).clone().requires_grad_(True)
-    g_slc = torch.rand((1, C_SEQ_LEN, HQ), dtype=dtype, device='cuda').requires_grad_(True)
-    g_swa = torch.rand((1, C_SEQ_LEN, HQ), dtype=dtype, device='cuda').requires_grad_(True)
-    do = torch.randn((1, C_SEQ_LEN, HQ, D), dtype=dtype, device='cuda')
+    perm_q = torch.randperm(C_SEQ_LEN, device="cuda")
+    perm_k = torch.randperm(C_SEQ_LEN, device="cuda")
+    perm_v = torch.randperm(C_SEQ_LEN, device="cuda")
+    q = (
+        torch.linspace(0, 1, steps=C_SEQ_LEN, dtype=dtype,
+                       device="cuda")[perm_q].view(1, C_SEQ_LEN, 1,
+                                                   1).expand(1, C_SEQ_LEN, HQ,
+                                                             D).clone().requires_grad_(True))
+    k = (
+        torch.linspace(0, 1, steps=C_SEQ_LEN, dtype=dtype,
+                       device="cuda")[perm_k].view(1, C_SEQ_LEN, 1,
+                                                   1).expand(1, C_SEQ_LEN, H,
+                                                             D).clone().requires_grad_(True))
+    v = (
+        torch.linspace(0, 1, steps=C_SEQ_LEN, dtype=dtype,
+                       device="cuda")[perm_v].view(1, C_SEQ_LEN, 1,
+                                                   1).expand(1, C_SEQ_LEN, H,
+                                                             D).clone().requires_grad_(True))
+    g_slc = torch.rand((1, C_SEQ_LEN, HQ), dtype=dtype, device="cuda").requires_grad_(True)
+    g_swa = torch.rand((1, C_SEQ_LEN, HQ), dtype=dtype, device="cuda").requires_grad_(True)
+    do = torch.randn((1, C_SEQ_LEN, HQ, D), dtype=dtype, device="cuda")
 
     token_indices = prepare_token_indices(offsets).tolist()
-    block_indices = torch.full((1, C_SEQ_LEN, H, S), C_SEQ_LEN, dtype=torch.long, device='cuda')
+    block_indices = torch.full((1, C_SEQ_LEN, H, S), C_SEQ_LEN, dtype=torch.long, device="cuda")
     for i in range(C_SEQ_LEN):
         _, t = token_indices[i]
         for h in range(H):
             i_i = torch.randperm(max(1, tilelang.cdiv(t, block_size)))[:S]
             block_indices[0, i, h, :len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
-    block_counts = torch.randint(1, S + 1, (1, C_SEQ_LEN, H), device='cuda')
+    block_counts = torch.randint(1, S + 1, (1, C_SEQ_LEN, H), device="cuda")
 
     ref = naive_nsa(
         q=q,
@@ -351,7 +366,8 @@ if __name__ == "__main__":
         block_indices=block_indices,
         block_counts=block_counts,
         block_size=block_size,
-        cu_seqlens=offsets)
+        cu_seqlens=offsets,
+    )
 
     tri = parallel_nsa(
         q=q,
@@ -362,7 +378,8 @@ if __name__ == "__main__":
         block_indices=block_indices,
         block_counts=block_counts,
         block_size=block_size,
-        cu_seqlens=offsets)
+        cu_seqlens=offsets,
+    )
 
     print("tri", tri)
     print("ref", ref)

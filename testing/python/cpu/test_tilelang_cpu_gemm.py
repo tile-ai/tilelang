@@ -31,7 +31,6 @@ def matmul(M, N, K, block_M, block_N, block_K, dtype="float16", accum_dtype="flo
             # )
 
             for ko in T.Pipelined(K // block_K, num_stages=num_stages):
-
                 T.copy(A[by * block_M, ko * block_K], A_local)
 
                 # Or Copy with Parallel

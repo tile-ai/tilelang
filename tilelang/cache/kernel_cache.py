@@ -1,4 +1,5 @@
 """The cache utils with class and database persistence - KernelCache Class"""
+from __future__ import annotations
 
 import json
 import logging
@@ -7,7 +8,7 @@ import shutil
 import threading
 import uuid
 from hashlib import sha256
-from typing import Callable, List, Literal, Optional, Union
+from typing import Callable, Literal
 
 import cloudpickle
 from tvm.target import Target
@@ -67,13 +68,13 @@ class KernelCache:
     def _generate_key(
         self,
         func: Callable,
-        out_idx: List[int],
+        out_idx: list[int],
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         args=None,
-        target: Union[str, Target] = "auto",
-        target_host: Union[str, Target] = None,
+        target: str | Target = "auto",
+        target_host: str | Target = None,
         pass_configs: dict = None,
-        compile_flags: Optional[Union[List[str], str]] = None,
+        compile_flags: list[str] | str | None = None,
     ) -> str:
         """
         Generates a unique hash key for caching compiled kernels.
@@ -112,14 +113,14 @@ class KernelCache:
     def cached(
         self,
         func: PrimFunc = None,
-        out_idx: List[int] = None,
+        out_idx: list[int] = None,
         *args,
-        target: Union[str, Target] = "auto",
-        target_host: Union[str, Target] = None,
+        target: str | Target = "auto",
+        target_host: str | Target = None,
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         verbose: bool = False,
         pass_configs: dict = None,
-        compile_flags: Optional[Union[List[str], str]] = None,
+        compile_flags: list[str] | str | None = None,
     ) -> JITKernel:
         """
         Caches and reuses compiled kernels to avoid redundant compilation.
@@ -159,17 +160,26 @@ class KernelCache:
         with self._lock:
             # First check in-memory cache
             if key in self._memory_cache:
-                self.logger.warning("Found kernel in memory cache. For better performance," \
-                                    " consider using `@tilelang.jit` instead of direct kernel caching.")
+                self.logger.warning(
+                    "Found kernel in memory cache. For better performance,"
+                    " consider using `@tilelang.jit` instead of direct kernel caching.")
                 return self._memory_cache[key]
 
             if verbose:
                 self.logger.debug(f"Checking disk cache for kernel {func.attrs['global_symbol']}")
 
             # Then check disk cache
-            kernel = self._load_kernel_from_disk(key, target, target_host, out_idx,
-                                                 execution_backend, pass_configs, compile_flags,
-                                                 func, verbose)
+            kernel = self._load_kernel_from_disk(
+                key,
+                target,
+                target_host,
+                out_idx,
+                execution_backend,
+                pass_configs,
+                compile_flags,
+                func,
+                verbose,
+            )
             if kernel is not None:
                 if verbose:
                     self.logger.debug(
@@ -280,22 +290,27 @@ class KernelCache:
                 self.logger.debug(
                     f"Saving wrapped kernel source code to file: {wrapped_kernel_path}")
             KernelCache._safe_write_file(
-                wrapped_kernel_path, "w",
-                lambda file: file.write(kernel.adapter.get_kernel_source()))
+                wrapped_kernel_path,
+                "w",
+                lambda file: file.write(kernel.adapter.get_kernel_source()),
+            )
         except Exception as e:
             self.logger.error(f"Error saving wrapped kernel source code to disk: {e}")
 
         # Save the kernel library
         try:
             # Save CUBIN or SO file
-            kernel_lib_path = KERNEL_CUBIN_PATH if self.execution_backend == "nvrtc" else KERNEL_LIB_PATH
+            kernel_lib_path = (
+                KERNEL_CUBIN_PATH if self.execution_backend == "nvrtc" else KERNEL_LIB_PATH)
             kernel_lib_path = os.path.join(cache_path, kernel_lib_path)
             src_lib_path = kernel.adapter.libpath
             if verbose:
                 self.logger.debug(f"Saving kernel library to file: {kernel_lib_path}")
             KernelCache._safe_write_file(
-                kernel_lib_path, "wb",
-                lambda file: file.write(KernelCache._load_binary(src_lib_path)))
+                kernel_lib_path,
+                "wb",
+                lambda file: file.write(KernelCache._load_binary(src_lib_path)),
+            )
 
             # Save an extra Python file for NVRTC
             if self.execution_backend == "nvrtc":
@@ -304,8 +319,10 @@ class KernelCache:
                 if verbose:
                     self.logger.debug(f"Saving kernel nvrtc python code to file: {kernel_py_path}")
                 KernelCache._safe_write_file(
-                    kernel_py_path, "wb",
-                    lambda file: file.write(KernelCache._load_binary(src_lib_path)))
+                    kernel_py_path,
+                    "wb",
+                    lambda file: file.write(KernelCache._load_binary(src_lib_path)),
+                )
         except Exception as e:
             self.logger.error(f"Error saving kernel library to disk: {e}")
 
@@ -322,15 +339,15 @@ class KernelCache:
     def _load_kernel_from_disk(
         self,
         key: str,
-        target: Union[str, Target] = "auto",
-        target_host: Union[str, Target] = None,
-        out_idx: List[int] = None,
+        target: str | Target = "auto",
+        target_host: str | Target = None,
+        out_idx: list[int] = None,
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         pass_configs: dict = None,
-        compile_flags: Optional[Union[List[str], str]] = None,
+        compile_flags: list[str] | str | None = None,
         func: Callable = None,
         verbose: bool = False,
-    ) -> Optional[JITKernel]:
+    ) -> JITKernel | None:
         """
         Loads a previously compiled kernel from disk cache.
 
@@ -355,15 +372,15 @@ class KernelCache:
         if not all([os.path.exists(file) for file in (kernel_lib_path, params_path)]):
             return None
 
-        kernel_global_source: Optional[str] = None
-        kernel_params: Optional[List[KernelParam]] = None
+        kernel_global_source: str | None = None
+        kernel_params: list[KernelParam] | None = None
 
         # Load the kernel source file (optional)
         try:
             if verbose:
                 self.logger.debug(
                     f"Loading wrapped kernel source code from file: {wrapped_kernel_path}")
-            with open(wrapped_kernel_path, "r") as f:
+            with open(wrapped_kernel_path) as f:
                 kernel_global_source = f.read()
         except Exception as e:
             self.logger.error(f"Error loading wrapped kernel source code from disk: {e}")

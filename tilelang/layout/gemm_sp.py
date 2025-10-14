@@ -1,17 +1,16 @@
 """Wrapping Layouts."""
 # pylint: disable=invalid-name, unsupported-binary-operation
+from __future__ import annotations
 
-from typing import Optional
 import tvm
 import tilelang.language as T
 import warnings
 
 from tilelang.contrib import nvcc
-from typing import List
 from math import prod
 
 
-def decompose_col_major(index_1d: int, basis: List[int]) -> List[int]:
+def decompose_col_major(index_1d: int, basis: list[int]) -> list[int]:
     res = []
     for x in basis:
         res.append(index_1d % x)
@@ -133,24 +132,26 @@ def _make_metadata_layout_sm8x_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str):
     return T.Layout(buffer.shape, ColumnMajorInterleaved)
 
 
-def make_metadata_layout(buffer: tvm.tir.Buffer,
-                         mma_dtype: str = "float16",
-                         backend: str = 'cutlass',
-                         arch: Optional[str] = None,
-                         **extra_args):
+def make_metadata_layout(
+    buffer: tvm.tir.Buffer,
+    mma_dtype: str = "float16",
+    backend: str = "cutlass",
+    arch: str | None = None,
+    **extra_args,
+):
     if arch is None:
         arch = nvcc.get_target_compute_version()
 
     compute_version = nvcc.parse_compute_version(arch)
 
     if compute_version >= (9, 0):
-        if backend == 'cutlass':
+        if backend == "cutlass":
             return _make_metadata_layout_sm90_cutlass(
                 buffer=buffer, mma_dtype=mma_dtype, **extra_args)
         else:
             raise NotImplementedError(f"Arch {arch}, Unsupported backend: {backend}")
     elif compute_version >= (8, 0):
-        if backend == 'cutlass':
+        if backend == "cutlass":
             return _make_metadata_layout_sm8x_cutlass(buffer=buffer, mma_dtype=mma_dtype)
         else:
             raise NotImplementedError(f"Arch {arch}, Unsupported backend: {backend}")

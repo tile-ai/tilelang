@@ -1,8 +1,8 @@
+from __future__ import annotations
 from dataclasses import dataclass
 from .base import BaseTemplate
 from tvm import te, tir
 from ..roller import Hint
-from typing import List
 from ..utils import get_roller_hints_from_func
 
 
@@ -29,6 +29,7 @@ class ConvTemplate(BaseTemplate):
         accum_dtype (str): Data type used for accumulation.
         with_bias (bool): Whether to add a bias term.
     """
+
     # Operation-related configuration parameters
     N: int  # The number of input samples processed simultaneously in a batch.
     C: int  # The number of input feature maps.
@@ -44,7 +45,7 @@ class ConvTemplate(BaseTemplate):
     accum_dtype: str = "float16"  # Data type for accumulation
     with_bias: bool = False  # Whether to add a bias term
 
-    def get_hardware_aware_configs(self, arch=None, topk=10) -> List[Hint]:
+    def get_hardware_aware_configs(self, arch=None, topk=10) -> list[Hint]:
         """
         Retrieves optimized hardware-aware configurations.
 
@@ -69,7 +70,17 @@ class ConvTemplate(BaseTemplate):
         Raises:
             AssertionError: If N, C, H, W, F, K, S, D, P are not positive integers.
         """
-        N, C, H, W, F, K, S, D, P = self.N, self.C, self.H, self.W, self.F, self.K, self.S, self.D, self.P
+        N, C, H, W, F, K, S, D, P = (
+            self.N,
+            self.C,
+            self.H,
+            self.W,
+            self.F,
+            self.K,
+            self.S,
+            self.D,
+            self.P,
+        )
         assert (isinstance(N, int) and isinstance(C, int) and isinstance(H, int) and
                 isinstance(W, int) and isinstance(F, int) and isinstance(K, int) and
                 isinstance(S, int) and isinstance(D, int) and
@@ -124,8 +135,10 @@ class ConvTemplate(BaseTemplate):
                 te.if_then_else(
                     te.all(h_in >= 0, h_in < H, w_in >= 0, w_in < W),
                     A[n, h_in, w_in, c].astype(accum_dtype) * B[kh, kw, c, f].astype(accum_dtype),
-                    tir.const(0, accum_dtype)),
-                axis=[kh, kw, c])
+                    tir.const(0, accum_dtype),
+                ),
+                axis=[kh, kw, c],
+            )
 
         # Compute convolution result
         C = te.compute(

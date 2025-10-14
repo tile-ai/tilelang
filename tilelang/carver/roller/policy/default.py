@@ -1,8 +1,10 @@
 """Policy for cuda core schedule"""
+from __future__ import annotations
+
 import functools
 import math
 from queue import PriorityQueue
-from typing import Iterable, Dict, List, Optional
+from typing import Iterable
 
 import numpy as np
 import tvm
@@ -22,11 +24,11 @@ class DefaultPolicy:
     """
 
     func: tvm.tir.PrimFunc
-    nodes: List[PrimFuncNode] = []
+    nodes: list[PrimFuncNode] = []
     arch: TileDevice
-    tags: Dict
+    tags: dict
 
-    def __init__(self, arch: TileDevice, tags: Optional[Dict] = None) -> None:
+    def __init__(self, arch: TileDevice, tags: dict | None = None) -> None:
         if tags is None:
             tags = {}
 
@@ -35,23 +37,22 @@ class DefaultPolicy:
         self.rasterization = NoRasterization()
 
     @classmethod
-    def from_prim_func(cls,
-                       func: tvm.tir.PrimFunc,
-                       arch: TileDevice,
-                       tags: Optional[Dict] = None,
-                       name: str = "PrimFuncNode"):
+    def from_prim_func(
+        cls,
+        func: tvm.tir.PrimFunc,
+        arch: TileDevice,
+        tags: dict | None = None,
+        name: str = "PrimFuncNode",
+    ):
         return cls(arch, tags)._init_with_prim_func(func, name)
 
     @classmethod
-    def from_output_nodes(cls,
-                          nodes: List[OutputNode],
-                          arch: TileDevice,
-                          tags: Optional[Dict] = None):
+    def from_output_nodes(cls, nodes: list[OutputNode], arch: TileDevice, tags: dict | None = None):
         return cls(arch, tags)._init_with_output_nodes(nodes)
 
     def _init_with_prim_func(self,
                              func: tvm.tir.PrimFunc,
-                             name: str = "PrimFuncNode") -> "DefaultPolicy":
+                             name: str = "PrimFuncNode") -> DefaultPolicy:
         if func is not None and isinstance(func, tvm.tir.PrimFunc):
             self.func = func
             self.prim_func_node = PrimFuncNode(self.func, tags=self.tags, name=name)
@@ -61,7 +62,7 @@ class DefaultPolicy:
         self._init_with_output_nodes(output_nodes)
         return self
 
-    def _init_with_output_nodes(self, output_nodes: List[OutputNode]):
+    def _init_with_output_nodes(self, output_nodes: list[OutputNode]):
         self.ordered_nodes = list(
             filter(lambda n: not n.is_placeholder() and not n.is_output(),
                    find_topo_sort(output_nodes)))
@@ -78,7 +79,7 @@ class DefaultPolicy:
                 self.output_nodes.append(node)
         return self
 
-    def emit_config(self, topk: int) -> List[Hint]:
+    def emit_config(self, topk: int) -> list[Hint]:
         base_tile = self.get_base_tile()
         if base_tile is None:
             return []
@@ -436,15 +437,19 @@ class DefaultPolicy:
                 if edge.src_node.is_placeholder():
                     nbytes = (edge.src_node.get_dtype().bits + 7) // 8
                     read_transaction_elements = self.arch.transaction_size[1] // nbytes
-                    traffic += coalesced_tensor_shape(input_shapes[i], edge.src_node.get_shape(),
-                                                      read_transaction_elements) * nbytes
+                    traffic += (
+                        coalesced_tensor_shape(input_shapes[i], edge.src_node.get_shape(),
+                                               read_transaction_elements) * nbytes)
             for edge in node.outputs:
                 if edge.dst_node.is_output():
                     nbytes = (edge.src_node.get_dtype().bits + 7) // 8
                     write_transaction_elements = self.arch.transaction_size[0] // nbytes
-                    traffic += coalesced_tensor_shape(output_shapes[edge.src_id],
-                                                      node.get_shape(edge.src_id),
-                                                      write_transaction_elements) * nbytes
+                    traffic += (
+                        coalesced_tensor_shape(
+                            output_shapes[edge.src_id],
+                            node.get_shape(edge.src_id),
+                            write_transaction_elements,
+                        ) * nbytes)
 
         return traffic, op_tile_map
 
@@ -557,7 +562,7 @@ class DefaultPolicy:
                 node, td)
         td.output_strides_map, td.tensor_strides_map = output_strides_map, tensor_strides_map
 
-    def compute_tile_dict(self, output_tile: List[int], rstep_map) -> TileDict:
+    def compute_tile_dict(self, output_tile: list[int], rstep_map) -> TileDict:
         """
         Computes and returns a TileDict object for a given output tile configuration and reduction step map.
 
@@ -624,7 +629,7 @@ class DefaultPolicy:
 
         return True
 
-    def recommend_block_size(self, td: TileDict) -> List[int]:
+    def recommend_block_size(self, td: TileDict) -> list[int]:
         """
         Recommends optimal block sizes based on the TileDict configuration.
 

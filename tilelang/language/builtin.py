@@ -1,11 +1,12 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
 from tilelang import tvm as tvm
 from tilelang.language import ptx_arrive_barrier, evaluate
 from tilelang.language.kernel import get_thread_bindings, get_block_extents
 from tilelang.utils.target import check_hip_availability
 from tvm import tir
-from typing import Union, Any
+from typing import Any
 from tvm.tir import PrimExpr, Var, Call, Buffer, BufferLoad
 
 _IS_HIP_AVAILABLE = check_hip_availability()
@@ -134,42 +135,36 @@ def set_max_nreg(reg_count: int, is_inc: int):
 
 
 def inc_max_nreg(reg_count: int):
-    """Increment the maximum number of registers to use.
-    """
+    """Increment the maximum number of registers to use."""
     return set_max_nreg(reg_count, 1)
 
 
 def dec_max_nreg(reg_count: int):
-    """Decrement the maximum number of registers to use.
-    """
+    """Decrement the maximum number of registers to use."""
     return set_max_nreg(reg_count, 0)
 
 
 def annotate_producer_reg_dealloc(reg_count: int = 24):
-    """Annotate the producer reg dealloc.
-    """
+    """Annotate the producer reg dealloc."""
     return dec_max_nreg(reg_count)
 
 
 def annotate_consumer_reg_alloc(reg_count: int = 240):
-    """Annotate the consumer reg alloc.
-    """
+    """Annotate the consumer reg alloc."""
     return inc_max_nreg(reg_count)
 
 
 def no_set_max_nreg():
-    """Disable the maximum register limit setting.
-    """
+    """Disable the maximum register limit setting."""
     return tir.call_intrin("handle", tir.op.Op.get("tl.no_set_max_nreg"))
 
 
 def disable_warp_group_reg_alloc():
-    """Disable the warp group reg alloc.
-    """
+    """Disable the warp group reg alloc."""
     return no_set_max_nreg()
 
 
-def mbarrier_wait_parity(mbarrier: Union[int, PrimExpr, tir.Call], parity: Union[int, Var]):
+def mbarrier_wait_parity(mbarrier: int | PrimExpr | tir.Call, parity: int | Var):
     """Wait for memory barrier parity condition.
 
     Args:
@@ -219,7 +214,7 @@ def mbarrier_wait_parity(mbarrier: Union[int, PrimExpr, tir.Call], parity: Union
     return tir.call_intrin("handle", tir.op.Op.get("tl.mbarrier_wait_parity"), mbarrier, parity)
 
 
-def mbarrier_arrive(mbarrier: Union[int, PrimExpr, tir.Call]):
+def mbarrier_arrive(mbarrier: int | PrimExpr | tir.Call):
     """Arrive at memory barrier.
 
     Args:
@@ -293,7 +288,7 @@ def wait_wgmma(id: int):
     return tir.call_intrin("handle", tir.op.Op.get("tl.wait_wgmma"), id)
 
 
-def barrier_wait(barrier_id: Union[int, PrimExpr, tir.Call], parity: Union[int, Var, None] = None):
+def barrier_wait(barrier_id: int | PrimExpr | tir.Call, parity: int | Var | None = None):
     """Wait for a memory barrier to complete.
 
     Args:
@@ -308,7 +303,7 @@ def barrier_wait(barrier_id: Union[int, PrimExpr, tir.Call], parity: Union[int, 
     return mbarrier_wait_parity(barrier_id, parity)
 
 
-def barrier_arrive(barrier_id: Union[int, PrimExpr, tir.Call]):
+def barrier_arrive(barrier_id: int | PrimExpr | tir.Call):
     """Arrive at a memory barrier.
 
     Args:
@@ -318,7 +313,7 @@ def barrier_arrive(barrier_id: Union[int, PrimExpr, tir.Call]):
     return mbarrier_arrive(barrier_id)
 
 
-def shfl_xor(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
+def shfl_xor(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
     """Perform a shuffle operation with XOR offset.
 
     Args:
@@ -332,10 +327,10 @@ def shfl_xor(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr,
     if _IS_HIP_AVAILABLE:
         return tir.call_extern(value.dtype, "__shfl_xor", value, offset)
     else:
-        return tir.call_extern(value.dtype, "__shfl_xor_sync", 0xffffffff, value, offset)
+        return tir.call_extern(value.dtype, "__shfl_xor_sync", 0xFFFFFFFF, value, offset)
 
 
-def shfl_down(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
+def shfl_down(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
     """Perform a shuffle operation with down offset.
 
     Args:
@@ -345,10 +340,10 @@ def shfl_down(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr
     if _IS_HIP_AVAILABLE:
         return tir.call_extern(value.dtype, "__shfl_down", value, offset)
     else:
-        return tir.call_extern(value.dtype, "__shfl_down_sync", 0xffffffff, value, offset)
+        return tir.call_extern(value.dtype, "__shfl_down_sync", 0xFFFFFFFF, value, offset)
 
 
-def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, tir.Call]):
+def shfl_up(value: int | PrimExpr | tir.Call, offset: int | PrimExpr | tir.Call):
     """Perform a shuffle operation with up offset.
 
     Args:
@@ -358,12 +353,11 @@ def shfl_up(value: Union[int, PrimExpr, tir.Call], offset: Union[int, PrimExpr, 
     if _IS_HIP_AVAILABLE:
         return tir.call_extern(value.dtype, "__shfl_up", value, offset)
     else:
-        return tir.call_extern(value.dtype, "__shfl_up_sync", 0xffffffff, value, offset)
+        return tir.call_extern(value.dtype, "__shfl_up_sync", 0xFFFFFFFF, value, offset)
 
 
 def sync_threads(barrier_id: int = None, arrive_count: int = None):
-    """Synchronize all threads in a block.
-    """
+    """Synchronize all threads in a block."""
     args = []
     if barrier_id is not None:
         args.append(barrier_id)
@@ -373,8 +367,7 @@ def sync_threads(barrier_id: int = None, arrive_count: int = None):
 
 
 def sync_global():
-    """Synchronize all threads in the entire grid.
-    """
+    """Synchronize all threads in the entire grid."""
     tx, ty, tz = get_thread_bindings()
     ex, ey, ez = get_block_extents()
     print(tx, ty, tz, ex, ey, ez)
@@ -383,16 +376,17 @@ def sync_global():
 
 
 def sync_grid():
-    """Synchronize all threads in a grid.
-    """
+    """Synchronize all threads in a grid."""
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"))
 
 
-def initialize_descriptor(descriptor: Buffer,
-                          start_address: PrimExpr,
-                          layout_type_: int = 0,
-                          leading_byte_offset: int = 0,
-                          stride_byte_offset: int = 0) -> PrimExpr:
+def initialize_descriptor(
+    descriptor: Buffer,
+    start_address: PrimExpr,
+    layout_type_: int = 0,
+    leading_byte_offset: int = 0,
+    stride_byte_offset: int = 0,
+) -> PrimExpr:
     """
     Initialize a memory descriptor with the given parameters.
 
@@ -413,13 +407,19 @@ def initialize_descriptor(descriptor: Buffer,
     if isinstance(descriptor, Buffer) and len(descriptor.shape) != 1 or descriptor.shape[0] != 1:
         raise ValueError("Descriptor must be a 1D buffer of size 1.")
 
-    descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(
-        descriptor, [0])
+    descriptor = (
+        descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(descriptor, [0]))
 
     return evaluate(
-        tir.call_intrin("handle", tir.op.Op.get("tl.initialize_descriptor"), descriptor,
-                        start_address, layout_type_, int(leading_byte_offset),
-                        int(stride_byte_offset)))
+        tir.call_intrin(
+            "handle",
+            tir.op.Op.get("tl.initialize_descriptor"),
+            descriptor,
+            start_address,
+            layout_type_,
+            int(leading_byte_offset),
+            int(stride_byte_offset),
+        ))
 
 
 def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimExpr:
@@ -439,8 +439,8 @@ def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimEx
     if isinstance(descriptor, Buffer) and len(descriptor.shape) != 1 or descriptor.shape[0] != 1:
         raise ValueError("Descriptor must be a 1D buffer of size 1.")
 
-    descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(
-        descriptor, [0])
+    descriptor = (
+        descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(descriptor, [0]))
 
     return evaluate(
         tir.call_intrin("handle", tir.op.Op.get("tl.increase_descriptor_offset"), descriptor,
@@ -448,12 +448,10 @@ def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimEx
 
 
 def loop_break():
-    """Break out of the innermost loop.
-    """
+    """Break out of the innermost loop."""
     return tir.call_intrin("handle", tir.op.Op.get("tl.loop_break"))
 
 
-def cp_async_barrier_noinc(barrier_id: Union[int, PrimExpr, tir.Call]):
-    """Perform a ptx async copy barrier using cp.async.mbarrier.arrive.noinc.
-    """
+def cp_async_barrier_noinc(barrier_id: int | PrimExpr | tir.Call):
+    """Perform a ptx async copy barrier using cp.async.mbarrier.arrive.noinc."""
     return tir.call_intrin("handle", tir.op.Op.get("tl.ptx_cp_async_barrier_noinc"), barrier_id)

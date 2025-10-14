@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
@@ -17,7 +16,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" LLaMA model configuration"""
+"""LLaMA model configuration"""
 
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
@@ -189,7 +188,7 @@ class BitnetConfig(PretrainedConfig):
             raise ValueError(
                 f"`rope_scaling`'s type field must be one of ['linear', 'dynamic'], got {rope_scaling_type}"
             )
-        if rope_scaling_factor is None or not isinstance(rope_scaling_factor,
-                                                         float) or rope_scaling_factor <= 1.0:
+        if (rope_scaling_factor is None or not isinstance(rope_scaling_factor, float) or
+                rope_scaling_factor <= 1.0):
             raise ValueError(
                 f"`rope_scaling`'s factor field must be a float > 1, got {rope_scaling_factor}")

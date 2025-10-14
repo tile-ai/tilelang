@@ -25,9 +25,9 @@ parser.add_argument("--saved_model_path", type=str, default=None)
 args = parser.parse_args()
 
 model_name_or_path = args.model_name_or_path
-saved_model_path = os.path.join(
-    dirpath, "models",
-    f"{model_name_or_path}_bitblas") if args.saved_model_path is None else args.saved_model_path
+saved_model_path = (
+    os.path.join(dirpath, "models", f"{model_name_or_path}_bitblas")
+    if args.saved_model_path is None else args.saved_model_path)
 
 
 def generate_text(model, tokenizer, prompt, max_length=100):
@@ -85,7 +85,7 @@ def main():
 
     # load quant config
     quant_config_path = cached_file(model_name_or_path, "quantize_config.json")
-    with open(quant_config_path, "r") as f:
+    with open(quant_config_path) as f:
         quant_config = json.load(f)
     print("quant config:")
     print(quant_config)
@@ -112,10 +112,10 @@ def main():
         file_path = cached_file(model_name_or_path, file)
         os.system(f"cp {file_path} {saved_model_path}")
     # load quantized model
-    qmodel = BitnetForCausalLM.from_quantized(saved_model_path,).cuda().half()
+    qmodel = (BitnetForCausalLM.from_quantized(saved_model_path,).cuda().half())
     print("quantized model generated text:")
     print(generate_text(qmodel, tokenizer, "Hi, ", max_length=100))
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

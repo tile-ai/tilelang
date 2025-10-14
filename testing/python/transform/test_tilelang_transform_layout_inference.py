@@ -8,9 +8,12 @@ import pytest
 auto_target = tvm.target.Target(determine_target("auto"))
 
 
-@pytest.mark.parametrize("block_M, block_N, block_K, threads, vec_load_b, dtype", [
-    (64, 64, 32, 128, 8, "float16"),
-])
+@pytest.mark.parametrize(
+    "block_M, block_N, block_K, threads, vec_load_b, dtype",
+    [
+        (64, 64, 32, 128, 8, "float16"),
+    ],
+)
 def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
     N = tvm.te.var("n")
     K = tvm.te.var("k")
@@ -27,16 +30,22 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
                     t = thread_bindings
                     for i in T.unroll(0, block_N * block_K // (threads * vec_load_b)):
                         for vec in T.Parallel(vec_load_b):
-                            B_shared[i * (threads * vec_load_b // block_N) + t //
-                                     (block_N // vec_load_b), t % (block_N // vec_load_b) *
-                                     (block_N // vec_load_b) + vec] = T.if_then_else(
-                                         k * block_K + i * (threads * vec_load_b // block_N) + t //
-                                         (block_N // vec_load_b) < K and bx * block_N + t %
-                                         (block_N // vec_load_b) * (block_N // vec_load_b) < N,
-                                         B[k * block_K + i * (threads * vec_load_b // block_N) +
-                                           t // (block_N // vec_load_b), bx * block_N + t %
-                                           (block_N // vec_load_b) * (block_N // vec_load_b) + vec],
-                                         T.float16(0))
+                            B_shared[
+                                i * (threads * vec_load_b // block_N) + t //
+                                (block_N // vec_load_b),
+                                t % (block_N // vec_load_b) * (block_N // vec_load_b) + vec,
+                            ] = T.if_then_else(
+                                k * block_K + i * (threads * vec_load_b // block_N) + t //
+                                (block_N // vec_load_b) < K and bx * block_N + t %
+                                (block_N // vec_load_b) * (block_N // vec_load_b) < N,
+                                B[
+                                    k * block_K + i * (threads * vec_load_b // block_N) + t //
+                                    (block_N // vec_load_b),
+                                    bx * block_N + t % (block_N // vec_load_b) *
+                                    (block_N // vec_load_b) + vec,
+                                ],
+                                T.float16(0),
+                            )
 
     @tvm.script.ir.ir_module
     class After:
@@ -52,30 +61,40 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
                         if (k * block_K + i * (threads * vec_load_b // block_N) + t //
                             (block_N // vec_load_b)) * N % vec_load_b == 0:
                             for vec in T.vectorized(vec_load_b):
-                                B_shared[i * (threads * vec_load_b // block_N) + t //
-                                         (block_N // vec_load_b), t % (block_N // vec_load_b) *
-                                         (block_N // vec_load_b) + vec] = T.if_then_else(
-                                             k * block_K + i *
-                                             (threads * vec_load_b // block_N) + t //
-                                             (block_N // vec_load_b) < K and bx * block_N + t %
-                                             (block_N // vec_load_b) * (block_N // vec_load_b) < N,
-                                             B[k * block_K + i * (threads * vec_load_b // block_N) +
-                                               t // (block_N // vec_load_b),
-                                               bx * block_N + t % (block_N // vec_load_b) *
-                                               (block_N // vec_load_b) + vec], T.float16(0))
+                                B_shared[
+                                    i * (threads * vec_load_b // block_N) + t //
+                                    (block_N // vec_load_b),
+                                    t % (block_N // vec_load_b) * (block_N // vec_load_b) + vec,
+                                ] = T.if_then_else(
+                                    k * block_K + i * (threads * vec_load_b // block_N) + t //
+                                    (block_N // vec_load_b) < K and bx * block_N + t %
+                                    (block_N // vec_load_b) * (block_N // vec_load_b) < N,
+                                    B[
+                                        k * block_K + i * (threads * vec_load_b // block_N) + t //
+                                        (block_N // vec_load_b),
+                                        bx * block_N + t % (block_N // vec_load_b) *
+                                        (block_N // vec_load_b) + vec,
+                                    ],
+                                    T.float16(0),
+                                )
                         else:
                             for vec in T.serial(vec_load_b):
-                                B_shared[i * (threads * vec_load_b // block_N) + t //
-                                         (block_N // vec_load_b), t % (block_N // vec_load_b) *
-                                         (block_N // vec_load_b) + vec] = T.if_then_else(
-                                             k * block_K + i *
-                                             (threads * vec_load_b // block_N) + t //
-                                             (block_N // vec_load_b) < K and bx * block_N + t %
-                                             (block_N // vec_load_b) * (block_N // vec_load_b) < N,
-                                             B[k * block_K + i * (threads * vec_load_b // block_N) +
-                                               t // (block_N // vec_load_b),
-                                               bx * block_N + t % (block_N // vec_load_b) *
-                                               (block_N // vec_load_b) + vec], T.float16(0))
+                                B_shared[
+                                    i * (threads * vec_load_b // block_N) + t //
+                                    (block_N // vec_load_b),
+                                    t % (block_N // vec_load_b) * (block_N // vec_load_b) + vec,
+                                ] = T.if_then_else(
+                                    k * block_K + i * (threads * vec_load_b // block_N) + t //
+                                    (block_N // vec_load_b) < K and bx * block_N + t %
+                                    (block_N // vec_load_b) * (block_N // vec_load_b) < N,
+                                    B[
+                                        k * block_K + i * (threads * vec_load_b // block_N) + t //
+                                        (block_N // vec_load_b),
+                                        bx * block_N + t % (block_N // vec_load_b) *
+                                        (block_N // vec_load_b) + vec,
+                                    ],
+                                    T.float16(0),
+                                )
 
     with tvm.target.Target(auto_target):
         mod = tvm.tir.transform.BindTarget(auto_target)(Before)

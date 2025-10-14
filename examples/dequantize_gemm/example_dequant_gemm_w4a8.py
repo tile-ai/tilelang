@@ -71,8 +71,8 @@ def torch_convert(tensor):
         assert val.dtype == torch.uint8
         val = val.view(torch.int8)
         mask = (1 << 4) - 1
-        i4_shifted = ((val >> (pos * 4)) & mask)
-        i4 = ((i4_shifted << 4) >> 4)
+        i4_shifted = (val >> (pos * 4)) & mask
+        i4 = (i4_shifted << 4) >> 4
 
         return i4.view(torch.int8)
 
@@ -114,7 +114,10 @@ def matmul_int8xint4(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune
                 Ct: T.Tensor((N, M), out_dtype),
         ):
             with T.Kernel(
-                    T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+                    T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (
+                        bx,
+                        by,
+                    ):
                 A_shared = T.alloc_shared(A_shared_shape, in_dtype)
                 B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
                 B_local = T.alloc_fragment(B_shared_shape, storage_dtype)
@@ -143,8 +146,10 @@ def matmul_int8xint4(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune
                     T.copy(B_dequantize_local, B_dequantize_prev_local)
                     T.gemm(B_dequantize_prev_local, A_shared, Ct_local, transpose_B=True)
                 T.copy(Ct_local, Ct_shared)
-                T.copy(Ct_shared, Ct[bx * block_N:(bx + 1) * block_N,
-                                     by * block_M:(by + 1) * block_M])
+                T.copy(
+                    Ct_shared,
+                    Ct[bx * block_N:(bx + 1) * block_N, by * block_M:(by + 1) * block_M],
+                )
 
         return main
 
@@ -167,7 +172,7 @@ def matmul_int8xint4(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune
 
 def main(m=128, n=256, k=256, tune=False):
     total_flops = 2 * m * n * k
-    if (not tune):
+    if not tune:
         kernel = matmul_int8xint4(
             m, n, k, "int8", "int32", "int32", num_bits=4, tune=tune)(
                 block_M=32, block_N=32, block_K=128, num_stages=1, threads=128)

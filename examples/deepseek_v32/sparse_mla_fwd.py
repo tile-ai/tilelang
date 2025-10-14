@@ -25,13 +25,13 @@ def sparse_mla_fwd(
     num_stages=2,
     threads=256,
 ):
-    assert dim == tilelang.math.next_power_of_2(
-        dim), f"haven't check padding correctness yet, dim={dim}"
-    assert tail_dim == tilelang.math.next_power_of_2(
-        tail_dim), f"haven't check padding correctness yet, dim={tail_dim}"
+    assert dim == tilelang.math.next_power_of_2(dim), (
+        f"haven't check padding correctness yet, dim={dim}")
+    assert tail_dim == tilelang.math.next_power_of_2(tail_dim), (
+        f"haven't check padding correctness yet, dim={tail_dim}")
     assert is_causal == True, "non-casual is not supported"
-    assert (topk %
-            block_I == 0), "otherwise will load some index=0 thus causing wrong kv to be loaded"
+    assert topk % block_I == 0, (
+        "otherwise will load some index=0 thus causing wrong kv to be loaded")
     if sm_scale is None:
         sm_scale = (1.0 / (dim + tail_dim))**0.5 * 1.44269504  # log2(e)
     else:
@@ -55,9 +55,9 @@ def sparse_mla_fwd(
     H = head_kv
     padded_H = max(tilelang.math.next_power_of_2(head_kv), 16)
     if padded_H != H:
-        assert (
-            kv_group == 1
-        ), "here we solve the H padding automatically, other wise you should handle Q copy and Output copy with your mask (when kv_group == 1, use g_i * padded_H:(g_i+1) * padded_H would be handled automatically)"
+        assert kv_group == 1, (
+            "here we solve the H padding automatically, other wise you should handle Q copy and Output copy with your mask (when kv_group == 1, use g_i * padded_H:(g_i+1) * padded_H would be handled automatically)"
+        )
     BI = block_I
     NI = tilelang.cdiv(topk, block_I)
     D = dim
@@ -118,7 +118,6 @@ def sparse_mla_fwd(
             T.copy(Q[b_i, s_i, H0:H1, D:], Q_tail_shared)
 
             for i_i in T.Pipelined(NI, num_stages=num_stages):
-
                 for bi_i in T.Parallel(BI):
                     mask[bi_i] = Indices[b_i, s_i, g_i, i_i * BI + bi_i] <= max_kv_i
 
@@ -174,15 +173,17 @@ def sparse_mla_fwd(
     return main
 
 
-def sparse_mla_fwd_interface(q,
-                             kv,
-                             indices,
-                             sm_scale=None,
-                             return_p_sum: bool = False,
-                             d_v=512,
-                             block_I=64,
-                             num_stages=2,
-                             threads=256):
+def sparse_mla_fwd_interface(
+    q,
+    kv,
+    indices,
+    sm_scale=None,
+    return_p_sum: bool = False,
+    d_v=512,
+    block_I=64,
+    num_stages=2,
+    threads=256,
+):
     is_casual = True
     assert return_p_sum == False, "This kernel file is for fwd only"
     assert q.is_contiguous() and kv.is_contiguous() and indices.is_contiguous()
@@ -208,7 +209,8 @@ def sparse_mla_fwd_interface(q,
         is_casual,
         block_I=block_I,
         num_stages=num_stages,
-        threads=threads)
+        threads=threads,
+    )
     out, lse = kernel(q, kv, indices)
     return out, lse
 
@@ -250,19 +252,21 @@ def ref_sparse_mla_fwd_interface(q, kv, indices, sm_scale=None, is_casual=True):
     return o.to(torch.bfloat16)
 
 
-def test_sparse_mla_fwd(B=1,
-                        S=4096,
-                        SKV=8192,
-                        H=128,
-                        HKV=1,
-                        DQK=576,
-                        DV=512,
-                        topk=2048,
-                        dtype=torch.bfloat16,
-                        check_correctness=True,
-                        block_I=64,
-                        num_stages=2,
-                        threads=256):
+def test_sparse_mla_fwd(
+    B=1,
+    S=4096,
+    SKV=8192,
+    H=128,
+    HKV=1,
+    DQK=576,
+    DV=512,
+    topk=2048,
+    dtype=torch.bfloat16,
+    check_correctness=True,
+    block_I=64,
+    num_stages=2,
+    threads=256,
+):
     torch.random.manual_seed(0)
     q = torch.randn((B, S, H, DQK), dtype=dtype, device="cuda").requires_grad_(True)
     kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device="cuda").requires_grad_(True)
@@ -313,4 +317,5 @@ if __name__ == "__main__":
         check_correctness=True,
         block_I=64,
         num_stages=2,
-        threads=256)
+        threads=256,
+    )

@@ -1,4 +1,5 @@
-from typing import Literal, Dict
+from __future__ import annotations
+from typing import Literal
 
 # Implementation asm for fp4 to bf16, using twiddling
 # Reference: https://github.com/triton-lang/triton/blob/main/python/triton_kernels/triton_kernels/tensor_details/layout_details/hopper_value.py#L11-L18
@@ -54,7 +55,7 @@ def get_mxfp_intrin_group(
     source_bit: int = 4,
     storage_dtype: Literal["int32", "int8", "uint8"] = "uint8",
     use_twiddling: bool = False,
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """
     Return metadata for an MXFP decoding intrinsic: function name and C source string.
 
@@ -81,12 +82,13 @@ def get_mxfp_intrin_group(
         KeyError: if the constructed key does not match any available C source implementation.
     """
     assert out_dtype in ["float16", "bfloat16"
-                        ], f"Invalid out_dtype: {out_dtype}. Expected 'float16' or 'bfloat16'."
-    assert source_format in ["int", "uint"
-                            ], f"Invalid source_format: {source_format}. Expected 'int' or 'uint'."
+                        ], (f"Invalid out_dtype: {out_dtype}. Expected 'float16' or 'bfloat16'.")
+    assert source_format in [
+        "int", "uint"
+    ], (f"Invalid source_format: {source_format}. Expected 'int' or 'uint'.")
     assert storage_dtype in [
         "int32", "int8", "uint8"
-    ], f"Invalid storage_dtype: {storage_dtype}. Expected 'int32' or 'int8' or 'uint8'."
+    ], (f"Invalid storage_dtype: {storage_dtype}. Expected 'int32' or 'int8' or 'uint8'.")
 
     dtype_map = {"float16": "f16", "bfloat16": "bf16"}
     key = f"fp{source_bit}_to_{dtype_map[out_dtype]}"

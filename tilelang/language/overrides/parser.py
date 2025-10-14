@@ -1,7 +1,7 @@
 """TVMScript parser overrides tailored for TileLang."""
+from __future__ import annotations
 
 from functools import partial
-from typing import Tuple
 
 from tvm.script.ir_builder import tir as T
 from tvm.script.parser._core import dispatch, doc
@@ -10,7 +10,7 @@ from tvm.tir import BufferLoad, Var
 from tvm.script.parser.tir import parser as tvm_tir_parser
 
 
-def _get_node_span(node: doc.AST) -> Tuple[int, int, int, int]:
+def _get_node_span(node: doc.AST) -> tuple[int, int, int, int]:
     """Return the span (lineno, col, end_lineno, end_col) for a doc node."""
     return (node.lineno, node.col_offset, node.end_lineno, node.end_col_offset)
 

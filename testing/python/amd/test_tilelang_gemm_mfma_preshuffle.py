@@ -23,7 +23,6 @@ def tl_matmul(
     b_preshuffle=False,
     b_g2l_load=False,
 ):
-
     micro_size_x = micro_size_y = micro_size_k = 16
 
     if in_dtype in {"float8_e4m3fnuz", "int8"}:
@@ -53,18 +52,18 @@ def tl_matmul(
 
     A_shape = (K, M) if a_transposed else (M, K)
     if b_preshuffle:
-        B_shape = (N // micro_size_y, K // pack_size_k, micro_size_y,
-                   pack_size_k) if b_transposed else (K // pack_size_k, N // micro_size_y,
-                                                      pack_size_k, micro_size_y)
+        B_shape = ((N // micro_size_y, K // pack_size_k, micro_size_y,
+                    pack_size_k) if b_transposed else
+                   (K // pack_size_k, N // micro_size_y, pack_size_k, micro_size_y))
     else:
         B_shape = (N, K) if b_transposed else (K, N)
 
     A_shared_shape = (block_K, block_M) if a_transposed else (block_M, block_K)
     if b_preshuffle:
-        B_shared_shape = (block_N // micro_size_y, block_K // pack_size_k, micro_size_y,
-                          pack_size_k) if b_transposed else (block_K // pack_size_k,
-                                                             block_N // micro_size_y, pack_size_k,
-                                                             micro_size_y)
+        B_shared_shape = ((block_N // micro_size_y, block_K // pack_size_k, micro_size_y,
+                           pack_size_k) if b_transposed else
+                          (block_K // pack_size_k, block_N // micro_size_y, pack_size_k,
+                           micro_size_y))
     else:
         B_shared_shape = (block_N, block_K) if b_transposed else (block_K, block_N)
 
@@ -99,7 +98,6 @@ def tl_matmul(
             C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
             A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
@@ -119,7 +117,6 @@ def tl_matmul(
             T.clear(C_local)
 
             for ko in T.Pipelined(num_ko, num_stages=0):
-
                 # Load A into shared memory
                 if a_transposed:
                     T.copy(A[ko * block_K, by * block_M], A_shared)
@@ -129,20 +126,33 @@ def tl_matmul(
                 # Load B into shared memory
                 if b_g2l_load is False:
                     if b_transposed:
-                        for j, k, jj, kk in T.Parallel(block_N // micro_size_y,
-                                                       block_K // pack_size_k, micro_size_y,
-                                                       pack_size_k):
-                            B_shared[j, k, jj, kk] = B[bx * block_N // micro_size_y + j,
-                                                       ko * block_K // pack_size_k + k, jj, kk]
+                        for j, k, jj, kk in T.Parallel(
+                                block_N // micro_size_y,
+                                block_K // pack_size_k,
+                                micro_size_y,
+                                pack_size_k,
+                        ):
+                            B_shared[j, k, jj, kk] = B[
+                                bx * block_N // micro_size_y + j,
+                                ko * block_K // pack_size_k + k,
+                                jj,
+                                kk,
+                            ]
                     else:
-                        for k, j, kk, jj in T.Parallel(block_K // pack_size_k,
-                                                       block_N // micro_size_y, pack_size_k,
-                                                       micro_size_y):
-                            B_shared[k, j, kk, jj] = B[ko * block_K // pack_size_k + k,
-                                                       bx * block_N // micro_size_y + j, kk, jj]
+                        for k, j, kk, jj in T.Parallel(
+                                block_K // pack_size_k,
+                                block_N // micro_size_y,
+                                pack_size_k,
+                                micro_size_y,
+                        ):
+                            B_shared[k, j, kk, jj] = B[
+                                ko * block_K // pack_size_k + k,
+                                bx * block_N // micro_size_y + j,
+                                kk,
+                                jj,
+                            ]
 
                 for ki in T.serial(0, num_ki):
-
                     # Load A S2L
                     mfma_emitter.ldmatrix_a(
                         A_local,
@@ -194,19 +204,32 @@ def shuffle_weight(
     return x.contiguous()
 
 
-def assert_tl_matmul_correctness(M,
-                                 N,
-                                 K,
-                                 in_dtype,
-                                 out_dtype,
-                                 accum_dtype="float32",
-                                 a_transposed=False,
-                                 b_transposed=True,
-                                 k_pack=1,
-                                 b_preshuffle=False,
-                                 b_g2l_load=False):
-    matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype, a_transposed, b_transposed,
-                       k_pack, b_preshuffle, b_g2l_load)
+def assert_tl_matmul_correctness(
+    M,
+    N,
+    K,
+    in_dtype,
+    out_dtype,
+    accum_dtype="float32",
+    a_transposed=False,
+    b_transposed=True,
+    k_pack=1,
+    b_preshuffle=False,
+    b_g2l_load=False,
+):
+    matmul = tl_matmul(
+        M,
+        N,
+        K,
+        in_dtype,
+        out_dtype,
+        accum_dtype,
+        a_transposed,
+        b_transposed,
+        k_pack,
+        b_preshuffle,
+        b_g2l_load,
+    )
     print(matmul)
     kernel = tilelang.compile(matmul)
     src_code = kernel.get_kernel_source()
@@ -281,7 +304,8 @@ def test_assert_tl_matmul():
         b_transposed=False,
         accum_dtype="int32",
         k_pack=2,
-        b_preshuffle=True)
+        b_preshuffle=True,
+    )
 
 
 if __name__ == "__main__":

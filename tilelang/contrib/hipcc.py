@@ -54,14 +54,14 @@ def compile_hip(code,
     if target_format not in ["hsaco"]:
         raise ValueError("target_format must be hsaco")
     temp_code = temp.relpath("my_kernel.cc")
-    temp_target = temp.relpath("my_kernel.%s" % target_format)
+    temp_target = temp.relpath(f"my_kernel.{target_format}")
 
     with open(temp_code, "w") as out_file:
         out_file.write(code)
 
     file_target = path_target if path_target else temp_target
     cmd = ["hipcc"]
-    cmd += ["-O3", '-c']
+    cmd += ["-O3", "-c"]
     if isinstance(arch, str):
         cmd += [f"--offload-arch={arch}"]
     if target_format == "hsaco":

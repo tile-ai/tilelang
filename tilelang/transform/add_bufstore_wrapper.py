@@ -1,7 +1,7 @@
-from tvm.tir import (BufferStore, For, AttrStmt, ForKind, Var, PrimFunc, BufferLoad, Buffer, IntImm)
+from __future__ import annotations
+from tvm.tir import BufferStore, For, AttrStmt, ForKind, Var, PrimFunc, BufferLoad, Buffer, IntImm
 from tvm.tir.stmt_functor import ir_transform, post_order_visit
 from tvm.tir.transform import prim_func_pass
-from typing import Tuple, List, Dict
 
 
 def AddWrapperForSingleBufStore():
@@ -42,7 +42,7 @@ def AddWrapperForSingleBufStore():
             post_order_visit(operation, visit_variable)
             return used_variables
 
-        def collect_buffer_accesses(statement) -> Tuple[List[Buffer], List[Buffer]]:
+        def collect_buffer_accesses(statement) -> tuple[list[Buffer], list[Buffer]]:
             """
             Categorizes buffers accessed in the statement by their scope.
 
@@ -69,7 +69,7 @@ def AddWrapperForSingleBufStore():
                     local_buffers.append(buffer)
             return local_buffers, fragment_buffers
 
-        def collect_buffer_indices(statement) -> Dict[Buffer, List[int]]:
+        def collect_buffer_indices(statement) -> dict[Buffer, list[int]]:
             """
             Maps each buffer to its access indices.
 
@@ -98,7 +98,7 @@ def AddWrapperForSingleBufStore():
             Returns:
                 True if the loop is a tile operation (parallel or has num_stages annotation)
             """
-            return loop.kind == ForKind.PARALLEL or 'num_stages' in loop.annotations
+            return loop.kind == ForKind.PARALLEL or "num_stages" in loop.annotations
 
         def pre_visit(statement):
             """
@@ -106,7 +106,7 @@ def AddWrapperForSingleBufStore():
             """
             nonlocal tile_operation_depth
 
-            if isinstance(statement, AttrStmt) and statement.attr_key == 'thread_extent':
+            if isinstance(statement, AttrStmt) and statement.attr_key == "thread_extent":
                 thread_binding_vars.add(statement.node.var)
             elif isinstance(statement, For) and is_tile_operation_loop(statement):
                 tile_operation_depth += 1

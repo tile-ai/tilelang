@@ -6,9 +6,11 @@ import argparse
 
 
 @tilelang.jit(
-    out_idx=[3, 4], pass_configs={
+    out_idx=[3, 4],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, block_N, groups=1):
     scale = (1.0 / dim_qk)**0.5 * 1.44269504  # log2(e)
     head_kv = heads // groups
@@ -81,9 +83,11 @@ def flashattn_fwd(batch, heads, seq_len, dim_qk, dim_v, is_causal, block_M, bloc
 
 
 @tilelang.jit(
-    out_idx=[2], pass_configs={
+    out_idx=[2],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim_v):
     dtype = "float16"
     accum_dtype = "float"
@@ -120,9 +124,11 @@ def make_dq_layout(dQ):
 
 
 @tilelang.jit(
-    out_idx=[1], pass_configs={
+    out_idx=[1],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def flashattn_bwd_postprocess(batch, heads, seq_len, dim_qk):
     dtype = "float16"
     accum_dtype = "float"
@@ -147,17 +153,19 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim_qk):
 @tilelang.jit(pass_configs={
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
 })
-def flashattn_bwd_atomic_add(batch,
-                             heads,
-                             seq_len,
-                             dim_qk,
-                             dim_v,
-                             is_causal,
-                             block_M,
-                             block_N,
-                             threads=256,
-                             num_stages=2,
-                             groups=1):
+def flashattn_bwd_atomic_add(
+    batch,
+    heads,
+    seq_len,
+    dim_qk,
+    dim_v,
+    is_causal,
+    block_M,
+    block_N,
+    threads=256,
+    num_stages=2,
+    groups=1,
+):
     sm_scale = (1.0 / dim_qk)**0.5
     scale = (1.0 / dim_qk)**0.5 * 1.44269504  # log2(e)
     head_kv = heads // groups
@@ -247,17 +255,19 @@ def flashattn_bwd_atomic_add(batch,
 @tilelang.jit(pass_configs={
     tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
 })
-def flashattn_bwd_split(batch,
-                        heads,
-                        seq_len,
-                        dim_qk,
-                        dim_v,
-                        is_causal,
-                        block_M,
-                        block_N,
-                        threads=256,
-                        num_stages=2,
-                        groups=1):
+def flashattn_bwd_split(
+    batch,
+    heads,
+    seq_len,
+    dim_qk,
+    dim_v,
+    is_causal,
+    block_M,
+    block_N,
+    threads=256,
+    num_stages=2,
+    groups=1,
+):
     sm_scale = (1.0 / dim_qk)**0.5
     scale = (1.0 / dim_qk)**0.5 * 1.44269504  # log2(e)
     head_kv = heads // groups
@@ -369,7 +379,10 @@ class _attention(torch.autograd.Function):
     def backward(ctx, do):
         q, k, v, o, lse = ctx.saved_tensors
         BATCH, N_CTX, H, D_HEAD_QK = q.shape
-        HEAD_KV, D_HEAD_V, = v.shape[-2], v.shape[-1]
+        (
+            HEAD_KV,
+            D_HEAD_V,
+        ) = v.shape[-2], v.shape[-1]
         groups = H // HEAD_KV
 
         def maybe_contiguous(x):
@@ -396,7 +409,8 @@ class _attention(torch.autograd.Function):
                 block_N,
                 threads=256,
                 num_stages=2,
-                groups=groups)
+                groups=groups,
+            )
             shape_q = [BATCH, N_CTX, H, D_HEAD_QK]
             shape_k = [BATCH, N_CTX, HEAD_KV, D_HEAD_QK]
             shape_v = [BATCH, N_CTX, HEAD_KV, D_HEAD_V]
@@ -419,7 +433,8 @@ class _attention(torch.autograd.Function):
                 block_N,
                 threads=256,
                 num_stages=2,
-                groups=groups)
+                groups=groups,
+            )
             shape_q = [BATCH, N_CTX, H, D_HEAD_QK]
             shape_k = [groups, BATCH, N_CTX, HEAD_KV, D_HEAD_QK]  # sum after kernel
             shape_v = [groups, BATCH, N_CTX, HEAD_KV, D_HEAD_V]  # sum after kernel
@@ -441,34 +456,36 @@ def ref_program(Q, K, V, is_causal, groups=1):
     # K: [B, T, HK, D_QK]
     # V: [B, T, HV, D_V]
     # HQ = HKV * groups
-    assert Q.size(2) == K.size(
-        2) * groups, f"Q.size(2): {Q.size(2)}, K.size(2): {K.size(2)}, groups: {groups}"
-    assert Q.size(2) == V.size(
-        2) * groups, f"Q.size(2): {Q.size(2)}, V.size(2): {V.size(2)}, groups: {groups}"
+    assert Q.size(2) == K.size(2) * groups, (
+        f"Q.size(2): {Q.size(2)}, K.size(2): {K.size(2)}, groups: {groups}")
+    assert Q.size(2) == V.size(2) * groups, (
+        f"Q.size(2): {Q.size(2)}, V.size(2): {V.size(2)}, groups: {groups}")
 
     dim_qk = Q.size(-1)
     K = K.repeat_interleave(groups, dim=2)
     V = V.repeat_interleave(groups, dim=2)
-    scores = torch.einsum('bqhd,bkhd->bhqk', Q, K)
+    scores = torch.einsum("bqhd,bkhd->bhqk", Q, K)
     scores = scores / torch.sqrt(torch.tensor(dim_qk, dtype=scores.dtype))
     if is_causal:
         seq_len = Q.size(1)
         mask = torch.tril(torch.ones(seq_len, seq_len, device=scores.device))
         mask = mask.unsqueeze(0).unsqueeze(0)
-        scores = scores.masked_fill(mask == 0, float('-inf'))
+        scores = scores.masked_fill(mask == 0, float("-inf"))
     attention_weights = F.softmax(scores, dim=-1)
-    output = torch.einsum('bhqk,bkhd->bqhd', attention_weights, V)
+    output = torch.einsum("bhqk,bkhd->bqhd", attention_weights, V)
     return output
 
 
-def main(BATCH: int = 1,
-         H: int = 32,
-         N_CTX: int = 256,
-         D_HEAD_QK: int = 192,
-         D_HEAD_V: int = 128,
-         groups: int = 16,
-         causal: bool = False,
-         use_atomic: bool = True):
+def main(
+    BATCH: int = 1,
+    H: int = 32,
+    N_CTX: int = 256,
+    D_HEAD_QK: int = 192,
+    D_HEAD_V: int = 128,
+    groups: int = 16,
+    causal: bool = False,
+    use_atomic: bool = True,
+):
     flops_per_qk = 2.0 * BATCH * H * N_CTX * N_CTX * D_HEAD_QK
     flops_per_v = 2.0 * BATCH * H * N_CTX * N_CTX * D_HEAD_V
     total_flops = 3 * flops_per_qk + 2 * flops_per_v
@@ -504,7 +521,7 @@ def main(BATCH: int = 1,
     torch.testing.assert_close(dV, dV_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dK, dK_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dQ, dQ_ref, rtol=1e-2, atol=1e-2)
-    print('All checks passed.✅')
+    print("All checks passed.✅")
 
     def run():
         O_ref.backward(dO, retain_graph=True)
@@ -515,26 +532,26 @@ def main(BATCH: int = 1,
     from tilelang.profiler import do_bench
 
     latency = do_bench(run, warmup=500)
-    print("torch: {:.2f} ms".format(latency))
-    print("torch: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"torch: {latency:.2f} ms")
+    print(f"torch: {total_flops / latency * 1e-9:.2f} TFlops")
     latency = do_bench(run1, warmup=500)
-    print("tilelang: {:.2f} ms".format(latency))
-    print("tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"tilelang: {latency:.2f} ms")
+    print(f"tilelang: {total_flops / latency * 1e-9:.2f} TFlops")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=8, help='Batch size')
-    parser.add_argument('--h', type=int, default=32, help='Number of heads')
-    parser.add_argument('--n_ctx', type=int, default=1024, help='Context size')
-    parser.add_argument('--d_head_qk', type=int, default=192, help='Head dimension for Q/K')
-    parser.add_argument('--d_head_v', type=int, default=128, help='Head dimension for V')
-    parser.add_argument('--causal', action='store_true', help='Causal flag')
-    parser.add_argument('--groups', type=int, default=16, help='groups')
+    parser.add_argument("--batch", type=int, default=8, help="Batch size")
+    parser.add_argument("--h", type=int, default=32, help="Number of heads")
+    parser.add_argument("--n_ctx", type=int, default=1024, help="Context size")
+    parser.add_argument("--d_head_qk", type=int, default=192, help="Head dimension for Q/K")
+    parser.add_argument("--d_head_v", type=int, default=128, help="Head dimension for V")
+    parser.add_argument("--causal", action="store_true", help="Causal flag")
+    parser.add_argument("--groups", type=int, default=16, help="groups")
     parser.add_argument(
-        '--use_atomic', action='store_true', default=False, help='Use atomic add for dK/dV')
+        "--use_atomic", action="store_true", default=False, help="Use atomic add for dK/dV")
     parser.add_argument(
-        '--use_split', action='store_true', default=False, help='Use split for dK/dV')
+        "--use_split", action="store_true", default=False, help="Use split for dK/dV")
     args = parser.parse_args()
 
     # Handle backward compatibility and logic
@@ -546,5 +563,13 @@ if __name__ == "__main__":
         # Default: use atomic
         use_atomic = True
 
-    main(args.batch, args.h, args.n_ctx, args.d_head_qk, args.d_head_v, args.groups, args.causal,
-         use_atomic)
+    main(
+        args.batch,
+        args.h,
+        args.n_ctx,
+        args.d_head_qk,
+        args.d_head_v,
+        args.groups,
+        args.causal,
+        use_atomic,
+    )

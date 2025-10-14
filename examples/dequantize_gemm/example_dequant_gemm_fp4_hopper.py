@@ -21,9 +21,11 @@ def _tir_u8_to_f4_to_f16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr, dtype:
     e_f16 = e_f4 + tir.const(14, "uint16")
     m_f4 = f4 & tir.const(1, "uint16")
     m_f16 = m_f4
-    val_f16 = tir.reinterpret("float16",
-                              ((e_f16 | (s << tir.const(5, "uint16"))) << tir.const(10, "uint16")
-                               | m_f16 << tir.const(9, "uint16")).astype("uint16"))
+    val_f16 = tir.reinterpret(
+        "float16",
+        ((e_f16 | (s << tir.const(5, "uint16"))) << tir.const(10, "uint16")
+         | m_f16 << tir.const(9, "uint16")).astype("uint16"),
+    )
     # return tir.Select(e_f4 == tir.const(0, "uint32"), tir.const(0, "float16"), val_f16)
     return val_f16
 
@@ -32,7 +34,7 @@ def torch_convert(tensor):
 
     def print_bit(name, val):
         val_cpu = val.cpu().item()
-        binary_repr = f'{val_cpu:032b}'
+        binary_repr = f"{val_cpu:032b}"
         print(name, binary_repr)
 
     def _convert(val, pos):
@@ -119,12 +121,12 @@ def get_configs():
     _configs = list(itertools.product(block_M, block_N, block_K, num_stages, threads, splits))
 
     configs = [{
-        'block_M': c[0],
-        'block_N': c[1],
-        'block_K': c[2],
-        'num_stages': c[3],
-        'threads': c[4],
-        'split': c[5]
+        "block_M": c[0],
+        "block_N": c[1],
+        "block_K": c[2],
+        "num_stages": c[3],
+        "threads": c[4],
+        "split": c[5],
     } for c in _configs]
     return configs
 
@@ -149,13 +151,20 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
                 B: T.Tensor(B_shape, storage_dtype),
                 Ct: T.Tensor((N, M), out_dtype),
         ):
-            SplitC = T.alloc_buffer([
-                split, (N + block_N - 1) // block_N * block_N,
-                (M + block_M - 1) // block_M * block_M
-            ], out_dtype)
+            SplitC = T.alloc_buffer(
+                [
+                    split,
+                    (N + block_N - 1) // block_N * block_N,
+                    (M + block_M - 1) // block_M * block_M,
+                ],
+                out_dtype,
+            )
             with T.Kernel(
-                    T.ceildiv(N, block_N), T.ceildiv(M, block_M), split,
-                    threads=threads) as (bx, by, bz):
+                    T.ceildiv(N, block_N), T.ceildiv(M, block_M), split, threads=threads) as (
+                        bx,
+                        by,
+                        bz,
+                    ):
                 A_shared = T.alloc_shared(A_shared_shape, in_dtype)
                 B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
                 B_local = T.alloc_fragment(B_shared_shape, storage_dtype)
@@ -183,8 +192,10 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
                         )
                     T.copy(B_dequantize_local, B_dequantize_prev_local)
                     T.gemm(B_dequantize_prev_local, A_shared, Ct_local, transpose_B=True)
-                T.copy(Ct_local, SplitC[bz, bx * block_N:(bx + 1) * block_N,
-                                        by * block_M:(by + 1) * block_M])
+                T.copy(
+                    Ct_local,
+                    SplitC[bz, bx * block_N:(bx + 1) * block_N, by * block_M:(by + 1) * block_M],
+                )
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M)) as (bx, by):
                 acc = T.alloc_fragment((block_N, block_M), out_dtype)
                 T.clear(acc)
@@ -200,7 +211,10 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
                 Ct: T.Tensor((N, M), out_dtype),
         ):
             with T.Kernel(
-                    T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
+                    T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (
+                        bx,
+                        by,
+                    ):
                 A_shared = T.alloc_shared(A_shared_shape, in_dtype)
                 B_shared = T.alloc_shared(B_shared_shape, storage_dtype)
                 B_local = T.alloc_fragment(B_shared_shape, storage_dtype)
@@ -229,8 +243,10 @@ def matmul(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits=4, tune=False):
                     T.copy(B_dequantize_local, B_dequantize_prev_local)
                     T.gemm(B_dequantize_prev_local, A_shared, Ct_local, transpose_B=True)
                 T.copy(Ct_local, Ct_shared)
-                T.copy(Ct_shared, Ct[bx * block_N:(bx + 1) * block_N,
-                                     by * block_M:(by + 1) * block_M])
+                T.copy(
+                    Ct_shared,
+                    Ct[bx * block_N:(bx + 1) * block_N, by * block_M:(by + 1) * block_M],
+                )
 
         if split == 1:
             return main
@@ -269,7 +285,7 @@ def ref_program(A, qB):
 def main(m=256, n=256, k=256, tune=False):
     total_flops = 2 * m * n * k
 
-    if (not tune):
+    if not tune:
         kernel = matmul(
             m, n, k, "float16", "float16", "float32", num_bits=4, tune=tune)(
                 block_M=128, block_N=128, block_K=128, num_stages=2, threads=256, split=1)
@@ -277,11 +293,11 @@ def main(m=256, n=256, k=256, tune=False):
         profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
         print("All checks pass.")
         latency = profiler.do_bench(ref_program, warmup=500)
-        print("Ref: {:.2f} ms".format(latency))
-        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Ref: {latency:.2f} ms")
+        print(f"Ref: {total_flops / latency * 1e-9:.2f} TFlops")
         latency = profiler.do_bench(warmup=500)
-        print("Tile-lang: {:.2f} ms".format(latency))
-        print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Tile-lang: {latency:.2f} ms")
+        print(f"Tile-lang: {total_flops / latency * 1e-9:.2f} TFlops")
     else:
         best_result = matmul(m, n, k, "float16", "float16", "float32", num_bits=4, tune=tune)
         best_latency = best_result.latency
@@ -293,10 +309,10 @@ def main(m=256, n=256, k=256, tune=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--m', type=int, default=256, help='M')
-    parser.add_argument('--n', type=int, default=256, help='N')
-    parser.add_argument('--k', type=int, default=256, help='K')
-    parser.add_argument('--tune', action='store_true', help='tune configs')
+    parser.add_argument("--m", type=int, default=256, help="M")
+    parser.add_argument("--n", type=int, default=256, help="N")
+    parser.add_argument("--k", type=int, default=256, help="K")
+    parser.add_argument("--tune", action="store_true", help="tune configs")
     args = parser.parse_args()
     M, N, K = args.m, args.n, args.k
     main(M, N, K, args.tune)

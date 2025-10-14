@@ -43,18 +43,19 @@ def matmul_non_persistent(M,
 
 
 @tilelang.jit(out_idx=[-1])
-def matmul_persistent(M,
-                      N,
-                      K,
-                      block_M,
-                      block_N,
-                      block_K,
-                      threads,
-                      num_stages,
-                      dtype="float16",
-                      accum_dtype="float",
-                      use_persistent_primitive=True):
-
+def matmul_persistent(
+    M,
+    N,
+    K,
+    block_M,
+    block_N,
+    block_K,
+    threads,
+    num_stages,
+    dtype="float16",
+    accum_dtype="float",
+    use_persistent_primitive=True,
+):
     sm_num = driver.get_num_sms()
     m_blocks = T.ceildiv(M, block_M)
     n_blocks = T.ceildiv(N, block_N)
@@ -151,9 +152,9 @@ def main(M=4096, N=4096, K=4096):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--M', type=int, default=8192, help='M dimension')
-    parser.add_argument('--N', type=int, default=8192, help='N dimension')
-    parser.add_argument('--K', type=int, default=8192, help='K dimension')
+    parser.add_argument("--M", type=int, default=8192, help="M dimension")
+    parser.add_argument("--N", type=int, default=8192, help="N dimension")
+    parser.add_argument("--K", type=int, default=8192, help="K dimension")
     args = parser.parse_args()
     M, N, K = args.M, args.N, args.K
     main(M, N, K)

@@ -73,6 +73,7 @@ def run_reduce_sum_clear(M, N, dtype="float32"):
         return A.sum(dim=1) + 1
 
     import torch
+
     dummp_A = torch.randn((M, N), dtype=getattr(torch, dtype)).cuda()
     ref_out = ref_program(dummp_A)
     tl_out = jit_kernel(dummp_A)

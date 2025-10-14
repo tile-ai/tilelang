@@ -1,8 +1,9 @@
 """Profiler and benchmarking utilities for PyTorch functions."""
+from __future__ import annotations
 
 import os
 import sys
-from typing import Callable, List, Literal, Optional, Union
+from typing import Callable, Literal
 
 import torch
 
@@ -15,8 +16,8 @@ class suppress_stdout_stderr:
 
     def __enter__(self):
         # Open null device files
-        self.outnull_file = open(os.devnull, 'w')
-        self.errnull_file = open(os.devnull, 'w')
+        self.outnull_file = open(os.devnull, "w")
+        self.errnull_file = open(os.devnull, "w")
 
         # Save original file descriptors
         self.old_stdout_fileno_undup = sys.stdout.fileno()
@@ -55,7 +56,7 @@ class suppress_stdout_stderr:
 
 
 IS_CUDA = torch.cuda.is_available()
-device = 'cuda:0' if IS_CUDA else 'mps:0'
+device = "cuda:0" if IS_CUDA else "mps:0"
 Event = torch.cuda.Event if IS_CUDA else torch.mps.Event
 
 
@@ -65,11 +66,11 @@ def do_bench(
     rep: float = 100,
     _n_warmup: int = 0,
     _n_repeat: int = 0,
-    quantiles: Optional[List[float]] = None,
+    quantiles: list[float] | None = None,
     fast_flush: bool = True,
     backend: Literal["event", "cupti"] = "event",
     return_mode: Literal["min", "max", "mean", "median"] = "mean",
-) -> Union[float, List[float]]:
+) -> float | list[float]:
     """Benchmark the runtime of a PyTorch function with L2 cache management.
 
     This function provides accurate GPU kernel timing by:
@@ -92,8 +93,7 @@ def do_bench(
     Returns:
         Runtime in milliseconds (float) or list of quantile values if quantiles specified
     """
-    assert return_mode in ["min", "max", "mean", "median"], \
-        f"Invalid return_mode: {return_mode}"
+    assert return_mode in ["min", "max", "mean", "median"], f"Invalid return_mode: {return_mode}"
 
     # Initial function call and synchronization
     fn()
@@ -138,9 +138,9 @@ def _bench_with_cuda_events(
     fn: Callable,
     cache: torch.Tensor,
     n_repeat: int,
-    quantiles: Optional[List[float]],
+    quantiles: list[float] | None,
     return_mode: str,
-) -> Union[float, List[float]]:
+) -> float | list[float]:
     """Benchmark using CUDA events for timing."""
     # Create timing events
     start_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_repeat)]

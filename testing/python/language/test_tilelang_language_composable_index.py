@@ -35,7 +35,8 @@ def run_tilelang_composable_copy(M=1024, N=1024, block_M=128, block_N=128, dtype
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     a = torch.randn(M, N, device="cuda", dtype=getattr(torch, dtype))
     b = kernel(a)
     torch.testing.assert_close(b.flatten(), a.flatten(), rtol=1e-2, atol=1e-2)

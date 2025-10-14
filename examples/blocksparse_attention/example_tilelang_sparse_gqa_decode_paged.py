@@ -21,11 +21,22 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
     kv_group_num = heads // heads_kv
 
     @tilelang.jit(
-        out_idx=[-1], pass_configs={
+        out_idx=[-1],
+        pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-        })
-    def kernel_func(block_N, block_H, page_block_size, num_split, num_stages, threads, num_pages,
-                    max_num_blocks_per_seq, max_selected_blocks):
+        },
+    )
+    def kernel_func(
+        block_N,
+        block_H,
+        page_block_size,
+        num_split,
+        num_stages,
+        threads,
+        num_pages,
+        max_num_blocks_per_seq,
+        max_selected_blocks,
+    ):
         shape_q = [batch, heads, dim]
         shape_k = [num_pages, page_block_size, heads_kv, dim]
         shape_v = [num_pages, page_block_size, heads_kv, dim_v]
@@ -49,7 +60,11 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
                 Output_partial: T.Tensor(part_shape, accum_dtype),
         ):
             with T.Kernel(
-                    batch, heads // valid_block_H, num_split, threads=threads) as (bx, by, bz):
+                    batch, heads // valid_block_H, num_split, threads=threads) as (
+                        bx,
+                        by,
+                        bz,
+                    ):
                 Q_shared = T.alloc_shared([block_H, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim_v], dtype)
@@ -77,7 +92,7 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
                 num_blocks = max_selected_blocks
                 blocks_per_split = T.floordiv(num_blocks, num_split)
                 remaining_blocks = T.floormod(num_blocks, num_split)
-                loop_range = (blocks_per_split + T.if_then_else(sid < remaining_blocks, 1, 0))
+                loop_range = blocks_per_split + T.if_then_else(sid < remaining_blocks, 1, 0)
                 start = blocks_per_split * sid + T.min(sid, remaining_blocks)
                 has_valid_block = False
                 for k in T.Pipelined(loop_range, num_stages=num_stages):
@@ -88,27 +103,40 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
                         block_tile_idx = T.floormod(logical_block_idx, block_ratio)
                         physical_block_idx = block_table[bid, block_table_idx]
                         T.copy(
-                            K[physical_block_idx,
-                              block_tile_idx * block_N:(block_tile_idx + 1) * block_N,
-                              cur_kv_head, :], K_shared)
+                            K[
+                                physical_block_idx,
+                                block_tile_idx * block_N:(block_tile_idx + 1) * block_N,
+                                cur_kv_head,
+                                :,
+                            ],
+                            K_shared,
+                        )
                         T.clear(acc_s)
                         T.gemm(
                             Q_shared,
                             K_shared,
                             acc_s,
                             transpose_B=True,
-                            policy=T.GemmWarpPolicy.FullRow)
-                        if k == 0:  # assume block_indices is sorted in reverse order, otherwise, remove this if condition
+                            policy=T.GemmWarpPolicy.FullRow,
+                        )
+                        if (
+                                k == 0
+                        ):  # assume block_indices is sorted in reverse order, otherwise, remove this if condition
                             for i, j in T.Parallel(block_H, block_N):
                                 acc_s[i, j] = T.if_then_else(
                                     logical_block_idx * block_N + j >= cache_seqlens[bid],
-                                    -T.infinity(accum_dtype), acc_s[i, j])
+                                    -T.infinity(accum_dtype),
+                                    acc_s[i, j],
+                                )
                         T.copy(scores_max, scores_max_prev)
                         T.fill(scores_max, -T.infinity(accum_dtype))
                         T.reduce_max(acc_s, scores_max, dim=1, clear=False)
                         for i in T.Parallel(block_H):
-                            scores_max[i] = T.if_then_else(scores_max[i] > scores_max_prev[i],
-                                                           scores_max[i], scores_max_prev[i])
+                            scores_max[i] = T.if_then_else(
+                                scores_max[i] > scores_max_prev[i],
+                                scores_max[i],
+                                scores_max_prev[i],
+                            )
                             scores_scale[i] = T.exp2(scores_max_prev[i] * scale -
                                                      scores_max[i] * scale)
                         for i, j in T.Parallel(block_H, block_N):
@@ -120,9 +148,14 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
                         for i, j in T.Parallel(block_H, dim_v):
                             acc_o[i, j] *= scores_scale[i]
                         T.copy(
-                            V[physical_block_idx,
-                              block_tile_idx * block_N:(block_tile_idx + 1) * block_N,
-                              cur_kv_head, :], V_shared)
+                            V[
+                                physical_block_idx,
+                                block_tile_idx * block_N:(block_tile_idx + 1) * block_N,
+                                cur_kv_head,
+                                :,
+                            ],
+                            V_shared,
+                        )
                         T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
                 if has_valid_block:
                     for i, j in T.Parallel(block_H, dim_v):
@@ -164,7 +197,7 @@ def flashattn(batch, heads, heads_kv, dim, dim_v):
                 lse_max_local[0] = -T.infinity(accum_dtype)
                 for k in T.serial(num_split):
                     lse_local_split[0] = glse[bz, by, k]
-                    if (lse_local_split[0] != 0):
+                    if lse_local_split[0] != 0:
                         max_split[0] = k
                         lse_max_local[0] = T.max(lse_max_local[0], glse[bz, by, k])
 
@@ -258,12 +291,13 @@ class SparseFlashAttn(torch.nn.Module):
             num_m_blocks,
             size_one_kv_head,
             is_causal_or_local=True,
-            max_splits=128)
+            max_splits=128,
+        )
 
-        glse = torch.empty((batch, heads, num_split), dtype=torch.float32, device='cuda')
+        glse = torch.empty((batch, heads, num_split), dtype=torch.float32, device="cuda")
         output_partial = torch.empty((batch, heads, num_split, dim_v),
                                      dtype=torch.float32,
-                                     device='cuda')
+                                     device="cuda")
 
         output = self.kernel(
             query,
@@ -278,14 +312,22 @@ class SparseFlashAttn(torch.nn.Module):
         return output
 
 
-def ref_program_torch_paged(query, key_cache, value_cache, block_indices, cache_seqlens,
-                            block_table, page_block_size, block_size):
+def ref_program_torch_paged(
+    query,
+    key_cache,
+    value_cache,
+    block_indices,
+    cache_seqlens,
+    block_table,
+    page_block_size,
+    block_size,
+):
     """
     Paged version of sparse attention reference implementation.
-    
+
     Args:
         query: [batch, heads, dim]
-        key_cache: [num_pages, page_block_size, heads_kv, dim] 
+        key_cache: [num_pages, page_block_size, heads_kv, dim]
         value_cache: [num_pages, page_block_size, heads_kv, dim]
         block_indices: [batch, heads_kv, max_selected_blocks] - logical block indices
         cache_seqlens: [batch] - actual sequence lengths
@@ -304,9 +346,11 @@ def ref_program_torch_paged(query, key_cache, value_cache, block_indices, cache_
     key_full = torch.zeros((batch, heads_kv, max_cache_seqlen, dim),
                            dtype=key_cache.dtype,
                            device=key_cache.device)
-    value_full = torch.zeros((batch, heads_kv, max_cache_seqlen, dim_v),
-                             dtype=value_cache.dtype,
-                             device=value_cache.device)
+    value_full = torch.zeros(
+        (batch, heads_kv, max_cache_seqlen, dim_v),
+        dtype=value_cache.dtype,
+        device=value_cache.device,
+    )
 
     # Reconstruct full tensors from paged cache using block_table
     for b in range(batch):
@@ -329,13 +373,13 @@ def ref_program_torch_paged(query, key_cache, value_cache, block_indices, cache_
 
     # Reshape query for grouped attention
     query = rearrange(
-        query, 'b (h g) d -> b g h d',
+        query, "b (h g) d -> b g h d",
         g=num_head_groups)  # [batch_size, num_head_groups, heads_kv, dim]
 
     # Compute attention scores
     scores = einsum(
         query, key_full,
-        'b g h d, b h s d -> b g h s')  # [batch_size, num_head_groups, heads_kv, seqlen_kv]
+        "b g h d, b h s d -> b g h s")  # [batch_size, num_head_groups, heads_kv, seqlen_kv]
 
     # Create sparse mask based on block_indices
     sparse_mask = torch.zeros_like(scores)
@@ -351,24 +395,24 @@ def ref_program_torch_paged(query, key_cache, value_cache, block_indices, cache_
                     sparse_mask[b, :, h, start_pos:end_pos] = 1
 
     # Apply sparse mask
-    scores = scores.masked_fill(sparse_mask == 0, float('-inf'))
+    scores = scores.masked_fill(sparse_mask == 0, float("-inf"))
 
     # Apply causal mask based on actual sequence lengths
     range_len = torch.arange(scores.shape[-1], device=scores.device).unsqueeze(0)
     cache_seqlens_expanded = cache_seqlens.unsqueeze(1)
     pad_mask = range_len >= cache_seqlens_expanded
     pad_mask = pad_mask[:, None, None, :]
-    scores = scores.masked_fill(pad_mask, float('-inf'))
+    scores = scores.masked_fill(pad_mask, float("-inf"))
 
     # Compute attention weights
     attention = F.softmax(scores / scale, dim=-1)
 
     # Apply attention to values
     out = einsum(attention, value_full,
-                 'b g h s, b h s d -> b g h d')  # [batch_size, num_head_groups, heads_kv, dim]
+                 "b g h s, b h s d -> b g h d")  # [batch_size, num_head_groups, heads_kv, dim]
 
     # Reshape output back to original format
-    out = rearrange(out, 'b g h d -> b (h g) d')  # [batch_size, heads, dim]
+    out = rearrange(out, "b g h d -> b (h g) d")  # [batch_size, heads, dim]
 
     return out
 
@@ -376,7 +420,8 @@ def ref_program_torch_paged(query, key_cache, value_cache, block_indices, cache_
 def ref_program_fa(query, kcache, vcache, cache_seqlens, block_table):
     # latency reference
     # from flash_attn_interface import flash_attn_with_kvcache # fa3
-    from flash_attn import flash_attn_with_kvcache  #fa2
+    from flash_attn import flash_attn_with_kvcache  # fa2
+
     query = query.unsqueeze(1)
     output = flash_attn_with_kvcache(
         query, kcache, vcache, cache_seqlens=cache_seqlens, block_table=block_table)
@@ -385,8 +430,14 @@ def ref_program_fa(query, kcache, vcache, cache_seqlens, block_table):
 
 
 def main(args):
-
-    batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = args.batch, args.heads, args.heads_kv, args.max_cache_seqlen, args.dim, args.dim_v
+    batch, heads, heads_kv, max_cache_seqlen, dim, dim_v = (
+        args.batch,
+        args.heads,
+        args.heads_kv,
+        args.max_cache_seqlen,
+        args.dim,
+        args.dim_v,
+    )
     sparse_ratio = args.sparse_ratio
     block_N = args.block_N
     page_block_size = args.page_block_size
@@ -398,27 +449,27 @@ def main(args):
     dtype = torch.float16
 
     # Generate random inputs
-    Q = torch.randn((batch, heads, dim), dtype=dtype, device='cuda')
+    Q = torch.randn((batch, heads, dim), dtype=dtype, device="cuda")
     cache_seqlens = torch.randint(
-        max_cache_seqlen // 2, max_cache_seqlen + 1, (batch,), dtype=torch.int32, device='cuda')
+        max_cache_seqlen // 2, max_cache_seqlen + 1, (batch,), dtype=torch.int32, device="cuda")
     print("cache_seqlens: ", cache_seqlens)
 
-    K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device='cuda')
-    V = torch.randn((batch, max_cache_seqlen, heads_kv, dim_v), dtype=dtype, device='cuda')
+    K = torch.randn((batch, max_cache_seqlen, heads_kv, dim), dtype=dtype, device="cuda")
+    V = torch.randn((batch, max_cache_seqlen, heads_kv, dim_v), dtype=dtype, device="cuda")
 
     # Create paged KV cache
-    K_cache = torch.zeros((num_blocks, page_block_size, heads_kv, dim), dtype=dtype, device='cuda')
+    K_cache = torch.zeros((num_blocks, page_block_size, heads_kv, dim), dtype=dtype, device="cuda")
     V_cache = torch.zeros((num_blocks, page_block_size, heads_kv, dim_v),
                           dtype=dtype,
-                          device='cuda')
+                          device="cuda")
 
     # Create block table and block indices for dense case (all blocks selected)
     max_num_blocks_per_seq = int(math.ceil(max_cache_seqlen / page_block_size))
     print("max_num_blocks_per_seq: ", max_num_blocks_per_seq)
-    block_table = torch.zeros((batch, max_num_blocks_per_seq), dtype=torch.int32, device='cuda')
+    block_table = torch.zeros((batch, max_num_blocks_per_seq), dtype=torch.int32, device="cuda")
     block_indices = torch.zeros((batch, heads_kv, max_selected_blocks),
                                 dtype=torch.int32,
-                                device='cuda')
+                                device="cuda")
 
     # Fill block table and block indices and cache
 
@@ -427,6 +478,7 @@ def main(args):
         int(math.ceil(cache_seqlens[seq_idx].item() / page_block_size)) for seq_idx in range(batch))
     available_blocks = list(range(total_blocks_needed))
     import random
+
     random.seed(42)  # For reproducibility
     random.shuffle(available_blocks)
 
@@ -499,10 +551,12 @@ def main(args):
                     remaining_blocks = [b for b in all_blocks if b not in selected_blocks]
                     if remaining_blocks:
                         import random
+
                         random.seed(42)  # For reproducibility
                         additional_blocks = random.sample(
                             remaining_blocks,
-                            min(num_selected - recent_blocks, len(remaining_blocks)))
+                            min(num_selected - recent_blocks, len(remaining_blocks)),
+                        )
                         selected_blocks.extend(additional_blocks)
 
                 # Sort selected blocks in reverse order (most recent first)
@@ -531,9 +585,8 @@ def main(args):
         max_diff = torch.max(torch.abs(output_sparse - output_ref_fa)).item()
         mean_diff = torch.mean(torch.abs(output_sparse - output_ref_fa)).item()
         assert torch.allclose(
-            output_ref_fa, output_ref_torch, atol=1e-2), "Reference outputs do not match!"
+            output_ref_fa, output_ref_torch, atol=1e-2), ("Reference outputs do not match!")
     else:
-
         max_diff = torch.max(torch.abs(output_sparse - output_ref_torch)).item()
         mean_diff = torch.mean(torch.abs(output_sparse - output_ref_torch)).item()
 
@@ -577,16 +630,16 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=8, help='batch size')
-    parser.add_argument('--heads', type=int, default=32, help='heads')
-    parser.add_argument('--heads_kv', type=int, default=8, help='heads_kv')
+    parser.add_argument("--batch", type=int, default=8, help="batch size")
+    parser.add_argument("--heads", type=int, default=32, help="heads")
+    parser.add_argument("--heads_kv", type=int, default=8, help="heads_kv")
     parser.add_argument(
-        '--max_cache_seqlen', type=int, default=8192, help='kvcache sequence length')
-    parser.add_argument('--dim', type=int, default=128, help='dim')
-    parser.add_argument('--dim_v', type=int, default=128, help='dim_v')
-    parser.add_argument('--sparse_ratio', type=float, default=0.0, help='sparse ratio')
-    parser.add_argument('--block_N', type=int, default=64, help='block_N')
-    parser.add_argument('--page_block_size', type=int, default=256, help='block size of pages')
-    parser.add_argument('--num_pages', type=int, default=1024, help='total number of pages')
+        "--max_cache_seqlen", type=int, default=8192, help="kvcache sequence length")
+    parser.add_argument("--dim", type=int, default=128, help="dim")
+    parser.add_argument("--dim_v", type=int, default=128, help="dim_v")
+    parser.add_argument("--sparse_ratio", type=float, default=0.0, help="sparse ratio")
+    parser.add_argument("--block_N", type=int, default=64, help="block_N")
+    parser.add_argument("--page_block_size", type=int, default=256, help="block size of pages")
+    parser.add_argument("--num_pages", type=int, default=1024, help="total number of pages")
     args = parser.parse_args()
     main(args)

@@ -104,7 +104,6 @@ def tl_matmul(
             C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
-
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype, scope=shared_scope)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
@@ -123,7 +122,6 @@ def tl_matmul(
             T.clear(C_local)
 
             for ko in T.Pipelined((K // block_K), num_stages=stage):
-
                 # Load A into shared memory
                 for i, k in T.Parallel(block_M, block_K):
                     A_shared[i, k] = A[by * block_M + i, ko * block_K + k]
@@ -133,7 +131,6 @@ def tl_matmul(
                     B_shared[j, k] = B[bx * block_N + j, ko * block_K + k]
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
-
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(A_local, A_shared, ki)
 

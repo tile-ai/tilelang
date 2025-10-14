@@ -1,4 +1,4 @@
-from typing import Tuple
+from __future__ import annotations
 
 import torch
 import tilelang.testing
@@ -48,7 +48,6 @@ def tl_gemm(
             scales_b: T.Tensor(Scales_B_shape, "float32"),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
-
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype)
@@ -88,7 +87,7 @@ def ceildiv(a, b):
     return (a + b - 1) // b
 
 
-def per_token_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def per_token_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     assert x.dim() == 2 and x.size(1) % 128 == 0
     m, n = x.shape
     x_view = x.view(m, -1, 128)
@@ -97,7 +96,7 @@ def per_token_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         m, n), (x_amax / 448.0).view(m, -1)
 
 
-def per_block_cast_to_fp8(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def per_block_cast_to_fp8(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     assert x.dim() == 2
     m, n = x.shape
     x_padded = torch.zeros(
@@ -131,7 +130,8 @@ def ref_deepgemm_fp8(A_fp8, B_fp8, A_scale, B_scale, out_dtype):
                     B_fp8[j * 128:(j + 1) * 128, k * 128:(k + 1) * 128].T,
                     scale_a=A_scales[i, k].view(128, 1).contiguous(),
                     scale_b=B_scales[j, k].view(1, 128).contiguous(),
-                    out_dtype=torch.bfloat16)
+                    out_dtype=torch.bfloat16,
+                )
                 c_acc += c.to(torch.float32)
             C[i * 128:(i + 1) * 128, j * 128:(j + 1) * 128] = c_acc.to(out_dtype)
     return C

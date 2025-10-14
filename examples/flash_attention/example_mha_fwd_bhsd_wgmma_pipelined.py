@@ -15,9 +15,11 @@ def get_configs():
 
 @autotune(configs=get_configs(), warmup=10, rep=10)
 @tilelang.jit(
-    out_idx=[3], pass_configs={
+    out_idx=[3],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def flashattn(batch,
               heads,
               seq_q,
@@ -147,7 +149,8 @@ def flashattn(batch,
                     num_stages=num_stages,
                     order=[-1, 0, 3, 1, -1, 2],
                     stage=[-1, 0, 0, 1, -1, 1],
-                    group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]]):
+                    group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]],
+            ):
                 MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
                 Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum,
                         logsum)
@@ -163,16 +166,16 @@ def flashattn(batch,
 
 def ref_program(Q, K, V, is_causal):
     dim = Q.size(-1)
-    scores = torch.einsum('bhqd,bhkd->bhqk', Q, K)
+    scores = torch.einsum("bhqd,bhkd->bhqk", Q, K)
     scores = scores / torch.sqrt(torch.tensor(dim, dtype=scores.dtype))
     if is_causal:
         seq_q = Q.size(2)
         seq_kv = K.size(2)
         mask = torch.tril(torch.ones(seq_q, seq_kv, device=scores.device), seq_kv - seq_q)
         mask = mask.unsqueeze(0).unsqueeze(0)
-        scores = scores.masked_fill(mask == 0, float('-inf'))
+        scores = scores.masked_fill(mask == 0, float("-inf"))
     attention_weights = F.softmax(scores, dim=-1)
-    output = torch.einsum('bhqk,bhkd->bhqd', attention_weights, V)
+    output = torch.einsum("bhqk,bhkd->bhqd", attention_weights, V)
     return output
 
 
@@ -190,7 +193,7 @@ def main(
     if is_causal:
         total_flops *= 0.5
 
-    if (not tune):
+    if not tune:
         kernel = flashattn(
             batch,
             heads,
@@ -201,18 +204,19 @@ def main(
             block_M=128,
             block_N=128,
             num_stages=2,
-            threads=256)
+            threads=256,
+        )
         ref_program_processed = partial(ref_program, is_causal=is_causal)
 
         profiler = kernel.get_profiler()
         profiler.assert_allclose(ref_program_processed, rtol=0.01, atol=0.01)
         print("All checks pass.")
         latency = profiler.do_bench(ref_program_processed, warmup=500)
-        print("Ref: {:.2f} ms".format(latency))
-        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Ref: {latency:.2f} ms")
+        print(f"Ref: {total_flops / latency * 1e-9:.2f} TFlops")
         latency = profiler.do_bench(warmup=500)
-        print("Tile-lang: {:.2f} ms".format(latency))
-        print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Tile-lang: {latency:.2f} ms")
+        print(f"Tile-lang: {total_flops / latency * 1e-9:.2f} TFlops")
     else:
         kernel = flashattn(batch, heads, seq_q, seq_kv, dim, is_causal)
         best_latency = kernel.latency
@@ -226,12 +230,12 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=8, help='batch size')
-    parser.add_argument('--heads', type=int, default=32, help='heads')
-    parser.add_argument('--seq_q', type=int, default=4096, help='query sequence length')
-    parser.add_argument('--seq_kv', type=int, default=4096, help='key/value sequence length')
-    parser.add_argument('--dim', type=int, default=128, help='dim')
-    parser.add_argument('--is_causal', action='store_true', help='causal')
-    parser.add_argument('--tune', action='store_true', help='tune configs')
+    parser.add_argument("--batch", type=int, default=8, help="batch size")
+    parser.add_argument("--heads", type=int, default=32, help="heads")
+    parser.add_argument("--seq_q", type=int, default=4096, help="query sequence length")
+    parser.add_argument("--seq_kv", type=int, default=4096, help="key/value sequence length")
+    parser.add_argument("--dim", type=int, default=128, help="dim")
+    parser.add_argument("--is_causal", action="store_true", help="causal")
+    parser.add_argument("--tune", action="store_true", help="tune configs")
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_q, args.seq_kv, args.dim, args.is_causal, args.tune)

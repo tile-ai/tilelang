@@ -1,5 +1,6 @@
+from __future__ import annotations
 from functools import wraps
-from typing import Callable, Optional, Union, List
+from typing import Callable
 
 import torch
 from tvm import tir
@@ -14,19 +15,19 @@ class MetalKernelAdapter(BaseKernelAdapter):
 
     def __init__(
         self,
-        params: List[KernelParam],
-        result_idx: List[int],
+        params: list[KernelParam],
+        result_idx: list[int],
         #  target: Union[str, Target],
-        func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+        func_or_mod: tir.PrimFunc | tvm.IRModule,
         #  host_mod: Optional[tvm.IRModule] = None,
-        device_mod: Optional[tvm.IRModule] = None,
-        kernel_global_source: Optional[str] = None,
+        device_mod: tvm.IRModule | None = None,
+        kernel_global_source: str | None = None,
         verbose: bool = False,
         #  pass_configs: Optional[Dict[str, Any]] = None,
         #  compile_flags: Optional[List[str]] = None
     ):
         self.kernel_global_source = kernel_global_source
-        self.kernel_name = func_or_mod.__name__ + '_kernel'
+        self.kernel_name = func_or_mod.__name__ + "_kernel"
         self.verbose = verbose
 
         self.block_info = [1, 1, 1]
@@ -34,7 +35,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
 
         for var, func in device_mod.functions.items():
             assert var.name_hint == self.kernel_name
-            thread_extent = func.attrs['thread_extent']
+            thread_extent = func.attrs["thread_extent"]
             for tag, extent in thread_extent.items():
                 if "threadIdx" in tag:
                     self.block_info["xyz".index(tag[-1])] = extent
@@ -42,7 +43,7 @@ class MetalKernelAdapter(BaseKernelAdapter):
                     self.grid_info["xyz".index(tag[-1])] = extent
             break
         else:
-            raise AssertionError(f'no kernel with name {func_or_mod.__name__}')
+            raise AssertionError(f"no kernel with name {func_or_mod.__name__}")
 
         # print(self.block_info, self.grid_info)
         super().__init__(func_or_mod, result_idx=result_idx, params=params)
@@ -50,15 +51,12 @@ class MetalKernelAdapter(BaseKernelAdapter):
     _kernel = None
 
     def _convert_torch_func(self) -> Callable:
-
         if self._kernel is None:
-
             _kernel = getattr(torch.mps.compile_shader(self.kernel_global_source), self.kernel_name)
             _threads = [x * y for (x, y) in zip(self.block_info, self.grid_info)]
 
             @wraps(_kernel)
             def launcher(*args: torch.Tensor):
-
                 return _kernel(
                     *args,
                     threads=_threads,

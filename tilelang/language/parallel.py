@@ -1,11 +1,12 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
-from typing import Optional, Dict, Any
+from typing import Any
 from tvm import tir
 from tilelang import _ffi_api
 
 
-def Parallel(*extents: tir.PrimExpr, coalesced_width: Optional[int] = None):
+def Parallel(*extents: tir.PrimExpr, coalesced_width: int | None = None):
     """Tools to construct nested parallel for loop.
        This can be used to create element-wise tensor expression.
 
@@ -22,7 +23,7 @@ def Parallel(*extents: tir.PrimExpr, coalesced_width: Optional[int] = None):
     res : frame.ForFrame
         The ForFrame.
     """
-    annotations: Dict[str, Any] = {}
+    annotations: dict[str, Any] = {}
     if coalesced_width is not None:
         annotations.update({"coalesced_width": coalesced_width})
     return _ffi_api.Parallel(extents, annotations)  # type: ignore[attr-defined] # pylint: disable=no-member

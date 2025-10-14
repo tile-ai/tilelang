@@ -1,6 +1,7 @@
+from __future__ import annotations
 import tilelang
 from tilelang import language as T
-from typing import Optional, Callable, Any
+from typing import Callable, Any
 import torch
 from tilelang import DataType
 from tilelang.quantize import (
@@ -26,7 +27,6 @@ def dequantize_gemv(
     group_size: int = -1,
     with_scaling: bool = False,
 ) -> Callable[..., Any]:
-
     assert n_partition is not None, "n_partition must be provided"
     assert reduce_thread is not None, (
         "reduce_thread must be provided currently, as related bitblas.gpu.gemv.GEMV"
@@ -53,7 +53,7 @@ def dequantize_gemv(
     dp4a_size = 4
     use_dp4a = in_dtype == "int8" and accum_dtype == "int32"
 
-    import_source: Optional[str] = None
+    import_source: str | None = None
     func_name: str = ""
     if fast_decoding is True:
         # Lazy import to decrease the startup time
@@ -121,9 +121,12 @@ def dequantize_gemv(
                 else:
                     for ki in T.serial(micro_size_k):
                         B_dequantize_local[ki] = _tir_packed_int_to_int_convert(
-                            storage_type,
-                            storage_nbit)(num_bits, B_quant_local[ki // num_elems_per_byte],
-                                          ki % num_elems_per_byte, in_dtype)
+                            storage_type, storage_nbit)(
+                                num_bits,
+                                B_quant_local[ki // num_elems_per_byte],
+                                ki % num_elems_per_byte,
+                                in_dtype,
+                            )
 
                 if use_dp4a:
                     for ki in T.serial(micro_size_k // dp4a_size):
@@ -174,9 +177,24 @@ def main() -> None:
     group_size = -1
     with_scaling = False
 
-    kernel = dequantize_gemv(M, N, K, in_dtype, out_dtype, accum_dtype, num_bits, storage_dtype,
-                             source_format, n_partition, reduce_thread, fast_decoding, trans_A,
-                             trans_B, group_size, with_scaling)
+    kernel = dequantize_gemv(
+        M,
+        N,
+        K,
+        in_dtype,
+        out_dtype,
+        accum_dtype,
+        num_bits,
+        storage_dtype,
+        source_format,
+        n_partition,
+        reduce_thread,
+        fast_decoding,
+        trans_A,
+        trans_B,
+        group_size,
+        with_scaling,
+    )
 
     storage_nbit = int("".join(c for c in storage_dtype if c.isdigit()))
     num_elems_per_byte = storage_nbit // num_bits
@@ -187,13 +205,12 @@ def main() -> None:
 
     if fast_decoding:
         from tilelang.quantize.utils import interleave_weight
+
         qB = interleave_weight(qB, num_bits, in_dtype)
     kernel(A, qB, C)
 
     # int4 reference
-    B = (
-        torch.zeros(qB.shape[0], qB.shape[1] * 8 // 4,
-                    dtype=torch.half).to(torch.half).to(A.device))
+    B = torch.zeros(qB.shape[0], qB.shape[1] * 8 // 4, dtype=torch.half).to(torch.half).to(A.device)
     for j in range(B.shape[1]):
         B[:, j] = ((qB[:, j // 2] >> (4 * (j % 2))) & 0xF).to(torch.half)
 

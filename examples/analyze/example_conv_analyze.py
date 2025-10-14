@@ -25,22 +25,24 @@ def check_hopper():
     return False
 
 
-def kernel(N,
-           C,
-           H,
-           W,
-           F,
-           K,
-           S,
-           D,
-           P,
-           block_M,
-           block_N,
-           block_K,
-           num_stages,
-           threads,
-           dtype="float16",
-           accum_dtype="float"):
+def kernel(
+    N,
+    C,
+    H,
+    W,
+    F,
+    K,
+    S,
+    D,
+    P,
+    block_M,
+    block_N,
+    block_K,
+    num_stages,
+    threads,
+    dtype="float16",
+    accum_dtype="float",
+):
     KH, KW = K, K
     OH = (H + 2 * P - D * (K - 1) - 1) // S + 1
     OW = (W + 2 * P - D * (K - 1) - 1) // S + 1
@@ -55,8 +57,10 @@ def kernel(N,
             out: T.Tensor((N, OH, OW, F), dtype),
     ):
         with T.Kernel(
-                T.ceildiv(F, block_N), T.ceildiv(N * OH * OW, block_M),
-                threads=threads) as (bx, by):
+                T.ceildiv(F, block_N), T.ceildiv(N * OH * OW, block_M), threads=threads) as (
+                    bx,
+                    by,
+                ):
             data_shared = T.alloc_shared((block_M, block_K), dtype)
             kernel_shared = T.alloc_shared((block_K, block_N), dtype)
             out_local = T.alloc_fragment((block_M, block_N), accum_dtype)

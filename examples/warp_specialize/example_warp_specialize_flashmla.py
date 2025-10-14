@@ -135,7 +135,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.barrier_arrive(kv_shared_1_pe_is_ready)
 
                 for k in T.serial(loop_range):
-
                     T.barrier_wait(kv_shared_0_l_is_ready, k % 2)
                     T.gemm(
                         Q_shared_l,
@@ -143,7 +142,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         acc_s_0,
                         transpose_B=True,
                         clear_accum=True,
-                        wg_wait=-1)
+                        wg_wait=-1,
+                    )
                     T.barrier_wait(kv_shared_0_r_is_ready, k % 2)
                     T.gemm(Q_shared_r, KV_shared_0_r, acc_s_0, transpose_B=True, wg_wait=-1)
 
@@ -185,8 +185,14 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
                     if k < loop_range - 1:
                         T.copy(
-                            KV[bid, (2 * k + 2) * block_N:(2 * k + 3) * block_N,
-                               cur_kv_head, :h_dim], KV_shared_0_l)
+                            KV[
+                                bid,
+                                (2 * k + 2) * block_N:(2 * k + 3) * block_N,
+                                cur_kv_head,
+                                :h_dim,
+                            ],
+                            KV_shared_0_l,
+                        )
                         T.barrier_arrive(kv_shared_0_l_is_ready)
 
                     # Step 11.
@@ -206,15 +212,21 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     T.gemm(SP1_shared, KV_shared_1_l, acc_o_l)
 
                     if k < loop_range - 1:
-
                         T.copy(
-                            KV[bid, (2 * k + 3) * block_N:(2 * k + 4) * block_N,
-                               cur_kv_head, :h_dim], KV_shared_1_l)
+                            KV[
+                                bid,
+                                (2 * k + 3) * block_N:(2 * k + 4) * block_N,
+                                cur_kv_head,
+                                :h_dim,
+                            ],
+                            KV_shared_1_l,
+                        )
                         T.barrier_arrive(kv_shared_1_l_is_ready)
 
                         T.copy(
                             K_pe[bid, (2 * k + 3) * block_N:(2 * k + 4) * block_N, cur_kv_head, :],
-                            K_pe_shared_1)
+                            K_pe_shared_1,
+                        )
                         T.barrier_arrive(kv_shared_1_pe_is_ready)
 
                 T.copy(logsum_0, logsum)
@@ -239,7 +251,6 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                 T.barrier_arrive(kv_shared_0_pe_is_ready)
 
                 for k in T.serial(loop_range):
-
                     # Step 2.
                     T.barrier_wait(kv_shared_1_l_is_ready, k % 2)
                     T.gemm(
@@ -248,7 +259,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         acc_s_1,
                         transpose_B=True,
                         clear_accum=True,
-                        wg_wait=-1)
+                        wg_wait=-1,
+                    )
 
                     T.barrier_wait(kv_shared_1_r_is_ready, k % 2)
                     T.gemm(Q_shared_r, KV_shared_1_r, acc_s_1, transpose_B=True, wg_wait=-1)
@@ -281,8 +293,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                         acc_o_r[i, j] = acc_o_r[i, j] * (scores_scale_0[i] * scores_scale_1[i])
 
                     for i in T.Parallel(block_H):
-                        logsum_1[i] = logsum_1[i] * scores_scale_1[i] * scores_scale_0[
-                            i] + scores_sum_1[i]
+                        logsum_1[i] = (
+                            logsum_1[i] * scores_scale_1[i] * scores_scale_0[i] + scores_sum_1[i])
 
                     T.barrier_arrive(scale_1_ready_barrier)
 
@@ -294,8 +306,14 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
 
                     if k < loop_range - 1:
                         T.copy(
-                            KV[bid, (2 * k + 3) * block_N:(2 * k + 4) * block_N, cur_kv_head,
-                               h_dim:], KV_shared_1_r)
+                            KV[
+                                bid,
+                                (2 * k + 3) * block_N:(2 * k + 4) * block_N,
+                                cur_kv_head,
+                                h_dim:,
+                            ],
+                            KV_shared_1_r,
+                        )
                         T.barrier_arrive(kv_shared_1_r_is_ready)
 
                     T.barrier_wait(p0_1_1_ready_barrier, k % 2)
@@ -303,15 +321,21 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     T.gemm(SP0_shared, KV_shared_0_r, acc_o_r)
 
                     if k < loop_range - 1:
-
                         T.copy(
-                            KV[bid, (2 * k + 2) * block_N:(2 * k + 3) * block_N, cur_kv_head,
-                               h_dim:], KV_shared_0_r)
+                            KV[
+                                bid,
+                                (2 * k + 2) * block_N:(2 * k + 3) * block_N,
+                                cur_kv_head,
+                                h_dim:,
+                            ],
+                            KV_shared_0_r,
+                        )
                         T.barrier_arrive(kv_shared_0_r_is_ready)
 
                         T.copy(
                             K_pe[bid, (2 * k + 2) * block_N:(2 * k + 3) * block_N, cur_kv_head, :],
-                            K_pe_shared_0)
+                            K_pe_shared_0,
+                        )
                         T.barrier_arrive(kv_shared_0_pe_is_ready)
 
                 T.barrier_wait(lse_0_ready_barrier, 0)
@@ -356,29 +380,29 @@ def ref_program(q, q_pe, kv, k_pe, glse, Output_partial):
     num_head_groups = q.shape[1] // kv.shape[2]
     scale = (dim + pe_dim)**0.5
     q = rearrange(
-        q, 'b (h g) d -> b g h d', g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
+        q, "b (h g) d -> b g h d", g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
 
     q_pe = rearrange(
-        q_pe, 'b (h g) d -> b g h d',
+        q_pe, "b (h g) d -> b g h d",
         g=num_head_groups)  # [batch_size, num_head_groups, groups, pe_dim]
 
-    kv = rearrange(kv, 'b n h d -> b h n d')  # [batch_size, groups, seqlen_kv, dim]
+    kv = rearrange(kv, "b n h d -> b h n d")  # [batch_size, groups, seqlen_kv, dim]
 
-    k_pe = rearrange(k_pe, 'b n h d -> b h n d')  # [batch_size, num_head_groups, groups, pe_dim]
+    k_pe = rearrange(k_pe, "b n h d -> b h n d")  # [batch_size, num_head_groups, groups, pe_dim]
 
     query = torch.concat([q, q_pe], dim=-1)
     key = torch.concat([kv, k_pe], dim=-1)
 
     scores = einsum(
         query, key,
-        'b g h d, b h s d -> b g h s')  # [batch_size, num_head_groups, groups, seqlen_kv]
+        "b g h d, b h s d -> b g h s")  # [batch_size, num_head_groups, groups, seqlen_kv]
 
     attention = F.softmax(
         scores / scale, dim=-1)  # [batch_size, num_head_groups, groups, seqlen_kv]
 
     out = einsum(attention, kv,
-                 'b g h s, b h s d -> b g h d')  # [batch_size, num_head_groups, groups, dim]
-    out = rearrange(out, 'b g h d -> b (h g) d')  # [batch_size, heads, dim]
+                 "b g h s, b h s d -> b g h d")  # [batch_size, num_head_groups, groups, dim]
+    out = rearrange(out, "b g h d -> b (h g) d")  # [batch_size, heads, dim]
     return out
 
 
@@ -401,12 +425,19 @@ def main(batch=1, heads=64, kv_heads=1, kv_ctx=1024, dim=512, pe_dim=64):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=1, help='batch size')
-    parser.add_argument('--heads', type=int, default=128, help='q heads number')
-    parser.add_argument('--kv_heads', type=int, default=1, help='kv heads number')
-    parser.add_argument('--kv_ctx', type=int, default=8192, help='kv context length')
-    parser.add_argument('--dim', type=int, default=512, help='head dim')
-    parser.add_argument('--pe_dim', type=int, default=64, help='pe head dim')
+    parser.add_argument("--batch", type=int, default=1, help="batch size")
+    parser.add_argument("--heads", type=int, default=128, help="q heads number")
+    parser.add_argument("--kv_heads", type=int, default=1, help="kv heads number")
+    parser.add_argument("--kv_ctx", type=int, default=8192, help="kv context length")
+    parser.add_argument("--dim", type=int, default=512, help="head dim")
+    parser.add_argument("--pe_dim", type=int, default=64, help="pe head dim")
     args = parser.parse_args()
-    batch, heads, kv_heads, kv_ctx, dim, pe_dim = args.batch, args.heads, args.kv_heads, args.kv_ctx, args.dim, args.pe_dim
+    batch, heads, kv_heads, kv_ctx, dim, pe_dim = (
+        args.batch,
+        args.heads,
+        args.kv_heads,
+        args.kv_ctx,
+        args.dim,
+        args.pe_dim,
+    )
     main(batch, heads, kv_heads, kv_ctx, dim, pe_dim)

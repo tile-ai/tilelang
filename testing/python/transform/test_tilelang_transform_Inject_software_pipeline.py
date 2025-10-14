@@ -25,7 +25,8 @@ def test_trival_pipeline():
                     annotations={
                         "software_pipeline_stage": [0, 1],
                         "software_pipeline_order": [0, 1]
-                    }):
+                    },
+            ):
                 with T.block():
                     T.reads(A[tx, i])
                     T.writes(C[tx, i])

@@ -1,12 +1,10 @@
-# -*- coding: utf-8 -*-
-
 # General information about the project.
 project = "Tile Language <br>"
 author = "Tile Lang Contributors"
-copyright = "2025-2025, %s" % author
+copyright = f"2025-2025, {author}"
 
 # Version information.
-with open("../VERSION", "r") as f:
+with open("../VERSION") as f:
     version = f.read().strip()
 release = version
 
@@ -22,27 +20,27 @@ extensions = [
     "autoapi.extension",
 ]
 
-autoapi_type = 'python'
-autoapi_dirs = ['../tilelang']
+autoapi_type = "python"
+autoapi_dirs = ["../tilelang"]
 
 autoapi_options = [
-    'members',
-    'undoc-members',
-    'show-inheritance',
-    'show-module-summary',
-    'special-members',
+    "members",
+    "undoc-members",
+    "show-inheritance",
+    "show-module-summary",
+    "special-members",
 ]
 autoapi_keep_files = False  # Useful for debugging the generated rst files
 
 autoapi_generate_api_docs = True
 
-autodoc_typehints = 'description'
+autodoc_typehints = "description"
 
 autoapi_ignore = ["*language/ast*", "*version*", "*libinfo*", "*parser*"]
 
 source_suffix = {
-    '.rst': 'restructuredtext',
-    '.md': 'markdown',
+    ".rst": "restructuredtext",
+    ".md": "markdown",
 }
 
 myst_enable_extensions = [

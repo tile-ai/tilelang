@@ -24,6 +24,7 @@ def matmul(
     num_bits=4,
 ):
     from tilelang.quantize import _tir_packed_to_unsigned_convert
+
     num_elems_per_byte = 8 // num_bits
     storage_dtype = "int8"
     storage_nbit = int("".join(c for c in storage_dtype if c.isdigit()))
@@ -149,6 +150,7 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
         TensorCoreIntrinEmitterWithLadderTransform,)
 
     from bitblas.gpu.intrin.lop3 import decode_i4_to_f16
+
     assert in_dtype in [
         "float16",
         "int8",
@@ -192,8 +194,12 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
     pad_factor = 8
 
     A_shape = (M, K)
-    B_shape = (N // micro_size_y, K // micro_size_k, micro_size_y,
-               micro_size_k // num_elems_per_byte)
+    B_shape = (
+        N // micro_size_y,
+        K // micro_size_k,
+        micro_size_y,
+        micro_size_k // num_elems_per_byte,
+    )
     A_shared_shape = (block_M, (block_K + pad_factor) if apply_pad_a else block_K)
     B_shared_shape = (
         block_N // micro_size_y,
@@ -228,7 +234,8 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
         chunk=chunk,
         reduce_k=reduce_k,
         transform_kind_b=transform_b,
-        num_elems_per_byte=num_elems_per_byte)
+        num_elems_per_byte=num_elems_per_byte,
+    )
 
     vec_load_qb = 16
     if block_N * (block_K // reduce_k) // num_elems_per_byte // threads < vec_load_qb:
@@ -243,7 +250,6 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
         with T.Kernel(
                 T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads,
                 prelude=decode_i4_to_f16) as (bx, by):
-
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
             B_shared = T.alloc_shared(B_shared_shape, storage_dtype, scope=shared_scope)
             C_shared = T.alloc_shared(C_shared_shape, out_dtype, scope=shared_scope)
@@ -264,7 +270,6 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
             T.clear(C_local)
 
             for ko in T.Pipelined((K // block_K), num_stages=stage):
-
                 # Load A into shared memory
                 for i, k in T.Parallel(block_M, (block_K // reduce_k)):
                     vk = rk * (block_K // reduce_k) + k
@@ -275,7 +280,9 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
                                   (threads * vec_load_qb)):
                     for v in T.vectorized(0, vec_load_qb):
                         t = thread_binding
-                        idx = i * threads * vec_load_qb * reduce_k + rk * threads * vec_load_qb + t * vec_load_qb + v
+                        idx = (
+                            i * threads * vec_load_qb * reduce_k + rk * threads * vec_load_qb +
+                            t * vec_load_qb + v)
                         vkk = idx % (micro_size_k // num_elems_per_byte)
                         vjj = (idx // (micro_size_k // num_elems_per_byte)) % micro_size_y
                         vk = (idx // (micro_size_k // num_elems_per_byte) // micro_size_y) % (
@@ -283,12 +290,14 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
                         vj = (idx // (micro_size_k // num_elems_per_byte) // micro_size_y //
                               (block_K // micro_size_k)) % (
                                   block_N // micro_size_y)
-                        B_shared[vj, vk, vjj,
-                                 vkk] = B[bx * (block_N // micro_size_y) + vj,
-                                          ko * (block_K // micro_size_k) + vk, vjj, vkk]
+                        B_shared[vj, vk, vjj, vkk] = B[
+                            bx * (block_N // micro_size_y) + vj,
+                            ko * (block_K // micro_size_k) + vk,
+                            vjj,
+                            vkk,
+                        ]
 
                 for ki in T.serial(0, (block_K // (micro_size_k * reduce_k))):
-
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
                         A_local,
@@ -307,9 +316,13 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
 
                     for j in T.serial(warp_cols):
                         local_size_b = mma_emitter.local_size_b
-                        T.call_extern('handle', 'decode_i4u_to_f16',
-                                      T.address_of(B_local[j * local_size_b // num_elems_per_byte]),
-                                      T.address_of(B_dequantize_local[j * local_size_b]), 8)
+                        T.call_extern(
+                            "handle",
+                            "decode_i4u_to_f16",
+                            T.address_of(B_local[j * local_size_b // num_elems_per_byte]),
+                            T.address_of(B_dequantize_local[j * local_size_b]),
+                            8,
+                        )
 
                     mma_emitter.mma(A_local, B_dequantize_local, C_local)
 
@@ -357,6 +370,7 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
     transform_b,
 ):
     import bitblas
+
     matmul = tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
         M, N, K, in_dtype, out_dtype, accum_dtype, transform_b)
 
@@ -407,9 +421,7 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
     # Ensure that the latency is not None
     assert latency is not None
 
-    B = (
-        torch.zeros(qB.shape[0], qB.shape[1] * 8 // 4,
-                    dtype=torch.half).to(torch.half).to(A.device))
+    B = torch.zeros(qB.shape[0], qB.shape[1] * 8 // 4, dtype=torch.half).to(torch.half).to(A.device)
     for i in range(B.shape[0]):
         for j in range(B.shape[1]):
             B[i][j] = ((qB[i][j // 2] >> (4 * (j % 2))) & 0xF).to(torch.half)

@@ -90,7 +90,8 @@ def run_gemm(
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -103,8 +104,8 @@ def run_gemm(
         if in_dtype == "float32":
             # Convert float32 to tfloat32 because tfloat32 mma cannot truncate
             # float32 automatically, -0x1000 meas
-            A = ((A.view(torch.int32) - 0x1000)).view(torch.float32)
-            B = ((B.view(torch.int32) - 0x1000)).view(torch.float32)
+            A = (A.view(torch.int32) - 0x1000).view(torch.float32)
+            B = (B.view(torch.int32) - 0x1000).view(torch.float32)
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         C = C.to(torch.__getattribute__(out_dtype))
         return C
@@ -124,7 +125,8 @@ def test_pipeline_order_stage():
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    })
+    },
+)
 def blocksparse_matmul(M,
                        N,
                        K,
@@ -134,7 +136,6 @@ def blocksparse_matmul(M,
                        num_stages,
                        dtype="float16",
                        accum_dtype="float"):
-
     block_mask_shape = (M // block_M, N // block_N, K // block_K)
 
     import tilelang.language as T
@@ -200,10 +201,9 @@ def run_blocksparse_matmul(num_stages):
                 accu = torch.zeros((block_M, block_N), dtype=torch.float32, device=A.device)
                 for k in range(K // block_K):
                     if BlockMask[i, j, k]:
-                        accu += (
-                            A[i * block_M:(i + 1) * block_M, k * block_K:(k + 1) * block_K].to(
-                                torch.float32) @ B[k * block_K:(k + 1) * block_K,
-                                                   j * block_N:(j + 1) * block_N].to(torch.float32))
+                        accu += A[i * block_M:(i + 1) * block_M, k * block_K:(k + 1) * block_K].to(
+                            torch.float32) @ B[k * block_K:(k + 1) * block_K,
+                                               j * block_N:(j + 1) * block_N].to(torch.float32)
                 ref_c[i * block_M:(i + 1) * block_M,
                       j * block_N:(j + 1) * block_N] = accu.to(torch.float16)
         return ref_c

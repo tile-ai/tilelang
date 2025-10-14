@@ -13,13 +13,12 @@ def chunk_retention_fwd_kernel(
     H,
     DK,
     DV,
-    dtype: str = 'float16',
+    dtype: str = "float16",
     scale: float = None,
 ) -> torch.Tensor:
-
     if scale is None:
         scale = DK**-0.5
-    accum_dtype = 'float'
+    accum_dtype = "float"
 
     chunk_size = 64
     BK = BV = 64  # Set to 128 can be faster, but has some numerical differences with FLA
@@ -38,8 +37,8 @@ def chunk_retention_fwd_kernel(
         with T.Kernel(NV, NK, B * H) as (i_v, i_k, i_bh):
             i_b = i_bh // H
             i_h = i_bh % H
-            log_decay = T.alloc_var('float32')
-            log_decay = T.log2(1 - T.exp2(-5. - 1. * i_h))  # Head-specific log decay
+            log_decay = T.alloc_var("float32")
+            log_decay = T.log2(1 - T.exp2(-5.0 - 1.0 * i_h))  # Head-specific log decay
 
             q = T.alloc_shared([chunk_size, BK], dtype)
             k = T.alloc_shared([chunk_size, BK], dtype)
@@ -83,8 +82,15 @@ def chunk_retention_fwd_kernel(
                 for row, col in T.Parallel(BK, BV):
                     h[row, col] = T.exp2(chunk_size * log_decay) * h[row, col]
                 T.copy(
-                    o, O[i_k, i_b, i * chunk_size:(i + 1) * chunk_size, i_h,
-                         i_v * BV:(i_v + 1) * BV])
+                    o,
+                    O[
+                        i_k,
+                        i_b,
+                        i * chunk_size:(i + 1) * chunk_size,
+                        i_h,
+                        i_v * BV:(i_v + 1) * BV,
+                    ],
+                )
                 T.gemm(k, v, h, transpose_A=True)
 
     return chunk_retention_fwd
@@ -96,24 +102,24 @@ def postprocess(o):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--B', type=int, default=8, help='Batch size')
-    parser.add_argument('--S', type=int, default=4096, help='Seq len')
-    parser.add_argument('--H', type=int, default=32, help='Num heads')
-    parser.add_argument('--D', type=int, default=128, help='Head dim')
+    parser.add_argument("--B", type=int, default=8, help="Batch size")
+    parser.add_argument("--S", type=int, default=4096, help="Seq len")
+    parser.add_argument("--H", type=int, default=32, help="Num heads")
+    parser.add_argument("--D", type=int, default=128, help="Head dim")
     args = parser.parse_args()
     B, S, H, D = args.B, args.S, args.H, args.D
     total_flops = 2.0 * B * S * S * H * D  # causal
 
-    q = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16)
-    k = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16)
-    v = torch.randn((B, S, H, D), device='cuda', dtype=torch.float16)
+    q = torch.randn((B, S, H, D), device="cuda", dtype=torch.float16)
+    k = torch.randn((B, S, H, D), device="cuda", dtype=torch.float16)
+    v = torch.randn((B, S, H, D), device="cuda", dtype=torch.float16)
 
     kernel = chunk_retention_fwd_kernel(B, S, H, D, D)
 
     t = do_bench(lambda: postprocess(kernel(q, k, v)), warmup=25, rep=100)
-    print(f'Tilelang latency: {t:.3f} ms')
-    print(f'Tilelang TFLOPs: {total_flops/t * 1e-9}')
+    print(f"Tilelang latency: {t:.3f} ms")
+    print(f"Tilelang TFLOPs: {total_flops / t * 1e-9}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

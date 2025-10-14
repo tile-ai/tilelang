@@ -41,8 +41,8 @@ def test_gemm_fp8(M, N, K, dtype):
 
     kernel = matmul(M, N, K, 128, 128, 64, dtype)
 
-    a = torch.randn(M, K, dtype=torch.float16, device='cuda').to(dtype=torch_dtype)
-    b = torch.randn(N, K, dtype=torch.float16, device='cuda').to(dtype=torch_dtype)
+    a = torch.randn(M, K, dtype=torch.float16, device="cuda").to(dtype=torch_dtype)
+    b = torch.randn(N, K, dtype=torch.float16, device="cuda").to(dtype=torch_dtype)
 
     c = kernel(a, b)
 
@@ -57,8 +57,8 @@ def test_gemm_fp8(M, N, K, dtype):
 
 
 def main():
-    test_gemm_fp8(1024, 1024, 1024, 'float8_e4m3')
-    test_gemm_fp8(1024, 1024, 1024, 'float8_e5m2')
+    test_gemm_fp8(1024, 1024, 1024, "float8_e4m3")
+    test_gemm_fp8(1024, 1024, 1024, "float8_e5m2")
 
 
 if __name__ == "__main__":

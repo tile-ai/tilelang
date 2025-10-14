@@ -34,11 +34,23 @@ def preprocess(
             T.clear(acc)
             for k in T.Pipelined(T.ceildiv(D, block_ND), num_stages=num_stages):
                 T.copy(
-                    O[bz, by * block_ND:(by + 1) * block_ND, bx, k * block_ND:(k + 1) * block_ND],
-                    o)
+                    O[
+                        bz,
+                        by * block_ND:(by + 1) * block_ND,
+                        bx,
+                        k * block_ND:(k + 1) * block_ND,
+                    ],
+                    o,
+                )
                 T.copy(
-                    dO[bz, by * block_ND:(by + 1) * block_ND, bx, k * block_ND:(k + 1) * block_ND],
-                    do)
+                    dO[
+                        bz,
+                        by * block_ND:(by + 1) * block_ND,
+                        bx,
+                        k * block_ND:(k + 1) * block_ND,
+                    ],
+                    do,
+                )
                 for i, j in T.Parallel(block_ND, block_ND):
                     acc[i, j] += o[i, j] * do[i, j]
             T.reduce_sum(acc, delta, 1)
@@ -82,7 +94,8 @@ def postprocess(
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    })
+    },
+)
 def bwd(
     B,
     S,
@@ -101,8 +114,9 @@ def bwd(
     dtype="bfloat16",
     accum_dtype="float",
 ):
-    assert is_causal == True, 'non-casual is not supported now'
-    assert topk % block_size == 0, 'otherwise will load some index=0 thus causing wrong kv to be loaded'
+    assert is_causal == True, "non-casual is not supported now"
+    assert topk % block_size == 0, (
+        "otherwise will load some index=0 thus causing wrong kv to be loaded")
     assert dtype == "bfloat16"
     assert accum_dtype == "float"
     assert indices_dtype == "int32"
@@ -202,7 +216,8 @@ def bwd(
                     KV_tail_shared,
                     acc_p,
                     transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullCol)
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
 
                 for h_i, bi_i in T.Parallel(padded_H, BS):
                     acc_p[h_i, bi_i] = T.exp2(acc_p[h_i, bi_i] * sm_scale_mul_reciprocal_log2 -
@@ -216,11 +231,13 @@ def bwd(
                     acc_dp,
                     transpose_B=True,
                     policy=T.GemmWarpPolicy.FullCol,
-                    clear_accum=True)
+                    clear_accum=True,
+                )
 
                 for h_i, bi_i in T.Parallel(padded_H, BS):
-                    acc_dp[h_i, bi_i] = acc_p[h_i, bi_i] * (
-                        acc_dp[h_i, bi_i] - Delta[by, s_i, bz * padded_H + h_i]) * sm_scale
+                    acc_dp[h_i, bi_i] = (
+                        acc_p[h_i, bi_i] *
+                        (acc_dp[h_i, bi_i] - Delta[by, s_i, bz * padded_H + h_i]) * sm_scale)
 
                 T.copy(acc_dp, dP_shared_cast)
                 T.gemm(dP_shared_cast, KV_shared, acc_dq, policy=T.GemmWarpPolicy.FullCol)
@@ -232,13 +249,15 @@ def bwd(
                     acc_dkv,
                     transpose_A=True,
                     policy=T.GemmWarpPolicy.FullCol,
-                    clear_accum=True)
+                    clear_accum=True,
+                )
                 T.gemm(
                     P_shared_cast,
                     dO_shared,
                     acc_dkv,
                     transpose_A=True,
-                    policy=T.GemmWarpPolicy.FullCol)
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
 
                 T.clear(acc_dkv_tail)
                 T.gemm(
@@ -246,7 +265,8 @@ def bwd(
                     Q_tail_shared,
                     acc_dkv_tail,
                     transpose_A=True,
-                    policy=T.GemmWarpPolicy.FullCol)
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
 
                 for s in range(split_store):
                     for bi_i, d_i in T.Parallel(BS, D):
@@ -261,14 +281,26 @@ def bwd(
 
                     for bi_i, d_i in T.Parallel(BS // split_store, D // 4):
                         T.atomic_addx4(
-                            dKV[by, Indices[by, s_i, bz, i_i * BS + bi_i + s * (BS // split_store)],
-                                bz, d_i * 4], acc_dkv_shared[bi_i, d_i * 4])
+                            dKV[
+                                by,
+                                Indices[by, s_i, bz, i_i * BS + bi_i + s * (BS // split_store)],
+                                bz,
+                                d_i * 4,
+                            ],
+                            acc_dkv_shared[bi_i, d_i * 4],
+                        )
 
                     # Atomically update dKV, dKV_tail tensors
                     for bi_i, d_i in T.Parallel(BS // split_store, D_tail // 4):
                         T.atomic_addx4(
-                            dKV[by, Indices[by, s_i, bz, i_i * BS + bi_i + s * (BS // split_store)],
-                                bz, D + d_i * 4], acc_dkv_tail_shared[bi_i, d_i * 4])
+                            dKV[
+                                by,
+                                Indices[by, s_i, bz, i_i * BS + bi_i + s * (BS // split_store)],
+                                bz,
+                                D + d_i * 4,
+                            ],
+                            acc_dkv_tail_shared[bi_i, d_i * 4],
+                        )
 
             # Store the accumulated dQ
             T.copy(acc_dq, dQ_shared)
@@ -322,6 +354,7 @@ def sparse_mla_bwd(q,
 
 def ref_sparse_mla_bwd_interface(q, kv, o, do, indices, lse, sm_scale=None, is_casual=True):
     from sparse_mla_fwd import ref_sparse_mla_fwd_interface
+
     q = q.detach().clone()
     kv = kv.detach().clone()
     q.requires_grad = True
@@ -331,22 +364,24 @@ def ref_sparse_mla_bwd_interface(q, kv, o, do, indices, lse, sm_scale=None, is_c
     return q.grad, kv.grad
 
 
-def test_sparse_mla_bwd(B=1,
-                        S=4096,
-                        SKV=8192,
-                        H=64,
-                        HKV=1,
-                        DQKV=576,
-                        DV=512,
-                        topk=2048,
-                        dtype=torch.bfloat16,
-                        check_correctness=True):
+def test_sparse_mla_bwd(
+    B=1,
+    S=4096,
+    SKV=8192,
+    H=64,
+    HKV=1,
+    DQKV=576,
+    DV=512,
+    topk=2048,
+    dtype=torch.bfloat16,
+    check_correctness=True,
+):
     # Prepare data
-    q = torch.randn((B, S, H, DQKV), dtype=dtype, device='cuda').requires_grad_(True)
-    kv = torch.randn((B, SKV, HKV, DQKV), dtype=dtype, device='cuda').requires_grad_(True)
-    do = torch.randn((B, S, H, DV), dtype=dtype, device='cuda')
+    q = torch.randn((B, S, H, DQKV), dtype=dtype, device="cuda").requires_grad_(True)
+    kv = torch.randn((B, SKV, HKV, DQKV), dtype=dtype, device="cuda").requires_grad_(True)
+    do = torch.randn((B, S, H, DV), dtype=dtype, device="cuda")
 
-    indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device='cuda')
+    indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device="cuda")
     for b in range(B):
         for t in range(S):
             for h in range(HKV):
@@ -355,6 +390,7 @@ def test_sparse_mla_bwd(B=1,
 
     # Forward
     from sparse_mla_fwd import sparse_mla_fwd_interface
+
     tl_out, tl_lse = sparse_mla_fwd_interface(q, kv, indices)
 
     tl_dq, tl_dkv = sparse_mla_bwd(q, kv, tl_out, do, indices, tl_lse)
@@ -379,9 +415,9 @@ def test_sparse_mla_bwd(B=1,
 
     ms = do_bench(fn, rep=100, warmup=250)
     print(f"Average time: {ms:.3f} ms")
-    print(f'bwd io bandwidth = ',
+    print(f"bwd io bandwidth = ",
           (B * S * max(DQKV * 2, DQKV + DV) * topk * 2) / (ms * 1e-3) / 1e12)
-    print(f'bwd tflops = ', per_token_flop * S / (ms * 1e-3) / 1e12)
+    print(f"bwd tflops = ", per_token_flop * S / (ms * 1e-3) / 1e12)
 
 
 if __name__ == "__main__":
@@ -395,4 +431,5 @@ if __name__ == "__main__":
         DV=512,
         topk=2048,
         dtype=torch.bfloat16,
-        check_correctness=True)
+        check_correctness=True,
+    )

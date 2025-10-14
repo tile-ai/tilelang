@@ -1,6 +1,6 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
-from typing import List, Optional
 from tvm import tir
 from tvm.tir import IntImm
 from tilelang import _ffi_api
@@ -10,10 +10,10 @@ def Pipelined(
     start: tir.PrimExpr,
     stop: tir.PrimExpr = None,
     num_stages: int = 0,
-    order: Optional[List[int]] = None,
-    stage: Optional[List[int]] = None,
-    sync: Optional[List[List[int]]] = None,
-    group: Optional[List[List[int]]] = None,
+    order: list[int] | None = None,
+    stage: list[int] | None = None,
+    sync: list[list[int]] | None = None,
+    group: list[list[int]] | None = None,
 ):
     """Tools to construct pipelined for loop.
 

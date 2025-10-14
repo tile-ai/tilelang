@@ -1,3 +1,4 @@
+from __future__ import annotations
 from tvm.target import Target
 from .arch_base import TileDevice
 
@@ -15,6 +16,6 @@ class METAL(TileDevice):
 
 
 __all__ = [
-    'is_metal_arch',
-    'METAL',
+    "is_metal_arch",
+    "METAL",
 ]

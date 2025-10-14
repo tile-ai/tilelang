@@ -76,6 +76,7 @@ def run_reduce_max_clear(M, N, dtype="float16"):
         return A.max(dim=1).values
 
     import torch
+
     dummp_A = torch.randn((M, N), dtype=getattr(torch, dtype)).cuda()
     ref_out = ref_program(dummp_A)
     tl_out = jit_kernel(dummp_A)

@@ -9,6 +9,7 @@ import sys  # noqa: F401
 # sys.path.insert(0, "/home/tzj/flash-linear-attention")
 try:
     import fla
+
     print(fla.__file__)
     from fla.ops.gated_delta_rule.wy_fast import recompute_w_u_fwd
 except ImportError:
@@ -116,30 +117,54 @@ def tilelang_recompute_w_u_fwd(
 
             for i_v in T.Pipelined(T.ceildiv(DV, block_DV), num_stages=num_stages):
                 T.copy(
-                    V[bb, bs * block_S:(bs + 1) * block_S, bh, i_v * block_DV:(i_v + 1) * block_DV],
-                    V_shared)
+                    V[
+                        bb,
+                        bs * block_S:(bs + 1) * block_S,
+                        bh,
+                        i_v * block_DV:(i_v + 1) * block_DV,
+                    ],
+                    V_shared,
+                )
                 for i_s, i_v2 in T.Parallel(block_S, block_DV):
                     U_Beta_shared[i_s, i_v2] = V_shared[i_s, i_v2] * Beta_shared[i_s]
                 T.gemm(A_shared, U_Beta_shared, U_fragment, clear_accum=True)
                 # First copy to smem, then copy to gmem to reduce U2RU instructions
                 T.copy(U_fragment, U_shared)
                 T.copy(
-                    U_shared, U[bb, bs * block_S:(bs + 1) * block_S, bh,
-                                i_v * block_DV:(i_v + 1) * block_DV])
+                    U_shared,
+                    U[
+                        bb,
+                        bs * block_S:(bs + 1) * block_S,
+                        bh,
+                        i_v * block_DV:(i_v + 1) * block_DV,
+                    ],
+                )
 
             for i_k in T.Pipelined(T.ceildiv(DK, block_DK), num_stages=num_stages):
                 T.copy(
-                    K[bb, bs * block_S:(bs + 1) * block_S, bh, i_k * block_DK:(i_k + 1) * block_DK],
-                    K_shared)
+                    K[
+                        bb,
+                        bs * block_S:(bs + 1) * block_S,
+                        bh,
+                        i_k * block_DK:(i_k + 1) * block_DK,
+                    ],
+                    K_shared,
+                )
                 for i_s, i_k2 in T.Parallel(block_S, block_DK):
-                    W_Beta_shared[i_s,
-                                  i_k2] = K_shared[i_s, i_k2] * Beta_shared[i_s] * G_shared[i_s]
+                    W_Beta_shared[i_s, i_k2] = (
+                        K_shared[i_s, i_k2] * Beta_shared[i_s] * G_shared[i_s])
                 T.gemm(A_shared, W_Beta_shared, W_fragment, clear_accum=True)
                 # First copy to smem, then copy to gmem to reduce U2RU instructions
                 T.copy(W_fragment, W_shared)
                 T.copy(
-                    W_shared, W[bb, bs * block_S:(bs + 1) * block_S, bh,
-                                i_k * block_DK:(i_k + 1) * block_DK])
+                    W_shared,
+                    W[
+                        bb,
+                        bs * block_S:(bs + 1) * block_S,
+                        bh,
+                        i_k * block_DK:(i_k + 1) * block_DK,
+                    ],
+                )
 
     return kernel
 
@@ -169,7 +194,8 @@ def run_test(
         chunk_size,
         getattr(torch, input_dtype),
         getattr(torch, output_dtype),
-        gate_dtype=getattr(torch, gate_dtype))
+        gate_dtype=getattr(torch, gate_dtype),
+    )
     W_ref, U_ref = prepare_output(B, S, H, DK, DV, getattr(torch, output_dtype))
     W_tilelang, U_tilelang = prepare_output(B, S, H, DK, DV, getattr(torch, output_dtype))
 
@@ -193,7 +219,8 @@ def run_test(
         block_DK=block_DK,
         block_DV=block_DV,
         threads=threads,
-        num_stages=num_stages)
+        num_stages=num_stages,
+    )
     print(kernel.get_kernel_source())
     W_tilelang, U_tilelang = kernel(K, V, Beta, G, A)
 
@@ -226,7 +253,8 @@ def main():
         block_DK=64,
         block_DV=32,
         threads=128,
-        num_stages=3)
+        num_stages=3,
+    )
 
 
 if __name__ == "__main__":

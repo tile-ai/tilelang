@@ -5,7 +5,7 @@ This module provides runtime compilation support using NVIDIA's NVRTC API.
 
 import logging
 
-__all__ = ['NVRTCKernelAdapter', 'is_nvrtc_available', 'check_nvrtc_available']
+__all__ = ["NVRTCKernelAdapter", "is_nvrtc_available", "check_nvrtc_available"]
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +18,7 @@ NVRTC_UNAVAILABLE_MESSAGE = ("cuda-python is not available, NVRTC backend cannot
 try:
     import cuda.bindings.driver as cuda  # noqa: F401
     import cuda.bindings.nvrtc as nvrtc  # noqa: F401
+
     is_nvrtc_available = True
 except ImportError as e:
     logger.debug(f"cuda-python import failed: {e}")

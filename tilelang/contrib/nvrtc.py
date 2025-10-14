@@ -1,20 +1,23 @@
+from __future__ import annotations
 import cuda.bindings.nvrtc as nvrtc
-from typing import Literal, Union, List, Optional, Tuple
+from typing import Literal
 from tvm.target import Target
 from .nvcc import get_target_compute_version, parse_compute_version
 
 
-def get_nvrtc_version() -> Tuple[int, int]:
+def get_nvrtc_version() -> tuple[int, int]:
     result, major, minor = nvrtc.nvrtcVersion()
     assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get NVRTC version: {result}"
     return (major, minor)
 
 
-def compile_cuda(code: str,
-                 target_format: Literal["ptx", "cubin"] = "ptx",
-                 arch: Optional[int] = None,
-                 options: Optional[Union[str, List[str]]] = None,
-                 verbose: bool = False) -> bytearray:
+def compile_cuda(
+    code: str,
+    target_format: Literal["ptx", "cubin"] = "ptx",
+    arch: int | None = None,
+    options: str | list[str] | None = None,
+    verbose: bool = False,
+) -> bytearray:
     """Compile cuda code with NVRTC.
 
     Parameters
@@ -76,11 +79,11 @@ def compile_cuda(code: str,
     compile_result = nvrtc.nvrtcCompileProgram(program, len(options_bytes), options_bytes)[0]
 
     if compile_result != nvrtc.nvrtcResult.NVRTC_SUCCESS:
-        msg = f"{code}\n" \
-            f"Compilation error:\n"
+        msg = f"{code}\nCompilation error:\n"
         if verbose:
             result, log_size = nvrtc.nvrtcGetProgramLogSize(program)
-            assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get program log size: {result}"
+            assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, (
+                f"Failed to get program log size: {result}")
             log_bytes = bytes(log_size)
             result = nvrtc.nvrtcGetProgramLog(program, log_bytes)[0]
             assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get program log: {result}"
@@ -104,7 +107,7 @@ def compile_cuda(code: str,
         assert result == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to get PTX: {result}"
 
     # Destroy handler
-    assert nvrtc.nvrtcDestroyProgram(
-        program)[0] == nvrtc.nvrtcResult.NVRTC_SUCCESS, f"Failed to destroy program: {result}"
+    assert nvrtc.nvrtcDestroyProgram(program)[0] == nvrtc.nvrtcResult.NVRTC_SUCCESS, (
+        f"Failed to destroy program: {result}")
 
     return result_bytes

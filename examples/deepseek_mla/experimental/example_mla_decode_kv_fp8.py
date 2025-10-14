@@ -8,9 +8,11 @@ import argparse
 
 
 @tilelang.jit(
-    out_idx=[-1], pass_configs={
+    out_idx=[-1],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_H):
     scale = (1.0 / (dim + pe_dim))**0.5 * 1.44269504  # log2(e)
     dtype = "float16"
@@ -70,7 +72,8 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, block_N, block_
                     K_pe_shared,
                     acc_s,
                     transpose_B=True,
-                    policy=T.GemmWarpPolicy.FullCol)
+                    policy=T.GemmWarpPolicy.FullCol,
+                )
                 T.copy(scores_max, scores_max_prev)
                 T.fill(scores_max, -T.infinity(accum_dtype))
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -108,42 +111,49 @@ def ref_program(q, q_pe, kv, k_pe):
     num_head_groups = q.shape[1] // kv.shape[2]
     scale = (dim + pe_dim)**0.5
     q = rearrange(
-        q, 'b (h g) d -> b g h d', g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
+        q, "b (h g) d -> b g h d", g=num_head_groups)  # [batch_size, num_head_groups, groups, dim]
 
     q_pe = rearrange(
-        q_pe, 'b (h g) d -> b g h d',
+        q_pe, "b (h g) d -> b g h d",
         g=num_head_groups)  # [batch_size, num_head_groups, groups, pe_dim]
 
-    kv = rearrange(kv, 'b n h d -> b h n d')  # [batch_size, groups, seqlen_kv, dim]
+    kv = rearrange(kv, "b n h d -> b h n d")  # [batch_size, groups, seqlen_kv, dim]
 
-    k_pe = rearrange(k_pe, 'b n h d -> b h n d')  # [batch_size, num_head_groups, groups, pe_dim]
+    k_pe = rearrange(k_pe, "b n h d -> b h n d")  # [batch_size, num_head_groups, groups, pe_dim]
 
     query = torch.concat([q, q_pe], dim=-1)
     key = torch.concat([kv, k_pe], dim=-1)
 
     scores = einsum(
         query, key,
-        'b g h d, b h s d -> b g h s')  # [batch_size, num_head_groups, groups, seqlen_kv]
+        "b g h d, b h s d -> b g h s")  # [batch_size, num_head_groups, groups, seqlen_kv]
 
     attention = F.softmax(
         scores / scale, dim=-1)  # [batch_size, num_head_groups, groups, seqlen_kv]
 
     out = einsum(attention, kv,
-                 'b g h s, b h s d -> b g h d')  # [batch_size, num_head_groups, groups, dim]
-    out = rearrange(out, 'b g h d -> b (h g) d')  # [batch_size, heads, dim]
+                 "b g h s, b h s d -> b g h d")  # [batch_size, num_head_groups, groups, dim]
+    out = rearrange(out, "b g h d -> b (h g) d")  # [batch_size, heads, dim]
     return out
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=128, help='batch size')
-    parser.add_argument('--heads', type=int, default=128, help='q heads number')
-    parser.add_argument('--kv_heads', type=int, default=1, help='kv heads number')
-    parser.add_argument('--kv_ctx', type=int, default=8192, help='kv context length')
-    parser.add_argument('--dim', type=int, default=512, help='head dim')
-    parser.add_argument('--pe_dim', type=int, default=64, help='pe head dim')
+    parser.add_argument("--batch", type=int, default=128, help="batch size")
+    parser.add_argument("--heads", type=int, default=128, help="q heads number")
+    parser.add_argument("--kv_heads", type=int, default=1, help="kv heads number")
+    parser.add_argument("--kv_ctx", type=int, default=8192, help="kv context length")
+    parser.add_argument("--dim", type=int, default=512, help="head dim")
+    parser.add_argument("--pe_dim", type=int, default=64, help="pe head dim")
     args = parser.parse_args()
-    batch, heads, kv_heads, kv_ctx, dim, pe_dim = args.batch, args.heads, args.kv_heads, args.kv_ctx, args.dim, args.pe_dim
+    batch, heads, kv_heads, kv_ctx, dim, pe_dim = (
+        args.batch,
+        args.heads,
+        args.kv_heads,
+        args.kv_ctx,
+        args.dim,
+        args.pe_dim,
+    )
     qk_flops = 2 * batch * heads * kv_ctx * (dim + pe_dim)
     pv_flops = 2 * batch * heads * kv_ctx * dim
     total_flops = qk_flops + pv_flops

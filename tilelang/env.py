@@ -1,3 +1,4 @@
+from __future__ import annotations
 import sys
 import os
 import pathlib
@@ -6,32 +7,31 @@ import shutil
 import glob
 import site
 from dataclasses import dataclass
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # SETUP ENVIRONMENT VARIABLES
-CUTLASS_NOT_FOUND_MESSAGE = ("CUTLASS is not installed or found in the expected path")
+CUTLASS_NOT_FOUND_MESSAGE = "CUTLASS is not installed or found in the expected path"
 ", which may lead to compilation bugs when utilize tilelang backend."
 COMPOSABLE_KERNEL_NOT_FOUND_MESSAGE = (
     "Composable Kernel is not installed or found in the expected path")
 ", which may lead to compilation bugs when utilize tilelang backend."
-TL_TEMPLATE_NOT_FOUND_MESSAGE = ("TileLang is not installed or found in the expected path")
+TL_TEMPLATE_NOT_FOUND_MESSAGE = "TileLang is not installed or found in the expected path"
 ", which may lead to compilation bugs when utilize tilelang backend."
-TVM_LIBRARY_NOT_FOUND_MESSAGE = ("TVM is not installed or found in the expected path")
+TVM_LIBRARY_NOT_FOUND_MESSAGE = "TVM is not installed or found in the expected path"
 
 SITE_PACKAGES = site.getsitepackages()
 
-TL_LIBS = [os.path.join(i, 'tilelang/lib') for i in site.getsitepackages()]
+TL_LIBS = [os.path.join(i, "tilelang/lib") for i in site.getsitepackages()]
 TL_LIBS = [i for i in TL_LIBS if os.path.exists(i)]
 
 TL_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 DEV = False
-THIRD_PARTY_ROOT = os.path.join(TL_ROOT, '3rdparty')
+THIRD_PARTY_ROOT = os.path.join(TL_ROOT, "3rdparty")
 if not os.path.exists(THIRD_PARTY_ROOT):
     DEV = True
-    THIRD_PARTY_ROOT = os.path.join(TL_ROOT, '..', '3rdparty')
+    THIRD_PARTY_ROOT = os.path.join(TL_ROOT, "..", "3rdparty")
 
 
 def _find_cuda_home() -> str:
@@ -40,7 +40,7 @@ def _find_cuda_home() -> str:
     Adapted from https://github.com/pytorch/pytorch/blob/main/torch/utils/cpp_extension.py
     """
     # Guess #1
-    cuda_home = os.environ.get('CUDA_HOME') or os.environ.get('CUDA_PATH')
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     if cuda_home is None:
         # Guess #2
         nvcc_path = shutil.which("nvcc")
@@ -58,15 +58,15 @@ def _find_cuda_home() -> str:
 
         else:
             # Guess #3
-            if sys.platform == 'win32':
-                cuda_homes = glob.glob('C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*.*')
-                cuda_home = '' if len(cuda_homes) == 0 else cuda_homes[0]
+            if sys.platform == "win32":
+                cuda_homes = glob.glob("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v*.*")
+                cuda_home = "" if len(cuda_homes) == 0 else cuda_homes[0]
             else:
                 # Linux/macOS
-                if os.path.exists('/usr/local/cuda'):
-                    cuda_home = '/usr/local/cuda'
-                elif os.path.exists('/opt/nvidia/hpc_sdk/Linux_x86_64'):
-                    cuda_home = '/opt/nvidia/hpc_sdk/Linux_x86_64'
+                if os.path.exists("/usr/local/cuda"):
+                    cuda_home = "/usr/local/cuda"
+                elif os.path.exists("/opt/nvidia/hpc_sdk/Linux_x86_64"):
+                    cuda_home = "/opt/nvidia/hpc_sdk/Linux_x86_64"
 
             # Validate found path
             if cuda_home is None or not os.path.exists(cuda_home):
@@ -77,13 +77,13 @@ def _find_cuda_home() -> str:
 
 def _find_rocm_home() -> str:
     """Find the ROCM install path."""
-    rocm_home = os.environ.get('ROCM_PATH') or os.environ.get('ROCM_HOME')
+    rocm_home = os.environ.get("ROCM_PATH") or os.environ.get("ROCM_HOME")
     if rocm_home is None:
         rocmcc_path = shutil.which("hipcc")
         if rocmcc_path is not None:
             rocm_home = os.path.dirname(os.path.dirname(rocmcc_path))
         else:
-            rocm_home = '/opt/rocm'
+            rocm_home = "/opt/rocm"
             if not os.path.exists(rocm_home):
                 rocm_home = None
     return rocm_home if rocm_home is not None else ""
@@ -92,6 +92,7 @@ def _find_rocm_home() -> str:
 # Cache control
 class CacheState:
     """Class to manage global kernel caching state."""
+
     _enabled = True
 
     @classmethod
@@ -162,7 +163,7 @@ class EnvVar:
 
     key: str  # Environment variable name (e.g. "TILELANG_PRINT_ON_COMPILATION")
     default: str  # Default value if the environment variable is not set
-    _forced_value: Optional[str] = None  # Temporary runtime override (mainly for tests/debugging)
+    _forced_value: str | None = None  # Temporary runtime override (mainly for tests/debugging)
 
     def get(self):
         if self._forced_value is not None:
@@ -292,16 +293,16 @@ else:
     tvm_path = os.path.join(THIRD_PARTY_ROOT, "tvm")
     assert os.path.exists(tvm_path), tvm_path
     if tvm_path not in sys.path:
-        tvm_python_binding = os.path.join(tvm_path, 'python')
+        tvm_python_binding = os.path.join(tvm_path, "python")
         prepend_pythonpath(tvm_python_binding)
         env.TVM_IMPORT_PYTHON_PATH = tvm_python_binding
 
     if os.environ.get("TVM_LIBRARY_PATH") is None:
-        os.environ['TVM_LIBRARY_PATH'] = env.TVM_LIBRARY_PATH = os.pathsep.join(TL_LIBS)
+        os.environ["TVM_LIBRARY_PATH"] = env.TVM_LIBRARY_PATH = os.pathsep.join(TL_LIBS)
 
 # Initialize CUTLASS paths
 if os.environ.get("TL_CUTLASS_PATH", None) is None:
-    cutlass_inc_path = os.path.join(THIRD_PARTY_ROOT, 'cutlass', 'include')
+    cutlass_inc_path = os.path.join(THIRD_PARTY_ROOT, "cutlass", "include")
     if os.path.exists(cutlass_inc_path):
         os.environ["TL_CUTLASS_PATH"] = env.CUTLASS_INCLUDE_DIR = cutlass_inc_path
     else:
@@ -309,7 +310,7 @@ if os.environ.get("TL_CUTLASS_PATH", None) is None:
 
 # Initialize COMPOSABLE_KERNEL paths
 if os.environ.get("TL_COMPOSABLE_KERNEL_PATH", None) is None:
-    ck_inc_path = os.path.join(THIRD_PARTY_ROOT, 'composable_kernel', 'include')
+    ck_inc_path = os.path.join(THIRD_PARTY_ROOT, "composable_kernel", "include")
     if os.path.exists(ck_inc_path):
         os.environ["TL_COMPOSABLE_KERNEL_PATH"] = env.COMPOSABLE_KERNEL_INCLUDE_DIR = ck_inc_path
     else:

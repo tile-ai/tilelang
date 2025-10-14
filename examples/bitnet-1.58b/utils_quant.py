@@ -173,7 +173,7 @@ class BitLinearBitBLAS(nn.Module):
 
     # for the correctness evaluation.
     def native_forward(self, input):
-        quant_input = (input + (activation_quant(input, self.input_bits) - input).detach())
+        quant_input = input + (activation_quant(input, self.input_bits) - input).detach()
         quant_weight = (
             self.weight + (weight_quant(self.weight, self.weight_bits) - self.weight).detach())
 
@@ -216,7 +216,7 @@ class BitLinearBitBLAS(nn.Module):
 class BitLinear(nn.Linear):
 
     def __init__(self, *kargs, weight_bits=1, input_bits=8, **kwargs):
-        super(BitLinear, self).__init__(*kargs, **kwargs)
+        super().__init__(*kargs, **kwargs)
         """
         RMSNorm is placed outside BitLinear
         """
@@ -224,10 +224,9 @@ class BitLinear(nn.Linear):
         self.input_bits = input_bits
 
     def forward(self, input):
-
         quant_input = input + (activation_quant(input, self.input_bits) - input).detach()
-        quant_weight = self.weight + (weight_quant(self.weight, self.weight_bits) -
-                                      self.weight).detach()
+        quant_weight = (
+            self.weight + (weight_quant(self.weight, self.weight_bits) - self.weight).detach())
 
         out = nn.functional.linear(quant_input, quant_weight)
         if self.bias is not None:

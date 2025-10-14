@@ -31,7 +31,6 @@ class GemmPrimitiveMMA(GemmBaseParams):
         C: tir.Buffer,
         mma_emitter: TensorCoreIntrinEmitter,
     ) -> tir.PrimExpr:
-
         in_dtype = self.in_dtype
         warp_cols = mma_emitter.warp_cols
         local_size_b = mma_emitter.local_size_b
@@ -67,7 +66,6 @@ class GemmPrimitiveMMA(GemmBaseParams):
             #     B_shared: make_mma_swizzle_layout(B_shared),
             # })
             for ki in T.serial(0, (block_K // micro_size_k)):
-
                 # Load B into fragment
                 mma_emitter.ldmatrix_b(
                     B_local,

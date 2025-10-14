@@ -1,14 +1,15 @@
+from __future__ import annotations
 import inspect
-from typing import Callable, Optional, Union
+from typing import Callable
 
 import tvm.script.parser.tir.entry as _tir_entry
 from tvm.tir.function import PrimFunc
 from tvm.script.parser._core import parse, scan_macro, utils
 
 
-def prim_func(func: Optional[Callable] = None,
+def prim_func(func: Callable | None = None,
               private: bool = False,
-              check_well_formed: bool = False) -> Union[PrimFunc, Callable]:
+              check_well_formed: bool = False) -> PrimFunc | Callable:
     """The parsing method for tir prim func, by using `@prim_func` as decorator.
 
     Parameters

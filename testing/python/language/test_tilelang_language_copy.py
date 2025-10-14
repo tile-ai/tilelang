@@ -29,8 +29,9 @@ def run_tilelang_copy(M=1024, N=1024, block_M=128, block_N=128, dtype="float16")
         target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True
-        })
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        },
+    )
     a = torch.randn(M, N, device="cuda", dtype=getattr(torch, dtype))
     b = kernel(a)
     torch.testing.assert_close(b, a, rtol=1e-2, atol=1e-2)
@@ -73,7 +74,8 @@ def run_tilelang_copy_with_stride(M=1024,
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        })
+        },
+    )
     if isinstance(NN, T.Var):
         NN = N * 2
     a = torch.randn(M, NN, device="cuda", dtype=getattr(torch, dtype))
@@ -109,8 +111,9 @@ def run_tilelang_copy_bufferload(num_tokens=128, dtype="float16"):
         out_idx=[1],
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True
-        })
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        },
+    )
 
 
 def test_tilelang_copy_bufferload():
@@ -144,8 +147,9 @@ def run_tilelang_copy_buffer_load_with_parallel(M=1024,
         target="cuda",
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True
-        })
+            tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        },
+    )
     a = torch.randn(M, N, device="cuda", dtype=getattr(torch, dtype))
     b = kernel(a)
     torch.testing.assert_close(b, a, rtol=1e-2, atol=1e-2)

@@ -178,7 +178,6 @@ def matmul(
         # Bind x-dimension to block index in N,
         #     y-dimension to block index in M.
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
-
             # Allocate shared memory for A sub-block of shape (block_M, block_K)
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             # Allocate shared memory for B sub-block of shape (block_N, block_K)

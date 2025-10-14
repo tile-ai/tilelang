@@ -31,10 +31,13 @@ def test_lower_fence_proxy():
             C_local = T.decl_buffer((32,), scope="local")
             for i in T.unroll(16):
                 C_local[i * 2:i * 2 + 2] = T.Broadcast(T.float32(0), 2)
-            T.call_extern("handle", "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
-                          T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, 0, 2048, 1),
-                          T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, 0, 2048, 1),
-                          T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3))
+            T.call_extern(
+                "handle",
+                "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
+                T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, 0, 2048, 1),
+                T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, 0, 2048, 1),
+                T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3),
+            )
 
     @T.prim_func
     def after():
@@ -45,10 +48,13 @@ def test_lower_fence_proxy():
             for i in T.unroll(16):
                 C_local[i * 2:i * 2 + 2] = T.Broadcast(T.float32(0), 2)
             T.fence_proxy_async()
-            T.call_extern("handle", "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
-                          T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, 0, 2048, 1),
-                          T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, 0, 2048, 1),
-                          T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3))
+            T.call_extern(
+                "handle",
+                "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
+                T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, 0, 2048, 1),
+                T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, 0, 2048, 1),
+                T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3),
+            )
 
     _check(before, after)
 
@@ -162,9 +168,24 @@ def test_wgmma_marked_async():
             C_local = T.decl_buffer((32,), "float16", scope="local")
             A_shared[0] = T.float16(0)
             T.warpgroup_arrive()
-            T.ptx_wgmma_ss("float16", "m64n64k16", T.bool(True), T.bool(True), "fp16", "fp16",
-                           "fp16", desc_a.data, T.int32(0), desc_b.data, T.int32(0), C_local.data,
-                           T.int32(0), T.bool(True), 1, 1)
+            T.ptx_wgmma_ss(
+                "float16",
+                "m64n64k16",
+                T.bool(True),
+                T.bool(True),
+                "fp16",
+                "fp16",
+                "fp16",
+                desc_a.data,
+                T.int32(0),
+                desc_b.data,
+                T.int32(0),
+                C_local.data,
+                T.int32(0),
+                T.bool(True),
+                1,
+                1,
+            )
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tir.transform.BindTarget(auto_target)(mod)
@@ -196,9 +217,24 @@ def test_wgmma_after_descriptor():
             T.initialize_descriptor(desc_a, T.uint64(0), 2, 1, 32)
             T.initialize_descriptor(desc_b, T.uint64(0), 2, 1, 32)
             T.warpgroup_arrive()
-            T.ptx_wgmma_ss("float16", "m64n64k16", T.bool(True), T.bool(True), "fp16", "fp16",
-                           "fp16", desc_a.data, T.int32(0), desc_b.data, T.int32(0), C_local.data,
-                           T.int32(0), T.bool(True), 1, 1)
+            T.ptx_wgmma_ss(
+                "float16",
+                "m64n64k16",
+                T.bool(True),
+                T.bool(True),
+                "fp16",
+                "fp16",
+                "fp16",
+                desc_a.data,
+                T.int32(0),
+                desc_b.data,
+                T.int32(0),
+                C_local.data,
+                T.int32(0),
+                T.bool(True),
+                1,
+                1,
+            )
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tir.transform.BindTarget(auto_target)(mod)

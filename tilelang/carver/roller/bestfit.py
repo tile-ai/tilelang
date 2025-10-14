@@ -17,7 +17,7 @@ class Block:
         self.end = max(self.end, other.end)
 
     def __repr__(self) -> str:
-        return "<Block offset={} size={}>".format(self.start, self.size())
+        return f"<Block offset={self.start} size={self.size()}>"
 
 
 class BestFit:
@@ -31,8 +31,8 @@ class BestFit:
         size = (size + self.align - 1) // self.align * self.align
         found = None
         for block in self.list:
-            if block.is_free and block.size() >= size and (not found or
-                                                           found.size() > block.size()):
+            if (block.is_free and block.size() >= size and
+                (not found or found.size() > block.size())):
                 found = block
         if found:
             found.is_free = False

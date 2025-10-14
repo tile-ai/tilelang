@@ -21,6 +21,6 @@ class CPU(TileDevice):
 
 
 __all__ = [
-    'is_cpu_arch',
-    'CPU',
+    "is_cpu_arch",
+    "CPU",
 ]

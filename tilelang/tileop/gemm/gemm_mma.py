@@ -87,7 +87,8 @@ class GemmMMA(GemmBase):
         B_shared = self.B
         C_local = self.C
 
-        assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
+        assert block_K >= micro_size_k, (
+            f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})")
 
         if self.is_gemm_ss():
 
@@ -135,7 +136,6 @@ class GemmMMA(GemmBase):
                 A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
-
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
                         A_local,
@@ -164,7 +164,6 @@ class GemmMMA(GemmBase):
                 B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
 
                 for ki in T.serial(0, (block_K // micro_size_k)):
-
                     # Load B into fragment
                     mma_emitter.ldmatrix_b(
                         B_local,

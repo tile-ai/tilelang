@@ -14,7 +14,8 @@ tilelang.testing.set_random_seed(0)
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    })
+    },
+)
 def native_sparse_attention(batch,
                             heads,
                             seq_len,
@@ -148,21 +149,21 @@ def main():
     )
     print(kernel.get_kernel_source())
     torch.random.manual_seed(0)
-    Q = torch.randn((B, SEQ_LEN, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
-    K = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-    V = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-    g_slc = torch.ones((B, SEQ_LEN, HQ), dtype=dtype, device='cuda').requires_grad_(True)
-    g_swa = torch.ones((B, SEQ_LEN, HQ), dtype=dtype, device='cuda').requires_grad_(True)
-    DO = torch.randn((B, SEQ_LEN, HQ, D), dtype=dtype, device='cuda')
+    Q = torch.randn((B, SEQ_LEN, HQ, D), dtype=dtype, device="cuda").requires_grad_(True)
+    K = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device="cuda").requires_grad_(True)
+    V = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device="cuda").requires_grad_(True)
+    g_slc = torch.ones((B, SEQ_LEN, HQ), dtype=dtype, device="cuda").requires_grad_(True)
+    g_swa = torch.ones((B, SEQ_LEN, HQ), dtype=dtype, device="cuda").requires_grad_(True)
+    DO = torch.randn((B, SEQ_LEN, HQ, D), dtype=dtype, device="cuda")
 
-    block_indices = torch.full((B, SEQ_LEN, H, S), SEQ_LEN, dtype=torch.long, device='cuda')
+    block_indices = torch.full((B, SEQ_LEN, H, S), SEQ_LEN, dtype=torch.long, device="cuda")
     for b in range(B):
         for t in range(SEQ_LEN):
             for h in range(H):
                 i_i = torch.randperm(max(1, (t // block_size)))[:S]
                 block_indices[b, t, h, :len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
-    block_counts = torch.randint(1, S + 1, (B, SEQ_LEN, H), device='cuda')
+    block_counts = torch.randint(1, S + 1, (B, SEQ_LEN, H), device="cuda")
 
     out = kernel(Q, K, V, block_indices.to(torch.int32))
 

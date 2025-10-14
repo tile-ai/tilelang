@@ -1,6 +1,5 @@
 def deprecated_warning(method_name: str, new_method_name: str, phaseout_version: str = None):
-    """A function to indicate that a method is deprecated
-    """
+    """A function to indicate that a method is deprecated"""
     import warnings  # pylint: disable=import-outside-toplevel, import-error
 
     warnings.warn(

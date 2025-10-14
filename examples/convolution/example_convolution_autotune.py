@@ -70,7 +70,7 @@ def get_heuristic_config() -> dict:
             "block_K": 32,
             "num_stages": 2,
             "thread_num": 128,
-            "enable_rasteration": True
+            "enable_rasteration": True,
         }
     elif sm_version in {90}:
         return {
@@ -79,7 +79,7 @@ def get_heuristic_config() -> dict:
             "block_K": 64,
             "num_stages": 3,
             "thread_num": 256,
-            "enable_rasteration": True
+            "enable_rasteration": True,
         }
     else:
         return {
@@ -88,29 +88,31 @@ def get_heuristic_config() -> dict:
             "block_K": 32,
             "num_stages": 0,
             "thread_num": 128,
-            "enable_rasteration": True
+            "enable_rasteration": True,
         }
 
 
 @tilelang.autotune(configs=get_configs())
 @tilelang.jit(out_idx=[2])
-def convolution(N,
-                C,
-                H,
-                W,
-                F,
-                K,
-                S,
-                D,
-                P,
-                block_M,
-                block_N,
-                block_K,
-                num_stages,
-                thread_num,
-                enable_rasteration,
-                dtype="float16",
-                accum_dtype="float"):
+def convolution(
+    N,
+    C,
+    H,
+    W,
+    F,
+    K,
+    S,
+    D,
+    P,
+    block_M,
+    block_N,
+    block_K,
+    num_stages,
+    thread_num,
+    enable_rasteration,
+    dtype="float16",
+    accum_dtype="float",
+):
     KH, KW = K, K
     OH = (H + 2 * P - D * (K - 1) - 1) // S + 1
     OW = (W + 2 * P - D * (K - 1) - 1) // S + 1
@@ -166,17 +168,19 @@ def convolution(N,
     return main
 
 
-def main(n: int = 128,
-         c: int = 128,
-         h: int = 64,
-         w: int = 64,
-         f: int = 128,
-         k: int = 3,
-         s: int = 1,
-         d: int = 1,
-         p: int = 1,
-         use_autotune: bool = False,
-         with_roller: bool = True):
+def main(
+    n: int = 128,
+    c: int = 128,
+    h: int = 64,
+    w: int = 64,
+    f: int = 128,
+    k: int = 3,
+    s: int = 1,
+    d: int = 1,
+    p: int = 1,
+    use_autotune: bool = False,
+    with_roller: bool = True,
+):
     N, C, H, W, F, K, S, D, P = n, c, h, w, f, k, s, d, p
     ref_prog = ref_program(S, P, D)
 
@@ -196,25 +200,38 @@ def main(n: int = 128,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
-    parser.add_argument('--n', type=int, default=128, help='n')
-    parser.add_argument('--c', type=int, default=128, help='c')
-    parser.add_argument('--h', type=int, default=64, help='h')
-    parser.add_argument('--w', type=int, default=64, help='w')
-    parser.add_argument('--f', type=int, default=128, help='f')
-    parser.add_argument('--k', type=int, default=3, help='k')
-    parser.add_argument('--s', type=int, default=1, help='s')
-    parser.add_argument('--d', type=int, default=1, help='d')
-    parser.add_argument('--p', type=int, default=1, help='p')
+    parser.add_argument("--n", type=int, default=128, help="n")
+    parser.add_argument("--c", type=int, default=128, help="c")
+    parser.add_argument("--h", type=int, default=64, help="h")
+    parser.add_argument("--w", type=int, default=64, help="w")
+    parser.add_argument("--f", type=int, default=128, help="f")
+    parser.add_argument("--k", type=int, default=3, help="k")
+    parser.add_argument("--s", type=int, default=1, help="s")
+    parser.add_argument("--d", type=int, default=1, help="d")
+    parser.add_argument("--p", type=int, default=1, help="p")
     parser.add_argument(
         "--use_autotune",
         action="store_true",
         default=False,
-        help="Whether to use autotune for matmul configs")
+        help="Whether to use autotune for matmul configs",
+    )
     parser.add_argument(
         "--with_roller",
         action="store_true",
         default=True,
-        help="Whether to enable BitBLAS roller for search space")
+        help="Whether to enable BitBLAS roller for search space",
+    )
     args = parser.parse_args()
-    main(args.n, args.c, args.h, args.w, args.f, args.k, args.s, args.d, args.p, args.use_autotune,
-         args.with_roller)
+    main(
+        args.n,
+        args.c,
+        args.h,
+        args.w,
+        args.f,
+        args.k,
+        args.s,
+        args.d,
+        args.p,
+        args.use_autotune,
+        args.with_roller,
+    )

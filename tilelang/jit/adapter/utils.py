@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Union, Optional, Literal, Dict
+from typing import Literal
 from tilelang import tvm as tvm
 from tvm import IRModule, tir
 from tvm.target import Target
@@ -65,12 +65,11 @@ def is_metal_target(target: Target) -> bool:
 
 
 def get_annotated_mod(
-    func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-    target: Union[str, Target] = "auto",
-    target_host: Optional[Union[str, Target]] = None,
+    func_or_mod: tir.PrimFunc | tvm.IRModule,
+    target: str | Target = "auto",
+    target_host: str | Target | None = None,
     model_type: Literal["device", "host", "all"] = "all",
-) -> Union[IRModule, tuple[IRModule, IRModule]]:
-
+) -> IRModule | tuple[IRModule, IRModule]:
     # Validate model_type early
     if model_type not in {"device", "host", "all"}:
         raise ValueError(f"Invalid model type: {model_type}")
@@ -100,14 +99,16 @@ def get_annotated_mod(
         "host":
             lambda m: tir.transform.Filter(_is_host_call)(m),
         "all":
-            lambda m: (tir.transform.Filter(_is_device_call)(m), tir.transform.Filter(_is_host_call)
-                       (m)),
+            lambda m: (
+                tir.transform.Filter(_is_device_call)(m),
+                tir.transform.Filter(_is_host_call)(m),
+            ),
     }
 
     return dispatch[model_type](mod)
 
 
-def pythonic_expr(expr: tvm.tir.PrimExpr, dtype_map: Optional[Dict[str, str]] = None) -> str:
+def pythonic_expr(expr: tvm.tir.PrimExpr, dtype_map: dict[str, str] | None = None) -> str:
     """
     Converts a TVM PrimExpr into a Python-style string, correctly handling operator precedence.
 
@@ -165,8 +166,22 @@ def pythonic_expr(expr: tvm.tir.PrimExpr, dtype_map: Optional[Dict[str, str]] = 
             p = PRECEDENCE.get(type(node), ATOMIC_PRECEDENCE)
         elif isinstance(
                 node,
-            (tvm.tir.Mul, tvm.tir.FloorDiv, tvm.tir.Add, tvm.tir.Sub, tvm.tir.FloorMod, tvm.tir.LT,
-             tvm.tir.LE, tvm.tir.GT, tvm.tir.GE, tvm.tir.EQ, tvm.tir.NE, tvm.tir.And, tvm.tir.Or)):
+            (
+                tvm.tir.Mul,
+                tvm.tir.FloorDiv,
+                tvm.tir.Add,
+                tvm.tir.Sub,
+                tvm.tir.FloorMod,
+                tvm.tir.LT,
+                tvm.tir.LE,
+                tvm.tir.GT,
+                tvm.tir.GE,
+                tvm.tir.EQ,
+                tvm.tir.NE,
+                tvm.tir.And,
+                tvm.tir.Or,
+            ),
+        ):
             op_map = {
                 tvm.tir.Mul: "*",
                 tvm.tir.FloorDiv: "/",

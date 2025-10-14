@@ -61,9 +61,9 @@ def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype="float32", sc
                       j * block_N:(j + 1) * block_N] = A[i * block_M:(i + 1) * block_M, j *
                                                          block_N:(j + 1) * block_N].cumsum(dim=dim)
                 if reverse:
-                    ref_b[i * block_M:(i + 1) * block_M, j * block_N:(j + 1) *
-                          block_N] = A[i * block_M:(i + 1) * block_M, j * block_N:(j + 1) *
-                                       block_N].flip(dims=[dim]).cumsum(dim=dim).flip(dims=[dim])
+                    ref_b[i * block_M:(i + 1) * block_M, j * block_N:(j + 1) * block_N] = (
+                        A[i * block_M:(i + 1) * block_M, j * block_N:(j + 1) *
+                          block_N].flip(dims=[dim]).cumsum(dim=dim).flip(dims=[dim]))
         return ref_b
 
     tilelang_res = jit_kernel(A)

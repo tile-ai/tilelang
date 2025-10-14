@@ -20,19 +20,21 @@ class TensorSupplyType(Enum):
 
 def map_torch_type(intype: str) -> torch.dtype:
     if intype == "float8_e4m3":
-        assert hasattr(torch, "float8_e4m3fn"), \
-            "torch.float8_e4m3fn is not supported in this version of torch" \
-                "Please upgrade torch >= 2.1.0"
+        assert hasattr(
+            torch,
+            "float8_e4m3fn"), ("torch.float8_e4m3fn is not supported in this version of torch"
+                               "Please upgrade torch >= 2.1.0")
         return torch.float8_e4m3fn
     elif intype == "float8_e5m2":
-        assert hasattr(torch, "float8_e5m2"), \
-            "torch.float8_e5m2 is not supported in this version of torch" \
-                "Please upgrade torch >= 2.1.0"
+        assert hasattr(
+            torch, "float8_e5m2"), ("torch.float8_e5m2 is not supported in this version of torch"
+                                    "Please upgrade torch >= 2.1.0")
         return torch.float8_e5m2
     elif intype == "e4m3fnuz_float8":
-        assert hasattr(torch, "float8_e4m3fnuz"), \
-            "torch.float8_e4m3fnuz is not supported in this version of torch" \
-                "Please upgrade torch >= 2.2.0"
+        assert hasattr(
+            torch,
+            "float8_e4m3fnuz"), ("torch.float8_e4m3fnuz is not supported in this version of torch"
+                                 "Please upgrade torch >= 2.2.0")
         return torch.float8_e4m3fnuz
     else:
         return getattr(torch, intype)
@@ -47,7 +49,10 @@ def adapt_torch2tvm(arg):
     }
     if isinstance(arg, torch.Tensor):
         if arg.dtype in {
-                torch.float8_e4m3fn, torch.float8_e4m3fnuz, torch.float8_e5m2, torch.float8_e5m2fnuz
+                torch.float8_e4m3fn,
+                torch.float8_e4m3fnuz,
+                torch.float8_e5m2,
+                torch.float8_e5m2fnuz,
         }:
             return ndarray.from_dlpack(to_dlpack(arg.view(torch.int8)))._create_view(
                 shape=arg.shape, dtype=float8_dtype_map[arg.dtype])
@@ -56,7 +61,6 @@ def adapt_torch2tvm(arg):
 
 
 def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
-
     from tilelang.engine.param import KernelParam
     from .device import get_current_device
 
@@ -114,11 +118,11 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
             else:
                 return torch.randint(low=-2, high=3, size=shape, device=device, dtype=dtype)
         elif supply_type == TensorSupplyType.Uniform:
-            return torch.empty(
-                *shape, device=device, dtype=torch.float32).uniform_(-1.0, 1.0).to(dtype)
+            return (torch.empty(*shape, device=device, dtype=torch.float32).uniform_(-1.0,
+                                                                                     1.0).to(dtype))
         elif supply_type == TensorSupplyType.Normal:
-            return torch.empty(
-                *shape, device=device, dtype=torch.float32).normal_(-1.0, 1.0).to(dtype)
+            return (torch.empty(*shape, device=device, dtype=torch.float32).normal_(-1.0,
+                                                                                    1.0).to(dtype))
         elif supply_type == TensorSupplyType.Randn:
             return torch.randn(*shape, device=device).to(dtype)
         elif supply_type == TensorSupplyType.Zero:
@@ -167,7 +171,7 @@ def _compare_attributes(
     if actual.layout != expected.layout:
         if check_layout:
             raise_mismatch_error("layout", actual.layout, expected.layout)
-    elif (actual.layout == torch.strided and check_stride and actual.stride() != expected.stride()):
+    elif actual.layout == torch.strided and check_stride and actual.stride() != expected.stride():
         raise_mismatch_error("stride()", actual.stride(), expected.stride())
     if check_device and actual.device != expected.device:
         raise_mismatch_error("device", actual.device, expected.device)
@@ -214,7 +218,7 @@ def _equalize_attributes(actual: torch.Tensor,
     if actual.layout != expected.layout:
         # These checks are needed, since Tensor.to_dense() fails on tensors that are already strided
         actual = actual.to_dense() if actual.layout != torch.strided else actual
-        expected = (expected.to_dense() if expected.layout != torch.strided else expected)
+        expected = expected.to_dense() if expected.layout != torch.strided else expected
     return actual, expected
 
 
@@ -263,7 +267,8 @@ def torch_assert_close(
         check_device=check_device,
         check_dtype=check_dtype,
         check_layout=check_layout,
-        check_stride=check_stride)
+        check_stride=check_stride,
+    )
     tensor_a, tensor_b = _equalize_attributes(tensor_a, tensor_b)
 
     mismatched = ~torch.isclose(tensor_a, tensor_b, rtol=rtol, atol=atol, equal_nan=equal_nan)

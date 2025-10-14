@@ -24,9 +24,11 @@ def get_configs():
     rep=10,
 )
 @tilelang.jit(
-    out_idx=[3], pass_configs={
+    out_idx=[3],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def flashattn(
     batch,
     heads,
@@ -152,7 +154,8 @@ def flashattn(
                     num_stages=num_stages,
                     order=[-1, 0, 3, 1, -1, 2],
                     stage=[-1, 0, 0, 1, -1, 1],
-                    group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]]):
+                    group=[[0], [1, 2], [3, 4, 5, 6, 7, 8, 9, 10], [11], [12], [13]],
+            ):
                 MMA0(K, Q_shared, K_shared, acc_s, k, bx, by, bz)
                 Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale, scores_sum,
                         logsum)
@@ -171,23 +174,23 @@ def ref_program(Q, K, V, is_causal, groups=1):
     # K: [B, T, HK, D]
     # V: [B, T, HV, D]
     # HQ = HKV * groups
-    assert Q.size(2) == K.size(
-        2) * groups, f"Q.size(2): {Q.size(2)}, K.size(2): {K.size(2)}, groups: {groups}"
-    assert Q.size(2) == V.size(
-        2) * groups, f"Q.size(2): {Q.size(2)}, V.size(2): {V.size(2)}, groups: {groups}"
+    assert Q.size(2) == K.size(2) * groups, (
+        f"Q.size(2): {Q.size(2)}, K.size(2): {K.size(2)}, groups: {groups}")
+    assert Q.size(2) == V.size(2) * groups, (
+        f"Q.size(2): {Q.size(2)}, V.size(2): {V.size(2)}, groups: {groups}")
 
     dim = Q.size(-1)
     K = K.repeat_interleave(groups, dim=2)
     V = V.repeat_interleave(groups, dim=2)
-    scores = torch.einsum('bqhd,bkhd->bhqk', Q, K)
+    scores = torch.einsum("bqhd,bkhd->bhqk", Q, K)
     scores = scores / torch.sqrt(torch.tensor(dim, dtype=scores.dtype))
     if is_causal:
         seq_len = Q.size(1)
         mask = torch.tril(torch.ones(seq_len, seq_len, device=scores.device))
         mask = mask.unsqueeze(0).unsqueeze(0)
-        scores = scores.masked_fill(mask == 0, float('-inf'))
+        scores = scores.masked_fill(mask == 0, float("-inf"))
     attention_weights = F.softmax(scores, dim=-1)
-    output = torch.einsum('bhqk,bkhd->bqhd', attention_weights, V)
+    output = torch.einsum("bhqk,bkhd->bqhd", attention_weights, V)
     return output
 
 
@@ -205,7 +208,7 @@ def main(
     if is_causal:
         total_flops *= 0.5
 
-    if (not tune):
+    if not tune:
         kernel = flashattn(
             batch,
             heads,
@@ -216,17 +219,18 @@ def main(
             block_M=128,
             block_N=128,
             num_stages=2,
-            threads=256)
+            threads=256,
+        )
         ref_program_processed = partial(ref_program, is_causal=is_causal, groups=groups)
         profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
         profiler.assert_allclose(ref_program_processed, rtol=0.01, atol=0.01)
         print("All checks pass.")
         latency = profiler.do_bench(ref_program_processed, warmup=500)
-        print("Ref: {:.2f} ms".format(latency))
-        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Ref: {latency:.2f} ms")
+        print(f"Ref: {total_flops / latency * 1e-9:.2f} TFlops")
         latency = profiler.do_bench(warmup=500)
-        print("Tile-lang: {:.2f} ms".format(latency))
-        print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+        print(f"Tile-lang: {latency:.2f} ms")
+        print(f"Tile-lang: {total_flops / latency * 1e-9:.2f} TFlops")
     else:
         kernel = flashattn(batch, heads, seq_len, dim, is_causal)
         best_latency = kernel.latency
@@ -240,12 +244,12 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=1, help='batch size')
-    parser.add_argument('--heads', type=int, default=64, help='heads')
-    parser.add_argument('--seq_len', type=int, default=4096, help='sequence length')
-    parser.add_argument('--dim', type=int, default=128, help='dim')
-    parser.add_argument('--is_causal', action='store_true', help='causal')
-    parser.add_argument('--tune', action='store_true', help='tune configs')
-    parser.add_argument('--groups', type=int, default=16, help='groups')
+    parser.add_argument("--batch", type=int, default=1, help="batch size")
+    parser.add_argument("--heads", type=int, default=64, help="heads")
+    parser.add_argument("--seq_len", type=int, default=4096, help="sequence length")
+    parser.add_argument("--dim", type=int, default=128, help="dim")
+    parser.add_argument("--is_causal", action="store_true", help="causal")
+    parser.add_argument("--tune", action="store_true", help="tune configs")
+    parser.add_argument("--groups", type=int, default=16, help="groups")
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_len, args.dim, args.is_causal, args.groups, args.tune)

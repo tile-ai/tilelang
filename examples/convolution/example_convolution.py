@@ -26,22 +26,24 @@ def ref_program(stride, padding, dilation):
 
 
 @tilelang.jit(out_idx=[2])
-def convolution(N,
-                C,
-                H,
-                W,
-                F,
-                K,
-                S,
-                D,
-                P,
-                block_M,
-                block_N,
-                block_K,
-                num_stages,
-                threads,
-                dtype="float16",
-                accum_dtype="float"):
+def convolution(
+    N,
+    C,
+    H,
+    W,
+    F,
+    K,
+    S,
+    D,
+    P,
+    block_M,
+    block_N,
+    block_K,
+    num_stages,
+    threads,
+    dtype="float16",
+    accum_dtype="float",
+):
     KH, KW = K, K
     OH = (H + 2 * P - D * (K - 1) - 1) // S + 1
     OW = (W + 2 * P - D * (K - 1) - 1) // S + 1
@@ -56,8 +58,10 @@ def convolution(N,
             out: T.Tensor((N, OH, OW, F), dtype),
     ):
         with T.Kernel(
-                T.ceildiv(F, block_N), T.ceildiv(N * OH * OW, block_M),
-                threads=threads) as (bx, by):
+                T.ceildiv(F, block_N), T.ceildiv(N * OH * OW, block_M), threads=threads) as (
+                    bx,
+                    by,
+                ):
             data_shared = T.alloc_shared((block_M, block_K), dtype)
             kernel_shared = T.alloc_shared((block_K, block_N), dtype)
             out_local = T.alloc_fragment((block_M, block_N), accum_dtype)
@@ -97,18 +101,28 @@ def convolution(N,
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--n', type=int, default=128, help='n')
-    parser.add_argument('--c', type=int, default=128, help='c')
-    parser.add_argument('--h', type=int, default=64, help='h')
-    parser.add_argument('--w', type=int, default=64, help='w')
-    parser.add_argument('--f', type=int, default=128, help='f')
-    parser.add_argument('--k', type=int, default=3, help='k')
-    parser.add_argument('--s', type=int, default=1, help='s')
-    parser.add_argument('--d', type=int, default=1, help='d')
-    parser.add_argument('--p', type=int, default=1, help='p')
+    parser.add_argument("--n", type=int, default=128, help="n")
+    parser.add_argument("--c", type=int, default=128, help="c")
+    parser.add_argument("--h", type=int, default=64, help="h")
+    parser.add_argument("--w", type=int, default=64, help="w")
+    parser.add_argument("--f", type=int, default=128, help="f")
+    parser.add_argument("--k", type=int, default=3, help="k")
+    parser.add_argument("--s", type=int, default=1, help="s")
+    parser.add_argument("--d", type=int, default=1, help="d")
+    parser.add_argument("--p", type=int, default=1, help="p")
 
     args = parser.parse_args(argv)
-    N, C, H, W, F, K, S, D, P = args.n, args.c, args.h, args.w, args.f, args.k, args.s, args.d, args.p
+    N, C, H, W, F, K, S, D, P = (
+        args.n,
+        args.c,
+        args.h,
+        args.w,
+        args.f,
+        args.k,
+        args.s,
+        args.d,
+        args.p,
+    )
     a = torch.randn(N, H, W, C).cuda().half()
     b = torch.randn(K, K, C, F).cuda().half()
 

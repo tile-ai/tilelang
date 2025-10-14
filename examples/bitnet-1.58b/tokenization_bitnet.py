@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
@@ -18,9 +17,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Tokenization classes for LLaMA."""
+from __future__ import annotations
+
 import os
 from shutil import copyfile
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 
 import sentencepiece as spm
 
@@ -148,7 +149,7 @@ class BitnetTokenizer(PreTrainedTokenizer):
         bos_token="<s>",
         eos_token="</s>",
         pad_token=None,
-        sp_model_kwargs: Optional[Dict[str, Any]] = None,
+        sp_model_kwargs: dict[str, Any] | None = None,
         add_bos_token=True,
         add_eos_token=False,
         clean_up_tokenization_spaces=False,
@@ -159,14 +160,18 @@ class BitnetTokenizer(PreTrainedTokenizer):
         **kwargs,
     ):
         self.sp_model_kwargs = {} if sp_model_kwargs is None else sp_model_kwargs
-        bos_token = AddedToken(
-            bos_token, normalized=False, special=True) if isinstance(bos_token, str) else bos_token
-        eos_token = AddedToken(
-            eos_token, normalized=False, special=True) if isinstance(eos_token, str) else eos_token
-        unk_token = AddedToken(
-            unk_token, normalized=False, special=True) if isinstance(unk_token, str) else unk_token
-        pad_token = AddedToken(
-            pad_token, normalized=False, special=True) if isinstance(pad_token, str) else pad_token
+        bos_token = (
+            AddedToken(bos_token, normalized=False, special=True)
+            if isinstance(bos_token, str) else bos_token)
+        eos_token = (
+            AddedToken(eos_token, normalized=False, special=True)
+            if isinstance(eos_token, str) else eos_token)
+        unk_token = (
+            AddedToken(unk_token, normalized=False, special=True)
+            if isinstance(unk_token, str) else unk_token)
+        pad_token = (
+            AddedToken(pad_token, normalized=False, special=True)
+            if isinstance(pad_token, str) else pad_token)
 
         if legacy is None:
             logger.warning_once(
@@ -247,7 +252,7 @@ class BitnetTokenizer(PreTrainedTokenizer):
         return vocab
 
     # Copied from transformers.models.t5.tokenization_t5.T5Tokenizer.tokenize
-    def tokenize(self, text: "TextInput", **kwargs) -> List[str]:
+    def tokenize(self, text: TextInput, **kwargs) -> list[str]:
         """
         Converts a string to a list of tokens. If `self.legacy` is set to `False`, a prefix token is added unless the
         first token is special.
@@ -261,8 +266,8 @@ class BitnetTokenizer(PreTrainedTokenizer):
 
         tokens = super().tokenize(text, **kwargs)
 
-        if len(tokens
-              ) > 1 and tokens[0] == SPIECE_UNDERLINE and tokens[1] in self.all_special_tokens:
+        if (len(tokens) > 1 and tokens[0] == SPIECE_UNDERLINE and
+                tokens[1] in self.all_special_tokens):
             tokens = tokens[1:]
         return tokens
 
@@ -318,7 +323,7 @@ class BitnetTokenizer(PreTrainedTokenizer):
         out_string += self.sp_model.decode(current_sub_tokens)
         return out_string
 
-    def save_vocabulary(self, save_directory, filename_prefix: Optional[str] = None) -> Tuple[str]:
+    def save_vocabulary(self, save_directory, filename_prefix: str | None = None) -> tuple[str]:
         """
         Save the vocabulary and special tokens file to a directory.
 
@@ -332,9 +337,10 @@ class BitnetTokenizer(PreTrainedTokenizer):
         if not os.path.isdir(save_directory):
             logger.error(f"Vocabulary path ({save_directory}) should be a directory")
             return
-        out_vocab_file = os.path.join(save_directory,
-                                      (filename_prefix + "-" if filename_prefix else "") +
-                                      VOCAB_FILES_NAMES["vocab_file"])
+        out_vocab_file = os.path.join(
+            save_directory,
+            (filename_prefix + "-" if filename_prefix else "") + VOCAB_FILES_NAMES["vocab_file"],
+        )
 
         if os.path.abspath(self.vocab_file) != os.path.abspath(out_vocab_file) and os.path.isfile(
                 self.vocab_file):
@@ -357,10 +363,12 @@ class BitnetTokenizer(PreTrainedTokenizer):
 
         return output
 
-    def get_special_tokens_mask(self,
-                                token_ids_0: List[int],
-                                token_ids_1: Optional[List[int]] = None,
-                                already_has_special_tokens: bool = False) -> List[int]:
+    def get_special_tokens_mask(
+        self,
+        token_ids_0: list[int],
+        token_ids_1: list[int] | None = None,
+        already_has_special_tokens: bool = False,
+    ) -> list[int]:
         """
         Retrieve sequence ids from a token list that has no special tokens added. This method is called when adding
         special tokens using the tokenizer `prepare_for_model` method.
@@ -389,8 +397,8 @@ class BitnetTokenizer(PreTrainedTokenizer):
                 ([0] * len(token_ids_1)) + eos_token_id)
 
     def create_token_type_ids_from_sequences(self,
-                                             token_ids_0: List[int],
-                                             token_ids_1: Optional[List[int]] = None) -> List[int]:
+                                             token_ids_0: list[int],
+                                             token_ids_1: list[int] | None = None) -> list[int]:
         """
         Creates a mask from the two sequences passed to be used in a sequence-pair classification task. An ALBERT
         sequence pair mask has the following format:

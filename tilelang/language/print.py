@@ -179,7 +179,7 @@ def print(obj: Any, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> 
                 elems *= dim
 
             # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
-            condition = (tx == main_lane and ty == 0 and tz == 0)
+            condition = tx == main_lane and ty == 0 and tz == 0
             if not msg:
                 msg = f"buffer<{buffer.name}, {buffer.dtype}>"
             return print_fragment_buffer_with_condition(condition, buffer, elems, msg)
@@ -190,7 +190,7 @@ def print(obj: Any, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> 
                 elems *= dim
 
             # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
-            condition = (tx == main_lane and ty == 0 and tz == 0)
+            condition = tx == main_lane and ty == 0 and tz == 0
             if not msg:
                 msg = f"buffer<{buffer.name}, {buffer.dtype}>"
             return print_shared_buffer_with_condition(condition, buffer, elems, msg)

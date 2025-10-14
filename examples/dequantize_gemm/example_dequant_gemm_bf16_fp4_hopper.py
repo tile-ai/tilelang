@@ -24,6 +24,7 @@ def get_configs():
         the parameter name to its chosen value.
     """
     import itertools
+
     iter_params = dict(
         block_M=[64, 128, 256],
         block_N=[64, 128, 256],
@@ -42,53 +43,55 @@ def get_configs():
     out_idx=[-1],
     pass_configs={
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     },
 )
-def matmul(M,
-           N,
-           K,
-           in_dtype,
-           out_dtype,
-           accum_dtype,
-           source_format='uint',
-           num_bits=4,
-           fast_dequant=True,
-           block_M=256,
-           block_N=128,
-           block_K=128,
-           num_stages=2,
-           threads=256,
-           split=1):
+def matmul(
+    M,
+    N,
+    K,
+    in_dtype,
+    out_dtype,
+    accum_dtype,
+    source_format="uint",
+    num_bits=4,
+    fast_dequant=True,
+    block_M=256,
+    block_N=128,
+    block_K=128,
+    num_stages=2,
+    threads=256,
+    split=1,
+):
     """
-           Builds a parameterized TileLang/TIR matrix-multiplication kernel that dequantizes 4-bit FP inputs to BF16 on-the-fly and computes C = A @ B^T.
+    Builds a parameterized TileLang/TIR matrix-multiplication kernel that dequantizes 4-bit FP inputs to BF16 on-the-fly and computes C = A @ B^T.
 
-           This function returns a tiled, autotunable prim_func implementing a block-wise GEMM with shared-memory buffering and a pipelined K-loop. The kernel accepts:
-           - A: dense input of shape (M, K) with dtype `in_dtype`.
-           - B: packed quantized input of shape (N, QK) where QK = K / (8 / num_bits) stored as `uint8`.
-           - C: output of shape (M, N) with dtype `out_dtype`.
+    This function returns a tiled, autotunable prim_func implementing a block-wise GEMM with shared-memory buffering and a pipelined K-loop. The kernel accepts:
+    - A: dense input of shape (M, K) with dtype `in_dtype`.
+    - B: packed quantized input of shape (N, QK) where QK = K / (8 / num_bits) stored as `uint8`.
+    - C: output of shape (M, N) with dtype `out_dtype`.
 
-           The generated kernel supports two dequantization paths:
-           - fast_dequant (fast_dequant=True): calls an external mxfp dequantization intrinsic (twiddling-based) loaded from a C source returned by get_mxfp_intrin_group.
-           - simple dequant (fast_dequant=False): performs a pure-TIR FP4 -> BF16 conversion per element.
+    The generated kernel supports two dequantization paths:
+    - fast_dequant (fast_dequant=True): calls an external mxfp dequantization intrinsic (twiddling-based) loaded from a C source returned by get_mxfp_intrin_group.
+    - simple dequant (fast_dequant=False): performs a pure-TIR FP4 -> BF16 conversion per element.
 
-           Important behavior and requirements:
-           - num_bits (default 4) is the bit-width of the quantized elements; storage_dtype is uint8 and num_elems_per_byte = 8 // num_bits.
-           - QK = K // num_elems_per_byte and Block_QK = block_K // num_elems_per_byte determine B and shared-buffer shapes.
-           - Asserts that K % (block_K * split) == 0; K must be divisible by block_K * split for the tiling to be valid.
-           - When fast_dequant is True, a valid mxfp intrinsic group (C source and function name) must be available via tilelang.quantize.get_mxfp_intrin_group.
-           - The kernel launches a 2D grid over ceildiv(N, block_N) and ceildiv(M, block_M) and uses `threads` threads per block with `num_stages` pipeline stages.
+    Important behavior and requirements:
+    - num_bits (default 4) is the bit-width of the quantized elements; storage_dtype is uint8 and num_elems_per_byte = 8 // num_bits.
+    - QK = K // num_elems_per_byte and Block_QK = block_K // num_elems_per_byte determine B and shared-buffer shapes.
+    - Asserts that K % (block_K * split) == 0; K must be divisible by block_K * split for the tiling to be valid.
+    - When fast_dequant is True, a valid mxfp intrinsic group (C source and function name) must be available via tilelang.quantize.get_mxfp_intrin_group.
+    - The kernel launches a 2D grid over ceildiv(N, block_N) and ceildiv(M, block_M) and uses `threads` threads per block with `num_stages` pipeline stages.
 
-           Parameters that alter kernel layout/behavior (brief):
-           - block_M, block_N, block_K: tile sizes for M, N, and K dimensions.
-           - num_stages: number of software pipeline stages for the K-loop.
-           - threads: number of threads used per kernel block.
-           - split: extra K-splitting factor; K must be divisible by block_K * split.
-           - source_format, num_bits: describe the quantized data layout passed to the mxfp intrinsics.
+    Parameters that alter kernel layout/behavior (brief):
+    - block_M, block_N, block_K: tile sizes for M, N, and K dimensions.
+    - num_stages: number of software pipeline stages for the K-loop.
+    - threads: number of threads used per kernel block.
+    - split: extra K-splitting factor; K must be divisible by block_K * split.
+    - source_format, num_bits: describe the quantized data layout passed to the mxfp intrinsics.
 
-           Returns:
-               A TileLang/TIR prim_func (the compiled `main`) implementing the described dequantize-then-GEMM kernel.
-           """
+    Returns:
+        A TileLang/TIR prim_func (the compiled `main`) implementing the described dequantize-then-GEMM kernel.
+    """
     num_elems_per_byte = 8 // num_bits
     storage_dtype = "uint8"
 
@@ -189,8 +192,8 @@ def matmul(M,
                 # Finally, store the dequantized data to shared memory.
                 for v in T.vectorized(0, local_size):
                     index = i * threads * local_size + tx * local_size + v
-                    B_dequantize_shared[index // block_K,
-                                        index % block_K] = B_dequantize_local_thread[v]
+                    B_dequantize_shared[index // block_K, index % block_K] = (
+                        B_dequantize_local_thread[v])
 
         return fast_dequant_bf16_fp4_twiddling
 
@@ -218,27 +221,27 @@ def matmul(M,
         def _tir_u8_to_f4_to_bf16(nbit: int, val: tir.PrimExpr, pos: tir.PrimExpr,
                                   scale: tir.PrimExpr, dtype: str):
             """
-                Convert a 4-bit FP4 value packed in a uint8 byte into a bfloat16 value.
+            Convert a 4-bit FP4 value packed in a uint8 byte into a bfloat16 value.
 
-                This helper extracts the 4-bit field located at the bit position `pos` within the
-                byte `val`, interprets it as an FP4 (sign, exponent, mantissa) value, applies an
-                exponent `scale` offset to align it with bfloat16 exponent bias, clamps the
-                resulting exponent to 8 bits, and returns the assembled bfloat16 bit pattern.
+            This helper extracts the 4-bit field located at the bit position `pos` within the
+            byte `val`, interprets it as an FP4 (sign, exponent, mantissa) value, applies an
+            exponent `scale` offset to align it with bfloat16 exponent bias, clamps the
+            resulting exponent to 8 bits, and returns the assembled bfloat16 bit pattern.
 
-                Parameters:
-                    nbit (int): Number of bits in the packed element; must be 4.
-                    val (tir.PrimExpr): A uint8 value containing packed FP4 elements.
-                    pos (tir.PrimExpr): Index (0-based) of which FP4 nibble inside `val` to extract.
-                    scale (tir.PrimExpr): Exponent offset applied when converting FP4 exponent to bfloat16.
-                    dtype (str): Target dtype string; must be "bfloat16".
+            Parameters:
+                nbit (int): Number of bits in the packed element; must be 4.
+                val (tir.PrimExpr): A uint8 value containing packed FP4 elements.
+                pos (tir.PrimExpr): Index (0-based) of which FP4 nibble inside `val` to extract.
+                scale (tir.PrimExpr): Exponent offset applied when converting FP4 exponent to bfloat16.
+                dtype (str): Target dtype string; must be "bfloat16".
 
-                Returns:
-                    tir.PrimExpr: A bfloat16-typed PrimExpr containing the converted value.
+            Returns:
+                tir.PrimExpr: A bfloat16-typed PrimExpr containing the converted value.
 
-                Notes:
-                    - The function asserts `nbit == 4`, `dtype == "bfloat16"`, and that `val.dtype` is "uint8".
-                    - The conversion uses a fixed mapping from FP4 exponent/mantissa layout into bfloat16
-                    bit fields and clamps the computed exponent to fit into 8 bits.
+            Notes:
+                - The function asserts `nbit == 4`, `dtype == "bfloat16"`, and that `val.dtype` is "uint8".
+                - The conversion uses a fixed mapping from FP4 exponent/mantissa layout into bfloat16
+                bit fields and clamps the computed exponent to fit into 8 bits.
             """
             assert nbit == 4
             assert dtype == "bfloat16"
@@ -254,8 +257,10 @@ def matmul(M,
             e_bf16 = T.min(e_bf16 + scale, tir.const((1 << 8) - 1, "uint16"))
             m_f4 = f4 & tir.const(1, "uint16")
             val_bf16 = tir.reinterpret(
-                "bfloat16", ((((s << tir.const(8, "uint16")) | e_bf16) << tir.const(7, "uint16"))
-                             | (m_f4 << tir.const(6, "uint16"))).astype("uint16"))
+                "bfloat16",
+                ((((s << tir.const(8, "uint16")) | e_bf16) << tir.const(7, "uint16"))
+                 | (m_f4 << tir.const(6, "uint16"))).astype("uint16"),
+            )
             return val_bf16
 
         @T.macro
@@ -297,27 +302,27 @@ def matmul(M,
             C: T.Tensor((M, N), out_dtype),
     ):
         """
-            Kernel entry for the tiled, pipelined matmul used by the generated prim_func.
+        Kernel entry for the tiled, pipelined matmul used by the generated prim_func.
 
-            This function implements a block-wise GEMM over a 2D grid (grid dims: ceildiv(N, block_N) x ceildiv(M, block_M)) with a thread block of `threads`. For each output block it:
-            - Allocates shared buffers for A, the packed/quantized B, and a dequantized B tile.
-            - Allocates a fragment accumulator (C_local) and a shared output tile (C_shared) with a swizzled layout.
-            - Pipelines over K in chunks of `block_K` for `num_stages` stages:
-              - Loads A and packed B tiles into shared memory.
-              - Dequantizes B into B_dequantize_shared using either the fast (twiddling/external) or the simple (pure-TIR) dequantization routine.
-              - Performs a GEMM accumulating into C_local with B transposed.
-            - Stores the accumulated block from C_local back to the global output C via C_shared.
+        This function implements a block-wise GEMM over a 2D grid (grid dims: ceildiv(N, block_N) x ceildiv(M, block_M)) with a thread block of `threads`. For each output block it:
+        - Allocates shared buffers for A, the packed/quantized B, and a dequantized B tile.
+        - Allocates a fragment accumulator (C_local) and a shared output tile (C_shared) with a swizzled layout.
+        - Pipelines over K in chunks of `block_K` for `num_stages` stages:
+          - Loads A and packed B tiles into shared memory.
+          - Dequantizes B into B_dequantize_shared using either the fast (twiddling/external) or the simple (pure-TIR) dequantization routine.
+          - Performs a GEMM accumulating into C_local with B transposed.
+        - Stores the accumulated block from C_local back to the global output C via C_shared.
 
-            Parameters:
-            - A: input tile of shape (M, K) with dtype `in_dtype`.
-            - B: packed/quantized input of shape (N, QK) with storage dtype `storage_dtype` (quantized FP4 packing).
-            - C: output tensor of shape (M, N) with dtype `out_dtype`.
+        Parameters:
+        - A: input tile of shape (M, K) with dtype `in_dtype`.
+        - B: packed/quantized input of shape (N, QK) with storage dtype `storage_dtype` (quantized FP4 packing).
+        - C: output tensor of shape (M, N) with dtype `out_dtype`.
 
-            Side effects:
-            - Writes the computed output block into the global tensor `C`.
-            - Uses and updates shared memory buffers and per-thread accumulators.
+        Side effects:
+        - Writes the computed output block into the global tensor `C`.
+        - Uses and updates shared memory buffers and per-thread accumulators.
 
-            No value is returned.
+        No value is returned.
         """
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
@@ -426,15 +431,16 @@ def main(m=256, n=256, k=256, fast_dequant=True, tune=False):
             block_K=128,
             num_stages=2,
             threads=256,
-            split=1)
+            split=1,
+        )
     profiler = kernel.get_profiler(tilelang.TensorSupplyType.Auto)
     if fast_dequant:
         profiler.assert_allclose(ref_program_twiddling, rtol=0.01, atol=0.01)
     else:
         profiler.assert_allclose(ref_program_simple, rtol=0.01, atol=0.01)
     latency = profiler.do_bench(warmup=500)
-    print("Tile-lang: {:.2f} ms".format(latency))
-    print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"Tile-lang: {latency:.2f} ms")
+    print(f"Tile-lang: {total_flops / latency * 1e-9:.2f} TFlops")
 
 
 if __name__ == "__main__":

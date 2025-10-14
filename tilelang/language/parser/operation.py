@@ -17,8 +17,7 @@
 # This file is modified from the original version,
 # which is part of the TVM project (https://tvm.apache.org/).
 """The tir expression operation registration"""
-
-from typing import Type
+from __future__ import annotations
 
 from tvm import tir
 from tvm.ffi.runtime_ctypes import DataType, DataTypeCode
@@ -28,7 +27,7 @@ from tvm.tir.expr import FloatImm
 from tvm.script.parser._core import OpMethod, doc, register_op
 
 
-def _register_expr_op(ty: Type):  # pylint: disable=invalid-name
+def _register_expr_op(ty: type):  # pylint: disable=invalid-name
     ty._dispatch_type = ty  # pylint: disable=protected-access
 
     def _and(a, b):
@@ -58,7 +57,6 @@ def _register_expr_op(ty: Type):  # pylint: disable=invalid-name
         return dtype[0:index]
 
     def _auto_broadcast(a, b, op):
-
         if isinstance(a, int):
             if hasattr(b, "dtype"):
                 if (DataType(b.dtype).type_code == DataTypeCode.INT or
@@ -88,10 +86,10 @@ def _register_expr_op(ty: Type):  # pylint: disable=invalid-name
 
         if DataType(a.dtype).lanes == DataType(b.dtype).lanes:
             return op(a, b)
-        elif (DataType(a.dtype).lanes == 1 and DataType(a.dtype).lanes != DataType(b.dtype).lanes):
+        elif DataType(a.dtype).lanes == 1 and DataType(a.dtype).lanes != DataType(b.dtype).lanes:
             broadcast_a = tir.Broadcast(a, DataType(b.dtype).lanes)
             return op(broadcast_a, b)
-        elif (DataType(b.dtype).lanes == 1 and DataType(a.dtype).lanes != DataType(b.dtype).lanes):
+        elif DataType(b.dtype).lanes == 1 and DataType(a.dtype).lanes != DataType(b.dtype).lanes:
             broadcast_b = tir.Broadcast(b, DataType(a.dtype).lanes)
             return op(a, broadcast_b)
         else:
@@ -115,7 +113,7 @@ def _register_expr_op(ty: Type):  # pylint: disable=invalid-name
     def _ge(a, b):
         return _auto_broadcast(a, b, tir.GE)
 
-    def r(op: Type, i: int, m: OpMethod):  # pylint: disable=invalid-name
+    def r(op: type, i: int, m: OpMethod):  # pylint: disable=invalid-name
         register_op(ty, op, i)(m)
 
     for i in [0, 1]:

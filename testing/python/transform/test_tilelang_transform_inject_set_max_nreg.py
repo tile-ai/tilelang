@@ -36,10 +36,13 @@ def test_inject_set_max_nreg():
                     if v - 128 == 0:
                         T.tma_load(
                             T.create_tma_descriptor(6, 2, A.data, 512, 512, 2, 1024, 32, 64, 1, 1,
-                                                    0, 2, 2, 0), T.get_mbarrier(k % 3),
+                                                    0, 2, 2, 0),
+                            T.get_mbarrier(k % 3),
                             T.tvm_access_ptr(
                                 T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 2),
-                            k * 32, by * 64)
+                            k * 32,
+                            by * 64,
+                        )
                     T.evaluate(
                         tir.Call("handle", "tir.ptx_arrive_barrier", [T.get_mbarrier(k % 3)]))
             else:
@@ -47,12 +50,14 @@ def test_inject_set_max_nreg():
                 for k in range(16):
                     T.mbarrier_wait_parity(T.get_mbarrier(k % 3), k // 3 % 2)
                     T.call_extern(
-                        "handle", "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
+                        "handle",
+                        "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
                         T.tvm_access_ptr(
                             T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 1),
                         T.tvm_access_ptr(
                             T.type_annotation("float16"), B_shared.data, k % 3 * 2048, 2048, 1),
-                        T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3))
+                        T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3),
+                    )
                     T.evaluate(
                         tir.Call("handle", "tir.ptx_arrive_barrier", [T.get_mbarrier(k % 3 + 3)]))
 
@@ -67,15 +72,15 @@ def test_inject_set_max_nreg():
     set_max_nreg_calls = []
 
     def collect_set_max_nreg(stmt):
-        if (isinstance(stmt, tvm.tir.Evaluate) and hasattr(stmt.value, 'op') and
-                hasattr(stmt.value.op, 'name') and stmt.value.op.name == "tl.set_max_nreg"):
+        if (isinstance(stmt, tvm.tir.Evaluate) and hasattr(stmt.value, "op") and
+                hasattr(stmt.value.op, "name") and stmt.value.op.name == "tl.set_max_nreg"):
             set_max_nreg_calls.append(stmt.value)
 
     tvm.tir.stmt_functor.post_order_visit(main_func.body, collect_set_max_nreg)
 
     # We should have at least 2 set_max_nreg calls (one for producer, one for consumer)
-    assert len(set_max_nreg_calls
-              ) >= 2, f"Expected at least 2 set_max_nreg calls, got {len(set_max_nreg_calls)}"
+    assert len(set_max_nreg_calls) >= 2, (
+        f"Expected at least 2 set_max_nreg calls, got {len(set_max_nreg_calls)}")
 
     print("InjectSetMaxNReg test passed!")
 
@@ -116,16 +121,16 @@ def test_inject_set_max_nreg_no_set_max_nreg():
     set_max_nreg_calls = []
 
     def collect_set_max_nreg(stmt):
-        if (isinstance(stmt, tvm.tir.Evaluate) and hasattr(stmt.value, 'op') and
-                hasattr(stmt.value.op, 'name') and stmt.value.op.name == "tl.set_max_nreg"):
+        if (isinstance(stmt, tvm.tir.Evaluate) and hasattr(stmt.value, "op") and
+                hasattr(stmt.value.op, "name") and stmt.value.op.name == "tl.set_max_nreg"):
             set_max_nreg_calls.append(stmt.value)
 
     tvm.tir.stmt_functor.post_order_visit(main_func.body, collect_set_max_nreg)
 
     # Should have no set_max_nreg calls when no_set_max_nreg is present
-    assert len(
-        set_max_nreg_calls
-    ) == 0, f"Expected 0 set_max_nreg calls when no_set_max_nreg is present, got {len(set_max_nreg_calls)}"
+    assert len(set_max_nreg_calls) == 0, (
+        f"Expected 0 set_max_nreg calls when no_set_max_nreg is present, got {len(set_max_nreg_calls)}"
+    )
 
     print("InjectSetMaxNReg with no_set_max_nreg test passed!")
 

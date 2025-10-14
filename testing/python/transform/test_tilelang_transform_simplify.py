@@ -76,6 +76,7 @@ def test_matmul():
     kernel = tl.compile(mod["main"], out_idx=[2])
 
     import torch
+
     a = torch.randn(1024, 1024, dtype=torch.float16).cuda().half()
     b = torch.randn(1024, 1024, dtype=torch.float16).cuda().half()
     c = kernel(a, b)

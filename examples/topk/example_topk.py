@@ -49,7 +49,6 @@ def tl_topk(
                 T.reduce_max(expand_max_idx, max_idx, dim=1, clear=True)
 
                 for i, j in T.Parallel(blk_m, N):
-
                     logits_frag[i, j] = T.if_then_else(max_val[i] == logits_frag[i, j], -10000.0,
                                                        logits_frag[i, j])
 
@@ -61,7 +60,6 @@ def tl_topk(
 
 
 def ref_program(logits, top_k):
-
     top_k_gates, top_k_indices = logits.topk(top_k, dim=1)
 
     return top_k_gates, top_k_indices.to(torch.int32)

@@ -19,7 +19,9 @@
 # Modifications Copyright (c) Microsoft.
 # The code below is mostly copied from apache/tvm common_schedules.py in dlight.
 """Common schedule strategies for TIR."""
-from typing import Callable, List
+from __future__ import annotations
+
+from typing import Callable
 
 from tvm import tir
 from .utils import retrieve_func_from_module
@@ -28,7 +30,7 @@ from .analysis import BlockInfo
 
 def get_block(
     sch: tir.Schedule,
-    blocks: List[BlockInfo],
+    blocks: list[BlockInfo],
     name: str,
 ):
     """Get the target block from a schedule.
@@ -56,7 +58,7 @@ def get_block(
 
 def get_output_blocks(
     sch: tir.Schedule,
-    blocks: List[BlockInfo],
+    blocks: list[BlockInfo],
 ):
     """Get the output blocks of a schedule.
 
@@ -89,8 +91,8 @@ def get_output_blocks(
 
 def try_inline(
     sch: tir.Schedule,
-    blocks: List[BlockInfo],
-) -> List[BlockInfo]:
+    blocks: list[BlockInfo],
+) -> list[BlockInfo]:
     """Try to inline as many blocks as possible, and return the remaining blocks.
 
     Parameters
@@ -127,8 +129,8 @@ def try_inline(
 
 def try_inline_contiguous_spatial(
     sch: tir.Schedule,
-    block_infos: List[BlockInfo],
-) -> List[BlockInfo]:
+    block_infos: list[BlockInfo],
+) -> list[BlockInfo]:
     """Try to inline contiguous spatial blocks in a schedule
 
     Parameters
@@ -161,3 +163,11 @@ def try_inline_contiguous_spatial(
     if spatial_blocks:
         results.extend(try_inline(sch, spatial_blocks))
     return results
+
+
+__all__ = [
+    get_block,
+    get_output_blocks,
+    try_inline,
+    try_inline_contiguous_spatial,
+]

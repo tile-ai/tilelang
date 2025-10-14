@@ -16,8 +16,8 @@ def ref_program(A, B, BlockMask, block_M, block_N, block_K):
                     accu += A[i * block_M:(i + 1) * block_M, k * block_K:(k + 1) * block_K].to(
                         torch.float32) @ B[k * block_K:(k + 1) * block_K,
                                            j * block_N:(j + 1) * block_N].to(torch.float32)
-            ref_c[i * block_M:(i + 1) * block_M, j * block_N:(j + 1) * block_N] = (
-                accu.to(torch.float16))
+            ref_c[i * block_M:(i + 1) * block_M,
+                  j * block_N:(j + 1) * block_N] = accu.to(torch.float16)
     return ref_c
 
 
@@ -35,7 +35,6 @@ def blocksparse_matmul_global(
     dtype="float16",
     accum_dtype="float",
 ):
-
     block_mask_shape = (M // block_M, N // block_N, K // block_K, condition_dim)
 
     @T.prim_func
@@ -80,7 +79,6 @@ def blocksparse_matmul_shared(
     dtype="float16",
     accum_dtype="float",
 ):
-
     block_mask_shape = (M // block_M, N // block_N, K // block_K, condition_dim)
 
     @T.prim_func
@@ -130,7 +128,6 @@ def blocksparse_matmul_local(
     dtype="float16",
     accum_dtype="float",
 ):
-
     block_mask_shape = (M // block_M, N // block_N, K // block_K, condition_dim)
 
     @T.prim_func
@@ -237,7 +234,8 @@ def run_block_sparse_matmul_shared(M=1024, N=1024, K=1024, sparsity=0.5, conditi
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     # Create block mask with desired sparsity
     mask_shape = (M // block_M, N // block_N, K // block_K)
     block_mask = torch.rand(mask_shape).cuda() > sparsity
@@ -284,7 +282,8 @@ def run_block_sparse_matmul_local(M=1024, N=1024, K=1024, sparsity=0.5, conditio
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     # Create block mask with desired sparsity
     mask_shape = (M // block_M, N // block_N, K // block_K)
     block_mask = torch.rand(mask_shape).cuda() > sparsity

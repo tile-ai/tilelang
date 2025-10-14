@@ -9,10 +9,16 @@ import argparse
 @tilelang.jit(
     out_idx=[-2, -1],
     compile_flags=[
-        "-O3", "-Wno-deprecated-declarations", "-U__CUDA_NO_HALF_OPERATORS__",
-        "-U__CUDA_NO_HALF_CONVERSIONS__", "-U__CUDA_NO_HALF2_OPERATORS__",
-        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "--expt-relaxed-constexpr", "--expt-extended-lambda",
-        "--ptxas-options=-v,--register-usage-level=10", "-DNDEBUG"
+        "-O3",
+        "-Wno-deprecated-declarations",
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_HALF2_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "--expt-relaxed-constexpr",
+        "--expt-extended-lambda",
+        "--ptxas-options=-v,--register-usage-level=10",
+        "-DNDEBUG",
     ],
 )
 def sparse_mla_fwd(
@@ -32,12 +38,13 @@ def sparse_mla_fwd(
     num_stages=0,
     threads=384,
 ):
-    assert dim == tilelang.math.next_power_of_2(
-        dim), f"haven't check padding correctness yet, dim={dim}"
-    assert tail_dim == tilelang.math.next_power_of_2(
-        tail_dim), f"haven't check padding correctness yet, dim={tail_dim}"
-    assert is_causal == True, 'non-casual is not supported'
-    assert topk % block_I == 0, 'otherwise will load some index=0 thus causing wrong kv to be loaded'
+    assert dim == tilelang.math.next_power_of_2(dim), (
+        f"haven't check padding correctness yet, dim={dim}")
+    assert tail_dim == tilelang.math.next_power_of_2(tail_dim), (
+        f"haven't check padding correctness yet, dim={tail_dim}")
+    assert is_causal == True, "non-casual is not supported"
+    assert topk % block_I == 0, (
+        "otherwise will load some index=0 thus causing wrong kv to be loaded")
     if sm_scale is None:
         sm_scale = (1.0 / (dim + tail_dim))**0.5 * 1.44269504  # log2(e)
     else:
@@ -57,15 +64,17 @@ def sparse_mla_fwd(
     H = head_kv
     padded_H = max(tilelang.math.next_power_of_2(head_kv), 16)
     if padded_H != H:
-        assert kv_group == 1, 'here we solve the H padding automatically, other wise you should handle Q copy and Output copy with your mask (when kv_group == 1, use g_i * padded_H:(g_i+1) * padded_H would be handled automatically)'
+        assert kv_group == 1, (
+            "here we solve the H padding automatically, other wise you should handle Q copy and Output copy with your mask (when kv_group == 1, use g_i * padded_H:(g_i+1) * padded_H would be handled automatically)"
+        )
     BI = block_I
     NI = tilelang.cdiv(topk, block_I)
-    assert NI % 2 == 0, 'NI should be a multiple of 2'
+    assert NI % 2 == 0, "NI should be a multiple of 2"
     D = dim
     D_tail = tail_dim
     KV_stride = kv_stride
     if head_kv > 64:
-        assert head_kv % 64 == 0, 'head_kv should be a multiple of 64'
+        assert head_kv % 64 == 0, "head_kv should be a multiple of 64"
         REPLICATE_H = head_kv // 64
     else:
         REPLICATE_H = 1
@@ -85,7 +94,8 @@ def sparse_mla_fwd(
             (seq_len - kv_stride + 1 if CP0 else seq_len) * REPLICATE_H,
                 batch,
                 kv_group,
-                threads=threads) as (bx, by, bz):
+                threads=threads,
+        ) as (bx, by, bz):
             Q_shared_l = T.alloc_shared([H_per_block, D // 2], dtype)
             Q_shared_r = T.alloc_shared([H_per_block, D // 2], dtype)
             Q_tail_shared = T.alloc_shared([H_per_block, D_tail], dtype)
@@ -122,8 +132,8 @@ def sparse_mla_fwd(
             bar_sScale_and_sS_free = T.alloc_barrier(arrive_count=256)
 
             b_i, g_i = by, bz
-            s_i = (bx + (KV_stride - 1 if CP0 else 0)) if REPLICATE_H == 1 else (
-                bx // REPLICATE_H + (KV_stride - 1 if CP0 else 0))
+            s_i = ((bx + (KV_stride - 1 if CP0 else 0)) if REPLICATE_H == 1 else
+                   (bx // REPLICATE_H + (KV_stride - 1 if CP0 else 0)))
             q_i = q_start_index_s[0] + s_i
             max_kv_i = (q_i + 1 - KV_stride) // KV_stride
 
@@ -140,12 +150,11 @@ def sparse_mla_fwd(
             if tx < 128:
                 T.set_max_nreg(240, 1)
                 T.fill(sumexp, 0)
-                T.fill(m_i, -2**30)  # avoid -inf - inf to cause nan
+                T.fill(m_i, -(2**30))  # avoid -inf - inf to cause nan
                 T.fill(acc_o_l, 0)
                 T.barrier_wait(bar_q, 0)
 
                 for i_i in T.serial(T.ceildiv(NI, 2)):
-
                     # Buffer 0
                     T.barrier_wait(bar_k_0_ready[0], (i_i & 1))
 
@@ -268,14 +277,24 @@ def sparse_mla_fwd(
                             with T.attr("default", "async_scope", 1):
                                 for u in T.serial(4):
                                     for v in T.vectorized(8):
-                                        KV_shared_0_l[r * 16 + (tx - 256) // 8,
-                                                      64 * u + (tx - 256) % 8 * 8 +
-                                                      v] = KV[b_i, indices_local[0], g_i,
-                                                              64 * u + (tx - 256) % 8 * 8 + v]
-                                        KV_shared_0_r[r * 16 + (tx - 256) // 8,
-                                                      64 * u + (tx - 256) % 8 * 8 +
-                                                      v] = KV[b_i, indices_local[0], g_i, D // 2 +
-                                                              64 * u + (tx - 256) % 8 * 8 + v]
+                                        KV_shared_0_l[
+                                            r * 16 + (tx - 256) // 8,
+                                            64 * u + (tx - 256) % 8 * 8 + v,
+                                        ] = KV[
+                                            b_i,
+                                            indices_local[0],
+                                            g_i,
+                                            64 * u + (tx - 256) % 8 * 8 + v,
+                                        ]
+                                        KV_shared_0_r[
+                                            r * 16 + (tx - 256) // 8,
+                                            64 * u + (tx - 256) % 8 * 8 + v,
+                                        ] = KV[
+                                            b_i,
+                                            indices_local[0],
+                                            g_i,
+                                            D // 2 + 64 * u + (tx - 256) % 8 * 8 + v,
+                                        ]
                             with T.attr("default", "async_scope", 1):
                                 for v in T.vectorized(8):
                                     K_tail_shared_0[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 +
@@ -293,14 +312,24 @@ def sparse_mla_fwd(
                             with T.attr("default", "async_scope", 1):
                                 for u in T.serial(4):
                                     for v in T.vectorized(8):
-                                        KV_shared_1_l[r * 16 + (tx - 256) // 8,
-                                                      64 * u + (tx - 256) % 8 * 8 +
-                                                      v] = KV[b_i, indices_local[0], g_i,
-                                                              64 * u + (tx - 256) % 8 * 8 + v]
-                                        KV_shared_1_r[r * 16 + (tx - 256) // 8,
-                                                      64 * u + (tx - 256) % 8 * 8 +
-                                                      v] = KV[b_i, indices_local[0], g_i, D // 2 +
-                                                              64 * u + (tx - 256) % 8 * 8 + v]
+                                        KV_shared_1_l[
+                                            r * 16 + (tx - 256) // 8,
+                                            64 * u + (tx - 256) % 8 * 8 + v,
+                                        ] = KV[
+                                            b_i,
+                                            indices_local[0],
+                                            g_i,
+                                            64 * u + (tx - 256) % 8 * 8 + v,
+                                        ]
+                                        KV_shared_1_r[
+                                            r * 16 + (tx - 256) // 8,
+                                            64 * u + (tx - 256) % 8 * 8 + v,
+                                        ] = KV[
+                                            b_i,
+                                            indices_local[0],
+                                            g_i,
+                                            D // 2 + 64 * u + (tx - 256) % 8 * 8 + v,
+                                        ]
                             with T.attr("default", "async_scope", 1):
                                 for v in T.vectorized(8):
                                     K_tail_shared_1[r * 16 + (tx - 256) // 8, (tx - 256) % 8 * 8 +
@@ -311,20 +340,22 @@ def sparse_mla_fwd(
     return main
 
 
-def sparse_mla_fwd_interface(q,
-                             kv,
-                             indices,
-                             q_start_index_s,
-                             kv_stride,
-                             sm_scale=None,
-                             is_casual=True,
-                             return_kernel=False,
-                             print_kernel=False):
+def sparse_mla_fwd_interface(
+    q,
+    kv,
+    indices,
+    q_start_index_s,
+    kv_stride,
+    sm_scale=None,
+    is_casual=True,
+    return_kernel=False,
+    print_kernel=False,
+):
     assert q.is_contiguous() and kv.is_contiguous() and indices.is_contiguous()
     batch, seq_len, heads, dim_plus_tail_dim = q.shape
     _, seq_len_kv, kv_group, _ = kv.shape
 
-    assert dim_plus_tail_dim == 576, 'you should assign dim otherwise'
+    assert dim_plus_tail_dim == 576, "you should assign dim otherwise"
     dim = 512
 
     assert kv.shape[-1] == dim_plus_tail_dim
@@ -334,11 +365,25 @@ def sparse_mla_fwd_interface(q,
     assert indices.shape == (batch, seq_len, kv_group, topk)
 
     if q_start_index_s != 0:
-        assert q_start_index_s > kv_stride, "If it is because each cp has too short length, you should fix the logic involving CP0 (cp_rank == 0), to make sure q with pos < KV_Stride - 1 is masked (or you may just ignore how this is handled if nan in these q's Out would not effect others, which is reported to be likely to happen by wangding)"
+        assert q_start_index_s > kv_stride, (
+            "If it is because each cp has too short length, you should fix the logic involving CP0 (cp_rank == 0), to make sure q with pos < KV_Stride - 1 is masked (or you may just ignore how this is handled if nan in these q's Out would not effect others, which is reported to be likely to happen by wangding)"
+        )
     CP0 = q_start_index_s == 0
 
-    kernel = sparse_mla_fwd(batch, seq_len, seq_len_kv, heads, dim, tail_dim, topk, kv_stride,
-                            kv_group, sm_scale, is_casual, CP0)
+    kernel = sparse_mla_fwd(
+        batch,
+        seq_len,
+        seq_len_kv,
+        heads,
+        dim,
+        tail_dim,
+        topk,
+        kv_stride,
+        kv_group,
+        sm_scale,
+        is_casual,
+        CP0,
+    )
     if print_kernel:
         print(kernel.get_kernel_source())
     out, lse = kernel(q, kv, indices,
@@ -365,7 +410,7 @@ def ref_sparse_mla_fwd_interface(q,
     if q_start_index_s is None:
         q_start_index_s = sk * kv_stride - sq
 
-    assert kv.shape[-1] == 576, 'you should assign dim otherwise'
+    assert kv.shape[-1] == 576, "you should assign dim otherwise"
     dim = 512
     k = kv
     v = kv[..., :dim]
@@ -397,28 +442,30 @@ def ref_sparse_mla_fwd_interface(q,
     return o.to(torch.bfloat16)
 
 
-def test_sparse_mla_fwd_pipelined(B=1,
-                                  S=4096,
-                                  SKV=8192,
-                                  H=128,
-                                  HKV=1,
-                                  DQK=576,
-                                  DV=512,
-                                  topk=2048,
-                                  dtype=torch.bfloat16,
-                                  q_start_s_index=1024,
-                                  check_correctness=True):
+def test_sparse_mla_fwd_pipelined(
+    B=1,
+    S=4096,
+    SKV=8192,
+    H=128,
+    HKV=1,
+    DQK=576,
+    DV=512,
+    topk=2048,
+    dtype=torch.bfloat16,
+    q_start_s_index=1024,
+    check_correctness=True,
+):
     KV_stride = 1
 
     torch.random.manual_seed(0)
-    q = torch.randn((B, S, H, DQK), dtype=dtype, device='cuda').requires_grad_(True) / 10
-    kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device='cuda').requires_grad_(True) / 10
+    q = torch.randn((B, S, H, DQK), dtype=dtype, device="cuda").requires_grad_(True) / 10
+    kv = torch.randn((B, SKV, HKV, DQK), dtype=dtype, device="cuda").requires_grad_(True) / 10
     q_start_s_index_t = torch.tensor([q_start_s_index], dtype=torch.int32, device="cuda")
 
     q.clamp_(-10, 10)
     kv.clamp_(-10, 10)
 
-    indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device='cuda')
+    indices = torch.full((B, S, HKV, topk), SKV, dtype=torch.int32, device="cuda")
     for b in range(B):
         for t in range(S):
             for h in range(HKV):
@@ -442,14 +489,15 @@ def test_sparse_mla_fwd_pipelined(B=1,
     torch.testing.assert_close(tl_out, ref_out, rtol=1e-3, atol=1e-3)
 
     from tilelang.profiler import do_bench
+
     ms = do_bench(
         fn,
         rep=10,
         warmup=10,
     )
     print(f"Average time: {ms:.3f} ms")
-    print(f'fwd io bandwidth = ', (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
-    print(f'fwd tflops = ', (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
+    print(f"fwd io bandwidth = ", (B * S * DQK * topk * 2) / (ms * 1e-3) / 1e12)
+    print(f"fwd tflops = ", (B * S * (DQK + DV) * topk * 2 * H) / (ms * 1e-3) / 1e12)
 
 
 if __name__ == "__main__":
@@ -457,8 +505,28 @@ if __name__ == "__main__":
     parser.add_argument("--test_correctness", action="store_true")
     args = parser.parse_args()
     if args.test_correctness:
-        B, S, SKV, H, HKV, DQK, DV, topk, dtype = 1, 1024, 8192, 128, 1, 576, 512, 2048, torch.bfloat16
+        B, S, SKV, H, HKV, DQK, DV, topk, dtype = (
+            1,
+            1024,
+            8192,
+            128,
+            1,
+            576,
+            512,
+            2048,
+            torch.bfloat16,
+        )
     else:
-        B, S, SKV, H, HKV, DQK, DV, topk, dtype = 1, 4096, 8192, 128, 1, 576, 512, 2048, torch.bfloat16
+        B, S, SKV, H, HKV, DQK, DV, topk, dtype = (
+            1,
+            4096,
+            8192,
+            128,
+            1,
+            576,
+            512,
+            2048,
+            torch.bfloat16,
+        )
     test_sparse_mla_fwd_pipelined(
         B, S, SKV, H, HKV, DQK, DV, topk, dtype, check_correctness=args.test_correctness)

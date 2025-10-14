@@ -56,7 +56,6 @@ def _fwd_kernel_inner(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
-
     mask_val = tl.load(block_mask_ptr + k_block_col_idx * stride_bmask_n)
 
     if mask_val == True:
@@ -73,7 +72,7 @@ def _fwd_kernel_inner(
         # the following is needed only when LAST_K_BLOCK or BLOCK_M < BLOCK_N
         if LAST_K_BLOCK:
             qk += tl.where(offs_m[:, None] + past_len >= (start_n + offs_n[None, :]), 0,
-                           float('-inf'))
+                           float("-inf"))
 
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
@@ -153,7 +152,7 @@ def _fwd_kernel(
     v_ptrs = V + off_v
     mask_ptrs = block_mask_ptr + start_m * stride_bmm
 
-    m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float('inf')
+    m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
@@ -191,24 +190,26 @@ def _fwd_kernel(
     acc = acc * l_recip
     acc = acc.to(Out.dtype.element_ty)
 
-    off_o = off_z * stride_oz + off_h * stride_oh + offs_m[:, None] * stride_om + offs_d[
-        None, :] * stride_od
+    off_o = (
+        off_z * stride_oz + off_h * stride_oh + offs_m[:, None] * stride_om +
+        offs_d[None, :] * stride_od)
     out_ptrs = Out + off_o
     tl.store(out_ptrs, acc, mask=offs_m[:, None] < N_CTX)
 
 
-def _forward(ctx,
-             q,
-             k,
-             v,
-             block_sparse_mask,
-             sm_scale,
-             BLOCK_M=64,
-             BLOCK_N=64,
-             num_warps=None,
-             num_stages=1,
-             out=None):
-
+def _forward(
+    ctx,
+    q,
+    k,
+    v,
+    block_sparse_mask,
+    sm_scale,
+    BLOCK_M=64,
+    BLOCK_N=64,
+    num_warps=None,
+    num_stages=1,
+    out=None,
+):
     assert q.shape[-1] == k.shape[-1] == v.shape[-1]
     assert k.shape[2] == v.shape[2]
     o = out if out is not None else torch.empty_like(q).contiguous()
@@ -271,15 +272,15 @@ block_sparse_triton_fn = _sparse_attention.apply
 
 def benchmark_topk_sparse_attention():
     from benchmark_configs import configs
+
     torch.manual_seed(0)
 
     # Config
     for BATCH, N_HEADS, SEQ_LEN, D_HEAD, TOPK, BLOCK in configs:
-
         # Create inputs
-        q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
-        k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
-        v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
+        q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+        k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+        v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
 
         sm_scale = 1.0 / (D_HEAD**0.5)
 
@@ -287,7 +288,7 @@ def benchmark_topk_sparse_attention():
         downsample_factor = BLOCK
         downsample_len = math.ceil(SEQ_LEN / downsample_factor)
         x_ds = torch.randn([BATCH, N_HEADS, downsample_len, downsample_len],
-                           device='cuda',
+                           device="cuda",
                            dtype=torch.bfloat16)
         x_ds[:, :, :, 0] = 100
         block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)

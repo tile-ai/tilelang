@@ -30,9 +30,11 @@ def get_sparse_attn_mask_from_threshold(x, threshold, use_dense_for_last_block=F
 
 
 @tilelang.jit(
-    out_idx=[4], pass_configs={
+    out_idx=[4],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_causal):
     block_M = 64
     block_N = 64
@@ -127,8 +129,10 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
                             past_len = seq_kv - seq_q
                             for i, j in T.Parallel(block_M, block_N):
                                 acc_s[i, j] = T.if_then_else(
-                                    bx * block_M + i + past_len >= k * block_N + j, 0,
-                                    -T.infinity(acc_s.dtype))
+                                    bx * block_M + i + past_len >= k * block_N + j,
+                                    0,
+                                    -T.infinity(acc_s.dtype),
+                                )
                         else:
                             T.clear(acc_s)
                         T.gemm(
@@ -136,10 +140,18 @@ def blocksparse_flashattn(batch, heads, seq_q, seq_kv, dim, downsample_len, is_c
                             K_shared,
                             acc_s,
                             transpose_B=True,
-                            policy=T.GemmWarpPolicy.FullRow)
+                            policy=T.GemmWarpPolicy.FullRow,
+                        )
 
-                        Softmax(acc_s, acc_s_cast, scores_max, scores_max_prev, scores_scale,
-                                scores_sum, logsum)
+                        Softmax(
+                            acc_s,
+                            acc_s_cast,
+                            scores_max,
+                            scores_max_prev,
+                            scores_scale,
+                            scores_sum,
+                            logsum,
+                        )
                         Rescale(acc_o, scores_scale)
                         T.copy(V[bz, by, k * block_N:(k + 1) * block_N, :], V_shared)
                         T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
@@ -163,9 +175,9 @@ def test_topk_sparse_attention():
     torch.manual_seed(0)
 
     # Create inputs
-    q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
-    k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
-    v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
+    q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
 
     sm_scale = 1.0 / (D_HEAD**0.5)
 
@@ -173,7 +185,7 @@ def test_topk_sparse_attention():
     downsample_factor = BLOCK
     downsample_len = math.ceil(SEQ_LEN / downsample_factor)
     x_ds = torch.randn([BATCH, N_HEADS, downsample_len, downsample_len],
-                       device='cuda',
+                       device="cuda",
                        dtype=torch.float16)
     x_ds[:, :, :, 0] = 100
     block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
@@ -185,22 +197,23 @@ def test_topk_sparse_attention():
 
     # Compute reference
     # Expand block mask to full attention matrix
-    full_mask = torch.kron(block_mask.float(), torch.ones(BLOCK, BLOCK, device='cuda'))
+    full_mask = torch.kron(block_mask.float(), torch.ones(BLOCK, BLOCK, device="cuda"))
     full_mask = full_mask[..., :SEQ_LEN, :SEQ_LEN].bool()
     full_mask = full_mask & torch.tril(torch.ones_like(full_mask))  # Apply causal
 
     # PyTorch reference implementation
-    attn = torch.einsum('bhsd,bhtd->bhst', q, k) * sm_scale
-    attn = attn.masked_fill(~full_mask, float('-inf'))
+    attn = torch.einsum("bhsd,bhtd->bhst", q, k) * sm_scale
+    attn = attn.masked_fill(~full_mask, float("-inf"))
     attn = F.softmax(attn, dim=-1)
-    ref_output = torch.einsum('bhst,bhtd->bhsd', attn, v)
+    ref_output = torch.einsum("bhst,bhtd->bhsd", attn, v)
 
     print("ref_output", ref_output)
     print("tilelang_output", tilelang_output)
 
     # Verify accuracy
-    assert torch.allclose(tilelang_output, ref_output, atol=1e-2, rtol=1e-2), \
-        "TileLang output doesn't match reference"
+    assert torch.allclose(
+        tilelang_output, ref_output, atol=1e-2,
+        rtol=1e-2), ("TileLang output doesn't match reference")
     print("Pass topk sparse attention test with qlen == klen")
 
 
@@ -213,15 +226,15 @@ def test_topk_sparse_attention_qlen_lt_klen():
     torch.manual_seed(0)
 
     # Create inputs.
-    q = torch.randn(BATCH, N_HEADS, Q_LEN, D_HEAD, device='cuda', dtype=torch.float16)
-    k = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device='cuda', dtype=torch.float16)
-    v = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device='cuda', dtype=torch.float16)
+    q = torch.randn(BATCH, N_HEADS, Q_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    k = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    v = torch.randn(BATCH, N_HEADS, K_LEN, D_HEAD, device="cuda", dtype=torch.float16)
     sm_scale = 1.0 / (D_HEAD**0.5)
 
     downsample_factor = BLOCK
     downsample_len = math.ceil(K_LEN / downsample_factor)  # number of blocks along one dimension
     x_ds = torch.randn(
-        BATCH, N_HEADS, downsample_len, downsample_len, device='cuda', dtype=torch.float16)
+        BATCH, N_HEADS, downsample_len, downsample_len, device="cuda", dtype=torch.float16)
     # Force the first column to be high so that the first block is always selected.
     x_ds[:, :, :, 0] = 100
     block_mask = get_sparse_attn_mask_from_topk(x_ds, topk=TOPK)
@@ -233,22 +246,22 @@ def test_topk_sparse_attention_qlen_lt_klen():
 
     past_len = K_LEN - Q_LEN
 
-    attn = torch.einsum('bhsd,bhtd->bhst', q, k) * sm_scale
+    attn = torch.einsum("bhsd,bhtd->bhst", q, k) * sm_scale
 
-    full_mask_full = torch.kron(block_mask.float(), torch.ones(BLOCK, BLOCK, device='cuda')).bool()
+    full_mask_full = torch.kron(block_mask.float(), torch.ones(BLOCK, BLOCK, device="cuda")).bool()
     full_mask_full = full_mask_full[..., :K_LEN, :K_LEN]
 
     effective_mask = full_mask_full[..., past_len:K_LEN, :]  # shape: (B, H, Q_LEN, K_LEN)
 
     i_global = torch.arange(past_len, K_LEN, device=k.device).unsqueeze(1)  # shape: (Q_LEN, 1)
     j_global = torch.arange(K_LEN, device=k.device).unsqueeze(0)  # shape: (1, K_LEN)
-    causal_mask = (j_global <= i_global)  # shape: (Q_LEN, K_LEN)
+    causal_mask = j_global <= i_global  # shape: (Q_LEN, K_LEN)
 
     final_mask = effective_mask & causal_mask  # shape: (B, H, Q_LEN, K_LEN)
 
-    attn = attn.masked_fill(~final_mask, float('-inf'))
+    attn = attn.masked_fill(~final_mask, float("-inf"))
     attn = F.softmax(attn, dim=-1)
-    ref_output = torch.einsum('bhst,bhtd->bhsd', attn, v)
+    ref_output = torch.einsum("bhst,bhtd->bhsd", attn, v)
 
     print("ref_output", ref_output)
     print("tilelang_output", tilelang_output)

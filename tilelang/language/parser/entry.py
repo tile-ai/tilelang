@@ -18,6 +18,7 @@
 # which is part of the TVM project (https://tvm.apache.org/).
 # ruff: noqa
 """The entry point of TVM parser for tir."""
+
 import inspect
 from typing import Callable, Optional, Union
 

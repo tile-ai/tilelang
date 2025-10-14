@@ -1,11 +1,11 @@
 # Adapted from tilelang/examples/flash_attention/example_mha_bwd_bhsd.py
+from __future__ import annotations
 
 import torch
 import tilelang
 from tilelang.profiler import do_bench
 import tilelang.language as T
 import argparse
-from typing import Optional
 
 
 def get_bwd_configs():
@@ -24,20 +24,21 @@ def get_bwd_configs():
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
-    compile_flags=["-O3", "-DENABLE_BF16"])
+    compile_flags=["-O3", "-DENABLE_BF16"],
+)
 def flashattn_fwd(
-        batch,
-        heads,
-        seq_len,
-        dim,
-        window_size=None,  # None for full attention,
-        sm_scale=None,
-        block_M=64,
-        block_N=64,
-        num_stages=1,
-        threads=128,
-        dtype: str = "float16"):
-
+    batch,
+    heads,
+    seq_len,
+    dim,
+    window_size=None,  # None for full attention,
+    sm_scale=None,
+    block_M=64,
+    block_N=64,
+    num_stages=1,
+    threads=128,
+    dtype: str = "float16",
+):
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
 
@@ -80,7 +81,7 @@ def flashattn_fwd(
                 sinks[i] = Sinks[by]
 
             end = T.min(T.ceildiv(seq_len, block_N), T.ceildiv((bx + 1) * block_M, block_N))
-            start = T.alloc_local([1], 'int32')
+            start = T.alloc_local([1], "int32")
             if window_size is not None:
                 start[0] = T.max(0, (bx * block_M - window_size) // block_N)
             else:
@@ -92,8 +93,11 @@ def flashattn_fwd(
                     q_idx = bx * block_M + i
                     k_idx = k * block_N + j
                     if window_size is not None:
-                        acc_s[i, j] = T.if_then_else(q_idx >= k_idx and q_idx < k_idx + window_size,
-                                                     0, -T.infinity(acc_s.dtype))
+                        acc_s[i, j] = T.if_then_else(
+                            q_idx >= k_idx and q_idx < k_idx + window_size,
+                            0,
+                            -T.infinity(acc_s.dtype),
+                        )
                     else:
                         acc_s[i, j] = T.if_then_else(q_idx >= k_idx, 0, -T.infinity(acc_s.dtype))
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
@@ -141,7 +145,8 @@ def flashattn_fwd(
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
-    compile_flags=["-O3", "-DENABLE_BF16"])
+    compile_flags=["-O3", "-DENABLE_BF16"],
+)
 def flashattn_bwd_preprocess(batch, heads, seq_len, dim, dtype: str = "float16"):
     accum_dtype = "float"
     shape = [batch, heads, seq_len, dim]
@@ -181,7 +186,8 @@ def make_dq_layout(dQ):
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
-    compile_flags=["-O3", "-DENABLE_BF16"])
+    compile_flags=["-O3", "-DENABLE_BF16"],
+)
 def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = "float16"):
     accum_dtype = "float"
     shape = [batch, heads, seq_len, dim]
@@ -206,7 +212,8 @@ def flashattn_bwd_postprocess(batch, heads, seq_len, dim, dtype: str = "float16"
     pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     },
-    compile_flags=["-O3", "-DENABLE_BF16"])
+    compile_flags=["-O3", "-DENABLE_BF16"],
+)
 def flashattn_bwd(
     batch,
     heads,
@@ -216,7 +223,6 @@ def flashattn_bwd(
     sm_scale=None,
     dtype: str = "float16",
 ):
-
     block_M, block_N, num_stages, threads = get_bwd_configs()
 
     if sm_scale is None:
@@ -275,11 +281,12 @@ def flashattn_bwd(
             T.clear(dk)
 
             loop_st = T.floordiv(by * block_M, block_N)
-            loop_ed = T.alloc_local([1], 'int32')
+            loop_ed = T.alloc_local([1], "int32")
             if window_size is not None:
                 loop_ed[0] = T.min(
                     T.ceildiv((by + 1) * block_M + window_size, block_N),
-                    T.ceildiv(seq_len, block_N))
+                    T.ceildiv(seq_len, block_N),
+                )
             else:
                 loop_ed[0] = T.ceildiv(seq_len, block_N)
             for k in T.Pipelined(loop_st, loop_ed[0], num_stages=num_stages):
@@ -293,7 +300,10 @@ def flashattn_bwd(
                     if window_size is not None:
                         qkT[i, j] = T.if_then_else(
                             by * block_M + i <= k * block_N + j and
-                            by * block_M + i > k * block_N + j - window_size, qkT[i, j], 0)
+                            by * block_M + i > k * block_N + j - window_size,
+                            qkT[i, j],
+                            0,
+                        )
                     else:
                         qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j],
                                                    0)
@@ -344,8 +354,8 @@ def flashattn_bwd_dsink(batch, heads, seq_len, block=128, dtype: str = "float16"
             T.copy(lse[bz, bx, by * block:(by + 1) * block], lse_fragment)
             T.copy(Delta[bz, bx, by * block:(by + 1) * block], delta_fragment)
             for i in T.Parallel(block):
-                dsink_fragment[i] = -T.exp2(Sinks[bx] * 1.44269504 -
-                                            lse_fragment[i]) * delta_fragment[i]
+                dsink_fragment[i] = (-T.exp2(Sinks[bx] * 1.44269504 - lse_fragment[i]) *
+                                     delta_fragment[i])
             T.copy(dsink_fragment, dsinks[bz, bx, by * block:(by + 1) * block])
 
     return flash_bwd_dsink
@@ -396,15 +406,16 @@ attention = _attention.apply
 
 # Adapted and optimized from
 # https://github.com/openai/gpt-oss/blob/main/gpt_oss/triton/attention.py
-def ref_program(query: torch.Tensor,
-                key: torch.Tensor,
-                value: torch.Tensor,
-                sinks: torch.Tensor,
-                sliding_window: Optional[int] = None,
-                dtype: torch.dtype = torch.float16) -> torch.Tensor:
-
-    query = query.transpose(1, 2).contiguous().unsqueeze(
-        3)  # align with the original function's interface
+def ref_program(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    sinks: torch.Tensor,
+    sliding_window: int | None = None,
+    dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    query = (query.transpose(1, 2).contiguous().unsqueeze(3)
+            )  # align with the original function's interface
     key = key.transpose(1, 2).contiguous()
     value = value.transpose(1, 2).contiguous()
 
@@ -444,24 +455,26 @@ def ref_program(query: torch.Tensor,
     return output.transpose(1, 2).contiguous()
 
 
-def main(BATCH: int = 1,
-         H: int = 1,
-         N_CTX: int = 512,
-         D_HEAD: int = 128,
-         window_size: int | None = None,
-         dtype: str = "float16"):
+def main(
+    BATCH: int = 1,
+    H: int = 1,
+    N_CTX: int = 512,
+    D_HEAD: int = 128,
+    window_size: int | None = None,
+    dtype: str = "float16",
+):
     torch_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
     if window_size is not None:
-        print('Using sliding window attention.')
+        print("Using sliding window attention.")
         assert window_size <= N_CTX
-        flops_per_matmul = 2.0 * BATCH * H * min(
-            window_size, N_CTX // 2) * N_CTX * D_HEAD  # just a rough estimation
+        flops_per_matmul = (2.0 * BATCH * H * min(window_size, N_CTX // 2) * N_CTX * D_HEAD
+                           )  # just a rough estimation
     else:
-        print('Using full attention.')
+        print("Using full attention.")
         flops_per_matmul = 2.0 * BATCH * H * N_CTX * N_CTX * D_HEAD * 0.5
     total_flops = 5 * flops_per_matmul
 
-    Q = (torch.randn(BATCH, H, N_CTX, D_HEAD, dtype=torch_dtype, device="cuda").requires_grad_())
+    Q = torch.randn(BATCH, H, N_CTX, D_HEAD, dtype=torch_dtype, device="cuda").requires_grad_()
     K = torch.randn_like(Q).requires_grad_()
     V = torch.randn_like(Q).requires_grad_()
     sinks = torch.randn(H, dtype=torch_dtype, device=Q.device).requires_grad_()
@@ -486,16 +499,16 @@ def main(BATCH: int = 1,
         "float16": (1e-2, 1e-2),
         "bfloat16": (2e-2, 2e-2),
     }[dtype]
-    assert torch.allclose(O, O_ref, rtol=rtol, atol=atol), f'O max err: {(O-O_ref).abs().max()}'
+    assert torch.allclose(O, O_ref, rtol=rtol, atol=atol), f"O max err: {(O - O_ref).abs().max()}"
     assert torch.allclose(
-        dV, dV_ref, rtol=rtol, atol=atol), f'dV max err: {(dV-dV_ref).abs().max()}'
+        dV, dV_ref, rtol=rtol, atol=atol), (f"dV max err: {(dV - dV_ref).abs().max()}")
     assert torch.allclose(
-        dK, dK_ref, rtol=rtol, atol=atol), f'dK max err: {(dK-dK_ref).abs().max()}'
+        dK, dK_ref, rtol=rtol, atol=atol), (f"dK max err: {(dK - dK_ref).abs().max()}")
     assert torch.allclose(
-        dQ, dQ_ref, rtol=rtol, atol=atol), f'dq max err: {(dQ-dQ_ref).abs().max()}'
+        dQ, dQ_ref, rtol=rtol, atol=atol), (f"dq max err: {(dQ - dQ_ref).abs().max()}")
     assert torch.allclose(
         dsinks, dsinks_ref, rtol=rtol,
-        atol=atol), f'dsinks max err: {(dsinks-dsinks_ref).abs().max()}'
+        atol=atol), (f"dsinks max err: {(dsinks - dsinks_ref).abs().max()}")
 
     print("All checks passed for tilelang kernels.✅")
 
@@ -507,25 +520,26 @@ def main(BATCH: int = 1,
         O.backward(dO, retain_graph=True)
 
     latency = do_bench(torch_bwd, warmup=500)
-    print("torch: {:.2f} ms".format(latency))
-    print("torch: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"torch: {latency:.2f} ms")
+    print(f"torch: {total_flops / latency * 1e-9:.2f} TFlops")
     latency = do_bench(tl_bwd, warmup=500)
-    print("tilelang: {:.2f} ms".format(latency))
-    print("tilelang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
+    print(f"tilelang: {latency:.2f} ms")
+    print(f"tilelang: {total_flops / latency * 1e-9:.2f} TFlops")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=1, help='Batch size')
-    parser.add_argument('--h', type=int, default=64, help='Number of heads')
-    parser.add_argument('--n_ctx', type=int, default=4096, help='Context size')
-    parser.add_argument('--d_head', type=int, default=128, help='Head dimension')
+    parser.add_argument("--batch", type=int, default=1, help="Batch size")
+    parser.add_argument("--h", type=int, default=64, help="Number of heads")
+    parser.add_argument("--n_ctx", type=int, default=4096, help="Context size")
+    parser.add_argument("--d_head", type=int, default=128, help="Head dimension")
     parser.add_argument(
-        '--window_size',
+        "--window_size",
         type=int,
         default=None,
-        help='window size (default: None, which means full attention)')
+        help="window size (default: None, which means full attention)",
+    )
     parser.add_argument(
-        '--dtype', type=str, default="float16", help="dtype, can be float16 or bfloat16")
+        "--dtype", type=str, default="float16", help="dtype, can be float16 or bfloat16")
     args = parser.parse_args()
     main(args.batch, args.h, args.n_ctx, args.d_head, args.window_size, args.dtype)

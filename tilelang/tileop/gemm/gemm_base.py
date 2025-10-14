@@ -9,7 +9,7 @@ from tvm.ir import PrimExpr
 
 
 @dataclass
-class GemmBase(object):
+class GemmBase:
     gemm_node: Node
 
     def infer_layout(self, target: Target, thread_nums: int):

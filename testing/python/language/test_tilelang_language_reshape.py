@@ -28,7 +28,8 @@ def run_reshape(N, M, dtype):
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     profiler = jit_kernel.get_profiler()
 
     def ref_program(A):
@@ -72,7 +73,8 @@ def run_reshape_smem_1d_2_2d(N, M, dtype):
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     profiler = jit_kernel.get_profiler()
 
     def ref_program(A):
@@ -115,7 +117,8 @@ def run_reshape_smem_2d_2_1d(N, M, dtype):
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     profiler = jit_kernel.get_profiler()
 
     def ref_program(A):

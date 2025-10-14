@@ -39,7 +39,7 @@ OP_NAMES: Dict[int, str] = {
     6: "sqrt",
     7: "tanh",
     8: "rsqrt",
-    9: "inv_sqrt"
+    9: "inv_sqrt",
 }
 
 # Block sizes for kernels
@@ -69,7 +69,7 @@ def initialize_cuda() -> torch.nn.Module:
     return load(
         name="cuda_ops",
         sources=["cuda_ops.cu"],
-        extra_cuda_cflags=[]  # No fast_math flags
+        extra_cuda_cflags=[],  # No fast_math flags
     )
 
 
@@ -274,7 +274,8 @@ def tilelang_op(x: torch.Tensor,
             target="cuda",
             pass_configs={
                 tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: use_fastmath,
-            })
+            },
+        )
         out = kernel(x, y)
     else:  # Unary operation
         kernel_func = make_tilelang_unary_kernel(M, N, op_id, use_fastmath)
@@ -284,7 +285,8 @@ def tilelang_op(x: torch.Tensor,
             target="cuda",
             pass_configs={
                 tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: use_fastmath,
-            })
+            },
+        )
         out = kernel(x)
 
     # Restore original shape
@@ -295,7 +297,7 @@ def triton_op(x: torch.Tensor, op_id: int, y: Optional[torch.Tensor] = None) -> 
     """Standard Triton operation interface."""
     assert x.is_cuda
     out = torch.empty_like(x)
-    grid = lambda meta: ((x.numel() + meta['BLOCK_SIZE'] - 1) // meta['BLOCK_SIZE'],)
+    grid = lambda meta: ((x.numel() + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
 
     if op_id == 0:  # Division - binary operation
         assert y is not None, "Division operation requires second operand"
@@ -312,7 +314,7 @@ def triton_libdevice_op(x: torch.Tensor,
     """LibDevice Triton operation interface."""
     assert x.is_cuda
     out = torch.empty_like(x)
-    grid = lambda meta: ((x.numel() + meta['BLOCK_SIZE'] - 1) // meta['BLOCK_SIZE'],)
+    grid = lambda meta: ((x.numel() + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)
 
     if op_id == 0:  # Division - binary operation
         assert y is not None, "Division operation requires second operand"

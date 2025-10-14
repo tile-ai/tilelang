@@ -16,16 +16,17 @@ tilelang.testing.set_random_seed(42)
         tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def native_sparse_attention(
-    batch,
-    heads,
-    seq_len,  # Length of K/V sequences (context window size)
-    dim,  # Embedding dimension per head
-    scale=None,
-    block_size=64,  # Tile size for attention computation
-    groups=1,  # Grouped query attention (GQA) groups
-    selected_blocks=16  # Number of blocks to select per attention head
+        batch,
+        heads,
+        seq_len,  # Length of K/V sequences (context window size)
+        dim,  # Embedding dimension per head
+        scale=None,
+        block_size=64,  # Tile size for attention computation
+        groups=1,  # Grouped query attention (GQA) groups
+        selected_blocks=16,  # Number of blocks to select per attention head
 ):
     if scale is None:
         scale = (1.0 / dim)**0.5 * 1.44269504  # log2(e)
@@ -53,7 +54,7 @@ def native_sparse_attention(
 
     @T.prim_func
     def native_sparse_attention(
-            Q: T.Tensor(q_shape, dtype),  # [batch, 1, heads, dim] 
+            Q: T.Tensor(q_shape, dtype),  # [batch, 1, heads, dim]
             K: T.Tensor(kv_shape, dtype),  # [batch, seq_len, head_kv, dim]
             V: T.Tensor(kv_shape, dtype),  # Same shape as K
             BlockIndices: T.Tensor(block_indices_shape,
@@ -149,21 +150,21 @@ def main():
         selected_blocks=S,
     )
 
-    Q = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device='cuda').requires_grad_(True)
-    K = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
-    V = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device='cuda').requires_grad_(True)
+    Q = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device="cuda").requires_grad_(True)
+    K = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device="cuda").requires_grad_(True)
+    V = torch.randn((B, SEQ_LEN, H, D), dtype=dtype, device="cuda").requires_grad_(True)
 
-    mask = torch.randint(0, 2, (B, SEQ_LEN, groups), device='cuda')
-    DO = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device='cuda')
+    mask = torch.randint(0, 2, (B, SEQ_LEN, groups), device="cuda")
+    DO = torch.randn((B, SEQ_LEN_Q, HQ, D), dtype=dtype, device="cuda")
 
-    block_indices = torch.full((B, SEQ_LEN_Q, H, S), SEQ_LEN, dtype=torch.long, device='cuda')
+    block_indices = torch.full((B, SEQ_LEN_Q, H, S), SEQ_LEN, dtype=torch.long, device="cuda")
     for b in range(B):
         for t in range(SEQ_LEN_Q):
             for h in range(H):
                 i_i = torch.randperm(max(1, (t // block_size)))[:S]
                 block_indices[b, t, h, :len(i_i)] = i_i
     block_indices = block_indices.sort(-1)[0]
-    block_counts = torch.randint(1, S + 1, (B, SEQ_LEN_Q, H), device='cuda')
+    block_counts = torch.randint(1, S + 1, (B, SEQ_LEN_Q, H), device="cuda")
 
     out = kernel(Q, K, V, block_indices.to(torch.int32))
 

@@ -17,7 +17,6 @@ tilelang.disable_cache()
 
 @tilelang.jit(out_idx=[3])
 def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_size):
-
     block_M = 64
     block_N = 64
     num_stages = 2
@@ -32,8 +31,10 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
     offset_shape = count_shape + [slash_size]
     index_shape = count_shape + [vertical_size]
 
-    vertical_size_round, slash_size_round = tilelang.next_power_of_2(
-        vertical_size), tilelang.next_power_of_2(slash_size)
+    vertical_size_round, slash_size_round = (
+        tilelang.next_power_of_2(vertical_size),
+        tilelang.next_power_of_2(slash_size),
+    )
 
     dtype = "float16"
     accum_dtype = "float"
@@ -118,7 +119,6 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                 ColumnIndex: T.Tensor(index_shape, int_dtype),
         ):
             with T.Kernel(T.ceildiv(seq_len, block_M), heads, batch, threads=256) as (bc, by, bz):
-
                 bx = T.ceildiv(seq_len, block_M) - 1 - bc
                 Q_shared = T.alloc_shared([block_M, dim], dtype)
                 K_shared = T.alloc_shared([2, block_N, dim], dtype)
@@ -190,7 +190,8 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                             K_shared[bi % 2, :, :],
                             acc_s,
                             transpose_B=True,
-                            policy=T.GemmWarpPolicy.FullRow)
+                            policy=T.GemmWarpPolicy.FullRow,
+                        )
                         T.mbarrier_arrive(mbarrier=bi % 2 + 4)
 
                         T.copy(scores_max, scores_max_prev)
@@ -206,12 +207,13 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                             acc_o[i, j] = acc_o[i, j] * scores_scale[i]
 
                         T.copy(acc_s, acc_s_cast)
-                        T.mbarrier_wait_parity(mbarrier=bi % 2 + 2, parity=(((bi & 3) >> 1)))
+                        T.mbarrier_wait_parity(mbarrier=bi % 2 + 2, parity=((bi & 3) >> 1))
                         T.gemm(
                             acc_s_cast,
                             V_shared[bi % 2, :, :],
                             acc_o,
-                            policy=T.GemmWarpPolicy.FullRow)
+                            policy=T.GemmWarpPolicy.FullRow,
+                        )
 
                         T.mbarrier_arrive(mbarrier=bi % 2 + 6)
 
@@ -226,29 +228,97 @@ def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_siz
                         for bi in T.serial(T.ceildiv(column_count[0], block_N) - 1):
                             k = bi * block_N
                             if bi % 2 == 0:
-                                Prefetch(K, V, K_shared_2, V_shared_2, column_index,
-                                         column_count[0], k + block_N, bz, by)
+                                Prefetch(
+                                    K,
+                                    V,
+                                    K_shared_2,
+                                    V_shared_2,
+                                    column_index,
+                                    column_count[0],
+                                    k + block_N,
+                                    bz,
+                                    by,
+                                )
 
-                                Compute(acc_s, acc_s_cast, acc_o, scores_max, scores_max_prev, k,
-                                        column_count[0], Q_shared, K_shared_1, V_shared_1,
-                                        scores_scale, scores_sum, logsum, 1)
+                                Compute(
+                                    acc_s,
+                                    acc_s_cast,
+                                    acc_o,
+                                    scores_max,
+                                    scores_max_prev,
+                                    k,
+                                    column_count[0],
+                                    Q_shared,
+                                    K_shared_1,
+                                    V_shared_1,
+                                    scores_scale,
+                                    scores_sum,
+                                    logsum,
+                                    1,
+                                )
                             else:
-                                Prefetch(K, V, K_shared_1, V_shared_1, column_index,
-                                         column_count[0], k + block_N, bz, by)
+                                Prefetch(
+                                    K,
+                                    V,
+                                    K_shared_1,
+                                    V_shared_1,
+                                    column_index,
+                                    column_count[0],
+                                    k + block_N,
+                                    bz,
+                                    by,
+                                )
 
-                                Compute(acc_s, acc_s_cast, acc_o, scores_max, scores_max_prev, k,
-                                        column_count[0], Q_shared, K_shared_2, V_shared_2,
-                                        scores_scale, scores_sum, logsum, 1)
+                                Compute(
+                                    acc_s,
+                                    acc_s_cast,
+                                    acc_o,
+                                    scores_max,
+                                    scores_max_prev,
+                                    k,
+                                    column_count[0],
+                                    Q_shared,
+                                    K_shared_2,
+                                    V_shared_2,
+                                    scores_scale,
+                                    scores_sum,
+                                    logsum,
+                                    1,
+                                )
                         if T.ceildiv(column_count[0], block_N) % 2 == 0:
-                            Compute(acc_s, acc_s_cast, acc_o, scores_max, scores_max_prev,
-                                    T.ceildiv(column_count[0], block_N) * block_N - block_N,
-                                    column_count[0], Q_shared, K_shared_2, V_shared_2, scores_scale,
-                                    scores_sum, logsum, 0)
+                            Compute(
+                                acc_s,
+                                acc_s_cast,
+                                acc_o,
+                                scores_max,
+                                scores_max_prev,
+                                T.ceildiv(column_count[0], block_N) * block_N - block_N,
+                                column_count[0],
+                                Q_shared,
+                                K_shared_2,
+                                V_shared_2,
+                                scores_scale,
+                                scores_sum,
+                                logsum,
+                                0,
+                            )
                         else:
-                            Compute(acc_s, acc_s_cast, acc_o, scores_max, scores_max_prev,
-                                    T.ceildiv(column_count[0], block_N) * block_N - block_N,
-                                    column_count[0], Q_shared, K_shared_1, V_shared_1, scores_scale,
-                                    scores_sum, logsum, 0)
+                            Compute(
+                                acc_s,
+                                acc_s_cast,
+                                acc_o,
+                                scores_max,
+                                scores_max_prev,
+                                T.ceildiv(column_count[0], block_N) * block_N - block_N,
+                                column_count[0],
+                                Q_shared,
+                                K_shared_1,
+                                V_shared_1,
+                                scores_scale,
+                                scores_sum,
+                                logsum,
+                                0,
+                            )
                     for i, j in T.Parallel(block_M, dim):
                         acc_o[i, j] /= logsum[i]
                     T.copy(acc_o, O_shared)
@@ -469,10 +539,10 @@ def vertical_slash_sparse_attention(
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
     sources = [
-        os.path.join(current_dir, 'ops', 'kernels.cpp'),
-        os.path.join(current_dir, 'ops', 'vertical_slash_index.cu')
+        os.path.join(current_dir, "ops", "kernels.cpp"),
+        os.path.join(current_dir, "ops", "vertical_slash_index.cu"),
     ]
-    ops = load(name='convert', sources=sources, verbose=False)
+    ops = load(name="convert", sources=sources, verbose=False)
     convert_vertical_slash_indexes = ops.convert_vertical_slash_indexes
     batch_size, num_heads, context_size, head_dim = query.shape
     pad = (block_size_M - context_size) & (block_size_M - 1)
@@ -488,10 +558,11 @@ def vertical_slash_sparse_attention(
         key = torch.nn.functional.pad(key, [0, target_dim, 0, 0, 0, 0, 0, 0])
         value = torch.nn.functional.pad(value, [0, target_dim, 0, 0, 0, 0, 0, 0])
 
-    v_idx = v_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(
-        dim=-1, descending=False)[0]
-    s_idx = s_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(
-        dim=-1, descending=True)[0]
+    v_idx = (
+        v_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1,
+                                                                        descending=False)[0])
+    s_idx = (
+        s_idx.to(torch.int32).reshape((batch_size, num_heads, -1)).sort(dim=-1, descending=True)[0])
 
     seqlens = torch.tensor([context_size] * query.shape[0], dtype=torch.int32, device=query.device)
     sm_scale = head_dim**-0.5
@@ -557,18 +628,21 @@ def main(argv=None):
     vertical_size, slash_size = args.vertical_size, args.slash_size
 
     torch.manual_seed(0)
-    q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
-    k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
-    v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device='cuda', dtype=torch.float16)
+    q = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    k = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
+    v = torch.randn(BATCH, N_HEADS, SEQ_LEN, D_HEAD, device="cuda", dtype=torch.float16)
 
     q_len = SEQ_LEN
 
     vertical_size, slash_size = min(q_len, vertical_size), min(q_len, slash_size)
     last_q = 64
-    qk = torch.einsum('bhmk, bhnk -> bhmn', q[:, :, -last_q:, :], k)
+    qk = torch.einsum("bhmk, bhnk -> bhmn", q[:, :, -last_q:, :], k)
     arange = torch.arange(last_q, device="cuda")
-    qk[:, :, :, -last_q:] = torch.where(arange[None, None, :, None] >= arange[None, None, None, :],
-                                        qk[:, :, :, -last_q:], -torch.inf)
+    qk[:, :, :, -last_q:] = torch.where(
+        arange[None, None, :, None] >= arange[None, None, None, :],
+        qk[:, :, :, -last_q:],
+        -torch.inf,
+    )
     qk = torch.nn.functional.softmax(qk, dim=-1, dtype=torch.float32)
     vertical = qk.sum(-2, keepdim=True)
     vertical[..., :30] = torch.inf

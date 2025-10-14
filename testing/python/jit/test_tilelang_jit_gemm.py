@@ -96,6 +96,7 @@ def run_gemm_kernel_jit(
 
     def ref_program(A, B):
         import torch
+
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         C = C.to(torch.__getattribute__(out_dtype))
         return C

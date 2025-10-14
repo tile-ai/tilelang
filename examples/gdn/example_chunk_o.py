@@ -9,6 +9,7 @@ import sys  # noqa: F401
 # sys.path.insert(0, "/home/tzj/flash-linear-attention")
 try:
     import fla
+
     print(fla.__file__)
     from fla.ops.common.chunk_o import chunk_fwd_o
 except ImportError:
@@ -97,8 +98,11 @@ def tilelang_chunk_fwd_o(
             O: T.Tensor(O_shape, dtype=output_dtype),
     ):
         with T.Kernel(
-                T.ceildiv(DV, block_DV), T.ceildiv(S, block_S), B * H,
-                threads=threads) as (bv, bs, bbh):
+                T.ceildiv(DV, block_DV), T.ceildiv(S, block_S), B * H, threads=threads) as (
+                    bv,
+                    bs,
+                    bbh,
+                ):
             bb, bh = bbh // H, bbh % H
             Q_shared = T.alloc_shared((block_S, block_DK), dtype=input_dtype)
             K_shared = T.alloc_shared((block_S, block_DK), dtype=input_dtype)
@@ -125,14 +129,33 @@ def tilelang_chunk_fwd_o(
             T.disable_warp_group_reg_alloc()
             for i_k in T.Pipelined(T.ceildiv(DK, block_DK), num_stages=num_stages):
                 T.copy(
-                    Q[bb, bs * block_S:(bs + 1) * block_S, bh, i_k * block_DK:(i_k + 1) * block_DK],
-                    Q_shared)
+                    Q[
+                        bb,
+                        bs * block_S:(bs + 1) * block_S,
+                        bh,
+                        i_k * block_DK:(i_k + 1) * block_DK,
+                    ],
+                    Q_shared,
+                )
                 T.copy(
-                    K[bb, bs * block_S:(bs + 1) * block_S, bh, i_k * block_DK:(i_k + 1) * block_DK],
-                    K_shared)
+                    K[
+                        bb,
+                        bs * block_S:(bs + 1) * block_S,
+                        bh,
+                        i_k * block_DK:(i_k + 1) * block_DK,
+                    ],
+                    K_shared,
+                )
                 T.copy(
-                    HIDDEN[bb, bs, bh, i_k * block_DK:(i_k + 1) * block_DK,
-                           bv * block_DV:(bv + 1) * block_DV], H_shared)
+                    HIDDEN[
+                        bb,
+                        bs,
+                        bh,
+                        i_k * block_DK:(i_k + 1) * block_DK,
+                        bv * block_DV:(bv + 1) * block_DV,
+                    ],
+                    H_shared,
+                )
                 T.gemm(Q_shared, H_shared, O_fragment)
                 T.gemm(Q_shared, K_shared, A_fragment, transpose_B=True)
 
@@ -157,8 +180,10 @@ def tilelang_chunk_fwd_o(
                     with T.Then():
                         A_fragment[i_s1, i_s2] = 0
 
-            T.copy(V[bb, bs * block_S:(bs + 1) * block_S, bh, bv * block_DV:(bv + 1) * block_DV],
-                   V_shared)
+            T.copy(
+                V[bb, bs * block_S:(bs + 1) * block_S, bh, bv * block_DV:(bv + 1) * block_DV],
+                V_shared,
+            )
             T.copy(A_fragment, A_shared)
             T.gemm(A_shared, V_shared, O_fragment)
 
@@ -166,8 +191,10 @@ def tilelang_chunk_fwd_o(
                 O_fragment[i_s, i_v] = O_fragment[i_s, i_v] * scale
 
             T.copy(O_fragment, O_shared)
-            T.copy(O_shared, O[bb, bs * block_S:(bs + 1) * block_S, bh,
-                               bv * block_DV:(bv + 1) * block_DV])
+            T.copy(
+                O_shared,
+                O[bb, bs * block_S:(bs + 1) * block_S, bh, bv * block_DV:(bv + 1) * block_DV],
+            )
 
     return kernel
 
@@ -193,8 +220,18 @@ def run_test(
     output_dtype_torch = getattr(torch, output_dtype)
     accum_dtype_torch = getattr(torch, accum_dtype)
     gate_dtype_torch = getattr(torch, gate_dtype)
-    Q, K, V, HIDDEN, G = prepare_input(B, S, H, DK, DV, chunk_size, input_dtype_torch,
-                                       output_dtype_torch, accum_dtype_torch, gate_dtype_torch)
+    Q, K, V, HIDDEN, G = prepare_input(
+        B,
+        S,
+        H,
+        DK,
+        DV,
+        chunk_size,
+        input_dtype_torch,
+        output_dtype_torch,
+        accum_dtype_torch,
+        gate_dtype_torch,
+    )
     scale = 1.0 / DK**0.5
 
     O_ref = prepare_output(B, S, H, DK, DV, chunk_size, output_dtype_torch)
@@ -202,9 +239,25 @@ def run_test(
 
     block_S = chunk_size
     O_tilelang = prepare_output(B, S, H, DK, DV, chunk_size, output_dtype_torch)
-    kernel = tilelang_chunk_fwd_o(B, S, H, DK, DV, input_dtype, output_dtype, accum_dtype,
-                                  gate_dtype, chunk_size, scale, use_g, block_S, block_DK, block_DV,
-                                  threads, num_stages)
+    kernel = tilelang_chunk_fwd_o(
+        B,
+        S,
+        H,
+        DK,
+        DV,
+        input_dtype,
+        output_dtype,
+        accum_dtype,
+        gate_dtype,
+        chunk_size,
+        scale,
+        use_g,
+        block_S,
+        block_DK,
+        block_DV,
+        threads,
+        num_stages,
+    )
     O_tilelang = kernel(Q, K, V, HIDDEN, G)
 
     try:

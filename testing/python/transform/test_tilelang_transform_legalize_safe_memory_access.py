@@ -26,7 +26,9 @@ def vectorize_access_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_off
                 A_shared[tid, j] = T.if_then_else(
                     j + N_offset < N,
                     T.if_then_else(tid + M_offset < M, A[tid + M_offset, j + N_offset],
-                                   T.float32(0)), T.float32(0))
+                                   T.float32(0)),
+                    T.float32(0),
+                )
 
     return main, expected
 

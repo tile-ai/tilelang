@@ -88,7 +88,8 @@ def run_matmul_ssr(
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -123,7 +124,8 @@ def test_gemm_f16f16f16_nt_ssr():
         128,
         32,
         2,
-        num_threads=128)
+        num_threads=128,
+    )
 
 
 def matmul_rsr(
@@ -214,7 +216,8 @@ def run_matmul_rsr(
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):
@@ -342,7 +345,8 @@ def run_matmul_rrr(
         pass_configs={
             tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
             tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        })
+        },
+    )
     profiler = kernel.get_profiler()
 
     def ref_program(A, B):

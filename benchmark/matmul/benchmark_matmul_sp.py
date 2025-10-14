@@ -184,8 +184,10 @@ def matmul_sp(M, N, K, accum_dtype):
             # Bind x-dimension to block index in N,
             #     y-dimension to block index in M.
             with T.Kernel(
-                    T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (bx, by):
-
+                    T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=thread_num) as (
+                        bx,
+                        by,
+                    ):
                 # Allocate shared memory for A sub-block of shape (block_M, block_K)
                 A_shared = T.alloc_shared((block_M, block_K // 2), dtype)
                 # Allocate shared memory for B sub-block of shape (block_N, block_K)
@@ -249,13 +251,14 @@ if __name__ == "__main__":
         type=str,
         default="float",
         choices=["float", "float16"],
-        help="Accumulation datatype")
+        help="Accumulation datatype",
+    )
     parser.add_argument(
         "--bench_torch_sparse",
         type=str,
-        choices=['cutlass', 'cusparselt'],
+        choices=["cutlass", "cusparselt"],
         default=None,
-        help="Whether to benchmark against torch sparse implementation, note that at current time only sm80 is supported"
+        help="Whether to benchmark against torch sparse implementation, note that at current time only sm80 is supported",
     )
     args = parser.parse_args()
 
@@ -277,7 +280,8 @@ if __name__ == "__main__":
 
     if args.bench_torch_sparse is not None:
         from torch.sparse import to_sparse_semi_structured, SparseSemiStructuredTensor
-        if args.bench_torch_sparse == 'cutlass':
+
+        if args.bench_torch_sparse == "cutlass":
             SparseSemiStructuredTensor._FORCE_CUTLASS = True
         A_sp = to_sparse_semi_structured(A, transposed=False)
         torch_sparse_latency = do_bench(lambda: A_sp @ B)

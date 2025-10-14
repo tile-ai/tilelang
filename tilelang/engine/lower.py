@@ -1,8 +1,9 @@
 """The compiler for TL programs."""
+from __future__ import annotations
 
 import os
 import os.path as osp
-from typing import Union, Optional, Callable, List
+from typing import Callable
 import tilelang.transform
 from tilelang import tvm as tvm
 from tvm import tir
@@ -30,7 +31,7 @@ def has_device_kernel_launch(attrs) -> bool:
 def is_device_call_c_device(func: tir.PrimFunc):
     attrs = func.attrs
     calling_conv = attrs.get("calling_conv", CallingConv.DEFAULT)
-    is_cpacked = (calling_conv == CallingConv.C_PACKED_FUNC)
+    is_cpacked = calling_conv == CallingConv.C_PACKED_FUNC
 
     # Check if it's a C target
     if "target" in attrs and attrs["target"].kind.name == "c" and not is_cpacked:
@@ -70,7 +71,8 @@ def tilelang_callback_cuda_compile(code, target):
     format = "cubin"
 
     # printing out number of registers
-    debug_option = "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage"
+    debug_option = (
+        "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage")
     ptx = nvcc.compile_cuda(
         code,
         format,
@@ -114,7 +116,7 @@ def tilelang_callback_hip_compile(code, target):
     return hsaco
 
 
-def extrac_params(func: tir.PrimFunc) -> List[KernelParam]:
+def extrac_params(func: tir.PrimFunc) -> list[KernelParam]:
     tensor_types = []
     for var in func.params:
         if var in func.buffer_map:
@@ -124,8 +126,7 @@ def extrac_params(func: tir.PrimFunc) -> List[KernelParam]:
     return tensor_types
 
 
-def canon_target_host(target: Union[str, Target], target_host: Optional[Union[str, Target]]):
-
+def canon_target_host(target: str | Target, target_host: str | Target | None):
     if not target_host:
         target_host = "llvm" if tvm.runtime.enabled("llvm") else "c"
 
@@ -190,19 +191,19 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
 
 
 def lower(
-    func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-    target: Union[str, Target] = "auto",
-    target_host: Optional[Union[str, Target]] = None,
+    func_or_mod: tir.PrimFunc | tvm.IRModule,
+    target: str | Target = "auto",
+    target_host: str | Target | None = None,
     runtime_only=False,
     enable_host_codegen=False,
     enable_device_compile=False,
 ) -> CompiledArtifact:
-    '''
-        enable_host_codegen: whether to enable host codegen, default is False, as we have our
-        own host codegen implementation in jit.
-        enable_device_compile: whether to enable device codegen, default is False, as we have our
-        own device codegen implementation in jit.
-    '''
+    """
+    enable_host_codegen: whether to enable host codegen, default is False, as we have our
+    own host codegen implementation in jit.
+    enable_device_compile: whether to enable device codegen, default is False, as we have our
+    own device codegen implementation in jit.
+    """
 
     mod = func_or_mod
     params = None
@@ -231,9 +232,9 @@ def lower(
     host_mod = tir.transform.Filter(_is_host_call)(mod)
     device_mod = tir.transform.Filter(_is_device_call)(mod)
 
-    codegen_mod = device_codegen(
-        device_mod, target) if enable_device_compile else device_codegen_without_compile(
-            device_mod, target)
+    codegen_mod = (
+        device_codegen(device_mod, target)
+        if enable_device_compile else device_codegen_without_compile(device_mod, target))
 
     if enable_host_codegen:
         host_mod = host_codegen(host_mod, target_host)

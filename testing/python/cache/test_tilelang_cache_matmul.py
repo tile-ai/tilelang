@@ -63,6 +63,7 @@ def run_cache_matmul():
         Reference PyTorch matrix multiplication for comparison.
         """
         import torch
+
         C = torch.matmul(A.to(torch.float), B.to(torch.float))
         C = C.to(torch.half)  # Assuming dtype="float16" in matmul
         return C

@@ -1,6 +1,7 @@
 """Policy for tensorcore schedule"""
+from __future__ import annotations
+
 import tvm
-from typing import Dict, List, Tuple, Optional
 import numpy as np
 import logging
 from ..hint import Hint, Stride, TileDict, IntrinInfo
@@ -13,15 +14,14 @@ logger = logging.getLogger(__name__)
 
 
 class TensorCorePolicy(DefaultPolicy):
-
     # this is the trick for wmma.
     # However, for int8 mma, the wmma_k should be 32.
     wmma_k: int = 16
     pipeline_stage: int = 1
     use_async_copy: bool = False
-    block_reduction_depth: Optional[int] = None
+    block_reduction_depth: int | None = None
 
-    def _init_with_prim_func(self, func: tvm.tir.PrimFunc, name: Optional[str] = None):
+    def _init_with_prim_func(self, func: tvm.tir.PrimFunc, name: str | None = None):
         super()._init_with_prim_func(func, name)
         self._legalize_info()
         return self
@@ -52,9 +52,9 @@ class TensorCorePolicy(DefaultPolicy):
     def _compute_tc_strides(
         self,
         node: PrimFuncNode,
-        tile: List[int],
-        rstep: Optional[Dict[str, int]] = None,
-    ) -> Tuple[Stride, Stride, Stride]:
+        tile: list[int],
+        rstep: dict[str, int] | None = None,
+    ) -> tuple[Stride, Stride, Stride]:
         if rstep is None:
             rstep = {}
         # strides was used for shared memory padding. which is necessary for avoiding
@@ -95,7 +95,7 @@ class TensorCorePolicy(DefaultPolicy):
             iter_name = iter_info.var.name
             iter_dom = iter_info.dom.extent
             if iter_dom % 16 > 0:
-                result[iter_name] = (16 if iter_dom < basic else basic)  # for the case of padding
+                result[iter_name] = 16 if iter_dom < basic else basic  # for the case of padding
             elif iter_dom % basic == 0:
                 result[iter_name] = basic
             else:
@@ -114,7 +114,6 @@ class TensorCorePolicy(DefaultPolicy):
             return False
 
         if _check_small_tile(td):
-
             smem_limit = min(self.arch.max_smem_usage // td.block_per_SM, self.arch.smem_cap)
             rstep_map = td.rstep_map.copy()
 

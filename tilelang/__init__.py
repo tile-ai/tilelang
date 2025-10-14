@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 from importlib.metadata import version
 
-__version__ = version('tilelang')
+__version__ = version("tilelang")
 
 
 class TqdmLoggingHandler(logging.Handler):

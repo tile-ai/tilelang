@@ -9,6 +9,7 @@ import sys  # noqa: F401
 # sys.path.insert(0, "/home/tzj/flash-linear-attention")
 try:
     import fla
+
     print(fla.__file__)
     from fla.ops.common.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 except ImportError:
@@ -107,8 +108,14 @@ def tilelang_chunk_scaled_dot_kkt_fwd(
 
             for i_k in T.Pipelined(T.ceildiv(DK, block_DK), num_stages=num_stages):
                 T.copy(
-                    K[bb, bs * block_S:(bs + 1) * block_S, bh, i_k * block_DK:(i_k + 1) * block_DK],
-                    K_shared)
+                    K[
+                        bb,
+                        bs * block_S:(bs + 1) * block_S,
+                        bh,
+                        i_k * block_DK:(i_k + 1) * block_DK,
+                    ],
+                    K_shared,
+                )
                 for i_s, i_k2 in T.Parallel(block_S, block_DK):
                     Beta_K_fragment[i_s, i_k2] = K_shared[i_s, i_k2] * Beta_shared[i_s]
                 T.gemm(Beta_K_fragment, K_shared, A_fragment, transpose_B=True)
@@ -151,8 +158,15 @@ def run_test(
     threads,
     num_stages,
 ):
-    K, Beta, G = prepare_input(B, S, H, DK, getattr(torch, input_dtype),
-                               getattr(torch, output_dtype), getattr(torch, accum_dtype))
+    K, Beta, G = prepare_input(
+        B,
+        S,
+        H,
+        DK,
+        getattr(torch, input_dtype),
+        getattr(torch, output_dtype),
+        getattr(torch, accum_dtype),
+    )
     A_ref = prepare_output(B, S, H, chunk_size, getattr(torch, output_dtype))
     A_tilelang = prepare_output(B, S, H, chunk_size, getattr(torch, output_dtype))
 
@@ -166,9 +180,21 @@ def run_test(
 
     # tilelang
     block_S = chunk_size
-    kernel = tilelang_chunk_scaled_dot_kkt_fwd(B, S, H, DK, chunk_size, input_dtype, output_dtype,
-                                               accum_dtype, use_g, block_S, block_DK, threads,
-                                               num_stages)
+    kernel = tilelang_chunk_scaled_dot_kkt_fwd(
+        B,
+        S,
+        H,
+        DK,
+        chunk_size,
+        input_dtype,
+        output_dtype,
+        accum_dtype,
+        use_g,
+        block_S,
+        block_DK,
+        threads,
+        num_stages,
+    )
     A_tilelang = kernel(K, Beta, G)
 
     try:
@@ -194,7 +220,8 @@ def main():
         use_g=True,
         block_DK=64,
         threads=128,
-        num_stages=2)
+        num_stages=2,
+    )
 
 
 if __name__ == "__main__":

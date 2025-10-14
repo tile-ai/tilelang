@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
-from typing import Optional, Tuple
+from __future__ import annotations
 
 import torch
 import triton
@@ -112,9 +112,9 @@ def per_token_group_quant_fp8(
     x: torch.Tensor,
     group_size: int,
     eps: float = 1e-10,
-    dtype: Optional[torch.dtype] = None,
+    dtype: torch.dtype | None = None,
     column_major_scales: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Function to perform per-token-group quantization on an input tensor `x`.
     It converts the tensor values into signed float8 values and returns the
     quantized tensor along with the scaling factor used for quantization.
@@ -128,9 +128,8 @@ def per_token_group_quant_fp8(
         Tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
         scaling factor for quantization.
     """
-    assert (x.shape[-1] %
-            group_size == 0), (f"the last dimension of `x` {x.shape[-1]} must be divisible "
-                               f"by `group_size` {group_size}")
+    assert x.shape[-1] % group_size == 0, (
+        f"the last dimension of `x` {x.shape[-1]} must be divisible by `group_size` {group_size}")
     assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
     finfo = torch.finfo(dtype)

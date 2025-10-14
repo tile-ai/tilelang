@@ -219,9 +219,11 @@ def attention_ref(
 
 
 @tilelang.jit(
-    out_idx=[6], pass_configs={
+    out_idx=[6],
+    pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    })
+    },
+)
 def flashattn(batch_size,
               UQ,
               UKV,
@@ -252,8 +254,11 @@ def flashattn(batch_size,
             Output_unpad: T.Tensor(o_shape, dtype),
     ):
         with T.Kernel(
-                T.ceildiv(max_seqlen_q, block_M), heads, batch_size,
-                threads=threads) as (bx, by, bz):
+                T.ceildiv(max_seqlen_q, block_M), heads, batch_size, threads=threads) as (
+                    bx,
+                    by,
+                    bz,
+                ):
             Q_shared = T.alloc_shared([block_M, dim], dtype, "shared")
             K_shared = T.alloc_shared([block_N, dim], dtype, "shared")
             V_shared = T.alloc_shared([block_N, dim], dtype, "shared")
@@ -302,15 +307,21 @@ def flashattn(batch_size,
                         K_shared[i, d] = 0
                 if is_causal:
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else((bx * block_M + i >= k * block_N + j) and
-                                                     (bx * block_M + i >= q_current_seqlen or
-                                                      k * block_N + j >= k_current_seqlen),
-                                                     -T.infinity(acc_s.dtype), 0)
+                        acc_s[i, j] = T.if_then_else(
+                            (bx * block_M + i >= k * block_N + j) and
+                            (bx * block_M + i >= q_current_seqlen or
+                             k * block_N + j >= k_current_seqlen),
+                            -T.infinity(acc_s.dtype),
+                            0,
+                        )
                 else:
                     for i, j in T.Parallel(block_M, block_N):
-                        acc_s[i, j] = T.if_then_else((bx * block_M + i >= q_current_seqlen or
-                                                      k * block_N + j >= k_current_seqlen),
-                                                     -T.infinity(acc_s.dtype), 0)
+                        acc_s[i, j] = T.if_then_else(
+                            (bx * block_M + i >= q_current_seqlen or
+                             k * block_N + j >= k_current_seqlen),
+                            -T.infinity(acc_s.dtype),
+                            0,
+                        )
 
                 T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
@@ -436,10 +447,10 @@ def main(batch: int = 2, heads: int = 16, seq_len: int = 256, dim: int = 32):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=2, help='batch size')
-    parser.add_argument('--heads', type=int, default=16, help='heads')
-    parser.add_argument('--seq_len', type=int, default=256, help='sequence length')
-    parser.add_argument('--dim', type=int, default=32, help='dim')
+    parser.add_argument("--batch", type=int, default=2, help="batch size")
+    parser.add_argument("--heads", type=int, default=16, help="heads")
+    parser.add_argument("--seq_len", type=int, default=256, help="sequence length")
+    parser.add_argument("--dim", type=int, default=32, help="dim")
 
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_len, args.dim)

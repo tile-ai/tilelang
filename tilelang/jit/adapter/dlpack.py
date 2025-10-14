@@ -1,7 +1,7 @@
 """The profiler and convert to torch utils"""
+from __future__ import annotations
 
 import torch
-from typing import List
 from tilelang.contrib.dlpack import to_pytorch_func
 from .base import BaseKernelAdapter
 
@@ -11,7 +11,7 @@ class TorchDLPackKernelAdapter(BaseKernelAdapter):
     def _convert_torch_func(self) -> callable:
         torch_func = to_pytorch_func(self.mod)
 
-        def func(*ins: List[torch.Tensor]):
+        def func(*ins: list[torch.Tensor]):
             if len(ins) + len(self.result_idx) != len(self.params):
                 raise ValueError(
                     f"Expected {len(self.params)} inputs, got {len(ins) + len(self.result_idx)} with {len(ins)} inputs and {len(self.result_idx)} outputs"

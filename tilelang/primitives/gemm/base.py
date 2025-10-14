@@ -1,7 +1,7 @@
+from __future__ import annotations
 from enum import IntEnum
 from dataclasses import dataclass
 
-from typing import Optional
 from tvm import tir
 
 
@@ -131,7 +131,7 @@ class GemmWarpPolicy(IntEnum):
             # Try to find the best balanced partition
             best_m = 1
             best_n = 1
-            best_balance = float('inf')
+            best_balance = float("inf")
 
             # Try all possible combinations that satisfy the constraints
             for m in range(1, min(max_m_warps, num_warps) + 1):
@@ -161,7 +161,7 @@ class GemmWarpPolicy(IntEnum):
         return m_warp, n_warp
 
     @classmethod
-    def from_warp_partition(cls, m_warp: int, n_warp: int) -> 'GemmWarpPolicy':
+    def from_warp_partition(cls, m_warp: int, n_warp: int) -> GemmWarpPolicy:
         """
         Determine the warp policy based on the given warp partitioning.
 
@@ -197,12 +197,12 @@ class GemmBaseParams:
 
     transpose_A: bool = False
     transpose_B: bool = False
-    block_row_warps: Optional[int] = None
-    block_col_warps: Optional[int] = None
-    warp_row_tiles: Optional[int] = None
-    warp_col_tiles: Optional[int] = None
-    chunk: Optional[int] = None
-    policy: GemmWarpPolicy = GemmWarpPolicy.Square,
+    block_row_warps: int | None = None
+    block_col_warps: int | None = None
+    warp_row_tiles: int | None = None
+    warp_col_tiles: int | None = None
+    chunk: int | None = None
+    policy: GemmWarpPolicy = (GemmWarpPolicy.Square,)
     k_pack: int = 1
 
     def get_warp_size(self) -> int:
@@ -226,7 +226,7 @@ class GemmBaseParams:
             "k_pack": self.k_pack,
         }
 
-    def infer_block_partition(self, threads: Optional[int]) -> None:
+    def infer_block_partition(self, threads: int | None) -> None:
         """
         Infer and set block partition parameters (e.g., block_row_warps,
         block_col_warps, warp_row_tiles, warp_col_tiles, chunk) based on the
@@ -273,11 +273,10 @@ class GemmBaseParams:
         A_shape, B_shape = A.shape, B.shape
 
         if require_infer:
-            assert (threads is not None), "threads must be provided for auto inference"
+            assert threads is not None, "threads must be provided for auto inference"
             # Auto-inference only supports 2D matrix multiplication
-            assert (
-                len(A_shape) == 2 and len(B_shape) == 2
-            ), f"Only support 2D matrix multiplication, got {len(A_shape)}D and {len(B_shape)}D"
+            assert len(A_shape) == 2 and len(B_shape) == 2, (
+                f"Only support 2D matrix multiplication, got {len(A_shape)}D and {len(B_shape)}D")
 
             # Analyze A/B shapes
             AM = A_shape[1] if transpose_A else A_shape[0]  # M dimension
