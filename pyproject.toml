@@ -81,7 +81,8 @@ column_limit = 100
 indent_width = 4
 
 [tool.codespell]
-ignore-words-list = "nd, te, ist, LOD, offen, NotIn, HSA"
+builtin = "clear,rare,en-GB_to_en-US"
+ignore-words = "docs/spelling_wordlist.txt"
 skip = [
     "build",
     "3rdparty",

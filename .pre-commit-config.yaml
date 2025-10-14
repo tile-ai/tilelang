@@ -28,6 +28,9 @@ repos:
       - id: check-ast
         fail_fast: true
       - id: debug-statements
+      - id: file-contents-sorter
+        args: [--ignore-case]
+        files: ^docs/spelling_wordlist\.txt$
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v15.0.7  # sync with requirements-lint.txt
     hooks:

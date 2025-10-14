@@ -215,7 +215,7 @@ jobs:
       - name: Set environment (Metal)
         if: contains(matrix.runner.toolkit, 'Metal')
         run: |
-          if [[ "${TOOLKIT}" == "Nightly-"* ]]; then
+          if [[ "${{ matrix.runner.toolkit }}" == "Nightly-"* ]]; then
             # Use torch nightly builds
             export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/nightly/cpu"
             export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
