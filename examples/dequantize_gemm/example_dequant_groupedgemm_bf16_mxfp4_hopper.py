@@ -437,7 +437,15 @@ def get_data(m, n, k, qk, scale_size, topk, E, block_M):
     return A, qB, Scale, Bias, topk_weights, sorted_token_ids, expert_ids, padding_M
 
 
-def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, with_bias=False, tune=False):
+def main(m=256,
+         n=256,
+         k=256,
+         scale_size=32,
+         topk=4,
+         E=32,
+         fast_dequant=True,
+         with_bias=False,
+         tune=False):
     # Tunable parameters
     block_M, block_N, block_K = 128, 256, 128  # noqa: F841
     num_stages = 1  # noqa: F841
@@ -525,13 +533,24 @@ def main(m=256, n=256, k=256, scale_size=32, topk=4, E=32, fast_dequant=True, wi
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--M", type=int, default=16384, help="M") # From gpt-oss-20b MoE's first gemm
+    parser.add_argument(
+        "--M", type=int, default=16384, help="M")  # From gpt-oss-20b MoE's first gemm
     parser.add_argument("--N", type=int, default=5760, help="N")
     parser.add_argument("--K", type=int, default=2944, help="K")
     parser.add_argument("--scale_size", type=int, default=32, help="scale size")
-    parser.add_argument("--topk", type=int, default=4, help="topk") # experts activated for each token
-    parser.add_argument("--E", type=int, default=32, help="E") # number of experts
+    parser.add_argument(
+        "--topk", type=int, default=4, help="topk")  # experts activated for each token
+    parser.add_argument("--E", type=int, default=32, help="E")  # number of experts
     parser.add_argument("--tune", action="store_true", help="tune configs")
     args = parser.parse_args()
 
-    main(args.M, args.N, args.K, args.scale_size, topk=args.topk, E=args.E, fast_dequant=True, with_bias=True, tune=args.tune)
+    main(
+        args.M,
+        args.N,
+        args.K,
+        args.scale_size,
+        topk=args.topk,
+        E=args.E,
+        fast_dequant=True,
+        with_bias=True,
+        tune=args.tune)
