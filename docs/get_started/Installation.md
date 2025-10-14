@@ -256,7 +256,7 @@ even if no source change.
 
 Developers who needs to recompile frequently could use:
 
-```
+```bash
 pip install -r requirements-dev.txt
 pip install -e . -v --no-build-isolation
 
@@ -265,7 +265,8 @@ cd build; ninja
 
 When running in editable/developer mode,
 you'll see logs like below:
-```
+
+```console
 $ python -c 'import tilelang'
 2025-10-14 11:11:29  [TileLang:tilelang.env:WARNING]: Loading tilelang libs from dev root: /Users/yyc/repo/tilelang/build
 ```
