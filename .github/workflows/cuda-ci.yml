@@ -14,8 +14,6 @@ jobs:
     runs-on: [self-hosted, nvidia]
     permissions:
       contents: write
-    env:
-      UV_INDEX_URL: https://mirrors.bfsu.edu.cn/pypi/web/simple
 
     steps:
     - name: Checkout repository
@@ -60,8 +58,6 @@ jobs:
     needs: format-check
     permissions:
       contents: read
-    env:
-      UV_INDEX_URL: https://mirrors.bfsu.edu.cn/pypi/web/simple
     steps:
     - name: Checkout repository
       uses: actions/checkout@v5
