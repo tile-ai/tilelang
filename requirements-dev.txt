@@ -5,9 +5,9 @@ build
 cmake>=3.26
 packaging
 setuptools>=61
+scikit-build-core
 torch
 wheel
-tox
 ninja
 
 auditwheel; platform_system == 'Linux'
