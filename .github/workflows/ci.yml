@@ -79,13 +79,17 @@ jobs:
         runner:
           - tags: [self-hosted, nvidia]
             name: self-hosted-nvidia
+            # Format: [Nightly-]CUDA-<major>.<minor>[.<patch>]. E.g., "CUDA-12.8" or "Nightly-CUDA-13.0".
+            # Use "Nightly-" prefix to use torch nightly builds.
             toolkit: CUDA-12.8
           - tags: [self-hosted, amd, gpu]
             name: self-hosted-amd
-            toolkit: ROCm-6.3
+            # Format: [Nightly-]ROCm-<major>.<minor>[.<patch>]. E.g., "ROCm-6.4" or "Nightly-ROCm-7.0".
+            # Use "Nightly-" prefix to use torch nightly builds.
+            toolkit: Nightly-ROCm-7.0
           - tags: [macos-latest]
             name: macos-latest
-            toolkit: Metal
+            toolkit: Metal # or Nightly-Metal
         python-version:
           - "3.12"
       fail-fast: false
@@ -143,7 +147,12 @@ jobs:
           CUDA_VERSION="${TOOLKIT##*-}"
           CUDA_VERSION_MAJMIN="$(echo ${CUDA_VERSION} | cut -d '.' -f-2)"
           CUDA_VERSION_MAJMIN_NODOT="${CUDA_VERSION_MAJMIN//./}"
-          export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}"
+          if [[ "${TOOLKIT}" == "Nightly-"* ]]; then
+            # Use torch nightly builds
+            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/nightly/cu${CUDA_VERSION_MAJMIN_NODOT}"
+          else
+            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cu${CUDA_VERSION_MAJMIN_NODOT}"
+          fi
           export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
           export CLANG_TIDY_CMAKE_OPTIONS="${CLANG_TIDY_CMAKE_OPTIONS} -DUSE_CUDA=ON"
 
@@ -174,7 +183,12 @@ jobs:
           ROCM_VERSION="${TOOLKIT##*-}"
           ROCM_VERSION_MAJMIN="$(echo ${ROCM_VERSION} | cut -d '.' -f-2)"
           ROCM_VERSION_MAJMIN_NODOT="${ROCM_VERSION_MAJMIN//./}"
-          export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/rocm${ROCM_VERSION_MAJMIN}"
+          if [[ "${TOOLKIT}" == "Nightly-"* ]]; then
+            # Use torch nightly builds
+            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/nightly/rocm${ROCM_VERSION_MAJMIN}"
+          else
+            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/rocm${ROCM_VERSION_MAJMIN}"
+          fi
           export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
           export CLANG_TIDY_CMAKE_OPTIONS="${CLANG_TIDY_CMAKE_OPTIONS} -DUSE_ROCM=ON"
 
@@ -201,6 +215,13 @@ jobs:
       - name: Set environment (Metal)
         if: contains(matrix.runner.toolkit, 'Metal')
         run: |
+          if [[ "${TOOLKIT}" == "Nightly-"* ]]; then
+            # Use torch nightly builds
+            export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/nightly/cpu"
+            export UV_INDEX="${PIP_EXTRA_INDEX_URL}"
+            echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
+            echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
+          fi
           export CLANG_TIDY_CMAKE_OPTIONS="${CLANG_TIDY_CMAKE_OPTIONS} -DUSE_METAL=ON"
 
           echo "USE_METAL=ON" | tee -a "${GITHUB_ENV}"
@@ -229,12 +250,15 @@ jobs:
         id: setup-venv
         run: |
           uv pip install --upgrade pip setuptools wheel
+          if [[ "${UV_INDEX}" == *"/nightly/"* ]]; then
+            uv pip install --prerelease=allow -v torch
+          fi
           uv pip install -v -r requirements-test.txt
-          if [[ "${{ matrix.runner.toolkit }}" == "CUDA"* ]]; then
+          if [[ "${{ matrix.runner.toolkit }}" == *"CUDA"* ]]; then
             uv pip install --no-build-isolation -v flash-attn==2.5.8
-          elif [[ "${{ matrix.runner.toolkit }}" == "ROCm"* ]]; then
+          elif [[ "${{ matrix.runner.toolkit }}" == *"ROCm"* ]]; then
             uv pip install -v -r requirements-rocm.txt
-          elif [[ "${{ matrix.runner.toolkit }}" == "Metal"* ]]; then
+          elif [[ "${{ matrix.runner.toolkit }}" == *"Metal"* ]]; then
             # Currently no extra dependency for metal
             :
           else
