@@ -1,14 +1,79 @@
+[project]
+name = "tilelang"
+authors = [{name = "Tile-AI"}]
+maintainers = [{name = "Lei Wang", email = "leiwang1999@outlook.com"}]
+description = "A tile level programming language to generate high performance code."
+readme.file = "README.md"
+license = "MIT"
+keywords = ["BLAS", "CUDA", "HIP", "Code Generation", "TVM"]
+classifiers = [
+    "Environment :: GPU",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: OS Independent",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Scientific/Engineering :: Artificial Intelligence",
+]
+
+readme.content-type = "text/markdown"
+requires-python = ">=3.8"
+
+dynamic = ["version"]
+
+# Somehow this does not work, hard-code for now
+# dynamic = ["version", "dependencies"]
+# [tool.setuptools.dynamic]
+# dependencies = {file = ["requirements.txt"]}
+dependencies = [
+    "numpy>=1.23.5",
+    "tqdm>=4.62.3",
+    "typing_extensions>=4.10.0",
+    "cloudpickle",
+    "ml_dtypes",
+    "psutil",
+    "torch",
+]
+
+[project.optional-dependencies]
+# mldtypes should be greater than 0.5.1
+# if you want to enable fp4
+fp4 = ["ml_dtypes>=0.5.1"]
+
 [build-system]
 requires = [
-    "build",
-    "cmake>=3.26",
-    "packaging",
-    "setuptools>=61",
-    "wheel",
-    "patchelf",
+    "setuptools>=63",
     "Cython>=3.0.0",
+    "scikit-build-core",
 ]
-build-backend = "setuptools.build_meta"
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+wheel.py-api = "cp38"
+cmake.version = ">=3.26.1"
+build-dir = "build"
+
+# editable.rebuild = true
+
+# Include backend and git info in version
+metadata.version.provider = "version_provider"
+metadata.version.provider-path = "."
+experimental = true
+
+[tool.scikit-build.wheel.packages]
+tilelang = "tilelang"
+"tilelang/src" = "src"
+"tilelang/3rdparty" = "3rdparty"
+
+# TODO: we might want to not include these in wheel?
+"tilelang/benchmark" = "benchmark"
+"tilelang/examples" = "examples"
+"tilelang/testing" = "testing"
 
 [tool.yapf]
 based_on_style = "yapf"
@@ -67,3 +132,50 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "3rdparty/**/*" = ["ALL"]
 "examples/deepseek_v32/inference/**/*" = ["ALL"]
+
+[tool.cibuildwheel]
+archs = ["auto64"]
+# wait for tvm fix
+build = "cp38-*"
+
+[tool.cibuildwheel.macos]
+archs = ["arm64"]
+
+[tool.cibuildwheel.linux]
+# Pin to glibc 2.17 for x86 and 2.28 for aarch64 for now
+manylinux-x86_64-image = "manylinux2014"
+manylinux-aarch64-image = "manylinux_2_28"
+skip = "*-musllinux*"
+environment-pass = ["CUDA_VERSION"]
+repair-wheel-command = [
+  "auditwheel repair --exclude libcuda.so.1 --exclude /usr/local/cuda\\* -w {dest_dir} {wheel}",
+  "pipx run abi3audit --strict --report {wheel}",
+]
+
+# Install CUDA runtime and stub driver library
+# manylinux_2_28 uses gcc 14, which needs CUDA 12.8
+before-all = """
+set -eux
+
+case "$(uname -m)" in
+"x86_64")
+    yum-config-manager --add-repo https://developer.download.nvidia.cn/compute/cuda/repos/rhel7/x86_64/cuda-rhel7.repo
+    ;;
+"aarch64")
+    dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/sbsa/cuda-rhel8.repo
+    ;;
+*)
+    exit 1
+    ;;
+esac
+
+# Assume CUDA_VERSION=xx.y
+v=${CUDA_VERSION:-12.4}
+v=${v:0:4}
+v=${v/./-}
+yum install -y cuda-minimal-build-${v} cuda-driver-devel-${v} cuda-nvrtc-devel-${v}
+"""
+
+[tool.cibuildwheel.linux.environment]
+# Equlivant to `source /opt/rh/gcc-toolset-12/enable`, safe when gcc-toolset-12 is not installed
+PATH = "/usr/local/cuda/bin:$PATH"
