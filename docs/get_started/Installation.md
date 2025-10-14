@@ -208,9 +208,6 @@ pip install tilelang -f https://tile-ai.github.io/whl/nightly/cu121/
 
 ## Install Configs
 
-tilelang use ffi/cython/dlpack to interact with pytorch tensor,
-so `--no-build-isolation` and similar configs are not necessary.
-
 ### Build-time environment variables
 `USE_CUDA`: If to enable CUDA support, default: `ON` on Linux, set to `OFF` to build a CPU version. By default, we'll use `/usr/local/cuda` for building tilelang. Set `CUDAToolkit_ROOT` to use different cuda toolkit.
 
@@ -251,3 +248,25 @@ VSCode with clangd and [clangd extension](https://marketplace.visualstudio.com/i
 If you plan to use your wheel in other environment,
 it's recommend to use auditwheel (on Linux) or delocate (on Darwin)
 to repair them.
+
+## Faster rebuild for developers
+
+`pip install` introduces extra [un]packaging and takes ~30 sec to complete,
+even if no source change.
+
+Developers who needs to recompile frequently could use:
+
+```bash
+pip install -r requirements-dev.txt
+pip install -e . -v --no-build-isolation
+
+cd build; ninja
+```
+
+When running in editable/developer mode,
+you'll see logs like below:
+
+```console
+$ python -c 'import tilelang'
+2025-10-14 11:11:29  [TileLang:tilelang.env:WARNING]: Loading tilelang libs from dev root: /Users/yyc/repo/tilelang/build
+```
