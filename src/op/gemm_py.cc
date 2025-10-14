@@ -13,79 +13,12 @@
 
 #include "../target/utils.h"
 #include "tvm/ffi/string.h"
-#include <vector>
+#include "tcgen5_meta.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
-
-struct TCGEN5MMAMeta {
-  int atom_m, atom_n, atom_k;
-};
-
-// Return {is_success, meta}
-static inline std::pair<bool, TCGEN5MMAMeta>
-GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
-// TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
-#define FAIL                                                                   \
-  return {                                                                     \
-    false, TCGEN5MMAMeta { 0, 0, 0 }                                           \
-  }
-#define SUCCESS(atom_m, atom_n, atom_k)                                        \
-  return {                                                                     \
-    true, TCGEN5MMAMeta { atom_m, atom_n, atom_k }                             \
-  }
-  std::vector<int> ws_valid_atom_ns = {256, 128, 64};
-  if ((ab_dtype.is_bfloat16() || ab_dtype.is_float16()) &&
-      (c_dtype.is_float() && c_dtype.bits() == 32)) {
-    if (K % 16 != 0)
-      FAIL;
-    if (M % 128 == 0) {
-      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
-        if (N % atom_n == 0)
-          SUCCESS(128, atom_n, 16);
-      FAIL;
-    } else if (M % 64 == 0) {
-      for (int atom_n : ws_valid_atom_ns)
-        if (N % atom_n == 0)
-          SUCCESS(64, atom_n, 16);
-      FAIL;
-    } else if (M % 32 == 0) {
-      for (int atom_n : ws_valid_atom_ns)
-        if (N % atom_n == 0)
-          SUCCESS(32, atom_n, 16);
-      FAIL;
-    } else {
-      FAIL;
-    }
-  } else if ((ab_dtype.is_float8_e4m3fn() || ab_dtype.is_float8_e5m2()) &&
-             (c_dtype.is_float() && c_dtype.bits() == 32)) {
-    if (K % 32 != 0)
-      FAIL;
-    if (M % 128 == 0) {
-      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
-        if (N % atom_n == 0)
-          SUCCESS(128, atom_n, 32);
-      FAIL;
-    } else if (M % 64 == 0) {
-      for (int atom_n : ws_valid_atom_ns)
-        if (N % atom_n == 0)
-          SUCCESS(64, atom_n, 32);
-      FAIL;
-    } else if (M % 32 == 0) {
-      for (int atom_n : ws_valid_atom_ns)
-        if (N % atom_n == 0)
-          SUCCESS(32, atom_n, 32);
-      FAIL;
-    } else {
-      FAIL;
-    }
-  }
-  FAIL;
-#undef FAIL
-#undef SUCCESS
-}
 
 /**
  * @brief Construct a Gemm operator from serialized TL arguments and a buffer
@@ -143,6 +76,20 @@ GemmPy::GemmPy(Array<PrimExpr> args, BufferMap vmap) {
   }
   if (args.size() > 15) {
     node->wg_wait = args[15].as<IntImm>().value()->value;
+  }
+  if (args.size() > 16) {
+    node->mbarptr = args[16];
+  } else {
+    node->mbarptr = IntImm(DataType::UInt(32), 0);
+  }
+  if (args.size() > 18) {
+    node->C_coords = Array<PrimExpr>({args[17], args[18]});
+  } else if (args.size() > 17) {
+    node->C_coords =
+        Array<PrimExpr>({args[17], IntImm(DataType::Int(32), 0)});
+  } else {
+    node->C_coords = Array<PrimExpr>(
+        {IntImm(DataType::Int(32), 0), IntImm(DataType::Int(32), 0)});
   }
   data_ = std::move(node);
 }
@@ -376,6 +323,32 @@ TVM_FFI_STATIC_INIT_BLOCK({
                         [](GemmPy gemm_py, int block_size, Target target) {
                           return gemm_py->GetGemmInst(block_size, target);
                         });
+});
+
+TVM_FFI_STATIC_INIT_BLOCK({
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def(
+      "tl.get_tcgen5_mma_meta",
+      [](int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
+        auto [success, meta] = GetTCGEN5MMAMeta(M, N, K, ab_dtype, c_dtype);
+        Array<Integer> result;
+        if (success) {
+          result.push_back(Integer(meta.atom_m));
+          result.push_back(Integer(meta.atom_n));
+          result.push_back(Integer(meta.atom_k));
+        }
+        return result;
+      });
+  refl::GlobalDef().def(
+      "tl.get_tcgen5_instr_desc",
+      [](int atom_m, int atom_n, int atom_k, DataType ab_dtype,
+         DataType c_dtype, bool a_is_k_major, bool b_is_k_major,
+         int scale_in_a, int scale_in_b) {
+        uint32_t desc = GetTCGEN5InstrDesc(atom_m, atom_n, atom_k, ab_dtype,
+                                           c_dtype, a_is_k_major, b_is_k_major,
+                                           scale_in_a, scale_in_b);
+        return Integer(static_cast<int64_t>(desc));
+      });
 });
 
 } // namespace tl

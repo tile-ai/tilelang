@@ -12,78 +12,12 @@
 #include <tvm/tir/transform.h>
 
 #include "../target/utils.h"
+#include "tcgen5_meta.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tir;
-
-struct TCGEN5MMAMeta {
-  int atom_m, atom_n, atom_k;
-};
-
-// Return {is_success, meta}
-static inline std::pair<bool, TCGEN5MMAMeta>
-GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
-// TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
-#define FAIL                                                                   \
-  return {                                                                     \
-    false, TCGEN5MMAMeta { 0, 0, 0 }                                           \
-  }
-#define SUCCESS(atom_m, atom_n, atom_k)                                        \
-  return {                                                                     \
-    true, TCGEN5MMAMeta { atom_m, atom_n, atom_k }                             \
-  }
-  std::vector<int> ws_valid_atom_ns = {256, 128, 64};
-  if ((ab_dtype.is_bfloat16() || ab_dtype.is_float16()) &&
-      (c_dtype.is_float() && c_dtype.bits() == 32)) {
-    if (K % 16 != 0)
-      FAIL;
-    if (M % 128 == 0) {
-      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
-        if (N % atom_n == 0)
-          SUCCESS(128, atom_n, 16);
-      FAIL;
-    } else if (M % 64 == 0) {
-      for (int atom_n : ws_valid_atom_ns)
-        if (N % atom_n == 0)
-          SUCCESS(64, atom_n, 16);
-      FAIL;
-    } else if (M % 32 == 0) {
-      for (int atom_n : ws_valid_atom_ns)
-        if (N % atom_n == 0)
-          SUCCESS(32, atom_n, 16);
-      FAIL;
-    } else {
-      FAIL;
-    }
-  } else if ((ab_dtype.is_float8_e4m3fn() || ab_dtype.is_float8_e5m2()) &&
-             (c_dtype.is_float() && c_dtype.bits() == 32)) {
-    if (K % 32 != 0)
-      FAIL;
-    if (M % 128 == 0) {
-      for (int atom_n = 256; atom_n >= 16; atom_n -= 16)
-        if (N % atom_n == 0)
-          SUCCESS(128, atom_n, 32);
-      FAIL;
-    } else if (M % 64 == 0) {
-      for (int atom_n : ws_valid_atom_ns)
-        if (N % atom_n == 0)
-          SUCCESS(64, atom_n, 32);
-      FAIL;
-    } else if (M % 32 == 0) {
-      for (int atom_n : ws_valid_atom_ns)
-        if (N % atom_n == 0)
-          SUCCESS(32, atom_n, 32);
-      FAIL;
-    } else {
-      FAIL;
-    }
-  }
-  FAIL;
-#undef FAIL
-#undef SUCCESS
-}
 
 /**
  * @brief Construct a Gemm operator from serialized TL arguments and a buffer
@@ -199,7 +133,7 @@ GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
              TargetIsSm100(target)) {
     return GemmInst::kMMA;
   } else {
-    ICHECK(0) << "Unsupported target for gemm: " << target->str();
+    ICHECK(0) << "Unsupported target for gemm: " << target;
   }
 }
 

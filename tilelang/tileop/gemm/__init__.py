@@ -8,6 +8,7 @@ import tvm.ffi
 from tilelang.ir import GemmWarpPolicy
 from .gemm_mma import GemmMMA
 from .gemm_wgmma import GemmWGMMA
+from .gemm_tcgen05 import GemmTCGEN5
 from tilelang import _ffi_api
 
 
@@ -122,7 +123,7 @@ class GemmPy(Node, Scriptable):
         elif gemm_inst.is_wgmma():
             return GemmWGMMA
         elif gemm_inst.is_tcgen5mma():
-            raise NotImplementedError("TCGEN5MMA is not implemented")
+            return GemmTCGEN5
         elif gemm_inst.is_mfma():
             raise NotImplementedError("MFMA is not implemented")
         else:

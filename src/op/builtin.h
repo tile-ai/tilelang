@@ -246,6 +246,11 @@ TVM_DLL const Op &ptx_wgmma_ss();
  */
 TVM_DLL const Op &ptx_wgmma_rs();
 
+/*! 
+ * \brief tvm intrinsic for tcgen05 mma shared-shared instructions.
+ */
+TVM_DLL const Op &ptx_tcgen05_mma_ss();
+
 /*!
  * \brief tvm intrinsics for initializing tensor memory
  *
@@ -467,7 +472,13 @@ TVM_DLL const Op &tl_shuffle_elect();
  *  This op is used to represent a descriptor initialization operation in
  * tilelang.
  */
-TVM_DLL const Op &initialize_descriptor();
+TVM_DLL const Op &initialize_wgmma_descriptor();
+
+/*! 
+ * \brief tilelang intrinsic for initializing a descriptor buffer for
+ * tcgen05 mma.
+ */
+TVM_DLL const Op &initialize_tcgen05_descriptor();
 
 /*!
  * \brief tilelang intrinsic for setting the start address of a descriptor

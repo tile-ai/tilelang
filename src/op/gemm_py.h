@@ -29,6 +29,8 @@ public:
   int stride_A, stride_B;
   int offset_A, offset_B;
   PrimExpr clear_accum = const_false();
+  PrimExpr mbarptr;
+  Array<PrimExpr> C_coords;
   // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
   // only will be enabled under cdna mfma instructions
   int kPack = 1;
@@ -57,6 +59,8 @@ public:
         .def_ro("offset_A", &GemmPyNode::offset_A)
         .def_ro("offset_B", &GemmPyNode::offset_B)
         .def_ro("clear_accum", &GemmPyNode::clear_accum)
+        .def_ro("mbarptr", &GemmPyNode::mbarptr)
+        .def_ro("C_coords", &GemmPyNode::C_coords)
         .def_ro("kPack", &GemmPyNode::kPack)
         .def_ro("wg_wait", &GemmPyNode::wg_wait)
         .def_ro("policy", &GemmPyNode::policy);
@@ -73,6 +77,8 @@ public:
            equal(offset_A, other->offset_B) &&
            equal(offset_B, other->offset_B) &&
            equal(clear_accum, other->clear_accum) &&
+           equal(mbarptr, other->mbarptr) &&
+           equal(C_coords, other->C_coords) &&
            equal(kPack, other->kPack) && equal(wg_wait, other->wg_wait) &&
            equal(policy, other->policy);
   }
@@ -94,6 +100,8 @@ public:
     hash_reduce(offset_A);
     hash_reduce(offset_B);
     hash_reduce(clear_accum);
+    hash_reduce(mbarptr);
+    hash_reduce(C_coords);
     hash_reduce(kPack);
     hash_reduce(wg_wait);
     hash_reduce(policy);

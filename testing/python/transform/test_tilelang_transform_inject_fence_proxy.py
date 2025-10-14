@@ -193,8 +193,8 @@ def test_wgmma_after_descriptor():
             desc_a = T.decl_buffer((1,), "uint64", scope="local.descriptor")
             desc_b = T.decl_buffer((1,), "uint64", scope="local.descriptor")
             C_local = T.decl_buffer((32,), "float16", scope="local")
-            T.initialize_descriptor(desc_a, T.uint64(0), 2, 1, 32)
-            T.initialize_descriptor(desc_b, T.uint64(0), 2, 1, 32)
+            T.initialize_wgmma_descriptor(desc_a, T.uint64(0), 2, 1, 32)
+            T.initialize_wgmma_descriptor(desc_b, T.uint64(0), 2, 1, 32)
             T.warpgroup_arrive()
             T.ptx_wgmma_ss("float16", "m64n64k16", T.bool(True), T.bool(True), "fp16", "fp16",
                            "fp16", desc_a.data, T.int32(0), desc_b.data, T.int32(0), C_local.data,

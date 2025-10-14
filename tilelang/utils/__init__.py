@@ -6,6 +6,7 @@ from .language import (
     is_global,  # noqa: F401
     is_shared,  # noqa: F401
     is_shared_dynamic,  # noqa: F401
+    is_tensor_memory,  # noqa: F401
     is_fragment,  # noqa: F401
     is_local,  # noqa: F401
     array_reduce,  # noqa: F401

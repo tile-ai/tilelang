@@ -449,38 +449,68 @@ def sync_grid():
     return tir.call_intrin("handle", tir.op.Op.get("tl.sync_grid"))
 
 
-def initialize_descriptor(descriptor: Buffer,
-                          start_address: PrimExpr,
-                          layout_type_: int = 0,
-                          leading_byte_offset: int = 0,
-                          stride_byte_offset: int = 0) -> PrimExpr:
-    """
-    Initialize a memory descriptor with the given parameters.
-
-    Parameters:
-        descriptor (Buffer): The memory descriptor to initialize.
-        start_address (PrimExpr): The starting address of the memory region.
-        layout_type_ (int, optional): Layout type identifier. Defaults to 0.
-        leading_byte_offset (int, optional): Leading byte offset. Defaults to 0.
-        stride_byte_offset (int, optional): Stride byte offset. Defaults to 0.
-
-    Returns:
-        PrimExpr: A handle representing the initialized descriptor.
-    """
+def initialize_wgmma_descriptor(
+    descriptor: Buffer,
+    start_address: PrimExpr,
+    layout_type_: int = 0,
+    leading_byte_offset: int = 0,
+    stride_byte_offset: int = 0,
+) -> PrimExpr:
+    """Initialize a WGMMA/UTCMMA shared-memory descriptor."""
 
     if not isinstance(descriptor, (BufferLoad, Buffer)):
         raise TypeError("Descriptor must be a tvm.tir.Buffer or tvm.tir.BufferLoad.")
 
-    if isinstance(descriptor, Buffer) and len(descriptor.shape) != 1 or descriptor.shape[0] != 1:
+    if isinstance(descriptor, Buffer) and (len(descriptor.shape) != 1 or descriptor.shape[0] != 1):
         raise ValueError("Descriptor must be a 1D buffer of size 1.")
 
     descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(
         descriptor, [0])
 
     return evaluate(
-        tir.call_intrin("handle", tir.op.Op.get("tl.initialize_descriptor"), descriptor,
-                        start_address, layout_type_, int(leading_byte_offset),
-                        int(stride_byte_offset)))
+        tir.call_intrin(
+            "handle",
+            tir.op.Op.get("tl.initialize_wgmma_descriptor"),
+            descriptor,
+            start_address,
+            layout_type_,
+            int(leading_byte_offset),
+            int(stride_byte_offset),
+        ))
+
+
+def initialize_tcgen05_descriptor(
+    descriptor: Buffer,
+    start_address: PrimExpr,
+    leading_byte_offset: int,
+    stride_byte_offset: int,
+    base_offset: int = 0,
+    leading_is_absolute: bool = False,
+    swizzle_mode: int = 0,
+) -> PrimExpr:
+    """Initialize a TCGEN05 shared-memory descriptor."""
+
+    if not isinstance(descriptor, (BufferLoad, Buffer)):
+        raise TypeError("Descriptor must be a tvm.tir.Buffer or tvm.tir.BufferLoad.")
+
+    if isinstance(descriptor, Buffer) and (len(descriptor.shape) != 1 or descriptor.shape[0] != 1):
+        raise ValueError("Descriptor must be a 1D buffer of size 1.")
+
+    descriptor = descriptor if isinstance(descriptor, BufferLoad) else tir.BufferLoad(
+        descriptor, [0])
+
+    return evaluate(
+        tir.call_intrin(
+            "handle",
+            tir.op.Op.get("tl.initialize_tcgen05_descriptor"),
+            descriptor,
+            start_address,
+            int(leading_byte_offset),
+            int(stride_byte_offset),
+            int(base_offset),
+            tir.IntImm("int32", 1 if leading_is_absolute else 0),
+            int(swizzle_mode),
+        ))
 
 
 def increase_descriptor_offset(descriptor: PrimExpr, offset: PrimExpr) -> PrimExpr:

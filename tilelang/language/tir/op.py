@@ -1141,6 +1141,48 @@ def ptx_wgmma_rs(
     )
 
 
+def ptx_tcgen05_mma_ss(
+    a_dtype,
+    b_dtype,
+    c_dtype,
+    desc_a,
+    A_offset,
+    desc_b,
+    B_offset,
+    C_ptr,
+    desc_val,
+    scale_out,
+    mask0,
+    mask1,
+    mask2,
+    mask3,
+):
+    """TVM intrinsic for tcgen05.mma shared-memory × shared-memory instructions.
+
+    Expects exactly 14 positional arguments:
+    (a_dtype, b_dtype, c_dtype, desc_a, A_offset, desc_b, B_offset, C_ptr,
+    desc_val, scale_out, mask0, mask1, mask2, mask3).
+    """
+    return call_intrin(
+        "handle",
+        _tvm_op.Op.get("tl.ptx_tcgen05_mma_ss"),
+        a_dtype,
+        b_dtype,
+        c_dtype,
+        desc_a,
+        A_offset,
+        desc_b,
+        B_offset,
+        C_ptr,
+        desc_val,
+        scale_out,
+        mask0,
+        mask1,
+        mask2,
+        mask3,
+    )
+
+
 def mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """TVM intrinsic for storing the result of PTX MMA into a destination pointer
 
