@@ -264,7 +264,7 @@ cd build; ninja
 ```
 
 When running in editable/developer mode,
-you'll see similar logs like below:
+you'll see logs like below:
 ```
 $ python -c 'import tilelang'
 2025-10-14 11:11:29  [TileLang:tilelang.env:WARNING]: Loading tilelang libs from dev root: /Users/yyc/repo/tilelang/build
