@@ -257,7 +257,7 @@ even if no source change.
 Developers who needs to recompile frequently could use:
 
 ```
-pip install -r requirement-dev.txt
+pip install -r requirements-dev.txt
 pip install -e . -v --no-build-isolation
 
 cd build; ninja
