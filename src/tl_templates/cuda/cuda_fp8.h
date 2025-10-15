@@ -77,7 +77,7 @@ struct __CUDA_ALIGN__(32) fp8_e5_32_t {
 };
 
 // Pack two fp8_e4_t values.
-TL_DEVICE fp8_e4_2_t make_fp8_e4_2_t(fp8_e4_t x, fp8_e4_t y) {
+__forceinline__ __device__ fp8_e4_2_t make_fp8_e4_2_t(fp8_e4_t x, fp8_e4_t y) {
   fp8_e4_2_t result;
   result.x = x;
   result.y = y;
@@ -85,7 +85,7 @@ TL_DEVICE fp8_e4_2_t make_fp8_e4_2_t(fp8_e4_t x, fp8_e4_t y) {
 }
 
 // Pack four fp8_e4_t values.
-TL_DEVICE fp8_e4_4_t make_fp8_e4_4_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
+__forceinline__ __device__ fp8_e4_4_t make_fp8_e4_4_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
                                      fp8_e4_t x3) {
   fp8_e4_4_t result;
   result.x = x0;
@@ -96,7 +96,7 @@ TL_DEVICE fp8_e4_4_t make_fp8_e4_4_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
 }
 
 // Pack eight fp8_e4_t values.
-TL_DEVICE fp8_e4_8_t make_fp8_e4_8_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
+__forceinline__ __device__ fp8_e4_8_t make_fp8_e4_8_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
                                      fp8_e4_t x3, fp8_e4_t x4, fp8_e4_t x5,
                                      fp8_e4_t x6, fp8_e4_t x7) {
   fp8_e4_8_t result;
@@ -106,7 +106,7 @@ TL_DEVICE fp8_e4_8_t make_fp8_e4_8_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
 }
 
 // Pack sixteen fp8_e4_t values.
-TL_DEVICE fp8_e4_16_t make_fp8_e4_16_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
+__forceinline__ __device__ fp8_e4_16_t make_fp8_e4_16_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
                                        fp8_e4_t x3, fp8_e4_t x4, fp8_e4_t x5,
                                        fp8_e4_t x6, fp8_e4_t x7, fp8_e4_t y0,
                                        fp8_e4_t y1, fp8_e4_t y2, fp8_e4_t y3,
@@ -119,7 +119,7 @@ TL_DEVICE fp8_e4_16_t make_fp8_e4_16_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
 }
 
 // Pack thirty-two fp8_e4_t values.
-TL_DEVICE fp8_e4_32_t make_fp8_e4_32_t(
+__forceinline__ __device__ fp8_e4_32_t make_fp8_e4_32_t(
     fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2, fp8_e4_t x3, fp8_e4_t x4,
     fp8_e4_t x5, fp8_e4_t x6, fp8_e4_t x7, fp8_e4_t x8, fp8_e4_t x9,
     fp8_e4_t x10, fp8_e4_t x11, fp8_e4_t x12, fp8_e4_t x13, fp8_e4_t x14,
@@ -136,7 +136,7 @@ TL_DEVICE fp8_e4_32_t make_fp8_e4_32_t(
 }
 
 // Pack two fp8_e5_t values.
-TL_DEVICE fp8_e5_2_t make_fp8_e5_2_t(fp8_e5_t x, fp8_e5_t y) {
+__forceinline__ __device__ fp8_e5_2_t make_fp8_e5_2_t(fp8_e5_t x, fp8_e5_t y) {
   fp8_e5_2_t result;
   result.x = x;
   result.y = y;
@@ -144,7 +144,7 @@ TL_DEVICE fp8_e5_2_t make_fp8_e5_2_t(fp8_e5_t x, fp8_e5_t y) {
 }
 
 // Pack four fp8_e5_t values.
-TL_DEVICE fp8_e5_4_t make_fp8_e5_4_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2,
+__forceinline__ __device__ fp8_e5_4_t make_fp8_e5_4_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2,
                                      fp8_e5_t x3) {
   fp8_e5_4_t result;
   result.x = x0;
@@ -155,7 +155,7 @@ TL_DEVICE fp8_e5_4_t make_fp8_e5_4_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2,
 }
 
 // Pack eight fp8_e5_t values.
-TL_DEVICE fp8_e5_8_t make_fp8_e5_8_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2,
+__forceinline__ __device__ fp8_e5_8_t make_fp8_e5_8_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2,
                                      fp8_e5_t x3, fp8_e5_t x4, fp8_e5_t x5,
                                      fp8_e5_t x6, fp8_e5_t x7) {
   fp8_e5_8_t result;
@@ -165,7 +165,7 @@ TL_DEVICE fp8_e5_8_t make_fp8_e5_8_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2,
 }
 
 // Pack sixteen fp8_e5_t values.
-TL_DEVICE fp8_e5_16_t make_fp8_e5_16_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2,
+__forceinline__ __device__ fp8_e5_16_t make_fp8_e5_16_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2,
                                        fp8_e5_t x3, fp8_e5_t x4, fp8_e5_t x5,
                                        fp8_e5_t x6, fp8_e5_t x7, fp8_e5_t y0,
                                        fp8_e5_t y1, fp8_e5_t y2, fp8_e5_t y3,
@@ -178,7 +178,7 @@ TL_DEVICE fp8_e5_16_t make_fp8_e5_16_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2,
 }
 
 // Pack thirty-two fp8_e5_t values.
-TL_DEVICE fp8_e5_32_t make_fp8_e5_32_t(
+__forceinline__ __device__ fp8_e5_32_t make_fp8_e5_32_t(
     fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2, fp8_e5_t x3, fp8_e5_t x4,
     fp8_e5_t x5, fp8_e5_t x6, fp8_e5_t x7, fp8_e5_t x8, fp8_e5_t x9,
     fp8_e5_t x10, fp8_e5_t x11, fp8_e5_t x12, fp8_e5_t x13, fp8_e5_t x14,
