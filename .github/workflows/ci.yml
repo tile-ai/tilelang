@@ -332,7 +332,7 @@ jobs:
             uv run --no-project -m --
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
-          "${PYTEST[@]}" --maxfail=3 \
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=2 \
             ../examples
 
       # NVIDIA CUDA tests
@@ -362,7 +362,7 @@ jobs:
           )
           "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
             ./python/amd/test_tilelang_test_amd.py
-          echo "::error::ROCm tests are known to be skipped incorrectly due to ROCm PyTorch build issues." >&2
+          echo "::error::ROCm tests are known to be skipped incorrectly due to ROCm TVM build issues." >&2
 
       # Apple Metal tests
       - name: Run Metal tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
