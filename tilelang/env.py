@@ -4,7 +4,6 @@ import pathlib
 import logging
 import shutil
 import glob
-import site
 from dataclasses import dataclass
 from typing import Optional
 
@@ -20,12 +19,9 @@ TL_TEMPLATE_NOT_FOUND_MESSAGE = ("TileLang is not installed or found in the expe
 ", which may lead to compilation bugs when utilize tilelang backend."
 TVM_LIBRARY_NOT_FOUND_MESSAGE = ("TVM is not installed or found in the expected path")
 
-SITE_PACKAGES = site.getsitepackages()
-
-TL_LIBS = [os.path.join(i, 'tilelang/lib') for i in site.getsitepackages()]
-TL_LIBS = [i for i in TL_LIBS if os.path.exists(i)]
-
 TL_ROOT = os.path.dirname(os.path.abspath(__file__))
+TL_LIBS = [os.path.join(i, 'lib') for i in [TL_ROOT]]
+TL_LIBS = [i for i in TL_LIBS if os.path.exists(i)]
 
 DEV = False
 THIRD_PARTY_ROOT = os.path.join(TL_ROOT, '3rdparty')
