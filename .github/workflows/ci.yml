@@ -198,8 +198,10 @@ jobs:
           echo "ROCM_VERSION=${ROCM_VERSION}" | tee -a "${GITHUB_ENV}"
           echo "ROCM_VERSION_MAJMIN=${ROCM_VERSION_MAJMIN}" | tee -a "${GITHUB_ENV}"
           echo "ROCM_VERSION_MAJMIN_NODOT=${ROCM_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
-          echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
-          echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
+          # FIXME: ROCm test incorrectly skips tests
+          echo "::warning::Using torch with CUDA build for ROCm tests"
+          # echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
+          # echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
           echo "CLANG_TIDY_CMAKE_OPTIONS=${CLANG_TIDY_CMAKE_OPTIONS}" | tee -a "${GITHUB_ENV}"
 
           if [[ ! -x "$(command -v hipcc)" ]]; then
@@ -270,6 +272,9 @@ jobs:
             echo "::error::Unknown toolkit: ${{ matrix.runner.toolkit }}"
             exit 1
           fi
+          echo "::group::torch.utils.collect_env"
+          uv run --no-project -m -- torch.utils.collect_env
+          echo "::endgroup::"
 
       - name: Clear uv cache for self-hosted runners (if setup failed)
         if: >-
