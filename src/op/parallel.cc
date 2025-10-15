@@ -5,6 +5,7 @@
 
 #include "parallel.h"
 
+#include <algorithm>
 #include <tvm/tir/op.h>
 
 #include "../layout/utils.h"
@@ -493,13 +494,39 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     //    thread bounds captured in the layout.
 
     [this, &store_shared_global_buffers, &store_fragment_buffers,
-     &has_cross_thread_access, &T]() {
+     &has_cross_thread_access, &const_index_fragment_buffer, &T]() {
       if (is_one(loop_layout_->ReplicateExtent()))
         return;
       if (!has_cross_thread_access)
         return;
 
       if (!store_fragment_buffers.empty()) {
+        // Iterate replicated fragment stores: when the fragment index is a
+        // constant (e.g. fragment[0]), every thread touches the same slot, so
+        // the rep == 0 predicate is unnecessary. Example: for i in
+        // T.Parallel(...):
+        //   shared[i] = ...
+        //   fragment[0] = ...
+        bool replicate_is_from_dynamic_index_fragment = false;
+        for (const auto &fragment : store_fragment_buffers) {
+          ICHECK(T.layout_map.count(fragment));
+          auto fragment_layout = T.layout_map[fragment].as<Fragment>().value();
+          if (is_one(fragment_layout->ReplicateExtent()))
+            continue;
+
+          if (analyzer_.CanProveEqual(fragment_layout->ReplicateExtent(),
+                                      loop_layout_->ReplicateExtent()))
+            continue;
+          if (std::find(const_index_fragment_buffer.begin(),
+                        const_index_fragment_buffer.end(),
+                        fragment) == const_index_fragment_buffer.end()) {
+            replicate_is_from_dynamic_index_fragment = true;
+          }
+        }
+
+        if (!replicate_is_from_dynamic_index_fragment)
+          return;
+
         ICHECK(store_shared_global_buffers.empty())
             << "Invalid layout: cannot have both fragment and shared store "
                "buffers "
