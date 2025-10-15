@@ -39,7 +39,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
-          fetch-depth: 1
+          fetch-depth: 0
+          submodules: recursive
 
       - name: Setup Python 3.8
         id: setup-py38
