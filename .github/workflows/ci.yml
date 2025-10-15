@@ -21,6 +21,7 @@ env:
   CLANG_TIDY_CMAKE_OPTIONS: "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" # to be updated
   PYTHONDEVMODE: "1"
   PYTHONUNBUFFERED: "1"
+  PYTHONPATH: "" # explicit cleanup
   FORCE_COLOR: "1"
   CLICOLOR_FORCE: "1"
   UV_INDEX_STRATEGY: "unsafe-best-match"
