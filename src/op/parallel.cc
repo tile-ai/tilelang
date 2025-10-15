@@ -413,18 +413,19 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
 
     // check if loop body contains a "pure" buffer store (i.e., direct
     // assignment, not compound update)
-    std::vector<Buffer> store_shared_global_buffers, store_fragment_buffers, store_buffers; 
+    std::vector<Buffer> store_shared_global_buffers, store_fragment_buffers;
     // Buffers that scope is above fragments.
     // global, shared, shared.dyn
     // which can be used to analysis replicate case
     PostOrderVisit(root_, [&](const ObjectRef &obj) {
       if (const auto *store = obj.as<BufferStoreNode>()) {
         auto buffer = store->buffer;
-        if (buffer.scope() == "shared" || buffer.scope() == "shared.dyn" || buffer.scope() == "global"){
+        if (buffer.scope() == "shared" || buffer.scope() == "shared.dyn" ||
+            buffer.scope() == "global") {
           store_shared_global_buffers.emplace_back(buffer);
-        } else if (buffer.scope() == "local.fragment")
+        } else if (buffer.scope() == "local.fragment") {
           store_fragment_buffers.emplace_back(buffer);
-        store_buffers.emplace_back(buffer);
+        }
       }
     });
 
@@ -491,14 +492,18 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
     // 2) The loop layout replicate extent is greater than 1, inferred from the
     //    thread bounds captured in the layout.
 
-    [this, &store_shared_global_buffers, &store_fragment_buffers, &has_cross_thread_access, &T](){
-      if (is_one(loop_layout_->ReplicateExtent())) return;
-      if (!has_cross_thread_access) return;
+    [this, &store_shared_global_buffers, &store_fragment_buffers,
+     &has_cross_thread_access, &T]() {
+      if (is_one(loop_layout_->ReplicateExtent()))
+        return;
+      if (!has_cross_thread_access)
+        return;
 
       if (!store_fragment_buffers.empty()) {
         ICHECK(store_shared_global_buffers.empty())
-            << "Invalid layout: cannot have both fragment and shared store buffers "
-              "in replicated loop layout.";
+            << "Invalid layout: cannot have both fragment and shared store "
+               "buffers "
+               "in replicated loop layout.";
         return;
       } else {
         // Now, store is global or shared
