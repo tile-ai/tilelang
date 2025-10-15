@@ -160,9 +160,8 @@ public:
         //     == truncdiv(a + b*c, b) - c
         IntImm min(op->a->dtype.element_of(), const_int_bound->min_value);
         PrimExpr ceildiv = truncdiv((op->b - 1) - min, op->b);
-        // Skip analyzer simplification so we preserve straightforward div
-        // expressions.
-        PrimExpr offset_numerator = op->a + op->b * ceildiv;
+        PrimExpr offset_numerator =
+            analyzer_->Simplify(op->a + op->b * ceildiv);
         return truncdiv(offset_numerator, op->b) - ceildiv;
       }
 
