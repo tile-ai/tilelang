@@ -16,6 +16,7 @@ jobs:
   perfbench:
     name: Benchmark between PR and main
     if: |
+      github.repository_owner == 'tile-ai' &&
       github.event.issue.pull_request &&
       (contains(github.event.comment.body, '/performance-report') || contains(github.event.comment.body, '/perf'))
     runs-on: [self-hosted, nvidia]

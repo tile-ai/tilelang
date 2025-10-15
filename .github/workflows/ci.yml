@@ -71,7 +71,9 @@ jobs:
 
   tests:
     name: Test for Python ${{ matrix.python-version }} with ${{ matrix.runner.toolkit }} (on ${{ matrix.runner.name }})
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     needs: [lint]
     runs-on: ${{ matrix.runner.tags }}
     strategy:

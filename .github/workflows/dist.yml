@@ -31,6 +31,9 @@ concurrency:
 jobs:
   build-wheels:
     name: Build wheels for Python ${{ matrix.python-version }} on ${{ matrix.target.runner }} with ${{ matrix.target.toolkit }}
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     strategy:
       matrix:
         target:
