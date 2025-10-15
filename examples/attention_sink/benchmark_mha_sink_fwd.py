@@ -1,6 +1,5 @@
 import torch
 import argparse
-import tilelang
 from tilelang.profiler import do_bench
 import triton
 import triton.language as tl

@@ -1,6 +1,5 @@
 import torch
 import argparse
-import tilelang
 from tilelang.profiler import do_bench
 import triton
 import triton.language as tl
@@ -173,7 +172,6 @@ def main(
             dtype=dtype)
 
         Q, K, V, sinks = gen_inputs(batch, heads, seq_q, seq_kv, dim, groups, dtype=torch_dtype)
-
 
         if torch.allclose(
                 triton_program(Q, K, V, sinks, window_size),
