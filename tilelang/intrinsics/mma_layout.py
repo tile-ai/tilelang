@@ -144,6 +144,10 @@ def mma_load_a_32x16_to_shared_16x32_layout(thread_id, local_id):
     col = 16 * (local_id // 8) + (thread_id % 4) * 4 + (local_id % 4)
     return row, col
 
+def mma_load_a_32x8_to_shared_16x16_layout(thread_id, local_id):
+    row = 8 * (local_id % 4 // 2) + (thread_id // 4)
+    col = 8 * (local_id // 4) + (thread_id % 4) * 2 + (local_id % 2)
+    return row, col
 
 def mma_load_b_32x16_to_shared_16x32_layout(thread_id, local_id):
     row = 8 * (local_id // 8) + (thread_id // 4)

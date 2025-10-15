@@ -20,6 +20,7 @@ from tilelang.intrinsics.mma_layout import (
     mma_load_b_32x4_to_shared_16x8_layout,
     mma_load_a_32x16_to_shared_16x32_layout,
     mma_load_b_32x16_to_shared_16x32_layout,
+    mma_load_a_32x8_to_shared_16x16_layout,
 )
 
 lift = convert
@@ -218,6 +219,8 @@ class TensorCoreIntrinEmitter(object):
         if not ldmatrix_available:
             if DataType(a_dtype).bits == 8:
                 mma_load_layout = mma_load_a_32x16_to_shared_16x32_layout
+            elif DataType(a_dtype).bits == 16:
+                mma_load_layout = mma_load_a_32x8_to_shared_16x16_layout
             elif DataType(a_dtype).bits == 32:
                 mma_load_layout = mma_load_a_32x4_to_shared_16x8_layout
             else:
@@ -256,7 +259,7 @@ class TensorCoreIntrinEmitter(object):
                 else:
                     for j in T.serial(local_size_a):
                         mi, mk = mma_load_layout(tx, j)
-                        A_local_buf[i * local_size_a + j] = A_shared_buf[wk + mk, wi + mi]
+                        A_local_buf[i * local_size_a + j] = A_shared_buf[wk + mk, wi + mi] if trans else A_shared_buf[wi + mi, wk + mk]
 
         return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
 
