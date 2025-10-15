@@ -170,9 +170,9 @@ class BitnetTokenizer(PreTrainedTokenizer):
 
         if legacy is None:
             logger.warning_once(
-                f"You are using the default legacy behaviour of the {self.__class__}. This is"
+                f"You are using the default legacy behavior of the {self.__class__}. This is"
                 " expected, and simply means that the `legacy` (previous) behavior will be used so nothing changes for you."
-                " If you want to use the new behaviour, set `legacy=False`. This should only be set if you understand what it"
+                " If you want to use the new behavior, set `legacy=False`. This should only be set if you understand what it"
                 " means, and thoroughly read the reason why this was added as explained in"
                 " https://github.com/huggingface/transformers/pull/24565")
             legacy = True
@@ -215,7 +215,7 @@ class BitnetTokenizer(PreTrainedTokenizer):
         with open(self.vocab_file, "rb") as f:
             sp_model = f.read()
             model_pb2 = import_protobuf(
-                f"The new behaviour of {self.__class__.__name__} (with `self.legacy = False`)")
+                f"The new behavior of {self.__class__.__name__} (with `self.legacy = False`)")
             model = model_pb2.ModelProto.FromString(sp_model)
             normalizer_spec = model_pb2.NormalizerSpec()
             normalizer_spec.add_dummy_prefix = False

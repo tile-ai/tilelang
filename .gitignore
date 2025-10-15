@@ -2,6 +2,7 @@
 *.slo
 *.lo
 *.o
+*.so
 *.obj
 *.pyc
 
@@ -18,7 +19,7 @@
 
 debug/
 build/
-dist/
+*dist/
 wheelhouse/
 __pycache__
 nnfusion.tar.gz
@@ -82,17 +83,11 @@ models/frozenmodels/
 # .ruff_cache
 .ruff_cache
 
-# build sdist
-build_sdist/
-
 # exclude debug testing folder
 !testing/python/debug
 
 # ignore lib with develop mode
 tilelang/lib
-
-# tox
-.tox/
 
 # cython
 tilelang/jit/adapter/cython/.cycache
