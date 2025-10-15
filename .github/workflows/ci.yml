@@ -90,7 +90,7 @@ jobs:
             name: self-hosted-amd
             # Format: [Nightly-]ROCm-<major>.<minor>[.<patch>]. E.g., "ROCm-6.4" or "Nightly-ROCm-7.0".
             # Use "Nightly-" prefix to use torch nightly builds.
-            toolkit: Nightly-ROCm-7.0
+            toolkit: ROCm-6.3
           - tags: [macos-latest]
             name: macos-latest
             toolkit: Metal # or Nightly-Metal
@@ -352,8 +352,6 @@ jobs:
       - name: Run ROCm tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         id: rocm-tests
         if: contains(matrix.runner.toolkit, 'ROCm')
-        # FIXME: ROCm test incorrectly skips tests
-        continue-on-error: true
         run: |
           cd testing
           PYTEST=(
@@ -362,7 +360,6 @@ jobs:
           )
           "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
             ./python/amd/test_tilelang_test_amd.py
-          echo "::error::ROCm tests are known to be skipped incorrectly due to ROCm TVM build issues." >&2
 
       # Apple Metal tests
       - name: Run Metal tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
