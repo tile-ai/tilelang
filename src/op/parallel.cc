@@ -413,22 +413,23 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
 
     // check if loop body contains a "pure" buffer store (i.e., direct
     // assignment, not compound update)
-    bool has_pure_buffer_store = false;
+    std::vector<Buffer> store_shared_global_buffers, store_fragment_buffers, store_buffers; 
+    // Buffers that scope is above fragments.
+    // global, shared, shared.dyn
+    // which can be used to analysis replicate case
     PostOrderVisit(root_, [&](const ObjectRef &obj) {
       if (const auto *store = obj.as<BufferStoreNode>()) {
-        // Check if the value is a direct load from another buffer (i.e., b[i]
-        // = a[i])
-        if (const auto *load = store->value.as<BufferLoadNode>()) {
-          has_pure_buffer_store = true;
-        }
+        auto buffer = store->buffer;
+        if (buffer.scope() == "shared" || buffer.scope() == "shared.dyn" || buffer.scope() == "global"){
+          store_shared_global_buffers.emplace_back(buffer);
+        } else if (buffer.scope() == "local.fragment")
+          store_fragment_buffers.emplace_back(buffer);
+        store_buffers.emplace_back(buffer);
       }
     });
 
     if (read_source_buffer.defined() && allow_layout_propgate) {
       loop_layout_ = compute_loop_layout_from_buffer(read_source_buffer);
-      // // Loop don't need to be replicated.
-      // if (!is_one(loop_layout_->ReplicateExtent()))
-      //   loop_layout_ = loop_layout_->DeReplicate();
     }
 
     if (!loop_layout_.defined()) {
@@ -477,16 +478,40 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
       DLOG(INFO) << "[PlanLoopPartition] loop_layout_ = "
                  << loop_layout_->DebugOutput() << '\n';
     }
-    if (!is_one(loop_layout_->ReplicateExtent()) && has_cross_thread_access &&
-        !has_pure_buffer_store) {
-      auto inv = loop_layout_->Inverse();
-      Array<PrimExpr> fwd;
-      for (size_t i = 0; i < loop_layout_->OutputDim(); i++)
-        fwd.push_back(0);
-      fwd.push_back(InputPlaceholder(0) - T.thread_bounds->min);
-      auto rep = inv->Forward(fwd).back();
-      AddPredicate(EQ(rep, 0));
-    }
+
+    // Lambda that guards replicated accesses:
+    // - When a loop layout replicates a fragment buffer (rep > 1), each thread
+    //   observes the same fragment elements. Blindly storing to shared/global
+    //   memory in that case would add the same value multiple times.
+    // - We therefore restrict the store so that only the replica with rep == 0
+    //   performs the update (e.g. global[i] += fragment[i] only fires once).
+    // Trigger conditions for this guard:
+    // 1) There are cross-thread stores targeting shared/global memory (no
+    //    fragment stores in this branch; atomic_add and similar remain TODO).
+    // 2) The loop layout replicate extent is greater than 1, inferred from the
+    //    thread bounds captured in the layout.
+
+    [this, &store_shared_global_buffers, &store_fragment_buffers, &has_cross_thread_access, &T](){
+      if (is_one(loop_layout_->ReplicateExtent())) return;
+      if (!has_cross_thread_access) return;
+
+      if (!store_fragment_buffers.empty()) {
+        ICHECK(store_shared_global_buffers.empty())
+            << "Invalid layout: cannot have both fragment and shared store buffers "
+              "in replicated loop layout.";
+        return;
+      } else {
+        // Now, store is global or shared
+        // or T.call_extern or T.call_intrin ...
+        auto inv = loop_layout_->Inverse();
+        Array<PrimExpr> fwd;
+        for (size_t i = 0; i < loop_layout_->OutputDim(); i++)
+          fwd.push_back(0);
+        fwd.push_back(InputPlaceholder(0) - T.thread_bounds->min);
+        auto rep = inv->Forward(fwd).back();
+        AddPredicate(EQ(rep, 0));
+      }
+    }();
   } else {
     return {};
   }
