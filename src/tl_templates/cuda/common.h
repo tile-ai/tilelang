@@ -54,11 +54,11 @@ using int4_t = int4;
     }                                                                          \
   } while (0)
 
-// abs function for bfloat_t and half_t since there is no implicit conversion
-// method
-TL_PATCH TL_DEVICE half_t __habs(const half_t x) {
-  return half_t(__habs(x.to_half()));
-}
+// using cutlass abs function for half_t
+TL_PATCH TL_DEVICE half_t __habs(const half_t x) { return abs(x); }
+
+// using cutlass abs function for bfloat_t
+TL_PATCH TL_DEVICE bfloat16_t __habs(const bfloat16_t x) { return abs(x); }
 
 // hrsqrt function for half_t
 TL_PATCH TL_DEVICE half_t hrsqrt(const half_t x) {

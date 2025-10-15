@@ -1,0 +1,8 @@
+# Lint requirements
+--requirement requirements-lint.txt
+
+# Common test requirements
+--requirement requirements-test.txt
+
+# CUDA specific requirements
+flash-attn==2.5.8

@@ -1968,6 +1968,41 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     enable_sparse_gemm_ = true;
     this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
                           op->args, true, os);
+  } else if (op->op.same_as(tl::get_lane_idx())) {
+    ICHECK_LE(op->args.size(), 1)
+        << "tl.get_lane_idx expects at most one argument <warp_size>.";
+    os << "tl::get_lane_idx(";
+    if (!op->args.empty()) {
+      os << PrintExpr(op->args[0]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::get_warp_idx_sync())) {
+    ICHECK_LE(op->args.size(), 1)
+        << "tl.get_warp_idx_sync expects at most one argument <warp_size>.";
+    os << "tl::get_warp_idx_sync(";
+    if (!op->args.empty()) {
+      os << PrintExpr(op->args[0]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::get_warp_idx())) {
+    ICHECK_LE(op->args.size(), 1)
+        << "tl.get_warp_idx expects at most one argument <warp_size>.";
+    os << "tl::get_warp_idx(";
+    if (!op->args.empty()) {
+      os << PrintExpr(op->args[0]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::get_warp_group_idx())) {
+    ICHECK_LE(op->args.size(), 2)
+        << "tl.get_warp_group_idx expects <warp_size, warps_per_group>.";
+    os << "tl::get_warp_group_idx(";
+    for (size_t i = 0; i < op->args.size(); ++i) {
+      if (i != 0) {
+        os << ", ";
+      }
+      os << PrintExpr(op->args[i]);
+    }
+    os << ")";
   } else if (op->op.same_as(tl::tl_shuffle_elect())) {
     os << "tl::tl_shuffle_elect<" << PrintExpr(op->args[0]) << ">()";
   } else if (op->op.same_as(tl::initialize_descriptor())) {

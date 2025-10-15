@@ -4,8 +4,8 @@ import example_topk
 
 @tilelang.testing.requires_cuda
 def test_topk_tilelang():
-    example_topk.main()
+    example_topk.main(argv=[])
 
 
 if __name__ == "__main__":
-    test_topk_tilelang()
+    tilelang.testing.main()
