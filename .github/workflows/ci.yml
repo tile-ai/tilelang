@@ -226,6 +226,7 @@ jobs:
             echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
             echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
           fi
+
           export CLANG_TIDY_CMAKE_OPTIONS="${CLANG_TIDY_CMAKE_OPTIONS} -DUSE_METAL=ON"
 
           echo "USE_METAL=ON" | tee -a "${GITHUB_ENV}"
@@ -289,21 +290,33 @@ jobs:
 
       - name: Run clang-tidy
         id: clang-tidy
+        if: runner.os == 'Linux'
         run: |
-          clang-tidy --version
+          echo "\$ $(command -v clang-tidy) --version" && clang-tidy --version
+
+          if [[ -x "$(command -v run-clang-tidy)" ]]; then
+            echo "Using run-clang-tidy from $(command -v run-clang-tidy)"
+            CLANG_TIDY=(run-clang-tidy)
+          else
+            echo "Downloading run-clang-tidy script"
+            wget -O run-clang-tidy.py https://raw.githubusercontent.com/llvm/llvm-project/refs/heads/release/21.x/clang-tools-extra/clang-tidy/tool/run-clang-tidy.py
+            CLANG_TIDY=(uv run --no-project --script -- run-clang-tidy.py)
+          fi
+          if [[ -x "$(command -v clang-apply-replacements)" ]]; then
+            echo "Using clang-apply-replacements from $(command -v clang-apply-replacements)"
+            CLANG_TIDY+=(-fix -clang-apply-replacements-binary="$(command -v clang-apply-replacements)")
+          else
+            echo "::warning::clang-apply-replacements not found in PATH, automatic fixing disabled."
+          fi
 
           # Run cmake to create the build directory with compile_commands.json
           cmake -S . -B cmake-build --fresh ${CLANG_TIDY_CMAKE_OPTIONS}  # no quotes here
 
           CXX_FILES=$(find src -type f -iname "*.[ch]pp" -o -iname "*.cc" -o -iname "*.c" -o -iname "*.h")
           rc=0
-          if [[ -x "$(command -v run-clang-tidy)" ]]; then
-            run-clang-tidy -clang-tidy-binary="$(command -v clang-tidy)" \
-              -fix -p="cmake-build" ${CXX_FILES} || rc="$?"
-          else
-            clang-tidy --fix -p="cmake-build" ${CXX_FILES} || rc="$?"
-          fi
-          rm -rf cmake-build
+          "${CLANG_TIDY[@]}" -clang-tidy-binary="$(command -v clang-tidy)" \
+            -p="cmake-build" ${CXX_FILES} || rc="$?"
+          rm -rf cmake-build run-clang-tidy.py
           if (( rc != 0 )); then
             echo "::error::clang-tidy found issues (exit code: ${rc}). Please run 'clang-tidy --fix' locally to fix them."
             git diff --color=always || true

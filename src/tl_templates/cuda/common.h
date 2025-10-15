@@ -244,8 +244,8 @@ union GmmaDescriptor {
     uint16_t stride_byte_offset_ : 14, : 2; // 14 bits [0,14), 2 bits unused
     // base_offset, bit [49,52)
     // Valid only for SWIZZLE_128B and SWIZZLE_64B
-    uint8_t : 1,
-        base_offset_ : 3, : 4; // 1 bit unused, 3 bits [1,4), 4 bits unused
+    uint8_t : 1, base_offset_ : 3,
+        : 4; // 1 bit unused, 3 bits [1,4), 4 bits unused
     // layout type, bit [62,64)
     // SWIZZLE_NONE = 0, SWIZZLE_32B = 3, SWIZZLE_64B = 2, SWIZZLE_128B = 1
     uint8_t : 6, layout_type_ : 2; // 6 bits unused, 2 bits [6,8)

@@ -86,14 +86,14 @@ private:
 
   class RegionVisitor : public ExprVisitor {
   public:
-    RegionVisitor(){};
+    RegionVisitor() {};
     void VisitExpr_(const VarNode *var) { seen_.insert(var); }
     std::unordered_set<const VarNode *> seen_;
   };
 
   class BlockIdxVisitor : public StmtVisitor {
   public:
-    BlockIdxVisitor(){};
+    BlockIdxVisitor() {};
     void VisitStmt_(const AttrStmtNode *attr) final {
       if (attr->attr_key == attr::thread_extent) {
         IterVar iv = Downcast<IterVar>(attr->node);

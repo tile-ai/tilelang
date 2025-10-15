@@ -1,6 +1,5 @@
 ---
 InheritParentConfig: true
-ExtraArgs: ['-v']
 FormatStyle: file
 UseColor: true
 WarningsAsErrors: '*'
