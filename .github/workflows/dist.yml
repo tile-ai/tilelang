@@ -78,7 +78,7 @@ jobs:
           PYTHON_VERSION_MAJMIN_NODOT="${PYTHON_VERSION_MAJMIN//./}"
           echo "CIBW_BUILD=cp${PYTHON_VERSION_MAJMIN_NODOT}-*" | tee -a "${GITHUB_ENV}"
 
-          if [[ "${{ matrix.target.toolkit }}" == "CUDA-"* ]]; then
+          if [[ "${{ matrix.target.toolkit }}" == *"CUDA"* ]]; then
             CUDA_VERSION="${{ matrix.target.toolkit }}"
             CUDA_VERSION="${CUDA_VERSION#CUDA-}"
             echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"

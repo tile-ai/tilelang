@@ -1,14 +1,14 @@
 # Requirements to run local build with `--no-build-isolation` or other developments
 
-Cython>=3.0.0
 build
 cmake>=3.26
+cython>=3.0.0
+ninja
 packaging
-setuptools>=61
 scikit-build-core
+setuptools>=61
 torch
 wheel
-ninja
 
 auditwheel; platform_system == 'Linux'
 patchelf; platform_system == 'Linux'

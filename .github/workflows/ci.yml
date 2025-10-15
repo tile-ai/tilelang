@@ -251,18 +251,21 @@ jobs:
       - name: Setup venv
         id: setup-venv
         run: |
+          set -o pipefail
+
           uv pip install --upgrade pip setuptools wheel
           if [[ "${UV_INDEX}" == *"/nightly/"* ]]; then
             uv pip install --prerelease=allow -v torch
           fi
           uv pip install -v -r requirements-test.txt
+          echo "import torch; print(f'torch: {torch.__version__}')" | uv run --no-project --script -
           if [[ "${{ matrix.runner.toolkit }}" == *"CUDA"* ]]; then
-            uv pip install --no-build-isolation -v flash-attn==2.5.8
+            uv pip install --no-build-isolation-package=flash-attn -v -r requirements-test-cuda.txt
+            echo "import flash_attn; print(f'flash_attn: {flash_attn.__version__}')" | uv run --no-project --script -
           elif [[ "${{ matrix.runner.toolkit }}" == *"ROCm"* ]]; then
-            uv pip install -v -r requirements-rocm.txt
+            uv pip install -v -r requirements-test-rocm.txt
           elif [[ "${{ matrix.runner.toolkit }}" == *"Metal"* ]]; then
-            # Currently no extra dependency for metal
-            :
+            uv pip install -v -r requirements-test-metal.txt
           else
             echo "::error::Unknown toolkit: ${{ matrix.runner.toolkit }}"
             exit 1
