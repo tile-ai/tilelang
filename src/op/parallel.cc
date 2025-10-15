@@ -509,7 +509,10 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
         //   fragment[0] = ...
         bool replicate_is_from_dynamic_index_fragment = false;
         for (const auto &fragment : store_fragment_buffers) {
-          ICHECK(T.layout_map.count(fragment));
+          if (!T.layout_map.count(fragment)) {
+            continue;
+          }
+
           auto fragment_layout = T.layout_map[fragment].as<Fragment>().value();
           if (is_one(fragment_layout->ReplicateExtent()))
             continue;
