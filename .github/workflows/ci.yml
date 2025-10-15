@@ -287,21 +287,27 @@ jobs:
           echo "Clearing uv cache at ${UV_CACHE_DIR} due to failure."
           uv cache clean
 
-      - name: Run format check
-        id: format-check
+      - name: Run clang-tidy
+        id: clang-tidy
         run: |
-          mkdir -p build
+          clang-tidy --version
+
           # Run cmake to create the build directory with compile_commands.json
-          (
-            cd build
-            cmake .. ${CLANG_TIDY_CMAKE_OPTIONS}  # no quotes here
-          )
+          cmake -S . -B cmake-build --fresh ${CLANG_TIDY_CMAKE_OPTIONS}  # no quotes here
+
+          CXX_FILES=$(find src -type f -iname "*.[ch]pp" -o -iname "*.cc" -o -iname "*.c" -o -iname "*.h")
           rc=0
-          bash format.sh || rc="$?"
-          rm -rf build
-          if [[ "${rc}" -ne 0 ]]; then
-            echo "::error::Format check failed. Please run 'bash format.sh' locally to fix the issues."
-            exit 1
+          if [[ -x "$(command -v run-clang-tidy)" ]]; then
+            run-clang-tidy -clang-tidy-binary="$(command -v clang-tidy)" \
+              -fix -p="cmake-build" ${CXX_FILES} || rc="$?"
+          else
+            clang-tidy --fix -p="cmake-build" ${CXX_FILES} || rc="$?"
+          fi
+          rm -rf cmake-build
+          if (( rc != 0 )); then
+            echo "::error::clang-tidy found issues (exit code: ${rc}). Please run 'clang-tidy --fix' locally to fix them."
+            git diff --color=always || true
+            exit "${rc}"
           fi
 
       - name: Enable core dump generation (Linux / GitHub-hosted runners)
