@@ -59,6 +59,27 @@ private:
   bool warp_specialized_ = false;
 };
 
+class SimtCopyDetector : public StmtExprVisitor {
+public:
+  static bool Detect(const Stmt &stmt) {
+    SimtCopyDetector detector;
+    detector.VisitStmt(stmt);
+    return detector.has_simt_copy_;
+  }
+
+private:
+  void VisitStmt_(const BufferStoreNode *op) final {
+    auto scope =
+        runtime::StorageScope::Create(GetPtrStorageScope(op->buffer->data));
+    if (scope.to_string() != "global") {
+      has_simt_copy_ = true;
+    }
+    StmtExprVisitor::VisitStmt_(op);
+  }
+
+  bool has_simt_copy_{false};
+};
+
 class SetMaxNRegInjector : public StmtExprMutator {
 public:
   static PrimFunc Inject(PrimFunc f) {
@@ -113,9 +134,7 @@ private:
       auto dec_reg_stmt = Evaluate(0);
 
       // Only inject if we have valid register hints and no SIMT copy
-      // For now, we assume no SIMT copy detection is available here
-      // TODO: Add SIMT copy detection if needed
-      bool has_simt_copy = false; // Placeholder
+      bool has_simt_copy = SimtCopyDetector::Detect(producer_body);
 
       if (dec_reg >= 0 && inc_reg >= 0 && !has_simt_copy) {
         auto inc_reg_num =

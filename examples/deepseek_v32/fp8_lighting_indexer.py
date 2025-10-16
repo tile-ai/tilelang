@@ -136,8 +136,6 @@ def mqa_attn_return_logits(
             cu_k_s_min = T.alloc_local([1], index_dtype)
             cu_k_e_max = T.alloc_local([1], index_dtype)
 
-            T.no_set_max_nreg()
-
             cu_k_s_min[0] = 2147483647
             cu_k_e_max[0] = -2147483648
 

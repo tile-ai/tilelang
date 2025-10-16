@@ -501,6 +501,13 @@ TVM_DLL const Op &initialize_descriptor();
  * tilelang.
  */
 TVM_DLL const Op &increase_descriptor_offset();
+/*!
+ * \brief tilelang intrinsic for element-wise atomic addition.
+ *
+ *  This op is used to represent an element-wise atomic add operation in
+ * tilelang.
+ */
+TVM_DLL const Op &atomicadd_elem_op();
 
 } // namespace tl
 } // namespace tvm
