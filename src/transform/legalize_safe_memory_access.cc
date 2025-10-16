@@ -58,13 +58,13 @@ private:
 //    log a warning or handle accordingly.
 struct GlobalMemChecker : public StmtExprVisitor {
 
-  GlobalMemChecker(arith::Analyzer *analyzer, bool recursive_collect_conds) : analyzer_(analyzer), recursive_collect_conds_(recursive_collect_conds) {}
+  GlobalMemChecker(arith::Analyzer *analyzer, bool recursively_collect_conds) : analyzer_(analyzer), recursively_collect_conds_(recursively_collect_conds) {}
   void VisitExpr_(const BufferLoadNode *op) final {
     // Check if the buffer is in global scope
     if (IsGlobalBuffer(op->buffer)) {
       CheckBufferIndices(op->buffer, op->indices, /*is_load=*/true);
     }
-    if (recursive_collect_conds_) {
+    if (recursively_collect_conds_) {
       StmtExprVisitor::VisitExpr_(op);
     }
   }
@@ -74,7 +74,7 @@ struct GlobalMemChecker : public StmtExprVisitor {
     if (IsGlobalBuffer(op->buffer)) {
       CheckBufferIndices(op->buffer, op->indices, /*is_load=*/false);
     }
-    if (recursive_collect_conds_) {
+    if (recursively_collect_conds_) {
       StmtExprVisitor::VisitStmt_(op);
     }
   }
@@ -138,7 +138,7 @@ struct GlobalMemChecker : public StmtExprVisitor {
 private:
   Array<PrimExpr> _conditions;
   arith::Analyzer *analyzer_;
-  bool recursive_collect_conds_;
+  bool recursively_collect_conds_;
 };
 
 class SafeMemorysRewriter : public StmtExprMutator {
@@ -156,7 +156,7 @@ private:
 
     // For Load/Store, we only check the current node, not its children.
     // Since rewriter will recursively visit children.
-    GlobalMemChecker checker(analyzer_, /*recursive_collect_conds=*/false);
+    GlobalMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
     checker(load);
     Array<PrimExpr> conditions = checker.GetConditions();
 
@@ -178,7 +178,7 @@ private:
     // Check if the buffer is in global scope
     auto store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
 
-    GlobalMemChecker checker(analyzer_, /*recursive_collect_conds=*/false);
+    GlobalMemChecker checker(analyzer_, /*recursively_collect_conds=*/false);
     checker(store);
     Array<PrimExpr> conditions = checker.GetConditions();
 
@@ -254,7 +254,7 @@ private:
         // For CallExtern, we recursively collect conditions from all children.
         // Since we cannot rewrite any BufferLoad in its children (Rewrite will cause potential Nullptr
         // exception).
-        GlobalMemChecker checker(analyzer_, /*recursive_collect_conds=*/true);
+        GlobalMemChecker checker(analyzer_, /*recursively_collect_conds=*/true);
         checker(call);
         Array<PrimExpr> conditions = checker.GetConditions();
 
