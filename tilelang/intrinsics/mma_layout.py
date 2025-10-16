@@ -145,8 +145,18 @@ def mma_load_a_32x16_to_shared_16x32_layout(thread_id, local_id):
     return row, col
 
 def mma_load_a_32x8_to_shared_16x16_layout(thread_id, local_id):
-    row = 8 * (local_id % 4 // 2) + (thread_id // 4)
-    col = 8 * (local_id // 4) + (thread_id % 4) * 2 + (local_id % 2)
+    """
+        groupID           = %laneid >> 2
+        threadID_in_group = %laneid % 4
+
+        row =      groupID            for ai where  0 <= i < 2 || 4 <= i < 6
+                groupID + 8         Otherwise
+
+        col =  (threadID_in_group * 2) + (i & 0x1)          for ai where i <  4
+        (threadID_in_group * 2) + (i & 0x1) + 8      for ai where i >= 4
+    """
+    row = (thread_id // 4) + 8 * (local_id % 4 // 2)
+    col = (thread_id % 4) * 2 +(local_id % 2) + 8 * (local_id // 4)
     return row, col
 
 def mma_load_b_32x16_to_shared_16x32_layout(thread_id, local_id):
@@ -154,6 +164,23 @@ def mma_load_b_32x16_to_shared_16x32_layout(thread_id, local_id):
     col = 16 * (local_id % 8 // 4) + (thread_id % 4) * 4 + (local_id % 4)
     return row, col
 
+def mma_load_b_32x4_to_shared_16x8_layout_16bit(thread_id, local_id):
+    """
+        groupID           = %laneid >> 2
+        threadID_in_group = %laneid % 4
+
+        row =  (threadID_in_group * 2) + (i & 0x1)           for bi where i <  2
+            (threadID_in_group * 2) + (i & 0x1) + 8       for bi where i >= 2
+
+        col = groupID
+    """
+    row = (thread_id % 4) * 2 + (local_id % 2) + (local_id // 2) * 8
+    col = (thread_id // 4)
+    return row, col
+
+def mma_load_b_32x8_to_shared_16x16_layout_16bit(thread_id, local_id):
+    row, col = mma_load_b_32x4_to_shared_16x8_layout_16bit(thread_id, local_id % 4)
+    return row, col + 8 * (local_id // 4)
 
 def shared_16x16_to_mma_32x8_smoothlayout(i, j):
     return (i * 2 + j // 8, j % 8)
