@@ -58,7 +58,9 @@ private:
 //    log a warning or handle accordingly.
 struct GlobalMemChecker : public StmtExprVisitor {
 
-  GlobalMemChecker(arith::Analyzer *analyzer, bool recursively_collect_conds) : analyzer_(analyzer), recursively_collect_conds_(recursively_collect_conds) {}
+  GlobalMemChecker(arith::Analyzer *analyzer, bool recursively_collect_conds)
+      : analyzer_(analyzer),
+        recursively_collect_conds_(recursively_collect_conds) {}
   void VisitExpr_(const BufferLoadNode *op) final {
     // Check if the buffer is in global scope
     if (IsGlobalBuffer(op->buffer)) {
@@ -164,7 +166,8 @@ private:
       return load;
     }
 
-    // For loading, we can always use padding value if the access is out of bounds
+    // For loading, we can always use padding value if the access is out of
+    // bounds
     PrimExpr value = load;
     for (auto cond : conditions) {
       ICHECK(cond.dtype() == DataType::Bool(1))
@@ -238,13 +241,13 @@ private:
   // T.call_extern("handle", "atomicAddx2", T.address_of(C),
   // T.address_of(C_shared))
 
-  // NOTE(chaofan): This is currently not the most rigorous solution. 
-  // The check here is primarily intended to handle extern functions like atomicAdd, 
-  // which may involve memory access. Due to their special nature, the BufferLoad in 
-  // their parameters might be used for boundary checks of the current statement. The 
-  // current solution adopts a simplified approach: directly applying the boundary 
-  // constraints of all parameters to the statement. While not entirely precise, 
-  // it addresses most common scenarios.
+  // NOTE(chaofan): This is currently not the most rigorous solution.
+  // The check here is primarily intended to handle extern functions like
+  // atomicAdd, which may involve memory access. Due to their special nature,
+  // the BufferLoad in their parameters might be used for boundary checks of the
+  // current statement. The current solution adopts a simplified approach:
+  // directly applying the boundary constraints of all parameters to the
+  // statement. While not entirely precise, it addresses most common scenarios.
   Stmt VisitStmt_(const EvaluateNode *op) final {
     auto evaluate = Downcast<Evaluate>(op);
 
@@ -252,8 +255,8 @@ private:
       auto call = Downcast<Call>(op->value);
       if (call->op == builtin::call_extern()) {
         // For CallExtern, we recursively collect conditions from all children.
-        // Since we cannot rewrite any BufferLoad in its children (Rewrite will cause potential Nullptr
-        // exception).
+        // Since we cannot rewrite any BufferLoad in its children (Rewrite will
+        // cause potential Nullptr exception).
         GlobalMemChecker checker(analyzer_, /*recursively_collect_conds=*/true);
         checker(call);
         Array<PrimExpr> conditions = checker.GetConditions();
