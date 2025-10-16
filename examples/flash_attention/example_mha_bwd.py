@@ -38,14 +38,10 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
             scores_sum = T.alloc_fragment([block_M], accum_dtype)
             logsum = T.alloc_fragment([block_M], accum_dtype)
 
-            T.annotate_layout({Q_shared: tilelang.layout.make_swizzled_layout(Q_shared)})
             T.copy(Q[bz, bx * block_M:(bx + 1) * block_M, by, :], Q_shared)
             T.fill(acc_o, 0)
             T.fill(logsum, 0)
             T.fill(scores_max, -T.infinity(accum_dtype))
-            # T.copy(Q_shared, Q_local)
-            # for i, j in T.Parallel(block_M, dim):
-            #     Q_local[i, j] *= scale
             loop_range = (
                 T.ceildiv(
                     (bx + 1) * block_M, block_N) if is_causal else T.ceildiv(seq_len, block_N))
@@ -192,9 +188,6 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
 
             T.annotate_layout({
                 dQ: make_dq_layout(dQ),
-                K_shared: tilelang.layout.make_swizzled_layout(K_shared),
-                dv_shared: tilelang.layout.make_swizzled_layout(dv_shared),
-                dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
             })
             T.copy(K[bz, by * block_M:(by + 1) * block_M, bx, :], K_shared)
             T.copy(V[bz, by * block_M:(by + 1) * block_M, bx, :], V_shared)

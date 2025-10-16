@@ -194,9 +194,7 @@ GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
     return GemmInst::kWGMMA;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
-  } else if (TargetIsVolta(target) || TargetIsAmpere(target) ||
-             TargetIsTuring(target) || TargetIsHopper(target) ||
-             TargetIsSm100(target)) {
+  } else if (TargetIsCuda(target)) {
     return GemmInst::kMMA;
   } else {
     ICHECK(0) << "Unsupported target for gemm: " << target->str();

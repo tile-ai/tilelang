@@ -67,13 +67,13 @@ def ref_program(logits, top_k):
     return top_k_gates, top_k_indices.to(torch.int32)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--M", type=int, default=320, help="num_tokens")
     parser.add_argument("--N", type=int, default=128, help="num_experts")
     parser.add_argument("--topk", type=int, default=6, help="topk")
     parser.add_argument("--blk_m", type=int, default=64, help="blk_m")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     M, N, topk, blk_m = args.M, args.N, args.topk, args.blk_m
 
     logits = torch.rand((M, N), device="cuda", dtype=torch.float32)
