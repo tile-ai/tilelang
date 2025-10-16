@@ -225,10 +225,8 @@ private:
         legal_vectorize = false;
     }
     if (legal_vectorize) {
-      const BufferLoad dst_node =
-          Downcast<BufferLoad>(node->args[0].as<BufferLoadNode>());
-      const BufferLoad value_node =
-          Downcast<BufferLoad>(node->args[1].as<BufferLoadNode>());
+      const BufferLoad dst_node = Downcast<BufferLoad>(node->args[0]);
+      const BufferLoad value_node = Downcast<BufferLoad>(node->args[1]);
 
       Call address_of_dst =
           Call(DataType::Handle(), builtin::address_of(), {dst_node});
