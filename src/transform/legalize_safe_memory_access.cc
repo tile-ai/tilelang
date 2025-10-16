@@ -50,13 +50,13 @@ private:
   bool parent_has_child_for_ = false;
 };
 
-// We will create a visitor to check BufferLoad and BufferStore nodes
-// within this loop body. This visitor will:
+// GlobalMemChecker for a BufferLoad/BufferStore node:
 // 1. Identify BufferLoad and BufferStore nodes.
 // 2. Check if the buffer is in global scope.
 // 3. For each index, compare against the buffer's shape.
 //    If the index might exceed the shape (upper bound too large),
 //    log a warning or handle accordingly.
+// Note that this checker will not recursive into child nodes.
 struct GlobalMemChecker : public StmtExprVisitor {
 
   GlobalMemChecker(arith::Analyzer *analyzer) : analyzer_(analyzer) {}
@@ -65,7 +65,6 @@ struct GlobalMemChecker : public StmtExprVisitor {
     if (IsGlobalBuffer(op->buffer)) {
       CheckBufferIndices(op->buffer, op->indices, /*is_load=*/true);
     }
-    StmtExprVisitor::VisitExpr_(op);
   }
 
   void VisitStmt_(const BufferStoreNode *op) final {
@@ -73,7 +72,6 @@ struct GlobalMemChecker : public StmtExprVisitor {
     if (IsGlobalBuffer(op->buffer)) {
       CheckBufferIndices(op->buffer, op->indices, /*is_load=*/false);
     }
-    StmtExprVisitor::VisitStmt_(op);
   }
 
   // Helper function to determine if a buffer is global
@@ -109,6 +107,7 @@ struct GlobalMemChecker : public StmtExprVisitor {
         }
       });
       if (!has_variable) {
+        // If index is a constant, we can skip the check
         continue;
       }
 
@@ -146,6 +145,27 @@ public:
         analyzer_(analyzer) {}
 
 private:
+  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
+    auto load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
+
+    GlobalMemChecker checker(analyzer_);
+    checker(load);
+    Array<PrimExpr> conditions = checker.GetConditions();
+
+    if (conditions.empty()) {
+      return load;
+    }
+
+    // For loading, we can always use padding value if the access is out of bounds
+    PrimExpr value = load;
+    for (auto cond : conditions) {
+      ICHECK(cond.dtype() == DataType::Bool(1))
+          << "condition is not a boolean: " << cond;
+      value = if_then_else(cond, value, GetPadding(load->buffer));
+    }
+    return value;
+  }
+
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     // Check if the buffer is in global scope
     auto store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
@@ -205,14 +225,23 @@ private:
     return store;
   }
 
-  // Handle Call Nodes
+  // Recursively check Load/Store in the call arguments.
   // For example
   // T.call_extern("handle", "atomicAddx2", T.address_of(C),
   // T.address_of(C_shared))
+
+  // NOTE(chaofan): This is currently not the most rigorous solution. 
+  // The check here is primarily intended to handle extern functions like atomicAdd, 
+  // which may involve memory access. Due to their special nature, the BufferLoad in 
+  // their parameters might be used for boundary checks of the current statement. The 
+  // current solution adopts a simplified approach: directly applying the boundary 
+  // constraints of all parameters to the statement. While not entirely precise, 
+  // it addresses most common scenarios.
   Stmt VisitStmt_(const EvaluateNode *op) final {
-    auto evaluate = Downcast<Evaluate>(StmtExprMutator::VisitStmt_(op));
+    auto evaluate = Downcast<Evaluate>(op);
+
     if (const CallNode *call_op = op->value.as<CallNode>()) {
-      auto call = Downcast<Call>(evaluate->value);
+      auto call = Downcast<Call>(op->value);
       if (call->op == builtin::call_extern()) {
         GlobalMemChecker checker(analyzer_);
         checker(call);
