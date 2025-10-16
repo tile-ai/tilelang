@@ -298,15 +298,40 @@ void CodeGenTileLangCUDA::VisitStmt_(const tir::ForNode *op) {
     PrintIndent();
     stream << "#pragma unroll\n";
   }
-  std::string extent =
-      PrintExpr(arith::Analyzer().Simplify(op->extent + op->min));
+  arith::Analyzer analyzer;
+  PrimExpr stop_expr = analyzer.Simplify(op->extent + op->min);
+  PrimExpr step_expr = analyzer.Simplify(op->step);
+  std::string stop = PrintExpr(stop_expr);
+  std::string step = PrintExpr(step_expr);
   PrintIndent();
   std::string vid = AllocVarID(op->loop_var.get());
   std::string start = PrintExpr(op->min);
   stream << "for (";
   PrintType(op->loop_var.dtype(), stream);
-  stream << ' ' << vid << " = " << start << "; " << vid << " < " << extent
-         << "; ++" << vid << ") {\n";
+  stream << ' ' << vid << " = " << start << "; ";
+  if (const auto *imm = step_expr.as<IntImmNode>()) {
+    if (imm->value > 0) {
+      stream << vid << " < " << stop;
+    } else {
+      stream << vid << " > " << stop;
+    }
+  } else {
+    stream << "((" << step << ") > 0 ? " << vid << " < " << stop << " : " << vid
+           << " > " << stop << ")";
+  }
+  stream << "; ";
+  if (const auto *imm = step_expr.as<IntImmNode>()) {
+    if (imm->value == 1) {
+      stream << "++" << vid;
+    } else if (imm->value == -1) {
+      stream << "--" << vid;
+    } else {
+      stream << vid << " += " << step;
+    }
+  } else {
+    stream << vid << " += " << step;
+  }
+  stream << ") {\n";
   int for_scope = BeginScope();
   PrintStmt(op->body);
   this->EndScope(for_scope);

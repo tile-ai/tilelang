@@ -99,6 +99,7 @@ private:
     // Step 1. Update unit loop info.
     PrimExpr min = this->VisitExpr(op->min);
     PrimExpr extent = this->VisitExpr(op->extent);
+    PrimExpr step = this->VisitExpr(op->step);
     if (is_one(extent) && op->annotations.empty()) {
       // handling unit loop
       unit_loop_vars_[op->loop_var] = min;
@@ -121,7 +122,8 @@ private:
     } else {
       // Case 3. An ordinary loop
       body = For(op->loop_var, std::move(min), std::move(extent), op->kind,
-                 std::move(body), std::nullopt, new_annotations);
+                 std::move(body), std::nullopt, new_annotations, Span(),
+                 std::move(step));
     }
     // Step 5. Insert nested attrs
     for (auto it = pragma_attrs.rbegin(); it != pragma_attrs.rend(); ++it) {

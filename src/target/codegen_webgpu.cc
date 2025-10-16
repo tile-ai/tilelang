@@ -653,13 +653,38 @@ void CodeGenTileLangWebGPU::VisitStmt_(const AllocateNode *op) {
 }
 
 void CodeGenTileLangWebGPU::VisitStmt_(const ForNode *op) {
-  std::string extent = PrintExpr(op->extent);
+  arith::Analyzer analyzer;
+  PrimExpr start_expr = analyzer.Simplify(op->min);
+  PrimExpr stop_expr = analyzer.Simplify(op->min + op->extent);
+  PrimExpr step_expr = analyzer.Simplify(op->step);
+  std::string start = PrintExpr(start_expr);
+  std::string stop = PrintExpr(stop_expr);
+  std::string step = PrintExpr(step_expr);
   std::string vid = AllocVarID(op->loop_var.get());
-  ICHECK(is_zero(op->min));
   PrintIndent();
   stream << "for (var " << vid << " : ";
   PrintType(op->loop_var.dtype(), stream);
-  stream << " = 0; " << vid << " < " << extent << "; " << vid << "++) {\n";
+  stream << " = " << start << "; ";
+  std::string compare;
+  if (const auto *imm = step_expr.as<IntImmNode>()) {
+    compare = imm->value > 0 ? vid + " < " + stop : vid + " > " + stop;
+  } else {
+    compare = "((" + step + ") > 0 ? " + vid + " < " + stop + " : " + vid + " > " + stop + ")";
+  }
+  stream << compare;
+  stream << "; ";
+  if (const auto *imm = step_expr.as<IntImmNode>()) {
+    if (imm->value == 1) {
+      stream << "++" << vid;
+    } else if (imm->value == -1) {
+      stream << "--" << vid;
+    } else {
+      stream << vid << " += " << step;
+    }
+  } else {
+    stream << vid << " += " << step;
+  }
+  stream << ") {\n";
   int for_scope = BeginScope();
   PrintStmt(op->body);
   this->EndScope(for_scope);
