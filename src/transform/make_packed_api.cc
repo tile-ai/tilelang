@@ -477,7 +477,7 @@ tvm::transform::Pass MakePackedAPI() {
     Map<GlobalVar, String> packed_func_methods;
     for (const auto &[gvar, base_func] : mod->functions) {
       if (auto opt = base_func.as<PrimFunc>()) {
-        auto prim_func = opt.value();
+        const auto &prim_func = opt.value();
         if (auto global_symbol = RequiresPackedAPI(prim_func)) {
           packed_func_methods.Set(gvar, global_symbol.value());
         }
