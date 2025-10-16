@@ -98,7 +98,7 @@ def vectorize_access_with_atmoic_add_legalize(M: int = 64,
                                    T.float32(0)), T.float32(0))
                 # Nest if-then-else is expected, do not flatten it to pass structural equal check
                 if j + 2 < 64:
-                    if tid + 2 < 64: # noqa: SIM102
+                    if tid + 2 < 64:  # noqa: SIM102
                         T.call_extern("handle", "AtomicAdd", A[tid + 2, j + 2], 1)
 
     return main, expected
