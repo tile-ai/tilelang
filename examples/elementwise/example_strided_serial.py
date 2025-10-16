@@ -1,9 +1,6 @@
 import argparse
-import os
-import sys
 import numpy as np
 
-import tilelang
 import tilelang.language as T
 
 
@@ -14,6 +11,7 @@ def build_cuda_kernel(numel: int, step: int):
     threads = 128
     blocks = (numel + threads - 1) // threads
     print("numel", numel, "step", step, "threads", threads, "blocks", blocks)
+
     @T.prim_func
     def strided_fill(out: T.Buffer((numel,), "float32"), value: T.float32):
         tx = T.thread_binding(0, threads, thread="threadIdx.x")
@@ -36,7 +34,9 @@ def main():
     print("Generated CUDA kernel:\n", rt_mod.imported_modules[0].get_source())
 
     if not tvm.cuda(0).exist:
-        print("CUDA device 0 not visible; skipping kernel launch. Set CUDA_VISIBLE_DEVICES or run on a GPU node.")
+        print(
+            "CUDA device 0 not visible; skipping kernel launch. Set CUDA_VISIBLE_DEVICES or run on a GPU node."
+        )
         return
 
     dev = tvm.cuda(0)

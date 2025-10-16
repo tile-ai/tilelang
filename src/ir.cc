@@ -42,7 +42,8 @@ static ForFrame MakeIterVarFrame(const std::string &name, const PrimExpr &dom) {
   n->doms.push_back(Range(0, dom));
   n->steps.push_back(make_const(dom->dtype, 1));
   n->f_make_for_loop = [](const Array<Var> &vars, const Array<Range> &doms,
-                          const Array<PrimExpr> &steps, const Stmt &body) -> Stmt {
+                          const Array<PrimExpr> &steps,
+                          const Stmt &body) -> Stmt {
     ICHECK_EQ(vars.size(), 1);
     ICHECK_EQ(doms.size(), 1);
     ICHECK_EQ(steps.size(), 1);
@@ -65,10 +66,9 @@ ForFrame ParallelFor(const Array<PrimExpr> &extents,
     n->doms.push_back(Range(make_const(dtype, 0), extent));
     n->steps.push_back(make_const(dtype, 1));
   }
-  n->f_make_for_loop = [annotations](const Array<Var> &vars,
-                                     const Array<Range> &doms,
-                                     const Array<PrimExpr> &steps,
-                                     Stmt body) -> Stmt {
+  n->f_make_for_loop =
+      [annotations](const Array<Var> &vars, const Array<Range> &doms,
+                    const Array<PrimExpr> &steps, Stmt body) -> Stmt {
     ICHECK_EQ(vars.size(), doms.size());
     ICHECK_EQ(vars.size(), steps.size());
     int n = vars.size();
@@ -76,8 +76,8 @@ ForFrame ParallelFor(const Array<PrimExpr> &extents,
       Range dom = doms[i];
       Var var = vars[i];
       body = For(var, dom->min, dom->extent, ForKind::kParallel, body,
-                 /*thread_binding=*/std::nullopt, /*annotations=*/annotations, Span(),
-                 steps[i]);
+                 /*thread_binding=*/std::nullopt, /*annotations=*/annotations,
+                 Span(), steps[i]);
     }
     return body;
   };
@@ -113,7 +113,8 @@ ForFrame PipelinedFor(PrimExpr start, const PrimExpr &stop, int num_stages,
     if (!groups.empty())
       anno.Set("tl_pipeline_group", groups);
     body = For(vars[0], doms[0]->min, doms[0]->extent, ForKind::kSerial, body,
-               /*thread_binding=*/std::nullopt, /*annotations=*/anno, Span(), steps[0]);
+               /*thread_binding=*/std::nullopt, /*annotations=*/anno, Span(),
+               steps[0]);
     return body;
   };
   return ForFrame(n);
@@ -153,7 +154,8 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
   grouped_domain.push_back(group_size);
 
   n->f_make_for_loop = [=](const Array<Var> &vars, const Array<Range> &doms,
-                           const Array<PrimExpr> &steps, const Stmt &body) -> Stmt {
+                           const Array<PrimExpr> &steps,
+                           const Stmt &body) -> Stmt {
     ICHECK_EQ(vars.size(), doms.size());
     ICHECK_EQ(vars.size(), steps.size());
     Map<String, ObjectRef> anno;
@@ -178,8 +180,8 @@ ForFrame PersistentFor(const Array<PrimExpr> &domain, const PrimExpr &wave_size,
       new_body = SeqStmt({out_if, body});
     }
     Stmt outer =
-        For(loop_var, 0, waves, ForKind::kSerial, new_body, std::nullopt, anno, Span(),
-            make_const(loop_var.dtype(), 1));
+        For(loop_var, 0, waves, ForKind::kSerial, new_body, std::nullopt, anno,
+            Span(), make_const(loop_var.dtype(), 1));
     for (int i = 0; i < vars.size() - 1; ++i) {
       outer = tvm::tir::LetStmt(vars[i], idxs[i + 1], outer);
     }

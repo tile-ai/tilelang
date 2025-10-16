@@ -10,8 +10,7 @@ if LIB_PATH not in sys.path:
     sys.path.insert(0, LIB_PATH)
 os.environ.setdefault("TVM_LIBRARY_PATH", LIB_PATH)
 os.environ["LD_LIBRARY_PATH"] = (
-    LIB_PATH + ":" + os.environ["LD_LIBRARY_PATH"] if "LD_LIBRARY_PATH" in os.environ else LIB_PATH
-)
+    LIB_PATH + ":" + os.environ["LD_LIBRARY_PATH"] if "LD_LIBRARY_PATH" in os.environ else LIB_PATH)
 
 import numpy as np
 import tvm
@@ -31,6 +30,7 @@ def _collect_first_for(stmt):
 
 
 def test_serial_with_step_constant():
+
     @T.prim_func
     def strided_fill(out: T.Buffer((8,), "float32")):
         for i in T.serial(0, 8, step=2):

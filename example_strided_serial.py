@@ -1,6 +1,6 @@
 import argparse
-import os
 import sys
+
 sys.path.append("/weka-hg/prod/deepseek/permanent/wanglei/tilelang")
 import tilelang
 import tilelang.language as T
@@ -14,6 +14,7 @@ def build_cuda_kernel(numel: int, step: int):
     threads = 128
     blocks = (numel + threads - 1) // threads
     print("numel", numel, "step", step, "threads", threads, "blocks", blocks)
+
     @T.prim_func
     def strided_fill(out: T.Tensor((numel,), "float32"), value: T.float32):
         with T.Kernel(blocks, threads=threads) as bx:

@@ -669,7 +669,8 @@ void CodeGenTileLangWebGPU::VisitStmt_(const ForNode *op) {
   if (const auto *imm = step_expr.as<IntImmNode>()) {
     compare = imm->value > 0 ? vid + " < " + stop : vid + " > " + stop;
   } else {
-    compare = "((" + step + ") > 0 ? " + vid + " < " + stop + " : " + vid + " > " + stop + ")";
+    compare = "((" + step + ") > 0 ? " + vid + " < " + stop + " : " + vid +
+              " > " + stop + ")";
   }
   stream << compare;
   stream << "; ";
