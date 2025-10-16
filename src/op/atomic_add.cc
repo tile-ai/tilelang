@@ -272,7 +272,6 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   PrimExpr dst_predicate = MakePredicate(analyzer, loop_vars, dst->shape, 1);
 
   Array<PrimExpr> new_args;
-  new_args.push_back(StringImm("AtomicAdd"));
 
   PrimExpr src_value = BufferLoad(src, src_indices);
   if (src->dtype != dst->dtype)
@@ -288,7 +287,7 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   new_args.push_back(src_value);
 
   Call atomicadd_call =
-      tvm::tir::Call(dst->dtype, builtin::call_extern(), new_args);
+      tvm::tir::Call(dst->dtype, atomicadd_elem_op(), new_args);
 
   Stmt body = tvm::tir::Evaluate(atomicadd_call);
 
@@ -325,10 +324,6 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
  */
 LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
                                      InferLevel level) const {
-  if (!par_op_.defined()) {
-    arith::Analyzer analyzer;
-    par_op_ = ParallelOp(MakeSIMTLoop(&analyzer));
-  }
   if (T.layout_map.count(src) && T.layout_map.count(dst)) {
     if (src.scope() == "local.fragment" && dst.scope() == "local.fragment") {
       const FragmentNode *src_layout = T.layout_map[src].as<FragmentNode>();
@@ -342,7 +337,7 @@ LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &T,
       }
     }
   }
-  return par_op_->InferLayout(T, level);
+  return {};
 }
 
 /**
