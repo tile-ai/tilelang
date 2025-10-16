@@ -1,3 +1,5 @@
+# ruff: noqa: SIM102
+
 from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
@@ -45,7 +47,7 @@ def issue_1013_buggy_kernel():
     num_threads = 128
 
     @T.prim_func
-    def main(x: T.Tensor[(num_tokens, ), 'int64']):
+    def main(x: T.Tensor((num_tokens, ), dtype="int64")):
         with T.Kernel(1, threads=num_threads) as _:
             count = T.alloc_var('int')
             thread_idx = T.get_thread_binding()
@@ -57,7 +59,7 @@ def issue_1013_buggy_kernel():
     # and the padding value is not used. However, the current prover cannot handle this case.
     # So for now the expected kernel is a if-else statement to check the boundary.
     @T.prim_func
-    def expected(x: T.Tensor[(num_tokens, ), 'int64']):
+    def expected(x: T.Tensor((num_tokens, ), dtype="int64")):
         with T.Kernel(1, threads=num_threads) as _:
             count = T.alloc_var('int')
             thread_idx = T.get_thread_binding()
@@ -92,6 +94,7 @@ def vectorize_access_with_atmoic_add_legalize(M: int = 64, N: int = 64, M_offset
                     j + N_offset < N,
                     T.if_then_else(tid + M_offset < M, A[tid + M_offset, j + N_offset],
                                    T.float32(0)), T.float32(0))
+                # Nest if-then-else is expected, do not flatten it to pass structural equal check
                 if j + 2 < 64:
                     if tid + 2 < 64:
                         T.call_extern("handle", "AtomicAdd", A[tid + 2, j + 2], 1)
