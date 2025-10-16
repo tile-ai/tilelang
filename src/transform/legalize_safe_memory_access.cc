@@ -56,14 +56,16 @@ private:
 // 3. For each index, compare against the buffer's shape.
 //    If the index might exceed the shape (upper bound too large),
 //    log a warning or handle accordingly.
-// Note that this checker will not recursive into child nodes.
 struct GlobalMemChecker : public StmtExprVisitor {
 
-  GlobalMemChecker(arith::Analyzer *analyzer) : analyzer_(analyzer) {}
+  GlobalMemChecker(arith::Analyzer *analyzer, bool recursive_collect_conds) : analyzer_(analyzer), recursive_collect_conds_(recursive_collect_conds) {}
   void VisitExpr_(const BufferLoadNode *op) final {
     // Check if the buffer is in global scope
     if (IsGlobalBuffer(op->buffer)) {
       CheckBufferIndices(op->buffer, op->indices, /*is_load=*/true);
+    }
+    if (recursive_collect_conds_) {
+      StmtExprVisitor::VisitExpr_(op);
     }
   }
 
@@ -71,6 +73,9 @@ struct GlobalMemChecker : public StmtExprVisitor {
     // Check if the buffer is in global scope
     if (IsGlobalBuffer(op->buffer)) {
       CheckBufferIndices(op->buffer, op->indices, /*is_load=*/false);
+    }
+    if (recursive_collect_conds_) {
+      StmtExprVisitor::VisitStmt_(op);
     }
   }
 
@@ -133,6 +138,7 @@ struct GlobalMemChecker : public StmtExprVisitor {
 private:
   Array<PrimExpr> _conditions;
   arith::Analyzer *analyzer_;
+  bool recursive_collect_conds_;
 };
 
 class SafeMemorysRewriter : public StmtExprMutator {
@@ -148,7 +154,9 @@ private:
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     auto load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
 
-    GlobalMemChecker checker(analyzer_);
+    // For Load/Store, we only check the current node, not its children.
+    // Since rewriter will recursively visit children.
+    GlobalMemChecker checker(analyzer_, /*recursive_collect_conds=*/false);
     checker(load);
     Array<PrimExpr> conditions = checker.GetConditions();
 
@@ -170,7 +178,7 @@ private:
     // Check if the buffer is in global scope
     auto store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
 
-    GlobalMemChecker checker(analyzer_);
+    GlobalMemChecker checker(analyzer_, /*recursive_collect_conds=*/false);
     checker(store);
     Array<PrimExpr> conditions = checker.GetConditions();
 
@@ -243,7 +251,10 @@ private:
     if (const CallNode *call_op = op->value.as<CallNode>()) {
       auto call = Downcast<Call>(op->value);
       if (call->op == builtin::call_extern()) {
-        GlobalMemChecker checker(analyzer_);
+        // For CallExtern, we recursively collect conditions from all children.
+        // Since we cannot rewrite any BufferLoad in its children (Rewrite will cause potential Nullptr
+        // exception).
+        GlobalMemChecker checker(analyzer_, /*recursive_collect_conds=*/true);
         checker(call);
         Array<PrimExpr> conditions = checker.GetConditions();
 
