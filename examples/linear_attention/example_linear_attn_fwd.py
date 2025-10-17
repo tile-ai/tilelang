@@ -37,7 +37,7 @@ def tl_fused_chunk_fwd_kernel(
     NT = tl.cdiv(S, chunk_size)
 
     @T.prim_func
-    def main(
+    def chunk_linear_attn_fwd(
             Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
             K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
             V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
@@ -83,7 +83,7 @@ def tl_fused_chunk_fwd_kernel(
             # Output final state
             T.copy(h, final_state[i_b, i_h, i_k * BK:(i_k + 1) * BK, i_v * BV:(i_v + 1) * BV])
 
-    return main
+    return chunk_linear_attn_fwd
 
 
 def tl_fused_chunk_fwd(q, k, v):
