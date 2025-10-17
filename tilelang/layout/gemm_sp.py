@@ -107,14 +107,10 @@ def _make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, b
 
 def _make_metadata_layout_sm8x_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str):
     """Make a layout of metadata that is compatible with cutlass sm8x compression kernel. Note that layout atom is the same for smem and gmem.
-
+        ref: https://github.com/pytorch/pytorch/blob/d0c24b392cbb7b213d22e42c52c6c2d1ac2da1bd/torch/sparse/_semi_structured_conversions.py#L5
     Args:
         buffer: metadata buffer shape, for sm80 it should be a 16bit type
     """
-
-    # ref: https://github.com/nvidia/cutlass/blob/ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e/include/cutlass/gemm/threadblock/default_mma_core_sparse_sm80.h#L651
-    #      https://github.com/nvidia/cutlass/blob/ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e/include/cutlass/layout/matrix.h#L405
-    #      https://github.com/nvidia/cutlass/blob/ad7b2f5e84fcfa124cb02b91d5bd26d238c0459e/include/cutlass/gemm/warp/mma_sparse_tensor_op.h#L172
 
     if mma_dtype in ["float16", "bfloat16"] and buffer.dtype not in ["uint16", "int16"]:
         raise ValueError(f"metadata should be 16 bit, got {buffer.dtype}")
@@ -122,13 +118,18 @@ def _make_metadata_layout_sm8x_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str):
     if mma_dtype in ["float8", "int8", "uint8"] and buffer.dtype not in ["uint32", "int32"]:
         raise ValueError(f"metadata should be 32 bit, got {buffer.dtype}")
 
-    kInterleaved = 2
-    stride = buffer.shape[0] * kInterleaved
+    m, k = buffer.shape
+    group = 32 if buffer.dtype.bits == 16 else 16
+    interweave = 4 if buffer.dtype.bits == 16 else 2
 
     def ColumnMajorInterleaved(i: int, j: int) -> int:
-        column_major = j // kInterleaved
-        column_minor = j % kInterleaved
-        return column_major * stride + i * kInterleaved + column_minor
+        i = i // group * group + (i % 8) * interweave + (i % group) // 8
+        topright = (1 - (i % 2)) & (j % 2)
+        bottomleft = (i % 2) & (1 - (j % 2))
+        i += topright - bottomleft
+        j -= topright - bottomleft
+        offset = (j // 2) * m * 2 + i * 2 + (j % 2)
+        return offset // k, offset % k
 
     return T.Layout(buffer.shape, ColumnMajorInterleaved)
 

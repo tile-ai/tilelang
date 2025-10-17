@@ -156,7 +156,7 @@ def mma_load_a_32x8_to_shared_16x16_layout(thread_id, local_id):
         (threadID_in_group * 2) + (i & 0x1) + 8      for ai where i >= 4
     """
     row = (thread_id // 4) + 8 * (local_id % 4 // 2)
-    col = (thread_id % 4) * 2 +(local_id % 2) + 8 * (local_id // 4)
+    col = (thread_id % 4) * 2 + (local_id % 2) + 8 * (local_id // 4)
     return row, col
 
 def mma_load_b_32x16_to_shared_16x32_layout(thread_id, local_id):

@@ -1,3 +1,4 @@
+from tilelang.layout.gemm_sp import make_metadata_layout
 from .gemm_sp_base import GemmSPBase
 from tilelang.layout import make_swizzled_layout
 from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
@@ -18,6 +19,7 @@ class GemmSPMMA(GemmSPBase):
         warp_col_tiles = int(self.N // n_warp)
         mma_emitter = SparseTensorCoreIntrinEmitter(
             a_dtype=self.in_dtype,
+            e_dtype=self.e_dtype,
             b_dtype=self.in_dtype,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
@@ -26,7 +28,7 @@ class GemmSPMMA(GemmSPBase):
             block_col_warps=n_warp,
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
-            chunk=self.chunk,
+            warp_k=self.K,
         )
         if self.is_gemm_ss():
             return {
@@ -67,9 +69,10 @@ class GemmSPMMA(GemmSPBase):
                                                             False)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
-        mma_emitter = TensorCoreIntrinEmitter(
+        mma_emitter = SparseTensorCoreIntrinEmitter(
             a_dtype=self.in_dtype,
             b_dtype=self.in_dtype,
+            e_dtype=self.e_dtype,
             accum_dtype=self.accum_dtype,
             a_transposed=self.trans_A,
             b_transposed=self.trans_B,
@@ -77,7 +80,7 @@ class GemmSPMMA(GemmSPBase):
             block_col_warps=n_warp,
             warp_row_tiles=warp_row_tiles,
             warp_col_tiles=warp_col_tiles,
-            chunk=self.chunk,
+            warp_k=self.K,
             thread_var=thread_var,
         )
 
@@ -85,15 +88,14 @@ class GemmSPMMA(GemmSPBase):
         warp_rows = mma_emitter.warp_rows
         warp_cols = mma_emitter.warp_cols
         local_size_a = mma_emitter.local_size_a
+        local_size_e = mma_emitter.local_size_e
         local_size_b = mma_emitter.local_size_b
-        block_K = mma_emitter.chunk
         micro_size_k = mma_emitter.micro_size_k
         A_shared = self.A
+        E_shared = self.E
         B_shared = self.B
         C_local = self.C
-
         if self.is_gemm_ss():
-
             @T.prim_func
             def _gemm_ssr() -> None:
                 """
@@ -102,9 +104,10 @@ class GemmSPMMA(GemmSPBase):
                 accumulating into C_local.
                 """
                 A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
+                E_local = T.alloc_local((warp_rows * local_size_e), self.e_dtype)
                 B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
 
-                for ki in T.serial(0, (block_K // micro_size_k)):
+                for ki in T.serial(0, (self.K // micro_size_k)):
                     # Load A into fragment
                     mma_emitter.ldmatrix_a(
                         A_local,
@@ -112,6 +115,13 @@ class GemmSPMMA(GemmSPBase):
                         ki,
                     )
 
+                    # Load E into fragment
+                    mma_emitter.ldmatrix_e(
+                        E_local,
+                        E_shared,
+                        ki,
+                    )
+                
                     # Load B into fragment
                     mma_emitter.ldmatrix_b(
                         B_local,
@@ -119,8 +129,12 @@ class GemmSPMMA(GemmSPBase):
                         ki,
                     )
 
+                    # T.print(A_local, f"A_local", thread_binding=mma_emitter.extract_thread_binding(mma_emitter.get_thread_binding()))
+                    # T.print(E_local, f"E_local", thread_binding=mma_emitter.extract_thread_binding(mma_emitter.get_thread_binding()))
+                    # T.print(B_local, f"B_local", thread_binding=mma_emitter.extract_thread_binding(mma_emitter.get_thread_binding()))
+
                     # Perform Matrix Multiplication
-                    mma_emitter.mma(A_local, B_local, C_local, ki)
+                    mma_emitter.mma_sp(A_local, E_local, B_local, C_local, ki)
 
             # Simplify to optimize the index computing
             # Must inline let statements to simplify the analysis

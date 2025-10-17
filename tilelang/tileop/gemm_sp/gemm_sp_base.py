@@ -31,23 +31,27 @@ class GemmSPBase(object):
 
     @property
     def M(self) -> int:
-        return self.gemm_node.M
+        return self.gemm_sp_node.M
 
     @property
     def N(self) -> int:
-        return self.gemm_node.N
+        return self.gemm_sp_node.N
 
     @property
     def K(self) -> int:
-        return self.gemm_node.K
+        return self.gemm_sp_node.K
 
     @property
     def trans_A(self) -> bool:
-        return self.gemm_node.trans_A
+        return self.gemm_sp_node.trans_A
 
     @property
     def trans_B(self) -> bool:
-        return self.gemm_node.trans_B
+        return self.gemm_sp_node.trans_B
+
+    @property
+    def e_dtype(self) -> str:
+        return self.E.dtype
 
     @property
     def in_dtype(self) -> str:
@@ -59,69 +63,65 @@ class GemmSPBase(object):
         return self.C.dtype
 
     @property
-    def chunk(self) -> int:
-        return self.A.shape[-2] if self.trans_A else self.A.shape[-1]
-
-    @property
     def A(self) -> tir.Buffer:
-        return self.gemm_node.A
+        return self.gemm_sp_node.A
 
     @property
     def E(self) -> tir.Buffer:
-        return self.gemm_node.E
+        return self.gemm_sp_node.E
 
     @property
     def B(self) -> tir.Buffer:
-        return self.gemm_node.B
+        return self.gemm_sp_node.B
 
     @property
     def C(self) -> tir.Buffer:
-        return self.gemm_node.C
+        return self.gemm_sp_node.C
 
     @property
     def APtr(self) -> tir.PrimExpr:
-        return self.gemm_node.APtr
+        return self.gemm_sp_node.APtr
 
     @property
     def EPtr(self) -> tir.PrimExpr:
-        return self.gemm_node.EPtr
+        return self.gemm_sp_node.EPtr
 
     @property
     def BPtr(self) -> tir.PrimExpr:
-        return self.gemm_node.BPtr
+        return self.gemm_sp_node.BPtr
 
     @property
     def CPtr(self) -> tir.PrimExpr:
-        return self.gemm_node.CPtr
+        return self.gemm_sp_node.CPtr
 
     @property
     def stride_A(self) -> int:
-        return self.gemm_node.stride_A
+        return self.gemm_sp_node.stride_A
 
     @property
     def stride_B(self) -> int:
-        return self.gemm_node.stride_B
+        return self.gemm_sp_node.stride_B
 
     @property
     def offset_A(self) -> int:
-        return self.gemm_node.offset_A
+        return self.gemm_sp_node.offset_A
 
     @property
     def offset_B(self) -> int:
-        return self.gemm_node.offset_B
+        return self.gemm_sp_node.offset_B
 
     @property
     def clear_accum(self) -> bool:
-        return self.gemm_node.clear_accum
+        return self.gemm_sp_node.clear_accum
 
     @property
     def k_pack(self) -> int:
-        return self.gemm_node.k_pack
+        return self.gemm_sp_node.k_pack
 
     @property
     def wg_wait(self) -> int:
-        return self.gemm_node.wg_wait
+        return self.gemm_sp_node.wg_wait
 
     @property
     def policy(self) -> GemmWarpPolicy:
-        return self.gemm_node.policy
+        return self.gemm_sp_node.policy
