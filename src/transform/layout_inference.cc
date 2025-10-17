@@ -755,7 +755,8 @@ private:
       auto loop_layout = result_.for_map[root];
       // FIXME: tell in-Parallel and out-of-Parallel `local`s apart
       // NOTE(lei): a bit ugly, we should rethink about this part in future.
-      bool parallel_loop = !skip_thread_partition_ && !local_register_only && !store_into_local;
+      bool parallel_loop =
+          !skip_thread_partition_ && !local_register_only && !store_into_local;
 
       if (parallel_loop) {
         for_node =
