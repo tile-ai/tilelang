@@ -168,7 +168,7 @@ private:
       return load;
     }
 
-    // For loading, we can always use padding value if the access is out of
+    // For loading, we can always use safe value if the access is out of
     // bounds
     PrimExpr value = load;
     for (auto cond : conditions) {
@@ -340,12 +340,12 @@ private:
       auto map = op->annotations.Get(attr::kSafeValueMap)
                      ->as<Map<Var, PrimExpr>>()
                      .value();
-      for (const auto &[var, padding] : map) {
+      for (const auto &[var, safe_value] : map) {
         ICHECK(buffer_data_to_buffer_.count(var))
             << "buffer " << var << " is not found in the block "
             << buffer_data_to_buffer_;
         auto buffer = buffer_data_to_buffer_[var];
-        annotated_safe_value_map_.Set(buffer, padding);
+        annotated_safe_value_map_.Set(buffer, safe_value);
       }
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);

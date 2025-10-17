@@ -168,7 +168,7 @@ def annotate_safe_value(safe_value_map: Dict):
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
                 A_shared = T.alloc_shared((block_M, block_N), dtype)
 
-                T.annotate_safe_value({A: pad_value})
+                T.annotate_safe_value({A: safe_value})
                 for i, j in T.Parallel(block_M, block_N):
                     A_shared[i, j] = A[by * block_M + i - 10, bx * block_N + j]
 
