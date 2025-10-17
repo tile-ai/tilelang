@@ -205,13 +205,12 @@ private:
       return store;
     }
 
-    auto value = store->value;
     // If a store is out of bounds, we skip the corresponding stmt directly.
     Stmt store_with_conditions = store;
     for (auto cond : conditions) {
       store_with_conditions = IfThenElse(cond, store_with_conditions);
     }
-    return store;
+    return store_with_conditions;
   }
 
   // Recursively check Load/Store in the call arguments.
