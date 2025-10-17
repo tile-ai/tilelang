@@ -3,8 +3,7 @@ import tilelang.testing
 import tilelang.language as T
 
 
-@tilelang.jit(pass_configs={
-    tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True})
+@tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True})
 def vectorize_test(N, M, stride_A, stride_B):
     assert N % 128 == 0 and M % 128 == 0
 
