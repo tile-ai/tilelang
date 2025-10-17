@@ -149,7 +149,7 @@ def annotate_layout(layout_map: Dict):
 def annotate_safe_value(safe_value_map: Dict):
     """Annotate the safe value of the buffer.
 
-    A safe value of a buffer is the value that will be used when the 
+    A safe value of a buffer is the value that will be used when the
     buffer is accessed out of bounds.
 
     Args:
