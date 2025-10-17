@@ -77,15 +77,44 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   Stmt body = std::move(op);
   auto inv_loop = loop_layout->Inverse();
   auto indices = inv_loop->Forward(Array<PrimExpr>(vars.begin(), vars.end()));
+  arith::Analyzer guard_analyzer;
+  for (int i = 0; i < new_loop_depth; i++) {
+    guard_analyzer.Bind(vars[i],
+                        Range::FromMinExtent(make_zero(vars[i]->dtype),
+                                             inv_loop->InputShape()[i]));
+  }
+  Range thread_range = loop_layout->ThreadRange().defined()
+                           ? loop_layout->ThreadRange()
+                           : Range::FromMinExtent(make_zero(thread_var->dtype),
+                                                  loop_layout->ThreadExtent());
+  guard_analyzer.Bind(thread_var, thread_range);
+  PrimExpr guard = const_true();
+  bool need_guard = false;
   for (int i = 0; i < old_loop_depth; i++) {
     const ForNode *loop = body.as<ForNode>();
     ICHECK(loop != nullptr);
     vmap.Set(loop->loop_var, indices[i]);
+    PrimExpr min = loop->min;
+    PrimExpr extent = loop->extent;
+    PrimExpr lower_cond = guard_analyzer.Simplify(GE(indices[i], min));
+    if (!guard_analyzer.CanProve(lower_cond)) {
+      guard = guard_analyzer.Simplify(logical_and(guard, lower_cond));
+      need_guard = true;
+    }
+    PrimExpr upper_cond = guard_analyzer.Simplify(LT(indices[i], min + extent));
+    if (!guard_analyzer.CanProve(upper_cond)) {
+      guard = guard_analyzer.Simplify(logical_and(guard, upper_cond));
+      need_guard = true;
+    }
     body = loop->body;
   }
 
   // substitute and re-construct the serial loop
   body = Substitute(body, vmap);
+  if (need_guard) {
+    guard = guard_analyzer.Simplify(guard);
+    body = IfThenElse(guard, body);
+  }
   for (int i = new_loop_depth - 1; i >= 0; i--) {
     body = For(vars[i], make_zero(vars[i]->dtype), inv_loop->InputShape()[i],
                ForKind::kSerial, body);
@@ -111,6 +140,9 @@ public:
 private:
   Stmt VisitStmt_(const ForNode *node) final {
     if (node->kind == ForKind::kSerial) {
+      if (as_const_int(node->extent) == nullptr) {
+        return StmtExprMutator::VisitStmt_(node);
+      }
       For new_for = GetRef<For>(node);
       auto for_ptr = new_for.CopyOnWrite();
       for_ptr->annotations.Set(tir::attr::pragma_unroll_explicit, Bool(false));
@@ -127,22 +159,20 @@ public:
 
   Fragment Partition(const For &op, int num_thread, int vectorize_size) {
     this->VisitStmt(op);
-    int loop_size_full = 1;
-    PrimExpr flattened = 0;
+    ICHECK(!loop_vars_.empty());
+    DataType dtype = loop_vars_[0]->var.dtype();
+    PrimExpr flattened = make_const(dtype, 0);
+    PrimExpr vector_extent = make_const(dtype, vectorize_size);
+    PrimExpr thread_extent_const = make_const(dtype, num_thread);
     for (size_t i = 0; i < loop_vars_.size(); i++) {
-      auto ext_ptr = as_const_int(loop_vars_[i]->dom->extent);
-      ICHECK(ext_ptr)
-          << "Loop partitioner only works with constant loop sizes, but got "
-          << loop_vars_[i]->dom->extent;
-      int extent = *ext_ptr;
-      loop_size_full *= extent;
+      PrimExpr extent = loop_vars_[i]->dom->extent;
       flattened = flattened * extent + loop_vars_[i]->var;
     }
-    ICHECK(loop_size_full % vectorize_size == 0);
-    PrimExpr access_idx = FloorDiv(flattened, vectorize_size);
-    PrimExpr thd = FloorMod(access_idx, num_thread);
-    PrimExpr idx = FloorDiv(access_idx, num_thread) * vectorize_size +
-                   FloorMod(flattened, vectorize_size);
+    PrimExpr access_idx = FloorDiv(flattened, vector_extent);
+    PrimExpr thd = FloorMod(access_idx, thread_extent_const);
+    PrimExpr idx = FloorDiv(access_idx, thread_extent_const) * vector_extent +
+                   FloorMod(flattened, vector_extent);
+
     auto fragment = Fragment(loop_vars_, {idx}, {thd}, {});
     if (has_fragment_) {
       // for fragment buffer, we don't need to replicate the loop layout
