@@ -153,7 +153,7 @@ def annotate_safe_value(safe_value_map: Dict):
     buffer is accessed out of bounds.
 
     Args:
-        safe_value_map (dict): a dictionary of buffer to padding value
+        safe_value_map (dict): a dictionary of buffer to safe value
 
     Returns:
         block_attr: a block attribute
