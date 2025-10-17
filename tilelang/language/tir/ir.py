@@ -9,6 +9,7 @@ import functools
 def serial(start: PrimExpr,
            stop: PrimExpr = None,
            *,
+           step: PrimExpr = None,
            annotations: Dict[str, Any] = None) -> frame.ForFrame:
     """The serial For statement.
 
@@ -28,12 +29,13 @@ def serial(start: PrimExpr,
     res : frame.ForFrame
         The ForFrame.
     """
-    return _ir.serial(start=start, stop=stop, annotations=annotations)
+    return _ir.serial(start=start, stop=stop, step=step, annotations=annotations)
 
 
 def parallel(start: PrimExpr,
              stop: PrimExpr = None,
              *,
+             step: PrimExpr = None,
              annotations: Dict[str, Any] = None) -> frame.ForFrame:
     """The parallel For statement.
 
@@ -53,12 +55,13 @@ def parallel(start: PrimExpr,
     res : frame.ForFrame
         The ForFrame.
     """
-    return _ir.parallel(start=start, stop=stop, annotations=annotations)
+    return _ir.parallel(start=start, stop=stop, step=step, annotations=annotations)
 
 
 def vectorized(start: PrimExpr,
                stop: PrimExpr = None,
                *,
+               step: PrimExpr = None,
                annotations: Dict[str, Any] = None) -> frame.ForFrame:
     """The vectorized For statement.
 
@@ -78,12 +81,13 @@ def vectorized(start: PrimExpr,
     res : frame.ForFrame
         The ForFrame.
     """
-    return _ir.vectorized(start=start, stop=stop, annotations=annotations)
+    return _ir.vectorized(start=start, stop=stop, step=step, annotations=annotations)
 
 
 def unroll(start: PrimExpr,
            stop: PrimExpr = None,
            *,
+           step: PrimExpr = None,
            annotations: Dict[str, Any] = None) -> frame.ForFrame:
     """The unrolled For statement.
 
@@ -103,7 +107,7 @@ def unroll(start: PrimExpr,
     res : frame.ForFrame
         The ForFrame.
     """
-    return _ir.unroll(start=start, stop=stop, annotations=annotations)
+    return _ir.unroll(start=start, stop=stop, step=step, annotations=annotations)
 
 
 def thread_binding(

@@ -672,6 +672,7 @@ class axis:  # pylint: disable=invalid-name
 def serial(start: PrimExpr,
            stop: PrimExpr = None,
            *,
+           step: PrimExpr = None,
            annotations: Dict[str, Any] = None) -> frame.ForFrame:
     """The serial For statement.
 
@@ -697,12 +698,13 @@ def serial(start: PrimExpr,
             start = IntImm(start.dtype, 0)
         else:
             start = 0
-    return _ffi_api.Serial(start, stop, annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
+    return _ffi_api.Serial(start, stop, step, annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
 def parallel(start: PrimExpr,
              stop: PrimExpr = None,
              *,
+             step: PrimExpr = None,
              annotations: Dict[str, Any] = None) -> frame.ForFrame:
     """The parallel For statement.
 
@@ -728,12 +730,13 @@ def parallel(start: PrimExpr,
             start = IntImm(start.dtype, 0)
         else:
             start = 0
-    return _ffi_api.Parallel(start, stop, annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
+    return _ffi_api.Parallel(start, stop, step, annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
 def vectorized(start: PrimExpr,
                stop: PrimExpr = None,
                *,
+               step: PrimExpr = None,
                annotations: Dict[str, Any] = None) -> frame.ForFrame:
     """The vectorized For statement.
 
@@ -759,7 +762,7 @@ def vectorized(start: PrimExpr,
             start = IntImm(start.dtype, 0)
         else:
             start = 0
-    return _ffi_api.Vectorized(start, stop, annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
+    return _ffi_api.Vectorized(start, stop, step, annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
 def unroll(start: PrimExpr,
