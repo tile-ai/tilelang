@@ -213,7 +213,7 @@ def moe_forward_tilelang_routed(d_hidden,
                 up_logits_local[i, j] = up_logits_local[i, j] * gate_logits_local[i, j]
 
             for i, j in T.Parallel(block_token, block_dexpert):
-                with T.If(i < actual_rows), T.Then():
+                if i < actual_rows:
                     up_logits[m_start + i, by * block_dexpert + j] = up_logits_local[i, j]
 
         # Step 2: Compute down logits
@@ -261,7 +261,7 @@ def moe_forward_tilelang_routed(d_hidden,
                     transpose_B=True)
 
             for i, j in T.Parallel(block_token, block_dhidden):
-                with T.If(i < actual_rows), T.Then():
+                if i < actual_rows:
                     output[m_start + i, by * block_dhidden +
                            j] = output_local[i, j] * routed_expert_weights[m_start + i]
 
@@ -356,11 +356,11 @@ class MoE(nn.Module):
             dtype=torch.float16,
             device=self.device)
         self.stacked_expert_weights = torch.empty(
-            (config["batch_size"] * config["seq_len"] * config["n_experts_per_token"], 1),
+            (config["batch_size"] * config["seq_len"] * config["n_experts_per_token"]),
             dtype=torch.float16,
             device=self.device)
         self.stacked_expert_tokens_idxs = torch.empty(
-            (config["batch_size"] * config["seq_len"] * config["n_experts_per_token"], 1),
+            (config["batch_size"] * config["seq_len"] * config["n_experts_per_token"]),
             dtype=torch.int64,
             device=self.device)
 
@@ -389,7 +389,7 @@ class MoE(nn.Module):
         batch_size, seq_len, hidden_dim = x.shape
         expert_indices, expert_scores = self.gating_network(x)
         flat_expert_indices = expert_indices.view(-1)
-        flat_expert_weights = expert_scores.view(-1, 1)
+        flat_expert_weights = expert_scores.view(-1)
         x_flat = x.view(-1, hidden_dim)
 
         # Prepare for grouped GEMM
@@ -412,7 +412,7 @@ class MoE(nn.Module):
             expert_tokens = x_flat[exp_token_idxs]
 
             self.stacked_expert_tokens[start_idx:end_idx] = expert_tokens
-            self.stacked_expert_tokens_idxs[start_idx:end_idx, 0] = exp_token_idxs
+            self.stacked_expert_tokens_idxs[start_idx:end_idx] = exp_token_idxs
             self.stacked_expert_weights[start_idx:end_idx] = flat_expert_weights[
                 idxs[start_idx:end_idx]]
 
