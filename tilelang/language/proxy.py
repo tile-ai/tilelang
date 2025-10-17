@@ -178,9 +178,6 @@ class StridedTensorProxy(BaseTensorProxy):
                  scope=None) -> tir.Buffer:
         if len(shape) != len(strides):
             raise ValueError("Invalid shape/strides' dimensions")
-        if not bool(strides[-1] == 1):
-            # TODO(chenggang): shall we support non-contiguous even for the last dimension?
-            raise ValueError("The stride of the last dimension must be 1 (contiguous)")
         return super().__call__(shape, dtype=dtype, strides=strides, scope=scope)
 
 
