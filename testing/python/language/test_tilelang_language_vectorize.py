@@ -1,17 +1,17 @@
 import torch
-from tilelang import tvm as tvm
 import tilelang.testing
-import tilelang as tl
 import tilelang.language as T
 
 
+@tilelang.jit(pass_configs={
+    tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: True})
 def vectorize_test(N, M, stride_A, stride_B):
     assert N % 128 == 0 and M % 128 == 0
 
     @T.prim_func
     def main(
-        A: T.StridedTensor[(N, M), (1, stride_A), "float32"],
-        B: T.StridedTensor[(N, M), (1, stride_B), "float32"],
+            A: T.StridedTensor[(N, M), (1, stride_A), "float32"],  # noqa: F821
+            B: T.StridedTensor[(N, M), (1, stride_B), "float32"],  # noqa: F821
     ):
         with T.Kernel(M // 128, threads=128) as (bx):
             tx = T.get_thread_binding(0)
@@ -26,8 +26,7 @@ def vectorize_test(N, M, stride_A, stride_B):
 def run_vectorize(N, M, stride_A, stride_B):
     assert stride_A >= N and stride_B >= N
 
-    program = vectorize_test(N, M, stride_A, stride_B)
-    jit_kernel = tl.compile(program, target="cuda", execution_backend="cython")
+    jit_kernel = vectorize_test(N, M, stride_A, stride_B)
 
     base_a = torch.randn(stride_A, M, device="cuda", dtype=torch.float32)
     base_b = torch.zeros(stride_B, M, device="cuda", dtype=torch.float32)
@@ -41,14 +40,12 @@ def run_vectorize(N, M, stride_A, stride_B):
     code = jit_kernel.get_kernel_source()
 
     vectorize_size = 1
-    while vectorize_size <= 4 and \
+    while vectorize_size <= 2 and \
           stride_A % (vectorize_size * 2) == 0 and \
           stride_B % (vectorize_size * 2) == 0:
         vectorize_size *= 2
-    
-    if vectorize_size == 8:
-        assert "ulonglong4" in code
-    elif vectorize_size == 4:
+
+    if vectorize_size == 4:
         assert "float4" in code
     elif vectorize_size == 2:
         assert "float2" in code
