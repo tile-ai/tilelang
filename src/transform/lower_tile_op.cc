@@ -179,7 +179,7 @@ private:
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
   Stmt VisitStmt_(const BlockNode *op) final {
-    if (op->annotations.count(attr::kPaddingMap)) {
+    if (op->annotations.count(attr::kSafeValueMap)) {
       return RewritePaddingMap(op);
     }
     return IRMutatorWithAnalyzer::VisitStmt_(op);
@@ -191,18 +191,18 @@ private:
    * \return The rewritten block.
    */
   Stmt RewritePaddingMap(const BlockNode *op) {
-    auto padding_map = op->annotations.Get(attr::kPaddingMap);
-    if (!padding_map) {
+    auto safe_value_map = op->annotations.Get(attr::kSafeValueMap);
+    if (!safe_value_map) {
       LOG(FATAL) << "Padding map annotation is missing";
     }
 
     Map<Var, Var> var_remap = CreateVarRemap();
-    Map<Var, PrimExpr> new_padding_map = RemapPaddingMap(
-        Downcast<Map<Var, PrimExpr>>(padding_map.value()), var_remap);
+    Map<Var, PrimExpr> new_safe_value_map = RemapPaddingMap(
+        Downcast<Map<Var, PrimExpr>>(safe_value_map.value()), var_remap);
 
     auto block = Downcast<Block>(IRMutatorWithAnalyzer::VisitStmt_(op));
     auto block_ptr = block.CopyOnWrite();
-    block_ptr->annotations.Set(attr::kPaddingMap, new_padding_map);
+    block_ptr->annotations.Set(attr::kSafeValueMap, new_safe_value_map);
     return block;
   }
 
@@ -220,21 +220,21 @@ private:
 
   /*!
    * \brief Remap the padding map using the variable remapping.
-   * \param padding_map The original padding map.
+   * \param safe_value_map The original padding map.
    * \param var_remap The variable remapping.
    * \return The remapped padding map.
    */
-  Map<Var, PrimExpr> RemapPaddingMap(const Map<Var, PrimExpr> &padding_map,
+  Map<Var, PrimExpr> RemapPaddingMap(const Map<Var, PrimExpr> &safe_value_map,
                                      const Map<Var, Var> &var_remap) const {
-    Map<Var, PrimExpr> new_padding_map;
-    for (const auto &[var, padding] : padding_map) {
+    Map<Var, PrimExpr> new_safe_value_map;
+    for (const auto &[var, padding] : safe_value_map) {
       if (var_remap.count(var)) {
-        new_padding_map.Set(var_remap.at(var), padding);
+        new_safe_value_map.Set(var_remap.at(var), padding);
       } else {
-        new_padding_map.Set(var, padding);
+        new_safe_value_map.Set(var, padding);
       }
     }
-    return new_padding_map;
+    return new_safe_value_map;
   }
 
   Map<Buffer, Buffer> buffer_remap_;
