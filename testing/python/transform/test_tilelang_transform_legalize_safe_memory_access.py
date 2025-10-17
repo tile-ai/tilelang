@@ -141,7 +141,6 @@ def assert_oob_store_legalize(M: int = 64, N: int = 64):
     tvm.ir.assert_structural_equal(transformed["main"].body, expected.body)
 
 
-
 def test_vectorize_access():
     assert_vectorize_access(64, 64)
 
@@ -159,7 +158,6 @@ def test_vectorize_access_with_atmoic_add():
 
 def test_oob_store():
     assert_oob_store_legalize(64, 64)
-
 
 
 if __name__ == "__main__":
