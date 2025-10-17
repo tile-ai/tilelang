@@ -116,6 +116,7 @@ elseif(USE_ROCM)
 elseif(USE_CUDA)
   set(CMAKE_CUDA_STANDARD 17)
   find_package(CUDAToolkit REQUIRED)
+  find_program(CMAKE_CUDA_COMPILER NAMES nvcc PATHS /usr/local/cuda/bin /opt/cuda/bin)
   add_compile_definitions("CUDA_MAJOR_VERSION=${CUDAToolkit_VERSION_MAJOR}")
 
   # Set `USE_CUDA=/usr/local/cuda-x.y`
