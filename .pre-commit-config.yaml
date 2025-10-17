@@ -1,7 +1,7 @@
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
 ci:
-  autofix_prs: true
+  autofix_prs: false
   autofix_commit_msg: "[Lint]: [pre-commit.ci] auto fixes [...]"
   autoupdate_commit_msg: "[CI] [pre-commit.ci] autoupdate"
   autoupdate_schedule: monthly
