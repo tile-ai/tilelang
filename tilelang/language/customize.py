@@ -4,6 +4,7 @@ import tilelang.language as T
 from tvm.tir import PrimExpr, Buffer, op
 from typing import List, Union
 from .atomic import atomic_max, atomic_min, atomic_add, atomic_addx2, atomic_addx4, atomic_load, atomic_store  # noqa: F401
+from .dtypes import get_tvm_dtype, AnyDType
 
 
 def dp4a(A: Buffer, B: Buffer, C: Buffer) -> PrimExpr:
@@ -51,7 +52,7 @@ def reshape(src: Buffer, shape: List[PrimExpr]) -> Buffer:
 
 def view(src: Buffer,
          shape: Union[List[PrimExpr], None] = None,
-         dtype: Union[str, None] = None) -> Buffer:
+         dtype: Union[AnyDType, None] = None) -> Buffer:
     """
          Return a Tensor view of the input buffer with an optional new shape and dtype.
 
@@ -61,6 +62,7 @@ def view(src: Buffer,
         shape = src.shape
     if dtype is None:
         dtype = src.dtype
+    dtype = get_tvm_dtype(dtype)
     return T.Tensor(shape, dtype, src.data)
 
 
