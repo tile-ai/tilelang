@@ -35,7 +35,7 @@ def tl_fused_chunk_bwd_kernel(
     NT = tl.cdiv(S, chunk_size)
 
     @T.prim_func
-    def main(
+    def chunk_linear_attn_bwd(
             Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
             K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
             V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
@@ -141,7 +141,7 @@ def tl_fused_chunk_bwd_kernel(
                        i_v * BV:(i_v + 1) * BV], dv_shared)
                 #TODO: consider using vectorized atomic add or tma reduce for sm90
 
-    return main
+    return chunk_linear_attn_bwd
 
 
 def tl_fused_chunk_bwd(Q, K, V, dO):
