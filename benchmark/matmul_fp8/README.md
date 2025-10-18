@@ -1,6 +1,6 @@
 # FP8 Matmul Benchmark (8192×8192)
 
-This document records the throughput achieved by `benchmark_matmul.py` when multiplying FP8 matrices sized `M = N = 8192` across different `K` dimensions. Each measurement relies on the default autotuning search space bundled with the benchmark. The file lives in `/weka-hg/prod/deepseek/permanent/wanglei/tilelang/benchmark/matmul_fp8`.
+This document records the throughput achieved by `benchmark_matmul.py` when multiplying FP8 matrices sized `M = N = 8192` across different `K` dimensions. Each measurement relies on the default autotuning search space bundled with the benchmark.
 
 ## Environment
 
