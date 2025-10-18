@@ -239,11 +239,8 @@ if __name__ == "__main__":
     best_result = matmul(M, N, K, with_roller)
     best_latency = best_result.latency
     best_config = best_result.config
-    ref_latency = best_result.ref_latency
 
     # Print out the benchmark results
     print(f"Best latency (s): {best_latency}")
     print(f"Best TFlops: {total_flops / best_latency * 1e-9:.3f}")
     print(f"Best config: {best_config}")
-
-    print(f"Reference TFlops: {total_flops / ref_latency * 1e-9:.3f}")
