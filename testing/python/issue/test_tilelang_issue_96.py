@@ -52,7 +52,7 @@ def run_gemm_pipeline_test(N, block_M=128, block_N=128, block_K=32):
 
 
 def test_pipeline_large_matrix():
-    """Test pipeline stages with large matrix multiplication (8192x8192)"""
+    """Test pipeline stages with large matrix multiplication (4096x4096)"""
     run_gemm_pipeline_test(4096)
 
 
