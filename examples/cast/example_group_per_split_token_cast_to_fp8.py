@@ -161,8 +161,7 @@ def ref_program(x: torch.Tensor, batch_sizes: torch.Tensor) -> \
     return x_fp8
 
 
-def main():
-    M, N, BG, blk_m = 8192, 8192, 2, 8
+def main(M=8192, N=8192, BG=2, blk_m=8):
     if dtype == "float":
         x = torch.randn(M, N, device="cuda", dtype=torch.float32)
     elif dtype == "float16":

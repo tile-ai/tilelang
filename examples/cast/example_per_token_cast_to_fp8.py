@@ -79,8 +79,7 @@ def ref_program(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     return x_fp8, (x_amax / 448.0).view(m, -1)
 
 
-def main():
-    M, N, blk_m = 8192, 8192, 8
+def main(M=8192, N=8192, blk_m=8):
     kernel = per_token_cast_to_fp8(M, N, blk_m)
     print(kernel.get_kernel_source())
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Randn)

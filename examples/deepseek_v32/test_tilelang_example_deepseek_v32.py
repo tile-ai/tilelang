@@ -13,7 +13,7 @@ def test_example_topk_selector():
 
 
 def test_example_fp8_lighting_indexer():
-    test_fp8_lighting_indexer()
+    test_fp8_lighting_indexer(S=1024, SKV=2048, H=32, HKV=1, D=64, kv_stride=1)
 
 
 @tilelang.testing.requires_cuda
