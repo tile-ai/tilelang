@@ -11,6 +11,7 @@ from bert_padding import pad_input, unpad_input
 torch.manual_seed(1)
 
 
+
 def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random"):
     assert mode in ["full", "random", "third"]
     if mode == "full":
