@@ -219,9 +219,9 @@ def matmul(
 if __name__ == "__main__":
     # Parse command-line arguments for matrix dimensions
     parser = argparse.ArgumentParser(description="Autotuned MatMul Benchmark")
-    parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
-    parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
-    parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
+    parser.add_argument("--m", type=int, default=8192, help="Matrix dimension M")
+    parser.add_argument("--n", type=int, default=8192, help="Matrix dimension N")
+    parser.add_argument("--k", type=int, default=8192, help="Matrix dimension K")
     parser.add_argument(
         "--with_roller",
         action="store_true",
@@ -237,13 +237,11 @@ if __name__ == "__main__":
 
     # matmul(...) returns (best_latency, best_config, ref_latency)
     best_result = matmul(M, N, K, with_roller)
+    print(best_result.get_kernel_source())
     best_latency = best_result.latency
     best_config = best_result.config
-    ref_latency = best_result.ref_latency
 
     # Print out the benchmark results
     print(f"Best latency (s): {best_latency}")
     print(f"Best TFlops: {total_flops / best_latency * 1e-9:.3f}")
     print(f"Best config: {best_config}")
-
-    print(f"Reference TFlops: {total_flops / ref_latency * 1e-9:.3f}")
