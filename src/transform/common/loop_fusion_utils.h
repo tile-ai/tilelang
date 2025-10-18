@@ -99,7 +99,7 @@ public:
 
 private:
   ParallelLoopFuser(arith::Analyzer *analyzer)
-      : IRMutatorWithAnalyzer(analyzer){};
+      : IRMutatorWithAnalyzer(analyzer) {};
 
   Stmt VisitStmt_(const ForNode *op) final {
     // Gather consecutive parallel loops

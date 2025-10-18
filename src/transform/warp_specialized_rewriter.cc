@@ -530,10 +530,11 @@ private:
         block_stmt.push_back(block->body);
         cur_id++;
       }
-      new_body.push_back(MakeGroupBlock(block_stmt.size() == 1
-                                            ? block_stmt[0]
-                                            : SeqStmt(std::move(block_stmt)),
-                                        annotations));
+      new_body.push_back(MakeGroupBlock(
+          block_stmt.size() == 1 ? block_stmt[0]
+                                 // NOLINTNEXTLINE(performance-move-const-arg)
+                                 : SeqStmt(std::move(block_stmt)),
+          annotations));
     }
     Array<Integer> order_anno;
     Array<Integer> stage_anno;
@@ -697,10 +698,12 @@ private:
             continue;
           if (marker_.GetRole(op->seq[i]) == Role::kBoth) {
             block_stmt.push_back(seq_transformed[i]);
-            new_body.push_back(MakeGroupBlock(
-                block_stmt.size() == 1 ? block_stmt[0]
-                                       : SeqStmt(std::move(block_stmt)),
-                annotations));
+            new_body.push_back(
+                MakeGroupBlock(block_stmt.size() == 1
+                                   ? block_stmt[0]
+                                   // NOLINTNEXTLINE(performance-move-const-arg)
+                                   : SeqStmt(std::move(block_stmt)),
+                               annotations));
             continue;
           }
         }
@@ -734,10 +737,12 @@ private:
             }
           }
           collector.Clear();
-          new_body.push_back(MakeGroupBlock(
-              block_stmt.size() == 1 ? block_stmt[0]
-                                     : SeqStmt(std::move(block_stmt)),
-              annotations));
+          new_body.push_back(
+              MakeGroupBlock(block_stmt.size() == 1
+                                 ? block_stmt[0]
+                                 // NOLINTNEXTLINE(performance-move-const-arg)
+                                 : SeqStmt(std::move(block_stmt)),
+                             annotations));
         }
       }
     } else { // consumer case
@@ -766,10 +771,11 @@ private:
             }
           }
         }
-        new_body.push_back(MakeGroupBlock(block_stmt.size() == 1
-                                              ? block_stmt[0]
-                                              : SeqStmt(std::move(block_stmt)),
-                                          annotations));
+        new_body.push_back(MakeGroupBlock(
+            block_stmt.size() == 1 ? block_stmt[0]
+                                   // NOLINTNEXTLINE(performance-move-const-arg)
+                                   : SeqStmt(std::move(block_stmt)),
+            annotations));
       }
       // Filter out the producer stmts
       int cur_id = 0;

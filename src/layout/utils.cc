@@ -134,7 +134,7 @@ Array<IterSplitExpr> DivideUnusedIterators(const Array<PrimExpr> &exprs,
   for (const IterVar &iter : input_iters) {
     IterMark iv_mark;
     for (const IterMark &mark : collector.visited_) {
-      if (mark->source.as<Var>()->same_as(iter->var)) {
+      if (mark->source.as<Var>()->same_as(iter->var)) { // NOLINT(*)
         iv_mark = mark;
         break;
       }

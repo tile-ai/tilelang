@@ -20,7 +20,7 @@ template <typename T> static std::string ArrayToStr(const T *ptr, size_t n) {
   for (size_t i = 0; i < n; i++) {
     if (i > 0)
       ss << ", ";
-    ss << ptr[i];
+    ss << ptr[i]; // NOLINT(clang-analyzer-security.ArrayBound)
   }
   ss << "]";
   return ss.str();

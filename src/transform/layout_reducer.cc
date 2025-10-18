@@ -209,7 +209,7 @@ private:
 
         auto opt_buffer = var_to_buffer_.Get(reducer_var);
         ICHECK(opt_buffer);
-        auto buffer = opt_buffer.value();
+        const auto &buffer = opt_buffer.value();
         Fragment f;
         if (info->rep == ReducerRepType::ALL) {
           f = Fragment(buffer->shape, {}, ReplicationPlaceholder(),

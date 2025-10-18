@@ -32,7 +32,7 @@ repos:
         args: [--ignore-case]
         files: ^docs/spelling_wordlist\.txt$
   - repo: https://github.com/pre-commit/mirrors-clang-format
-    rev: v15.0.7  # sync with requirements-lint.txt
+    rev: v21.1.2  # sync with requirements-lint.txt
     hooks:
       - id: clang-format
         exclude: |

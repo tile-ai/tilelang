@@ -218,7 +218,7 @@ CodeGenTileLangWebGPU::AddFunction(const PrimFunc &f, bool skip_readonly_decl) {
   this->decl_stream << "\nstruct " << type_pod_args << " {\n";
 
   for (size_t i = 0; i < pod_args.size(); ++i) {
-    Var v = pod_args[i];
+    const Var &v = pod_args[i];
     ICHECK(!v.dtype().is_handle());
     std::string vid = AllocVarID(v.get());
 

@@ -42,7 +42,7 @@ class ParallelOpNode;
 
 class ParallelLoopNestVisitor : public StmtExprVisitor {
 private:
-  ParallelLoopNestVisitor(ParallelOpNode *op) : p(op){};
+  ParallelLoopNestVisitor(ParallelOpNode *op) : p(op) {};
   void VisitStmt_(const ForNode *op) override;
   void VisitStmt_(const BufferStoreNode *op) override;
   void VisitExpr_(const BufferLoadNode *op) override;
