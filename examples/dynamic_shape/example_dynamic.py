@@ -96,8 +96,7 @@ def matmul_dynamic(M, N, K, block_M, block_N, block_K, trans_A, trans_B, in_dtyp
     print(f"Latency: {latency} ms")
 
 
-def main():
-    M, N, K = 16384, 16384, 16384
+def main(M=16384, N=16384, K=16384):
     block_M, block_N, block_K = 128, 128, 32
     trans_A, trans_B = False, False
     in_dtype, out_dtype = "float16", "float16"
