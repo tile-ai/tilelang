@@ -23,38 +23,39 @@ AtomicAddVectorizePlanner::Plan(const For &node, int compute_capability) {
 
   PostOrderVisit(node, [&](const ObjectRef &obj) {
     if (const auto *call = obj.as<CallNode>()) {
-      if (call->op == builtin::call_extern() && call->args.size() >= 2) {
-        const auto *func_name = call->args[0].as<StringImmNode>();
-        if (!func_name)
+      if (call->op == atomicadd_elem_op()) {
+        if (call->args.size() < 2) {
+          // Fallback: unexpected arity
+          vectorize_size_max = 1;
+          DLOG(WARNING) << "[AtomicAddVectorizePlanner] atomicadd_elem_op "
+                           "expects 2 args, got "
+                        << call->args.size() << "; Fallback to no vectorize";
           return;
-        if (func_name->value == "AtomicAdd") {
-          DataType dtype;
-          if (const auto *load = call->args[1].as<BufferLoadNode>()) {
-            dtype = load->dtype;
+        }
+        DataType dtype;
+        if (const auto *load = call->args[0].as<BufferLoadNode>()) {
+          dtype = load->dtype;
+          vectorize_size_max = GetVectorizeSizeMax(compute_capability, dtype);
+        } else if (const auto *ite = call->args[0].as<IfThenElseNode>()) {
+          if (const auto *then_load = ite->then_case.as<BufferLoadNode>()) {
+            dtype = then_load->dtype;
             vectorize_size_max = GetVectorizeSizeMax(compute_capability, dtype);
-          } else if (const auto *ite = call->args[1].as<IfThenElseNode>()) {
-            if (const auto *then_load = ite->then_case.as<BufferLoadNode>()) {
-              dtype = then_load->dtype;
-              vectorize_size_max =
-                  GetVectorizeSizeMax(compute_capability, dtype);
-            } else if (const auto *else_load =
-                           ite->else_case.as<BufferLoadNode>()) {
-              dtype = else_load->dtype;
-              vectorize_size_max =
-                  GetVectorizeSizeMax(compute_capability, dtype);
-            } else {
-              // fallback
-              vectorize_size_max = 1;
-              DLOG(WARNING) << "[AtomicAddVectorizePlanner] IfThenElse case "
-                               "has no BufferLoad; Fallback to no vectorize";
-            }
+          } else if (const auto *else_load =
+                         ite->else_case.as<BufferLoadNode>()) {
+            dtype = else_load->dtype;
+            vectorize_size_max = GetVectorizeSizeMax(compute_capability, dtype);
           } else {
             // fallback
             vectorize_size_max = 1;
-            DLOG(WARNING) << "[AtomicAddVectorizePlanner] Unexpected arg1 type "
-                          << call->args[1]->GetTypeKey()
-                          << "; Fallback to no vectorize";
+            DLOG(WARNING) << "[AtomicAddVectorizePlanner] IfThenElse case "
+                             "has no BufferLoad; Fallback to no vectorize";
           }
+        } else {
+          // fallback
+          vectorize_size_max = 1;
+          DLOG(WARNING) << "[AtomicAddVectorizePlanner] Unexpected arg1 type "
+                        << call->args[1]->GetTypeKey()
+                        << "; Fallback to no vectorize";
         }
       }
     }
@@ -75,22 +76,19 @@ void AtomicAddVectorizePlanner::VisitStmt_(const ForNode *node) {
 }
 
 void AtomicAddVectorizePlanner::VisitExpr_(const CallNode *node) {
-  if (node->op == builtin::call_extern() && node->args.size() >= 2) {
-    if (const auto *func_name = node->args[0].as<StringImmNode>()) {
-      if (func_name->value == "AtomicAdd") {
-        const BufferLoadNode *buffer_load_dst =
-            node->args[1].as<BufferLoadNode>();
-        const BufferLoadNode *buffer_load_src =
-            node->args[2].as<BufferLoadNode>();
-        if (buffer_load_src && buffer_load_src->buffer.defined() &&
-            buffer_load_dst && buffer_load_dst->buffer.defined()) {
-          Buffer dst_buffer = buffer_load_dst->buffer;
-          UpdateVectorSize(buffer_load_dst->indices, dst_buffer);
+  if (node->op == atomicadd_elem_op() && !node->args.empty()) {
+    if (node->args.size() < 2) {
+      return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
+    }
+    const BufferLoadNode *buffer_load_dst = node->args[0].as<BufferLoadNode>();
+    const BufferLoadNode *buffer_load_src = node->args[1].as<BufferLoadNode>();
+    if (buffer_load_src && buffer_load_src->buffer.defined() &&
+        buffer_load_dst && buffer_load_dst->buffer.defined()) {
+      Buffer dst_buffer = buffer_load_dst->buffer;
+      UpdateVectorSize(buffer_load_dst->indices, dst_buffer);
 
-          Buffer src_buffer = buffer_load_src->buffer;
-          UpdateVectorSize(buffer_load_src->indices, src_buffer);
-        }
-      }
+      Buffer src_buffer = buffer_load_src->buffer;
+      UpdateVectorSize(buffer_load_src->indices, src_buffer);
     }
   }
   return arith::IRVisitorWithAnalyzer::VisitExpr_(node);
@@ -188,6 +186,8 @@ private:
   Stmt VisitStmt_(const ForNode *node) final {
     inner_for_ = node;
     auto ret = StmtExprMutator::VisitStmt_(node);
+    if (vector_size_ == 1)
+      return ret;
     if (inner_for_ == node) {
       For fnode = ret.as<For>().value();
       auto old_var = fnode->loop_var;
@@ -210,47 +210,54 @@ private:
   }
 
   PrimExpr VisitExpr_(const CallNode *node) final {
-    if (dynamic_) {
-      return StmtExprMutator::VisitExpr_(node);
+    bool legal_vectorize = true;
+    if (dynamic_)
+      legal_vectorize = false;
+    if (!(node->op == atomicadd_elem_op()))
+      legal_vectorize = false;
+    if (node->args.size() < 2)
+      legal_vectorize = false;
+    if (legal_vectorize) {
+      const BufferLoadNode *temp_dst_node = node->args[0].as<BufferLoadNode>();
+      const BufferLoadNode *temp_value_node =
+          node->args[1].as<BufferLoadNode>();
+      if (!temp_dst_node || !temp_value_node)
+        legal_vectorize = false;
     }
-    if (vector_size_ == 2 || vector_size_ == 4) {
-      if (node->op == builtin::call_extern() && node->args.size() >= 2) {
-        if (const auto *func_name = node->args[0].as<StringImmNode>()) {
-          if (func_name->value == "AtomicAdd") {
-            const BufferLoadNode *temp_dst_node =
-                node->args[1].as<BufferLoadNode>();
-            const BufferLoadNode *temp_value_node =
-                node->args[2].as<BufferLoadNode>();
-            if (!temp_dst_node || !temp_value_node) {
-              return StmtExprMutator::VisitExpr_(node);
-            }
-            const BufferLoad dst_node =
-                Downcast<BufferLoad>(node->args[1].as<BufferLoadNode>());
-            const BufferLoad value_node =
-                Downcast<BufferLoad>(node->args[2].as<BufferLoadNode>());
+    if (legal_vectorize) {
+      const BufferLoad dst_node = Downcast<BufferLoad>(node->args[0]);
+      const BufferLoad value_node = Downcast<BufferLoad>(node->args[1]);
 
-            Call address_of_dst =
-                Call(DataType::Handle(), builtin::address_of(), {dst_node});
-            Call address_of_value =
-                Call(DataType::Handle(), builtin::address_of(), {value_node});
-            Array<PrimExpr> new_args;
-            if (vector_size_ == 2) {
-              new_args.push_back(StringImm("AtomicAddx2"));
-            } else {
-              new_args.push_back(StringImm("AtomicAddx4"));
-            }
-            new_args.push_back(address_of_dst);
-            new_args.push_back(address_of_value);
-
-            Call new_call =
-                tvm::tir::Call(node->dtype, builtin::call_extern(), new_args);
-
-            return new_call;
-          }
-        }
+      Call address_of_dst =
+          Call(DataType::Handle(), builtin::address_of(), {dst_node});
+      Call address_of_value =
+          Call(DataType::Handle(), builtin::address_of(), {value_node});
+      Array<PrimExpr> new_args;
+      if (vector_size_ == 4) {
+        new_args.push_back(StringImm("AtomicAddx4"));
+      } else if (vector_size_ == 2) {
+        new_args.push_back(StringImm("AtomicAddx2"));
+      } else {
+        new_args.push_back(StringImm("AtomicAdd"));
       }
+      new_args.push_back(address_of_dst);
+      new_args.push_back(address_of_value);
+
+      Call new_call =
+          tvm::tir::Call(node->dtype, builtin::call_extern(), new_args);
+
+      return new_call;
+    } else {
+      Array<PrimExpr> new_args;
+      new_args.push_back(StringImm("AtomicAdd"));
+      for (auto x : node->args)
+        new_args.push_back(x);
+
+      Call new_call =
+          tvm::tir::Call(node->dtype, builtin::call_extern(), new_args);
+
+      return new_call;
     }
-    return StmtExprMutator::VisitExpr_(node);
   }
 
   const ForNode *inner_for_;
@@ -263,9 +270,6 @@ For VectorizeAtomicAdd(const For &for_node, int compute_capability) {
   AtomicAddVectorizePlanResult res = {1, false, 0};
   AtomicAddVectorizePlanner planner;
   res = planner.Plan(for_node, compute_capability);
-  int vectorize_hint = res.vector_size;
-  if (vectorize_hint == 1)
-    return for_node;
   auto rewriter = AtomicAddVectorizeRewriter(res);
   return Downcast<For>(rewriter(for_node));
 }

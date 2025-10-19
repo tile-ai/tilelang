@@ -2,60 +2,125 @@ name: Dist
 on:
   schedule:
     # gemini said this is 6:00 china time
-    - cron: '0 22 * * *'
+    - cron: "0 22 * * *"
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - setup.py
+      - setup.cfg
+      - pyproject.toml
+      - MANIFEST.in
+      - CMakeLists.txt
+      - version_provider.py
+      - .github/workflows/dist.yml
   release:
-    types: [ published ]
+    types:
+      - published
 
-env:
-  PYTHON_VERSION: '3.12'
+permissions:
+  contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
 
 jobs:
   build-wheels:
+    name: Build wheels for Python ${{ matrix.python-version }} on ${{ matrix.target.runner }} with ${{ matrix.target.toolkit }}
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     strategy:
       matrix:
-        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-16]
-        include:
-        - os: ubuntu-22.04
-          cuda_version: "12.1"
-        - os: ubuntu-22.04-arm
-          cuda_version: "12.8"
-      fail-fast: true
-    runs-on: ${{ matrix.os }}
+        target:
+          - { runner: ubuntu-latest, toolkit: "CUDA-12.1" }
+          - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8" }
+          - { runner: macos-latest, toolkit: "Metal" }
+        python-version:
+          - "3.8"
+          # TVM is built with Python 3.8 Limited API, it should work with all Python >= 3.8.
+          # - "3.9"
+          # - "3.10"
+          # - "3.11"
+          # - "3.12"
+          # - "3.13"
+          # - "3.14"
+      fail-fast: false
+    timeout-minutes: 120
+    runs-on: ${{ matrix.target.runner }}
     env:
-      CUDA_VERSION: ${{ matrix.cuda_version }}
-      NO_VERSION_LABEL: ${{ github.event_name != 'release' }}
+      NO_VERSION_LABEL: ${{ github.event_name == 'release' && 'OFF' || 'ON' }}
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 1
-        submodules: recursive
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
 
-    - name: ccache
-      uses: hendrikmuhs/ccache-action@v1.2
-      if: startsWith(matrix.os, 'macos')
-      with:
-        create-symlink: true
-        key: ${{ github.job }}-${{ matrix.os }}
+      # NB: CIBW builds wheels in containers on Linux
+      - name: Setup ccache (macOS only)
+        if: runner.os == 'macOS'
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          create-symlink: true
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ matrix.target.toolkit }}
+          evict-old-files: "7d"
 
-    - name: Build wheels
-      uses: pypa/cibuildwheel@v3.2
-      with:
-        output-dir: wheelhouse
-        config-file: "{package}/pyproject.toml"
+      - name: Set CIBW_BUILD
+        run: |
+          PYTHON_VERSION="${{ matrix.python-version }}"
+          PYTHON_VERSION_MAJMIN="$(echo "${PYTHON_VERSION}" | cut -d '.' -f-2)"
+          PYTHON_VERSION_MAJMIN_NODOT="${PYTHON_VERSION_MAJMIN//./}"
+          echo "CIBW_BUILD=cp${PYTHON_VERSION_MAJMIN_NODOT}-*" | tee -a "${GITHUB_ENV}"
 
-    # just for now to list all files
-    - name: List wheels
-      id: ls-whl
-      run: echo "whl_name=$(ls wheelhouse | head -n1)" >> $GITHUB_OUTPUT
+          if [[ "${{ matrix.target.toolkit }}" == *"CUDA"* ]]; then
+            CUDA_VERSION="${{ matrix.target.toolkit }}"
+            CUDA_VERSION="${CUDA_VERSION#CUDA-}"
+            echo "CUDA_VERSION=${CUDA_VERSION}" | tee -a "${GITHUB_ENV}"
+          fi
 
-    - uses: actions/upload-artifact@v4
-      with:
-        name: ${{ steps.ls-whl.outputs.whl_name }}.zip
-        path: wheelhouse/${{ steps.ls-whl.outputs.whl_name }}
-        compression-level: 0
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v3.2
+        with:
+          package-dir: .
+          output-dir: wheelhouse
+          config-file: "{package}/pyproject.toml"
+
+      - name: Upload wheels
+        # Not PR to save artifact storage, as wheels are only needed for releases.
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.python-version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  list-artifacts:
+    name: List artifacts
+    # Not PR to save artifact storage, as wheels are only needed for releases.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    needs: [build-wheels]
+    timeout-minutes: 15
+    steps:
+      - name: Download built wheels
+        uses: actions/download-artifact@v5
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: List distributions
+        run: ls -lh dist/*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts
+          path: dist/*
+          if-no-files-found: error

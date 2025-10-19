@@ -1,7 +1,7 @@
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
 ci:
-  autofix_prs: true
+  autofix_prs: false
   autofix_commit_msg: "[Lint]: [pre-commit.ci] auto fixes [...]"
   autoupdate_commit_msg: "[CI] [pre-commit.ci] autoupdate"
   autoupdate_schedule: monthly
@@ -48,6 +48,12 @@ repos:
   - repo: https://github.com/google/yapf
     rev: v0.43.0  # sync with requirements-lint.txt
     hooks:
+      - id: yapf
+        name: yapf-multiproc-bugfix
+        # yapf is not multiprocess safe, so we run a dummy yapf first.
+        args: [--in-place, docs/conf.py]
+        always_run: true
+        pass_filenames: false
       - id: yapf
         args: [--recursive, --in-place]
   - repo: https://github.com/codespell-project/codespell

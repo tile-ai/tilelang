@@ -1,12 +1,65 @@
 #pragma once
 
+#include "common.h"
+#include "cutlass/cutlass.h"
+
 #if __CUDA_ARCH_LIST__ >= 900
 #include "cute/arch/cluster_sm90.hpp"
 #include "cute/arch/mma_sm90_gmma.hpp"
-#include "cutlass/cutlass.h"
+#endif
 
 namespace tl {
 
+namespace detail {
+
+// Provide architecture-specific defaults so callers may omit arguments.
+TL_DEVICE constexpr int default_warp_size() {
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIP_DEVICE_COMPILE__)
+  return 64;
+#else
+  return 32;
+#endif
+}
+
+TL_DEVICE constexpr int default_warps_per_group() { return 4; }
+
+TL_DEVICE int linear_thread_idx_in_block() {
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+  return threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z);
+#else
+  return 0;
+#endif
+}
+
+} // namespace detail
+
+TL_DEVICE int get_lane_idx(int warp_size = detail::default_warp_size()) {
+  warp_size = warp_size > 0 ? warp_size : detail::default_warp_size();
+  return detail::linear_thread_idx_in_block() % warp_size;
+}
+
+TL_DEVICE int get_warp_idx_sync(int warp_size = detail::default_warp_size()) {
+  warp_size = warp_size > 0 ? warp_size : detail::default_warp_size();
+  return detail::linear_thread_idx_in_block() / warp_size;
+}
+
+TL_DEVICE int get_warp_idx(int warp_size = detail::default_warp_size()) {
+  warp_size = warp_size > 0 ? warp_size : detail::default_warp_size();
+  return detail::linear_thread_idx_in_block() / warp_size;
+}
+
+TL_DEVICE int
+get_warp_group_idx(int warp_size = detail::default_warp_size(),
+                   int warps_per_group = detail::default_warps_per_group()) {
+  warp_size = warp_size > 0 ? warp_size : detail::default_warp_size();
+  warps_per_group =
+      warps_per_group > 0 ? warps_per_group : detail::default_warps_per_group();
+  int threads_per_group = warp_size * warps_per_group;
+  threads_per_group = threads_per_group > 0 ? threads_per_group : warp_size;
+  return detail::linear_thread_idx_in_block() / threads_per_group;
+}
+
+#if __CUDA_ARCH_LIST__ >= 900
 TL_DEVICE void warpgroup_arrive() { cute::warpgroup_arrive(); }
 TL_DEVICE void warpgroup_commit_batch() { cute::warpgroup_commit_batch(); }
 
@@ -61,5 +114,6 @@ template <uint32_t RegCount> TL_DEVICE void warpgroup_reg_alloc() {
 template <uint32_t RegCount> TL_DEVICE void warpgroup_reg_dealloc() {
   asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" : : "n"(RegCount));
 }
-} // namespace tl
 #endif
+
+} // namespace tl

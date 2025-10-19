@@ -22,7 +22,7 @@ namespace tvm {
 namespace tl {
 
 namespace attr {
-static constexpr const char *kPaddingMap = "padding_map";
+static constexpr const char *kSafeValueMap = "safe_value_map";
 static constexpr const char *kWarpSpecializationScope =
     "kWarpSpecializationScope";
 static constexpr const char *kCustomWarpSpecialization =
@@ -359,6 +359,38 @@ TVM_DLL const Op &warpgroup_commit_batch();
 TVM_DLL const Op &warpgroup_wait();
 
 /*!
+ * \brief Return the canonical lane index for the calling thread.
+ *
+ * get_lane_idx([warp_size])
+ *
+ */
+TVM_DLL const Op &get_lane_idx();
+
+/*!
+ * \brief Return the canonical warp index, assuming converged threads.
+ *
+ * get_warp_idx_sync([warp_size])
+ *
+ */
+TVM_DLL const Op &get_warp_idx_sync();
+
+/*!
+ * \brief Return the canonical warp index without synchronizing the warp.
+ *
+ * get_warp_idx([warp_size])
+ *
+ */
+TVM_DLL const Op &get_warp_idx();
+
+/*!
+ * \brief Return the canonical warp group index for converged threads.
+ *
+ * get_warp_group_idx([warp_size, warps_per_group])
+ *
+ */
+TVM_DLL const Op &get_warp_group_idx();
+
+/*!
  * \brief Wait the previous wgmma to finish
  *
  * wait_wgmma(num_mma)
@@ -469,6 +501,13 @@ TVM_DLL const Op &initialize_descriptor();
  * tilelang.
  */
 TVM_DLL const Op &increase_descriptor_offset();
+/*!
+ * \brief tilelang intrinsic for element-wise atomic addition.
+ *
+ *  This op is used to represent an element-wise atomic add operation in
+ * tilelang.
+ */
+TVM_DLL const Op &atomicadd_elem_op();
 
 } // namespace tl
 } // namespace tvm

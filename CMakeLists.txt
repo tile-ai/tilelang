@@ -10,6 +10,30 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.gitmodules" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+  find_package(Git QUIET)
+  if(Git_FOUND)
+    execute_process(
+      COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
+      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+      RESULT_VARIABLE TILELANG_GIT_SUBMODULE_RESULT
+    )
+    if(NOT TILELANG_GIT_SUBMODULE_RESULT EQUAL 0)
+      message(
+        FATAL_ERROR
+          "Failed to initialize git submodules. Please run "
+          "`git submodule update --init --recursive` and re-run CMake."
+      )
+    endif()
+  else()
+    message(
+      FATAL_ERROR
+        "Git is required to initialize TileLang submodules. "
+        "Please install git or fetch the submodules manually."
+    )
+  endif()
+endif()
+
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
   set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "C compiler launcher")
@@ -92,6 +116,7 @@ elseif(USE_ROCM)
 elseif(USE_CUDA)
   set(CMAKE_CUDA_STANDARD 17)
   find_package(CUDAToolkit REQUIRED)
+  set(CMAKE_CUDA_COMPILER "${CUDAToolkit_BIN_DIR}/nvcc")
   add_compile_definitions("CUDA_MAJOR_VERSION=${CUDAToolkit_VERSION_MAJOR}")
 
   # Set `USE_CUDA=/usr/local/cuda-x.y`

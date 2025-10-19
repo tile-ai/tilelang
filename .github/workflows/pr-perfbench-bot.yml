@@ -16,7 +16,8 @@ jobs:
   perfbench:
     name: Benchmark between PR and main
     if: |
-      github.event_name == 'pull_request' &&
+      github.repository_owner == 'tile-ai' &&
+      github.event.issue.pull_request &&
       (contains(github.event.comment.body, '/performance-report') || contains(github.event.comment.body, '/perf'))
     runs-on: [self-hosted, nvidia]
     steps:
@@ -27,7 +28,7 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.9"

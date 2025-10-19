@@ -1,7 +1,7 @@
-# formatting
+# Format and lint requirements
 pre-commit
-yapf==0.43.0
-ruff==0.14.0
-codespell[toml]==2.4.1
 clang-format==15.0.7
 clang-tidy==18.1.8
+codespell[toml]==2.4.1
+ruff==0.14.0
+yapf==0.43.0

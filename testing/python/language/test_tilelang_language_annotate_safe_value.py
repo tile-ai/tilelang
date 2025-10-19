@@ -17,7 +17,7 @@ def tilelang_copy(M, N, block_M, block_N, dtype="float16", pad_value=0):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
             A_shared = T.alloc_shared((block_M, block_N), dtype)
 
-            T.annotate_padding({A_shared: pad_value})
+            T.annotate_safe_value({A: pad_value})
             for i, j in T.Parallel(block_M, block_N):
                 A_shared[i, j] = A[by * block_M + i - 10, bx * block_N + j]
 

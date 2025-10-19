@@ -146,11 +146,14 @@ def annotate_layout(layout_map: Dict):
     return block_attr({"layout_map": _layout_map})
 
 
-def annotate_padding(padding_map: Dict):
-    """Annotate the padding of the buffer
+def annotate_safe_value(safe_value_map: Dict):
+    """Annotate the safe value of the buffer.
+
+    A safe value of a buffer is the value that will be used when the
+    buffer is accessed out of bounds.
 
     Args:
-        padding_map (dict): a dictionary of buffer to padding value
+        safe_value_map (dict): a dictionary of buffer to safe value
 
     Returns:
         block_attr: a block attribute
@@ -165,7 +168,7 @@ def annotate_padding(padding_map: Dict):
             with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
                 A_shared = T.alloc_shared((block_M, block_N), dtype)
 
-                T.annotate_padding({A_shared: pad_value})
+                T.annotate_safe_value({A: safe_value})
                 for i, j in T.Parallel(block_M, block_N):
                     A_shared[i, j] = A[by * block_M + i - 10, bx * block_N + j]
 
@@ -174,13 +177,11 @@ def annotate_padding(padding_map: Dict):
 
         return main
     """
-    # padding_map is a dictionary of buffer to padding value
-    _padding_map = {}
-    for buffer, padding_value in padding_map.items():
-        # assert not global
-        assert buffer.scope() != "global", "padding can not be applied to global buffers"
-        _padding_map[buffer.data] = padding_value
-    return block_attr({"padding_map": _padding_map})
+    # safe_value_map is a dictionary of buffer to safe value
+    _safe_value_map = {}
+    for buffer, safe_value in safe_value_map.items():
+        _safe_value_map[buffer.data] = safe_value
+    return block_attr({"safe_value_map": _safe_value_map})
 
 
 def annotate_l2_hit_ratio(l2_hit_ratio_map: Dict):

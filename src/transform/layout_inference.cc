@@ -719,7 +719,23 @@ private:
       //     A_local[i] = A_global[i]
       // Here, A_local is a register-local buffer held independently by each
       // thread, so explicit thread binding is not required.
-      //
+      bool store_into_local = false;
+      PostOrderVisit(root, [&](const ObjectRef &obj) {
+        if (const auto *store = obj.as<BufferStoreNode>()) {
+          if (store->buffer.scope() == "local") {
+            store_into_local = true;
+          }
+          // if the case is like:
+          // for i in T.Parallel(1024):
+          //     A_local[i] = B_global[i]
+          //     A_frag[i] = A_global[i]
+          // exception will be raise in Parallel::LayoutInference
+        }
+      });
+      // This check if for the loop that only manuplates "local" buffers,
+      // for i in T.Parallel(1024):
+      //     A_local[i] = B_local[i]
+      // Though this might be illegal
       // We use PostOrderVisit to detect whether the loop only manuplates
       // "local" buffers, which indicates register usage and justifies skipping
       // thread binding.
@@ -738,7 +754,9 @@ private:
 
       auto loop_layout = result_.for_map[root];
       // FIXME: tell in-Parallel and out-of-Parallel `local`s apart
-      bool parallel_loop = !skip_thread_partition_ && !local_register_only;
+      // NOTE(lei): a bit ugly, we should rethink about this part in future.
+      bool parallel_loop =
+          !skip_thread_partition_ && !local_register_only && !store_into_local;
 
       if (parallel_loop) {
         for_node =

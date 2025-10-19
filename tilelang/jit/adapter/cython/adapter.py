@@ -29,6 +29,13 @@ except ImportError:
     raise
 
 
+def is_symbolic_expr(expr) -> bool:
+    """Check if the expression is a symbolic expression.
+    A symbolic expression can be a simple tvm.Var, or an tvm.PrimExpr containing tvm.Var.
+    """
+    return not isinstance(expr, tir.IntImm) and isinstance(expr, tir.PrimExpr)
+
+
 class CythonKernelAdapter(BaseKernelAdapter):
     """Adapter class that converts TVM/TIR functions to callable CUDA kernels using cython.
 
@@ -278,6 +285,10 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 for j, s in enumerate(buffer.shape):
                     if isinstance(s, tir.IntImm):
                         static_shape.append((j, s.value))
+                    elif is_symbolic_expr(s):
+                        static_shape.append((j, -1))  # -1 for symbolic
+                    else:
+                        raise ValueError(f"Unsupported shape type: {type(s)}")
                 for j, s in enumerate(buffer.strides):
                     if isinstance(s, tir.IntImm):
                         static_strides.append((j, s.value))

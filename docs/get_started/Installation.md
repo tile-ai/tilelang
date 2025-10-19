@@ -65,6 +65,26 @@ If you want to install **tile-lang** in development mode, you can run the follow
 pip install -e . -v
 ```
 
+If you prefer to work directly from the source tree via `PYTHONPATH`, make sure the native extension is built first:
+
+```bash
+mkdir -p build
+cd build
+cmake .. -DUSE_CUDA=ON
+make -j
+```
+Then add the repository root to `PYTHONPATH` before importing `tilelang`, for example:
+
+```bash
+export PYTHONPATH=/path/to/tilelang:$PYTHONPATH
+python -c "import tilelang; print(tilelang.__version__)"
+```
+
+Some useful CMake options you can toggle while configuring:
+- `-DUSE_CUDA=ON|OFF` builds against NVIDIA CUDA (default ON when CUDA headers are found).
+- `-DUSE_ROCM=ON` selects ROCm support when building on AMD GPUs.
+- `-DNO_VERSION_LABEL=ON` disables the backend/git suffix in `tilelang.__version__`.
+
 We currently provide four methods to install **tile-lang**:
 
 1. [Install Using Docker](#install-method-1) (Recommended)
