@@ -380,7 +380,7 @@ class SparseTensorCoreIntrinEmitter(object):
             # if DataType(b_dtype).bits == 8:
             #     mma_load_layout = mma_load_b_32x16_to_shared_16x32_layout
             if DataType(b_dtype).bits == 16:
-                mma_load_layout = mma_sp_load_b_32x16_to_shared_32x16_layout if replicate_b else mma_sp_load_b_32x8_to_shared_32x8_layout
+                mma_load_layout = mma_sp_load_b_32x16_to_shared_16x32_layout
             # elif DataType(b_dtype).bits == 32:
             #     mma_load_layout = mma_load_b_32x4_to_shared_16x8_layout
             else:
@@ -425,8 +425,8 @@ class SparseTensorCoreIntrinEmitter(object):
                     # load 16x32 data from shared buffer to local buffer
                     # must be transposed.
                     for j in T.serial(local_size_b):
-                        mk, mi = mma_load_layout(tx, j)
-                        B_local_buf[i * local_size_b + j] =  B_shared_buf[wk + mk, wi + mi] if trans else B_shared_buf[wi + mi, wk + mk]
+                        mi, mk = mma_load_layout(tx, j)
+                        B_local_buf[i * local_size_b + j] = B_shared_buf[wi + mi, wk + mk] if b_transposed else B_shared_buf[wk + mk, wi + mi]
 
         return _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk)
 

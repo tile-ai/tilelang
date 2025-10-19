@@ -2,22 +2,23 @@ from typing import Tuple
 
 from .mma_layout import (
     mma_load_a_32x8_to_shared_16x16_layout,
-    mma_load_b_32x4_to_shared_16x8_layout_16bit,
-
+    mma_load_b_32x4_to_shared_8x16_layout_16bit,
 )
 
 def mma_sp_load_a_32x8_to_shared_16x32_layout(thread_id, local_id):
     return mma_load_a_32x8_to_shared_16x16_layout(thread_id, local_id)
 
-def mma_sp_load_b_32x8_to_shared_32x8_layout(thread_id, local_id):
-    return mma_load_b_32x4_to_shared_16x8_layout_16bit(thread_id, local_id)
+def mma_sp_load_b_32x8_to_shared_8x64_layout(thread_id, local_id):
+    return mma_load_b_32x8_to_shared_8x32_layout(thread_id, local_id)
 
-def mma_sp_load_b_32x16_to_shared_32x16_layout(thread_id, local_id):
-    row, col = mma_load_b_32x4_to_shared_16x8_layout_16bit(thread_id, local_id % 8)
-    return row, col + 8 * (local_id // 8) 
+def mma_sp_load_b_32x16_to_shared_16x64_layout(thread_id, local_id):
+    row, col =  mma_load_b_32x16_to_shared_16x32_layout(thread_id, local_id % 8)
+    return row, col + 8 * (local_id // 8)
 
-
-def get_logical_id(thread_id: int) -> int:
+def mma_sp_load_b_32x16_to_shared_16x32_layout(thread_id, local_id):
+    col = (thread_id % 4) * 2 + (local_id % 8 % 2) + ((local_id % 8) // 2) * 8
+    row = (thread_id // 4) + 8 * (local_id // 8)
+    return row, col
     return (thread_id // 4) * 2 + (thread_id % 4) % 2
 
 def metadata_load_32x4_to_shared_16x4_layout_8bit(thread_id: int, local_id: int) -> Tuple[int, int]:
