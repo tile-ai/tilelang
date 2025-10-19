@@ -1,5 +1,5 @@
 import torch
-import tilelang as tl
+import tilelang
 import tilelang.language as T
 from tilelang.profiler import do_bench
 import argparse
@@ -9,11 +9,11 @@ from einops import rearrange
 from typing import Optional, Tuple
 
 
-@tl.jit(
+@tilelang.jit(
     out_idx=[4],
     pass_configs={
-        tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     })
 def tl_fused_chunk_fwd_kernel(
     B,
@@ -32,12 +32,12 @@ def tl_fused_chunk_fwd_kernel(
     chunk_size = 64
     BK = BV = 64  # Set to 128 can be faster, but has some numerical differences with FLA
     assert S % chunk_size == 0 and DK % BK == 0 and DV % BV == 0
-    NK = tl.cdiv(DK, BK)
-    NV = tl.cdiv(DV, BV)
-    NT = tl.cdiv(S, chunk_size)
+    NK = tilelang.cdiv(DK, BK)
+    NV = tilelang.cdiv(DV, BV)
+    NT = tilelang.cdiv(S, chunk_size)
 
     @T.prim_func
-    def chunk_linear_attn_fwd(
+    def fused_chunk_linear_attn_fwd(
             Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
             K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
             V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
@@ -56,11 +56,13 @@ def tl_fused_chunk_fwd_kernel(
             s_shared = T.alloc_shared([chunk_size, chunk_size], dtype)
             o = T.alloc_fragment([chunk_size, BV], accum_dtype)
             o_shared = T.alloc_shared([chunk_size, BV], accum_dtype)
-            T.clear(h)
 
+            T.annotate_layout({o_shared: tilelang.layout.make_swizzled_layout(o_shared)})
             T.use_swizzle(10)
 
-            for i in T.Pipelined(0, NT, num_stages=1):
+            T.clear(h)
+
+            for i in T.Pipelined(0, NT):
                 for row, col in T.Parallel(chunk_size, BK):
                     q[row, col] = Q[i_b, i * chunk_size + row, i_h, i_k * BK + col] * scale
                 T.copy(K[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_k * BK:(i_k + 1) * BK], k)
@@ -83,7 +85,7 @@ def tl_fused_chunk_fwd_kernel(
             # Output final state
             T.copy(h, final_state[i_b, i_h, i_k * BK:(i_k + 1) * BK, i_v * BV:(i_v + 1) * BV])
 
-    return chunk_linear_attn_fwd
+    return fused_chunk_linear_attn_fwd
 
 
 def tl_fused_chunk_fwd(q, k, v):
@@ -135,10 +137,8 @@ def main(B=1, S=512, H=16, D=128):
 
     t1 = do_bench(
         lambda: fused_chunk_linear_attn(q, k, v, output_final_state=True, normalize=False),
-        warmup=25,
-        rep=100,
         backend='cupti')
-    t2 = do_bench(lambda: tl_fused_chunk_fwd(q, k, v), warmup=25, rep=100, backend='cupti')
+    t2 = do_bench(lambda: tl_fused_chunk_fwd(q, k, v), backend='cupti')
     print(f'Triton latency: {t1:.3f} ms')
     print(f'TileLang latency: {t2:.3f} ms')
     print(f'Speedup: {t1/t2:.3f}x')

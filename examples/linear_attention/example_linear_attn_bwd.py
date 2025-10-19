@@ -1,5 +1,5 @@
 import torch
-import tilelang as tl
+import tilelang
 import tilelang.language as T
 from tilelang.profiler import do_bench
 import argparse
@@ -9,10 +9,11 @@ from einops import rearrange
 from typing import Optional, Tuple
 
 
-@tl.jit(pass_configs={
-    tl.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-    tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-})
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    })
 def tl_fused_chunk_bwd_kernel(
     B,
     S,
@@ -30,12 +31,12 @@ def tl_fused_chunk_bwd_kernel(
     chunk_size = 64
     BK = BV = 64  # Set to 128 can be faster, but has some numerical differences with FLA
     assert S % chunk_size == 0 and DK % BK == 0 and DV % BV == 0
-    NK = tl.cdiv(DK, BK)
-    NV = tl.cdiv(DV, BV)
-    NT = tl.cdiv(S, chunk_size)
+    NK = tilelang.cdiv(DK, BK)
+    NV = tilelang.cdiv(DV, BV)
+    NT = tilelang.cdiv(S, chunk_size)
 
     @T.prim_func
-    def chunk_linear_attn_bwd(
+    def fused_chunk_linear_attn_bwd(
             Q: T.Tensor([B, S, H, DK], dtype),  # type: ignore
             K: T.Tensor([B, S, H, DK], dtype),  # type: ignore
             V: T.Tensor([B, S, H, DV], dtype),  # type: ignore
@@ -64,18 +65,19 @@ def tl_fused_chunk_bwd_kernel(
             h_shared = T.alloc_shared([BV, BK], dtype)
             dh = T.alloc_fragment([BK, BV], accum_dtype)
             dh_shared = T.alloc_shared([BK, BV], dtype)
-            T.clear(h)
-            T.clear(dh)
 
             T.annotate_layout({
-                dq_shared: tl.layout.make_swizzled_layout(dq_shared),
-                dk_shared: tl.layout.make_swizzled_layout(dk_shared),
-                dv_shared: tl.layout.make_swizzled_layout(dv_shared)
+                dq_shared: tilelang.layout.make_swizzled_layout(dq_shared),
+                dk_shared: tilelang.layout.make_swizzled_layout(dk_shared),
+                dv_shared: tilelang.layout.make_swizzled_layout(dv_shared)
             })
             T.use_swizzle(10)
 
+            T.clear(h)
+            T.clear(dh)
+
             # Calculate dQ
-            for i in T.Pipelined(0, NT, num_stages=1):
+            for i in T.Pipelined(0, NT):
                 T.copy(K[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_k * BK:(i_k + 1) * BK], k)
                 T.copy(V[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_v * BV:(i_v + 1) * BV], v)
                 T.copy(dO[i_b, i * chunk_size:(i + 1) * chunk_size, i_h, i_v * BV:(i_v + 1) * BV],
@@ -97,7 +99,7 @@ def tl_fused_chunk_bwd_kernel(
                     dq_shared)
 
             # Calculate dK, dV (reversely)
-            for i in T.Pipelined(1, NT + 1, num_stages=1):
+            for i in T.Pipelined(1, NT + 1):
                 start = NT - i
                 for row, col in T.Parallel(chunk_size, BK):
                     q[row, col] = Q[i_b, start * chunk_size + row, i_h, i_k * BK + col] * scale
@@ -139,9 +141,8 @@ def tl_fused_chunk_bwd_kernel(
                 T.atomic_add(
                     dV[i_b, start * chunk_size:(start + 1) * chunk_size, i_h,
                        i_v * BV:(i_v + 1) * BV], dv_shared)
-                #TODO: consider using vectorized atomic add or tma reduce for sm90
 
-    return chunk_linear_attn_bwd
+    return fused_chunk_linear_attn_bwd
 
 
 def tl_fused_chunk_bwd(Q, K, V, dO):
@@ -188,6 +189,7 @@ def main(B=1, S=1024, H=16, D=128):
     k = l2norm_fwd(k)[0].requires_grad_(True)
 
     dq, dk, dv = tl_fused_chunk_bwd(q, k, v, do)
+    q.grad = k.grad = v.grad = None
     o_ref, _ = ref_program(q, k, v)
     o_ref.backward(do, retain_graph=True)
 
@@ -202,9 +204,8 @@ def main(B=1, S=1024, H=16, D=128):
     # Benchmark
     q.grad = k.grad = v.grad = None
     o_ref, _ = fused_chunk_linear_attn(q, k, v, output_final_state=True, normalize=False)
-    t1 = do_bench(
-        lambda: o_ref.backward(do, retain_graph=True), warmup=25, rep=100, backend='cupti')
-    t2 = do_bench(lambda: tl_fused_chunk_bwd(q, k, v, do), warmup=25, rep=100, backend='cupti')
+    t1 = do_bench(lambda: o_ref.backward(do, retain_graph=True), backend='cupti')
+    t2 = do_bench(lambda: tl_fused_chunk_bwd(q, k, v, do), backend='cupti')
     print(f'Triton latency: {t1:.3f} ms')
     print(f'TileLang latency: {t2:.3f} ms')
     print(f'Speedup: {t1/t2:.3f}x')
