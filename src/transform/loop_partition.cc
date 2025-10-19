@@ -64,7 +64,6 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   ICHECK(thread_var.defined());
   int old_loop_depth = loop_layout->InputDim();
   int new_loop_depth = loop_layout->OutputDim();
-
   // Create the new loop iter var
   Array<Var> vars;
   for (int i = 0; i < new_loop_depth; i++) {
@@ -75,45 +74,68 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   // create the substitute map, and the loop body
   Map<Var, PrimExpr> vmap;
   Stmt body = std::move(op);
+  Array<PrimExpr> loop_mins;
+  Array<PrimExpr> loop_extents;
   auto inv_loop = loop_layout->Inverse();
   auto indices = inv_loop->Forward(Array<PrimExpr>(vars.begin(), vars.end()));
-  arith::Analyzer guard_analyzer;
-  for (int i = 0; i < new_loop_depth; i++) {
-    guard_analyzer.Bind(vars[i],
-                        Range::FromMinExtent(make_zero(vars[i]->dtype),
-                                             inv_loop->InputShape()[i]));
+  // Normalize thread var once so we can reuse the same substitution later.
+  Map<Var, PrimExpr> thread_offset_map;
+  bool has_thread_offset = false;
+  if (loop_layout->ThreadRange().defined()) {
+    auto range = loop_layout->ThreadRange();
+    thread_offset_map.Set(thread_var, thread_var - range->min);
+    has_thread_offset = true;
   }
-  Range thread_range = loop_layout->ThreadRange().defined()
-                           ? loop_layout->ThreadRange()
-                           : Range::FromMinExtent(make_zero(thread_var->dtype),
-                                                  loop_layout->ThreadExtent());
-  guard_analyzer.Bind(thread_var, thread_range);
-  PrimExpr guard = const_true();
-  bool need_guard = false;
   for (int i = 0; i < old_loop_depth; i++) {
     const ForNode *loop = body.as<ForNode>();
     ICHECK(loop != nullptr);
     vmap.Set(loop->loop_var, indices[i]);
-    PrimExpr min = loop->min;
-    PrimExpr extent = loop->extent;
-    PrimExpr lower_cond = guard_analyzer.Simplify(GE(indices[i], min));
-    if (!guard_analyzer.CanProve(lower_cond)) {
-      guard = guard_analyzer.Simplify(logical_and(guard, lower_cond));
-      need_guard = true;
-    }
-    PrimExpr upper_cond = guard_analyzer.Simplify(LT(indices[i], min + extent));
-    if (!guard_analyzer.CanProve(upper_cond)) {
-      guard = guard_analyzer.Simplify(logical_and(guard, upper_cond));
-      need_guard = true;
-    }
+    loop_mins.push_back(loop->min);
+    loop_extents.push_back(loop->extent);
     body = loop->body;
   }
-
   // substitute and re-construct the serial loop
   body = Substitute(body, vmap);
-  if (need_guard) {
-    guard = guard_analyzer.Simplify(guard);
-    body = IfThenElse(guard, body);
+  // Guard executes the recovered loop body only if each inverse-mapped iterator
+  // falls back into the original For ranges. We first check every axis from the
+  // old loop nest (old_loop_depth) and then the extra index produced by inverse
+  // layouts that carry a replicate/thread component (`inv_output_shape`). Both
+  // must stay within bounds to ensure correctness. Example: layout([i, j]) =
+  // floor((i * 16 + j) / 32) may generate extra points when the new loop
+  // enumerates 0..31; the guard drops iterations whose inverse-mapped (i, j)
+  // or replicate index fall outside their original extents.
+  // Example: layout([i, j]) = floor((i * 16 + j) / 32) may produce extra points
+  // when the new loop enumerates 0..31; this guard skips iterations where the
+  // inverse i, j land outside the original extents. This protects
+  // non-surjective loop_layout mappings that otherwise over-cover the parallel
+  // space.
+  PrimExpr guard = const_true();
+  for (int i = 0; i < old_loop_depth; i++) {
+    PrimExpr index = indices[i];
+    if (has_thread_offset) {
+      index = Substitute(index, thread_offset_map);
+    }
+    PrimExpr lower_bound = analyzer->Simplify(index >= loop_mins[i]);
+    PrimExpr upper_bound =
+        analyzer->Simplify(index < loop_mins[i] + loop_extents[i]);
+    guard = And(guard, And(lower_bound, upper_bound));
+  }
+  auto inv_output_shape = inv_loop->OutputShape();
+  if (inv_output_shape.size() > static_cast<size_t>(old_loop_depth)) {
+    PrimExpr replicate_index = indices[old_loop_depth];
+    if (has_thread_offset) {
+      replicate_index = Substitute(replicate_index, thread_offset_map);
+    }
+    PrimExpr replicate_extent = inv_output_shape[old_loop_depth];
+    PrimExpr lower_bound = analyzer->Simplify(
+        replicate_index >= make_zero(replicate_index.dtype()));
+    PrimExpr upper_bound =
+        analyzer->Simplify(replicate_index < replicate_extent);
+    guard = And(guard, And(lower_bound, upper_bound));
+  }
+  PrimExpr simplified_guard = analyzer->Simplify(guard);
+  if (!analyzer->CanProve(simplified_guard)) {
+    body = IfThenElse(simplified_guard, body, Stmt());
   }
   for (int i = new_loop_depth - 1; i >= 0; i--) {
     body = For(vars[i], make_zero(vars[i]->dtype), inv_loop->InputShape()[i],
@@ -123,13 +145,11 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
 
   body = BufferIndiceSimplify(analyzer)(body);
 
-  auto for_node = LoopPragmaUnroll(Downcast<For>(body));
-  if (loop_layout->ThreadRange().defined()) {
-    auto range = loop_layout->ThreadRange();
-    auto thread_var_with_offset = thread_var - range->min;
-    for_node.CopyOnWrite()->body =
-        Substitute(for_node->body, {{thread_var, thread_var_with_offset}});
+  if (has_thread_offset) {
+    body = Substitute(body, thread_offset_map);
   }
+
+  auto for_node = LoopPragmaUnroll(Downcast<For>(body));
   return for_node;
 }
 
@@ -140,7 +160,8 @@ public:
 private:
   Stmt VisitStmt_(const ForNode *node) final {
     if (node->kind == ForKind::kSerial) {
-      if (as_const_int(node->extent) == nullptr) {
+      auto analyzer = std::make_shared<arith::Analyzer>();
+      if (as_const_int(analyzer->Simplify(node->extent)) == nullptr) {
         return StmtExprMutator::VisitStmt_(node);
       }
       For new_for = GetRef<For>(node);
