@@ -7,6 +7,8 @@
 #define TVM_TL_LAYOUT_LAYOUT_H_
 
 #include <tvm/arith/analyzer.h>
+#include <tvm/arith/iter_affine_map.h>
+#include <utility>
 
 namespace tvm {
 namespace tl {
@@ -36,6 +38,7 @@ public:
   virtual Array<PrimExpr> Forward(const Array<PrimExpr> &vars) const;
 
   virtual Layout Inverse() const;
+  virtual std::pair<Layout, arith::IterMapLevel> InverseWithLevel() const;
 
   virtual std::string DebugOutput() const;
 
@@ -76,6 +79,7 @@ public:
   Array<PrimExpr> GetForwardVars() const final;
 
   Layout Inverse() const final;
+  std::pair<Layout, arith::IterMapLevel> InverseWithLevel() const final;
 
   PrimExpr ThreadExtent() const;
 

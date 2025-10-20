@@ -128,6 +128,7 @@ def atomic_add(dst: Buffer,
         value (PrimExpr): Value to add atomically.
         memory_order (Optional[str]): Optional memory-order name controlling the atomic operation's ordering.
         return_prev (bool): If True, return the previous value; if False, return handle (default False).
+        use_tma (bool): If True, use TMA (cp.reduce) to perform the atomic add. This is available only for sm90+ (default False).
 
     Returns:
         PrimExpr: A handle representing the atomic addition operation, or the previous value if return_prev is True.
