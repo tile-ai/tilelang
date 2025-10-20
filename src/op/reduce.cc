@@ -242,12 +242,12 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     }
 
     if (need_duplicate) {
-    // Create a new buffer with same shape and dtype as dst_buffer
+      // Create a new buffer with same shape and dtype as dst_buffer
       clear_buffer = decl_buffer(dst_buffer->shape, dst_buffer->dtype,
                                  dst_buffer->name + "_clear",
                                  GetPtrStorageScope(dst_buffer->data));
     }
-  // make reduce-init stmt
+    // make reduce-init stmt
     if (require_init) {
       stmts.push_back(
           BufferStore(clear_buffer, this->MakeInitValue(), dst_indices));
