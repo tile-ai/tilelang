@@ -74,12 +74,6 @@ Layout::Layout(Array<PrimExpr> input_size, Array<PrimExpr> forward_index) {
   data_ = std::move(n);
 }
 
-std::pair<Layout, arith::IterMapLevel> Layout::InverseWithLevel() const {
-  const auto *ptr = get();
-  ICHECK(ptr != nullptr);
-  return ptr->InverseWithLevel();
-}
-
 void LayoutNode::RegisterReflection() {
   namespace refl = tvm::ffi::reflection;
   refl::ObjectDef<LayoutNode>()
@@ -235,8 +229,7 @@ Fragment FragmentNode::BindThreadRange(Range thread_range) const {
   return Fragment(n);
 }
 
-std::pair<Layout, arith::IterMapLevel>
-LayoutNode::InverseWithLevel() const {
+std::pair<Layout, arith::IterMapLevel> LayoutNode::InverseWithLevel() const {
   arith::Analyzer analyzer;
   auto collect_symbolic = [&](const Array<PrimExpr> &shape) {
     Array<PrimExpr> symbolic_dims;
@@ -288,10 +281,9 @@ LayoutNode::InverseWithLevel() const {
 }
 
 Layout LayoutNode::Inverse() const {
-  auto result = InverseWithLevel();
-  return std::move(result.first);
+  auto inverse_result = InverseWithLevel();
+  return std::move(inverse_result.first);
 }
-
 PrimExpr infer_fragment_index(const Map<Var, Range> &input_iters,
                               const PrimExpr &forward_thread,
                               arith::Analyzer *analyzer) {
@@ -401,6 +393,11 @@ PrimExpr FragmentNode::ForwardThread(const Array<PrimExpr> &vars,
 }
 
 Layout FragmentNode::Inverse() const {
+  auto result = InverseWithLevel();
+  return std::move(result.first);
+}
+
+std::pair<Layout, arith::IterMapLevel> FragmentNode::InverseWithLevel() const {
   auto input_size_copy = input_size_;
   input_size_copy.push_back(ReplicateExtent());
   auto forward_index_copy = forward_index_;
@@ -408,8 +405,7 @@ Layout FragmentNode::Inverse() const {
       Substitute(forward_thread_,
                  {{ReplicationPlaceholder(), InputPlaceholder(InputDim())}}));
   auto fwd = Layout(input_size_copy, forward_index_copy);
-  auto bwd = fwd->Inverse();
-  return bwd;
+  return fwd->InverseWithLevel();
 }
 
 Fragment FragmentNode::CondenseReplicateVar() const {

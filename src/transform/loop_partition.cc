@@ -68,7 +68,8 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   Array<Var> vars;
   for (int i = 0; i < new_loop_depth; i++) {
     Var var = Var(std::string{char('i' + i)});
-    analyzer->Bind(var, Range::FromMinExtent(make_zero(var->dtype), loop_layout->OutputShape()[i]));
+    analyzer->Bind(var, Range::FromMinExtent(make_zero(var->dtype),
+                                             loop_layout->OutputShape()[i]));
     vars.push_back(var);
   }
   vars.push_back(thread_var);
@@ -87,8 +88,8 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   bool has_thread_offset = false;
   if (loop_layout->ThreadRange().defined()) {
     auto range = loop_layout->ThreadRange();
-    analyzer->Bind(thread_var,
-                   Range::FromMinExtent(range->min, range->extent), true);
+    analyzer->Bind(thread_var, Range::FromMinExtent(range->min, range->extent),
+                   true);
     thread_offset_map.Set(thread_var, thread_var - range->min);
     has_thread_offset = true;
   }

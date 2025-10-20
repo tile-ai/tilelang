@@ -81,6 +81,7 @@ public:
   Array<PrimExpr> GetForwardVars() const final;
 
   Layout Inverse() const final;
+  std::pair<Layout, arith::IterMapLevel> InverseWithLevel() const final;
 
   PrimExpr ThreadExtent() const;
 
