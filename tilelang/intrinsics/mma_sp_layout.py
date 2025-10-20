@@ -1,27 +1,38 @@
 from typing import Tuple
 
-from .mma_layout import (
+from tilelang.intrinsics.mma_layout import (
+    mma_load_a_32x16_to_shared_16x32_layout,
     mma_load_a_32x8_to_shared_16x16_layout,
     mma_load_b_32x4_to_shared_8x16_layout_16bit,
 )
 
+def mma_sp_load_a_32x16_to_shared_16x64_layout(thread_id, local_id):
+    return mma_load_a_32x16_to_shared_16x32_layout(thread_id, local_id)
+
 def mma_sp_load_a_32x8_to_shared_16x32_layout(thread_id, local_id):
     return mma_load_a_32x8_to_shared_16x16_layout(thread_id, local_id)
 
-def mma_sp_load_b_32x8_to_shared_8x64_layout(thread_id, local_id):
-    return mma_load_b_32x8_to_shared_8x32_layout(thread_id, local_id)
-
-def mma_sp_load_b_32x16_to_shared_16x64_layout(thread_id, local_id):
-    row, col =  mma_load_b_32x16_to_shared_16x32_layout(thread_id, local_id % 8)
-    return row, col + 8 * (local_id // 8)
+def mma_sp_load_b_32x32_to_shared_16x64_layout(thread_id, local_id):
+    col = (thread_id % 4) * 4 + (local_id % 4) + 16 * ((local_id % 16) // 4)
+    row = (thread_id // 4) + 8 * (local_id // 16)
+    return row, col
 
 def mma_sp_load_b_32x16_to_shared_16x32_layout(thread_id, local_id):
-    col = (thread_id % 4) * 2 + (local_id % 8 % 2) + ((local_id % 8) // 2) * 8
+    col = (thread_id % 4) * 2 + (local_id % 2) + ((local_id % 8) // 2) * 8
     row = (thread_id // 4) + 8 * (local_id // 8)
     return row, col
+
+def get_logical_id_8bit(thread_id: int) -> int:
+    return thread_id
+
+def metadata_32bit_load_32x1_to_shared_16x2_layout_8bit(thread_id: int, local_id: int) -> Tuple[int, int]:
+    logical_id = get_logical_id_8bit(thread_id)
+    return logical_id // 4 + (logical_id % 2) * 8, (logical_id % 4) // 2
+
+def get_logical_id_16bit(thread_id: int) -> int:
     return (thread_id // 4) * 2 + (thread_id % 4) % 2
 
-def metadata_load_32x4_to_shared_16x4_layout_8bit(thread_id: int, local_id: int) -> Tuple[int, int]:
+def metadata_8bit_load_32x4_to_shared_16x4_layout_16bit(thread_id: int, local_id: int) -> Tuple[int, int]:
     """
     For 16 bit mma dtype, 8 bit mma dtype
     32x4 // 2 == 16x4, For consecutive 4 threads, only 2 (lower or higher depends on selector) are needed to load metadata.
@@ -31,7 +42,7 @@ def metadata_load_32x4_to_shared_16x4_layout_8bit(thread_id: int, local_id: int)
     Returns:
         row (int): The row index in the shared memory
     """
-    logical_id = get_logical_id(thread_id)
+    logical_id = get_logical_id_16bit(thread_id)
     thread_row = logical_id // 2
     thread_col = logical_id % 2
     local_row = local_id // 2
@@ -40,8 +51,7 @@ def metadata_load_32x4_to_shared_16x4_layout_8bit(thread_id: int, local_id: int)
     col = thread_col * 2 + local_col
     return row, col
 
-
-def metadata_load_32x2_to_shared_16x2_layout_16bit(thread_id: int, local_id: int) -> Tuple[int, int]:
+def metadata_16bit_load_32x2_to_shared_16x2_layout_16bit(thread_id: int, local_id: int) -> Tuple[int, int]:
     """
     For 16 bit mma dtype, 16 bit mma dtype
     32x2 // 2 == 16x2, For consecutive 4 threads, only 2 (lower or higher depends on selector) are needed to load metadata.
@@ -51,7 +61,7 @@ def metadata_load_32x2_to_shared_16x2_layout_16bit(thread_id: int, local_id: int
     Returns:
         row (int): The row index in the shared memory
     """
-    logical_id = get_logical_id(thread_id)
+    logical_id = get_logical_id_16bit(thread_id)
     thread_row = logical_id // 2
     thread_col = logical_id % 2
     row = thread_row + local_id * 8
