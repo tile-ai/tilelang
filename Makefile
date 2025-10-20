@@ -136,6 +136,8 @@ clang-tidy: clang-tidy-install cmake-configure
 
 .PHONY: docs
 docs: docs-install
+	$(call check_pip_install,sphinx)
+	$(call check_pip_install,sphinx-autobuild)
 	$(PYTHON) -m sphinx_autobuild --watch $(PROJECT_PATH) --open-browser docs docs/_build
 
 .PHONY: clean-docs
