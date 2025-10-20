@@ -74,6 +74,12 @@ Layout::Layout(Array<PrimExpr> input_size, Array<PrimExpr> forward_index) {
   data_ = std::move(n);
 }
 
+std::pair<Layout, arith::IterMapLevel> Layout::InverseWithLevel() const {
+  const auto *ptr = get();
+  ICHECK(ptr != nullptr);
+  return ptr->InverseWithLevel();
+}
+
 void LayoutNode::RegisterReflection() {
   namespace refl = tvm::ffi::reflection;
   refl::ObjectDef<LayoutNode>()
@@ -229,7 +235,8 @@ Fragment FragmentNode::BindThreadRange(Range thread_range) const {
   return Fragment(n);
 }
 
-Layout LayoutNode::Inverse() const {
+std::pair<Layout, arith::IterMapLevel>
+LayoutNode::InverseWithLevel() const {
   arith::Analyzer analyzer;
   auto collect_symbolic = [&](const Array<PrimExpr> &shape) {
     Array<PrimExpr> symbolic_dims;
@@ -277,7 +284,12 @@ Layout LayoutNode::Inverse() const {
     }
   }
 
-  return Layout(outputs_shape, backward_index);
+  return {Layout(outputs_shape, backward_index), level};
+}
+
+Layout LayoutNode::Inverse() const {
+  auto result = InverseWithLevel();
+  return std::move(result.first);
 }
 
 PrimExpr infer_fragment_index(const Map<Var, Range> &input_iters,

@@ -77,13 +77,18 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   Stmt body = std::move(op);
   Array<PrimExpr> loop_mins;
   Array<PrimExpr> loop_extents;
-  auto inv_loop = loop_layout->Inverse();
+  auto inverse_info = loop_layout->InverseWithLevel();
+  auto inv_loop = inverse_info.first;
+  // Must check the guard if the layout can not be proved as bijective
+  bool need_guard = inverse_info.second != arith::IterMapLevel::Bijective;
   auto indices = inv_loop->Forward(Array<PrimExpr>(vars.begin(), vars.end()));
   // Normalize thread var once so we can reuse the same substitution later.
   Map<Var, PrimExpr> thread_offset_map;
   bool has_thread_offset = false;
   if (loop_layout->ThreadRange().defined()) {
     auto range = loop_layout->ThreadRange();
+    analyzer->Bind(thread_var,
+                   Range::FromMinExtent(range->min, range->extent), true);
     thread_offset_map.Set(thread_var, thread_var - range->min);
     has_thread_offset = true;
   }
@@ -111,37 +116,42 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   // non-surjective loop_layout mappings that otherwise over-cover the parallel
   // space.
   PrimExpr guard = const_true();
-  for (int i = 0; i < old_loop_depth; i++) {
-    PrimExpr index = indices[i];
-    if (has_thread_offset) {
-      index = Substitute(index, thread_offset_map);
+  if (need_guard) {
+    for (int i = 0; i < old_loop_depth; i++) {
+      PrimExpr index = indices[i];
+      if (has_thread_offset) {
+        index = Substitute(index, thread_offset_map);
+      }
+      PrimExpr lower_bound = analyzer->Simplify(index >= loop_mins[i]);
+      PrimExpr upper_bound =
+          analyzer->Simplify(index < loop_mins[i] + loop_extents[i]);
+      guard = And(guard, And(lower_bound, upper_bound));
     }
-    PrimExpr lower_bound = analyzer->Simplify(index >= loop_mins[i]);
-    PrimExpr upper_bound =
-        analyzer->Simplify(index < loop_mins[i] + loop_extents[i]);
-    guard = And(guard, And(lower_bound, upper_bound));
-  }
-  auto inv_output_shape = inv_loop->OutputShape();
-  if (inv_output_shape.size() > static_cast<size_t>(old_loop_depth)) {
-    PrimExpr replicate_index = indices[old_loop_depth];
-    if (has_thread_offset) {
-      replicate_index = Substitute(replicate_index, thread_offset_map);
+    auto inv_output_shape = inv_loop->OutputShape();
+    if (inv_output_shape.size() > static_cast<size_t>(old_loop_depth)) {
+      PrimExpr replicate_index = indices[old_loop_depth];
+      if (has_thread_offset) {
+        replicate_index = Substitute(replicate_index, thread_offset_map);
+      }
+      PrimExpr replicate_extent = inv_output_shape[old_loop_depth];
+      PrimExpr lower_bound = analyzer->Simplify(
+          replicate_index >= make_zero(replicate_index.dtype()));
+      PrimExpr upper_bound =
+          analyzer->Simplify(replicate_index < replicate_extent);
+      guard = And(guard, And(lower_bound, upper_bound));
     }
-    PrimExpr replicate_extent = inv_output_shape[old_loop_depth];
-    PrimExpr lower_bound = analyzer->Simplify(
-        replicate_index >= make_zero(replicate_index.dtype()));
-    PrimExpr upper_bound =
-        analyzer->Simplify(replicate_index < replicate_extent);
-    guard = And(guard, And(lower_bound, upper_bound));
-  }
-  PrimExpr simplified_guard = analyzer->Simplify(guard);
-  if (!analyzer->CanProve(simplified_guard)) {
-    body = IfThenElse(simplified_guard, body, Stmt());
+    PrimExpr simplified_guard = analyzer->Simplify(guard);
+    if (!analyzer->CanProve(simplified_guard)) {
+      body = IfThenElse(simplified_guard, body, Stmt());
+    }
   }
   for (int i = new_loop_depth - 1; i >= 0; i--) {
     body = For(vars[i], make_zero(vars[i]->dtype), inv_loop->InputShape()[i],
                ForKind::kSerial, body);
-    analyzer->Bind(vars[i], Range(0, inv_loop->InputShape()[i]));
+    analyzer->Bind(vars[i],
+                   Range::FromMinExtent(make_zero(vars[i]->dtype),
+                                        inv_loop->InputShape()[i]),
+                   true);
   }
 
   body = BufferIndiceSimplify(analyzer)(body);
