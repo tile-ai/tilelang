@@ -540,7 +540,7 @@ def flashattn_bwd_split(batch,
     return flash_bwd
 
 
-# @torch.compile
+@torch.compile
 class _attention(torch.autograd.Function):
 
     @staticmethod
