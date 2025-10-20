@@ -368,15 +368,21 @@ def flashattn_bwd_atomic_add(batch,
                 T.clear(dq)
                 T.gemm(dsT_shared, K_shared, dq, transpose_A=True)
                 for i, d in T.Parallel(block_N, dim_qk):
-                    # if k_base * block_N + i < q_current_seqlen:
-                    T.atomic_add(dQ[q_start_idx + k_base * block_N + i, bx, d], dq[i, d], memory_order="acq_rel")
+                    T.atomic_add(
+                        dQ[q_start_idx + k_base * block_N + i, bx, d],
+                        dq[i, d],
+                        memory_order="acq_rel")
 
             for i, d in T.Parallel(block_M, dim_v):
-                # if by * block_M + i < k_current_seqlen:
-                T.atomic_add(dV[k_start_idx + by * block_M + i, bx // groups, d], dv[i, d], memory_order="acq_rel")
+                T.atomic_add(
+                    dV[k_start_idx + by * block_M + i, bx // groups, d],
+                    dv[i, d],
+                    memory_order="acq_rel")
             for i, d in T.Parallel(block_M, dim_qk):
-                # if by * block_M + i < k_current_seqlen:
-                T.atomic_add(dK[k_start_idx + by * block_M + i, bx // groups, d], dk[i, d], memory_order="acq_rel")
+                T.atomic_add(
+                    dK[k_start_idx + by * block_M + i, bx // groups, d],
+                    dk[i, d],
+                    memory_order="acq_rel")
 
     return flash_bwd
 
