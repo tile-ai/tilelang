@@ -37,9 +37,9 @@ def sparse_mla_fwd(
     else:
         sm_scale = sm_scale * 1.44269504  # log2(e)
 
-    batch = T.symbolic("batch")
-    seq_len = T.symbolic("seq_len")
-    seq_len_kv = T.symbolic("seq_len_kv")
+    batch = T.dynamic("batch")
+    seq_len = T.dynamic("seq_len")
+    seq_len_kv = T.dynamic("seq_len_kv")
 
     head_kv = heads // kv_group
     q_shape = [batch, seq_len, heads, dim + tail_dim]

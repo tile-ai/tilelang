@@ -231,6 +231,16 @@ class AutoTuner:
     def generate_cache_key(self, parameters: Dict[str, Any]) -> Optional[AutotuneResult]:
         """Generate a cache key for the auto-tuning process.
         """
+
+        def _normalize_param(value):
+            if isinstance(value, Var):
+                return str(value)
+            if isinstance(value, (list, tuple)):
+                return [_normalize_param(v) for v in value]
+            if isinstance(value, dict):
+                return {str(k): _normalize_param(v) for k, v in value.items()}
+            return value
+
         # extract parameters from the function signature
         op_parameters = []
         for _, default_value in parameters.items():
@@ -238,7 +248,7 @@ class AutoTuner:
                 op_parameters.append(default_value.default)
 
         if self._kernel_parameters is not None:
-            op_parameters += self._kernel_parameters
+            op_parameters += _normalize_param(self._kernel_parameters)
 
         func_source = inspect.getsource(self.fn)
         key_data = {

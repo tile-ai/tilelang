@@ -223,12 +223,12 @@ class SparseFlashAttn(torch.nn.Module):
             block_N=block_N,
             block_H=self.block_H,
             page_block_size=page_block_size,
-            num_split=T.symbolic("num_split"),
+            num_split=T.dynamic("num_split"),
             num_stages=2,
             threads=128,
             num_pages=num_pages,
-            max_num_blocks_per_seq=T.symbolic("max_num_blocks_per_seq"),
-            max_selected_blocks=T.symbolic("max_selected_blocks"),
+            max_num_blocks_per_seq=T.dynamic("max_num_blocks_per_seq"),
+            max_selected_blocks=T.dynamic("max_selected_blocks"),
         )
 
         props = torch.cuda.get_device_properties(torch.device("cuda:0"))

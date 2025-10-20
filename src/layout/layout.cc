@@ -229,11 +229,34 @@ Fragment FragmentNode::BindThreadRange(Range thread_range) const {
   return Fragment(n);
 }
 
-Layout LayoutNode::Inverse() const {
+std::pair<Layout, arith::IterMapLevel> LayoutNode::InverseWithLevel() const {
   arith::Analyzer analyzer;
+  auto collect_symbolic = [&](const Array<PrimExpr> &shape) {
+    Array<PrimExpr> symbolic_dims;
+    for (const auto &dim : shape) {
+      if (!as_const_int(dim)) {
+        symbolic_dims.push_back(dim);
+      }
+    }
+    return symbolic_dims;
+  };
+  Array<PrimExpr> symbolic_dims = collect_symbolic(input_size_);
+  Array<PrimExpr> output_shape = OutputShape();
+  symbolic_dims.insert(symbolic_dims.end(), output_shape.begin(),
+                       output_shape.end());
+  symbolic_dims = collect_symbolic(symbolic_dims);
+  bool is_static_shape = symbolic_dims.empty();
+  auto level = is_static_shape ? arith::IterMapLevel::Bijective
+                               : arith::IterMapLevel::NoCheck;
+  if (!is_static_shape) {
+    // Runtime guards keep dynamic tails safe, so we allow NoCheck here and
+    // warn.
+    LOG(WARNING) << "Layout::Inverse on symbolic layout, falling back to "
+                    "NoCheck; symbolic dims: "
+                 << symbolic_dims;
+  }
   arith::IterMapResult res =
-      arith::DetectIterMap(forward_index_, getVarMap(), 1,
-                           arith::IterMapLevel::Bijective, &analyzer);
+      arith::DetectIterMap(forward_index_, getVarMap(), 1, level, &analyzer);
   ICHECK(res->errors.empty())
       << "Layout " << DebugOutput() << " has errors: " << res->errors;
 
@@ -254,9 +277,13 @@ Layout LayoutNode::Inverse() const {
     }
   }
 
-  return Layout(outputs_shape, backward_index);
+  return {Layout(outputs_shape, backward_index), level};
 }
 
+Layout LayoutNode::Inverse() const {
+  auto inverse_result = InverseWithLevel();
+  return std::move(inverse_result.first);
+}
 PrimExpr infer_fragment_index(const Map<Var, Range> &input_iters,
                               const PrimExpr &forward_thread,
                               arith::Analyzer *analyzer) {
@@ -366,6 +393,11 @@ PrimExpr FragmentNode::ForwardThread(const Array<PrimExpr> &vars,
 }
 
 Layout FragmentNode::Inverse() const {
+  auto result = InverseWithLevel();
+  return std::move(result.first);
+}
+
+std::pair<Layout, arith::IterMapLevel> FragmentNode::InverseWithLevel() const {
   auto input_size_copy = input_size_;
   input_size_copy.push_back(ReplicateExtent());
   auto forward_index_copy = forward_index_;
@@ -373,8 +405,7 @@ Layout FragmentNode::Inverse() const {
       Substitute(forward_thread_,
                  {{ReplicationPlaceholder(), InputPlaceholder(InputDim())}}));
   auto fwd = Layout(input_size_copy, forward_index_copy);
-  auto bwd = fwd->Inverse();
-  return bwd;
+  return fwd->InverseWithLevel();
 }
 
 Fragment FragmentNode::CondenseReplicateVar() const {

@@ -70,6 +70,19 @@ PrimExpr ReduceOpNode::MakeInitValue() const {
     }
   } else if (type->isAbsMax()) {
     return make_const(dst->dtype, 0);
+  } else if (type->isBitAnd()) {
+    if (is_int) {
+      return make_const(dst->dtype, -1);
+    } else if (is_uint) {
+      return make_const(dst->dtype, (1 << bits) - 1);
+    } else {
+      // Should not arrive here
+      return make_const(dst->dtype, -INFINITY);
+    }
+  } else if (type->isBitOr()) {
+    return make_zero(dst->dtype);
+  } else if (type->isBitXor()) {
+    return make_zero(dst->dtype);
   } else {
     LOG(FATAL) << "Unsupported reduce type: " << type->type;
   }
@@ -91,6 +104,12 @@ PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &lhs,
     return Min(lhs, rhs);
   } else if (type->isAbsMax()) {
     return Max(Max(lhs, rhs), -Min(lhs, rhs));
+  } else if (type->isBitAnd()) {
+    return lhs & rhs;
+  } else if (type->isBitOr()) {
+    return lhs | rhs;
+  } else if (type->isBitXor()) {
+    return lhs ^ rhs;
   } else {
     LOG(FATAL) << "Unsupported reduce type: " << type->type;
   }
@@ -107,6 +126,12 @@ std::string ReduceOpNode::MakeCodegenReducer() const {
     return "tl::MinOp";
   } else if (type->isAbsMax()) {
     return "tl::MaxOp";
+  } else if (type->isBitAnd()) {
+    return "tl::BitAndOp";
+  } else if (type->isBitOr()) {
+    return "tl::BitOrOp";
+  } else if (type->isBitXor()) {
+    return "tl::BitXorOp";
   } else {
     LOG(FATAL) << "Unsupported reduce type: " << type->type;
     return "";
@@ -195,6 +220,12 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     require_init = true;
   } else if (this->type->isAbsSum()) {
     require_init = true;
+  } else if (this->type->isBitAnd()) {
+    require_init = true;
+  } else if (this->type->isBitOr()) {
+    require_init = true;
+  } else if (this->type->isBitXor()) {
+    require_init = true;
   }
 
   Buffer clear_buffer = dst_buffer;
@@ -202,6 +233,12 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   if (this->type->isSum() && !this->clear) {
     need_duplicate = true;
   } else if (this->type->isAbsSum() && !this->clear) {
+    need_duplicate = true;
+  } else if (this->type->isBitAnd()) {
+    need_duplicate = true;
+  } else if (this->type->isBitOr() && !this->clear) {
+    need_duplicate = true;
+  } else if (this->type->isBitXor() && !this->clear) {
     need_duplicate = true;
   }
 
@@ -213,9 +250,10 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   }
 
   // make reduce-init stmt
-  if (require_init)
+  if (require_init) {
     stmts.push_back(
         BufferStore(clear_buffer, this->MakeInitValue(), dst_indices));
+  }
 
   // make thread-local reduce
   Array<PrimExpr> src_indice_compressed;
@@ -298,6 +336,29 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                                   Add(BufferLoad(dst_buffer, dst_indices),
                                       BufferLoad(clear_buffer, dst_indices)),
                                   dst_indices));
+    } else if (this->type->isBitAnd()) {
+      if (!this->clear) {
+        stmts.push_back(
+            BufferStore(dst_buffer,
+                        bitwise_and(BufferLoad(dst_buffer, dst_indices),
+                                    BufferLoad(clear_buffer, dst_indices)),
+                        dst_indices));
+      } else {
+        stmts.push_back(BufferStore(
+            dst_buffer, BufferLoad(clear_buffer, dst_indices), dst_indices));
+      }
+    } else if (this->type->isBitOr()) {
+      stmts.push_back(
+          BufferStore(dst_buffer,
+                      bitwise_or(BufferLoad(dst_buffer, dst_indices),
+                                 BufferLoad(clear_buffer, dst_indices)),
+                      dst_indices));
+    } else if (this->type->isBitXor()) {
+      stmts.push_back(
+          BufferStore(dst_buffer,
+                      bitwise_xor(BufferLoad(dst_buffer, dst_indices),
+                                  BufferLoad(clear_buffer, dst_indices)),
+                      dst_indices));
     } else {
       ICHECK(false) << "Unsupported reduce type: " << this->type->type;
     }
