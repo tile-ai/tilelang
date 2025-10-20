@@ -171,7 +171,6 @@ def test_wgmma_marked_async():
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tir.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.InjectFenceProxy()(mod)
-    print(mod)
     order = []
 
     def visit(node):
