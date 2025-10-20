@@ -88,8 +88,6 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   bool has_thread_offset = false;
   if (loop_layout->ThreadRange().defined()) {
     auto range = loop_layout->ThreadRange();
-    analyzer->Bind(thread_var, Range::FromMinExtent(range->min, range->extent),
-                   true);
     thread_offset_map.Set(thread_var, thread_var - range->min);
     has_thread_offset = true;
   }
