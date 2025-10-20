@@ -395,14 +395,14 @@ def run_ctypes_dynamic_shape(M,
 
 def test_ctypes_dynamic_shape():
     run_ctypes_dynamic_shape(
-        T.symbolic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
+        T.dynamic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
 
     run_ctypes_dynamic_shape(
-        T.symbolic("m"), T.symbolic("n"), 768, False, False, "float16", "float16", "float16", 128,
+        T.dynamic("m"), T.dynamic("n"), 768, False, False, "float16", "float16", "float16", 128,
         256, 32, 2)
 
     run_ctypes_dynamic_shape(
-        T.symbolic("m"), T.symbolic("n"), T.symbolic("k"), False, False, "float16", "float16",
+        T.dynamic("m"), T.dynamic("n"), T.dynamic("k"), False, False, "float16", "float16",
         "float16", 128, 256, 32, 2)
 
 

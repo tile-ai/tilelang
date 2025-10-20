@@ -83,7 +83,7 @@ def run_tilelang_copy_with_stride(M=1024,
 
 def test_tilelang_copy_with_stride():
     run_tilelang_copy_with_stride(M=1024, N=1024, NN=2048, block_M=128, block_N=128)
-    run_tilelang_copy_with_stride(M=1024, N=1024, NN=T.symbolic("NN"), block_M=128, block_N=128)
+    run_tilelang_copy_with_stride(M=1024, N=1024, NN=T.dynamic("NN"), block_M=128, block_N=128)
 
 
 def tilelang_copy_bufferload(num_tokens, dtype="float16"):

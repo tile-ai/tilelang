@@ -24,7 +24,7 @@ def test_empty_kernel_lowering():
 
 @tilelang.jit
 def _empty_with_dead_code_kernel():
-    num_tokens = T.symbolic("num_tokens")
+    num_tokens = T.dynamic("num_tokens")
 
     @T.prim_func
     def buggy_kernel(x: T.Tensor[(num_tokens,), "float32"]):
