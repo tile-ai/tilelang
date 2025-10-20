@@ -117,6 +117,7 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   // non-surjective loop_layout mappings that otherwise over-cover the parallel
   // space.
   PrimExpr guard = const_true();
+
   if (need_guard) {
     for (int i = 0; i < old_loop_depth; i++) {
       PrimExpr index = indices[i];
@@ -146,13 +147,11 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
       body = IfThenElse(simplified_guard, body, Stmt());
     }
   }
+
   for (int i = new_loop_depth - 1; i >= 0; i--) {
     body = For(vars[i], make_zero(vars[i]->dtype), inv_loop->InputShape()[i],
                ForKind::kSerial, body);
-    analyzer->Bind(vars[i],
-                   Range::FromMinExtent(make_zero(vars[i]->dtype),
-                                        inv_loop->InputShape()[i]),
-                   true);
+    analyzer->Bind(vars[i], Range(0, inv_loop->InputShape()[i]));
   }
 
   body = BufferIndiceSimplify(analyzer)(body);

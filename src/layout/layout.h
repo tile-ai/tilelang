@@ -65,8 +65,6 @@ public:
   TVM_DLL Layout(Array<IterVar> forward_var, Array<PrimExpr> forward_index);
   TVM_DLL Layout(Array<PrimExpr> input_size, Array<PrimExpr> forward_index);
 
-  std::pair<Layout, arith::IterMapLevel> InverseWithLevel() const;
-
   TVM_DEFINE_OBJECT_REF_METHODS(Layout, ObjectRef, LayoutNode);
 };
 
