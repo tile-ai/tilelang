@@ -159,7 +159,7 @@ public:
           }
         }
         // If already in map, ensure they are structurally equal
-        ICHECK(StructuralEqual()(layout, layout_map[buffer]))
+        ICHECK(layout->IsEqual(layout_map[buffer].get()))
             << "Get different layout for " << buffer
             << "\n current layout: " << layout->DebugOutput()
             << "\n previous layout: " << layout_map[buffer]->DebugOutput();

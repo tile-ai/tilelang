@@ -22,6 +22,24 @@ struct MinOp {
   }
 };
 
+struct BitAndOp {
+  template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
+    return x & y;
+  }
+};
+
+struct BitOrOp {
+  template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
+    return x | y;
+  }
+};
+
+struct BitXorOp {
+  template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
+    return x ^ y;
+  }
+};
+
 template <class Reducer, int threads, int scale, int thread_offset = 0,
           int all_threads = threads>
 struct AllReduce {

@@ -116,10 +116,22 @@ def matmul(M,
     return main
 
 
-def run_autotune(M: int, N: int, K: int):
+def run_autotune(M, N, K, M_value=None, N_value=None, K_value=None):
     import torch
-    a = torch.randn(M, K, dtype=torch.float16).cuda()
-    b = torch.randn(N, K, dtype=torch.float16).cuda()
+
+    def _resolve(dim, provided, name):
+        if isinstance(dim, T.Var):
+            if provided is None:
+                raise ValueError(f"Dynamic dimension {name} requires a concrete value.")
+            return provided
+        return dim
+
+    actual_M = _resolve(M, M_value, "M")
+    actual_N = _resolve(N, N_value, "N")
+    actual_K = _resolve(K, K_value, "K")
+
+    a = torch.randn(actual_M, actual_K, dtype=torch.float16).cuda()
+    b = torch.randn(actual_N, actual_K, dtype=torch.float16).cuda()
 
     with set_autotune_inputs([a, b]):
         kernel = matmul(M, N, K)
@@ -138,6 +150,10 @@ def test_autotune_matmul():
     executes it, and asserts the result matches a reference CPU implementation within tolerances.
     """
     run_autotune(1024, 1024, 1024)
+
+
+def test_autotune_matmul_symbolic_m():
+    run_autotune(T.symbolic("m"), 1024, 1024, M_value=1024)
 
 
 if __name__ == "__main__":
