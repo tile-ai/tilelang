@@ -21,6 +21,9 @@ enum class ReduceTypeEnum : uint8_t {
   kMax,    ///< Maximum value reduction
   kMin,    ///< Minimum value reduction
   kAbsMax, ///< Maximum absolute value reduction
+  kBitAnd, ///< Bitwise and reduction
+  kBitOr,  ///< Bitwise or reduction
+  kBitXor, ///< Bitwise xor reduction
 };
 
 /// Node class representing a reduction type
@@ -50,6 +53,9 @@ public:
   bool isMax() const { return type == int(ReduceTypeEnum::kMax); }
   bool isMin() const { return type == int(ReduceTypeEnum::kMin); }
   bool isAbsMax() const { return type == int(ReduceTypeEnum::kAbsMax); }
+  bool isBitAnd() const { return type == int(ReduceTypeEnum::kBitAnd); }
+  bool isBitOr() const { return type == int(ReduceTypeEnum::kBitOr); }
+  bool isBitXor() const { return type == int(ReduceTypeEnum::kBitXor); }
 };
 
 /// Wrapper class for reduction type with string-based construction
@@ -68,6 +74,12 @@ public:
       node->type = int(ReduceTypeEnum::kAbsMax);
     } else if (type == "min") {
       node->type = int(ReduceTypeEnum::kMin);
+    } else if (type == "bitand") {
+      node->type = int(ReduceTypeEnum::kBitAnd);
+    } else if (type == "bitor") {
+      node->type = int(ReduceTypeEnum::kBitOr);
+    } else if (type == "bitxor") {
+      node->type = int(ReduceTypeEnum::kBitXor);
     } else {
       LOG(FATAL) << "Invalid reduce type: " << type;
     }

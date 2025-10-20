@@ -58,6 +58,9 @@ from .reduce import (
     reduce_sum,  # noqa: F401
     reduce_abssum,  # noqa: F401
     reduce_absmax,  # noqa: F401
+    reduce_bitand,  # noqa: F401
+    reduce_bitor,  # noqa: F401
+    reduce_bitxor,  # noqa: F401
     cumsum,  # noqa: F401
     finalize_reducer,  # noqa: F401
 )

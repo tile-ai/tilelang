@@ -443,7 +443,8 @@ class _attention(torch.autograd.Function):
             dk = torch.empty(shape_k, dtype=torch.float16, device=q.device)
             dv = torch.empty(shape_v, dtype=torch.float16, device=q.device)
             kernel(q, k, v, do, lse, delta, dq, dk, dv)
-            dq = mod_post(dq)
+            dq, _, _ = mod_post(dq, torch.zeros_like(k, dtype=torch.float32),
+                                torch.zeros_like(v, dtype=torch.float32))
             dk, dv = dk.sum(0), dv.sum(0)
 
         return dq, dk, dv, None, None, None

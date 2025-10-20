@@ -64,28 +64,88 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   ICHECK(thread_var.defined());
   int old_loop_depth = loop_layout->InputDim();
   int new_loop_depth = loop_layout->OutputDim();
-
   // Create the new loop iter var
   Array<Var> vars;
   for (int i = 0; i < new_loop_depth; i++) {
     Var var = Var(std::string{char('i' + i)});
+    analyzer->Bind(var, Range::FromMinExtent(make_zero(var->dtype),
+                                             loop_layout->OutputShape()[i]));
     vars.push_back(var);
   }
   vars.push_back(thread_var);
   // create the substitute map, and the loop body
   Map<Var, PrimExpr> vmap;
   Stmt body = std::move(op);
-  auto inv_loop = loop_layout->Inverse();
+  Array<PrimExpr> loop_mins;
+  Array<PrimExpr> loop_extents;
+  auto inverse_info = loop_layout->InverseWithLevel();
+  auto inv_loop = inverse_info.first;
+  // Must check the guard if the layout can not be proved as bijective
+  bool need_guard = inverse_info.second != arith::IterMapLevel::Bijective;
   auto indices = inv_loop->Forward(Array<PrimExpr>(vars.begin(), vars.end()));
+  // Normalize thread var once so we can reuse the same substitution later.
+  Map<Var, PrimExpr> thread_offset_map;
+  bool has_thread_offset = false;
+  if (loop_layout->ThreadRange().defined()) {
+    auto range = loop_layout->ThreadRange();
+    thread_offset_map.Set(thread_var, thread_var - range->min);
+    has_thread_offset = true;
+  }
   for (int i = 0; i < old_loop_depth; i++) {
     const ForNode *loop = body.as<ForNode>();
     ICHECK(loop != nullptr);
     vmap.Set(loop->loop_var, indices[i]);
+    loop_mins.push_back(loop->min);
+    loop_extents.push_back(loop->extent);
     body = loop->body;
   }
-
   // substitute and re-construct the serial loop
   body = Substitute(body, vmap);
+  // Guard executes the recovered loop body only if each inverse-mapped iterator
+  // falls back into the original For ranges. We first check every axis from the
+  // old loop nest (old_loop_depth) and then the extra index produced by inverse
+  // layouts that carry a replicate/thread component (`inv_output_shape`). Both
+  // must stay within bounds to ensure correctness. Example: layout([i, j]) =
+  // floor((i * 16 + j) / 32) may generate extra points when the new loop
+  // enumerates 0..31; the guard drops iterations whose inverse-mapped (i, j)
+  // or replicate index fall outside their original extents.
+  // Example: layout([i, j]) = floor((i * 16 + j) / 32) may produce extra points
+  // when the new loop enumerates 0..31; this guard skips iterations where the
+  // inverse i, j land outside the original extents. This protects
+  // non-surjective loop_layout mappings that otherwise over-cover the parallel
+  // space.
+  PrimExpr guard = const_true();
+
+  if (need_guard) {
+    for (int i = 0; i < old_loop_depth; i++) {
+      PrimExpr index = indices[i];
+      if (has_thread_offset) {
+        index = Substitute(index, thread_offset_map);
+      }
+      PrimExpr lower_bound = analyzer->Simplify(index >= loop_mins[i]);
+      PrimExpr upper_bound =
+          analyzer->Simplify(index < loop_mins[i] + loop_extents[i]);
+      guard = And(guard, And(lower_bound, upper_bound));
+    }
+    auto inv_output_shape = inv_loop->OutputShape();
+    if (inv_output_shape.size() > static_cast<size_t>(old_loop_depth)) {
+      PrimExpr replicate_index = indices[old_loop_depth];
+      if (has_thread_offset) {
+        replicate_index = Substitute(replicate_index, thread_offset_map);
+      }
+      PrimExpr replicate_extent = inv_output_shape[old_loop_depth];
+      PrimExpr lower_bound = analyzer->Simplify(
+          replicate_index >= make_zero(replicate_index.dtype()));
+      PrimExpr upper_bound =
+          analyzer->Simplify(replicate_index < replicate_extent);
+      guard = And(guard, And(lower_bound, upper_bound));
+    }
+    PrimExpr simplified_guard = analyzer->Simplify(guard);
+    if (!analyzer->CanProve(simplified_guard)) {
+      body = IfThenElse(simplified_guard, body, Stmt());
+    }
+  }
+
   for (int i = new_loop_depth - 1; i >= 0; i--) {
     body = For(vars[i], make_zero(vars[i]->dtype), inv_loop->InputShape()[i],
                ForKind::kSerial, body);
@@ -94,13 +154,11 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
 
   body = BufferIndiceSimplify(analyzer)(body);
 
-  auto for_node = LoopPragmaUnroll(Downcast<For>(body));
-  if (loop_layout->ThreadRange().defined()) {
-    auto range = loop_layout->ThreadRange();
-    auto thread_var_with_offset = thread_var - range->min;
-    for_node.CopyOnWrite()->body =
-        Substitute(for_node->body, {{thread_var, thread_var_with_offset}});
+  if (has_thread_offset) {
+    body = Substitute(body, thread_offset_map);
   }
+
+  auto for_node = LoopPragmaUnroll(Downcast<For>(body));
   return for_node;
 }
 
@@ -111,6 +169,10 @@ public:
 private:
   Stmt VisitStmt_(const ForNode *node) final {
     if (node->kind == ForKind::kSerial) {
+      auto analyzer = std::make_shared<arith::Analyzer>();
+      if (as_const_int(analyzer->Simplify(node->extent)) == nullptr) {
+        return StmtExprMutator::VisitStmt_(node);
+      }
       For new_for = GetRef<For>(node);
       auto for_ptr = new_for.CopyOnWrite();
       for_ptr->annotations.Set(tir::attr::pragma_unroll_explicit, Bool(false));
@@ -127,22 +189,20 @@ public:
 
   Fragment Partition(const For &op, int num_thread, int vectorize_size) {
     this->VisitStmt(op);
-    int loop_size_full = 1;
-    PrimExpr flattened = 0;
+    ICHECK(!loop_vars_.empty());
+    DataType dtype = loop_vars_[0]->var.dtype();
+    PrimExpr flattened = make_const(dtype, 0);
+    PrimExpr vector_extent = make_const(dtype, vectorize_size);
+    PrimExpr thread_extent_const = make_const(dtype, num_thread);
     for (size_t i = 0; i < loop_vars_.size(); i++) {
-      auto ext_ptr = as_const_int(loop_vars_[i]->dom->extent);
-      ICHECK(ext_ptr)
-          << "Loop partitioner only works with constant loop sizes, but got "
-          << loop_vars_[i]->dom->extent;
-      int extent = *ext_ptr;
-      loop_size_full *= extent;
+      PrimExpr extent = loop_vars_[i]->dom->extent;
       flattened = flattened * extent + loop_vars_[i]->var;
     }
-    ICHECK(loop_size_full % vectorize_size == 0);
-    PrimExpr access_idx = FloorDiv(flattened, vectorize_size);
-    PrimExpr thd = FloorMod(access_idx, num_thread);
-    PrimExpr idx = FloorDiv(access_idx, num_thread) * vectorize_size +
-                   FloorMod(flattened, vectorize_size);
+    PrimExpr access_idx = FloorDiv(flattened, vector_extent);
+    PrimExpr thd = FloorMod(access_idx, thread_extent_const);
+    PrimExpr idx = FloorDiv(access_idx, thread_extent_const) * vector_extent +
+                   FloorMod(flattened, vector_extent);
+
     auto fragment = Fragment(loop_vars_, {idx}, {thd}, {});
     if (has_fragment_) {
       // for fragment buffer, we don't need to replicate the loop layout
