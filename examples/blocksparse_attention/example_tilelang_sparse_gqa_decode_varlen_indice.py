@@ -206,11 +206,11 @@ class SparseFlashAttn(torch.nn.Module):
         self.kernel = flashattn(batch, heads, heads_kv, dim, dim_v)(
             block_N=block_size,
             block_H=self.block_H,
-            num_split=T.symbolic("num_split"),
+            num_split=T.dynamic("num_split"),
             num_stages=2,
             threads=128,
-            max_cache_seqlen=T.symbolic("max_cache_seqlen"),
-            max_selected_blocks=T.symbolic("max_selected_blocks"))
+            max_cache_seqlen=T.dynamic("max_cache_seqlen"),
+            max_selected_blocks=T.dynamic("max_selected_blocks"))
 
         props = torch.cuda.get_device_properties(torch.device("cuda:0"))
         self.num_sm = props.multi_processor_count
@@ -301,11 +301,11 @@ def sparse_gqa_decode_varlen_indice(query, key, value, block_indices, cache_seql
     kernel = flashattn(batch, heads, heads_kv, dim, dim_v)(
         block_N=block_size,
         block_H=block_H,
-        num_split=T.symbolic("num_split"),
+        num_split=T.dynamic("num_split"),
         num_stages=2,
         threads=128,
-        max_cache_seqlen=T.symbolic("max_cache_seqlen"),
-        max_selected_blocks=T.symbolic("max_selected_blocks"))
+        max_cache_seqlen=T.dynamic("max_cache_seqlen"),
+        max_selected_blocks=T.dynamic("max_selected_blocks"))
 
     output = kernel(query, key, value, block_indices, cache_seqlens, glse, Output_partial)
     return output

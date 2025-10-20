@@ -26,8 +26,8 @@ def convert_to_uint32(x):
 
 @tilelang.jit(pass_configs=pass_configs)
 def tl_topk_impl(topk, in_dtype="float32", out_dtype="int32"):
-    batch = T.symbolic("batch")
-    seq_len = T.symbolic("seq_len")
+    batch = T.dynamic("batch")
+    seq_len = T.dynamic("seq_len")
     RADIX = 1 << 8
     BLOCK_SIZE = 1024
     SMEM_INPUT_SIZE = 4096  # assume the threshold bucket size after first pass is less than 4K

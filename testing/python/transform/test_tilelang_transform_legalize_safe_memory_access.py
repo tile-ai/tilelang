@@ -41,7 +41,7 @@ def assert_vectorize_access(M: int = 64, N: int = 64):
 def issue_1013_buggy_kernel():
     # NOTE: This kernel is mainly to test some corner cases in boundary check
 
-    num_tokens = T.symbolic('num_tokens')
+    num_tokens = T.dynamic('num_tokens')
     num_threads = 128
 
     @T.prim_func
