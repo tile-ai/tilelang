@@ -368,15 +368,15 @@ def flashattn_bwd_atomic_add(batch,
                 T.clear(dq)
                 T.gemm(dsT_shared, K_shared, dq, transpose_A=True)
                 for i, d in T.Parallel(block_N, dim_qk):
-                    if k_base * block_N + i < q_current_seqlen:
-                        T.atomic_add(dQ[q_start_idx + k_base * block_N + i, bx, d], dq[i, d])
+                    # if k_base * block_N + i < q_current_seqlen:
+                    T.atomic_add(dQ[q_start_idx + k_base * block_N + i, bx, d], dq[i, d], memory_order="acq_rel")
 
             for i, d in T.Parallel(block_M, dim_v):
-                if by * block_M + i < k_current_seqlen:
-                    T.atomic_add(dV[k_start_idx + by * block_M + i, bx // groups, d], dv[i, d])
+                # if by * block_M + i < k_current_seqlen:
+                T.atomic_add(dV[k_start_idx + by * block_M + i, bx // groups, d], dv[i, d], memory_order="acq_rel")
             for i, d in T.Parallel(block_M, dim_qk):
-                if by * block_M + i < k_current_seqlen:
-                    T.atomic_add(dK[k_start_idx + by * block_M + i, bx // groups, d], dk[i, d])
+                # if by * block_M + i < k_current_seqlen:
+                T.atomic_add(dK[k_start_idx + by * block_M + i, bx // groups, d], dk[i, d], memory_order="acq_rel")
 
     return flash_bwd
 
@@ -534,7 +534,7 @@ def flashattn_bwd_split(batch,
     return flash_bwd
 
 
-@torch.compile
+# @torch.compile
 class _attention(torch.autograd.Function):
 
     @staticmethod
@@ -659,6 +659,8 @@ def ref_program(Q, K, V, padding_mask, is_causal, groups=1):
     # K: [B, T, HK, D_QK]
     # V: [B, T, HV, D_V]
     # HQ = HKV * groups
+    # To handle precision issue
+    Q, K, V = Q.float(), K.float(), V.float()
     assert Q.size(2) == K.size(
         2) * groups, f"Q.size(2): {Q.size(2)}, K.size(2): {K.size(2)}, groups: {groups}"
     assert Q.size(2) == V.size(
@@ -731,7 +733,7 @@ def main(BATCH: int = 1,
     dK_ref, K.grad = K.grad.clone(), None
     dV_ref, V.grad = V.grad.clone(), None
 
-    torch.testing.assert_close(O, O_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(O, O_ref.half(), rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dQ, dQ_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dK, dK_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dV, dV_ref, rtol=1e-2, atol=1e-2)
@@ -777,8 +779,8 @@ if __name__ == "__main__":
     elif args.use_atomic:
         use_atomic = True
     else:
-        # Default: use split
-        use_atomic = False
+        # Default: use atomic
+        use_atomic = True
 
     main(args.batch, args.h, args.n_ctx, args.d_head_qk, args.d_head_v, args.groups, args.causal,
          use_atomic)
