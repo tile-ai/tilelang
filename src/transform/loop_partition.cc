@@ -68,6 +68,7 @@ For PartitionLoop(For op, Var thread_var, arith::Analyzer *analyzer,
   Array<Var> vars;
   for (int i = 0; i < new_loop_depth; i++) {
     Var var = Var(std::string{char('i' + i)});
+    analyzer->Bind(var, Range::FromMinExtent(make_zero(var->dtype), loop_layout->OutputShape()[i]));
     vars.push_back(var);
   }
   vars.push_back(thread_var);
