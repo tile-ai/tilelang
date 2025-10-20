@@ -3,7 +3,7 @@
 from typing import Callable, Dict
 
 from tilelang.layout import Layout
-from tilelang.language.ast.ir import attr, block_attr
+from tvm.script.parser.tir import attr, block_attr
 
 __all__ = [
     "use_swizzle",
