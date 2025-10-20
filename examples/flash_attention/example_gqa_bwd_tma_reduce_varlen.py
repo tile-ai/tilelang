@@ -8,7 +8,7 @@ from einops import rearrange, repeat
 from bert_padding import pad_input, unpad_input
 
 # tilelang.disable_cache()
-# torch.manual_seed(0)
+torch.manual_seed(1)
 
 
 def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random"):
@@ -371,18 +371,18 @@ def flashattn_bwd_atomic_add(batch,
                     T.atomic_add(
                         dQ[q_start_idx + k_base * block_N + i, bx, d],
                         dq[i, d],
-                        memory_order="acq_rel")
+                        memory_order="release")
 
             for i, d in T.Parallel(block_M, dim_v):
                 T.atomic_add(
                     dV[k_start_idx + by * block_M + i, bx // groups, d],
                     dv[i, d],
-                    memory_order="acq_rel")
+                    memory_order="release")
             for i, d in T.Parallel(block_M, dim_qk):
                 T.atomic_add(
                     dK[k_start_idx + by * block_M + i, bx // groups, d],
                     dk[i, d],
-                    memory_order="acq_rel")
+                    memory_order="release")
 
     return flash_bwd
 
