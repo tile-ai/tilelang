@@ -113,28 +113,28 @@ def matmul_sp_sm80(
     B_shape = (K, N) if not trans_B else (N, K)
     A_shared_shape = (block_M, block_K // 2) if not trans_A else (block_K // 2, block_M)
     B_shared_shape = (block_K, block_N) if not trans_B else (block_N, block_K)
+    metadata_dtype = 'int32' if is_8_bit else 'int16'
 
     import tilelang.language as T
 
     @T.prim_func
     def main(
             A_sparse: T.Tensor(A_sparse_shape, in_dtype),
-            E: T.Tensor((M, K // E_factor), 'int32' if is_8_bit else 'int16'),
+            E: T.Tensor((M, K // E_factor), metadata_dtype),
             B: T.Tensor(B_shape, in_dtype),
             C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
-            E_shared = T.alloc_shared((block_M, block_K // E_factor),
-                                      'int32' if is_8_bit else 'int16')
+            E_shared = T.alloc_shared((block_M, block_K // E_factor), metadata_dtype)
             C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.annotate_layout({
                 E:
-                    make_metadata_layout(E, mma_dtype="float16", backend="cutlass", arch="8.0"),
+                    make_metadata_layout(E, mma_dtype=in_dtype, backend="cutlass", arch="8.0"),
                 E_shared:
                     make_metadata_layout(
-                        E_shared, mma_dtype="float16", backend="cutlass", arch="8.0"),
+                        E_shared, mma_dtype=in_dtype, backend="cutlass", arch="8.0"),
             })
             T.clear(C_frag)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
