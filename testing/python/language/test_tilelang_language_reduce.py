@@ -69,33 +69,23 @@ def reduce_sum_test(M, N, dtype="float32"):
 
 
 def reduce_sum_ss(M, N, dtype="float32"):
-    return _make_shared_reduce(
-        M, N, dtype, lambda T, src, dst: T.reduce_sum(src, dst, dim=1)
-    )
+    return _make_shared_reduce(M, N, dtype, lambda T, src, dst: T.reduce_sum(src, dst, dim=1))
 
 
 def reduce_max_ss(M, N, dtype="float32"):
-    return _make_shared_reduce(
-        M, N, dtype, lambda T, src, dst: T.reduce_max(src, dst, dim=1)
-    )
+    return _make_shared_reduce(M, N, dtype, lambda T, src, dst: T.reduce_max(src, dst, dim=1))
 
 
 def reduce_min_ss(M, N, dtype="float32"):
-    return _make_shared_reduce(
-        M, N, dtype, lambda T, src, dst: T.reduce_min(src, dst, dim=1)
-    )
+    return _make_shared_reduce(M, N, dtype, lambda T, src, dst: T.reduce_min(src, dst, dim=1))
 
 
 def reduce_abssum_ss(M, N, dtype="float32"):
-    return _make_shared_reduce(
-        M, N, dtype, lambda T, src, dst: T.reduce_abssum(src, dst, dim=1)
-    )
+    return _make_shared_reduce(M, N, dtype, lambda T, src, dst: T.reduce_abssum(src, dst, dim=1))
 
 
 def reduce_absmax_ss(M, N, dtype="float32"):
-    return _make_shared_reduce(
-        M, N, dtype, lambda T, src, dst: T.reduce_absmax(src, dst, dim=1)
-    )
+    return _make_shared_reduce(M, N, dtype, lambda T, src, dst: T.reduce_absmax(src, dst, dim=1))
 
 
 def run_reduce_sum(M, N, dtype="float32", mode="rr"):
@@ -104,7 +94,7 @@ def run_reduce_sum(M, N, dtype="float32", mode="rr"):
     elif mode == "ss":
         program = reduce_sum_ss(M, N, dtype)
     else:
-        raise NotImplementedError("run_reduce_sum only supports rr ans ss")
+        raise NotImplementedError("run_reduce_sum only supports rr and ss")
     _run_program(program, lambda A: A.sum(dim=1))
 
 
@@ -136,30 +126,20 @@ def test_reduce_max():
 
 
 def test_reduce_max_shared():
-    run_shared_reduce(
-        reduce_max_ss, lambda A: A.max(dim=1).values, 64, 64, "float32"
-    )
-    run_shared_reduce(
-        reduce_max_ss, lambda A: A.max(dim=1).values, 96, 48, "float32"
-    )
+    run_shared_reduce(reduce_max_ss, lambda A: A.max(dim=1).values, 64, 64, "float32")
+    run_shared_reduce(reduce_max_ss, lambda A: A.max(dim=1).values, 96, 48, "float32")
 
 
 def test_reduce_min_shared():
-    run_shared_reduce(
-        reduce_min_ss, lambda A: A.min(dim=1).values, 64, 64, "float32"
-    )
+    run_shared_reduce(reduce_min_ss, lambda A: A.min(dim=1).values, 64, 64, "float32")
 
 
 def test_reduce_abssum_shared():
-    run_shared_reduce(
-        reduce_abssum_ss, lambda A: A.abs().sum(dim=1), 64, 64, "float32"
-    )
+    run_shared_reduce(reduce_abssum_ss, lambda A: A.abs().sum(dim=1), 64, 64, "float32")
 
 
 def test_reduce_absmax_shared():
-    run_shared_reduce(
-        reduce_absmax_ss, lambda A: A.abs().max(dim=1).values, 64, 64, "float32"
-    )
+    run_shared_reduce(reduce_absmax_ss, lambda A: A.abs().max(dim=1).values, 64, 64, "float32")
 
 
 def reduce_sum_test_clear(M, N, dtype="float32"):

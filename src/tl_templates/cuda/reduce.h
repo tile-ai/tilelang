@@ -43,9 +43,9 @@ struct BitXorOp {
 template <class Reducer, int Threads, bool UseAbs, bool NeedAccumulate>
 struct SharedReduceWarp {
   template <typename T>
-  static TL_DEVICE void run(const T *__restrict__ src,
-                            T *__restrict__ dst, int total_dest,
-                            int reduce_extent, int tail, T init_value) {
+  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
+                            int total_dest, int reduce_extent, int tail,
+                            T init_value) {
     if (total_dest <= 0 || reduce_extent <= 0)
       return;
     constexpr int kWarpSize = 32;
@@ -85,7 +85,7 @@ struct SharedReduceWarp {
       }
     }
   }
-}
+};
 
 template <class Reducer, int threads, int scale, int thread_offset = 0,
           int all_threads = threads>

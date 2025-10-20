@@ -22,12 +22,30 @@ struct MinOp {
   }
 };
 
+struct BitAndOp {
+  template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
+    return x & y;
+  }
+};
+
+struct BitOrOp {
+  template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
+    return x | y;
+  }
+};
+
+struct BitXorOp {
+  template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {
+    return x ^ y;
+  }
+};
+
 template <class Reducer, int Threads, bool UseAbs, bool NeedAccumulate>
 struct SharedReduceWarp {
   template <typename T>
-  static TL_DEVICE void run(const T *__restrict__ src,
-                            T *__restrict__ dst, int total_dest,
-                            int reduce_extent, int tail, T init_value) {
+  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
+                            int total_dest, int reduce_extent, int tail,
+                            T init_value) {
     if (total_dest <= 0 || reduce_extent <= 0)
       return;
     constexpr int kWarpSize = 64;
