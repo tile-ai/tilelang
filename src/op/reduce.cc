@@ -208,15 +208,18 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
                                  IterVarType::kDataPar));
     }
 
-    Array<IterVar> src_vars = dst_vars;
+    Array<IterVar> src_vars;
+    if (!is_1d_reduce) {
+      src_vars = dst_vars;
+    }
     Range reduce_dom(0, src_layout->InputShape()[this->dim]);
     IterVar reduce_iv(reduce_dom, Var("rv"), IterVarType::kDataPar);
     src_vars.insert(src_vars.begin() + this->dim, reduce_iv);
 
-    Array<PrimExpr> dst_indices = dst_layout->Forward(
-        dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
     Array<PrimExpr> src_indices = src_layout->Forward(
         src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
+    Array<PrimExpr> dst_indices = dst_layout->Forward(
+        dst_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }));
 
     Array<Stmt> stmts;
 
@@ -239,16 +242,18 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
     }
 
     if (need_duplicate) {
+    // Create a new buffer with same shape and dtype as dst_buffer
       clear_buffer = decl_buffer(dst_buffer->shape, dst_buffer->dtype,
                                  dst_buffer->name + "_clear",
                                  GetPtrStorageScope(dst_buffer->data));
     }
-
+  // make reduce-init stmt
     if (require_init) {
       stmts.push_back(
           BufferStore(clear_buffer, this->MakeInitValue(), dst_indices));
     }
 
+    // make thread-local reduce
     Array<PrimExpr> src_indice_compressed;
     Array<IterVar> src_var_compressed;
     for (size_t i = 0; i < src_layout->OutputDim(); ++i) {
