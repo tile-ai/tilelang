@@ -72,7 +72,7 @@ Then you are ready to rock. Thanks for contributing to TileLang!
 To install TileLang in an "editable" mode, run:
 
 ```bash
-python3 -m pip install --no-build-isolation --verbose --editable .
+make install-editable
 ```
 
 in the main directory. This installation is removable by:
@@ -86,7 +86,7 @@ python3 -m pip uninstall tilelang
 To check the linting, run:
 
 ```bash
-pre-commit run --all-files
+make lint
 ```
 
 ## Test Locally
@@ -105,4 +105,11 @@ _TBA_
 
 ## Documentation
 
-_TBA_
+To build and serve the documentation locally, run:
+
+```bash
+make docs
+```
+
+It will watch for changes in the source files and automatically rebuild and refresh the browser.
+The documentation will be available at [http://localhost:8000](http://localhost:8000).
