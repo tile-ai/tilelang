@@ -70,6 +70,19 @@ PrimExpr ReduceOpNode::MakeInitValue() const {
     }
   } else if (type->isAbsMax()) {
     return make_const(dst->dtype, 0);
+  } else if (type->isBitAnd()) {
+    if (is_int) {
+      return make_const(dst->dtype, -1);
+    } else if (is_uint) {
+      return make_const(dst->dtype, (1 << bits) - 1);
+    } else {
+      // Should not arrive here
+      return make_const(dst->dtype, -INFINITY);
+    }
+  } else if (type->isBitOr()) {
+    return make_zero(dst->dtype);
+  } else if (type->isBitXor()) {
+    return make_zero(dst->dtype);
   } else {
     LOG(FATAL) << "Unsupported reduce type: " << type->type;
   }
@@ -91,6 +104,12 @@ PrimExpr ReduceOpNode::MakeReduce(const PrimExpr &lhs,
     return Min(lhs, rhs);
   } else if (type->isAbsMax()) {
     return Max(Max(lhs, rhs), -Min(lhs, rhs));
+  } else if (type->isBitAnd()) {
+    return lhs & rhs;
+  } else if (type->isBitOr()) {
+    return lhs | rhs;
+  } else if (type->isBitXor()) {
+    return lhs ^ rhs;
   } else {
     LOG(FATAL) << "Unsupported reduce type: " << type->type;
   }
@@ -107,6 +126,12 @@ std::string ReduceOpNode::MakeCodegenReducer() const {
     return "tl::MinOp";
   } else if (type->isAbsMax()) {
     return "tl::MaxOp";
+  } else if (type->isBitAnd()) {
+    return "tl::BitAndOp";
+  } else if (type->isBitOr()) {
+    return "tl::BitOrOp";
+  } else if (type->isBitXor()) {
+    return "tl::BitXorOp";
   } else {
     LOG(FATAL) << "Unsupported reduce type: " << type->type;
     return "";
@@ -169,9 +194,153 @@ Stmt ReduceOpNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
     bool is_1d_reduce = src_dim == dst_dim && dst_dim == 1;
 
-    if (is_1d_reduce) {
-      ICHECK(is_one(dst_layout->OutputShape().back()))
-          << "Reduce for scalar not implemented.";
+  Array<Stmt> stmts;
+
+  bool require_init = this->clear;
+  // sum op must be cleared
+  if (this->type->isSum()) {
+    require_init = true;
+  } else if (this->type->isAbsSum()) {
+    require_init = true;
+  } else if (this->type->isBitAnd()) {
+    require_init = true;
+  } else if (this->type->isBitOr()) {
+    require_init = true;
+  } else if (this->type->isBitXor()) {
+    require_init = true;
+  }
+
+  Buffer clear_buffer = dst_buffer;
+  bool need_duplicate = false;
+  if (this->type->isSum() && !this->clear) {
+    need_duplicate = true;
+  } else if (this->type->isAbsSum() && !this->clear) {
+    need_duplicate = true;
+  } else if (this->type->isBitAnd()) {
+    need_duplicate = true;
+  } else if (this->type->isBitOr() && !this->clear) {
+    need_duplicate = true;
+  } else if (this->type->isBitXor() && !this->clear) {
+    need_duplicate = true;
+  }
+
+  if (need_duplicate) {
+    // Create a new buffer with same shape and dtype as dst_buffer
+    clear_buffer = decl_buffer(dst_buffer->shape, dst_buffer->dtype,
+                               dst_buffer->name + "_clear",
+                               GetPtrStorageScope(dst_buffer->data));
+  }
+
+  // make reduce-init stmt
+  if (require_init) {
+    stmts.push_back(
+        BufferStore(clear_buffer, this->MakeInitValue(), dst_indices));
+  }
+
+  // make thread-local reduce
+  Array<PrimExpr> src_indice_compressed;
+  Array<IterVar> src_var_compressed;
+  for (size_t i = 0; i < src_layout->OutputDim(); i++) {
+    PrimExpr expr;
+    IterVar var;
+    std::tie(expr, var) = CompressIterator(src_indices[i], src_vars,
+                                           src_vars[this->dim]->var, analyzer);
+    src_indice_compressed.push_back(expr);
+    src_var_compressed.push_back(var);
+  }
+  Stmt reduce_local = BufferStore(
+      clear_buffer,
+      this->MakeReduce(BufferLoad(clear_buffer, dst_indices),
+                       BufferLoad(src_buffer, src_indice_compressed)),
+      dst_indices);
+  for (int i = src_layout->OutputDim() - 1; i >= 0; i--) {
+    reduce_local =
+        For(src_var_compressed[i]->var, 0, src_var_compressed[i]->dom->extent,
+            ForKind::kUnrolled, reduce_local, std::nullopt,
+            {{tir::attr::pragma_unroll_explicit, Bool(false)}});
+  }
+  stmts.push_back(reduce_local);
+
+  // make inter-thread reduce
+  PrimExpr src_thread = src_layout->ForwardThread(
+      src_vars.Map([](const auto &iv) { return PrimExpr(iv->var); }), {});
+  auto iter_sum =
+      arith::NormalizeToIterSum(src_thread, ToVMap(src_vars), analyzer);
+  for (const auto &iter_split : iter_sum->args) {
+    auto mark = iter_split->source->source.as<Var>();
+    ICHECK(mark) << "Not a normalized iterator: " << iter_split->source;
+    if (mark.value().same_as(src_vars[this->dim]->var)) {
+      auto scale = as_const_int(iter_split->scale);
+      auto extent = as_const_int(iter_split->extent);
+      ICHECK(scale != nullptr && extent != nullptr);
+      if (*extent == 1)
+        continue;
+
+      int reducing_threads = (*extent) * (*scale);
+      std::stringstream ss;
+
+      auto thread_offset = T.thread_bounds->min;
+      if (TargetIsHopper(T.target) || TargetIsSm100(T.target)) {
+        auto all_threads = T.thread_bounds->extent;
+        ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+           << reducing_threads << ", " << (*scale) << ", " << thread_offset
+           << ", " << all_threads << ">::run_hopper";
+      } else {
+        ss << "tl::AllReduce<" << this->MakeCodegenReducer() << ", "
+           << reducing_threads << ", " << (*scale) << ", " << thread_offset
+           << ">::run";
+      }
+      Array<PrimExpr> thread_reduce_args = {
+          StringImm(ss.str()), BufferLoad(clear_buffer, dst_indices)};
+      if (reducing_threads >= 32) {
+        PrimExpr workspace = T.AddWorkspace(
+            *as_const_int(T.thread_bounds->extent), clear_buffer->dtype);
+        thread_reduce_args.push_back(workspace);
+      }
+      auto call =
+          Call(clear_buffer->dtype, builtin::call_extern(), thread_reduce_args);
+      stmts.push_back(BufferStore(clear_buffer, call, dst_indices));
+    }
+  }
+  Stmt reduce_interthread = BufferStore(
+      clear_buffer, BufferLoad(clear_buffer, dst_indices), dst_indices);
+
+  // copy clear_buffer to dst_buffer
+  if (need_duplicate) {
+    // if is reduce sum, we should add a copy from clear_buffer to dst_buffer
+    if (this->type->isSum()) {
+      stmts.push_back(BufferStore(dst_buffer,
+                                  Add(BufferLoad(dst_buffer, dst_indices),
+                                      BufferLoad(clear_buffer, dst_indices)),
+                                  dst_indices));
+    } else if (this->type->isAbsSum()) {
+      stmts.push_back(BufferStore(dst_buffer,
+                                  Add(BufferLoad(dst_buffer, dst_indices),
+                                      BufferLoad(clear_buffer, dst_indices)),
+                                  dst_indices));
+    } else if (this->type->isBitAnd()) {
+      if (!this->clear) {
+        stmts.push_back(
+            BufferStore(dst_buffer,
+                        bitwise_and(BufferLoad(dst_buffer, dst_indices),
+                                    BufferLoad(clear_buffer, dst_indices)),
+                        dst_indices));
+      } else {
+        stmts.push_back(BufferStore(
+            dst_buffer, BufferLoad(clear_buffer, dst_indices), dst_indices));
+      }
+    } else if (this->type->isBitOr()) {
+      stmts.push_back(
+          BufferStore(dst_buffer,
+                      bitwise_or(BufferLoad(dst_buffer, dst_indices),
+                                 BufferLoad(clear_buffer, dst_indices)),
+                      dst_indices));
+    } else if (this->type->isBitXor()) {
+      stmts.push_back(
+          BufferStore(dst_buffer,
+                      bitwise_xor(BufferLoad(dst_buffer, dst_indices),
+                                  BufferLoad(clear_buffer, dst_indices)),
+                      dst_indices));
     } else {
       ICHECK(src_dim == dst_dim + 1) << "Reduce dimension mismatch.";
     }
