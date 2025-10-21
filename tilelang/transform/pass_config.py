@@ -69,6 +69,46 @@ class PassConfigKey(str, Enum):
     TL_FORCE_LET_INLINE = "tl.force_let_inline"
     """Force TileLang to inline let bindings during simplification. Default: False"""
 
+    TL_STORAGE_REWRITE_DETECT_INPLACE = "tl.storage_rewrite_detect_inplace"
+    """Control StorageRewrite inplace detection.
+
+    When False (default) StorageRewrite keeps distinct temporaries for patterns
+    such as `dst[i] = f(src[i])`, avoiding implicit aliasing:
+
+    ```
+    read = T.allocate([1], "int32", "local.var")
+    write = T.allocate([1], "int32", "local.var")
+    read_buf = T.Buffer((1,), "int32", data=read, scope="local.var")
+    write_buf = T.Buffer((1,), "int32", data=write, scope="local.var")
+    write_buf[0] = read_buf[0] * 2
+    f(write_buf[0])
+    ```
+
+    Setting the flag to True allows StorageRewrite to reuse the `read` buffer
+    for the write when it can prove the update is safely inplace, producing IR
+    like:
+
+    ```
+    read = T.allocate([1], "int32", "local.var")
+    read_buf = T.Buffer((1,), "int32", data=read, scope="local.var")
+    read_buf[0] = read_buf[0] * 2
+    f(read_buf[0])
+    ```
+
+    This reduces local memory usage but introduces aliasing between the buffers.
+
+    Usage:
+
+    ```python
+    from tilelang.transform import PassContext, PassConfigKey
+
+    with PassContext(
+        config={PassConfigKey.TL_STORAGE_REWRITE_DETECT_INPLACE.value: True}
+    ):
+        mod = tilelang.transform.StorageRewrite()(mod)
+    ```
+    """
+
     # TIR related configs
     TIR_ENABLE_EQUIV_TERMS_IN_CSE = "tir.enable_equiv_terms_in_cse_tir"
     """Enable equivalent terms in TIR Common Subexpression Elimination. Default: True"""
