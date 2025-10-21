@@ -12,8 +12,6 @@ import tilelang
 import tilelang.language as T
 from tilelang.profiler import do_bench
 
-tilelang.disable_cache()
-
 
 @tilelang.jit(out_idx=[3])
 def _tl_vs_sparse_flashattn(batch, heads, seq_len, dim, vertical_size, slash_size):

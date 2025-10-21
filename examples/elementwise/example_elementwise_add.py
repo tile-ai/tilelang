@@ -5,8 +5,6 @@ import tilelang
 import tilelang.language as T
 from tilelang.autotuner import AutoTuner
 
-tilelang.disable_cache()
-
 
 def ref_program(x, y):
     return x + y

@@ -5,8 +5,6 @@ import tilelang.language as T
 from einops import rearrange, einsum
 import argparse
 
-tilelang.disable_cache()
-
 
 def get_configs():
     import itertools

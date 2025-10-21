@@ -38,6 +38,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "../op/builtin.h"
 #include "arith/int_operator.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/ir/buffer_common.h"
@@ -1914,6 +1915,8 @@ using namespace tir::transform;
 namespace transform {
 Pass StorageRewrite() {
   auto pass_func = [](PrimFunc f, const IRModule &m, PassContext ctx) {
+    bool detect_inplace =
+        ctx->GetConfig<Bool>(kStorageRewriteDetectInplace, Bool(false)).value();
     bool enable_reuse = true;
     bool reuse_require_exact_matched_dtype = false;
     bool merge_static_smem =
@@ -1939,9 +1942,9 @@ Pass StorageRewrite() {
       reuse_require_exact_matched_dtype = true;
     }
     auto *n = f.CopyOnWrite();
-    n->body =
-        StoragePlanRewriter().Rewrite(std::move(n->body), true, enable_reuse,
-                                      reuse_require_exact_matched_dtype);
+    n->body = StoragePlanRewriter().Rewrite(std::move(n->body), detect_inplace,
+                                            enable_reuse,
+                                            reuse_require_exact_matched_dtype);
     // Parameters may not be rewritten, but internal allocations may.
     // Vectorization of AllocateConst is currently disabled, as it has
     // indexing issues for types that include padding (e.g. int8x3

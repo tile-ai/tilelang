@@ -7,7 +7,6 @@ import argparse
 from einops import rearrange, repeat
 from bert_padding import pad_input, unpad_input
 
-# tilelang.disable_cache()
 torch.manual_seed(1)
 
 

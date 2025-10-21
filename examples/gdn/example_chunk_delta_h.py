@@ -32,8 +32,6 @@ from utils import *
 
 torch.random.manual_seed(0)
 
-tilelang.disable_cache()
-
 
 def prepare_input(
     B,
