@@ -30,6 +30,11 @@ install-editable install-e:
 uninstall:
 	$(PYTHON) -m pip uninstall -y $(PROJECT_NAME)
 
+.PHONY: sdist
+sdist:
+	$(PYTHON) -m pip install --upgrade pip setuptools build
+	$(PYTHON) -m build --sdist --outdir=dist
+
 # Tools Installation
 
 check_pip_install = $(PYTHON) -m pip show $(1) &>/dev/null || (cd && $(PYTHON) -m pip install --upgrade $(1))

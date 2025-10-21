@@ -1,10 +1,19 @@
 include VERSION
-include CMakeLists.txt
-include requirements.txt
-include requirements-test.txt
-include requirements-dev.txt
+include LICENSE
+include THIRDPARTYNOTICES.txt
+
+include version_provider.py
+include Makefile
+include requirements*.txt
 include tilelang/jit/adapter/cython/cython_wrapper.pyx
-recursive-include src *
-recursive-include 3rdparty *
-recursive-exclude 3rdparty/clang* * 
-recursive-exclude 3rdparty/llvm* *
+
+include CMakeLists.txt
+graft src
+graft cmake
+graft 3rdparty
+prune 3rdparty/clang*
+prune 3rdparty/llvm*
+
+# Prune compiled files
+prune */__pycache__
+global-exclude *~ *.py[cod] *.so *.a *.dylib *.pxd *.dll *.lib *.o *.obj
