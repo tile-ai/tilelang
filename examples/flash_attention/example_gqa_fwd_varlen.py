@@ -8,8 +8,6 @@ from einops import rearrange, repeat
 from tilelang.profiler import do_bench
 from varlen_utils import generate_random_padding_mask, generate_qkv
 
-tilelang.disable_cache()
-
 
 def attention_ref(
         q,

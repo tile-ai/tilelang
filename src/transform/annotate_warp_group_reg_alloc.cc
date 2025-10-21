@@ -95,8 +95,7 @@ public:
 private:
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (const CallNode *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(set_max_nreg()) ||
-          call->op.same_as(no_set_max_nreg())) {
+      if (call->op.same_as(no_set_max_nreg())) {
         // Remove the original set_max_nreg calls as they will be re-inserted
         // at appropriate locations
         return Evaluate(0);
@@ -136,11 +135,9 @@ private:
       // Only inject if we have valid register hints and no SIMT copy
       bool has_simt_copy = SimtCopyDetector::Detect(producer_body);
 
-      if (dec_reg >= 0 && inc_reg >= 0 && !has_simt_copy) {
-        auto inc_reg_num =
-            IntImm(DataType::Int(32), inc_reg == 0 ? 240 : inc_reg);
-        auto dec_reg_num =
-            IntImm(DataType::Int(32), dec_reg == 0 ? 24 : dec_reg);
+      if (dec_reg == 0 && inc_reg == 0 && !has_simt_copy) {
+        auto inc_reg_num = IntImm(DataType::Int(32), 240);
+        auto dec_reg_num = IntImm(DataType::Int(32), 24);
         inc_reg_stmt = Evaluate(
             Call(DataType::Handle(), set_max_nreg(), {inc_reg_num, 1}));
         dec_reg_stmt = Evaluate(

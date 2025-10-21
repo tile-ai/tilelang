@@ -94,6 +94,11 @@ bool IsAsyncIntrinsic(const CallNode *call) {
     return true;
   }
 
+  // wgmma async intrinsics
+  if (call->op.same_as(tl_gemm()) || call->op.same_as(tl_gemm_sp())) {
+    return true;
+  }
+
   return false;
 }
 
@@ -208,8 +213,10 @@ private:
       } else if (IsKnownGeneric(call)) {
         kind = ProxyKind::kGeneric;
       } else {
-        // Treat unknown externs as async to avoid missing required fences.
-        kind = ProxyKind::kAsync;
+        // We can now treat extern as Generic, since gemm and gemm_sp are never
+        // represented as call_extern nodes. They are call_intrin nodes and will
+        // be handled by IsAsyncIntrinsic above.
+        kind = ProxyKind::kGeneric;
       }
     }
 

@@ -105,8 +105,9 @@ TL_DEVICE void AtomicAdd(T1 &ref, T2 val,
                          int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
   T1 *address = &ref;
-  if constexpr (std::is_same_v<NT1, half> ||
-                std::is_same_v<NT1, __nv_bfloat16>) {
+  if constexpr ((std::is_same_v<NT1, half> ||
+                 std::is_same_v<NT1, __nv_bfloat16>)&&memory_order ==
+                int(cuda::memory_order_relaxed)) {
     atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
   } else {
     cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
@@ -119,8 +120,9 @@ TL_DEVICE T1 AtomicAddRet(T1 &ref, T2 val,
                           int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
   T1 *address = &ref;
-  if constexpr (std::is_same_v<NT1, half> ||
-                std::is_same_v<NT1, __nv_bfloat16>) {
+  if constexpr ((std::is_same_v<NT1, half> ||
+                 std::is_same_v<NT1, __nv_bfloat16>)&&memory_order ==
+                int(cuda::memory_order_relaxed)) {
     return static_cast<T1>(
         atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val)));
   } else {
@@ -130,24 +132,31 @@ TL_DEVICE T1 AtomicAddRet(T1 &ref, T2 val,
   }
 }
 
-TL_DEVICE void AtomicAddx2(half_t *ref, half_t *val) {
+// TODO add memory_order for vectorized atomic add
+TL_DEVICE void AtomicAddx2(half_t *ref, half_t *val,
+                           int memory_order = int(cuda::memory_order_relaxed)) {
   atomicAdd(reinterpret_cast<half2 *>(ref),
             static_cast<half2>(*reinterpret_cast<half2 *>(val)));
 }
 
-TL_DEVICE half2 AtomicAddx2Ret(half_t *ref, half_t *val) {
+TL_DEVICE half2
+AtomicAddx2Ret(half_t *ref, half_t *val,
+               int memory_order = int(cuda::memory_order_relaxed)) {
   return atomicAdd(reinterpret_cast<half2 *>(ref),
                    static_cast<half2>(*reinterpret_cast<half2 *>(val)));
 }
 
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 750))
-TL_DEVICE void AtomicAddx2(bfloat16_t *ref, bfloat16_t *val) {
+TL_DEVICE void AtomicAddx2(bfloat16_t *ref, bfloat16_t *val,
+                           int memory_order = int(cuda::memory_order_relaxed)) {
   atomicAdd(
       reinterpret_cast<__nv_bfloat162 *>(ref),
       static_cast<__nv_bfloat162>(*reinterpret_cast<__nv_bfloat162 *>(val)));
 }
 
-TL_DEVICE __nv_bfloat162 AtomicAddx2Ret(bfloat16_t *ref, bfloat16_t *val) {
+TL_DEVICE __nv_bfloat162
+AtomicAddx2Ret(bfloat16_t *ref, bfloat16_t *val,
+               int memory_order = int(cuda::memory_order_relaxed)) {
   return atomicAdd(
       reinterpret_cast<__nv_bfloat162 *>(ref),
       static_cast<__nv_bfloat162>(*reinterpret_cast<__nv_bfloat162 *>(val)));
@@ -155,22 +164,28 @@ TL_DEVICE __nv_bfloat162 AtomicAddx2Ret(bfloat16_t *ref, bfloat16_t *val) {
 #endif
 
 #if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 900))
-TL_DEVICE void AtomicAddx2(float *ref, float *val) {
+TL_DEVICE void AtomicAddx2(float *ref, float *val,
+                           int memory_order = int(cuda::memory_order_relaxed)) {
   atomicAdd(reinterpret_cast<float2 *>(ref),
             static_cast<float2>(*reinterpret_cast<float2 *>(val)));
 }
 
-TL_DEVICE float2 AtomicAddx2Ret(float *ref, float *val) {
+TL_DEVICE float2
+AtomicAddx2Ret(float *ref, float *val,
+               int memory_order = int(cuda::memory_order_relaxed)) {
   return atomicAdd(reinterpret_cast<float2 *>(ref),
                    static_cast<float2>(*reinterpret_cast<float2 *>(val)));
 }
 
-TL_DEVICE void AtomicAddx4(float *ref, float *val) {
+TL_DEVICE void AtomicAddx4(float *ref, float *val,
+                           int memory_order = int(cuda::memory_order_relaxed)) {
   atomicAdd(reinterpret_cast<float4 *>(ref),
             static_cast<float4>(*reinterpret_cast<float4 *>(val)));
 }
 
-TL_DEVICE float4 AtomicAddx4Ret(float *ref, float *val) {
+TL_DEVICE float4
+AtomicAddx4Ret(float *ref, float *val,
+               int memory_order = int(cuda::memory_order_relaxed)) {
   return atomicAdd(reinterpret_cast<float4 *>(ref),
                    static_cast<float4>(*reinterpret_cast<float4 *>(val)));
 }
