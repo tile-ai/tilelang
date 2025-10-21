@@ -23,8 +23,7 @@ def _compile_kernel_without_inplace():
 @tilelang.jit(
     pass_configs={
         tilelang.PassConfigKey.TL_STORAGE_REWRITE_DETECT_INPLACE: True,
-    },
-)
+    },)
 def _compile_kernel_with_inplace():
     num_tokens = T.symbolic("num_tokens")
 
@@ -49,13 +48,13 @@ def _get_device_kernel_script(detect_inplace: bool) -> str:
     source = kernel.get_kernel_source()
     return source
 
+
 def test_storage_rewrite_detect_inplace_toggle():
     script_off = _get_device_kernel_script(detect_inplace=False)
     script_on = _get_device_kernel_script(detect_inplace=True)
-    
+
     assert script_off.count("read = (read * 2);") == 0
     assert script_on.count("read = (read * 2);") > 0
-    
 
 
 if __name__ == "__main__":
