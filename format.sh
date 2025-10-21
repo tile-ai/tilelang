@@ -84,7 +84,7 @@ elif [[ "${#FILES[@]}" -gt 0 ]]; then
 fi
 
 # If pre-commit is not installed, install it.
-if python3 -m pre_commit --version &>/dev/null; then
+if ! python3 -m pre_commit --version &>/dev/null; then
     python3 -m pip install pre-commit
 fi
 
@@ -107,9 +107,9 @@ echo 'tile-lang pre-commit: Done'
 
 echo 'tile-lang clang-tidy: Check Start'
 # If clang-tidy is available, run it; otherwise, skip
-if command -v run-clang-tidy &>/dev/null; then
+if [[ -x "$(command -v run-clang-tidy)" ]]; then
     # Check if clang-tidy is available
-    if ! command -v clang-tidy &>/dev/null; then
+    if [[ ! -x "$(command -v clang-tidy)" ]]; then
         python3 -m pip install --upgrade --requirements "${ROOT}/requirements-lint.txt"
     fi
     # Get clang-tidy version
