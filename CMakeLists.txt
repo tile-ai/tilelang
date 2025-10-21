@@ -158,12 +158,13 @@ endif()
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})
 
 add_custom_command(
-  OUTPUT "${CMAKE_BINARY_DIR}/cython_wrapper.cpp"
+  OUTPUT "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp"
   COMMENT
     "Cythoning tilelang/jit/adapter/cython/cython_wrapper.pyx"
   COMMAND Python::Interpreter -m cython
           "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/cython/cython_wrapper.pyx"
-          --cplus --output-file "${CMAKE_BINARY_DIR}/cython_wrapper.cpp"
+          --module-name tilelang_cython_wrapper
+          --cplus --output-file "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp"
   DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/cython/cython_wrapper.pyx"
   VERBATIM)
 
@@ -171,9 +172,12 @@ if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
   set(USE_SABI USE_SABI ${SKBUILD_SABI_VERSION})
 endif()
 
-python_add_library(cython_wrapper MODULE "${CMAKE_BINARY_DIR}/cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
-# Install to site dir to support direct import
-install(TARGETS cython_wrapper LIBRARY DESTINATION .)
+python_add_library(tilelang_cython_wrapper MODULE "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
+# Install extension into the tilelang package directory
+install(TARGETS tilelang_cython_wrapper
+        LIBRARY DESTINATION tilelang
+        RUNTIME DESTINATION tilelang
+        ARCHIVE DESTINATION tilelang)
 
 # let libtilelang to search tvm/tvm_runtime in same dir
 if(APPLE)

@@ -74,7 +74,6 @@ column_limit = 100
 indent_width = 4
 
 [tool.codespell]
-builtin = "clear,rare,en-GB_to_en-US"
 ignore-words = "docs/spelling_wordlist.txt"
 skip = [
     "build",

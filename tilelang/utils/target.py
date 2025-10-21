@@ -1,20 +1,27 @@
 from platform import mac_ver
-from typing import Literal, Union
+from typing import Dict, Literal, Union
 from tilelang import tvm as tvm
 from tilelang import _ffi_api
 from tvm.target import Target
 from tvm.contrib import rocm
 from tilelang.contrib import nvcc
 
-AVALIABLE_TARGETS = {
-    "auto",
-    "cuda",
-    "hip",
-    "webgpu",
-    "c",  # represent c source backend
-    "llvm",
-    "metal",
+SUPPORTED_TARGETS: Dict[str, str] = {
+    "auto": "Auto-detect CUDA/HIP/Metal based on availability.",
+    "cuda": "CUDA GPU target (supports options such as `cuda -arch=sm_80`).",
+    "hip": "ROCm HIP target (supports options like `hip -mcpu=gfx90a`).",
+    "metal": "Apple Metal target for arm64 Macs.",
+    "llvm": "LLVM CPU target (accepts standard TVM LLVM options).",
+    "webgpu": "WebGPU target for browser/WebGPU runtimes.",
+    "c": "C source backend.",
 }
+
+
+def describe_supported_targets() -> Dict[str, str]:
+    """
+    Return a mapping of supported target names to usage descriptions.
+    """
+    return dict(SUPPORTED_TARGETS)
 
 
 def check_cuda_availability() -> bool:
@@ -90,11 +97,27 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
             raise ValueError("No CUDA or HIP or MPS available on this system.")
     else:
         # Validate the target if it's not "auto"
-        assert isinstance(
-            target, Target) or target in AVALIABLE_TARGETS, f"Target {target} is not supported"
-        return_var = target
+        if isinstance(target, Target):
+            return_var = target
+        elif isinstance(target, str):
+            normalized_target = target.strip()
+            if not normalized_target:
+                raise AssertionError(f"Target {target} is not supported")
+            try:
+                Target(normalized_target)
+            except Exception as err:
+                examples = ", ".join(f"`{name}`" for name in SUPPORTED_TARGETS)
+                raise AssertionError(
+                    f"Target {target} is not supported. Supported targets include: {examples}. "
+                    "Pass additional options after the base name, e.g. `cuda -arch=sm_80`."
+                ) from err
+            return_var = normalized_target
+        else:
+            raise AssertionError(f"Target {target} is not supported")
 
     if return_object:
+        if isinstance(return_var, Target):
+            return return_var
         return Target(return_var)
     return return_var
 

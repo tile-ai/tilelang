@@ -48,6 +48,8 @@ static constexpr const char *kEnablePTXASVerboseOutput =
 static constexpr const char *kDisableVectorize256 = "tl.disable_vectorize_256";
 static constexpr const char *kDisableWGMMA = "tl.disable_wgmma";
 static constexpr const char *kDisableShuffleElect = "tl.disable_shuffle_elect";
+static constexpr const char *kStorageRewriteDetectInplace =
+    "tl.storage_rewrite_detect_inplace";
 /*!
  * \brief Whether to disable dynamic tail split
  *

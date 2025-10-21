@@ -19,8 +19,6 @@ import torch
 
 torch.random.manual_seed(1)
 
-tilelang.disable_cache()
-
 
 def prepare_input(B, S, H, DK, DV, chunk_size, input_dtype, output_dtype, gate_dtype=torch.float32):
     BS = chunk_size

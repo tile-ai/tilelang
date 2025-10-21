@@ -4,8 +4,6 @@ import tilelang.language as T
 from typing import Tuple
 from tilelang.utils.tensor import torch_assert_close
 
-tilelang.disable_cache()
-
 
 @tilelang.jit(out_idx=[1, 2])
 def per_token_cast_to_fp8(M, N, blk_m):
