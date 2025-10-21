@@ -920,6 +920,19 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     }
   }
 
+  // Handle conversion from float32 to float8 (E4M3/E5M2)
+  if (from_ty.is_float() && target_ty.is_float8()) {
+    // FP32 -> FP8: Use __nv_cvt_float2_to_fp8x2 for vectorized conversion (float2 -> fp8x2)
+    if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
+      PrintIndent();
+      stream << "*reinterpret_cast<__nv_fp8x2_storage_t*>(&(" << sret << ")) = __nv_cvt_float2_to_fp8x2(*reinterpret_cast<float2*>(&(" << src
+             << ")), __NV_SATFINITE, "
+             << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2") << ");\n";
+      os << sret;
+      return;
+    } 
+  }
+
   // Handle bfloat16 special cases with supported ops
   bool used_bf16_op = false;
   if (from_ty.is_bfloat16() || target_ty.is_bfloat16()) {
@@ -970,6 +983,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       }
       stream << " const &>(" << src << "));\n";
       stream << "#else\n";
+      // bf16 cases don't need early return, as we use elementwise cast as fallback
     }
   }
 
