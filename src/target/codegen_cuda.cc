@@ -921,7 +921,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   // Handle conversion from float32 to float8 (E4M3/E5M2)
-  if (from_ty.is_float() && target_ty.is_float8()) {
+  if (from_ty.is_float() &&
+      (target_ty.is_float8_e4m3() || target_ty.is_float8_e5m2())) {
     // FP32 -> FP8: Use __nv_cvt_float2_to_fp8x2 for vectorized conversion
     // (float2 -> fp8x2)
     if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
