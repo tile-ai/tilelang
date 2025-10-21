@@ -87,6 +87,12 @@ skip = [
 target-version = "py38"
 line-length = 100
 output-format = "full"
+exclude = [
+    "build",
+    "3rdparty",
+    "dist",
+    ".venv"
+]
 
 [tool.ruff.lint]
 select = [
