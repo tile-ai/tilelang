@@ -1,7 +1,6 @@
 """The language interface for tl programs."""
 from __future__ import annotations
 
-from typing import Optional
 # from .parser import *
 # now is fully compatible with the upstream
 # tir script

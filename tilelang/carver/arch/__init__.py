@@ -1,10 +1,10 @@
 from __future__ import annotations
+
 from .arch_base import TileDevice
 from .cuda import *
 from .cpu import *
 from .cdna import *
 from .metal import *
-from typing import Union
 from tvm.target import Target
 import torch
 

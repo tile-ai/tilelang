@@ -7,14 +7,9 @@ from __future__ import annotations
 
 from typing import (
     Any,
-    List,
-    Union,
     Callable,
-    Tuple,
     overload,
     Literal,
-    Dict,  # For type hinting dicts
-    Optional,
 )
 from tilelang import tvm as tvm
 from tilelang.jit.adapter.utils import is_metal_target

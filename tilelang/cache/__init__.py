@@ -1,7 +1,7 @@
 """The cache utils with class and database persistence - Init file"""
 from __future__ import annotations
 
-from typing import List, Union, Literal, Optional
+from typing import Literal
 from tvm.target import Target
 from tvm.tir import PrimFunc
 from tilelang.jit import JITKernel
