@@ -900,6 +900,26 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   stream << ' ' << sret << ";\n";
   std::string src = SSAGetID(PrintExpr(op->value), from_ty);
 
+  // Handle conversion between float16 and float32
+  if (from_ty.is_float16() && target_ty.is_float()) {
+    // Use __half22float2 for vectorized conversion (half2 -> float2)
+    if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
+      PrintIndent();
+      stream << sret << " = __half22float2(*(half2*)(&(" << src << ")));\n";
+      os << sret;
+      return;
+    }
+  } else if (from_ty.is_float() && target_ty.is_float16()) {
+    // Use __float22half2_rn for vectorized conversion (float2 -> half2)
+    if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
+      PrintIndent();
+      stream << "*(half2*)(&(" << sret << ")) = __float22half2_rn(*(float2*)(&("
+             << src << ")));\n";
+      os << sret;
+      return;
+    }
+  }
+
   // Handle bfloat16 special cases with supported ops
   bool used_bf16_op = false;
   if (from_ty.is_bfloat16() || target_ty.is_bfloat16()) {
