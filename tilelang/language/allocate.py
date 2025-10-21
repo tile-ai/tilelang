@@ -67,7 +67,7 @@ def alloc_fragment(shape, dtype, scope="local.fragment"):
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_var(dtype, *args, scope="local.var", init: Union[PrimExpr]=None):
+def alloc_var(dtype, *args, scope="local.var", init: Union[PrimExpr] = None):
     """Allocate a single-element variable buffer.
 
     Args:
@@ -106,8 +106,7 @@ def alloc_var(dtype, *args, scope="local.var", init: Union[PrimExpr]=None):
         parsed_scope = parsed_scope_arg
     elif len(args) > 2:
         raise TypeError(
-            f"alloc_var expected at most 3 positional arguments but got {len(args) + 1}."
-        )
+            f"alloc_var expected at most 3 positional arguments but got {len(args) + 1}.")
 
     if not isinstance(parsed_scope, str):
         raise TypeError("Scope must be a string in alloc_var.")

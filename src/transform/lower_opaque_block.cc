@@ -72,7 +72,8 @@ private:
     if (!is_one(predicate)) {
       body = IfThenElse(predicate, std::move(body));
     }
-    // Step 3. Handle annotations, block annotations are not preserved by default.
+    // Step 3. Handle annotations, block annotations are not preserved by
+    // default.
     std::vector<std::pair<std::string, PrimExpr>> pragma_attrs;
     HandleAnnotations(new_block->annotations, &pragma_attrs, /*is_block=*/true,
                       new_block->alloc_buffers);
@@ -204,10 +205,11 @@ private:
    * \return New annotation dict with preserved keys. Also update pragma attr
    * pairs ordered by key.
    */
-  Map<String, ffi::Any> HandleAnnotations(
-      const Map<String, ffi::Any> &annotations,
-      std::vector<std::pair<std::string, PrimExpr>> *pragma_attrs, bool is_block,
-      const Array<Buffer> &alloc_buffers = Array<Buffer>()) {
+  Map<String, ffi::Any>
+  HandleAnnotations(const Map<String, ffi::Any> &annotations,
+                    std::vector<std::pair<std::string, PrimExpr>> *pragma_attrs,
+                    bool is_block,
+                    const Array<Buffer> &alloc_buffers = Array<Buffer>()) {
     Map<String, ffi::Any> preserved_annotations;
     pragma_attrs->clear();
     for (const auto &kv : annotations) {
@@ -215,15 +217,13 @@ private:
       if (tir::attr::IsPragmaKey(key)) {
         pragma_attrs->emplace_back(key, ConvertAttrValue(key, kv.second));
       } else if (key == tl::attr::kLocalVarInit) {
-        if (auto local_init_map =
-                kv.second.try_cast<Map<Var, PrimExpr>>()) {
+        if (auto local_init_map = kv.second.try_cast<Map<Var, PrimExpr>>()) {
           for (const auto &pair : local_init_map.value()) {
             local_var_init_map_.Set(pair.first, pair.second);
           }
         } else if (auto init_expr = kv.second.try_cast<PrimExpr>()) {
-          ICHECK(is_block)
-              << "`" << tl::attr::kLocalVarInit
-              << "` on non-block annotations is not supported";
+          ICHECK(is_block) << "`" << tl::attr::kLocalVarInit
+                           << "` on non-block annotations is not supported";
           Buffer target = ResolveLocalVarBuffer(alloc_buffers);
           if (!target.defined()) {
             LOG(WARNING) << "Failed to resolve buffer for `"

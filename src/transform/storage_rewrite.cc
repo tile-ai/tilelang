@@ -39,11 +39,11 @@
 #include <unordered_set>
 #include <utility>
 
+#include "../op/builtin.h"
 #include "arith/int_operator.h"
 #include "runtime/thread_storage_scope.h"
 #include "tir/ir/buffer_common.h"
 #include "tir/transforms/ir_utils.h"
-#include "../op/builtin.h"
 
 namespace tvm {
 namespace tl {
@@ -782,10 +782,9 @@ private:
           // simply use the original allocation.
           Map<String, ffi::Any> annotations =
               MakeAllocateAnnotations(e->alloc_var);
-          e->alloc_nest.push_back(
-              Allocate(e->alloc_var, alloc_type, e->allocs[0]->extents,
-                       e->allocs[0]->condition, Evaluate(0),
-                       std::move(annotations)));
+          e->alloc_nest.push_back(Allocate(
+              e->alloc_var, alloc_type, e->allocs[0]->extents,
+              e->allocs[0]->condition, Evaluate(0), std::move(annotations)));
           if (auto ptr = e->allocs[0]->body.as<DeclBufferNode>()) {
             e->alloc_nest.push_back(DeclBuffer(
                 RemapBuffer(ptr->buffer, e->alloc_var), Evaluate(0)));
@@ -843,10 +842,9 @@ private:
           combo_size = analyzer_.Simplify(combo_size);
           Map<String, ffi::Any> annotations =
               MakeAllocateAnnotations(e->alloc_var);
-          e->alloc_nest.push_back(Allocate(e->alloc_var, alloc_type,
-                                           {combo_size}, const_true(),
-                                           Evaluate(0),
-                                           std::move(annotations)));
+          e->alloc_nest.push_back(
+              Allocate(e->alloc_var, alloc_type, {combo_size}, const_true(),
+                       Evaluate(0), std::move(annotations)));
           if (IsSpecialTaggedMemory(e->scope)) {
             MemoryInfo info = GetMemoryInfo(e->scope.to_string());
             if (info.defined()) {
@@ -895,8 +893,7 @@ private:
     uint64_t type_bits = e->elem_type.bits() * e->elem_type.lanes();
     PrimExpr alloc_size = make_const(e->allocs[0]->extents[0].dtype(),
                                      (total_bits + type_bits - 1) / type_bits);
-    Map<String, ffi::Any> annotations =
-        MakeAllocateAnnotations(e->alloc_var);
+    Map<String, ffi::Any> annotations = MakeAllocateAnnotations(e->alloc_var);
     e->alloc_nest.push_back(Allocate(e->alloc_var, e->elem_type, {alloc_size},
                                      const_true(), Evaluate(0),
                                      std::move(annotations)));
