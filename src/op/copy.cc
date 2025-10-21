@@ -324,8 +324,13 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   PrimExpr dst_predicate = MakePredicate(analyzer, loop_vars, dst->shape, 1);
 
   PrimExpr value = BufferLoad(src, src_indices);
-  if (src->dtype != dst->dtype)
+  if (src->dtype != dst->dtype) {
+    // If dst is fp8 and src is bf16, first cast dst to fp32.
+    if (src->dtype.is_bfloat16() && dst->dtype.is_float8_e4m3()) {
+      value = Cast(DataType::Float(32), value);
+    }
     value = Cast(dst->dtype, value);
+  }
   if (src_predicate.defined())
     value = if_then_else(src_predicate, value, make_zero(dst->dtype));
 
