@@ -334,5 +334,4 @@ def test_fastmath_versions():
 
 
 if __name__ == "__main__":
-    tilelang.disable_cache()
     tilelang.testing.main()

@@ -4,8 +4,6 @@ import argparse
 import tilelang
 import tilelang.language as T
 
-tilelang.disable_cache()
-
 
 @tilelang.jit(
     out_idx=[2], pass_configs={
