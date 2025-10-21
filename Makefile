@@ -47,6 +47,10 @@ python-format-install:
 ruff-install:
 	$(call check_pip_install,ruff)
 
+.PHONY: lint-install
+lint-install:
+	$(PYTHON) -m pip install --requirement requirements-lint.txt
+
 .PHONY: docs-install
 docs-install:
 	$(PYTHON) -m pip install --requirement docs/requirements.txt
@@ -147,7 +151,7 @@ clean-docs:
 # Utility Functions
 
 .PHONY: format
-format: pre-commit python-format ruff clang-format
+format: lint-install pre-commit python-format ruff clang-format
 
 .PHONY: lint
 lint: format clang-tidy
