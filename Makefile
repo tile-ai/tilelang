@@ -172,6 +172,8 @@ clean-python:
 clean-build:
 	rm -rf build/ dist/ cmake-build/ cmake-build-*/
 	find $(PROJECT_PATH) -type f -name '*.so' -delete
+	find $(PROJECT_PATH) -type f -name '*.dylib' -delete
+	find $(PROJECT_PATH) -type d -name '*.dylib.dSYM' -prune -exec rm -rf '{}' +
 	rm -rf *.egg-info .eggs
 
 .PHONY: clean
