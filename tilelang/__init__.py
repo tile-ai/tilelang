@@ -3,11 +3,25 @@ import os
 import ctypes
 
 import logging
+import warnings
 from tqdm import tqdm
 
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 
-__version__ = version('tilelang')
+try:
+    __version__ = version('tilelang')
+except PackageNotFoundError:
+    try:
+        from version_provider import dynamic_metadata
+
+        __version__ = dynamic_metadata('version')
+    except Exception as exc:
+        warnings.warn(
+            f"tilelang version metadata unavailable ({exc!r}); using development version.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        __version__ = "0.0.dev0"
 
 
 class TqdmLoggingHandler(logging.Handler):

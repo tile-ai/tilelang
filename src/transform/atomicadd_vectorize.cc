@@ -227,6 +227,10 @@ private:
     if (legal_vectorize) {
       const BufferLoad dst_node = Downcast<BufferLoad>(node->args[0]);
       const BufferLoad value_node = Downcast<BufferLoad>(node->args[1]);
+      // The default memory order is relaxed
+      // Ref: src/tl_templates/cuda/atomic.h::AtomicAdd
+      const IntImm memory_order =
+          node->args.size() >= 3 ? Downcast<IntImm>(node->args[2]) : IntImm(0);
 
       Call address_of_dst =
           Call(DataType::Handle(), builtin::address_of(), {dst_node});
@@ -242,6 +246,7 @@ private:
       }
       new_args.push_back(address_of_dst);
       new_args.push_back(address_of_value);
+      new_args.push_back(memory_order);
 
       Call new_call =
           tvm::tir::Call(node->dtype, builtin::call_extern(), new_args);

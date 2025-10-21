@@ -429,7 +429,6 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
         }
       }
     });
-
     if (read_source_buffer.defined() && allow_layout_propgate) {
       loop_layout_ = compute_loop_layout_from_buffer(read_source_buffer);
     }

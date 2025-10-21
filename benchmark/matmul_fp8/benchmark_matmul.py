@@ -1,7 +1,7 @@
 import argparse
 import itertools
 import logging
-
+import tilelang
 import tilelang.language as T
 from tilelang.autotuner import autotune
 from tilelang import jit
@@ -190,6 +190,8 @@ def matmul(
 
             # Enable (or disable) swizzling optimization
             T.use_swizzle(panel_size=10, enable=enable_rasteration)
+            # to utilize swizzle tma layout
+            T.annotate_layout({C_shared: tilelang.layout.make_swizzled_layout(C_shared)})
 
             # Clear out the accumulation buffer
             T.clear(C_local)
@@ -239,11 +241,8 @@ if __name__ == "__main__":
     best_result = matmul(M, N, K, with_roller)
     best_latency = best_result.latency
     best_config = best_result.config
-    ref_latency = best_result.ref_latency
 
     # Print out the benchmark results
     print(f"Best latency (s): {best_latency}")
     print(f"Best TFlops: {total_flops / best_latency * 1e-9:.3f}")
     print(f"Best config: {best_config}")
-
-    print(f"Reference TFlops: {total_flops / ref_latency * 1e-9:.3f}")

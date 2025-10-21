@@ -332,7 +332,7 @@ jobs:
             uv run --no-project -m --
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=2 \
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=4 \
             ../examples
 
       # NVIDIA CUDA tests

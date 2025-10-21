@@ -103,8 +103,8 @@ def mqa_attn_return_logits(
     accum_dtype = "float"
     index_dtype = "int32"
 
-    seq_len = T.symbolic("seq_len")
-    seq_len_kv = T.symbolic("seq_len_kv")
+    seq_len = T.dynamic("seq_len")
+    seq_len_kv = T.dynamic("seq_len_kv")
 
     index_q_shape = [seq_len * heads, index_dim]
     index_k_shape = [seq_len_kv, index_dim]
@@ -182,8 +182,8 @@ def clean_logits_(
     threads: int = 512,
     block_K: int = 4096,
 ):
-    seq_len = T.symbolic("seq_len")
-    seq_len_kv = T.symbolic("seq_len_kv")
+    seq_len = T.dynamic("seq_len")
+    seq_len_kv = T.dynamic("seq_len_kv")
 
     dtype = "float"
     indices_dtype = "int32"

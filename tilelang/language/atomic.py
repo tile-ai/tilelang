@@ -128,6 +128,7 @@ def atomic_add(dst: Buffer,
         value (PrimExpr): Value to add atomically.
         memory_order (Optional[str]): Optional memory-order name controlling the atomic operation's ordering.
         return_prev (bool): If True, return the previous value; if False, return handle (default False).
+        use_tma (bool): If True, use TMA (cp.reduce) to perform the atomic add. This is available only for sm90+ (default False).
 
     Returns:
         PrimExpr: A handle representing the atomic addition operation, or the previous value if return_prev is True.
@@ -226,7 +227,11 @@ def atomic_add(dst: Buffer,
         raise NotImplementedError(
             "return_prev is not supported for tile-region-based atomic operations")
 
-    return T.call_intrin("handle", op.Op.get("tl.atomicadd"), value, dst, use_tma)
+    if memory_order is None:
+        return T.call_intrin("handle", op.Op.get("tl.atomicadd"), value, dst, use_tma, 0)
+    else:
+        return T.call_intrin("handle", op.Op.get("tl.atomicadd"), value, dst, use_tma,
+                             _MEMORY_ORDER_ID_MAP[memory_order])
 
 
 def atomic_addx2(dst: Buffer, value: PrimExpr, return_prev: bool = False) -> PrimExpr:
