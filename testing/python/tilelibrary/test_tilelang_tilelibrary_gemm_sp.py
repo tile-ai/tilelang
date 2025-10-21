@@ -5,7 +5,6 @@ import tilelang.testing
 from tilelang.utils.sparse import compress, randn_semi_sparse
 from tilelang.layout import make_metadata_layout
 
-tilelang.disable_cache()
 torch.set_printoptions(threshold=float('inf'), edgeitems=float('inf'), linewidth=10000)
 torch.manual_seed(42)
 

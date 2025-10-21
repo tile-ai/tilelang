@@ -59,14 +59,7 @@ def compile(
         Whether to enable verbose output (default: False).
     pass_configs : dict, optional
         Additional keyword arguments to pass to the Compiler PassContext.
-        Available options:
-            "tir.disable_vectorize": bool, default: False
-            "tl.disable_tma_lower": bool, default: False
-            "tl.disable_warp_specialized": bool, default: False
-            "tl.config_index_bitwidth": int, default: None
-            "tl.disable_dynamic_tail_split": bool, default: False
-            "tl.dynamic_vectorize_size_bits": int, default: 128
-            "tl.disable_safe_memory_legalize": bool, default: False
+        Refer to `tilelang.transform.PassConfigKey` for supported options.
     """
     assert isinstance(func, PrimFunc), f"target function must be a PrimFunc but got {type(func)}"
     if isinstance(compile_flags, str):

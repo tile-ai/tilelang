@@ -1937,6 +1937,8 @@ using namespace tir::transform;
 namespace transform {
 Pass StorageRewrite() {
   auto pass_func = [](PrimFunc f, const IRModule &m, PassContext ctx) {
+    bool detect_inplace =
+        ctx->GetConfig<Bool>(kStorageRewriteDetectInplace, Bool(false)).value();
     bool enable_reuse = true;
     bool reuse_require_exact_matched_dtype = false;
     bool merge_static_smem =
@@ -1968,7 +1970,7 @@ Pass StorageRewrite() {
     }
     auto *n = f.CopyOnWrite();
     StoragePlanRewriter plan_rewriter;
-    n->body = plan_rewriter.Rewrite(std::move(n->body), true, enable_reuse,
+    n->body = plan_rewriter.Rewrite(std::move(n->body), detect_inplace, enable_reuse,
                                     reuse_require_exact_matched_dtype,
                                     std::move(local_var_init_map));
     // Parameters may not be rewritten, but internal allocations may.

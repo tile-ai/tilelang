@@ -22,8 +22,6 @@ import torch.nn.functional as F
 torch.random.manual_seed(0)
 torch.set_printoptions(profile="full")
 
-tilelang.disable_cache()
-
 
 def prepare_input_fake(
     B,

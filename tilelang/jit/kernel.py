@@ -11,7 +11,7 @@ from tilelang.engine.param import CompiledArtifact, KernelParam
 from tilelang.jit.adapter import (BaseKernelAdapter, CtypesKernelAdapter, CythonKernelAdapter,
                                   NVRTCKernelAdapter, TorchDLPackKernelAdapter, MetalKernelAdapter)
 from tilelang.profiler import Profiler, TensorSupplyType
-from tilelang.utils.target import AVALIABLE_TARGETS, determine_target
+from tilelang.utils.target import determine_target
 import logging
 
 logger = logging.getLogger(__name__)
@@ -71,11 +71,7 @@ class JITKernel(object):
             Whether to enable verbose output (default: False).
         pass_configs : dict, optional
             Additional keyword arguments to pass to the Compiler PassContext.
-            Available options:
-                "tir.disable_vectorize": bool, default: False
-                "tl.disable_tma_lower": bool, default: False
-                "tl.disable_dynamic_tail_split": bool, default: False
-                "tl.dynamic_vectorize_size_bits": int, default: 128
+            Refer to `tilelang.PassConfigKey` for supported options.
         from_database : bool, optional
             Whether to create a TorchFunction from a database.
         """
@@ -90,13 +86,8 @@ class JITKernel(object):
 
         self.compile_flags = compile_flags
 
-        # If the target is specified as a string, validate it and convert it to a TVM Target.
-        if isinstance(target, str):
-            assert target in AVALIABLE_TARGETS, f"Invalid target: {target}"
-            target = determine_target(target)
-
-        # Ensure the target is always a TVM Target object.
-        self.target = Target(target)
+        # Ensure the target is always a valid TVM Target object.
+        self.target = determine_target(target, return_object=True)
 
         # Validate the execution backend.
         assert execution_backend in [
