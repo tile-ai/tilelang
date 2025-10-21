@@ -1942,9 +1942,9 @@ Pass StorageRewrite() {
       reuse_require_exact_matched_dtype = true;
     }
     auto *n = f.CopyOnWrite();
-    n->body = StoragePlanRewriter().Rewrite(
-        std::move(n->body), detect_inplace, enable_reuse,
-        reuse_require_exact_matched_dtype);
+    n->body = StoragePlanRewriter().Rewrite(std::move(n->body), detect_inplace,
+                                            enable_reuse,
+                                            reuse_require_exact_matched_dtype);
     // Parameters may not be rewritten, but internal allocations may.
     // Vectorization of AllocateConst is currently disabled, as it has
     // indexing issues for types that include padding (e.g. int8x3
