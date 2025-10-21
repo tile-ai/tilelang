@@ -49,9 +49,7 @@ def reshape(src: Buffer, shape: list[PrimExpr]) -> Buffer:
     return T.Tensor(shape, src.dtype, src.data)
 
 
-def view(src: Buffer,
-         shape: list[PrimExpr] | None = None,
-         dtype: str | None = None) -> Buffer:
+def view(src: Buffer, shape: list[PrimExpr] | None = None, dtype: str | None = None) -> Buffer:
     """
          Return a Tensor view of the input buffer with an optional new shape and dtype.
 

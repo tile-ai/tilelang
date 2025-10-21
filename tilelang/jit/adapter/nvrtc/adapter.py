@@ -181,9 +181,7 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         """
         return self.pymodule.call(self.kernels, *args, stream=stream)
 
-    def _wrap_forward_from_prebuild_lib(self,
-                                        *ins: list[torch.Tensor],
-                                        stream: int | None = None):
+    def _wrap_forward_from_prebuild_lib(self, *ins: list[torch.Tensor], stream: int | None = None):
         """High-level wrapper for kernel execution.
 
         Handles:

@@ -137,8 +137,7 @@ def gemm(
     stride_a = A_stride[-2]
     stride_b = B_stride[-2]
 
-    def retrieve_ptr(object: tir.Buffer | tir.BufferRegion,
-                     access_type: str = "r") -> tir.PrimExpr:
+    def retrieve_ptr(object: tir.Buffer | tir.BufferRegion, access_type: str = "r") -> tir.PrimExpr:
         if isinstance(object, tir.Buffer):
             return object.access_ptr(access_type)
         elif isinstance(object, tir.BufferRegion):
@@ -338,8 +337,7 @@ def gemm_v2(
     stride_a = A_stride[-2]
     stride_b = B_stride[-2]
 
-    def retrieve_ptr(object: tir.Buffer | tir.BufferRegion,
-                     access_type: str = "r") -> tir.PrimExpr:
+    def retrieve_ptr(object: tir.Buffer | tir.BufferRegion, access_type: str = "r") -> tir.PrimExpr:
         if isinstance(object, tir.Buffer):
             return object.access_ptr(access_type)
         elif isinstance(object, tir.BufferRegion):

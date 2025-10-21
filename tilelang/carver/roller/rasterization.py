@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 
-
 class Rasterization:
 
     panel_width_ = None

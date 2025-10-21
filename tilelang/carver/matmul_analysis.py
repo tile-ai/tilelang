@@ -554,8 +554,7 @@ def get_tensorized_func_and_tags(
         sm_version = arch.replace("sm_", "")
         return int(sm_version) if sm_version.isdigit() else -1
 
-    def analysis_tensorcore_tags(sch: tir.Schedule, block: BlockRV,
-                                 target: Target) -> bool | dict:
+    def analysis_tensorcore_tags(sch: tir.Schedule, block: BlockRV, target: Target) -> bool | dict:
         tags: dict[str, list[int] | int] = {}
         block_stmt = sch.get(block)
 

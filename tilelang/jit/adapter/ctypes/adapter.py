@@ -194,9 +194,7 @@ class CtypesKernelAdapter(BaseKernelAdapter):
         ctypes_args.append(ctypes.c_void_p(stream))
         self.lib.call(*ctypes_args)
 
-    def _wrap_forward_from_prebuild_lib(self,
-                                        *ins: list[torch.Tensor],
-                                        stream: int | None = None):
+    def _wrap_forward_from_prebuild_lib(self, *ins: list[torch.Tensor], stream: int | None = None):
         """High-level wrapper for kernel execution.
 
         Handles:

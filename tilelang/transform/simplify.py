@@ -28,8 +28,7 @@ def Simplify(simplify_arguments: bool = False):
     return _ffi_api.Simplify(simplify_arguments)  # type: ignore
 
 
-def _Simplify(stmt: PrimFunc | IRModule,
-              inline_let: bool = False) -> PrimFunc | IRModule:
+def _Simplify(stmt: PrimFunc | IRModule, inline_let: bool = False) -> PrimFunc | IRModule:
     if isinstance(stmt, PrimFunc):
         if inline_let:
             mod = LetInline()(IRModule.from_expr(stmt))
@@ -60,7 +59,6 @@ def simplify_prim_func(func: Callable) -> Callable:
     return wrapper
 
 
-def apply_simplify(stmt: PrimFunc | IRModule,
-                   inline_let: bool = False) -> PrimFunc | IRModule:
+def apply_simplify(stmt: PrimFunc | IRModule, inline_let: bool = False) -> PrimFunc | IRModule:
     """Apply Simplify pass to a PrimFunc or IRModule."""
     return _Simplify(stmt, inline_let)

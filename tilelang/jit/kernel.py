@@ -296,16 +296,15 @@ class JITKernel:
 
         return adapter
 
-    def _create_adapter_from_database(
-            self,
-            params: list[KernelParam],
-            result_idx: list[int] | int,
-            target: str | Target,
-            func_or_mod: PrimFunc | tvm.runtime.Module,
-            kernel_global_source: str,
-            kernel_lib_path: str,
-            pass_configs: dict[str, Any] | None = None,
-            compile_flags: list[str] | None = None) -> BaseKernelAdapter:
+    def _create_adapter_from_database(self,
+                                      params: list[KernelParam],
+                                      result_idx: list[int] | int,
+                                      target: str | Target,
+                                      func_or_mod: PrimFunc | tvm.runtime.Module,
+                                      kernel_global_source: str,
+                                      kernel_lib_path: str,
+                                      pass_configs: dict[str, Any] | None = None,
+                                      compile_flags: list[str] | None = None) -> BaseKernelAdapter:
         target = self.target
         execution_backend = self.execution_backend
 

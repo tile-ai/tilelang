@@ -69,11 +69,10 @@ def get_roller_hints_from_func(func_or_module: tir.PrimFunc | IRModule,
     return roller_hints
 
 
-def get_roller_hints_from_output_nodes(
-        output_nodes: list[OutputNode],
-        arch: TileDevice,
-        topk: int = 10,
-        extra_tags: list[str] | None = None) -> list[Hint] | None:
+def get_roller_hints_from_output_nodes(output_nodes: list[OutputNode],
+                                       arch: TileDevice,
+                                       topk: int = 10,
+                                       extra_tags: list[str] | None = None) -> list[Hint] | None:
     assert isinstance(output_nodes, list), "The input should be a list of functions."
 
     lints = []

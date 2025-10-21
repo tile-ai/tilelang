@@ -44,10 +44,7 @@ class DefaultPolicy:
         return cls(arch, tags)._init_with_prim_func(func, name)
 
     @classmethod
-    def from_output_nodes(cls,
-                          nodes: list[OutputNode],
-                          arch: TileDevice,
-                          tags: dict | None = None):
+    def from_output_nodes(cls, nodes: list[OutputNode], arch: TileDevice, tags: dict | None = None):
         return cls(arch, tags)._init_with_output_nodes(nodes)
 
     def _init_with_prim_func(self,

@@ -400,9 +400,7 @@ class PrimFuncNode(Node):
             results.append(trimmed_shape)
         return results
 
-    def propagate_reduction_inputs(self,
-                                   shape,
-                                   rstep: dict | None = None) -> dict[str, list[int]]:
+    def propagate_reduction_inputs(self, shape, rstep: dict | None = None) -> dict[str, list[int]]:
         if rstep is None:
             rstep = {}
         if self.reduction_block is None:

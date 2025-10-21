@@ -19,7 +19,6 @@
 """The tir expression operation registration"""
 from __future__ import annotations
 
-
 from tvm import tir
 from tvm.ffi.runtime_ctypes import DataType, DataTypeCode
 from tvm.tir import IntImm
