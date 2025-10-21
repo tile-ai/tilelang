@@ -1,21 +1,22 @@
 """The profiler and convert to torch utils"""
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, List, Callable, Optional
+from typing import Any, Callable
 from tilelang.engine.param import KernelParam
 
 
 class BaseKernelAdapter(ABC):
 
-    func: Optional[Callable] = None
+    func: Callable | None = None
 
-    def __init__(self, mod, params: List[KernelParam], result_idx: List[int]) -> None:
+    def __init__(self, mod, params: list[KernelParam], result_idx: list[int]) -> None:
         self.mod = mod
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
         self._post_init()
 
-    def _legalize_result_idx(self, result_idx: Optional[List[int]]) -> List[int]:
+    def _legalize_result_idx(self, result_idx: list[int] | None) -> list[int]:
         params = self.params
         # result_idx is a list of indices of the output tensors
         if result_idx is None:

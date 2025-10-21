@@ -1,7 +1,7 @@
+from __future__ import annotations
 import tvm
 from tvm.target import Target
 from .arch_base import TileDevice
-from typing import List, Union
 from .driver import cuda_driver
 
 
@@ -91,21 +91,21 @@ def is_tensorcore_supported_precision(in_dtype: str, accum_dtype: str, arch: Til
         raise ValueError(f"Unsupported architecture: {arch}")
 
 
-class TensorInstruction(object):
+class TensorInstruction:
 
     def __init__(
         self,
         name: str,
-        shape: List[int],
+        shape: list[int],
     ):
         self.name: str = name
         # only hold the shape of M and N
-        self.shape: List[int] = shape
+        self.shape: list[int] = shape
 
 
 class CUDA(TileDevice):
 
-    def __init__(self, target: Union[Target, str]):
+    def __init__(self, target: Target | str):
         if isinstance(target, str):
             target = tvm.target.Target(target)
         self.target = target
@@ -126,15 +126,15 @@ class CUDA(TileDevice):
         self.sm_partition: int = 4
         self.l2_cache_size_bytes: int = target.l2_cache_size_bytes
         # the number of transaction size in bytes
-        self.transaction_size: List[int] = [32, 128]  # in bytes
+        self.transaction_size: list[int] = [32, 128]  # in bytes
         # bandwidth in MB/s, will be used for recommend basic tile size
         # TODO(lei): find some way to get the real bandwidth
         # However, the ratio of bandwidth between different devices can
         # be similar. The bandwidth can work for another devices as well.
-        self.bandwidth: List[int] = [750, 12080]
+        self.bandwidth: list[int] = [750, 12080]
         # get the available tensor instructions during runtime to avoid
         # the dependency of the tensor intrinsics registration
-        self.available_tensor_instructions: List[TensorInstruction] = None
+        self.available_tensor_instructions: list[TensorInstruction] = None
 
     def get_avaliable_tensorintrin_shapes(self):
         self.available_tensor_instructions = (

@@ -1,5 +1,6 @@
+from __future__ import annotations
 import tilelang.language as T
-from typing import Union, Tuple, Optional, Literal, Callable
+from typing import Literal, Callable
 from tilelang.common import TransformKind
 from tvm import DataType
 from tvm.tir import PrimExpr, IndexMap, Buffer, Var
@@ -25,7 +26,7 @@ from tilelang.intrinsics.mma_layout import (
 lift = convert
 
 
-class TensorCoreIntrinEmitter(object):
+class TensorCoreIntrinEmitter:
     """
     To eliminate Python syntax within TIR Macro.
     """
@@ -62,8 +63,8 @@ class TensorCoreIntrinEmitter(object):
         chunk: int = 16,
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
-        is_m_first: Optional[bool] = False,
-        thread_var: Optional[Var] = None,
+        is_m_first: bool | None = False,
+        thread_var: Var | None = None,
     ):
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
@@ -144,7 +145,7 @@ class TensorCoreIntrinEmitter(object):
         self.micro_size_x = m_dim
         self.micro_size_k = k_dim
 
-    def _initialize_is_m_first(self, is_m_first: Optional[bool] = False):
+    def _initialize_is_m_first(self, is_m_first: bool | None = False):
         if is_m_first is not None:
             self.is_m_first = is_m_first
 
@@ -167,7 +168,7 @@ class TensorCoreIntrinEmitter(object):
     def extract_thread_binding(
             self,
             thread_id: PrimExpr,
-            is_m_first: Optional[bool] = None) -> Tuple[PrimExpr, PrimExpr, PrimExpr]:
+            is_m_first: bool | None = None) -> tuple[PrimExpr, PrimExpr, PrimExpr]:
         """
         is_m_first: True if the thread binding is in the form of (tx, warp_n, warp_m)
         which represents [warp_size, block_row_warps (split n), block_col_warps (split m)]
@@ -200,7 +201,7 @@ class TensorCoreIntrinEmitter(object):
                    A_local_buf: Buffer,
                    A_shared_buf: Buffer,
                    ki: PrimExpr,
-                   rk: Optional[PrimExpr] = 0):
+                   rk: PrimExpr | None = 0):
         warp_row_tiles = self.warp_row_tiles
         warp_rows = self.warp_rows
         chunk = self.chunk
@@ -264,7 +265,7 @@ class TensorCoreIntrinEmitter(object):
                    B_local_buf: Buffer,
                    B_shared_buf: Buffer,
                    ki: PrimExpr,
-                   rk: Optional[PrimExpr] = 0):
+                   rk: PrimExpr | None = 0):
         warp_col_tiles = self.warp_col_tiles
         warp_cols = self.warp_cols
         chunk = self.chunk
@@ -336,7 +337,7 @@ class TensorCoreIntrinEmitter(object):
             A_local_buf: Buffer,
             B_local_buf: Buffer,
             C_local_buf: Buffer,
-            k_inner: Optional[PrimExpr] = 0):
+            k_inner: PrimExpr | None = 0):
         warp_rows = self.warp_rows
         warp_cols = self.warp_cols
         local_size_a = self.local_size_a
@@ -518,8 +519,7 @@ class TensorCoreIntrinEmitter(object):
         else:
             raise ValueError(f"Unsupported matrix {matrix}")
 
-        assert is_fragment(local_buf), "local_buf must be a fragment, but got {}".format(
-            local_buf.scope())
+        assert is_fragment(local_buf), f"local_buf must be a fragment, but got {local_buf.scope()}"
 
         if matrix_is_a:
             micro_size_s, micro_size_r = self.micro_size_x, self.micro_size_k
@@ -684,9 +684,9 @@ class TensorCoreIntrinEmitterWithLadderTransform(TensorCoreIntrinEmitter):
         chunk: int = 16,
         reduce_k: int = 1,
         num_elems_per_byte: int = 1,
-        is_m_first: Optional[bool] = False,
-        transform_kind_a: Union[int, TransformKind] = 0,
-        transform_kind_b: Union[int, TransformKind] = 0,
+        is_m_first: bool | None = False,
+        transform_kind_a: int | TransformKind = 0,
+        transform_kind_b: int | TransformKind = 0,
     ):
         super().__init__(
             a_dtype=a_dtype,

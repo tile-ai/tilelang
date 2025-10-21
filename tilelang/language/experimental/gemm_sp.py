@@ -1,16 +1,16 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
 from tilelang.primitives.gemm.base import GemmWarpPolicy
 import tilelang.language as T
 from tvm import tir
-from typing import Union
 
 
 def gemm_sp(
-    A_sparse: Union[tir.Buffer, tir.Var],
-    E: Union[tir.Buffer, tir.Var],
-    B: Union[tir.Buffer, tir.Var],
-    C: Union[tir.Buffer, tir.Var],
+    A_sparse: tir.Buffer | tir.Var,
+    E: tir.Buffer | tir.Var,
+    B: tir.Buffer | tir.Var,
+    C: tir.Buffer | tir.Var,
     transpose_A: bool = False,
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
@@ -42,7 +42,7 @@ def gemm_sp(
         AssertionError: If the K dimensions of matrices A and B don't match
     """
 
-    def legalize_arguments(arg: Union[tir.Buffer, tir.Var]):
+    def legalize_arguments(arg: tir.Buffer | tir.Var):
         """Convert let-bound variables to their corresponding buffers.
 
         Args:

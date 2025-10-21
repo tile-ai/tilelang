@@ -1,6 +1,7 @@
 """Annotation helpers exposed on the TileLang language surface."""
+from __future__ import annotations
 
-from typing import Callable, Dict
+from typing import Callable
 
 from tilelang.layout import Layout
 from tvm.script.parser.tir import attr, block_attr
@@ -21,7 +22,7 @@ def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
     return attr(None, "threadblock_swizzle_pattern", f"tl::{device_func}<{panel_size}>")
 
 
-def annotate_layout(layout_map: Dict):
+def annotate_layout(layout_map: dict):
     """Annotate the layout of the buffer."""
     _layout_map = {}
     for buffer, layout in layout_map.items():
@@ -35,7 +36,7 @@ def annotate_layout(layout_map: Dict):
     return block_attr({"layout_map": _layout_map})
 
 
-def annotate_safe_value(safe_value_map: Dict):
+def annotate_safe_value(safe_value_map: dict):
     """Annotate the safe value of the buffer."""
     _safe_value_map = {}
     for buffer, safe_value in safe_value_map.items():
@@ -43,7 +44,7 @@ def annotate_safe_value(safe_value_map: Dict):
     return block_attr({"safe_value_map": _safe_value_map})
 
 
-def annotate_l2_hit_ratio(l2_hit_ratio_map: Dict):
+def annotate_l2_hit_ratio(l2_hit_ratio_map: dict):
     """Annotate the L2 hit ratio of the buffer."""
     _l2_hit_ratio_map = {}
     for buffer, hit_ratio in l2_hit_ratio_map.items():

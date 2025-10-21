@@ -1,6 +1,6 @@
 """Rasteration Plan For L2 Cache Locality"""
+from __future__ import annotations
 
-from typing import List
 
 
 class Rasterization:
@@ -10,7 +10,7 @@ class Rasterization:
     def __init__(self) -> None:
         pass
 
-    def get_code(self) -> List[str]:
+    def get_code(self) -> list[str]:
         raise NotImplementedError()
 
     @property
@@ -27,7 +27,7 @@ class NoRasterization(Rasterization):
     def __repr__(self) -> str:
         return "<NoRasterization>"
 
-    def get_code(self) -> List[str]:
+    def get_code(self) -> list[str]:
         return []
 
 
@@ -47,7 +47,7 @@ class Rasterization2DRow(Rasterization):
     def __repr__(self) -> str:
         return f"<Rasterization2DRow({self.panel_width_})>"
 
-    def get_code(self) -> List[str]:
+    def get_code(self) -> list[str]:
         raise NotImplementedError()
 
 
@@ -84,10 +84,10 @@ __device__ __inline__ dim3 rasterization2DColumn(const int panel_width) {
 }
     """
 
-    def get_code(self, panel_width: int = None) -> List[str]:
+    def get_code(self, panel_width: int = None) -> list[str]:
         if panel_width is None:
             panel_width = self.panel_width_
         return [
             self.get_device_function(),
-            "const dim3 blockIdx = rasterization2DColumn({});\n".format(panel_width),
+            f"const dim3 blockIdx = rasterization2DColumn({panel_width});\n",
         ]

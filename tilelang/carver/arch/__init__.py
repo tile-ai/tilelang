@@ -1,3 +1,4 @@
+from __future__ import annotations
 from .arch_base import TileDevice
 from .cuda import *
 from .cpu import *
@@ -8,7 +9,7 @@ from tvm.target import Target
 import torch
 
 
-def get_arch(target: Union[str, Target] = "cuda") -> TileDevice:
+def get_arch(target: str | Target = "cuda") -> TileDevice:
     if isinstance(target, str):
         target = Target(target)
 

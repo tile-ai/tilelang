@@ -2,11 +2,11 @@
 # modified from apache tvm python/tvm/contrib/nvcc.py
 """Utility to invoke nvcc compiler in the system"""
 from __future__ import absolute_import as _abs
+from __future__ import annotations
 
 import os
 import subprocess
 import warnings
-from typing import Tuple
 from tilelang.env import CUDA_HOME
 
 import tvm.ffi
@@ -299,7 +299,7 @@ def get_target_compute_version(target=None):
                      "Try specifying it by adding '-arch=sm_xx' to your target.")
 
 
-def parse_compute_version(compute_version) -> Tuple[int, int]:
+def parse_compute_version(compute_version) -> tuple[int, int]:
     """Parse compute capability string to divide major and minor version
 
     Parameters

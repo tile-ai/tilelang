@@ -1,4 +1,5 @@
-from typing import Any, Optional
+from __future__ import annotations
+from typing import Any
 import tvm
 from tvm.ir import PrimExpr
 from tvm.ir.base import Span
@@ -1857,7 +1858,7 @@ def min_value(dtype, span=None):
     return _tvm_op.min_value(dtype, span)
 
 
-def max_value(dtype: str, span: Optional[Span] = None) -> Any:
+def max_value(dtype: str, span: Span | None = None) -> Any:
     """maximum value of dtype
 
     Parameters
@@ -1876,7 +1877,7 @@ def max_value(dtype: str, span: Optional[Span] = None) -> Any:
     return _tvm_op.max_value(dtype, span)
 
 
-def infinity(dtype: str, span: Optional[Span] = None) -> Any:
+def infinity(dtype: str, span: Span | None = None) -> Any:
     """infinity value of dtype
 
     Parameters
@@ -1895,7 +1896,7 @@ def infinity(dtype: str, span: Optional[Span] = None) -> Any:
     return _tvm_op.infinity(dtype, span)
 
 
-def reinterpret(dtype, value, span: Optional[Span] = None) -> Any:
+def reinterpret(dtype, value, span: Span | None = None) -> Any:
     """infinity value of dtype
 
     Parameters
