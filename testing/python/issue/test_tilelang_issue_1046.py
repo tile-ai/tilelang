@@ -9,7 +9,7 @@ BF16 = "bfloat16"
 
 @tilelang.jit
 def test_kernel(N, in_dtype=BF16, out_dtype=FP8):
-    M = T.symbolic("M")
+    M = T.dynamic("M")
     blk_m = 128
     group_size = 128
 
