@@ -11,7 +11,6 @@ from bert_padding import pad_input, unpad_input
 torch.manual_seed(1)
 
 
-
 def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random"):
     assert mode in ["full", "random", "third"]
     if mode == "full":
@@ -369,16 +368,19 @@ def flashattn_bwd_atomic_add(batch,
                 T.clear(dq)
                 T.gemm(dsT_shared, K_shared, dq, transpose_A=True)
                 T.atomic_add(
-                    dQ[q_start_idx + k_base * block_N : q_start_idx + k_base * block_N + block_N, bx, :],
+                    dQ[q_start_idx + k_base * block_N:q_start_idx + k_base * block_N + block_N,
+                       bx, :],
                     dq,
                     memory_order="release")
 
             T.atomic_add(
-                dV[k_start_idx + by * block_M : k_start_idx + by * block_M + block_M, bx // groups, :],
+                dV[k_start_idx + by * block_M:k_start_idx + by * block_M + block_M,
+                   bx // groups, :],
                 dv,
                 memory_order="release")
             T.atomic_add(
-                dK[k_start_idx + by * block_M : k_start_idx + by * block_M + block_M, bx // groups, :],
+                dK[k_start_idx + by * block_M:k_start_idx + by * block_M + block_M,
+                   bx // groups, :],
                 dk,
                 memory_order="release")
 
