@@ -22,15 +22,9 @@ from tilelang.utils.tensor import map_torch_type
 logger = logging.getLogger(__name__)
 
 try:
-    # Prefer packaged extension under tilelang/
-    from tilelang.tilelang_cython_wrapper import CythonKernelWrapper
+    from tilelang_cython_wrapper import CythonKernelWrapper
 except ImportError:
-    try:
-        # Fallback for dev builds where the module sits at the root
-        from tilelang_cython_wrapper import CythonKernelWrapper
-    except ImportError:
-        # TODO: tolerance a build without cython backend
-        raise
+    raise
 
 
 def is_symbolic_expr(expr) -> bool:
