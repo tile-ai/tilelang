@@ -113,7 +113,7 @@ def alloc_var(dtype, *args, scope="local.var", init: Union[PrimExpr] = None):
 
     buffer = T.alloc_buffer([1], dtype, scope=parsed_scope)
     if parsed_init is not None:
-        block_attr({"tl.local_var_init": parsed_init})
+        block_attr({"tl.local_var_init": {buffer.data: parsed_init}})
     return buffer
 
 
