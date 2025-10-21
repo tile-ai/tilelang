@@ -93,9 +93,10 @@ exclude = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Only enable type hint checks in src
+# Do not upgrade type hint in testing and examples.
 # See https://github.com/tile-ai/tilelang/issues/1079 for more information.
-"!tilelang/**.py" = ["UP", "FA"]
+"testing/**.py" = ["UP", "FA"]
+"examples/**.py" = ["UP", "FA"]
 
 [tool.ruff.lint]
 select = [
