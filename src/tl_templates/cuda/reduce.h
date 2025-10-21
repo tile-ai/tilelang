@@ -40,6 +40,53 @@ struct BitXorOp {
   }
 };
 
+template <class Reducer, int Threads, bool UseAbs, bool NeedAccumulate>
+struct SharedReduceWarp {
+  template <typename T>
+  static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
+                            int total_dest, int reduce_extent, int tail,
+                            T init_value) {
+    if (total_dest <= 0 || reduce_extent <= 0)
+      return;
+    constexpr int kWarpSize = 32;
+    static_assert(Threads % kWarpSize == 0,
+                  "SharedReduceWarp expects blockDim.x to be a multiple of "
+                  "warp size on CUDA.");
+    const int tid = threadIdx.x;
+    const int warp_id = tid / kWarpSize;
+    const int lane = tid % kWarpSize;
+    const int num_warps = Threads / kWarpSize;
+    for (int dest_idx = warp_id; dest_idx < total_dest; dest_idx += num_warps) {
+      const int prefix = tail == 1 ? dest_idx : dest_idx / tail;
+      const int suffix = tail == 1 ? 0 : dest_idx % tail;
+      const int src_base = (prefix * reduce_extent) * tail + suffix;
+      const int dst_index = prefix * tail + suffix;
+
+      T partial = init_value;
+      for (int rv = lane; rv < reduce_extent; rv += kWarpSize) {
+        T val = src[src_base + rv * tail];
+        if constexpr (UseAbs) {
+          val = val < T(0) ? -val : val;
+        }
+        partial = Reducer()(partial, val);
+      }
+
+      unsigned mask = __activemask();
+      for (int offset = kWarpSize / 2; offset > 0; offset >>= 1) {
+        T other = __shfl_down_sync(mask, partial, offset);
+        partial = Reducer()(partial, other);
+      }
+
+      if (lane == 0) {
+        if constexpr (NeedAccumulate) {
+          partial = Reducer()(dst[dst_index], partial);
+        }
+        dst[dst_index] = partial;
+      }
+    }
+  }
+};
+
 template <class Reducer, int threads, int scale, int thread_offset = 0,
           int all_threads = threads>
 struct AllReduce {

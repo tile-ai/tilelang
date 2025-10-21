@@ -22,6 +22,7 @@ public:
       dst_range;          ///< Access ranges for source and destination
   IntImm use_tma;         ///< Whether to use TMA for memory operations
   IntImm coalesced_width; ///< Width for memory coalescing optimization
+  IntImm memory_order;    ///< Memory order for atomic operations
 
   mutable ParallelOp par_op_; ///< Associated parallel operation
   static constexpr const char *_type_key = "tl.AtomicAdd";
@@ -41,7 +42,8 @@ public:
         .def_ro("src_range", &AtomicAddNode::src_range)
         .def_ro("dst_range", &AtomicAddNode::dst_range)
         .def_ro("use_tma", &AtomicAddNode::use_tma)
-        .def_ro("coalesced_width", &AtomicAddNode::coalesced_width);
+        .def_ro("coalesced_width", &AtomicAddNode::coalesced_width)
+        .def_ro("memory_order", &AtomicAddNode::memory_order);
   }
 
   bool SEqualReduce(const AtomicAddNode *other, SEqualReducer equal) const {
@@ -49,7 +51,8 @@ public:
            equal(src_range, other->src_range) &&
            equal(dst_range, other->dst_range) &&
            equal(use_tma, other->use_tma) &&
-           equal(coalesced_width, other->coalesced_width);
+           equal(coalesced_width, other->coalesced_width) &&
+           equal(memory_order, other->memory_order);
   }
 
   void SHashReduce(SHashReducer hash_reduce) const {
@@ -59,6 +62,7 @@ public:
     hash_reduce(dst_range);
     hash_reduce(use_tma);
     hash_reduce(coalesced_width);
+    hash_reduce(memory_order);
   }
 
   static constexpr bool _type_has_method_sequal_reduce = true;

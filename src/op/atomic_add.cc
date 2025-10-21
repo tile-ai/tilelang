@@ -58,8 +58,12 @@ AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) {
   if (args.size() >= 3) {
     node->use_tma = Downcast<IntImm>(args[2]);
   }
+  node->memory_order = IntImm(0);
   if (args.size() >= 4) {
-    node->coalesced_width = Downcast<IntImm>(args[3]);
+    node->memory_order = Downcast<IntImm>(args[3]);
+  }
+  if (args.size() >= 5) {
+    node->coalesced_width = Downcast<IntImm>(args[4]);
   }
   data_ = std::move(node);
 }
@@ -285,6 +289,7 @@ For AtomicAddNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
 
   new_args.push_back(dst_value);
   new_args.push_back(src_value);
+  new_args.push_back(memory_order);
 
   Call atomicadd_call =
       tvm::tir::Call(dst->dtype, atomicadd_elem_op(), new_args);

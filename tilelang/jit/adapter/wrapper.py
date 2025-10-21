@@ -12,7 +12,7 @@ from tvm.tir.stmt_functor import post_order_visit
 
 PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY = """
     cudaError_t result_{0} = cudaFuncSetAttribute({0}, cudaFuncAttributeMaxDynamicSharedMemorySize, {1});
-    if (result_{0} != CUDA_SUCCESS) {{
+    if (result_{0} != cudaSuccess) {{
         snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed dynamic shared memory size to %d with error: %s", {1}, cudaGetErrorString(result_{0}));
         return -1;
     }}

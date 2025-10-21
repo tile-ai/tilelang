@@ -226,7 +226,6 @@ jobs:
             echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
             echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
           fi
-
           export CLANG_TIDY_CMAKE_OPTIONS="${CLANG_TIDY_CMAKE_OPTIONS} -DUSE_METAL=ON"
 
           echo "USE_METAL=ON" | tee -a "${GITHUB_ENV}"
