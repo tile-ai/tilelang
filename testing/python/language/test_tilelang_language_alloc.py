@@ -142,6 +142,7 @@ def alloc_multi_vars_with_initializer(
 
     return main
 
+
 def run_alloc_multi_vars_with_initializer(
     N,
     block_N,
@@ -158,6 +159,7 @@ def run_alloc_multi_vars_with_initializer(
 
 def test_alloc_multi_vars_with_initializer():
     run_alloc_multi_vars_with_initializer(256, 64, "int32")
+
 
 if __name__ == "__main__":
     tilelang.testing.main()
