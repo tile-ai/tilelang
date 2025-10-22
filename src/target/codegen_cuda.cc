@@ -942,6 +942,48 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     }
   }
 
+  // Handle conversion between bfloat16 and float32
+  if (from_ty.is_bfloat16() && target_ty.is_float()) {
+    // Use __bfloat1622float2 for vectorized conversion (bfloat162 -> float2)
+    if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
+      // bfloat162 -> float2
+      PrintIndent();
+      stream << sret << " = __bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&(" << src << ")));\n";
+      os << sret;
+      return;
+    } else if (from_ty.lanes() == 4 && target_ty.lanes() == 4) {
+      // bfloat162x2 -> float4
+      PrintIndent();
+      stream << "((float2*)(&" << sret << "))[0] = "
+             << "__bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&(" << src << ")));\n";
+      PrintIndent();
+      stream << "((float2*)(&" << sret << "))[1] = "
+             << "__bfloat1622float2(*(reinterpret_cast<__nv_bfloat162*>(&(" << src << "))+1));\n";
+      os << sret;
+      return;
+    }
+  } else if (from_ty.is_float() && target_ty.is_bfloat16()) {
+    // Use __float22bfloat162_rn for vectorized conversion (float2 -> bfloat162)
+    if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
+      // float2 -> bfloat162
+      PrintIndent();
+      stream << "*reinterpret_cast<__nv_bfloat162*>(&(" << sret << ")) = __float22bfloat162_rn(*(float2*)(&("
+             << src << ")));\n";
+      os << sret;
+      return;
+    } else if (from_ty.lanes() == 4 && target_ty.lanes() == 4) {
+      // float4 -> bfloat162x2
+      PrintIndent();
+      stream << "(reinterpret_cast<__nv_bfloat162*>(&" << sret << "))[0] = "
+             << "__float22bfloat162_rn(*(float2*)(&(" << src << ")));\n";
+      PrintIndent();
+      stream << "(reinterpret_cast<__nv_bfloat162*>(&" << sret << "))[1] = "
+             << "__float22bfloat162_rn(*((float2*)(&(" << src << "))+1));\n";
+      os << sret;
+      return;
+    }
+  }
+
   // Handle conversion from float32 to float8 (E4M3/E5M2)
   if (from_ty.is_float() &&
       (target_ty.is_float8_e4m3() || target_ty.is_float8_e5m2())) {
@@ -974,63 +1016,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     }
   }
 
-  // Handle bfloat16 special cases with supported ops
-  // NOTE(wt): Currently bf16 related ops don't support lanes=4,
-  // We should add this in the future.
-  bool used_bf16_op = false;
-  if (from_ty.is_bfloat16() || target_ty.is_bfloat16()) {
-    std::ostringstream func_name;
-    if (from_ty.is_bfloat16()) {
-      func_name << "bf16";
-    } else if (from_ty.is_float()) {
-      func_name << "float";
-    }
-    if (from_ty.lanes() > 1) {
-      func_name << from_ty.lanes();
-    }
-    func_name << "2";
-    if (target_ty.is_bfloat16()) {
-      func_name << "bf16";
-    } else if (target_ty.is_float()) {
-      func_name << "float";
-    } else if (target_ty == DataType::Int(16)) {
-      func_name << "int16";
-    }
-    if (target_ty.lanes() > 1) {
-      func_name << target_ty.lanes();
-    }
-
-    auto fname = func_name.str();
-    if (bf16_supported_ops_.count(fname)) {
-      used_bf16_op = true;
-      stream << "#ifdef ENABLE_BF16\n";
-      PrintIndent();
-      stream << "reinterpret_cast<";
-      if (target_ty.is_bfloat16()) {
-        stream << "__nv_bfloat16";
-      } else {
-        PrintType(target_ty.element_of(), stream);
-      }
-      if (target_ty.lanes() > 1) {
-        stream << target_ty.lanes();
-      }
-      stream << " &>(" << sret << ") = fastertransformer::" << fname
-             << "(reinterpret_cast<";
-      if (from_ty.is_bfloat16()) {
-        stream << "__nv_bfloat16";
-      } else {
-        PrintType(from_ty.element_of(), stream);
-      }
-      if (from_ty.lanes() > 1) {
-        stream << from_ty.lanes();
-      }
-      stream << " const &>(" << src << "));\n";
-      stream << "#else\n";
-      // bf16 cases don't need early return, as we use elementwise cast as
-      // fallback
-    }
-  }
-
   // Fallback: elementwise cast
   for (int i = 0, lanes = from_ty.lanes(); i < lanes; ++i) {
     std::ostringstream val;
@@ -1042,9 +1027,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     PrintVecElemStore(sret, target_ty, i, val.str());
   }
 
-  if (used_bf16_op) {
-    stream << "#endif\n";
-  }
   os << sret;
 }
 

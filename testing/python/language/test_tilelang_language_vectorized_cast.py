@@ -11,7 +11,7 @@ str2dtype = {
 }
 
 
-@tilelang.jit(compile_flags=['-DENABLE_BF16'])
+@tilelang.jit
 def vectorized_cast_kernel(M: int, dtype_A: str, dtype_B: str):
     assert M % 256 == 0
 
@@ -57,28 +57,27 @@ def test_vectorized_cast():
     run_vectorized_cast("float32", "float16", "__float22half2_rn", 2)
     run_vectorized_cast("float32", "float16", "__float22half2_rn", 4)
 
-    # # fp16 -> fp32
+    # fp16 -> fp32
     run_vectorized_cast("float16", "float32", "__half22float2", 2)
     run_vectorized_cast("float16", "float32", "__half22float2", 4)
 
-    # # fp32 -> fp8_e4m3
+    # fp32 -> fp8_e4m3
     run_vectorized_cast("float32", "float8_e4m3", "__nv_cvt_float2_to_fp8x2", 2)
     run_vectorized_cast("float32", "float8_e4m3", "__nv_cvt_float2_to_fp8x2", 4)
 
-    # # fp32 -> fp8_e5m2
+    # fp32 -> fp8_e5m2
     run_vectorized_cast("float32", "float8_e5m2", "__nv_cvt_float2_to_fp8x2", 2)
     run_vectorized_cast("float32", "float8_e5m2", "__nv_cvt_float2_to_fp8x2", 4)
 
     # fp32 -> bf16
-    # NOTE(wt): currently bf16 related ops don't support lanes=4,
-    # We will add this in the future.
-    run_vectorized_cast("float32", "bfloat16", "fastertransformer", 2)
-    # run_vectorized_cast("float32", "bfloat16", "fastertransformer", 4)
+    run_vectorized_cast("float32", "bfloat16", "__float22bfloat162_rn", 2)
+    run_vectorized_cast("float32", "bfloat16", "__float22bfloat162_rn", 4)
 
     # bf16 -> fp32
-    run_vectorized_cast("bfloat16", "float32", "fastertransformer", 2)
-    # run_vectorized_cast("bfloat16", "float32", "fastertransformer", 4)
+    run_vectorized_cast("bfloat16", "float32", "__bfloat1622float2", 2)
+    run_vectorized_cast("bfloat16", "float32", "__bfloat1622float2", 4)
 
 
 if __name__ == "__main__":
     tilelang.testing.main()
+
