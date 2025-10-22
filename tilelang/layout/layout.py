@@ -2,6 +2,7 @@
 # pylint: disable=invalid-name, unsupported-binary-operation
 
 import tvm
+import tvm_ffi
 from tvm.ir import Node, Range
 from tvm.tir import IterVar, Var, PrimExpr, IndexMap
 from tilelang import _ffi_api
@@ -9,7 +10,7 @@ from typing import List
 
 
 # Register the Layout class as a TVM object under the name "tl.Layout"
-@tvm.ffi.register_object("tl.Layout")
+@tvm_ffi.register_object("tl.Layout")
 class Layout(Node):
 
     def __init__(self, shape, forward_fn):

@@ -33,7 +33,7 @@ private:
     auto then_case = VisitStmt(op->then_case);
     Optional<Stmt> else_case = op->else_case;
     if (else_case.defined()) {
-      return GetRef<Stmt>(op);
+      return tvm::ffi::GetRef<Stmt>(op);
     }
     ICHECK(then_case.defined()) << "then_case must be defined";
     ICHECK(!else_case.defined()) << "else_case must be undefined";
@@ -81,10 +81,10 @@ tvm::transform::Pass IfStmtBinding() {
   return CreatePrimFuncPass(pass_func, 0, "tl.IfStmtBinding", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.IfStmtBinding", IfStmtBinding);
-});
+}
 
 } // namespace tl
 } // namespace tvm

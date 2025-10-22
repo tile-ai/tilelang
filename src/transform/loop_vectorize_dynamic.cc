@@ -231,10 +231,10 @@ private:
       if (flag) {
         return thenexpr;
       } else {
-        return GetRef<PrimExpr>(op);
+        return tvm::ffi::GetRef<PrimExpr>(op);
       }
     } else {
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     }
   }
 
@@ -535,11 +535,11 @@ tvm::transform::Pass LoopVectorizeDynamic() {
 }
 
 // Register the pass globally so it can be used in the compilation pipeline
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LoopVectorizeDynamic",
                         LoopVectorizeDynamic);
-});
+}
 
 } // namespace tl
 } // namespace tvm

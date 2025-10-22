@@ -178,7 +178,7 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
 }
 
 TileOperator ParallelOpNode::Clone() const {
-  auto op = make_object<ParallelOpNode>(*this);
+  auto op = tvm::ffi::make_object<ParallelOpNode>(*this);
   return ParallelOp(op);
 }
 
@@ -642,7 +642,7 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
       ->CondenseReplicateVar();
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({ ParallelOpNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK() { ParallelOpNode::RegisterReflection(); }
 
 } // namespace tl
 } // namespace tvm

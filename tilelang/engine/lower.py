@@ -6,6 +6,7 @@ from typing import Union, Optional, Callable, List
 import tilelang.transform
 from tilelang import tvm as tvm
 from tvm import tir
+import tvm_ffi
 from tvm.ir import CallingConv
 from tvm.target import Target
 from tilelang.contrib import hipcc, nvcc
@@ -51,7 +52,7 @@ def get_host_call(is_device_c: bool = False) -> Callable[[tir.PrimFunc], bool]:
     return lambda func: not get_device_call(is_device_c)(func)
 
 
-@tvm.register_func("tilelang_callback_cuda_compile", override=True)
+@tvm_ffi.register_global_func("tilelang_callback_cuda_compile", override=True)
 def tilelang_callback_cuda_compile(code, target):
     project_root = osp.join(osp.dirname(__file__), "../..")
     if "TL_TEMPLATE_PATH" in os.environ:
@@ -88,7 +89,7 @@ def tilelang_callback_cuda_compile(code, target):
     return ptx
 
 
-@tvm.register_func("tilelang_callback_hip_compile", override=True)
+@tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
 def tilelang_callback_hip_compile(code, target):
     project_root = osp.join(osp.dirname(__file__), "../..")
     tl_template_path = osp.abspath(osp.join(project_root, "src"))
@@ -180,7 +181,7 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
     elif target.kind.name == "llvm":
         device_mod = tvm.ffi.get_global_func("target.build.llvm")(device_mod, target)
     elif target.kind.name == "webgpu":
-        device_mod = tvm.ffi.get_global_func("target.build.tilelang_webgpu")(device_mod, target)
+        device_mod = tvm.ffi.get_global_func("target.build.webgpu")(device_mod, target)
     elif target.kind.name == "metal":
         device_mod = tvm.ffi.get_global_func("target.build.metal")(device_mod, target)
     else:
@@ -239,6 +240,6 @@ def lower(
         host_mod = host_codegen(host_mod, target_host)
         host_mod.import_module(codegen_mod)
         return CompiledArtifact(
-            host_mod, device_mod, params, codegen_mod.get_source(), rt_mod=host_mod)
+            host_mod, device_mod, params, codegen_mod.inspect_source(), rt_mod=host_mod)
 
-    return CompiledArtifact(host_mod, device_mod, params, codegen_mod.get_source())
+    return CompiledArtifact(host_mod, device_mod, params, codegen_mod.inspect_source())

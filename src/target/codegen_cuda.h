@@ -58,14 +58,14 @@ public:
 
   // Override this as a work around for __grid_constant__ parameter
   void AddFunction(const GlobalVar &gvar, const PrimFunc &f);
-  void PrintFunctionSignature(const String &function_name, const PrimFunc &func,
+  void PrintFunctionSignature(const ffi::String &function_name, const PrimFunc &func,
                               std::ostream &os);
 
 protected:
   virtual std::string GetBufferRef(DataType t, const BufferNode *buffer,
                                    PrimExpr index) final;
-  void PrintCallExtern(Type ret_type, String global_symbol,
-                       const Array<PrimExpr> &args, bool skip_first_arg,
+  void PrintCallExtern(Type ret_type, ffi::String global_symbol,
+                       const ffi::Array<PrimExpr> &args, bool skip_first_arg,
                        std::ostream &os) final; // NOLINT(*)
 
 private:

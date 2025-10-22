@@ -68,8 +68,6 @@ file(GLOB TILE_LANG_SRCS
   src/target/utils.cc
   src/target/codegen_cpp.cc
   src/target/rt_mod_cpp.cc
-  # webgpu doesn't have system dependency
-  src/target/codegen_webgpu.cc
   # intrin_rule doesn't have system dependency
   src/target/intrin_rule*.cc
 )
@@ -192,7 +190,7 @@ install(TARGETS tvm tvm_runtime tilelang_module tilelang LIBRARY DESTINATION til
 
 # Copy tvm cython ext for wheels
 # TODO: not necessary for editable builds
-if(TVM_BUILD_FROM_SOURCE)
-  add_dependencies(tilelang tvm_cython)
-  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/tvm/python/tvm/ffi/core.abi3.so" DESTINATION tilelang/3rdparty/tvm/python/tvm/ffi/)
-endif()
+# if(TVM_BUILD_FROM_SOURCE)
+#   add_dependencies(tilelang tvm_cython)
+#   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/tvm/python/tvm/ffi/core.abi3.so" DESTINATION tilelang/3rdparty/tvm/python/tvm/ffi/)
+# endif()

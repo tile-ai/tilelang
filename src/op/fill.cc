@@ -60,7 +60,7 @@ using namespace tir;
  * of bounds.
  */
 Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<FillNode> node = make_object<FillNode>();
+  ObjectPtr<FillNode> node = tvm::ffi::make_object<FillNode>();
 
   if (args[0]->IsInstance<BufferLoadNode>()) {
     auto buffer_load = Downcast<BufferLoad>(args[0]);
@@ -117,7 +117,7 @@ Fill::Fill(Array<PrimExpr> args, BufferMap vmap) {
  * @return TileOperator A TileOperator that owns the copied FillNode.
  */
 TileOperator FillNode::Clone() const {
-  auto op = make_object<FillNode>(*this);
+  auto op = tvm::ffi::make_object<FillNode>(*this);
   return Fill(op);
 }
 
@@ -226,7 +226,7 @@ TIR_REGISTER_TL_OP(Fill, fill)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TVM_FFI_STATIC_INIT_BLOCK({ FillNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK() { FillNode::RegisterReflection(); }
 
 } // namespace tl
 } // namespace tvm

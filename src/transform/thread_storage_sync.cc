@@ -782,10 +782,10 @@ tvm::transform::Pass ThreadSync(const String &storage_scope) {
   return CreatePrimFuncPass(pass_func, 0, "tl.ThreadSync", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.ThreadSync", ThreadSync);
-});
+}
 
 } // namespace transform
 } // namespace tl

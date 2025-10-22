@@ -2,6 +2,7 @@
 # pylint: disable=invalid-name, unsupported-binary-operation
 
 import tvm
+import tvm_ffi
 from tvm.ir import Range
 from tvm.tir import IterVar, Var, PrimExpr, IndexMap
 from tilelang import _ffi_api
@@ -9,7 +10,7 @@ from tilelang.layout import Layout
 from typing import List
 
 
-@tvm.ffi.register_object("tl.Fragment")
+@tvm_ffi.register_object("tl.Fragment")
 class Fragment(Layout):
     """
     A Fragment layout object that encapsulates iteration variables (forward_vars),

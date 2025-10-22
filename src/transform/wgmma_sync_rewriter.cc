@@ -266,10 +266,10 @@ tvm::transform::Pass RewriteWgmmaSync() {
   return CreatePrimFuncPass(pass_func, 0, "tl.RewriteWgmmaSync", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.RewriteWgmmaSync", RewriteWgmmaSync);
-});
+}
 
 } // namespace tl
 } // namespace tvm

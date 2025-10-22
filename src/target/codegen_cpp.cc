@@ -32,6 +32,7 @@
 #include "support/str_escape.h"
 #include "target/build_common.h"
 #include "target/source/codegen_params.h"
+#include "../support/ffi_aliases.h"
 
 namespace tvm {
 namespace codegen {
@@ -54,7 +55,7 @@ void CodeGenTileLangCPP::Init(bool output_ssa, bool emit_asserts,
 }
 
 void CodeGenTileLangCPP::InitGlobalContext() {
-  decl_stream << "void* " << tvm::runtime::symbol::tvm_ffi_library_ctx
+  decl_stream << "void* " << ffi::symbol::tvm_ffi_library_ctx
               << " = NULL;\n";
 }
 
@@ -256,8 +257,8 @@ void CodeGenTileLangCPP::AddFunction(const PrimFunc &f) {
   // reserve keywords
   ReserveKeywordsAsUnique();
 
-  auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
-  ICHECK(global_symbol.defined())
+  auto global_symbol = f->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
+  ICHECK(global_symbol)
       << "CodeGenC: Expect PrimFunc to have the global_symbol attribute";
   bool no_alias = f->HasNonzeroAttr(tir::attr::kNoAlias);
 

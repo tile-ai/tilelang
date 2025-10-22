@@ -1,32 +1,32 @@
 from tilelang import tvm as tvm
 from tvm.ir.base import Node
 from tvm.runtime import Scriptable
-import tvm.ffi
+import tvm_ffi
 from tvm.target import Target
 from tilelang import _ffi_api
 
 
-@tvm.ffi.register_object("tl.Fill")
+@tvm_ffi.register_object("tl.Fill")
 class Fill(Node, Scriptable):
     ...
 
 
-@tvm.ffi.register_object("tl.AtomicAdd")
+@tvm_ffi.register_object("tl.AtomicAdd")
 class AtomicAdd(Node, Scriptable):
     ...
 
 
-@tvm.ffi.register_object("tl.Copy")
+@tvm_ffi.register_object("tl.Copy")
 class Copy(Node, Scriptable):
     ...
 
 
-@tvm.ffi.register_object("tl.Conv2DIm2Col")
+@tvm_ffi.register_object("tl.Conv2DIm2Col")
 class Conv2DIm2ColOp(Node, Scriptable):
     ...
 
 
-@tvm.ffi.register_object("tl.GemmWarpPolicy")
+@tvm_ffi.register_object("tl.GemmWarpPolicy")
 class GemmWarpPolicy(Node, Scriptable):
     policy_type: int
     m_warp: int
@@ -39,41 +39,41 @@ class GemmWarpPolicy(Node, Scriptable):
         return self.m_warp, self.n_warp
 
 
-@tvm.ffi.register_object("tl.Gemm")
+@tvm_ffi.register_object("tl.Gemm")
 class Gemm(Node, Scriptable):
     ...
 
 
-@tvm.ffi.register_object("tl.GemmSP")
+@tvm_ffi.register_object("tl.GemmSP")
 class GemmSP(Node, Scriptable):
     ...
 
 
-@tvm.ffi.register_object("tl.FinalizeReducerOp")
+@tvm_ffi.register_object("tl.FinalizeReducerOp")
 class FinalizeReducerOp(Node, Scriptable):
     ...
 
 
-@tvm.ffi.register_object("tl.ParallelOp")
+@tvm_ffi.register_object("tl.ParallelOp")
 class ParallelOp(Node, Scriptable):
     ...
 
 
-@tvm.ffi.register_object("tl.ReduceOp")
+@tvm_ffi.register_object("tl.ReduceOp")
 class ReduceOp(Node, Scriptable):
     ...
 
 
-@tvm.ffi.register_object("tl.CumSumOp")
+@tvm_ffi.register_object("tl.CumSumOp")
 class CumSumOp(Node, Scriptable):
     ...
 
 
-@tvm.ffi.register_object("tl.RegionOp")
+@tvm_ffi.register_object("tl.RegionOp")
 class RegionOp(Node, Scriptable):
     ...
 
 
-@tvm.ffi.register_object("tl.ReduceType")
+@tvm_ffi.register_object("tl.ReduceType")
 class ReduceType(Node, Scriptable):
     ...

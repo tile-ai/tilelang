@@ -110,13 +110,13 @@ runtime::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
                           std::string());
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def("target.build.tilelang_hip", BuildTileLangHIP)
       .def("target.build.tilelang_hip_without_compile",
            BuildTileLangHIPWithoutCompile);
-});
+}
 
 } // namespace codegen
 } // namespace tvm
