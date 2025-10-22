@@ -9,29 +9,20 @@ from .utils import (
     get_ldmatrix_offset,
 )
 from tilelang.utils import is_fragment
-# from tilelang.intrinsics.mma_layout import (
-#     shared_16x8_to_mma_32x4_layout_sr_a,
-#     shared_16x8_to_mma_32x4_layout_sr_b,
-#     shared_16x16_to_mma_32x8_layout_sr_a,
-#     shared_16x16_to_mma_32x8_layout_sr_b,
-#     shared_16x32_to_mma_32x16_layout_sr_a,
-#     shared_16x32_to_mma_32x16_layout_sr_b,
-#     mma_load_a_32x4_to_shared_16x8_layout,
-#     mma_load_b_32x4_to_shared_16x8_layout,
-#     mma_load_b_32x4_to_shared_16x8_layout_16bit,
-#     mma_load_b_32x8_to_shared_16x16_layout_16bit,
-#     mma_load_a_32x16_to_shared_16x32_layout,
-#     mma_load_b_32x16_to_shared_16x32_layout,
-#     mma_load_a_32x8_to_shared_16x16_layout,
-# )
+
 from tilelang.intrinsics.mma_sp_layout import (
-    mma_sp_load_a_32x16_to_shared_16x64_layout,
+    mma_sp_load_a_32x4_to_shared_16x16_layout,
     mma_sp_load_a_32x8_to_shared_16x32_layout,
+    mma_sp_load_a_32x16_to_shared_16x64_layout,
+    mma_sp_load_b_32x8_to_shared_16x16_layout,
     mma_sp_load_b_32x16_to_shared_16x32_layout,
     mma_sp_load_b_32x32_to_shared_16x64_layout,
-    metadata_16bit_load_32x2_to_shared_16x4_layout_8bit,
+    metadata_8bit_load_32x4_to_shared_16x4_layout_32bit,
+    metadata_16bit_load_32x2_to_shared_16x2_layout_32bit,
     metadata_8bit_load_32x4_to_shared_16x4_layout_16bit,
     metadata_16bit_load_32x2_to_shared_16x2_layout_16bit,
+    metadata_8bit_load_32x4_to_shared_16x4_layout_8bit,
+    metadata_16bit_load_32x2_to_shared_16x4_layout_8bit,
     metadata_32bit_load_32x1_to_shared_16x2_layout_8bit,
 )
 
@@ -61,41 +52,47 @@ class SparseTensorCoreIntrinEmitter(object):
     }
 
     E_FACTOR_MAP = {  # e_kdim = mma_kdim // e_factor
+        "float32": {
+            "int16": 8,
+            "uint16": 8,
+        },
         "float16": {
-            "int8": 8,  # TODO: refactor values to make it tidy after debugging
-            "uint8": 8,
+            # "int8": 8,  # TODO: refactor values to make it tidy after debugging
+            # "uint8": 8,
             "int16": 16,
             "uint16": 16,
-            "int32": 32,
-            "uint32": 32,
+            # "int32": 32,
+            # "uint32": 32,
         },
         "bfloat16": {
-            "int8": 8,
-            "uint8": 8,
+            # "int8": 8,
+            # "uint8": 8,
             "int16": 16,
             "uint16": 16,
-            "int32": 32,
-            "uint32": 32,
+            # "int32": 32,
+            # "uint32": 32,
         },
         "int8": {
-            "int8": 8,
-            "uint8": 8,
-            "int16": 16,
-            "uint16": 16,
+            # "int8": 8,
+            # "uint8": 8,
+            # "int16": 16,
+            # "uint16": 16,
             "int32": 32,
             "uint32": 32,
         },
         "uint8": {
-            "int8": 8,
-            "uint8": 8,
-            "int16": 16,
-            "uint16": 16,
+            # "int8": 8,
+            # "uint8": 8,
+            # "int16": 16,
+            # "uint16": 16,
             "int32": 32,
             "uint32": 32,
-        }
+        },
+        
     }
 
     E_REPLICATE_FACTOR = {  # metadata replicate every 4 consecutive threads
+        "float32": 2,
         "float16": 2,  # 2 of 4 consecutive threads provides
         "bfloat16": 2,
         "int8": 1,  # 4 of 4 consecutive threads provides
@@ -288,12 +285,12 @@ class SparseTensorCoreIntrinEmitter(object):
             return i, j
 
         if not ldmatrix_available:
-            # if DataType(a_dtype).bits == 8:
+            if DataType(a_dtype).bits == 8:
                 mma_load_layout = mma_sp_load_a_32x16_to_shared_16x64_layout
             elif DataType(a_dtype).bits == 16:
                 mma_load_layout = mma_sp_load_a_32x8_to_shared_16x32_layout
-            # elif DataType(a_dtype).bits == 32:
-            #     mma_load_layout = mma_load_a_32x4_to_shared_16x8_layout
+            elif DataType(a_dtype).bits == 32:
+                mma_load_layout = mma_sp_load_a_32x4_to_shared_16x16_layout
             else:
                 raise ValueError(f"Unsupported dtype: {a_dtype}")
 
@@ -355,13 +352,22 @@ class SparseTensorCoreIntrinEmitter(object):
             return i, j
 
         if not ldmatrix_available:
-            # if DataType(e_dtype).bits == 8:
-            #     mma_load_layout = metadata_8bit_load_32x4_to_shared_16x4_layout_16bit
-            if DataType(e_dtype).bits == 16:
-                # if DataType(a_dtype).bits == 8:
-                #     mma_load_layout = metadata_16bit_load_32x2_to_shared_16x4_layout_8bit
+            if DataType(e_dtype).bits == 8:
+                if DataType(a_dtype).bits == 8:
+                    mma_load_layout = metadata_8bit_load_32x4_to_shared_16x4_layout_8bit
+                elif DataType(a_dtype).bits == 16:
+                    mma_load_layout = metadata_8bit_load_32x4_to_shared_16x4_layout_16bit
+                elif DataType(a_dtype).bits == 32:
+                    mma_load_layout = metadata_8bit_load_32x4_to_shared_16x4_layout_32bit
+                else:
+                    raise ValueError(f"Unsupported a_dtype for e_dtype 8bit: {a_dtype}")
+            elif DataType(e_dtype).bits == 16:
+                if DataType(a_dtype).bits == 8:
+                    mma_load_layout = metadata_16bit_load_32x2_to_shared_16x4_layout_8bit
                 if DataType(a_dtype).bits == 16:
                     mma_load_layout = metadata_16bit_load_32x2_to_shared_16x2_layout_16bit
+                elif DataType(a_dtype).bits == 32:
+                    mma_load_layout = metadata_16bit_load_32x2_to_shared_16x2_layout_32bit
                 else:
                     raise ValueError(f"Unsupported a_dtype for e_dtype 16bit: {a_dtype}")
             elif DataType(e_dtype).bits == 32:
@@ -419,12 +425,11 @@ class SparseTensorCoreIntrinEmitter(object):
                 mma_load_layout = mma_sp_load_b_32x32_to_shared_16x64_layout
             elif DataType(b_dtype).bits == 16:
                 mma_load_layout = mma_sp_load_b_32x16_to_shared_16x32_layout
-            # elif DataType(b_dtype).bits == 32:
-            #     mma_load_layout = mma_load_b_32x4_to_shared_16x8_layout
+            elif DataType(b_dtype).bits == 32:
+                mma_load_layout = mma_sp_load_b_32x8_to_shared_16x16_layout
             else:
                 raise ValueError(f"Unsupported dtype: {b_dtype}")
 
-        print(f"{replicate_b=}")
         @T.macro
         def _warp_ldmatrix_b(
             B_local_buf,

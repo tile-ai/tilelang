@@ -34,38 +34,42 @@ def mma_sp_load_b_32x32_to_shared_16x64_layout(thread_id, local_id):
 def get_logical_id_32bit(thread_id: int) -> int:
     return (thread_id // 4) * 2 + (thread_id % 4) % 2
 
+def metadata_8bit_load_32x4_to_shared_16x4_layout_32bit(thread_id: int, local_id: int) -> Tuple[int, int]:
+    logical_id = get_logical_id_32bit(thread_id)
+    row = logical_id // 4 + local_id * 8
+    col = logical_id % 4
+    return row, col
+
 def metadata_16bit_load_32x2_to_shared_16x2_layout_32bit(thread_id: int, local_id: int) -> Tuple[int, int]:
     logical_id = get_logical_id_32bit(thread_id)
-    thread_row = logical_id // 2
-    thread_col = logical_id % 2
-    return thread_row + local_id * 8, thread_col
+    row = logical_id // 2 + local_id * 8
+    col = logical_id % 2
+    return row, col
 
-def get_logical_id_16bit(thread_id: int) -> int:
-    return (thread_id // 4) * 2 + (thread_id % 4) % 2
+def metadata_8bit_load_32x4_to_shared_16x4_layout_16bit(thread_id: int, local_id: int) -> Tuple[int, int]:
+    return metadata_8bit_load_32x4_to_shared_16x4_layout_32bit(thread_id, local_id)  # same mapping for 16bit and 32bit
 
 def metadata_16bit_load_32x2_to_shared_16x2_layout_16bit(thread_id: int, local_id: int) -> Tuple[int, int]:
-    logical_id = get_logical_id_16bit(thread_id)
-    thread_row = logical_id // 2
-    thread_col = logical_id % 2
-    row = thread_row + local_id * 8
-    col = thread_col
-    return row, col
+    return metadata_16bit_load_32x2_to_shared_16x2_layout_32bit(thread_id, local_id)  # same mapping for 16bit and 32bit
 
 def get_logical_id_8bit(thread_id: int) -> int:
     return thread_id
 
-def metadata_32bit_load_32x1_to_shared_16x2_layout_8bit(thread_id: int, local_id: int) -> Tuple[int, int]:
+def metadata_8bit_load_32x4_to_shared_16x4_layout_8bit(thread_id: int, local_id: int) -> Tuple[int, int]:
     logical_id = get_logical_id_8bit(thread_id)
-    return logical_id // 4 + (logical_id % 2) * 8, (logical_id % 4) // 2
+    row = logical_id // 2 + local_id * 8
+    col = (logical_id % 4) // 2 * 4 + local_id
+    return row, col
 
+def metadata_16bit_load_32x2_to_shared_16x4_layout_8bit(thread_id: int, local_id: int) -> Tuple[int, int]:
+    logical_id = get_logical_id_8bit(thread_id)
+    row = logical_id // 2 + local_id * 8
+    col = (logical_id % 4) // 2 * 2 + local_id
+    return row, col
 
-if __name__ == "__main__":
-    matrix = [[None for _ in range(16)] for _ in range(16)]
-    for tid in range(32):
-        print(f"Thread ID: {tid} => {get_logical_id_32bit(tid)}")
-        for lid in range(2):
-            n, k = metadata_16bit_load_32x2_to_shared_16x2_layout_32bit(tid, lid)
-            print(f"thread_id: {tid}, local_id: {lid} => row: {n}, col: {k}")
-            # matrix[k][i] = f"T{tid}_L{lid}"
-    # for r in range(16):
-    #     print(matrix[r])
+def metadata_32bit_load_32x1_to_shared_16x2_layout_8bit(thread_id: int, local_id: int) -> Tuple[int, int]:
+    # local_id is always 0
+    logical_id = get_logical_id_8bit(thread_id)
+    row = logical_id // 4 + (logical_id % 2) * 8
+    col = (logical_id % 4) // 2
+    return row, col
