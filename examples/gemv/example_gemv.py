@@ -344,7 +344,7 @@ def check_correctness_and_bench(kernel, N, K, bench_ref=True):
     print(f"TileLang Latency: {latency} ms\n")
 
 
-def main():
+def main(do_bench: bool = True):
     parser = argparse.ArgumentParser(description="GEMV Example")
     parser.add_argument("--n", type=int, default=1024, help="Matrix dimension N")
     parser.add_argument("--k", type=int, default=1024, help="Matrix dimension K")
@@ -359,18 +359,19 @@ def main():
 
     print("Test passed!")
 
-    best_result = get_autotuned_kernel(N, K)
-    best_config = best_result.config
-    kernel = splitk_gemv_vectorized_tvm(N, K, **best_config)
-    profiler = kernel.get_profiler()
-    latency = profiler.do_bench(lambda x, y: x @ y.T, warmup=500)
-    print(f"Torch Latency: {latency} ms")
-    tilelang_thread_latency = profiler.do_bench(kernel, warmup=500)
-    print(f"TileLang SIMT Latency: {tilelang_thread_latency} ms\n")
-    kernel = gemv_alloc_reducer(N, K)
-    profiler = kernel.get_profiler()
-    tilelang_tile_latency = profiler.do_bench(kernel, warmup=500)
-    print(f"TileLang BlockReduce Latency: {tilelang_tile_latency} ms\n")
+    if not do_bench:
+        best_result = get_autotuned_kernel(N, K)
+        best_config = best_result.config
+        kernel = splitk_gemv_vectorized_tvm(N, K, **best_config)
+        profiler = kernel.get_profiler()
+        latency = profiler.do_bench(lambda x, y: x @ y.T, warmup=500)
+        print(f"Torch Latency: {latency} ms")
+        tilelang_thread_latency = profiler.do_bench(kernel, warmup=500)
+        print(f"TileLang SIMT Latency: {tilelang_thread_latency} ms\n")
+        kernel = gemv_alloc_reducer(N, K)
+        profiler = kernel.get_profiler()
+        tilelang_tile_latency = profiler.do_bench(kernel, warmup=500)
+        print(f"TileLang BlockReduce Latency: {tilelang_tile_latency} ms\n")
 
 
 if __name__ == "__main__":
