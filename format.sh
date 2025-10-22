@@ -88,11 +88,6 @@ if ! python3 -m pre_commit --version &>/dev/null; then
     python3 -m pip install pre-commit
 fi
 
-if [[ ! -f "${ROOT}/.git/hooks/pre-commit" ]]; then
-    echo "Installing and initializing pre-commit hooks..."
-    python3 -m pre_commit install --install-hooks
-fi
-
 echo 'tile-lang pre-commit: Check Start'
 
 if [[ -n "${ALL_FILES}" ]]; then
