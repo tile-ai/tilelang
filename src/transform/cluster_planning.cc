@@ -68,7 +68,8 @@ public:
     }
 
     if (mem_reuse_max > 0) {
-      std::string tag_str = static_cast<std::string>(cluster_tag); // Convert to std::string
+      std::string tag_str =
+          static_cast<std::string>(cluster_tag); // Convert to std::string
       if (tag_str.rfind("blockIdx", 0) == 0) {
         // starts with "blockIdx"
         tag_str = "clusterIdx" + tag_str.substr(strlen("blockIdx"));

@@ -103,8 +103,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                 << T.ToDebugString();
     }
     *ret = static_cast<int>(result);
-  }
-);
+  });
 }
 
 struct TensorMapIm2ColArgs {
@@ -197,8 +196,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                     << T.ToDebugString();
         }
         *ret = static_cast<int>(result);
-      }
-    );
+      });
 }
 
 #endif // (CUDA_MAJOR_VERSION >= 12)

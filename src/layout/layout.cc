@@ -334,8 +334,8 @@ Fragment::Fragment(Array<IterVar> forward_var, Array<PrimExpr> forward_index,
       forward_index.Map([&](const PrimExpr &e) { return Substitute(e, vmap); });
   forward_thread = Substitute(forward_thread, vmap);
 
-  auto n = tvm::ffi::make_object<FragmentNode>(input_size, forward_index, forward_thread,
-                                     replicate_size);
+  auto n = tvm::ffi::make_object<FragmentNode>(input_size, forward_index,
+                                               forward_thread, replicate_size);
   data_ = std::move(n);
 }
 
@@ -346,8 +346,8 @@ Fragment::Fragment(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
     forward_thread = Substitute(
         forward_thread, {{replicate_var.value(), ReplicationPlaceholder()}});
   }
-  auto n = tvm::ffi::make_object<FragmentNode>(input_size, forward_index, forward_thread,
-                                     replicate_size);
+  auto n = tvm::ffi::make_object<FragmentNode>(input_size, forward_index,
+                                               forward_thread, replicate_size);
   data_ = std::move(n);
 }
 

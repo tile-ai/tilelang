@@ -1723,7 +1723,8 @@ Array<PrimExpr> TMADesc::EncodeCallArgs() const {
  * @param vmap Mapping from original buffer variables to actual Buffer objects.
  */
 Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<Conv2DIm2ColOpNode> node = tvm::ffi::make_object<Conv2DIm2ColOpNode>();
+  ObjectPtr<Conv2DIm2ColOpNode> node =
+      tvm::ffi::make_object<Conv2DIm2ColOpNode>();
   node->src = vmap[GetVarFromAccessPtr(args[0])];
   node->dst = vmap[GetVarFromAccessPtr(args[1])];
   node->nhw_step = args[2];

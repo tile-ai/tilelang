@@ -51,7 +51,8 @@ public:
 /// Wrapper class for reduction type with string-based construction
 class ReduceType : public ObjectRef {
 public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReduceType, ObjectRef, ReduceTypeNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReduceType, ObjectRef,
+                                             ReduceTypeNode);
   TVM_DLL ReduceType(std::string type) {
     auto node = tvm::ffi::make_object<ReduceTypeNode>();
     if (type == "sum") {
@@ -85,7 +86,8 @@ public:
   ReduceType type;      ///< Type of reduction operation
   bool clear;           ///< Whether to clear destination before reduction
 
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReduceOp", ReduceOpNode, TileOperatorNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReduceOp", ReduceOpNode,
+                                    TileOperatorNode);
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -117,7 +119,8 @@ private:
 /// Wrapper class for reduction operations
 class ReduceOp : public TileOperator {
 public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReduceOp, TileOperator, ReduceOpNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReduceOp, TileOperator,
+                                             ReduceOpNode);
   TVM_DLL ReduceOp(Array<PrimExpr> args, BufferMap vmap);
   static const Op &Get();
 };
@@ -128,7 +131,8 @@ public:
   tir::Buffer src, dst; ///< Source and destination buffers
   int dim;              ///< Dimension along which to compute cumulative sum
   bool reverse;         ///< Whether to compute in reverse order
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.CumSumOp", CumSumOpNode, TileOperatorNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.CumSumOp", CumSumOpNode,
+                                    TileOperatorNode);
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -149,7 +153,8 @@ public:
 /// Wrapper class for cumulative sum operations
 class CumSumOp : public TileOperator {
 public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(CumSumOp, TileOperator, CumSumOpNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(CumSumOp, TileOperator,
+                                             CumSumOpNode);
   TVM_DLL CumSumOp(Array<PrimExpr> args, BufferMap vmap);
   static const Op &Get();
 };

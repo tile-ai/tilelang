@@ -28,7 +28,7 @@ public:
 class GemmSPWarpPolicy : public ObjectRef {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmSPWarpPolicy, ObjectRef,
-                                GemmSPWarpPolicyNode);
+                                             GemmSPWarpPolicyNode);
 
   explicit GemmSPWarpPolicy(GemmWarpPolicyType policy_type) {
     auto node = tvm::ffi::make_object<GemmSPWarpPolicyNode>();

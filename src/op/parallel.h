@@ -136,7 +136,8 @@ private:
 
 class ParallelOp : public TileOperator {
 public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ParallelOp, TileOperator, ParallelOpNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ParallelOp, TileOperator,
+                                             ParallelOpNode);
 
   ParallelOp(const For &root) {
     auto op = tvm::ffi::make_object<ParallelOpNode>(root);

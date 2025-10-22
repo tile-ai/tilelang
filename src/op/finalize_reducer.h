@@ -47,7 +47,7 @@ public:
 class FinalizeReducerOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(FinalizeReducerOp, TileOperator,
-                                FinalizeReducerOpNode);
+                                             FinalizeReducerOpNode);
   TVM_DLL FinalizeReducerOp(Array<PrimExpr> args, BufferMap vmap);
   static const Op &Get();
 };

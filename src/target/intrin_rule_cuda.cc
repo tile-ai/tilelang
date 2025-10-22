@@ -5,8 +5,8 @@
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op_attr_types.h>
 
-#include "target/intrin_rule.h"
 #include "../support/ffi_aliases.h"
+#include "target/intrin_rule.h"
 
 namespace tvm {
 namespace codegen {

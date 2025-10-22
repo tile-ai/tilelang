@@ -101,12 +101,12 @@ public:
         .def_ro("ranges", &RegionOpNode::ranges_)
         .def_ro("access_mask", &RegionOpNode::access_mask_);
   }
-
 };
 
 class RegionOp : public TileOperator {
 public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(RegionOp, TileOperator, RegionOpNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(RegionOp, TileOperator,
+                                             RegionOpNode);
   TVM_DLL RegionOp(Array<PrimExpr> args, BufferMap vmap);
 
   static const Op &Get();

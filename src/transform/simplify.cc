@@ -63,8 +63,8 @@ struct SimplifyConfigNode : public AttrsNodeReflAdapter<SimplifyConfigNode> {
                 "branch",
                 refl::DefaultValue(false));
   }
-  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.transform.SimplifyConfig", SimplifyConfigNode,
-                                      BaseAttrsNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.transform.SimplifyConfig",
+                                    SimplifyConfigNode, BaseAttrsNode);
 
   RewriteSimplifier::Extension GetEnabledExtensions() const {
     RewriteSimplifier::Extension flags = RewriteSimplifier::kNone;
@@ -210,8 +210,8 @@ CollectVarsUsedInBufferDefinition(const Stmt &stmt) {
 
 class SimplifyConfig : public Attrs {
 public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(SimplifyConfig, Attrs, SimplifyConfigNode);
-
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(SimplifyConfig, Attrs,
+                                                SimplifyConfigNode);
 };
 TVM_FFI_STATIC_INIT_BLOCK() { SimplifyConfigNode::RegisterReflection(); }
 

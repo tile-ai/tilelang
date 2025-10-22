@@ -75,7 +75,8 @@ public:
     data_ = tvm::ffi::make_object<ReducerInfoNode>(op_str, rep_str);
   }
 
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReducerInfo, ObjectRef, ReducerInfoNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReducerInfo, ObjectRef,
+                                             ReducerInfoNode);
 };
 
 namespace attr {

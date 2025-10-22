@@ -41,7 +41,8 @@ void TileLangStorageAccessVisitor::VisitExpr_(const BufferLoadNode *op) {
   buffer_data_to_buffer_.Set(tvm::ffi::GetRef<Var>(buf.get()), op->buffer);
   StorageScope scope = GetScope(buf);
   if (Enabled(buf.get(), scope)) {
-    ICHECK(allow_append_) << tvm::ffi::GetRef<BufferLoad>(op) << " " << scope.to_string();
+    ICHECK(allow_append_) << tvm::ffi::GetRef<BufferLoad>(op) << " "
+                          << scope.to_string();
     AccessEntry e;
     e.threads = env_threads();
     e.thread_range = this->ComputeThreadRange(e.threads);
@@ -356,7 +357,8 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
         // cannot find buffer map, use the default buffer
         buffer_ranges = {Range::FromMinExtent(offset, extent)};
       } else {
-        Buffer buffer = buffer_data_to_buffer_.at(tvm::ffi::GetRef<Var>(buffer_var));
+        Buffer buffer =
+            buffer_data_to_buffer_.at(tvm::ffi::GetRef<Var>(buffer_var));
         auto buffer_shape = buffer->shape;
         // convert 1d offset to multi-dimensional index
         auto linear_to_indices = [this](PrimExpr offset,

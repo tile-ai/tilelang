@@ -30,8 +30,7 @@ public:
   mutable int n_warp{0};
   int policy_type;
 
-  TVM_FFI_DECLARE_OBJECT_INFO("tl.GemmWarpPolicy", GemmWarpPolicyNode,
-                              Object);
+  TVM_FFI_DECLARE_OBJECT_INFO("tl.GemmWarpPolicy", GemmWarpPolicyNode, Object);
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -59,7 +58,8 @@ public:
 
 class GemmWarpPolicy : public ObjectRef {
 public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmWarpPolicy, ObjectRef, GemmWarpPolicyNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmWarpPolicy, ObjectRef,
+                                             GemmWarpPolicyNode);
 
   explicit GemmWarpPolicy(GemmWarpPolicyType policy_type) {
     auto node = tvm::ffi::make_object<GemmWarpPolicyNode>();

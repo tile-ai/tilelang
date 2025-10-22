@@ -49,7 +49,8 @@ public:
 
   static void RegisterReflection();
   TVM_FFI_DECLARE_OBJECT_INFO("tl.Layout", LayoutNode, Object);
-  static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind = kTVMFFISEqHashKindTreeNode;
+  static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind =
+      kTVMFFISEqHashKindTreeNode;
 
 protected:
   virtual Map<Var, Range> getVarMap() const;
@@ -111,7 +112,8 @@ public:
   static void RegisterReflection();
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Fragment", FragmentNode, LayoutNode);
-  static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind = kTVMFFISEqHashKindTreeNode;
+  static constexpr TVMFFISEqHashKind _type_s_eq_hash_kind =
+      kTVMFFISEqHashKindTreeNode;
 
 protected:
   Map<Var, Range> getVarMap() const final;

@@ -978,8 +978,8 @@ private:
           ICHECK(alloc_info.count(var));
           const AllocEntry &entry = alloc_info.at(var);
           const AllocateNode *alloc = entry.alloc;
-          auto storage_scope =
-              StorageScope::Create(GetPtrStorageScope(tvm::ffi::GetRef<Var>(var)));
+          auto storage_scope = StorageScope::Create(
+              GetPtrStorageScope(tvm::ffi::GetRef<Var>(var)));
           StorageEntry *dst_entry = nullptr;
           // inplace detection
           if (detect_inplace) {

@@ -58,8 +58,8 @@ public:
 
   // Override this as a work around for __grid_constant__ parameter
   void AddFunction(const GlobalVar &gvar, const PrimFunc &f);
-  void PrintFunctionSignature(const ffi::String &function_name, const PrimFunc &func,
-                              std::ostream &os);
+  void PrintFunctionSignature(const ffi::String &function_name,
+                              const PrimFunc &func, std::ostream &os);
 
 protected:
   virtual std::string GetBufferRef(DataType t, const BufferNode *buffer,

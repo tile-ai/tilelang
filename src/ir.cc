@@ -233,7 +233,8 @@ public:
 KernelLaunchFrame KernelLaunch(const Array<PrimExpr> &grid_size,
                                const Optional<Array<PrimExpr>> &block_size_opt,
                                const Map<String, ffi::Any> &attrs) {
-  ObjectPtr<KernelLaunchFrameNode> n = tvm::ffi::make_object<KernelLaunchFrameNode>();
+  ObjectPtr<KernelLaunchFrameNode> n =
+      tvm::ffi::make_object<KernelLaunchFrameNode>();
 
   // If the kernel is a CPU kernel, we don't need to launch any threads.
   bool is_cpu_kernel_frame =
@@ -348,7 +349,8 @@ public:
 WarpSpecializeFrame WarpSpecialize(const Array<IntImm> &warp_group_ids,
                                    const PrimExpr &thread_idx,
                                    int warp_group_size = 128) {
-  ObjectPtr<WarpSpecializeFrameNode> n = tvm::ffi::make_object<WarpSpecializeFrameNode>();
+  ObjectPtr<WarpSpecializeFrameNode> n =
+      tvm::ffi::make_object<WarpSpecializeFrameNode>();
   PrimExpr condition;
   std::vector<int> warp_groups;
   warp_groups.reserve(warp_group_ids.size());

@@ -228,8 +228,8 @@ Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.lower")) {
     auto prim_func =
-        Downcast<PrimFunc>((*f)(tvm::ffi::GetRef<GemmPy>(this), T.layout_map, T.target,
-                                T.thread_bounds, T.thread_var));
+        Downcast<PrimFunc>((*f)(tvm::ffi::GetRef<GemmPy>(this), T.layout_map,
+                                T.target, T.thread_bounds, T.thread_var));
     ICHECK(prim_func->attrs.defined());
     auto global_symbol =
         prim_func->attrs.GetAttr<tvm::ffi::String>("global_symbol");

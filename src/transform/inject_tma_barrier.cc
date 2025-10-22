@@ -295,8 +295,9 @@ public:
 
   void VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(mbarrier_expect_tx())) {
-      PrimExpr e =
-          tma_op_to_barrier_id_[tvm::ffi::GetRef<Call>(op)].as<CallNode>()->args[0];
+      PrimExpr e = tma_op_to_barrier_id_[tvm::ffi::GetRef<Call>(op)]
+                       .as<CallNode>()
+                       ->args[0];
       auto int_set = arith::EvalSet(e, var_int_set_);
       expect_.push_back(if_depth_ == 1);
       sequence.push_back(0);

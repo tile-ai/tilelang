@@ -87,14 +87,16 @@ SwizzledLayout::SwizzledLayout(Array<IterVar> forward_var,
   forward_index =
       forward_index.Map([&](const PrimExpr &e) { return Substitute(e, vmap); });
 
-  auto n = tvm::ffi::make_object<SwizzledLayoutNode>(input_size, forward_index, pattern);
+  auto n = tvm::ffi::make_object<SwizzledLayoutNode>(input_size, forward_index,
+                                                     pattern);
   data_ = std::move(n);
 }
 
 SwizzledLayout::SwizzledLayout(Array<PrimExpr> input_size,
                                Array<PrimExpr> forward_index,
                                SwizzlePattern pattern) {
-  auto n = tvm::ffi::make_object<SwizzledLayoutNode>(input_size, forward_index, pattern);
+  auto n = tvm::ffi::make_object<SwizzledLayoutNode>(input_size, forward_index,
+                                                     pattern);
   data_ = std::move(n);
 }
 

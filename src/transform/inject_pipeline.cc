@@ -459,7 +459,8 @@ private:
    * \return The resized buffer.
    */
   Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
-    ObjectPtr<BufferNode> new_buffer = tvm::ffi::make_object<BufferNode>(*(buffer.get()));
+    ObjectPtr<BufferNode> new_buffer =
+        tvm::ffi::make_object<BufferNode>(*(buffer.get()));
     new_buffer->shape.insert(new_buffer->shape.begin(), PrimExpr(num_versions));
     if (!new_buffer->strides.empty()) {
       ICHECK(new_buffer->strides.size() + 1 == new_buffer->shape.size());
