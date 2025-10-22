@@ -29,7 +29,7 @@ ALL_FILES=''
 ONLY_CHANGED=''
 FILES=()
 if (($# == 0)); then
-    if [[ -n "$(git status --porcelain)" ]]; then
+    if [[ -n "$(git status --porcelain --ignore-submodules --untracked-files=no)" ]]; then
         echo 'Detected uncommitted changes. Please commit or stash them before running format.sh.' >&2
         exit 1
     fi
