@@ -324,9 +324,8 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   PrimExpr dst_predicate = MakePredicate(analyzer, loop_vars, dst->shape, 1);
 
   PrimExpr value = BufferLoad(src, src_indices);
-  if (src->dtype != dst->dtype) {
+  if (src->dtype != dst->dtype)
     value = Cast(dst->dtype, value);
-  }
   if (src_predicate.defined())
     value = if_then_else(src_predicate, value, make_zero(dst->dtype));
 
