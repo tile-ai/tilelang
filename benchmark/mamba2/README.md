@@ -36,7 +36,7 @@ PY
 
 ## Results
 
-| Seq_len| Latency (s) | Throughput (TFLOPs) |
+| Seq_len| Latency (ms) | Throughput (TFLOPs) |
 |-------|-------------|---------------------|
 |  1024 | 0.169    | 126.477                 |
 |  2048 | 0.329    | 130.195                 |
