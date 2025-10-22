@@ -954,7 +954,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   const char *convert_part =
-      (from_ty.is_bfloat16() || target_ty.is_float8_e4m3()) ? ")(half)(" : ")(";
+      (from_ty.is_bfloat16() &&
+       (target_ty.is_float8_e4m3() || target_ty.is_float8_e5m2()))
+          ? ")(half)("
+          : ")(";
 
   // Fallback: elementwise cast
   for (int i = 0, lanes = from_ty.lanes(); i < lanes; ++i) {
