@@ -93,7 +93,9 @@ Array<IterSplitExpr> get_unused_iters(const IterMark &mark,
     if (j == splits.size()) {
       ICHECK(lowest != splits.size());
       ICHECK(CanProveDivisible(splits[lowest]->lower_factor,
-                               expected_lower_factor));
+                               expected_lower_factor))
+          << " Cannot prove divisible for " << splits[lowest]->lower_factor
+          << " and " << expected_lower_factor;
       results.emplace_back(
           mark, expected_lower_factor,
           FloorDiv(splits[lowest]->lower_factor, expected_lower_factor), 1);
