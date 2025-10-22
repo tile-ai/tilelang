@@ -105,6 +105,8 @@ def randn_semi_sparse(M: int, K: int, dtype=torch.float16, device='cuda', transp
         transposed (bool): If True, returns a transposed tensor of shape (K, M)
     """
     elem, group = 2, 4
+    if dtype == torch.float32:
+        elem, group = 1, 2
     tensor = torch.randn((M, K), dtype=torch.float, device=device).view(M, -1, group)
     indice = tensor.topk(elem, dim=-1).indices
     tensor.scatter_(-1, indice, 0)
@@ -129,6 +131,8 @@ def arange_semi_sparse(M: int,
         transposed (bool): If True, returns a transposed tensor of shape (K, M)
     """
     elem, group = 2, 4
+    if dtype == torch.float32:
+        elem, group = 1, 2
     tensor = torch.arange(M * K, dtype=dtype, device=device).view(M, -1, group)
     indice = tensor.topk(elem, dim=-1).indices
     tensor.scatter_(-1, indice, 0)
