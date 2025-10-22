@@ -32,7 +32,6 @@ def run_vectorized_cast(src_dtype_str: str, dst_dtype_str: str, check_str: str, 
         src_dtype_str: The source data type string.
         dst_dtype_str: The destination data type string.
         check_str: Used to ensure vectorized cast is used.
-        M: The size of the tensor.
         lanes: The number of lanes of the source and destination data types.
     """
 
@@ -80,4 +79,3 @@ def test_vectorized_cast():
 
 if __name__ == "__main__":
     tilelang.testing.main()
-

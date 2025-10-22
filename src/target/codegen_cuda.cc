@@ -948,17 +948,21 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
       // bfloat162 -> float2
       PrintIndent();
-      stream << sret << " = __bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&(" << src << ")));\n";
+      stream << sret
+             << " = __bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&("
+             << src << ")));\n";
       os << sret;
       return;
     } else if (from_ty.lanes() == 4 && target_ty.lanes() == 4) {
       // bfloat162x2 -> float4
       PrintIndent();
       stream << "((float2*)(&" << sret << "))[0] = "
-             << "__bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&(" << src << ")));\n";
+             << "__bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&("
+             << src << ")));\n";
       PrintIndent();
       stream << "((float2*)(&" << sret << "))[1] = "
-             << "__bfloat1622float2(*(reinterpret_cast<__nv_bfloat162*>(&(" << src << "))+1));\n";
+             << "__bfloat1622float2(*(reinterpret_cast<__nv_bfloat162*>(&("
+             << src << "))+1));\n";
       os << sret;
       return;
     }
@@ -967,8 +971,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
       // float2 -> bfloat162
       PrintIndent();
-      stream << "*reinterpret_cast<__nv_bfloat162*>(&(" << sret << ")) = __float22bfloat162_rn(*(float2*)(&("
-             << src << ")));\n";
+      stream << "*reinterpret_cast<__nv_bfloat162*>(&(" << sret
+             << ")) = __float22bfloat162_rn(*(float2*)(&(" << src << ")));\n";
       os << sret;
       return;
     } else if (from_ty.lanes() == 4 && target_ty.lanes() == 4) {
