@@ -163,7 +163,7 @@ private:
   }
 
   PrimExpr VisitExpr_(const CallNode *op) {
-    if (op->op.same_as(tma_load())) {
+    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
       auto arg0 = op->args[0].as<Call>();
       bool is_1d_tma_load =
           arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
@@ -203,7 +203,7 @@ private:
 
   void VisitStmt_(const EvaluateNode *op) final {
     if (const auto *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(tma_load())) {
+      if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
         pending_tma_ops_.push_back(GetRef<Call>(call));
       } else if (call->op.same_as(mbarrier_expect_tx())) {
         pending_tma_ops_.push_back(GetRef<Call>(call));
@@ -451,7 +451,7 @@ private:
   }
 
   PrimExpr VisitExpr_(const CallNode *op) {
-    if (op->op.same_as(tma_load())) {
+    if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
       // check this must be in the tma_op_to_barrier_id_
       ICHECK(tma_op_to_barrier_id_.count(GetRef<Call>(op)))
           << "tma_load must be in the tma_op_to_barrier_id_";
@@ -459,7 +459,8 @@ private:
       auto new_args = op->args;
       auto arg0 = op->args[0].as<Call>();
       auto is_1d_tma_load =
-          arg0 && !arg0.value()->op.same_as(create_tma_descriptor());
+          arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
+          !arg0.value()->op.same_as(create_tma_im2col_descriptor());
       if (is_1d_tma_load) {
         new_args.Set(2, barrier_id);
       } else {

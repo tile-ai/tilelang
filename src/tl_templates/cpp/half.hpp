@@ -1192,8 +1192,8 @@ unsigned int float2half_impl(T value, ...) {
 template <std::float_round_style R, typename T>
 unsigned int float2half(T value) {
   return float2half_impl<R>(
-      value, bool_type < std::numeric_limits<T>::is_iec559 &&
-                 sizeof(typename bits<T>::type) == sizeof(T) > ());
+      value, bool_type<std::numeric_limits<T>::is_iec559 &&
+                       sizeof(typename bits<T>::type) == sizeof(T)>());
 }
 
 /// Convert integer to half-precision floating-point.
@@ -1665,9 +1665,10 @@ template <typename T> T half2float_impl(unsigned int value, T, ...) {
 /// \param value half-precision value to convert
 /// \return floating-point value
 template <typename T> T half2float(unsigned int value) {
-  return half2float_impl(value, T(),
-                         bool_type < std::numeric_limits<T>::is_iec559 &&
-                             sizeof(typename bits<T>::type) == sizeof(T) > ());
+  return half2float_impl(
+      value, T(),
+      bool_type<std::numeric_limits<T>::is_iec559 &&
+                sizeof(typename bits<T>::type) == sizeof(T)>());
 }
 
 /// Convert half-precision floating-point to integer.

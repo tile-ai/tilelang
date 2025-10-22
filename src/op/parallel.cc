@@ -373,8 +373,21 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &T,
           throw LayoutConflictException(oss.str());
         }
       });
-      result = Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter)
-                   ->BindThreadRange(T.thread_bounds);
+
+      try {
+        result = Fragment(loop_vars_, {}, loop_var_to_thread, rep_iter)
+                     ->BindThreadRange(T.thread_bounds);
+      } catch (const tvm::runtime::Error &err) {
+        std::ostringstream msg;
+        msg << "Layout inference for buffer `" << buffer->name
+            << "` failed inside `T.parallel` loop.";
+
+        msg << "\nUnderlying TVM error: " << err.what();
+        msg << "\nProblematic loop AST:\n " << root_;
+        msg << "\nHint: ensure the loop extent divides the thread binding or "
+               "adjust the fragment mapping.";
+        LOG(FATAL) << msg.str();
+      }
     }
     DLOG(INFO) << "[compute_loop_layout_from_buffer] ... and get "
                << result->DebugOutput() << '\n';

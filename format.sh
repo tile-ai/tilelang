@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Usage:
 #    # Do work and commit your work.
-
+#
 #    # Format files that differ from origin/main.
 #    bash format.sh
-
-#    # Commit changed files with message 'Run yapf and ruff'
+#
+#    # Format all files.
+#    bash format.sh --all
 #
 #
 # YAPF + Clang formatter (if installed). This script formats all changed files from the last mergebase.
@@ -14,303 +15,149 @@
 # Cause the script to exit if a single command fails
 set -eo pipefail
 
+if [[ -z "${BASH_VERSION}" ]]; then
+    echo "Please run this script using bash." >&2
+    exit 1
+fi
+
 # this stops git rev-parse from failing if we run this from the .git directory
 builtin cd "$(dirname "${BASH_SOURCE:-$0}")"
 ROOT="$(git rev-parse --show-toplevel)"
 builtin cd "$ROOT" || exit 1
 
-# If yapf/ruff/codespell is not installed, install according to the requirements
-if ! (yapf --version &>/dev/null && ruff --version &>/dev/null && codespell --version &>/dev/null); then
-    pip install -r requirements-lint.txt
+ALL_FILES=''
+ONLY_CHANGED=''
+FILES=()
+if (($# == 0)); then
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo 'Detected uncommitted changes. Please commit or stash them before running format.sh.' >&2
+        exit 1
+    fi
+    ONLY_CHANGED='true'
+else
+    while (($# > 0)); do
+        case $1 in
+        --files)
+            shift
+            while (($# > 0)); do
+                FILES+=("$1")
+                shift
+            done
+            ;;
+        --all)
+            ALL_FILES='true'
+            shift
+            ;;
+        *)
+            echo "Unknown argument: '$1'" >&2
+            exit 1
+            ;;
+        esac
+    done
 fi
 
-YAPF_VERSION=$(yapf --version | awk '{print $2}')
-RUFF_VERSION=$(ruff --version | awk '{print $2}')
-CODESPELL_VERSION=$(codespell --version)
-
-# # params: tool name, tool version, required version
-tool_version_check() {
-    if [[ $2 != $3 ]]; then
-        echo "Wrong $1 version installed: $3 is required, not $2."
-        pip install -r requirements-lint.txt
-    fi
-}
-
-tool_version_check "yapf" $YAPF_VERSION "$(grep yapf requirements-lint.txt | cut -d'=' -f3)"
-tool_version_check "ruff" $RUFF_VERSION "$(grep "ruff==" requirements-lint.txt | cut -d'=' -f3)"
-tool_version_check "codespell" "$CODESPELL_VERSION" "$(grep codespell requirements-lint.txt | cut -d'=' -f3)"
-
-echo 'tile-lang yapf: Check Start'
-
-YAPF_FLAGS=(
-    '--recursive'
-    '--parallel'
-)
-
-YAPF_EXCLUDES=(
-    '--exclude' 'build/**'
-    '--exclude' '3rdparty/**'
-)
-
-# Format specified files
-format() {
-    yapf --in-place "${YAPF_FLAGS[@]}" "$@"
-}
-
-# Format files that differ from main branch. Ignores dirs that are not slated
-# for autoformat yet.
-format_changed() {
-    # The `if` guard ensures that the list of filenames is not empty, which
-    # could cause yapf to receive 0 positional arguments, making it hang
-    # waiting for STDIN.
-    #
-    # `diff-filter=ACM` and $MERGEBASE is to ensure we only format files that
-    # exist on both branches.
+MERGE_BASE=""
+get_merge_base() {
     UPSTREAM_REPO="https://github.com/tile-ai/tilelang"
-    
-    if git ls-remote --exit-code "$UPSTREAM_REPO" main &>/dev/null; then
+    if git ls-remote --exit-code "${UPSTREAM_REPO}" main &>/dev/null; then
         # First try to use the upstream repository directly
-        MERGEBASE="$(git fetch "$UPSTREAM_REPO" main &>/dev/null && git merge-base FETCH_HEAD HEAD)"
+        MERGE_BASE="$(git fetch "${UPSTREAM_REPO}" main &>/dev/null && git merge-base FETCH_HEAD HEAD)"
     elif git show-ref --verify --quiet refs/remotes/origin/main; then
         # Fall back to origin/main if available
         BASE_BRANCH="origin/main"
-        MERGEBASE="$(git merge-base $BASE_BRANCH HEAD)"
+        MERGE_BASE="$(git merge-base "${BASE_BRANCH}" HEAD)"
     else
         # Last resort, use local main
         BASE_BRANCH="main"
-        MERGEBASE="$(git merge-base $BASE_BRANCH HEAD)"
+        MERGE_BASE="$(git merge-base "${BASE_BRANCH}" HEAD)"
     fi
-
-    if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
-        git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs -P 5 \
-             yapf --in-place "${YAPF_EXCLUDES[@]}" "${YAPF_FLAGS[@]}"
-    fi
+    echo "${MERGE_BASE}"
 }
 
-# Format all files
-format_all() {
-    yapf --in-place "${YAPF_FLAGS[@]}" "${YAPF_EXCLUDES[@]}" .
-}
-
-## This flag formats individual files. --files *must* be the first command line
-## arg to use this option.
-if [[ "$1" == '--files' ]]; then
-   format "${@:2}"
-   # If `--all` is passed, then any further arguments are ignored and the
-   # entire python directory is formatted.
-elif [[ "$1" == '--all' ]]; then
-   format_all
-else
-   # Format only the files that changed in last commit.
-   format_changed
-fi
-echo 'tile-lang yapf: Done'
-
-echo 'tile-lang codespell: Check Start'
-# check spelling of specified files
-spell_check() {
-    codespell "$@"
-}
-
-spell_check_all(){
-  codespell --toml pyproject.toml
-}
-
-# Spelling  check of files that differ from main branch.
-spell_check_changed() {
-    # The `if` guard ensures that the list of filenames is not empty, which
-    # could cause ruff to receive 0 positional arguments, making it hang
-    # waiting for STDIN.
-    #
-    # `diff-filter=ACM` and $MERGEBASE is to ensure we only lint files that
-    # exist on both branches.
-    if git show-ref --verify --quiet refs/remotes/origin/main; then
-        BASE_BRANCH="origin/main"
-    else
-        BASE_BRANCH="main"
-    fi
-
-    MERGEBASE="$(git merge-base $BASE_BRANCH HEAD)"
-
-    if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
-        git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
-             codespell
-    fi
-}
-
-# Run Codespell
-## This flag runs spell check of individual files. --files *must* be the first command line
-## arg to use this option.
-if [[ "$1" == '--files' ]]; then
-   spell_check "${@:2}"
-   # If `--all` is passed, then any further arguments are ignored and the
-   # entire python directory is linted.
-elif [[ "$1" == '--all' ]]; then
-   spell_check_all
-else
-   # Check spelling only of the files that changed in last commit.
-   spell_check_changed
-fi
-echo 'tile-lang codespell: Done'
-
-echo 'tile-lang ruff: Check Start'
-# Lint specified files
-lint() {
-    ruff check "$@"
-}
-
-# Lint files that differ from main branch. Ignores dirs that are not slated
-# for autolint yet.
-lint_changed() {
-    # The `if` guard ensures that the list of filenames is not empty, which
-    # could cause ruff to receive 0 positional arguments, making it hang
-    # waiting for STDIN.
-    #
-    # `diff-filter=ACM` and $MERGEBASE is to ensure we only lint files that
-    # exist on both branches.
-    if git show-ref --verify --quiet refs/remotes/origin/main; then
-        BASE_BRANCH="origin/main"
-    else
-        BASE_BRANCH="main"
-    fi
-
-    MERGEBASE="$(git merge-base $BASE_BRANCH HEAD)"
-
-    if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
-        git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
-             ruff check
-    fi
-
-}
-
-# Run Ruff
-### This flag lints individual files. --files *must* be the first command line
-### arg to use this option.
-if [[ "$1" == '--files' ]]; then
-   lint "${@:2}"
-   # If `--all` is passed, then any further arguments are ignored and the
-   # entire python directory is linted.
-elif [[ "$1" == '--all' ]]; then
-   lint python testing
-else
-   # Format only the files that changed in last commit.
-   lint_changed
+if [[ -n "${ALL_FILES}" ]]; then
+    echo "Checking all files..." >&2
+elif [[ -n "${ONLY_CHANGED}" ]]; then
+    MERGE_BASE="$(get_merge_base)"
+    echo "Checking changed files compared to merge base (${MERGE_BASE})..." >&2
+elif [[ "${#FILES[@]}" -gt 0 ]]; then
+    echo "Checking specified files: ${FILES[*]}..." >&2
 fi
 
-echo 'tile-lang ruff: Done'
-
-echo 'tile-lang clang-format: Check Start'
-# If clang-format is available, run it; otherwise, skip
-if command -v clang-format &>/dev/null; then
-    CLANG_FORMAT_VERSION=$(clang-format --version | awk '{print $3}')
-    tool_version_check "clang-format" "$CLANG_FORMAT_VERSION" "$(grep clang-format requirements-lint.txt | cut -d'=' -f3)"
-
-    CLANG_FORMAT_FLAGS=("-i")
-
-    # Apply clang-format to specified files
-    clang_format() {
-        clang-format "${CLANG_FORMAT_FLAGS[@]}" "$@"
-    }
-
-    # Format all C/C++ files in the repo, excluding specified directories
-    clang_format_all() {
-        find . -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) \
-            -not -path "./3rdparty/*" \
-            -not -path "./build/*" \
-            -exec clang-format -i {} +
-    }
-
-    # Format changed C/C++ files relative to main
-    clang_format_changed() {
-        if git show-ref --verify --quiet refs/remotes/origin/main; then
-            BASE_BRANCH="origin/main"
-        else
-            BASE_BRANCH="main"
-        fi
-
-        MERGEBASE="$(git merge-base $BASE_BRANCH HEAD)"
-
-        if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' &>/dev/null; then
-            git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' | xargs clang-format -i
-        fi
-    }
-
-    if [[ "$1" == '--files' ]]; then
-       # If --files is given, format only the provided files
-       clang_format "${@:2}"
-    elif [[ "$1" == '--all' ]]; then
-       # If --all is given, format all eligible C/C++ files
-       clang_format_all
-    else
-       # Otherwise, format only changed C/C++ files
-       clang_format_changed
-    fi
-else
-    echo "clang-format not found. Skipping C/C++ formatting."
+# If pre-commit is not installed, install it.
+if ! python3 -m pre_commit --version &>/dev/null; then
+    python3 -m pip install pre-commit
 fi
-echo 'tile-lang clang-format: Done'
+
+if [[ ! -f "${ROOT}/.git/hooks/pre-commit" ]]; then
+    echo "Installing and initializing pre-commit hooks..."
+    python3 -m pre_commit install --install-hooks
+fi
+
+echo 'tile-lang pre-commit: Check Start'
+
+if [[ -n "${ALL_FILES}" ]]; then
+    python3 -m pre_commit run --all-files
+elif [[ -n "${ONLY_CHANGED}" ]]; then
+    python3 -m pre_commit run --from-ref "${MERGE_BASE}" --to-ref HEAD
+elif [[ "${#FILES[@]}" -gt 0 ]]; then
+    python3 -m pre_commit run --files "${FILES[@]}"
+fi
+
+echo 'tile-lang pre-commit: Done'
 
 echo 'tile-lang clang-tidy: Check Start'
 # If clang-tidy is available, run it; otherwise, skip
-if command -v run-clang-tidy &>/dev/null; then
+if [[ -x "$(command -v run-clang-tidy)" ]]; then
     # Check if clang-tidy is available
-    if ! command -v clang-tidy &>/dev/null; then
-        echo "clang-tidy not found. Skipping clang-tidy checks."
+    if [[ ! -x "$(command -v clang-tidy)" ]]; then
+        python3 -m pip install --upgrade --requirements "${ROOT}/requirements-lint.txt"
+    fi
+    # Get clang-tidy version
+    CLANG_TIDY_VERSION="$(clang-tidy --version | head -n1 | awk '{print $4}')"
+    echo "Using clang-tidy version: ${CLANG_TIDY_VERSION}"
+
+    # Check if build directory exists
+    if [[ ! -d "${ROOT}/build" ]]; then
+        echo "Build directory not found. Skipping clang-tidy checks."
     else
-        # Get clang-tidy version
-        CLANG_TIDY_VERSION=$(clang-tidy --version | head -n1 | awk '{print $4}')
-        echo "Using clang-tidy version: $CLANG_TIDY_VERSION"
+        # Run clang-tidy on specified files
+        clang_tidy_files() {
+            run-clang-tidy -j 64 "$@" -p build
+        }
 
-        # Check if build directory exists
-        if [ ! -d "build" ]; then
-            echo "Build directory not found. Skipping clang-tidy checks."
-        else
-            # Run clang-tidy on specified files
-            clang_tidy_files() {
-                run-clang-tidy -j 64 "$@" -p build
-            }
+        # Run clang-tidy on all C/C++ source files
+        clang_tidy_all() {
+            run-clang-tidy -j 64 src/*.cc -p build
+        }
 
-            # Run clang-tidy on all C/C++ source files
-            clang_tidy_all() {
-                run-clang-tidy -j 64 src/*.cc -p build
-            }
+        # Run clang-tidy on changed C/C++ files relative to main
+        clang_tidy_changed() {
+            # Get changed C/C++ files
+            CHANGED_FILES="$(git diff --name-only --diff-filter=ACM "${MERGE_BASE}" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' 2>/dev/null || true)"
 
-            # Run clang-tidy on changed C/C++ files relative to main
-            clang_tidy_changed() {
-                if git show-ref --verify --quiet refs/remotes/origin/main; then
-                    BASE_BRANCH="origin/main"
-                else
-                    BASE_BRANCH="main"
-                fi
-
-                MERGEBASE="$(git merge-base $BASE_BRANCH HEAD)"
-
-                # Get changed C/C++ files
-                CHANGED_FILES=$(git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.c' '*.cc' '*.cpp' '*.h' '*.hpp' 2>/dev/null || true)
-                
-                if [ -n "$CHANGED_FILES" ]; then
-                    echo "Running clang-tidy on changed files:"
-                    echo "$CHANGED_FILES"
-                    # Convert newline-separated files to space-separated and run clang-tidy once
-                    CHANGED_FILES_SPACE=$(echo "$CHANGED_FILES" | tr '\n' ' ')
-                    run-clang-tidy -j 64 $CHANGED_FILES_SPACE -p build -fix
-                else
-                    echo "No C/C++ files changed. Skipping clang-tidy."
-                fi
-            }
-
-            if [[ "$1" == '--files' ]]; then
-               # If --files is given, run clang-tidy only on the provided files
-               clang_tidy_files "${@:2}"
-            elif [[ "$1" == '--all' ]]; then
-               # If --all is given, run clang-tidy on all source files
-               clang_tidy_all
+            if [[ -n "${CHANGED_FILES}" ]]; then
+                echo "Running clang-tidy on changed files:"
+                echo "${CHANGED_FILES}"
+                # Convert newline-separated files to space-separated and run clang-tidy once
+                CHANGED_FILES_SPACE="$(echo "${CHANGED_FILES}" | tr '\n' ' ')"
+                run-clang-tidy -j 64 ${CHANGED_FILES_SPACE} -p build -fix
             else
-               # Otherwise, run clang-tidy only on changed C/C++ files
-               clang_tidy_changed
+                echo "No C/C++ files changed. Skipping clang-tidy."
             fi
+        }
+
+        if [[ -n "${ALL_FILES}" ]]; then
+            # If --all is given, run clang-tidy on all source files
+            clang_tidy_all
+        elif [[ -n "${ONLY_CHANGED}" ]]; then
+            # Otherwise, run clang-tidy only on changed C/C++ files
+            clang_tidy_changed
+        elif [[ "${#FILES[@]}" -gt 0 ]]; then
+            # If --files is given, run clang-tidy only on the provided files
+            clang_tidy_files "${FILES[@]}"
         fi
     fi
+
 else
     echo "run-clang-tidy not found. Skipping clang-tidy checks."
     echo "To install clang-tidy tools, you may need to install clang-tidy and run-clang-tidy."

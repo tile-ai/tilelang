@@ -1,4 +1,13 @@
-Checks: >
+---
+InheritParentConfig: true
+ExtraArgs: ['-v']
+FormatStyle: file
+UseColor: true
+WarningsAsErrors: '*'
+ExcludeHeaderFilterRegex: '^(3rdparty|tvm)/.*$'
+
+# NOTE: there must be no spaces before the '-', so put the comma last.
+Checks: >-
   # 1. Retained categories: easier to find bugs/performance issues
   clang-analyzer-*,
   cppcoreguidelines-pro-type-static-cast-downcast,
@@ -47,7 +56,3 @@ Checks: >
   -clang-analyzer-deadcode.DeadStores,
   -clang-analyzer-optin.cplusplus.VirtualCall,
   -clang-diagnostic-tautological-constant-compare,
-
-WarningsAsErrors: '*'
-
-HeaderFilterRegex: '^(?!.*(3rdparty|build)).*$'

@@ -106,8 +106,8 @@ TL_DEVICE void AtomicAdd(T1 &ref, T2 val,
   using NT1 = typename normalize_atomic_type<T1>::type;
   T1 *address = &ref;
   if constexpr ((std::is_same_v<NT1, half> ||
-                 std::is_same_v<NT1, __nv_bfloat16>)&&memory_order ==
-                int(cuda::memory_order_relaxed)) {
+                 std::is_same_v<NT1, __nv_bfloat16>) &&
+                memory_order == int(cuda::memory_order_relaxed)) {
     atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val));
   } else {
     cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(*address);
@@ -121,8 +121,8 @@ TL_DEVICE T1 AtomicAddRet(T1 &ref, T2 val,
   using NT1 = typename normalize_atomic_type<T1>::type;
   T1 *address = &ref;
   if constexpr ((std::is_same_v<NT1, half> ||
-                 std::is_same_v<NT1, __nv_bfloat16>)&&memory_order ==
-                int(cuda::memory_order_relaxed)) {
+                 std::is_same_v<NT1, __nv_bfloat16>) &&
+                memory_order == int(cuda::memory_order_relaxed)) {
     return static_cast<T1>(
         atomicAdd(reinterpret_cast<NT1 *>(address), static_cast<NT1>(val)));
   } else {

@@ -287,21 +287,39 @@ jobs:
           echo "Clearing uv cache at ${UV_CACHE_DIR} due to failure."
           uv cache clean
 
-      - name: Run format check
-        id: format-check
+      - name: Run clang-tidy
+        id: clang-tidy
+        if: runner.os == 'Linux'
         run: |
-          mkdir -p build
+          echo "\$ $(command -v clang-tidy) --version" && clang-tidy --version
+
+          if [[ -x "$(command -v run-clang-tidy)" ]]; then
+            echo "Using run-clang-tidy from $(command -v run-clang-tidy)"
+            CLANG_TIDY=(run-clang-tidy)
+          else
+            echo "Downloading run-clang-tidy script"
+            wget -O run-clang-tidy.py https://raw.githubusercontent.com/llvm/llvm-project/refs/heads/release/21.x/clang-tools-extra/clang-tidy/tool/run-clang-tidy.py
+            CLANG_TIDY=(uv run --no-project --script -- run-clang-tidy.py)
+          fi
+          if [[ -x "$(command -v clang-apply-replacements)" ]]; then
+            echo "Using clang-apply-replacements from $(command -v clang-apply-replacements)"
+            CLANG_TIDY+=(-fix -clang-apply-replacements-binary="$(command -v clang-apply-replacements)")
+          else
+            echo "::warning::clang-apply-replacements not found in PATH, automatic fixing disabled."
+          fi
+
           # Run cmake to create the build directory with compile_commands.json
-          (
-            cd build
-            cmake .. ${CLANG_TIDY_CMAKE_OPTIONS}  # no quotes here
-          )
+          cmake -S . -B cmake-build --fresh ${CLANG_TIDY_CMAKE_OPTIONS}  # no quotes here
+
+          CXX_FILES=$(find src -type f -iname "*.[ch]pp" -o -iname "*.cc" -o -iname "*.c" -o -iname "*.h")
           rc=0
-          bash format.sh || rc="$?"
-          rm -rf build
-          if [[ "${rc}" -ne 0 ]]; then
-            echo "::error::Format check failed. Please run 'bash format.sh' locally to fix the issues."
-            exit 1
+          "${CLANG_TIDY[@]}" -clang-tidy-binary="$(command -v clang-tidy)" \
+            -p="cmake-build" ${CXX_FILES} || rc="$?"
+          rm -rf cmake-build run-clang-tidy.py
+          if (( rc != 0 )); then
+            echo "::error::clang-tidy found issues (exit code: ${rc}). Please run 'clang-tidy --fix' locally to fix them."
+            git diff --color=always || true
+            exit "${rc}"
           fi
 
       - name: Enable core dump generation (Linux / GitHub-hosted runners)

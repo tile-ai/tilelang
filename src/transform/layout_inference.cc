@@ -131,13 +131,13 @@ public:
           ICHECK(dst_layout_opt.has_value())
               << "Failed to cast layout to Fragment for buffer " << buffer
               << ", layout type is " << layout->GetTypeKey();
-          auto dst_layout = dst_layout_opt.value();
+          const auto &dst_layout = dst_layout_opt.value();
           auto src_layout_opt = layout_map[buffer].as<Fragment>();
           ICHECK(src_layout_opt.has_value())
               << "Failed to cast layout_map[buffer] to Fragment for buffer "
               << buffer << ", layout type is "
               << layout_map[buffer]->GetTypeKey();
-          auto src_layout = src_layout_opt.value();
+          const auto &src_layout = src_layout_opt.value();
           ICHECK(dst_layout->InputDim() == src_layout->InputDim());
           Array<PrimExpr> indices;
           indices.reserve(dst_layout->InputDim());
@@ -398,7 +398,7 @@ private:
                       << call->args[1]->GetTypeKey();
         return std::nullopt;
       }
-      auto var = var_opt.value();
+      const auto &var = var_opt.value();
       return buffer_data_to_buffer_[var];
     } else if (call->op.same_as(RegionOp::Get())) {
       return call->args[0].as<BufferLoadNode>()->buffer;
@@ -636,7 +636,7 @@ private:
   LayoutInferencer(const LayoutInferenceResult &result,
                    bool skip_thread_partition, arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer), result_(result),
-        skip_thread_partition_(skip_thread_partition){};
+        skip_thread_partition_(skip_thread_partition) {};
 
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 

@@ -27,6 +27,7 @@ static constexpr const char *kWarpSpecializationScope =
     "kWarpSpecializationScope";
 static constexpr const char *kCustomWarpSpecialization =
     "kCustomWarpSpecialization";
+static constexpr const char *kLocalVarInit = "tl.local_var_init";
 } // namespace attr
 
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
