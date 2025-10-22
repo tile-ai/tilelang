@@ -2,7 +2,6 @@ import torch
 import tilelang.testing
 import tilelang.language as T
 
-
 str2dtype = {
     "float32": torch.float32,
     "float16": torch.float16,
@@ -18,8 +17,8 @@ def vectorized_cast_kernel(M: int, dtype_A: str, dtype_B: str):
 
     @T.prim_func
     def main(
-        A: T.Tensor[(M), dtype_A],  # noqa: F821
-        B: T.Tensor[(M), dtype_B],  # noqa: F821
+            A: T.Tensor[(M), dtype_A],  # noqa: F821
+            B: T.Tensor[(M), dtype_B],  # noqa: F821
     ):
         with T.Kernel(1, threads=128):
             T.copy(A, B)
@@ -27,12 +26,7 @@ def vectorized_cast_kernel(M: int, dtype_A: str, dtype_B: str):
     return main
 
 
-def run_vectorized_cast(
-    src_dtype_str: str,
-    dst_dtype_str: str, 
-    check_str: str,
-    lanes: int = 2
-):
+def run_vectorized_cast(src_dtype_str: str, dst_dtype_str: str, check_str: str, lanes: int = 2):
     """Run the vectorized cast kernel and check the correctness.
     Args:
         src_dtype_str: The source data type string.
