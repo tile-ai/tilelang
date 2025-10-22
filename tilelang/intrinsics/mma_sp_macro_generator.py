@@ -279,7 +279,6 @@ class SparseTensorCoreIntrinEmitter(object):
         a_transposed = self.a_transposed
         # ldmatrix cannot be used for int8 + trans case.
         ldmatrix_available = not (DataType(a_dtype).bits != 16 and a_transposed)
-        ldmatrix_available = False
 
         def mma_load_layout(i, j):
             return i, j
