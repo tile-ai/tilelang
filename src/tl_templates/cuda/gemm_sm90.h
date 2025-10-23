@@ -15,9 +15,15 @@ using namespace SM90;
 namespace tl_wgmma {
 
 using namespace cutlass::gemm::collective::detail; // ss_smem_selector
-template<typename T> struct to_cute_type {using type = T;};
-template<> struct to_cute_type<tl::float_e4m3_t> {using type = cute::float_e4m3_t;};
-template<> struct to_cute_type<tl::float_e5m2_t> {using type = cute::float_e5m2_t;};
+template <typename T> struct to_cute_type {
+  using type = T;
+};
+template <> struct to_cute_type<tl::float_e4m3_t> {
+  using type = cute::float_e4m3_t;
+};
+template <> struct to_cute_type<tl::float_e5m2_t> {
+  using type = cute::float_e5m2_t;
+};
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, typename A_type_raw,
