@@ -1,8 +1,8 @@
 #pragma once
 
+#include "common.h"
 #include <cuda_fp8.h>
 #include <cute/numeric/numeric_types.hpp>
-#include "common.h"
 
 using fp8_e4_t = tl::float_e4m3_t;
 using fp8_e5_t = tl::float_e5m2_t;

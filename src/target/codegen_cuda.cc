@@ -964,7 +964,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     PrintVecElemStore(sret, target_ty, i, val.str());
   }
 
-
   if (used_bf16_op) {
     stream << "#endif\n";
   }
