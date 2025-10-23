@@ -299,10 +299,6 @@ PrimExpr CopyNode::MakePredicate(arith::Analyzer *analyzer,
 For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Array<IterVar> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.empty();
-  if (is_scalar) {
-    return For(Var("i"), 0, 1, ForKind::kSerial,
-               BufferStore(dst, BufferLoad(src, {0}), {0}));
-  }
 
   for (const auto &iv : loop_vars)
     analyzer->Bind(iv->var, iv->dom);
@@ -332,6 +328,9 @@ For CopyNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
   Stmt body = BufferStore(dst, value, dst_indices);
   if (dst_predicate.defined())
     body = IfThenElse(dst_predicate, body);
+  if (is_scalar) {
+    return For(Var("i"), 0, 1, ForKind::kSerial, body);
+  }
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
     Map<String, ObjectRef> annotations = {};
     if (coalesced_width.defined()) {
@@ -844,6 +843,7 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
                                arith::Analyzer *analyzer) const {
   bool is_cpu_target = T.target->GetTargetDeviceType() == kDLCPU;
   auto simt_loop = MakeSIMTLoop(analyzer);
+  LOG(INFO) << "[LowerNormalCopy] simt_loop " << simt_loop;
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
 
   auto transformed_loop =
