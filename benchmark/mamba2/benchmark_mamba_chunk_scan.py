@@ -7,12 +7,6 @@ from einops import rearrange, repeat
 import itertools
 
 
-def chunk_scan_triton(cb, x, dt, dA_cumsum, C, states, D):
-    from mamba_ssm.ops.triton.ssd_chunk_scan import _chunk_scan_fwd
-    out, _ = _chunk_scan_fwd(cb, x, dt, dA_cumsum, C, states, D)
-    return out
-
-
 def ref_program(cb, x, dt, dA_cumsum, C, prev_states, D):
     """
     Argument:
@@ -220,35 +214,10 @@ if __name__ == "__main__":
     batch, heads, groups, seq_len, chunk_size, dim, dstate = args.batch, args.heads, args.groups, args.seq_len, args.chunk_size, args.dim, args.dstate
     total_flops = 2 * batch * seq_len * chunk_size * heads * dim * 0.5 + 2 * batch * seq_len * heads * dim * dstate
 
-    if (not args.tune):
-        kernel = chunk_scan_fwd(
-            batch,
-            seq_len,
-            chunk_size,
-            groups,
-            heads,
-            dim,
-            dstate,
-            block_M=64,
-            block_N=64,
-            block_K=64,
-            block_Dstate=128,
-            num_stages=2,
-            threads=128)
-        profiler = kernel.get_profiler(tilelang.TensorSupplyType.Normal)
-        profiler.assert_allclose(ref_program, rtol=0.01, atol=0.01)
-        print("All checks pass.")
-        latency = profiler.do_bench(ref_program, warmup=500)
-        print("Ref: {:.2f} ms".format(latency))
-        print("Ref: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-        latency = profiler.do_bench(warmup=500)
-        print("Tile-lang: {:.2f} ms".format(latency))
-        print("Tile-lang: {:.2f} TFlops".format(total_flops / latency * 1e-9))
-    else:
-        kernel = chunk_scan_fwd(batch, seq_len, chunk_size, groups, heads, dim, dstate)
-        best_latency = kernel.latency
-        best_config = kernel.config
-        ref_latency = kernel.ref_latency
-        print(f"Best latency: {best_latency}")
-        print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
-        print(f"Best config: {best_config}")
+    kernel = chunk_scan_fwd(batch, seq_len, chunk_size, groups, heads, dim, dstate)
+    best_latency = kernel.latency
+    best_config = kernel.config
+    ref_latency = kernel.ref_latency
+    print(f"Best latency: {best_latency}")
+    print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
+    print(f"Best config: {best_config}")

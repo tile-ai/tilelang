@@ -29,14 +29,14 @@ ALL_FILES=''
 ONLY_CHANGED=''
 FILES=()
 if (($# == 0)); then
-    if [[ -n "$(git status --porcelain)" ]]; then
-        echo 'Detected uncommitted changes. Please commit or stash them before running format.sh.' >&2
+    if [[ -n "$(git status --porcelain --ignore-submodules --untracked-files=no)" ]]; then
+        echo "Detected uncommitted changes. Please commit or stash them before running $0." >&2
         exit 1
     fi
     ONLY_CHANGED='true'
 else
     while (($# > 0)); do
-        case $1 in
+        case "$1" in
         --files)
             shift
             while (($# > 0)); do
@@ -86,11 +86,6 @@ fi
 # If pre-commit is not installed, install it.
 if ! python3 -m pre_commit --version &>/dev/null; then
     python3 -m pip install pre-commit
-fi
-
-if [[ ! -f "${ROOT}/.git/hooks/pre-commit" ]]; then
-    echo "Installing and initializing pre-commit hooks..."
-    python3 -m pre_commit install --install-hooks
 fi
 
 echo 'tile-lang pre-commit: Check Start'

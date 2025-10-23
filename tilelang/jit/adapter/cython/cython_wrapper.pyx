@@ -251,6 +251,8 @@ cdef class CythonKernelWrapper:
                     if dtype not in dtype_to_ctype:
                         raise ValueError(f"Unsupported tensor dtype: {dtype}")
                     call_args.append(dtype_to_ctype[dtype](tensor))
+            elif tensor is None:
+                call_args.append(ctypes.c_void_p(0))
             else:
                 raise ValueError(f"Unsupported tensor type: {type(tensor)}")
 

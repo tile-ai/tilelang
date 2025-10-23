@@ -1,11 +1,12 @@
 """The auto-tune parameters.
 """
+from __future__ import annotations
 
 import tilelang
 from tilelang import tvm as tvm
 from tvm.tir import PrimFunc
 from tvm.target import Target
-from typing import Callable, List, Literal, Any, Optional, Union, Dict
+from typing import Callable, Literal, Any
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,12 +41,12 @@ class CompileArgs:
         Refer to `tilelang.PassConfigKey` for supported options.
     """
 
-    out_idx: Optional[Union[List[int], int]] = None
+    out_idx: list[int] | int | None = None
     execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython"
     target: Literal['auto', 'cuda', 'hip'] = 'auto'
-    target_host: Union[str, Target] = None
+    target_host: str | Target = None
     verbose: bool = False
-    pass_configs: Optional[Dict[str, Any]] = None
+    pass_configs: dict[str, Any] | None = None
 
     def compile_program(self, program: PrimFunc):
         return tilelang.compile(
@@ -135,12 +136,12 @@ class AutotuneResult:
         func: Optimized function.
         kernel: Compiled kernel function.
     """
-    latency: Optional[float] = None
-    config: Optional[dict] = None
-    ref_latency: Optional[float] = None
-    libcode: Optional[str] = None
-    func: Optional[Callable] = None
-    kernel: Optional[Callable] = None
+    latency: float | None = None
+    config: dict | None = None
+    ref_latency: float | None = None
+    libcode: str | None = None
+    func: Callable | None = None
+    kernel: Callable | None = None
 
     def _save_kernel_to_disk(self, cache_path: Path, kernel: JITKernel, verbose: bool = False):
         """
@@ -204,9 +205,9 @@ class AutotuneResult:
     def _load_kernel_from_disk(
         self,
         cache_path: Path,
-        target: Union[str, Target] = "auto",
-        target_host: Union[str, Target] = None,
-        out_idx: Optional[Union[List[int], int]] = None,
+        target: str | Target = "auto",
+        target_host: str | Target = None,
+        out_idx: list[int] | int | None = None,
         execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
         pass_configs: dict = None,
         func: Callable = None,
@@ -232,14 +233,14 @@ class AutotuneResult:
         if not os.path.exists(cache_path):
             return None
 
-        kernel_global_source: Optional[str] = None
-        kernel_params: Optional[List[KernelParam]] = None
+        kernel_global_source: str | None = None
+        kernel_params: list[KernelParam] | None = None
 
         try:
             wrapped_kernel_path = os.path.join(cache_path, WRAPPED_KERNEL_PATH)
             if verbose:
                 logger.debug(f"Loading wrapped kernel source code from file: {wrapped_kernel_path}")
-            with open(wrapped_kernel_path, "r") as f:
+            with open(wrapped_kernel_path) as f:
                 kernel_global_source = f.read()
         except Exception as e:
             logger.error(f"Error loading wrapped kernel source code from disk: {e}")
@@ -300,7 +301,7 @@ class AutotuneResult:
         self._save_kernel_to_disk(path, self.kernel)
 
     @classmethod
-    def load_from_disk(cls, path: Path, compile_args: CompileArgs) -> 'AutotuneResult':
+    def load_from_disk(cls, path: Path, compile_args: CompileArgs) -> AutotuneResult:
         if not os.path.exists(path):
             return None
 
@@ -308,7 +309,7 @@ class AutotuneResult:
         # load best config
         if verbose:
             logger.debug(f"Loading best config from file: {path / BEST_CONFIG_PATH}")
-        with open(path / BEST_CONFIG_PATH, "r") as f:
+        with open(path / BEST_CONFIG_PATH) as f:
             config = json.load(f)
 
         # load function
@@ -320,7 +321,7 @@ class AutotuneResult:
         # load latency
         if verbose:
             logger.debug(f"Loading latency from file: {path / LATENCY_PATH}")
-        with open(path / LATENCY_PATH, "r") as f:
+        with open(path / LATENCY_PATH) as f:
             latency = json.load(f)
             latency, ref_latency = latency["latency"], latency["ref_latency"]
 

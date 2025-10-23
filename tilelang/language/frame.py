@@ -1,4 +1,5 @@
 """Override the LetFrame to print a message when entering the frame."""
+from __future__ import annotations
 
 from tvm.ffi import register_object as _register_object
 from tvm.tir import Var, PrimExpr, BufferLoad, BufferRegion
@@ -6,7 +7,6 @@ from tvm.ir import Range
 from tvm import DataType
 from tvm.script.ir_builder.tir.frame import TIRFrame
 from collections import deque
-from typing import Optional
 import threading
 
 
@@ -150,7 +150,7 @@ class LetFrame(TIRFrame):
         super().__exit__(ptype, value, trace)
 
     @classmethod
-    def Current(cls) -> "LetFrame":
+    def Current(cls) -> LetFrame:
         """Get the current (topmost) let frame.
 
         Returns:
@@ -198,7 +198,7 @@ def has_let_value(var: Var) -> bool:
     return _get_let_stack().has_value(var)
 
 
-def get_let_value(var: Var) -> Optional[PrimExpr]:
+def get_let_value(var: Var) -> PrimExpr | None:
     """Get the value bound to a variable in the current let frame stack.
 
     Args:

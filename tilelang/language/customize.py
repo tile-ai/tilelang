@@ -1,8 +1,8 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
 import tilelang.language as T
 from tvm.tir import PrimExpr, Buffer, op
-from typing import List, Union
 from .atomic import atomic_max, atomic_min, atomic_add, atomic_addx2, atomic_addx4, atomic_load, atomic_store  # noqa: F401
 
 
@@ -36,7 +36,7 @@ def clamp(dst: PrimExpr, min_val: PrimExpr, max_val: PrimExpr) -> PrimExpr:
     return dst
 
 
-def reshape(src: Buffer, shape: List[PrimExpr]) -> Buffer:
+def reshape(src: Buffer, shape: list[PrimExpr]) -> Buffer:
     """Reshapes the input buffer to the specified shape.
 
     Args:
@@ -49,9 +49,7 @@ def reshape(src: Buffer, shape: List[PrimExpr]) -> Buffer:
     return T.Tensor(shape, src.dtype, src.data)
 
 
-def view(src: Buffer,
-         shape: Union[List[PrimExpr], None] = None,
-         dtype: Union[str, None] = None) -> Buffer:
+def view(src: Buffer, shape: list[PrimExpr] | None = None, dtype: str | None = None) -> Buffer:
     """
          Return a Tensor view of the input buffer with an optional new shape and dtype.
 
