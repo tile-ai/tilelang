@@ -190,7 +190,7 @@ public:
   Fragment Partition(const For &op, int num_thread, int vectorize_size) {
     this->VisitStmt(op);
     DataType dtype = DataType::Int(32);
-    if (!loop_vars_.empty()){
+    if (!loop_vars_.empty()) {
       dtype = loop_vars_.back()->var.dtype();
     }
     PrimExpr flattened = make_const(dtype, 0);
