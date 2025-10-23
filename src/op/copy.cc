@@ -843,7 +843,6 @@ Stmt CopyNode::LowerNormalCopy(const LowerArgs &T,
                                arith::Analyzer *analyzer) const {
   bool is_cpu_target = T.target->GetTargetDeviceType() == kDLCPU;
   auto simt_loop = MakeSIMTLoop(analyzer);
-  LOG(INFO) << "[LowerNormalCopy] simt_loop " << simt_loop;
   auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
 
   auto transformed_loop =
