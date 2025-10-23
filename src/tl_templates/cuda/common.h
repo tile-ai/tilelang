@@ -342,6 +342,16 @@ struct float_e5m2_t : public cute::float_e5m2_t {
       : float_e5m2_t(static_cast<float>(x)) {}
 };
 
+template <typename T> struct to_cute_type {
+  using type = T;
+};
+template <> struct to_cute_type<tl::float_e4m3_t> {
+  using type = cute::float_e4m3_t;
+};
+template <> struct to_cute_type<tl::float_e5m2_t> {
+  using type = cute::float_e5m2_t;
+};
+
 } // namespace tl
 
 namespace cutlass {

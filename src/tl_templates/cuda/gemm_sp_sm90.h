@@ -13,10 +13,12 @@ class GemmTensorOp {
 public:
   static_assert(num_warp_m % 4 == 0, "num_warp_m must be a multiple of 4");
 
-  using A_type = conditional_t<std::is_same<A_type_raw, float>::value,
-                               tfloat32_t, A_type_raw>;
-  using B_type = conditional_t<std::is_same<B_type_raw, float>::value,
-                               tfloat32_t, B_type_raw>;
+  using A_type_cute = typename tl::to_cute_type<A_type_raw>::type;
+  using B_type_cute = typename tl::to_cute_type<B_type_raw>::type;
+  using A_type = conditional_t<std::is_same<A_type_cute, float>::value,
+                               tfloat32_t, A_type_cute>;
+  using B_type = conditional_t<std::is_same<B_type_cute, float>::value,
+                               tfloat32_t, B_type_cute>;
   using C_type = C_type_raw;
 
   static constexpr bool need_tfloat32_cast =
