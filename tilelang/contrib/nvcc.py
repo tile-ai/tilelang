@@ -8,8 +8,8 @@ import subprocess
 import warnings
 from typing import Tuple
 from tilelang.env import CUDA_HOME
-
 import tvm_ffi
+from tilelang import tvm as tvm
 from tvm.target import Target
 
 from tvm.base import py_str

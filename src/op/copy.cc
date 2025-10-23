@@ -402,7 +402,7 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
   using namespace tvm::transform;
   PassContext pass_ctx = PassContext::Current();
   bool disable_tma_lower =
-      pass_ctx->GetConfig<bool>(kDisableTMALower, false).value();
+      pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
   auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma,
                                T.layout_map, T.analyzer, T.buffer_oob);
 
@@ -794,7 +794,7 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   using namespace tvm::transform;
   PassContext pass_ctx = PassContext::Current();
   bool disable_tma_lower =
-      pass_ctx->GetConfig<bool>(kDisableTMALower, false).value();
+      pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
   auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma,
                                T.layout_map, analyzer);
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
