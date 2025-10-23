@@ -15,16 +15,21 @@ using namespace SM90;
 namespace tl_wgmma {
 
 using namespace cutlass::gemm::collective::detail; // ss_smem_selector
+template<typename T> struct to_cute_type {using type = T;};
+template<> struct to_cute_type<tl::float_e4m3_t> {using type = cute::float_e4m3_t;};
+template<> struct to_cute_type<tl::float_e5m2_t> {using type = cute::float_e5m2_t;};
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, typename A_type_raw,
           typename B_type_raw, typename C_type_raw>
 class GemmTensorOp {
 public:
-  using A_type = conditional_t<std::is_same<A_type_raw, float>::value,
-                               tfloat32_t, A_type_raw>;
-  using B_type = conditional_t<std::is_same<B_type_raw, float>::value,
-                               tfloat32_t, B_type_raw>;
+  using A_type_cute = typename to_cute_type<A_type_raw>::type;
+  using B_type_cute = typename to_cute_type<B_type_raw>::type;
+  using A_type = conditional_t<std::is_same<A_type_cute, float>::value,
+                               tfloat32_t, A_type_cute>;
+  using B_type = conditional_t<std::is_same<B_type_cute, float>::value,
+                               tfloat32_t, A_type_cute>;
   using C_type = C_type_raw;
 
   static constexpr GMMA::Major GmmaMajorA =

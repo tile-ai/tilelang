@@ -322,8 +322,8 @@ TL_DEVICE void increase_descriptor_offset(GmmaDescriptor &descriptor,
 }
 
 // and add the desired implicit conversion from bfloat16_t.
-struct float_e4m3_t : public cutlass::float_e4m3_t {
-  using cutlass::float_e4m3_t::float_e4m3_t;
+struct float_e4m3_t : public cute::float_e4m3_t {
+  using cute::float_e4m3_t::float_e4m3_t;
   CUTLASS_HOST_DEVICE
   float_e4m3_t() = default;
 
@@ -332,8 +332,8 @@ struct float_e4m3_t : public cutlass::float_e4m3_t {
       : float_e4m3_t(static_cast<float>(x)) {}
 };
 
-struct float_e5m2_t : public cutlass::float_e5m2_t {
-  using cutlass::float_e5m2_t::float_e5m2_t;
+struct float_e5m2_t : public cute::float_e5m2_t {
+  using cute::float_e5m2_t::float_e5m2_t;
   CUTLASS_HOST_DEVICE
   float_e5m2_t() = default;
 
