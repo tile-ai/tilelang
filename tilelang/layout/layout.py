@@ -1,11 +1,11 @@
 """Wrapping Layouts."""
 # pylint: disable=invalid-name, unsupported-binary-operation
+from __future__ import annotations
 
 import tvm
 from tvm.ir import Node, Range
 from tvm.tir import IterVar, Var, PrimExpr, IndexMap
 from tilelang import _ffi_api
-from typing import List
 
 
 # Register the Layout class as a TVM object under the name "tl.Layout"
@@ -92,7 +92,7 @@ class Layout(Node):
     def get_forward_index(self):
         return self.index
 
-    def map_forward_index(self, indices: List[PrimExpr]) -> PrimExpr:
+    def map_forward_index(self, indices: list[PrimExpr]) -> PrimExpr:
         """
         Compute the forward index mapping for a given set of input indices.
 
@@ -122,7 +122,7 @@ class Layout(Node):
         # Map the provided indices using the constructed index mapping
         return index_map.map_indices(indices)
 
-    def inverse(self) -> "Layout":
+    def inverse(self) -> Layout:
         """
         Compute the inverse of the current layout transformation.
 
@@ -133,7 +133,7 @@ class Layout(Node):
         """
         return _ffi_api.Layout_inverse(self)
 
-    def is_equal(self, other: "Layout") -> bool:
+    def is_equal(self, other: Layout) -> bool:
         """
         Check if the current layout is equal to another layout.
 

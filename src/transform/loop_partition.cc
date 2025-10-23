@@ -189,8 +189,10 @@ public:
 
   Fragment Partition(const For &op, int num_thread, int vectorize_size) {
     this->VisitStmt(op);
-    ICHECK(!loop_vars_.empty());
-    DataType dtype = loop_vars_[0]->var.dtype();
+    DataType dtype = DataType::Int(32);
+    if (!loop_vars_.empty()) {
+      dtype = loop_vars_.back()->var.dtype();
+    }
     PrimExpr flattened = make_const(dtype, 0);
     PrimExpr vector_extent = make_const(dtype, vectorize_size);
     PrimExpr thread_extent_const = make_const(dtype, num_thread);

@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import platform
 import subprocess
-from typing import Optional
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -17,13 +16,12 @@ def _read_cmake_bool(i: str | None, default=False):
     return i.lower() not in ('0', 'false', 'off', 'no', 'n', '')
 
 
-def get_git_commit_id() -> Optional[str]:
+def get_git_commit_id() -> str | None:
     """Get the current git commit hash by running git in the current file's directory."""
 
     r = subprocess.run(['git', 'rev-parse', 'HEAD'],
                        cwd=ROOT,
-                       stdout=subprocess.PIPE,
-                       stderr=subprocess.PIPE,
+                       capture_output=True,
                        encoding='utf-8')
     if r.returncode == 0:
         return r.stdout.strip()

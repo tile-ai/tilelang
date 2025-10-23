@@ -97,3 +97,7 @@ tilelang/jit/adapter/cython/.cycache
 
 # claude
 **/.claude
+
+# CMake
+cmake-build/
+cmake-build-*/

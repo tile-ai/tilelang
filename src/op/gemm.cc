@@ -27,9 +27,7 @@ static inline std::pair<bool, TCGEN5MMAMeta>
 GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
 // TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
 #define FAIL                                                                   \
-  return {                                                                     \
-    false, TCGEN5MMAMeta { 0, 0, 0 }                                           \
-  }
+  return { false, TCGEN5MMAMeta{0, 0, 0} }
 #define SUCCESS(atom_m, atom_n, atom_k)                                        \
   return {                                                                     \
     true, TCGEN5MMAMeta { atom_m, atom_n, atom_k }                             \

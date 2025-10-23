@@ -16,6 +16,9 @@ with the appropriate memory scope.
 
 from tilelang import tvm as tvm
 from tvm.script import tir as T
+from tvm.tir import PrimExpr
+from tvm.script.parser.tir import block_attr
+from typing import Union
 
 
 def alloc_shared(shape, dtype, scope="shared.dyn"):
@@ -64,17 +67,54 @@ def alloc_fragment(shape, dtype, scope="local.fragment"):
     return T.alloc_buffer(shape, dtype, scope=scope)
 
 
-def alloc_var(dtype, scope="local.var"):
+def alloc_var(dtype, *args, scope="local.var", init: Union[PrimExpr] = None):
     """Allocate a single-element variable buffer.
 
     Args:
         dtype (str): The data type of the buffer (e.g., 'float32', 'int32')
-        scope (str, optional): The memory scope. Defaults to "local.var"
+        *args: Optional positional arguments. A single positional string is treated
+            as the scope for backward compatibility. A single non-string positional
+            argument (or keyword ``init``) specifies the initializer. When two
+            positional arguments are provided, they are interpreted as
+            ``(init, scope)``.
+        scope (str, optional): The memory scope. Defaults to "local.var".
+            Use as keyword argument for clarity when also providing an initializer.
+        init (PrimExpr, optional): The optional initializer value. When provided,
+            the generated code will initialize the variable with this value instead
+            of defaulting to zero.
 
     Returns:
         T.Buffer: A TVM buffer object allocated as a single-element variable
     """
-    return T.alloc_buffer([1], dtype, scope=scope)
+    parsed_scope = scope
+    parsed_init = init
+
+    if len(args) == 1:
+        arg = args[0]
+        if isinstance(arg, str) and parsed_init is None and scope == "local.var":
+            parsed_scope = arg
+        else:
+            if parsed_init is not None:
+                raise TypeError("Initializer specified multiple times in alloc_var.")
+            parsed_init = arg
+    elif len(args) == 2:
+        if parsed_init is not None:
+            raise TypeError("Initializer specified multiple times in alloc_var.")
+        parsed_init, parsed_scope_arg = args
+        if not isinstance(parsed_scope_arg, str):
+            raise TypeError("Scope must be provided as a string in alloc_var.")
+        parsed_scope = parsed_scope_arg
+    elif len(args) > 2:
+        raise TypeError(
+            f"alloc_var expected at most 3 positional arguments but got {len(args) + 1}.")
+
+    if not isinstance(parsed_scope, str):
+        raise TypeError("Scope must be a string in alloc_var.")
+
+    buffer = T.alloc_buffer([1], dtype, scope=parsed_scope)
+    if parsed_init is not None:
+        block_attr({"tl.local_var_init": {buffer.data: parsed_init}})
+    return buffer
 
 
 def alloc_barrier(arrive_count: int):
@@ -141,7 +181,6 @@ def alloc_reducer(shape, dtype, op="sum", replication=None):
     Returns:
         T.Buffer: A TVM buffer object allocated in thread-private storage, available to reduce values in T.Parallel loops.
     """
-    import tilelang.language as TL
 
     assert op in ["sum", "max", "min"]
     # TODO: support automatic layout
@@ -150,7 +189,7 @@ def alloc_reducer(shape, dtype, op="sum", replication=None):
     assert replication in ["all", "none"]
 
     reducer = T.alloc_buffer(shape, dtype, scope="local.fragment")
-    TL.block_attr({"reducer_info": {reducer.data: {"rep": replication, "op": op}}})
+    block_attr({"reducer_info": {reducer.data: {"rep": replication, "op": op}}})
 
     return reducer
 

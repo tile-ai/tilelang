@@ -1,7 +1,7 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
 from tvm import tir
-from typing import Optional
 from tilelang.language import copy, macro, alloc_shared
 
 
@@ -199,7 +199,7 @@ def cumsum_fragment(src: tir.Buffer, dst: tir.Buffer, dim: int, reverse: bool) -
     copy(cumsum_smem, dst)
 
 
-def cumsum(src: tir.Buffer, dst: Optional[tir.Buffer] = None, dim: int = 0, reverse: bool = False):
+def cumsum(src: tir.Buffer, dst: tir.Buffer | None = None, dim: int = 0, reverse: bool = False):
     """
     Compute the cumulative sum of `src` along `dim`, writing results to `dst`.
 
