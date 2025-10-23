@@ -953,22 +953,17 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     }
   }
 
-  const char *convert_part =
-      (from_ty.is_bfloat16() &&
-       (target_ty.is_float8_e4m3() || target_ty.is_float8_e5m2()))
-          ? ")(half)("
-          : ")(";
-
   // Fallback: elementwise cast
   for (int i = 0, lanes = from_ty.lanes(); i < lanes; ++i) {
     std::ostringstream val;
     val << "(";
     PrintType(target_ty.element_of(), val);
-    val << convert_part;
+    val << ")(";
     PrintVecElemLoad(src, from_ty, i, val);
     val << ")";
     PrintVecElemStore(sret, target_ty, i, val.str());
   }
+
 
   if (used_bf16_op) {
     stream << "#endif\n";

@@ -10,6 +10,9 @@
 #include <cutlass/numeric_types.h>
 #include <math_constants.h>
 
+#include <cutlass/float8.h>
+#include <cutlass/bfloat16.h>
+
 using cutlass::bfloat16_t;
 using cutlass::half_t;
 using cutlass::tfloat32_t;
@@ -317,6 +320,27 @@ TL_DEVICE void increase_descriptor_offset(GmmaDescriptor &descriptor,
                                           T offset) {
   descriptor.reg32_[0] += (offset >> 4);
 }
+
+// and add the desired implicit conversion from bfloat16_t.
+struct float_e4m3_t : public cutlass::float_e4m3_t {
+  using cutlass::float_e4m3_t::float_e4m3_t;
+  CUTLASS_HOST_DEVICE
+  float_e4m3_t() = default;
+
+  CUTLASS_HOST_DEVICE
+  explicit float_e4m3_t(__nv_bfloat16 x) : float_e4m3_t(static_cast<float>(x)) {
+  }
+};
+
+struct float_e5m2_t : public cutlass::float_e5m2_t {
+  using cutlass::float_e5m2_t::float_e5m2_t;
+  CUTLASS_HOST_DEVICE
+  float_e5m2_t() = default;
+
+  CUTLASS_HOST_DEVICE
+  explicit float_e5m2_t(__nv_bfloat16 x) : float_e5m2_t(static_cast<float>(x)) {
+  }
+};
 
 } // namespace tl
 
