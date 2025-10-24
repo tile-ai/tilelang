@@ -140,7 +140,7 @@ void ArgBinder::BindBuffer(const Buffer &arg, const Buffer &value,
       os << arg_name << ".shape[" << i << "]";
       this->Bind(arg->shape[i], value->shape[i + diff], os.str());
     }
-    if (value->strides.size() != 0) {
+    if (!value->strides.empty()) {
       ICHECK_EQ(arg->strides.size(), arg->shape.size());
       ICHECK_EQ(value->strides.size(), value->shape.size());
       for (size_t i = 0; i < arg->strides.size(); ++i) {
@@ -246,7 +246,7 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
   init_nest_.emplace_back(DeclBuffer(buf_strides, nop));
   PrimExpr v_strides_is_null =
       Call(DataType::Bool(1), builtin::isnullptr(), {buf_strides->data});
-  if (buffer->strides.size() == 0) {
+  if (buffer->strides.empty()) {
     // Assert the buffer is compact
     DataType stype = buffer->DefaultIndexType();
     PrimExpr expect_stride = make_const(stype, 1);
@@ -260,7 +260,7 @@ void ArgBinder::BindDLTensor(const Buffer &buffer, const PrimExpr &device_type,
     }
     std::ostringstream stride_err_msg;
     stride_err_msg << stride_handle_name() << ": expected to be compact array";
-    if (conds.size() != 0) {
+    if (!conds.empty()) {
       auto stride_msg = StringImm(stride_err_msg.str());
       Stmt check =
           AssertStmt(foldl([](PrimExpr a, PrimExpr b,
