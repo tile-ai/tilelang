@@ -12,6 +12,7 @@ ninja
 --requirement requirements.txt
 
 # Test requirements
+apache-tvm-ffi
 cffi
 cpplint
 cython
@@ -29,3 +30,4 @@ scipy
 tabulate
 tornado
 wheel
+flash-linear-attention==0.3.2
