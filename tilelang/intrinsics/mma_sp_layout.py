@@ -1,4 +1,6 @@
 from typing import Tuple
+from tvm import DataType
+from typing import Literal
 
 from tilelang.intrinsics.mma_layout import (
     mma_load_a_32x4_to_shared_16x8_layout,
@@ -73,3 +75,35 @@ def metadata_32bit_load_32x1_to_shared_16x2_layout_8bit(thread_id: int, local_id
     row = logical_id // 4 + (logical_id % 2) * 8
     col = (logical_id % 4) // 2
     return row, col
+
+def ldmatrix_32x16_to_shared_32x16_layout(thread_id, local_id):
+    row = thread_id
+    col = local_id % 8 + 8 * (local_id // 8)
+    return row, col
+
+def ldmatrix_trans_32x16_to_shared_16x32_layout(thread_id, local_id):
+    row = 8 * (local_id // 8) + thread_id % 8
+    col = (thread_id // 8) * 8 + local_id % 8
+    return row, col
+
+def get_ldmatrix_offset_b(
+    matrix: Literal["B"],
+    row_idx,
+    col_idx,
+    stride,
+    dtype: Literal["float16", "int8"] = "float16",
+    transposed: bool = False,
+):
+    assert matrix == "B", "matrix should be B"
+    dtype_bits = DataType(dtype).bits
+    if dtype_bits == 16:
+        transform_func = ldmatrix_32x16_to_shared_32x16_layout
+        transform_func_trans = ldmatrix_trans_32x16_to_shared_16x32_layout
+        if transposed:
+            new_row_idx, new_col_idx = transform_func_trans(row_idx, col_idx)
+            return new_row_idx * stride + new_col_idx
+        else:
+            new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
+            return new_row_idx * stride + new_col_idx
+    else:
+        raise ValueError(f"Unsupported dtype {dtype}")

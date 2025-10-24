@@ -24,6 +24,7 @@ from tilelang.intrinsics.mma_sp_layout import (
     metadata_8bit_load_32x4_to_shared_16x4_layout_8bit,
     metadata_16bit_load_32x2_to_shared_16x4_layout_8bit,
     metadata_32bit_load_32x1_to_shared_16x2_layout_8bit,
+    get_ldmatrix_offset_b,
 )
 
 lift = convert
@@ -326,7 +327,7 @@ class SparseTensorCoreIntrinEmitter(object):
                 else:
                     for j in T.serial(local_size_a):
                         mi, mk = mma_load_layout(tx, j)
-                        A_local_buf[i * local_size_a + j] = A_shared_buf[wk + mk, wi + mi] if trans else A_shared_buf[wi + mi, wk + mk]
+                        A_local_buf[i * local_size_a + j] = A_shared_buf[wk + mk, wi + mi] if a_transposed else A_shared_buf[wi + mi, wk + mk]
 
         return _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk)
 
@@ -414,8 +415,7 @@ class SparseTensorCoreIntrinEmitter(object):
         thread_binding = self.get_thread_binding()
         replicate_b = (self.n_dim == 16)
         # ldmatrix cannot be used for int8 + trans case.
-        ldmatrix_available = False  # TODO: use ldmatrix when possible
-
+        ldmatrix_available = not (DataType(b_dtype).bits != 16 and not b_transposed)
         def mma_load_layout(i, j):
             return i, j
 
@@ -460,7 +460,18 @@ class SparseTensorCoreIntrinEmitter(object):
                         B_local_buf.data,
                         i * local_size_b,
                         T.address_of(B_shared_buf_elem),
-                        get_ldmatrix_offset("B", tx, 0, stride, b_dtype, b_transposed),
+                        get_ldmatrix_offset_b("B", tx, 0, stride, b_dtype, b_transposed),
+                    )
+
+                    T.ptx_ldmatrix(
+                        b_dtype,
+                        T.bool(trans),
+                        4 if replicate_b else 2,
+                        ".b16",
+                        B_local_buf.data,
+                        i * local_size_b + lift(local_size_b) // 2,
+                        T.address_of(B_shared_buf_elem),
+                        get_ldmatrix_offset_b("B", tx, 8, stride, b_dtype, b_transposed),
                     )
 
                 else:
