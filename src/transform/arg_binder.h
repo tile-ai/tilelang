@@ -52,18 +52,18 @@ using namespace tir;
  *  - assert bufferB.shape[0] == 3
  *  - assert bufferB.shape[1] == n + 3
  *
- *  In general, this is a constraint solving problem. We have simplified assumption
- *  over the binding declaration, such that we require the variable occurred in
- *  constraint must be declared in argument list. So it is illegal to have signature
- *  f(tA(shape=(n+3))) without any argument variable corresponds to n, even though
- *  it is already enough to derive n from the input argument.
+ *  In general, this is a constraint solving problem. We have simplified
+ * assumption over the binding declaration, such that we require the variable
+ * occurred in constraint must be declared in argument list. So it is illegal to
+ * have signature f(tA(shape=(n+3))) without any argument variable corresponds
+ * to n, even though it is already enough to derive n from the input argument.
  */
 class ArgBinder {
 public:
   /*!
    * \brief Constructor
-   * \param def_map A definition map that contains definition of known variables.
-   *   ArgBinder will update this def_map when adding new definitions.
+   * \param def_map A definition map that contains definition of known
+   * variables. ArgBinder will update this def_map when adding new definitions.
    */
   explicit ArgBinder(std::unordered_map<const VarNode *, PrimExpr> *def_map)
       : def_map_(def_map) {}
@@ -89,8 +89,8 @@ public:
    * \param arg The argument to be binded.
    * \param value The target expression value
    * \param arg_name argument name.
-   * \param fuzzy_match If enabled, we allow value's dimension to be smaller than arg, as long as
-   * arg's higher dimensions are of 1.
+   * \param fuzzy_match If enabled, we allow value's dimension to be smaller
+   * than arg, as long as arg's higher dimensions are of 1.
    */
   void BindBuffer(const Buffer &arg, const Buffer &value,
                   const std::string &arg_name, bool fuzzy_match);

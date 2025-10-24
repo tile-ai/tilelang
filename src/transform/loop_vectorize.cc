@@ -273,21 +273,18 @@ bool IndiceCanVectorize(const PrimExpr &expr, Var var,
   if (!analyzer->CanProveEqual(FloorMod(iter_var_size, target_size_for_iter),
                                0))
     return false;
-  
+
   // The base offset must be divisible
-  if (!analyzer->CanProveEqual(FloorMod(Substitute(expr, {{var, zero}}),
-                                        target_size_for_expr),
-                               0)) {
+  if (!analyzer->CanProveEqual(
+          FloorMod(Substitute(expr, {{var, zero}}), target_size_for_expr), 0)) {
     return false;
   }
 
   // Bind thread range
   Var v0("v0", var.dtype()), v1("v1", var.dtype());
   analyzer->Bind(v0, Range(zero, target_size_for_var));
-  analyzer->Bind(
-      v1,
-      Range(zero,
-            analyzer->Simplify(FloorDiv(iter_var_size, target_size_for_iter))));
+  analyzer->Bind(v1, Range(zero, analyzer->Simplify(FloorDiv(
+                                     iter_var_size, target_size_for_iter))));
   PrimExpr expr_transformed = analyzer->Simplify(
       Substitute(expr, {{var, v0 + v1 * target_size_for_var}}));
   Vectorizer vectorizer(v0, target_size_for_var);
