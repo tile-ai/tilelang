@@ -4,7 +4,7 @@ ExtraArgs: ['-v']
 FormatStyle: file
 UseColor: true
 WarningsAsErrors: '*'
-ExcludeHeaderFilterRegex: '^(3rdparty|tvm)/.*$'
+HeaderFilterRegex: '^(?!.*(?:/|^)(3rdparty|tvm)/).*'
 
 # NOTE: there must be no spaces before the '-', so put the comma last.
 Checks: >-
