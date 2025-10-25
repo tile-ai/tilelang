@@ -79,23 +79,42 @@ bool IsAsyncIntrinsic(const CallNode *call) {
   }
 
   // TileLang async intrinsics
-  if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
+  if (
+      // TMA TileOp
+      call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
       call->op.same_as(tma_store()) || call->op.same_as(tma_store_arrive()) ||
       call->op.same_as(tma_store_wait()) ||
+      // mbarrier TileOp
+      call->op.same_as(mbarrier_wait_parity()) ||
+      call->op.same_as(mbarrier_expect_tx()) ||
+      // WGMMA TileOp
+      call->op.same_as(warpgroup_arrive()) ||
+      call->op.same_as(warpgroup_commit_batch()) ||
+      call->op.same_as(warpgroup_wait()) || call->op.same_as(wait_wgmma()) ||
+      // ptx_ TileOP
       call->op.same_as(ptx_cp_async_barrier_noinc()) ||
       call->op.same_as(ptx_wgmma_ss()) || call->op.same_as(ptx_wgmma_rs())) {
     return true;
   }
 
-  // PTX async copy intrinsics
-  if (call->op.same_as(builtin::ptx_cp_async()) ||
-      call->op.same_as(builtin::ptx_cp_async_barrier()) ||
-      call->op.same_as(builtin::ptx_cp_async_bulk())) {
+  // wgmma async intrinsics
+  if (call->op.same_as(tl_gemm()) || call->op.same_as(tl_gemm_sp())) {
     return true;
   }
 
-  // wgmma async intrinsics
-  if (call->op.same_as(tl_gemm()) || call->op.same_as(tl_gemm_sp())) {
+  // tvm builtin async intrinsics
+  if (
+      // PTX async copy intrinsics
+      call->op.same_as(builtin::ptx_cp_async()) ||
+      call->op.same_as(builtin::ptx_cp_async_barrier()) ||
+      call->op.same_as(builtin::ptx_cp_async_bulk()) ||
+      // wgmma
+      call->op.same_as(builtin::ptx_commit_group()) ||
+      call->op.same_as(builtin::ptx_wait_group()) ||
+      // mbar
+      call->op.same_as(builtin::ptx_arrive_barrier()) ||
+      call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
+      call->op.same_as(builtin::ptx_init_barrier_thread_count())) {
     return true;
   }
 
@@ -213,9 +232,10 @@ private:
       } else if (IsKnownGeneric(call)) {
         kind = ProxyKind::kGeneric;
       } else {
-        // We can now treat extern as Generic, since gemm and gemm_sp are never
-        // represented as call_extern nodes. They are call_intrin nodes and will
-        // be handled by IsAsyncIntrinsic above.
+        // NOTE(wt): Remaining intrinsic and extern calls are considered
+        // Generic. We can now treat extern as Generic, since gemm and gemm_sp
+        // are never represented as call_extern nodes. They are call_intrin
+        // nodes and will be handled by IsAsyncIntrinsic above.
         kind = ProxyKind::kGeneric;
       }
     }
