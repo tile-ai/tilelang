@@ -7,8 +7,6 @@ import argparse
 from einops import rearrange, repeat
 from bert_padding import pad_input, unpad_input
 
-torch.manual_seed(1)
-
 
 def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random"):
     assert mode in ["full", "random", "third"]
@@ -525,7 +523,10 @@ def flashattn_bwd_split(batch,
                 T.gemm(dsT_shared, K_shared, dq, transpose_A=True)
                 for i, j in T.Parallel(block_N, dim_qk):
                     if k_base * block_N + i < q_current_seqlen:
-                        T.atomic_add(dQ[q_start_idx + k_base * block_N + i, bx, j], dq[i, j])
+                        T.atomic_add(
+                            dQ[q_start_idx + k_base * block_N + i, bx, j],
+                            dq[i, j],
+                            memory_order="release")
 
             T.copy(dv, dv_shared)
             for i, d in T.Parallel(block_M, dim_v):
@@ -739,9 +740,9 @@ def main(BATCH: int = 1,
     dV_ref, V.grad = V.grad.clone(), None
 
     torch.testing.assert_close(O, O_ref.half(), rtol=1e-2, atol=1e-2)
-    torch.testing.assert_close(dQ, dQ_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dK, dK_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(dV, dV_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(dQ, dQ_ref, rtol=1e-2, atol=1e-2)
     print('All checks passed.✅')
 
     def run():
@@ -784,8 +785,8 @@ if __name__ == "__main__":
     elif args.use_atomic:
         use_atomic = True
     else:
-        # Default: use atomic
-        use_atomic = True
+        # Default: use split
+        use_atomic = False
 
     main(args.batch, args.h, args.n_ctx, args.d_head_qk, args.d_head_v, args.groups, args.causal,
          use_atomic)

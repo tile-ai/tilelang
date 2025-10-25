@@ -12,6 +12,12 @@ import example_mha_fwd_bshd_wgmma_pipelined
 import example_mha_fwd_varlen
 import example_mha_bwd_wgmma_pipelined
 import example_mha_fwd_bhsd
+import example_gqa_bwd_tma_reduce_varlen
+
+
+@tilelang.testing.requires_cuda
+def test_example_gqa_bwd_tma_reduce_varlen():
+    example_gqa_bwd_tma_reduce_varlen.main()
 
 
 @tilelang.testing.requires_cuda
