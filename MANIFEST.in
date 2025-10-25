@@ -1,10 +1,35 @@
+# Reference: https://setuptools.pypa.io/en/latest/userguide/miscellaneous.html
+
+# Include licenses
 include VERSION
-include CMakeLists.txt
-include requirements.txt
-include requirements-test.txt
-include requirements-dev.txt
+include LICENSE
+include THIRDPARTYNOTICES.txt
+
+# Version and dependency files
+include version_provider.py
+include requirements*.txt
 include tilelang/jit/adapter/cython/cython_wrapper.pyx
-recursive-include src *
-recursive-include 3rdparty *
-recursive-exclude 3rdparty/clang* * 
-recursive-exclude 3rdparty/llvm* *
+
+# Include source files in SDist
+include CMakeLists.txt
+graft src
+graft cmake
+graft 3rdparty
+
+# Include test suites in SDist
+graft testing
+graft examples
+global-exclude .coverage .coverage.* coverage.xml coverage-*.xml coverage.*.xml
+global-exclude .junit .junit.* junit.xml junit-*.xml junit.*.xml
+
+# Exclude unneeded files and directories
+prune .git
+prune .github
+prune */.git
+prune */.github
+prune 3rdparty/clang*
+prune 3rdparty/llvm*
+
+# Prune compiled files
+prune */__pycache__
+global-exclude *~ *.py[cod] *.so *.a *.dylib *.pxd *.dll *.lib *.o *.obj

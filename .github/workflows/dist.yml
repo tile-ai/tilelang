@@ -29,6 +29,61 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  build-sdist:
+    name: Build SDist
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      NO_VERSION_LABEL: ${{ github.event_name == 'release' && 'OFF' || 'ON' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Setup Python and uv with caching
+        id: setup-uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          activate-environment: true
+
+      - name: Build SDist
+        run: |
+          uv run --no-project --with=build -m -- build --sdist --outdir=dist
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          create-symlink: true
+          key: ccache-${{ runner.os }}-${{ runner.arch }}
+          evict-old-files: "7d"
+
+      - name: Test SDist buildable
+        run: |
+          TEMP_DIR="$(mktemp -d -t tilelang-sdist-test)"
+          cp -r dist "${TEMP_DIR}/dist"
+          uv run --no-project -m -- venv "${TEMP_DIR}/venv"
+          source "${TEMP_DIR}/venv/bin/activate"
+          cd "${TEMP_DIR}"
+          python3 -m pip install --upgrade pip setuptools wheel
+          python3 -m pip install -v dist/*.tar.gz
+          python3 -c "import tilelang; print(tilelang.__version__)"
+
+      - name: Upload SDist
+        # Not PR to save artifact storage, as wheels are only needed for releases.
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
   build-wheels:
     name: Build wheels for Python ${{ matrix.python-version }} on ${{ matrix.target.runner }} with ${{ matrix.target.toolkit }}
     if: |
@@ -105,9 +160,17 @@ jobs:
     # Not PR to save artifact storage, as wheels are only needed for releases.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    needs: [build-wheels]
+    needs: [build-sdist, build-wheels]
     timeout-minutes: 15
     steps:
+      - name: Download built SDist
+        uses: actions/download-artifact@v5
+        with:
+          # unpacks default artifact into dist/
+          # if `name: artifact` is omitted, the action will create extra parent dir
+          name: sdist
+          path: dist
+
       - name: Download built wheels
         uses: actions/download-artifact@v5
         with:
