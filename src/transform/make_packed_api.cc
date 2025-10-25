@@ -36,7 +36,7 @@
 #include <vector>
 
 #include "../op/builtin.h"
-#include "tir/transforms/arg_binder.h"
+#include "arg_binder.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -497,7 +497,6 @@ tvm::transform::Pass MakePackedAPI() {
                                                       func->body)) {
           func.CopyOnWrite()->body = body.value();
         }
-
         func = MakePackedAPI(std::move(func));
 
         if (!func.same_as(orig_func)) {
