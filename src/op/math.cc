@@ -9,6 +9,8 @@
 #include <tvm/tir/op.h>
 #include <tvm/tir/op_attr_types.h>
 
+#include "../support/ffi_aliases.h"
+
 namespace tvm {
 namespace tl {
 using namespace tir;

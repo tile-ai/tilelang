@@ -9,7 +9,7 @@ from __future__ import absolute_import as _abs
 
 import subprocess
 
-import tvm.ffi
+import tvm_ffi
 
 from tvm.contrib import utils
 from tvm.base import py_str
@@ -96,7 +96,7 @@ def compile_hip(code,
         return data
 
 
-@tvm.ffi.register_func("tilelang_callback_hip_compile", override=True)
+@tvm_ffi.register_global_func("tilelang_callback_hip_compile", override=True)
 def tilelang_callback_hip_compile(code, target):
     """use hipcc to generate fatbin code for better optimization"""
     hsaco = compile_hip(code, target_format="hsaco")

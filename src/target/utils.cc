@@ -5,6 +5,9 @@
 
 #include "utils.h"
 
+#include "../support/ffi_aliases.h"
+#include <tvm/node/node.h>
+
 namespace tvm {
 namespace tl {
 
@@ -16,8 +19,8 @@ bool TargetIsRocm(Target target) {
 }
 
 int GetArchInt(Target target) {
-  auto s = target->GetAttr<String>("arch");
-  ICHECK(s.defined());
+  auto s = target->GetAttr<tvm::ffi::String>("arch");
+  ICHECK(s.has_value());
   const std::string arch_str = s.value();
   ICHECK(arch_str.size() >= 3);
   ICHECK_EQ(arch_str.compare(0, 3, "sm_"), 0)
@@ -71,7 +74,7 @@ bool TargetIsCDNA(Target target) {
   if (!TargetIsRocm(target))
     return false;
   if (target->attrs.count("mcpu")) {
-    std::string mcpu = Downcast<String>(target->attrs.at("mcpu"));
+    std::string mcpu = Downcast<tvm::ffi::String>(target->attrs.at("mcpu"));
     // if mcpu start with "gfx9", it is CDNA
     return mcpu.find("gfx9") == 0;
   }
@@ -84,7 +87,7 @@ bool TargetHasAsyncCopy(Target target) {
     return arch >= 80;
   } else if (TargetIsCDNA(target)) {
     if (target->attrs.count("mcpu")) {
-      std::string mcpu = Downcast<String>(target->attrs.at("mcpu"));
+      std::string mcpu = Downcast<tvm::ffi::String>(target->attrs.at("mcpu"));
       if (mcpu.rfind("gfx9", 0) == 0) {
         int gfx_version = std::stoi(mcpu.substr(3, 2));
         return gfx_version >= 94;
@@ -131,7 +134,7 @@ int TargetGetWarpSize(Target target) {
   return res;
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def("tl.TargetIsCuda",
@@ -160,7 +163,7 @@ TVM_FFI_STATIC_INIT_BLOCK({
            [](Target target) { return TargetHasBulkCopy(target); })
       .def("tl.TargetGetWarpSize",
            [](Target target) { return TargetGetWarpSize(target); });
-});
+}
 
 } // namespace tl
 } // namespace tvm

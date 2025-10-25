@@ -55,7 +55,7 @@ TileOperator ParseOperator(Call call, BufferMap vmap) {
 TileOperator ParseOperator(Stmt stmt, BufferMap vmap) {
   if (stmt.as<Evaluate>() && stmt.as<EvaluateNode>()->value.as<CallNode>()) {
     auto call = stmt.as<EvaluateNode>()->value.as<CallNode>();
-    return ParseOperator(GetRef<Call>(call), vmap);
+    return ParseOperator(tvm::ffi::GetRef<Call>(call), vmap);
   }
   return TileOperator();
 }
@@ -77,7 +77,7 @@ Var GetVarFromAccessPtr(const PrimExpr &expr) {
   ICHECK(call->op.same_as(builtin::tvm_access_ptr()));
   auto var = call->args[1].as<VarNode>();
   ICHECK(var);
-  return GetRef<Var>(var);
+  return tvm::ffi::GetRef<Var>(var);
 }
 
 } // namespace tl

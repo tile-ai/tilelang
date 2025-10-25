@@ -11,8 +11,8 @@
 #include <tvm/tir/op_attr_types.h>
 #include <tvm/tir/transform.h>
 
+#include "../support/ffi_aliases.h"
 #include "../target/utils.h"
-#include "tvm/ffi/string.h"
 
 namespace tvm {
 namespace tl {
@@ -48,7 +48,7 @@ using namespace tir;
  *       performed here.
  */
 GemmPy::GemmPy(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<GemmPyNode> node = make_object<GemmPyNode>();
+  ObjectPtr<GemmPyNode> node = tvm::ffi::make_object<GemmPyNode>();
 
   node->Aptr = args[0];
   node->Bptr = args[1];
@@ -88,7 +88,7 @@ GemmPy::GemmPy(Array<PrimExpr> args, BufferMap vmap) {
  * @return TileOperator A Gemm operator that owns a copy of this node.
  */
 TileOperator GemmPyNode::Clone() const {
-  auto op = make_object<GemmPyNode>(*this);
+  auto op = tvm::ffi::make_object<GemmPyNode>(*this);
   return GemmPy(op);
 }
 
@@ -208,8 +208,8 @@ bool GemmPyNode::CheckWGMMA() const {
  */
 static int GetArchInt(Target target) {
   int arch_int = 0;
-  auto s = target->GetAttr<String>("arch");
-  ICHECK(s.defined());
+  auto s = target->GetAttr<tvm::ffi::String>("arch");
+  ICHECK(s.has_value());
   std::string arch = s.value();
   if (arch.rfind("sm_", 0) == 0) {
     arch_int = std::stoi(arch.substr(3));
@@ -228,11 +228,12 @@ Stmt GemmPyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
 
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.lower")) {
     auto prim_func =
-        Downcast<PrimFunc>((*f)(GetRef<GemmPy>(this), T.layout_map, T.target,
-                                T.thread_bounds, T.thread_var));
+        Downcast<PrimFunc>((*f)(tvm::ffi::GetRef<GemmPy>(this), T.layout_map,
+                                T.target, T.thread_bounds, T.thread_var));
     ICHECK(prim_func->attrs.defined());
-    auto global_symbol = prim_func->attrs.GetAttr<String>("global_symbol");
-    ICHECK(global_symbol.defined());
+    auto global_symbol =
+        prim_func->attrs.GetAttr<tvm::ffi::String>("global_symbol");
+    ICHECK(global_symbol.has_value());
     if (prim_func->body.as<BlockRealizeNode>()) {
       BlockRealize block_realize = Downcast<BlockRealize>(prim_func->body);
       auto block = block_realize->block;
@@ -265,7 +266,7 @@ LayoutMap GemmPyNode::InferLayout(const LayoutInferArgs &T,
 
   if (const auto f = ffi::Function::GetGlobal("tl.gemm_py.infer_layout")) {
     results = Downcast<LayoutMap>(
-        (*f)(GetRef<GemmPy>(this), T.target, T.thread_bounds));
+        (*f)(tvm::ffi::GetRef<GemmPy>(this), T.target, T.thread_bounds));
   } else {
     LOG(FATAL) << "No infer layout function found for gemm_py";
   }
@@ -279,15 +280,15 @@ TIR_REGISTER_TL_OP(GemmPy, gemm_py)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TVM_FFI_STATIC_INIT_BLOCK({ GemmPyNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK() { GemmPyNode::RegisterReflection(); }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.GemmPyGemmInst",
                         [](GemmPy gemm_py, int block_size, Target target) {
                           return gemm_py->GetGemmInst(block_size, target);
                         });
-});
+}
 
 } // namespace tl
 } // namespace tvm

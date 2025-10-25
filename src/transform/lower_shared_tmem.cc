@@ -30,7 +30,7 @@ public:
 
 private:
   Stmt VisitStmt_(const BlockNode *op) final {
-    Block block = GetRef<Block>(op);
+    Block block = tvm::ffi::GetRef<Block>(op);
     Array<Buffer> alloc_buffers = op->alloc_buffers;
     if (op->annotations.count(attr::kLayoutMap)) {
       auto layout_map = op->annotations.Get(attr::kLayoutMap);
@@ -300,10 +300,10 @@ tvm::transform::Pass LowerSharedTmem() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerSharedTmem", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LowerSharedTmem", LowerSharedTmem);
-});
+}
 
 } // namespace transform
 } // namespace tl

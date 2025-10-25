@@ -23,6 +23,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+using namespace ffi;
 using namespace arith;
 
 struct SimplifyConfigNode : public AttrsNodeReflAdapter<SimplifyConfigNode> {
@@ -62,8 +63,8 @@ struct SimplifyConfigNode : public AttrsNodeReflAdapter<SimplifyConfigNode> {
                 "branch",
                 refl::DefaultValue(false));
   }
-  static constexpr const char *_type_key = "tl.transform.SimplifyConfig";
-  TVM_FFI_DECLARE_FINAL_OBJECT_INFO(SimplifyConfigNode, BaseAttrsNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.transform.SimplifyConfig",
+                                    SimplifyConfigNode, BaseAttrsNode);
 
   RewriteSimplifier::Extension GetEnabledExtensions() const {
     RewriteSimplifier::Extension flags = RewriteSimplifier::kNone;
@@ -209,12 +210,11 @@ CollectVarsUsedInBufferDefinition(const Stmt &stmt) {
 
 class SimplifyConfig : public Attrs {
 public:
-  TVM_DEFINE_NOTNULLABLE_OBJECT_REF_METHODS(SimplifyConfig, Attrs,
-                                            SimplifyConfigNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(SimplifyConfig, Attrs,
+                                                SimplifyConfigNode);
 };
-TVM_FFI_STATIC_INIT_BLOCK({ SimplifyConfigNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK() { SimplifyConfigNode::RegisterReflection(); }
 
-TVM_REGISTER_NODE_TYPE(SimplifyConfigNode);
 TVM_REGISTER_PASS_CONFIG_OPTION("tl.Simplify", SimplifyConfig);
 
 class StmtSimplifier : public IRMutatorWithAnalyzer {
@@ -391,7 +391,7 @@ private:
     if (can_inline && !used_in_buffer_def) {
       return body;
     } else if (value.same_as(op->value) && body.same_as(op->body)) {
-      return GetRef<Stmt>(op);
+      return tvm::ffi::GetRef<Stmt>(op);
     } else {
       auto n = this->CopyOnWrite(op);
       n->value = std::move(value);
@@ -522,10 +522,10 @@ tvm::transform::Pass Simplify(bool simplify_arguments = true) {
   return CreatePrimFuncPass(pass_func, 0, "tl.Simplify", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.Simplify", Simplify);
-});
+}
 
 } // namespace tl
 } // namespace tvm

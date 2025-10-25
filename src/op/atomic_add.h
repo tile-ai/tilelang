@@ -25,8 +25,8 @@ public:
   IntImm memory_order;    ///< Memory order for atomic operations
 
   mutable ParallelOp par_op_; ///< Associated parallel operation
-  static constexpr const char *_type_key = "tl.AtomicAdd";
-  TVM_DECLARE_FINAL_OBJECT_INFO(AtomicAddNode, TileOperatorNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.AtomicAdd", AtomicAddNode,
+                                    TileOperatorNode);
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const;
   LayoutMap InferLayout(const LayoutInferArgs &T, InferLevel level) const;
@@ -46,28 +46,6 @@ public:
         .def_ro("memory_order", &AtomicAddNode::memory_order);
   }
 
-  bool SEqualReduce(const AtomicAddNode *other, SEqualReducer equal) const {
-    return equal(src, other->src) && equal(dst, other->dst) &&
-           equal(src_range, other->src_range) &&
-           equal(dst_range, other->dst_range) &&
-           equal(use_tma, other->use_tma) &&
-           equal(coalesced_width, other->coalesced_width) &&
-           equal(memory_order, other->memory_order);
-  }
-
-  void SHashReduce(SHashReducer hash_reduce) const {
-    hash_reduce(src);
-    hash_reduce(dst);
-    hash_reduce(src_range);
-    hash_reduce(dst_range);
-    hash_reduce(use_tma);
-    hash_reduce(coalesced_width);
-    hash_reduce(memory_order);
-  }
-
-  static constexpr bool _type_has_method_sequal_reduce = true;
-  static constexpr bool _type_has_method_shash_reduce = true;
-
 protected:
   /// Create SIMT-style parallel loop structure
   For MakeSIMTLoop(arith::Analyzer *analyzer) const;
@@ -85,7 +63,8 @@ protected:
 /// Wrapper class for atomic addition operations
 class AtomicAdd : public TileOperator {
 public:
-  TVM_DEFINE_OBJECT_REF_METHODS(AtomicAdd, TileOperator, AtomicAddNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(AtomicAdd, TileOperator,
+                                             AtomicAddNode);
   TVM_DLL AtomicAdd(Array<PrimExpr> args, BufferMap vmap);
   static const Op &Get();
 };

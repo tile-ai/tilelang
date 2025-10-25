@@ -42,7 +42,7 @@ using namespace tir;
  * - The constructed node is stored in this->data_.
  */
 AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<AtomicAddNode> node = make_object<AtomicAddNode>();
+  ObjectPtr<AtomicAddNode> node = tvm::ffi::make_object<AtomicAddNode>();
   Array<Range> rgs[2];
   Buffer bf[2];
   for (int i = 0; i < 2; i++) {
@@ -78,7 +78,7 @@ AtomicAdd::AtomicAdd(Array<PrimExpr> args, BufferMap vmap) {
  * @return TileOperator A TileOperator owning the cloned AtomicAddNode.
  */
 TileOperator AtomicAddNode::Clone() const {
-  auto op = make_object<AtomicAddNode>(*this);
+  auto op = tvm::ffi::make_object<AtomicAddNode>(*this);
   if (par_op_.defined()) {
     op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
   }
@@ -549,7 +549,7 @@ TIR_REGISTER_TL_OP(AtomicAdd, atomicadd)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TVM_FFI_STATIC_INIT_BLOCK({ AtomicAddNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK() { AtomicAddNode::RegisterReflection(); }
 
 } // namespace tl
 } // namespace tvm

@@ -85,7 +85,7 @@ def run_gemm(
 
     stramp = "&*(XS)"
 
-    @tvm.register_func("tilelang_callback_cuda_postproc", override=True)
+    @tvm.register_global_func("tilelang_callback_cuda_postproc", override=True)
     def tilelang_callback_cuda_postproc(code, _):
         code = f"// {stramp}\n" + code
         return code
@@ -407,4 +407,5 @@ def test_ctypes_dynamic_shape():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    # tilelang.testing.main()
+    test_gemm_f16f16f16_nn()

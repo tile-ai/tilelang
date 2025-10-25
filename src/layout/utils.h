@@ -9,6 +9,8 @@
 
 #include <tvm/arith/iter_affine_map.h>
 
+#include "../support/ffi_aliases.h"
+
 namespace tvm {
 namespace tl {
 

@@ -151,7 +151,7 @@ private:
   }
 
   PrimExpr VisitExpr_(const VarNode *op) final {
-    Var var = GetRef<Var>(op);
+    Var var = tvm::ffi::GetRef<Var>(op);
     auto it = unit_loop_vars_.find(var);
     if (it == unit_loop_vars_.end()) {
       return var;
@@ -286,10 +286,10 @@ tir::transform::Pass LowerOpaqueBlock() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerOpaqueBlock", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LowerOpaqueBlock", LowerOpaqueBlock);
-});
+}
 
 } // namespace tl
 } // namespace tvm

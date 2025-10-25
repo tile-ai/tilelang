@@ -112,7 +112,7 @@ GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
  *       performed here.
  */
 Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<GemmNode> node = make_object<GemmNode>();
+  ObjectPtr<GemmNode> node = tvm::ffi::make_object<GemmNode>();
 
   node->Aptr = args[0];
   node->Bptr = args[1];
@@ -160,7 +160,7 @@ Gemm::Gemm(Array<PrimExpr> args, BufferMap vmap) {
  * @return TileOperator A Gemm operator that owns a copy of this node.
  */
 TileOperator GemmNode::Clone() const {
-  auto op = make_object<GemmNode>(*this);
+  auto op = tvm::ffi::make_object<GemmNode>(*this);
   return Gemm(op);
 }
 
@@ -476,8 +476,8 @@ bool GemmNode::CheckWGMMA() const {
  */
 static int GetArchInt(Target target) {
   int arch_int = 0;
-  auto s = target->GetAttr<String>("arch");
-  ICHECK(s.defined());
+  auto s = target->GetAttr<tvm::ffi::String>("arch");
+  ICHECK(s.has_value());
   std::string arch = s.value();
   if (arch.rfind("sm_", 0) == 0) {
     arch_int = std::stoi(arch.substr(3));
@@ -874,7 +874,7 @@ TIR_REGISTER_TL_OP(Gemm, gemm)
 TVM_REGISTER_OP("tl.GemmWarpPolicy")
     .set_attr<TScriptPrinterName>("TScriptPrinterName", "GemmWarpPolicy");
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   GemmNode::RegisterReflection();
   GemmWarpPolicyNode::RegisterReflection();
   namespace refl = tvm::ffi::reflection;
@@ -883,9 +883,8 @@ TVM_FFI_STATIC_INIT_BLOCK({
                            Target target, GemmInst gemm_inst) {
                           policy->ComputeWarpPartition(M, N, block_size, target,
                                                        gemm_inst);
-                          return;
                         });
-});
+}
 
 } // namespace tl
 } // namespace tvm

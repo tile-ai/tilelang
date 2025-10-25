@@ -10,6 +10,8 @@
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
+#include "../support/ffi_aliases.h"
+
 namespace tvm {
 namespace tir {
 
@@ -66,7 +68,8 @@ public:
     }
 
     if (mem_reuse_max > 0) {
-      std::string tag_str = cluster_tag; // Convert to std::string
+      std::string tag_str =
+          static_cast<std::string>(cluster_tag); // Convert to std::string
       if (tag_str.rfind("blockIdx", 0) == 0) {
         // starts with "blockIdx"
         tag_str = "clusterIdx" + tag_str.substr(strlen("blockIdx"));
@@ -74,7 +77,7 @@ public:
         // Unexpected format — maybe just prefix
         tag_str = "clusterIdx" + tag_str;
       }
-      cluster_tag = tvm::ffi::String(tag_str); // Convert back
+      cluster_tag = String(tag_str); // Convert back
       return WithAttr(f, cluster_tag, Integer(cluster_size_));
     } else {
       return f;
@@ -122,10 +125,10 @@ tvm::transform::Pass ClusterPlanning() {
   return CreatePrimFuncPass(pass_func, 0, "tl.ClusterPlanning", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.ClusterPlanning", ClusterPlanning);
-});
+}
 } // namespace transform
 
 } // namespace tir

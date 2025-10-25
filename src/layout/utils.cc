@@ -189,7 +189,7 @@ public:
 
   IterMark Mutate(const IterMark &mark) {
     if (auto *op = mark->source.as<IterSumExprNode>()) {
-      return IterMark(Mutate(GetRef<IterSumExpr>(op)), mark->extent);
+      return IterMark(Mutate(tvm::ffi::GetRef<IterSumExpr>(op)), mark->extent);
     } else {
       return mark;
     }

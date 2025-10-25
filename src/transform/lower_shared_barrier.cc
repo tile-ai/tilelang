@@ -32,7 +32,7 @@ private:
       : disable_shuffle_elect_(disable_shuffle_elect) {}
 
   Stmt VisitStmt_(const BlockNode *op) final {
-    Block block = GetRef<Block>(op);
+    Block block = tvm::ffi::GetRef<Block>(op);
     Array<Buffer> alloc_buffers = op->alloc_buffers;
 
     // Record the mapping from buffer data var to buffer for later lookup
@@ -204,10 +204,10 @@ tvm::transform::Pass LowerSharedBarrier() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerSharedBarrier", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LowerSharedBarrier", LowerSharedBarrier);
-});
+}
 
 } // namespace transform
 } // namespace tl

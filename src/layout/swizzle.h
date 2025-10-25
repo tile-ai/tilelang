@@ -44,10 +44,9 @@ public:
   Layout Inverse() const final;
   std::string DebugOutput() const final;
   bool IsEqual(const SwizzledLayoutNode *other, bool skip_index = false) const;
-  static constexpr const char *_type_key = "tl.SwizzledLayout";
-  bool SEqualReduce(const SwizzledLayoutNode *other, SEqualReducer equal) const;
   static void RegisterReflection();
-  TVM_DECLARE_FINAL_OBJECT_INFO(SwizzledLayoutNode, LayoutNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.SwizzledLayout", SwizzledLayoutNode,
+                                    LayoutNode);
 
 private:
   SwizzlePattern pattern_;
@@ -62,8 +61,8 @@ public:
                          Array<PrimExpr> forward_index, SwizzlePattern pattern);
   TVM_DLL SwizzledLayout(Array<PrimExpr> input_size,
                          Array<PrimExpr> forward_index, SwizzlePattern pattern);
-
-  TVM_DEFINE_OBJECT_REF_METHODS(SwizzledLayout, Layout, SwizzledLayoutNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(SwizzledLayout, Layout,
+                                             SwizzledLayoutNode);
 };
 
 } // namespace tl

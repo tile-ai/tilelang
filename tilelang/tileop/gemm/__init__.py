@@ -4,20 +4,20 @@ from tvm import tir
 from tvm.target import Target
 from tvm.ir.base import Node
 from tvm.runtime import Scriptable
-import tvm.ffi
+import tvm_ffi
 from tilelang.ir import GemmWarpPolicy
 from .gemm_mma import GemmMMA
 from .gemm_wgmma import GemmWGMMA
 from tilelang import _ffi_api
 
 
-@tvm.ffi.register_func("tl.gemm_py.infer_layout")
+@tvm_ffi.register_global_func("tl.gemm_py.infer_layout")
 def gemm_py_infer_layout(gemm_py, target, thread_bounds):
     thread_nums = thread_bounds.extent
     return gemm_py.infer_layout(target, thread_nums)
 
 
-@tvm.ffi.register_func("tl.gemm_py.lower")
+@tvm_ffi.register_global_func("tl.gemm_py.lower")
 def gemm_py_lower(gemm_py, layout_map, target, thread_bounds, thread_var):
     thread_nums = thread_bounds.extent
     stmt = gemm_py.lower(layout_map, target, thread_nums, thread_var)
@@ -41,7 +41,7 @@ class GemmInst(IntEnum):
         return self == GemmInst.MFMA
 
 
-@tvm.ffi.register_object("tl.GemmPy")
+@tvm_ffi.register_object("tl.GemmPy")
 class GemmPy(Node, Scriptable):
     A: tir.Buffer
     B: tir.Buffer

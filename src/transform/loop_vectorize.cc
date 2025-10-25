@@ -240,8 +240,9 @@ int GetVectorizeSize(const For &loop) { return VectorizePlanner().Plan(loop); }
 bool CanProveIndependent(const PrimExpr &expr, Var var,
                          arith::Analyzer *analyzer) {
   // 1. if var doesn't exist, it is independent
-  bool used_var = UsesVar(
-      expr, [&](const VarNode *v) { return GetRef<Var>(v).same_as(var); });
+  bool used_var = UsesVar(expr, [&](const VarNode *v) {
+    return tvm::ffi::GetRef<Var>(v).same_as(var);
+  });
   if (!used_var) {
     return true;
   }

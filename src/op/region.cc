@@ -44,7 +44,7 @@ RegionOp::RegionOp(Array<PrimExpr> args, BufferMap vmap) {
     PrimExpr extent = args[2 + i];
     ranges.push_back(Range::FromMinExtent(min, extent));
   }
-  ObjectPtr<RegionOpNode> node = make_object<RegionOpNode>();
+  ObjectPtr<RegionOpNode> node = tvm::ffi::make_object<RegionOpNode>();
   node->buffer_ = load->buffer;
   node->access_mask_ = static_cast<int>(*as_const_int(args[1]));
   node->ranges_ = ranges;
@@ -57,7 +57,7 @@ RegionOp::RegionOp(Array<PrimExpr> args, BufferMap vmap) {
  * @return TileOperator A new TileOperator that owns a copied RegionOpNode.
  */
 TileOperator RegionOpNode::Clone() const {
-  auto op = make_object<RegionOpNode>(*this);
+  auto op = tvm::ffi::make_object<RegionOpNode>(*this);
   return RegionOp(op);
 }
 
@@ -117,6 +117,8 @@ TIR_REGISTER_TL_OP(RegionOp, region)
     .set_num_inputs(-1)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kPure));
+
+TVM_FFI_STATIC_INIT_BLOCK() { RegionOpNode::RegisterReflection(); }
 
 } // namespace tl
 } // namespace tvm

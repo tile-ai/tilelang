@@ -173,7 +173,7 @@ private:
       if (as_const_int(analyzer->Simplify(node->extent)) == nullptr) {
         return StmtExprMutator::VisitStmt_(node);
       }
-      For new_for = GetRef<For>(node);
+      For new_for = tvm::ffi::GetRef<For>(node);
       auto for_ptr = new_for.CopyOnWrite();
       for_ptr->annotations.Set(tir::attr::pragma_unroll_explicit, Bool(false));
       for_ptr->kind = ForKind::kUnrolled;

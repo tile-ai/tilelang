@@ -362,10 +362,10 @@ tvm::transform::Pass LayoutReducer() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LayoutReducer", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LayoutReducer", LayoutReducer);
-});
+}
 
 } // namespace tl
 } // namespace tvm

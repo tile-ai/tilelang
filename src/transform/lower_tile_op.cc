@@ -435,7 +435,7 @@ private:
       return expr;
     }
     if (const auto *var_node = expr.as<VarNode>()) {
-      Var var = GetRef<Var>(var_node);
+      Var var = tvm::ffi::GetRef<Var>(var_node);
       auto it = let_bindings_.find(var);
       if (it != let_bindings_.end()) {
         return it->second;
@@ -611,7 +611,7 @@ private:
       let_bindings_.erase(op->var);
     }
     if (value.same_as(op->value) && body.same_as(op->body)) {
-      return GetRef<Stmt>(op);
+      return tvm::ffi::GetRef<Stmt>(op);
     } else {
       auto n = this->CopyOnWrite(op);
       n->value = value;
@@ -652,7 +652,8 @@ private:
     if (call && call->op.as<GlobalVarNode>())
       return Downcast<Evaluate>(IRMutatorWithAnalyzer::VisitStmt_(op));
 
-    auto tile_op = ParseOperator(GetRef<Stmt>(op), buffer_data_to_buffer_);
+    auto tile_op =
+        ParseOperator(tvm::ffi::GetRef<Stmt>(op), buffer_data_to_buffer_);
     if (!tile_op.defined())
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     AddWorkspaceCallback callback = [this](int num_elem, DataType dtype) {
@@ -730,10 +731,10 @@ tvm::transform::Pass LowerTileOp() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerTileOp", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LowerTileOp", LowerTileOp);
-});
+}
 } // namespace transform
 
 } // namespace tl

@@ -42,6 +42,7 @@
 namespace tvm {
 namespace tl {
 using namespace tir;
+using namespace ffi;
 static constexpr const char *kDeviceContextVar = "device_api_context";
 
 namespace {
@@ -168,7 +169,7 @@ private:
     auto node = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
 
     if (auto *gvar_ptr = node->op.as<GlobalVarNode>()) {
-      auto gvar = GetRef<GlobalVar>(gvar_ptr);
+      auto gvar = tvm::ffi::GetRef<GlobalVar>(gvar_ptr);
       if (auto symbol = packed_func_methods.Get(gvar)) {
         Array<PrimExpr> cpacked_args;
         cpacked_args.push_back(tir::StringImm(symbol.value()));
@@ -220,7 +221,7 @@ Optional<String> RequiresPackedAPI(const PrimFunc &func) {
 
   // Internal function calls do not need the PackedFunc API
   auto global_symbol = func->GetAttr<String>(tvm::attr::kGlobalSymbol);
-  if (!global_symbol.defined()) {
+  if (!global_symbol) {
     return std::nullopt;
   }
 
@@ -229,7 +230,7 @@ Optional<String> RequiresPackedAPI(const PrimFunc &func) {
 
 PrimFunc MakePackedAPI(PrimFunc func) {
   auto global_symbol = RequiresPackedAPI(func);
-  if (!global_symbol.defined()) {
+  if (!global_symbol) {
     return func;
   }
   std::string name_hint = global_symbol.value();
@@ -406,7 +407,7 @@ PrimFunc MakePackedAPI(PrimFunc func) {
                   StringImm(name_hint + "_compute_"), body);
   // Set device context
   if (vmap.count(device_id.get())) {
-    ObjectRef node = String("default");
+    auto node = String("default");
     seq_check.push_back(AttrStmt(node, tir::attr::device_id, device_id, nop));
     seq_check.push_back(
         AttrStmt(node, tir::attr::device_type, device_type, nop));
@@ -513,11 +514,11 @@ tvm::transform::Pass MakePackedAPI() {
   return tvm::transform::CreateModulePass(pass_func, 0, "tl.MakePackedAPI", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.MakePackedAPI",
                         []() { return MakePackedAPI(); });
-});
+}
 
 } // namespace tl
 } // namespace tvm

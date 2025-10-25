@@ -39,6 +39,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
+using namespace ffi;
 using arith::IRVisitorWithAnalyzer;
 using runtime::StorageRank;
 using runtime::StorageScope;

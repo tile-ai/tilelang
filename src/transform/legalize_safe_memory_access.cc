@@ -38,7 +38,7 @@ private:
     StmtVisitor::VisitStmt(op->body);
 
     if (!has_child_for_) {
-      leaf_for_nodes.push_back(GetRef<For>(op));
+      leaf_for_nodes.push_back(tvm::ffi::GetRef<For>(op));
     }
 
     parent_has_child_for_ = parent_has_child_for;
@@ -378,11 +378,11 @@ tvm::transform::Pass LegalizeSafeMemoryAccess() {
 }
 
 // Register the pass globally so it can be used in the compilation pipeline
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LegalizeSafeMemoryAccess",
                         LegalizeSafeMemoryAccess);
-});
+}
 
 } // namespace tl
 } // namespace tvm

@@ -80,8 +80,8 @@ public:
   Array<Range> ranges_;
   int access_mask_;
 
-  static constexpr const char *_type_key = "tl.RegionOp";
-  TVM_DECLARE_FINAL_OBJECT_INFO(RegionOpNode, TileOperatorNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.RegionOp", RegionOpNode,
+                                    TileOperatorNode);
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &T,
@@ -101,25 +101,12 @@ public:
         .def_ro("ranges", &RegionOpNode::ranges_)
         .def_ro("access_mask", &RegionOpNode::access_mask_);
   }
-
-  bool SEqualReduce(const RegionOpNode *other, SEqualReducer equal) const {
-    return equal(buffer_, other->buffer_) && equal(ranges_, other->ranges_) &&
-           equal(access_mask_, other->access_mask_);
-  }
-
-  void SHashReduce(SHashReducer hash_reduce) const {
-    hash_reduce(buffer_);
-    hash_reduce(ranges_);
-    hash_reduce(access_mask_);
-  }
-
-  static constexpr bool _type_has_method_sequal_reduce = true;
-  static constexpr bool _type_has_method_shash_reduce = true;
 };
 
 class RegionOp : public TileOperator {
 public:
-  TVM_DEFINE_OBJECT_REF_METHODS(RegionOp, TileOperator, RegionOpNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(RegionOp, TileOperator,
+                                             RegionOpNode);
   TVM_DLL RegionOp(Array<PrimExpr> args, BufferMap vmap);
 
   static const Op &Get();

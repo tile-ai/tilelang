@@ -6,6 +6,7 @@
 
 #include "swizzle.h"
 
+#include <tvm/node/node.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/stmt_functor.h>
 
@@ -86,14 +87,16 @@ SwizzledLayout::SwizzledLayout(Array<IterVar> forward_var,
   forward_index =
       forward_index.Map([&](const PrimExpr &e) { return Substitute(e, vmap); });
 
-  auto n = make_object<SwizzledLayoutNode>(input_size, forward_index, pattern);
+  auto n = tvm::ffi::make_object<SwizzledLayoutNode>(input_size, forward_index,
+                                                     pattern);
   data_ = std::move(n);
 }
 
 SwizzledLayout::SwizzledLayout(Array<PrimExpr> input_size,
                                Array<PrimExpr> forward_index,
                                SwizzlePattern pattern) {
-  auto n = make_object<SwizzledLayoutNode>(input_size, forward_index, pattern);
+  auto n = tvm::ffi::make_object<SwizzledLayoutNode>(input_size, forward_index,
+                                                     pattern);
   data_ = std::move(n);
 }
 
@@ -101,15 +104,6 @@ void SwizzledLayoutNode::RegisterReflection() {
   namespace refl = tvm::ffi::reflection;
   refl::ObjectDef<SwizzledLayoutNode>();
 }
-
-bool SwizzledLayoutNode::SEqualReduce(const SwizzledLayoutNode *other,
-                                      SEqualReducer equal) const {
-  return equal(this->InputShape(), other->InputShape()) &&
-         equal(this->forward_index_, other->forward_index_) &&
-         pattern_ == other->pattern_;
-}
-
-TVM_REGISTER_NODE_TYPE(SwizzledLayoutNode);
 
 } // namespace tl
 } // namespace tvm

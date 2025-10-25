@@ -30,8 +30,7 @@ public:
   mutable int n_warp{0};
   int policy_type;
 
-  static constexpr const char *_type_key = "tl.GemmWarpPolicy";
-  TVM_DECLARE_FINAL_OBJECT_INFO(GemmWarpPolicyNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO("tl.GemmWarpPolicy", GemmWarpPolicyNode, Object);
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -40,21 +39,6 @@ public:
         .def_ro("m_warp", &GemmWarpPolicyNode::m_warp)
         .def_ro("n_warp", &GemmWarpPolicyNode::n_warp);
   }
-
-  bool SEqualReduce(const GemmWarpPolicyNode *other,
-                    SEqualReducer equal) const {
-    return equal(policy_type, other->policy_type) &&
-           equal(m_warp, other->m_warp) && equal(n_warp, other->n_warp);
-  }
-
-  void SHashReduce(SHashReducer hash_reduce) const {
-    hash_reduce(policy_type);
-    hash_reduce(m_warp);
-    hash_reduce(n_warp);
-  }
-
-  static constexpr bool _type_has_method_sequal_reduce = true;
-  static constexpr bool _type_has_method_shash_reduce = true;
 
   std::pair<int, int> ComputeWarpPartition(int M, int N, int block_size,
                                            Target target,
@@ -74,22 +58,23 @@ public:
 
 class GemmWarpPolicy : public ObjectRef {
 public:
-  TVM_DEFINE_OBJECT_REF_METHODS(GemmWarpPolicy, ObjectRef, GemmWarpPolicyNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmWarpPolicy, ObjectRef,
+                                             GemmWarpPolicyNode);
 
   explicit GemmWarpPolicy(GemmWarpPolicyType policy_type) {
-    auto node = make_object<GemmWarpPolicyNode>();
+    auto node = tvm::ffi::make_object<GemmWarpPolicyNode>();
     node->policy_type = (int)policy_type;
     data_ = std::move(node);
   }
 
   explicit GemmWarpPolicy(int policy_type) {
-    auto node = make_object<GemmWarpPolicyNode>();
+    auto node = tvm::ffi::make_object<GemmWarpPolicyNode>();
     node->policy_type = policy_type;
     data_ = std::move(node);
   }
 
   explicit GemmWarpPolicy(int m_warp, int n_warp) {
-    auto node = make_object<GemmWarpPolicyNode>();
+    auto node = tvm::ffi::make_object<GemmWarpPolicyNode>();
     node->m_warp = m_warp;
     node->n_warp = n_warp;
     node->policy_type = (int)GemmWarpPolicyType::kFree;
@@ -116,9 +101,7 @@ public:
   std::optional<tir::Buffer> mbar; // mbar is optional, only used for TCGEN5MMA
   Array<PrimExpr> C_coords;
   mutable GemmWarpPolicy policy;
-
-  static constexpr const char *_type_key = "tl.Gemm";
-  TVM_DECLARE_FINAL_OBJECT_INFO(GemmNode, TileOperatorNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Gemm", GemmNode, TileOperatorNode);
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -144,45 +127,6 @@ public:
         .def_ro("policy", &GemmNode::policy);
   }
 
-  bool SEqualReduce(const GemmNode *other, SEqualReducer equal) const {
-    return equal(A, other->A) && equal(B, other->B) && equal(C, other->C) &&
-           equal(Aptr, other->Aptr) && equal(Bptr, other->Bptr) &&
-           equal(Cptr, other->Cptr) && equal(trans_A, other->trans_A) &&
-           equal(trans_B, other->trans_B) && equal(M, other->M) &&
-           equal(N, other->N) && equal(K, other->K) &&
-           equal(stride_A, other->stride_A) &&
-           equal(stride_B, other->stride_B) &&
-           equal(offset_A, other->offset_A) &&
-           equal(offset_B, other->offset_B) &&
-           equal(clear_accum, other->clear_accum) &&
-           equal(kPack, other->kPack) && equal(wg_wait, other->wg_wait) &&
-           equal(policy, other->policy);
-  }
-
-  void SHashReduce(SHashReducer hash_reduce) const {
-    hash_reduce(A);
-    hash_reduce(B);
-    hash_reduce(C);
-    hash_reduce(Aptr);
-    hash_reduce(Bptr);
-    hash_reduce(Cptr);
-    hash_reduce(trans_A);
-    hash_reduce(trans_B);
-    hash_reduce(M);
-    hash_reduce(N);
-    hash_reduce(K);
-    hash_reduce(stride_A);
-    hash_reduce(stride_B);
-    hash_reduce(offset_A);
-    hash_reduce(offset_B);
-    hash_reduce(clear_accum);
-    hash_reduce(kPack);
-    hash_reduce(wg_wait);
-    hash_reduce(policy);
-  }
-  static constexpr bool _type_has_method_sequal_reduce = true;
-  static constexpr bool _type_has_method_shash_reduce = true;
-
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &T,
                         InferLevel level) const override;
@@ -199,7 +143,7 @@ private:
 
 class Gemm : public TileOperator {
 public:
-  TVM_DEFINE_OBJECT_REF_METHODS(Gemm, TileOperator, GemmNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Gemm, TileOperator, GemmNode);
   TVM_DLL Gemm(Array<PrimExpr> args, BufferMap vmap);
   static const Op &Get();
 };

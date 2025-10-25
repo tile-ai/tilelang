@@ -103,7 +103,7 @@ private:
           ICHECK(call->op.same_as(builtin::tvm_access_ptr()));
           auto var = call->args[1].as<VarNode>();
           ICHECK(var);
-          auto it = buffer_data_to_buffer_.find(GetRef<Var>(var));
+          auto it = buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(var));
           ICHECK(it != buffer_data_to_buffer_.end());
           return (*it).second;
         };
@@ -210,7 +210,7 @@ private:
       if (const auto *load = op->args[0].as<BufferLoadNode>()) {
         buffer_region = BufferRegion::FullRegion(load->buffer);
       } else if (const auto *var_node = op->args[0].as<VarNode>()) {
-        Var data_var = GetRef<Var>(var_node);
+        Var data_var = tvm::ffi::GetRef<Var>(var_node);
         auto it = buffer_data_to_buffer_.find(data_var);
         if (it != buffer_data_to_buffer_.end()) {
           buffer_region = BufferRegion::FullRegion((*it).second);
@@ -223,7 +223,7 @@ private:
     } else if (op->op.same_as(builtin::tvm_access_ptr())) {
       const VarNode *buffer_var = op->args[1].as<VarNode>();
       ICHECK(buffer_var);
-      auto it = buffer_data_to_buffer_.find(GetRef<Var>(buffer_var));
+      auto it = buffer_data_to_buffer_.find(tvm::ffi::GetRef<Var>(buffer_var));
       if (it != buffer_data_to_buffer_.end()) {
         const Buffer &buffer = (*it).second;
         const BufferRegion buffer_region = BufferRegion::FullRegion(buffer);
@@ -402,7 +402,7 @@ private:
       if (TargetHasAsyncCopy(target_) && use_async_copy_)
         annotations.Set(tir::attr::software_pipeline_async_stages,
                         Array<Integer>{0});
-      auto for_node = GetRef<For>(loop);
+      auto for_node = tvm::ffi::GetRef<For>(loop);
       for_node.CopyOnWrite()->annotations = annotations;
       return for_node;
     }
@@ -728,10 +728,10 @@ tvm::transform::Pass PipelinePlanning() {
   return CreatePrimFuncPass(pass_func, 0, "tl.PipelinePlanning", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.PipelinePlanning", PipelinePlanning);
-});
+}
 
 } // namespace tl
 } // namespace tvm

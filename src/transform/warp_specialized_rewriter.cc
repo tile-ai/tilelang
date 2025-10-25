@@ -159,7 +159,7 @@ public:
 
     // Check reads from global
     Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
-                /*body*/ GetRef<Stmt>(op));
+                /*body*/ tvm::ffi::GetRef<Stmt>(op));
     auto access = GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
     auto reads = access[0];
     Role role = Role::kProducer;
@@ -511,7 +511,7 @@ private:
     annotations.Set(String("stmt_group"), Integer(1));
     auto original_node = (op->body).as<SeqStmtNode>();
     if (!original_node) {
-      return GetRef<For>(op);
+      return tvm::ffi::GetRef<For>(op);
     }
     Array<Stmt> new_body;
     int cur_id = 0;
@@ -646,7 +646,7 @@ private:
     if (role == Role::kBoth) {
       return StmtMutator::VisitStmt_(op);
     } else if ((role == Role::kProducer) == is_emitting_producer_) {
-      return GetRef<Stmt>(op);
+      return tvm::ffi::GetRef<Stmt>(op);
     } else {
       return Evaluate(0);
     }
@@ -1284,7 +1284,7 @@ tvm::transform::Pass WarpSpecialized() {
       return WarpSpecializedRewriter::Substitute(f, disable_warp_specialized,
                                                  disable_shuffle_elect);
     } else {
-      ObjectRef node = String("default");
+      auto node = ffi::String("default");
       f.CopyOnWrite()->body =
           AttrStmt(node, attr::kCustomWarpSpecialization, 1, f->body);
       return f;
@@ -1293,10 +1293,10 @@ tvm::transform::Pass WarpSpecialized() {
   return CreatePrimFuncPass(pass_func, 0, "tl.WarpSpecialized", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.WarpSpecialized", WarpSpecialized);
-});
+}
 
 } // namespace tl
 } // namespace tvm

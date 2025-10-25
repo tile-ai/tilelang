@@ -156,9 +156,9 @@ tvm::transform::Pass InjectAssumes() {
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectAssumes", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.InjectAssumes", InjectAssumes);
-});
+}
 
 } // namespace tvm::tl

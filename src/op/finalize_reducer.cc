@@ -33,7 +33,7 @@ using namespace tir;
  * Buffer.
  */
 FinalizeReducerOp::FinalizeReducerOp(Array<PrimExpr> args, BufferMap vmap) {
-  auto node = make_object<FinalizeReducerOpNode>();
+  auto node = tvm::ffi::make_object<FinalizeReducerOpNode>();
   node->reducer = vmap[GetVarFromAccessPtr(args[0])];
   node->op = (ReducerOpType)*as_const_int(args[1]);
   data_ = std::move(node);
@@ -152,7 +152,7 @@ LayoutMap FinalizeReducerOpNode::InferLayout(const LayoutInferArgs &T,
  * @return TileOperator A TileOperator that contains a deep copy of this node.
  */
 TileOperator FinalizeReducerOpNode::Clone() const {
-  auto node = make_object<FinalizeReducerOpNode>(*this);
+  auto node = tvm::ffi::make_object<FinalizeReducerOpNode>(*this);
   return TileOperator(node);
 }
 
@@ -161,6 +161,6 @@ TIR_REGISTER_TL_OP(FinalizeReducerOp, finalize_reducer)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TVM_FFI_STATIC_INIT_BLOCK({ FinalizeReducerOpNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK() { FinalizeReducerOpNode::RegisterReflection(); }
 } // namespace tl
 } // namespace tvm

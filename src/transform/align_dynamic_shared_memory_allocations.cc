@@ -47,7 +47,7 @@ public:
   }
 
   Stmt VisitStmt_(const BlockNode *op) final {
-    Block block = GetRef<Block>(op);
+    Block block = tvm::ffi::GetRef<Block>(op);
     Array<Buffer> alloc_buffers = op->alloc_buffers;
     alloc_buffers.MutateByApply([this](Buffer buf) {
       auto storage_scope =
@@ -58,7 +58,7 @@ public:
                                                  buf->dtype.bytes());
         if (!new_shape.same_as(buf->shape)) {
           ObjectPtr<BufferNode> new_buffer =
-              make_object<BufferNode>(*(buf.get()));
+              tvm::ffi::make_object<BufferNode>(*(buf.get()));
           new_buffer->shape = std::move(new_shape);
           buffer_remap_.Set(buf, Buffer(new_buffer));
           return Buffer(new_buffer);
@@ -73,7 +73,7 @@ public:
   }
 
   Stmt VisitStmt_(const BufferStoreNode *op) final {
-    auto store_node = GetRef<BufferStore>(op);
+    auto store_node = tvm::ffi::GetRef<BufferStore>(op);
     Buffer buf = op->buffer;
     if (buffer_remap_.count(buf)) {
       buf = buffer_remap_[buf];
@@ -83,7 +83,7 @@ public:
   }
 
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    auto load_node = GetRef<BufferLoad>(op);
+    auto load_node = tvm::ffi::GetRef<BufferLoad>(op);
     Buffer buf = op->buffer;
     if (buffer_remap_.count(buf)) {
       buf = buffer_remap_[buf];
@@ -149,11 +149,11 @@ tvm::transform::Pass AlignDynamicSharedMemoryAllocations(int align_bytes) {
                             "tl.AlignDynamicSharedMemoryAllocations", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.AlignDynamicSharedMemoryAllocations",
                         AlignDynamicSharedMemoryAllocations);
-});
+}
 
 } // namespace tl
 } // namespace tvm

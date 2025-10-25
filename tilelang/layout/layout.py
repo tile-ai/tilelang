@@ -2,14 +2,14 @@
 # pylint: disable=invalid-name, unsupported-binary-operation
 from __future__ import annotations
 
-import tvm
+import tvm_ffi
 from tvm.ir import Node, Range
 from tvm.tir import IterVar, Var, PrimExpr, IndexMap
 from tilelang import _ffi_api
 
 
 # Register the Layout class as a TVM object under the name "tl.Layout"
-@tvm.ffi.register_object("tl.Layout")
+@tvm_ffi.register_object("tl.Layout")
 class Layout(Node):
 
     def __init__(self, shape, forward_fn):

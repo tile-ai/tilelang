@@ -319,10 +319,10 @@ tvm::transform::Pass InjectFenceProxy() {
                                             {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.InjectFenceProxy", InjectFenceProxy);
-});
+}
 
 } // namespace tl
 } // namespace tvm

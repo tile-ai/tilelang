@@ -36,7 +36,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tir;
-
+using namespace ffi;
 namespace {
 struct KernelInfo {
   // The device on which the PrimFunc runs
@@ -372,8 +372,8 @@ tvm::transform::Pass LowerDeviceKernelLaunch() {
       IRModule updates;
       for (const auto &[gvar, base_func] : mod->functions) {
         if (auto *ptr = base_func.as<PrimFuncNode>()) {
-          auto prim_func =
-              mutator.RewriteKernelLaunchSite(gvar, GetRef<PrimFunc>(ptr));
+          auto prim_func = mutator.RewriteKernelLaunchSite(
+              gvar, tvm::ffi::GetRef<PrimFunc>(ptr));
           if (!prim_func.same_as(base_func)) {
             updates->Add(gvar, prim_func);
           }
@@ -388,8 +388,8 @@ tvm::transform::Pass LowerDeviceKernelLaunch() {
       IRModule updates;
       for (const auto &[gvar, base_func] : mod->functions) {
         if (auto *ptr = base_func.as<PrimFuncNode>()) {
-          auto prim_func =
-              mutator.UpdateKernelAttributes(gvar, GetRef<PrimFunc>(ptr));
+          auto prim_func = mutator.UpdateKernelAttributes(
+              gvar, tvm::ffi::GetRef<PrimFunc>(ptr));
           if (!prim_func.same_as(base_func)) {
             updates->Add(gvar, prim_func);
           }
@@ -407,11 +407,11 @@ tvm::transform::Pass LowerDeviceKernelLaunch() {
                                           "tl.LowerDeviceKernelLaunch", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LowerDeviceKernelLaunch",
                         LowerDeviceKernelLaunch);
-});
+}
 
 } // namespace transform
 } // namespace tl

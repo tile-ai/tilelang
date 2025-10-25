@@ -66,17 +66,17 @@ struct ReducerInfoNode : Object {
 
   ReducerInfoNode() = default;
   ReducerInfoNode(const String &op_str, const String &rep_str);
-  static constexpr const char *_type_key = "tl.ReducerInfo";
-  TVM_DECLARE_FINAL_OBJECT_INFO(ReducerInfoNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReducerInfo", ReducerInfoNode, Object);
 };
 
 struct ReducerInfo : ObjectRef {
 public:
   TVM_DLL ReducerInfo(const String &op_str, const String &rep_str) {
-    data_ = make_object<ReducerInfoNode>(op_str, rep_str);
+    data_ = tvm::ffi::make_object<ReducerInfoNode>(op_str, rep_str);
   }
 
-  TVM_DEFINE_OBJECT_REF_METHODS(ReducerInfo, ObjectRef, ReducerInfoNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReducerInfo, ObjectRef,
+                                             ReducerInfoNode);
 };
 
 namespace attr {

@@ -84,7 +84,7 @@ std::pair<int, int> GemmSPWarpPolicyNode::ComputeWarpPartition(int M, int N,
  * @note An ICHECK failure is raised if a provided kPack is not 1 or 2.
  */
 GemmSP::GemmSP(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<GemmSPNode> node = make_object<GemmSPNode>();
+  ObjectPtr<GemmSPNode> node = tvm::ffi::make_object<GemmSPNode>();
   node->A = vmap[GetVarFromAccessPtr(args[0])];
   node->E = vmap[GetVarFromAccessPtr(args[1])];
   node->B = vmap[GetVarFromAccessPtr(args[2])];
@@ -118,7 +118,7 @@ GemmSP::GemmSP(Array<PrimExpr> args, BufferMap vmap) {
  * @return TileOperator A TileOperator holding a cloned GemmSPNode.
  */
 TileOperator GemmSPNode::Clone() const {
-  auto op = make_object<GemmSPNode>(*this);
+  auto op = tvm::ffi::make_object<GemmSPNode>(*this);
   return GemmSP(op);
 }
 
@@ -303,7 +303,7 @@ TIR_REGISTER_TL_OP(GemmSP, gemm_sp)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TVM_FFI_STATIC_INIT_BLOCK({ GemmSPNode::RegisterReflection(); });
+TVM_FFI_STATIC_INIT_BLOCK() { GemmSPNode::RegisterReflection(); }
 
 } // namespace tl
 } // namespace tvm

@@ -41,7 +41,7 @@ public:
       return StmtMutator::VisitStmt_(op);
 
     // Collect loop variables and ranges
-    auto for_node = GetRef<For>(op);
+    auto for_node = tvm::ffi::GetRef<For>(op);
     Array<Var> loop_vars;
     Array<PrimExpr> loop_extents;
     Stmt body = op->body;
@@ -81,7 +81,7 @@ public:
         // post order visit the index
         PostOrderVisit(index, [&](const ObjectRef &obj) {
           if (const VarNode *v = obj.as<VarNode>()) {
-            used_vars.insert(GetRef<Var>(v));
+            used_vars.insert(tvm::ffi::GetRef<Var>(v));
           }
         });
         if (used_vars.empty()) {
