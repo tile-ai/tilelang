@@ -167,6 +167,7 @@ jobs:
           echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
           echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
           echo "CLANG_TIDY_CMAKE_OPTIONS=${CLANG_TIDY_CMAKE_OPTIONS}" | tee -a "${GITHUB_ENV}"
+          echo "UV_HTTP_TIMEOUT=600" | tee -a "${GITHUB_ENV}"
 
           if [[ ! -x "$(command -v nvcc)" ]]; then
             export PATH="/usr/local/cuda/bin:${PATH}"
