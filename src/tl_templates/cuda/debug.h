@@ -257,3 +257,12 @@ __device__ void debug_print_buffer_value<int16_t>(const char *msg,
          msg, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, threadIdx.y,
          threadIdx.z, buf_name, index, (int32_t)var);
 }
+
+TL_DEVICE void device_assert(bool cond) { assert(cond); }
+
+TL_DEVICE void device_assert_with_msg(bool cond, const char *msg) {
+  if (!cond) {
+    printf("Device assert failed: %s\n", msg);
+    assert(0);
+  }
+}

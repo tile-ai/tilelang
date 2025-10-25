@@ -64,7 +64,7 @@ from .reduce import (
     cumsum,  # noqa: F401
     finalize_reducer,  # noqa: F401
 )
-from .print import print  # noqa: F401
+from .print import print, device_assert  # noqa: F401
 from .customize import (
     atomic_max,  # noqa: F401
     atomic_min,  # noqa: F401
