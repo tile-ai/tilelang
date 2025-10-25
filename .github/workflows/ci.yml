@@ -42,14 +42,14 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Setup Python 3.8
+      - name: Setup Python 3.9
         id: setup-py38
         uses: actions/setup-python@v6
         with:
-          python-version: "3.8" # use lowest supported version for linting
+          python-version: "3.9" # use lowest supported version for linting
           update-environment: false
 
-      - name: Check AST with Python 3.8
+      - name: Check AST with Python 3.9
         run: |
           "${{ steps.setup-py38.outputs.python-path }}" -m compileall -q -f tilelang
 
