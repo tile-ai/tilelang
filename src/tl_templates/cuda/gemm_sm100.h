@@ -289,12 +289,14 @@ template <int M, int N, int K, int AtomM, int AtomN, int AtomK, bool trans_A,
           typename C_type_raw>
 class GemmTensorOp {
 public:
+  using A_type_cute = typename tl::to_cute_type<A_type_raw>::type;
+  using B_type_cute = typename tl::to_cute_type<B_type_raw>::type;
   using A_type =
-      typename std::conditional<std::is_same<A_type_raw, float>::value,
-                                tfloat32_t, A_type_raw>::type;
+      typename std::conditional<std::is_same<A_type_cute, float>::value,
+                                tfloat32_t, A_type_cute>::type;
   using B_type =
-      typename std::conditional<std::is_same<B_type_raw, float>::value,
-                                tfloat32_t, B_type_raw>::type;
+      typename std::conditional<std::is_same<B_type_cute, float>::value,
+                                tfloat32_t, B_type_cute>::type;
   using C_type = C_type_raw;
 
   static_assert(AtomM == 128 || AtomM == 64 || AtomM == 32);

@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Memory allocation utilities for Tile-AI programs.
 
 This module provides a set of functions for allocating different types of memory buffers
@@ -14,7 +15,6 @@ Each function takes shape and dtype parameters and returns a TVM buffer object
 with the appropriate memory scope.
 """
 
-from __future__ import annotations
 from tilelang import tvm as tvm
 from tvm.script import tir as T
 from tvm.tir import PrimExpr

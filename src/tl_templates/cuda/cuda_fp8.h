@@ -1,10 +1,11 @@
 #pragma once
 
+#include "common.h"
 #include <cuda_fp8.h>
 #include <cute/numeric/numeric_types.hpp>
 
-using fp8_e4_t = cute::float_e4m3_t;
-using fp8_e5_t = cute::float_e5m2_t;
+using fp8_e4_t = tl::float_e4m3_t;
+using fp8_e5_t = tl::float_e5m2_t;
 
 struct __CUDA_ALIGN__(2) fp8_e4_2_t {
   fp8_e4_t x;
