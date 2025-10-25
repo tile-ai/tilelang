@@ -143,7 +143,8 @@ _IS_CUDA_AVAILABLE = check_cuda_availability()
 def device_assert(condition: tir.PrimExpr, msg: str = ""):
     """
     Device-side assert emulation.
-    In debug mode (TILELANG_DEBUG != 0), emits a device-side assert call on CUDA targets only.
+    Emits a device-side assert call on CUDA targets when CUDA is available.
+    The assert is always enabled and cannot be disabled at runtime.
     """
     if _IS_CUDA_AVAILABLE:
         if msg == "":
