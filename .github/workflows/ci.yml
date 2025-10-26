@@ -277,17 +277,6 @@ jobs:
           uv run --no-project -m -- torch.utils.collect_env
           echo "::endgroup::"
 
-      - name: Clear uv cache for self-hosted runners (if setup failed)
-        if: >-
-          ${{
-            failure() &&
-            startsWith(matrix.runner.name, 'self-hosted') &&
-            (steps.setup-uv.conclusion == 'failure' || steps.setup-venv.conclusion == 'failure')
-          }}
-        run: |
-          echo "Clearing uv cache at ${UV_CACHE_DIR} due to failure."
-          uv cache clean
-
       - name: Run clang-tidy
         id: clang-tidy
         if: runner.os == 'Linux'
