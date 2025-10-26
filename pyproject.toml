@@ -163,6 +163,9 @@ manylinux-x86_64-image = "manylinux2014"
 manylinux-aarch64-image = "manylinux_2_28"
 skip = "*musllinux*"
 environment-pass = ["CUDA_VERSION"]
+test-command = [
+    """python -c 'import tilelang; print("TileLang version:", tilelang.__version__)'""",
+]
 
 [tool.cibuildwheel.linux]
 repair-wheel-command = [
