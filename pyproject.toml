@@ -58,15 +58,31 @@ metadata.version.provider = "version_provider"
 metadata.version.provider-path = "."
 experimental = true
 
-[tool.scikit-build.wheel.packages]
-tilelang = "tilelang"
-"tilelang/src" = "src"
-"tilelang/3rdparty" = "3rdparty"
-
-# TODO: we might want to not include these in wheel?
-"tilelang/benchmark" = "benchmark"
-"tilelang/examples" = "examples"
-"tilelang/testing" = "testing"
+[tool.scikit-build.sdist]
+# See MANIFEST.in for details
+include = [
+    "VERSION",
+    "LICENSE",
+    "THIRDPARTYNOTICES.txt",
+    "version_provider.py",
+    "requirements*.txt",
+    "tilelang/jit/adapter/cython/cython_wrapper.pyx",
+    "CMakeLists.txt",
+    "src/**",
+    "cmake/**",
+    "3rdparty/**",
+    "testing/**",
+    "examples/**",
+]
+exclude = [
+    ".git",
+    ".github",
+    "**/.git",
+    "**/.github",
+    "3rdparty/clang**",
+    "3rdparty/llvm**",
+    "build",
+]
 
 [tool.yapf]
 based_on_style = "yapf"
