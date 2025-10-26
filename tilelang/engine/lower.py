@@ -1,8 +1,9 @@
 """The compiler for TL programs."""
+from __future__ import annotations
 
 import os
 import os.path as osp
-from typing import Union, Optional, Callable, List
+from typing import Callable
 import tilelang.transform
 from tilelang import tvm as tvm
 from tvm import tir
@@ -114,7 +115,7 @@ def tilelang_callback_hip_compile(code, target):
     return hsaco
 
 
-def extrac_params(func: tir.PrimFunc) -> List[KernelParam]:
+def extrac_params(func: tir.PrimFunc) -> list[KernelParam]:
     tensor_types = []
     for var in func.params:
         if var in func.buffer_map:
@@ -124,7 +125,7 @@ def extrac_params(func: tir.PrimFunc) -> List[KernelParam]:
     return tensor_types
 
 
-def canon_target_host(target: Union[str, Target], target_host: Optional[Union[str, Target]]):
+def canon_target_host(target: str | Target, target_host: str | Target | None):
 
     if not target_host:
         target_host = "llvm" if tvm.runtime.enabled("llvm") else "c"
@@ -190,9 +191,9 @@ def device_codegen_without_compile(device_mod: tvm.IRModule, target: Target) -> 
 
 
 def lower(
-    func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-    target: Union[str, Target] = "auto",
-    target_host: Optional[Union[str, Target]] = None,
+    func_or_mod: tir.PrimFunc | tvm.IRModule,
+    target: str | Target = "auto",
+    target_host: str | Target | None = None,
     runtime_only=False,
     enable_host_codegen=False,
     enable_device_compile=False,

@@ -23,11 +23,9 @@ def get_configs():
     rep=100,
 )
 @tilelang.jit(
-    out_idx=[3],
-    pass_configs={
+    out_idx=[3], pass_configs={
         tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
-    },
-    compile_flags=["-O3", "-DENABLE_BF16"])
+    })
 def flashattn(
     batch,
     heads,

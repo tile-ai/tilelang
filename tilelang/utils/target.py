@@ -1,12 +1,13 @@
+from __future__ import annotations
 from platform import mac_ver
-from typing import Dict, Literal, Union
+from typing import Literal
 from tilelang import tvm as tvm
 from tilelang import _ffi_api
 from tvm.target import Target
 from tvm.contrib import rocm
 from tilelang.contrib import nvcc
 
-SUPPORTED_TARGETS: Dict[str, str] = {
+SUPPORTED_TARGETS: dict[str, str] = {
     "auto": "Auto-detect CUDA/HIP/Metal based on availability.",
     "cuda": "CUDA GPU target (supports options such as `cuda -arch=sm_80`).",
     "hip": "ROCm HIP target (supports options like `hip -mcpu=gfx90a`).",
@@ -17,7 +18,7 @@ SUPPORTED_TARGETS: Dict[str, str] = {
 }
 
 
-def describe_supported_targets() -> Dict[str, str]:
+def describe_supported_targets() -> dict[str, str]:
     """
     Return a mapping of supported target names to usage descriptions.
     """
@@ -58,8 +59,8 @@ def check_metal_availability() -> bool:
     return arch == 'arm64'
 
 
-def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
-                     return_object: bool = False) -> Union[str, Target]:
+def determine_target(target: str | Target | Literal["auto"] = "auto",
+                     return_object: bool = False) -> str | Target:
     """
     Determine the appropriate target for compilation (CUDA, HIP, or manual selection).
 
@@ -76,7 +77,7 @@ def determine_target(target: Union[str, Target, Literal["auto"]] = "auto",
         AssertionError: If the target is invalid.
     """
 
-    return_var: Union[str, Target] = target
+    return_var: str | Target = target
 
     if target == "auto":
         target = tvm.target.Target.current(allow_none=True)

@@ -1,10 +1,11 @@
 """The profiler and convert to torch utils"""
+from __future__ import annotations
 
 import ctypes
 import logging
 import torch
 
-from typing import List, Optional, Union, Callable, Dict, Tuple, Any
+from typing import Callable, Any
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tilelang.engine.param import KernelParam
@@ -44,43 +45,43 @@ class CythonKernelAdapter(BaseKernelAdapter):
     """
 
     # Class attributes to store compiled kernel information
-    target: Union[str, Target] = "cuda"
-    ir_module: Optional[tvm.IRModule] = None
+    target: str | Target = "cuda"
+    ir_module: tvm.IRModule | None = None
     # The global source code of the kernel -> global means the source code of the kernel
     # that is not wrapped by the wrapper code
-    kernel_global_source: Optional[str] = None
-    lib: Optional[ctypes.CDLL] = None  # Compiled library handle
-    wrapped_source: Optional[str] = None  # Generated C++ wrapper code
+    kernel_global_source: str | None = None
+    lib: ctypes.CDLL | None = None  # Compiled library handle
+    wrapped_source: str | None = None  # Generated C++ wrapper code
     # Maps symbolic variables to their corresponding buffer and shape indices
-    dynamic_symbolic_map: Optional[Dict[tir.Var, Tuple[int, int]]] = None
+    dynamic_symbolic_map: dict[tir.Var, tuple[int, int]] | None = None
     # Maps pointer arguments to their corresponding (buffer_index, shape_dimension)
-    ptr_map: Optional[Dict[int, str]] = None
+    ptr_map: dict[int, str] | None = None
     # Maps buffer variables to their corresponding dtypes
-    buffer_dtype_map: Optional[Dict[tir.Var, Tuple[int, torch.dtype]]] = None
+    buffer_dtype_map: dict[tir.Var, tuple[int, torch.dtype]] | None = None
     # Maps buffer variables to their corresponding static shapes and strides,
     # e.g., {
     #     "A": [(0, 16), (1, 16)] -> represents A.shape/strides = (16, 16)
     # }
-    static_shape_map: Optional[Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]]] = None
-    static_strides_map: Optional[Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]]] = None
+    static_shape_map: dict[tir.Var, tuple[int, list[tuple[int, int]]]] | None = None
+    static_strides_map: dict[tir.Var, tuple[int, list[tuple[int, int]]]] | None = None
     # Contains contiguous buffers
-    static_contiguous_list: Optional[List[tir.Var]] = None
+    static_contiguous_list: list[tir.Var] | None = None
     # Maps buffer variables to their corresponding devices
-    buffer_device_map: Optional[Dict[tir.Var, Tuple[int, torch.device]]] = None
+    buffer_device_map: dict[tir.Var, tuple[int, torch.device]] | None = None
     # Pass configs for the compiler
-    pass_configs: Optional[Dict[str, Any]] = None
+    pass_configs: dict[str, Any] | None = None
 
     def __init__(self,
-                 params: List[KernelParam],
-                 result_idx: List[int],
-                 target: Union[str, Target],
-                 func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
-                 host_mod: Optional[tvm.IRModule] = None,
-                 device_mod: Optional[tvm.IRModule] = None,
-                 kernel_global_source: Optional[str] = None,
+                 params: list[KernelParam],
+                 result_idx: list[int],
+                 target: str | Target,
+                 func_or_mod: tir.PrimFunc | tvm.IRModule,
+                 host_mod: tvm.IRModule | None = None,
+                 device_mod: tvm.IRModule | None = None,
+                 kernel_global_source: str | None = None,
                  verbose: bool = False,
-                 pass_configs: Optional[Dict[str, Any]] = None,
-                 compile_flags: Optional[List[str]] = None):
+                 pass_configs: dict[str, Any] | None = None,
+                 compile_flags: list[str] | None = None):
         """Initialize the adapter with the given TIR function or module.
 
         Args:
@@ -146,15 +147,15 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
     @classmethod
     def from_database(cls,
-                      params: List[TensorType],
-                      result_idx: List[int],
+                      params: list[TensorType],
+                      result_idx: list[int],
                       target: str,
-                      func_or_mod: Union[tir.PrimFunc, tvm.IRModule],
+                      func_or_mod: tir.PrimFunc | tvm.IRModule,
                       kernel_global_source: str,
                       kernel_lib_path: str,
                       verbose: bool = False,
-                      pass_configs: Optional[Dict[str, Any]] = None,
-                      compile_flags: Optional[List[str]] = None):
+                      pass_configs: dict[str, Any] | None = None,
+                      compile_flags: list[str] | None = None):
         adapter = cls.__new__(cls)
         adapter.params = params
         adapter.result_idx = adapter._legalize_result_idx(result_idx)
@@ -205,7 +206,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter._post_init()
         return adapter
 
-    def _process_dynamic_symbolic(self) -> Dict[tir.Var, Tuple[int, int, int]]:
+    def _process_dynamic_symbolic(self) -> dict[tir.Var, tuple[int, int, int]]:
         """Extract information about dynamic shapes from the TIR function.
 
         Maps symbolic variables to their corresponding (id, buffer_index, dimension)
@@ -232,7 +233,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                         dynamic_symbolic_map[stride] = (1, i, j)
         return dynamic_symbolic_map
 
-    def _process_buffer_dtype(self) -> Dict[tir.Var, Tuple[int, torch.dtype]]:
+    def _process_buffer_dtype(self) -> dict[tir.Var, tuple[int, torch.dtype]]:
         """Extract information about buffer dtypes from the TIR function.
 
         Maps buffer variables to their corresponding dtypes.
@@ -248,7 +249,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 buffer_dtype_map[name] = (i, map_torch_type(dtype))
         return buffer_dtype_map
 
-    def _process_ptr_map(self) -> Dict[int, str]:
+    def _process_ptr_map(self) -> dict[int, str]:
         """Extract information about pointer arguments from the TIR function.
 
         Maps pointer arguments to their corresponding (buffer_index, shape_dimension)
@@ -263,9 +264,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
         return ptr_map
 
     def _process_static_buffer_infos(self) -> \
-            Tuple[Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]],
-                  Dict[tir.Var, Tuple[int, List[Tuple[int, int]]]],
-                  List[Tuple[tir.Var]]]:
+            tuple[dict[tir.Var, tuple[int, list[tuple[int, int]]]],
+                  dict[tir.Var, tuple[int, list[tuple[int, int]]]],
+                  list[tuple[tir.Var]]]:
         """Extract information about static shapes from the TIR function.
 
         Maps buffer variables to their corresponding static shapes.
@@ -300,7 +301,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                     static_contiguous_list.append((i, buffer.name))
         return static_shape_map, static_strides_map, static_contiguous_list
 
-    def _process_buffer_device(self) -> Dict[tir.Var, Tuple[int, torch.device]]:
+    def _process_buffer_device(self) -> dict[tir.Var, tuple[int, torch.device]]:
         """Extract information about buffer devices from the TIR function.
 
         Maps buffer variables to their corresponding devices.
@@ -326,7 +327,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 buffer_device_map[name] = (i, device)
         return buffer_device_map
 
-    def _forward_from_prebuild_lib(self, *args, stream: Optional[int] = None):
+    def _forward_from_prebuild_lib(self, *args, stream: int | None = None):
         """Low-level function to call the compiled CUDA kernel.
 
         Converts PyTorch tensor pointers to C void pointers for ctypes interface.

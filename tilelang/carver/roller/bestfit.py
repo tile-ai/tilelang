@@ -17,7 +17,7 @@ class Block:
         self.end = max(self.end, other.end)
 
     def __repr__(self) -> str:
-        return "<Block offset={} size={}>".format(self.start, self.size())
+        return f"<Block offset={self.start} size={self.size()}>"
 
 
 class BestFit:

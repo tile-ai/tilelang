@@ -3,17 +3,13 @@ This module provides an auto-tuning infrastructure for TileLang (tl) programs.
 It includes functionality to JIT-compile TileLang programs into a runnable
 kernel adapter using TVM.
 """
+from __future__ import annotations
 
 from typing import (
     Any,
-    List,
-    Union,
     Callable,
-    Tuple,
     overload,
     Literal,
-    Dict,  # For type hinting dicts
-    Optional,
 )
 from tilelang import tvm as tvm
 from tilelang.jit.adapter.utils import is_metal_target
@@ -33,13 +29,13 @@ logger = getLogger(__name__)
 
 def compile(
     func: PrimFunc = None,
-    out_idx: Union[List[int], int, None] = None,
+    out_idx: list[int] | int | None = None,
     execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
-    target: Union[str, Target] = "auto",
-    target_host: Union[str, Target, None] = None,
+    target: str | Target = "auto",
+    target_host: str | Target | None = None,
     verbose: bool = False,
-    pass_configs: Optional[Dict[str, Any]] = None,
-    compile_flags: Optional[Union[List[str], str]] = None,
+    pass_configs: dict[str, Any] | None = None,
+    compile_flags: list[str] | str | None = None,
 ) -> JITKernel:
     """
     Compile the given TileLang PrimFunc with TVM and build a JITKernel.
@@ -85,24 +81,24 @@ def compile(
 
 class _JitImplementation:
 
-    out_idx: Optional[Union[List[int], int]]
-    target: Union[str, Target]
-    target_host: Union[str, Target]
+    out_idx: list[int] | int | None
+    target: str | Target
+    target_host: str | Target
     execution_backend: Literal["dlpack", "ctypes", "cython"]
     verbose: bool
-    pass_configs: Optional[Dict[str, Any]]
-    debug_root_path: Optional[str]
-    compile_flags: Optional[Union[List[str], str]]
+    pass_configs: dict[str, Any] | None
+    debug_root_path: str | None
+    compile_flags: list[str] | str | None
 
     def __init__(self,
                  out_idx: Any = None,
-                 target: Union[str, Target] = "auto",
-                 target_host: Union[str, Target] = None,
+                 target: str | Target = "auto",
+                 target_host: str | Target = None,
                  execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
                  verbose: bool = False,
-                 pass_configs: Optional[Dict[str, Any]] = None,
-                 debug_root_path: Optional[str] = None,
-                 compile_flags: Optional[Union[List[str], str]] = None):
+                 pass_configs: dict[str, Any] | None = None,
+                 debug_root_path: str | None = None,
+                 compile_flags: list[str] | str | None = None):
         """
         Initializes the JIT compiler decorator.
 
@@ -155,12 +151,12 @@ class _JitImplementation:
             except NameError:
                 self.debug_root_path = path.abspath(self.debug_root_path)
 
-        self._kernel_cache: Dict[tuple, Kernel] = {}
+        self._kernel_cache: dict[tuple, Kernel] = {}
 
     # This tells the type checker what the *wrapper* function will return.
     # this is for linting, please do not remove it.
     @overload
-    def __call__(self, func: Callable[_P, _RProg]) -> Callable[_P, Tuple[_RProg, Kernel]]:
+    def __call__(self, func: Callable[_P, _RProg]) -> Callable[_P, tuple[_RProg, Kernel]]:
         ...
 
     @overload
@@ -235,16 +231,16 @@ class _JitImplementation:
 
 
 def jit(  # This is the new public interface
-        func: Union[Callable[_P, _RProg], PrimFunc, None] = None,
+        func: Callable[_P, _RProg] | PrimFunc | None = None,
         *,  # Indicates subsequent arguments are keyword-only
         out_idx: Any = None,
-        target: Union[str, Target] = "auto",
-        target_host: Union[str, Target] = None,
+        target: str | Target = "auto",
+        target_host: str | Target = None,
         execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
         verbose: bool = False,
-        pass_configs: Optional[Dict[str, Any]] = None,
-        debug_root_path: Optional[str] = None,
-        compile_flags: Optional[Union[List[str], str]] = None):
+        pass_configs: dict[str, Any] | None = None,
+        debug_root_path: str | None = None,
+        compile_flags: list[str] | str | None = None):
     """
     Just-In-Time (JIT) compiler decorator for TileLang functions.
 
