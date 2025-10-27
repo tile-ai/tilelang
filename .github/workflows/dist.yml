@@ -28,6 +28,13 @@ concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
 
+env:
+  PYTHONDEVMODE: "1"
+  PYTHONUNBUFFERED: "1"
+  COLUMNS: "100"
+  FORCE_COLOR: "1"
+  CLICOLOR_FORCE: "1"
+
 jobs:
   build-wheels:
     name: Build wheels for Python ${{ matrix.python-version }} on ${{ matrix.target.runner }} with ${{ matrix.target.toolkit }}
@@ -41,13 +48,9 @@ jobs:
           - { runner: ubuntu-24.04-arm, toolkit: "CUDA-12.8" }
           - { runner: macos-latest, toolkit: "Metal" }
         python-version:
+          # Wheels are built with Python 3.9 Limited API, they should work with all Python >= 3.9.
+          # Only build wheels against Python 3.9 to save CI resources.
           - "3.9"
-          # TVM is built with Python 3.9 Limited API, it should work with all Python >= 3.9.
-          # - "3.10"
-          # - "3.11"
-          # - "3.12"
-          # - "3.13"
-          # - "3.14"
       fail-fast: false
     timeout-minutes: 120
     runs-on: ${{ matrix.target.runner }}
