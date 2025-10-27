@@ -85,14 +85,9 @@ exclude = [
 ]
 
 [tool.scikit-build.wheel.packages]
-tilelang = "tilelang"
-"tilelang/src" = "src"
+# NOTE: The mapping below places the contents of '3rdparty' inside 'tilelang/3rdparty' in the wheel.
+# This is necessary to find TVM shared libraries at runtime.
 "tilelang/3rdparty" = "3rdparty"
-
-# TODO: we might want to not include these in wheel?
-"tilelang/benchmark" = "benchmark"
-"tilelang/examples" = "examples"
-"tilelang/testing" = "testing"
 
 [tool.yapf]
 based_on_style = "yapf"
