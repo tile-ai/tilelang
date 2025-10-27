@@ -42,13 +42,13 @@ ExtractFuncInfo(const IRModule &mod) {
         info.launch_param_tags.push_back(tag);
       }
     }
-    auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
+    auto global_symbol = f->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
     fmap[static_cast<std::string>(global_symbol.value())] = info;
   }
   return fmap;
 }
 
-runtime::Module BuildTileLangHIP(IRModule mod, Target target) {
+ffi::Module BuildTileLangHIP(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenTileLangHIP cg;
   cg.Init(output_ssa);
@@ -84,7 +84,7 @@ runtime::Module BuildTileLangHIP(IRModule mod, Target target) {
   return ROCMModuleCreate(ptx, fmt, ExtractFuncInfo(mod), code, std::string());
 }
 
-runtime::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
+ffi::Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
   bool output_ssa = false;
   CodeGenTileLangHIP cg;
   cg.Init(output_ssa);
