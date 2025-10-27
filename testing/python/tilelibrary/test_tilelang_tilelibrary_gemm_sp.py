@@ -4,8 +4,9 @@ import tilelang.testing
 
 from tilelang.utils.sparse import compress, randn_semi_sparse
 from tilelang.layout import make_metadata_layout
+from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 
-tilelang.disable_cache()
+torch.backends.cuda.matmul.allow_tf32 = False
 torch.set_printoptions(threshold=float('inf'), edgeitems=float('inf'), linewidth=10000)
 torch.manual_seed(42)
 
@@ -108,7 +109,8 @@ def matmul_sp_sm80(
     trans_B,
 ):
     is_8_bit = "8" in in_dtype
-    E_factor = 32 if is_8_bit else 16
+    metadata_dtype = 'int32' if is_8_bit else 'int16'
+    E_factor = SparseTensorCoreIntrinEmitter.E_FACTOR_MAP[in_dtype][metadata_dtype]
     A_sparse_shape = (M, K // 2) if not trans_A else (K // 2, M)
     B_shape = (K, N) if not trans_B else (N, K)
     A_shared_shape = (block_M, block_K // 2) if not trans_A else (block_K // 2, block_M)
@@ -147,7 +149,7 @@ def matmul_sp_sm80(
                     T.copy(B[bx * block_N, k * block_K], B_shared)
                 else:
                     T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm_sp(A_shared, E_shared, B_shared, C_frag, trans_A, trans_B)
+                T.gemm_sp_v2(A_shared, E_shared, B_shared, C_frag, trans_A, trans_B)
             T.copy(C_frag, C[by * block_M, bx * block_N])
 
     return main
