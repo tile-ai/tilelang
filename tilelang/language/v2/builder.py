@@ -3,7 +3,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import inspect
-import typing
 
 import torch
 from tilelang.language.kernel import KernelLaunchFrame
@@ -400,7 +399,6 @@ def __torch_tensor_tl_arg__(self: torch.Tensor, name: str, builder: Builder):
 
 torch.Tensor.__tl_arg__ = __torch_tensor_tl_arg__
 
-
 _P = ParamSpec('_P')
 _T = TypeVar('_T')
 
@@ -447,11 +445,7 @@ def build_ir_generator(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
 
 
 def macro(func: Callable[_P, _T]) -> Macro[_P, _T]:
-    return Macro(
-        name=func.__name__,
-        orig_func=func,
-        ir_gen=build_ir_generator(func)
-    )
+    return Macro(name=func.__name__, orig_func=func, ir_gen=build_ir_generator(func))
 
 
 def prim_func(func: Callable[_P, _T]) -> PrimFunc[_P, _T]:
@@ -467,8 +461,7 @@ def prim_func(func: Callable[_P, _T]) -> PrimFunc[_P, _T]:
                 "To fix this, please use default argument instead of type annotations: \n"
                 "```py\n"
                 "def foo(a=tl.Tensor((128, 128), 'float32'), b=tl.float32()): ..."
-                "```"
-            ) from e
+                "```") from e
     args = []
     kwargs = {}
     for name, param in sig.parameters.items():
