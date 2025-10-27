@@ -7,17 +7,19 @@ from einops import rearrange, repeat
 import itertools
 import math
 from tilelang.profiler import do_bench
+
 try:
     from mamba_ssm.ops.triton.ssd_chunk_scan import _chunk_scan_fwd
-except ImportError:
-    raise ImportError("Please install mamba-ssm to use the triton chunk scan operator.")
+except ImportError as err:
+    raise ImportError("Please install mamba-ssm to use the triton chunk scan operator.") from err
+
 try:
     import helion
-    from helion._testing import DEVICE
     from helion._testing import run_example
     import helion.language as hl
-except ImportError:
-    raise ImportError("Please install helion to use the helion chunk scan operator.")
+except ImportError as err:
+    raise ImportError("Please install helion to use the helion chunk scan operator.") from err
+
 
 def ref_program(cb, x, dt, dA_cumsum, C, prev_states, D):
     """
@@ -65,9 +67,11 @@ def ref_program(cb, x, dt, dA_cumsum, C, prev_states, D):
         out = out + x * D
     return out
 
+
 def chunk_scan_triton(cb, x, dt, dA_cumsum, C, states, D):
     out, _ = _chunk_scan_fwd(cb, x, dt, dA_cumsum, C, states, D)
     return out
+
 
 def chunk_scan_helion(cb, x, dt, dA_cumsum, C, states, D):
 
@@ -114,15 +118,8 @@ def chunk_scan_helion(cb, x, dt, dA_cumsum, C, states, D):
 
         dtype = cb.dtype
         accum_dtype = torch.float32
-        assert (
-            x.dtype
-            == dt.dtype
-            == dA_cumsum.dtype
-            == C.dtype
-            == prev_states.dtype
-            == D.dtype
-            == dtype
-        )
+        assert (x.dtype == dt.dtype == dA_cumsum.dtype == C.dtype == prev_states.dtype == D.dtype ==
+                dtype)
 
         out = torch.empty_like(x)
 
@@ -130,12 +127,11 @@ def chunk_scan_helion(cb, x, dt, dA_cumsum, C, states, D):
 
         for tile_h, tile_m, tile_n, tile_b, tile_c in hl.tile(
             [nheads, chunk_size, headdim, batch, nchunks],
-            block_size=[1, block_m, block_n, 1, 1],
+                block_size=[1, block_m, block_n, 1, 1],
         ):
             acc_o = hl.zeros([tile_m, tile_n], dtype=accum_dtype)
-            dA_cumsum_local_m = dA_cumsum[
-                tile_b.begin, tile_h.begin, tile_c.begin, tile_m
-            ].to(torch.float32)
+            dA_cumsum_local_m = dA_cumsum[tile_b.begin, tile_h.begin, tile_c.begin,
+                                          tile_m].to(torch.float32)
             scale_m_local = torch.exp2(dA_cumsum_local_m * p)
 
             C_local = C[
@@ -144,9 +140,7 @@ def chunk_scan_helion(cb, x, dt, dA_cumsum, C, states, D):
                 tile_h.begin // (nheads // ngroups),
                 :,
             ]
-            prev_states_local = prev_states[
-                tile_b.begin, tile_c.begin, tile_h.begin, tile_n, :
-            ]
+            prev_states_local = prev_states[tile_b.begin, tile_c.begin, tile_h.begin, tile_n, :]
             acc_o = hl.dot(C_local, prev_states_local.T, acc=acc_o)
             acc_o *= scale_m_local[:, None]
 
@@ -158,15 +152,11 @@ def chunk_scan_helion(cb, x, dt, dA_cumsum, C, states, D):
                     tile_m,
                     tile_k,
                 ]
-                dA_cumsum_local_k = dA_cumsum[
-                    tile_b.begin, tile_h.begin, tile_c.begin, tile_k
-                ].to(torch.float32)
-                cb_local *= torch.exp2(
-                    dA_cumsum_local_m[:, None] * p - dA_cumsum_local_k[None, :] * p
-                )
-                dt_local = dt[tile_b.begin, tile_h.begin, tile_c.begin, tile_k].to(
-                    torch.float32
-                )
+                dA_cumsum_local_k = dA_cumsum[tile_b.begin, tile_h.begin, tile_c.begin,
+                                              tile_k].to(torch.float32)
+                cb_local *= torch.exp2(dA_cumsum_local_m[:, None] * p -
+                                       dA_cumsum_local_k[None, :] * p)
+                dt_local = dt[tile_b.begin, tile_h.begin, tile_c.begin, tile_k].to(torch.float32)
                 cb_local = (cb_local * dt_local[None, :]).to(dtype)
                 pred = (tile_m.index + 0)[:, None] >= (tile_k.index + 0)[None, :]
                 cb_local = torch.where(pred, cb_local, torch.zeros_like(cb_local))
@@ -179,19 +169,17 @@ def chunk_scan_helion(cb, x, dt, dA_cumsum, C, states, D):
                 acc_o = hl.dot(cb_local, x_local, acc=acc_o)
 
             D_local = D[tile_h.begin].to(torch.float32)
-            x_residual = x[
-                tile_b.begin, tile_c.begin * chunk_size + tile_m.index, tile_h.begin, tile_n
-            ].to(torch.float32)
+            x_residual = x[tile_b.begin, tile_c.begin * chunk_size + tile_m.index, tile_h.begin,
+                           tile_n].to(torch.float32)
             acc_o += x_residual * D_local
-            out[
-                tile_b.begin, tile_c.begin * chunk_size + tile_m.index, tile_h.begin, tile_n
-            ] = acc_o.to(dtype=dtype)
+            out[tile_b.begin, tile_c.begin * chunk_size + tile_m.index, tile_h.begin,
+                tile_n] = acc_o.to(dtype=dtype)
 
         return out
-    
+
     args = (cb, x, dt, dA_cumsum, C, states, D)
     run_example(helion_mamba2_chunk_scan_kernel, ref_program, args)
-    
+
 
 def get_configs():
     iter_params = dict(
@@ -354,7 +342,7 @@ if __name__ == "__main__":
     nchunks = math.ceil(seq_len / chunk_size)
     total_flops = 2 * batch * seq_len * chunk_size * heads * dim * 0.5 + 2 * batch * seq_len * heads * dim * dstate
 
-    print(f"Benchmarking TileLang...")
+    print("Benchmarking TileLang...")
     kernel = chunk_scan_fwd(batch, seq_len, chunk_size, groups, heads, dim, dstate)
     best_latency = kernel.latency
     best_config = kernel.config
@@ -362,7 +350,7 @@ if __name__ == "__main__":
     print(f"Best latency: {best_latency}")
     print(f"Best TFlops: {total_flops / best_latency * 1e-9}")
     print(f"Best config: {best_config}")
-    
+
     cb = torch.randn(batch, nchunks, groups, chunk_size, chunk_size).half().cuda()
     x = torch.randn(batch, seq_len, heads, dim).half().cuda()
     dt = torch.randn(batch, heads, nchunks, chunk_size).half().cuda()
@@ -370,10 +358,11 @@ if __name__ == "__main__":
     C = torch.randn(batch, seq_len, groups, dstate).half().cuda()
     states = torch.randn(batch, nchunks, heads, dim, dstate).half().cuda()
     D = torch.randn(heads).half().cuda()
-    
-    print(f"Benchmarking Triton...")
-    triton_latency = do_bench(lambda: chunk_scan_triton(cb, x, dt, dA_cumsum, C, states, D), _n_warmup=10, _n_repeat=10)
+
+    print("Benchmarking Triton...")
+    triton_latency = do_bench(
+        lambda: chunk_scan_triton(cb, x, dt, dA_cumsum, C, states, D), _n_warmup=10, _n_repeat=10)
     print(f"Triton TFlops: {total_flops / triton_latency * 1e-9}")
-    
-    print(f"Benchmarking Helion...")
+
+    print("Benchmarking Helion...")
     chunk_scan_helion(cb, x, dt, dA_cumsum, C, states, D)
