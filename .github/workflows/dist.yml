@@ -45,6 +45,11 @@ jobs:
     timeout-minutes: 30
     env:
       NO_VERSION_LABEL: ${{ github.event_name == 'release' && 'OFF' || 'ON' }}
+      # NO_GIT_VERSION disables embedding the git commit hash in version metadata.
+      # Otherwise, the version of the SDist has a git hash suffix (e.g., 0.1.0+gitabcdef12),
+      # but the package built from the SDist has no way to get the git hash (it is not a git repo),
+      # leading to inconsistent versions between SDist and built packages (+gitabcdef12 vs. +gitunknown).
+      NO_GIT_VERSION: "ON"
 
     steps:
       - name: Checkout repository
@@ -116,11 +121,6 @@ jobs:
     runs-on: ${{ matrix.target.runner }}
     env:
       NO_VERSION_LABEL: ${{ github.event_name == 'release' && 'OFF' || 'ON' }}
-      # NO_GIT_VERSION disables embedding the git commit hash in version metadata.
-      # Otherwise, the version of the SDist has a git hash suffix (e.g., 0.1.0+gitabcdef12),
-      # but the package build from the SDist has no way to get the git hash (it is not a git repo),
-      # leading to inconsistent versions between SDist and built packages (+gitabcdef12 vs. +gitunknown).
-      NO_GIT_VERSION: "ON"
 
     steps:
       - name: Checkout repository
