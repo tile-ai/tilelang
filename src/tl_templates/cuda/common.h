@@ -93,13 +93,13 @@ TL_DEVICE unsigned __pack_nv_bfloat162(const bfloat16_t x, const bfloat16_t y) {
   return (v1 << 16) | v0;
 }
 
-// Pack four char values
+// Pack four char values.
 TL_DEVICE int make_int(signed char x0, signed char x1, signed char x2,
                        signed char x3) {
   return (x3 << 24) | (x2 << 16) | (x1 << 8) | x0;
 }
 
-// Pack eight char values into int2
+// Pack eight char values.
 TL_DEVICE int2 make_int2(signed char x0, signed char x1, signed char x2,
                          signed char x3, signed char y0, signed char y1,
                          signed char y2, signed char y3) {
