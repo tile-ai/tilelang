@@ -157,7 +157,12 @@ def eval_aug_assign(op: Operator, left: Any, sl: slice, right: Any) -> Any:
     raise ValueError(f'Unknown operator: {op}')
 
 
+class _empty:
+    ...
+
+
 class BaseBuilder:
+    empty = _empty
 
     def get_parent_locals(self):
         return inspect.currentframe().f_back.f_back.f_locals
@@ -189,10 +194,13 @@ class BaseBuilder:
         while cond():
             yield
 
-    def bind(self, name: str, value: Any) -> Any:
+    def bind(self, name: str, value: Any, annot: Any = empty) -> Any:
         return value
 
-    def assign_slice(self, lval: Any, sl: slice, value: Any):
+    def unwrap_value(self, value):
+        return value
+
+    def assign_slice(self, lval: Any, sl: slice, value: Any, annot: Any = empty):
         lval[sl] = value
 
     def aug_assign(self, op: Operator, target: Any, aug_value: Any) -> Any:
@@ -273,7 +281,8 @@ class DSLMutator(ast.NodeTransformer):
         elif isinstance(target, ast.Tuple):
             return ("(" + ",".join([self._parse_names(elt) for elt in target.elts]) + ",)")
         else:
-            raise SyntaxError("Unsupported for target")
+            s = ast.unparse(target)
+            raise NotImplementedError(f"Unsupported for target `{s}`")
 
     def visit_For(self, node: ast.For):
         node = self.generic_visit(node)
@@ -299,18 +308,42 @@ class DSLMutator(ast.NodeTransformer):
         node = self.generic_visit(node)
         return quote("if __tb.ctx_break(): break", span=node)
 
-    def _emit_assign_target(self, target: ast.expr, rval: ast.expr) -> list[ast.AST]:
+    def _emit_assign_target(self,
+                            target: ast.expr,
+                            rval: ast.expr,
+                            annot: ast.expr = None) -> list[ast.AST]:
         if isinstance(target, ast.Name):
-            return quote(
-                f"name = __tb.bind('{target.id}', value)", name=target, value=rval, span=target)
+            if annot is None:
+                return quote(
+                    f"name = __tb.bind('{target.id}', value)", name=target, value=rval, span=target)
+            else:
+                return quote(
+                    f'name = __tb.bind("{target.id}", value, annot)',
+                    name=target,
+                    value=rval,
+                    annot=annot,
+                    span=target)
+        elif isinstance(target, ast.Attribute):
+            s = ast.unparse(target)
+            raise NotImplementedError(f'Attribute assignment not supported yet, `{s}`')
         elif isinstance(target, ast.Subscript):
-            return quote(
-                "__tb.assign_slice(lval, slice, value)",
-                lval=target.value,
-                slice=target.slice,
-                value=rval,
-                span=target,
-            )
+            if annot is None:
+                return quote(
+                    "__tb.assign_slice(lval, slice, value)",
+                    lval=target.value,
+                    slice=target.slice,
+                    value=rval,
+                    span=target,
+                )
+            else:
+                return quote(
+                    "__tb.assign_slice(lval, slice, value, annot)",
+                    lval=target.value,
+                    slice=target.slice,
+                    value=rval,
+                    annot=annot,
+                    span=target,
+                )
         else:
             unpacked = []
 
@@ -327,7 +360,9 @@ class DSLMutator(ast.NodeTransformer):
                     ast_set_span(res, ast_get_span(target))
                     return res
 
-            unpack_stmt = ast.Assign(targets=[_visit_target(target)], value=rval)
+            unpack_stmt = ast.Assign(
+                targets=[_visit_target(target)],
+                value=quote_expr('__tb.unwrap_value(rval)', rval=rval, span=rval))
             ast_set_span(unpack_stmt, ast_get_span(target))
             stmts = [unpack_stmt]
             bind_lvals = []
@@ -353,7 +388,8 @@ class DSLMutator(ast.NodeTransformer):
                             slice=target.slice,
                             span=target))
                 else:
-                    raise NotImplementedError(f'Unsupported target: {target}')
+                    s = ast.unparse(target)
+                    raise NotImplementedError(f'Unsupported target: {s}')
             flush_binds()
             return stmts
 
@@ -387,6 +423,11 @@ class DSLMutator(ast.NodeTransformer):
         else:
             return node
 
+    def visit_AnnAssign(self, node: ast.AnnAssign):
+        node = self.generic_visit(node)
+        rval = node.value or quote_expr('__tb.empty', span=node, annot=node)
+        return self._emit_assign_target(node.target, rval, annot=node.annotation)
+
     def visit_While(self, node):
         return quote1(
             "for _ in __tb.ctx_while(lambda: cond):\n  pass",
@@ -412,7 +453,7 @@ class DSLMutator(ast.NodeTransformer):
         node.body = stmts + node.body
         node.decorator_list.clear()
         return quote1(
-            "def ir_generator(__tb):\n"
+            f"def {node.name}(__tb):\n"
             "  range = __tb.override('range')\n"
             "  pass\n"
             f"  return {node.name}",
@@ -483,7 +524,7 @@ def mutate(func: Callable[_P, _T]) -> Callable[[BaseBuilder], Callable[_P, _T]]:
     tree = utils.get_ast(func)
     filename = inspect.getsourcefile(func) or inspect.getfile(func)
     tree = DSLMutator().visit(tree)
-    fn = utils.get_compiled_object(tree, "ir_generator", filename,
+    fn = utils.get_compiled_object(tree, func.__name__, filename,
                                    utils.inspect_function_capture(func))
     fn.__source__ = ast.unparse(tree)
     return fn

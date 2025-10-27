@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import functools
+from dataclasses import dataclass
+
+import torch
 from tilelang.language.kernel import KernelLaunchFrame
 from tvm.ffi.container import Map
 from tvm.ir.base import Span
@@ -9,8 +11,10 @@ from .ast import BaseBuilder, eval_op, mutate
 import tvm
 from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
-from tvm.tir.expr import EqualOp, NotEqualOp, PrimExpr
-from typing import Callable, ContextManager, Any, Generic, ParamSpec, Self, TypeVar
+from tvm.tir.expr import EqualOp, NotEqualOp, PrimExpr, Var
+from typing import Callable, ContextManager, Any, Generic, Hashable, ParamSpec, Self, TypeVar
+from .dtypes import get_tvm_dtype
+from types import EllipsisType
 import threading
 import logging
 
@@ -89,9 +93,13 @@ TIR_VAR_SCOPE_FRAME = (
 )
 
 
+def is_var(v: Any) -> bool:
+    return isinstance(v, Buffer) and v.scope() == 'local.var'
+
+
 class Builder(BaseBuilder):
 
-    def __init__(self, arg_annot: dict[str, Any]):
+    def __init__(self, arg_annot: dict[str, Any] = None):
         self.arg_annot = arg_annot
         self.frames: list[AnyFrame] = []
         self.ir_builder = IRBuilder()
@@ -210,20 +218,45 @@ class Builder(BaseBuilder):
     def ctx_while(self, cond):
         raise RuntimeError("while loops are not supported in TileLang builder")
 
-    def bind(self, name, value):
-        if name == '_':
-            return value
+    def bind(self, name, value, annot=BaseBuilder.empty):
         locals = self.get_parent_locals()
         orig_value = locals.get(name, None)
-        # handle var
-        if isinstance(orig_value, Buffer) and orig_value.scope() == 'local.var':
+        # annotation like tl.float32
+        if callable(annot):
+            annot_val = annot()
+            if isinstance(annot_val, tir.Var):
+                orig_value = tir.alloc_buffer((1,), dtype=annot_val.dtype, scope='local.var')
+                IRBuilder.name(name, orig_value)
+                if isinstance(value, EllipsisType) or value is self.empty:
+                    return orig_value
+        # if orig_value is a local.var, we use buffer_store to modify it immutably
+        #   however, if rvalue is also a local.var, this is a new binding,
+        #   we should not use buffer_store, and bind it instead
+        #   ```py
+        #   a = tl.alloc_var('float32')  # bind var `a`
+        #   a = tl.alloc_var('float32')  # bind a new var `a_1`
+        #   b = a                        # get value of var `b = a_1[0]``
+        #   c = tl.alloc_var('float32')  # bind var `c`
+        #   c = a                        # get and assign `c[0] = a_1[0]`
+        #   ```
+        if is_var(orig_value) and not is_var(value):
             tir.buffer_store(orig_value, value, 0)
             return orig_value
         res = self.bind_immutable(name, value)
-        frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
-        assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
-        self.name_inside_frame[name] = self.frames[frame]
+        if name != '_':
+            frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
+            assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
+            self.name_inside_frame[name] = self.frames[frame]
         return res
+
+    def unwrap_value(self, value):
+        # handle bx, by = tl.Kernel(128, 128), rval is frame
+        if isinstance(value, tir.meta_var):
+            return value.value
+        elif isinstance(value, tir.frame.IRBuilderFrame):
+            return self.enter_frame(value)
+        else:
+            return value
 
     def bind_immutable(self, name, value):
         if isinstance(value, tir.meta_var):
@@ -243,7 +276,10 @@ class Builder(BaseBuilder):
             IRBuilder.name(name, var)
             return self.enter_frame(frame)
 
-    def assign_slice(self, lval: Any, sl: slice, value: Any):
+    def assign_slice(self, lval: Any, sl: slice, value: Any, annot=BaseBuilder.empty):
+        if annot is not self.empty:
+            logger.warning(
+                "Type annotation in slice assignment has no effect", stack_info=True, stacklevel=2)
         if isinstance(lval, Buffer):
             tir.buffer_store(lval, value, sl)
         else:
@@ -333,11 +369,14 @@ class Builder(BaseBuilder):
     def arg(self, name, value):
         if self.find_frame_idx(MacroFrame) is not None:
             return value
+        if isinstance(value, (Buffer, Var)):
+            return tir.arg(name, value)
+        elif hasattr(value, '__tl_arg__'):
+            return value.__tl_arg__(name, self)
+        elif isinstance(value, Hashable):
+            return value
         else:
-            annot = self.arg_annot[name]
-            if callable(annot):
-                annot = annot()
-            return tir.arg(name, annot)
+            raise TypeError(f"Unsupported argument type: {type(value)} for argument `{name}`.")
 
     def override(self, name: str):
         if name == 'range':
@@ -345,8 +384,25 @@ class Builder(BaseBuilder):
         raise ValueError(f'Unknown override: {name}')
 
 
+def __torch_tensor_tl_arg__(self: torch.Tensor, name: str, builder: Builder):
+    buffer = tir.buffer(
+        self.shape, get_tvm_dtype(self.dtype), strides=self.stride(), scope='global')
+    return tir.arg(name, buffer)
+
+
+torch.Tensor.__tl_arg__ = __torch_tensor_tl_arg__
+
 _P = ParamSpec('_P')
 _T = TypeVar('_T')
+
+
+@dataclass
+class IRGenerator(Generic[_P, _T]):
+    func: Callable[[BaseBuilder], Callable[_P, _T]]
+    source: str
+
+    def __call__(self, tb: BaseBuilder) -> Callable[_P, _T]:
+        return self.func(tb)
 
 
 class PrimFunc(Generic[_P, _T], tvm.tir.PrimFunc):
@@ -356,28 +412,43 @@ class PrimFunc(Generic[_P, _T], tvm.tir.PrimFunc):
     buffer_map: Map[tvm.tir.Var, tvm.tir.Buffer]
     attrs: tvm.Attrs | None
     span: Span | None
+    ir_gen: IRGenerator[_P, _T]
+    source: str
 
 
-def macro(func: Callable[_P, _T]) -> PrimFunc[_P, _T]:
-    ir_gen = mutate(func)
+@dataclass
+class Macro(Generic[_P, _T]):
+    name: str
+    ir_gen: IRGenerator[_P, _T]
 
-    @functools.wraps(func)
-    def macro_wrapper(*args, **kwargs):
+    @property
+    def source(self) -> str:
+        return self.ir_gen.source
+
+    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _T:
         builder = Builder.current()
-        with builder.macro(func.__name__):
-            res = ir_gen(builder)(*args, **kwargs)
+        with builder.macro(self.name):
+            res = self.ir_gen(builder)(*args, **kwargs)
         return res
 
-    return macro_wrapper
+
+def macro(func: Callable[_P, _T]) -> Macro[_P, _T]:
+    ir_gen = mutate(func)
+    ir_gen = IRGenerator(func=ir_gen, source=ir_gen.__source__)
+    return Macro(func.__name__, ir_gen)
 
 
 def prim_func(func: Callable[_P, _T]) -> PrimFunc[_P, _T]:
-    # hints = get_type_hints(func)
     hints = func.__annotations__
+    for k in hints:
+        if callable(hints[k]):
+            hints[k] = hints[k]()
     ir_gen = mutate(func)
-    builder = Builder(hints)
+    ir_gen = IRGenerator(func=ir_gen, source=ir_gen.__source__)
+    builder = Builder()
     with builder.prim_func(func.__name__):
-        ir_gen(builder)(*hints)
+        ir_gen(builder)(**hints)
     res = builder.get()
     res.ir_gen = ir_gen
+    res.source = ir_gen.source
     return res
