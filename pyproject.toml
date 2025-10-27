@@ -182,7 +182,7 @@ manylinux-aarch64-image = "manylinux_2_28" # AlmaLinux 8
 [tool.cibuildwheel.linux]
 environment = { PYTHONDEVMODE = "1", PYTHONUNBUFFERED = "1", PATH = "/usr/local/cuda/bin:$PATH" }
 repair-wheel-command = [
-    "auditwheel repair --verbose --exclude libtvm_ffi.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
+    "auditwheel -v repair --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
     "pipx run abi3audit --verbose --summary --strict {wheel}",
 ]
 # Install CUDA runtime and stub driver library
@@ -212,6 +212,6 @@ yum install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-de
 
 [tool.cibuildwheel.macos]
 repair-wheel-command = [
-    "delocate-wheel --verbose --exclude libtvm_ffi.dylib --require-archs {delocate_archs} -w {dest_dir} -v {wheel}",
+    "delocate-wheel --verbose --require-archs {delocate_archs} -w {dest_dir} -v {wheel}",
     "pipx run abi3audit --verbose --summary --strict {wheel}",
 ]

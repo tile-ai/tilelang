@@ -37,7 +37,8 @@ ExtractFuncInfo(const IRModule &mod) {
       }
       info.arg_types.push_back(f->params[i].dtype());
     }
-    if (auto opt = f->GetAttr<Array<String>>(tir::attr::kKernelLaunchParams)) {
+    if (auto opt =
+            f->GetAttr<Array<ffi::String>>(tir::attr::kKernelLaunchParams)) {
       for (const auto &tag : opt.value()) {
         info.launch_param_tags.push_back(tag);
       }

@@ -8,6 +8,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND "$ENV{CIBUILDWHEEL}")
+  # Warning came from tvm submodule
+  string(APPEND CMAKE_CXX_FLAGS " -Wno-dangling-reference")
+endif()
+
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.gitmodules" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
@@ -186,11 +191,7 @@ else()
   set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN")
 endif()
 
-install(TARGETS tvm tvm_runtime tilelang_module tilelang LIBRARY DESTINATION tilelang/lib)
-
-# Copy tvm cython ext for wheels
-# TODO: not necessary for editable builds
-# if(TVM_BUILD_FROM_SOURCE)
-#   add_dependencies(tilelang tvm_cython)
-#   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/tvm/python/tvm/ffi/core.abi3.so" DESTINATION tilelang/3rdparty/tvm/python/tvm/ffi/)
-# endif()
+install(
+  TARGETS tvm tvm_runtime tvm_ffi_shared tilelang_module tilelang
+  LIBRARY DESTINATION tilelang/lib
+)
