@@ -190,11 +190,11 @@ class Builder(BaseBuilder):
         elif isinstance(val, PrimExpr):
             tir.evaluate(val)
         elif isinstance(val, (int, bool)):
-            self.enter_frame(tir.evaluate(tvm.tir.const(val)))
+            tir.evaluate(tvm.tir.const(val))
         elif isinstance(val, str):
             pass
         elif isinstance(val, tvm.tir.stmt.BufferStore):
-            self.enter_frame(tir.buffer_store(val.buffer, val.value, val.indices, val.predicate))
+            tir.buffer_store(val.buffer, val.value, val.indices, val.predicate)
         else:
             raise TypeError(f"Unsupported eval value: {val} of type {type(val)}")
 
