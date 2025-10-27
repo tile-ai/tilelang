@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+import inspect
 
 import torch
 from tilelang.language.kernel import KernelLaunchFrame
@@ -420,6 +421,7 @@ class PrimFunc(Generic[_P, _T], tvm.tir.PrimFunc):
     span: Span | None
     ir_gen: IRGenerator[_P, _T]
     source: str
+    orig_func: Callable[_P, _T]
 
 
 @dataclass
@@ -445,16 +447,22 @@ def macro(func: Callable[_P, _T]) -> Macro[_P, _T]:
 
 
 def prim_func(func: Callable[_P, _T]) -> PrimFunc[_P, _T]:
-    hints = func.__annotations__
-    for k in hints:
-        if callable(hints[k]):
-            hints[k] = hints[k]()
+    sig = inspect.signature(func)
+    annot = func.__annotations__
+    for param in sig.parameters.values():
+        if param.default is param.empty:
+            if param.annotation is param.empty:
+                raise TypeError(f"Parameter `{param.name}` in prim_func `{func.__name__}` "
+                                "must have type annotation or default value.")
+            param.default = param.annotation
+    args = sig.bind()
     ir_gen = mutate(func)
     ir_gen = IRGenerator(func=ir_gen, source=ir_gen.__source__)
-    builder = Builder()
+    builder = Builder(annot)
     with builder.prim_func(func.__name__):
-        ir_gen(builder)(**hints)
+        ir_gen(builder)(*args.args, **args.kwargs)
     res = builder.get()
     res.ir_gen = ir_gen
     res.source = ir_gen.source
+    res.orig_func = func
     return res
