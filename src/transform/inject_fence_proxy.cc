@@ -79,24 +79,18 @@ bool IsAsyncIntrinsic(const CallNode *call) {
   }
 
   // TileLang async intrinsics
-  if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
-      call->op.same_as(tma_store()) || call->op.same_as(tma_store_arrive()) ||
-      call->op.same_as(tma_store_wait()) ||
-      call->op.same_as(ptx_cp_async_barrier_noinc()) ||
+  // NOTE(wt): We only need to inject fences before tma_store and WGMMA,
+  // since tma_load and WGMMA contain implicit proxy fence after them
+  if (call->op.same_as(tma_store()) ||  
       call->op.same_as(ptx_wgmma_ss()) || call->op.same_as(ptx_wgmma_rs())) {
     return true;
   }
 
-  // PTX async copy intrinsics
-  if (call->op.same_as(builtin::ptx_cp_async()) ||
-      call->op.same_as(builtin::ptx_cp_async_barrier()) ||
-      call->op.same_as(builtin::ptx_cp_async_bulk())) {
-    return true;
-  }
-
-  // wgmma async intrinsics
   if (call->op.same_as(tl_gemm()) || call->op.same_as(tl_gemm_sp())) {
-    return true;
+    // determine whether async wgmma is utilized
+    std::ostringstream oss;
+    oss << call->args[0].as<StringImmNode>()->value;
+    return oss.str().find("wgmma") != std::string::npos;
   }
 
   return false;
@@ -174,6 +168,7 @@ public:
 
 private:
   Stmt VisitStmt_(const SeqStmtNode *op) final {
+    // FIXME: 1st stmt cannot know the previous proxy kind
     Array<Stmt> seq;
     seq.reserve(op->seq.size());
 
@@ -213,7 +208,8 @@ private:
       } else if (IsKnownGeneric(call)) {
         kind = ProxyKind::kGeneric;
       } else {
-        // We can now treat extern as Generic, since gemm and gemm_sp are never
+        // Remaining intrinsic and extern are marked as Generic.
+        // We can now all extern as Generic, since gemm and gemm_sp are never
         // represented as call_extern nodes. They are call_intrin nodes and will
         // be handled by IsAsyncIntrinsic above.
         kind = ProxyKind::kGeneric;

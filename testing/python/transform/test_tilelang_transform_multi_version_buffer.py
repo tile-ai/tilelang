@@ -60,7 +60,7 @@ def test_multi_version_buffer():
                         T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, 0, 2048, 2),
                         bx * 64, k * 32)
                 T.call_extern(
-                    "handle", "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
+                    "handle", "tl::wgmma_gemm_ss<64, 64, 32, 4, 1, 0, 0>",
                     T.tvm_access_ptr(T.type_annotation("float16"), A_shared.data, 0, 2048, 1),
                     T.tvm_access_ptr(T.type_annotation("float16"), B_shared.data, 0, 2048, 1),
                     T.tvm_access_ptr(T.type_annotation("float32"), C_local.data, 0, 32, 3))
@@ -95,7 +95,7 @@ def test_multi_version_buffer():
                             T.type_annotation("float16"), B_shared.data, k % 3 * 2048, 2048, 2),
                         bx * 64, k * 32)
                 T.call_extern(
-                    "handle", "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
+                    "handle", "tl::wgmma_gemm_ss<64, 64, 32, 4, 1, 0, 0>",
                     T.tvm_access_ptr(
                         T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 1),
                     T.tvm_access_ptr(

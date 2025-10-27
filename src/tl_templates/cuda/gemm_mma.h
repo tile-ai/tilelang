@@ -449,7 +449,7 @@ namespace tl::tl_mma {
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
           int offset_b, typename A_type, typename B_type, typename C_type>
-CUTLASS_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
+CUTLASS_DEVICE void mma_gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
   using MMA =
       cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
                                  trans_B, clear_accum, lda, ldb, offset_a,
@@ -460,7 +460,7 @@ CUTLASS_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
           int offset_b, typename A_type, typename B_type, typename C_type>
-CUTLASS_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
+CUTLASS_DEVICE void mma_gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
   using MMA =
       cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
                                  trans_B, clear_accum, lda, ldb, offset_a,
@@ -471,7 +471,7 @@ CUTLASS_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, int lda, int ldb, int offset_a,
           int offset_b, typename A_type, typename B_type, typename C_type>
-CUTLASS_DEVICE void gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
+CUTLASS_DEVICE void mma_gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
   using MMA =
       cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
                                  trans_B, clear_accum, lda, ldb, offset_a,

@@ -47,7 +47,7 @@ def test_inject_set_max_nreg():
                 for k in range(16):
                     T.mbarrier_wait_parity(T.get_mbarrier(k % 3), k // 3 % 2)
                     T.call_extern(
-                        "handle", "tl::gemm_ss<64, 64, 32, 4, 1, 0, 0>",
+                        "handle", "tl::wgmma_gemm_ss<64, 64, 32, 4, 1, 0, 0>",
                         T.tvm_access_ptr(
                             T.type_annotation("float16"), A_shared.data, k % 3 * 2048, 2048, 1),
                         T.tvm_access_ptr(

@@ -161,7 +161,7 @@ namespace tl {
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, typename A_type, typename B_type,
           typename C_type>
-CUTLASS_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
+CUTLASS_DEVICE void wmma_gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
   using MMA = GemmTensorOp<GemmShape<M, N, K>, num_warp_m, num_warp_n, trans_A,
                            trans_B, clear_accum, A_type, B_type, C_type>;
   using FragmentC = typename MMA::FragmentC;
@@ -174,7 +174,7 @@ CUTLASS_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum, typename A_type, typename B_type,
           typename C_type>
-CUTLASS_DEVICE void gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
+CUTLASS_DEVICE void wmma_gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
   using MMA = GemmTensorOp<GemmShape<M, N, K>, num_warp_m, num_warp_n, trans_A,
                            trans_B, clear_accum, A_type, B_type, C_type>;
   using FragmentA = typename MMA::FragmentA;

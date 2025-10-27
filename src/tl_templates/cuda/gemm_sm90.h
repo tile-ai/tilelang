@@ -232,43 +232,45 @@ namespace tl {
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum = false, int lda = 0, int ldb = 0,
-          int offset_a = 0, int offset_b = 0, bool use_wgmma = true,
+          int offset_a = 0, int offset_b = 0,
           int wg_wait = 0, typename A_type, typename B_type, typename C_type>
-TL_DEVICE void gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
-  if constexpr (use_wgmma) {
-    static_assert((trans_A && lda == M) || (!trans_A && lda == K),
-                  "Hopper wgmma doesn't support custom stride for A");
-    static_assert((trans_B && ldb == K) || (!trans_B && ldb == N),
-                  "Hopper wgmma doesn't support custom stride for B");
-    static_assert(offset_a == 0 && offset_b == 0,
-                  "offset_a and offset_b must be zero for wgmma");
-    using MMA = cute::tl_wgmma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n,
-                                             trans_A, trans_B, clear_accum,
-                                             A_type, B_type, C_type>;
-    MMA::body<wg_wait>(pA, pB, accum);
-  } else {
-    using MMA =
-        cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                   trans_B, clear_accum, lda, ldb, offset_a,
-                                   offset_b, A_type, B_type, C_type>;
-    MMA::body(pA, pB, accum);
-  }
+TL_DEVICE void wgmma_gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
+  static_assert((trans_A && lda == M) || (!trans_A && lda == K),
+                "Hopper wgmma doesn't support custom stride for A");
+  static_assert((trans_B && ldb == K) || (!trans_B && ldb == N),
+                "Hopper wgmma doesn't support custom stride for B");
+  static_assert(offset_a == 0 && offset_b == 0,
+                "offset_a and offset_b must be zero for wgmma");
+  using MMA = cute::tl_wgmma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n,
+                                            trans_A, trans_B, clear_accum,
+                                            A_type, B_type, C_type>;
+  MMA::body<wg_wait>(pA, pB, accum);
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum = false, int lda = 0, int ldb = 0,
-          int offset_a = 0, int offset_b = 0, bool use_wgmma = true,
+          int offset_a = 0, int offset_b = 0,
+          int wg_wait = 0, typename A_type, typename B_type, typename C_type>
+TL_DEVICE void mma_gemm_ss(A_type *pA, B_type *pB, C_type *accum) {
+  using MMA = cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
+                                   trans_B, clear_accum, lda, ldb, offset_a,
+                                   offset_b, A_type, B_type, C_type>;
+  MMA::body(pA, pB, accum);
+}
+
+template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
+          bool trans_B, bool clear_accum = false, int lda = 0, int ldb = 0,
+          int offset_a = 0, int offset_b = 0,
           int wg_wait = 0, typename A_type, typename B_type, typename C_type>
 TL_DEVICE /**
            * Perform a read-share (B in shared memory, A in global) tiled GEMM
            * and accumulate into `accum`.
            *
-           * Dispatches at compile time to either the Hopper wgmma
-           * implementation or the fallback MMA implementation depending on
-           * `use_wgmma`. The selected GemmTensorOp::body_rs performs the
+           * Dispatches at compile time to the Hopper wgmma
+           * implementation. The selected GemmTensorOp::body_rs performs the
            * region-tiled GEMM loop and updates the accumulator in-place.
            *
-           * When `use_wgmma == true`, this function enforces wgmma constraints
+           * This function enforces wgmma constraints
            * at compile time:
            * - A's leading dimension must equal (trans_A ? M : K)
            * - B's leading dimension must equal (trans_B ? K : N)
@@ -281,9 +283,7 @@ TL_DEVICE /**
            * @param accum Pointer to the accumulator/output C buffer updated
            * in-place.
            */
-    void
-    gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
-  if constexpr (use_wgmma) {
+  void wgmma_gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
     static_assert((trans_A && lda == M) || (!trans_A && lda == K),
                   "Hopper wgmma doesn't support custom stride for A");
     static_assert((trans_B && ldb == K) || (!trans_B && ldb == N),
@@ -291,21 +291,41 @@ TL_DEVICE /**
     static_assert(offset_a == 0 && offset_b == 0,
                   "offset_a and offset_b must be zero for wgmma");
     using MMA = cute::tl_wgmma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n,
-                                             trans_A, trans_B, clear_accum,
-                                             A_type, B_type, C_type>;
+                                              trans_A, trans_B, clear_accum,
+                                              A_type, B_type, C_type>;
     MMA::body_rs<wg_wait>(pA, pB, accum);
-  } else {
-    using MMA =
-        cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                   trans_B, clear_accum, lda, ldb, offset_a,
-                                   offset_b, A_type, B_type, C_type>;
-    MMA::body_rs(pA, pB, accum);
-  }
 }
 
 template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
           bool trans_B, bool clear_accum = false, int lda = 0, int ldb = 0,
-          int offset_a = 0, int offset_b = 0, bool use_wgmma = true,
+          int offset_a = 0, int offset_b = 0,
+          int wg_wait = 0, typename A_type, typename B_type, typename C_type>
+TL_DEVICE /**
+           * Perform a read-share (B in shared memory, A in global) tiled GEMM
+           * and accumulate into `accum`.
+           *
+           * Dispatches at compile time to the fallback mma
+           * implementation. The selected GemmTensorOp::body_rs performs the
+           * region-tiled GEMM loop and updates the accumulator in-place.
+           *
+           * @param pA Pointer to operand A (global memory). Layout/stride
+           * expectations depend on template parameters.
+           * @param pB Pointer to operand B (base for shared-memory staging).
+           * Layout/stride expectations depend on template parameters.
+           * @param accum Pointer to the accumulator/output C buffer updated
+           * in-place.
+           */
+  void mma_gemm_rs(A_type *pA, B_type *pB, C_type *accum) {
+    using MMA =
+        cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
+                                    trans_B, clear_accum, lda, ldb, offset_a,
+                                    offset_b, A_type, B_type, C_type>;
+    MMA::body_rs(pA, pB, accum);
+}
+
+template <int M, int N, int K, int num_warp_m, int num_warp_n, bool trans_A,
+          bool trans_B, bool clear_accum = false, int lda = 0, int ldb = 0,
+          int offset_a = 0, int offset_b = 0,
           int wg_wait = 0, typename A_type, typename B_type, typename C_type>
 TL_DEVICE /**
            * Perform a non-wgmma tiled GEMM where A regions are staged into
@@ -313,8 +333,7 @@ TL_DEVICE /**
            * accumulating into `accum`.
            *
            * This overload dispatches to the tl_mma::GemmTensorOp::body_sr
-           * implementation. Must be instantiated with `use_wgmma = false`
-           * (enforced via static_assert).
+           * implementation. 
            *
            * @param pA Pointer to the A operand in global memory (source that
            * will be staged to shared memory).
@@ -323,14 +342,12 @@ TL_DEVICE /**
            * @param accum Pointer to the output accumulator matrix in global
            * memory.
            */
-    void
-    gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
-  static_assert(!use_wgmma, "wgmma doesn't support gemm_sr");
-  using MMA =
-      cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
-                                 trans_B, clear_accum, lda, ldb, offset_a,
-                                 offset_b, A_type, B_type, C_type>;
-  MMA::body_sr(pA, pB, accum);
+  void mma_gemm_sr(A_type *pA, B_type *pB, C_type *accum) {
+    using MMA =
+        cute::tl_mma::GemmTensorOp<M, N, K, num_warp_m, num_warp_n, trans_A,
+                                  trans_B, clear_accum, lda, ldb, offset_a,
+                                  offset_b, A_type, B_type, C_type>;
+    MMA::body_sr(pA, pB, accum);
 }
 
 template <int num_mma>
