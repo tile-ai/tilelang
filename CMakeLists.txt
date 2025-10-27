@@ -167,7 +167,13 @@ add_custom_command(
   COMMAND Python::Interpreter -m cython
           "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/cython/cython_wrapper.pyx"
           --module-name tilelang_cython_wrapper
-          --cplus --output-file "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp"
+          --cplus --output-file "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.tmp.cpp"
+  # Use Python 3.9 Limited API
+  COMMAND "${CMAKE_COMMAND}" -E echo "#undef Py_LIMITED_API" > "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp"
+  COMMAND "${CMAKE_COMMAND}" -E echo "#define Py_LIMITED_API 0x03090000" >> "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp"
+  COMMAND "${CMAKE_COMMAND}" -E echo "" >> "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp"
+  COMMAND "${CMAKE_COMMAND}" -E cat "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.tmp.cpp" >> "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp"
+  COMMAND "${CMAKE_COMMAND}" -E rm "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.tmp.cpp"
   DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/cython/cython_wrapper.pyx"
   VERBATIM)
 
@@ -176,8 +182,6 @@ if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
 endif()
 
 python_add_library(tilelang_cython_wrapper MODULE "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
-# Use Python 3.9 Limited API
-target_compile_definitions(tilelang_cython_wrapper PUBLIC -DPy_LIMITED_API=0x03090000)
 # Install extension into the tilelang package directory
 install(TARGETS tilelang_cython_wrapper
         LIBRARY DESTINATION tilelang
