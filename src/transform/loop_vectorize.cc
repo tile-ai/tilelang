@@ -262,24 +262,32 @@ bool IndiceCanVectorize(const PrimExpr &expr, Var var,
     return true;
 
   // Extent must be divisible
-  if (!analyzer->CanProveEqual(FloorMod(iter_var_size, target_vectorized_size),
+  PrimExpr target_size_for_iter =
+      make_const(iter_var_size.dtype(), target_vectorized_size);
+  PrimExpr target_size_for_expr =
+      make_const(expr.dtype(), target_vectorized_size);
+  PrimExpr target_size_for_var =
+      make_const(var.dtype(), target_vectorized_size);
+  PrimExpr zero = make_const(var.dtype(), 0);
+
+  if (!analyzer->CanProveEqual(FloorMod(iter_var_size, target_size_for_iter),
                                0))
     return false;
 
   // The base offset must be divisible
   if (!analyzer->CanProveEqual(
-          FloorMod(Substitute(expr, {{var, 0}}), target_vectorized_size), 0)) {
+          FloorMod(Substitute(expr, {{var, zero}}), target_size_for_expr), 0)) {
     return false;
   }
 
   // Bind thread range
-  Var v0("v0"), v1("v1");
-  analyzer->Bind(v0, Range(0, target_vectorized_size));
-  analyzer->Bind(v1, Range(0, analyzer->Simplify(FloorDiv(
-                                  iter_var_size, target_vectorized_size))));
+  Var v0("v0", var.dtype()), v1("v1", var.dtype());
+  analyzer->Bind(v0, Range(zero, target_size_for_var));
+  analyzer->Bind(v1, Range(zero, analyzer->Simplify(FloorDiv(
+                                     iter_var_size, target_size_for_iter))));
   PrimExpr expr_transformed = analyzer->Simplify(
-      Substitute(expr, {{var, v0 + v1 * target_vectorized_size}}));
-  Vectorizer vectorizer(v0, IntImm(v0->dtype, target_vectorized_size));
+      Substitute(expr, {{var, v0 + v1 * target_size_for_var}}));
+  Vectorizer vectorizer(v0, target_size_for_var);
   PrimExpr expr_vectorized = vectorizer.VisitExpr(expr_transformed);
 
   // This simplify is necessary for thread region specified
