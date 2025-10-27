@@ -125,13 +125,13 @@ TL_DEVICE int4_t make_int4(signed char x0, signed char x1, signed char x2,
 }
 
 // Pack eight int values.
-TL_DEVICE longlong4 make_longlong4(int x0, int x1, int y0, int y1,
-                                   int z0, int z1, int w0, int w1) {
+TL_DEVICE longlong4 make_longlong4(int x0, int x1, int y0, int y1, int z0,
+                                   int z1, int w0, int w1) {
   longlong4 result;
-  *((int2*)&result.x) = make_int2(x0, x1);
-  *((int2*)&result.y) = make_int2(y0, y1);
-  *((int2*)&result.z) = make_int2(z0, z1);
-  *((int2*)&result.w) = make_int2(w0, w1);
+  *((int2 *)&result.x) = make_int2(x0, x1);
+  *((int2 *)&result.y) = make_int2(y0, y1);
+  *((int2 *)&result.z) = make_int2(z0, z1);
+  *((int2 *)&result.w) = make_int2(w0, w1);
   return result;
 }
 
