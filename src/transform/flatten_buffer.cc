@@ -25,12 +25,15 @@
 #include "tir/transforms/ir_utils.h"
 #include <tvm/arith/iter_affine_map.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/attrs.h>
 #include <tvm/tir/analysis.h>
 #include <tvm/tir/data_type_rewriter.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/tir/transform.h>
 
 #include <utility>
+
+#include "../op/builtin.h"
 
 namespace tvm {
 namespace tl {
@@ -46,6 +49,10 @@ public:
   static PrimFunc Flatten(PrimFunc func) {
     arith::Analyzer ana;
     auto pass = BufferFlattener(&ana);
+    if (auto init_map =
+            func->attrs.GetAttr<Map<Var, PrimExpr>>(tl::attr::kLocalVarInit)) {
+      pass.local_var_init_map_ = init_map.value();
+    }
     auto writer = func.CopyOnWrite();
     pass.MarkBufferMapShapes(func);
     writer->body = pass.VisitStmt(func->body);
@@ -197,6 +204,13 @@ private:
 
     if (!new_extents.same_as(alloc->extents)) {
       alloc.CopyOnWrite()->extents = new_extents;
+    }
+    if (!local_var_init_map_.empty()) {
+      auto init_it = local_var_init_map_.find(alloc->buffer_var);
+      if (init_it != local_var_init_map_.end()) {
+        const PrimExpr &init = (*init_it).second;
+        alloc.CopyOnWrite()->annotations.Set(tl::attr::kLocalVarInit, init);
+      }
     }
 
     return std::move(alloc);
@@ -354,6 +368,9 @@ private:
 
   /*! \brief The updated external buffer map. */
   Map<Var, Buffer> updated_extern_buffer_map_;
+
+  /*! \brief Local var initializers preserved from block annotations. */
+  Map<Var, PrimExpr> local_var_init_map_;
 };
 
 PrimFunc FlattenBufferRewriter(PrimFunc f) {

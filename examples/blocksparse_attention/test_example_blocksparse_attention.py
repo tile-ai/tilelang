@@ -24,11 +24,27 @@ def test_example_tilelang_sparse_gqa_decode_varlen_mask():
 
 
 def test_example_triton_sparse_gqa_decode_varlen_indice():
-    example_triton_sparse_gqa_decode_varlen_indice.main()
+    example_triton_sparse_gqa_decode_varlen_indice.main(
+        batch=16,
+        heads=16,
+        heads_kv=8,
+        max_cache_seqlen=4096,
+        dim=128,
+        dim_v=128,
+        sparse_ratio=0.8,
+        block_size=32)
 
 
 def test_example_triton_sparse_gqa_decode_varlen_mask():
-    example_triton_sparse_gqa_decode_varlen_mask.main()
+    example_triton_sparse_gqa_decode_varlen_mask.main(
+        batch=16,
+        heads=16,
+        heads_kv=8,
+        max_cache_seqlen=4096,
+        dim=128,
+        dim_v=128,
+        sparse_ratio=0.8,
+        block_size=32)
 
 
 if __name__ == "__main__":

@@ -209,7 +209,7 @@ void TileLangStorageAccessVisitor::VisitStmt_(const ForNode *op) {
 bool IsThreadInvariant(const PrimExpr &cond) {
   if (auto call = cond.as<CallNode>()) {
     if (auto opt_call_op = call->op.as<Op>()) {
-      auto call_op = opt_call_op.value();
+      const auto &call_op = opt_call_op.value();
       if (call_op.same_as(builtin::tvm_thread_invariant())) {
         return true;
       }

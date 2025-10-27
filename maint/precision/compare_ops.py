@@ -17,8 +17,6 @@ from triton.language.extra import libdevice
 import tilelang
 import tilelang.language as T
 
-tilelang.disable_cache()
-
 from tilelang.contrib import nvcc
 from tilelang.utils.target import determine_target
 

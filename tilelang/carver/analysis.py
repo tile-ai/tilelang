@@ -1,5 +1,5 @@
 """Analysis on TIR blocks, loops and functions."""
-from typing import List, Optional, Set, Union
+from __future__ import annotations
 from typing_extensions import Literal
 
 from tvm import ir, tir, DataType
@@ -31,7 +31,7 @@ class IterInfo:
         self.loop_rv = loop_rv
 
     @property
-    def dom(self) -> Union[int, tir.PrimExpr]:
+    def dom(self) -> int | tir.PrimExpr:
         """The iteration domain of the loop."""
         return int(self._dom) if isinstance(self._dom, tir.IntImm) else self._dom
 
@@ -46,14 +46,14 @@ class BlockInfo:
     """Information about a TIR block."""
 
     name: str
-    iters: List[IterInfo]
+    iters: list[IterInfo]
     block_rv: tir.schedule.BlockRV
     _reduction_block: bool
 
     def __init__(
         self,
         name: str,
-        iters: List[IterInfo],
+        iters: list[IterInfo],
         block_rv: tir.schedule.BlockRV,
         reduction_block: bool = False,
     ):
@@ -63,7 +63,7 @@ class BlockInfo:
         self.iters = iters
         self._reduction_block = reduction_block
 
-    def dom(self) -> List[Union[int, tir.PrimExpr]]:
+    def dom(self) -> list[int | tir.PrimExpr]:
         """The iteration domain of the block."""
         return [i.dom for i in self.iters]
 
@@ -118,7 +118,7 @@ class BlockInfo:
 _normalize_prim_func = get_global_func("tir.schedule.NormalizePrimFunc")
 
 
-def normalize_prim_func(sch: tir.Schedule) -> Optional[List[BlockInfo]]:
+def normalize_prim_func(sch: tir.Schedule) -> list[BlockInfo] | None:
     """Normalize the primfunc to normal form"""
     try:
         result = _normalize_prim_func(sch)
@@ -133,7 +133,7 @@ def normalize_prim_func(sch: tir.Schedule) -> Optional[List[BlockInfo]]:
             tir.IterVar.CommReduce: "R",
         }.get(i.iter_type, "O")
 
-    blocks: List[BlockInfo] = []
+    blocks: list[BlockInfo] = []
     for block, loops, iters, is_reduction in zip(*result):
         blocks.append(
             BlockInfo(
@@ -203,7 +203,7 @@ def get_root_block(sch: Schedule, func_name: str = "main") -> BlockRV:
 
 
 def collect_block_iter_vars_used_in_access_region(block: tir.Block,
-                                                  region: List[ir.Range]) -> Set[tir.Var]:
+                                                  region: list[ir.Range]) -> set[tir.Var]:
     """Collect the block iter variables used in the access region of a buffer region."""
     tir_vars = set()
     for expr in region:
@@ -214,7 +214,7 @@ def collect_block_iter_vars_used_in_access_region(block: tir.Block,
     return tir_vars
 
 
-def collect_vars_used_in_prim_expr(expr: tir.PrimExpr) -> Set[tir.Var]:
+def collect_vars_used_in_prim_expr(expr: tir.PrimExpr) -> set[tir.Var]:
     """Collect the variables used in the PrimExpr."""
     tir_vars = set()
 
@@ -259,7 +259,7 @@ def is_broadcast_epilogue(
 
 
 def get_reduction_blocks(sch: tir.Schedule,
-                         blocks: List[tir.schedule.BlockRV]) -> List[tir.schedule.BlockRV]:
+                         blocks: list[tir.schedule.BlockRV]) -> list[tir.schedule.BlockRV]:
     # Get the main computation block
     def is_reduction(block: BlockRV) -> bool:
         block_stmt = sch.get(block)
@@ -286,7 +286,7 @@ def get_reduction_blocks(sch: tir.Schedule,
 def get_coalesced_veclen(block_stmt: tir.Block, target_bits: int = 128) -> int:
     # gpu memory prefer 128 bits coalesced access (e.g. four banks)
     # 128 bits
-    buffers: List[tir.Buffer] = []
+    buffers: list[tir.Buffer] = []
     for read in block_stmt.reads:
         buffers.append(read.buffer)
     for write in block_stmt.writes:

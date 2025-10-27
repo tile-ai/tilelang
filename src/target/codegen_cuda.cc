@@ -900,56 +900,123 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   stream << ' ' << sret << ";\n";
   std::string src = SSAGetID(PrintExpr(op->value), from_ty);
 
-  // Handle bfloat16 special cases with supported ops
-  bool used_bf16_op = false;
-  if (from_ty.is_bfloat16() || target_ty.is_bfloat16()) {
-    std::ostringstream func_name;
-    if (from_ty.is_bfloat16()) {
-      func_name << "bf16";
-    } else if (from_ty.is_float()) {
-      func_name << "float";
-    }
-    if (from_ty.lanes() > 1) {
-      func_name << from_ty.lanes();
-    }
-    func_name << "2";
-    if (target_ty.is_bfloat16()) {
-      func_name << "bf16";
-    } else if (target_ty.is_float()) {
-      func_name << "float";
-    } else if (target_ty == DataType::Int(16)) {
-      func_name << "int16";
-    }
-    if (target_ty.lanes() > 1) {
-      func_name << target_ty.lanes();
-    }
-
-    auto fname = func_name.str();
-    if (bf16_supported_ops_.count(fname)) {
-      used_bf16_op = true;
-      stream << "#ifdef ENABLE_BF16\n";
+  // Handle conversion between float16 and float32
+  if (from_ty.is_float16() && target_ty.is_float()) {
+    // Use __half22float2 for vectorized conversion (half2 -> float2)
+    if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
+      // half2 -> float2
       PrintIndent();
-      stream << "reinterpret_cast<";
-      if (target_ty.is_bfloat16()) {
-        stream << "__nv_bfloat16";
-      } else {
-        PrintType(target_ty.element_of(), stream);
-      }
-      if (target_ty.lanes() > 1) {
-        stream << target_ty.lanes();
-      }
-      stream << " &>(" << sret << ") = fastertransformer::" << fname
-             << "(reinterpret_cast<";
-      if (from_ty.is_bfloat16()) {
-        stream << "__nv_bfloat16";
-      } else {
-        PrintType(from_ty.element_of(), stream);
-      }
-      if (from_ty.lanes() > 1) {
-        stream << from_ty.lanes();
-      }
-      stream << " const &>(" << src << "));\n";
-      stream << "#else\n";
+      stream << sret << " = __half22float2(*(half2*)(&(" << src << ")));\n";
+      os << sret;
+      return;
+    } else if (from_ty.lanes() == 4 && target_ty.lanes() == 4) {
+      // half4 -> float4
+      PrintIndent();
+      stream << "((float2*)(&" << sret << "))[0] = "
+             << "__half22float2(*(half2*)(&(" << src << ")));\n";
+      PrintIndent();
+      stream << "((float2*)(&" << sret << "))[1] = "
+             << "__half22float2(*((half2*)(&(" << src << "))+1));\n";
+      os << sret;
+      return;
+    }
+  } else if (from_ty.is_float() && target_ty.is_float16()) {
+    // Use __float22half2_rn for vectorized conversion (float2 -> half2)
+    if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
+      // float2 -> half2
+      PrintIndent();
+      stream << "*(half2*)(&(" << sret << ")) = __float22half2_rn(*(float2*)(&("
+             << src << ")));\n";
+      os << sret;
+      return;
+    } else if (from_ty.lanes() == 4 && target_ty.lanes() == 4) {
+      // float4 -> half4
+      PrintIndent();
+      stream << "((half2*)(&" << sret << "))[0] = "
+             << "__float22half2_rn(*(float2*)(&(" << src << ")));\n";
+      PrintIndent();
+      stream << "((half2*)(&" << sret << "))[1] = "
+             << "__float22half2_rn(*((float2*)(&(" << src << "))+1));\n";
+      os << sret;
+      return;
+    }
+  }
+
+  // Handle conversion between bfloat16 and float32
+  if (from_ty.is_bfloat16() && target_ty.is_float()) {
+    // Use __bfloat1622float2 for vectorized conversion (bfloat162 -> float2)
+    if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
+      // bfloat162 -> float2
+      PrintIndent();
+      stream << sret
+             << " = __bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&("
+             << src << ")));\n";
+      os << sret;
+      return;
+    } else if (from_ty.lanes() == 4 && target_ty.lanes() == 4) {
+      // bfloat162x2 -> float4
+      PrintIndent();
+      stream << "((float2*)(&" << sret << "))[0] = "
+             << "__bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&("
+             << src << ")));\n";
+      PrintIndent();
+      stream << "((float2*)(&" << sret << "))[1] = "
+             << "__bfloat1622float2(*(reinterpret_cast<__nv_bfloat162*>(&("
+             << src << "))+1));\n";
+      os << sret;
+      return;
+    }
+  } else if (from_ty.is_float() && target_ty.is_bfloat16()) {
+    // Use __float22bfloat162_rn for vectorized conversion (float2 -> bfloat162)
+    if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
+      // float2 -> bfloat162
+      PrintIndent();
+      stream << "*reinterpret_cast<__nv_bfloat162*>(&(" << sret
+             << ")) = __float22bfloat162_rn(*(float2*)(&(" << src << ")));\n";
+      os << sret;
+      return;
+    } else if (from_ty.lanes() == 4 && target_ty.lanes() == 4) {
+      // float4 -> bfloat162x2
+      PrintIndent();
+      stream << "(reinterpret_cast<__nv_bfloat162*>(&" << sret << "))[0] = "
+             << "__float22bfloat162_rn(*(float2*)(&(" << src << ")));\n";
+      PrintIndent();
+      stream << "(reinterpret_cast<__nv_bfloat162*>(&" << sret << "))[1] = "
+             << "__float22bfloat162_rn(*((float2*)(&(" << src << "))+1));\n";
+      os << sret;
+      return;
+    }
+  }
+
+  // Handle conversion from float32 to float8 (E4M3/E5M2)
+  if (from_ty.is_float() &&
+      (target_ty.is_float8_e4m3() || target_ty.is_float8_e5m2())) {
+    // FP32 -> FP8: Use __nv_cvt_float2_to_fp8x2 for vectorized conversion
+    // (float2 -> fp8x2)
+    if (from_ty.lanes() == 2 && target_ty.lanes() == 2) {
+      // float2 -> fp8x2
+      PrintIndent();
+      stream << "*reinterpret_cast<__nv_fp8x2_storage_t*>(&(" << sret
+             << ")) = __nv_cvt_float2_to_fp8x2(*reinterpret_cast<float2*>(&("
+             << src << ")), __NV_SATFINITE, "
+             << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
+             << ");\n";
+      os << sret;
+      return;
+    } else if (from_ty.lanes() == 4 && target_ty.lanes() == 4) {
+      // float4 -> fp8x4
+      PrintIndent();
+      stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[0] = "
+             << "__nv_cvt_float2_to_fp8x2(*(float2*)(&(" << src
+             << ")), __NV_SATFINITE, "
+             << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
+             << ");\n";
+      PrintIndent();
+      stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[1] = "
+             << "__nv_cvt_float2_to_fp8x2(*((float2*)(&(" << src
+             << "))+1), __NV_SATFINITE, "
+             << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
+             << ");\n";
     }
   }
 
@@ -964,9 +1031,6 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
     PrintVecElemStore(sret, target_ty, i, val.str());
   }
 
-  if (used_bf16_op) {
-    stream << "#endif\n";
-  }
   os << sret;
 }
 
@@ -1749,8 +1813,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
       os << "}\n";
     } else {
       os << "for (int local_id = 0; local_id < 8; ++local_id) {\n";
-      os << dst << "[" + this->PrintExpr(dst_ind) + "]"
-         << " = " << src << "[" << src_offset << " + local_id];\n";
+      os << dst << "[" + this->PrintExpr(dst_ind) + "]" << " = " << src << "["
+         << src_offset << " + local_id];\n";
       os << "}\n";
     }
 
@@ -1968,6 +2032,41 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     enable_sparse_gemm_ = true;
     this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
                           op->args, true, os);
+  } else if (op->op.same_as(tl::get_lane_idx())) {
+    ICHECK_LE(op->args.size(), 1)
+        << "tl.get_lane_idx expects at most one argument <warp_size>.";
+    os << "tl::get_lane_idx(";
+    if (!op->args.empty()) {
+      os << PrintExpr(op->args[0]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::get_warp_idx_sync())) {
+    ICHECK_LE(op->args.size(), 1)
+        << "tl.get_warp_idx_sync expects at most one argument <warp_size>.";
+    os << "tl::get_warp_idx_sync(";
+    if (!op->args.empty()) {
+      os << PrintExpr(op->args[0]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::get_warp_idx())) {
+    ICHECK_LE(op->args.size(), 1)
+        << "tl.get_warp_idx expects at most one argument <warp_size>.";
+    os << "tl::get_warp_idx(";
+    if (!op->args.empty()) {
+      os << PrintExpr(op->args[0]);
+    }
+    os << ")";
+  } else if (op->op.same_as(tl::get_warp_group_idx())) {
+    ICHECK_LE(op->args.size(), 2)
+        << "tl.get_warp_group_idx expects <warp_size, warps_per_group>.";
+    os << "tl::get_warp_group_idx(";
+    for (size_t i = 0; i < op->args.size(); ++i) {
+      if (i != 0) {
+        os << ", ";
+      }
+      os << PrintExpr(op->args[i]);
+    }
+    os << ")";
   } else if (op->op.same_as(tl::tl_shuffle_elect())) {
     os << "tl::tl_shuffle_elect<" << PrintExpr(op->args[0]) << ">()";
   } else if (op->op.same_as(tl::initialize_descriptor())) {
@@ -2166,8 +2265,16 @@ void CodeGenTileLangCUDA::VisitStmt_(const AllocateNode *op) {
     } else if (scope == "local") {
       stream << ' ' << vid << '[' << constant_size << "];\n";
     } else if (scope == "local.var") {
-      stream << ' ' << vid << " = " << PrintExpr(tir::make_const(op->dtype, 0))
-             << ";\n";
+      PrimExpr init = tir::make_const(op->dtype, 0);
+      auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
+      if (init_it != op->annotations.end()) {
+        PrimExpr user_init = Downcast<PrimExpr>((*init_it).second);
+        if (!user_init.dtype().is_void() && user_init.dtype() != op->dtype) {
+          user_init = tir::Cast(op->dtype, user_init);
+        }
+        init = user_init;
+      }
+      stream << ' ' << vid << " = " << PrintExpr(init) << ";\n";
     } else if (scope != "local.descriptor") {
       ICHECK(false) << "Unsupported scope: " << scope;
     }

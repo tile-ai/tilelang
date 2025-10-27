@@ -36,7 +36,7 @@
 #include <vector>
 
 #include "../op/builtin.h"
-#include "tir/transforms/arg_binder.h"
+#include "arg_binder.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -477,7 +477,7 @@ tvm::transform::Pass MakePackedAPI() {
     Map<GlobalVar, String> packed_func_methods;
     for (const auto &[gvar, base_func] : mod->functions) {
       if (auto opt = base_func.as<PrimFunc>()) {
-        auto prim_func = opt.value();
+        const auto &prim_func = opt.value();
         if (auto global_symbol = RequiresPackedAPI(prim_func)) {
           packed_func_methods.Set(gvar, global_symbol.value());
         }
@@ -496,7 +496,6 @@ tvm::transform::Pass MakePackedAPI() {
                                                       func->body)) {
           func.CopyOnWrite()->body = body.value();
         }
-
         func = MakePackedAPI(std::move(func));
 
         if (!func.same_as(orig_func)) {

@@ -20,8 +20,6 @@ import torch
 torch.set_printoptions(profile="full")
 torch.random.manual_seed(0)
 
-tilelang.disable_cache()
-
 
 def prepare_input(
     B,

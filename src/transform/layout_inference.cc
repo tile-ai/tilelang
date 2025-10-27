@@ -131,13 +131,13 @@ public:
           ICHECK(dst_layout_opt.has_value())
               << "Failed to cast layout to Fragment for buffer " << buffer
               << ", layout type is " << layout->GetTypeKey();
-          auto dst_layout = dst_layout_opt.value();
+          const auto &dst_layout = dst_layout_opt.value();
           auto src_layout_opt = layout_map[buffer].as<Fragment>();
           ICHECK(src_layout_opt.has_value())
               << "Failed to cast layout_map[buffer] to Fragment for buffer "
               << buffer << ", layout type is "
               << layout_map[buffer]->GetTypeKey();
-          auto src_layout = src_layout_opt.value();
+          const auto &src_layout = src_layout_opt.value();
           ICHECK(dst_layout->InputDim() == src_layout->InputDim());
           Array<PrimExpr> indices;
           indices.reserve(dst_layout->InputDim());
@@ -159,7 +159,7 @@ public:
           }
         }
         // If already in map, ensure they are structurally equal
-        ICHECK(StructuralEqual()(layout, layout_map[buffer]))
+        ICHECK(layout->IsEqual(layout_map[buffer].get()))
             << "Get different layout for " << buffer
             << "\n current layout: " << layout->DebugOutput()
             << "\n previous layout: " << layout_map[buffer]->DebugOutput();
@@ -398,7 +398,7 @@ private:
                       << call->args[1]->GetTypeKey();
         return std::nullopt;
       }
-      auto var = var_opt.value();
+      const auto &var = var_opt.value();
       return buffer_data_to_buffer_[var];
     } else if (call->op.same_as(RegionOp::Get())) {
       return call->args[0].as<BufferLoadNode>()->buffer;
@@ -636,7 +636,7 @@ private:
   LayoutInferencer(const LayoutInferenceResult &result,
                    bool skip_thread_partition, arith::Analyzer *analyzer)
       : arith::IRMutatorWithAnalyzer(analyzer), result_(result),
-        skip_thread_partition_(skip_thread_partition){};
+        skip_thread_partition_(skip_thread_partition) {};
 
   using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
 
@@ -719,7 +719,23 @@ private:
       //     A_local[i] = A_global[i]
       // Here, A_local is a register-local buffer held independently by each
       // thread, so explicit thread binding is not required.
-      //
+      bool store_into_local = false;
+      PostOrderVisit(root, [&](const ObjectRef &obj) {
+        if (const auto *store = obj.as<BufferStoreNode>()) {
+          if (store->buffer.scope() == "local") {
+            store_into_local = true;
+          }
+          // if the case is like:
+          // for i in T.Parallel(1024):
+          //     A_local[i] = B_global[i]
+          //     A_frag[i] = A_global[i]
+          // exception will be raise in Parallel::LayoutInference
+        }
+      });
+      // This check if for the loop that only manuplates "local" buffers,
+      // for i in T.Parallel(1024):
+      //     A_local[i] = B_local[i]
+      // Though this might be illegal
       // We use PostOrderVisit to detect whether the loop only manuplates
       // "local" buffers, which indicates register usage and justifies skipping
       // thread binding.
@@ -738,7 +754,9 @@ private:
 
       auto loop_layout = result_.for_map[root];
       // FIXME: tell in-Parallel and out-of-Parallel `local`s apart
-      bool parallel_loop = !skip_thread_partition_ && !local_register_only;
+      // NOTE(lei): a bit ugly, we should rethink about this part in future.
+      bool parallel_loop =
+          !skip_thread_partition_ && !local_register_only && !store_into_local;
 
       if (parallel_loop) {
         for_node =

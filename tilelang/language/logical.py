@@ -1,13 +1,13 @@
 """The language interface for tl programs."""
+from __future__ import annotations
 
 from tilelang import language as T
 from tvm.tir import Buffer, BufferRegion, BufferLoad
 from tvm import tir
-from typing import Union
 from tilelang.utils.language import get_buffer_elems
 
 
-def any_of(buffer: Union[T.Tensor, BufferRegion]):
+def any_of(buffer: T.Tensor | BufferRegion):
     """Check if any element in the buffer is true.
 
     Args:
@@ -42,7 +42,7 @@ def any_of(buffer: Union[T.Tensor, BufferRegion]):
         raise ValueError(f"Invalid buffer type: {type(buffer)}")
 
 
-def all_of(buffer: Union[T.Tensor, BufferRegion]):
+def all_of(buffer: T.Tensor | BufferRegion):
     """Check if all elements in the buffer are true.
 
     Args:

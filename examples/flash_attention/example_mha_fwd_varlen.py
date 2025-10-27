@@ -7,158 +7,7 @@ import argparse
 
 import torch
 from einops import rearrange, repeat
-from bert_padding import pad_input, unpad_input
-
-
-def generate_random_padding_mask(max_seqlen, batch_size, device, mode="random"):
-    assert mode in ["full", "random", "third"]
-    if mode == "full":
-        lengths = torch.full((batch_size, 1), max_seqlen, device=device, dtype=torch.int32)
-    elif mode == "random":
-        lengths = torch.randint(
-            max(1, max_seqlen - 20), max_seqlen + 1, (batch_size, 1), device=device)
-    elif mode == "third":
-        lengths = torch.randint(max_seqlen // 3, max_seqlen + 1, (batch_size, 1), device=device)
-    padding_mask = (
-        repeat(torch.arange(max_seqlen, device=device), "s -> b s", b=batch_size) < lengths)
-    return padding_mask
-
-
-def generate_qkv(q,
-                 k,
-                 v,
-                 query_padding_mask=None,
-                 key_padding_mask=None,
-                 kvpacked=False,
-                 qkvpacked=False):
-    """
-    Arguments:
-        q: (batch_size, seqlen_q, nheads, d)
-        k: (batch_size, seqlen_k, nheads_k, d)
-        v: (batch_size, seqlen_k, nheads_k, d)
-        query_padding_mask: (batch_size, seqlen), bool
-        key_padding_mask: (batch_size, seqlen), bool
-    """
-    assert not (kvpacked and qkvpacked)
-    batch_size, seqlen_q, nheads, d = q.shape
-    _, seqlen_k, nheads_k, _ = k.shape
-    assert k.shape == (batch_size, seqlen_k, nheads_k, d)
-    assert v.shape == (batch_size, seqlen_k, nheads_k, d)
-
-    if query_padding_mask is not None:
-        q_unpad, indices_q, cu_seqlens_q, max_seqlen_q = unpad_input(q, query_padding_mask)
-        output_pad_fn = lambda output_unpad: pad_input(output_unpad, indices_q, batch_size, seqlen_q
-                                                      )
-    else:
-        q_unpad = rearrange(q, "b s h d -> (b s) h d")
-        cu_seqlens_q = torch.arange(
-            0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32, device=q_unpad.device)
-        max_seqlen_q = seqlen_q
-        output_pad_fn = lambda output_unpad: rearrange(
-            output_unpad, "(b s) h d -> b s h d", b=batch_size)
-
-    if key_padding_mask is not None:
-        k_unpad, indices_k, cu_seqlens_k, max_seqlen_k = unpad_input(k, key_padding_mask)
-        v_unpad, _, _, _ = unpad_input(v, key_padding_mask)
-    else:
-        k_unpad = rearrange(k, "b s h d -> (b s) h d")
-        v_unpad = rearrange(v, "b s h d -> (b s) h d")
-        cu_seqlens_k = torch.arange(
-            0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32, device=k_unpad.device)
-        max_seqlen_k = seqlen_k
-
-    if qkvpacked:
-        assert (query_padding_mask == key_padding_mask).all()
-        assert nheads == nheads_k
-        qkv_unpad = torch.stack([q_unpad, k_unpad, v_unpad], dim=1)
-        qkv = torch.stack([q, k, v], dim=2)
-        if query_padding_mask is not None:
-            dqkv_pad_fn = lambda dqkv_unpad: pad_input(dqkv_unpad, indices_q, batch_size, seqlen_q)
-        else:
-            dqkv_pad_fn = lambda dqkv_unpad: rearrange(
-                dqkv_unpad, "(b s) t h d -> b s t h d", b=batch_size)
-        return (
-            qkv_unpad.detach().requires_grad_(),
-            cu_seqlens_q,
-            max_seqlen_q,
-            qkv.detach().requires_grad_(),
-            output_pad_fn,
-            dqkv_pad_fn,
-        )
-    elif kvpacked:
-        kv_unpad = torch.stack([k_unpad, v_unpad], dim=1)
-        kv = torch.stack([k, v], dim=2)
-        dq_pad_fn = output_pad_fn
-        if key_padding_mask is not None:
-            dkv_pad_fn = lambda dkv_unpad: pad_input(dkv_unpad, indices_k, batch_size, seqlen_k)
-        else:
-            dkv_pad_fn = lambda dkv_unpad: rearrange(
-                dkv_unpad, "(b s) t h d -> b s t h d", b=batch_size)
-        return (
-            q_unpad.detach().requires_grad_(),
-            kv_unpad.detach().requires_grad_(),
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            q.detach().requires_grad_(),
-            kv.detach().requires_grad_(),
-            output_pad_fn,
-            dq_pad_fn,
-            dkv_pad_fn,
-        )
-    else:
-        dq_pad_fn = output_pad_fn
-        if key_padding_mask is not None:
-            dk_pad_fn = lambda dk_unpad: pad_input(dk_unpad, indices_k, batch_size, seqlen_k)
-        else:
-            dk_pad_fn = lambda dk_unpad: rearrange(dk_unpad, "(b s) h d -> b s h d", b=batch_size)
-        return (
-            q_unpad.detach().requires_grad_(),
-            k_unpad.detach().requires_grad_(),
-            v_unpad.detach().requires_grad_(),
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            q.detach().requires_grad_(),
-            k.detach().requires_grad_(),
-            v.detach().requires_grad_(),
-            output_pad_fn,
-            dq_pad_fn,
-            dk_pad_fn,
-        )
-
-
-def construct_local_mask(
-    seqlen_q,
-    seqlen_k,
-    window_size=(-1, -1),  # -1 means infinite window size
-    query_padding_mask=None,
-    key_padding_mask=None,
-    device=None,
-    key_leftpad=None,
-):
-    row_idx = rearrange(torch.arange(seqlen_q, device=device, dtype=torch.long), "s -> s 1")
-    col_idx = torch.arange(seqlen_k, device=device, dtype=torch.long)
-    if key_leftpad is not None:
-        key_leftpad = rearrange(key_leftpad, "b -> b 1 1 1")
-        col_idx = repeat(col_idx, "s -> b 1 1 s", b=key_leftpad.shape[0])
-        col_idx = torch.where(col_idx >= key_leftpad, col_idx - key_leftpad, 2**32)
-    sk = (
-        seqlen_k if key_padding_mask is None else rearrange(
-            key_padding_mask.sum(-1), "b -> b 1 1 1"))
-    sq = (
-        seqlen_q if query_padding_mask is None else rearrange(
-            query_padding_mask.sum(-1), "b -> b 1 1 1"))
-    if window_size[0] < 0:
-        return col_idx > row_idx + sk - sq + window_size[1]
-    else:
-        sk = torch.full_like(col_idx, seqlen_k) if key_padding_mask is None else sk
-        return torch.logical_or(
-            col_idx > torch.minimum(row_idx + sk - sq + window_size[1], sk),
-            col_idx < row_idx + sk - sq - window_size[0],
-        )
+from varlen_utils import generate_random_padding_mask, generate_qkv
 
 
 def attention_ref(
@@ -359,7 +208,7 @@ def flashattn(batch_size,
     return main
 
 
-def main(batch: int = 2, heads: int = 16, seq_len: int = 256, dim: int = 32):
+def main(batch: int = 8, heads: int = 64, seq_len: int = 2048, dim: int = 128):
     flops_per_matmul = 2.0 * batch * heads * seq_len * seq_len * dim
     total_flops = 2 * flops_per_matmul
 
@@ -431,15 +280,15 @@ def main(batch: int = 2, heads: int = 16, seq_len: int = 256, dim: int = 32):
     fla_out = output_pad_fn(fla_out_unpad)
     torch.testing.assert_close(out, fla_out, rtol=1e-2, atol=1e-2)
 
-    print("Assert Equal Passed")
+    print("All checks passed.✅")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=2, help='batch size')
-    parser.add_argument('--heads', type=int, default=16, help='heads')
-    parser.add_argument('--seq_len', type=int, default=256, help='sequence length')
-    parser.add_argument('--dim', type=int, default=32, help='dim')
+    parser.add_argument('--batch', type=int, default=8, help='batch size')
+    parser.add_argument('--heads', type=int, default=64, help='heads')
+    parser.add_argument('--seq_len', type=int, default=2048, help='sequence length')
+    parser.add_argument('--dim', type=int, default=128, help='dim')
 
     args = parser.parse_args()
     main(args.batch, args.heads, args.seq_len, args.dim)

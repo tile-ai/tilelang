@@ -8,6 +8,7 @@ on:
 jobs:
   remind:
     runs-on: ubuntu-latest
+    if: github.repository_owner == 'tile-ai'
     steps:
       - name: Remind
         uses: actions/github-script@v8

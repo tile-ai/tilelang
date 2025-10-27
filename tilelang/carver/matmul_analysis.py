@@ -1,8 +1,8 @@
 # pylint: disable=missing-docstring, invalid-name
 """A GEMM schedule rule for GPU operators."""
+from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Set, Union, Tuple, Dict
 from tvm import tir
 from tvm.ir import Range
 from tvm.tir import IterVar, PrimExpr, Var, BufferRegion, IndexMap
@@ -57,7 +57,7 @@ def _collect_consumers(sch: tir.Schedule, block: tir.schedule.BlockRV):
 def auto_inline_producers(
     sch: tir.Schedule,
     block: tir.schedule.BlockRV,
-    skip_blocks: Optional[List[tir.schedule.BlockRV]] = None,
+    skip_blocks: list[tir.schedule.BlockRV] | None = None,
 ):
     skip_blocks = skip_blocks or []
     while True:
@@ -118,7 +118,7 @@ def auto_inline_consumer_chain(
 
 
 # used to match the similar region with dequantize op.
-def find_first_similar_region(regions: List[BufferRegion], buffer: tir.Buffer):
+def find_first_similar_region(regions: list[BufferRegion], buffer: tir.Buffer):
     for region in regions:
         if len(region.buffer.shape) == len(buffer.shape):
             return region
@@ -126,7 +126,7 @@ def find_first_similar_region(regions: List[BufferRegion], buffer: tir.Buffer):
 
 
 # used to match the similar buffer with dequantize op.
-def find_first_similar_buffer(regions: List[BufferRegion], buffer: tir.Buffer):
+def find_first_similar_buffer(regions: list[BufferRegion], buffer: tir.Buffer):
     for region in regions:
         if len(region.buffer.shape) == len(buffer.shape):
             return region.buffer
@@ -134,7 +134,7 @@ def find_first_similar_buffer(regions: List[BufferRegion], buffer: tir.Buffer):
 
 
 # find the block that required to be reindex and scope.
-def find_last_producer_from_buffer(sch, main_block, buffer: tir.Buffer) -> Optional[BlockRV]:
+def find_last_producer_from_buffer(sch, main_block, buffer: tir.Buffer) -> BlockRV | None:
     # block that most near to the arguments
     block = main_block
     buffer = buffer
@@ -209,11 +209,11 @@ class IterTrait:
 
 
 def make_iter_fusion_index_map(
-    traits: List[IterTrait],
-    kind_order: List[IterKind],
+    traits: list[IterTrait],
+    kind_order: list[IterKind],
 ) -> tir.IndexMap:
-    fused_iters: Dict[IterKind, PrimExpr] = {}
-    input_iters: List[tir.Var] = []
+    fused_iters: dict[IterKind, PrimExpr] = {}
+    input_iters: list[tir.Var] = []
     for i, trait in enumerate(traits):
         v_i = tir.Var(f"i{i}", trait.extent.dtype)
         input_iters.append(v_i)
@@ -226,14 +226,14 @@ def make_iter_fusion_index_map(
         else:
             fused_iters[trait.kind] = v_i
 
-    final_indices: List[tir.PrimExpr] = [
+    final_indices: list[tir.PrimExpr] = [
         fused_iters.get(kind, tir.IntImm(traits[0].extent.dtype, 0)) for kind in kind_order
     ]
 
     return tir.IndexMap(input_iters, final_indices, None)
 
 
-def detect_iter_traits(block: tir.Block) -> Optional[Tuple[List[IterTrait]]]:
+def detect_iter_traits(block: tir.Block) -> tuple[list[IterTrait]] | None:
     """Detect iter traits based on the pattern C[S, I, J] += A[S, I, K] * B[S, J, K]
 
     Parameters
@@ -252,8 +252,8 @@ def detect_iter_traits(block: tir.Block) -> Optional[Tuple[List[IterTrait]]]:
     if len(block.reads) != 2 or len(block.writes) != 1:
         return None
 
-    def get_access_axes(region: List[Range]) -> Set[Var]:
-        axes: Set[Var] = set()
+    def get_access_axes(region: list[Range]) -> set[Var]:
+        axes: set[Var] = set()
         for r in region:
             if not _is_one(r.extent):
                 raise ValueError("Expect elemwise block access")
@@ -267,7 +267,7 @@ def detect_iter_traits(block: tir.Block) -> Optional[Tuple[List[IterTrait]]]:
     except ValueError:
         return None
 
-    traits: Dict[Var, IterTrait] = {}
+    traits: dict[Var, IterTrait] = {}
     for iter_var in block.iter_vars:
         var = iter_var.var
         kind: IterKind
@@ -308,7 +308,7 @@ def detect_iter_traits(block: tir.Block) -> Optional[Tuple[List[IterTrait]]]:
 
 
 def get_index_map(block: tir.Block,
-                  layout: Optional[List[str]] = None) -> Optional[Tuple[tir.IndexMap, ...]]:
+                  layout: list[str] | None = None) -> tuple[tir.IndexMap, ...] | None:
     """Get index maps for the block
 
     Parameters
@@ -334,8 +334,8 @@ def get_index_map(block: tir.Block,
         return None
     A_traits, B_traits, C_traits, block_traits = traits
 
-    def get_ordered_axes(region: List[Range]) -> Set[Var]:
-        axes: List[Var] = []
+    def get_ordered_axes(region: list[Range]) -> set[Var]:
+        axes: list[Var] = []
         for r in region:
             if not _is_one(r.extent):
                 raise ValueError("Expect elemwise block access")
@@ -352,11 +352,11 @@ def get_index_map(block: tir.Block,
         vars = collect_vars_from_expr(var)
         return any(is_common_reduce(v) for v in vars)
 
-    def check_last_trait(region: List[Range]):
+    def check_last_trait(region: list[Range]):
         axes = get_ordered_axes(region)
         return has_common_reduce(axes[-1])
 
-    def infer_layout(layout: str, region: List[Range], kind: str = "A"):
+    def infer_layout(layout: str, region: list[Range], kind: str = "A"):
         """
         Infer the layout based on the region and the kind of buffer
         kind: "A", "B", "C"
@@ -409,7 +409,7 @@ def get_index_map(block: tir.Block,
     )
 
 
-def get_in_out_dtypes(block: tir.Block) -> Tuple[str]:
+def get_in_out_dtypes(block: tir.Block) -> tuple[str]:
     """
     Detect In/Out data types for the given block based on the analysis if read/write buffers.
     """
@@ -419,7 +419,7 @@ def get_in_out_dtypes(block: tir.Block) -> Tuple[str]:
     return (in_dtype, out_dtype)
 
 
-def get_dequantize_block(sch, blocks) -> Optional[BlockRV]:
+def get_dequantize_block(sch, blocks) -> BlockRV | None:
     # check at least two input and one output
     # at lease one input has uint dtype, and the output dtype is float
     def is_dequantize(block: BlockRV) -> bool:
@@ -445,8 +445,8 @@ def is_identity_or_transpose_block(block_stmt: tir.Block) -> bool:
     if not isinstance(block_stmt.body.value, tir.BufferLoad):
         return False, False
 
-    def get_access_vars(region: List[Range]) -> List[Var]:
-        axes: List[Var] = []
+    def get_access_vars(region: list[Range]) -> list[Var]:
+        axes: list[Var] = []
         for r in region:
             if not _is_one(r.extent):
                 return None
@@ -475,7 +475,7 @@ def is_transpose_block(block_stmt: tir.Block) -> bool:
     return is_identity_or_transpose_block(block_stmt)[1]
 
 
-def inline_transpose_block(sch: tir.Schedule, blocks: List[tir.schedule.BlockRV]):
+def inline_transpose_block(sch: tir.Schedule, blocks: list[tir.schedule.BlockRV]):
     result_blocks = []
     for block in blocks:
         if not is_transpose_block(sch.get(block)):
@@ -493,7 +493,7 @@ def inline_transpose_block(sch: tir.Schedule, blocks: List[tir.schedule.BlockRV]
 
 def normalize_to_matmul(sch: tir.Schedule,
                         main_block: BlockRV,
-                        layout: Optional[List[str]] = None) -> Optional[tir.Schedule]:
+                        layout: list[str] | None = None) -> tir.Schedule | None:
     if layout is None:
         layout = ["n", "t", "n"]
     block_stmt = sch.get(main_block)
@@ -521,10 +521,10 @@ def normalize_to_matmul(sch: tir.Schedule,
 def get_tensorized_func_and_tags(
     func: tir.PrimFunc,
     target: Target,
-    layout: Optional[List[str]] = None,
+    layout: list[str] | None = None,
     skip_normalize: bool = False,
     allow_gemv: bool = False,
-) -> Tuple[tir.PrimFunc, Dict[str, Union[List[int], int]]]:
+) -> tuple[tir.PrimFunc, dict[str, list[int] | int]]:
     """
         transform function to matmul if necessary (e.g. transform conv2d with im2col)
     """
@@ -554,9 +554,8 @@ def get_tensorized_func_and_tags(
         sm_version = arch.replace("sm_", "")
         return int(sm_version) if sm_version.isdigit() else -1
 
-    def analysis_tensorcore_tags(sch: tir.Schedule, block: BlockRV,
-                                 target: Target) -> Union[bool, Dict]:
-        tags: Dict[str, Union[List[int], int]] = {}
+    def analysis_tensorcore_tags(sch: tir.Schedule, block: BlockRV, target: Target) -> bool | dict:
+        tags: dict[str, list[int] | int] = {}
         block_stmt = sch.get(block)
 
         # Nvidia Only Support Tensor Core for
@@ -584,8 +583,8 @@ def get_tensorized_func_and_tags(
             tags["use_async_copy"] = True
 
         # analysis intrin information
-        def get_ordered_axes(region: List[Range]) -> Set[Var]:
-            axes: List[Var] = []
+        def get_ordered_axes(region: list[Range]) -> set[Var]:
+            axes: list[Var] = []
             for r in region:
                 if not _is_one(r.extent):
                     raise ValueError("Expect elemwise block access")
@@ -602,7 +601,7 @@ def get_tensorized_func_and_tags(
             vars = collect_vars_from_expr(var)
             return any(is_common_reduce(v) for v in vars)
 
-        def check_last_trait(region: List[Range]):
+        def check_last_trait(region: list[Range]):
             axes = get_ordered_axes(region)
             return has_common_reduce(axes[-1])
 

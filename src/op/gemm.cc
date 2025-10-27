@@ -27,9 +27,7 @@ static inline std::pair<bool, TCGEN5MMAMeta>
 GetTCGEN5MMAMeta(int M, int N, int K, DataType ab_dtype, DataType c_dtype) {
 // TODO (lei) Currently not all shapes / dtypes are supported for TCGEN5MMA.
 #define FAIL                                                                   \
-  return {                                                                     \
-    false, TCGEN5MMAMeta { 0, 0, 0 }                                           \
-  }
+  return { false, TCGEN5MMAMeta{0, 0, 0} }
 #define SUCCESS(atom_m, atom_n, atom_k)                                        \
   return {                                                                     \
     true, TCGEN5MMAMeta { atom_m, atom_n, atom_k }                             \
@@ -194,9 +192,7 @@ GemmInst GemmNode::GetGemmInst(int block_size, Target target) const {
     return GemmInst::kWGMMA;
   } else if (TargetIsCDNA(target)) {
     return GemmInst::kMFMA;
-  } else if (TargetIsVolta(target) || TargetIsAmpere(target) ||
-             TargetIsTuring(target) || TargetIsHopper(target) ||
-             TargetIsSm100(target)) {
+  } else if (TargetIsCuda(target)) {
     return GemmInst::kMMA;
   } else {
     ICHECK(0) << "Unsupported target for gemm: " << target->str();

@@ -10,6 +10,30 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.gitmodules" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+  find_package(Git QUIET)
+  if(Git_FOUND)
+    execute_process(
+      COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
+      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+      RESULT_VARIABLE TILELANG_GIT_SUBMODULE_RESULT
+    )
+    if(NOT TILELANG_GIT_SUBMODULE_RESULT EQUAL 0)
+      message(
+        FATAL_ERROR
+          "Failed to initialize git submodules. Please run "
+          "`git submodule update --init --recursive` and re-run CMake."
+      )
+    endif()
+  else()
+    message(
+      FATAL_ERROR
+        "Git is required to initialize TileLang submodules. "
+        "Please install git or fetch the submodules manually."
+    )
+  endif()
+endif()
+
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
   set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}" CACHE STRING "C compiler launcher")
@@ -92,6 +116,7 @@ elseif(USE_ROCM)
 elseif(USE_CUDA)
   set(CMAKE_CUDA_STANDARD 17)
   find_package(CUDAToolkit REQUIRED)
+  set(CMAKE_CUDA_COMPILER "${CUDAToolkit_BIN_DIR}/nvcc")
   add_compile_definitions("CUDA_MAJOR_VERSION=${CUDAToolkit_VERSION_MAJOR}")
 
   # Set `USE_CUDA=/usr/local/cuda-x.y`
@@ -133,12 +158,13 @@ endif()
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})
 
 add_custom_command(
-  OUTPUT "${CMAKE_BINARY_DIR}/cython_wrapper.cpp"
+  OUTPUT "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp"
   COMMENT
     "Cythoning tilelang/jit/adapter/cython/cython_wrapper.pyx"
   COMMAND Python::Interpreter -m cython
           "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/cython/cython_wrapper.pyx"
-          --cplus --output-file "${CMAKE_BINARY_DIR}/cython_wrapper.cpp"
+          --module-name tilelang_cython_wrapper
+          --cplus --output-file "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp"
   DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tilelang/jit/adapter/cython/cython_wrapper.pyx"
   VERBATIM)
 
@@ -146,9 +172,12 @@ if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
   set(USE_SABI USE_SABI ${SKBUILD_SABI_VERSION})
 endif()
 
-python_add_library(cython_wrapper MODULE "${CMAKE_BINARY_DIR}/cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
-# Install to site dir to support direct import
-install(TARGETS cython_wrapper LIBRARY DESTINATION .)
+python_add_library(tilelang_cython_wrapper MODULE "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
+# Install extension into the tilelang package directory
+install(TARGETS tilelang_cython_wrapper
+        LIBRARY DESTINATION tilelang
+        RUNTIME DESTINATION tilelang
+        ARCHIVE DESTINATION tilelang)
 
 # let libtilelang to search tvm/tvm_runtime in same dir
 if(APPLE)

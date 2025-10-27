@@ -223,7 +223,7 @@ def _tir_u8_to_f8_e4m3_to_f16_naive(nbit: int, val: tir.PrimExpr, dtype: str):
     e4 = val & tir.const(0x40, "uint16")
     prefix = tir.Select(e4 == tir.const(0, "uint16"), tir.const(0x2000, "uint16"),
                         tir.const(0x4000, "uint16"))
-    e_f16 = (((val & tir.const(63, "uint16")) << tir.const(7, "uint16"))) | prefix
+    e_f16 = ((val & tir.const(63, "uint16")) << tir.const(7, "uint16")) | prefix
     return tir.reinterpret("float16", s_f16 | e_f16)
 
 
@@ -232,7 +232,7 @@ def _tir_u8_to_f8_e4m3_to_f16(nbit: int, val: tir.PrimExpr, dtype: str):
     assert dtype == "float16"
     s_f16 = (val >> tir.const(7, "uint16")) << tir.const(15, "uint16")
     e4 = val & tir.const(0x40, "uint16")
-    e_f16 = (((val & tir.const(63, "uint16")) << tir.const(7, "uint16"))) | (e4 << tir.const(8, "uint16")) | (e4 << tir.const(7, "uint16"))
+    e_f16 = ((val & tir.const(63, "uint16")) << tir.const(7, "uint16")) | (e4 << tir.const(8, "uint16")) | (e4 << tir.const(7, "uint16"))
     e_f16 = e_f16 ^ tir.const(0x2000, "uint16")
     return tir.reinterpret("float16", s_f16 | e_f16)
 

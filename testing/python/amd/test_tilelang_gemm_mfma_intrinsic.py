@@ -238,6 +238,12 @@ def test_assert_tl_matmul():
         128, 256, 256, "int8", "int32", b_transposed=False, accum_dtype="int32")
     assert_tl_matmul_correctness(
         128, 256, 256, "int8", "int32", b_transposed=False, accum_dtype="int32", k_pack=2)
+    assert_tl_matmul_correctness(128, 128, 128, "float8_e4m3fnuz", "float16")
+    assert_tl_matmul_correctness(128, 256, 256, "float8_e4m3fnuz", "float32")
+    assert_tl_matmul_correctness(128, 256, 256, "float8_e4m3fnuz", "float32", k_pack=2)
+    assert_tl_matmul_correctness(128, 256, 256, "float8_e4m3fnuz", "float32", b_transposed=False)
+    assert_tl_matmul_correctness(
+        128, 256, 256, "float8_e4m3fnuz", "float32", b_transposed=False, k_pack=2)
 
 
 if __name__ == "__main__":

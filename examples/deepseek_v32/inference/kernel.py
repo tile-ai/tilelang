@@ -34,7 +34,7 @@ def fast_round_scale(amax, fp8_max_inv):
 
 @tilelang.jit(pass_configs=pass_configs)
 def act_quant_kernel(N, in_dtype=BF16, out_dtype=FP8, scale_dtype=FP32, round_scale=False):
-    M = T.symbolic("M")
+    M = T.dynamic("M")
     fp8_min = -448.0
     fp8_max = 448.0
     fp8_max_inv = 1 / fp8_max
@@ -110,7 +110,7 @@ def act_quant(x: torch.Tensor,
 def fp8_gemm_kernel(N, K, out_dtype=BF16, accum_dtype="float32"):
     assert out_dtype in [BF16, "float32"]
 
-    M = T.symbolic("M")
+    M = T.dynamic("M")
     group_size = 128
     block_M = 32
     block_N = 128
@@ -192,9 +192,9 @@ def fp8_gemm(a: torch.Tensor, a_s: torch.Tensor, b: torch.Tensor,
 
 @tilelang.jit(out_idx=[4], pass_configs=pass_configs)
 def fp8_index_kernel(h: int, d: int):
-    b = T.symbolic("b")
-    m = T.symbolic("m")
-    n = T.symbolic("n")
+    b = T.dynamic("b")
+    m = T.dynamic("m")
+    n = T.dynamic("n")
 
     blk_n1 = 512
     blk_n2 = 128
