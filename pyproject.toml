@@ -2,7 +2,7 @@
 name = "tilelang"
 description = "A tile level programming language to generate high performance code."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.8"
 authors = [{ name = "TileLang Contributors" }, { name = "Tile-AI" }]
 maintainers = [{ name = "Lei Wang", email = "leiwang1999@outlook.com" }]
 license = "MIT"
@@ -14,10 +14,13 @@ classifiers = [
     "Operating System :: MacOS",
     "Programming Language :: C++",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: Implementation :: CPython",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
@@ -46,7 +49,7 @@ requires = ["cython>=3.0.0", "scikit-build-core"]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
-wheel.py-api = "cp39"
+wheel.py-api = "cp38"
 cmake.version = ">=3.26.1"
 build-dir = "build"
 
@@ -105,7 +108,7 @@ skip = [
 ]
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py38"
 line-length = 100
 output-format = "full"
 

@@ -5,7 +5,7 @@
 **Prerequisites for installation via wheel or PyPI:**
 
 - **glibc**: 2.28 (Ubuntu 20.04 or later)
-- **Python Version**: >= 3.9
+- **Python Version**: >= 3.8
 - **CUDA Version**: 12.0 <= CUDA < 13
 
 The easiest way to install **tile-lang** is directly from PyPI using pip. To install the latest version, run the following command in your terminal:
@@ -37,7 +37,7 @@ python -c "import tilelang; print(tilelang.__version__)"
 **Prerequisites for building from source:**
 
 - **Operating System**: Linux
-- **Python Version**: >= 3.9
+- **Python Version**: >= 3.8
 - **CUDA Version**: >= 10.0
 
 ```bash

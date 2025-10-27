@@ -64,7 +64,7 @@ def get_cc():
     return None
 
 
-@functools.cache
+@functools.lru_cache(maxsize=None)
 def get_cplus_compiler():
     """Return the path to the default C/C++ compiler.
 
