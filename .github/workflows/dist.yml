@@ -109,7 +109,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Download built wheels
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           pattern: wheels-*
           path: dist
