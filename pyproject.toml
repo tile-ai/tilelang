@@ -168,7 +168,12 @@ archs = ["auto64"]
 skip = "*musllinux*"
 build-frontend = "build"
 environment = { PYTHONDEVMODE = "1", PYTHONUNBUFFERED = "1" }
-environment-pass = ["CUDA_VERSION"]
+environment-pass = [
+    "CUDA_VERSION",
+    "COLUMNS",
+    "FORCE_COLOR",
+    "CLICOLOR_FORCE",
+]
 before-build = "env -0 | sort -z | tr '\\0' '\\n'"
 windows.before-build = "set"
 # Pin to glibc 2.17 for x86 and 2.28 for aarch64 for now

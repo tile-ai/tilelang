@@ -28,6 +28,13 @@ concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
 
+env:
+  PYTHONDEVMODE: "1"
+  PYTHONUNBUFFERED: "1"
+  COLUMNS: "100"
+  FORCE_COLOR: "1"
+  CLICOLOR_FORCE: "1"
+
 jobs:
   build-sdist:
     name: Build SDist
