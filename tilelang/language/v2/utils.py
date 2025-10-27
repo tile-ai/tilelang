@@ -100,7 +100,7 @@ def get_compiled_object(source: str | ast.AST,
             compiled = disk_compile(source, name)
     except Exception as e:
         source_str = source if isinstance(source, str) else ast.unparse(source)
-        raise RuntimeError(f'Failed to compile source for {name}:\n{source_str}') from e
+        raise RuntimeError(f'Failed to compile source for {name}, Error: {e}:\n{source_str}') from e
     locs = {}
     exec(compiled, globals, locs)
     return locs[name]

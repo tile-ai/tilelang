@@ -396,11 +396,18 @@ class DSLMutator(ast.NodeTransformer):
     def visit_Assign(self, node: ast.Assign) -> list[ast.AST]:
         node = self.generic_visit(node)
         rval = node.value
-        stmts = []
-        for target in reversed(node.targets):
-            stmts.extend(self._emit_assign_target(target, rval))
-            rval = target
-        return stmts
+        if len(node.targets) == 1:
+            return self._emit_assign_target(node.targets[0], rval)
+        else:
+            tmp_name = self.get_tmp()
+            tmp_store = ast.Name(tmp_name, ctx=ast.Store())
+            tmp_load = ast.Name(tmp_name, ctx=ast.Load())
+            ast_set_span(tmp_store, node.targets[0])
+            ast_set_span(tmp_load, node.targets[0])
+            stmt = self._emit_assign_target(tmp_store, rval)
+            for target in node.targets:
+                stmt.extend(self._emit_assign_target(target, tmp_load))
+            return stmt
 
     def visit_AugAssign(self, node: ast.AugAssign) -> list[ast.AST]:
         node = self.generic_visit(node)

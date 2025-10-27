@@ -29,7 +29,7 @@ def unwrap_expr(expr) -> PrimExpr | int | float:
         expr = tir.BufferLoad(expr, indices=[0])
     elif isinstance(expr, (EqualOp, NotEqualOp)):
         expr = expr.asobject()
-    elif isinstance(expr, tir.IntImm) and expr.dtype == 'int32':
+    elif isinstance(expr, IntImm) and expr.dtype == 'int32':
         expr = expr.value
     return expr
 
@@ -257,10 +257,9 @@ class Builder(BaseBuilder):
         return res
 
     def unwrap_value(self, value):
+        value = unwrap_expr(value)
         # handle bx, by = tl.Kernel(128, 128), rval is frame
-        if isinstance(value, tir.meta_var):
-            return value.value
-        elif isinstance(value, tir.frame.IRBuilderFrame):
+        if isinstance(value, tir.frame.IRBuilderFrame):
             return self.enter_frame(value)
         else:
             return value
@@ -295,9 +294,9 @@ class Builder(BaseBuilder):
             return super().assign_slice(lval, sl, value)
 
     def aug_assign(self, op, target, aug_value):
-        if isinstance(target, Buffer) and target.scope() == 'local.var':
-            tir.buffer_store(target, eval_op(op, target, aug_value), 0)
-        if isinstance(target, Buffer):
+        if is_var(target):
+            tir.buffer_store(target, eval_op(op, target[0], aug_value), 0)
+        elif isinstance(target, Buffer):
             raise RuntimeError("Augmented assignment is not supported for Buffer")
         else:
             return super().aug_assign(op, target, aug_value)
@@ -370,11 +369,7 @@ class Builder(BaseBuilder):
                     f"Use immutable variable `{name}` outside its defining region, did you forget **alloc_var**?\n"
                     f"variable `{name}` is defined in frame: {frame}, current frames: {self.frames}."
                 )
-        if isinstance(value, tir.IntImm):
-            return value.value
-        if isinstance(value, Buffer) and value.scope() == 'local.var':
-            return tir.BufferLoad(value, indices=[0])
-        return super().rval(name, value)
+        return unwrap_expr(value)
 
     def arg(self, name, value):
         if self.find_frame_idx(MacroFrame) is not None:
