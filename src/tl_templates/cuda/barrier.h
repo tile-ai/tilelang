@@ -133,6 +133,10 @@ TL_DEVICE void fence_proxy_async() {
   asm volatile("fence.proxy.async.shared::cta;" : :);
 }
 
+TL_DEVICE void fence_barrier_init() {
+  asm volatile("fence.mbarrier_init.release.cluster;" : :);
+}
+
 // Indicate arrival of warp issuing TMA_STORE
 TL_DEVICE void tma_store_arrive() {
   asm volatile("cp.async.bulk.commit_group;");

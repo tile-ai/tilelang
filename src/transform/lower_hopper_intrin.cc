@@ -83,6 +83,16 @@ public:
                                   stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
           stmt_seq.push_back(stmt_);
           if (!init_mbarrier_calls_.empty()) {
+            // Note from FlashAttention:
+            // Helps with visibility of barrier init operations across warps /
+            // cta / cluster Available as a separate function so as to batch
+            // inits across barriers and fence once Note : It must be composed
+            // with an appropriate sync instruction with the right scope to
+            // ensure visibility eg. __syncthreads() or a cluster_arrive() +
+            // cluster_wait()
+            Stmt mem_fence = Evaluate(Call(
+                DataType::Handle(), tvm::tl::ptx_fence_barrier_init(), {}));
+            stmt_seq.push_back(mem_fence);
             Stmt mem_sync =
                 Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
                               {StringImm("shared")}));
