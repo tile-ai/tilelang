@@ -8,21 +8,24 @@ maintainers = [{name = "Lei Wang", email = "leiwang1999@outlook.com"}]
 license = "MIT"
 keywords = ["BLAS", "CUDA", "HIP", "Code Generation", "TVM"]
 classifiers = [
+    "Development Status :: 4 - Beta",
     "Environment :: GPU",
     "Operating System :: POSIX :: Linux",
-    "Operating System :: OS Independent",
     "Operating System :: MacOS",
-    "Programming Language :: Python :: 3.9",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: CPython",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Scientific/Engineering :: Artificial Intelligence",
 ]
 dynamic = ["version"]
 dependencies = [
+    "apache-tvm-ffi",
     "cloudpickle",
     "ml-dtypes",
     "numpy>=1.23.5",
@@ -31,7 +34,6 @@ dependencies = [
     "torch>=2.7; platform_system == 'Darwin'",
     "tqdm>=4.62.3",
     "typing-extensions>=4.10.0",
-    "apache-tvm-ffi",
 ]
 
 [project.optional-dependencies]
@@ -48,7 +50,7 @@ requires = [
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
-wheel.py-api = "cp38"
+wheel.py-api = "cp39"
 cmake.version = ">=3.26.1"
 build-dir = "build"
 
@@ -84,7 +86,7 @@ skip = [
 ]
 
 [tool.ruff]
-target-version = "py38"
+target-version = "py39"
 line-length = 100
 output-format = "full"
 

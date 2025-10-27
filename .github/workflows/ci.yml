@@ -25,6 +25,7 @@ env:
   FORCE_COLOR: "1"
   CLICOLOR_FORCE: "1"
   UV_INDEX_STRATEGY: "unsafe-best-match"
+  UV_HTTP_TIMEOUT: "600"
   XDG_CACHE_HOME: "${{ github.workspace }}/.cache" # to be updated
   PIP_CACHE_DIR: "${{ github.workspace }}/.cache/pip" # to be updated
   UV_CACHE_DIR: "${{ github.workspace }}/.cache/uv" # to be updated
@@ -43,7 +44,7 @@ jobs:
           submodules: recursive
 
       - name: Setup Python 3.9
-        id: setup-py38
+        id: setup-pylowest
         uses: actions/setup-python@v6
         with:
           python-version: "3.9" # use lowest supported version for linting
@@ -51,7 +52,7 @@ jobs:
 
       - name: Check AST with Python 3.9
         run: |
-          "${{ steps.setup-py38.outputs.python-path }}" -m compileall -q -f tilelang
+          "${{ steps.setup-pylowest.outputs.python-path }}" -m compileall -q -f tilelang
 
       - name: Setup Python 3.12
         uses: actions/setup-python@v6
@@ -167,7 +168,6 @@ jobs:
           echo "PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}" | tee -a "${GITHUB_ENV}"
           echo "UV_INDEX=${UV_INDEX}" | tee -a "${GITHUB_ENV}"
           echo "CLANG_TIDY_CMAKE_OPTIONS=${CLANG_TIDY_CMAKE_OPTIONS}" | tee -a "${GITHUB_ENV}"
-          echo "UV_HTTP_TIMEOUT=600" | tee -a "${GITHUB_ENV}"
 
           if [[ ! -x "$(command -v nvcc)" ]]; then
             export PATH="/usr/local/cuda/bin:${PATH}"
@@ -276,6 +276,17 @@ jobs:
           echo "::group::torch.utils.collect_env"
           uv run --no-project -m -- torch.utils.collect_env
           echo "::endgroup::"
+
+      - name: Clear uv cache for self-hosted runners (if setup failed)
+        if: >-
+          ${{
+            failure() &&
+            startsWith(matrix.runner.name, 'self-hosted') &&
+            (steps.setup-uv.conclusion == 'failure' || steps.setup-venv.conclusion == 'failure')
+          }}
+        run: |
+          echo "Clearing uv cache at ${UV_CACHE_DIR} due to failure."
+          uv cache clean
 
       - name: Run clang-tidy
         id: clang-tidy

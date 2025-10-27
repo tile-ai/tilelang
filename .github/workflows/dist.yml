@@ -43,7 +43,6 @@ jobs:
         python-version:
           - "3.9"
           # TVM is built with Python 3.9 Limited API, it should work with all Python >= 3.9.
-          # - "3.9"
           # - "3.10"
           # - "3.11"
           # - "3.12"
