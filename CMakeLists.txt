@@ -186,9 +186,13 @@ install(TARGETS tilelang_cython_wrapper
 if(APPLE)
   set_target_properties(tilelang PROPERTIES INSTALL_RPATH "@loader_path")
   set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "@loader_path")
+  set_target_properties(tvm PROPERTIES INSTALL_RPATH "@loader_path")
+  set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "@loader_path")
 else()
   set_target_properties(tilelang PROPERTIES INSTALL_RPATH "\$ORIGIN")
   set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN")
+  set_target_properties(tvm PROPERTIES INSTALL_RPATH "\$ORIGIN")
+  set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "\$ORIGIN")
 endif()
 
 install(
