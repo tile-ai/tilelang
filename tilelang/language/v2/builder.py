@@ -273,6 +273,8 @@ class Builder(BaseBuilder):
         elif isinstance(value, (Buffer, tir.IterVar, tir.Var)):
             IRBuilder.name(name, value)
             return value
+        elif isinstance(value, (tuple, list, tvm.ffi.Array)):
+            return value
         else:
             try:
                 value = tvm.runtime.convert(value)
@@ -365,7 +367,8 @@ class Builder(BaseBuilder):
             frame = self.name_inside_frame[name]
             if frame not in self.frames:
                 raise RuntimeError(
-                    f"Use variable `{name}` outside its defining region, defined in frame: {frame}, current frames: {self.frames}."
+                    f"Use immutable variable `{name}` outside its defining region, did you forget **alloc_var**?\n"
+                    f"variable `{name}` is defined in frame: {frame}, current frames: {self.frames}."
                 )
         if isinstance(value, tir.IntImm):
             return value.value
