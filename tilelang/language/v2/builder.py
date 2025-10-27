@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import inspect
+import typing
 
 import torch
 from tilelang.language.kernel import KernelLaunchFrame
@@ -13,7 +14,7 @@ import tvm
 from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
 from tvm.tir.expr import EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, Var
-from typing import Callable, ContextManager, Any, Generic, Hashable, ParamSpec, Self, TypeVar
+from typing import Callable, ContextManager, Any, Generic, Hashable, ParamSpec, Self, TypeVar, get_type_hints
 from .dtypes import get_tvm_dtype
 from types import EllipsisType
 import threading
@@ -399,17 +400,15 @@ def __torch_tensor_tl_arg__(self: torch.Tensor, name: str, builder: Builder):
 
 torch.Tensor.__tl_arg__ = __torch_tensor_tl_arg__
 
+
 _P = ParamSpec('_P')
 _T = TypeVar('_T')
 
 
 @dataclass
 class IRGenerator(Generic[_P, _T]):
-    func: Callable[[BaseBuilder], Callable[_P, _T]]
+    gen: Callable[[BaseBuilder], Callable[_P, _T]]
     source: str
-
-    def __call__(self, tb: BaseBuilder) -> Callable[_P, _T]:
-        return self.func(tb)
 
 
 class PrimFunc(Generic[_P, _T], tvm.tir.PrimFunc):
@@ -427,6 +426,7 @@ class PrimFunc(Generic[_P, _T], tvm.tir.PrimFunc):
 @dataclass
 class Macro(Generic[_P, _T]):
     name: str
+    orig_func: Callable[_P, _T]
     ir_gen: IRGenerator[_P, _T]
 
     @property
@@ -436,31 +436,59 @@ class Macro(Generic[_P, _T]):
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _T:
         builder = Builder.current()
         with builder.macro(self.name):
-            res = self.ir_gen(builder)(*args, **kwargs)
+            res = self.ir_gen.gen(builder)(*args, **kwargs)
         return res
 
 
-def macro(func: Callable[_P, _T]) -> Macro[_P, _T]:
+def build_ir_generator(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
     ir_gen = mutate(func)
-    ir_gen = IRGenerator(func=ir_gen, source=ir_gen.__source__)
-    return Macro(func.__name__, ir_gen)
+    ir_gen = IRGenerator(gen=ir_gen, source=ir_gen.__source__)
+    return ir_gen
+
+
+def macro(func: Callable[_P, _T]) -> Macro[_P, _T]:
+    return Macro(
+        name=func.__name__,
+        orig_func=func,
+        ir_gen=build_ir_generator(func)
+    )
 
 
 def prim_func(func: Callable[_P, _T]) -> PrimFunc[_P, _T]:
     sig = inspect.signature(func)
     annot = func.__annotations__
-    for param in sig.parameters.values():
-        if param.default is param.empty:
-            if param.annotation is param.empty:
-                raise TypeError(f"Parameter `{param.name}` in prim_func `{func.__name__}` "
-                                "must have type annotation or default value.")
-            param.default = param.annotation
-    args = sig.bind()
-    ir_gen = mutate(func)
-    ir_gen = IRGenerator(func=ir_gen, source=ir_gen.__source__)
+    if any(map(lambda x: isinstance(x, str), annot)):
+        try:
+            annot = get_type_hints(func)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to get type hints for function `{func.__name__}`. \n"
+                "Note: if you are using `from __future__ import annotations`, type hints may be missing, \n"
+                "To fix this, please use default argument instead of type annotations: \n"
+                "```py\n"
+                "def foo(a=tl.Tensor((128, 128), 'float32'), b=tl.float32()): ..."
+                "```"
+            ) from e
+    args = []
+    kwargs = {}
+    for name, param in sig.parameters.items():
+        if param.annotation is not param.empty:
+            if callable(param.annotation):
+                value = param.annotation()
+            else:
+                value = param.annotation
+        elif param.default is not param.empty:
+            value = param.default
+        else:
+            value = Builder.empty
+        if param.kind == param.POSITIONAL_ONLY:
+            args.append(value)
+        else:
+            kwargs[name] = value
+    ir_gen = build_ir_generator(func)
     builder = Builder(annot)
     with builder.prim_func(func.__name__):
-        ir_gen(builder)(*args.args, **args.kwargs)
+        ir_gen.gen(builder)(*args, **kwargs)
     res = builder.get()
     res.ir_gen = ir_gen
     res.source = ir_gen.source
