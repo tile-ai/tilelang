@@ -5,9 +5,14 @@ kernel adapter using TVM.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+import inspect
 from typing import (
     Any,
     Callable,
+    Generic,
+    ParamSpec,
+    TypeVar,
     overload,
     Literal,
 )
@@ -21,8 +26,7 @@ from tilelang.utils.target import determine_target
 from tilelang.cache import cached
 from os import path, makedirs
 from logging import getLogger
-import functools
-from tilelang.jit.param import Kernel, _P, _RProg
+from tilelang.jit.param import Kernel
 
 logger = getLogger(__name__)
 
@@ -79,8 +83,13 @@ def compile(
     )
 
 
-class _JitImplementation:
+_P = ParamSpec('_P')
+_T = TypeVar('_T')
 
+
+@dataclass
+class JITImpl(Generic[_P, _T]):
+    func: Callable[_P, _T]
     out_idx: list[int] | int | None
     target: str | Target
     target_host: str | Target
@@ -89,149 +98,98 @@ class _JitImplementation:
     pass_configs: dict[str, Any] | None
     debug_root_path: str | None
     compile_flags: list[str] | str | None
+    func_source: str
+    signature: inspect.Signature
 
-    def __init__(self,
-                 out_idx: Any = None,
-                 target: str | Target = "auto",
-                 target_host: str | Target = None,
-                 execution_backend: Literal["dlpack", "ctypes", "cython"] = "cython",
-                 verbose: bool = False,
-                 pass_configs: dict[str, Any] | None = None,
-                 debug_root_path: str | None = None,
-                 compile_flags: list[str] | str | None = None):
-        """
-        Initializes the JIT compiler decorator.
-
-        Parameters
-        ----------
-        out_idx : Any, optional
-            Index(es) of the output tensors to return from the compiled kernel
-            (default: None, meaning all outputs are returned or determined by the kernel itself).
-        target : Union[str, Target], optional
-            Compilation target for TVM. Can be a string (e.g., "cuda", "llvm")
-            or a TVM Target object. If "auto", the target is determined automatically
-            (default: "auto").
-        target_host : Union[str, Target], optional
-            Target host for cross-compilation, similar to `target` (default: None).
-        execution_backend : Literal["dlpack", "ctypes", "cython"], optional
-            The backend used for kernel execution and argument passing.
-            "dlpack" is generally preferred for zero-copy tensor passing with compatible frameworks.
-            "ctypes" uses standard C types. "cython" uses Cython for potentially faster execution.
-            (default: "cython").
-        verbose : bool, optional
-            If True, enables verbose logging during compilation (default: False).
-        pass_configs : Optional[Dict[str, Any]], optional
-            A dictionary of configurations for TVM's pass context. These can fine-tune
-            the compilation process. Examples include "tir.disable_vectorize"
-            (default: None).
-        debug_root_path : Optional[str], optional
-            If provided, the compiled kernel's source code will be saved to a file
-            in this directory. This is useful for debugging the generated code.
-            If None, no debug information is saved (default: None).
-            If a relative path is given, it's made absolute relative to the project root
-            or current working directory.
-        compile_flags : Optional[Union[List[str], str]], optional
-            Additional compilation flags to pass to the compiler.
-            If None, no additional compilation flags are passed (default: None).
-        """
-        self.out_idx = out_idx
-        self.execution_backend = execution_backend
-        self.target = target
-        self.target_host = target_host
-        self.verbose = verbose
-        self.pass_configs = pass_configs
-        self.compile_flags = compile_flags
-
-        # Corrected debug_root_path handling
-        self.debug_root_path = debug_root_path
+    def __post_init__(self):
         if self.debug_root_path is not None and not path.isabs(self.debug_root_path):
             try:
                 base_path = path.dirname(path.dirname(path.dirname(__file__)))
                 self.debug_root_path = path.join(base_path, self.debug_root_path)
             except NameError:
                 self.debug_root_path = path.abspath(self.debug_root_path)
-
         self._kernel_cache: dict[tuple, Kernel] = {}
 
-    # This tells the type checker what the *wrapper* function will return.
-    # this is for linting, please do not remove it.
-    @overload
-    def __call__(self, func: Callable[_P, _RProg]) -> Callable[_P, tuple[_RProg, Kernel]]:
-        ...
+    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel:
+        # Separate out the tuning parameters from the user's kwargs
+        tune_params = kwargs.pop('__tune_params', {})
+        # Whether to return the compile arguments (out_idx, target, target_host, etc.) for autotuner cache
+        return_compile_arguments = kwargs.pop('__return_compile_arguments', False)
+        if return_compile_arguments:
+            compile_args = {
+                'out_idx': self.out_idx,
+                'execution_backend': self.execution_backend,
+                'target': self.target,
+                'target_host': self.target_host,
+                'verbose': self.verbose,
+                'pass_configs': self.pass_configs,
+                'compile_flags': self.compile_flags,
+            }
+            return compile_args
 
-    @overload
-    def __call__(self, func: Callable[_P, _RProg]) -> Callable[_P, Kernel]:
-        ...
+        key_args_tuple = args
+        key_kwargs_tuple = tuple(sorted(kwargs.items()))
+        tuned_key_kwargs_tuple = tuple(sorted(tune_params.items()))
+        key = (key_args_tuple, key_kwargs_tuple, tuned_key_kwargs_tuple)
 
-    # Actual implementation of __call__
-    def __call__(
-        self,
-        func: Callable[_P, _RProg]  # func is Union[Callable[_P, _RProg], PrimFunc] in original
-    ) -> Callable[_P, Any]:
+        if key not in self._kernel_cache:
+            # Ensure 'func' (the original user function) is used correctly
+            program_result_source = self.func
+            if isinstance(program_result_source, PrimFunc):
+                program_result = program_result_source
+            elif callable(program_result_source):
+                program_result = program_result_source(*args, **kwargs, **tune_params)
+            else:
+                raise ValueError(f"Invalid function type: {type(program_result_source)}")
 
-        @functools.wraps(func)
-        def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> Any:
-            # Separate out the tuning parameters from the user's kwargs
-            tune_params = kwargs.pop('__tune_params', {})
-            # Whether to return the compile arguments (out_idx, target, target_host, etc.) for autotuner cache
-            return_compile_arguments = kwargs.pop('__return_compile_arguments', False)
-            if return_compile_arguments:
-                compile_args = {
-                    'out_idx': self.out_idx,
-                    'execution_backend': self.execution_backend,
-                    'target': self.target,
-                    'target_host': self.target_host,
-                    'verbose': self.verbose,
-                    'pass_configs': self.pass_configs,
-                    'compile_flags': self.compile_flags,
-                }
-                return compile_args
+            kernel_result = compile(
+                program_result,
+                out_idx=self.out_idx,
+                execution_backend=self.execution_backend,
+                target=self.target,
+                target_host=self.target_host,
+                verbose=self.verbose,
+                pass_configs=self.pass_configs,
+                compile_flags=self.compile_flags,
+            )
 
-            key_args_tuple = args
-            key_kwargs_tuple = tuple(sorted(kwargs.items()))
-            tuned_key_kwargs_tuple = tuple(sorted(tune_params.items()))
-            key = (key_args_tuple, key_kwargs_tuple, tuned_key_kwargs_tuple)
+            if self.debug_root_path:
+                func_name = getattr(self.func, '__name__', 'jit_kernel')  # Use func for name
+                kernel_file = f'tilelang_jit_kernel_{func_name}.c'
+                program_file = f'tilelang_jit_program_{func_name}.py'
+                makedirs(self.debug_root_path, exist_ok=True)
+                with open(path.join(self.debug_root_path, kernel_file), 'w') as f:
+                    print(kernel_result.get_kernel_source(), file=f)
+                with open(path.join(self.debug_root_path, program_file), 'w') as f:
+                    print(program_result.script(), file=f)
 
-            if key not in self._kernel_cache:
-                # Ensure 'func' (the original user function) is used correctly
-                program_result_source = func
-                if isinstance(program_result_source, PrimFunc):
-                    program_result = program_result_source
-                elif callable(program_result_source):
-                    program_result = program_result_source(*args, **kwargs, **tune_params)
-                else:
-                    raise ValueError(f"Invalid function type: {type(program_result_source)}")
+            self._kernel_cache[key] = kernel_result
 
-                kernel_result = compile(
-                    program_result,
-                    out_idx=self.out_idx,
-                    execution_backend=self.execution_backend,
-                    target=self.target,
-                    target_host=self.target_host,
-                    verbose=self.verbose,
-                    pass_configs=self.pass_configs,
-                    compile_flags=self.compile_flags,
-                )
+        return self._kernel_cache[key]
 
-                if self.debug_root_path:
-                    func_name = getattr(func, '__name__', 'jit_kernel')  # Use func for name
-                    kernel_file = f'tilelang_jit_kernel_{func_name}.c'
-                    program_file = f'tilelang_jit_program_{func_name}.py'
-                    makedirs(self.debug_root_path, exist_ok=True)
-                    with open(path.join(self.debug_root_path, kernel_file), 'w') as f:
-                        print(kernel_result.get_kernel_source(), file=f)
-                    with open(path.join(self.debug_root_path, program_file), 'w') as f:
-                        print(program_result.script(), file=f)
 
-                self._kernel_cache[key] = kernel_result
+@overload
+def jit(func: Callable[_P, _T]) -> JITImpl[_P, _T]:
+    ...
 
-            return self._kernel_cache[key]
 
-        return wrapper
+@overload
+def jit(
+        *,  # Indicates subsequent arguments are keyword-only
+        out_idx: Any = None,
+        target: str | Target = "auto",
+        target_host: str | Target = None,
+        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
+        verbose: bool = False,
+        pass_configs: dict[str, Any] | None = None,
+        debug_root_path: str | None = None,
+        compile_flags: list[str] | str | None = None
+) -> Callable[[Callable[_P, _T]], JITImpl[_P, _T]]:
+    ...
 
 
 def jit(  # This is the new public interface
-        func: Callable[_P, _RProg] | PrimFunc | None = None,
+        func: Callable[_P, _T] | PrimFunc | None = None,
         *,  # Indicates subsequent arguments are keyword-only
         out_idx: Any = None,
         target: str | Target = "auto",
@@ -275,32 +233,22 @@ def jit(  # This is the new public interface
     if isinstance(compile_flags, str):
         compile_flags = [compile_flags]
 
+    def decorator(func: Callable[_P, _T]) -> JITImpl[_P, _T]:
+        return JITImpl(
+            func,
+            out_idx=out_idx,
+            target=target,
+            target_host=target_host,
+            execution_backend=execution_backend,
+            verbose=verbose,
+            pass_configs=pass_configs,
+            debug_root_path=debug_root_path,
+            compile_flags=compile_flags,
+            func_source=inspect.getsource(func),
+            signature=inspect.signature(func),
+        )
+
     if callable(func):
-        # Case 1: Used as @jit (func_or_out_idx is the function, others are defaults)
-        # Create a default _JitImplementation instance and apply it to the function.
-        default_decorator = _JitImplementation(
-            out_idx=out_idx,  # Explicitly None for the default case
-            target=target,
-            target_host=target_host,
-            execution_backend=execution_backend,
-            verbose=verbose,
-            pass_configs=pass_configs,
-            debug_root_path=debug_root_path,
-            compile_flags=compile_flags)
-        return default_decorator(func)
-    elif isinstance(func, PrimFunc):
-        raise ValueError("Use tilelang.jit to decorate prim_func is not supported yet.")
+        return decorator(func)
     else:
-        # Case 2: Used as @jit(...) to configure, or func_or_out_idx is meant as out_idx.
-        # Create a _JitImplementation instance with the provided/defaulted arguments.
-        # This instance is a decorator that will be applied to the function later.
-        configured_decorator = _JitImplementation(
-            out_idx=out_idx,  # Pass along; could be an actual out_idx or None
-            target=target,
-            target_host=target_host,
-            execution_backend=execution_backend,
-            verbose=verbose,
-            pass_configs=pass_configs,
-            debug_root_path=debug_root_path,
-            compile_flags=compile_flags)
-        return configured_decorator
+        return decorator
