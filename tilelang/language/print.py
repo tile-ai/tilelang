@@ -1,6 +1,6 @@
 """
 This module provides macros and utilities for debugging TileLang (tl) programs.
-It includes functionality to print variables, print values in buffers, and conditionally execute debug prints.
+It includes functionality to print variables, print values in buffers, conditionally execute debug prints and assert.
 """
 
 from tvm import tir
@@ -131,6 +131,27 @@ def print_local_buffer_with_condition(condition: tir.PrimExpr,
             coords = index_to_coordinates(i, buffer.shape)
             tir.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i,
                             buffer[coords])
+
+
+from tilelang.utils.target import check_cuda_availability
+import warnings
+
+_IS_CUDA_AVAILABLE = check_cuda_availability()
+
+
+@macro
+def device_assert(condition: tir.PrimExpr, msg: str = ""):
+    """
+    Device-side assert emulation.
+    Emits a device-side assert call on CUDA targets when CUDA is available.
+    The assert is always enabled and cannot be disabled at runtime.
+    """
+    if _IS_CUDA_AVAILABLE:
+        if msg == "":
+            tir.call_extern("void", "device_assert", condition)
+        else:
+            warnings.warn("Non-empty msg may slightly slow down the kernel", stacklevel=2)
+            tir.call_extern("void", "device_assert_with_msg", condition, msg)
 
 
 def print(obj: Any, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> tir.PrimExpr:
