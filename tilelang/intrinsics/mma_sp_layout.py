@@ -76,6 +76,11 @@ def metadata_32bit_load_32x1_to_shared_16x2_layout_8bit(thread_id: int, local_id
     col = (logical_id % 4) // 2
     return row, col
 
+def ldmatrix_trans_32x8_to_shared_16x16_layout(thread_id, local_id):
+    row = (local_id // 4) * 8 + thread_id % 8
+    col = (thread_id // 8) * 4 + local_id % 4
+    return row, col
+
 def ldmatrix_32x16_to_shared_32x16_layout(thread_id, local_id):
     row = thread_id
     col = local_id % 8 + 8 * (local_id // 8)
@@ -84,6 +89,11 @@ def ldmatrix_32x16_to_shared_32x16_layout(thread_id, local_id):
 def ldmatrix_trans_32x16_to_shared_16x32_layout(thread_id, local_id):
     row = 8 * (local_id // 8) + thread_id % 8
     col = (thread_id // 8) * 8 + local_id % 8
+    return row, col
+
+def ldmatrix_trans_32x32_to_shared_shared_16x64_layout(thread_id, local_id):
+    row = (local_id // 16) * 8 + thread_id % 8
+    col = (thread_id // 8) * 16 + local_id % 16
     return row, col
 
 def get_ldmatrix_offset_b(
@@ -96,7 +106,14 @@ def get_ldmatrix_offset_b(
 ):
     assert matrix == "B", "matrix should be B"
     dtype_bits = DataType(dtype).bits
-    if dtype_bits == 16:
+    if dtype_bits == 32:
+        if transposed:
+            transform_func = ldmatrix_trans_32x8_to_shared_16x16_layout
+            new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
+            return new_row_idx * stride + new_col_idx
+        else:
+            raise ValueError("ldmatrix only supports B transposed for 32-bit dtype")
+    elif dtype_bits == 16:
         transform_func = ldmatrix_32x16_to_shared_32x16_layout
         transform_func_trans = ldmatrix_trans_32x16_to_shared_16x32_layout
         if transposed:
@@ -105,5 +122,12 @@ def get_ldmatrix_offset_b(
         else:
             new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
             return new_row_idx * stride + new_col_idx
+    elif dtype_bits == 8:
+        if transposed:
+            transform_func = ldmatrix_trans_32x32_to_shared_shared_16x64_layout
+            new_row_idx, new_col_idx = transform_func(row_idx, col_idx)
+            return new_row_idx * stride + new_col_idx
+        else:
+            raise ValueError("ldmatrix only supports B transposed for 8-bit dtype")
     else:
         raise ValueError(f"Unsupported dtype {dtype}")

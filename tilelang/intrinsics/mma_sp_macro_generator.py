@@ -471,7 +471,7 @@ class SparseTensorCoreIntrinEmitter(object):
                         B_local_buf.data,
                         i * local_size_b + lift(local_size_b) // 2,
                         T.address_of(B_shared_buf_elem),
-                        get_ldmatrix_offset_b("B", tx, 8, stride, b_dtype, b_transposed),
+                        get_ldmatrix_offset_b("B", tx, lift(local_size_b) // 2, stride, b_dtype, b_transposed),
                     )
 
                 else:
