@@ -176,6 +176,8 @@ if(NOT "${SKBUILD_SABI_VERSION}" STREQUAL "")
 endif()
 
 python_add_library(tilelang_cython_wrapper MODULE "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp" ${USE_SABI} WITH_SOABI)
+# Use Python 3.9 Limited API
+target_compile_definitions(tilelang_cython_wrapper PUBLIC -DPy_LIMITED_API=0x03090000)
 # Install extension into the tilelang package directory
 install(TARGETS tilelang_cython_wrapper
         LIBRARY DESTINATION tilelang
