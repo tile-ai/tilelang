@@ -11,7 +11,7 @@ from .ast import BaseBuilder, eval_op, mutate
 import tvm
 from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
-from tvm.tir.expr import EqualOp, NotEqualOp, PrimExpr, Var
+from tvm.tir.expr import EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, Var
 from typing import Callable, ContextManager, Any, Generic, Hashable, ParamSpec, Self, TypeVar
 from .dtypes import get_tvm_dtype
 from types import EllipsisType
@@ -228,6 +228,12 @@ class Builder(BaseBuilder):
                 orig_value = tir.alloc_buffer((1,), dtype=annot_val.dtype, scope='local.var')
                 IRBuilder.name(name, orig_value)
                 if isinstance(value, EllipsisType) or value is self.empty:
+                    return orig_value
+                elif isinstance(value, (int, float, IntImm, FloatImm)):
+                    tir.block_attr(
+                        {'tl.local_var_init': {
+                            orig_value.data: tvm.runtime.convert(value)
+                        }})
                     return orig_value
         # if orig_value is a local.var, we use buffer_store to modify it immutably
         #   however, if rvalue is also a local.var, this is a new binding,
