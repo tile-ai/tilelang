@@ -42,11 +42,7 @@ dependencies = [
 fp4 = ["ml-dtypes>=0.5.1"]
 
 [build-system]
-requires = [
-    "cython>=3.0.0",
-    "scikit-build-core",
-    "setuptools>=63",
-]
+requires = ["cython>=3.0.0", "scikit-build-core"]
 build-backend = "scikit_build_core.build"
 
 [tool.scikit-build]
@@ -61,15 +57,38 @@ metadata.version.provider = "version_provider"
 metadata.version.provider-path = "."
 experimental = true
 
+[tool.scikit-build.sdist]
+# See MANIFEST.in for details
+include = [
+    "VERSION",
+    "LICENSE",
+    "THIRDPARTYNOTICES.txt",
+    "version_provider.py",
+    "requirements*.txt",
+    "tilelang/jit/adapter/cython/cython_wrapper.pyx",
+    "CMakeLists.txt",
+    "src/**",
+    "cmake/**",
+    "3rdparty/**",
+    "testing/**",
+    "examples/**",
+]
+exclude = [
+    ".git",
+    ".github",
+    "**/.git",
+    "**/.github",
+    "3rdparty/clang**",
+    "3rdparty/llvm**",
+    "build",
+]
+
 [tool.scikit-build.wheel.packages]
 tilelang = "tilelang"
 "tilelang/src" = "src"
+# NOTE: The mapping below places the contents of '3rdparty' inside 'tilelang/3rdparty' in the wheel.
+# This is necessary to find TVM shared libraries at runtime.
 "tilelang/3rdparty" = "3rdparty"
-
-# TODO: we might want to not include these in wheel?
-"tilelang/benchmark" = "benchmark"
-"tilelang/examples" = "examples"
-"tilelang/testing" = "testing"
 
 [tool.yapf]
 based_on_style = "yapf"
@@ -157,8 +176,8 @@ environment-pass = [
 before-build = "env -0 | sort -z | tr '\\0' '\\n'"
 windows.before-build = "set"
 # Pin to glibc 2.17 for x86 and 2.28 for aarch64 for now
-manylinux-x86_64-image = "manylinux2014"
-manylinux-aarch64-image = "manylinux_2_28"
+manylinux-x86_64-image = "manylinux2014"   # CentOS 7
+manylinux-aarch64-image = "manylinux_2_28" # AlmaLinux 8
 
 [tool.cibuildwheel.linux]
 environment = { PYTHONDEVMODE = "1", PYTHONUNBUFFERED = "1", PATH = "/usr/local/cuda/bin:$PATH" }
