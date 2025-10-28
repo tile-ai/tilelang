@@ -83,9 +83,9 @@ protected:
     // simulation based approach to find dependencies
     for (size_t i = 0; i < seq.size(); ++i) {
       const StmtEntry &s = seq[i];
-      // check if sync before statement is needed.
-      bool sync_before_stmt = (syncs_inserted_.count(s.stmt) != 0);
-      // Apply the syncs added already.
+      const bool pre_marked_sync = (syncs_inserted_.count(s.stmt) != 0);
+      bool sync_before_stmt = pre_marked_sync;
+
       if (sync_before_stmt) {
         reads.clear();
         writes.clear();
@@ -98,7 +98,8 @@ protected:
             break;
           }
         } else if (acc.type == kWrite) {
-          if (FindConflict(reads, acc, false)) {
+          if (FindConflict(reads, acc, false) ||
+              FindConflict(writes, acc, false)) {
             sync_before_stmt = true;
             break;
           }
@@ -107,12 +108,12 @@ protected:
           writes.clear();
         }
       }
-      // If sync is inserted. remove the irrelevant things.
+
       if (sync_before_stmt) {
         reads.clear();
         writes.clear();
       }
-      // Add the read/write of current statement
+
       for (const AccessEntry &acc : s.access) {
         if (acc.type == kRead) {
           reads.push_back(acc);
@@ -123,7 +124,8 @@ protected:
           writes.clear();
         }
       }
-      if (sync_before_stmt) {
+
+      if (sync_before_stmt && !pre_marked_sync) {
         insert_syncs(s.stmt);
       }
     }
@@ -142,7 +144,8 @@ protected:
               break;
             }
           } else if (acc.type == kWrite) {
-            if (FindConflict(reads, acc, true)) {
+            if (FindConflict(reads, acc, true) ||
+                FindConflict(writes, acc, true)) {
               sync_before_stmt = true;
               break;
             }
@@ -327,7 +330,7 @@ private:
         }
       }
 
-      if (!(has_same_index)) {
+      if (!has_same_index) {
         break;
       }
     }
