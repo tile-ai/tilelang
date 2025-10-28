@@ -700,7 +700,9 @@ private:
     size_t offset{0};
     size_t size{0};
     const VarNode *var{nullptr};
-    bool operator>(const ActiveInterval &other) const { return end > other.end; }
+    bool operator>(const ActiveInterval &other) const {
+      return end > other.end;
+    }
   };
 
   static ArenaPlan LinearScanPack(std::vector<Interval> intervals) {
@@ -733,15 +735,15 @@ private:
     for (const Interval &interval : intervals) {
       retire(interval.start);
       size_t offset = 0;
-      if (auto slot = freelist.Allocate(interval.size_bytes,
-                                        interval.alignment)) {
+      if (auto slot =
+              freelist.Allocate(interval.size_bytes, interval.alignment)) {
         offset = slot.value();
       } else {
         offset = AlignUpSize(arena_top, interval.alignment);
         arena_top = offset + interval.size_bytes;
       }
-      active.push(
-          ActiveInterval{interval.end, offset, interval.size_bytes, interval.var});
+      active.push(ActiveInterval{interval.end, offset, interval.size_bytes,
+                                 interval.var});
       offsets[interval.var] = offset;
     }
 
@@ -1124,8 +1126,8 @@ private:
       Interval interval;
       interval.start = info.start;
       interval.end = info.end;
-      interval.size_bytes =
-          static_cast<size_t>(std::max<int64_t>(0, info.const_size_bytes.value()));
+      interval.size_bytes = static_cast<size_t>(
+          std::max<int64_t>(0, info.const_size_bytes.value()));
       interval.alignment = info.alignment;
       interval.var = info.var;
       intervals.push_back(interval);
@@ -1135,7 +1137,8 @@ private:
     size_t arena_size_const = plan.arena_size;
 
     if (verbose_) {
-      LOG(DEBUG) << "ArenaPlan (constant buffers): arena_size=" << arena_size_const;
+      LOG(DEBUG) << "ArenaPlan (constant buffers): arena_size="
+                 << arena_size_const;
       for (const auto &kv : plan.offsets) {
         const VarNode *var = kv.first;
         LOG(DEBUG) << "  " << var->name_hint << " -> offset=" << kv.second;
@@ -1174,9 +1177,9 @@ private:
       total_size = max(total_size, buf_end);
     }
 
-    merged_alloc_size_ =
-        buf_infos.empty() ? make_const(offset_dtype, 0)
-                          : AlignPrimExpr(total_size, align_bytes_);
+    merged_alloc_size_ = buf_infos.empty()
+                             ? make_const(offset_dtype, 0)
+                             : AlignPrimExpr(total_size, align_bytes_);
 
     bool overlap_detected = false;
 
@@ -1203,8 +1206,7 @@ private:
           auto b_off_imm = buffer_byte_offsets_.at(b.var).as<IntImmNode>();
           if (!b.const_size_bytes.has_value() || b_off_imm == nullptr)
             continue;
-          bool live_overlap =
-              !(a.end <= b.start || b.end <= a.start);
+          bool live_overlap = !(a.end <= b.start || b.end <= a.start);
           if (!live_overlap)
             continue;
           int64_t b_off = b_off_imm->value;
@@ -1235,9 +1237,9 @@ private:
         new_total = max(new_total, buf_end);
         new_cursor = buf_end;
       }
-      merged_alloc_size_ =
-          buf_infos.empty() ? make_const(offset_dtype, 0)
-                            : AlignPrimExpr(new_total, align_bytes_);
+      merged_alloc_size_ = buf_infos.empty()
+                               ? make_const(offset_dtype, 0)
+                               : AlignPrimExpr(new_total, align_bytes_);
     }
   }
 
