@@ -15,7 +15,7 @@ from tvm.target import Target
 import inspect
 from functools import partial
 from typing import (Callable, Generic, Literal, Any, ParamSpec, TypeVar)
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import logging
 import concurrent.futures
 import torch
@@ -525,12 +525,12 @@ class AutoTuner:
                 # latency, ref_latency = target_fn(jit_kernel)
                 latency, ref_latency = run_with_timeout(target_fn, timeout, jit_kernel)
             except TimeoutException:
-                logger.info(
+                logger.warning(
                     f"A timeout occurred while testing config {config}, checkout autotuner.log for more details"
                 )
                 continue
             except Exception:
-                logger.info(
+                logger.warning(
                     f"An error occurred while testing config {config}, checkout autotuner.log for more details"
                 )
                 logger.debug(f"Error: {traceback.format_exc()}")

@@ -11,6 +11,7 @@ from typing import (
     Any,
     Callable,
     Generic,
+    Iterable,
     ParamSpec,
     TypeVar,
     overload,
@@ -27,6 +28,9 @@ from tilelang.cache import cached
 from os import path, makedirs
 from logging import getLogger
 from tilelang.jit.param import Kernel
+import concurrent.futures
+
+from tqdm.auto import tqdm
 
 logger = getLogger(__name__)
 
@@ -83,6 +87,72 @@ def compile(
     )
 
 
+def par_compile(funcs: Iterable[PrimFunc],
+                out_idx: list[int] | int | None = None,
+                execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
+                target: str | Target = "auto",
+                target_host: str | Target | None = None,
+                verbose: bool = False,
+                pass_configs: dict[str, Any] | None = None,
+                compile_flags: list[str] | str | None = None,
+                num_workers: int = None,
+                ignore_error: bool = False) -> list[JITKernel]:
+    """
+    Parallel compile multiple TileLang PrimFunc with TVM and build JITKernels.
+    Parameters
+    ----------
+    funcs : Iterable[tvm.tir.PrimFunc]
+        The TileLang TIR functions to compile and wrap.
+    out_idx : Union[List[int], int], optional
+        Index(es) of the output tensors to return (default: None).
+    execution_backend : Literal["dlpack", "ctypes", "cython", "nvrtc"], optional
+        Execution backend to use for kernel execution (default: "cython").
+    target : Union[str, Target], optional
+        Compilation target, either as a string or a TVM Target object (default: "auto").
+    target_host : Union[str, Target], optional
+        Target host for cross-compilation (default: None).
+    verbose : bool, optional
+        Whether to enable verbose output (default: False).
+    pass_configs : dict, optional
+        Additional keyword arguments to pass to the Compiler PassContext.
+        Refer to `tilelang.transform.PassConfigKey` for supported options.
+    """
+    with concurrent.futures.ThreadPoolExecutor(num_workers, 'tl-par-comp') as executor:
+        futures = []
+        future_map = {}
+        for i, func in enumerate(funcs):
+            future = executor.submit(
+                compile,
+                func=func,
+                out_idx=out_idx,
+                execution_backend=execution_backend,
+                target=target,
+                target_host=target_host,
+                verbose=verbose,
+                pass_configs=pass_configs,
+                compile_flags=compile_flags,
+            )
+            future_map[future] = i
+            futures.append(future)
+        results = [... for _ in futures]
+        for future in tqdm(
+                concurrent.futures.as_completed(futures),
+                total=len(futures),
+                desc="Parallel Compiling",
+        ):
+            idx = future_map[future]
+            if ignore_error:
+                try:
+                    results[idx] = future.result()
+                except Exception as e:
+                    logger.warning(f"Error compiling function at index {idx}: {e}")
+                    results[idx] = None
+            else:
+                results[idx] = future.result()
+        return results
+    return results
+
+
 _P = ParamSpec('_P')
 _T = TypeVar('_T')
 
@@ -91,9 +161,9 @@ _T = TypeVar('_T')
 class JITImpl(Generic[_P, _T]):
     func: Callable[_P, _T]
     out_idx: list[int] | int | None
+    execution_backend: Literal["dlpack", "ctypes", "cython"]
     target: str | Target
     target_host: str | Target
-    execution_backend: Literal["dlpack", "ctypes", "cython"]
     verbose: bool
     pass_configs: dict[str, Any] | None
     debug_root_path: str | None
@@ -109,6 +179,69 @@ class JITImpl(Generic[_P, _T]):
             except NameError:
                 self.debug_root_path = path.abspath(self.debug_root_path)
         self._kernel_cache: dict[tuple, Kernel] = {}
+
+    def get_tir(self, *args: _P.args, **kwargs: _P.kwargs) -> PrimFunc:
+        program_result_source = self.func
+        if isinstance(program_result_source, PrimFunc):
+            program_result = program_result_source
+        elif callable(program_result_source):
+            program_result = program_result_source(*args, **kwargs)
+        else:
+            raise ValueError(f"Invalid function type: {type(program_result_source)}")
+        return program_result
+
+    def par_compile(self,
+                    configs: Iterable[dict[str, Any] | tuple[str, Any]],
+                    num_workers: int = None,
+                    ignore_error: bool = False) -> list[JITKernel]:
+        configs = list(configs)
+        funcs = []
+        for cfg in tqdm(configs, desc='Elaborating'):
+            if isinstance(cfg, tuple):
+                funcs.append(self.get_tir(*cfg))
+            elif isinstance(cfg, dict):
+                funcs.append(self.get_tir(**cfg))
+            else:
+                raise ValueError(f"Invalid config type: {type(cfg)}, expected tuple or dict.")
+        return par_compile(
+            funcs,
+            out_idx=self.out_idx,
+            execution_backend=self.execution_backend,
+            target=self.target,
+            target_host=self.target_host,
+            verbose=self.verbose,
+            pass_configs=self.pass_configs,
+            compile_flags=self.compile_flags,
+            num_workers=num_workers,
+            ignore_error=ignore_error)
+
+    def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel:
+        func = self.get_tir(*args, **kwargs)
+        kernel_result = compile(
+            func,
+            out_idx=self.out_idx,
+            execution_backend=self.execution_backend,
+            target=self.target,
+            target_host=self.target_host,
+            verbose=self.verbose,
+            pass_configs=self.pass_configs,
+            compile_flags=self.compile_flags,
+        )
+
+        if self.debug_root_path:
+            if isinstance(self.func, PrimFunc):
+                func_name = self.func.attrs['global_symbol']
+            else:
+                func_name = getattr(self.func, '__name__', 'jit_kernel')
+            kernel_file = f'tilelang_jit_kernel_{func_name}.c'
+            program_file = f'tilelang_jit_program_{func_name}.py'
+            makedirs(self.debug_root_path, exist_ok=True)
+            with open(path.join(self.debug_root_path, kernel_file), 'w') as f:
+                print(kernel_result.get_kernel_source(), file=f)
+            with open(path.join(self.debug_root_path, program_file), 'w') as f:
+                print(func.script(), file=f)
+
+        return kernel_result
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel:
         # Separate out the tuning parameters from the user's kwargs
@@ -133,37 +266,7 @@ class JITImpl(Generic[_P, _T]):
         key = (key_args_tuple, key_kwargs_tuple, tuned_key_kwargs_tuple)
 
         if key not in self._kernel_cache:
-            # Ensure 'func' (the original user function) is used correctly
-            program_result_source = self.func
-            if isinstance(program_result_source, PrimFunc):
-                program_result = program_result_source
-            elif callable(program_result_source):
-                program_result = program_result_source(*args, **kwargs, **tune_params)
-            else:
-                raise ValueError(f"Invalid function type: {type(program_result_source)}")
-
-            kernel_result = compile(
-                program_result,
-                out_idx=self.out_idx,
-                execution_backend=self.execution_backend,
-                target=self.target,
-                target_host=self.target_host,
-                verbose=self.verbose,
-                pass_configs=self.pass_configs,
-                compile_flags=self.compile_flags,
-            )
-
-            if self.debug_root_path:
-                func_name = getattr(self.func, '__name__', 'jit_kernel')  # Use func for name
-                kernel_file = f'tilelang_jit_kernel_{func_name}.c'
-                program_file = f'tilelang_jit_program_{func_name}.py'
-                makedirs(self.debug_root_path, exist_ok=True)
-                with open(path.join(self.debug_root_path, kernel_file), 'w') as f:
-                    print(kernel_result.get_kernel_source(), file=f)
-                with open(path.join(self.debug_root_path, program_file), 'w') as f:
-                    print(program_result.script(), file=f)
-
-            self._kernel_cache[key] = kernel_result
+            self._kernel_cache[key] = self.compile(*args, **kwargs, **tune_params)
 
         return self._kernel_cache[key]
 
@@ -237,9 +340,9 @@ def jit(  # This is the new public interface
         return JITImpl(
             func,
             out_idx=out_idx,
+            execution_backend=execution_backend,
             target=target,
             target_host=target_host,
-            execution_backend=execution_backend,
             verbose=verbose,
             pass_configs=pass_configs,
             debug_root_path=debug_root_path,
