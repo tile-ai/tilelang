@@ -29,8 +29,8 @@
 #include <string>
 #include <utility>
 
-#include "tir/transforms/ir_utils.h"
 #include "../op/builtin.h"
+#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
