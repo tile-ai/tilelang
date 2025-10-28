@@ -1050,8 +1050,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const MinNode *op, std::ostream &os) {
   if (t.is_float() && t.is_scalar()) {
     if (t.bits() == 32 || t.bits() == 64) {
       os << "min(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+      return;
     }
-    return;
   }
   
   // For all other scalar types (int, uint), use default implementation
@@ -1072,8 +1072,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const MaxNode *op, std::ostream &os) {
   if (t.is_float() && t.is_scalar()) {
     if (t.bits() == 32 || t.bits() == 64) {
       os << "max(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+      return;
     }
-    return;
   }
   
   // For all other scalar types (int, uint), use default implementation
