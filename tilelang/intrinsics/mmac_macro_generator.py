@@ -118,13 +118,11 @@ class MatrixCoreIntrinEmitter(object):
         in_dtype_abbrv = {
             "float16": "f16",
             "float32": "f32",
-            "int8": "i8"
+            "int8": "i8",
+            "bfloat16" : "bf16"
         }[in_dtype]
 
-        if in_dtype_abbrv == "i8":
-            self.mmac_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}_i8"
-        else:
-            self.mmac_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}{in_dtype_abbrv}"
+        self.mmac_suffix = f"{out_dtype_abbrv}_{M_DIM}x{N_DIM}x{k_dim}{in_dtype_abbrv}"
 
     def _initialize_micro_size(self, m_dim=16, n_dim=16, k_dim=16):
         self.micro_size_x = m_dim
@@ -581,7 +579,7 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
             if is_transposed:
                 for j in T.serial(warp_cols):
                     for local_id in T.vectorized(k_pack * local_size_b):
-                        row, col = T.meta_var(reverse_index_map(((tx & 15) / 4 + (tx & 3) * 4 + (tx / 16) * 16), local_id))
+                        row, col = T.meta_var(reverse_index_map(((tx & 15) >> 2) + ((tx & 3) << 2) + ((tx >> 4) << 4), local_id))
                         l, r = (
                             warp_n * warp_cols + j,
                             rk * (chunk // micro_size_k) + ki,
@@ -591,7 +589,7 @@ class MatrixCorePreshuffleIntrinEmitter(MatrixCoreIntrinEmitter):
             else:
                 for j in T.serial(warp_cols):
                     for local_id in T.vectorized(k_pack * local_size_b):
-                        row, col = T.meta_var(reverse_index_map(((tx & 15) / 4 + (tx & 3) * 4 + (tx / 16) * 16), local_id))
+                        row, col = T.meta_var(reverse_index_map(((tx & 15) >> 2) + ((tx & 3) << 2) + ((tx >> 4) << 4), local_id))
                         l, r = (
                             rk * (chunk // micro_size_k) + ki,
                             warp_n * warp_cols + j,

@@ -165,7 +165,7 @@ public:
     auto tx = lane_id;
 
     auto alane_id = lane_id;
-    auto blane_id = (lane_id & 15) / 4 + (lane_id & 3) * 4 + (lane_id / 16) * 16;
+    auto blane_id = ((lane_id & 15) >> 2) + ((lane_id & 3) << 2) + ((lane_id >> 4) << 4);
     
 
     constexpr auto local_size_a = (micro_size_x * micro_size_k) / warp_size;
@@ -246,7 +246,7 @@ public:
     auto tx = lane_id;
 
     auto alane_id = lane_id;
-    auto blane_id = (lane_id & 15) / 4 + (lane_id & 3) * 4 + (lane_id / 16) * 16;
+    auto blane_id = ((lane_id & 15) >> 2) + ((lane_id & 3) << 2) + ((lane_id >> 4) << 4);
 
     constexpr auto local_size_a = (micro_size_x * micro_size_k) / warp_size;
     constexpr auto local_size_b = (micro_size_y * micro_size_k) / warp_size;

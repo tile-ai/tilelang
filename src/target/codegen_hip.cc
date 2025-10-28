@@ -1383,7 +1383,6 @@ void CodeGenTileLangHIP::AddFunction(const PrimFunc &f) {
   CodeGenC::PrintType(f->ret_type, stream);
   this->PrintExtraAttrs(f, stream);
   this->stream << " " << static_cast<std::string>(global_symbol.value()) << "(";
-
   for (size_t i = 0; i < f->params.size(); ++i) {
     tir::Var v = f->params[i];
     std::string vid = AllocVarID(v.get());
