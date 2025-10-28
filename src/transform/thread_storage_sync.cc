@@ -131,23 +131,44 @@ protected:
       }
     }
     if (loop != nullptr) {
+      // Check if the loop body contains any reads in the same sync scope.
+      // If there are reads, we conservatively keep the sync within the loop
+      // body to preserve per-iteration ordering when needed. If there are no
+      // reads (e.g., only writes to shared.dyn), we can safely hoist the sync
+      // to before the loop to avoid redundant barriers.
+      bool has_read_in_scope = false;
+      for (const StmtEntry &s : seq) {
+        for (const AccessEntry &acc : s.access) {
+          if (acc.type == kRead && acc.scope == sync_scope_) {
+            has_read_in_scope = true;
+            break;
+          }
+        }
+        if (has_read_in_scope) break;
+      }
+      // If there is a loop-carried dependency, insert a single sync
+      // before the loop rather than hoisting a sync into the loop body.
+      // This reduces redundant per-iteration synchronizations for cases
+      // where each iteration touches disjoint regions (e.g., stmatrix
+      // writes to shared.dyn) and only a global ordering before/after the
+      // loop is required.
       for (size_t i = 0; i < seq.size(); ++i) {
         const StmtEntry &s = seq[i];
         if (syncs_inserted_.count(s.stmt) != 0)
           break;
         if (reads.empty() && writes.empty())
           break;
-        bool sync_before_stmt = false;
+        bool need_loop_sync = false;
         for (const AccessEntry &acc : s.access) {
           if (acc.type == kRead) {
             if (FindConflict(writes, acc, true)) {
-              sync_before_stmt = true;
+              need_loop_sync = true;
               break;
             }
           } else if (acc.type == kWrite) {
             if (FindConflict(reads, acc, true) ||
                 FindConflict(writes, acc, true)) {
-              sync_before_stmt = true;
+              need_loop_sync = true;
               break;
             }
           } else if (acc.type == kSync) {
@@ -155,8 +176,17 @@ protected:
             writes.clear();
           }
         }
-        if (sync_before_stmt) {
-          insert_syncs(s.stmt);
+        if (need_loop_sync) {
+          if (!has_read_in_scope) {
+            // Mark the loop itself to receive a sync before it, instead of
+            // inserting inside the loop body. This ensures a single sync is
+            // emitted outside the loop and avoids per-iteration overhead.
+            insert_syncs(loop);
+          } else {
+            // Fall back to inserting before the first conflicting statement
+            // inside the loop to maintain correctness when reads are present.
+            insert_syncs(s.stmt);
+          }
           break;
         }
       }
