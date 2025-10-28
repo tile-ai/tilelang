@@ -13,7 +13,7 @@ import tvm
 from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
 from tvm.tir.expr import EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, Var
-from typing import Callable, ContextManager, Any, Generic, Hashable, ParamSpec, Self, TypeVar, get_type_hints
+from typing import TYPE_CHECKING, Callable, ContextManager, Any, Generic, Hashable, ParamSpec, Self, TypeVar, ForwardRef
 from .dtypes import get_tvm_dtype
 from types import EllipsisType
 import threading
@@ -333,9 +333,8 @@ class Builder(BaseBuilder):
             frame = self.find_frame_idx(TIR_CONTROL_FRAME, start=last_macro)
             if frame is not None:
                 raise NotImplementedError(
-                    "Return from control flow is not supported yet. "
-                    "You can't return inside `if`, `for`, `while` blocks in a macro. "
-                    "You should allocate a var before the control flow, assign value inside the blocks, "
+                    "Return from control flow is not supported yet. \n"
+                    "You should allocate a var before the control flow, assign value inside the blocks, \n"
                     "and return the var after the control flow. i.e.\n"
                     "```\n"
                     "@T.macro\n" \
@@ -407,16 +406,20 @@ class IRGenerator(Generic[_P, _T]):
     source: str
 
 
-class PrimFunc(Generic[_P, _T], tvm.tir.PrimFunc):
-    params: list[tvm.tir.Var | tvm.tir.Buffer]
-    body: tvm.tir.Stmt
-    ret_type: tvm.ir.Type
-    buffer_map: Map[tvm.tir.Var, tvm.tir.Buffer]
-    attrs: tvm.Attrs | None
-    span: Span | None
-    ir_gen: IRGenerator[_P, _T]
-    source: str
-    orig_func: Callable[_P, _T]
+if TYPE_CHECKING:
+
+    class PrimFunc(Generic[_P, _T], tvm.tir.PrimFunc):
+        params: list[tvm.tir.Var | tvm.tir.Buffer]
+        body: tvm.tir.Stmt
+        ret_type: tvm.ir.Type
+        buffer_map: Map[tvm.tir.Var, tvm.tir.Buffer]
+        attrs: tvm.Attrs | None
+        span: Span | None
+        ir_gen: IRGenerator[_P, _T] | None
+        source: str | None
+        orig_func: Callable[_P, _T] | None
+else:
+    PrimFunc = tvm.tir.PrimFunc
 
 
 @dataclass
@@ -446,20 +449,33 @@ def macro(func: Callable[_P, _T]) -> Macro[_P, _T]:
     return Macro(name=func.__name__, orig_func=func, ir_gen=build_ir_generator(func))
 
 
+from typing import _eval_type
+
+
+def get_type_hints(func):
+    annot = getattr(func, '__annotations__', None)
+    if annot is None:
+        raise TypeError(f'Failed to get function type hints, {func} is not a function')
+    hints = {}
+    type_params = getattr(func, "__type_params__", ())
+    globalns = getattr(func, '__globals__', {})
+    localns = globalns
+    for name, value in annot.items():
+        if isinstance(value, tvm.DataType):
+            hints[name] = value
+            continue
+        if value is None:
+            value = type(None)
+        if isinstance(value, str):
+            value = ForwardRef(value, is_argument=True, is_class=False)
+
+        hints[name] = _eval_type(value, globalns=globalns, localns=localns, type_params=type_params)
+    return hints
+
+
 def prim_func(func: Callable[_P, _T]) -> PrimFunc[_P, _T]:
     sig = inspect.signature(func)
-    annot = func.__annotations__
-    if any(map(lambda x: isinstance(x, str), annot)):
-        try:
-            annot = get_type_hints(func)
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to get type hints for function `{func.__name__}`. \n"
-                "Note: if you are using `from __future__ import annotations`, type hints may be missing, \n"
-                "To fix this, please use default argument instead of type annotations: \n"
-                "```py\n"
-                "def foo(a=tl.Tensor((128, 128), 'float32'), b=tl.float32()): ..."
-                "```") from e
+    annot = get_type_hints(func)
     args = []
     kwargs = {}
     for name, param in sig.parameters.items():

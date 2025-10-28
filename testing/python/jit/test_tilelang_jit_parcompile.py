@@ -1,7 +1,7 @@
-from tilelang import tvm
 import tilelang.testing
 import tilelang
 import torch
+
 
 @tilelang.jit(
     out_idx=-1,  # create the output tensor during runtime
@@ -61,7 +61,6 @@ def test_par_compile():
         (2048, 2048, 2048, 256, 256, 64),
         (4096, 4096, 4096, 64, 64, 128),
     ]
-    ker = matmul_kernel_jit(1024, 1024, 1024, 128, 128, 32)
     kernels = matmul_kernel_jit.par_compile(configs)
     for (M, N, K, _, _, _), kernel in zip(configs, kernels):
         A = torch.randn(M, K, dtype=torch.float16).cuda()

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Generic, Literal, ParamSpec, TypeVar
 
 from tilelang.jit.adapter.utils import is_metal_target
 from tvm.target import Target
@@ -17,8 +17,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+_P = ParamSpec('_P')
+_T = TypeVar('_T')
 
-class JITKernel:
+
+class JITKernel(Generic[_P, _T]):
     """
     A wrapper class for compiling and invoking TileLang (TVM TIR) functions as PyTorch-compatible functions.
 
@@ -170,7 +173,7 @@ class JITKernel:
         instance.torch_function = instance.adapter.func
         return instance
 
-    def __call__(self, *args: Any, **kwds: Any) -> Any:
+    def __call__(self, *args: _P.args, **kwds: _P.kwargs) -> _T:
         """
         Invokes the compiled function with the given arguments.
 

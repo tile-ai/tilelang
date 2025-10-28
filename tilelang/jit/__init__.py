@@ -18,8 +18,8 @@ from typing import (
     Literal,
 )
 from tilelang import tvm as tvm
+from tilelang.language.v2 import PrimFunc
 from tilelang.jit.adapter.utils import is_metal_target
-from tvm.tir import PrimFunc
 from tvm.target import Target
 
 from tilelang.jit.kernel import JITKernel
@@ -34,9 +34,13 @@ from tqdm.auto import tqdm
 
 logger = getLogger(__name__)
 
+_P = ParamSpec('_P')
+_KP = ParamSpec('_KP')
+_T = TypeVar('_T')
+
 
 def compile(
-    func: PrimFunc = None,
+    func: PrimFunc[_KP, _T] = None,
     out_idx: list[int] | int | None = None,
     execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
     target: str | Target = "auto",
@@ -44,7 +48,7 @@ def compile(
     verbose: bool = False,
     pass_configs: dict[str, Any] | None = None,
     compile_flags: list[str] | str | None = None,
-) -> JITKernel:
+) -> JITKernel[_KP, _T]:
     """
     Compile the given TileLang PrimFunc with TVM and build a JITKernel.
     Parameters
@@ -87,7 +91,7 @@ def compile(
     )
 
 
-def par_compile(funcs: Iterable[PrimFunc],
+def par_compile(funcs: Iterable[PrimFunc[_KP, _T]],
                 out_idx: list[int] | int | None = None,
                 execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
                 target: str | Target = "auto",
@@ -96,7 +100,7 @@ def par_compile(funcs: Iterable[PrimFunc],
                 pass_configs: dict[str, Any] | None = None,
                 compile_flags: list[str] | str | None = None,
                 num_workers: int = None,
-                ignore_error: bool = False) -> list[JITKernel]:
+                ignore_error: bool = False) -> list[JITKernel[_KP, _T]]:
     """
     Parallel compile multiple TileLang PrimFunc with TVM and build JITKernels.
     Parameters
@@ -153,13 +157,9 @@ def par_compile(funcs: Iterable[PrimFunc],
     return results
 
 
-_P = ParamSpec('_P')
-_T = TypeVar('_T')
-
-
 @dataclass
-class JITImpl(Generic[_P, _T]):
-    func: Callable[_P, _T]
+class JITImpl(Generic[_P, _KP, _T]):
+    func: Callable[_P, _T] | PrimFunc[_KP, _T]
     out_idx: list[int] | int | None
     execution_backend: Literal["dlpack", "ctypes", "cython"]
     target: str | Target
@@ -180,7 +180,7 @@ class JITImpl(Generic[_P, _T]):
                 self.debug_root_path = path.abspath(self.debug_root_path)
         self._kernel_cache: dict[tuple, Kernel] = {}
 
-    def get_tir(self, *args: _P.args, **kwargs: _P.kwargs) -> PrimFunc:
+    def get_tir(self, *args: _P.args, **kwargs: _P.kwargs) -> PrimFunc[_KP, _T]:
         program_result_source = self.func
         if isinstance(program_result_source, PrimFunc):
             program_result = program_result_source
@@ -193,7 +193,7 @@ class JITImpl(Generic[_P, _T]):
     def par_compile(self,
                     configs: Iterable[dict[str, Any] | tuple[str, Any]],
                     num_workers: int = None,
-                    ignore_error: bool = False) -> list[JITKernel]:
+                    ignore_error: bool = False) -> list[JITKernel[_KP, _T]]:
         configs = list(configs)
         funcs = []
         for cfg in tqdm(configs, desc='Elaborating'):
@@ -215,7 +215,7 @@ class JITImpl(Generic[_P, _T]):
             num_workers=num_workers,
             ignore_error=ignore_error)
 
-    def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel:
+    def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel[_KP, _T]:
         func = self.get_tir(*args, **kwargs)
         kernel_result = compile(
             func,
@@ -243,7 +243,7 @@ class JITImpl(Generic[_P, _T]):
 
         return kernel_result
 
-    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel:
+    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> JITKernel[_KP, _T]:
         # Separate out the tuning parameters from the user's kwargs
         tune_params = kwargs.pop('__tune_params', {})
         # Whether to return the compile arguments (out_idx, target, target_host, etc.) for autotuner cache
@@ -272,22 +272,22 @@ class JITImpl(Generic[_P, _T]):
 
 
 @overload
-def jit(func: Callable[_P, _T]) -> JITImpl[_P, _T]:
+def jit(func: Callable[_P, PrimFunc[_KP, _T]]) -> JITImpl[_P, _KP, _T]:
     ...
 
 
 @overload
 def jit(
-        *,  # Indicates subsequent arguments are keyword-only
-        out_idx: Any = None,
-        target: str | Target = "auto",
-        target_host: str | Target = None,
-        execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
-        verbose: bool = False,
-        pass_configs: dict[str, Any] | None = None,
-        debug_root_path: str | None = None,
-        compile_flags: list[str] | str | None = None
-) -> Callable[[Callable[_P, _T]], JITImpl[_P, _T]]:
+    *,  # Indicates subsequent arguments are keyword-only
+    out_idx: Any = None,
+    target: str | Target = "auto",
+    target_host: str | Target = None,
+    execution_backend: Literal["dlpack", "ctypes", "cython", "nvrtc"] = "cython",
+    verbose: bool = False,
+    pass_configs: dict[str, Any] | None = None,
+    debug_root_path: str | None = None,
+    compile_flags: list[str] | str | None = None
+) -> Callable[[Callable[_P, PrimFunc[_KP, _T]]], JITImpl[_P, _KP, _T]]:
     ...
 
 
@@ -337,6 +337,10 @@ def jit(  # This is the new public interface
         compile_flags = [compile_flags]
 
     def decorator(func: Callable[_P, _T]) -> JITImpl[_P, _T]:
+        if isinstance(func, PrimFunc):
+            orig_func = func.orig_func
+        else:
+            orig_func = func
         return JITImpl(
             func,
             out_idx=out_idx,
@@ -347,11 +351,11 @@ def jit(  # This is the new public interface
             pass_configs=pass_configs,
             debug_root_path=debug_root_path,
             compile_flags=compile_flags,
-            func_source=inspect.getsource(func),
-            signature=inspect.signature(func),
+            func_source=inspect.getsource(orig_func),
+            signature=inspect.signature(orig_func),
         )
 
-    if callable(func):
+    if func is not None:
         return decorator(func)
     else:
         return decorator
