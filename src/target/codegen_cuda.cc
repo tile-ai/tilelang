@@ -2596,11 +2596,15 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       if (op->value < 0) {
         temp << "-";
       }
-      temp << "std::numeric_limits<" << op->dtype << ">::infinity()";
+      temp << "std::numeric_limits<";
+      p->PrintType(op->dtype, temp);
+      temp << ">::infinity()";
     } else if (std::isnan(op->value)) {
-      temp << "std::numeric_limits<" << op->dtype << ">::quiet_NaN()";
+      temp << "std::numeric_limits<";
+      p->PrintType(op->dtype, temp);
+      temp << ">::quiet_NaN()";
     } else {
-      temp << op->dtype;
+      p->PrintType(op->dtype, temp);
       temp << '(' << std::hexfloat << op->value << 'f';
       temp << "/*" << std::scientific << op->value << "*/";
       temp << ')';
