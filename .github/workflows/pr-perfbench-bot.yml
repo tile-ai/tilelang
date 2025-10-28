@@ -20,12 +20,8 @@ env:
   COLUMNS: "100"
   FORCE_COLOR: "1"
   CLICOLOR_FORCE: "1"
-  UV_INDEX_STRATEGY: "unsafe-best-match"
-  UV_HTTP_TIMEOUT: "600"
   XDG_CACHE_HOME: "${{ github.workspace }}/.cache" # to be updated
   PIP_CACHE_DIR: "${{ github.workspace }}/.cache/pip" # to be updated
-  UV_CACHE_DIR: "${{ github.workspace }}/.cache/uv" # to be updated
-  PRE_COMMIT_HOME: "${{ github.workspace }}/.cache/pip/.pre-commit" # to be updated
 
 jobs:
   perfbench:
@@ -52,7 +48,6 @@ jobs:
           cache-dependency-path: |
             pyproject.toml
             requirements*.txt
-            .pre-commit-config.yaml
 
       - name: Install merged version
         run: |
