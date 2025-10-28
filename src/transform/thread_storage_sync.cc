@@ -83,8 +83,9 @@ protected:
     // simulation based approach to find dependencies
     for (size_t i = 0; i < seq.size(); ++i) {
       const StmtEntry &s = seq[i];
-      const bool pre_marked_sync = (syncs_inserted_.count(s.stmt) != 0);
-      bool sync_before_stmt = pre_marked_sync;
+      // check if sync before statement is needed.
+      bool sync_before_stmt = (syncs_inserted_.count(s.stmt) != 0);
+      // Apply the syncs added already.
 
       if (sync_before_stmt) {
         reads.clear();
@@ -108,12 +109,12 @@ protected:
           writes.clear();
         }
       }
-
+      // If sync is inserted. remove the irrelevant things.
       if (sync_before_stmt) {
         reads.clear();
         writes.clear();
       }
-
+      // Add the read/write of current statement
       for (const AccessEntry &acc : s.access) {
         if (acc.type == kRead) {
           reads.push_back(acc);
@@ -125,7 +126,7 @@ protected:
         }
       }
 
-      if (sync_before_stmt && !pre_marked_sync) {
+      if (sync_before_stmt) {
         insert_syncs(s.stmt);
       }
     }
@@ -244,10 +245,14 @@ private:
       return true;
     }
     if (prev.is_pointer_access || curr.is_pointer_access) {
-      // If either access is a pointer access, conservatively assume a
-      // conflict. For example, address_of(A[0, 0]) may refer to an unknown
-      // memory region, so we cannot safely determine if it overlaps with
-      // previous accesses.
+      // For accesses created via tvm_access_ptr we may still be able to prove
+      // disjointness using their byte ranges.  If both sides expose a touched
+      // interval and we can show they don't overlap, skip the conflict.
+      if (prev.is_pointer_access && curr.is_pointer_access &&
+          PointerAccessIsDisjoint(prev, curr)) {
+        return false;
+      }
+      // Otherwise fall back to the conservative answer: treat them as overlapping.
       return true;
     }
 
@@ -351,6 +356,27 @@ private:
     // true. if range_is_overlap is false, then they are not in conflict, we
     // should return false.
     return range_is_overlap;
+  }
+
+  bool PointerAccessIsDisjoint(const AccessEntry &lhs,
+                               const AccessEntry &rhs) {
+    if (lhs.touched.size() != 1 || rhs.touched.size() != 1) {
+      return false;
+    }
+    PrimExpr lhs_min = analyzer_.Simplify(lhs.touched[0].min());
+    PrimExpr lhs_max = analyzer_.Simplify(lhs.touched[0].max());
+    PrimExpr rhs_min = analyzer_.Simplify(rhs.touched[0].min());
+    PrimExpr rhs_max = analyzer_.Simplify(rhs.touched[0].max());
+
+    if (analyzer_.CanProve(lhs_max < rhs_min,
+                           arith::ProofStrength::kSymbolicBound)) {
+      return true;
+    }
+    if (analyzer_.CanProve(rhs_max < lhs_min,
+                           arith::ProofStrength::kSymbolicBound)) {
+      return true;
+    }
+    return false;
   }
 
   void VisitStmt_(const AttrStmtNode *op) final {
