@@ -252,6 +252,14 @@ private:
 
   bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
                     bool loop_carry) {
+    // Special case: ignore conflicts between async-copy writes (e.g., TMA
+    // loads into shared memory). Multiple async writes do not require
+    // interspersed barriers among themselves. We still respect conflicts with
+    // reads to ensure visibility before consumption.
+    if (prev.type == kWrite && curr.type == kWrite && prev.is_async_copy &&
+        curr.is_async_copy) {
+      return false;
+    }
     // Access to different buffers does not conflict.
     if (!prev.buffer.same_as(curr.buffer)) {
       return false;

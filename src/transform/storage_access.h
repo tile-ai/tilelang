@@ -83,6 +83,10 @@ public:
     bool double_buffer_write = false;
     /*! \brief Whether the access is pointer access */
     bool is_pointer_access = false;
+    /*! \brief Whether this access originates from an async copy context
+     *         (e.g., inside a TMA load) and therefore multiple writes
+     *         among themselves should not force barriers between them. */
+    bool is_async_copy = false;
   };
 
   /*! \brief Access pattern about a single statement */
@@ -159,6 +163,8 @@ private:
   bool allow_append_{false};
   // Whether we are in device environment
   bool in_device_env_{false};
+  // Nesting depth of tma_load/tma_load_im2col calls
+  int tma_depth_{0};
   // Whether we are inside condition.
   int condition_counter_{0};
   // The current double buffer write scope.
