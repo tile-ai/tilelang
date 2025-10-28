@@ -146,7 +146,8 @@ public:
   void VisitStmt_(const AllocateNode *op) final {
     size_t level = scope_.size();
     const VarNode *buf = op->buffer_var.get();
-    // Record the allocation site and depth so liveness can reason about the original scope.
+    // Record the allocation site and depth so liveness can reason about the
+    // original scope.
     alloc_info_[buf].alloc = op;
     alloc_info_[buf].level = level;
     StmtExprVisitor::VisitStmt_(op);
@@ -260,7 +261,8 @@ public:
     scope_.pop_back();
     int64_t end_index = static_cast<int64_t>(linear_seq_.size());
     ICHECK_GT(end_index, begin_index);
-    // The paired entries serve as scope sentinels once we flatten the control-flow tree.
+    // The paired entries serve as scope sentinels once we flatten the
+    // control-flow tree.
     e.scope_pair_offset = begin_index - end_index;
     linear_seq_.push_back(e);
     // record the pointer to end index.
@@ -355,8 +357,10 @@ private:
   void VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tl::tl_gemm()) || op->op.same_as(tl::tl_gemm_sp()) ||
         op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store()) ||
-        op->op.same_as(tl::ptx_wgmma_ss()) || op->op.same_as(tl::ptx_wgmma_rs())) {
-      // These intrinsics introduce stricter SMEM alignment requirements; mark the subtree.
+        op->op.same_as(tl::ptx_wgmma_ss()) ||
+        op->op.same_as(tl::ptx_wgmma_rs())) {
+      // These intrinsics introduce stricter SMEM alignment requirements; mark
+      // the subtree.
       under_alignment_scope_ = true;
       StmtExprVisitor::VisitExpr_(op);
       under_alignment_scope_ = false;
@@ -412,7 +416,8 @@ public:
                                               enable_aggressive_merge, verbose);
     finder(stmt);
     shmem_alignment_map_ = SharedMemoryAlignmentPlanner::Plan(stmt);
-    // First compute liveness over the flattened schedule, then feed it into the arena packer.
+    // First compute liveness over the flattened schedule, then feed it into the
+    // arena packer.
     this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_);
     this->PlanMemory(finder.linear_seq_, finder.stmt_attrs_);
   }
@@ -595,8 +600,8 @@ private:
     PrimExpr size_expr;
     std::optional<int64_t> const_size_bytes; // in bytes if compile-time known.
     int alignment{0};                        // required byte alignment.
-    int start{0};                            // first statement index touching the buf.
-    int end{0};                              // one-past-last statement index.
+    int start{0}; // first statement index touching the buf.
+    int end{0};   // one-past-last statement index.
     DataType size_dtype{DataType::Int(32)};
   };
 
@@ -635,7 +640,8 @@ private:
   class FreeList {
   public:
     std::optional<size_t> Allocate(size_t need, size_t alignment) {
-      // Best-fit search: pick the slot that wastes the least space after alignment.
+      // Best-fit search: pick the slot that wastes the least space after
+      // alignment.
       int best = -1;
       size_t best_waste = std::numeric_limits<size_t>::max();
       for (int i = 0, n = static_cast<int>(blocks_.size()); i < n; ++i) {
@@ -717,7 +723,8 @@ private:
   };
 
   static ArenaPlan LinearScanPack(std::vector<Interval> intervals) {
-    // Process intervals in program order so lifetimes correspond to the linearised CFG.
+    // Process intervals in program order so lifetimes correspond to the
+    // linearised CFG.
     std::sort(intervals.begin(), intervals.end(),
               [](const Interval &lhs, const Interval &rhs) {
                 if (lhs.start != rhs.start) {
@@ -748,7 +755,8 @@ private:
     for (const Interval &interval : intervals) {
       retire(interval.start);
       size_t offset = 0;
-      // Try to recycle previously freed memory first; fall back to bumping the arena.
+      // Try to recycle previously freed memory first; fall back to bumping the
+      // arena.
       if (auto slot =
               freelist.Allocate(interval.size_bytes, interval.alignment)) {
         offset = slot.value();

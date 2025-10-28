@@ -144,7 +144,8 @@ protected:
             break;
           }
         }
-        if (has_read_in_scope) break;
+        if (has_read_in_scope)
+          break;
       }
       // If there is a loop-carried dependency, insert a single sync
       // before the loop rather than hoisting a sync into the loop body.
@@ -282,7 +283,8 @@ private:
           PointerAccessIsDisjoint(prev, curr)) {
         return false;
       }
-      // Otherwise fall back to the conservative answer: treat them as overlapping.
+      // Otherwise fall back to the conservative answer: treat them as
+      // overlapping.
       return true;
     }
 
@@ -388,8 +390,7 @@ private:
     return range_is_overlap;
   }
 
-  bool PointerAccessIsDisjoint(const AccessEntry &lhs,
-                               const AccessEntry &rhs) {
+  bool PointerAccessIsDisjoint(const AccessEntry &lhs, const AccessEntry &rhs) {
     if (lhs.touched.size() != 1 || rhs.touched.size() != 1) {
       return false;
     }
