@@ -1039,13 +1039,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
 void CodeGenTileLangCUDA::VisitExpr_(const MinNode *op, std::ostream &os) {
   // TODO(wt): Consider vectorized reduction and impl for other dtypes
   DataType t = op->dtype;
-  
+
   // Standard min/max functions don't support bfloat16 or float16
   if ((t.is_bfloat16() || t.is_float16()) && t.is_scalar()) {
-    os << "cutlass::fast_min(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+    os << "cutlass::fast_min(" << PrintExpr(op->a) << ", " << PrintExpr(op->b)
+       << ")";
     return;
   }
-    
+
   // For float32 and float64 scalar, use standard min functions
   if (t.is_float() && t.is_scalar()) {
     if (t.bits() == 32 || t.bits() == 64) {
@@ -1053,7 +1054,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const MinNode *op, std::ostream &os) {
       return;
     }
   }
-  
+
   // For all other scalar types (int, uint), use default implementation
   CodeGenC::VisitExpr_(op, os);
 }
@@ -1061,13 +1062,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const MinNode *op, std::ostream &os) {
 void CodeGenTileLangCUDA::VisitExpr_(const MaxNode *op, std::ostream &os) {
   // TODO(wt): Consider vectorized reduction and impl for other dtypes
   DataType t = op->dtype;
-  
+
   // Standard min/max functions don't support bfloat16 or float16
-  if ((t.is_bfloat16() || t.is_float16())&& t.is_scalar()) {
-    os << "cutlass::fast_max(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+  if ((t.is_bfloat16() || t.is_float16()) && t.is_scalar()) {
+    os << "cutlass::fast_max(" << PrintExpr(op->a) << ", " << PrintExpr(op->b)
+       << ")";
     return;
   }
-    
+
   // For float32 and float64 scalar, use standard max functions
   if (t.is_float() && t.is_scalar()) {
     if (t.bits() == 32 || t.bits() == 64) {
@@ -1075,7 +1077,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const MaxNode *op, std::ostream &os) {
       return;
     }
   }
-  
+
   // For all other scalar types (int, uint), use default implementation
   CodeGenC::VisitExpr_(op, os);
 }
@@ -2586,7 +2588,7 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
 
 inline void PrintConst(const FloatImmNode *op, std::ostream &os,
                        CodeGenTileLangCUDA *p) { // NOLINT(*)
-  // Type code is kBFloat/kFloat16 
+  // Type code is kBFloat/kFloat16
   // which is indeed CUTLASS supported types currently
   if (op->dtype.is_bfloat16() || op->dtype.is_float16()) {
     std::ostringstream temp;
