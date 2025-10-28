@@ -280,9 +280,10 @@ std::string CodeGenTileLangCUDA::Finish() {
   decl_stream << "#include <tl_templates/cuda/ldsm.h>\n";
   decl_stream << "#include <tl_templates/cuda/threadblock_swizzle.h>\n";
   decl_stream << "#include <tl_templates/cuda/debug.h>\n";
-  decl_stream << "#ifdef ENABLE_BF16\n";
-  decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
-  decl_stream << "#endif\n";
+
+  if (enable_bf16_) {
+    decl_stream << "#include <tl_templates/cuda/cuda_bf16_fallbacks.cuh>\n";
+  }
 
   if (need_global_barrier_) {
     decl_stream << "__device__ unsigned " << vid_global_barrier_state_
@@ -1032,6 +1033,68 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   os << sret;
+}
+
+void CodeGenTileLangCUDA::VisitExpr_(const MinNode *op, std::ostream &os) {
+  // TODO(wt): Consider vectorized reduction and impl for other dtypes
+  DataType t = op->dtype;
+  
+  // Standard min/max functions don't support bfloat16
+  // CUTLASS provides binary comparison operators for bfloat16
+  // We use them to implement min/max functions in cuda_bf16_wrapper.h
+  if (t.is_bfloat16() && t.is_scalar()) {
+    os << "min(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+    enable_bf16_ = true;
+    return;
+  }
+  
+  // For float16 scalar, use __hmin
+  if (t.is_float16() && t.is_scalar()) {
+    os << "__hmin(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+    return;
+  }
+  
+  // For float32 and float64 scalar, use standard fmin functions
+  if (t.is_float() && t.is_scalar()) {
+    if (t.bits() == 32 || t.bits() == 64) {
+      os << "min(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+    }
+    return;
+  }
+  
+  // For all other scalar types (int, uint), use default implementation
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangCUDA::VisitExpr_(const MaxNode *op, std::ostream &os) {
+  // TODO(wt): Consider vectorized reduction and impl for other dtypes
+  DataType t = op->dtype;
+  
+  // Standard min/max functions don't support bfloat16
+  // CUTLASS provides binary comparison operators for bfloat16
+  // We use them to implement min/max functions in cuda_bf16_wrapper.h
+  if (t.is_bfloat16() && t.is_scalar()) {
+    os << "max(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+    enable_bf16_ = true;
+    return;
+  }
+  
+   // For float16 scalar, use __hmax
+   if (t.is_float16() && t.is_scalar()) {
+    os << "__hmax(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+    return;
+  }
+  
+  // For float32 and float64 scalar, use standard max functions
+  if (t.is_float() && t.is_scalar()) {
+    if (t.bits() == 32 || t.bits() == 64) {
+      os << "max(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+    }
+    return;
+  }
+  
+  // For all other scalar types (int, uint), use default implementation
+  CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenTileLangCUDA::PrintCallExtern(Type ret_type, String global_symbol,
@@ -2542,10 +2605,24 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
                        CodeGenTileLangCUDA *p) { // NOLINT(*)
   // Type code is kBFloat
   if (op->dtype.is_bfloat16()) {
-    os << "bfloat16_t";
-    os << '(' << std::hexfloat << op->value << 'f';
-    os << "/*" << std::scientific << op->value << "*/";
-    os << ')';
+    std::ostringstream temp;
+    if (std::isinf(op->value)) {
+      if (op->value < 0) {
+        temp << "-";
+      }
+      temp << "bfloat16_t(CUDART_INF_BF16)";  // CUDART_INF_BF16 is nv_bfloat16
+      p->enable_bf16_ = true;
+    } else if (std::isnan(op->value)) {
+      temp << "bfloat16_t(CUDART_NAN_BF16)";
+      p->enable_bf16_ = true;
+    } else {
+      temp << "bfloat16_t";
+      temp << '(' << std::hexfloat << op->value << 'f';
+      temp << "/*" << std::scientific << op->value << "*/";
+      temp << ')';
+    }
+    p->MarkConst(temp.str());
+    os << temp.str();
     return;
   }
   // Type code is kFloat8_e5m2 or kE4M4Float
@@ -2556,7 +2633,7 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     os << ')';
     return;
   }
-  // Type code is kFloat
+  // Type code is kFloat (64/32/16)
   switch (op->dtype.bits()) {
   case 64:
   case 32: {

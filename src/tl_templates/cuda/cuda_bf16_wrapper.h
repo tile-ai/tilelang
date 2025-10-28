@@ -18,6 +18,14 @@
 
 #pragma once
 
-#ifdef ENABLE_BF16
 #include <cuda_bf16.h>
-#endif
+#include "common.h"
+
+TL_DEVICE bfloat16_t min(const bfloat16_t a, const bfloat16_t b) {
+    return (a < b) ? a : b;
+}
+
+TL_DEVICE bfloat16_t max(const bfloat16_t a, const bfloat16_t b) {
+    return (a > b) ? a : b;
+}
+
