@@ -1017,6 +1017,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
              << "))+1), __NV_SATFINITE, "
              << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
              << ");\n";
+      os << sret;
+      return;
     }
   }
 
