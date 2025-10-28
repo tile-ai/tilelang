@@ -172,25 +172,29 @@ build-frontend = "build"
 environment = { PYTHONDEVMODE = "1", PYTHONUNBUFFERED = "1" }
 environment-pass = [
     "CUDA_VERSION",
+    "NO_VERSION_LABEL",
+    "NO_TOOLCHAIN_VERSION",
+    "NO_GIT_VERSION",
     "COLUMNS",
+    "CMAKE_GENERATOR",
+    "CMAKE_BUILD_PARALLEL_LEVEL",
     "FORCE_COLOR",
     "CLICOLOR_FORCE",
 ]
 before-build = "env -0 | sort -z | tr '\\0' '\\n'"
 windows.before-build = "set"
-# Pin to glibc 2.17 for x86 and 2.28 for aarch64 for now
-manylinux-x86_64-image = "manylinux2014"   # CentOS 7
-manylinux-aarch64-image = "manylinux_2_28" # AlmaLinux 8
 test-command = [
     "python -c 'import tilelang; print(tilelang.__version__)'",
 ]
 
 [tool.cibuildwheel.linux]
-environment = { PYTHONDEVMODE = "1", PYTHONUNBUFFERED = "1", PATH = "/usr/local/cuda/bin:$PATH" }
-repair-wheel-command = [
-    "auditwheel -v repair --exclude libtvm_ffi.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
-    "pipx run abi3audit --verbose --strict {wheel}",
-]
+environment.PYTHONDEVMODE = "1"
+environment.PYTHONUNBUFFERED = "1"
+environment.PATH = "/usr/local/cuda/bin:$PATH"
+environment.LD_LIBRARY_PATH = "/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:$LD_LIBRARY_PATH"
+# Pin to glibc 2.17 for x86 and 2.28 for aarch64 for now
+manylinux-x86_64-image = "manylinux2014"   # CentOS 7
+manylinux-aarch64-image = "manylinux_2_28" # AlmaLinux 8
 # Install CUDA runtime and stub driver library
 # manylinux_2_28 uses gcc 14, which needs CUDA 12.8
 before-all = """
@@ -213,8 +217,12 @@ esac
 
 cudaver="$(echo "${CUDA_VERSION:-"12.4"}" | cut -d '.' -f-2)"
 v="${cudaver//./-}"
-yum install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-devel-${v}"
+yum install -y "cuda-minimal-build-${v}" "cuda-driver-devel-${v}" "cuda-nvrtc-devel-${v}" nvidia-driver-cuda-libs
 """
+repair-wheel-command = [
+    "auditwheel -v repair --exclude libtvm_ffi.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
+    "pipx run abi3audit --verbose --strict {wheel}",
+]
 
 [tool.cibuildwheel.macos]
 repair-wheel-command = [
