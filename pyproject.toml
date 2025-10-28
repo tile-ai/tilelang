@@ -186,7 +186,9 @@ test-command = [
 ]
 
 [tool.cibuildwheel.linux]
-environment = { PYTHONDEVMODE = "1", PYTHONUNBUFFERED = "1", PATH = "/usr/local/cuda/bin:$PATH" }
+environment.PYTHONDEVMODE = "1"
+environment.PYTHONUNBUFFERED = "1"
+environment.PATH = "/usr/local/cuda/bin:/host/usr/lib/ccache:/host/usr/local/opt/ccache/libexec:$PATH"
 repair-wheel-command = [
     "auditwheel -v repair --exclude libtvm_ffi.so --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
     "pipx run abi3audit --verbose --strict {wheel}",
