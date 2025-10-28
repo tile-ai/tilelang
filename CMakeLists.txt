@@ -184,18 +184,18 @@ install(TARGETS tilelang_cython_wrapper
 
 # let libtilelang to search tvm/tvm_runtime in same dir
 if(APPLE)
-  set_target_properties(tilelang PROPERTIES INSTALL_RPATH "@loader_path")
-  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "@loader_path")
-  set_target_properties(tvm PROPERTIES INSTALL_RPATH "@loader_path")
-  set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "@loader_path")
-else()
-  set_target_properties(tilelang PROPERTIES INSTALL_RPATH "\$ORIGIN")
-  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH "\$ORIGIN")
-  set_target_properties(tvm PROPERTIES INSTALL_RPATH "\$ORIGIN")
-  set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH "\$ORIGIN")
+  set_target_properties(tilelang PROPERTIES INSTALL_RPATH '@loader_path:@loader_path/../../tvm_ffi/lib')
+  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH '@loader_path:@loader_path/../../tvm_ffi/lib')
+  set_target_properties(tvm PROPERTIES INSTALL_RPATH '@loader_path:@loader_path/../../tvm_ffi/lib')
+  set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH '@loader_path:@loader_path/../../tvm_ffi/lib')
+elseif(UNIX)
+  set_target_properties(tilelang PROPERTIES INSTALL_RPATH '$ORIGIN:$ORIGIN/../../tvm_ffi/lib')
+  set_target_properties(tilelang_module PROPERTIES INSTALL_RPATH '$ORIGIN:$ORIGIN/../../tvm_ffi/lib')
+  set_target_properties(tvm PROPERTIES INSTALL_RPATH '$ORIGIN:$ORIGIN/../../tvm_ffi/lib')
+  set_target_properties(tvm_runtime PROPERTIES INSTALL_RPATH '$ORIGIN:$ORIGIN/../../tvm_ffi/lib')
 endif()
 
 install(
-  TARGETS tvm tvm_runtime tvm_ffi_shared tilelang_module tilelang
+  TARGETS tvm tvm_runtime tilelang_module tilelang
   LIBRARY DESTINATION tilelang/lib
 )
