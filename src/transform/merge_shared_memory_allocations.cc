@@ -146,6 +146,7 @@ public:
   void VisitStmt_(const AllocateNode *op) final {
     size_t level = scope_.size();
     const VarNode *buf = op->buffer_var.get();
+    // Record the allocation site and depth so liveness can reason about the original scope.
     alloc_info_[buf].alloc = op;
     alloc_info_[buf].level = level;
     StmtExprVisitor::VisitStmt_(op);
@@ -259,6 +260,7 @@ public:
     scope_.pop_back();
     int64_t end_index = static_cast<int64_t>(linear_seq_.size());
     ICHECK_GT(end_index, begin_index);
+    // The paired entries serve as scope sentinels once we flatten the control-flow tree.
     e.scope_pair_offset = begin_index - end_index;
     linear_seq_.push_back(e);
     // record the pointer to end index.
@@ -352,7 +354,9 @@ public:
 private:
   void VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tl::tl_gemm()) || op->op.same_as(tl::tl_gemm_sp()) ||
-        op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store())) {
+        op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store()) ||
+        op->op.same_as(tl::ptx_wgmma_ss()) || op->op.same_as(tl::ptx_wgmma_rs())) {
+      // These intrinsics introduce stricter SMEM alignment requirements; mark the subtree.
       under_alignment_scope_ = true;
       StmtExprVisitor::VisitExpr_(op);
       under_alignment_scope_ = false;
@@ -408,6 +412,7 @@ public:
                                               enable_aggressive_merge, verbose);
     finder(stmt);
     shmem_alignment_map_ = SharedMemoryAlignmentPlanner::Plan(stmt);
+    // First compute liveness over the flattened schedule, then feed it into the arena packer.
     this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_);
     this->PlanMemory(finder.linear_seq_, finder.stmt_attrs_);
   }
@@ -582,17 +587,20 @@ private:
   using StmtEntry = SharedMemLinearAccessPatternFinder::StmtEntry;
   using StmtAttr = SharedMemLinearAccessPatternFinder::StmtAttr;
 
+  // Metadata about a single shared-memory allocation prior to merging.  This
+  // is used to build lifetimes, alignment requirements, and final offsets.
   struct BufInfo {
     const VarNode *var{nullptr};
     std::string name;
     PrimExpr size_expr;
-    std::optional<int64_t> const_size_bytes;
-    int alignment{0};
-    int start{0};
-    int end{0};
+    std::optional<int64_t> const_size_bytes; // in bytes if compile-time known.
+    int alignment{0};                        // required byte alignment.
+    int start{0};                            // first statement index touching the buf.
+    int end{0};                              // one-past-last statement index.
     DataType size_dtype{DataType::Int(32)};
   };
 
+  // Interval describing the liveness window of a (constant-sized) allocation.
   struct Interval {
     int start{0};
     int end{0};
@@ -601,6 +609,8 @@ private:
     const VarNode *var{nullptr};
   };
 
+  // Result of a linear-scan arena packing.  Offsets contain the byte offset for
+  // each constant-sized buffer, arena_size is the total constant footprint.
   struct ArenaPlan {
     size_t arena_size{0};
     std::unordered_map<const VarNode *, size_t> offsets;
@@ -625,6 +635,7 @@ private:
   class FreeList {
   public:
     std::optional<size_t> Allocate(size_t need, size_t alignment) {
+      // Best-fit search: pick the slot that wastes the least space after alignment.
       int best = -1;
       size_t best_waste = std::numeric_limits<size_t>::max();
       for (int i = 0, n = static_cast<int>(blocks_.size()); i < n; ++i) {
@@ -706,6 +717,7 @@ private:
   };
 
   static ArenaPlan LinearScanPack(std::vector<Interval> intervals) {
+    // Process intervals in program order so lifetimes correspond to the linearised CFG.
     std::sort(intervals.begin(), intervals.end(),
               [](const Interval &lhs, const Interval &rhs) {
                 if (lhs.start != rhs.start) {
@@ -724,6 +736,7 @@ private:
     size_t arena_top = 0;
     std::unordered_map<const VarNode *, size_t> offsets;
 
+    // Expire intervals that end before or at program counter `pc`.
     auto retire = [&](int pc) {
       while (!active.empty() && active.top().end <= pc) {
         const ActiveInterval top = active.top();
@@ -735,6 +748,7 @@ private:
     for (const Interval &interval : intervals) {
       retire(interval.start);
       size_t offset = 0;
+      // Try to recycle previously freed memory first; fall back to bumping the arena.
       if (auto slot =
               freelist.Allocate(interval.size_bytes, interval.alignment)) {
         offset = slot.value();
@@ -1037,6 +1051,7 @@ private:
       return;
     }
 
+    // Discover the first and last touch for every allocation.
     std::unordered_map<const VarNode *, int> start_index;
     std::unordered_map<const VarNode *, int> end_index;
 
@@ -1061,6 +1076,7 @@ private:
 
     std::vector<BufInfo> buf_infos;
     buf_infos.reserve(shmem_allocs_.size());
+    // Build a BufInfo for all allocations that participate in liveness.
     for (const auto &kv : shmem_allocs_) {
       const VarNode *var = kv.first;
       auto start_it = start_index.find(var);
@@ -1109,6 +1125,7 @@ private:
       buf_infos.push_back(std::move(info));
     }
 
+    // Stable order so the later passes have deterministic behaviour.
     std::sort(buf_infos.begin(), buf_infos.end(),
               [](const BufInfo &a, const BufInfo &b) {
                 if (a.start != b.start)
@@ -1123,6 +1140,8 @@ private:
     for (const BufInfo &info : buf_infos) {
       if (!info.const_size_bytes.has_value())
         continue;
+      // Only constant-sized buffers participate in the arena packing because
+      // dynamic sizes must be placed sequentially later.
       Interval interval;
       interval.start = info.start;
       interval.end = info.end;
@@ -1145,6 +1164,7 @@ private:
       }
     }
 
+    // Cursor tracks the running byte offset within the merged arena.
     DataType offset_dtype =
         buf_infos.empty() ? DataType::Int(32) : buf_infos.front().size_dtype;
     PrimExpr total_size = make_const(offset_dtype, 0);
@@ -1166,6 +1186,7 @@ private:
         offset_expr =
             make_const(offset_dtype, static_cast<int64_t>(it->second));
       } else {
+        // Dynamic-sized buffers are appended after the constant arena.
         cursor = AlignPrimExpr(cursor, info.alignment);
         PrimExpr size_expr = CastToOffset(info.size_expr);
         offset_expr = cursor;
@@ -1227,6 +1248,7 @@ private:
       LOG(WARNING) << "Detected overlapping constant buffers; falling back to "
                    << "sequential allocation without reuse.";
       buffer_byte_offsets_.clear();
+      // In the fallback path we simply lay buffers out sequentially.
       PrimExpr new_cursor = make_const(offset_dtype, 0);
       PrimExpr new_total = make_const(offset_dtype, 0);
       for (const BufInfo &info : buf_infos) {
