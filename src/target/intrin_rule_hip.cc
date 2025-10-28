@@ -240,6 +240,16 @@ TVM_REGISTER_OP("tir.fmod")
                                DispatchPureExtern<HIPMath>);
 
 // Register low-level builtin ops.
+TVM_REGISTER_OP("tir.hip.__shfl")
+    .set_num_inputs(3)
+    .add_argument("var", "Expr", "Value to shuffle")
+    .add_argument("lane", "Expr", "Source lane")
+    .add_argument("width", "Expr", "Warp width")
+    .set_attr<TGlobalSymbol>("TGlobalSymbol", "__shfl")
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+
 TVM_REGISTER_OP("tir.hip.__shfl_sync")
     .set_num_inputs(4)
     .add_argument("mask", "Expr", "The thread mask.")

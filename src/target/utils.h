@@ -22,6 +22,7 @@ bool TargetIsHopper(Target target);
 bool TargetIsSm100(Target target);
 bool TargetIsSM120(Target target);
 bool TargetIsCDNA(Target target);
+bool TargetIsDCU(Target target);
 
 bool TargetHasAsyncCopy(Target target);
 bool TargetHasLdmatrix(Target target);
