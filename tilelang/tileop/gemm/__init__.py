@@ -8,6 +8,7 @@ import tvm.ffi
 from tilelang.ir import GemmWarpPolicy
 from .gemm_mma import GemmMMA
 from .gemm_wgmma import GemmWGMMA
+from .gemm_mfma import GemmMFMA
 from tilelang import _ffi_api
 
 
@@ -28,14 +29,18 @@ def gemm_py_lower(gemm_py, layout_map, target, thread_bounds, thread_var):
 # same definition with src/op/gemm_py.h
 class GemmInst(IntEnum):
     MMA = 0
-    WGMMMA = 1
-    MFMA = 2
+    WGMMA = 1
+    TCGEN5MMA = 2
+    MFMA = 3
 
     def is_mma(self) -> bool:
         return self == GemmInst.MMA
 
     def is_wgmma(self) -> bool:
-        return self == GemmInst.WGMMMA
+        return self == GemmInst.WGMMA
+
+    def is_tcgen5mma(self) -> bool:
+        return self == GemmInst.TCGEN5MMA
 
     def is_mfma(self) -> bool:
         return self == GemmInst.MFMA
@@ -115,6 +120,8 @@ class GemmPy(Node, Scriptable):
         elif gemm_inst.is_wgmma():
             return GemmWGMMA
         elif gemm_inst.is_mfma():
-            raise NotImplementedError("MFMA is not implemented")
+            return GemmMFMA
+        elif gemm_inst.is_tcgen5mma():
+            raise NotImplementedError("TCGEN5MMA is not implemented")
         else:
             raise ValueError(f"Unsupported GEMM instruction: {gemm_inst}")
