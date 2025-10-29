@@ -2350,13 +2350,11 @@ void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
     std::string cond = PrintExpr(call->args[0]);
     this->PrintIndent();
     stream << "device_assert(" << cond << ");\n";
-    return;
   } else if (call && call->op.same_as(tvm::tl::device_assert_with_msg())) {
     std::string cond = PrintExpr(call->args[0]);
     std::string msg_expr = PrintExpr(call->args[1]);
     this->PrintIndent();
     stream << "device_assert_with_msg(" << cond << ", " << msg_expr << ");\n";
-    return;
   } else {
     CodeGenC::VisitStmt_(op);
   }
