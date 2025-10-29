@@ -673,7 +673,7 @@ public:
       // Record mapping from the new var to its bound value
       let_value_binding_[op->var] = op->value;
       let_value_binding_[new_var] = value;
-      
+
       return LetStmt(new_var, value, this->VisitStmt(op->body));
     } else {
       let_var_map_[op->var] = op->var;
