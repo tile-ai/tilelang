@@ -28,7 +28,74 @@ concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
 
+env:
+  PYTHONDEVMODE: "1"
+  PYTHONUNBUFFERED: "1"
+  COLUMNS: "100"
+  FORCE_COLOR: "1"
+  CLICOLOR_FORCE: "1"
+
 jobs:
+  build-sdist:
+    name: Build SDist
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      NO_VERSION_LABEL: ${{ github.event_name == 'release' && 'OFF' || 'ON' }}
+      # NO_GIT_VERSION disables embedding the git commit hash in version metadata.
+      # Otherwise, the version of the SDist has a git hash suffix (e.g., 0.1.0+gitabcdef12),
+      # but the package built from the SDist has no way to get the git hash (it is not a git repo),
+      # leading to inconsistent versions between SDist and built packages (+gitabcdef12 vs. +gitunknown).
+      NO_GIT_VERSION: "ON"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Setup Python and uv with caching
+        id: setup-uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          activate-environment: true
+
+      - name: Build SDist
+        run: |
+          uv run --no-project --with=build -m -- build --sdist --outdir=dist
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          create-symlink: true
+          key: ccache-${{ runner.os }}-${{ runner.arch }}
+          evict-old-files: "7d"
+
+      - name: Test SDist buildable
+        run: |
+          TEMP_DIR="$(mktemp -d -t tilelang-sdist-test)"
+          cp -r dist "${TEMP_DIR}/dist"
+          uv venv --seed "${TEMP_DIR}/venv"
+          source "${TEMP_DIR}/venv/bin/activate"
+          cd "${TEMP_DIR}"
+          python3 -m pip install --upgrade pip setuptools wheel
+          python3 -m pip install -v dist/*.tar.gz
+          python3 -c "import tilelang; print(tilelang.__version__)"
+
+      - name: Upload SDist
+        # Not PR to save artifact storage, as SDist is only needed for releases.
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
   build-wheels:
     name: Build wheels for Python ${{ matrix.python-version }} on ${{ matrix.target.runner }} with ${{ matrix.target.toolkit }}
     if: |
@@ -94,7 +161,7 @@ jobs:
       - name: Upload wheels
         # Not PR to save artifact storage, as wheels are only needed for releases.
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: wheels-${{ matrix.python-version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
           path: wheelhouse/*.whl
@@ -102,14 +169,22 @@ jobs:
 
   list-artifacts:
     name: List artifacts
-    # Not PR to save artifact storage, as wheels are only needed for releases.
+    # Not PR to save artifact storage, as artifacts are only needed for releases.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    needs: [build-wheels]
+    needs: [build-sdist, build-wheels]
     timeout-minutes: 15
     steps:
-      - name: Download built wheels
+      - name: Download built SDist
         uses: actions/download-artifact@v5
+        with:
+          # unpacks default artifact into dist/
+          # if `name: artifact` is omitted, the action will create extra parent dir
+          name: sdist
+          path: dist
+
+      - name: Download built wheels
+        uses: actions/download-artifact@v6
         with:
           pattern: wheels-*
           path: dist
@@ -119,7 +194,7 @@ jobs:
         run: ls -lh dist/*
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: artifacts
           path: dist/*

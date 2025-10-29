@@ -29,6 +29,7 @@
 #include <string>
 #include <utility>
 
+#include "../op/builtin.h"
 #include "tir/transforms/ir_utils.h"
 
 namespace tvm {
@@ -301,6 +302,24 @@ void TileLangStorageAccessVisitor::VisitStmt_(const WhileNode *op) {
 }
 
 void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
+  // Mark async TMA load context so that tvm_access_ptr within the call
+  // can be tagged accordingly.
+  auto is_tma_load = [&]() {
+    if (auto opt = op->op.as<Op>()) {
+      const Op &call_op = opt.value();
+      return call_op.same_as(tl::tma_load()) ||
+             call_op.same_as(tl::tma_load_im2col());
+    }
+    return false;
+  }();
+  if (is_tma_load) {
+    tma_depth_++;
+    for (const auto &a : op->args) {
+      this->VisitExpr(a);
+    }
+    tma_depth_--;
+    return;
+  }
   if (op->op.same_as(builtin::address_of())) {
     ICHECK_EQ(op->args.size(), 1U);
     if (auto load = op->args[0].as<BufferLoadNode>()) {
@@ -395,10 +414,12 @@ void TileLangStorageAccessVisitor::VisitExpr_(const CallNode *op) {
       e.scope = scope;
       if (flag->value & 1) {
         e.type = kRead;
+        e.is_async_copy = (tma_depth_ > 0);
         curr_stmt_.access.emplace_back(e);
       }
       if (flag->value & 2) {
         e.type = kWrite;
+        e.is_async_copy = (tma_depth_ > 0);
         curr_stmt_.access.emplace_back(e);
       }
     }

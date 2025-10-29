@@ -3,8 +3,8 @@ name = "tilelang"
 description = "A tile level programming language to generate high performance code."
 readme = "README.md"
 requires-python = ">=3.8"
-authors = [{name = "TileLang Contributors"}, {name = "Tile-AI"}]
-maintainers = [{name = "Lei Wang", email = "leiwang1999@outlook.com"}]
+authors = [{ name = "TileLang Contributors" }, { name = "Tile-AI" }]
+maintainers = [{ name = "Lei Wang", email = "leiwang1999@outlook.com" }]
 license = "MIT"
 keywords = ["BLAS", "CUDA", "HIP", "Code Generation", "TVM"]
 classifiers = [
@@ -58,15 +58,38 @@ metadata.version.provider = "version_provider"
 metadata.version.provider-path = "."
 experimental = true
 
+[tool.scikit-build.sdist]
+# See MANIFEST.in for details
+include = [
+    "VERSION",
+    "LICENSE",
+    "THIRDPARTYNOTICES.txt",
+    "version_provider.py",
+    "requirements*.txt",
+    "tilelang/jit/adapter/cython/cython_wrapper.pyx",
+    "CMakeLists.txt",
+    "src/**",
+    "cmake/**",
+    "3rdparty/**",
+    "testing/**",
+    "examples/**",
+]
+exclude = [
+    ".git",
+    ".github",
+    "**/.git",
+    "**/.github",
+    "3rdparty/clang**",
+    "3rdparty/llvm**",
+    "build",
+]
+
 [tool.scikit-build.wheel.packages]
 tilelang = "tilelang"
 "tilelang/src" = "src"
+# NOTE: The mapping below places the contents of '3rdparty' inside 'tilelang/3rdparty' in the wheel.
+# This is necessary to find TVM shared libraries at runtime.
 "tilelang/3rdparty" = "3rdparty"
-
-# TODO: we might want to not include these in wheel?
-"tilelang/benchmark" = "benchmark"
-"tilelang/examples" = "examples"
-"tilelang/testing" = "testing"
 
 [tool.yapf]
 based_on_style = "yapf"
@@ -142,18 +165,27 @@ filterwarnings = ["always"]
 
 [tool.cibuildwheel]
 archs = ["auto64"]
+skip = "*musllinux*"
+build-frontend = "build"
+environment = { PYTHONDEVMODE = "1", PYTHONUNBUFFERED = "1" }
+environment-pass = [
+    "CUDA_VERSION",
+    "COLUMNS",
+    "FORCE_COLOR",
+    "CLICOLOR_FORCE",
+]
+before-build = "env -0 | sort -z | tr '\\0' '\\n'"
+windows.before-build = "set"
 # Pin to glibc 2.17 for x86 and 2.28 for aarch64 for now
 manylinux-x86_64-image = "manylinux2014"
 manylinux-aarch64-image = "manylinux_2_28"
-skip = "*musllinux*"
-environment-pass = ["CUDA_VERSION"]
 
 [tool.cibuildwheel.linux]
+environment = { PYTHONDEVMODE = "1", PYTHONUNBUFFERED = "1", PATH = "/usr/local/cuda/bin:$PATH" }
 repair-wheel-command = [
     "auditwheel repair --exclude libcuda.so.1 --exclude '/usr/local/cuda*' -w {dest_dir} {wheel}",
     "pipx run abi3audit --strict --report {wheel}",
 ]
-environment.PATH = "/usr/local/cuda/bin:$PATH"
 # Install CUDA runtime and stub driver library
 # manylinux_2_28 uses gcc 14, which needs CUDA 12.8
 before-all = """
