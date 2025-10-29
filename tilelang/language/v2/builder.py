@@ -12,7 +12,7 @@ from .ast import BaseBuilder, eval_op, mutate
 import tvm
 from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
-from tvm.tir.expr import EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, Var
+from tvm.tir.expr import EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
 from typing import TYPE_CHECKING, Callable, ContextManager, Any, Generic, Hashable, ParamSpec, Self, TypeVar, ForwardRef
 from .dtypes import get_tvm_dtype
 from types import EllipsisType
@@ -23,34 +23,42 @@ logger = logging.getLogger(__name__)
 
 
 def unwrap_expr(expr) -> PrimExpr | int | float:
+    '''
+    unwrap expr and convert it into PrimExpr like
+    '''
     if isinstance(expr, tir.meta_var):
         expr = expr.value
     elif isinstance(expr, Buffer) and expr.scope() == 'local.var':
         expr = tir.BufferLoad(expr, indices=[0])
     elif isinstance(expr, (EqualOp, NotEqualOp)):
         expr = expr.asobject()
-    elif isinstance(expr, IntImm) and expr.dtype == 'int32':
-        expr = expr.value
     return expr
 
 
 def unwrap_cond(expr):
+    '''
+    unwrap expr and convert to bool condition
+    '''
     expr = unwrap_expr(expr)
-    if isinstance(expr, PrimExpr):
+    if isinstance(expr, (IntImm, FloatImm, StringImm)):
+        return bool(expr.value)
+    elif isinstance(expr, PrimExpr):
         return expr
     elif isinstance(expr, Buffer):
         raise TypeError(f"Buffer `{expr}` cannot be used as condition directly.")
-    elif isinstance(expr, (int, bool, tuple, list)):
-        return expr
+    elif isinstance(expr, (int, bool)) or expr is None:
+        return bool(expr)
     else:
-        logger.warning(f"Python expression `{expr}` is used in TileLang. ", stack_info=True)
-        return expr
+        logger.warning(
+            f"Python expression `{expr}` is used as condition in TileLang, \n"
+                 "this is treated as a constant expression. ", stack_info=True, stacklevel=3)
+        return bool(expr)
 
 
 thread_local_storage = threading.local()
 
 
-class DummyFrame:
+class Frame:
 
     def __enter__(self):
         ...
@@ -59,23 +67,30 @@ class DummyFrame:
         ...
 
 
-class MacroFrame(DummyFrame):
+class MacroFrame(Frame):
     ...
 
 
-class BoolOpFrame(DummyFrame):
+class BoolOpFrame(Frame):
     ...
 
 
-class ConstIfFrame(DummyFrame):
+class ConstIfFrame(Frame):
     ...
 
 
-class BlockFrame(DummyFrame):
+class BlockFrame(Frame):
     ...
 
 
-AnyFrame = tir.frame.IRBuilderFrame | DummyFrame
+class ContinueFrame(Frame):
+    ...
+
+class BreakFrame(Frame):
+    ...
+
+ContinueOrBreak = ContinueFrame | BreakFrame
+AnyFrame = tir.frame.IRBuilderFrame | Frame
 
 TIR_CONTROL_FRAME = (
     tir.frame.WhileFrame,
@@ -144,6 +159,15 @@ class Builder(BaseBuilder):
         self.frames.append(frame)
         return frame.__enter__()
 
+    def check_continue_break(self):
+        idx = self.find_frame_idx(ContinueOrBreak)
+        if idx is not None:
+            logger.warning(
+                'Writing code after continue/break may cause undefined behavior in tilelang.',
+                stack_info=True,
+                stacklevel=3
+            )
+
     @contextmanager
     def with_frame(self, frame: ContextManager | None):
         pop_idx = len(self.frames)
@@ -155,6 +179,7 @@ class Builder(BaseBuilder):
         ...
 
     def ctx_if(self, cond):
+        self.check_continue_break()
         cond = unwrap_cond(cond)
         if isinstance(cond, PrimExpr):
             with self.with_frame(tir.If(cond)):
@@ -199,6 +224,7 @@ class Builder(BaseBuilder):
             raise TypeError(f"Unsupported eval value: {val} of type {type(val)}")
 
     def ctx_for(self, it):
+        self.check_continue_break()
         it = unwrap_expr(it)
         if isinstance(it, range):
             assert it.step == 1, "Only step=1 is supported in range for now."
@@ -211,15 +237,21 @@ class Builder(BaseBuilder):
             yield v
 
     def ctx_continue(self):
+        self.check_continue_break()
+        self.enter_frame(ContinueFrame())
         raise RuntimeError("continue is not supported in TileLang builder")
 
     def ctx_break(self):
+        self.check_continue_break()
+        self.enter_frame(BreakFrame())
         raise RuntimeError("break is not supported in TileLang builder")
 
     def ctx_while(self, cond):
+        self.check_continue_break()
         raise RuntimeError("while loops are not supported in TileLang builder")
 
     def bind(self, name, value, annot=BaseBuilder.empty):
+        self.check_continue_break()
         locals = self.get_parent_locals()
         orig_value = locals.get(name, None)
         # annotation like tl.float32
@@ -285,6 +317,7 @@ class Builder(BaseBuilder):
             return self.enter_frame(frame)
 
     def assign_slice(self, lval: Any, sl: slice, value: Any, annot=BaseBuilder.empty):
+        self.check_continue_break()
         if annot is not self.empty:
             logger.warning(
                 "Type annotation in slice assignment has no effect", stack_info=True, stacklevel=2)
@@ -294,6 +327,7 @@ class Builder(BaseBuilder):
             return super().assign_slice(lval, sl, value)
 
     def aug_assign(self, op, target, aug_value):
+        self.check_continue_break()
         if is_var(target):
             tir.buffer_store(target, eval_op(op, target[0], aug_value), 0)
         elif isinstance(target, Buffer):
@@ -302,6 +336,7 @@ class Builder(BaseBuilder):
             return super().aug_assign(op, target, aug_value)
 
     def aug_assign_slice(self, op, target, sl, aug_value):
+        self.check_continue_break()
         if isinstance(target, Buffer):
             tir.buffer_store(target, eval_op(op, target[sl], aug_value), sl)
         else:
@@ -328,6 +363,9 @@ class Builder(BaseBuilder):
             return super().ifexp(cond, then, otherwise)
 
     def ret(self, value):
+        self.check_continue_break()
+        # handle return T.alloc_var()
+        value = self.unwrap_value(value)
         last_macro = self.find_frame_idx(MacroFrame)
         if last_macro is not None:
             frame = self.find_frame_idx(TIR_CONTROL_FRAME, start=last_macro)
@@ -345,15 +383,17 @@ class Builder(BaseBuilder):
                     "    return a\n"
                     "```"
                 )
-        return super().ret(value)
+        return value
 
     def ctx_with(self, ctx):
+        self.check_continue_break()
         if isinstance(ctx, tir.frame.IRBuilderFrame):
             return self.with_frame(ctx)
         else:
             return super().ctx_with(ctx)
 
     def assert_expr(self, cond, msg):
+        self.check_continue_break()
         cond = unwrap_cond(cond)
         if isinstance(cond, PrimExpr):
             self.enter_frame(tir.Assert(cond, msg))
@@ -368,7 +408,7 @@ class Builder(BaseBuilder):
                     f"Use immutable variable `{name}` outside its defining region, did you forget **alloc_var**?\n"
                     f"variable `{name}` is defined in frame: {frame}, current frames: {self.frames}."
                 )
-        return unwrap_expr(value)
+        return self.unwrap_value(value)
 
     def arg(self, name, value):
         if self.find_frame_idx(MacroFrame) is not None:
