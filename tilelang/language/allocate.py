@@ -1,4 +1,3 @@
-from __future__ import annotations
 """Memory allocation utilities for Tile-AI programs.
 
 This module provides a set of functions for allocating different types of memory buffers
