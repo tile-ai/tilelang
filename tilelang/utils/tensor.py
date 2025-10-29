@@ -15,6 +15,13 @@ def is_float8(tensor: torch.Tensor) -> bool:
         torch.float8_e4m3fnuz,
     }
 
+def fp8_remove_negative_zeros(tensor: torch.Tensor) -> torch.Tensor:
+    assert is_float8(tensor), "Input tensor must be of float8 dtype"
+    bits = tensor.view(torch.uint8)
+    zeros_mask = (tensor == 0)
+    bits[zeros_mask] = 0x00
+    return tensor
+
 class TensorSupplyType(Enum):
     Integer = 1
     Uniform = 2

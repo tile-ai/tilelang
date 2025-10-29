@@ -3,7 +3,7 @@ import torch
 import warnings
 from typing import Optional, Tuple
 from tilelang.contrib import nvcc
-from tilelang.utils.tensor import is_float8
+from tilelang.utils.tensor import is_float8, fp8_remove_negative_zeros
 from torch.utils.cpp_extension import load, _import_module_from_library
 from tilelang import env
 
@@ -90,6 +90,7 @@ def compress(A: torch.Tensor,
         return compress_sm90(A, transposed=transposed, **kwargs)
     elif compute_version >= (8, 0):
         if is_float8(A):
+            A = fp8_remove_negative_zeros(A)
             origin_dtype = A.dtype
             A = A.view(torch.int8)
         A_sp, E = compress_sm80(A, transposed=transposed)
