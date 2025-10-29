@@ -346,6 +346,7 @@ class SparseTensorCoreIntrinEmitter(object):
         a_dtype = self.a_dtype
         e_dtype = self.e_dtype
         # ldmatrix cannot be used for int8 + trans case.
+        # include/cutlass/gemm/warp/mma_tensor_op_tile_iterator_sparse.h
         ldmatrix_available = False  # TODO: use ldmatrix when possible
 
         def mma_load_layout(i, j):

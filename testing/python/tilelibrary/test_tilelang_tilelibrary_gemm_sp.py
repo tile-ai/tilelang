@@ -19,14 +19,6 @@ STR_TO_TYPE = {
     "int32": torch.int32,
 }
 
-SPARSITY_MAP = {
-    # 'float32': (1, 2),  # not supported for now
-    torch.float16: (2, 4),
-    torch.bfloat16: (2, 4),
-    torch.float8_e4m3fn: (2, 4),
-    torch.int8: (2, 4),
-}
-
 
 def matmul_sp_sm90(
     M,
@@ -115,7 +107,6 @@ def matmul_sp_sm80(
     B_shape = (K, N) if not trans_B else (N, K)
     A_shared_shape = (block_M, block_K // 2) if not trans_A else (block_K // 2, block_M)
     B_shared_shape = (block_K, block_N) if not trans_B else (block_N, block_K)
-    metadata_dtype = 'int32' if is_8_bit else 'int16'
 
     import tilelang.language as T
 
