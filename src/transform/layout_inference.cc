@@ -792,7 +792,7 @@ private:
       // If a cast operation exists, vectorization may still be required
       bool has_cast_operations = false;
       PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
-        if (const auto* store = obj.as<BufferStoreNode>()) {
+        if (const auto *store = obj.as<BufferStoreNode>()) {
           // Check if this is a non-reducer store with Cast operation
           if (store->value.as<CastNode>()) {
             has_cast_operations = true;
