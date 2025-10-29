@@ -597,7 +597,9 @@ private:
             }
           }
           // Update the best plan if this one uses fewer registers
-          if (reg_num < min_reg_num) {
+          if (reg_num < min_reg_num ||
+              (reg_num == min_reg_num &&
+               attempt_infer_root < min_reg_num_infer_root)) {
             best_infer_list =
                 BackupInferList(); // Use backup to avoid moving out infer_list_
             best_layout_map = tmp_layout_map;
@@ -787,7 +789,18 @@ private:
           }
       });
 
-      if (has_non_local && !has_reducer) {
+      // If a cast operation exists, vectorization may still be required
+      bool has_cast_operations = false;
+      PostOrderVisit(for_node->body, [&](const ObjectRef &obj) {
+        if (const auto* store = obj.as<BufferStoreNode>()) {
+          // Check if this is a non-reducer store with Cast operation
+          if (store->value.as<CastNode>()) {
+            has_cast_operations = true;
+          }
+        }
+      });
+
+      if ((has_non_local || has_cast_operations) && !has_reducer) {
         for_node = VectorizeLoop(for_node);
       }
 
