@@ -168,30 +168,56 @@ public:
 
 private:
   Stmt VisitStmt_(const SeqStmtNode *op) final {
-    // FIXME: 1st stmt cannot know the previous proxy kind
     Array<Stmt> seq;
     seq.reserve(op->seq.size());
 
     ProxyKind sequence_kind = ProxyKind::kUnknown;
     ProxyKind prev_kind = ProxyKind::kUnknown;
+    ProxyKind entry_kind = ProxyKind::kUnknown; // Entry kind for parent-level checking
+    ProxyKind prev_entry_kind = prev_stmt_kind_; // Entry kind from before this SeqStmt
 
-    for (const Stmt &stmt : op->seq) {
+    for (size_t i = 0; i < op->seq.size(); ++i) {
+      const Stmt &stmt = op->seq[i];
       Stmt new_stmt = VisitStmt(stmt);
-      ProxyKind current_kind = GetProxyKind(new_stmt);
+      
+      // Get the entry kind of the visited statement
+      ProxyKind current_entry_kind = GetEntryKind(new_stmt);
+      // Get the exit kind
+      ProxyKind current_exit_kind = prev_stmt_kind_;
 
-      if (!seq.empty() && NeedsFence(prev_kind, current_kind)) {
-        Stmt fence = MakeFenceStmt();
-        seq.push_back(fence);
-        prev_kind = GetProxyKind(fence);
+      if (i == 0) {
+        // First statement: record its entry kind for parent-level checking
+        entry_kind = current_entry_kind;
+        
+        // Check if fence needed before this SeqStmt (parent will handle it)
+        // We skip fence injection here
+      } else {
+        // Subsequent statements: check if fence needed between prev and current
+        if (NeedsFence(prev_kind, current_entry_kind)) {
+          Stmt fence = MakeFenceStmt();
+          seq.push_back(fence);
+          prev_kind = GetProxyKind(fence);
+        }
       }
 
       seq.push_back(new_stmt);
-      sequence_kind = CombineProxy(sequence_kind, current_kind);
-      prev_kind = current_kind;
+      
+      // Use GetProxyKind for the combined kind stored in the map
+      ProxyKind stmt_combined_kind = GetProxyKind(new_stmt);
+      sequence_kind = CombineProxy(sequence_kind, stmt_combined_kind);
+      
+      // Update prev_kind to the exit kind for next iteration
+      prev_kind = current_exit_kind;
     }
 
     Stmt result = seq.size() == 1 ? seq[0] : SeqStmt(std::move(seq));
     SetProxyKind(result, sequence_kind);
+    
+    // Set entry kind of this SeqStmt (for parent's fence checking)
+    SetEntryKind(result, entry_kind);
+    
+    // prev_stmt_kind_ already contains the exit kind (last statement's exit kind)
+    
     return result;
   }
 
@@ -217,12 +243,16 @@ private:
     }
 
     SetProxyKind(stmt, kind);
+    SetEntryKind(stmt, kind); // Entry kind = exit kind for single statements
+    prev_stmt_kind_ = kind;
     return stmt;
   }
 
   Stmt VisitStmt_(const BufferStoreNode *op) final {
     Stmt stmt = StmtMutator::VisitStmt_(op);
     SetProxyKind(stmt, ProxyKind::kGeneric);
+    SetEntryKind(stmt, ProxyKind::kGeneric);
+    prev_stmt_kind_ = ProxyKind::kGeneric;
     return stmt;
   }
 
@@ -230,10 +260,14 @@ private:
     Stmt stmt = StmtMutator::VisitStmt_(op);
     const auto *node = stmt.as<IfThenElseNode>();
     ProxyKind kind = GetProxyKind(node->then_case);
+    ProxyKind entry_kind = GetEntryKind(node->then_case);
     if (node->else_case.defined()) {
       kind = CombineProxy(kind, GetProxyKind(node->else_case.value()));
+      entry_kind = CombineProxy(entry_kind, GetEntryKind(node->else_case.value()));
     }
     SetProxyKind(stmt, kind);
+    SetEntryKind(stmt, entry_kind);
+    prev_stmt_kind_ = kind;
     return stmt;
   }
 
@@ -241,14 +275,21 @@ private:
     Stmt stmt = StmtMutator::VisitStmt_(op);
     const auto *node = stmt.as<AttrStmtNode>();
     ProxyKind body_kind = GetProxyKind(node->body);
+    ProxyKind body_entry_kind = GetEntryKind(node->body);
     SetProxyKind(stmt, body_kind);
+    SetEntryKind(stmt, body_entry_kind);
+    prev_stmt_kind_ = body_kind;
     return stmt;
   }
 
   Stmt VisitStmt_(const BlockRealizeNode *op) final {
     Stmt stmt = StmtMutator::VisitStmt_(op);
     const auto *node = stmt.as<BlockRealizeNode>();
-    SetProxyKind(stmt, GetProxyKind(node->block));
+    ProxyKind kind = GetProxyKind(node->block);
+    ProxyKind entry_kind = GetEntryKind(node->block);
+    SetProxyKind(stmt, kind);
+    SetEntryKind(stmt, entry_kind);
+    prev_stmt_kind_ = kind;
     return stmt;
   }
 
@@ -256,11 +297,22 @@ private:
     Stmt stmt = StmtMutator::VisitStmt_(op);
     const auto *node = stmt.as<BlockNode>();
     ProxyKind kind = ProxyKind::kUnknown;
+    ProxyKind entry_kind = ProxyKind::kUnknown;
     if (node->init.defined()) {
       kind = CombineProxy(kind, GetProxyKind(node->init.value()));
+      entry_kind = CombineProxy(entry_kind, GetEntryKind(node->init.value()));
     }
     kind = CombineProxy(kind, GetProxyKind(node->body));
+    if (entry_kind == ProxyKind::kUnknown) {
+      // If no init, use body's entry kind
+      entry_kind = GetEntryKind(node->body);
+    } else {
+      // If init exists, combine with body's combined kind
+      entry_kind = CombineProxy(entry_kind, GetProxyKind(node->body));
+    }
     SetProxyKind(stmt, kind);
+    SetEntryKind(stmt, entry_kind);
+    prev_stmt_kind_ = kind;
     return stmt;
   }
 
@@ -275,7 +327,10 @@ private:
     Stmt stmt = StmtMutator::VisitStmt_(op);
     const auto *node = stmt.as<NodeType>();
     ProxyKind body_kind = GetProxyKind(node->body);
+    ProxyKind body_entry_kind = GetEntryKind(node->body);
     SetProxyKind(stmt, body_kind);
+    SetEntryKind(stmt, body_entry_kind); // Propagate entry kind from body
+    prev_stmt_kind_ = body_kind;
     return stmt;
   }
 
@@ -294,6 +349,21 @@ private:
     return it->second;
   }
 
+  void SetEntryKind(const Stmt &stmt, ProxyKind kind) {
+    entry_map_[stmt.get()] = kind;
+  }
+
+  ProxyKind GetEntryKind(const Stmt &stmt) const {
+    if (!stmt.defined()) {
+      return ProxyKind::kUnknown;
+    }
+    auto it = entry_map_.find(stmt.get());
+    if (it == entry_map_.end()) {
+      return ProxyKind::kUnknown;
+    }
+    return it->second;
+  }
+
   Stmt MakeFenceStmt() {
     Stmt fence = Evaluate(Call(DataType::Handle(), fence_proxy_async(), {}));
     SetProxyKind(fence, ProxyKind::kNeutral);
@@ -301,6 +371,8 @@ private:
   }
 
   std::unordered_map<const StmtNode *, ProxyKind> proxy_map_;
+  std::unordered_map<const StmtNode *, ProxyKind> entry_map_;
+  ProxyKind prev_stmt_kind_ = ProxyKind::kUnknown;
 };
 
 } // namespace
