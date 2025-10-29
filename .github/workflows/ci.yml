@@ -298,8 +298,9 @@ jobs:
             echo "Using run-clang-tidy from $(command -v run-clang-tidy)"
             CLANG_TIDY=(run-clang-tidy)
           else
-            echo "Downloading run-clang-tidy script"
-            wget -O run-clang-tidy.py https://raw.githubusercontent.com/llvm/llvm-project/refs/heads/release/21.x/clang-tools-extra/clang-tidy/tool/run-clang-tidy.py
+            RCT_URL=https://raw.githubusercontent.com/llvm/llvm-project/refs/heads/release/21.x/clang-tools-extra/clang-tidy/tool/run-clang-tidy.py
+            echo "Downloading run-clang-tidy script from ${RCT_URL}"
+            echo "import urllib.request; url = '${RCT_URL}'.rstrip('/'); urllib.request.urlretrieve(url, url.split('/')[-1])" | uv run --no-project --script -
             CLANG_TIDY=(uv run --no-project --script -- run-clang-tidy.py)
           fi
           if [[ -x "$(command -v clang-apply-replacements)" ]]; then
