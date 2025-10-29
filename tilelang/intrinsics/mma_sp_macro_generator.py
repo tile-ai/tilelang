@@ -89,7 +89,22 @@ class SparseTensorCoreIntrinEmitter(object):
             "int32": 32,
             "uint32": 32,
         },
-        
+        "float8_e4m3": {
+            "int8": 8,
+            "uint8": 8,
+            "int16": 16,
+            "uint16": 16,
+            "int32": 32,
+            "uint32": 32,
+        },
+        "float8_e5m2": {
+            "int8": 8,
+            "uint8": 8,
+            "int16": 16,
+            "uint16": 16,
+            "int32": 32,
+            "uint32": 32,
+        },
     }
 
     E_REPLICATE_FACTOR = {  # metadata replicate every 4 consecutive threads
