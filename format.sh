@@ -29,10 +29,7 @@ ALL_FILES=''
 ONLY_CHANGED=''
 FILES=()
 if (($# == 0)); then
-    if [[ -n "$(git status --porcelain --ignore-submodules --untracked-files=no)" ]]; then
-        echo "Detected uncommitted changes. Please commit or stash them before running $0." >&2
-        exit 1
-    fi
+    # Default: allow dirty workspace; run on changed files (committed + worktree)
     ONLY_CHANGED='true'
 else
     while (($# > 0)); do
@@ -78,7 +75,7 @@ if [[ -n "${ALL_FILES}" ]]; then
     echo "Checking all files..." >&2
 elif [[ -n "${ONLY_CHANGED}" ]]; then
     MERGE_BASE="$(get_merge_base)"
-    echo "Checking changed files compared to merge base (${MERGE_BASE})..." >&2
+    echo "Checking changed files vs merge base (${MERGE_BASE}) and working tree..." >&2
 elif [[ "${#FILES[@]}" -gt 0 ]]; then
     echo "Checking specified files: ${FILES[*]}..." >&2
 fi
@@ -93,7 +90,17 @@ echo 'tile-lang pre-commit: Check Start'
 if [[ -n "${ALL_FILES}" ]]; then
     python3 -m pre_commit run --all-files
 elif [[ -n "${ONLY_CHANGED}" ]]; then
-    python3 -m pre_commit run --from-ref "${MERGE_BASE}" --to-ref HEAD
+    # Collect changed files (committed since merge-base + current worktree)
+    CHANGED_FILES="$(git diff --name-only --diff-filter=ACM "${MERGE_BASE}" 2>/dev/null || true)"
+    if [[ -n "${CHANGED_FILES}" ]]; then
+        echo "Running pre-commit on changed files:"
+        echo "${CHANGED_FILES}"
+        # Convert newline-separated files to space-separated and run pre-commit once
+        CHANGED_FILES_SPACE="$(echo "${CHANGED_FILES}" | tr '\n' ' ')"
+        python3 -m pre_commit run --files ${CHANGED_FILES_SPACE}
+    else
+        echo "No files changed relative to merge base and worktree. Skipping pre-commit."
+    fi
 elif [[ "${#FILES[@]}" -gt 0 ]]; then
     python3 -m pre_commit run --files "${FILES[@]}"
 fi
