@@ -7,6 +7,13 @@ from tvm import tir
 from torch.utils.dlpack import to_dlpack
 import numpy as np
 
+def is_float8(tensor: torch.Tensor) -> bool:
+    return tensor.dtype in {
+        torch.float8_e5m2,
+        torch.float8_e5m2fnuz,
+        torch.float8_e4m3fn,
+        torch.float8_e4m3fnuz,
+    }
 
 class TensorSupplyType(Enum):
     Integer = 1

@@ -2,22 +2,14 @@ import torch
 import tilelang
 import tilelang.testing
 
-from tilelang.utils.sparse import compress, randn_semi_sparse
+from tilelang.utils.sparse import compress, randn_semi_sparse, randint_semi_sparse
 from tilelang.layout import make_metadata_layout
+from tilelang.utils.tensor import torch_assert_close, map_torch_type
 from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.set_printoptions(threshold=float('inf'), edgeitems=float('inf'), linewidth=10000)
 torch.manual_seed(42)
-
-STR_TO_TYPE = {
-    'float32': torch.float32,
-    "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
-    "float8_e4m3": torch.float8_e4m3fn,
-    "int8": torch.int8,
-    "int32": torch.int32,
-}
 
 
 def matmul_sp_sm90(
@@ -175,18 +167,17 @@ def run_gemm_sp(
         kernel,
         out_idx=[-1],
     )
-    A = randn_semi_sparse(M, K, dtype=STR_TO_TYPE[in_dtype], device='cuda', transposed=trans_A)
+    if "int" in in_dtype:
+        A = randint_semi_sparse(M, K, low=0, high=128, dtype=map_torch_type(in_dtype), device='cuda', transposed=trans_A)
+    else:
+        A = randn_semi_sparse(M, K, dtype=map_torch_type(in_dtype), device='cuda', transposed=trans_A)
     if trans_B:
         B = torch.randn((N, K), device='cuda', dtype=torch.float32)
     else:
         B = torch.randn((K, N), device='cuda', dtype=torch.float32)
 
-    if "float8" in in_dtype or "int8" in in_dtype:
-        A = normalize(A.float())
-        B = normalize(B.float())
-
-    A = A.to(STR_TO_TYPE[in_dtype])
-    B = B.to(STR_TO_TYPE[in_dtype])
+    A = A.to(map_torch_type(in_dtype))
+    B = B.to(map_torch_type(in_dtype))
 
     A_sparse, E = compress(A, transposed=trans_A, block_k=block_K)
 
@@ -200,14 +191,18 @@ def run_gemm_sp(
         if "float8" in in_dtype or "int8" in in_dtype:
             A = A.to(torch.float32)
             B = B.to(torch.float32)
-        return torch.matmul(A, B).to(STR_TO_TYPE[out_dtype])
+        return torch.matmul(A, B)
 
     C = _matmul(A, B)
-    if 'float8' in in_dtype:
-        diff = calc_diff(C_sp, C)
-        assert diff < 1e-3, f"{diff=}"
-    else:
-        torch.testing.assert_close(C_sp, C, atol=1e-3, rtol=1e-3)
+
+    torch_assert_close(
+        C_sp.to(torch.float32),
+        C.to(torch.float32),
+        rtol=1e-3,
+        atol=1e-3,
+        base_name="tilelang_sp",
+        ref_name="ref_dense",
+    )
     print("pass")
 
 
@@ -353,4 +348,11 @@ def test_gemm_sp_sm80():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    tilelang.disable_cache()
+    # tilelang.testing.main()
+    # run_gemm_sp_sm80(32, 64, 64, "float16", "float32", "float32", 32, 64, 64, 0, 32)
+    # run_gemm_sp_sm80(32, 16, 64, "float16", "float32", "float32", 32, 16, 64, 0, 32, trans_B=True)
+    # run_gemm_sp_sm80(32, 32, 32, "float32", "float32", "float32", 32, 32, 32, 0, 32, trans_B=False)
+    # run_gemm_sp_sm80(512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 3, 128, False, True)
+    run_gemm_sp_sm80(128, 128, 128, "float8_e4m3", "float32", "float32", 128, 128, 64, 2, 32, False, True)
+    # run_gemm_sp_sm80(128, 128, 128, "float8_e4m3", "float8_e4m3", "float32", 128, 128, 64, 2, 32, False, True)
