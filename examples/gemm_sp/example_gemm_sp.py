@@ -14,9 +14,7 @@ import torch
 
 arch = nvcc.get_target_compute_version()
 
-ARCH_INFO = {"8.0": (16, "int16"), "8.9": (16, "int16"), "9.0": (8, "uint8")}
-
-default_config = {  # take best config from autotune script
+DEFAULT_CONFIG = {  # take best config from autotune script
     "4090": {
         'float': {
             'block_M': 128,
@@ -59,6 +57,7 @@ default_config = {  # take best config from autotune script
     }
 }
 
+ARCH_INFO = {"8.0": (16, "int16"), "8.9": (16, "int16"), "9.0": (8, "uint8")}
 
 @tilelang.jit(out_idx=[-1])
 def matmul_sp_fp16(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, thread_num, policy,
@@ -98,7 +97,7 @@ def matmul_sp_fp16(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, 
                 T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
                 T.copy(E[by * block_M, k * block_K // e_factor], E_shared)
                 T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm_sp(A_shared, E_shared, B_shared, C_local, False, False, policy=policy)
+                T.gemm_sp_v2(A_shared, E_shared, B_shared, C_local, False, False, policy=policy)
 
             T.copy(C_local, C_shared)
             T.copy(C_shared, C[by * block_M, bx * block_N])
@@ -120,7 +119,7 @@ def main():
     parser.add_argument("--cfg", type=str, choices=["4090", "h20"], required=True)
     args = parser.parse_args()
     kernel = matmul_sp_fp16(args.m, args.n, args.k, args.accum_dtype,
-                            **default_config[args.cfg][args.accum_dtype])
+                            **DEFAULT_CONFIG[args.cfg][args.accum_dtype])
 
     a = randn_semi_sparse(args.m, args.k, device='cuda', dtype=torch.half)
     b = torch.randn(args.k, args.n, device='cuda', dtype=torch.half)
@@ -128,7 +127,7 @@ def main():
     a_sparse, e = compress(
         a,
         transposed=False,
-        block_k=default_config[args.cfg][args.accum_dtype]['block_K'],
+        block_k=DEFAULT_CONFIG[args.cfg][args.accum_dtype]['block_K'],
         arch=arch)
     c = kernel(a_sparse, e, b)
 
