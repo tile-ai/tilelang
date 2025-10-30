@@ -126,7 +126,8 @@ def fast_flashattn(
                 current_bx = bx_loop_var
                 q_block_offset = current_bx * block_M
 
-                Q_shared = T.alloc_shared([block_M, dim], dtype)
+                # Q stays in register, K and V in LDS as per DY's specification
+                Q_register = T.alloc_fragment([block_M, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
                 acc_s_cast = T.alloc_fragment([block_M, block_N], dtype)
@@ -137,7 +138,7 @@ def fast_flashattn(
 
                 T.copy(
                     Q[bz, q_block_offset:q_block_offset + block_M, by, :],
-                    Q_shared,
+                    Q_register,
                     coalesced_width=vec_size)
 
                 loop_end_k = (
@@ -165,7 +166,7 @@ def fast_flashattn(
                     else:
                         T.clear(acc_s)
                     T.gemm(
-                        Q_shared,
+                        Q_register,
                         K_shared,
                         acc_s,
                         transpose_B=True,
@@ -296,8 +297,10 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
         with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=threads) as (bx, by, bz):
             T.use_swizzle(panel_size, enable=enable_rasterization)
 
+            # V in register; K, Q, QT, dO, dOT in LDS as per DY's specification
+            # Note: K kept in LDS due to multiple usage patterns causing layout conflicts
             K_shared = T.alloc_shared([block_M, dim], dtype)
-            V_shared = T.alloc_shared([block_M, dim], dtype)
+            V_register = T.alloc_fragment([block_M, dim], dtype)
             q_shared = T.alloc_shared([block_N, dim], dtype)
             do_shared = T.alloc_shared([block_N, dim], dtype)
             lse_shared = T.alloc_shared([block_N], accum_dtype)
@@ -314,7 +317,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
             dq = T.alloc_fragment([block_N, dim], accum_dtype)
 
             T.copy(K[bz, by * block_M:(by + 1) * block_M, bx // groups, :], K_shared)
-            T.copy(V[bz, by * block_M:(by + 1) * block_M, bx // groups, :], V_shared)
+            T.copy(V[bz, by * block_M:(by + 1) * block_M, bx // groups, :], V_register)
             T.clear(dv)
             T.clear(dk)
 
@@ -340,7 +343,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
                 T.copy(dO[bz, k * block_N:(k + 1) * block_N, bx, :], do_shared)
                 T.clear(dP)
 
-                T.gemm(V_shared, do_shared, dP, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(V_register, do_shared, dP, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(P_acc, p_cast)
                 T.gemm(p_cast, do_shared, dv, policy=T.GemmWarpPolicy.FullRow)
@@ -354,7 +357,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, groups, block_M: int, b
 
                 T.copy(p_cast, ds_shared)
                 T.clear(dq)
-                T.gemm(ds_shared, K_shared, dq, transpose_A=True)
+                T.gemm(ds_shared, K_shared, dq, transpose_A=True, policy=T.GemmWarpPolicy.FullRow)
                 for i, j in T.Parallel(block_N, dim):
                     T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
 

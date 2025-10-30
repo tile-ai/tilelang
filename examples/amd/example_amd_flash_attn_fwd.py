@@ -122,7 +122,8 @@ def fast_flashattn(
                 current_bx = bx
                 q_block_offset = current_bx * block_M
 
-                Q_shared = T.alloc_shared([block_M, dim], dtype)
+                # Q stays in register (fragment), K/V in LDS (shared)
+                Q_fragment = T.alloc_fragment([block_M, dim], dtype)
                 K_shared = T.alloc_shared([block_N, dim], dtype)
                 V_shared = T.alloc_shared([block_N, dim], dtype)
                 # Use register fragment for P instead of shared memory to reduce LDS usage
@@ -134,7 +135,7 @@ def fast_flashattn(
 
                 T.copy(
                     Q[bz, q_block_offset:q_block_offset + block_M, by, :],
-                    Q_shared,
+                    Q_fragment,
                     coalesced_width=vec_size)
 
                 loop_end_k = T.ceildiv(q_block_offset + block_M,
@@ -161,12 +162,11 @@ def fast_flashattn(
                     else:
                         T.clear(acc_s)
                     T.gemm(
-                        Q_shared,
+                        Q_fragment,
                         K_shared,
                         acc_s,
                         transpose_B=True,
                         k_pack=k_pack,
-                        policy=GemmWarpPolicy.FullRow,
                     )
 
                     T.copy(m_i, m_prev)
@@ -190,7 +190,7 @@ def fast_flashattn(
                     # Cast acc_s (accum_dtype) to dtype in registers and directly GEMM with V
                     T.copy(acc_s, acc_s_cast)
 
-                    T.gemm(acc_s_cast, V_shared, acc_o, policy=GemmWarpPolicy.FullRow)
+                    T.gemm(acc_s_cast, V_shared, acc_o)
 
                 l_inv = T.alloc_fragment([block_M], accum_dtype)
                 for i in T.Parallel(block_M):
