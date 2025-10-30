@@ -3,7 +3,7 @@ import tilelang
 import tilelang.testing
 
 from tilelang.utils.sparse import compress, randn_semi_sparse, randint_semi_sparse
-from tilelang.layout import make_metadata_layout
+from tilelang.layout import make_cutlass_metadata_layout
 from tilelang.utils.tensor import torch_assert_close, map_torch_type
 from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 
@@ -48,14 +48,13 @@ def matmul_sp_sm90(
             C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.annotate_layout({
                 E:
-                    make_metadata_layout(
-                        E, mma_dtype="float16", arch="9.0", backend="cutlass", block_k=block_K),
+                    make_cutlass_metadata_layout(
+                        E, mma_dtype="float16", arch="9.0", block_k=block_K),
                 E_shared:
-                    make_metadata_layout(
+                    make_cutlass_metadata_layout(
                         E_shared,
                         mma_dtype="float16",
                         arch="9.0",
-                        backend="cutlass",
                         block_k=block_K),
             })
             T.disable_warp_group_reg_alloc()
@@ -115,10 +114,10 @@ def matmul_sp_sm80(
             C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.annotate_layout({
                 E:
-                    make_metadata_layout(E, mma_dtype=in_dtype, backend="cutlass", arch="8.0"),
+                    make_cutlass_metadata_layout(E, mma_dtype=in_dtype, arch="8.0"),
                 E_shared:
-                    make_metadata_layout(
-                        E_shared, mma_dtype=in_dtype, backend="cutlass", arch="8.0"),
+                    make_cutlass_metadata_layout(
+                        E_shared, mma_dtype=in_dtype, arch="8.0"),
             })
             T.clear(C_frag)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):

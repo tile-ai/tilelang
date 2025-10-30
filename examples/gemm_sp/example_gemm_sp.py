@@ -5,7 +5,7 @@ import argparse
 import tilelang
 import tilelang.language as T
 
-from tilelang.layout import make_metadata_layout
+from tilelang.layout import make_cutlass_metadata_layout
 from tilelang.utils.sparse import compress, randn_semi_sparse
 from tilelang.contrib import nvcc
 from triton.testing import do_bench
@@ -83,13 +83,12 @@ def matmul_sp_fp16(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, 
             T.use_swizzle(panel_size=10, enable=enable_rasterization)
             T.annotate_layout({
                 E:
-                    make_metadata_layout(
-                        E, mma_dtype="float16", backend="cutlass", block_k=block_K, arch=arch),
+                    make_cutlass_metadata_layout(
+                        E, mma_dtype="float16", block_k=block_K, arch=arch),
                 E_shared:
-                    make_metadata_layout(
+                    make_cutlass_metadata_layout(
                         E_shared,
                         mma_dtype="float16",
-                        backend="cutlass",
                         block_k=block_K,
                         arch=arch),
             })

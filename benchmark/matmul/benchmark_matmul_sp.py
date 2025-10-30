@@ -9,7 +9,7 @@ import tilelang.language as T
 from tilelang.autotuner import autotune
 from tilelang import jit
 from tilelang.contrib import nvcc
-from tilelang.layout import make_metadata_layout
+from tilelang.layout import make_cutlass_metadata_layout
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -203,11 +203,11 @@ def matmul_sp(M, N, K, in_dtype, accum_dtype):
                 T.use_swizzle(panel_size=10, enable=enable_rasterization)
                 T.annotate_layout({
                     E:
-                        make_metadata_layout(
-                            E, mma_dtype="float16", backend="cutlass", block_k=block_K),
+                        make_cutlass_metadata_layout(
+                            E, mma_dtype="float16", block_k=block_K),
                     E_shared:
-                        make_metadata_layout(
-                            E_shared, mma_dtype="float16", backend="cutlass", block_k=block_K),
+                        make_cutlass_metadata_layout(
+                            E_shared, mma_dtype="float16", block_k=block_K),
                 })
                 # Loop over sub-blocks in K dimension, pipelined by num_stages
                 for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):

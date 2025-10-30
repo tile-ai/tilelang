@@ -19,7 +19,7 @@ def decompose_col_major(index_1d: int, basis: List[int]) -> List[int]:
     return res
 
 
-def _make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, block_k: int):
+def make_cutlass_metadata_layout_sm90(buffer: tvm.tir.Buffer, mma_dtype: str, block_k: int):
     """Make a layout of metadata that is compatible with cutlass sm90 compression kernel. Note that layout atom is the same for smem and gmem.
 
     Args:
@@ -105,7 +105,7 @@ def _make_metadata_layout_sm90_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str, b
     return T.Layout(shape, transform)
 
 
-def _make_metadata_layout_sm8x_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str):
+def make_cutlass_metadata_layout_sm8x(buffer: tvm.tir.Buffer, mma_dtype: str):
     """Make a layout of metadata that is compatible with cutlass sm8x compression kernel. Note that layout atom is the same for smem and gmem.
         ref: https://github.com/pytorch/pytorch/blob/d0c24b392cbb7b213d22e42c52c6c2d1ac2da1bd/torch/sparse/_semi_structured_conversions.py#L5
     Args:
@@ -134,9 +134,8 @@ def _make_metadata_layout_sm8x_cutlass(buffer: tvm.tir.Buffer, mma_dtype: str):
     return T.Layout(buffer.shape, ColumnMajorInterleaved)
 
 
-def make_metadata_layout(buffer: tvm.tir.Buffer,
+def make_cutlass_metadata_layout(buffer: tvm.tir.Buffer,
                          mma_dtype: str = "float16",
-                         backend: str = 'cutlass',
                          arch: Optional[str] = None,
                          **extra_args):
     if arch is None:
@@ -145,15 +144,9 @@ def make_metadata_layout(buffer: tvm.tir.Buffer,
     compute_version = nvcc.parse_compute_version(arch)
 
     if compute_version >= (9, 0):
-        if backend == 'cutlass':
-            return _make_metadata_layout_sm90_cutlass(
-                buffer=buffer, mma_dtype=mma_dtype, **extra_args)
-        else:
-            raise NotImplementedError(f"Arch {arch}, Unsupported backend: {backend}")
+        return make_cutlass_metadata_layout_sm90(
+            buffer=buffer, mma_dtype=mma_dtype, **extra_args)
     elif compute_version >= (8, 0):
-        if backend == 'cutlass':
-            return _make_metadata_layout_sm8x_cutlass(buffer=buffer, mma_dtype=mma_dtype)
-        else:
-            raise NotImplementedError(f"Arch {arch}, Unsupported backend: {backend}")
+        return make_cutlass_metadata_layout_sm8x(buffer=buffer, mma_dtype=mma_dtype)
     else:
         raise NotImplementedError(f"Unsupported architecture: {arch}")

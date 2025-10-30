@@ -5,7 +5,7 @@ import argparse
 import tilelang
 import tilelang.language as T
 
-from tilelang.layout import make_metadata_layout
+from tilelang.layout import make_cutlass_metadata_layout
 from tilelang.utils.sparse import compress, randn_semi_sparse, arange_semi_sparse
 from tilelang.contrib import nvcc
 from tilelang.utils.tensor import torch_assert_close, map_torch_type
