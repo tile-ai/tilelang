@@ -1,3 +1,4 @@
+ARG TARGETARCH
 FROM pytorch/manylinux2_28-builder:cuda12.1 AS builder_amd64
 ENV CUDA_VERSION=12.1 \
     AUDITWHEEL_PLAT=manylinux_2_28_x86_64

@@ -70,7 +70,24 @@ include = [
     "CMakeLists.txt",
     "src/**",
     "cmake/**",
-    "3rdparty/**",
+    # TVM package items (allowlist)
+    "3rdparty/tvm/src",
+    "3rdparty/tvm/python",
+    "3rdparty/tvm/licenses",
+    "3rdparty/tvm/conftest.py",
+    "3rdparty/tvm/CONTRIBUTORS.md",
+    "3rdparty/tvm/KEYS",
+    "3rdparty/tvm/LICENSE",
+    "3rdparty/tvm/README.md",
+    "3rdparty/tvm/mypy.ini",
+    "3rdparty/tvm/pyproject.toml",
+    "3rdparty/tvm/version.py",
+    # CUTLASS prebuilt items (allowlist)
+    "3rdparty/cutlass/include",
+    "3rdparty/cutlass/tools",
+    # Composable Kernel prebuilt items (allowlist)
+    "3rdparty/composable_kernel/include",
+    "3rdparty/composable_kernel/library",
     "testing/**",
     "examples/**",
 ]
@@ -89,7 +106,17 @@ tilelang = "tilelang"
 "tilelang/src" = "src"
 # NOTE: The mapping below places the contents of '3rdparty' inside 'tilelang/3rdparty' in the wheel.
 # This is necessary to find TVM shared libraries at runtime.
-"tilelang/3rdparty" = "3rdparty"
+# Restrict 3rdparty contents in wheel to the same allowlist as sdist
+# TVM
+"tilelang/3rdparty/tvm/src" = "3rdparty/tvm/src"
+"tilelang/3rdparty/tvm/python" = "3rdparty/tvm/python"
+"tilelang/3rdparty/tvm/version.py" = "3rdparty/tvm/version.py"
+# CUTLASS
+"tilelang/3rdparty/cutlass/include" = "3rdparty/cutlass/include"
+"tilelang/3rdparty/cutlass/tools" = "3rdparty/cutlass/tools"
+# Composable Kernel
+"tilelang/3rdparty/composable_kernel/include" = "3rdparty/composable_kernel/include"
+"tilelang/3rdparty/composable_kernel/library" = "3rdparty/composable_kernel/library"
 
 [tool.yapf]
 based_on_style = "yapf"
