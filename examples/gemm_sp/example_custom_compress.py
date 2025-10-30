@@ -220,16 +220,16 @@ def torch_compress(dense):
 
     return (sparse, meta)
 
-def decode_2to4_metadata_2x2bit(meta: torch.Tensor, M, K) -> torch.Tensor:
+def decode_metadata(meta: torch.Tensor) -> torch.Tensor:
+    assert meta.dtype is torch.int16
     groups_per_meta = 16 // 4  # 4 groups per uint16
     out = []
-
     for g in range(groups_per_meta):
         group_bits = (meta >> (g * 4)) & 0xF
         idx0 = group_bits & 0x3
         idx1 = (group_bits >> 2) & 0x3
         out.append(torch.stack([idx0, idx1], dim=-1))
-    return torch.concat(out, dim=-1).view(M, -1)
+    return torch.concat(out, dim=-1).view(meta.shape[0], -1)
 
 @tilelang.jit(out_idx=[1, 2], pass_configs={
     tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True,
