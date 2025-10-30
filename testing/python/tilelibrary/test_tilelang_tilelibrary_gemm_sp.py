@@ -8,7 +8,6 @@ from tilelang.utils.tensor import torch_assert_close, map_torch_type
 from tilelang.intrinsics.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 
 torch.backends.cuda.matmul.allow_tf32 = False
-torch.set_printoptions(threshold=float('inf'), edgeitems=float('inf'), linewidth=10000)
 torch.manual_seed(42)
 
 
@@ -46,7 +45,7 @@ def matmul_sp_sm90(
             A_shared = T.alloc_shared(A_shared_shape, in_dtype)
             B_shared = T.alloc_shared(B_shared_shape, in_dtype)
             E_shared = T.alloc_shared((block_M, block_K // E_factor), 'uint8')
-            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            C_frag = T.alloc_fragment((block_M, block_N), accum_dtype)
             T.annotate_layout({
                 E:
                     make_metadata_layout(
@@ -60,7 +59,7 @@ def matmul_sp_sm90(
                         block_k=block_K),
             })
             T.disable_warp_group_reg_alloc()
-            T.clear(C_local)
+            T.clear(C_frag)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(E[by * block_M, k * block_K // E_factor], E_shared)
                 if trans_A:
@@ -71,8 +70,8 @@ def matmul_sp_sm90(
                     T.copy(B[bx * block_N, k * block_K], B_shared)
                 else:
                     T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm_sp(A_shared, E_shared, B_shared, C_local, trans_A, trans_B)
-            T.copy(C_local, C[by * block_M, bx * block_N])
+                T.gemm_sp(A_shared, E_shared, B_shared, C_frag, trans_A, trans_B)
+            T.copy(C_frag, C[by * block_M, bx * block_N])
 
     return main
 
@@ -132,7 +131,7 @@ def matmul_sp_sm80(
                     T.copy(B[bx * block_N, k * block_K], B_shared)
                 else:
                     T.copy(B[k * block_K, bx * block_N], B_shared)
-                T.gemm_sp_v2(A_shared, E_shared, B_shared, C_frag, trans_A, trans_B)
+                T.gemm_sp(A_shared, E_shared, B_shared, C_frag, trans_A, trans_B)
             T.copy(C_frag, C[by * block_M, bx * block_N])
 
     return main
@@ -348,11 +347,4 @@ def test_gemm_sp_sm80():
 
 
 if __name__ == "__main__":
-    tilelang.disable_cache()
-    # tilelang.testing.main()
-    # run_gemm_sp_sm80(32, 64, 64, "float16", "float32", "float32", 32, 64, 64, 0, 32)
-    # run_gemm_sp_sm80(32, 16, 64, "float16", "float32", "float32", 32, 16, 64, 0, 32, trans_B=True)
-    # run_gemm_sp_sm80(32, 32, 32, "float32", "float32", "float32", 32, 32, 32, 0, 32, trans_B=False)
-    # run_gemm_sp_sm80(512, 1024, 768, "int8", "int32", "int32", 64, 64, 64, 3, 128, False, True)
-    run_gemm_sp_sm80(128, 128, 128, "float8_e4m3", "float32", "float32", 128, 128, 64, 2, 32, False, True)
-    # run_gemm_sp_sm80(128, 128, 128, "float8_e4m3", "float8_e4m3", "float32", 128, 128, 64, 2, 32, False, True)
+    tilelang.testing.main()
