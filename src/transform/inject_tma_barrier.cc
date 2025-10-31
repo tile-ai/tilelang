@@ -295,14 +295,17 @@ public:
 
   void VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(mbarrier_expect_tx())) {
-      PrimExpr e = tma_op_to_barrier_id_[tvm::ffi::GetRef<Call>(op)]
-                       .as<CallNode>()
-                       ->args[0];
-      auto int_set = arith::EvalSet(e, var_int_set_);
-      expect_.push_back(if_depth_ == 1);
-      sequence.push_back(0);
-      int_sets_.push_back(int_set);
-      expect_tx_count_ += 1;
+      auto call_ref = tvm::ffi::GetRef<Call>(op);
+      if (tma_op_to_barrier_id_.count(call_ref)) {
+        PrimExpr e = tma_op_to_barrier_id_[call_ref]
+                         .as<CallNode>()
+                         ->args[0];
+        auto int_set = arith::EvalSet(e, var_int_set_);
+        expect_.push_back(if_depth_ == 1);
+        sequence.push_back(0);
+        int_sets_.push_back(int_set);
+        expect_tx_count_ += 1;
+      }
     } else if (op->op.same_as(builtin::ptx_arrive_barrier())) {
       sequence.push_back(1);
     } else if (op->op.same_as(builtin::ptx_cp_async_barrier())) {
@@ -453,10 +456,11 @@ private:
 
   PrimExpr VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
-      // check this must be in the tma_op_to_barrier_id_
-      ICHECK(tma_op_to_barrier_id_.count(tvm::ffi::GetRef<Call>(op)))
-          << "tma_load must be in the tma_op_to_barrier_id_";
-      auto barrier_id = tma_op_to_barrier_id_[tvm::ffi::GetRef<Call>(op)];
+      auto call_ref = tvm::ffi::GetRef<Call>(op);
+      if (!tma_op_to_barrier_id_.count(call_ref)) {
+        return IRMutatorWithAnalyzer::VisitExpr_(op);
+      }
+      auto barrier_id = tma_op_to_barrier_id_[call_ref];
       auto new_args = op->args;
       auto arg0 = op->args[0].as<Call>();
       auto is_1d_tma_load =
@@ -469,9 +473,11 @@ private:
       }
       return Call(op->dtype, op->op, new_args);
     } else if (op->op.same_as(mbarrier_expect_tx())) {
-      ICHECK(tma_op_to_barrier_id_.count(tvm::ffi::GetRef<Call>(op)))
-          << "mbarrier_expect_tx must be in the tma_op_to_barrier_id_";
-      auto barrier_id = tma_op_to_barrier_id_[tvm::ffi::GetRef<Call>(op)];
+      auto call_ref = tvm::ffi::GetRef<Call>(op);
+      if (!tma_op_to_barrier_id_.count(call_ref)) {
+        return IRMutatorWithAnalyzer::VisitExpr_(op);
+      }
+      auto barrier_id = tma_op_to_barrier_id_[call_ref];
       auto new_args = op->args;
       new_args.Set(0, barrier_id);
       if (!has_warp_specialization_)
