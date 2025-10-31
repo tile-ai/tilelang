@@ -94,6 +94,7 @@ class GemmSPMMA(GemmSPBase):
         E_shared = self.E
         B_shared = self.B
         C_local = self.C
+        assert self.K >= micro_size_k, f"K dimension {self.K} should be >= micro size k {micro_size_k}"
         if self.is_gemm_ss():
             @T.prim_func
             def _gemm_ssr() -> None:
