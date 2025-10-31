@@ -65,6 +65,6 @@ else
     /bin/bash -lc "$script"
 
   if [ -d dist ]; then
-    mv -f dist "dist-${TARGETARCH}"
+    mv -f dist "dist-local-${TARGETARCH}"
   fi
 fi
