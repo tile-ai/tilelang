@@ -353,7 +353,9 @@ public:
       size_t need_n =
           std::max<size_t>(cur_n, static_cast<size_t>(ensure_min_count_));
 
-      std::vector<bool> replace(cur_n, false);
+      // Mark barriers to restore across the full needed length, not just the
+      // original length, so newly appended entries can be restored as well.
+      std::vector<bool> replace(need_n, false);
       for (auto &id : restore_barrier_ids_) {
         if (id >= 0 && static_cast<size_t>(id) < replace.size()) {
           replace[id] = true;
@@ -373,7 +375,11 @@ public:
       }
       // Append additional barriers if required
       for (size_t i = cur_n; i < need_n; ++i) {
-        new_args.push_back(default_barrier_thread_count_);
+        if (replace[i]) {
+          new_args.push_back(producer_thread_extent_);
+        } else {
+          new_args.push_back(default_barrier_thread_count_);
+        }
       }
 
       return Call(op->dtype, op->op, new_args);
