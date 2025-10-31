@@ -505,6 +505,7 @@ TVM_DLL const Op &initialize_descriptor();
  */
 
 TVM_DLL const Op &increase_descriptor_offset();
+
 /*!
  * \brief tilelang intrinsic for element-wise atomic addition.
  *
@@ -512,6 +513,20 @@ TVM_DLL const Op &increase_descriptor_offset();
  * tilelang.
  */
 TVM_DLL const Op &atomicadd_elem_op();
+
+/*!
+ * \brief tilelang intrinsic for assert on device.
+ *
+ *  This op is used to represent an assert on device
+ */
+TVM_DLL const Op &device_assert();
+
+/*!
+ * \brief tilelang intrinsic for assert on device with additional message.
+ *
+ *  This op is used to represent an assert on device with additional message.
+ */
+TVM_DLL const Op &device_assert_with_msg();
 
 } // namespace tl
 } // namespace tvm

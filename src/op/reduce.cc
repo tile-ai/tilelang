@@ -22,7 +22,7 @@ namespace tl {
 using namespace tir;
 
 ReduceOp::ReduceOp(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<ReduceOpNode> node = make_object<ReduceOpNode>();
+  ObjectPtr<ReduceOpNode> node = tvm::ffi::make_object<ReduceOpNode>();
   node->src = vmap[GetVarFromAccessPtr(args[0])];
   node->dst = vmap[GetVarFromAccessPtr(args[1])];
   std::string reduce_type = args[2].as<StringImm>().value()->value;
@@ -33,12 +33,12 @@ ReduceOp::ReduceOp(Array<PrimExpr> args, BufferMap vmap) {
 }
 
 TileOperator ReduceOpNode::Clone() const {
-  auto op = make_object<ReduceOpNode>(*this);
+  auto op = tvm::ffi::make_object<ReduceOpNode>(*this);
   return ReduceOp(op);
 }
 
 TileOperator CumSumOpNode::Clone() const {
-  auto op = make_object<CumSumOpNode>(*this);
+  auto op = tvm::ffi::make_object<CumSumOpNode>(*this);
   return CumSumOp(op);
 }
 
@@ -85,6 +85,7 @@ PrimExpr ReduceOpNode::MakeInitValue() const {
     return make_zero(dst->dtype);
   } else {
     LOG(FATAL) << "Unsupported reduce type: " << type->type;
+    return PrimExpr();
   }
 }
 
@@ -512,7 +513,7 @@ CumSumOp::CumSumOp(Array<PrimExpr> args, BufferMap vmap) {
   /// - dim: dimension to cumsum
   /// - reverse: whether to cumsum in reverse order
   CHECK_EQ(args.size(), 4);
-  ObjectPtr<CumSumOpNode> node = make_object<CumSumOpNode>();
+  ObjectPtr<CumSumOpNode> node = tvm::ffi::make_object<CumSumOpNode>();
   node->src = vmap[GetVarFromAccessPtr(args[0])];
   node->dst = vmap[GetVarFromAccessPtr(args[1])];
   node->dim = args[2].as<IntImm>().value()->value;
@@ -567,5 +568,12 @@ TIR_REGISTER_TL_OP(CumSumOp, cumsum)
     .set_num_inputs(4)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  ReduceOpNode::RegisterReflection();
+  CumSumOpNode::RegisterReflection();
+  ReduceTypeNode::RegisterReflection();
+}
+
 } // namespace tl
 } // namespace tvm

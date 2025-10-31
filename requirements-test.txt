@@ -18,10 +18,11 @@ cython
 docutils
 dtlib
 einops
+flash-linear-attention==0.3.2
 packaging>=21.0
-pytest-xdist>=2.2.1
 pytest-durations
 pytest-timeout
+pytest-xdist>=2.2.1
 pytest>=6.2.4
 pyyaml
 requests

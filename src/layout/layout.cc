@@ -64,13 +64,12 @@ Layout::Layout(Array<IterVar> forward_var, Array<PrimExpr> forward_index) {
   }
   forward_index =
       forward_index.Map([&](const PrimExpr &e) { return Substitute(e, vmap); });
-
-  auto n = make_object<LayoutNode>(input_size, forward_index);
+  auto n = tvm::ffi::make_object<LayoutNode>(input_size, forward_index);
   data_ = std::move(n);
 }
 
 Layout::Layout(Array<PrimExpr> input_size, Array<PrimExpr> forward_index) {
-  auto n = make_object<LayoutNode>(input_size, forward_index);
+  auto n = tvm::ffi::make_object<LayoutNode>(input_size, forward_index);
   data_ = std::move(n);
 }
 
@@ -130,7 +129,6 @@ Array<PrimExpr> LayoutNode::Forward(const Array<PrimExpr> &vars) const {
 
   Array<PrimExpr> transformed = forward_index_.Map(
       [&](const PrimExpr &e) { return Substitute(e, vmap); });
-
   // Concatenate with the remaining elements from vars
   Array<PrimExpr> result;
   for (size_t i = 0; i < vars.size() - InputDim(); i++) {
@@ -212,7 +210,7 @@ Fragment FragmentNode::DeReplicate() const {
     factor = arith::ZeroAwareGCD(*rep_size, *idx_size);
   }
   if (factor == 1)
-    return GetRef<Fragment>(this);
+    return tvm::ffi::GetRef<Fragment>(this);
 
   Map<Var, PrimExpr> vmap;
   vmap.Set(ReplicationPlaceholder(), ReplicationPlaceholder() * factor +
@@ -224,7 +222,7 @@ Fragment FragmentNode::DeReplicate() const {
 }
 
 Fragment FragmentNode::BindThreadRange(Range thread_range) const {
-  auto n = make_object<FragmentNode>(*this);
+  auto n = tvm::ffi::make_object<FragmentNode>(*this);
   n->thread_range_ = thread_range;
   return Fragment(n);
 }
@@ -336,8 +334,8 @@ Fragment::Fragment(Array<IterVar> forward_var, Array<PrimExpr> forward_index,
       forward_index.Map([&](const PrimExpr &e) { return Substitute(e, vmap); });
   forward_thread = Substitute(forward_thread, vmap);
 
-  auto n = make_object<FragmentNode>(input_size, forward_index, forward_thread,
-                                     replicate_size);
+  auto n = tvm::ffi::make_object<FragmentNode>(input_size, forward_index,
+                                               forward_thread, replicate_size);
   data_ = std::move(n);
 }
 
@@ -348,8 +346,8 @@ Fragment::Fragment(Array<PrimExpr> input_size, Array<PrimExpr> forward_index,
     forward_thread = Substitute(
         forward_thread, {{replicate_var.value(), ReplicationPlaceholder()}});
   }
-  auto n = make_object<FragmentNode>(input_size, forward_index, forward_thread,
-                                     replicate_size);
+  auto n = tvm::ffi::make_object<FragmentNode>(input_size, forward_index,
+                                               forward_thread, replicate_size);
   data_ = std::move(n);
 }
 
@@ -442,21 +440,6 @@ std::string FragmentNode::DebugOutput() const {
   return ss.str();
 }
 
-bool LayoutNode::SEqualReduce(const LayoutNode *other,
-                              SEqualReducer equal) const {
-  return equal(this->InputShape(), other->InputShape()) &&
-         equal(this->forward_index_, other->forward_index_);
-}
-
-bool FragmentNode::SEqualReduce(const FragmentNode *other,
-                                SEqualReducer equal) const {
-  return equal(this->ReplicateExtent(), other->ReplicateExtent()) &&
-         equal(this->InputShape(), other->InputShape()) &&
-         equal(this->ThreadExtent(), other->ThreadExtent()) &&
-         equal(this->forward_index_, other->forward_index_) &&
-         equal(this->forward_thread_, other->forward_thread_);
-}
-
 bool LayoutNode::IsEqual(const LayoutNode *other, bool skip_index) const {
   bool ret = StructuralEqual()(this->InputShape(), other->InputShape());
   ret &= StructuralEqual()(this->OutputShape(), other->OutputShape());
@@ -495,10 +478,7 @@ void FragmentNode::RegisterReflection() {
       .def_ro("replicate_size", &FragmentNode::replicate_size_);
 }
 
-TVM_REGISTER_NODE_TYPE(LayoutNode);
-TVM_REGISTER_NODE_TYPE(FragmentNode);
-
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef()
       .def_packed("tl.Layout",
@@ -582,13 +562,13 @@ TVM_FFI_STATIC_INIT_BLOCK({
       .def("tl.make_linear_layout", [](int stride, int continuous) {
         return makeGemmLayoutLinear(stride, continuous);
       });
-});
+}
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   LayoutNode::RegisterReflection();
   FragmentNode::RegisterReflection();
-});
+}
 
 } // namespace tl
 } // namespace tvm

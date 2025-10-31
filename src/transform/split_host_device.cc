@@ -37,7 +37,7 @@
 
 namespace tvm {
 namespace tl {
-
+using namespace ffi;
 namespace tir = tvm::tir;
 
 class HostDeviceSplitter : public tir::StmtMutator {
@@ -200,10 +200,10 @@ tvm::transform::Pass SplitHostDevice() {
                                           {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.SplitHostDevice", SplitHostDevice);
-});
+}
 
 } // namespace transform
 } // namespace tl

@@ -20,6 +20,7 @@
 namespace tvm {
 namespace codegen {
 using namespace tvm::tl::codegen;
+using namespace ffi;
 
 struct CUDAMath {
   std::string operator()(DataType t, std::string name) const {
@@ -919,6 +920,22 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
              << "__half22float2(*((half2*)(&(" << src << "))+1));\n";
       os << sret;
       return;
+    } else if (from_ty.lanes() == 8 && target_ty.lanes() == 8) {
+      // half8 -> float8
+      PrintIndent();
+      stream << "((float2*)(&" << sret << "))[0] = "
+             << "__half22float2(*(half2*)(&(" << src << ")));\n";
+      PrintIndent();
+      stream << "((float2*)(&" << sret << "))[1] = "
+             << "__half22float2(*((half2*)(&(" << src << "))+1));\n";
+      PrintIndent();
+      stream << "((float2*)(&" << sret << "))[2] = "
+             << "__half22float2(*((half2*)(&(" << src << "))+2));\n";
+      PrintIndent();
+      stream << "((float2*)(&" << sret << "))[3] = "
+             << "__half22float2(*((half2*)(&(" << src << "))+3));\n";
+      os << sret;
+      return;
     }
   } else if (from_ty.is_float() && target_ty.is_float16()) {
     // Use __float22half2_rn for vectorized conversion (float2 -> half2)
@@ -937,6 +954,22 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       PrintIndent();
       stream << "((half2*)(&" << sret << "))[1] = "
              << "__float22half2_rn(*((float2*)(&(" << src << "))+1));\n";
+      os << sret;
+      return;
+    } else if (from_ty.lanes() == 8 && target_ty.lanes() == 8) {
+      // float8 -> half8
+      PrintIndent();
+      stream << "((half2*)(&" << sret << "))[0] = "
+             << "__float22half2_rn(*(float2*)(&(" << src << ")));\n";
+      PrintIndent();
+      stream << "((half2*)(&" << sret << "))[1] = "
+             << "__float22half2_rn(*((float2*)(&(" << src << "))+1));\n";
+      PrintIndent();
+      stream << "((half2*)(&" << sret << "))[2] = "
+             << "__float22half2_rn(*((float2*)(&(" << src << "))+2));\n";
+      PrintIndent();
+      stream << "((half2*)(&" << sret << "))[3] = "
+             << "__float22half2_rn(*((float2*)(&(" << src << "))+3));\n";
       os << sret;
       return;
     }
@@ -965,6 +998,26 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
              << src << "))+1));\n";
       os << sret;
       return;
+    } else if (from_ty.lanes() == 8 && target_ty.lanes() == 8) {
+      // bfloat162x4 -> float8
+      PrintIndent();
+      stream << "((float2*)(&" << sret << "))[0] = "
+             << "__bfloat1622float2(*reinterpret_cast<__nv_bfloat162*>(&("
+             << src << ")));\n";
+      PrintIndent();
+      stream << "((float2*)(&" << sret << "))[1] = "
+             << "__bfloat1622float2(*(reinterpret_cast<__nv_bfloat162*>(&("
+             << src << "))+1));\n";
+      PrintIndent();
+      stream << "((float2*)(&" << sret << "))[2] = "
+             << "__bfloat1622float2(*(reinterpret_cast<__nv_bfloat162*>(&("
+             << src << "))+2));\n";
+      PrintIndent();
+      stream << "((float2*)(&" << sret << "))[3] = "
+             << "__bfloat1622float2(*(reinterpret_cast<__nv_bfloat162*>(&("
+             << src << "))+3));\n";
+      os << sret;
+      return;
     }
   } else if (from_ty.is_float() && target_ty.is_bfloat16()) {
     // Use __float22bfloat162_rn for vectorized conversion (float2 -> bfloat162)
@@ -983,6 +1036,22 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       PrintIndent();
       stream << "(reinterpret_cast<__nv_bfloat162*>(&" << sret << "))[1] = "
              << "__float22bfloat162_rn(*((float2*)(&(" << src << "))+1));\n";
+      os << sret;
+      return;
+    } else if (from_ty.lanes() == 8 && target_ty.lanes() == 8) {
+      // float8 -> bfloat162x4
+      PrintIndent();
+      stream << "(reinterpret_cast<__nv_bfloat162*>(&" << sret << "))[0] = "
+             << "__float22bfloat162_rn(*(float2*)(&(" << src << ")));\n";
+      PrintIndent();
+      stream << "(reinterpret_cast<__nv_bfloat162*>(&" << sret << "))[1] = "
+             << "__float22bfloat162_rn(*((float2*)(&(" << src << "))+1));\n";
+      PrintIndent();
+      stream << "(reinterpret_cast<__nv_bfloat162*>(&" << sret << "))[2] = "
+             << "__float22bfloat162_rn(*((float2*)(&(" << src << "))+2));\n";
+      PrintIndent();
+      stream << "(reinterpret_cast<__nv_bfloat162*>(&" << sret << "))[3] = "
+             << "__float22bfloat162_rn(*((float2*)(&(" << src << "))+3));\n";
       os << sret;
       return;
     }
@@ -1017,6 +1086,36 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
              << "))+1), __NV_SATFINITE, "
              << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
              << ");\n";
+      os << sret;
+      return;
+    } else if (from_ty.lanes() == 8 && target_ty.lanes() == 8) {
+      // float8 -> fp8x8
+      PrintIndent();
+      stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[0] = "
+             << "__nv_cvt_float2_to_fp8x2(*(float2*)(&(" << src
+             << ")), __NV_SATFINITE, "
+             << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
+             << ");\n";
+      PrintIndent();
+      stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[1] = "
+             << "__nv_cvt_float2_to_fp8x2(*((float2*)(&(" << src
+             << "))+1), __NV_SATFINITE, "
+             << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
+             << ");\n";
+      PrintIndent();
+      stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[2] = "
+             << "__nv_cvt_float2_to_fp8x2(*((float2*)(&(" << src
+             << "))+2), __NV_SATFINITE, "
+             << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
+             << ");\n";
+      PrintIndent();
+      stream << "((__nv_fp8x2_storage_t*)(&" << sret << "))[3] = "
+             << "__nv_cvt_float2_to_fp8x2(*((float2*)(&(" << src
+             << "))+3), __NV_SATFINITE, "
+             << (target_ty.is_float8_e4m3() ? "__NV_E4M3" : "__NV_E5M2")
+             << ");\n";
+      os << sret;
+      return;
     }
   }
 
@@ -1032,6 +1131,52 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   }
 
   os << sret;
+}
+
+void CodeGenTileLangCUDA::VisitExpr_(const MinNode *op, std::ostream &os) {
+  // TODO(wt): Consider vectorized reduction and impl for other dtypes
+  DataType t = op->dtype;
+
+  // Standard min/max functions don't support bfloat16 or float16
+  if ((t.is_bfloat16() || t.is_float16()) && t.is_scalar()) {
+    os << "cutlass::fast_min(" << PrintExpr(op->a) << ", " << PrintExpr(op->b)
+       << ")";
+    return;
+  }
+
+  // For float32 and float64 scalar, use standard min functions
+  if (t.is_float() && t.is_scalar()) {
+    if (t.bits() == 32 || t.bits() == 64) {
+      os << "min(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+      return;
+    }
+  }
+
+  // For all other scalar types (int, uint), use default implementation
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangCUDA::VisitExpr_(const MaxNode *op, std::ostream &os) {
+  // TODO(wt): Consider vectorized reduction and impl for other dtypes
+  DataType t = op->dtype;
+
+  // Standard min/max functions don't support bfloat16 or float16
+  if ((t.is_bfloat16() || t.is_float16()) && t.is_scalar()) {
+    os << "cutlass::fast_max(" << PrintExpr(op->a) << ", " << PrintExpr(op->b)
+       << ")";
+    return;
+  }
+
+  // For float32 and float64 scalar, use standard max functions
+  if (t.is_float() && t.is_scalar()) {
+    if (t.bits() == 32 || t.bits() == 64) {
+      os << "max(" << PrintExpr(op->a) << ", " << PrintExpr(op->b) << ")";
+      return;
+    }
+  }
+
+  // For all other scalar types (int, uint), use default implementation
+  CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenTileLangCUDA::PrintCallExtern(Type ret_type, String global_symbol,
@@ -2021,8 +2166,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                                     "A_ptr, B_ptr, C_ptr>, but got "
                                  << op->args.size();
     auto op_instance = Downcast<StringImm>(op->args[0]);
-    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
-                          op->args, true, os);
+    this->PrintCallExtern(GetType(tvm::ffi::GetRef<PrimExpr>(op)),
+                          op_instance->value, op->args, true, os);
   } else if (op->op.same_as(tl::tl_gemm_sp())) {
     ICHECK(op->args.size() == 5)
         << "tl_gemm_sp expects 5 arguments <op_instance, A_ptr, B_ptr, C_ptr, "
@@ -2030,8 +2175,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
         << op->args.size();
     auto op_instance = Downcast<StringImm>(op->args[0]);
     enable_sparse_gemm_ = true;
-    this->PrintCallExtern(GetType(GetRef<PrimExpr>(op)), op_instance->value,
-                          op->args, true, os);
+    this->PrintCallExtern(GetType(tvm::ffi::GetRef<PrimExpr>(op)),
+                          op_instance->value, op->args, true, os);
   } else if (op->op.same_as(tl::get_lane_idx())) {
     ICHECK_LE(op->args.size(), 1)
         << "tl.get_lane_idx expects at most one argument <warp_size>.";
@@ -2297,6 +2442,16 @@ void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
     stream << "  " << vid_global_barrier_expect_ << " = 0;\n";
     PrintIndent();
     stream << "}\n";
+  }
+  if (call && (call->op.same_as(tvm::tl::device_assert()))) {
+    std::string cond = PrintExpr(call->args[0]);
+    this->PrintIndent();
+    stream << "device_assert(" << cond << ");\n";
+  } else if (call && call->op.same_as(tvm::tl::device_assert_with_msg())) {
+    std::string cond = PrintExpr(call->args[0]);
+    std::string msg_expr = PrintExpr(call->args[1]);
+    this->PrintIndent();
+    stream << "device_assert_with_msg(" << cond << ", " << msg_expr << ");\n";
   } else {
     CodeGenC::VisitStmt_(op);
   }
@@ -2304,8 +2459,8 @@ void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
 
 void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
-  CHECK_LE(lanes, 4) << "Translate Ramp Node " << GetRef<Ramp>(op) << " with "
-                     << lanes << " lanes is not allowed.";
+  CHECK_LE(lanes, 4) << "Translate Ramp Node " << tvm::ffi::GetRef<Ramp>(op)
+                     << " with " << lanes << " lanes is not allowed.";
   os << "(make_";
   PrintType(op->dtype, os);
   os << "(";
@@ -2540,12 +2695,29 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
 
 inline void PrintConst(const FloatImmNode *op, std::ostream &os,
                        CodeGenTileLangCUDA *p) { // NOLINT(*)
-  // Type code is kBFloat
-  if (op->dtype.is_bfloat16()) {
-    os << "bfloat16_t";
-    os << '(' << std::hexfloat << op->value << 'f';
-    os << "/*" << std::scientific << op->value << "*/";
-    os << ')';
+  // Type code is kBFloat/kFloat16
+  // which is indeed CUTLASS supported types currently
+  if (op->dtype.is_bfloat16() || op->dtype.is_float16()) {
+    std::ostringstream temp;
+    if (std::isinf(op->value)) {
+      if (op->value < 0) {
+        temp << "-";
+      }
+      temp << "std::numeric_limits<";
+      p->PrintType(op->dtype, temp);
+      temp << ">::infinity()";
+    } else if (std::isnan(op->value)) {
+      temp << "std::numeric_limits<";
+      p->PrintType(op->dtype, temp);
+      temp << ">::quiet_NaN()";
+    } else {
+      p->PrintType(op->dtype, temp);
+      temp << '(' << std::hexfloat << op->value << 'f';
+      temp << "/*" << std::scientific << op->value << "*/";
+      temp << ')';
+    }
+    p->MarkConst(temp.str());
+    os << temp.str();
     return;
   }
   // Type code is kFloat8_e5m2 or kE4M4Float
@@ -2556,7 +2728,7 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     os << ')';
     return;
   }
-  // Type code is kFloat
+  // Type code is kFloat64/kFloat32 (kFloat16 is handled above)
   switch (op->dtype.bits()) {
   case 64:
   case 32: {
@@ -2578,13 +2750,6 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     }
     p->MarkConst(temp.str());
     os << temp.str();
-    break;
-  }
-  case 16: {
-    os << "half_t" << '(';
-    FloatImm const_f32 = FloatImm(DataType::Float(32), op->value);
-    PrintConst(const_f32.get(), os, p);
-    os << ')';
     break;
   }
   default:
@@ -2807,7 +2972,7 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
   ReserveKeywordsAsUnique();
 
   auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
-  ICHECK(global_symbol.defined())
+  ICHECK(global_symbol)
       << "CodeGenC: Expect PrimFunc to have the global_symbol attribute";
   bool no_alias = f->HasNonzeroAttr(tir::attr::kNoAlias);
 
