@@ -344,12 +344,14 @@ public:
       : restore_barrier_ids_(std::move(restore_barrier_ids)),
         producer_thread_extent_(std::move(producer_thread_extent)),
         ensure_min_count_(ensure_min_count),
-        default_barrier_thread_count_(std::move(default_barrier_thread_count)) {}
+        default_barrier_thread_count_(std::move(default_barrier_thread_count)) {
+  }
 
   PrimExpr VisitExpr_(const CallNode *op) {
     if (op->op.same_as(create_list_of_mbarrier())) {
       size_t cur_n = op->args.size();
-      size_t need_n = std::max<size_t>(cur_n, static_cast<size_t>(ensure_min_count_));
+      size_t need_n =
+          std::max<size_t>(cur_n, static_cast<size_t>(ensure_min_count_));
 
       std::vector<bool> replace(cur_n, false);
       for (auto &id : restore_barrier_ids_) {
@@ -504,13 +506,15 @@ private:
         // so codegen can emit mbarrier[index]. This handles degenerate
         // producer-only kernels where no arrive() is seen and mapping is empty.
         auto arg0 = op->args[0].as<Call>();
-        bool is_1d_tma_load = arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
-                              !arg0.value()->op.same_as(create_tma_im2col_descriptor());
+        bool is_1d_tma_load =
+            arg0 && !arg0.value()->op.same_as(create_tma_descriptor()) &&
+            !arg0.value()->op.same_as(create_tma_im2col_descriptor());
         if (is_1d_tma_load && op->args.size() >= 3) {
           if (const auto *imm = op->args[2].as<IntImmNode>()) {
             Array<PrimExpr> new_args = op->args;
             new_args.Set(2, Call(DataType::Handle(), get_mbarrier(),
-                                 {IntImm(DataType::Int(32), static_cast<int>(imm->value))}));
+                                 {IntImm(DataType::Int(32),
+                                         static_cast<int>(imm->value))}));
             return Call(op->dtype, op->op, new_args);
           }
         }
