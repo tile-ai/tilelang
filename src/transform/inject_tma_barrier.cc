@@ -297,9 +297,7 @@ public:
     if (op->op.same_as(mbarrier_expect_tx())) {
       auto call_ref = tvm::ffi::GetRef<Call>(op);
       if (tma_op_to_barrier_id_.count(call_ref)) {
-        PrimExpr e = tma_op_to_barrier_id_[call_ref]
-                         .as<CallNode>()
-                         ->args[0];
+        PrimExpr e = tma_op_to_barrier_id_[call_ref].as<CallNode>()->args[0];
         auto int_set = arith::EvalSet(e, var_int_set_);
         expect_.push_back(if_depth_ == 1);
         sequence.push_back(0);
