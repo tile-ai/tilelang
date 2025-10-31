@@ -404,8 +404,7 @@ TL_DEVICE T shfl_up_sync(unsigned mask, T val, int delta) {
   return __shfl_up_sync(mask, val, delta);
 }
 
-template <typename T>
-TL_DEVICE T shfl_sync(unsigned mask, T val, int srcLane) {
+template <typename T> TL_DEVICE T shfl_sync(unsigned mask, T val, int srcLane) {
   return __shfl_sync(mask, val, srcLane);
 }
 
@@ -431,8 +430,7 @@ TL_DEVICE half_t shfl_up_sync(unsigned mask, half_t val, int delta) {
   return half_t(r);
 }
 
-template <>
-TL_DEVICE half_t shfl_sync(unsigned mask, half_t val, int srcLane) {
+template <> TL_DEVICE half_t shfl_sync(unsigned mask, half_t val, int srcLane) {
   float f = static_cast<float>(val);
   float r = __shfl_sync(mask, f, srcLane);
   return half_t(r);
@@ -440,7 +438,8 @@ TL_DEVICE half_t shfl_sync(unsigned mask, half_t val, int srcLane) {
 
 // Specializations for cutlass::bfloat16_t
 template <>
-TL_DEVICE bfloat16_t shfl_xor_sync(unsigned mask, bfloat16_t val, int laneMask) {
+TL_DEVICE bfloat16_t shfl_xor_sync(unsigned mask, bfloat16_t val,
+                                   int laneMask) {
   float f = static_cast<float>(val);
   float r = __shfl_xor_sync(mask, f, laneMask);
   return bfloat16_t(r);
