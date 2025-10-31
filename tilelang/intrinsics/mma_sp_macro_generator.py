@@ -468,27 +468,39 @@ class SparseTensorCoreIntrinEmitter(object):
                     B_shared_buf_elem = B_shared_buf[wi, wk] if b_transposed else B_shared_buf[wk,
                                                                                                wi]
 
-                    T.ptx_ldmatrix(
-                        b_dtype,
-                        T.bool(trans),
-                        4 if replicate_b else 2,
-                        ".b16",
-                        B_local_buf.data,
-                        i * local_size_b,
-                        T.address_of(B_shared_buf_elem),
-                        get_ldmatrix_offset_b("B", tx, 0, stride, b_dtype, b_transposed),
-                    )
+                    if replicate_b:
+                        T.ptx_ldmatrix(
+                            b_dtype,
+                            T.bool(trans),
+                            4,
+                            ".b16",
+                            B_local_buf.data,
+                            i * local_size_b,
+                            T.address_of(B_shared_buf_elem),
+                            get_ldmatrix_offset_b("B", tx, 0, stride, b_dtype, b_transposed),
+                        )
 
-                    T.ptx_ldmatrix(
-                        b_dtype,
-                        T.bool(trans),
-                        4 if replicate_b else 2,
-                        ".b16",
-                        B_local_buf.data,
-                        i * local_size_b + lift(local_size_b) // 2,
-                        T.address_of(B_shared_buf_elem),
-                        get_ldmatrix_offset_b("B", tx, lift(local_size_b) // 2, stride, b_dtype, b_transposed),
-                    )
+                        T.ptx_ldmatrix(
+                            b_dtype,
+                            T.bool(trans),
+                            4,
+                            ".b16",
+                            B_local_buf.data,
+                            i * local_size_b + lift(local_size_b) // 2,
+                            T.address_of(B_shared_buf_elem),
+                            get_ldmatrix_offset_b("B", tx, lift(local_size_b) // 2, stride, b_dtype, b_transposed),
+                        )
+                    else:
+                        T.ptx_ldmatrix(
+                            b_dtype,
+                            T.bool(trans),
+                            4,
+                            ".b16",
+                            B_local_buf.data,
+                            i * local_size_b,
+                            T.address_of(B_shared_buf_elem),
+                            get_ldmatrix_offset_b("B", tx, 0, stride, b_dtype, b_transposed),
+                        )
 
                 else:
                     # load 16x32 data from shared buffer to local buffer
@@ -654,7 +666,6 @@ class SparseTensorCoreIntrinEmitter(object):
         AssertionError
             If `local_buf` is not detected to be a fragment buffer.
         """
-        raise NotImplementedError("This function is not implemented yet.")
         from tilelang.utils import is_fragment
         assert matrix in ["A", "B"], "matrix should be either A or B"
         matrix_is_a: bool = matrix == "A"
