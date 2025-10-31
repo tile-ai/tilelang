@@ -14,7 +14,6 @@ from triton.testing import do_bench
 
 import torch
 
-torch.set_printoptions(threshold=float('inf'), edgeitems=float('inf'), linewidth=10000)
 torch.manual_seed(42)
 
 
@@ -66,7 +65,7 @@ ARCH_INFO = {"8.0": (16, "int16"), "8.9": (16, "int16"), "9.0": (8, "uint8")}
 
 @tilelang.jit(out_idx=[-1])
 def matmul_sp_fp16_custom_compress(M, N, K, accum_dtype, block_M, block_N, block_K, num_stages, thread_num, policy,
-                   enable_rasterization):
+                   enable_rasterization, use_cutlass_layout):
     e_factor, e_dtype = (16, "int16")
 
     @T.prim_func
@@ -82,10 +81,21 @@ def matmul_sp_fp16_custom_compress(M, N, K, accum_dtype, block_M, block_N, block
             B_shared = T.alloc_shared((block_K, block_N), 'float16')
             C_shared = T.alloc_shared((block_M, block_N), accum_dtype)
             C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-
+            if use_cutlass_layout:
+                T.annotate_layout({
+                    E:
+                        make_cutlass_metadata_layout(
+                            E, mma_dtype="float16", arch="8.0", block_k=block_K),
+                    E_shared:
+                        make_cutlass_metadata_layout(
+                            E_shared,
+                            mma_dtype="float16",
+                            arch="8.0",
+                            block_k=block_K),
+                })
             T.clear(C_local)
-            # T.disable_warp_group_reg_alloc()
-            # T.use_swizzle(panel_size=10, enable=enable_rasterization)
+            T.disable_warp_group_reg_alloc()
+            T.use_swizzle(panel_size=10, enable=enable_rasterization)
             for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
                 T.copy(A_sparse[by * block_M, k * block_K // 2], A_shared)
                 T.copy(E[by * block_M, k * block_K // e_factor], E_shared)
@@ -234,7 +244,7 @@ def decode_metadata(meta: torch.Tensor) -> torch.Tensor:
 @tilelang.jit(out_idx=[1, 2], pass_configs={
     tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True,
 })
-def compress_kernel(M, K, block_M, block_K, dtype):
+def compress_kernel(M, K, block_M, block_K, dtype, use_cutlass_layout):
     e_factor, e_dtype = ARCH_INFO["8.0"]
     e_K = K // e_factor
     elem, group = 2, 4
@@ -254,6 +264,18 @@ def compress_kernel(M, K, block_M, block_K, dtype):
             A_shared = T.alloc_shared((block_M, block_K), dtype)
             A_sp_shared = T.alloc_shared((block_M, block_K // 2), dtype)
             E_shared = T.alloc_shared((block_M, block_K // e_factor), e_dtype)
+            if use_cutlass_layout:
+                T.annotate_layout({
+                    E:
+                        make_cutlass_metadata_layout(
+                            E, mma_dtype="float16", arch="8.0", block_k=block_K),
+                    E_shared:
+                        make_cutlass_metadata_layout(
+                            E_shared,
+                            mma_dtype="float16",
+                            arch="8.0",
+                            block_k=block_K),
+                })
             T.clear(A_sp_shared)
             T.clear(E_shared)
             # TODO: alloc_var seems buggy here
@@ -295,7 +317,8 @@ def main():
     parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
     parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
     parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
-    parser.add_argument("--use_torch_sparse", action='store_true', help="Use torch sparse for reference")
+    parser.add_argument("--use_cutlass_layout", action='store_true', help="Use cutlass layout for E tensor")
+    parser.add_argument("--use_torch_compressor", action='store_true', help="Use torch sparse for reference")
     parser.add_argument(
         "--accum_dtype",
         type=str,
@@ -305,15 +328,16 @@ def main():
     parser.add_argument("--cfg", type=str, choices=["4090"], required=True)
     args = parser.parse_args()
     kernel = matmul_sp_fp16_custom_compress(args.m, args.n, args.k, args.accum_dtype,
-                            **DEFAULT_CONFIG[args.cfg][args.accum_dtype])
+                            **DEFAULT_CONFIG[args.cfg][args.accum_dtype], use_cutlass_layout=args.use_cutlass_layout)
 
     a = randn_semi_sparse(args.m, args.k, device='cuda', dtype=torch.half)
     b = torch.randn(args.k, args.n, device='cuda', dtype=torch.half)
 
-    if args.use_torch_sparse:
+    if args.use_torch_compressor:
+        assert not args.use_cutlass_layout, "torch sparse must be used with naive layout"
         a_sparse, e = torch_compress(a)
     else:
-        a_sparse, e = compress_kernel(args.m, args.k, 32, 32, "float16")(a)
+        a_sparse, e = compress_kernel(args.m, args.k, 32, 32, "float16", use_cutlass_layout=args.use_cutlass_layout)(a)
 
     c = kernel(a_sparse, e, b)
 
