@@ -7,8 +7,8 @@ from tvm import tir
 from torch.utils.dlpack import to_dlpack
 import numpy as np
 
-def is_float8(tensor: torch.Tensor) -> bool:
-    return tensor.dtype in {
+def is_float8(dtype: torch.dtype) -> bool:
+    return dtype in {
         torch.float8_e5m2,
         torch.float8_e5m2fnuz,
         torch.float8_e4m3fn,
@@ -16,7 +16,7 @@ def is_float8(tensor: torch.Tensor) -> bool:
     }
 
 def fp8_remove_negative_zeros(tensor: torch.Tensor) -> torch.Tensor:
-    assert is_float8(tensor), "Input tensor must be of float8 dtype"
+    assert is_float8(tensor.dtype), "Input tensor must be of float8 dtype"
     bits = tensor.view(torch.uint8)
     zeros_mask = (tensor == 0)
     bits[zeros_mask] = 0x00

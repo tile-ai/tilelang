@@ -89,12 +89,12 @@ def compress(A: torch.Tensor,
     if compute_version >= (9, 0):
         return compress_sm90(A, transposed=transposed, **kwargs)
     elif compute_version >= (8, 0):
-        if is_float8(A):
+        origin_dtype = A.dtype
+        if is_float8(origin_dtype):
             A = fp8_remove_negative_zeros(A)
-            origin_dtype = A.dtype
             A = A.view(torch.int8)
         A_sp, E = compress_sm80(A, transposed=transposed)
-        if is_float8(A):
+        if is_float8(origin_dtype):
             A_sp = A_sp.view(origin_dtype)
         return A_sp, E
     else:
