@@ -198,6 +198,7 @@ def test_torch_eq():
     ]
     for a, b in zip(dtypes, torch_dtypes):
         assert a == b, f"{a} and {b} are not equal"
+        assert T.dtype(b) == a, f"dtype convertion error"
 
 
 def test_var_assign():

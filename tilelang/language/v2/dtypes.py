@@ -1,17 +1,14 @@
 from tilelang import tvm
 from tvm import ir
+import tvm_ffi
 import torch
 import ctypes
 from typing import TYPE_CHECKING
 from tvm import tir
 import tvm.script.ir_builder.tir._ffi_api as tb_ffi
 
-
-class VoidPtr:
-    ...
-
-
-AnyDType = ir.Type | str | type | torch.dtype | tvm.DataType
+dtype = tvm.DataType
+AnyDType = ir.Type | str | type | torch.dtype | dtype
 
 _dtype_cvt = [
     (None, 'handle', ctypes.c_long, 'long', None),  # use long to repr void*
@@ -58,12 +55,12 @@ def _create_type_mapper(sidx, didx, smapper=lambda x: x, dmapper=lambda x: x):
 
 _dtype_py2tvmstr = _create_type_mapper(0, 1)
 _dtype_tvmstr2fficall = _create_type_mapper(1, 4, dmapper=lambda x: getattr(tb_ffi, x))
-_dtype_tvm2py = _create_type_mapper(1, 0, lambda x: tvm.DataType(x))
-_dtype_tvm2ctype = _create_type_mapper(1, 2, lambda x: tvm.DataType(x))
-_dtype_tvm2cffi = _create_type_mapper(1, 3, lambda x: tvm.DataType(x))
+_dtype_tvm2py = _create_type_mapper(1, 0, lambda x: dtype(x))
+_dtype_tvm2ctype = _create_type_mapper(1, 2, lambda x: dtype(x))
+_dtype_tvm2cffi = _create_type_mapper(1, 3, lambda x: dtype(x))
 
 
-def __dtype_eq__(self: tvm.DataType, other: AnyDType):
+def __dtype_eq__(self: dtype, other: AnyDType):
     if isinstance(other, str):
         return str.__eq__(self, other)
     if other in _dtype_py2tvmstr:
@@ -71,7 +68,7 @@ def __dtype_eq__(self: tvm.DataType, other: AnyDType):
     return NotImplemented
 
 
-def __dtype_ne__(self: tvm.DataType, other: AnyDType):
+def __dtype_ne__(self: dtype, other: AnyDType):
     if isinstance(other, str):
         return str.__ne__(self, other)
     if other in _dtype_py2tvmstr:
@@ -79,7 +76,7 @@ def __dtype_ne__(self: tvm.DataType, other: AnyDType):
     return NotImplemented
 
 
-def __dtype_call__(self: tvm.DataType, expr=None, is_size_var: bool = False) -> tir.Var:
+def __dtype_call__(self: dtype, expr=None, is_size_var: bool = False) -> tir.Var:
     if self in _dtype_tvmstr2fficall:
         return _dtype_tvmstr2fficall[self](expr, is_size_var)
     # try to construct the ffi call
@@ -103,7 +100,7 @@ def __dtype_call__(self: tvm.DataType, expr=None, is_size_var: bool = False) -> 
     return call(expr, is_size_var)
 
 
-def __dtype_new__(cls, value: AnyDType) -> tvm.DataType:
+def __dtype_new__(cls, value: AnyDType) -> dtype:
     if isinstance(value, str):
         val = str.__new__(cls, value)
     elif value in _dtype_py2tvmstr:
@@ -111,642 +108,338 @@ def __dtype_new__(cls, value: AnyDType) -> tvm.DataType:
     else:
         expected = set(list(_dtype_py2tvmstr.keys()) + list(_dtype_tvmstr2fficall.values()))
         raise TypeError(f"Invalid DataType {value}({type(value)}), expect one of {expected}")
-    val.__tvm_ffi_dtype__ = tvm.ffi.core.DataType(val)
+    val.__tvm_ffi_dtype__ = tvm_ffi.core.DataType(val)
     return val
 
 
-tvm.DataType.__eq__ = __dtype_eq__
-tvm.DataType.__req__ = __dtype_eq__
-tvm.DataType.__ne__ = __dtype_ne__
-tvm.DataType.__rne__ = __dtype_ne__
-tvm.DataType.__call__ = __dtype_call__
-tvm.DataType.__new__ = __dtype_new__
+dtype.__eq__ = __dtype_eq__
+dtype.__req__ = __dtype_eq__
+dtype.__ne__ = __dtype_ne__
+dtype.__rne__ = __dtype_ne__
+dtype.__call__ = __dtype_call__
+dtype.__new__ = __dtype_new__
 
 
-def get_tvm_dtype(value: AnyDType) -> tvm.DataType:
-    if isinstance(value, (tvm.DataType, ir.Type)):
+def get_tvm_dtype(value: AnyDType) -> dtype:
+    if isinstance(value, (dtype, ir.Type)):
         return value
-    return tvm.DataType(value)
+    return dtype(value)
 
 
 if TYPE_CHECKING:
 
-    class bool(tvm.DataType):
-        ...
+    # yapf: disable
+    class bool(dtype): ...
+    class short(dtype): ...
+    class int(dtype): ...
+    class long(dtype): ...
+    class half(dtype): ...
+    class float(dtype): ...
+    class double(dtype): ...
+    class int8(dtype): ...
+    class int16(dtype): ...
+    class int32(dtype): ...
+    class int64(dtype): ...
+    class int8x4(dtype): ...
+    class int16x4(dtype): ...
+    class int32x4(dtype): ...
+    class int64x4(dtype): ...
+    class int8x8(dtype): ...
+    class int16x8(dtype): ...
+    class int32x8(dtype): ...
+    class int64x8(dtype): ...
+    class int8x16(dtype): ...
+    class int16x16(dtype): ...
+    class int32x16(dtype): ...
+    class int64x16(dtype): ...
+    class int8x32(dtype): ...
+    class int16x32(dtype): ...
+    class int32x32(dtype): ...
+    class int64x32(dtype): ...
+    class int8x64(dtype): ...
+    class int16x64(dtype): ...
+    class int32x64(dtype): ...
+    class int64x64(dtype): ...
+    class uint8(dtype): ...
+    class uint16(dtype): ...
+    class uint32(dtype): ...
+    class uint64(dtype): ...
+    class uint8x4(dtype): ...
+    class uint16x4(dtype): ...
+    class uint32x4(dtype): ...
+    class uint64x4(dtype): ...
+    class uint8x8(dtype): ...
+    class uint16x8(dtype): ...
+    class uint32x8(dtype): ...
+    class uint64x8(dtype): ...
+    class uint8x16(dtype): ...
+    class uint16x16(dtype): ...
+    class uint32x16(dtype): ...
+    class uint64x16(dtype): ...
+    class uint8x32(dtype): ...
+    class uint16x32(dtype): ...
+    class uint32x32(dtype): ...
+    class uint64x32(dtype): ...
+    class uint8x64(dtype): ...
+    class uint16x64(dtype): ...
+    class uint32x64(dtype): ...
+    class uint64x64(dtype): ...
+    class float16(dtype): ...
+    class float32(dtype): ...
+    class float64(dtype): ...
+    class float16x2(dtype): ...
+    class float32x2(dtype): ...
+    class float64x2(dtype): ...
+    class float16x4(dtype): ...
+    class float32x4(dtype): ...
+    class float64x4(dtype): ...
+    class float16x8(dtype): ...
+    class float32x8(dtype): ...
+    class float64x8(dtype): ...
+    class float16x16(dtype): ...
+    class float32x16(dtype): ...
+    class float64x16(dtype): ...
+    class float16x32(dtype): ...
+    class float32x32(dtype): ...
+    class float64x32(dtype): ...
+    class float16x64(dtype): ...
+    class float32x64(dtype): ...
+    class float64x64(dtype): ...
+    class float8_e3m4(dtype): ...
+    class float8_e3m4x2(dtype): ...
+    class float8_e3m4x4(dtype): ...
+    class float8_e3m4x8(dtype): ...
+    class float8_e3m4x16(dtype): ...
+    class float8_e3m4x32(dtype): ...
+    class float8_e3m4x64(dtype): ...
+    class float8_e4m3(dtype): ...
+    class float8_e4m3x2(dtype): ...
+    class float8_e4m3x4(dtype): ...
+    class float8_e4m3x8(dtype): ...
+    class float8_e4m3x16(dtype): ...
+    class float8_e4m3x32(dtype): ...
+    class float8_e4m3x64(dtype): ...
+    class float8_e4m3b11fnuz(dtype): ...
+    class float8_e4m3b11fnuzx2(dtype): ...
+    class float8_e4m3b11fnuzx4(dtype): ...
+    class float8_e4m3b11fnuzx8(dtype): ...
+    class float8_e4m3b11fnuzx16(dtype): ...
+    class float8_e4m3b11fnuzx32(dtype): ...
+    class float8_e4m3b11fnuzx64(dtype): ...
+    class float8_e4m3fn(dtype): ...
+    class float8_e4m3fnx2(dtype): ...
+    class float8_e4m3fnx4(dtype): ...
+    class float8_e4m3fnx8(dtype): ...
+    class float8_e4m3fnx16(dtype): ...
+    class float8_e4m3fnx32(dtype): ...
+    class float8_e4m3fnx64(dtype): ...
+    class float8_e4m3fnuz(dtype): ...
+    class float8_e4m3fnuzx2(dtype): ...
+    class float8_e4m3fnuzx4(dtype): ...
+    class float8_e4m3fnuzx8(dtype): ...
+    class float8_e4m3fnuzx16(dtype): ...
+    class float8_e4m3fnuzx32(dtype): ...
+    class float8_e4m3fnuzx64(dtype): ...
+    class float8_e5m2(dtype): ...
+    class float8_e5m2x2(dtype): ...
+    class float8_e5m2x4(dtype): ...
+    class float8_e5m2x8(dtype): ...
+    class float8_e5m2x16(dtype): ...
+    class float8_e5m2x32(dtype): ...
+    class float8_e5m2x64(dtype): ...
+    class float8_e5m2fnuz(dtype): ...
+    class float8_e5m2fnuzx2(dtype): ...
+    class float8_e5m2fnuzx4(dtype): ...
+    class float8_e5m2fnuzx8(dtype): ...
+    class float8_e5m2fnuzx16(dtype): ...
+    class float8_e5m2fnuzx32(dtype): ...
+    class float8_e5m2fnuzx64(dtype): ...
+    class float8_e8m0fnu(dtype): ...
+    class float8_e8m0fnux2(dtype): ...
+    class float8_e8m0fnux4(dtype): ...
+    class float8_e8m0fnux8(dtype): ...
+    class float8_e8m0fnux16(dtype): ...
+    class float8_e8m0fnux32(dtype): ...
+    class float8_e8m0fnux64(dtype): ...
+    class float6_e2m3fn(dtype): ...
+    class float6_e2m3fnx2(dtype): ...
+    class float6_e2m3fnx4(dtype): ...
+    class float6_e2m3fnx8(dtype): ...
+    class float6_e2m3fnx16(dtype): ...
+    class float6_e2m3fnx32(dtype): ...
+    class float6_e2m3fnx64(dtype): ...
+    class float6_e3m2fn(dtype): ...
+    class float6_e3m2fnx2(dtype): ...
+    class float6_e3m2fnx4(dtype): ...
+    class float6_e3m2fnx8(dtype): ...
+    class float6_e3m2fnx16(dtype): ...
+    class float6_e3m2fnx32(dtype): ...
+    class float6_e3m2fnx64(dtype): ...
+    class float4_e2m1fn(dtype): ...
+    class float4_e2m1fnx2(dtype): ...
+    class float4_e2m1fnx4(dtype): ...
+    class float4_e2m1fnx8(dtype): ...
+    class float4_e2m1fnx16(dtype): ...
+    class float4_e2m1fnx32(dtype): ...
+    class float4_e2m1fnx64(dtype): ...
+    class bfloat16(dtype): ...
+    # yapf: enable
 
-    class short(tvm.DataType):
-        ...
-
-    class int(tvm.DataType):
-        ...
-
-    class long(tvm.DataType):
-        ...
-
-    class half(tvm.DataType):
-        ...
-
-    class float(tvm.DataType):
-        ...
-
-    class double(tvm.DataType):
-        ...
-
-    class int8(tvm.DataType):
-        ...
-
-    class int16(tvm.DataType):
-        ...
-
-    class int32(tvm.DataType):
-        ...
-
-    class int64(tvm.DataType):
-        ...
-
-    class int8x4(tvm.DataType):
-        ...
-
-    class int16x4(tvm.DataType):
-        ...
-
-    class int32x4(tvm.DataType):
-        ...
-
-    class int64x4(tvm.DataType):
-        ...
-
-    class int8x8(tvm.DataType):
-        ...
-
-    class int16x8(tvm.DataType):
-        ...
-
-    class int32x8(tvm.DataType):
-        ...
-
-    class int64x8(tvm.DataType):
-        ...
-
-    class int8x16(tvm.DataType):
-        ...
-
-    class int16x16(tvm.DataType):
-        ...
-
-    class int32x16(tvm.DataType):
-        ...
-
-    class int64x16(tvm.DataType):
-        ...
-
-    class int8x32(tvm.DataType):
-        ...
-
-    class int16x32(tvm.DataType):
-        ...
-
-    class int32x32(tvm.DataType):
-        ...
-
-    class int64x32(tvm.DataType):
-        ...
-
-    class int8x64(tvm.DataType):
-        ...
-
-    class int16x64(tvm.DataType):
-        ...
-
-    class int32x64(tvm.DataType):
-        ...
-
-    class int64x64(tvm.DataType):
-        ...
-
-    class uint8(tvm.DataType):
-        ...
-
-    class uint16(tvm.DataType):
-        ...
-
-    class uint32(tvm.DataType):
-        ...
-
-    class uint64(tvm.DataType):
-        ...
-
-    class uint8x4(tvm.DataType):
-        ...
-
-    class uint16x4(tvm.DataType):
-        ...
-
-    class uint32x4(tvm.DataType):
-        ...
-
-    class uint64x4(tvm.DataType):
-        ...
-
-    class uint8x8(tvm.DataType):
-        ...
-
-    class uint16x8(tvm.DataType):
-        ...
-
-    class uint32x8(tvm.DataType):
-        ...
-
-    class uint64x8(tvm.DataType):
-        ...
-
-    class uint8x16(tvm.DataType):
-        ...
-
-    class uint16x16(tvm.DataType):
-        ...
-
-    class uint32x16(tvm.DataType):
-        ...
-
-    class uint64x16(tvm.DataType):
-        ...
-
-    class uint8x32(tvm.DataType):
-        ...
-
-    class uint16x32(tvm.DataType):
-        ...
-
-    class uint32x32(tvm.DataType):
-        ...
-
-    class uint64x32(tvm.DataType):
-        ...
-
-    class uint8x64(tvm.DataType):
-        ...
-
-    class uint16x64(tvm.DataType):
-        ...
-
-    class uint32x64(tvm.DataType):
-        ...
-
-    class uint64x64(tvm.DataType):
-        ...
-
-    class float16(tvm.DataType):
-        ...
-
-    class float32(tvm.DataType):
-        ...
-
-    class float64(tvm.DataType):
-        ...
-
-    class float16x2(tvm.DataType):
-        ...
-
-    class float32x2(tvm.DataType):
-        ...
-
-    class float64x2(tvm.DataType):
-        ...
-
-    class float16x4(tvm.DataType):
-        ...
-
-    class float32x4(tvm.DataType):
-        ...
-
-    class float64x4(tvm.DataType):
-        ...
-
-    class float16x8(tvm.DataType):
-        ...
-
-    class float32x8(tvm.DataType):
-        ...
-
-    class float64x8(tvm.DataType):
-        ...
-
-    class float16x16(tvm.DataType):
-        ...
-
-    class float32x16(tvm.DataType):
-        ...
-
-    class float64x16(tvm.DataType):
-        ...
-
-    class float16x32(tvm.DataType):
-        ...
-
-    class float32x32(tvm.DataType):
-        ...
-
-    class float64x32(tvm.DataType):
-        ...
-
-    class float16x64(tvm.DataType):
-        ...
-
-    class float32x64(tvm.DataType):
-        ...
-
-    class float64x64(tvm.DataType):
-        ...
-
-    class float8_e3m4(tvm.DataType):
-        ...
-
-    class float8_e3m4x2(tvm.DataType):
-        ...
-
-    class float8_e3m4x4(tvm.DataType):
-        ...
-
-    class float8_e3m4x8(tvm.DataType):
-        ...
-
-    class float8_e3m4x16(tvm.DataType):
-        ...
-
-    class float8_e3m4x32(tvm.DataType):
-        ...
-
-    class float8_e3m4x64(tvm.DataType):
-        ...
-
-    class float8_e4m3(tvm.DataType):
-        ...
-
-    class float8_e4m3x2(tvm.DataType):
-        ...
-
-    class float8_e4m3x4(tvm.DataType):
-        ...
-
-    class float8_e4m3x8(tvm.DataType):
-        ...
-
-    class float8_e4m3x16(tvm.DataType):
-        ...
-
-    class float8_e4m3x32(tvm.DataType):
-        ...
-
-    class float8_e4m3x64(tvm.DataType):
-        ...
-
-    class float8_e4m3b11fnuz(tvm.DataType):
-        ...
-
-    class float8_e4m3b11fnuzx2(tvm.DataType):
-        ...
-
-    class float8_e4m3b11fnuzx4(tvm.DataType):
-        ...
-
-    class float8_e4m3b11fnuzx8(tvm.DataType):
-        ...
-
-    class float8_e4m3b11fnuzx16(tvm.DataType):
-        ...
-
-    class float8_e4m3b11fnuzx32(tvm.DataType):
-        ...
-
-    class float8_e4m3b11fnuzx64(tvm.DataType):
-        ...
-
-    class float8_e4m3fn(tvm.DataType):
-        ...
-
-    class float8_e4m3fnx2(tvm.DataType):
-        ...
-
-    class float8_e4m3fnx4(tvm.DataType):
-        ...
-
-    class float8_e4m3fnx8(tvm.DataType):
-        ...
-
-    class float8_e4m3fnx16(tvm.DataType):
-        ...
-
-    class float8_e4m3fnx32(tvm.DataType):
-        ...
-
-    class float8_e4m3fnx64(tvm.DataType):
-        ...
-
-    class float8_e4m3fnuz(tvm.DataType):
-        ...
-
-    class float8_e4m3fnuzx2(tvm.DataType):
-        ...
-
-    class float8_e4m3fnuzx4(tvm.DataType):
-        ...
-
-    class float8_e4m3fnuzx8(tvm.DataType):
-        ...
-
-    class float8_e4m3fnuzx16(tvm.DataType):
-        ...
-
-    class float8_e4m3fnuzx32(tvm.DataType):
-        ...
-
-    class float8_e4m3fnuzx64(tvm.DataType):
-        ...
-
-    class float8_e5m2(tvm.DataType):
-        ...
-
-    class float8_e5m2x2(tvm.DataType):
-        ...
-
-    class float8_e5m2x4(tvm.DataType):
-        ...
-
-    class float8_e5m2x8(tvm.DataType):
-        ...
-
-    class float8_e5m2x16(tvm.DataType):
-        ...
-
-    class float8_e5m2x32(tvm.DataType):
-        ...
-
-    class float8_e5m2x64(tvm.DataType):
-        ...
-
-    class float8_e5m2fnuz(tvm.DataType):
-        ...
-
-    class float8_e5m2fnuzx2(tvm.DataType):
-        ...
-
-    class float8_e5m2fnuzx4(tvm.DataType):
-        ...
-
-    class float8_e5m2fnuzx8(tvm.DataType):
-        ...
-
-    class float8_e5m2fnuzx16(tvm.DataType):
-        ...
-
-    class float8_e5m2fnuzx32(tvm.DataType):
-        ...
-
-    class float8_e5m2fnuzx64(tvm.DataType):
-        ...
-
-    class float8_e8m0fnu(tvm.DataType):
-        ...
-
-    class float8_e8m0fnux2(tvm.DataType):
-        ...
-
-    class float8_e8m0fnux4(tvm.DataType):
-        ...
-
-    class float8_e8m0fnux8(tvm.DataType):
-        ...
-
-    class float8_e8m0fnux16(tvm.DataType):
-        ...
-
-    class float8_e8m0fnux32(tvm.DataType):
-        ...
-
-    class float8_e8m0fnux64(tvm.DataType):
-        ...
-
-    class float6_e2m3fn(tvm.DataType):
-        ...
-
-    class float6_e2m3fnx2(tvm.DataType):
-        ...
-
-    class float6_e2m3fnx4(tvm.DataType):
-        ...
-
-    class float6_e2m3fnx8(tvm.DataType):
-        ...
-
-    class float6_e2m3fnx16(tvm.DataType):
-        ...
-
-    class float6_e2m3fnx32(tvm.DataType):
-        ...
-
-    class float6_e2m3fnx64(tvm.DataType):
-        ...
-
-    class float6_e3m2fn(tvm.DataType):
-        ...
-
-    class float6_e3m2fnx2(tvm.DataType):
-        ...
-
-    class float6_e3m2fnx4(tvm.DataType):
-        ...
-
-    class float6_e3m2fnx8(tvm.DataType):
-        ...
-
-    class float6_e3m2fnx16(tvm.DataType):
-        ...
-
-    class float6_e3m2fnx32(tvm.DataType):
-        ...
-
-    class float6_e3m2fnx64(tvm.DataType):
-        ...
-
-    class float4_e2m1fn(tvm.DataType):
-        ...
-
-    class float4_e2m1fnx2(tvm.DataType):
-        ...
-
-    class float4_e2m1fnx4(tvm.DataType):
-        ...
-
-    class float4_e2m1fnx8(tvm.DataType):
-        ...
-
-    class float4_e2m1fnx16(tvm.DataType):
-        ...
-
-    class float4_e2m1fnx32(tvm.DataType):
-        ...
-
-    class float4_e2m1fnx64(tvm.DataType):
-        ...
-
-    class bfloat16(tvm.DataType):
-        ...
 else:
-    bool = tvm.DataType('bool')
-    short = tvm.DataType('int16')
-    int = tvm.DataType('int32')
-    long = tvm.DataType('int64')
-    half = tvm.DataType('float16')
-    float = tvm.DataType('float32')
-    double = tvm.DataType('float64')
-    int8 = tvm.DataType('int8')
-    int16 = tvm.DataType('int16')
-    int32 = tvm.DataType('int32')
-    int64 = tvm.DataType('int64')
-    int8x4 = tvm.DataType('int8x4')
-    int16x4 = tvm.DataType('int16x4')
-    int32x4 = tvm.DataType('int32x4')
-    int64x4 = tvm.DataType('int64x4')
-    int8x8 = tvm.DataType('int8x8')
-    int16x8 = tvm.DataType('int16x8')
-    int32x8 = tvm.DataType('int32x8')
-    int64x8 = tvm.DataType('int64x8')
-    int8x16 = tvm.DataType('int8x16')
-    int16x16 = tvm.DataType('int16x16')
-    int32x16 = tvm.DataType('int32x16')
-    int64x16 = tvm.DataType('int64x16')
-    int8x32 = tvm.DataType('int8x32')
-    int16x32 = tvm.DataType('int16x32')
-    int32x32 = tvm.DataType('int32x32')
-    int64x32 = tvm.DataType('int64x32')
-    int8x64 = tvm.DataType('int8x64')
-    int16x64 = tvm.DataType('int16x64')
-    int32x64 = tvm.DataType('int32x64')
-    int64x64 = tvm.DataType('int64x64')
-    uint8 = tvm.DataType('uint8')
-    uint16 = tvm.DataType('uint16')
-    uint32 = tvm.DataType('uint32')
-    uint64 = tvm.DataType('uint64')
-    uint8x4 = tvm.DataType('uint8x4')
-    uint16x4 = tvm.DataType('uint16x4')
-    uint32x4 = tvm.DataType('uint32x4')
-    uint64x4 = tvm.DataType('uint64x4')
-    uint8x8 = tvm.DataType('uint8x8')
-    uint16x8 = tvm.DataType('uint16x8')
-    uint32x8 = tvm.DataType('uint32x8')
-    uint64x8 = tvm.DataType('uint64x8')
-    uint8x16 = tvm.DataType('uint8x16')
-    uint16x16 = tvm.DataType('uint16x16')
-    uint32x16 = tvm.DataType('uint32x16')
-    uint64x16 = tvm.DataType('uint64x16')
-    uint8x32 = tvm.DataType('uint8x32')
-    uint16x32 = tvm.DataType('uint16x32')
-    uint32x32 = tvm.DataType('uint32x32')
-    uint64x32 = tvm.DataType('uint64x32')
-    uint8x64 = tvm.DataType('uint8x64')
-    uint16x64 = tvm.DataType('uint16x64')
-    uint32x64 = tvm.DataType('uint32x64')
-    uint64x64 = tvm.DataType('uint64x64')
-    float16 = tvm.DataType('float16')
-    float32 = tvm.DataType('float32')
-    float64 = tvm.DataType('float64')
-    float16x2 = tvm.DataType('float16x2')
-    float32x2 = tvm.DataType('float32x2')
-    float64x2 = tvm.DataType('float64x2')
-    float16x4 = tvm.DataType('float16x4')
-    float32x4 = tvm.DataType('float32x4')
-    float64x4 = tvm.DataType('float64x4')
-    float16x8 = tvm.DataType('float16x8')
-    float32x8 = tvm.DataType('float32x8')
-    float64x8 = tvm.DataType('float64x8')
-    float16x16 = tvm.DataType('float16x16')
-    float32x16 = tvm.DataType('float32x16')
-    float64x16 = tvm.DataType('float64x16')
-    float16x32 = tvm.DataType('float16x32')
-    float32x32 = tvm.DataType('float32x32')
-    float64x32 = tvm.DataType('float64x32')
-    float16x64 = tvm.DataType('float16x64')
-    float32x64 = tvm.DataType('float32x64')
-    float64x64 = tvm.DataType('float64x64')
-    float8_e3m4 = tvm.DataType('float8_e3m4')
-    float8_e3m4x2 = tvm.DataType('float8_e3m4x2')
-    float8_e3m4x4 = tvm.DataType('float8_e3m4x4')
-    float8_e3m4x8 = tvm.DataType('float8_e3m4x8')
-    float8_e3m4x16 = tvm.DataType('float8_e3m4x16')
-    float8_e3m4x32 = tvm.DataType('float8_e3m4x32')
-    float8_e3m4x64 = tvm.DataType('float8_e3m4x64')
-    float8_e4m3 = tvm.DataType('float8_e4m3')
-    float8_e4m3x2 = tvm.DataType('float8_e4m3x2')
-    float8_e4m3x4 = tvm.DataType('float8_e4m3x4')
-    float8_e4m3x8 = tvm.DataType('float8_e4m3x8')
-    float8_e4m3x16 = tvm.DataType('float8_e4m3x16')
-    float8_e4m3x32 = tvm.DataType('float8_e4m3x32')
-    float8_e4m3x64 = tvm.DataType('float8_e4m3x64')
-    float8_e4m3b11fnuz = tvm.DataType('float8_e4m3b11fnuz')
-    float8_e4m3b11fnuzx2 = tvm.DataType('float8_e4m3b11fnuzx2')
-    float8_e4m3b11fnuzx4 = tvm.DataType('float8_e4m3b11fnuzx4')
-    float8_e4m3b11fnuzx8 = tvm.DataType('float8_e4m3b11fnuzx8')
-    float8_e4m3b11fnuzx16 = tvm.DataType('float8_e4m3b11fnuzx16')
-    float8_e4m3b11fnuzx32 = tvm.DataType('float8_e4m3b11fnuzx32')
-    float8_e4m3b11fnuzx64 = tvm.DataType('float8_e4m3b11fnuzx64')
-    float8_e4m3fn = tvm.DataType('float8_e4m3fn')
-    float8_e4m3fnx2 = tvm.DataType('float8_e4m3fnx2')
-    float8_e4m3fnx4 = tvm.DataType('float8_e4m3fnx4')
-    float8_e4m3fnx8 = tvm.DataType('float8_e4m3fnx8')
-    float8_e4m3fnx16 = tvm.DataType('float8_e4m3fnx16')
-    float8_e4m3fnx32 = tvm.DataType('float8_e4m3fnx32')
-    float8_e4m3fnx64 = tvm.DataType('float8_e4m3fnx64')
-    float8_e4m3fnuz = tvm.DataType('float8_e4m3fnuz')
-    float8_e4m3fnuzx2 = tvm.DataType('float8_e4m3fnuzx2')
-    float8_e4m3fnuzx4 = tvm.DataType('float8_e4m3fnuzx4')
-    float8_e4m3fnuzx8 = tvm.DataType('float8_e4m3fnuzx8')
-    float8_e4m3fnuzx16 = tvm.DataType('float8_e4m3fnuzx16')
-    float8_e4m3fnuzx32 = tvm.DataType('float8_e4m3fnuzx32')
-    float8_e4m3fnuzx64 = tvm.DataType('float8_e4m3fnuzx64')
-    float8_e5m2 = tvm.DataType('float8_e5m2')
-    float8_e5m2x2 = tvm.DataType('float8_e5m2x2')
-    float8_e5m2x4 = tvm.DataType('float8_e5m2x4')
-    float8_e5m2x8 = tvm.DataType('float8_e5m2x8')
-    float8_e5m2x16 = tvm.DataType('float8_e5m2x16')
-    float8_e5m2x32 = tvm.DataType('float8_e5m2x32')
-    float8_e5m2x64 = tvm.DataType('float8_e5m2x64')
-    float8_e5m2fnuz = tvm.DataType('float8_e5m2fnuz')
-    float8_e5m2fnuzx2 = tvm.DataType('float8_e5m2fnuzx2')
-    float8_e5m2fnuzx4 = tvm.DataType('float8_e5m2fnuzx4')
-    float8_e5m2fnuzx8 = tvm.DataType('float8_e5m2fnuzx8')
-    float8_e5m2fnuzx16 = tvm.DataType('float8_e5m2fnuzx16')
-    float8_e5m2fnuzx32 = tvm.DataType('float8_e5m2fnuzx32')
-    float8_e5m2fnuzx64 = tvm.DataType('float8_e5m2fnuzx64')
-    float8_e8m0fnu = tvm.DataType('float8_e8m0fnu')
-    float8_e8m0fnux2 = tvm.DataType('float8_e8m0fnux2')
-    float8_e8m0fnux4 = tvm.DataType('float8_e8m0fnux4')
-    float8_e8m0fnux8 = tvm.DataType('float8_e8m0fnux8')
-    float8_e8m0fnux16 = tvm.DataType('float8_e8m0fnux16')
-    float8_e8m0fnux32 = tvm.DataType('float8_e8m0fnux32')
-    float8_e8m0fnux64 = tvm.DataType('float8_e8m0fnux64')
-    float6_e2m3fn = tvm.DataType('float6_e2m3fn')
-    float6_e2m3fnx2 = tvm.DataType('float6_e2m3fnx2')
-    float6_e2m3fnx4 = tvm.DataType('float6_e2m3fnx4')
-    float6_e2m3fnx8 = tvm.DataType('float6_e2m3fnx8')
-    float6_e2m3fnx16 = tvm.DataType('float6_e2m3fnx16')
-    float6_e2m3fnx32 = tvm.DataType('float6_e2m3fnx32')
-    float6_e2m3fnx64 = tvm.DataType('float6_e2m3fnx64')
-    float6_e3m2fn = tvm.DataType('float6_e3m2fn')
-    float6_e3m2fnx2 = tvm.DataType('float6_e3m2fnx2')
-    float6_e3m2fnx4 = tvm.DataType('float6_e3m2fnx4')
-    float6_e3m2fnx8 = tvm.DataType('float6_e3m2fnx8')
-    float6_e3m2fnx16 = tvm.DataType('float6_e3m2fnx16')
-    float6_e3m2fnx32 = tvm.DataType('float6_e3m2fnx32')
-    float6_e3m2fnx64 = tvm.DataType('float6_e3m2fnx64')
-    float4_e2m1fn = tvm.DataType('float4_e2m1fn')
-    float4_e2m1fnx2 = tvm.DataType('float4_e2m1fnx2')
-    float4_e2m1fnx4 = tvm.DataType('float4_e2m1fnx4')
-    float4_e2m1fnx8 = tvm.DataType('float4_e2m1fnx8')
-    float4_e2m1fnx16 = tvm.DataType('float4_e2m1fnx16')
-    float4_e2m1fnx32 = tvm.DataType('float4_e2m1fnx32')
-    float4_e2m1fnx64 = tvm.DataType('float4_e2m1fnx64')
-    bfloat16 = tvm.DataType('bfloat16')
+    bool = dtype('bool')
+    short = dtype('int16')
+    int = dtype('int32')
+    long = dtype('int64')
+    half = dtype('float16')
+    float = dtype('float32')
+    double = dtype('float64')
+    int8 = dtype('int8')
+    int16 = dtype('int16')
+    int32 = dtype('int32')
+    int64 = dtype('int64')
+    int8x4 = dtype('int8x4')
+    int16x4 = dtype('int16x4')
+    int32x4 = dtype('int32x4')
+    int64x4 = dtype('int64x4')
+    int8x8 = dtype('int8x8')
+    int16x8 = dtype('int16x8')
+    int32x8 = dtype('int32x8')
+    int64x8 = dtype('int64x8')
+    int8x16 = dtype('int8x16')
+    int16x16 = dtype('int16x16')
+    int32x16 = dtype('int32x16')
+    int64x16 = dtype('int64x16')
+    int8x32 = dtype('int8x32')
+    int16x32 = dtype('int16x32')
+    int32x32 = dtype('int32x32')
+    int64x32 = dtype('int64x32')
+    int8x64 = dtype('int8x64')
+    int16x64 = dtype('int16x64')
+    int32x64 = dtype('int32x64')
+    int64x64 = dtype('int64x64')
+    uint8 = dtype('uint8')
+    uint16 = dtype('uint16')
+    uint32 = dtype('uint32')
+    uint64 = dtype('uint64')
+    uint8x4 = dtype('uint8x4')
+    uint16x4 = dtype('uint16x4')
+    uint32x4 = dtype('uint32x4')
+    uint64x4 = dtype('uint64x4')
+    uint8x8 = dtype('uint8x8')
+    uint16x8 = dtype('uint16x8')
+    uint32x8 = dtype('uint32x8')
+    uint64x8 = dtype('uint64x8')
+    uint8x16 = dtype('uint8x16')
+    uint16x16 = dtype('uint16x16')
+    uint32x16 = dtype('uint32x16')
+    uint64x16 = dtype('uint64x16')
+    uint8x32 = dtype('uint8x32')
+    uint16x32 = dtype('uint16x32')
+    uint32x32 = dtype('uint32x32')
+    uint64x32 = dtype('uint64x32')
+    uint8x64 = dtype('uint8x64')
+    uint16x64 = dtype('uint16x64')
+    uint32x64 = dtype('uint32x64')
+    uint64x64 = dtype('uint64x64')
+    float16 = dtype('float16')
+    float32 = dtype('float32')
+    float64 = dtype('float64')
+    float16x2 = dtype('float16x2')
+    float32x2 = dtype('float32x2')
+    float64x2 = dtype('float64x2')
+    float16x4 = dtype('float16x4')
+    float32x4 = dtype('float32x4')
+    float64x4 = dtype('float64x4')
+    float16x8 = dtype('float16x8')
+    float32x8 = dtype('float32x8')
+    float64x8 = dtype('float64x8')
+    float16x16 = dtype('float16x16')
+    float32x16 = dtype('float32x16')
+    float64x16 = dtype('float64x16')
+    float16x32 = dtype('float16x32')
+    float32x32 = dtype('float32x32')
+    float64x32 = dtype('float64x32')
+    float16x64 = dtype('float16x64')
+    float32x64 = dtype('float32x64')
+    float64x64 = dtype('float64x64')
+    float8_e3m4 = dtype('float8_e3m4')
+    float8_e3m4x2 = dtype('float8_e3m4x2')
+    float8_e3m4x4 = dtype('float8_e3m4x4')
+    float8_e3m4x8 = dtype('float8_e3m4x8')
+    float8_e3m4x16 = dtype('float8_e3m4x16')
+    float8_e3m4x32 = dtype('float8_e3m4x32')
+    float8_e3m4x64 = dtype('float8_e3m4x64')
+    float8_e4m3 = dtype('float8_e4m3')
+    float8_e4m3x2 = dtype('float8_e4m3x2')
+    float8_e4m3x4 = dtype('float8_e4m3x4')
+    float8_e4m3x8 = dtype('float8_e4m3x8')
+    float8_e4m3x16 = dtype('float8_e4m3x16')
+    float8_e4m3x32 = dtype('float8_e4m3x32')
+    float8_e4m3x64 = dtype('float8_e4m3x64')
+    float8_e4m3b11fnuz = dtype('float8_e4m3b11fnuz')
+    float8_e4m3b11fnuzx2 = dtype('float8_e4m3b11fnuzx2')
+    float8_e4m3b11fnuzx4 = dtype('float8_e4m3b11fnuzx4')
+    float8_e4m3b11fnuzx8 = dtype('float8_e4m3b11fnuzx8')
+    float8_e4m3b11fnuzx16 = dtype('float8_e4m3b11fnuzx16')
+    float8_e4m3b11fnuzx32 = dtype('float8_e4m3b11fnuzx32')
+    float8_e4m3b11fnuzx64 = dtype('float8_e4m3b11fnuzx64')
+    float8_e4m3fn = dtype('float8_e4m3fn')
+    float8_e4m3fnx2 = dtype('float8_e4m3fnx2')
+    float8_e4m3fnx4 = dtype('float8_e4m3fnx4')
+    float8_e4m3fnx8 = dtype('float8_e4m3fnx8')
+    float8_e4m3fnx16 = dtype('float8_e4m3fnx16')
+    float8_e4m3fnx32 = dtype('float8_e4m3fnx32')
+    float8_e4m3fnx64 = dtype('float8_e4m3fnx64')
+    float8_e4m3fnuz = dtype('float8_e4m3fnuz')
+    float8_e4m3fnuzx2 = dtype('float8_e4m3fnuzx2')
+    float8_e4m3fnuzx4 = dtype('float8_e4m3fnuzx4')
+    float8_e4m3fnuzx8 = dtype('float8_e4m3fnuzx8')
+    float8_e4m3fnuzx16 = dtype('float8_e4m3fnuzx16')
+    float8_e4m3fnuzx32 = dtype('float8_e4m3fnuzx32')
+    float8_e4m3fnuzx64 = dtype('float8_e4m3fnuzx64')
+    float8_e5m2 = dtype('float8_e5m2')
+    float8_e5m2x2 = dtype('float8_e5m2x2')
+    float8_e5m2x4 = dtype('float8_e5m2x4')
+    float8_e5m2x8 = dtype('float8_e5m2x8')
+    float8_e5m2x16 = dtype('float8_e5m2x16')
+    float8_e5m2x32 = dtype('float8_e5m2x32')
+    float8_e5m2x64 = dtype('float8_e5m2x64')
+    float8_e5m2fnuz = dtype('float8_e5m2fnuz')
+    float8_e5m2fnuzx2 = dtype('float8_e5m2fnuzx2')
+    float8_e5m2fnuzx4 = dtype('float8_e5m2fnuzx4')
+    float8_e5m2fnuzx8 = dtype('float8_e5m2fnuzx8')
+    float8_e5m2fnuzx16 = dtype('float8_e5m2fnuzx16')
+    float8_e5m2fnuzx32 = dtype('float8_e5m2fnuzx32')
+    float8_e5m2fnuzx64 = dtype('float8_e5m2fnuzx64')
+    float8_e8m0fnu = dtype('float8_e8m0fnu')
+    float8_e8m0fnux2 = dtype('float8_e8m0fnux2')
+    float8_e8m0fnux4 = dtype('float8_e8m0fnux4')
+    float8_e8m0fnux8 = dtype('float8_e8m0fnux8')
+    float8_e8m0fnux16 = dtype('float8_e8m0fnux16')
+    float8_e8m0fnux32 = dtype('float8_e8m0fnux32')
+    float8_e8m0fnux64 = dtype('float8_e8m0fnux64')
+    float6_e2m3fn = dtype('float6_e2m3fn')
+    float6_e2m3fnx2 = dtype('float6_e2m3fnx2')
+    float6_e2m3fnx4 = dtype('float6_e2m3fnx4')
+    float6_e2m3fnx8 = dtype('float6_e2m3fnx8')
+    float6_e2m3fnx16 = dtype('float6_e2m3fnx16')
+    float6_e2m3fnx32 = dtype('float6_e2m3fnx32')
+    float6_e2m3fnx64 = dtype('float6_e2m3fnx64')
+    float6_e3m2fn = dtype('float6_e3m2fn')
+    float6_e3m2fnx2 = dtype('float6_e3m2fnx2')
+    float6_e3m2fnx4 = dtype('float6_e3m2fnx4')
+    float6_e3m2fnx8 = dtype('float6_e3m2fnx8')
+    float6_e3m2fnx16 = dtype('float6_e3m2fnx16')
+    float6_e3m2fnx32 = dtype('float6_e3m2fnx32')
+    float6_e3m2fnx64 = dtype('float6_e3m2fnx64')
+    float4_e2m1fn = dtype('float4_e2m1fn')
+    float4_e2m1fnx2 = dtype('float4_e2m1fnx2')
+    float4_e2m1fnx4 = dtype('float4_e2m1fnx4')
+    float4_e2m1fnx8 = dtype('float4_e2m1fnx8')
+    float4_e2m1fnx16 = dtype('float4_e2m1fnx16')
+    float4_e2m1fnx32 = dtype('float4_e2m1fnx32')
+    float4_e2m1fnx64 = dtype('float4_e2m1fnx64')
+    bfloat16 = dtype('bfloat16')
 
 _all_dtypes = [
     'bool',
@@ -906,6 +599,7 @@ _all_dtypes = [
 ]
 
 __all__ = _all_dtypes + [
+    'dtype',
     'AnyDType',
     'get_tvm_dtype',
 ]

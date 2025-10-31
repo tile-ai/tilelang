@@ -4,9 +4,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import inspect
 
-import torch
 from tilelang.language.kernel import KernelLaunchFrame
-from tvm.ffi.container import Map
+from tvm_ffi.container import Map
 from tvm.ir.base import Span
 from .ast import BaseBuilder, eval_op, mutate
 import tvm
@@ -14,7 +13,7 @@ from tvm.tir import Buffer
 from tvm.script.ir_builder import tir, IRBuilder
 from tvm.tir.expr import EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
 from typing import TYPE_CHECKING, Callable, ContextManager, Any, Generic, Hashable, ParamSpec, Self, TypeVar, ForwardRef
-from .dtypes import get_tvm_dtype
+from . import dtypes as dt
 from types import EllipsisType
 import threading
 import logging
@@ -115,8 +114,7 @@ def is_var(v: Any) -> bool:
 
 class Builder(BaseBuilder):
 
-    def __init__(self, arg_annot: dict[str, Any] = None):
-        self.arg_annot = arg_annot
+    def __init__(self):
         self.frames: list[AnyFrame] = []
         self.ir_builder = IRBuilder()
         self.name_inside_frame: dict[str, AnyFrame] = {}
@@ -211,6 +209,12 @@ class Builder(BaseBuilder):
         if val is None:
             pass
         elif isinstance(val, tir.frame.IRBuilderFrame):
+            if isinstance(val, tir.frame.ForFrame):
+                logger.warning(
+                    f'Evaluating a for frame to may cause undefined behavior in tilelang.',
+                    stack_info=True,
+                    stacklevel=1,
+                )
             self.enter_frame(val)
         elif isinstance(val, PrimExpr):
             tir.evaluate(val)
@@ -226,9 +230,6 @@ class Builder(BaseBuilder):
     def ctx_for(self, it):
         self.check_continue_break()
         it = unwrap_expr(it)
-        if isinstance(it, range):
-            assert it.step == 1, "Only step=1 is supported in range for now."
-            it = tir.serial(it.start, it.stop)
         if not isinstance(it, tir.frame.ForFrame):
             raise TypeError(
                 f"Invalid for loop, got {it}({type(it)}), expect one of the following: "
@@ -285,6 +286,12 @@ class Builder(BaseBuilder):
         if name != '_':
             frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
             assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
+            if name in self.name_inside_frame and self.name_inside_frame[name] in self.frames:
+                logger.warning(
+                    f'Variable `{name}` shadows another declared value, Are you forgetting to use alloc it as a var?',
+                    stack_info=True,
+                    stacklevel=2,
+                )
             self.name_inside_frame[name] = self.frames[frame]
         return res
 
@@ -300,6 +307,12 @@ class Builder(BaseBuilder):
         if isinstance(value, tir.meta_var):
             return value.value
         elif isinstance(value, tir.frame.IRBuilderFrame):
+            if isinstance(value, tir.frame.ForFrame):
+                logger.warning(
+                    f'Binding a for frame to variable may cause undefined behavior in tilelang.',
+                    stack_info=True,
+                    stacklevel=2,
+                )
             return self.enter_frame(value)
         elif isinstance(value, (Buffer, tir.IterVar, tir.Var)):
             IRBuilder.name(name, value)
@@ -397,8 +410,8 @@ class Builder(BaseBuilder):
         cond = unwrap_cond(cond)
         if isinstance(cond, PrimExpr):
             self.enter_frame(tir.Assert(cond, msg))
-        else:
-            super().assert_expr(cond, msg)
+        elif not cond:
+            raise AssertionError(msg)
 
     def rval(self, name: str, value: Any) -> Any:
         if name in self.name_inside_frame:
@@ -412,29 +425,25 @@ class Builder(BaseBuilder):
 
     def arg(self, name, value):
         if self.find_frame_idx(MacroFrame) is not None:
-            return value
+            if isinstance(value, (str, StringImm)):
+                # this is a workaround for string argument in macro
+                return value
+            else:
+                return self.bind(name, value)
         if isinstance(value, (Buffer, Var)):
             return tir.arg(name, value)
-        elif hasattr(value, '__tl_arg__'):
-            return value.__tl_arg__(name, self)
-        elif isinstance(value, Hashable):
-            return value
+        elif value is self.empty:
+            raise ValueError(f'Argument `{name}` is not annotated')
+        # elif isinstance(value, Hashable):
+        #     return value
         else:
-            raise TypeError(f"Unsupported argument type: {type(value)} for argument `{name}`.")
+            raise TypeError(f"Unsupported argument type: {value}({type(value)}) for argument `{name}`.")
 
     def override(self, name: str):
         if name == 'range':
             return tir.serial
         raise ValueError(f'Unknown override: {name}')
 
-
-def __torch_tensor_tl_arg__(self: torch.Tensor, name: str, builder: Builder):
-    buffer = tir.buffer(
-        self.shape, get_tvm_dtype(self.dtype), strides=self.stride(), scope='global')
-    return tir.arg(name, buffer)
-
-
-torch.Tensor.__tl_arg__ = __torch_tensor_tl_arg__
 
 _P = ParamSpec('_P')
 _T = TypeVar('_T')
@@ -501,43 +510,57 @@ def get_type_hints(func):
     globalns = getattr(func, '__globals__', {})
     localns = globalns
     for name, value in annot.items():
+        if name == 'return':
+            continue
         if isinstance(value, tvm.DataType):
             hints[name] = value
             continue
         if value is None:
             value = type(None)
         if isinstance(value, str):
+            _, v = value.split('.', maxsplit=1)
+            if v in dt._all_dtypes:
+                try:
+                    hints[name] = eval(value, globalns, localns)
+                    continue
+                except Exception as e:
+                    pass
             value = ForwardRef(value, is_argument=True, is_class=False)
-
         hints[name] = _eval_type(value, globalns=globalns, localns=localns, type_params=type_params)
     return hints
 
 
-def prim_func(func: Callable[_P, _T]) -> PrimFunc[_P, _T]:
+def _is_static_annot(annot: Any) -> bool:
+    return isinstance(annot, (dt.dtype, Buffer, Var))
+
+
+def prim_func(func: Callable[_P, _T]) -> PrimFunc[_P, _T] | Callable[_P, PrimFunc[_P, _T]]:
     sig = inspect.signature(func)
     annot = get_type_hints(func)
-    args = []
-    kwargs = {}
-    for name, param in sig.parameters.items():
-        if param.annotation is not param.empty:
-            if callable(param.annotation):
-                value = param.annotation()
-            else:
-                value = param.annotation
-        elif param.default is not param.empty:
-            value = param.default
-        else:
-            value = Builder.empty
-        if param.kind == param.POSITIONAL_ONLY:
-            args.append(value)
-        else:
-            kwargs[name] = value
+
+    for k in annot:
+        if callable(annot[k]):
+            annot[k] = annot[k]()
+
+    all_arg_annotated = all([x in annot for x in sig.parameters])
+    all_annot_are_static = all([_is_static_annot(x) for x in annot.values()])
     ir_gen = build_ir_generator(func)
-    builder = Builder(annot)
-    with builder.prim_func(func.__name__):
-        ir_gen.gen(builder)(*args, **kwargs)
-    res = builder.get()
-    res.ir_gen = ir_gen
-    res.source = ir_gen.source
-    res.orig_func = func
-    return res
+
+    def prim_func_generator(*args, **kwargs):
+        builder = Builder()
+        with builder.prim_func(func.__name__):
+            ir_gen.gen(builder)(*args, **kwargs)
+        res = builder.get()
+        res.ir_gen = ir_gen
+        res.source = ir_gen.source
+        res.orig_func = func
+        return res
+
+    prim_func_generator.ir_gen = ir_gen
+    prim_func_generator.source = ir_gen.source
+    prim_func_generator.orig_func = func
+
+    if all_arg_annotated and all_annot_are_static:
+        return prim_func_generator(**annot)
+    else:
+        return prim_func_generator
