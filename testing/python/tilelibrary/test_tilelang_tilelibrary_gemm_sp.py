@@ -11,6 +11,23 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.manual_seed(42)
 
 
+def generate_dense_input(M, N, K, trans_A, trans_B, in_dtype):
+    is_8bit = "8" in in_dtype
+    is_unsigned = "uint" in in_dtype
+    is_int = "int" in in_dtype
+    if is_int:
+        if is_8bit:
+            low, high = (0, 4) if is_unsigned else (-2, 2)
+        else:
+            low, high = (0, 128) if is_unsigned else (-64, 64)
+        A = randint_semi_sparse(M, K, low=low, high=high, dtype=map_torch_type(in_dtype), device='cuda', transposed=trans_A)
+        B = torch.randint(size=(N, K) if trans_B else (K, N), low=low, high=high, dtype=map_torch_type(in_dtype), device='cuda')
+    else:
+        A = randn_semi_sparse(M, K, dtype=map_torch_type(in_dtype), device='cuda', transposed=trans_A)
+        B = torch.randn((N, K) if trans_B else (K, N), device='cuda', dtype=map_torch_type(in_dtype))
+    return A, B
+
+
 def matmul_sp_sm90(
     M,
     N,
@@ -165,18 +182,14 @@ def run_gemm_sp(
         kernel,
         out_idx=[-1],
     )
-    if "int" in in_dtype:
-        A = randint_semi_sparse(M, K, low=0, high=128, dtype=map_torch_type(in_dtype), device='cuda', transposed=trans_A)
-    else:
-        A = randn_semi_sparse(M, K, dtype=map_torch_type(in_dtype), device='cuda', transposed=trans_A)
-    if trans_B:
-        B = torch.randn((N, K), device='cuda', dtype=torch.float32)
-    else:
-        B = torch.randn((K, N), device='cuda', dtype=torch.float32)
-
-    A = A.to(map_torch_type(in_dtype))
-    B = B.to(map_torch_type(in_dtype))
-
+    A, B = generate_dense_input(
+        M=M,
+        N=N,
+        K=K,
+        trans_A=trans_A,
+        trans_B=trans_B,
+        in_dtype=in_dtype,
+    )
     A_sparse, E = compress(A, transposed=trans_A, block_k=block_K)
 
     C_sp = kernel(A_sparse, E, B)
