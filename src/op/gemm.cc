@@ -4,7 +4,7 @@
  */
 
 #include "gemm.h"
-
+#include <fstream>
 #include "builtin.h"
 #include <tvm/tir/builtin.h>
 #include <tvm/tir/op.h>
@@ -828,9 +828,16 @@ LayoutMap GemmNode::InferLayout(const LayoutInferArgs &T,
     ICHECK(C.scope() == "local.fragment")
         << "CDNA gemm (FMMA) only supports C in local.fragment scope, got "
         << C.scope();
+    if (TargetIsDCU(T.target))
+    {
+      auto fragment =
+          makeGemmFragmentCDCU(M, N, M / warp_m, N / warp_n, C->dtype.bits());
+      results.Set(C, fragment->BindThreadRange(thread_range));
+    } else {
     auto fragment =
         makeGemmFragmentCCDNA(M, N, M / warp_m, N / warp_n, C->dtype.bits());
     results.Set(C, fragment->BindThreadRange(thread_range));
+    }
 
     if (A.scope() == "shared" || A.scope() == "shared.dyn") {
       int dim_A = A->shape.size();

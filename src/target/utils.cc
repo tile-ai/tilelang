@@ -5,6 +5,7 @@
 
 #include "utils.h"
 
+
 namespace tvm {
 namespace tl {
 
@@ -74,6 +75,16 @@ bool TargetIsCDNA(Target target) {
     std::string mcpu = Downcast<String>(target->attrs.at("mcpu"));
     // if mcpu start with "gfx9", it is CDNA
     return mcpu.find("gfx9") == 0;
+  }
+  return false;
+}
+
+bool TargetIsDCU(Target target) {
+  if (!TargetIsRocm(target))
+    return false;
+  if (target->attrs.count("mcpu")) {
+    // if mcpu start with "gfx936", it is DCU
+    return mcpu.find("gfx936") == 0;
   }
   return false;
 }
