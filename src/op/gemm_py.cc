@@ -327,7 +327,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                         });
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK(){
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def(
       "tl.get_tcgen5_mma_meta",
@@ -351,7 +351,7 @@ TVM_FFI_STATIC_INIT_BLOCK({
                                            scale_in_a, scale_in_b);
         return Integer(static_cast<int64_t>(desc));
       });
-});
+}
 
 } // namespace tl
 } // namespace tvm

@@ -1964,8 +1964,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto dtype_a_enum = tl::codegen::ptx::DTypeFromString(A_dtype);
     auto dtype_b_enum = tl::codegen::ptx::DTypeFromString(B_dtype);
     auto dtype_c_enum = tl::codegen::ptx::DTypeFromString(C_dtype);
-    uint32_t instr_desc = get_const_uint32(desc_expr);
-    auto decoded = decode_instr_desc(instr_desc, dtype_a_enum);
+    // uint32_t instr_desc = get_const_uint32(desc_expr);
+    // auto decoded = decode_instr_desc(instr_desc, dtype_a_enum);
 
     need_tcgen05mma_instruction_h_ = true;
     this->PrintIndent();
@@ -1983,13 +1983,13 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
                            tl::codegen::ptx::DTypeEnumToString(dtype_b_enum));
     replacer.register_rule("(CType)",
                            tl::codegen::ptx::DTypeEnumToString(dtype_c_enum));
-    replacer.register_rule("(M)", std::to_string(decoded.m));
-    replacer.register_rule("(N)", std::to_string(decoded.n));
-    replacer.register_rule("(K)", std::to_string(decoded.k));
-    replacer.register_rule("(tnspA)", decoded.a_is_k_major ? "false" : "true");
-    replacer.register_rule("(tnspB)", decoded.b_is_k_major ? "false" : "true");
-    replacer.register_rule("(scaleA)", decoded.scale_in_a_pos ? "1" : "-1");
-    replacer.register_rule("(scaleB)", decoded.scale_in_b_pos ? "1" : "-1");
+    // replacer.register_rule("(M)", std::to_string(decoded.m));
+    // replacer.register_rule("(N)", std::to_string(decoded.n));
+    // replacer.register_rule("(K)", std::to_string(decoded.k));
+    // replacer.register_rule("(tnspA)", decoded.a_is_k_major ? "false" : "true");
+    // replacer.register_rule("(tnspB)", decoded.b_is_k_major ? "false" : "true");
+    // replacer.register_rule("(scaleA)", decoded.scale_in_a_pos ? "1" : "-1");
+    // replacer.register_rule("(scaleB)", decoded.scale_in_b_pos ? "1" : "-1");
     replacer.register_rule("(desc_a)", a_desc);
     replacer.register_rule("(A_offset)", A_offset);
     replacer.register_rule("(desc_b)", b_desc);

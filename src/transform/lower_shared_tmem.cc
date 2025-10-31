@@ -261,7 +261,7 @@ private:
     return expr;
   }
   PrimExpr VisitExpr_(const VarNode *op) final {
-    Var var = GetRef<Var>(op);
+    Var var = tvm::ffi::GetRef<Var>(op);
     if (var_remap_.count(var)) {
       return var_remap_[var];
     }
