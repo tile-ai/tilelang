@@ -17,11 +17,32 @@ def vectorized_cast_kernel(M: int, dtype_A: str, dtype_B: str):
 
     @T.prim_func
     def main(
-            A: T.Tensor[(M), dtype_A],  # noqa: F821
-            B: T.Tensor[(M), dtype_B],  # noqa: F821
+            A: T.Tensor[(M,), dtype_A],  # noqa: F821
+            B: T.Tensor[(M,), dtype_B],  # noqa: F821
     ):
         with T.Kernel(1, threads=128):
             T.copy(A, B)
+
+    return main
+
+
+@tilelang.jit
+def parallel_vectorized_cast_kernel(M: int, dtype_A: str, dtype_B: str):
+    assert M % 256 == 0
+
+    @T.prim_func
+    def main(
+            A: T.Tensor[(M,), dtype_A],  # noqa: F821
+            B: T.Tensor[(M,), dtype_B],  # noqa: F821
+    ):
+        with T.Kernel(1, threads=128):
+            A_local = T.alloc_fragment((M,), dtype_A)
+            B_local = T.alloc_fragment((M,), dtype_B)
+
+            T.copy(A, A_local)
+            for i in T.Parallel(M):
+                B_local[i] = A_local[i]
+            T.copy(B_local, B)
 
     return main
 
@@ -37,17 +58,22 @@ def run_vectorized_cast(src_dtype_str: str, dst_dtype_str: str, check_str: str, 
 
     M = 128 * lanes
     kernel = vectorized_cast_kernel(M, src_dtype_str, dst_dtype_str)
+    kernel_parallel = parallel_vectorized_cast_kernel(M, src_dtype_str, dst_dtype_str)
 
     A = torch.randn(M, dtype=str2dtype[src_dtype_str]).cuda()
     B = torch.zeros(M, dtype=str2dtype[dst_dtype_str]).cuda()
+    C = torch.zeros(M, dtype=str2dtype[dst_dtype_str]).cuda()
 
     kernel(A, B)
+    kernel_parallel(A, C)
 
     torch.testing.assert_close(A.to(str2dtype[dst_dtype_str]), B)
+    torch.testing.assert_close(A.to(str2dtype[dst_dtype_str]), C)
 
     code = kernel.get_kernel_source()
+    code_parallel = kernel_parallel.get_kernel_source()
 
-    assert check_str in code, \
+    assert check_str in code and check_str in code_parallel, \
         f"Cast {src_dtype_str} to {dst_dtype_str} with {lanes=} is not vectorized!"
 
 

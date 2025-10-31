@@ -1,6 +1,6 @@
 set -eux
 
-rm -rf dist
+rm -rf dist raw_dist
 
 python -mpip install -U pip
 python -mpip install -U build wheel auditwheel patchelf

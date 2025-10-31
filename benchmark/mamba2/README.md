@@ -45,6 +45,12 @@ PY
 | 16384 | 2.531    | 135.711                 |
 | 32768 | 5.076    | 135.379                 |
 
+
+## Compare with Baselines
+
+- Triton: v3.5.0, mamba-ssm: v2.2.6.post3
+- Helion: v0.2.1
+
 <figure style="text-align: center">
   <a href="mamba_benchmark_result.png">
     <img src="mamba_benchmark_result.png" alt="Mamba2_chunk_scan Performance Comparison on H100">

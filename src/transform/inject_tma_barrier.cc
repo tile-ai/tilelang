@@ -204,9 +204,9 @@ private:
   void VisitStmt_(const EvaluateNode *op) final {
     if (const auto *call = op->value.as<CallNode>()) {
       if (call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col())) {
-        pending_tma_ops_.push_back(GetRef<Call>(call));
+        pending_tma_ops_.push_back(tvm::ffi::GetRef<Call>(call));
       } else if (call->op.same_as(mbarrier_expect_tx())) {
-        pending_tma_ops_.push_back(GetRef<Call>(call));
+        pending_tma_ops_.push_back(tvm::ffi::GetRef<Call>(call));
       } else if (call->op.same_as(builtin::ptx_arrive_barrier())) {
         PrimExpr barrier_id = call->args[0];
         for (const auto &tma_call : pending_tma_ops_) {
@@ -295,8 +295,9 @@ public:
 
   void VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(mbarrier_expect_tx())) {
-      PrimExpr e =
-          tma_op_to_barrier_id_[GetRef<Call>(op)].as<CallNode>()->args[0];
+      PrimExpr e = tma_op_to_barrier_id_[tvm::ffi::GetRef<Call>(op)]
+                       .as<CallNode>()
+                       ->args[0];
       auto int_set = arith::EvalSet(e, var_int_set_);
       expect_.push_back(if_depth_ == 1);
       sequence.push_back(0);
@@ -406,7 +407,7 @@ public:
 
 private:
   Stmt VisitStmt_(const BlockNode *op) {
-    auto block = GetRef<Block>(op);
+    auto block = tvm::ffi::GetRef<Block>(op);
     if (!has_create_list_of_mbarrier_ && !barrier_id_to_range_.empty() &&
         op->name_hint == MainBlockName) {
       ICHECK(false) << "Please declare create_list_of_mbarrier.";
@@ -453,9 +454,9 @@ private:
   PrimExpr VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tma_load()) || op->op.same_as(tma_load_im2col())) {
       // check this must be in the tma_op_to_barrier_id_
-      ICHECK(tma_op_to_barrier_id_.count(GetRef<Call>(op)))
+      ICHECK(tma_op_to_barrier_id_.count(tvm::ffi::GetRef<Call>(op)))
           << "tma_load must be in the tma_op_to_barrier_id_";
-      auto barrier_id = tma_op_to_barrier_id_[GetRef<Call>(op)];
+      auto barrier_id = tma_op_to_barrier_id_[tvm::ffi::GetRef<Call>(op)];
       auto new_args = op->args;
       auto arg0 = op->args[0].as<Call>();
       auto is_1d_tma_load =
@@ -468,9 +469,9 @@ private:
       }
       return Call(op->dtype, op->op, new_args);
     } else if (op->op.same_as(mbarrier_expect_tx())) {
-      ICHECK(tma_op_to_barrier_id_.count(GetRef<Call>(op)))
+      ICHECK(tma_op_to_barrier_id_.count(tvm::ffi::GetRef<Call>(op)))
           << "mbarrier_expect_tx must be in the tma_op_to_barrier_id_";
-      auto barrier_id = tma_op_to_barrier_id_[GetRef<Call>(op)];
+      auto barrier_id = tma_op_to_barrier_id_[tvm::ffi::GetRef<Call>(op)];
       auto new_args = op->args;
       new_args.Set(0, barrier_id);
       if (!has_warp_specialization_)
@@ -522,10 +523,10 @@ tvm::transform::Pass InjectTmaBarrier() {
   return CreatePrimFuncPass(pass_func, 0, "tl.InjectTmaBarrier", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.InjectTmaBarrier", InjectTmaBarrier);
-});
+}
 
 } // namespace tl
 } // namespace tvm

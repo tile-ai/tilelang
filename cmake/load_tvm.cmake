@@ -11,8 +11,17 @@ endif()
 
 set(TVM_INCLUDES
   ${TVM_SOURCE}/include
-  ${TVM_SOURCE}/ffi/include
   ${TVM_SOURCE}/src
   ${TVM_SOURCE}/3rdparty/dlpack/include
   ${TVM_SOURCE}/3rdparty/dmlc-core/include
 )
+
+if(EXISTS ${TVM_SOURCE}/ffi/include)
+  list(APPEND TVM_INCLUDES ${TVM_SOURCE}/ffi/include)
+elseif(EXISTS ${TVM_SOURCE}/3rdparty/tvm-ffi/include)
+  list(APPEND TVM_INCLUDES ${TVM_SOURCE}/3rdparty/tvm-ffi/include)
+endif()
+
+if(EXISTS ${TVM_SOURCE}/3rdparty/tvm-ffi/3rdparty/dlpack/include)
+  list(APPEND TVM_INCLUDES ${TVM_SOURCE}/3rdparty/tvm-ffi/3rdparty/dlpack/include)
+endif()

@@ -544,7 +544,7 @@ public:
       }
       return it->second->alloc_var;
     } else {
-      return GetRef<PrimExpr>(op);
+      return tvm::ffi::GetRef<PrimExpr>(op);
     }
   }
   PrimExpr VisitExpr_(const CallNode *op) final {
@@ -978,8 +978,8 @@ private:
           ICHECK(alloc_info.count(var));
           const AllocEntry &entry = alloc_info.at(var);
           const AllocateNode *alloc = entry.alloc;
-          auto storage_scope =
-              StorageScope::Create(GetPtrStorageScope(GetRef<Var>(var)));
+          auto storage_scope = StorageScope::Create(
+              GetPtrStorageScope(tvm::ffi::GetRef<Var>(var)));
           StorageEntry *dst_entry = nullptr;
           // inplace detection
           if (detect_inplace) {
@@ -1732,7 +1732,7 @@ public:
     Var var = (it == rewrite_map_.end()) ? op->var : it->second.new_buffer_var;
     if (var.same_as(op->var) && value.same_as(op->value) &&
         body.same_as(op->body)) {
-      return GetRef<Stmt>(op);
+      return tvm::ffi::GetRef<Stmt>(op);
     }
     return LetStmt(var, value, body);
   }
@@ -1985,10 +1985,10 @@ Pass StorageRewrite() {
   return CreatePrimFuncPass(pass_func, 0, "tir.StorageRewrite", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.StorageRewrite", StorageRewrite);
-});
+}
 
 Pass PointerValueTypeRewrite() {
   auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
@@ -1997,11 +1997,11 @@ Pass PointerValueTypeRewrite() {
   return CreatePrimFuncPass(pass_func, 0, "tl.PointerValueTypeRewrite", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.PointerValueTypeRewrite",
                         PointerValueTypeRewrite);
-});
+}
 
 } // namespace transform
 } // namespace tl

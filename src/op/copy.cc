@@ -130,7 +130,7 @@ template <typename T> static Array<T> ReverseArray(Array<T> array) {
  * @param vmap BufferMap used to resolve RegionOp buffers and ranges.
  */
 Copy::Copy(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<CopyNode> node = make_object<CopyNode>();
+  ObjectPtr<CopyNode> node = tvm::ffi::make_object<CopyNode>();
   Array<Range> rgs[2];
   Buffer bf[2];
   for (int i = 0; i < 2; i++) {
@@ -169,7 +169,7 @@ Copy::Copy(Array<PrimExpr> args, BufferMap vmap) {
  * @return TileOperator A TileOperator owning the cloned CopyNode.
  */
 TileOperator CopyNode::Clone() const {
-  auto op = make_object<CopyNode>(*this);
+  auto op = tvm::ffi::make_object<CopyNode>(*this);
   if (par_op_.defined()) {
     op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
   }
@@ -401,7 +401,7 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &T,
   using namespace tvm::transform;
   PassContext pass_ctx = PassContext::Current();
   bool disable_tma_lower =
-      pass_ctx->GetConfig<bool>(kDisableTMALower, false).value();
+      pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
   auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma,
                                T.layout_map, T.analyzer, T.buffer_oob);
 
@@ -793,7 +793,7 @@ Stmt CopyNode::Lower(const LowerArgs &T, arith::Analyzer *analyzer) const {
   using namespace tvm::transform;
   PassContext pass_ctx = PassContext::Current();
   bool disable_tma_lower =
-      pass_ctx->GetConfig<bool>(kDisableTMALower, false).value();
+      pass_ctx->GetConfig<Bool>(kDisableTMALower, Bool(false)).value();
   auto copy_inst = GetCopyInst(target, disable_tma_lower || disable_tma,
                                T.layout_map, analyzer);
   if (copy_inst == CopyInst::kTMemLoad || copy_inst == CopyInst::kTMemStore) {
@@ -1722,7 +1722,8 @@ Array<PrimExpr> TMADesc::EncodeCallArgs() const {
  * @param vmap Mapping from original buffer variables to actual Buffer objects.
  */
 Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args, BufferMap vmap) {
-  ObjectPtr<Conv2DIm2ColOpNode> node = make_object<Conv2DIm2ColOpNode>();
+  ObjectPtr<Conv2DIm2ColOpNode> node =
+      tvm::ffi::make_object<Conv2DIm2ColOpNode>();
   node->src = vmap[GetVarFromAccessPtr(args[0])];
   node->dst = vmap[GetVarFromAccessPtr(args[1])];
   node->nhw_step = args[2];
@@ -1747,7 +1748,7 @@ Conv2DIm2ColOp::Conv2DIm2ColOp(Array<PrimExpr> args, BufferMap vmap) {
  * @return TileOperator A TileOperator containing the cloned Conv2DIm2ColOpNode.
  */
 TileOperator Conv2DIm2ColOpNode::Clone() const {
-  auto op = make_object<Conv2DIm2ColOpNode>(*this);
+  auto op = tvm::ffi::make_object<Conv2DIm2ColOpNode>(*this);
   return Conv2DIm2ColOp(op);
 }
 
@@ -1973,9 +1974,9 @@ TIR_REGISTER_TL_OP(Conv2DIm2ColOp, c2d_im2col)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   CopyNode::RegisterReflection();
   Conv2DIm2ColOpNode::RegisterReflection();
-});
+}
 } // namespace tl
 } // namespace tvm

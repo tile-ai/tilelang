@@ -5,6 +5,7 @@ It includes functionality to print variables, print values in buffers, condition
 
 from tvm import tir
 from typing import Any
+import tilelang.language as T
 from tilelang.language.kernel import get_thread_bindings
 from tilelang.language import copy, macro, serial, alloc_shared
 from tilelang.language.utils import index_to_coordinates
@@ -148,10 +149,10 @@ def device_assert(condition: tir.PrimExpr, msg: str = ""):
     """
     if _IS_CUDA_AVAILABLE:
         if msg == "":
-            tir.call_extern("void", "device_assert", condition)
+            T.call_intrin("void", tir.op.Op.get("tl.device_assert"), condition)
         else:
             warnings.warn("Non-empty msg may slightly slow down the kernel", stacklevel=2)
-            tir.call_extern("void", "device_assert_with_msg", condition, msg)
+            T.call_intrin("void", tir.op.Op.get("tl.device_assert_with_msg"), condition, msg)
 
 
 def print(obj: Any, msg: str = "", warp_group_id: int = 0, warp_id: int = 0) -> tir.PrimExpr:

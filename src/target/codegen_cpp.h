@@ -73,10 +73,10 @@ public:
   void VisitStmt_(const AssertStmtNode *op) final; // NOLINT(*)
   void VisitStmt_(const AllocateNode *op) final;   // NOLINT(*)
 
-  void GenerateForwardFunctionDeclarations(String global_symbol,
-                                           const Array<Type> &arg_types,
+  void GenerateForwardFunctionDeclarations(ffi::String global_symbol,
+                                           const ffi::Array<Type> &arg_types,
                                            const Type &ret_type) override;
-  Array<String> GetFunctionNames() { return function_names_; }
+  ffi::Array<ffi::String> GetFunctionNames() { return function_names_; }
 
 private:
   /* \brief Internal structure to store information about function calls */
@@ -92,7 +92,7 @@ private:
   /* \brief mapping global packed func to the unique name */
   std::unordered_map<std::string, std::string> declared_globals_;
   /* \brief names of the functions declared in this module */
-  Array<String> function_names_;
+  ffi::Array<ffi::String> function_names_;
   /*! \brief whether to emit asserts in the resulting C code */
   bool emit_asserts_;
   /*! \brief whether to emit forward function declarations in the resulting C

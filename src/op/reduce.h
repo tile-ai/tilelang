@@ -30,22 +30,12 @@ enum class ReduceTypeEnum : uint8_t {
 class ReduceTypeNode : public Object {
 public:
   int type{-1}; ///< Internal type identifier
-  static constexpr const char *_type_key = "tl.ReduceType";
-  TVM_DECLARE_FINAL_OBJECT_INFO(ReduceTypeNode, Object);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReduceType", ReduceTypeNode, Object);
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
     refl::ObjectDef<ReduceTypeNode>().def_ro("type", &ReduceTypeNode::type);
   }
-
-  bool SEqualReduce(const ReduceTypeNode *other, SEqualReducer equal) const {
-    return equal(type, other->type);
-  }
-
-  void SHashReduce(SHashReducer hash_reduce) const { hash_reduce(type); }
-
-  static constexpr bool _type_has_method_sequal_reduce = true;
-  static constexpr bool _type_has_method_shash_reduce = true;
 
   /// Type checking methods
   bool isSum() const { return type == int(ReduceTypeEnum::kSum); }
@@ -61,9 +51,10 @@ public:
 /// Wrapper class for reduction type with string-based construction
 class ReduceType : public ObjectRef {
 public:
-  TVM_DEFINE_OBJECT_REF_METHODS(ReduceType, ObjectRef, ReduceTypeNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReduceType, ObjectRef,
+                                             ReduceTypeNode);
   TVM_DLL ReduceType(std::string type) {
-    auto node = make_object<ReduceTypeNode>();
+    auto node = tvm::ffi::make_object<ReduceTypeNode>();
     if (type == "sum") {
       node->type = int(ReduceTypeEnum::kSum);
     } else if (type == "abssum") {
@@ -95,8 +86,8 @@ public:
   ReduceType type;      ///< Type of reduction operation
   bool clear;           ///< Whether to clear destination before reduction
 
-  static constexpr const char *_type_key = "tl.ReduceOp";
-  TVM_DECLARE_FINAL_OBJECT_INFO(ReduceOpNode, TileOperatorNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReduceOp", ReduceOpNode,
+                                    TileOperatorNode);
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -107,23 +98,6 @@ public:
         .def_ro("type", &ReduceOpNode::type)
         .def_ro("clear", &ReduceOpNode::clear);
   }
-
-  bool SEqualReduce(const ReduceOpNode *other, SEqualReducer equal) const {
-    return equal(src, other->src) && equal(dst, other->dst) &&
-           equal(dim, other->dim) && equal(type, other->type) &&
-           equal(clear, other->clear);
-  }
-
-  void SHashReduce(SHashReducer hash_reduce) const {
-    hash_reduce(src);
-    hash_reduce(dst);
-    hash_reduce(dim);
-    hash_reduce(type);
-    hash_reduce(clear);
-  }
-
-  static constexpr bool _type_has_method_sequal_reduce = true;
-  static constexpr bool _type_has_method_shash_reduce = true;
 
   /// Lower the operator to TIR statements
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
@@ -145,7 +119,8 @@ private:
 /// Wrapper class for reduction operations
 class ReduceOp : public TileOperator {
 public:
-  TVM_DEFINE_OBJECT_REF_METHODS(ReduceOp, TileOperator, ReduceOpNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReduceOp, TileOperator,
+                                             ReduceOpNode);
   TVM_DLL ReduceOp(Array<PrimExpr> args, BufferMap vmap);
   static const Op &Get();
 };
@@ -156,8 +131,17 @@ public:
   tir::Buffer src, dst; ///< Source and destination buffers
   int dim;              ///< Dimension along which to compute cumulative sum
   bool reverse;         ///< Whether to compute in reverse order
-  static constexpr const char *_type_key = "tl.CumSumOp";
-  TVM_DECLARE_FINAL_OBJECT_INFO(CumSumOpNode, TileOperatorNode);
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.CumSumOp", CumSumOpNode,
+                                    TileOperatorNode);
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<CumSumOpNode>()
+        .def_ro("src", &CumSumOpNode::src)
+        .def_ro("dst", &CumSumOpNode::dst)
+        .def_ro("dim", &CumSumOpNode::dim)
+        .def_ro("reverse", &CumSumOpNode::reverse);
+  }
 
   Stmt Lower(const LowerArgs &T, arith::Analyzer *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &T,
@@ -169,7 +153,8 @@ public:
 /// Wrapper class for cumulative sum operations
 class CumSumOp : public TileOperator {
 public:
-  TVM_DEFINE_OBJECT_REF_METHODS(CumSumOp, TileOperator, CumSumOpNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(CumSumOp, TileOperator,
+                                             CumSumOpNode);
   TVM_DLL CumSumOp(Array<PrimExpr> args, BufferMap vmap);
   static const Op &Get();
 };

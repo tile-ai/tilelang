@@ -113,14 +113,14 @@ public:
     if (call->op.same_as(create_tma_descriptor()) ||
         call->op.same_as(create_tma_im2col_descriptor())) {
       Var var;
-      auto iter = desc_map_.find(GetRef<Call>(call));
+      auto iter = desc_map_.find(tvm::ffi::GetRef<Call>(call));
       if (iter != desc_map_.end()) {
         var = iter->second;
       } else {
         String name = call->args[2].as<Var>().value()->name_hint;
         var = Var(name + "_desc",
                   PointerType(PrimType(cuTensorMapType()), "grid_constant"));
-        desc_map_[GetRef<Call>(call)] = var;
+        desc_map_[tvm::ffi::GetRef<Call>(call)] = var;
         prefetch_calls_.push_back(
             Evaluate(Call(DataType::Handle(), builtin::call_extern(),
                           {StringImm("tl::prefetch_tma_descriptor"), var})));
@@ -161,10 +161,10 @@ tvm::transform::Pass LowerHopperIntrin() {
   return CreatePrimFuncPass(pass_func, 0, "tl.LowerHopperIntrin", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.LowerHopperIntrin", LowerHopperIntrin);
-});
+}
 #endif // (CUDA_MAJOR_VERSION >= 12)
 
 } // namespace tl

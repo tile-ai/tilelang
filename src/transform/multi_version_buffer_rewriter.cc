@@ -57,7 +57,7 @@ public:
 
     // Check reads from global
     Block block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{}, /*name_hint=*/"",
-                /*body*/ GetRef<Stmt>(op));
+                /*body*/ tvm::ffi::GetRef<Stmt>(op));
     auto access = GetBlockReadWriteRegion(block, buffer_data_to_buffer_);
     auto reads = access[0];
     Role role = Role::kProducer;
@@ -253,7 +253,8 @@ private:
   }
 
   static Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
-    ObjectPtr<BufferNode> new_buffer = make_object<BufferNode>(*(buffer.get()));
+    ObjectPtr<BufferNode> new_buffer =
+        tvm::ffi::make_object<BufferNode>(*(buffer.get()));
     new_buffer->shape.insert(new_buffer->shape.begin(), PrimExpr(num_versions));
     if (!new_buffer->strides.empty()) {
       ICHECK(new_buffer->strides.size() + 1 == new_buffer->shape.size());
@@ -493,10 +494,10 @@ tvm::transform::Pass MultiVersionBuffer() {
   return CreatePrimFuncPass(pass_func, 0, "tl.MultiVersionBuffer", {});
 }
 
-TVM_FFI_STATIC_INIT_BLOCK({
+TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = tvm::ffi::reflection;
   refl::GlobalDef().def("tl.transform.MultiVersionBuffer", MultiVersionBuffer);
-});
+}
 
 } // namespace tl
 } // namespace tvm
